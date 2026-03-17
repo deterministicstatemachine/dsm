@@ -1,0 +1,8 @@
+[build]
+rustflags = ["-D", "warnings"]
+
+[alias]
+xtask = "run --package xtask --"
+
+[net]
+retry = 3

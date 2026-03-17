@@ -1,0 +1,38 @@
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    reviewers:
+      - "deterministicstatemachine/core-maintainers"
+    labels:
+      - "dependencies"
+    groups:
+      crypto:
+        patterns:
+          - "sha2"
+          - "ed25519-*"
+          - "x25519-*"
+          - "curve25519-*"
+          - "rand*"
+      tokio:
+        patterns:
+          - "tokio*"
+      serde:
+        patterns:
+          - "serde*"
+      tracing:
+        patterns:
+          - "tracing*"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    reviewers:
+      - "deterministicstatemachine/core-maintainers"
+    labels:
+      - "ci"

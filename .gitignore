@@ -1,0 +1,44 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+
+# Cargo lock for library crates (keep for binary crates via workspace)
+# We keep Cargo.lock since this workspace contains a binary (dsm-cli)
+
+# Environment and secrets
+.env
+.env.*
+*.key
+*.pem
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editor and IDE files
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*~
+\#*\#
+.#*
+
+# Coverage and profiling
+coverage/
+*.profraw
+*.profdata
+lcov.info
+tarpaulin-report.html
+
+# Documentation build output
+/docs/book/
+
+# Node (if used for docs tooling)
+node_modules/

@@ -1,0 +1,79 @@
+[workspace]
+members = [
+  "crates/dsm-core",
+  "crates/dsm-crypto",
+  "crates/dsm-network",
+  "crates/dsm-storage",
+  "crates/dsm-consensus",
+  "crates/dsm-cli",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/deterministicstatemachine/dsm"
+homepage = "https://github.com/deterministicstatemachine/dsm"
+rust-version = "1.85.0"
+
+[workspace.dependencies]
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Logging / tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Cryptography
+sha2 = "0.10"
+ed25519-dalek = { version = "2", features = ["serde", "rand_core"] }
+x25519-dalek = { version = "2", features = ["serde", "static_secrets"] }
+rand = "0.8"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Internal crates
+dsm-core = { path = "crates/dsm-core" }
+dsm-crypto = { path = "crates/dsm-crypto" }
+dsm-network = { path = "crates/dsm-network" }
+dsm-storage = { path = "crates/dsm-storage" }
+dsm-consensus = { path = "crates/dsm-consensus" }
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"
+nursery = "warn"
+unwrap_used = "deny"
+expect_used = "warn"
+panic = "deny"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[profile.test]
+opt-level = 1
+
+[profile.bench]
+lto = "thin"
+codegen-units = 1
