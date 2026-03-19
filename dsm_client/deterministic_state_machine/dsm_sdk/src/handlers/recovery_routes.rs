@@ -204,18 +204,24 @@ impl AppRouterImpl {
                                 generated::RecoveryTombstoneResponse::decode(&*rp.body)
                             {
                                 // Store tombstone receipt bytes for later relay
-                                if let Err(e) = crate::storage::client_db::recovery::store_tombstone_receipt(
-                                    &tombstone_resp.tombstone_receipt,
-                                ) {
+                                if let Err(e) =
+                                    crate::storage::client_db::recovery::store_tombstone_receipt(
+                                        &tombstone_resp.tombstone_receipt,
+                                    )
+                                {
                                     log::warn!("[RECOVERY] Failed to store tombstone receipt: {e}");
                                 }
 
                                 // Store tombstone hash
                                 if let Some(ref th) = tombstone_resp.tombstone_hash {
-                                    if let Err(e) = crate::storage::client_db::recovery::store_tombstone_hash(
-                                        &th.v,
-                                    ) {
-                                        log::warn!("[RECOVERY] Failed to store tombstone hash: {e}");
+                                    if let Err(e) =
+                                        crate::storage::client_db::recovery::store_tombstone_hash(
+                                            &th.v,
+                                        )
+                                    {
+                                        log::warn!(
+                                            "[RECOVERY] Failed to store tombstone hash: {e}"
+                                        );
                                     }
                                 }
 
@@ -383,7 +389,11 @@ impl AppRouterImpl {
             "recovery.propagateTombstone" => {
                 let receipt = match crate::storage::client_db::recovery::get_tombstone_receipt() {
                     Ok(Some(r)) => r,
-                    Ok(None) => return err("No tombstone receipt stored. Call recovery.tombstone first.".into()),
+                    Ok(None) => {
+                        return err(
+                            "No tombstone receipt stored. Call recovery.tombstone first.".into(),
+                        )
+                    }
                     Err(e) => return err(format!("recovery.propagateTombstone: {e}")),
                 };
 
@@ -399,7 +409,9 @@ impl AppRouterImpl {
                 for device_id in &unsynced {
                     // Compute storage key: BLAKE3("DSM/tombstone-notify\0" || device_id)
                     let key = {
-                        let mut hasher = dsm::crypto::blake3::Hasher::new_keyed(b"DSM/tombstone-notify\0\0\0\0\0\0\0\0\0\0\0\0");
+                        let mut hasher = dsm::crypto::blake3::Hasher::new_keyed(
+                            b"DSM/tombstone-notify\0\0\0\0\0\0\0\0\0\0\0\0",
+                        );
                         hasher.update(device_id);
                         let hash = hasher.finalize();
                         crate::util::text_id::encode_base32_crockford(hash.as_bytes())
@@ -415,16 +427,17 @@ impl AppRouterImpl {
                         }
                         Err(e) => {
                             failed += 1;
-                            log::warn!(
-                                "[RECOVERY] Failed to push tombstone for counterparty: {e}"
-                            );
+                            log::warn!("[RECOVERY] Failed to push tombstone for counterparty: {e}");
                         }
                     }
                 }
 
                 let resp = generated::AppStateResponse {
                     key: "recovery.propagateTombstone".to_string(),
-                    value: Some(format!("pushed={pushed},failed={failed},total={}", unsynced.len())),
+                    value: Some(format!(
+                        "pushed={pushed},failed={failed},total={}",
+                        unsynced.len()
+                    )),
                 };
                 pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
             }
@@ -445,8 +458,8 @@ impl AppRouterImpl {
                 }
 
                 // Get our new device_id for ACK key computation
-                let our_device_id = crate::sdk::app_state::AppState::get_device_id()
-                    .unwrap_or_default();
+                let our_device_id =
+                    crate::sdk::app_state::AppState::get_device_id().unwrap_or_default();
 
                 let mut new_acks = 0u64;
                 let tick = crate::util::deterministic_time::tick();
@@ -454,7 +467,9 @@ impl AppRouterImpl {
                 for device_id in &unsynced {
                     // Check for ACK: BLAKE3("DSM/tombstone-ack\0" || our_device_id || counterparty_device_id)
                     let key = {
-                        let mut hasher = dsm::crypto::blake3::Hasher::new_keyed(b"DSM/tombstone-ack\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0");
+                        let mut hasher = dsm::crypto::blake3::Hasher::new_keyed(
+                            b"DSM/tombstone-ack\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0",
+                        );
                         hasher.update(&our_device_id);
                         hasher.update(device_id);
                         let hash = hasher.finalize();
@@ -463,10 +478,11 @@ impl AppRouterImpl {
 
                     match crate::sdk::storage_node_sdk::get_from_storage(&key) {
                         Ok(Some(_ack_bytes)) => {
-                            if let Err(e) = crate::storage::client_db::recovery::mark_counterparty_synced(
-                                device_id,
-                                tick,
-                            ) {
+                            if let Err(e) =
+                                crate::storage::client_db::recovery::mark_counterparty_synced(
+                                    device_id, tick,
+                                )
+                            {
                                 log::warn!("[RECOVERY] Failed to mark counterparty synced: {e}");
                             } else {
                                 new_acks += 1;
@@ -479,8 +495,8 @@ impl AppRouterImpl {
                     }
                 }
 
-                let (synced, total) = crate::storage::client_db::recovery::get_sync_progress()
-                    .unwrap_or((0, 0));
+                let (synced, total) =
+                    crate::storage::client_db::recovery::get_sync_progress().unwrap_or((0, 0));
                 let all_done = synced == total && total > 0;
 
                 let resp = generated::AppStateResponse {
@@ -496,15 +512,17 @@ impl AppRouterImpl {
             // Counterparty-side: check storage nodes for tombstone notifications addressed to us.
             // If found, validate and ACK.
             "recovery.checkTombstones" => {
-                let our_device_id = crate::sdk::app_state::AppState::get_device_id()
-                    .unwrap_or_default();
+                let our_device_id =
+                    crate::sdk::app_state::AppState::get_device_id().unwrap_or_default();
                 if our_device_id.len() != 32 {
                     return err("Device identity not initialized".into());
                 }
 
                 // Check for tombstone notifications: BLAKE3("DSM/tombstone-notify\0" || our_device_id)
                 let notify_key = {
-                    let mut hasher = dsm::crypto::blake3::Hasher::new_keyed(b"DSM/tombstone-notify\0\0\0\0\0\0\0\0\0\0\0\0");
+                    let mut hasher = dsm::crypto::blake3::Hasher::new_keyed(
+                        b"DSM/tombstone-notify\0\0\0\0\0\0\0\0\0\0\0\0",
+                    );
                     hasher.update(&our_device_id);
                     let hash = hasher.finalize();
                     crate::util::text_id::encode_base32_crockford(hash.as_bytes())
@@ -519,8 +537,10 @@ impl AppRouterImpl {
                             Ok(receipt) => {
                                 // Look up the sender's public key from contacts
                                 let sender_device_id_bytes =
-                                    crate::util::text_id::decode_base32_crockford(&receipt.device_id)
-                                        .unwrap_or_default();
+                                    crate::util::text_id::decode_base32_crockford(
+                                        &receipt.device_id,
+                                    )
+                                    .unwrap_or_default();
 
                                 if sender_device_id_bytes.len() == 32 {
                                     let mut sender_arr = [0u8; 32];
@@ -528,12 +548,16 @@ impl AppRouterImpl {
 
                                     // Store as tombstoned device
                                     let tick = crate::util::deterministic_time::tick();
-                                    if let Err(e) = crate::storage::client_db::recovery::store_tombstoned_device(
-                                        &sender_arr,
-                                        &receipt.tombstone_hash,
-                                        tick,
-                                    ) {
-                                        log::warn!("[RECOVERY] Failed to store tombstoned device: {e}");
+                                    if let Err(e) =
+                                        crate::storage::client_db::recovery::store_tombstoned_device(
+                                            &sender_arr,
+                                            &receipt.tombstone_hash,
+                                            tick,
+                                        )
+                                    {
+                                        log::warn!(
+                                            "[RECOVERY] Failed to store tombstoned device: {e}"
+                                        );
                                     }
 
                                     // Write ACK to storage:
@@ -545,7 +569,9 @@ impl AppRouterImpl {
                                         hasher.update(&sender_device_id_bytes);
                                         hasher.update(&our_device_id);
                                         let hash = hasher.finalize();
-                                        crate::util::text_id::encode_base32_crockford(hash.as_bytes())
+                                        crate::util::text_id::encode_base32_crockford(
+                                            hash.as_bytes(),
+                                        )
                                     };
 
                                     // ACK payload is just our device_id (proof we acknowledged)
@@ -563,18 +589,24 @@ impl AppRouterImpl {
                                             &receipt.device_id[..receipt.device_id.len().min(16)]
                                         )),
                                     };
-                                    pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
+                                    pack_envelope_ok(
+                                        generated::envelope::Payload::AppStateResponse(resp),
+                                    )
                                 } else {
                                     err("Invalid tombstone sender device_id".into())
                                 }
                             }
                             Err(e) => {
-                                log::warn!("[RECOVERY] Invalid tombstone receipt from storage: {e}");
+                                log::warn!(
+                                    "[RECOVERY] Invalid tombstone receipt from storage: {e}"
+                                );
                                 let resp = generated::AppStateResponse {
                                     key: "recovery.checkTombstones".to_string(),
                                     value: Some("found=false".to_string()),
                                 };
-                                pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
+                                pack_envelope_ok(generated::envelope::Payload::AppStateResponse(
+                                    resp,
+                                ))
                             }
                         }
                     }
@@ -585,7 +617,9 @@ impl AppRouterImpl {
                         };
                         pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
                     }
-                    Err(e) => err(format!("recovery.checkTombstones: storage query failed: {e}")),
+                    Err(e) => err(format!(
+                        "recovery.checkTombstones: storage query failed: {e}"
+                    )),
                 }
             }
 
@@ -601,18 +635,14 @@ impl AppRouterImpl {
                     "tombstone_receipt",
                     &[],
                 );
-                let _ = crate::storage::client_db::recovery::set_recovery_pref(
-                    "tombstone_hash",
-                    &[],
-                );
+                let _ =
+                    crate::storage::client_db::recovery::set_recovery_pref("tombstone_hash", &[]);
                 let _ = crate::storage::client_db::recovery::set_recovery_pref(
                     "capsule_counterparty_ids",
                     &[],
                 );
-                let _ = crate::storage::client_db::recovery::set_recovery_pref(
-                    "capsule_smt_root",
-                    &[],
-                );
+                let _ =
+                    crate::storage::client_db::recovery::set_recovery_pref("capsule_smt_root", &[]);
                 let _ = crate::storage::client_db::recovery::set_recovery_pref(
                     "capsule_rollup_hash",
                     &[],

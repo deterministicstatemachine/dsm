@@ -75,7 +75,11 @@ fn decode_internal_envelope(result: AppResult, route: &str) -> Result<generated:
         .map_err(|e| format!("{route}: failed to decode envelope: {e}"))
 }
 
-fn ensure_dbtc_exit_balance(route: &str, available_sats: u64, required_sats: u64) -> Result<(), String> {
+fn ensure_dbtc_exit_balance(
+    route: &str,
+    available_sats: u64,
+    required_sats: u64,
+) -> Result<(), String> {
     if available_sats < required_sats {
         return Err(format!(
             "{route}: insufficient dBTC balance: have {} sats, need {} sats",
@@ -227,27 +231,32 @@ fn take_withdrawal_execution_test_result(
     // Compare all routing-relevant fields; skip plan_id which is a runtime-derived
     // opaque withdrawal identifier that the test cannot predict (tick-dependent).
     assert_eq!(
-        expectation.request.source_vault_id, req.source_vault_id,
+        expectation.request.source_vault_id,
+        req.source_vault_id,
         "withdrawal execution test: source_vault_id mismatch for {}",
         route.as_str()
     );
     assert_eq!(
-        expectation.request.exit_amount_sats, req.exit_amount_sats,
+        expectation.request.exit_amount_sats,
+        req.exit_amount_sats,
         "withdrawal execution test: exit_amount_sats mismatch for {}",
         route.as_str()
     );
     assert_eq!(
-        expectation.request.successor_locktime, req.successor_locktime,
+        expectation.request.successor_locktime,
+        req.successor_locktime,
         "withdrawal execution test: successor_locktime mismatch for {}",
         route.as_str()
     );
     assert_eq!(
-        expectation.request.refund_iterations, req.refund_iterations,
+        expectation.request.refund_iterations,
+        req.refund_iterations,
         "withdrawal execution test: refund_iterations mismatch for {}",
         route.as_str()
     );
     assert_eq!(
-        expectation.request.destination_address, req.destination_address,
+        expectation.request.destination_address,
+        req.destination_address,
         "withdrawal execution test: destination_address mismatch for {}",
         route.as_str()
     );
@@ -516,9 +525,7 @@ impl AppRouterImpl {
                 burn_amount_sats: plan.total_gross_exit_sats,
             },
         )
-        .map_err(|e| {
-            format!("withdrawal metadata init failed: {e}")
-        })?;
+        .map_err(|e| format!("withdrawal metadata init failed: {e}"))?;
 
         let mut executed_legs = Vec::with_capacity(plan.legs.len());
         let mut sweep_txids = Vec::with_capacity(plan.legs.len());
@@ -2262,9 +2269,11 @@ impl AppRouterImpl {
                     .await
                 {
                     Ok(d) => d,
-                    Err(e) => return err(format!(
+                    Err(e) => {
+                        return err(format!(
                         "bitcoin.fractional.exit: fetch vault data from storage nodes failed: {e}"
-                    )),
+                    ))
+                    }
                 };
 
                 let dev = crate::util::text_id::encode_base32_crockford(&self.device_id_bytes);
@@ -2332,11 +2341,9 @@ impl AppRouterImpl {
                 };
 
                 // Gate 1: verify dBTC balance covers the exit amount
-                if let Err(message) = ensure_dbtc_exit_balance(
-                    "bitcoin.fractional.exit",
-                    current_dbtc,
-                    burn_amount,
-                ) {
+                if let Err(message) =
+                    ensure_dbtc_exit_balance("bitcoin.fractional.exit", current_dbtc, burn_amount)
+                {
                     return err(message);
                 }
 
@@ -2367,9 +2374,7 @@ impl AppRouterImpl {
                 if let Err(e) =
                     crate::storage::client_db::lock_dbtc_for_exit(&dev, dbtc_id, burn_amount)
                 {
-                    return err(format!(
-                        "bitcoin.fractional.exit: balance lock failed: {e}"
-                    ));
+                    return err(format!("bitcoin.fractional.exit: balance lock failed: {e}"));
                 }
                 log::info!(
                     "[bitcoin.fractional.exit] Phase 2: locked {} sats for exit",
@@ -2396,9 +2401,7 @@ impl AppRouterImpl {
                         dbtc_id,
                         burn_amount,
                     ) {
-                        log::error!(
-                            "[bitcoin.fractional.exit] also failed to release lock: {e2}"
-                        );
+                        log::error!("[bitcoin.fractional.exit] also failed to release lock: {e2}");
                     }
                     return err(format!(
                         "bitcoin.fractional.exit: failed to mark SweepPending: {e}"
@@ -2463,13 +2466,11 @@ impl AppRouterImpl {
                         log::error!(
                             "[bitcoin.fractional.exit] Phase 3: sweep FAILED: {e} — releasing lock"
                         );
-                        if let Err(e2) =
-                            crate::storage::client_db::release_locked_to_available(
-                                &dev,
-                                dbtc_id,
-                                burn_amount,
-                            )
-                        {
+                        if let Err(e2) = crate::storage::client_db::release_locked_to_available(
+                            &dev,
+                            dbtc_id,
+                            burn_amount,
+                        ) {
                             log::error!("[bitcoin.fractional.exit] CRITICAL: failed to release lock after sweep failure: {e2}");
                         }
                         if let Err(e2) = crate::storage::client_db::update_vault_record_state(
@@ -2667,11 +2668,9 @@ impl AppRouterImpl {
                         .map(|b| b.available())
                         .unwrap_or(0),
                 };
-                if let Err(message) = ensure_dbtc_exit_balance(
-                    "bitcoin.full.sweep",
-                    current_dbtc,
-                    burn_amount,
-                ) {
+                if let Err(message) =
+                    ensure_dbtc_exit_balance("bitcoin.full.sweep", current_dbtc, burn_amount)
+                {
                     return err(message);
                 }
 
@@ -2751,25 +2750,26 @@ impl AppRouterImpl {
                     return err("bitcoin.full.sweep: no destination address available".to_string());
                 }
 
-                let client =
-                    match super::mempool_api::MempoolClient::from_config_for_network(network) {
-                        Ok(c) => c,
-                        Err(e) => {
-                            log::error!("[bitcoin.full.sweep] mempool client init failed: {e}");
-                            if let Err(e2) = crate::storage::client_db::release_locked_to_available(
-                                &dev,
-                                dbtc_id,
-                                burn_amount,
-                            ) {
-                                log::error!(
-                                    "[bitcoin.full.sweep] CRITICAL: failed to release dBTC lock: {e2}"
-                                );
-                            }
-                            return err(format!(
-                                "bitcoin.full.sweep: mempool client init failed: {e}"
-                            ));
+                let client = match super::mempool_api::MempoolClient::from_config_for_network(
+                    network,
+                ) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        log::error!("[bitcoin.full.sweep] mempool client init failed: {e}");
+                        if let Err(e2) = crate::storage::client_db::release_locked_to_available(
+                            &dev,
+                            dbtc_id,
+                            burn_amount,
+                        ) {
+                            log::error!(
+                                "[bitcoin.full.sweep] CRITICAL: failed to release dBTC lock: {e2}"
+                            );
                         }
-                    };
+                        return err(format!(
+                            "bitcoin.full.sweep: mempool client init failed: {e}"
+                        ));
+                    }
+                };
 
                 let utxos = match client.list_address_utxos(std::slice::from_ref(addr)).await {
                     Ok(u) if !u.is_empty() => u,
@@ -2900,9 +2900,12 @@ impl AppRouterImpl {
                 // Mark source vault as spent on storage nodes.
                 // The UTXO is gone — future planners skip this vault without
                 // hitting Bitcoin. Storage nodes prune spent ads after a TTL.
-                if let Err(e) = crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::mark_vault_spent_on_storage_nodes(
-                    &req.source_vault_id,
-                ).await {
+                if let Err(e) =
+                    crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::mark_vault_spent_on_storage_nodes(
+                        &req.source_vault_id,
+                    )
+                    .await
+                {
                     log::warn!("[bitcoin.full.sweep] mark_vault_spent failed: {e}");
                 }
 
@@ -4443,7 +4446,9 @@ async fn sweep_and_broadcast(req: SweepBroadcastRequest<'_>) -> Result<String, S
     // The sweep consumed the source UTXO. Future planners skip it.
     if let Err(e) = crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::mark_vault_spent_on_storage_nodes(
         &source_exec_data.vault_id,
-    ).await {
+    )
+    .await
+    {
         log::warn!("[BITCOIN sweep] mark_vault_spent failed: {e}");
     }
 
@@ -4716,7 +4721,10 @@ mod tests {
             .expect("read withdrawal")
             .expect("withdrawal exists");
         assert_eq!(persisted.state, "committed");
-        assert_eq!(persisted.amount_sats, 100_000, "planner-authored requested net must remain intact");
+        assert_eq!(
+            persisted.amount_sats, 100_000,
+            "planner-authored requested net must remain intact"
+        );
         assert_eq!(persisted.burn_amount_sats, 104_700);
     }
 
@@ -4724,7 +4732,10 @@ mod tests {
     fn ensure_dbtc_exit_balance_uses_required_amount() {
         let err = ensure_dbtc_exit_balance("bitcoin.fractional.exit", 100_000, 104_700)
             .expect_err("gross requirement should fail when only net is available");
-        assert!(err.contains("have 100000 sats, need 104700 sats"), "unexpected error: {err}");
+        assert!(
+            err.contains("have 100000 sats, need 104700 sats"),
+            "unexpected error: {err}"
+        );
     }
 
     #[tokio::test]
@@ -5099,9 +5110,17 @@ mod tests {
         let expected_leg = plan_resp.legs.first().expect("expected one planned leg");
         let expected_request = generated::BitcoinFractionalExitRequest {
             source_vault_id: expected_leg.vault_id.clone(),
-            exit_amount_sats: if expected_leg.kind == "full" { 0 } else { expected_leg.gross_exit_sats },
+            exit_amount_sats: if expected_leg.kind == "full" {
+                0
+            } else {
+                expected_leg.gross_exit_sats
+            },
             successor_locktime: if expected_leg.kind == "full" { 0 } else { 144 },
-            refund_iterations: if expected_leg.kind == "full" { 0 } else { 10_000 },
+            refund_iterations: if expected_leg.kind == "full" {
+                0
+            } else {
+                10_000
+            },
             destination_address: "tb1qpolicy".to_string(),
             plan_id: String::new(),
         };
@@ -5179,7 +5198,10 @@ mod tests {
             .expect("list unresolved withdrawals");
         assert_eq!(unresolved.len(), 1, "withdrawal must still be listed");
         let wd = &unresolved[0];
-        assert_eq!(wd.state, "committed", "state must remain committed, not refunded");
+        assert_eq!(
+            wd.state, "committed",
+            "state must remain committed, not refunded"
+        );
         assert!(
             wd.settlement_poll_count > max_polls,
             "poll count should exceed budget: got {}",
