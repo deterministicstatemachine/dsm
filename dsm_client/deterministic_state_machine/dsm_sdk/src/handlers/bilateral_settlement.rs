@@ -112,12 +112,13 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
 
         if ctx.is_sender {
             if transfer_amount > 0 {
-                let debit_result = crate::storage::client_db::apply_sender_debit_and_store_transaction_atomic(
-                    &local_txt,
-                    token_for_atomic,
-                    transfer_amount,
-                    &tx_record,
-                );
+                let debit_result =
+                    crate::storage::client_db::apply_sender_debit_and_store_transaction_atomic(
+                        &local_txt,
+                        token_for_atomic,
+                        transfer_amount,
+                        &tx_record,
+                    );
 
                 // Enhanced error handling for dBTC transfers
                 if let Err(e) = &debit_result {
@@ -159,7 +160,10 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
             if let Err(e) = &confirm_result {
                 if token_id_str == "dBTC" {
                     error!("[BilateralSettlement] ❌ dBTC receive failed: database error during credit. Amount: {} sats, Error: {}", transfer_amount, e);
-                    return Err(format!("dBTC receive failed: database error during balance credit ({})", e));
+                    return Err(format!(
+                        "dBTC receive failed: database error during balance credit ({})",
+                        e
+                    ));
                 } else {
                     // Generic error for other tokens
                     confirm_result.map_err(|e| {
