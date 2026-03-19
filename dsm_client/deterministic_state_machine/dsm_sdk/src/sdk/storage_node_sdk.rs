@@ -312,8 +312,7 @@ pub struct GenesisCreationResponse {
     pub tick: u64,
 }
 
-#[derive(Debug, Clone)]
-#[derive(PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum StorageNodeErrorKind {
     Network,
     Timeout,
@@ -487,7 +486,10 @@ impl StorageNodeClient {
         if let Some(auth) = &self.auth {
             let msg_id = Self::generate_message_id(key);
             req_builder = req_builder
-                .header("authorization", format!("DSM {}:{}", auth.device_id_b32, auth.token_b32))
+                .header(
+                    "authorization",
+                    format!("DSM {}:{}", auth.device_id_b32, auth.token_b32),
+                )
                 .header("x-dsm-message-id", msg_id);
         }
 
@@ -617,7 +619,10 @@ impl StorageNodeClient {
         if let Some(auth) = &self.auth {
             let msg_id = Self::generate_message_id(key);
             req_builder = req_builder
-                .header("authorization", format!("DSM {}:{}", auth.device_id_b32, auth.token_b32))
+                .header(
+                    "authorization",
+                    format!("DSM {}:{}", auth.device_id_b32, auth.token_b32),
+                )
                 .header("x-dsm-message-id", msg_id);
         }
 

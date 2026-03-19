@@ -21,8 +21,7 @@ use crate::jni::state::DEVICE_ID_TO_ADDR;
 // Re-export types from bilateral_session so existing import paths still work.
 pub use super::bilateral_session::{
     BilateralBleSession, BilateralEventCallback, BilateralPhase, BilateralSettlementContext,
-    BilateralSettlementDelegate, SessionStore,
-    is_inflight_phase, phase_to_str, phase_from_str,
+    BilateralSettlementDelegate, SessionStore, is_inflight_phase, phase_to_str, phase_from_str,
     MAX_TERMINAL_SESSIONS_PER_COUNTERPARTY,
 };
 
@@ -960,7 +959,10 @@ impl BilateralBleHandler {
                                     None, // no chain tip
                                     Some(addr),
                                 );
-                                debug!("[BLE_HANDLER] Persisted BLE address from in-memory map: {}", addr);
+                                debug!(
+                                    "[BLE_HANDLER] Persisted BLE address from in-memory map: {}",
+                                    addr
+                                );
                                 addr.clone()
                             } else {
                                 warn!("[BLE_HANDLER] No BLE address found for counterparty device (contact exists but no address persisted or in map)");
@@ -3362,7 +3364,6 @@ impl BilateralBleHandler {
                     sender_ble_address: None,
                     failure_reason: None,
                 });
-
             }
             Err(e) => {
                 // RECOVERY PATH: Manager finalization failed (likely pre-commitment expired/missing
