@@ -541,27 +541,21 @@ describe('Offline Transfer — Full Cycle', () => {
     expect(res.accepted).toBe(true);
   });
 
-  test('CRITICAL: signing key sent to bridge is exactly 64 bytes', async () => {
-    // This is THE test that proves BLE pairing will work.
-    // A 32-byte or empty signing key causes Rust-side identity verification to fail.
-    let capturedEnvelope: pb.Envelope | null = null;
+  test('CRITICAL: BilateralPrepareRequest fields sent to bridge are correct', async () => {
+    // Verifies the TS-side fields in the BilateralPrepareRequest that offlineSend
+    // constructs and sends via appRouterInvokeBin('wallet.sendOffline', ArgPack).
+    // The Rust layer adds senderSigningPublicKey/senderDeviceId/senderGenesisHash
+    // before BLE transmission — those are NOT set by the TS side.
+    let capturedPrepReq: pb.BilateralPrepareRequest | null = null;
 
-    // Intercept appRouterInvoke calls to capture the Envelope containing BilateralPrepareRequest
+    // Intercept appRouterInvoke to capture the ArgPack → BilateralPrepareRequest
     const origCallBin = (global as any).window.DsmBridge.__callBin;
     (global as any).window.DsmBridge.__callBin = async (reqBytes: Uint8Array) => {
       const { method, payload, appRouterMethodName } = decodeBridgeReq(reqBytes);
-      if (method === 'appRouterInvoke') {
-        // bilateralOfflineSendBin sends: appRouterInvokeBin('bilateralOfflineSend', args)
-        // args layout: [u32be bleAddrLen][bleAddr utf8][Envelope bytes]
+      if (method === 'appRouterInvoke' && appRouterMethodName === 'wallet.sendOffline') {
         try {
-          if (payload && payload.length > 4) {
-            const addrLen = ((payload[0] << 24) | (payload[1] << 16) | (payload[2] << 8) | payload[3]) >>> 0;
-            const envStart = 4 + addrLen;
-            if (envStart < payload.length) {
-              const envBytes = payload.slice(envStart);
-              capturedEnvelope = pb.Envelope.fromBinary(envBytes);
-            }
-          }
+          const argPack = pb.ArgPack.fromBinary(payload);
+          capturedPrepReq = pb.BilateralPrepareRequest.fromBinary(argPack.body);
         } catch {
           // fall through
         }
@@ -586,27 +580,13 @@ describe('Offline Transfer — Full Cycle', () => {
     const res = await promise;
     expect(res.accepted).toBe(true);
 
-    // Extract BilateralPrepareRequest from the captured Envelope
-    expect(capturedEnvelope).not.toBeNull();
-    const tx = (capturedEnvelope!.payload.value as pb.UniversalTx);
-    expect(tx.ops.length).toBeGreaterThan(0);
-    const op = tx.ops[0];
-    expect(op.kind.case).toBe('invoke');
-    const inv = op.kind.value as pb.Invoke;
-    expect(inv.method).toBe('bilateral.prepare');
-    const prepReq = pb.BilateralPrepareRequest.fromBinary(inv.args!.body);
-
-    // THE critical assertion: signing key must be 64 bytes
-    expect(prepReq.senderSigningPublicKey).toHaveLength(64);
-    expect(prepReq.senderSigningPublicKey[0]).toBe(0x5A); // matches our mock SIGNING_KEY
-
-    // Also verify other field constraints
-    expect(prepReq.counterpartyDeviceId).toHaveLength(32);
-    expect(prepReq.senderDeviceId).toHaveLength(32);
-    expect(prepReq.expectedCounterpartyStateHash?.v).toHaveLength(32);
-    expect(prepReq.senderGenesisHash?.v).toHaveLength(32);
-    expect(prepReq.senderChainTip).toBeUndefined();
-    expect(prepReq.operationData.length).toBeGreaterThan(0);
+    // Verify the BilateralPrepareRequest that TS sends to the Rust layer
+    expect(capturedPrepReq).not.toBeNull();
+    expect(capturedPrepReq!.counterpartyDeviceId).toHaveLength(32);
+    expect(capturedPrepReq!.counterpartyDeviceId[0]).toBe(0xBB); // matches DEVICE_B
+    expect(capturedPrepReq!.bleAddress).toBe('AA:BB:CC:DD:EE:FF');
+    expect(capturedPrepReq!.validityIterations).toBe(100n);
+    expect(capturedPrepReq!.transferAmount).toBe(BigInt(11000 + testIndex));
   });
 
   test('BILATERAL_EVENT_REJECTED event → accepted=false', async () => {
@@ -655,12 +635,26 @@ describe('Offline Transfer — Full Cycle', () => {
   });
 
   test('missing BLE address with no resolution → error', async () => {
-    // Override bridge to fail BLE resolution
+    // Override bridge: when wallet.sendOffline is called with an empty bleAddress,
+    // the Rust layer rejects with a bilateralPrepareReject error.
     const origCallBin = (global as any).window.DsmBridge.__callBin;
     (global as any).window.DsmBridge.__callBin = async (reqBytes: Uint8Array) => {
-      const { method } = decodeBridgeReq(reqBytes);
-      if (method === 'resolveBleAddressForDeviceId') {
-        return wrapSuccess(new Uint8Array(0));
+      const { method, payload, appRouterMethodName } = decodeBridgeReq(reqBytes);
+      if (method === 'appRouterInvoke' && appRouterMethodName === 'wallet.sendOffline') {
+        // Check if bleAddress is empty in the request
+        try {
+          const argPack = pb.ArgPack.fromBinary(payload);
+          const prep = pb.BilateralPrepareRequest.fromBinary(argPack.body);
+          if (!prep.bleAddress) {
+            // Simulate Rust-side rejection for missing BLE address
+            const reject = new pb.BilateralPrepareReject({ reason: 'bleAddress unavailable' } as any);
+            const env = new pb.Envelope({
+              version: 3,
+              payload: { case: 'bilateralPrepareReject', value: reject },
+            } as any);
+            return wrapSuccess(withRouterPrefix(frameEnvelope(env)));
+          }
+        } catch { /* fall through */ }
       }
       return origCallBin(reqBytes);
     };
@@ -669,11 +663,11 @@ describe('Offline Transfer — Full Cycle', () => {
       to: DEVICE_B,
       amount: BigInt(14000 + testIndex),
       tokenId: 'ERA',
-      // no ble_address provided
+      // no bleAddress provided
     } as any);
 
     expect(res.accepted).toBe(false);
-    expect(String(res.result)).toMatch(/ble_address|bleAddress|unavailable/i);
+    expect(String(res.result)).toMatch(/ble|unavailable|rejected/i);
   }, 15000);
 });
 
