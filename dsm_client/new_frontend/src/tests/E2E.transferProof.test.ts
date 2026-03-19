@@ -1,3 +1,4 @@
+/// <reference types="jest" />
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // SPDX-License-Identifier: Apache-2.0
 /**
@@ -259,7 +260,7 @@ describe('Online Transfer — Full Cycle', () => {
     onlineTransferOverride = () => makeOnlineResponseEnvelope(true, 'transfer ok', 500n);
 
     const res = await dsm.sendOnlineTransfer({
-      to: DEVICE_B,
+      to: encodeBase32Crockford(DEVICE_B),
       amount: BigInt(1000 + testIndex), // unique amount to avoid dedup
       tokenId: 'ERA',
     });
@@ -270,7 +271,7 @@ describe('Online Transfer — Full Cycle', () => {
     onlineTransferOverride = () => makeOnlineResponseEnvelope(false, 'insufficient funds', 0n);
 
     const res = await dsm.sendOnlineTransfer({
-      to: DEVICE_B,
+      to: encodeBase32Crockford(DEVICE_B),
       amount: BigInt(2000 + testIndex),
       tokenId: 'ERA',
     });
@@ -291,7 +292,7 @@ describe('Online Transfer — Full Cycle', () => {
     };
 
     const res = await dsm.sendOnlineTransfer({
-      to: DEVICE_B,
+      to: encodeBase32Crockford(DEVICE_B),
       amount: BigInt(3000 + testIndex),
       tokenId: 'ERA',
     });
@@ -312,7 +313,7 @@ describe('Online Transfer — Full Cycle', () => {
     };
 
     const res = await dsm.sendOnlineTransfer({
-      to: DEVICE_B,
+      to: encodeBase32Crockford(DEVICE_B),
       amount: BigInt(4000 + testIndex),
       tokenId: 'ERA',
     });
@@ -336,7 +337,7 @@ describe('Online Transfer — Full Cycle', () => {
     };
 
     const res = await dsm.sendOnlineTransfer({
-      to: DEVICE_B,
+      to: encodeBase32Crockford(DEVICE_B),
       amount: BigInt(5000 + testIndex),
       tokenId: 'ERA',
     });
@@ -354,7 +355,7 @@ describe('Online Transfer — Input Validation', () => {
 
   test('invalid device ID length (16 bytes) → error', async () => {
     const shortId = new Uint8Array(16).fill(0x22);
-    const res = await dsm.sendOnlineTransfer({ to: shortId, amount: BigInt(6000 + testIndex), tokenId: 'ERA' });
+    const res = await dsm.sendOnlineTransfer({ to: shortId as unknown as string, amount: BigInt(6000 + testIndex), tokenId: 'ERA' });
     expect(res.accepted).toBe(false);
     expect(String(res.result)).toMatch(/32 bytes/);
   });
@@ -380,7 +381,7 @@ describe('Online Transfer — Input Validation', () => {
       return origCallBin(reqBytes);
     };
 
-    const res = await dsm.sendOnlineTransfer({ to: DEVICE_B, amount: BigInt(8000 + testIndex), tokenId: 'ERA' });
+    const res = await dsm.sendOnlineTransfer({ to: encodeBase32Crockford(DEVICE_B), amount: BigInt(8000 + testIndex), tokenId: 'ERA' });
     expect(res.accepted).toBe(true);
   });
 
@@ -401,7 +402,7 @@ describe('Online Transfer — Input Validation', () => {
       return origCallBin(reqBytes);
     };
 
-    const res = await dsm.sendOnlineTransfer({ to: DEVICE_B, amount: BigInt(9000 + testIndex), tokenId: 'ERA' });
+    const res = await dsm.sendOnlineTransfer({ to: encodeBase32Crockford(DEVICE_B), amount: BigInt(9000 + testIndex), tokenId: 'ERA' });
     expect(res.accepted).toBe(false);
     expect(String(res.result)).toMatch(/device.id|32 bytes|bridge headers|identity not ready/i);
   });
@@ -626,7 +627,7 @@ describe('Offline Transfer — Full Cycle', () => {
       commitmentHash: COMMITMENT_HASH,
       status: 'failed',
       message: 'BLE disconnected',
-      failureReason: pb.BilateralFailureReason.BILATERAL_FAILURE_BLE_DISCONNECTED,
+      failureReason: pb.BilateralFailureReason.FAILURE_REASON_BLE_GATT_ERROR,
     } as any).toBinary());
 
     const res = await promise;
