@@ -155,7 +155,7 @@ proptest = "1.4.0"
 
 # Web framework and middleware (optional; core must be network-agnostic by default; no JSON feature)
 axum = { version = "0.8", features = ["tracing"], optional = true }
-tower = { version = "0.4.13", features = ["util", "timeout", "load-shed", "limit"], optional = true }
+tower = { version = "0.5.3", features = ["util", "timeout", "load-shed", "limit"], optional = true }
 
 # Network utilities
 if-addrs = "0.13.3"
