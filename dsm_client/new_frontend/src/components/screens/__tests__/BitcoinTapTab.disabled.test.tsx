@@ -226,10 +226,7 @@ describe('BitcoinTapTab withdrawal planner flow', () => {
     await waitFor(() => {
       expect(mockExecuteWithdrawalPlan).toHaveBeenCalledWith(
         'withdraw-1',
-        250_000n,
         'tb1qwithdrawdest',
-        Uint8Array.from([1, 2, 3, 4]),
-        'dbtc/manifold/policy/routes/commitment-1',
       );
     });
     expect(await screen.findByText(/Execution: completed/i)).toBeInTheDocument();
