@@ -66,6 +66,18 @@ pub struct VaultSpecification {
 
     /// Arbitrary string metadata (no serde_json::Value).
     pub metadata: Option<HashMap<String, String>>,
+
+    /// Deployment mode: posted (storage nodes) or local (bilateral).
+    /// Default: posted. Only used by `dsm-gen compile`.
+    pub deployment_mode: Option<DeploymentMode>,
+
+    /// External commitment context strings for atomic grouping (Level 1).
+    /// Reserved for Phase 2 program compilation.
+    pub external_commits: Option<Vec<String>>,
+
+    /// Pre-commitment fork group name (Level 1).
+    /// Reserved for Phase 2 program compilation.
+    pub fork_group: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -196,6 +208,16 @@ impl From<BitcoinNetwork> for u32 {
             BitcoinNetwork::Signet => 2,
         }
     }
+}
+
+/// Deployment mode for compiled vault blobs.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum DeploymentMode {
+    /// Published to storage nodes. Creator can go offline.
+    Posted,
+    /// Local only. Bilateral fulfillment (BLE/QR/NFC).
+    Local,
 }
 
 // ---------------------------------------------------------------------------
@@ -434,6 +456,9 @@ impl VaultSpecification {
                 },
             }),
             metadata: None,
+            deployment_mode: None,
+            external_commits: None,
+            fork_group: None,
         }
     }
 }

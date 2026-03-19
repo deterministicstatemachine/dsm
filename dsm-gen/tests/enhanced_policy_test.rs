@@ -33,6 +33,9 @@ fn multi_sig_vault_spec() -> VaultSpecification {
         tick_lock: None,
         recovery: None,
         metadata: None,
+        deployment_mode: None,
+        external_commits: None,
+        fork_group: None,
     }
 }
 
@@ -211,6 +214,9 @@ fn test_bitcoin_htlc_variant_all_languages() -> Result<(), Box<dyn std::error::E
         tick_lock: None,
         recovery: None,
         metadata: None,
+        deployment_mode: None,
+        external_commits: None,
+        fork_group: None,
     };
     let spec = DsmSpecification::Vault(vault_spec);
 
