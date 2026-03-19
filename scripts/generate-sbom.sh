@@ -14,7 +14,7 @@ Usage: scripts/generate-sbom.sh [--run-id <id>] [--skip-validation]
 Generates a usable DSM SBOM bundle:
 - Rust SBOMs from cargo-cyclonedx
 - lockfile-resolved Node inventories where package-lock.json exists
-- manifest snapshot inventories for the root pnpm workspace and Android Gradle files
+- manifest snapshot inventories for the root npm workspace and Android Gradle files
 - validation evidence from `cargo run -p dsm_vertical_validation -- tla-check`
 EOF
 }
@@ -333,7 +333,7 @@ generate_workspace_manifest_sbom() {
                         { name: "dsm.inventory.kind", value: "manifest-snapshot" },
                         { name: "dsm.inventory.source", value: "package.json" },
                         { name: "dsm.source.manifest", value: $manifest_path },
-                        { name: "dsm.note", value: "Root JS workspace is captured from package.json. This run does not resolve pnpm-lock.yaml." }
+                        { name: "dsm.note", value: "Root JS workspace is captured from package.json and package-lock.json." }
                     ]
                 }
             },
@@ -635,7 +635,7 @@ generate_metadata() {
             limits: [
                 "Rust dependencies are resolved through cargo-cyclonedx for the current host target and current feature set.",
                 "Frontend and MCP server Node inventories are lockfile-resolved because package-lock.json is present.",
-                "The root JS workspace inventory is manifest-only in this run; pnpm-lock.yaml is not resolved here.",
+                "The root JS workspace inventory is lockfile-resolved via package-lock.json.",
                 "Android dependencies are build-file derived in this run; they are not Gradle-resolved.",
                 "No vulnerability scan or license/compliance verdict is included by this generator."
             ]
