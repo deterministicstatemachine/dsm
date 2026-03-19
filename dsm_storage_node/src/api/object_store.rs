@@ -133,7 +133,10 @@ pub async fn put_object(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let caller_device = ctx.as_ref().map(|c| c.0.device_id.as_str()).unwrap_or("<unauthenticated>");
+    let caller_device = ctx
+        .as_ref()
+        .map(|c| c.0.device_id.as_str())
+        .unwrap_or("<unauthenticated>");
     info!(
         "put_object: handler entered, body_len={}, device={}, headers: dlv_id={}, path={}",
         body.len(),
@@ -255,11 +258,11 @@ pub async fn delete_object_proto(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let caller_device = ctx.as_ref().map(|c| c.0.device_id.as_str()).unwrap_or("<unauthenticated>");
-    info!(
-        "delete_object_proto: device={}",
-        caller_device,
-    );
+    let caller_device = ctx
+        .as_ref()
+        .map(|c| c.0.device_id.as_str())
+        .unwrap_or("<unauthenticated>");
+    info!("delete_object_proto: device={}", caller_device,);
     match headers
         .get(axum::http::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())

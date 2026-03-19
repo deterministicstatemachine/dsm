@@ -1429,7 +1429,11 @@ impl<I: Send + Sync> TokenSDK<I> {
                 log::debug!("[TokenSDK] No dBTC balance in SQLite for device {}, falling back to core state", device_id_txt);
             }
             Err(e) => {
-                log::warn!("[TokenSDK] Failed to query dBTC balance from SQLite for device {}: {}", device_id_txt, e);
+                log::warn!(
+                    "[TokenSDK] Failed to query dBTC balance from SQLite for device {}: {}",
+                    device_id_txt,
+                    e
+                );
                 // Continue to fall back to core state rather than failing
             }
         }
@@ -1452,7 +1456,9 @@ impl<I: Send + Sync> TokenSDK<I> {
                 // The SDK’s offline bilateral debit path relies on token_balances rows
                 // being present, while the ledger state is canonical.
                 let device_id_txt = crate::util::text_id::encode_base32_crockford(device_id);
-                if let Ok(None) = crate::storage::client_db::get_token_balance(&device_id_txt, "dBTC") {
+                if let Ok(None) =
+                    crate::storage::client_db::get_token_balance(&device_id_txt, "dBTC")
+                {
                     if let Err(e) = crate::storage::client_db::upsert_token_balance(
                         &device_id_txt,
                         "dBTC",

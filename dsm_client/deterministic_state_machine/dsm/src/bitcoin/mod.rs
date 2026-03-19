@@ -13,7 +13,5 @@ pub mod types;
 pub use header_chain::{verify_header_chain, Checkpoint};
 pub use script::{build_htlc_script, htlc_p2wsh_address, verify_htlc_script};
 pub use spv::{verify_spv_proof, verify_block_header_work, SpvProof};
-pub use trust::{
-	BitcoinSettlementObservation, RustVerifierAcceptedEvidence, RustVerifierTrustProfile,
-};
+pub use trust::{BitcoinSettlementObservation, RustVerifierAcceptedEvidence, RustVerifierTrustProfile};
 pub use types::{BitcoinNetwork, BtcAmount};
