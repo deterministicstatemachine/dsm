@@ -92,11 +92,9 @@ impl RecoveryHandler for RecoveryImpl {
                 .collect();
 
             if !counterparty_ids.is_empty() {
-                if let Err(e) =
-                    crate::storage::client_db::recovery::store_capsule_counterparty_ids(
-                        &counterparty_ids,
-                    )
-                {
+                if let Err(e) = crate::storage::client_db::recovery::store_capsule_counterparty_ids(
+                    &counterparty_ids,
+                ) {
                     log::warn!("[RECOVERY] Failed to persist counterparty IDs: {e}");
                 } else {
                     log::info!(
@@ -260,9 +258,9 @@ impl RecoveryHandler for RecoveryImpl {
         .map_err(|e| format!("Core succession creation failed: {}", e))?;
 
         // Store succession receipt for later reference during resume
-        if let Err(e) = crate::storage::client_db::recovery::store_succession_receipt(
-            &succession.signature,
-        ) {
+        if let Err(e) =
+            crate::storage::client_db::recovery::store_succession_receipt(&succession.signature)
+        {
             log::warn!("[RECOVERY] Failed to store succession receipt: {e}");
         }
 
@@ -272,15 +270,15 @@ impl RecoveryHandler for RecoveryImpl {
         // Now bind the new device identity.
         {
             let new_device_id = new_device_commitment[..32].to_vec();
-            let public_key =
-                crate::sdk::app_state::AppState::get_public_key().unwrap_or_default();
+            let public_key = crate::sdk::app_state::AppState::get_public_key().unwrap_or_default();
             let genesis_hash = succession.new_device_commitment.clone();
 
             // Read capsule's SMT root from recovery_prefs if available
-            let smt_root = crate::storage::client_db::recovery::get_recovery_pref("capsule_smt_root")
-                .ok()
-                .flatten()
-                .unwrap_or_else(|| vec![0u8; 32]);
+            let smt_root =
+                crate::storage::client_db::recovery::get_recovery_pref("capsule_smt_root")
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| vec![0u8; 32]);
 
             crate::sdk::app_state::AppState::set_identity_info(
                 new_device_id,
@@ -348,9 +346,8 @@ impl RecoveryHandler for RecoveryImpl {
         // Update the contact's chain tip to the recovered value.
         // This ensures the next bilateral interaction starts from the recovered state.
         {
-            let device_id_b32 = crate::util::text_id::encode_base32_crockford(
-                counterparty_device_id,
-            );
+            let device_id_b32 =
+                crate::util::text_id::encode_base32_crockford(counterparty_device_id);
             let head_hash_32: [u8; 32] = if last_head_hash.len() == 32 {
                 let mut arr = [0u8; 32];
                 arr.copy_from_slice(&last_head_hash);

@@ -2343,9 +2343,7 @@ impl BitcoinTapSdk {
     /// Updates the existing advertisement's lifecycle_state to "spent" and
     /// routeable to false. Future planners skip spent vaults without
     /// hitting Bitcoin for UTXO checks.
-    pub(crate) async fn mark_vault_spent_on_storage_nodes(
-        vault_id: &str,
-    ) -> Result<(), DsmError> {
+    pub(crate) async fn mark_vault_spent_on_storage_nodes(vault_id: &str) -> Result<(), DsmError> {
         let ad_key = Self::vault_advertisement_key(vault_id);
         let ad_bytes = match Self::storage_get_bytes(&ad_key).await {
             Ok(b) => b,
@@ -2383,9 +2381,7 @@ impl BitcoinTapSdk {
     /// Called after settlement at dmin — the vault is economically final,
     /// the UTXO is buried, no one needs the advertisement anymore.
     /// Prevents spent vaults from accumulating on storage nodes.
-    pub(crate) async fn delete_vault_from_storage_nodes(
-        vault_id: &str,
-    ) -> Result<(), DsmError> {
+    pub(crate) async fn delete_vault_from_storage_nodes(vault_id: &str) -> Result<(), DsmError> {
         let ad_key = Self::vault_advertisement_key(vault_id);
         let proto_key = Self::vault_proto_key(vault_id);
         // Best-effort delete — if it fails, the spent ad is just stale data.
@@ -2432,10 +2428,9 @@ impl BitcoinTapSdk {
         // Pre-5cb45ac policy commit (old HTLC script with CLTV dead-man path).
         // Ads stored under this prefix are orphaned after the policy commit migration.
         const STALE_POLICY_COMMIT: [u8; 32] = [
-            0xac, 0x14, 0x12, 0x34, 0xeb, 0x83, 0xb6, 0x75,
-            0xbf, 0x9d, 0xfa, 0xb2, 0x54, 0x75, 0x0a, 0x07,
-            0x04, 0xc9, 0x47, 0xb7, 0x11, 0x4b, 0x96, 0xcc,
-            0x5f, 0x6b, 0xe5, 0x2d, 0x82, 0x94, 0xff, 0xb8,
+            0xac, 0x14, 0x12, 0x34, 0xeb, 0x83, 0xb6, 0x75, 0xbf, 0x9d, 0xfa, 0xb2, 0x54, 0x75,
+            0x0a, 0x07, 0x04, 0xc9, 0x47, 0xb7, 0x11, 0x4b, 0x96, 0xcc, 0x5f, 0x6b, 0xe5, 0x2d,
+            0x82, 0x94, 0xff, 0xb8,
         ];
 
         let current_prefix = Self::vault_advertisement_prefix();
@@ -2446,7 +2441,10 @@ impl BitcoinTapSdk {
         // Collect all prefixes to sweep: current manifold + stale manifold (ad + proto).
         let prefixes_to_sweep = [
             current_prefix.clone(),
-            format!("dbtc/manifold/{}/vault-proto/", Self::dbtc_policy_commit_b32()),
+            format!(
+                "dbtc/manifold/{}/vault-proto/",
+                Self::dbtc_policy_commit_b32()
+            ),
             stale_ad_prefix,
             stale_proto_prefix,
         ];
@@ -2567,21 +2565,23 @@ impl BitcoinTapSdk {
         let genesis = crate::sdk::app_state::AppState::get_genesis_hash()?;
         let device_id_b32 = crate::util::text_id::encode_base32_crockford(&device_id);
         let genesis_b32 = crate::util::text_id::encode_base32_crockford(&genesis);
-        let token = match crate::storage::client_db::get_auth_token(node_url, &device_id_b32, &genesis_b32) {
-            Ok(Some(t)) => t,
-            Ok(None) => {
-                log::debug!(
+        let token =
+            match crate::storage::client_db::get_auth_token(node_url, &device_id_b32, &genesis_b32)
+            {
+                Ok(Some(t)) => t,
+                Ok(None) => {
+                    log::debug!(
                     "[storage_auth] no auth token for node={} device={} (device not registered?)",
                     &node_url[..node_url.len().min(40)],
                     &device_id_b32[..device_id_b32.len().min(12)]
                 );
-                return None;
-            }
-            Err(e) => {
-                log::warn!("[storage_auth] auth token lookup failed: {e}");
-                return None;
-            }
-        };
+                    return None;
+                }
+                Err(e) => {
+                    log::warn!("[storage_auth] auth token lookup failed: {e}");
+                    return None;
+                }
+            };
         Some(crate::sdk::storage_node_sdk::StorageAuthContext {
             device_id_b32,
             token_b32: token,
