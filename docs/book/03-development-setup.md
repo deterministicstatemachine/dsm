@@ -95,7 +95,7 @@ make doctor
 make setup
 ```
 
-`make doctor` reports missing prerequisites without changing the repo. `make setup` verifies the toolchain, installs frontend dependencies if needed, and generates the `.cargo/config.toml` for NDK cross-compilation when `ANDROID_NDK_HOME` is configured.
+`make doctor` reports missing prerequisites without changing the repo. `make setup` verifies the toolchain, tries to auto-detect the Android SDK and writes the ignored `dsm_client/android/local.properties` for Gradle, installs frontend dependencies if needed, and generates the `.cargo/config.toml` for NDK cross-compilation when `ANDROID_NDK_HOME` is configured.
 
 ---
 
@@ -138,6 +138,8 @@ git clone https://github.com/irrefutable-labs/dsm.git
 cd dsm
 make setup
 ```
+
+On Linux, `make setup` also tries to auto-detect the Android SDK from `ANDROID_HOME`, `ANDROID_SDK_ROOT`, `$HOME/Android/sdk`, or the macOS-style SDK path if present.
 
 ---
 
@@ -195,6 +197,8 @@ Inside WSL2, follow the Linux setup above. Build from WSL2:
 ```bash
 make android
 ```
+
+`make android` is a fresh build path: it rewrites Gradle's ignored `local.properties` from the detected SDK path, deletes old Android `.so` files before rebuilding JNI libs, rebuilds and recopies the frontend assets, then runs `./gradlew clean :app:assembleDebug`.
 
 Copy the APK from WSL2 to Windows to sideload, or use `make install` if the device is connected via USB.
 

@@ -26,7 +26,7 @@ pub mod proto {
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 // ---------------------------------------------------------------------------
 // Top-level spec discriminant
@@ -35,6 +35,7 @@ use std::collections::HashMap;
 /// Top-level DSM specification — either a vault or a policy.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type")]
+#[allow(clippy::large_enum_variant)]
 pub enum DsmSpecification {
     #[serde(rename = "vault")]
     Vault(VaultSpecification),
@@ -65,7 +66,19 @@ pub struct VaultSpecification {
     pub recovery: Option<RecoveryConfig>,
 
     /// Arbitrary string metadata (no serde_json::Value).
-    pub metadata: Option<HashMap<String, String>>,
+    pub metadata: Option<BTreeMap<String, String>>,
+
+    /// Deployment mode: posted (storage nodes) or local (bilateral).
+    /// Default: posted. Only used by `dsm-gen compile`.
+    pub deployment_mode: Option<DeploymentMode>,
+
+    /// External commitment context strings for atomic grouping (Level 1).
+    /// Reserved for Phase 2 program compilation.
+    pub external_commits: Option<Vec<String>>,
+
+    /// Pre-commitment fork group name (Level 1).
+    /// Reserved for Phase 2 program compilation.
+    pub fork_group: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -198,6 +211,16 @@ impl From<BitcoinNetwork> for u32 {
     }
 }
 
+/// Deployment mode for compiled vault blobs.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum DeploymentMode {
+    /// Published to storage nodes. Creator can go offline.
+    Posted,
+    /// Local only. Bilateral fulfillment (BLE/QR/NFC).
+    Local,
+}
+
 // ---------------------------------------------------------------------------
 // Assets
 // ---------------------------------------------------------------------------
@@ -213,7 +236,7 @@ pub struct AssetDefinition {
     pub chain_state_hash: Option<String>,
     /// Reference state number paired with `chain_state_hash`.
     pub chain_state_number: Option<u64>,
-    pub metadata: Option<HashMap<String, String>>,
+    pub metadata: Option<BTreeMap<String, String>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -280,7 +303,7 @@ pub struct PolicySpecification {
     pub version: String,
     pub description: Option<String>,
     pub rules: Vec<TransferRule>,
-    pub metadata: Option<HashMap<String, String>>,
+    pub metadata: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -295,7 +318,7 @@ pub struct TransferRule {
 pub struct RuleCondition {
     pub condition_type: ConditionType,
     /// String-keyed parameters — no `serde_json::Value` (Invariant #2).
-    pub parameters: HashMap<String, String>,
+    pub parameters: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -434,13 +457,16 @@ impl VaultSpecification {
                 },
             }),
             metadata: None,
+            deployment_mode: None,
+            external_commits: None,
+            fork_group: None,
         }
     }
 }
 
 impl PolicySpecification {
     pub fn example(name: String) -> Self {
-        let mut params = HashMap::new();
+        let mut params = BTreeMap::new();
         params.insert("max_amount".to_string(), "1000".to_string());
 
         Self {

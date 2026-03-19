@@ -3,6 +3,8 @@
 //! Core library providing code generation capabilities for DSM vault and policy clients.
 //! Supports multiple target languages with type-safe builders and compile-time safety.
 
+pub mod base32;
+pub mod compiler;
 pub mod generators;
 pub mod schema;
 
