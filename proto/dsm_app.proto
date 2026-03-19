@@ -1,0 +1,2501 @@
+// SPDX-License-Identifier: Apache-2.0
+// DSM Core Protocol — Schema 2.4.0 (2026-02-08) | Envelope wire v3
+// Single canonical path: no alternate paths, no wall clocks, no non-deterministic maps in hashed preimages.
+// After editing, run `pnpm --filter dsm-wallet run proto:gen` to keep dsm_app_pb.js current.
+
+syntax = "proto3";
+package dsm;
+
+import "google/protobuf/descriptor.proto";
+
+// ====================== DSM FILE/FIELD OPTIONS ======================
+// Declare extensions BEFORE use.
+extend google.protobuf.FileOptions {
+  string dsm_schema_semver  = 52000;
+  uint32 dsm_envelope_epoch = 52001;
+}
+extend google.protobuf.FieldOptions {
+  uint32 dsm_fixed_len = 51000; // exact length in bytes
+  uint32 dsm_max_len   = 51001; // upper bound in bytes
+}
+
+option optimize_for        = SPEED;
+option java_multiple_files = true;
+option java_package        = "dsm.types.proto";
+option csharp_namespace    = "Dsm.Proto";
+option go_package          = "github.com/dsm-project/sdk/go/dsmpb";
+option swift_prefix        = "DSM";
+
+option (dsm_schema_semver)  = "2.4.0";
+option (dsm_envelope_epoch) = 3;
+
+// ============================ WRAPPERS ===============================
+message Hash32 { bytes v = 1 [(dsm_fixed_len)=32]; }     // BLAKE3-256 (DSM standard)
+message Hash16 { bytes v = 1 [(dsm_fixed_len)=16]; }     // 16-byte opaque id / nonce
+message U128   { bytes le = 1 [(dsm_fixed_len)=16]; }    // little-endian u128
+message S128   { bytes le = 1 [(dsm_fixed_len)=16]; }    // little-endian two’s-compl. s128
+
+// Acyclic program reference (non–TC DAG root bound to identity).
+message ProgramRef {
+  string program_id = 1; // e.g., "dex.swap.v3"
+  Hash32 dag_root   = 2; // Merkle root of program DAG
+}
+
+// ============================== EVIDENCE =============================
+enum AttestorType {
+  ATTESTOR_UNSPECIFIED = 0;
+  ATTESTOR_ORACLE      = 1;
+  ATTESTOR_TEE         = 2;
+  ATTESTOR_QUORUM      = 3;
+  ATTESTOR_CLOCK       = 4;
+  ATTESTOR_CHAIN       = 5;
+  ATTESTOR_PREIMAGE    = 6;
+}
+
+// ============================== TRANSACTION TYPES =============================
+enum TransactionType {
+  TX_TYPE_UNSPECIFIED      = 0;
+  TX_TYPE_FAUCET           = 1; // Faucet claim
+  TX_TYPE_BILATERAL_OFFLINE = 2; // Offline bilateral transfer
+  TX_TYPE_BILATERAL_OFFLINE_RECOVERED = 3; // Recovered offline bilateral
+  TX_TYPE_ONLINE           = 4; // Online transfer
+  TX_TYPE_DBTC_MINT        = 5; // BTC→dBTC deposit (mint)
+  TX_TYPE_DBTC_BURN        = 6; // dBTC→BTC withdrawal (burn)
+}
+
+message EvidenceOracle {
+  bytes payload    = 1 [(dsm_max_len)=65535];
+  bytes signature  = 2 [(dsm_max_len)=65535];
+  bytes oracle_key = 3 [(dsm_max_len)=96]; // raw key or key-hash
+}
+message EvidenceClock {
+  uint64 attested_iterations = 1; // clockless iteration proof
+  bytes  attestor_sig        = 2 [(dsm_max_len)=65535];
+}
+message EvidenceTee   { bytes report = 1 [(dsm_max_len)=65535]; bytes cert = 2 [(dsm_max_len)=65535]; }
+message EvidenceQuorum{
+  uint32 threshold        = 1;
+  repeated bytes pubkeys  = 2 [(dsm_max_len)=96];
+  repeated bytes sigs     = 3 [(dsm_max_len)=65535];
+  Hash32 payload_hash     = 4;
+}
+message EvidenceChain  { bytes chain_id = 1 [(dsm_max_len)=32]; bytes header = 2 [(dsm_max_len)=65535]; bytes proof = 3 [(dsm_max_len)=65535]; }
+message EvidencePreimage { bytes preimage = 1 [(dsm_max_len)=65535]; }
+
+message Evidence {
+  oneof kind {
+    EvidenceOracle   oracle   = 1;
+    EvidenceTee      tee      = 2;
+    EvidenceQuorum   quorum   = 3;
+    EvidenceClock    clock    = 4;
+    EvidenceChain    chain    = 5;
+    EvidencePreimage preimage = 6;
+  }
+}
+
+// ===================== CHOICE-LOCK (XOR PRECOMMIT) ==================
+message Guard {
+  AttestorType attestor       = 1;
+  bytes        attestor_key   = 2 [(dsm_max_len)=96];
+  uint64       min_iterations = 3;
+  uint64       max_iterations = 4;
+}
+message PrecommitOption {
+  uint32 idx             = 1; // 0..N-1
+  Guard  guard           = 2;
+  Hash32 post_state_hash = 3;
+  bytes  payload         = 4 [(dsm_max_len)=4096]; // app-opaque
+}
+message PrecommitOneOf {
+  Hash32 precommit_id      = 1;
+  Hash32 pre_state_hash    = 2; // MUST equal current tip
+  repeated bytes cosigners = 3 [(dsm_max_len)=96];
+  repeated PrecommitOption options = 4; // >= 2
+  bytes   commitment_sig   = 5 [(dsm_max_len)=65535];
+  uint32  max_options      = 6; // MUST equal options.size()
+}
+message ResolvePrecommit {
+  Hash32   precommit_id     = 1;
+  uint32   chosen_idx       = 2;
+  Evidence evidence         = 3; // must satisfy Guard.attestor
+  repeated bytes signatures = 4 [(dsm_max_len)=65535]; // includes cosigners
+  Hash32   post_state_hash  = 5; // MUST equal option.post_state_hash
+}
+
+// ============================ EXTERNAL COMMITS ======================
+message ExternalCommit {
+  // Canonical source identifier:
+  // BLAKE3-256("DSM/external-source-id\0" || source_utf8_bytes)
+  Hash32 source_id = 1;
+  bytes  payload   = 2 [(dsm_max_len)=65535];
+  Evidence evidence= 3;
+  reserved 4; // removed field — prevent reuse
+  // Canonical commit identifier:
+  // BLAKE3-256("DSM/external-commit-id\0" || source_id || payload || evidence_hash)
+  // where evidence_hash := BLAKE3-256("DSM/external-evidence\0" || evidence_bytes)
+  // and evidence_hash = 32x00 if evidence is absent.
+  Hash32 commit_id = 5;
+}
+
+// ======= DELEGATED CAPABILITIES & ATTESTED ACTIONS (AUTHZ) =========
+message CapabilityConstraint { string key = 1; string value = 2; }
+message CapabilityScope {
+  string  resource = 1; // e.g., "token/TRANSFER", "kv/WRITE"
+  string  action   = 2; // e.g., "invoke", "mint", "set"
+  repeated CapabilityConstraint constraints = 3;
+  uint64  min_iterations = 4;
+  uint64  max_iterations = 5;
+}
+message DelegatedCapability {
+  Hash32  cap_id    = 1; // hash of body (canonical bytes)
+  bytes   issuer    = 2 [(dsm_max_len)=96];
+  bytes   subject   = 3 [(dsm_max_len)=96];
+  repeated CapabilityScope scopes = 4;
+  optional Hash32 parent_cap_id = 5;
+  bytes   signature = 6 [(dsm_max_len)=65535];
+}
+message AttestedAction {
+  bytes    actor     = 1 [(dsm_max_len)=96];
+  string   action    = 2; // canonical verb
+  bytes    payload   = 3 [(dsm_max_len)=4096];
+  Evidence evidence  = 4;
+  bytes    signature = 5 [(dsm_max_len)=65535];
+}
+
+// ============ DETERMINISTIC LIMBO VAULTS (DLV) PRIMITIVES ===========
+message DlvCreate { Hash32 vault_id = 1; Hash32 policy_hash = 2; Hash32 seed_commit = 3; bytes owner = 4 [(dsm_max_len)=96]; bytes signature = 5 [(dsm_max_len)=65535]; }
+message DlvUnlock { Hash32 vault_id = 1; bytes condition_proof = 2 [(dsm_max_len)=65535]; Evidence evidence = 3; bytes signature = 4 [(dsm_max_len)=65535]; }
+
+// ----------------------------- Vault helpers ----------------------------
+message FulfillmentMechanism {
+  reserved 1; // time-based mechanism removed
+  oneof kind {
+    Payment payment = 2;
+    CryptoCondition crypto_condition = 3;
+    MultiSignature multi_signature = 4;
+    StateReference state_reference = 5;
+    RandomWalkVerification random_walk_verification = 6;
+    And and = 7;
+    Or or = 8;
+    BitcoinHTLC bitcoin_htlc = 9;
+  }
+}
+
+message BitcoinHTLC {
+  bytes  hash_lock = 1 [(dsm_fixed_len)=32]; // SHA256(sk_V): fulfill hashlock h_f (path a)
+  uint64 refund_iterations = 2; // DSM state iterations before depositor can derive rk_V
+  bytes  bitcoin_pubkey = 3 [(dsm_max_len)=33]; // Counterparty's compressed Bitcoin pubkey
+  uint64 expected_btc_amount_sats = 4; // Expected Bitcoin amount in satoshis
+  uint32 network = 5; // 0=mainnet, 1=testnet, 2=signet
+  uint64 min_confirmations = 6; // dBTC §6.4/§12.1.3: min block depth for vault transition (canonical=100)
+  bytes  refund_hash_lock = 7 [(dsm_fixed_len)=32]; // SHA256(rk_V): refund hashlock h_r (path b)
+}
+
+message BitcoinHTLCProof {
+  bytes  preimage = 1 [(dsm_max_len)=32]; // Secret s where SHA256(s) = hash_lock
+  bytes  bitcoin_txid = 2 [(dsm_fixed_len)=32]; // Bitcoin transaction ID (little-endian)
+  bytes  spv_proof = 3 [(dsm_max_len)=65535]; // Merkle proof of inclusion in Bitcoin block
+  bytes  block_header = 4 [(dsm_fixed_len)=80]; // Raw 80-byte Bitcoin block header
+  uint64 confirmations = 5; // Number of confirmations (advisory)
+  repeated bytes header_chain = 6; // 80-byte headers from checkpoint to block
+}
+
+// ===================== BITCOIN TAP (DEPOSIT / WITHDRAWAL) =====================
+message DepositRequest {
+  string vault_op_id = 1;
+  string direction = 2; // "dsm_to_btc" or "btc_to_dsm"
+  uint64 dsm_amount = 3;
+  string dsm_token_id = 4;
+  uint64 btc_amount_sats = 5;
+  bytes  hash_lock = 6 [(dsm_fixed_len)=32];
+  bytes  btc_pubkey = 7 [(dsm_max_len)=33]; // Counterparty's Bitcoin compressed pubkey
+  uint64 refund_iterations = 8; // DSM-side iteration timeout
+  string destination_address = 9; // BTC destination for dbtc_to_btc withdrawals (bech32)
+}
+
+message DepositResponse {
+  string vault_op_id = 1;
+  string status = 2; // "initiated", "awaiting_counterparty", etc.
+  string vault_id = 3;
+  bytes  external_commitment = 4 [(dsm_fixed_len)=32];
+  bytes  hash_lock = 5 [(dsm_fixed_len)=32];
+  bytes  htlc_script = 6 [(dsm_max_len)=512]; // Bitcoin HTLC redeem script
+  string htlc_address = 7; // Bitcoin P2SH/P2WSH address
+  string message = 8;
+  string funding_txid = 9; // Resolved funding/sweep tx id (hex, display order)
+}
+
+message DepositCompleteRequest {
+  string vault_op_id = 1;
+  bytes  preimage = 2 [(dsm_max_len)=32];
+  bytes  bitcoin_txid = 3 [(dsm_fixed_len)=32];
+  bytes  spv_proof = 4 [(dsm_max_len)=65535];
+  bytes  block_header = 5 [(dsm_fixed_len)=80];
+  uint64 confirmations = 6;
+  bytes  bitcoin_tx_raw = 7 [(dsm_max_len)=1048576]; // Raw Bitcoin tx bytes for amount/script verification
+  repeated bytes header_chain = 8; // Sequence of 80-byte headers from checkpoint anchor to block_header
+  bytes  recipient_device_id = 9 [(dsm_fixed_len)=32]; // Optional mint recipient override (defaults to local device)
+  // Burn receipt + sigma are derived internally by the SDK from the applied
+  // Burn transition before vault unlock (§6.1–§6.2).
+}
+
+message DepositRefundRequest {
+  string vault_op_id = 1;
+}
+
+message DepositStatusRequest {
+  string vault_op_id = 1;
+}
+
+// ===================== BITCOIN TAP (dBTC) =====================
+
+message BitcoinAddressRequest {
+  uint32 network = 1; // 0=mainnet, 1=testnet, 2=signet
+  uint32 index = 2; // BIP84 address index (default 0)
+}
+
+message BitcoinAddressResponse {
+  string address = 1; // bech32 P2WPKH address (bc1q... / tb1q...)
+  uint32 index = 2; // BIP84 address index
+  bytes  compressed_pubkey = 3; // 33-byte compressed public key
+}
+
+// Select and persist the active receive index for the current Bitcoin account.
+message BitcoinAddressSelectRequest {
+  uint32 index = 1; // BIP84 address index to set as active (0..N)
+}
+
+message BitcoinAddressSelectResponse {
+  bool   success          = 1;
+  string address          = 2; // bech32 address at the selected index
+  uint32 index            = 3; // confirmed active index
+  bytes  compressed_pubkey = 4; // 33-byte compressed public key
+}
+
+message BitcoinDepositListRequest {}
+
+message BitcoinDepositListResponse {
+  repeated BitcoinDepositEntry deposits = 1;
+}
+
+message BitcoinDepositEntry {
+  string vault_op_id = 1;
+  string direction = 2; // "btc_to_dbtc" or "dbtc_to_btc"
+  string status = 3; // "initiated", "awaiting_confirmation", "claimable", "completed", "expired", "refunded"
+  uint64 btc_amount_sats = 4;
+  string htlc_address = 5;
+  string vault_id = 6;
+  bool   is_fractional_successor = 7; // true when this deposit was created by a fractional exit
+  string funding_txid = 8; // on-chain funding transaction ID (hex, set after fund_and_broadcast)
+}
+
+message BitcoinClaimTxRequest {
+  string vault_op_id = 1;
+  string destination_address = 2; // bech32 address to send claimed BTC
+  uint64 fee_rate_sat_vb = 3; // fee rate in sat/vbyte
+  bytes  outpoint_txid = 4 [(dsm_fixed_len)=32]; // Funding txid containing the HTLC output
+  uint32 outpoint_vout = 5; // Funding output index containing the HTLC UTXO
+  bytes  preimage = 6 [(dsm_max_len)=64]; // Optional preimage override; falls back to deposit preimage
+  uint32 signing_index = 7; // BIP84 receive index used for signing (default: 0)
+}
+
+message BitcoinClaimTxResponse {
+  bytes  raw_tx = 1; // serialized raw Bitcoin transaction
+  string txid = 2; // transaction ID (hex, reversed byte order)
+}
+
+// ===================== BITCOIN BROADCAST / AUTO-CLAIM / TX STATUS =====================
+
+message BitcoinBroadcastRequest {
+  bytes raw_tx = 1 [(dsm_max_len)=1048576]; // Serialized raw Bitcoin transaction bytes
+}
+
+message BitcoinBroadcastResponse {
+  bytes txid = 1 [(dsm_fixed_len)=32]; // Transaction ID (32 bytes, internal byte order)
+}
+
+message BitcoinAutoClaimRequest {
+  string vault_op_id = 1;
+  string destination_address = 2; // bech32 address to receive claimed BTC
+  bytes  funding_txid = 3 [(dsm_fixed_len)=32]; // HTLC funding transaction ID (internal byte order)
+  uint32 funding_vout = 4; // Output index of the HTLC UTXO
+  uint64 fee_rate_sat_vb = 5; // Fee rate in sat/vbyte (minimum 1)
+  uint32 signing_index = 6; // BIP84 receive index for signing (default: 0)
+}
+
+message BitcoinAutoClaimResponse {
+  bytes txid = 1 [(dsm_fixed_len)=32]; // Claim transaction ID (internal byte order)
+  bytes raw_tx = 2 [(dsm_max_len)=1048576]; // Serialized signed claim transaction
+}
+
+message BitcoinTxStatusRequest {
+  bytes txid = 1 [(dsm_fixed_len)=32]; // Transaction ID (internal byte order)
+}
+
+message BitcoinTxStatusResponse {
+  uint32 confirmations = 1; // Number of confirmations (0 = mempool only)
+  bool   in_mempool = 2; // True if transaction is in the mempool
+}
+
+// ===================== VAULT MONITOR =====================
+
+message BitcoinVaultListRequest {}
+
+message BitcoinVaultListResponse {
+  repeated BitcoinVaultSummary vaults = 1;
+}
+
+message BitcoinVaultSummary {
+  string vault_id = 1;
+  string state = 2; // "limbo", "unlocked", "claimed", "invalidated"
+  uint64 amount_sats = 3; // BTC amount locked in this vault
+  string direction = 4; // "btc_to_dbtc" or "dbtc_to_btc"
+  string htlc_address = 5; // Bitcoin P2WSH address
+  bytes  entry_header = 6 [(dsm_max_len)=80]; // 80-byte Bitcoin block header at entry (if set)
+}
+
+message BitcoinVaultGetRequest {
+  string vault_id = 1;
+}
+
+message BitcoinVaultGetResponse {
+  string vault_id = 1;
+  string state = 2;
+  uint64 amount_sats = 3;
+  string direction = 4;
+  string htlc_address = 5;
+  bytes  entry_header = 6 [(dsm_max_len)=80];
+  uint64 created_at_state = 7;
+  bytes  content_commitment = 8 [(dsm_max_len)=64];
+  string vault_op_id = 9; // Associated vault operation ID (if known)
+}
+
+message BitcoinWalletHealthResponse {
+  string network = 1; // "mainnet", "testnet", "signet"
+  bool   reachable = 2;
+  string source = 3; // "CHAIN" or "UNKNOWN"
+  string reason = 4; // empty when reachable
+  string rpc_url = 5; // masked RPC URL (scheme + host only)
+  uint32 tracked_addresses = 6;
+}
+
+// --- Fee estimation (Phase 8.1) ---
+
+message BitcoinFeeEstimateRequest {
+  string vault_op_id = 1; // vault operation whose HTLC we're estimating for
+  uint64 fee_rate_sat_vb = 2; // fee rate in sat/vbyte
+  bool   is_fractional = 3; // true → sweep-and-change, false → full claim
+}
+
+message BitcoinFeeEstimateResponse {
+  uint64 estimated_fee_sats = 1;
+  uint64 estimated_vsize = 2;
+  uint64 output_amount_sats = 3;
+}
+
+// --- HTLC refund TX builder (Phase 8.3) ---
+
+message BitcoinRefundTxRequest {
+  string vault_op_id = 1;
+  string refund_address = 2; // where refunded BTC goes
+  bytes  outpoint_txid = 3 [(dsm_max_len)=32];
+  uint32 outpoint_vout = 4;
+  uint64 fee_rate_sat_vb = 5;
+  uint32 signing_index = 6;
+}
+
+message BitcoinRefundTxResponse {
+  bytes  raw_tx = 1;
+  string txid = 2;
+}
+
+// --- Fractional exit (Phase 8.4) ---
+
+message BitcoinFractionalExitRequest {
+  string source_vault_id = 1;
+  uint64 exit_amount_sats = 2;
+  uint32 successor_locktime = 3;
+  uint64 refund_iterations = 4;
+  string destination_address = 5; // Native BTC destination for sweep (§6.3)
+  string plan_id = 6;             // Deterministic withdrawal ID (ρ) from planning phase
+}
+
+message BitcoinFractionalExitResponse {
+  string source_vault_id = 1;
+  string successor_vault_id = 2;
+  string successor_vault_op_id = 3;
+  uint64 exit_amount_sats = 4;
+  uint64 remainder_sats = 5;
+  uint32 successor_depth = 6;
+  bytes  successor_htlc_script = 7 [(dsm_max_len)=256];
+  string successor_htlc_address = 8;
+  string exit_vault_op_id = 9;
+  // Exit anchor: sweep/claim tx id (dBTC §6.4.3)
+  string sweep_txid = 10;
+  // Exit anchor: block confirmation depth achieved (dBTC §12.1.3)
+  uint32 confirm_depth = 11;
+}
+
+message BitcoinWithdrawalPlanRequest {
+  uint64 requested_net_sats = 1;
+  string destination_address = 2;
+}
+
+message BitcoinWithdrawalBlockedVault {
+  string vault_id = 1;
+  uint64 amount_sats = 2;
+  string reason = 3;
+}
+
+message BitcoinWithdrawalPlanLeg {
+  string vault_id = 1;
+  string kind = 2; // "full" or "partial"
+  uint64 source_amount_sats = 3;
+  uint64 gross_exit_sats = 4;
+  uint64 estimated_fee_sats = 5;
+  uint64 estimated_net_sats = 6;
+  uint64 remainder_sats = 7;
+  uint32 successor_depth_after = 8;
+}
+
+message BitcoinWithdrawalPlanResponse {
+  string plan_id = 1;
+  string plan_class = 2;
+  uint64 requested_net_sats = 3;
+  uint64 planned_net_sats = 4;
+  uint64 total_gross_exit_sats = 5;
+  uint64 total_fee_sats = 6;
+  uint64 shortfall_sats = 7;
+  repeated BitcoinWithdrawalPlanLeg legs = 8;
+  repeated BitcoinWithdrawalBlockedVault blocked_vaults = 9;
+  bytes route_commitment_id = 10 [deprecated = true];
+  string route_commitment_key = 11 [deprecated = true];
+  bytes selector_snapshot_hash = 12 [deprecated = true];
+  bytes policy_commit = 13 [(dsm_fixed_len)=32];
+  uint64 available_dbtc_sats = 14;
+}
+
+message BitcoinWithdrawalExecuteRequest {
+  string plan_id = 1;
+  uint64 requested_net_sats = 2 [deprecated = true];
+  string destination_address = 3;
+  bytes route_commitment_id = 4 [deprecated = true];
+  string route_commitment_key = 5 [deprecated = true];
+}
+
+message BitcoinWithdrawalExecutionLeg {
+  string vault_id = 1;
+  string kind = 2; // "full" or "partial"
+  string status = 3; // "completed" or "failed"
+  uint64 gross_exit_sats = 4;
+  uint64 estimated_fee_sats = 5;
+  uint64 estimated_net_sats = 6;
+  uint64 actual_remainder_sats = 7;
+  string successor_vault_id = 8;
+  string successor_vault_op_id = 9;
+  string exit_vault_op_id = 10;
+  string sweep_txid = 11;
+}
+
+message BitcoinWithdrawalExecuteResponse {
+  string plan_id = 1;
+  string plan_class = 2;
+  string status = 3;
+  string message = 4;
+  uint64 requested_net_sats = 5;
+  uint64 planned_net_sats = 6;
+  uint64 total_gross_exit_sats = 7;
+  uint64 total_fee_sats = 8;
+  uint64 shortfall_sats = 9;
+  repeated BitcoinWithdrawalExecutionLeg executed_legs = 10;
+  repeated BitcoinWithdrawalBlockedVault blocked_vaults = 11;
+  bytes route_commitment_id = 12 [deprecated = true];
+  string route_commitment_key = 13 [deprecated = true];
+}
+
+message DbtcVaultAdvertisementV1 {
+  uint32 version = 1;
+  bytes policy_commit = 2 [(dsm_fixed_len)=32];
+  string vault_id = 3;
+  bytes controller_device_id = 4 [(dsm_fixed_len)=32];
+  uint64 amount_sats = 5;
+  uint32 successor_depth = 6;
+  string lifecycle_state = 7;
+  bool routeable = 8;
+  string busy_reason = 9;
+  uint64 updated_state_number = 10;
+  string vault_proto_key = 11;
+  bytes vault_proto_digest = 12 [(dsm_fixed_len)=32];
+  // Bitcoin txid that funded this vault's HTLC (internal byte order).
+  // Published at deposit/sweep time. Withdrawer verifies against Bitcoin
+  // directly (UTXO check + SPV from any Bitcoin node). Storage nodes
+  // never verify — they just cache the pointer.
+  bytes entry_txid = 13 [(dsm_fixed_len)=32];
+  // HTLC P2WSH address — withdrawer queries the Bitcoin UTXO set at this address
+  // to determine vault liveness and confirm depth (spec §8 Definition 7).
+  string htlc_address = 14;
+  // BLAKE3("DSM/script-commit" || htlc_script) — commits the spending template
+  // without revealing the full script (spec Definition 9: script_commit_k).
+  bytes script_commit = 15 [(dsm_fixed_len)=32];
+  // Public construction data needed to assemble the Bitcoin spend tx (spec
+  // Definition 9: redeem_params_k). Excludes the bearer-derived witness.
+  // Encoded as DbtcRedeemParams protobuf.
+  bytes redeem_params = 16;
+  // Random 32-byte nonce per vault — public, safe without manifold_seed.
+  // Bearer derives η = BLAKE3("DSM/dbtc-bearer-eta\0" || manifold_seed || deposit_nonce).
+  bytes deposit_nonce = 17 [(dsm_fixed_len)=32];
+}
+
+// Public construction data for a vault's HTLC (spec Definition 11).
+// Sufficient to assemble a redemption transaction structure but NOT to authorize it.
+// The bearer-derived witness (preimage + signature) is computed locally at spend time.
+message DbtcRedeemParams {
+  // Raw HTLC redeem script bytes.
+  bytes htlc_script = 1;
+  // Claim public key (33 bytes compressed secp256k1).
+  bytes claim_pubkey = 2;
+  // Hash lock embedded in the HTLC: SHA256(preimage).
+  bytes hash_lock = 3 [(dsm_fixed_len)=32];
+  // Refund hash lock for the time-locked refund path.
+  bytes refund_hash_lock = 4 [(dsm_fixed_len)=32];
+  // Refund iteration count (maps to HTLC locktime).
+  uint32 refund_iterations = 5;
+}
+
+message DbtcRouteCommitmentLegV1 {
+  string vault_id = 1;
+  string kind = 2;
+  uint64 source_amount_sats = 3;
+  uint64 gross_exit_sats = 4;
+  uint64 estimated_fee_sats = 5;
+  uint64 estimated_net_sats = 6;
+  uint64 remainder_sats = 7;
+  uint32 successor_depth_after = 8;
+}
+
+message DbtcRouteCommitmentV1 {
+  uint32 version = 1;
+  bytes policy_commit = 2 [(dsm_fixed_len)=32];
+  string token_in = 3;
+  string token_out = 4;
+  uint64 requested_net_sats = 5;
+  string destination_address = 6;
+  bytes selector_snapshot_hash = 7 [(dsm_fixed_len)=32];
+  repeated DbtcRouteCommitmentLegV1 legs = 8;
+  string plan_class = 9;
+  uint64 planned_net_sats = 10;
+  uint64 total_gross_exit_sats = 11;
+  uint64 total_fee_sats = 12;
+  uint64 shortfall_sats = 13;
+  bytes planner_device_id = 14 [(dsm_fixed_len)=32];
+}
+
+message BitcoinWalletImportRequest {
+  string import_kind  = 1; // "wif" | "xpriv" | "mnemonic"
+  string secret       = 2; // user-supplied import material (kept local to device)
+  string label        = 3; // user-visible account label
+  uint32 network      = 4; // 0=mainnet, 1=testnet, 2=signet
+  uint32 start_index  = 5; // BIP84 address index to use as the active receive address (default 0)
+}
+
+message BitcoinWalletAccount {
+  string account_id           = 1;
+  string label                = 2;
+  string import_kind          = 3;
+  uint32 network              = 4;
+  bool   active               = 5;
+  string first_address        = 6;
+  uint32 active_receive_index = 7; // currently selected BIP84 address index
+}
+
+message BitcoinWalletImportResponse {
+  bool success = 1;
+  string account_id = 2;
+  string message = 3;
+}
+
+message BitcoinWalletListRequest {}
+
+message BitcoinWalletListResponse {
+  repeated BitcoinWalletAccount accounts = 1;
+  string active_account_id = 2;
+}
+
+message BitcoinWalletSelectRequest {
+  string account_id = 1;
+}
+
+message BitcoinWalletSelectResponse {
+  bool success = 1;
+  string active_account_id = 2;
+  string message = 3;
+}
+
+// Generate a fresh BIP39 wallet — no secret needed, returns mnemonic for backup.
+message BitcoinWalletCreateRequest {
+  uint32 network    = 1; // 0=mainnet, 1=testnet, 2=signet
+  string label      = 2; // user-visible account label (optional)
+  uint32 word_count = 3; // 12 or 24 (default 24)
+}
+
+message BitcoinWalletCreateResponse {
+  bool   success       = 1;
+  string account_id    = 2;
+  string mnemonic      = 3; // DISPLAY AND BACK UP — not stored in plaintext after this call
+  string first_address = 4;
+  string message       = 5;
+}
+
+message Payment {
+  uint64 amount = 1;
+  string token_id = 2;
+  string recipient = 3;
+  bytes verification_state = 4; // opaque state bytes
+}
+
+message CryptoCondition {
+  bytes condition_hash = 1;
+  bytes public_params = 2;
+}
+
+message MultiSignature {
+  repeated bytes public_keys = 1;
+  uint32 threshold = 2;
+}
+
+message StateReference {
+  repeated bytes reference_states = 1;
+  bytes parameters = 2;
+}
+
+message RandomWalkVerification {
+  bytes verification_key = 1;
+  string statement = 2;
+}
+
+message And { repeated FulfillmentMechanism conditions = 1; }
+message Or  { repeated FulfillmentMechanism conditions = 1; }
+
+// Minimal encrypted content proto for vaults
+message EncryptedContentProto {
+  bytes encapsulated_key = 1;
+  bytes encrypted_data = 2;
+  bytes nonce = 3;
+  bytes aad = 4;
+}
+
+// Vault state (lightweight representation)
+message VaultStateProto {
+  oneof kind {
+    bool limbo = 1; // Limbo state: vault locked, awaiting fulfillment. Standard proto oneof unit variant.
+    Unlocked unlocked = 2;
+    Claimed claimed = 3;
+    Invalidated invalidated = 4;
+  }
+}
+message Unlocked { uint64 unlocked_state_number = 1; bytes fulfillment_proof = 2; }
+message Claimed { uint64 claimed_state_number = 1; bytes claimant = 2; bytes claim_proof = 3; }
+message Invalidated { uint64 invalidated_state_number = 1; string reason = 2; bytes creator_signature = 3; }
+
+// Limbo vault canonical proto for storage/transport
+message LimboVaultProto {
+  string id = 1;
+  uint64 created_at_state = 2;
+  bytes creator_public_key = 3;
+  FulfillmentMechanism fulfillment_condition = 4;
+  optional bytes intended_recipient = 5;
+  VaultStateProto state = 6;
+  string content_type = 7;
+  EncryptedContentProto encrypted_content = 8;
+  bytes content_commitment = 9;
+  bytes parameters_hash = 10;
+  bytes creator_signature = 11;
+  repeated bytes verification_positions = 12;
+  bytes reference_state_hash = 13;
+  optional bytes entry_header = 14; // 80-byte Bitcoin block header cached at entry (Invariant 19, §12.2.3)
+}
+
+// Vault post wrapper for storage nodes
+message VaultPostProto {
+  string vault_id = 1;
+  string lock_description = 2;
+  string creator_id = 3;
+  bytes commitment_hash = 4;
+  string status = 5;
+  repeated ParamKV metadata = 6; // sorted by key (deterministic)
+  bytes vault_data = 7; // encoded LimboVaultProto
+}
+
+// ===== Soft-Vault deterministic export (import must re-derive exactly) =====
+message SoftVaultExportV1 {
+  uint32 version        = 1; // MUST be 1
+  bytes  vault_id       = 2; // canonical vault id (binary)
+  bytes  device_id      = 3; // binary device id used in KDF
+  bytes  binder_hash32  = 4 [(dsm_fixed_len)=32]; // C-DBRW device binding fingerprint
+  uint32 export_seqno   = 5; // deterministic counter, not time
+  bytes  nonce          = 6 [(dsm_fixed_len)=24]; // XChaCha20-Poly1305 nonce
+  bytes  ciphertext     = 7; // AEAD(ct || tag), AAD = vault_id
+}
+
+// ===================== STORAGE-NODE MIRRORED OBJECTS (V3) ==================
+// These objects are mirrored by storage nodes as raw bytes.
+// All authenticity/enforcement is device-side; nodes are dumb mirrors.
+
+// ------------------------------- Contacts ---------------------------------
+message ContactAddV3 {
+  // domain: "DSM/contact/add\0"
+  bytes author_device_id  = 1 [(dsm_fixed_len)=32];
+  bytes contact_device_id = 2 [(dsm_fixed_len)=32];
+  bytes contact_chain_tip = 3 [(dsm_fixed_len)=32];
+  bytes parent_digest     = 4 [(dsm_fixed_len)=32]; // optional, empty allowed
+}
+
+message ContactAcceptV3 {
+  // domain: "DSM/contact/accept\0"
+  bytes accepter_device_id = 1 [(dsm_fixed_len)=32];
+  bytes add_digest         = 2 [(dsm_fixed_len)=32];
+  bytes local_chain_tip    = 3 [(dsm_fixed_len)=32];
+}
+
+// ---------------------------- Token Policies ------------------------------
+message TokenPolicyV3 {
+  // domain: "DSM/policy\0"
+  bytes policy_bytes = 1 [(dsm_max_len)=65535];
+}
+
+message PolicyAnchorV3 {
+  // domain: "DSM/policy/anchor\0"
+  bytes policy_digest    = 1 [(dsm_fixed_len)=32];
+  bytes author_device_id = 2 [(dsm_fixed_len)=32];
+  bytes parent_digest    = 3 [(dsm_fixed_len)=32]; // optional, empty allowed
+}
+
+// ---------------------------- Token Creation -----------------------------
+message TokenCreateRequest {
+  string ticker = 1; // 2-8 uppercase
+  string alias = 2; // display name
+  uint32 decimals = 3; // 0..18
+  bytes max_supply_u128 = 4 [(dsm_fixed_len)=16]; // big-endian u128
+  bytes policy_anchor = 5 [(dsm_fixed_len)=32]; // anchor for the CPTA policy bytes
+}
+
+message TokenCreateResponse {
+  bool success = 1;
+  string token_id = 2; // deterministic token id
+  bytes policy_anchor = 3 [(dsm_fixed_len)=32];
+  string message = 4;
+}
+
+// ------------------------- DLV Lifecycle Objects --------------------------
+message DlvCreateV3 {
+  // domain: "DSM/dlv/create\0"
+  bytes device_id      = 1 [(dsm_fixed_len)=32];
+  bytes policy_digest  = 2 [(dsm_fixed_len)=32];
+  bytes precommit      = 3 [(dsm_fixed_len)=32];
+  bytes vault_id       = 4 [(dsm_fixed_len)=32];
+  bytes parent_digest  = 5 [(dsm_fixed_len)=32]; // optional, empty allowed
+}
+
+message DlvOpenV3 {
+  // domain: "DSM/dlv/open\0"
+  bytes device_id       = 1 [(dsm_fixed_len)=32];
+  bytes vault_id        = 2 [(dsm_fixed_len)=32];
+  bytes reveal_material = 3 [(dsm_max_len)=65535];
+}
+
+// ===================== STORAGE NODE ADMIN/GOSSIP/LIST (V1) ==================
+// Protobuf-only responses for admin and gossip endpoints (no JSON, no clocks).
+
+enum StorageNodeStatus {
+  STORAGE_NODE_STATUS_UNSPECIFIED = 0;
+  STORAGE_NODE_STATUS_ALIVE       = 1;
+  STORAGE_NODE_STATUS_SUSPECTED   = 2;
+  STORAGE_NODE_STATUS_DEAD        = 3;
+}
+
+message StorageNodeInfoV1 {
+  string node_id       = 1;
+  string address       = 2;
+  int64  last_seen_tick = 3; // deterministic counter (transport/admin only)
+  StorageNodeStatus status = 4;
+}
+
+message GossipMessageV1 {
+  string sender_node_id = 1;
+  int64  sender_tick    = 2; // deterministic counter (transport/admin only)
+  repeated StorageNodeInfoV1 node_states = 3;
+}
+
+message GossipStatusV1 {
+  uint32 alive_nodes_count = 1;
+  repeated StorageNodeInfoV1 nodes = 2;
+}
+
+message ObjectListItemV1 {
+  string key        = 1;
+  string dlv_id_b32 = 2; // base32-crockford
+  int64  size_bytes = 3;
+}
+
+message ObjectListResponseV1 {
+  repeated ObjectListItemV1 items = 1;
+  optional string next_cursor = 2;
+}
+
+message AdminCleanupResponseV1 {
+  uint64 objects_deleted = 1;
+  uint64 spool_deleted   = 2;
+  int64  before_iter     = 3; // deterministic counter (admin only)
+}
+
+message AdminMaintenanceResponseV1 {
+  int64 tick = 1; // deterministic counter (admin only)
+  bool  ok   = 2;
+}
+
+// ============================ SMART COMMITMENTS =====================
+enum SmartLogic { SMART_LOGIC_UNSPECIFIED = 0; SMART_AND = 1; SMART_OR = 2; }
+message SmartIndex   { uint64 unlock_index = 1; }     // chain-height delta or iteration index
+message SmartBalance { uint64 minimum_balance = 1; string token_id = 2; }
+message SmartClause  { oneof clause { SmartIndex index = 1; SmartBalance balance = 2; } }
+message SmartPolicy  { uint32 version = 1; SmartLogic logic = 2; repeated SmartClause clauses = 3; }
+message ClauseWitness{ uint32 idx = 1; bytes proof = 2 [(dsm_max_len)=65535]; }
+message SmartProof   { Hash32 policy_hash = 1; repeated ClauseWitness witnesses = 2; }
+
+// =================== UNIVERSAL ARG/RESULT PACKS =====================
+enum Codec { CODEC_UNSPECIFIED = 0; CODEC_PROTO = 1; }   // canonical: PROTO only
+message ArgPack    { Hash32 schema_hash = 1; Codec codec = 2; bytes body = 3 [(dsm_max_len)=65535]; }
+message ResultPack { Hash32 schema_hash = 1; Codec codec = 2; bytes body = 3 [(dsm_max_len)=65535]; }
+
+// ============================ KV (binary) ===========================
+message KvGetRequest  { bytes key = 1 [(dsm_max_len)=1024]; }
+message KvGetResponse { bool found = 1; bytes value = 2 [(dsm_max_len)=65535]; }
+message KvSetRequest  { bytes key = 1 [(dsm_max_len)=1024]; bytes value = 2 [(dsm_max_len)=65535]; }
+message KvSetResponse { bool ok = 1; }
+
+// =================== App State (non-canonical/local) =================
+message AppStateRequest  { string key = 1; string operation = 2; string value = 3; }
+message AppStateResponse { string key = 1; optional string value = 2; }
+
+// Native-owned runtime snapshot pushed into the WebView as a protobuf event.
+message AppSessionLockStatusProto {
+  bool enabled = 1;
+  bool locked = 2;
+  string method = 3;
+  bool lock_on_pause = 4;
+}
+
+message AppSessionBleHardwareStatusProto {
+  bool enabled = 1;
+  bool permissions_granted = 2;
+  bool scanning = 3;
+  bool advertising = 4;
+}
+
+message AppSessionQrHardwareStatusProto {
+  bool available = 1;
+  bool active = 2;
+  bool camera_permission = 3;
+}
+
+message AppSessionHardwareStatusProto {
+  bool app_foreground = 1;
+  AppSessionBleHardwareStatusProto ble = 2;
+  AppSessionQrHardwareStatusProto qr = 3;
+}
+
+message AppSessionStateProto {
+  string phase = 1;
+  string identity_status = 2;
+  string env_config_status = 3;
+  AppSessionLockStatusProto lock_status = 4;
+  AppSessionHardwareStatusProto hardware_status = 5;
+  string fatal_error = 6;
+  uint64 wallet_refresh_hint = 7;
+}
+
+// Kotlin → Rust: hardware facts subset sent via JNI.
+// Kotlin is the sole producer; Rust decodes and folds into SessionManager.
+message SessionHardwareFactsProto {
+  bool app_foreground = 1;
+  bool ble_enabled = 2;
+  bool ble_permissions = 3;
+  bool ble_scanning = 4;
+  bool ble_advertising = 5;
+  bool qr_available = 6;
+  bool qr_active = 7;
+  bool camera_permission = 8;
+}
+
+// Frontend -> Rust: lock policy configuration. Secret verification remains app-local.
+message SessionConfigureLockRequest {
+  bool enabled = 1;
+  string method = 2;
+  bool lock_on_pause = 3;
+}
+
+// State introspection summary (QueryOp: state.info)
+message StateInfoResponse {
+  bool has_genesis = 1;
+  bool has_wallet = 2;
+  uint64 contacts_count = 3;
+  uint64 transactions_count = 4;
+  uint64 preferences_count = 5;
+}
+
+// Non-hashed, device-local storage (maps allowed: not part of canonical commitments).
+message AppStateStorage {
+  bool has_identity = 1;
+  bool sdk_initialized = 2;
+  optional bytes device_id = 3 [(dsm_fixed_len)=32];   // binary device id (non-canonical)
+  optional bytes public_key = 4 [(dsm_max_len)=512];
+  optional bytes genesis_hash = 5 [(dsm_fixed_len)=32];
+  optional bytes smt_root = 6 [(dsm_fixed_len)=32];
+  map<string,string> recovery_sessions = 7;
+  map<string,string> key_value_store   = 8;
+  optional bytes device_tree_root = 9 [(dsm_fixed_len)=32]; // R_G — Device Tree root (§2.3)
+}
+
+// Binary serialization for sensitive app data (replaces manual length-prefixed format).
+message SensitiveAppDataProto {
+  bytes device_id = 1 [(dsm_fixed_len)=32];
+  bytes public_key = 2 [(dsm_max_len)=512];
+  bytes genesis_hash = 3 [(dsm_fixed_len)=32];
+  bytes smt_root = 4 [(dsm_fixed_len)=32];
+}
+
+// =================== Canonical State & Transition ===================
+message TokenBalanceEntry { string token_id = 1; U128 amount = 2; } // ordered lexicographically by token_id
+
+message StateWire {
+  uint64 state_number     = 1;
+  bytes  prev_state_hash  = 2 [(dsm_fixed_len)=32];
+  repeated TokenBalanceEntry token_balances = 3;
+  string operation        = 4;
+  bytes  device_id        = 5 [(dsm_fixed_len)=32];
+}
+
+message BalanceDeltaEntry { string token_id = 1; S128 delta = 2; } // ordered by token_id
+
+message PositionSequenceProto {
+  repeated PositionList positions = 1; // sequence of position lists
+  bytes seed = 2 [(dsm_max_len)=65535]; // seed used to generate positions
+}
+
+message PositionList {
+  repeated sint32 positions = 1; // list of positions
+}
+
+message PreCommitmentProto {
+  string operation_type = 1;
+  repeated ParamKV fixed_parameters = 2; // sorted by key
+  repeated string variable_parameters = 3; // sorted lexicographically
+  uint64 min_state_number = 4;
+  Hash32 hash = 5;
+  repeated bytes signatures = 6 [(dsm_max_len)=65535];
+  optional bytes entity_signature = 7 [(dsm_max_len)=65535];
+  optional bytes counterparty_signature = 8 [(dsm_max_len)=65535];
+  repeated sint32 value = 9; // calculation values
+  repeated sint32 commitment = 10; // commitment data
+  bytes counterparty_id = 11 [(dsm_fixed_len)=32];
+}
+
+message StateTransitionProto {
+  bytes  device_id           = 1 [(dsm_fixed_len)=32];
+  bytes  counterparty_id     = 2 [(dsm_fixed_len)=32];
+  string bilateral_chain_id  = 3;
+  bytes  prev_state_hash     = 4 [(dsm_fixed_len)=32];
+  bytes  new_state_hash      = 5 [(dsm_fixed_len)=32];
+  uint64 state_number        = 6;
+  string operation           = 7;
+  repeated BalanceDeltaEntry balance_delta = 8;
+  bytes  signature           = 9 [(dsm_max_len)=65535];
+  string transaction_direction = 10;
+}
+
+// Canonical state transition for internal commitments (replaces custom binary format)
+message CanonicalStateTransitionProto {
+  bytes operation = 1 [(dsm_max_len)=65535]; // canonical operation bytes
+  optional bytes new_entropy = 2 [(dsm_max_len)=65535];
+  optional bytes encapsulated_entropy = 3 [(dsm_max_len)=65535];
+  bytes device_id = 4 [(dsm_fixed_len)=32];
+  repeated string flags = 5; // sorted lexicographically
+  optional PositionSequenceProto position_sequence = 6;
+  repeated TokenBalanceEntry token_balances = 7; // sorted by token_id
+  optional PreCommitmentProto forward_commitment = 8;
+  optional bytes prev_state_hash = 9 [(dsm_fixed_len)=32];
+  optional bytes entity_signature = 10 [(dsm_max_len)=65535];
+  optional bytes counterparty_signature = 11 [(dsm_max_len)=65535];
+  bytes proof_of_authorization = 12 [(dsm_max_len)=65535];
+  bytes signature = 13 [(dsm_max_len)=65535];
+}
+
+// Deterministic params (no maps in canonical preimages).
+message ParamKV { string key = 1; string value = 2; }
+message TransactionParamsProto { repeated ParamKV kv = 1; } // sorted by key before hashing
+
+// Canonical token metadata (no wall-clock markers; deterministic index).
+message MetadataField { string key = 1; string value = 2; }
+message TokenMetadataProto {
+  string token_id = 1;
+  string name     = 2;
+  string symbol   = 3;
+  uint32 decimals = 4;
+  string token_type = 5;
+  string owner_id   = 6;
+  optional string metadata_uri = 7;
+  optional string description  = 8;
+  optional string icon_url     = 9;
+  optional string policy_anchor= 10;
+  repeated MetadataField fields= 11;
+  uint64 creation_index        = 12;
+}
+
+// MPC Token creation request (canonical).
+message TokenMpcRequest {
+  string session_id = 1;
+  string token_name = 2;
+  string token_symbol = 3;
+  uint32 threshold = 4;
+  string creator_genesis_id = 5;
+  bool   anchored_token = 6;
+  uint64 request_iteration = 7;
+}
+
+// ======================= System Genesis (binary) ====================
+message SystemGenesisRequest { string locale = 1; string network_id = 2; bytes device_entropy = 3 [(dsm_fixed_len)=32]; }
+message SystemGenesisResponse { Hash32 genesis_hash = 1; bytes public_key = 2 [(dsm_max_len)=512]; }
+message GenesisCreated {
+  bytes  device_id    = 1 [(dsm_fixed_len)=32];
+  Hash32 genesis_hash = 2;
+  bytes  public_key   = 3 [(dsm_max_len)=512];
+  Hash32 smt_root     = 4;
+  bytes  device_entropy = 5 [(dsm_fixed_len)=32];
+  string session_id   = 6;
+  uint32 threshold    = 7;
+  repeated string storage_nodes = 8;
+  string network_id   = 9;
+  string locale       = 10;
+}
+
+// Secondary device initialization (binds to existing genesis via QR scan)
+message SecondaryDeviceRequest {
+  bytes genesis_hash = 1 [(dsm_fixed_len)=32]; // Scanned from root device QR
+  bytes device_entropy = 2 [(dsm_fixed_len)=32]; // New device's entropy
+}
+
+message SecondaryDeviceResponse {
+  bytes device_id = 1 [(dsm_fixed_len)=32]; // New device ID bound to genesis
+  Hash32 genesis_hash = 2; // Same genesis as root device
+  bool success = 3;
+}
+
+// ============================ AUTH / REGISTRATION ==========================
+// Device registration request/response for storage node authentication.
+// Binary-only: raw 32-byte identifiers, no text encoding on the wire.
+message RegisterDeviceRequest {
+  bytes device_id    = 1 [(dsm_fixed_len)=32];
+  bytes pubkey       = 2 [(dsm_fixed_len)=32];
+  bytes genesis_hash = 3 [(dsm_fixed_len)=32];
+}
+
+message RegisterDeviceResponse {
+  bytes token = 1 [(dsm_fixed_len)=32];
+}
+
+// ================= Bilateral Operations (binary IDs) =================
+message BilateralPrepareRequest {
+  bytes  counterparty_device_id = 1 [(dsm_fixed_len)=32];
+  bytes  operation_data         = 2 [(dsm_max_len)=4096];
+  uint64 validity_iterations    = 3;
+  Hash32 expected_genesis_hash  = 4;
+  Hash32 expected_counterparty_state_hash = 5;
+  string ble_address            = 6; // BLE MAC address of recipient device
+  bytes  sender_signing_public_key = 7 [(dsm_fixed_len)=64]; // Sender's SPHINCS+ SPX256s public key for offline verification
+  bytes  sender_device_id       = 8 [(dsm_fixed_len)=32]; // Sender's device ID for relationship binding
+  Hash32 sender_genesis_hash    = 9; // Sender's genesis hash for relationship anchor
+  Hash32 sender_chain_tip       = 10; // Sender's current chain tip for state synchronization
+  // Transfer intent fields — if operation_data is empty, Rust builds it from
+  // these. Callers should set these instead of building operation_data in the
+  // frontend. operation_data takes precedence if non-empty (backward compat).
+  uint64 transfer_amount         = 11; // amount in token base units
+  string token_id_hint           = 12; // token ID (e.g. "ERA")
+  string memo_hint               = 13; // optional transfer memo
+}
+message BilateralPrepareResponse {
+  Hash32 commitment_hash        = 1;
+  bytes  local_signature        = 2 [(dsm_max_len)=65535];
+  uint64 expires_iterations     = 3;
+  Hash32 counterparty_state_hash= 4;
+  Hash32 local_state_hash       = 5;
+  // SPHINCS+ SPX256s public key for bilateral verification (64 bytes)
+  // CRITICAL: This allows the sender to update their contact's signing key
+  // when receiving the accept response, enabling session registration for future transfers.
+  bytes  responder_signing_public_key = 6 [(dsm_fixed_len)=64];
+  // Field 7 reserved (removed: old DBRW warning)
+}
+message BilateralPrepareReject {
+  Hash32 commitment_hash        = 1;
+  string reason                 = 2;
+  bytes  rejector_device_id     = 3 [(dsm_fixed_len)=32];
+}
+
+message BilateralTransferRequest {
+  bytes  counterparty_device_id      = 1 [(dsm_fixed_len)=32];
+  Hash32 commitment_hash             = 2;
+  bytes  counterparty_sig            = 3 [(dsm_max_len)=65535];
+  bytes  operation_data              = 4 [(dsm_max_len)=4096];
+  Hash32 expected_genesis_hash       = 5;
+  Hash32 expected_counterparty_state_hash = 6;
+  Hash32 expected_local_state_hash   = 7;
+}
+
+// UI-friendly offline bilateral summary (transport-only; not hashed).
+enum OfflineBilateralTransactionStatus {
+  OFFLINE_TX_STATUS_UNSPECIFIED = 0;
+  OFFLINE_TX_PENDING = 1;
+  OFFLINE_TX_IN_PROGRESS = 2;
+  OFFLINE_TX_CONFIRMED = 3;
+  OFFLINE_TX_FAILED = 4;
+  OFFLINE_TX_REJECTED = 5;
+}
+message OfflineBilateralTransaction {
+  string id = 1;
+  bytes sender_id = 2 [(dsm_fixed_len)=32];
+  bytes recipient_id = 3 [(dsm_fixed_len)=32];
+  bytes commitment_hash = 4 [(dsm_fixed_len)=32];
+  bytes sender_state_hash = 5 [(dsm_fixed_len)=32];
+  bytes recipient_state_hash = 6 [(dsm_fixed_len)=32];
+  OfflineBilateralTransactionStatus status = 7;
+  map<string,string> metadata = 8; // transport/UI only
+}
+message OfflineBilateralPendingListResponse {
+  repeated OfflineBilateralTransaction transactions = 1;
+}
+message BilateralTransferResponse { bool success = 1; Hash32 transaction_hash = 2; string message = 3; }
+message BilateralAcceptRequest {
+  bytes  counterparty_device_id      = 1 [(dsm_fixed_len)=32];
+  Hash32 commitment_hash             = 2;
+  bytes  local_signature             = 3 [(dsm_max_len)=65535];
+  Hash32 expected_counterparty_state_hash = 4;
+  Hash32 expected_local_state_hash   = 5;
+}
+message BilateralAcceptResponse { bool accepted = 1; bytes counterparty_sig = 2 [(dsm_max_len)=65535]; string message = 3; }
+message BilateralCommitRequest {
+  bytes  counterparty_device_id      = 1 [(dsm_fixed_len)=32];
+  Hash32 commitment_hash             = 2;
+  bytes  local_signature             = 3 [(dsm_max_len)=65535];
+  bytes  counterparty_sig            = 4 [(dsm_max_len)=65535];
+  Hash32 expected_local_state_hash   = 5;
+  Hash32 expected_counterparty_state_hash = 6;
+  Hash32 sender_post_finalize_chain_tip  = 7;
+}
+message BilateralCommitResponse {
+  bool   success          = 1;
+  Hash32 post_state_hash  = 2;
+  Hash32 transaction_hash = 3;
+  string message          = 4;
+  Hash32 commitment_hash  = 5;
+}
+
+// 3-step BLE protocol: Step 3 — Sender confirms (A→B), both finalize.
+// Per §18.2: neither party finalizes until this message arrives.
+message BilateralConfirmRequest {
+  Hash32 commitment_hash             = 1;
+  bytes  sender_signature            = 2 [(dsm_max_len)=65535]; // σ_A
+  bytes  sender_smt_root             = 3 [(dsm_fixed_len)=32]; // r'_A (post-update root)
+  bytes  rel_proof_parent            = 4 [(dsm_max_len)=131072]; // π(h_n ∈ r_A) — verified against sender_smt_root_before (§4.3); required
+  bytes  rel_proof_child             = 5 [(dsm_max_len)=131072]; // π(h_{n+1} ∈ r'_A)
+  bytes  stitched_receipt            = 6 [(dsm_max_len)=131072]; // complete receipt, both sigs; enforced ≤128 KiB (§11.1)
+  Hash32 shared_chain_tip_new        = 7; // h_{n+1}
+  bytes  pre_entropy                 = 8 [(dsm_max_len)=32]; // entropy used to derive h_{n+1}; receiver re-derives for independent verification (§4.1 / §C1)
+  bytes  sender_smt_root_before      = 9 [(dsm_fixed_len)=32]; // r_A (pre-update root) — enables full §4.3 π_rel_parent verification by receiver
+}
+
+// Canonical receipt commit form for hashing/signing (whitepaper Sec. 4.2.1)
+message ReceiptCommit {
+  bytes genesis         = 1 [(dsm_fixed_len)=32]; // G
+  bytes devid_a         = 2 [(dsm_fixed_len)=32]; // DevID_A
+  bytes devid_b         = 3 [(dsm_fixed_len)=32]; // DevID_B
+  bytes parent_tip      = 4 [(dsm_fixed_len)=32]; // h_n
+  bytes child_tip       = 5 [(dsm_fixed_len)=32]; // h_{n+1}
+  bytes parent_root     = 6 [(dsm_fixed_len)=32]; // r_A
+  bytes child_root      = 7 [(dsm_fixed_len)=32]; // r_A'
+  // Proof fields are capped to enforce the 128 KiB strict-fail invariant end-to-end.
+  bytes rel_proof_parent= 8 [(dsm_max_len)=131072]; // pi_rel(h_n in r_A)
+  bytes rel_proof_child = 9 [(dsm_max_len)=131072]; // pi'_rel(h_{n+1} in r_A')
+  bytes dev_proof       = 10 [(dsm_max_len)=131072]; // pi_dev(DevID_A in R_G)
+  // Tripwire-critical witness material: MUST be committed into ReceiptCommit.
+  // Verifiers recompute child_root from parent_root by applying a single-leaf replace.
+  bytes rel_replace_witness = 11 [(dsm_max_len)=131072];
+  // Dual SPHINCS+ signatures — NOT part of canonical commit preimage.
+  // Proto3 omits empty bytes fields, so canonical encode_to_vec() skips these.
+  bytes sig_a = 12 [(dsm_max_len)=65535]; // SPHINCS+ sig from party A
+  bytes sig_b = 13 [(dsm_max_len)=65535]; // SPHINCS+ sig from party B
+}
+
+
+// Bilateral event notifications for frontend
+enum BilateralEventType {
+  BILATERAL_EVENT_UNSPECIFIED     = 0;
+  BILATERAL_EVENT_PREPARE_RECEIVED = 1; // Receiver: incoming transfer request
+  BILATERAL_EVENT_ACCEPT_SENT      = 2; // Receiver: accepted transfer
+  BILATERAL_EVENT_COMMIT_RECEIVED  = 3; // Receiver: commit finalization
+  BILATERAL_EVENT_TRANSFER_COMPLETE= 4; // Both: transaction finalized
+  BILATERAL_EVENT_REJECTED         = 5; // Receiver: rejected transfer
+  BILATERAL_EVENT_FAILED           = 6; // Either: transaction failed
+}
+
+enum BilateralFailureReason {
+  FAILURE_REASON_UNSPECIFIED = 0;
+  FAILURE_REASON_BLE_GATT_ERROR = 1; // Transport failure (connection dropped, MTU, write failed)
+  FAILURE_REASON_CRYPTO_INVALID = 2; // Signature mismatch, hash mismatch, invalid proof
+  FAILURE_REASON_SECURITY_LOCKOUT = 3; // Hardware binding key missing/locked
+  FAILURE_REASON_REJECTED_BY_PEER = 4; // Explicit rejection by counterparty logic
+  FAILURE_REASON_PROTOCOL_VIOLATION = 5; // Malformed envelope, wrong version, precommit violation
+  FAILURE_REASON_TIMEOUT = 6; // Operation timed out
+}
+
+message BilateralEventNotification {
+  BilateralEventType event_type           = 1;
+  bytes              counterparty_device_id = 2 [(dsm_fixed_len)=32];
+  bytes              commitment_hash        = 3 [(dsm_fixed_len)=32];
+  optional bytes     transaction_hash       = 4 [(dsm_fixed_len)=32];
+  optional uint64    amount                 = 5;  // transfer amount (if applicable)
+  optional string    token_id               = 6;  // token identifier
+  string             status                 = 7; // human-readable status
+  string             message                = 8; // optional details
+  optional string    sender_ble_address     = 9;  // BLE MAC address for response routing
+  optional BilateralFailureReason failure_reason = 10;
+  // Field 11 reserved (removed: old DBRW warning)
+}
+
+// =========================== Bluetooth Transport ====================
+enum BtMessageType {
+  BTMSG_TYPE_UNSPECIFIED = 0;
+  BTMSG_TYPE_TX_PROPOSAL  = 1;
+  BTMSG_TYPE_TX_ACCEPT    = 2;
+  BTMSG_TYPE_TX_REJECT    = 3;
+  BTMSG_TYPE_STATE_SYNC   = 4;
+  BTMSG_TYPE_STATE_ACK    = 5;
+  BTMSG_TYPE_PING         = 6;
+  BTMSG_TYPE_PONG         = 7;
+  BTMSG_TYPE_ERROR        = 8;
+  BTMSG_TYPE_DATA         = 9;
+}
+message DsmBtMessage {
+  string         message_id        = 1; // opaque message id
+  BtMessageType  message_type      = 2;
+  bytes          sender_id         = 3 [(dsm_fixed_len)=32];
+  bytes          recipient_id      = 4 [(dsm_fixed_len)=32];
+  bytes          payload           = 5 [(dsm_max_len)=4096];
+  uint64         sequence          = 6; // ordered per-connection
+  bool           requires_ack      = 7;
+  uint32         checksum          = 8; // CRC32 over core fields
+  string         ack_for           = 9; // message_id being acknowledged
+  uint64         received_sequence = 10; // observed sequence
+}
+// BLE UI events (protobuf-only; no JSON)
+message BleTransactionError        { bytes device_id = 1 [(dsm_fixed_len)=32]; int32  error_code = 2; string message = 3; }
+message BleTransactionSent         { bytes device_id = 1 [(dsm_fixed_len)=32]; uint64 data_size  = 2; }
+message BleTransactionRequest      { bytes device_id = 1 [(dsm_fixed_len)=32]; uint64 data_size  = 2; }
+message BleTransactionResponseSent { bytes device_id = 1 [(dsm_fixed_len)=32]; uint64 data_size  = 2; }
+message BtAck { string ack_for = 1; uint64 received_sequence = 2; }
+message BilateralTransactionReceived {
+  bytes  counterparty_device_id = 1 [(dsm_fixed_len)=32];
+  bytes  operation_data         = 2 [(dsm_max_len)=4096];
+  bytes  commitment_hash        = 3 [(dsm_fixed_len)=32];
+}
+// Platform events
+message BleDeviceInfo         { string address = 1; string name = 2; int32 rssi = 3; }
+message BleCharacteristicData { string address = 1; bytes  data = 2 [(dsm_max_len)=1024]; }
+message BlePairingRequest     { string address = 1; bytes genesis_hash = 2 [(dsm_fixed_len)=32]; bytes device_id = 3 [(dsm_fixed_len)=32]; string alias = 4; }
+message BlePairingAccept      { string address = 1; bytes genesis_hash = 2 [(dsm_fixed_len)=32]; bytes device_id = 3 [(dsm_fixed_len)=32]; }
+// Phase 3 confirmation: scanner → advertiser after receiving BlePairingAccept.
+// Neither side persists ble_address until this round-trip completes (atomic pairing).
+message BlePairingConfirm     { string address = 1; bytes device_id = 2 [(dsm_fixed_len)=32]; }
+// Identity observed implicitly via GATT identity characteristic read (not an explicit pairing handshake)
+message BleIdentityObserved   { string address = 1; bytes genesis_hash = 2 [(dsm_fixed_len)=32]; bytes device_id = 3 [(dsm_fixed_len)=32]; }
+
+// Protobuf-encoded identity value carried on the BLE GATT identity characteristic
+// (UUID 8e7f00ff-7c07-4f3f-9b32-7bf3ba6c2a01). Replaces raw 64-byte concatenation.
+// Kotlin MUST NOT parse or split identity bytes — all encoding/decoding is Rust-side.
+message BleIdentityCharValue {
+  bytes genesis_hash = 1 [(dsm_fixed_len)=32];
+  bytes device_id    = 2 [(dsm_fixed_len)=32];
+}
+
+// Response from processGattIdentityRead JNI call.
+// Rust decodes the BleIdentityCharValue from GATT, dispatches identity events, and
+// returns the write-back envelope for the peer's PAIRING characteristic.
+message BleGattIdentityReadResult {
+  bool   success             = 1;
+  bytes  write_back_envelope = 2 [(dsm_max_len)=4096]; // Framed Envelope to write to PAIRING char
+  string error_message       = 3;
+}
+
+// Response from processIncomingBleData JNI call.
+// Rust decides internally whether to route as chunk or Envelope v3, runs any
+// frame-type detection, and returns pre-chunked follow-up bytes for Kotlin to
+// write verbatim over the BLE characteristic. Kotlin MUST NOT inspect content.
+message BleIncomingDataResponse {
+  repeated bytes response_chunks = 1 [(dsm_max_len)=1024]; // BLE chunks to write back (may be empty)
+  bool pairing_complete          = 2; // true = bilateral confirm delivered, Kotlin may clean up
+  bool use_reliable_write        = 3; // true = send via requestGattWriteChunks (bilateral follow-ups)
+}
+
+// Status update emitted by PairingOrchestrator during the pairing loop.
+// Wrapped in a BleEvent envelope (0x03 framing) and dispatched to the frontend.
+message PairingStatusUpdate {
+  bytes  device_id   = 1; // 32-byte contact device ID being paired
+  string status      = 2; // "scanning", "found", "connected", "paired", "failed", "timeout"
+  string message     = 3; // human-readable detail
+  string ble_address = 4; // peer BLE MAC if known
+}
+
+// Genesis lifecycle events — authored by Rust, transported via BleEvent envelope.
+// Kotlin MUST NOT dispatch these directly; it calls createGenesis*Envelope() JNI
+// functions which return a framed Envelope v3 to relay verbatim.
+message GenesisLifecycleEvent {
+  enum Kind {
+    GENESIS_KIND_UNSPECIFIED        = 0;
+    GENESIS_KIND_STARTED            = 1;
+    GENESIS_KIND_OK                 = 2;
+    GENESIS_KIND_ERROR              = 3;
+    GENESIS_KIND_SECURING_DEVICE    = 4;
+    GENESIS_KIND_SECURING_PROGRESS  = 5;
+    GENESIS_KIND_SECURING_COMPLETE  = 6;
+    GENESIS_KIND_SECURING_ABORTED   = 7;
+  }
+  Kind   kind     = 1;
+  uint32 progress = 2; // 0–100, only meaningful for SECURING_PROGRESS
+}
+
+// BLE permission denied notification — authored by Rust, transport via BleEvent.
+message BlePermissionEvent {
+  string operation = 1; // "scan" | "advertise"
+}
+
+// NFC recovery capsule payload — raw NdefRecord bytes wrapped in Envelope v3.
+message NfcRecoveryCapsule {
+  bytes payload = 1 [(dsm_max_len)=65535];
+}
+
+message BleEvent {
+  oneof ev {
+    BleDeviceInfo device_found            = 1;
+    BleDeviceInfo device_connected        = 2;
+    BleDeviceInfo device_disconnected     = 3;
+    BleCharacteristicData characteristic_written = 4;
+    BleCharacteristicData characteristic_read    = 5;
+    bool   scan_started        = 6;
+    bool   scan_stopped        = 7;
+    bool   advertising_started = 8;
+    bool   advertising_stopped = 9;
+    string connection_failed   = 10; // human text (transport only)
+    BlePairingRequest pairing_request = 11;
+    BlePairingAccept  pairing_accept  = 12;
+    BleIdentityObserved identity_observed = 13;
+    PairingStatusUpdate pairing_status    = 14;
+    BlePairingConfirm   pairing_confirm  = 15;
+    GenesisLifecycleEvent genesis_lifecycle = 16;
+    BlePermissionEvent    ble_permission     = 17;
+  }
+}
+// Android BLE bridge commands
+message BleStartScan          { reserved 1; }
+message BleStopScan           {}
+message BleStartAdvertising   { string device_name = 1; }
+message BleStopAdvertising    {}
+message BleConnectDevice      { string address = 1; }
+message BleDisconnectDevice   { string address = 1; }
+message BleWriteCharacteristic{ string address = 1; bytes data = 2 [(dsm_max_len)=1024]; }
+message BleReadCharacteristic { string address = 1; }
+message BleCommand {
+  oneof cmd {
+    BleStartScan           start_scan          = 1;
+    BleStopScan            stop_scan           = 2;
+    BleStartAdvertising    start_advertising   = 3;
+    BleStopAdvertising     stop_advertising    = 4;
+    BleConnectDevice       connect_device      = 5;
+    BleDisconnectDevice    disconnect_device   = 6;
+    BleWriteCharacteristic write_characteristic= 7;
+    BleReadCharacteristic  read_characteristic = 8;
+  }
+}
+message BleCommandResponse { bool ok = 1; string message = 2; bytes payload = 3 [(dsm_max_len)=65535]; }
+
+// ====================== Bilateral Bluetooth Wire (proto only) ======================
+message BilateralDeviceInfo {
+  bytes device_id = 1 [(dsm_fixed_len)=32];
+  bytes genesis_hash = 2 [(dsm_fixed_len)=32];
+  bytes current_state_hash = 3 [(dsm_fixed_len)=32];
+  uint64 state_number = 4;
+  bytes public_key = 5 [(dsm_max_len)=65535];
+  optional string bluetooth_address = 6;
+  string device_name = 7;
+}
+
+message BilateralSessionInit {
+  bytes session_id = 1 [(dsm_fixed_len)=16];
+  BilateralDeviceInfo initiator = 2;
+  bytes proposed_transaction = 3 [(dsm_max_len)=4096];
+}
+
+message BilateralSessionAccept {
+  bytes session_id = 1 [(dsm_fixed_len)=16];
+  BilateralDeviceInfo responder = 2;
+}
+
+message BilateralSessionReject {
+  bytes session_id = 1 [(dsm_fixed_len)=16];
+  string reason = 2;
+}
+
+message BilateralStateSync {
+  bytes session_id = 1 [(dsm_fixed_len)=16];
+  bytes state_hash = 2 [(dsm_fixed_len)=32];
+  uint64 state_number = 3;
+}
+
+enum BilateralSignerRole {
+  BILATERAL_SIGNER_ROLE_UNSPECIFIED = 0;
+  BILATERAL_SIGNER_ROLE_INITIATOR = 1;
+  BILATERAL_SIGNER_ROLE_RESPONDER = 2;
+}
+
+message BilateralTransactionSign {
+  bytes session_id = 1 [(dsm_fixed_len)=16];
+  bytes signature = 2 [(dsm_max_len)=65535];
+  BilateralSignerRole role = 3;
+}
+
+message BilateralSessionComplete {
+  bytes session_id = 1 [(dsm_fixed_len)=16];
+  bytes final_state_hash = 2 [(dsm_fixed_len)=32];
+}
+
+message BilateralError {
+  bytes session_id = 1 [(dsm_fixed_len)=16];
+  string error_code = 2;
+  string message = 3;
+}
+
+// ================= BILATERAL STATE RECONCILIATION (Task 2: Beta Readiness) =================
+// Per beta readiness critique: "actively checks for transactions that are committed on one device,
+// but still pending on the other" when BLE sessions end abruptly.
+
+message BilateralState {
+  bytes state_bytes = 1 [(dsm_max_len)=131072]; // Encoded bilateral state/receipt (protobuf bytes)
+  SmtProof smt_proof = 2; // Per-Device SMT inclusion proof (protobuf)
+  DeviceTreeProof device_tree_proof = 3; // Device Tree inclusion proof (protobuf)
+  bytes chain_tip = 4 [(dsm_fixed_len)=32]; // Relationship tip for this state
+  uint64 state_number = 5; // Monotonic relationship state number
+  bytes smt_root = 6 [(dsm_fixed_len)=32]; // Per-Device SMT root for proof verification
+  bytes device_tree_root = 7 [(dsm_fixed_len)=32]; // Device Tree root for proof verification
+  bytes relationship_key = 8 [(dsm_fixed_len)=32]; // Canonical SMT key for this relationship (must equal smt_proof.key)
+}
+
+message BilateralChainHistoryRequest {
+  bytes remote_device_id = 1 [(dsm_fixed_len)=32]; // Device requesting history
+  bytes from_tip = 2 [(dsm_max_len)=32]; // Optional: start from this tip
+  uint32 max_states = 3; // Max states to return (pagination)
+}
+
+message BilateralChainHistoryResponse {
+  repeated BilateralState states = 1; // Chain history in order
+  bytes current_tip = 2 [(dsm_fixed_len)=32]; // Remote's current chain tip
+  bool is_complete = 3; // True if entire chain returned
+}
+
+message BilateralReconciliationRequest {
+  bytes remote_device_id = 1 [(dsm_fixed_len)=32];
+  bytes local_tip = 2 [(dsm_fixed_len)=32]; // Our view of the relationship tip
+  bool force_reconcile = 3; // Force reconciliation even if no mismatch
+}
+
+message BilateralReconciliationResponse {
+  bool mismatch_detected = 1;
+  bool reconciled = 2;
+  bytes remote_tip = 3 [(dsm_fixed_len)=32]; // Remote's actual tip
+  string error_message = 4;
+}
+
+message BilateralMessageEnvelope {
+  oneof msg {
+    BilateralSessionInit session_init = 1;
+    BilateralSessionAccept session_accept = 2;
+    BilateralSessionReject session_reject = 3;
+    BilateralStateSync state_sync = 4;
+    BilateralTransactionSign transaction_sign = 5;
+    BilateralSessionComplete session_complete = 6;
+    BilateralError error = 7;
+    BilateralChainHistoryRequest chain_history_request = 8;
+    BilateralChainHistoryResponse chain_history_response = 9;
+    BilateralReconciliationRequest reconciliation_request = 10;
+    BilateralReconciliationResponse reconciliation_response = 11;
+  }
+}
+
+// ============================ BLE CHUNK FRAMING ============================
+enum BleFrameType {
+  BLE_FRAME_TYPE_UNSPECIFIED               = 0;
+  BLE_FRAME_TYPE_BILATERAL_PREPARE         = 1; // Envelope with BilateralPrepareRequest
+  BLE_FRAME_TYPE_BILATERAL_PREPARE_RESPONSE= 2; // Envelope with BilateralPrepareResponse
+  BLE_FRAME_TYPE_BILATERAL_PREPARE_REJECT  = 3; // Envelope with BilateralPrepareReject
+  BLE_FRAME_TYPE_BILATERAL_COMMIT          = 4; // Envelope with BilateralCommitRequest
+  BLE_FRAME_TYPE_BILATERAL_COMMIT_RESPONSE = 5; // Envelope with BilateralCommitResponse
+  BLE_FRAME_TYPE_ACK                       = 6; // transport ack only
+  BLE_FRAME_TYPE_NACK                      = 7; // transport negative ack only
+  BLE_FRAME_TYPE_CHAIN_HISTORY_REQUEST     = 8; // BilateralChainHistoryRequest (Task 2: reconciliation)
+  BLE_FRAME_TYPE_CHAIN_HISTORY_RESPONSE    = 9; // BilateralChainHistoryResponse (Task 2: reconciliation)
+  BLE_FRAME_TYPE_RECONCILIATION_REQUEST    = 10; // BilateralReconciliationRequest (Task 2: reconciliation)
+  BLE_FRAME_TYPE_RECONCILIATION_RESPONSE   = 11; // BilateralReconciliationResponse (Task 2: reconciliation)
+  BLE_FRAME_TYPE_BILATERAL_CONFIRM         = 12; // Step 3: Sender confirms (BilateralConfirmRequest)
+}
+
+message BleFrameHeader {
+  reserved 1; // removed field — prevent reuse
+  BleFrameType frame_type       = 2; // transport-level kind
+  uint32       total_chunks     = 3; // constant across chunks
+  uint32       chunk_index      = 4; // zero-based
+  uint32       payload_len      = 5; // full unchunked payload length
+  uint32       checksum         = 6; // per-chunk BLAKE3 CRC32
+  bytes        frame_commitment = 7 [(dsm_fixed_len)=32]; // BLAKE3("DSM/ble-frame\0" || payload || frame_type_u8)
+}
+
+message BleChunk {
+  BleFrameHeader header = 1;
+  bytes          data   = 2 [(dsm_max_len)=1024];
+}
+
+// Resumable BLE chunk transfer — receiver reports persisted chunk progress
+message BleResumeRequest {
+  bytes frame_commitment = 1 [(dsm_fixed_len)=32];
+}
+
+message BleResumeResponse {
+  bytes  frame_commitment = 1 [(dsm_fixed_len)=32];
+  uint32 have_count       = 2; // contiguous chunks 0..have_count-1 already received
+}
+
+// ============== GENERIC INVOKE / QUERY / VAULT UNIVERSAL OPS ===============
+message Invoke {
+  ProgramRef program        = 1;
+  string     method         = 2; // e.g., "token.transfer"
+  ArgPack    args           = 3;
+  Hash32     pre_state_hash = 4; // MUST equal caller’s current tip
+  Hash32     post_state_hash= 5; // expected effects commitment
+  repeated bytes cosigners  = 6 [(dsm_max_len)=96]; // optional required parties
+  Evidence   evidence       = 7; // optional attestation
+  Hash16     nonce          = 8; // replay protection
+}
+message VaultOp { oneof kind { DlvCreate create = 1; DlvUnlock unlock = 2; } }
+message QueryOp { string path = 1; ArgPack params = 2; bool include_proofs = 3; }
+
+// ====================== UNIVERSAL OP/TX/RX TYPES ====================
+message UniversalOp {
+  Hash32  op_id        = 1; // client-assigned match id
+  bytes   actor        = 2 [(dsm_max_len)=96]; // initiator (genesis/key)
+  bytes   genesis_hash = 3 [(dsm_fixed_len)=32]; // actor’s chain root
+  reserved 18, 19, 27, 28; // Bilateral ops removed
+  oneof kind {
+    Invoke                  invoke                 = 10;
+    PrecommitOneOf          precommit_oneof        = 11;
+    ResolvePrecommit        resolve_precommit      = 12;
+    ExternalCommit          external_commit        = 13;
+    DelegatedCapability     delegated_capability   = 14;
+    AttestedAction          attested_action        = 15;
+    VaultOp                 vault                  = 16;
+    QueryOp                 query                  = 17;
+    // Field numbers 20, 21, 30 reserved (removed: old DBRW ops)
+    RecoveryCapsuleDecryptRequest recovery_capsule_decrypt = 22;
+    RecoveryTombstoneRequest     recovery_tombstone       = 23;
+    RecoverySuccessionRequest    recovery_succession      = 24;
+    RecoveryResumeRequest        recovery_resume          = 25;
+    FaucetClaimRequest           faucet_claim             = 26;
+  }
+}
+message UniversalTx { repeated UniversalOp ops = 1; bool atomic = 2; }
+// NOTE: `source_tag` is a stable category tag for programmatic client handling.
+// It is intentionally separate from `code` (which may be a finer-grained error code).
+//
+// Tag mapping is owned by the Rust SDK boundary (see `dsm_sdk::wire`); clients should
+// switch on this value rather than string-matching `message`.
+message Error {
+  uint32 code = 1;
+  string message = 2;
+  bytes context = 3 [(dsm_max_len)=4096];
+  uint32 source_tag = 4;
+  bool is_recoverable = 5;
+  // Base32-Crockford debug string encoding of the canonical Error bytes
+  // Useful for human-readable diagnostics without introducing JSON.
+  string debug_b32 = 6 [(dsm_max_len)=4096];
+}
+message OpResult { Hash32 op_id = 1; bool accepted = 2; Hash32 post_state_hash = 3; ResultPack result = 4; Error error = 5; }
+message UniversalRx { repeated OpResult results = 1; }
+
+// ================================ BATCH ==============================
+message BatchEnvelope {
+  repeated Envelope envelopes = 1;
+  bytes   batch_signature     = 2 [(dsm_max_len)=65535];
+  bool    atomic_execution    = 3; // deterministic local ordering
+}
+
+message SequencedEnvelope {
+  Envelope envelope = 1;
+  uint64   seq_num   = 2; // sequence number for idempotent retrieval
+}
+
+message SequencedBatchEnvelope {
+  repeated SequencedEnvelope envelopes = 1;
+  uint64 next_seq = 2; // next sequence number to request
+}
+
+// =============================== ENVELOPE ============================
+message Headers {
+  bytes device_id    = 1 [(dsm_fixed_len)=32]; // REQUIRED: 32 bytes
+  bytes chain_tip    = 2 [(dsm_fixed_len)=32]; // RESERVED/IGNORED: SDK always emits zeros; frontend must never read or supply this
+  bytes genesis_hash = 3 [(dsm_fixed_len)=32]; // REQUIRED: genesis anchor (mandatory per DSM spec)
+  uint64 seq         = 4; // transport-local only (deterministic counter)
+}
+message Envelope {
+  uint32  version   = 1; // MUST be 3 (strict-fail if != 3)
+  Headers headers   = 2;
+  bytes   message_id= 3 [(dsm_fixed_len)=16]; // 16-byte opaque transport id (MUST NOT be derived from wall-clock)
+  oneof payload {
+    UniversalTx  universal_tx    = 10;
+    UniversalRx  universal_rx    = 11;
+    BatchEnvelope batch_envelope = 12;
+
+    // Field numbers 13, 14, 33 reserved (removed: old DBRW responses)
+    RecoveryCapsuleDecryptResponse   recovery_capsule_decrypt_response = 15;
+    RecoveryTombstoneResponse        recovery_tombstone_response       = 16;
+    RecoverySuccessionResponse       recovery_succession_response      = 17;
+    RecoveryResumeResponse           recovery_resume_response          = 18;
+
+    BilateralPrepareResponse         bilateral_prepare_response        = 19;
+    BilateralPrepareReject           bilateral_prepare_reject          = 23;
+    BilateralTransferResponse        bilateral_transfer_response       = 20;
+    AppStateRequest                  app_state_request                 = 21;
+    AppStateResponse                 app_state_response                = 22;
+    FaucetClaimResponse              faucet_claim_response             = 24;
+    GenesisCreated                   genesis_created_response          = 25;
+    BilateralAcceptResponse          bilateral_accept_response         = 27;
+    BilateralCommitResponse          bilateral_commit_response         = 28;
+    DsmBtMessage                     dsm_bt_message                    = 29;
+
+    // SDK init/status responses
+    InitFailed                       init_failed                       = 31;
+
+    // BLE events
+    BleEvent                         ble_event                        = 32;
+
+    // Additional response types
+    BalancesListResponse              balances_list_response           = 34;
+    StorageSyncResponse               storage_sync_response            = 35;
+    OfflineBilateralPendingListResponse offline_bilateral_pending_list_response = 36;
+    InboxResponse                     inbox_response                   = 37;
+    WalletHistoryResponse             wallet_history_response          = 38;
+    ContactsListResponse              contacts_list_response           = 39;
+    OnlineTransferResponse            online_transfer_response         = 40;
+    OnlineMessageResponse             online_message_response          = 41;
+    StateInfoResponse                 state_info_response              = 42;
+    SecondaryDeviceResponse           secondary_device_response        = 43;
+    ContactQrV3                       contact_qr_response              = 44;
+    BalanceGetResponse                balance_get_response             = 45;
+    ContactAddResponse                contact_add_response             = 46;
+    StorageStatusResponse             storage_status_response          = 47;
+    BleCommandResponse                ble_command_response             = 48;
+
+    // Token policy operations (now on canonical Envelope v3 path)
+    TokenCreateRequest                token_create_request             = 49;
+    TokenCreateResponse               token_create_response            = 50;
+
+    // Bitcoin Tap (deposit) operations
+    DepositRequest                 deposit_request              = 51;
+    DepositResponse                deposit_response             = 52;
+    DepositCompleteRequest         deposit_complete_request     = 53;
+    DepositRefundRequest           deposit_refund_request       = 54;
+    DepositStatusRequest           deposit_status_request       = 55;
+
+    // Bitcoin Tap (dBTC) address and deposit management
+    BitcoinAddressRequest             bitcoin_address_request          = 56;
+    BitcoinAddressResponse            bitcoin_address_response         = 57;
+    BitcoinDepositListRequest            bitcoin_deposit_list_request        = 58;
+    BitcoinDepositListResponse           bitcoin_deposit_list_response       = 59;
+    BitcoinClaimTxRequest             bitcoin_claim_tx_request         = 60;
+    BitcoinClaimTxResponse            bitcoin_claim_tx_response        = 61;
+    BitcoinWalletImportRequest        bitcoin_wallet_import_request    = 62;
+    BitcoinWalletImportResponse       bitcoin_wallet_import_response   = 63;
+    BitcoinWalletListResponse         bitcoin_wallet_list_response     = 64;
+    BitcoinWalletSelectRequest        bitcoin_wallet_select_request    = 65;
+    BitcoinWalletSelectResponse       bitcoin_wallet_select_response   = 66;
+
+    // Bitcoin broadcast, auto-claim, and tx status
+    BitcoinBroadcastRequest           bitcoin_broadcast_request        = 67;
+    BitcoinBroadcastResponse          bitcoin_broadcast_response       = 68;
+    BitcoinAutoClaimRequest           bitcoin_auto_claim_request       = 69;
+    BitcoinAutoClaimResponse          bitcoin_auto_claim_response      = 70;
+    BitcoinTxStatusRequest            bitcoin_tx_status_request        = 71;
+    BitcoinTxStatusResponse           bitcoin_tx_status_response       = 72;
+
+    // Bitcoin vault monitor
+    BitcoinVaultListRequest           bitcoin_vault_list_request       = 73;
+    BitcoinVaultListResponse          bitcoin_vault_list_response      = 74;
+    BitcoinVaultGetRequest            bitcoin_vault_get_request        = 75;
+    BitcoinVaultGetResponse           bitcoin_vault_get_response       = 76;
+
+    // Bitcoin wallet health (replaces JSON-in-AppStateResponse)
+    BitcoinWalletHealthResponse       bitcoin_wallet_health_response   = 77;
+
+    // Fee estimation
+    BitcoinFeeEstimateRequest         bitcoin_fee_estimate_request     = 78;
+    BitcoinFeeEstimateResponse        bitcoin_fee_estimate_response    = 79;
+
+    // Fractional exit
+    BitcoinFractionalExitRequest      bitcoin_fractional_exit_request  = 80;
+    BitcoinFractionalExitResponse     bitcoin_fractional_exit_response = 81;
+
+    // HTLC refund TX builder
+    BitcoinRefundTxRequest            bitcoin_refund_tx_request        = 82;
+    BitcoinRefundTxResponse           bitcoin_refund_tx_response       = 83;
+
+    // Bitcoin address index selection
+    BitcoinAddressSelectRequest       bitcoin_address_select_request   = 84;
+    BitcoinAddressSelectResponse      bitcoin_address_select_response  = 85;
+
+    // Bitcoin wallet creation (fresh mnemonic)
+    BitcoinWalletCreateRequest        bitcoin_wallet_create_request    = 86;
+    BitcoinWalletCreateResponse       bitcoin_wallet_create_response   = 87;
+
+    // Storage node health & management
+    StorageNodeStatsResponse          storage_node_stats_response      = 88;
+    StorageNodeManageResponse         storage_node_manage_response     = 89;
+    DbrwStatusResponse                dbrw_status_response             = 90;
+    BitcoinWithdrawalPlanRequest      bitcoin_withdrawal_plan_request  = 91;
+    BitcoinWithdrawalPlanResponse     bitcoin_withdrawal_plan_response = 92;
+    BitcoinWithdrawalExecuteRequest   bitcoin_withdrawal_execute_request = 93;
+    BitcoinWithdrawalExecuteResponse  bitcoin_withdrawal_execute_response = 94;
+
+    // Session state snapshot (session.status query response)
+    AppSessionStateProto              session_state_response           = 95;
+    NfcRecoveryCapsule                nfc_recovery_capsule             = 96;
+    TokenPolicyListResponse           token_policy_list_response       = 97;
+
+    Error                             error                            = 99;
+  }
+}
+
+// ===================== SDK INIT / STATUS =====================
+// Returned when the app attempts to mark the SDK/wallet "initialized" but a
+// mandatory prerequisite is missing (e.g., C-DBRW not bootstrapped yet).
+message InitFailed {
+  enum Reason {
+    REASON_UNSPECIFIED = 0;
+    CDBRW_NOT_READY = 1;
+    PLATFORM_CONTEXT_MISSING = 2;
+    INVALID_INPUT = 3;
+  }
+  Reason reason = 1;
+  string message = 2;
+}
+
+// ============ RECOVERY OPERATIONS (binary IDs) ==============
+
+message ThermalStateProto {
+  string health = 1;
+  int32 status_code = 2;
+  string description = 3;
+  string recommendation = 4;
+}
+message ArchitectureInfoProto {
+  string status = 1;
+  string device_arch = 2;
+  string supported_abis = 3;
+  string message = 4;
+  string recommendation = 5;
+}
+message RecoveryCapsuleDecryptRequest { bytes encrypted_capsule = 1 [(dsm_max_len)=4096]; bytes mnemonic_key = 2 [(dsm_fixed_len)=32]; }
+message RecoveryCapsuleDecryptResponse{
+  bool   success          = 1;
+  Hash32 global_root      = 2;
+  repeated ChainTip chain_tips = 3;
+  Hash32 receipt_rollup   = 4;
+  bytes  meta_data        = 5 [(dsm_max_len)=256]; // version/flags/counters only
+}
+message SmtLeaf     { uint64 index = 1; Hash32 value = 2; }
+message SmtSnapshot { uint32 height = 1; uint64 leaf_count = 2; repeated SmtLeaf leaves = 3; }
+message PersistedRelationshipState {
+  bytes  device_id = 1 [(dsm_fixed_len)=32];
+  SmtSnapshot tree_snapshot = 2;
+  Hash32 last_head = 3;
+  uint64 local_counter_confirmed = 4;
+  uint64 pending_counter = 5; // 0 == none
+  uint64 remote_counter_confirmed = 6;
+}
+message ReceiptGuardSnapshotProto { uint64 capacity = 1; repeated uint64 sequence = 2; }
+message PersistedOfflineState { uint32 version = 1; repeated PersistedRelationshipState relationships = 2; ReceiptGuardSnapshotProto guard_snapshot = 3; }
+message ChainTip { bytes counterparty_device_id = 1 [(dsm_fixed_len)=32]; uint64 height = 2; Hash32 head_hash = 3; }
+message RecoveryTombstoneRequest { Hash32 global_root = 1; uint64 counter = 2; Hash32 rollup_hash = 3; bytes device_entropy = 4 [(dsm_max_len)=4096]; bytes environment_data = 5 [(dsm_max_len)=4096]; }
+message RecoveryTombstoneResponse{ bool success = 1; Hash32 tombstone_hash = 2; bytes tombstone_receipt = 3 [(dsm_max_len)=4096]; }
+message RecoverySuccessionRequest { Hash32 tombstone_hash = 1; bytes device_entropy = 2 [(dsm_max_len)=4096]; bytes environment_data = 3 [(dsm_max_len)=4096]; }
+message RecoverySuccessionResponse{ bool success = 1; Hash32 succession_hash = 2; bytes succession_receipt = 3 [(dsm_max_len)=4096]; Hash32 new_genesis_hash = 4; }
+message RecoveryResumeRequest  { bytes counterparty_device_id = 1 [(dsm_fixed_len)=32]; Hash32 last_head_hash = 2; uint64 last_height = 3; }
+message RecoveryResumeResponse { bool success = 1; Hash32 new_transaction_hash = 2; bytes transaction_receipt = 3 [(dsm_max_len)=4096]; }
+
+// ==================== Minimal deterministic identity =================
+message ContactQrV3 {
+  bytes  device_id       = 1 [(dsm_fixed_len)=32]; // raw 32-byte device identifier
+  string network         = 2; // e.g. "main" | "test"
+  // Replace single CSV storage_hint with an explicit
+  // repeated list of storage node endpoints. A minimum of 3 MUST be supplied
+  // to allow multi-node online genesis hash verification.
+  repeated string storage_nodes = 3; // e.g. ["http://host:8080", "http://host:8081", ...]
+  bytes  sdk_fingerprint = 4 [(dsm_fixed_len)=32];
+  bytes  genesis_hash    = 5 [(dsm_fixed_len)=32]; // raw 32-byte genesis hash
+  bytes  signing_public_key = 6 [(dsm_fixed_len)=64]; // SPHINCS+ SPX256s public key for bilateral verification
+  string preferred_alias = 7; // Optional user-chosen alias; backend uses this if non-empty, otherwise generates from device_id
+}
+
+message ContactManualAddRequest {
+  string alias = 1;
+  bytes  device_id = 2 [(dsm_fixed_len)=32];
+  bytes  genesis_hash = 3 [(dsm_fixed_len)=32];
+  bytes  signing_public_key = 4 [(dsm_fixed_len)=64];
+}
+
+// ==================== Contacts (canonical results) ==================
+message ContactAddResponse {
+  string alias = 1;
+  bytes  device_id = 2 [(dsm_fixed_len)=32];
+  Hash32 genesis_hash = 3;
+  optional Hash32 chain_tip = 4;
+  optional SmtProof chain_tip_smt_proof = 5;
+  optional bytes alias_binding = 6 [(dsm_max_len)=4096];
+  bool   genesis_verified_online = 7;
+  uint64 verify_counter          = 8; // deterministic counter (no time)
+  uint64 added_counter           = 9; // deterministic counter (no time)
+  repeated string verifying_storage_nodes = 10;
+  string ble_address = 11; // BLE MAC address for offline bilateral transfers
+  bytes  signing_public_key = 12 [(dsm_fixed_len)=64]; // SPHINCS+ SPX256s public key for bilateral verification
+}
+
+// ======================== Faucet Operations =========================
+message FaucetClaimRequest  { bytes device_id = 1 [(dsm_fixed_len)=32]; }
+message FaucetClaimResponse { bool success = 1; uint64 tokens_received = 2; uint64 next_available_index = 3; string message = 4; }
+
+// ======================= Online Transfer Messages ====================
+message OnlineTransferRequest {
+  string token_id = 1;
+  bytes to_device_id = 2 [(dsm_fixed_len)=32];
+  uint64 amount = 3;
+  string memo = 4;
+  bytes signature = 5 [(dsm_max_len)=65535]; // optional sender signature (crypto proof)
+  // Deterministic 32-byte nonce signed by sender to prevent replays (AF-2)
+  bytes nonce = 6 [(dsm_fixed_len)=32];
+  // Envelope v3 signing context (AF-2 remediation)
+  bytes from_device_id = 7 [(dsm_fixed_len)=32]; // REQUIRED: sender identity for key selection
+  bytes chain_tip = 8 [(dsm_fixed_len)=32]; // RESERVED/IGNORED: SDK derives bilateral tip from SQLite; frontend must never supply this
+  uint64 seq = 9; // REQUIRED: deterministic sequence counter
+  // §4.2 ReceiptCommit canonical protobuf bytes — SMT proofs for this transition
+  bytes receipt_commit = 10 [(dsm_max_len)=131072];
+}
+
+message OnlineTransferSmartRequest {
+  string recipient = 1; // Alias or Base32 ID
+  string amount = 2; // Decimal string
+  string token_id = 3;
+  string memo = 4;
+}
+
+message OnlineTransferResponse {
+  bool success = 1;
+  Hash32 transaction_hash = 2;
+  string message = 3;
+  uint64 new_balance = 4;
+}
+
+// ======================= Online Message Messages ====================
+message OnlineMessageRequest {
+  bytes to_device_id = 1 [(dsm_fixed_len)=32];
+  bytes payload = 2 [(dsm_max_len)=4096];
+  string memo = 3;
+  bytes signature = 4; // optional sender signature
+  bytes nonce = 5 [(dsm_fixed_len)=32];
+  bytes from_device_id = 6 [(dsm_fixed_len)=32];
+  bytes chain_tip = 7 [(dsm_fixed_len)=32];
+  uint64 seq = 8; // deterministic sequence counter
+}
+
+message OnlineMessageResponse {
+  bool success = 1;
+  string message = 2;
+  bytes message_id = 3 [(dsm_fixed_len)=16];
+}
+
+// =================== Discovery / Publish Diagnostics =================
+message DiscoverLocalResponse { repeated string discovered_nodes = 1; string discovery_method = 2; uint64 event_counter = 3; }
+message PublishGenesisResponse { bool success = 1; bool published = 2; string key = 3; uint32 published_to_nodes = 4; uint64 event_counter = 5; }
+
+message TokenPolicyCacheEntry {
+  bytes  policy_commit = 1 [(dsm_fixed_len)=32];
+  bytes  policy_bytes  = 2 [(dsm_max_len)=131072];
+  string ticker        = 3;
+  string alias         = 4;
+  uint32 decimals      = 5;
+  string max_supply    = 6;
+}
+
+message TokenPolicyListResponse { repeated TokenPolicyCacheEntry policies = 1; }
+
+// ======================= Query Result Messages ======================
+message BalanceGetResponse {
+  string token_id = 1;
+  uint64 available = 2;
+  uint64 locked = 3;
+  string symbol = 4;
+  uint32 decimals = 5;
+  string token_name = 6;
+}
+// Multi-token enumeration (ordered lexicographically by token_id on server side)
+message BalancesListResponse { repeated BalanceGetResponse balances = 1; }
+message TransactionInfo {
+  string id            = 1;
+  bytes  from_device_id= 2 [(dsm_fixed_len)=32];
+  bytes  to_device_id  = 3 [(dsm_fixed_len)=32];
+  string token_id      = 4;
+  uint64 amount        = 5;
+  uint64 fee           = 6;
+  uint64 logical_index = 7; // device-local counter
+  bytes  tx_hash       = 8 [(dsm_fixed_len)=32];
+  sint64 amount_signed = 9; // signed amount for DLV/faucet: positive=incoming, negative=outgoing
+  TransactionType tx_type = 10; // enumerated transaction type
+  string status        = 11; // "completed", "confirmed", "pending", etc.
+  string recipient     = 12; // alias or device ID text for UI display
+  bytes  stitched_receipt = 13 [(dsm_max_len)=131072]; // canonical stitched receipt bytes (if available)
+  uint64 created_at = 14; // DISPLAY-ONLY: unix timestamp (seconds) for UI history ordering. MUST NOT be used in hash preimages, ReceiptCommit fields, acceptance predicates, or protocol ordering.
+  string memo = 15; // optional memo/note
+  bool   receipt_verified = 16; // true iff stitched_receipt passes cryptographic verification (SMT roots, tripwire, proofs)
+}
+message WalletHistoryResponse { repeated TransactionInfo transactions = 1; }
+message ContactsListResponse  { repeated ContactAddResponse contacts = 1; }
+
+// ========================= Geo Emissions (transport only) =========================
+// Transport messages for clockless geo-claim submission and acknowledgment.
+// Verification (spawn proof, C-DBRW witness, SPHINCS+ signature over canonical bytes)
+// is implemented in the Rust core; these are I/O envelopes only.
+message MerkleInclusionProof {
+  Hash32 root         = 1; // 32B Merkle root
+  repeated bytes siblings = 2 [(dsm_fixed_len)=32]; // ordered root→leaf or leaf→root per implementation; see verifier notes
+  uint32 leaf_index   = 3; // zero-based index of leaf
+}
+
+// ========================= B0x Inbox =========================
+message InboxItem {
+  string id              = 1;
+  string preview         = 2;
+  uint64 tick            = 3; // deterministic counter (transport only)
+  optional string sender_id = 4;
+  bytes  payload         = 5;
+  bool   is_stale_route  = 6; // arrived via previous (non-current) relationship tip
+}
+message InboxRequest {
+  uint32 limit           = 1; // max items to retrieve (0 = use default)
+  string chain_tip       = 2; // optional: filter by chain tip
+}
+message InboxResponse { repeated InboxItem items = 1; }
+
+// ========================= Storage Sync =========================
+message StorageSyncRequest {
+  bool pull_inbox        = 1; // retrieve pending items from b0x
+  bool push_pending      = 2; // submit local pending transactions
+  uint32 limit           = 3; // max inbox items to pull (0 = default 100)
+}
+message StorageSyncResponse {
+  bool   success         = 1;
+  uint32 pulled          = 2; // items pulled from inbox
+  uint32 processed       = 3; // items successfully processed
+  uint32 pushed          = 4; // transactions pushed to storage
+  repeated string errors = 5; // any errors encountered
+}
+
+// ========================= Canonical Proofs =========================
+message SmtPathLeaf { bytes key = 1 [(dsm_fixed_len)=32]; bytes value = 2 [(dsm_fixed_len)=32]; }
+message SmtProof {
+  bytes key = 1 [(dsm_fixed_len)=32];
+  oneof v_path {
+    SmtPathLeaf existing_leaf = 2;
+    bool absent = 3;
+  }
+  repeated bytes siblings = 4 [(dsm_fixed_len)=32]; // root→leaf, MSB-first
+}
+
+message DeviceTreeProof {
+  repeated bytes siblings = 1 [(dsm_fixed_len)=32];
+  bool leaf_to_root = 2;
+  uint32 path_bits_len = 3; // number of bits in path_bits
+  bytes path_bits = 4 [(dsm_max_len)=2048]; // packed LSB-first bitfield
+}
+
+// ========================= Device Tree =========================
+message DeviceTreeEntry {
+  bytes device_id = 1 [(dsm_fixed_len)=32];
+  bytes genesis_hash = 2 [(dsm_fixed_len)=32];
+  bytes parent_hash = 3 [(dsm_fixed_len)=32];
+  uint32 tree_depth = 4;
+  repeated bytes merkle_proof = 5 [(dsm_fixed_len)=32];
+}
+
+// ========================= Storage Object Messages =========================
+// Protobuf-based storage object submission (no hex, no headers)
+message StorageObjectPut {
+  bytes dlv_id = 1 [(dsm_fixed_len)=32]; // 32-byte DLV identifier (raw bytes)
+  string path = 2; // object path within DLV
+  bytes payload = 3; // object data (raw bytes)
+  reserved 4; // retention field removed (clockless)
+}
+
+message StorageObjectPutResponse {
+  bool success = 1;
+  string message = 2;
+  bytes object_key = 3; // computed storage key
+}
+
+message StorageObjectGet {
+  bytes dlv_id = 1 [(dsm_fixed_len)=32]; // 32-byte DLV identifier (raw bytes)
+  string path = 2; // object path within DLV
+}
+
+message StorageObjectGetResponse {
+  bool success = 1;
+  bytes payload = 2; // object data (raw bytes)
+  string message = 3;
+}
+
+message StorageObjectDelete {
+  bytes dlv_id = 1 [(dsm_fixed_len)=32]; // 32-byte DLV identifier (raw bytes)
+  string path = 2; // object path within DLV
+}
+
+message StorageObjectDeleteResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// ========================= Storage Status =========================
+message StorageStatusRequest {
+  // No params needed for now
+}
+
+message StorageStatusResponse {
+  uint32 total_nodes = 1;
+  uint32 connected_nodes = 2;
+  uint64 last_sync_iter = 3; // deterministic sync counter
+  string data_size = 4;
+  string backup_status = 5;
+}
+
+// ========================= C-DBRW Status =========================
+message DbrwStatusResponse {
+  bool enrolled = 1;
+  bool binding_key_present = 2;
+  bool verifier_keypair_present = 3;
+  bool storage_base_dir_set = 4;
+  bool observe_only = 5;
+  string access_mode = 6;
+  uint32 enrollment_revision = 7;
+  uint32 arena_bytes = 8;
+  uint32 probes = 9;
+  uint32 steps_per_probe = 10;
+  uint32 histogram_bins = 11;
+  uint32 rotation_bits = 12;
+  float epsilon_intra = 13;
+  uint32 mean_histogram_len = 14;
+  bytes reference_anchor_prefix = 15 [(dsm_max_len)=16];
+  bytes binding_key_prefix = 16 [(dsm_max_len)=16];
+  bytes verifier_public_key_prefix = 17 [(dsm_max_len)=16];
+  uint32 verifier_public_key_len = 18;
+  string storage_base_dir = 19;
+  string status_note = 20;
+  bool runtime_metrics_present = 21;
+  string runtime_access_level = 22;
+  float runtime_trust_score = 23;
+  bool runtime_health_check_ran = 24;
+  bool runtime_health_check_passed = 25;
+  float runtime_h_hat = 26;
+  float runtime_rho_hat = 27;
+  float runtime_l_hat = 28;
+  float runtime_match_score = 29;
+  float runtime_w1_distance = 30;
+  float runtime_w1_threshold = 31;
+  bytes runtime_anchor_prefix = 32 [(dsm_max_len)=16];
+  string runtime_error = 33;
+
+  // Derived C-DBRW resonant health metrics (§4.5.4, §4.6, §8.1 of C-DBRW spec)
+  // Computed in SDK from raw hHat/rhoHat/lHat — not in the Android binary snapshot.
+  float runtime_h0_eff = 34; // Effective entropy rate: hHat * (1 - |rhoHat|) per Prop 4.23
+  uint32 runtime_recommended_n = 35; // Recommended orbit length for current entropy rate
+  string runtime_resonant_status = 36; // PASS | RESONANT | ADAPTED | FAIL per tri-layer §7
+}
+
+// ========================= Storage Node Stats =========================
+// Per-node health and Prometheus metrics (display-only operational data)
+message StorageNodeStatsRequest {
+  repeated string endpoints = 1; // if empty, use all configured endpoints
+}
+
+message StorageNodeStats {
+  string url = 1;
+  string name = 2; // human-readable label (e.g. "dsm-node-1")
+  string region = 3; // geographic region (e.g. "us-east-1")
+  string status = 4; // "healthy" | "degraded" | "down"
+  uint32 latency_ms = 5; // display-only round-trip time
+  string last_error = 6;
+  uint64 objects_put_total = 7;
+  uint64 objects_get_total = 8;
+  uint64 bytes_written_total = 9;
+  uint64 bytes_read_total = 10;
+  uint64 cleanup_runs_total = 11;
+  uint64 replication_failures = 12;
+}
+
+message StorageNodeStatsResponse {
+  repeated StorageNodeStats nodes = 1;
+  uint32 total_nodes = 2;
+  uint32 healthy_nodes = 3;
+}
+
+// Storage node management (add/remove)
+message StorageNodeManageRequest {
+  string action = 1; // "add" | "remove"
+  string url = 2; // used only for "remove"; ignored when auto_assign = true
+  string name = 3; // unused (reserved for remove display purposes)
+  string region = 4; // unused (reserved for remove display purposes)
+  // When true, the SDK selects the next node via keyed Fisher-Yates over
+  // the known pool (dsm_env_config.toml nodes minus currently active nodes).
+  // The user does NOT choose which node is added — required for security
+  // and even distribution across the network.
+  bool auto_assign = 5;
+}
+
+message StorageNodeManageResponse {
+  bool success = 1;
+  string error = 2;
+  repeated string current_endpoints = 3; // updated list after operation
+  // Populated when auto_assign = true: the URL of the node the SDK assigned.
+  string assigned_url = 4;
+}
+
+// ========================= Storage Replica Set Config =========================
+// UI/local configuration persisted via protobuf (no JSON/localStorage).
+// Storage nodes are independent, free-market participants — any N nodes can
+// serve as a device's replica set. Keyed Fisher-Yates reshuffles on churn.
+// There is no fixed cluster; each device independently selects its replica set.
+enum StorageNodeAuthType {
+  STORAGE_NODE_AUTH_UNSPECIFIED = 0;
+  STORAGE_NODE_AUTH_NONE = 1;
+  STORAGE_NODE_AUTH_BEARER = 2;
+  STORAGE_NODE_AUTH_BASIC = 3;
+}
+
+message StorageNodeAuthProto {
+  StorageNodeAuthType type = 1;
+  string token = 2;
+  string username = 3;
+  string password = 4;
+}
+
+message StorageNodeEndpointProto {
+  string url = 1;
+  bool is_primary = 2;
+  StorageNodeAuthProto auth = 3;
+  string tls_cert = 4;
+  reserved 5;
+  string name = 6; // human-readable label
+  string region = 7; // AWS region or geographic label
+}
+
+message StorageReplicaSetConfig {
+  repeated StorageNodeEndpointProto nodes = 1;
+  string primary_node = 2;
+  bool read_failover_enabled = 3;
+  string write_strategy = 4;
+  uint32 retry_max = 5;
+  uint32 retry_backoff_ms = 6;
+  uint32 verification_quorum = 7;
+}
+
+// ============================ DIAGNOSTICS EXPORT ============================
+message NodeHealthEntry {
+  string url = 1;
+  string status = 2; // "healthy" | "degraded" | "down" | "unknown"
+  string last_error = 3;
+  string name = 4;
+  string region = 5;
+  uint32 latency_ms = 6;
+  uint64 objects_put_total = 7;
+  uint64 objects_get_total = 8;
+  uint64 bytes_written_total = 9;
+  uint64 bytes_read_total = 10;
+}
+
+message DiagnosticsExport {
+  StorageReplicaSetConfig replica_set_config = 1;
+  repeated NodeHealthEntry node_health = 2;
+  repeated string recent_errors = 3;
+  string mode = 4; // "local" | "production"
+  string platform = 5;
+  string version = 6;
+}
+
+// ============================ POLICY FILE (Canonical) ============================
+message PolicyRoleProto {
+  string id = 1;
+  string name = 2;
+  repeated string permissions = 3; // sorted
+}
+
+message PolicyConditionProto {
+  oneof kind {
+    IdentityConstraintProto identity_constraint = 1;
+    VaultEnforcementProto vault_enforcement = 2;
+    OperationRestrictionProto operation_restriction = 3;
+    LogicalTimeConstraintProto logical_time_constraint = 4;
+    EmissionsScheduleProto emissions_schedule = 5;
+    CreditBundlePolicyProto credit_bundle_policy = 6;
+    CustomConstraintProto custom = 7;
+    BitcoinTapConstraintProto bitcoin_tap_constraint = 8;
+  }
+}
+
+message IdentityConstraintProto { repeated string allowed_identities = 1; bool allow_derived = 2; }
+message VaultEnforcementProto { VaultConditionProto condition = 1; }
+message OperationRestrictionProto { repeated string allowed_operations = 1; }
+message LogicalTimeConstraintProto { uint64 min_tick = 1; uint64 max_tick = 2; }
+message EmissionsScheduleProto { uint64 total_supply = 1; uint32 shard_depth = 2; uint32 schedule_steps = 3; uint64 initial_step_emissions = 4; uint64 initial_step_amount = 5; }
+message CreditBundlePolicyProto { uint64 bundle_size = 1; string debit_rule = 2; string refill_rule = 3; }
+
+// Bitcoin tap safety constraints (dBTC §12). Protocol law — frozen into policy_commit.
+message BitcoinTapConstraintProto {
+  uint32 max_successor_depth = 1; // Maximum successor vault generations (§12.1.1)
+  uint64 min_vault_balance_sats = 2; // Minimum vault balance after fractional exit (§12.1.2)
+  uint64 dust_floor_sats = 3; // Bitcoin dust floor — hard floor for any UTXO output
+  uint64 min_confirmations = 4; // Required block depth for entry/exit anchors (§12.1.3)
+}
+
+// IMPORTANT: `parameters_kv` is the canonical/deterministic representation.
+// `parameters` (map) is UI/interop only and MUST NOT be used in hashed preimages.
+message CustomConstraintProto {
+  string constraint_type = 1;
+
+  // UI/interop only (non-deterministic ordering). Do not hash.
+  map<string, string> parameters = 2;
+
+  // Canonical: sorted by key before hashing/signing.
+  repeated ParamKV parameters_kv = 3;
+}
+
+message VaultConditionProto {
+  oneof kind {
+    bytes hash = 1;
+    uint64 minimum_balance = 2;
+    string vault_type = 3;
+    bytes smart_policy = 4;
+  }
+}
+
+message CanonicalPolicy {
+  string author = 1;
+  repeated PolicyConditionProto conditions = 2;
+  repeated PolicyRoleProto roles = 3;
+}
+
+message StoredPolicy {
+  string name = 1;
+  string revision = 2;
+  uint64 created_tick = 3; // deterministic tick (UI/ops only)
+  string author = 4;
+  string description = 5;
+  repeated PolicyConditionProto conditions = 6;
+  repeated PolicyRoleProto roles = 7;
+  map<string, string> metadata = 8;
+}
+
+// ====================== WebView Bridge Messages ======================
+// Formal schema for SinglePathWebViewBridge binary RPC calls
+// Replaces manual byte slicing with protobuf serialization
+
+message BridgeRpcRequest {
+  string method = 1 [(dsm_max_len)=128];
+  oneof payload {
+    EmptyPayload empty = 2;
+    BytesPayload bytes = 3;
+    StringPayload string = 4;
+    PreferencePayload preference = 5;
+    AppRouterPayload app_router = 6;
+    CreateGenesisPayload create_genesis = 7;
+    BleContactPayload ble_contact = 8;
+    BleAddressPayload ble_address = 9;
+    BleIdentityPayload ble_identity = 10;
+    BilateralPayload bilateral = 11;
+  }
+}
+
+message BridgeRpcResponse {
+  oneof result {
+    SuccessResponse success = 1;
+    ErrorResponse error = 2;
+  }
+}
+
+message EmptyPayload {}
+
+message BytesPayload {
+  bytes data = 1 [(dsm_max_len)=65535];
+}
+
+message StringPayload {
+  string value = 1 [(dsm_max_len)=1024];
+}
+
+message PreferencePayload {
+  string key = 1 [(dsm_max_len)=256];
+  optional string value = 2 [(dsm_max_len)=4096]; // null for get, set for set
+}
+
+message AppRouterPayload {
+  string method_name = 1 [(dsm_max_len)=256];
+  bytes args = 2 [(dsm_max_len)=65535];
+}
+
+message CreateGenesisPayload {
+  string locale = 1 [(dsm_max_len)=16];
+  string network_id = 2 [(dsm_max_len)=64];
+  bytes entropy = 3 [(dsm_fixed_len)=32];
+}
+
+message BleContactPayload {
+  bytes pairing_data = 1 [(dsm_max_len)=4096];
+}
+
+message BleAddressPayload {
+  bytes device_id = 1 [(dsm_fixed_len)=32];
+}
+
+message BleIdentityPayload {
+  bytes genesis_hash = 1 [(dsm_fixed_len)=32];
+  bytes device_id = 2 [(dsm_fixed_len)=32];
+}
+
+message BilateralPayload {
+  bytes commitment = 1 [(dsm_fixed_len)=32];
+  optional string reason = 2 [(dsm_max_len)=1024]; // for reject operations
+}
+
+message SuccessResponse {
+  bytes data = 1 [(dsm_max_len)=65535];
+}
+
+message ErrorResponse {
+  uint32 error_code = 1;
+  string message = 2 [(dsm_max_len)=1024];
+  // Base32-Crockford debug string encoding of the canonical ErrorResponse bytes
+  // Useful for human-readable diagnostics without introducing JSON.
+  string debug_b32 = 3 [(dsm_max_len)=4096];
+}
+
+// DLV stitched receipt storage (§7.3, §18.4)
+
+message DlvReceiptSubmission {
+  bytes sigma = 1 [(dsm_fixed_len)=32]; // 32-byte BLAKE3 commitment
+  string vault_id = 2 [(dsm_max_len)=256];
+  bytes receipt_proto = 3 [(dsm_max_len)=65535]; // canonical ReceiptCommit protobuf
+  bytes sig_a = 4 [(dsm_max_len)=65535]; // SPHINCS+ sig from party A
+  bytes sig_b = 5 [(dsm_max_len)=65535]; // SPHINCS+ sig from party B
+}
+
+message DlvReceiptQuery {
+  string vault_id = 1 [(dsm_max_len)=256]; // query by vault
+  bytes sigma = 2 [(dsm_fixed_len)=32]; // OR query by sigma
+}
+
+message DlvReceiptResponse {
+  repeated DlvReceiptSubmission receipts = 1;
+}
+
+// ─── Storage Node Regulation (clockless, signature-free) ────────────────────
+
+// Capacity up-signal: node utilization >= U_UP for w consecutive cycles.
+// Domain: "DSM/signal/up\0"
+message UpSignalV3 {
+  bytes node_id   = 1; // 32 bytes
+  uint64 capacity = 2; // declared capacity C
+  repeated bytes anchors = 3; // H(B_{t-w+1}),...,H(B_t) ByteCommit digests
+}
+
+// Capacity down-signal: node utilization <= U_DOWN for w consecutive cycles.
+// Domain: "DSM/signal/down\0"
+message DownSignalV3 {
+  bytes node_id   = 1; // 32 bytes
+  uint64 capacity = 2;
+  repeated bytes anchors = 3;
+}
+
+// Active node registry: sorted ascending lexicographic order.
+// Domain: "DSM/registry\0"
+message RegistryV3 {
+  repeated bytes node_ids = 1; // sorted ascending lex
+}
+
+// Applicant pack for joining the active storage-node set.
+// Domain: "DSM/apply\0"
+message ApplicantV3 {
+  bytes hw_bind   = 1; // C-DBRW hardware binding
+  bytes env_fp    = 2; // environment fingerprint
+  uint64 capacity = 3; // declared capacity C
+  bytes stake_dlv = 4; // StakeDLV address
+  bytes seed_app  = 5; // H("DSM/app_seed\0" || hw_bind || G)
+}
+
+// DrainProof: d consecutive ByteCommits with bytes_used=0 (stake exit).
+// Domain: "DSM/drain\0"
+message DrainProofV3 {
+  bytes node_id = 1; // 32 bytes
+  repeated uint64 cycle_indices = 2; // d consecutive cycle indices
+  repeated bytes bytecommit_digests = 3; // H(B_t) for each cycle
+}
+
+// Storage payment receipt for PaidK spend-gate.
+// Domain: "DSM/pay/storage\0"
+message StoragePaymentReceiptV3 {
+  bytes device_id        = 1; // 32 bytes, payer
+  bytes operator_node_id = 2; // 32 bytes, recipient operator
+  uint64 amount          = 3; // payment amount (>= FLAT_RATE)
+  bytes receipt_digest   = 4; // H("DSM/pay/storage\0" || ProtoDet(this without digest))
+}
+
+// Registry update result (informational, for mirroring).
+message RegistryUpdateV3 {
+  bytes previous_registry_addr = 1;
+  bytes new_registry_addr      = 2;
+  int64 position_delta         = 3; // dP = |U| - |D|
+  repeated bytes added_nodes   = 4;
+  repeated bytes removed_nodes = 5;
+}
+
+// PaidK status response.
+message PaidKStatusV3 {
+  bool satisfied         = 1;
+  uint32 distinct_operators = 2;
+  uint32 required_k      = 3;
+}
+
+// DrainProof verification response (advisory).
+message DrainVerifyV3 {
+  bool verified           = 1;
+  bytes node_id           = 2;
+  uint64 start_cycle      = 3;
+  uint64 end_cycle        = 4;
+  uint32 consecutive_empty = 5;
+}

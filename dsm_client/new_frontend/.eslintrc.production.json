@@ -1,0 +1,105 @@
+{
+  "root": true,
+  "parser": "@typescript-eslint/parser",
+  "plugins": ["@typescript-eslint", "react", "react-hooks", "security"],
+  "ignorePatterns": [
+    "src/proto/**",
+    "src/setupTests.ts",
+    "src/tests/**",
+    "src/vectors/**",
+    "src/**/__tests__/**",
+    "src/**/*.test.ts",
+    "src/**/*.test.tsx"
+  ],
+  "extends": [
+    "eslint:recommended",
+    "plugin:@typescript-eslint/recommended",
+    "plugin:react/recommended",
+    "plugin:react-hooks/recommended",
+    "plugin:security/recommended",
+    "prettier"
+  ],
+  "rules": {
+    "no-control-regex": "warn",
+    "@typescript-eslint/no-require-imports": "warn",
+    "@typescript-eslint/no-explicit-any": "warn",
+    "@typescript-eslint/no-unused-vars": ["warn", { "argsIgnorePattern": "^_", "varsIgnorePattern": "^_", "caughtErrorsIgnorePattern": "^_" }],
+    "react/no-unescaped-entities": "warn",
+    "react/prop-types": "off",
+    "react-hooks/exhaustive-deps": "warn",
+    "no-console": ["warn", { "allow": ["warn", "error"] }],
+    "security/detect-object-injection": "off",
+    "no-empty": ["warn", { "allowEmptyCatch": true }],
+    "no-restricted-imports": [
+      "error",
+      {
+        "name": "console",
+        "message": "Please use our custom logger from src/utils/logger instead of direct console calls."
+      }
+    ],
+    "no-restricted-syntax": [
+      "error",
+      {
+        "selector": "MemberExpression[property.name='genesis_hash']",
+        "message": "INVARIANT: No snake_case proto fields. Use camelCase (genesisHash). Proto data MUST come from @bufbuild/protobuf codegen — never raw/duck-typed objects."
+      },
+      {
+        "selector": "MemberExpression[property.name='device_id']",
+        "message": "INVARIANT: No snake_case proto fields. Use camelCase (deviceId). Proto data MUST come from @bufbuild/protobuf codegen — never raw/duck-typed objects."
+      },
+      {
+        "selector": "MemberExpression[property.name='ble_address']",
+        "message": "INVARIANT: No snake_case proto fields. Use camelCase (bleAddress). Proto data MUST come from @bufbuild/protobuf codegen — never raw/duck-typed objects."
+      },
+      {
+        "selector": "MemberExpression[property.name='token_id']",
+        "message": "INVARIANT: No snake_case proto fields. Use camelCase (tokenId). Proto data MUST come from @bufbuild/protobuf codegen — never raw/duck-typed objects."
+      },
+      {
+        "selector": "MemberExpression[property.name='chain_tip']",
+        "message": "INVARIANT: No snake_case proto fields. Use camelCase (chainTip). Proto data MUST come from @bufbuild/protobuf codegen — never raw/duck-typed objects."
+      },
+      {
+        "selector": "MemberExpression[property.name='signing_public_key']",
+        "message": "INVARIANT: No snake_case proto fields. Use camelCase (signingPublicKey). Proto data MUST come from @bufbuild/protobuf codegen — never raw/duck-typed objects."
+      },
+      {
+        "selector": "MemberExpression[property.name='genesis_verified_online']",
+        "message": "INVARIANT: No snake_case proto fields. Use camelCase (genesisVerifiedOnline). Proto data MUST come from @bufbuild/protobuf codegen — never raw/duck-typed objects."
+      },
+      {
+        "selector": "MemberExpression[property.name='needs_online_reconcile']",
+        "message": "INVARIANT: No snake_case proto fields. Use camelCase (needsOnlineReconcile). Proto data MUST come from @bufbuild/protobuf codegen — never raw/duck-typed objects."
+      },
+      {
+        "selector": "MemberExpression[property.name='chain_tip_smt_proof']",
+        "message": "INVARIANT: No snake_case proto fields. Use camelCase (chainTipSmtProof). Proto data MUST come from @bufbuild/protobuf codegen — never raw/duck-typed objects."
+      },
+      {
+        "selector": "MemberExpression[property.name='added_counter']",
+        "message": "INVARIANT: No snake_case proto fields. Use camelCase (addedCounter). Proto data MUST come from @bufbuild/protobuf codegen — never raw/duck-typed objects."
+      },
+      {
+        "selector": "MemberExpression[property.name='verify_counter']",
+        "message": "INVARIANT: No snake_case proto fields. Use camelCase (verifyCounter). Proto data MUST come from @bufbuild/protobuf codegen — never raw/duck-typed objects."
+      }
+    ]
+  },
+  "parserOptions": {
+    "ecmaVersion": 2020,
+    "sourceType": "module",
+    "ecmaFeatures": {
+      "jsx": true
+    }
+  },
+  "settings": {
+    "react": {
+      "version": "detect"
+    }
+  },
+  "env": {
+    "browser": true,
+    "node": true,
+    "es6": true
+  }
+}

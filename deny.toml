@@ -1,0 +1,61 @@
+# deny.toml — DSM Cargo Deny Policy (Strict Mode)
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+
+# NOTE: Avoid overly broad bans here.
+# If you want to enforce "no serde/json/base64/etc" in *specific crates or paths*,
+# do it with crate-level lints, feature flags, or workspace policy checks.
+# Cargo-deny bans are global (including transitive deps) and will cause noisy failures.
+deny = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+
+[licenses]
+# Keep this allow-list tight, but include permissive licenses that appear in
+# common Rust dependencies used across the workspace.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "CC0-1.0",
+    "Unlicense",
+    "Unicode-3.0",
+]
+
+# Build-time tooling sometimes pulls in additional licenses (e.g., cbindgen via build.rs).
+# We treat those as exceptions rather than expanding the global allow list too far.
+exceptions = [
+    { allow = ["MPL-2.0"], name = "cbindgen" },
+    # Transitive in rustls via aws-lc-rs; required on some platforms.
+    { allow = ["OpenSSL"], name = "aws-lc-sys" },
+    # Transitive via dirs/dirs-sys.
+    { allow = ["MPL-2.0"], name = "option-ext" },
+    # Root CA bundle crates; licenses vary by major version.
+    { allow = ["MPL-2.0", "CDLA-Permissive-2.0"], name = "webpki-roots" },
+    # Used transitively by tokio-postgres-rustls.
+    { allow = ["MPL-2.0"], name = "x509-certificate" },
+]
+
+[advisories]
+yanked = "deny"
+
+# We fail the build only on vulnerabilities. Unmaintained crates are tracked here
+# so cargo-deny can remain strict without blocking development.
+ignore = [
+    # Transitive via pqcrypto-*; no fixed upgrade currently.
+    "RUSTSEC-2024-0436", # paste: unmaintained
+
+    # Transitive; rustls recommends migrating to rustls-pki-types PEM APIs.
+    "RUSTSEC-2025-0134", # rustls-pemfile: unmaintained
+
+    # Transitive via config; evaluate yaml-rust2 migration later.
+    "RUSTSEC-2024-0320", # yaml-rust: unmaintained
+]

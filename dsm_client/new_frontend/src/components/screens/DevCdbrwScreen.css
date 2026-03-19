@@ -1,0 +1,265 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+
+.cdbrw-dashboard-shell {
+  --cdbrw-panel-faint: rgba(var(--bg-rgb), 0.06);
+}
+
+.cdbrw-dashboard-stage {
+  display: grid;
+  gap: 6px;
+}
+
+.cdbrw-dashboard-shell .storage-tab-nav {
+  display: flex;
+  border: 2px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.cdbrw-dashboard-shell .storage-tab-button {
+  flex: 1 1 0;
+  min-width: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  padding: 6px 2px;
+  border: 0;
+  border-right: 1px solid var(--border);
+  border-radius: 0;
+  background: var(--text-dark);
+  color: var(--bg);
+  cursor: pointer;
+  font-size: 6px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  text-align: center;
+  opacity: 0.6;
+}
+
+.cdbrw-dashboard-shell .storage-tab-button:last-child {
+  border-right: 0;
+}
+
+.cdbrw-dashboard-shell .storage-tab-button.active {
+  background: var(--bg);
+  color: var(--text-dark);
+  opacity: 1;
+}
+
+.cdbrw-dashboard-shell .storage-tab-button.focused {
+  position: relative;
+  outline: 2px solid var(--text-dark);
+  outline-offset: -2px;
+  z-index: 1;
+}
+
+.cdbrw-dashboard-shell .snd-card {
+  border: 2px solid var(--border);
+  border-radius: 4px;
+  background: var(--text-dark);
+  color: var(--bg);
+  overflow: hidden;
+}
+
+.cdbrw-dashboard-shell .snd-stat-label,
+.cdbrw-dashboard-shell .snd-throughput,
+.cdbrw-dashboard-shell .snd-table-header,
+.cdbrw-dashboard-shell .snd-region,
+.cdbrw-dashboard-shell .snd-ms {
+  color: rgba(var(--bg-rgb), 0.55);
+}
+
+.cdbrw-dashboard-shell .snd-info-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 7px 10px;
+  border-bottom: 1px solid rgba(var(--bg-rgb), 0.14);
+  font-size: 8px;
+}
+
+.cdbrw-dashboard-shell .snd-info-row:last-child {
+  border-bottom: 0;
+}
+
+.cdbrw-dashboard-shell .snd-info-label {
+  flex: 0 0 auto;
+  min-width: 0;
+  opacity: 0.6;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  font-size: 6px;
+  font-weight: 700;
+}
+
+.cdbrw-dashboard-shell .snd-info-val {
+  flex: 0 0 auto;
+  min-width: 0;
+  text-align: right;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.cdbrw-dashboard-shell .snd-info-val--mono {
+  font-size: 7px;
+  font-family: "Martian Mono", monospace;
+}
+
+.cdbrw-dashboard-shell .snd-info-note {
+  padding: 8px 10px;
+  font-size: 7px;
+  line-height: 1.6;
+  opacity: 0.72;
+}
+
+.cdbrw-dashboard-shell .snd-btn {
+  border: 2px solid var(--border);
+}
+
+.cdbrw-action-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.cdbrw-report-card {
+  display: grid;
+  gap: 8px;
+}
+
+.cdbrw-report-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  font-size: 6px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: rgba(var(--bg-rgb), 0.55);
+}
+
+.cdbrw-report-preview {
+  margin: 0;
+  max-height: 220px;
+  overflow: auto;
+  padding: 8px 10px;
+  border: 1px solid rgba(var(--bg-rgb), 0.16);
+  background: var(--cdbrw-panel-faint);
+  color: var(--bg);
+  font-size: 7px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.cdbrw-status-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 56px;
+  padding: 2px 6px;
+  border: 1px solid rgba(var(--bg-rgb), 0.28);
+  border-radius: 999px;
+  font-size: 6px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+}
+
+.cdbrw-status-pill--ok {
+  background: rgba(var(--bg-rgb), 0.08);
+}
+
+.cdbrw-status-pill--warn {
+  background: rgba(var(--bg-rgb), 0.03);
+  opacity: 0.75;
+}
+
+/* 4-tier resonant health status per C-DBRW spec section 7 */
+/* Differentiated via opacity, borders, backgrounds — monochrome GameBoy palette only. */
+
+.cdbrw-health-pill {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 2px;
+  font-weight: 700;
+  font-size: 7px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+/* PASS — full brightness, solid fill */
+.cdbrw-health-pass {
+  background: rgba(var(--bg-rgb), 0.14);
+  border: 1px solid rgba(var(--bg-rgb), 0.3);
+  opacity: 1;
+}
+
+/* RESONANT — full brightness, double border (distinct from PASS) */
+.cdbrw-health-resonant {
+  background: rgba(var(--bg-rgb), 0.10);
+  border: 2px solid rgba(var(--bg-rgb), 0.4);
+  opacity: 1;
+}
+
+/* ADAPTED — dimmed, dashed border signals caution */
+.cdbrw-health-adapted {
+  background: rgba(var(--bg-rgb), 0.04);
+  border: 1px dashed rgba(var(--bg-rgb), 0.3);
+  opacity: 0.65;
+}
+
+/* FAIL — inverted: bg-color text on faint background, strong border */
+.cdbrw-health-fail {
+  background: rgba(var(--bg-rgb), 0.02);
+  border: 2px solid rgba(var(--bg-rgb), 0.5);
+  opacity: 0.5;
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+
+.cdbrw-health-unknown {
+  opacity: 0.35;
+}
+
+/* Note boxes beneath health status — use border style to convey severity */
+.cdbrw-health-note-resonant {
+  border-top: 1px solid rgba(var(--bg-rgb), 0.2);
+  opacity: 0.8;
+}
+
+.cdbrw-health-note-adapted {
+  border-top: 1px dashed rgba(var(--bg-rgb), 0.2);
+  opacity: 0.65;
+}
+
+.cdbrw-health-note-fail {
+  border-top: 2px solid rgba(var(--bg-rgb), 0.3);
+  opacity: 0.55;
+}
+
+@media (max-width: 360px) {
+  .cdbrw-action-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .cdbrw-dashboard-shell .snd-stat-val {
+    font-size: 18px;
+  }
+
+  .cdbrw-dashboard-shell .snd-stat-val-sm {
+    font-size: 11px;
+  }
+
+  .cdbrw-dashboard-shell .snd-info-row {
+    gap: 6px;
+    padding: 6px 8px;
+  }
+
+  .cdbrw-dashboard-shell .snd-info-label {
+    flex-basis: 38%;
+  }
+}

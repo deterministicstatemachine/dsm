@@ -1,0 +1,3 @@
+# Build configuration optimized for security
+[build]
+rustflags = ["-C", "overflow-checks=on"]

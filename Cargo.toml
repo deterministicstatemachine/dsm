@@ -1,79 +1,38 @@
 [workspace]
-members = [
-  "crates/dsm-core",
-  "crates/dsm-crypto",
-  "crates/dsm-network",
-  "crates/dsm-storage",
-  "crates/dsm-consensus",
-  "crates/dsm-cli",
-]
 resolver = "2"
+members = [
+    "dsm_client/deterministic_state_machine/dsm",
+    "dsm_client/deterministic_state_machine/dsm_sdk",
+    "dsm_storage_node",
+    "dsm-gen",
+    "tools/vector_runner",
+    "tools/vector_builder",
+    "tools/vertical_validation"
+]
 
 [workspace.package]
-version = "0.1.0"
-edition = "2024"
-license = "Apache-2.0"
-repository = "https://github.com/deterministicstatemachine/dsm"
-homepage = "https://github.com/deterministicstatemachine/dsm"
-rust-version = "1.85.0"
-
-[workspace.dependencies]
-# Error handling
-thiserror = "2"
-anyhow = "1"
-
-# Serialization
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-
-# Async runtime
-tokio = { version = "1", features = ["full"] }
-
-# Logging / tracing
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-
-# Cryptography
-sha2 = "0.10"
-ed25519-dalek = { version = "2", features = ["serde", "rand_core"] }
-x25519-dalek = { version = "2", features = ["serde", "static_secrets"] }
-rand = "0.8"
-
-# CLI
-clap = { version = "4", features = ["derive"] }
-
-# Internal crates
-dsm-core = { path = "crates/dsm-core" }
-dsm-crypto = { path = "crates/dsm-crypto" }
-dsm-network = { path = "crates/dsm-network" }
-dsm-storage = { path = "crates/dsm-storage" }
-dsm-consensus = { path = "crates/dsm-consensus" }
+license = "MIT OR Apache-2.0"
 
 [workspace.lints.clippy]
-all = "warn"
-pedantic = "warn"
-nursery = "warn"
-unwrap_used = "deny"
+# Keep only targeted denials; allow formatting/doc/style lints to warn, not fail
+uninlined_format_args = "warn"
+unused_async = "deny"
+
+# Production safety: warn on unwrap/expect/panic in non-test code
+# These can cause runtime panics and should be avoided in production paths
+# Build scripts, tests, and examples can override with #[allow(clippy::unwrap_used)]
+# Start with "warn" to identify issues without blocking builds
+unwrap_used = "warn"
 expect_used = "warn"
-panic = "deny"
+panic = "warn"
+# Also warn on unwrap in result contexts
+unwrap_in_result = "warn"
 
-[workspace.lints.rust]
-unsafe_code = "deny"
-missing_docs = "warn"
+# Allow all other warnings with lower priority
+all = { level = "allow", priority = -1 }
+pedantic = { level = "allow", priority = -1 }
+# Explicitly allow documentation warnings
+missing_errors_doc = "allow"
+doc_markdown = "allow"
 
-[profile.release]
-lto = "fat"
-codegen-units = 1
-strip = true
-panic = "abort"
-
-[profile.dev]
-opt-level = 0
-debug = true
-
-[profile.test]
-opt-level = 1
-
-[profile.bench]
-lto = "thin"
-codegen-units = 1
+## Root is a pure workspace manifest; no [package] here to avoid cargo metadata errors.

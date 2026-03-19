@@ -1,0 +1,46 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "target": "ES2021",
+    "module": "ESNext",
+    "moduleResolution": "Node",
+    "jsx": "react-jsx",
+    "outDir": "dist/compiled",
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "removeComments": false,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": false
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "src/proto/dsm_app.ts",
+    "src/proto/google/protobuf/**",
+    "scripts/**",
+    "src/**/*.old.tsx",
+    "src/**/*.legacy.ts",
+    "src/**/*.legacy.tsx",
+    "src/dsm/index.ts",
+    "src/contexts/BleContext.tsx",
+    "src/services/bleBridge.ts",
+    "src/services/dsmClientNew.ts",
+    "src/services/headerService.ts",
+    "**/__tests__/**",
+    "**/*.spec.ts",
+    "**/*.spec.tsx",
+    "**/*.test.ts",
+    "**/__mocks__/**"
+  ]
+}

@@ -1,44 +1,185 @@
-# Rust build artifacts
-/target/
+# ===========================================================================
+# DSM Project .gitignore — shared rules for all contributors
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# Rust / Cargo
+# ---------------------------------------------------------------------------
+/debug/
+target/
 **/*.rs.bk
 *.pdb
+vendor/
+*.d
 
-# Cargo lock for library crates (keep for binary crates via workspace)
-# We keep Cargo.lock since this workspace contains a binary (dsm-cli)
+# ---------------------------------------------------------------------------
+# Node / Frontend
+# ---------------------------------------------------------------------------
+node_modules/
+dsm_client/new_frontend/dist/
+dsm_client/new_frontend/build/
+dsm_client/new_frontend/.next/
+dsm-mcp/dist/
+packages/dsm-mcp/dist/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
 
-# Environment and secrets
-.env
-.env.*
+# ---------------------------------------------------------------------------
+# Android
+# ---------------------------------------------------------------------------
+dsm_client/android/app/build/
+dsm_client/android/build/
+dsm_client/android/.gradle/
+dsm_client/android/.gradle_isolated/
+dsm_client/android/app/src/main/assets/
+dsm_client/android/app/src/main/proto/
+dsm_client/android/local.properties
+*.apk
+*.aab
+*.ap_
+*.dex
+*.idsig
+
+# Android packaged WebView assets (hashed filenames change on rebuild)
+dsm_client/android/app/src/main/assets/css/main.*.css
+dsm_client/android/app/src/main/assets/js/main.*.js
+dsm_client/android/app/src/main/assets/js/vendors.*.js
+dsm_client/android/app/src/main/assets/js/runtime.*.js
+dsm_client/android/app/src/main/assets/js/*.LICENSE.txt
+
+# ---------------------------------------------------------------------------
+# Compiled native libraries (built by cargo ndk)
+# ---------------------------------------------------------------------------
+**/*.so
+jniLibs/
+
+# ---------------------------------------------------------------------------
+# Machine-local NDK config (has absolute paths)
+# ---------------------------------------------------------------------------
+dsm_client/deterministic_state_machine/dsm_sdk/.cargo/config.toml
+
+# ---------------------------------------------------------------------------
+# Storage node runtime artifacts
+# ---------------------------------------------------------------------------
+dev-node*.pid
+dsm_storage_node/dev-node*.pid
+data-dev-node*/
+dsm_storage_node/data-dev-node*/
+logs/
+dsm_storage_node/logs/
+pgdata-dev/
+pgdata-dev.bak-*/
+dsm_client/deterministic_state_machine/dsm/dsm_core_db/
+dsm_client/deterministic_state_machine/dsm/output.txt
+
+# ---------------------------------------------------------------------------
+# Terraform — state contains live IPs, resource IDs, secrets
+# ---------------------------------------------------------------------------
+dsm_storage_node/terraform/.terraform/
+dsm_storage_node/terraform/.terraform.lock.hcl
+dsm_storage_node/terraform/terraform.tfstate
+dsm_storage_node/terraform/terraform.tfstate.backup
+dsm_storage_node/terraform/terraform.tfstate.d/
+dsm_storage_node/terraform/terraform.tfvars
+
+# ---------------------------------------------------------------------------
+# Database files
+# ---------------------------------------------------------------------------
+*.db
+*.db-shm
+*.db-wal
+
+# ---------------------------------------------------------------------------
+# Credentials and secrets — NEVER commit these
+# ---------------------------------------------------------------------------
+.env*
+!*.env.template
 *.key
 *.pem
+*.p12
+*secret*
+*password*
 
-# Logs
-*.log
+# ---------------------------------------------------------------------------
+# Android environment config (contains local IPs / credentials)
+# ---------------------------------------------------------------------------
+dsm_client/new_frontend/android-assets/dsm_env_config.json
+dsm_client/new_frontend/android-assets/dsm_env_config.toml
+dsm_env_config.override.toml
 
-# OS files
-.DS_Store
-Thumbs.db
-Desktop.ini
+# ---------------------------------------------------------------------------
+# Coverage, SBOM, test output
+# ---------------------------------------------------------------------------
+coverage/
+coverage.json
+lcov.info
+*.lcov
+*.coverage
+sbom/
+*.cdx.json
+*-20????????T??????Z.json
+test-results/
+junit.xml
+dsm_client/new_frontend/build-stats.json
+verification-reports/verification-report.json
+verification-reports/verification-report.txt
 
-# Editor and IDE files
-.idea/
+# ---------------------------------------------------------------------------
+# Generated TLA+ traces
+# ---------------------------------------------------------------------------
+/.tlacache/
+tla/DSM_TTrace_*.tla
+tla/DSM_TTrace_*.bin
+tla/DSM_*_TTrace_*.tla
+tla/DSM_*_TTrace_*.bin
+tla/DSM_*_probe_[0-9]*_[0-9]*
+tla/*_trace_*
+tla/probe_*_[0-9]*_[0-9]*
+tla/states/
+tla/.tlacache/
+.tlacache/
+*.thy
+*.thy.out
+
+# ---------------------------------------------------------------------------
+# Compiler crash dumps
+# ---------------------------------------------------------------------------
+rustc-ice-*.txt
+dsm_client/deterministic_state_machine/rustc-ice-*.txt
+
+# ---------------------------------------------------------------------------
+# IDE
+# ---------------------------------------------------------------------------
 .vscode/
-*.iml
+.idea/
 *.swp
 *.swo
 *~
-\#*\#
-.#*
 
-# Coverage and profiling
-coverage/
-*.profraw
-*.profdata
-lcov.info
-tarpaulin-report.html
+# ---------------------------------------------------------------------------
+# OS
+# ---------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
 
-# Documentation build output
-/docs/book/
+# ---------------------------------------------------------------------------
+# Misc generated artifacts
+# ---------------------------------------------------------------------------
+*.dropin
+**/__pycache__/
+*.pyc
+*.pyo
+*.orig
+*.rej
+*.crash
+tmp/
+backups/
+.nodes.pids
 
-# Node (if used for docs tooling)
-node_modules/
+# ---------------------------------------------------------------------------
+# Stray scratch / one-off files
+# ---------------------------------------------------------------------------
+dsm_client/deterministic_state_machine/test_balance_fix.rs

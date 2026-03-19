@@ -1,0 +1,9 @@
+<svg version="1.2" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+	<title>IMG_3924</title>
+	<defs>
+		<image  width="670" height="320" id="img1" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAp4AAAFAAQMAAAAvZO4SAAAAAXNSR0IB2cksfwAAAAZQTFRFAAAAFyEJSU2hfQAAAAJ0Uk5TAP9bkSK1AAABnUlEQVR4nO3cwW6DMAyAYSqQdtz7v+UeoFVbGKQJcUKCarvTfh+x83FxLIsDl6EU47WYqsZtGi6goEboWXNWQUGN0PPmUwUFNUWfA7cr1lOgoKZon7pdGFBQQ/T2de1iF3M+BApqiU5jj7oWj6CgGug9S8/MgnasFOH9oKAaaG5GaFTcaIKCqqDV5m9U4zsCCqqCFus26ZBNCkBBfdAjNU2DgjqhyRCuk6Cgfmil/7MEKKgW+tvcIZKlt6oKtwIUVAndmSIqstKbQEGV0JbmFwh5xQAF1UKFENAdW9gvQEG90RgqmKCg/mgYzCUSFPQDUGHrAAU1Rb9/4tryMnHAgoJqoi+ziK6TeRvQ8qAGBdVED5s/WXjLiy8oqCo6ZLlp9yBvdeEhKKgfOoofYCUVFNQNlfcGMQUK6oSWOl9UQUF90ErnCwWgoC7ooZmWgII6oA3kVhUOgIIao21m/HJQUGs06ulmFRTUGP07fxgC/cfoEu1mdAYU1BTtIV8qKKgp2mmGY6Cglui5UPmZOijom1VQUDv0LDsPdlDQN6MPOo/NWS+uWeUAAAAASUVORK5CYII="/>
+	</defs>
+	<style>
+	</style>
+	<use id="Background" href="#img1" x="50" y="312"/>
+</svg>

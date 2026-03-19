@@ -1,0 +1,23 @@
+# Clippy configuration for DSM workspace
+# Enforces production-ready code standards
+
+# Deny unwrap/expect in production code
+# These lints help prevent runtime panics in production
+disallowed-methods = [
+    # Disallow unwrap() - forces explicit error handling
+    { path = "std::option::Option::unwrap", reason = "use pattern matching or ok_or/ok_or_else instead" },
+    { path = "std::result::Result::unwrap", reason = "use pattern matching or propagate errors with ?" },
+    
+    # Disallow expect() - similar to unwrap but with message
+    { path = "std::option::Option::expect", reason = "use pattern matching or ok_or/ok_or_else instead" },
+    { path = "std::result::Result::expect", reason = "use pattern matching or propagate errors with ?" },
+    
+    # Disallow unwrap_err() - can panic if Ok
+    { path = "std::result::Result::unwrap_err", reason = "use pattern matching instead" },
+]
+
+# Note: panic! macro cannot be disallowed via disallowed-methods (it's a macro, not a method).
+# Use #![deny(clippy::panic)] in lib.rs files or configure via allow/deny attributes instead.
+
+# Additional restrictive lints for production code
+warn-on-all-wildcard-imports = true

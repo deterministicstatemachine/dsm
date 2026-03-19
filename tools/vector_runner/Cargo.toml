@@ -1,0 +1,14 @@
+[package]
+name = "dsm_vector_runner"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[features]
+noop_api = []
+
+[dependencies]
+anyhow = "1"
+walkdir = "2"
+dsm = { path = "../../dsm_client/deterministic_state_machine/dsm" }
+prost = "0.12"

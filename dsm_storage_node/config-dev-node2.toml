@@ -1,0 +1,107 @@
+# DSM Dev Storage Node Configuration - Node 2
+# Checked-in localhost development config
+
+[api]
+bind_address = "0.0.0.0"
+port = 8081
+enable_cors = false
+cors_allow_origins = ["*"]
+enable_rate_limits = false
+max_body_size = 52428800
+
+[node]
+id = "dev-node-2"
+name = "DSM Dev Storage Node 2"
+region = "local"
+operator = "DSM Dev Team"
+version = "0.1.0"
+description = "Development storage node 2 for local testing"
+public_key = ""
+endpoint = "http://127.0.0.1:8081"
+listen_address = "0.0.0.0:8081"
+
+[replication_groups]
+enabled = false
+groups = ["group-a", "group-c"]
+overlap_factor = 2
+target_group_size = 3
+min_group_size = 2
+
+[storage]
+engine = "postgresql"
+capacity = 1073741824
+data_dir = "./data-dev-node2"
+database_path = "./data-dev-node2/storage.db"
+
+[database]
+url = "postgresql://dsm:dsm@localhost:5432/dsm_storage_node2"
+assignment_strategy = "DeterministicHashing"
+replication_strategy = "FixedReplicas"
+replica_count = 3
+min_regions = 1
+default_ttl = 0
+enable_pruning = true
+pruning_interval = 3600
+
+[storage.epidemic]
+gossip_interval_ms = 5000
+reconciliation_interval_ms = 30000
+topology_maintenance_interval_ms = 60000
+gossip_fanout = 3
+max_reconciliation_diff = 1000
+replication_factor = 3
+k_neighbors = 5
+alpha = 0.7
+max_long_links = 10
+max_topology_connections = 50
+topology_connection_timeout_ms = 5000
+cleanup_interval_ms = 300000
+
+[network]
+listen_addr = "0.0.0.0"
+public_endpoint = "http://127.0.0.1:8081"
+port = 8081
+max_connections = 100
+connection_timeout = 300
+enable_discovery = true
+discovery_interval = 300
+max_peers = 10
+peers = [
+  "http://127.0.0.1:8080",
+  "http://127.0.0.1:8082",
+  "http://127.0.0.1:8083",
+  "http://127.0.0.1:8084"
+]
+
+[security]
+private_key_path = "./keys/dev-node2.key"
+public_key_path = "./keys/dev-node2.pub"
+enable_tls = false
+require_auth = false
+enable_rate_limits = false
+
+[tls]
+enabled = false
+cert_path = "./keys/production/node.crt"
+key_path = "./keys/production/node.key"
+
+[staking]
+enable_staking = false
+
+[mpc]
+enabled = true
+threshold = 3
+max_participants = 5
+session_timeout = 300
+contribution_timeout = 60
+enable_blind_signatures = true
+dbrw_enabled = true
+max_concurrent_sessions = 10
+cleanup_interval = 300
+participant_discovery_timeout = 30
+
+[logging]
+level = "debug"
+file_path = "./logs/dev-node2.log"
+format = "text"
+console_logging = true

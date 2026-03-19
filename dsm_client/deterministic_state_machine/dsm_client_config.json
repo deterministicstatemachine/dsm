@@ -1,0 +1,33 @@
+{
+  "storage": {
+    "url": "DYNAMIC_FROM_ENV_CONFIG",
+    "cache_dir": "./data/cache",
+    "local_storage_path": "./data"
+  },
+  "network": {
+    "discovery_nodes": "DYNAMIC_FROM_ENV_CONFIG",
+    "connection_timeout": 60
+  },
+  "security": {
+    "identity_file": "./data/identity.key",
+    "create_identity_if_missing": true,
+    "enable_tls": true,
+    "post_quantum_transport": true
+  },
+  "mpc": {
+    "threshold": 3,
+    "max_participants": 5,
+    "session_timeout": 300000,
+    "aux": {
+      "domain": "dsm-genesis",
+      "protocol_version": "2.1",
+      "network": "mainnet"
+    }
+  },
+  "device_binding": {
+    "enable_dbrw": true,
+    "entropy_source": "hybrid"
+  },
+  "_note": "All endpoints are loaded dynamically from ../dsm_env_config.json at runtime",
+  "endpoints_config_path": "../dsm_env_config.json"
+}

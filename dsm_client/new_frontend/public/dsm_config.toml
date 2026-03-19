@@ -1,0 +1,36 @@
+# DSM runtime environment configuration — AWS production nodes (6-node cluster)
+# This file is bundled into Android assets via webpack CopyPlugin.
+# The authoritative config read by the SDK is dsm_env_config.toml (same directory).
+protocol = "https"
+lan_ip = "0.0.0.0"
+ports = [8080]
+allow_localhost = false
+storage_node_mode = "remote"
+custom_ca_certs = ["ca.crt"]
+bitcoin_network = "signet"
+dbtc_min_confirmations = 1
+mempool_api_url = "https://mempool.space"
+
+[[nodes]]
+name = "us-east-1a"
+endpoint = "https://13.218.83.69:8080"
+
+[[nodes]]
+name = "us-east-1b"
+endpoint = "https://44.223.31.184:8080"
+
+[[nodes]]
+name = "eu-west-1a"
+endpoint = "https://54.74.145.172:8080"
+
+[[nodes]]
+name = "eu-west-1b"
+endpoint = "https://3.249.79.215:8080"
+
+[[nodes]]
+name = "ap-southeast-1a"
+endpoint = "https://18.141.56.252:8080"
+
+[[nodes]]
+name = "ap-southeast-1b"
+endpoint = "https://13.215.175.231:8080"

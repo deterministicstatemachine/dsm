@@ -1,0 +1,42 @@
+{
+  "name": "dsm-workspace",
+  "private": true,
+  "license": "MIT OR Apache-2.0",
+  "scripts": {
+    "help": "make help",
+    "menu": "make menu",
+    "setup": "make setup",
+    "doctor": "make doctor",
+    "build": "make build",
+    "frontend": "make frontend",
+    "android:build": "make android",
+    "android:install": "make install",
+    "type-check": "cd dsm_client/new_frontend && npm run type-check",
+    "fe:build": "cd dsm_client/new_frontend && npm run build:full-deploy",
+    "fe:type-check": "cd dsm_client/new_frontend && npm run type-check",
+    "fe:test": "cd dsm_client/new_frontend && npm run test -- --passWithNoTests",
+    "nodes:up": "make nodes-up",
+    "nodes:down": "make nodes-down",
+    "nodes:status": "make nodes-status",
+    "ship": "make install",
+    "verify": "make ci-scan",
+    "guardrails": "./scripts/enforce-guardrails.sh",
+    "guardrails:strict": "./scripts/enforce-guardrails.sh",
+    "proto:guard": "make proto-guard",
+    "codegen:enforce": "bash scripts/codegen_enforce.sh",
+    "proto:ts": "cd dsm_client/new_frontend && npm run proto:gen",
+    "coverage:aggregate": "node scripts/aggregate_coverage.mjs"
+  },
+  "devDependencies": {
+    "@bufbuild/protobuf": "^1.10.1",
+    "@bufbuild/protoc-gen-es": "^1.10.1",
+    "long": "^5.3.2",
+    "protobufjs": "^7.5.4",
+    "ts-proto": "^1.179.1"
+  },
+  "dependencies": {
+    "cross-env": "^7.0.3",
+    "webpack": "^5.88.0",
+    "webpack-cli": "^6.0.1"
+  }
+}

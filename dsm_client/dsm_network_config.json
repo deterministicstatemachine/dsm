@@ -1,0 +1,53 @@
+{
+  "_generated": {
+    "config_version": 1,
+    "generator": "repo_default_bootstrap_config",
+    "environment": "dev",
+    "platform": "android",
+    "detected_ip": "127.0.0.1",
+    "network_type": "localhost",
+    "interface": "loopback",
+    "client_only": true
+  },
+  "client": {
+    "mode": "dev",
+    "platform": "android"
+  },
+  "storage_nodes": {
+    "protocol": "http",
+    "host": "127.0.0.1",
+    "ports": [8080,8081,8082,8083,8084],
+    "nodes": [
+      {
+        "name": "node1",
+        "endpoint": "http://127.0.0.1:8080",
+        "port": 8080,
+        "status": "unknown"
+      },
+      {
+        "name": "node2",
+        "endpoint": "http://127.0.0.1:8081",
+        "port": 8081,
+        "status": "unknown"
+      },
+      {
+        "name": "node3",
+        "endpoint": "http://127.0.0.1:8082",
+        "port": 8082,
+        "status": "unknown"
+      },
+      {
+        "name": "node4",
+        "endpoint": "http://127.0.0.1:8083",
+        "port": 8083,
+        "status": "unknown"
+      },
+      {
+        "name": "node5",
+        "endpoint": "http://127.0.0.1:8084",
+        "port": 8084,
+        "status": "unknown"
+      }
+    ]
+  }
+}

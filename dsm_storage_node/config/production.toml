@@ -1,0 +1,44 @@
+# DSM Storage Node — Production Configuration Template
+#
+# Placeholders are filled by deploy/generate_node_configs.sh:
+#   __NODE_ID__         — e.g. "dsm-node-1"
+#   __LISTEN_ADDR__     — e.g. "0.0.0.0"
+#   __PORT__            — e.g. 8080
+#   __DATABASE_URL__    — e.g. "postgresql://dsm:PASSWORD@postgres:5432/dsm_storage"
+
+[node]
+id = "__NODE_ID__"
+
+[network]
+listen_addr = "__LISTEN_ADDR__"
+port = __PORT__
+max_connections = 256
+
+[tls]
+enabled = true
+cert_path = "/certs/node.crt"
+key_path  = "/certs/node.key"
+
+[database]
+url = "__DATABASE_URL__"
+
+[http]
+body_limit_bytes = 1048576    # 1 MiB
+
+[security_headers]
+hsts_max_age = 31536000       # 1 year
+
+[replication]
+# Peers are listed here; generate_node_configs.sh fills them in.
+# peers = ["https://NODE2_IP:8080", "https://NODE3_IP:8080", ...]
+
+[paidk]
+flat_rate = 1000     # Minimum payment amount per operator
+k = 3                # Distinct operators required for spend-gate satisfaction
+
+[registry]
+grace_cycles = 8     # New nodes protected from Down signals for this many cycles
+discovery_window = 4 # Signal aggregation window (cycles)
+n = 6                # Target node count
+u_up = 0.85          # Utilization threshold for Up signal validity
+u_down = 0.35        # Utilization threshold for Down signal validity

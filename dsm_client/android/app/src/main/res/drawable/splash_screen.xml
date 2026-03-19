@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@color/ic_launcher_bg" />
+    <item
+        android:width="520dp"
+        android:height="520dp"
+        android:gravity="center"
+        android:drawable="@drawable/splash_logo_inset" />
+</layer-list>

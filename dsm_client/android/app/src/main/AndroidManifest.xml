@@ -1,0 +1,198 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Network -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"/>
+
+    <!-- BLE permissions (capped at API 30 for older APIs) -->
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30"/>
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30"/>
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation"
+        tools:targetApi="s"/>
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE"/>
+
+    <!-- Location permissions for BLE scanning on pre-Android 12 devices only -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" android:maxSdkVersion="30"/>
+    <!-- FINE_LOCATION removed: BLE scanning uses neverForLocation on Android 12+ -->
+
+    <!-- Foreground Services + types -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+
+    <!-- Notifications (Android 13+) for FGS persistent notif -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+
+    <!-- Start after reboot when user opts into Always-on scanning -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+
+    <!-- Camera for QR scanning in WebView -->
+    <uses-permission android:name="android.permission.CAMERA"/>
+    <!-- NFC for recovery capsule import -->
+    <uses-permission android:name="android.permission.NFC" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-feature android:name="android.hardware.nfc" android:required="false" />
+
+    <!-- Optional feature hints -->
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="false"/>
+    <uses-feature android:name="android.hardware.camera" android:required="false"/>
+
+    <application
+        android:name="com.dsm.wallet.App"
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:usesCleartextTraffic="false"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:theme="@style/Theme.DsmClient"
+        android:enableOnBackInvokedCallback="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/empty_backup"
+        tools:targetApi="tiramisu"
+        android:appCategory="productivity">
+
+        <!-- 16 KB page size support for high-RAM devices (Android 15+)
+             Per https://developer.android.com/guide/practices/page-sizes
+             Benefits: 3-8% faster app launch, 4.5% lower power, 4-6% faster camera, 8% faster boot
+             Native libs built with -Wl,-z,max-page-size=16384 for forward compatibility -->
+        <property android:name="android.supports_16kb_page_size" android:value="true" />
+
+        <!-- Early-process provider to load JNI before any Activity/Service -->
+        <provider
+            android:name="com.dsm.wallet.DsmInitProvider"
+            android:authorities="${applicationId}.dsminitprovider"
+            android:exported="false"
+            android:initOrder="1000" />
+
+        <!-- MAIN ACTIVITY (WebView container + deterministic JS bridge) -->
+        <activity
+            android:name="com.dsm.wallet.ui.MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:screenOrientation="portrait"
+            android:configChanges="orientation|keyboardHidden|screenSize"
+            android:clearTaskOnLaunch="true"
+            android:theme="@style/Theme.DsmClient.Splash"
+            tools:ignore="LockedOrientationActivity">
+            <!-- Orientation locked to portrait intentionally:
+                 1) WebView UI layout & BLE scanning flows optimized for vertical scrolling.
+                 2) Avoids repeated re-initialization of bridge on ChromeOS / tablets when users rotate.
+                 3) Acts like a kiosk-style deterministic surface for recovery & pairing.
+                 If wider multi-window orientation support is later required, remove this and test responsive breakpoints.
+                 tools:ignore added to acknowledge conscious decision. -->
+            <!-- tools:ignore attribute suppresses LockedOrientationActivity lint after rationale above. -->
+            <meta-data android:name="orientation.rationale" android:value="Portrait only for deterministic BLE/WebView UX" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+
+        <!-- NFC Recovery Activity (handles NDEF capsules - READ) -->
+        <activity
+            android:name="com.dsm.wallet.recovery.NfcRecoveryActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:configChanges="orientation|keyboardHidden|screenSize">
+            <intent-filter>
+                <action android:name="android.nfc.action.NDEF_DISCOVERED" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <!-- Accept generic text or application-specific mime types -->
+                <data android:mimeType="text/plain" />
+                <data android:mimeType="application/vnd.dsm.recovery" />
+            </intent-filter>
+        </activity>
+
+        <!-- NFC Write Activity (writes recovery capsules to NFC ring - WRITE) -->
+        <activity
+            android:name="com.dsm.wallet.recovery.NfcWriteActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:screenOrientation="portrait"
+            android:theme="@style/Theme.AppCompat.NoActionBar"
+            android:configChanges="orientation|keyboardHidden|screenSize"
+            tools:ignore="LockedOrientationActivity" />
+
+        <!-- Native QR Scanner Activity (ML Kit + CameraX) -->
+        <activity
+            android:name="com.dsm.wallet.ui.QrScannerActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:screenOrientation="portrait"
+            android:theme="@style/Theme.AppCompat.NoActionBar"
+            tools:ignore="LockedOrientationActivity" />
+
+        <!-- MCP core host (protobuf-only runtime hub) -->
+        <service
+            android:name="com.dsm.wallet.mcp.McpService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice|dataSync" />
+
+        <!-- Proximity Foreground Service (Always-on mode; if you use it) -->
+        <service
+            android:name="com.dsm.wallet.proximity.ProximityScanService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice|dataSync" />
+
+        <!-- BLE Foreground Service (keeps advertising/GATT alive for offline transfers) -->
+        <service
+            android:name="com.dsm.wallet.service.BleBackgroundService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice|dataSync" />
+
+        <!-- Faucet background scanner (location-based availability signals) -->
+        <service
+            android:name="com.dsm.faucet.FaucetService"
+            android:exported="false"
+            android:foregroundServiceType="location" />
+
+
+        <!-- Restart DSM/MCP after app updates -->
+        <receiver
+            android:name="com.dsm.wallet.mcp.PackageReplacedReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>
+            </intent-filter>
+        </receiver>
+
+        <!-- Auto-start proximity service on reboot IF user chose Always-on -->
+        <receiver
+            android:name="com.dsm.wallet.proximity.BootCompletedReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED"/>
+            </intent-filter>
+        </receiver>
+
+        <!-- Debug pairing test activity (manual isolated pairing control) -->
+        <activity
+            android:name="com.dsm.wallet.debug.PairingTestActivity"
+            android:exported="false"
+            android:label="Pairing Test"
+            android:launchMode="singleTop" />
+
+        <!-- Hardware Incompatibility Screen (shown when JNI library fails to load) -->
+        <activity
+            android:name="com.dsm.wallet.IncompatibleDeviceScreen"
+            android:exported="false"
+            android:label="Device Incompatible"
+            android:launchMode="singleTop"
+            android:screenOrientation="portrait"
+            tools:ignore="LockedOrientationActivity" />
+
+    </application>
+</manifest>

@@ -1,0 +1,10 @@
+[package]
+name = "dsm_vector_builder"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+anyhow = "1"
+prost = "0.12"
+dsm = { path = "../../dsm_client/deterministic_state_machine/dsm" }

@@ -1,0 +1,47 @@
+{
+  "_generated": {
+    "config_version": 1,
+    "generator": "repo_default_bootstrap_config",
+    "detected_ip": "127.0.0.1",
+    "discovered_nodes": 5
+  },
+  "network": {
+    "bootstrap_nodes": [
+      "http://127.0.0.1:8080",
+      "http://127.0.0.1:8081",
+      "http://127.0.0.1:8082",
+      "http://127.0.0.1:8083",
+      "http://127.0.0.1:8084"
+    ],
+    "enable_p2p": true
+  },
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8421,
+    "enable_tls": false,
+    "post_quantum_transport": true
+  },
+  "storage": {
+    "data_dir": "./data"
+  },
+  "unilateral": {
+    "max_transaction_size": 1048576
+  },
+  "vault": {
+    "auto_expire_check_interval": 3600
+  },
+  "mpc": {
+    "threshold": 3,
+    "max_participants": 5,
+    "session_timeout": 300000,
+    "aux": {
+      "domain": "dsm-genesis",
+      "protocol_version": "2.1",
+      "network": "testnet"
+    }
+  },
+  "device_binding": {
+    "enable_dbrw": true,
+    "entropy_source": "hybrid"
+  }
+}

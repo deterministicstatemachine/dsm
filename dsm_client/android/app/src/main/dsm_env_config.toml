@@ -1,0 +1,42 @@
+# DSM Android runtime environment configuration — AWS production nodes (6-node cluster)
+protocol = "https"
+lan_ip = "0.0.0.0"
+ports = [8080]
+allow_localhost = false
+storage_node_mode = "remote"
+
+# TLS: self-signed CA cert bundled in assets and materialized to filesDir at boot
+custom_ca_certs = ["ca.crt"]
+
+# Bitcoin network for dBTC key derivation and address format
+bitcoin_network = "signet"
+
+# dBTC deep-anchor confirmation depth (100 for mainnet, 1 for testing)
+dbtc_min_confirmations = 1
+
+# mempool.space public API base URL (used for signet/testnet balance + broadcast)
+mempool_api_url = "https://mempool.space"
+
+[[nodes]]
+name = "us-east-1a"
+endpoint = "https://13.218.83.69:8080"
+
+[[nodes]]
+name = "us-east-1b"
+endpoint = "https://44.223.31.184:8080"
+
+[[nodes]]
+name = "eu-west-1a"
+endpoint = "https://54.74.145.172:8080"
+
+[[nodes]]
+name = "eu-west-1b"
+endpoint = "https://3.249.79.215:8080"
+
+[[nodes]]
+name = "ap-southeast-1a"
+endpoint = "https://18.141.56.252:8080"
+
+[[nodes]]
+name = "ap-southeast-1b"
+endpoint = "https://13.215.175.231:8080"

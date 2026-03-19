@@ -1,0 +1,387 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DsmSpecification",
+  "description": "Top-level DSM specification that can be either a vault or policy",
+  "anyOf": [
+    {
+      "$ref": "#/definitions/VaultSpecification"
+    },
+    {
+      "$ref": "#/definitions/PolicySpecification"
+    }
+  ],
+  "definitions": {
+    "AssetDefinition": {
+      "description": "Asset definition for vault contents",
+      "type": "object",
+      "required": [
+        "amount",
+        "asset_id"
+      ],
+      "properties": {
+        "amount": {
+          "description": "Amount of the asset",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "asset_id": {
+          "description": "Unique identifier for the asset",
+          "type": "string"
+        },
+        "metadata": {
+          "description": "Optional metadata",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": true
+        }
+      }
+    },
+    "ConditionType": {
+      "description": "Types of rule conditions",
+      "type": "string",
+      "enum": [
+        "amount_limit",
+        "time_window",
+        "whitelist",
+        "blacklist",
+        "signature_required",
+        "custom"
+      ]
+    },
+    "LockConditionType": {
+      "description": "Supported lock condition types",
+      "type": "string",
+      "enum": [
+        "multi_sig",
+        "time_lock",
+        "hash_lock",
+        "repayment_confirmation",
+        "custom",
+        "composite"
+      ]
+    },
+    "LockConditions": {
+      "description": "Lock conditions for vault access",
+      "type": "object",
+      "required": [
+        "condition_type",
+        "parameters"
+      ],
+      "properties": {
+        "condition_type": {
+          "description": "Type of lock condition",
+          "allOf": [
+            {
+              "$ref": "#/definitions/LockConditionType"
+            }
+          ]
+        },
+        "parameters": {
+          "description": "Parameters specific to the condition type",
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
+    "PolicySpecification": {
+      "description": "Complete specification for a DSM policy",
+      "type": "object",
+      "required": [
+        "name",
+        "rules",
+        "version"
+      ],
+      "properties": {
+        "description": {
+          "description": "Optional description",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "metadata": {
+          "description": "Additional metadata",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": true
+        },
+        "name": {
+          "description": "Human-readable name for the policy",
+          "type": "string"
+        },
+        "rules": {
+          "description": "Rules that govern transfers",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/TransferRule"
+          }
+        },
+        "version": {
+          "description": "Semantic version of the specification",
+          "type": "string"
+        }
+      }
+    },
+    "RecoveryConfig": {
+      "description": "Recovery configuration for vault",
+      "type": "object",
+      "required": [
+        "mechanism",
+        "parameters"
+      ],
+      "properties": {
+        "mechanism": {
+          "description": "Recovery mechanism type",
+          "allOf": [
+            {
+              "$ref": "#/definitions/RecoveryMechanism"
+            }
+          ]
+        },
+        "parameters": {
+          "description": "Parameters for the recovery mechanism",
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
+    "RecoveryMechanism": {
+      "description": "Supported recovery mechanisms",
+      "type": "string",
+      "enum": [
+        "multi_sig_recovery",
+        "time_delayed_recovery",
+        "social_recovery"
+      ]
+    },
+    "RuleAction": {
+      "description": "Action to take when a rule condition is met",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "allow",
+            "deny",
+            "require_approval"
+          ]
+        },
+        {
+          "type": "object",
+          "required": [
+            "delay"
+          ],
+          "properties": {
+            "delay": {
+              "type": "object",
+              "required": [
+                "seconds"
+              ],
+              "properties": {
+                "seconds": {
+                  "type": "integer",
+                  "format": "uint64",
+                  "minimum": 0.0
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "RuleCondition": {
+      "description": "Condition for a transfer rule",
+      "type": "object",
+      "required": [
+        "condition_type",
+        "parameters"
+      ],
+      "properties": {
+        "condition_type": {
+          "description": "Type of condition",
+          "allOf": [
+            {
+              "$ref": "#/definitions/ConditionType"
+            }
+          ]
+        },
+        "parameters": {
+          "description": "Parameters for the condition",
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
+    "TimeoutAction": {
+      "description": "Actions that can be taken when a vault times out",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "return_to_owner",
+            "burn"
+          ]
+        },
+        {
+          "type": "object",
+          "required": [
+            "release_to_address"
+          ],
+          "properties": {
+            "release_to_address": {
+              "type": "object",
+              "required": [
+                "address"
+              ],
+              "properties": {
+                "address": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "TimeoutConfig": {
+      "description": "Timeout configuration for vault",
+      "type": "object",
+      "required": [
+        "duration_seconds",
+        "timeout_action"
+      ],
+      "properties": {
+        "duration_seconds": {
+          "description": "Duration in seconds before timeout",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "timeout_action": {
+          "description": "Action to take on timeout",
+          "allOf": [
+            {
+              "$ref": "#/definitions/TimeoutAction"
+            }
+          ]
+        }
+      }
+    },
+    "TransferRule": {
+      "description": "Transfer rule definition",
+      "type": "object",
+      "required": [
+        "action",
+        "condition",
+        "name",
+        "priority"
+      ],
+      "properties": {
+        "action": {
+          "description": "Action to take if condition is met",
+          "allOf": [
+            {
+              "$ref": "#/definitions/RuleAction"
+            }
+          ]
+        },
+        "condition": {
+          "description": "Condition that must be met",
+          "allOf": [
+            {
+              "$ref": "#/definitions/RuleCondition"
+            }
+          ]
+        },
+        "name": {
+          "description": "Name of the rule",
+          "type": "string"
+        },
+        "priority": {
+          "description": "Priority of the rule (higher number = higher priority)",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    "VaultSpecification": {
+      "description": "Complete specification for a DSM vault",
+      "type": "object",
+      "required": [
+        "assets",
+        "lock_conditions",
+        "name",
+        "version"
+      ],
+      "properties": {
+        "assets": {
+          "description": "Assets to be stored in the vault",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/AssetDefinition"
+          }
+        },
+        "description": {
+          "description": "Optional description",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lock_conditions": {
+          "description": "Lock conditions that must be satisfied to unlock the vault",
+          "allOf": [
+            {
+              "$ref": "#/definitions/LockConditions"
+            }
+          ]
+        },
+        "metadata": {
+          "description": "Additional metadata",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": true
+        },
+        "name": {
+          "description": "Human-readable name for the vault",
+          "type": "string"
+        },
+        "recovery": {
+          "description": "Optional recovery configuration",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RecoveryConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "timeout": {
+          "description": "Optional timeout configuration",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TimeoutConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "version": {
+          "description": "Semantic version of the specification",
+          "type": "string"
+        }
+      }
+    }
+  }
+}

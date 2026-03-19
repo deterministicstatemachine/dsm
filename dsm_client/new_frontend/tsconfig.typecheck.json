@@ -1,0 +1,30 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "incremental": false
+  },
+  "include": [
+    "src/components/screens/QRCodeScannerScreen.tsx",
+    "src/contexts/WalletContext.tsx",
+    "src/dsm/bridgeTypes.ts",
+    "src/dsm/decoding.ts",
+    "src/dsm/EventBridge.ts",
+    "src/dsm/WebViewBridge.ts",
+    "src/services/genesis.ts",
+    "src/services/identity.ts",
+    "src/services/appState.ts",
+    "src/services/dsmClient.ts",
+    "src/stores/walletStore.ts",
+    "src/types/**/*.d.ts",
+    "src/proto/gen/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "src/__tests__/**",
+    "src/services/ble**",
+    "src/services/headerService.ts",
+    "src/services/dsmClientNew.ts",
+    "**/__mocks__/**"
+  ]
+}

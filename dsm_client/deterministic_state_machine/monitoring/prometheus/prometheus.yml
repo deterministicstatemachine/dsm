@@ -1,0 +1,119 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  scrape_timeout: 10s
+
+# Alert manager configuration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          # - alertmanager:9093
+
+# Rule files to load
+rule_files:
+  # - "rules/dsm_alerts.yml"
+
+# Scrape configurations
+scrape_configs:
+  # DSM Core metrics
+  - job_name: "dsm-core"
+    metrics_path: "/metrics"
+    scheme: http
+    static_configs:
+      - targets: ["dsm-core:9090"]
+    scrape_interval: 10s
+    scrape_timeout: 5s
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: "dsm-core"
+
+  # DSM Storage Node metrics
+  - job_name: "dsm-storage"
+    metrics_path: "/metrics"
+    scheme: http
+    static_configs:
+      - targets: 
+        - "dsm-storage-primary:9090"
+        - "dsm-storage-replica:9090"
+    scrape_interval: 10s
+    scrape_timeout: 5s
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        regex: "dsm-storage-(.*):9090"
+        replacement: "storage-$1"
+
+  # Ethereum Bridge metrics
+  - job_name: "ethereum-bridge"
+    metrics_path: "/metrics"
+    scheme: http
+    static_configs:
+      - targets: ["dsm-ethereum-bridge:9090"]
+    scrape_interval: 10s
+    scrape_timeout: 5s
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: "ethereum-bridge"
+
+  # Self-monitoring
+  - job_name: "prometheus"
+    metrics_path: "/metrics"
+    static_configs:
+      - targets: ["localhost:9090"]
+    scrape_interval: 15s
+    scrape_timeout: 5s
+
+# Remote write configuration
+# For long-term storage integration (optional)
+# remote_write:
+#   - url: "http://remote-storage:9201/write"
+
+# Storage configuration
+storage:
+  tsdb:
+    path: /prometheus
+    retention:
+      time: 15d
+      size: 5GB
+    # Enable for performance on large workloads
+    # wal_compression: true
+
+# Security and TLS configuration
+# tls_server_config:
+#   cert_file: /etc/prometheus/certs/server.crt
+#   key_file: /etc/prometheus/certs/server.key
+
+# HTTP server configuration
+web:
+  listen_address: 0.0.0.0:9090
+  # External URL (for alert manager links)
+  external_url: http://localhost:9090
+  # Security headers
+  cors:
+    cors_origins: ['*']
+    cors_methods: ['GET', 'OPTIONS']
+    cors_headers: ['Content-Type', 'Authorization']
+  # TLS server configuration (if needed)
+  # tls_server_config:
+  #   cert_file: /etc/prometheus/certs/server.crt
+  #   key_file: /etc/prometheus/certs/server.key
+
+# Query execution and timeouts
+query:
+  lookback_delta: 5m
+  max_samples: 50000000
+  timeout: 2m
+
+# TSDB settings for storage optimization
+tsdb:
+  # When blocks are considered complete (affects compaction)
+  min_block_duration: 2h
+  # Controls concurrency and memory usage during compaction
+  max_block_duration: 36h
+  # Retention settings (can be adjusted based on needs)
+  retention:
+    time: 15d
+    size: 5GB

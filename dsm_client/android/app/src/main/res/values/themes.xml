@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Base application theme optimized for DSM Wallet -->
+    <style name="Theme.DsmClient" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <!-- DSM Brand Colors -->
+        <item name="colorPrimary">@color/dsm_primary</item>
+        <item name="colorPrimaryVariant">@color/dsm_primary_variant</item>
+        <item name="colorOnPrimary">@color/white</item>
+        <!-- Secondary colors -->
+        <item name="colorSecondary">@color/dsm_secondary</item>
+        <item name="colorSecondaryVariant">@color/teal_700</item>
+        <item name="colorOnSecondary">@color/black</item>
+        <!-- Surface colors -->
+        <item name="colorSurface">@color/dsm_surface</item>
+        <item name="colorOnSurface">@color/black</item>
+        <!-- System bars: near-black permanently (matches stateboy-shell area) -->
+        <item name="android:statusBarColor">#0D0D0D</item>
+        <item name="android:navigationBarColor">#0D0D0D</item>
+    </style>
+
+    <style name="Theme.DsmClient.Splash" parent="Theme.DsmClient">
+        <item name="android:windowBackground">@drawable/splash_screen</item>
+    </style>
+</resources>

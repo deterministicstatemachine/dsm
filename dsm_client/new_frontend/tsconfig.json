@@ -1,0 +1,68 @@
+{
+  "compilerOptions": {
+    "target": "ES2021",
+    "lib": [
+      "DOM",
+      "DOM.Iterable",
+      "ESNext"
+    ],
+    "module": "ESNext",
+    "moduleResolution": "Node",
+    "jsx": "react-jsx",
+    "strict": true,
+    "noImplicitAny": true,
+    "exactOptionalPropertyTypes": false,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "incremental": true,
+    "tsBuildInfoFile": "node_modules/.cache/tsconfig.tsbuildinfo",
+    "declaration": true,
+    "outDir": "dist",
+    "baseUrl": "src",
+    "paths": {
+      "@/*": ["*"],
+      "@/components/*": ["components/*"],
+      "@/hooks/*": ["hooks/*"],
+      "@/types/*": ["types/*"],
+      "@/utils/*": ["utils/*"],
+      "@/styles/*": ["styles/*"],
+      "@/services/*": ["services/*"],
+      "@/bridge/*": ["bridge/*"],
+      "@/contexts/*": ["contexts/*"]
+    },
+    "types": [
+      "react",
+      "react-dom",
+      "node",
+      "jest"
+    ]
+  },
+  "include": [
+    "src"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "src/proto/dsm_app.ts",
+    "src/proto/google/protobuf/**",
+    "scripts/**",
+    "src/**/*.old.tsx",
+    "src/**/*.legacy.ts",
+    "src/**/*.legacy.tsx",
+    // Temporarily exclude unmigrated bufbuild-style modules until ts-proto migration completes
+    "src/dsm/index.ts",
+    "src/contexts/BleContext.tsx",
+    "src/services/bleBridge.ts",
+    "src/services/dsmClientNew.ts",
+    "src/services/headerService.ts",
+    "**/__tests__/**",
+    "**/*.spec.ts",
+    "**/*.spec.tsx",
+    "**/*.test.ts",
+    "**/__mocks__/**"
+  ]
+}

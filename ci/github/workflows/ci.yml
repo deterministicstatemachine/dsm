@@ -1,0 +1,33 @@
+name: DSM CI (legacy — disabled; use .github/workflows/ci.yml)
+on:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Build core+sdk+storage
+        run: |
+          cargo fmt --all -- --check
+          cargo +stable clippy --all-targets -- -D warnings
+          cargo build --workspace --release
+          cargo test --workspace -- --nocapture
+      - name: Audit
+        run: |
+          cargo install cargo-audit || true
+          cargo audit
+      - name: Cargo Deny (policy gate)
+        run: |
+          cargo install cargo-deny || true
+          cargo deny check
+  docker:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Storage Node image
+        run: |
+          docker build -f ci/docker/StorageNode.Dockerfile -t dsm/storage-node:latest .

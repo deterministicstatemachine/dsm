@@ -1,0 +1,9 @@
+{
+  "chain_tip": 0,
+  "created_at": 1756755578,
+  "device_id": "device_db751244ac868d5a",
+  "genesis_hash": "genesis_db751244ac868d59",
+  "locale": "en_US",
+  "network_id": "testnet",
+  "wallet_initialized": true
+}

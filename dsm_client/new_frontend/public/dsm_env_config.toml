@@ -1,0 +1,47 @@
+# DSM Android runtime environment configuration
+# Default: AWS storage nodes (6 nodes, 3 regions).
+# For local dev, push override via: scripts/push_env_override.sh --local
+
+protocol = "https"
+lan_ip = "0.0.0.0"
+allow_localhost = false
+storage_node_mode = "remote"
+ports = [8080]
+
+# Bitcoin network for dBTC key derivation and address format
+# Valid: "mainnet", "testnet", "signet"
+bitcoin_network = "signet"
+
+# dBTC deep-anchor confirmation depth (100 for mainnet, 2 for testing)
+dbtc_min_confirmations = 1
+
+# mempool.space public API base URL (used for signet/testnet balance + broadcast)
+mempool_api_url = "https://mempool.space"
+
+# Self-signed CA for AWS storage node TLS certs.
+# Path is relative to this config file's directory (resolved by SDK).
+custom_ca_certs = ["ca.crt"]
+
+[[nodes]]
+name = "us-east-1a"
+endpoint = "https://13.218.83.69:8080"
+
+[[nodes]]
+name = "us-east-1b"
+endpoint = "https://44.223.31.184:8080"
+
+[[nodes]]
+name = "eu-west-1a"
+endpoint = "https://54.74.145.172:8080"
+
+[[nodes]]
+name = "eu-west-1b"
+endpoint = "https://3.249.79.215:8080"
+
+[[nodes]]
+name = "ap-southeast-1a"
+endpoint = "https://18.141.56.252:8080"
+
+[[nodes]]
+name = "ap-southeast-1b"
+endpoint = "https://13.215.175.231:8080"

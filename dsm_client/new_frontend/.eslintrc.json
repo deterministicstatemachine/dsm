@@ -1,0 +1,65 @@
+{
+  "root": true,
+  "parser": "@typescript-eslint/parser",
+  "plugins": [
+    "@typescript-eslint",
+    "react",
+    "react-hooks",
+    "security"
+  ],
+  "extends": [
+    "eslint:recommended",
+    "plugin:@typescript-eslint/recommended",
+    "plugin:react/recommended",
+    "plugin:react-hooks/recommended",
+    "plugin:security/recommended",
+    "prettier"
+  ],
+  "parserOptions": {
+    "ecmaVersion": 2020,
+    "sourceType": "module",
+    "ecmaFeatures": {
+      "jsx": true
+    }
+  },
+  "rules": {
+    "react/react-in-jsx-scope": "off",
+    "react/prop-types": "off",
+    "@typescript-eslint/explicit-function-return-type": "off",
+    "@typescript-eslint/explicit-module-boundary-types": "off",
+    "@typescript-eslint/no-unused-vars": ["warn", { "argsIgnorePattern": "^_", "varsIgnorePattern": "^_", "caughtErrors": "all", "caughtErrorsIgnorePattern": "^_" }],
+    "@typescript-eslint/no-explicit-any": "warn",
+    "no-unused-vars": "off",
+    "security/detect-object-injection": "off",
+    "security/detect-unsafe-regex": "off",
+    
+    // Disable no-undef for TS projects as it conflicts with type-only globals and DOM types
+    // Typescript handles undefined variables at compile-time
+    
+      "no-empty": ["error", { "allowEmptyCatch": true }],
+    "prefer-const": "warn",
+    "no-var": "error",
+    "object-shorthand": "warn",
+    "prefer-template": "warn",
+    "react-hooks/exhaustive-deps": "warn",
+    "no-redeclare": "warn",
+    "no-useless-catch": "warn",
+    "no-case-declarations": "warn"
+  },
+  "env": {
+    "browser": true,
+    "es2020": true,
+    "node": true,
+    "jest": true
+  },
+  "settings": {
+    "react": {
+      "version": "detect"
+    }
+  },
+  "ignorePatterns": [
+    "dist/",
+    "node_modules/",
+    "*.js"
+  ]
+}

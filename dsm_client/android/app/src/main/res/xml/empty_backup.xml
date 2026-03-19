@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <!-- Explicitly empty: deterministic state must not be backed up on pre-Android 12 devices -->
+</full-backup-content>

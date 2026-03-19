@@ -1,0 +1,1697 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover" />
+  <title>DSM Wallet</title>
+  <meta name="description" content="Distributed State Machine Wallet" />
+  <meta name="theme-color" content="#232323" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="msapplication-navbutton-color" content="#000000" />
+  <meta name="apple-mobile-web-app-title" content="DSM" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; 
+    script-src 'self' 'unsafe-inline' 'unsafe-eval'; 
+    style-src 'self' 'unsafe-inline'; 
+    font-src 'self' data:; 
+    img-src 'self' data: https://*.tile.openstreetmap.org https://tile.openstreetmap.org https://demotiles.maplibre.org; 
+    connect-src 'self' https://*.dsm-wallet.io https://demotiles.maplibre.org https://*.tile.openstreetmap.org https://tile.openstreetmap.org <% if (htmlWebpackPlugin && htmlWebpackPlugin.options && htmlWebpackPlugin.options.templateParameters && htmlWebpackPlugin.options.templateParameters.buildTarget === 'android') { %> http://localhost:8080 http://localhost:8081 http://localhost:8082 http://localhost:8083 http://localhost:8084 http://127.0.0.1:8080 http://127.0.0.1:8081 http://127.0.0.1:8082 http://127.0.0.1:8083 http://127.0.0.1:8084 <% } %>; 
+    worker-src 'self' blob:; 
+    object-src 'none';" />
+  <meta http-equiv="X-XSS-Protection" content="1; mode=block" />
+  <meta http-equiv="X-Content-Type-Options" content="nosniff" />
+  <meta http-equiv="Referrer-Policy" content="no-referrer-when-downgrade" />
+  <link rel="icon" type="image/x-icon" href="favicon/favicon.ico" />
+  <link rel="icon" type="image/png" sizes="32x32" href="favicon/favicon-32x32.png" />
+  <link rel="icon" type="image/png" sizes="16x16" href="favicon/favicon-16x16.png" />
+  <link rel="apple-touch-icon" sizes="180x180" href="favicon/apple-icon-180x180.png" />
+
+  <style>
+    :root{--bg:#9bbc0f;--bg-secondary:#8bac0f;--text:#0f380f;--text-dark:#071f07;--border:#306230;--text-disabled:#306230;--error:#ff4444;--success:#44ff44;--warning:#ffa500;--stateboy-screen:#849d18;--stateboy-dark:#0f380f;--stateboy-shell:#1c1c1c;--stateboy-gray:#3c4040;--accent-magenta:rgb(255,0,255);--accent-cyan:rgb(0,255,255);--accent-yellow:rgb(238,255,0);--shell-label-color:rgb(238,255,0);--text-rgb:15,56,15;--text-dark-rgb:7,31,7;--bg-rgb:155,188,15;--vh:1vh;--nav-lit-color:#9bbc0f}
+    *{scrollbar-width:none;-ms-overflow-style:none}::-webkit-scrollbar{display:none}
+  body{display:flex;height:100vh;width:100vw;align-items:center;justify-content:center;margin:0;padding:0;overflow:hidden;background-color:var(--stateboy-shell);font-family:monospace,sans-serif;touch-action:manipulation;-webkit-tap-highlight-color:transparent;overscroll-behavior:none;user-select:none;-webkit-touch-callout:none;-webkit-user-drag:none}
+  </style>
+  <meta http-equiv="X-XSS-Protection" content="1; mode=block" />
+  <meta http-equiv="X-Content-Type-Options" content="nosniff" />
+  <meta http-equiv="Referrer-Policy" content="no-referrer-when-downgrade" />
+  <!-- Local fonts only: map font family names to system-safe fallbacks to avoid network calls -->
+  <link rel="stylesheet" href="css/fonts.css" />
+  <link rel="icon" type="image/x-icon" href="favicon/favicon.ico" />
+  <link rel="icon" type="image/png" sizes="32x32" href="favicon/favicon-32x32.png" />
+  <link rel="icon" type="image/png" sizes="16x16" href="favicon/favicon-16x16.png" />
+  <link rel="apple-touch-icon" sizes="180x180" href="favicon/apple-icon-180x180.png" />
+
+  <style>
+    :root{--bg:#9bbc0f;--bg-secondary:#8bac0f;--text:#0f380f;--text-dark:#071f07;--border:#306230;--text-disabled:#306230;--error:#ff4444;--success:#44ff44;--warning:#ffa500;--stateboy-screen:#849d18;--stateboy-dark:#0f380f;--stateboy-shell:#131313;--stateboy-gray:#3c4040;--accent-magenta:rgb(255,0,255);--accent-cyan:rgb(0,255,255);--accent-yellow:rgb(238,255,0);--shell-label-color:rgb(238,255,0);--text-rgb:15,56,15;--text-dark-rgb:7,31,7;--bg-rgb:155,188,15;--vh:1vh;--nav-lit-color:#9bbc0f}
+    *{scrollbar-width:none;-ms-overflow-style:none}::-webkit-scrollbar{display:none}
+  body{display:flex;height:100vh;width:100vw;align-items:center;justify-content:center;margin:0;padding:0;overflow:hidden;background-color:var(--stateboy-shell);font-family:'Press Start 2P',monospace;touch-action:manipulation;-webkit-tap-highlight-color:transparent;overscroll-behavior:none;user-select:none;-webkit-touch-callout:none;-webkit-user-drag:none}
+  .stateboy{position:relative;height:100vh;width:100vw;max-width:400px;font-family:'Martian Mono',monospace;transform:scale(1);margin:0 auto;display:flex;flex-direction:column;will-change:transform;background-color:var(--stateboy-shell);padding-top:max(env(safe-area-inset-top), 0px);padding-bottom:max(env(safe-area-inset-bottom), 0px);box-sizing:border-box}
+  .front-plate{position:relative;overflow:visible;width:100%;height:100%;border-radius:0;background-color:var(--stateboy-shell);box-shadow:inset 0 1px 1px -2px rgba(0,0,0,.95),inset 0 -4px 16px 0 rgba(0,0,0,.5),0 40px 60px 0 rgba(0,0,0,.6)}
+  .front-plate::before{content:'';position:absolute;inset:0;pointer-events:none;z-index:0;background-image:url('grain.png');background-size:128px 128px;background-repeat:repeat;opacity:0.15;mix-blend-mode:soft-light}
+    .screen-container{position:absolute;top:1.5%;left:50%;transform:translateX(-50%);width:92%;height:80%;padding:45px 24px 0 24px;box-sizing:border-box;overflow:visible;background-color:var(--stateboy-gray);box-shadow:inset 0 2px 8px rgba(0,0,0,.3);display:flex;flex-direction:column;justify-content:flex-start;align-items:center;border-radius:6px;position:relative}
+    .battery-light{position:absolute;top:11px;left:19px;width:16px;height:16px;border-radius:50%;border:2px solid #282828;z-index:10;box-shadow:inset 0 2px 0 0 rgba(0,0,0,.7),0 1px 2px rgba(0,0,0,.35);transition:all .3s ease;background:radial-gradient(circle at 40% 35%,rgba(255,255,255,.05),rgba(0,0,0,.14) 68%,rgba(0,0,0,.22) 100%);display:flex;align-items:center;justify-content:center;overflow:visible}
+  .battery-light span{display:block;width:12px;height:12px;border-radius:50%;background:var(--stateboy-dark);box-shadow:0 0 3px rgba(0,0,0,.35),inset 0 1px 1px rgba(255,255,255,.18);transition:background .3s,box-shadow .3s,transform .3s}
+    .battery-light.charging span{animation:batteryCharging 2s infinite}
+    .battery-light.full span{background-color:#44ffe3!important}
+    .battery-light.low span{background-color:#ffe344!important}
+    .battery-light.medium span{background-color:#ff00ea!important}
+  /* Bluetooth active indicator: force blue glow and subtle pulse */
+  .battery-light.bluetooth span{background-color:#1486ff!important;box-shadow:0 0 4px rgba(20,134,255,.95),0 0 8px rgba(20,134,255,.8),0 0 14px rgba(20,134,255,.55);animation:batteryPulse 2s infinite!important}
+    @keyframes batteryCharging{0%{background-color:#a244ff;box-shadow:0 0 4px rgba(162,68,255,.95),0 0 8px rgba(162,68,255,.75),0 0 14px rgba(162,68,255,.45)}33%{background-color:#41eef8;box-shadow:0 0 4px rgba(65,238,248,.95),0 0 8px rgba(65,238,248,.75),0 0 14px rgba(65,238,248,.45)}66%{background-color:#44ffe3;box-shadow:0 0 4px rgba(68,255,227,.95),0 0 8px rgba(68,255,227,.75),0 0 14px rgba(68,255,227,.45)}100%{background-color:#fff644;box-shadow:0 0 4px rgba(255,246,68,.95),0 0 8px rgba(255,246,68,.75),0 0 14px rgba(255,246,68,.45)}}
+    @keyframes batteryPulse{0%,100%{opacity:1}50%{opacity:.6}}
+    .dsm-shell-logo{position:absolute;top:0;left:50%;transform:translateX(-50%);z-index:10;pointer-events:none;width:112px;height:45px;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#333}
+    .dsm-shell-logo img{width:100%;height:100%;object-fit:contain;object-position:center;display:block}
+    .screen-wrapper{width:100%;flex:1;display:flex;flex-direction:column;position:relative;overflow:hidden}
+    .screen{position:relative;margin:0;width:100%;flex:1;box-sizing:border-box;overflow:hidden;background-color:var(--stateboy-screen);border-radius:8px 8px 0 0;display:flex;flex-direction:column;justify-content:flex-start;align-items:stretch;z-index:5;border:1px solid rgba(48,98,48,.18);border-bottom:none;animation:powerOn 1s ease-in-out}
+    .screen-content{position:relative;width:100%;height:100%;margin-top:0;z-index:2;display:flex;flex-direction:column;overflow-y:auto;overflow-x:hidden;background-color:transparent;scroll-behavior:smooth;-webkit-overflow-scrolling:touch;align-items:flex-start;justify-content:flex-start;padding:0}
+    .screen-nav-bar{position:relative;width:100%;height:60px;display:flex;justify-content:space-around;align-items:center;background:var(--stateboy-gray);border-top:2px solid #555;padding:8px 0;box-sizing:border-box;z-index:20;box-shadow:inset 0 2px 4px rgba(0,0,0,.3);border-radius:0 0 6px 6px;margin:0}
+    .screen-nav-icon{display:flex;align-items:center;justify-content:center;width:60px;height:44px;border:1px solid transparent;background:rgba(0,0,0,.1);cursor:pointer;transition:all .15s ease-in-out;position:relative;pointer-events:auto;border-radius:4px;margin:0 4px}
+    .screen-nav-icon:hover{background:rgba(0,0,0,.2);transform:translateY(-1px)}
+    .screen-nav-icon.pressed,.screen-nav-icon:active{background:rgba(0,0,0,.4);transform:translateY(1px);box-shadow:inset 0 2px 4px rgba(0,0,0,.5)}
+  /* Active state: icon-only glow in theme color (no background/halo) */
+  .screen-nav-icon.active{background:rgba(0,0,0,.15);box-shadow:none;transform:none}
+  .screen-nav-icon.active::after{content:none}
+  .screen-nav-icon .nav-icon-svg{transition:opacity .15s ease-in-out, transform .15s ease-in-out, filter .2s ease-in-out}
+  .screen-nav-icon.active .nav-icon-svg{
+    opacity:1;transform:scale(1.08);
+    filter: brightness(0) invert(1) drop-shadow(0 0 2px var(--nav-lit-color)) drop-shadow(0 0 4px var(--nav-lit-color)) drop-shadow(0 0 6px var(--nav-lit-color));
+  }
+    .nav-icon-svg{width:24px;height:24px;transition:all .15s ease-in-out;opacity:.9;filter:brightness(0) invert(1)}
+    .screen-nav-icon[data-nav="wallet"] .nav-icon-svg{width:26px;height:26px}
+    .screen-nav-icon:hover .nav-icon-svg{opacity:1;transform:scale(1.1)}
+    #dsm-app-root{width:100%;height:100%;position:relative;z-index:3;background-color:var(--bg);display:flex;flex-direction:column;overflow-y:auto;overflow-x:hidden;scroll-behavior:smooth;-webkit-overflow-scrolling:touch;max-width:100%;box-sizing:border-box;overscroll-behavior-y:contain;padding:20px;text-align:center}
+    .scanlines{position:absolute;top:0;left:0;width:100%;height:100%;background:linear-gradient(to bottom,transparent,transparent 50%,rgba(0,0,0,.15) 50%,rgba(0,0,0,.15));background-size:100% 2px;z-index:12;pointer-events:none;opacity:.8;mix-blend-mode:multiply}
+    .screen:has(.qr-code-above-scanlines) .scanlines{z-index:1!important}
+    .qr-code-above-scanlines{position:fixed!important;z-index:99999!important}
+    .screen-inner-shadow{position:absolute;display:block;height:100%;width:100%;top:0;left:0;z-index:15;pointer-events:none;border-radius:8px 8px 0 0;box-shadow:inset 8px 8px 12px rgba(0,0,0,.5),inset -6px -6px 12px rgba(0,0,0,.3),inset 0 0 20px rgba(0,0,0,.4),inset 0 2px 4px rgba(0,0,0,.6)}
+    .screen-depth-sheen{position:absolute;top:0;left:0;width:100%;height:100%;background:linear-gradient(135deg,rgba(255,255,255,.05) 0,rgba(255,255,255,0) 30%,rgba(0,0,0,0) 70%,rgba(0,0,0,.1) 100%);pointer-events:none;z-index:14;border-radius:8px 8px 0 0;opacity:.5}
+    #controller{position:absolute;bottom:2%;left:0;right:0;height:20%;padding:10px;display:flex;justify-content:center;align-items:center}
+    /* D-pad */
+    .new-dpad {
+      position: absolute;
+      width: 100px;
+      height: 100px;
+      border-radius: 50%;
+      left: 30px;
+      top: 50%;
+      transform: translateY(-50%);
+      z-index: 5;
+    }
+
+    .new-dpad-plus {
+      width: 100%;
+      height: 100%;
+      position: relative;
+      border-radius: 50%;
+    }
+
+  .new-dpad-background {
+      position: absolute;
+      width: 100%;
+      height: 100%;
+  background: var(--stateboy-shell);
+      border-radius: 50%;
+      top: 0;
+      left: 0;
+      box-shadow:
+        inset 0 3px 16px rgba(0, 0, 0, 0.20),
+        inset 0 1px 6px rgba(0, 0, 0, 0.18),
+      inset 0 -3px 9px rgba(255, 255, 255, 0.05),
+      var(--control-shell-glow, 0 0 0 rgba(0, 0, 0, 0));
+      transition: background 0.4s ease, box-shadow 0.4s ease;
+    }
+
+    .new-dpad-vertical {
+      position: absolute;
+      width: 30px;
+      height: 85px;
+      background: linear-gradient(135deg, #ff0080 0%, #640134 100%);
+      border-radius: 6px;
+      top: 7.5px;
+      left: 35px;
+      box-shadow: 
+        inset 0 1px 2px rgba(255, 255, 255, 0.4),
+        inset 0 -1px 2px rgba(0, 0, 0, 0.4),
+        0 2px 5px rgba(0, 0, 0, 0.5);
+      border-top: 2px solid #d74f8e;
+      transition: all 0.1s ease;
+    }
+
+    .new-dpad-horizontal {
+      position: absolute;
+      width: 85px;
+      height: 30px;
+      background: linear-gradient(135deg, #ff0080 0%, #640134 100%);
+      border-radius: 6px;
+      top: 35px;
+      left: 7.5px;
+      box-shadow: 
+        inset 0 1px 2px rgba(255, 255, 255, 0.0),
+        inset 0 -1px 2px rgba(0, 0, 0, 0.0),
+        0 2px 5px rgba(0, 0, 0, 0.0);
+      /* no border-top spanning full width — split into two pseudo-elements that stop at inner corners */
+      transition: all 0.1s ease;
+      overflow: visible;
+    }
+    /* Left arm — clipped top highlight + bottom shadow, both stopping at inner corner */
+    .new-dpad-horizontal::before {
+      content: '';
+      position: absolute;
+      top: 1px;
+      bottom: 0;
+      left: 0;
+      width: 28px;
+      background: linear-gradient(#d74f8e, #d74f8e) top / 100% 2px no-repeat;
+      border-radius: 6px 0 0 6px;
+      clip-path: inset(0 1px 0 0 round 6px 0 0 6px);
+      box-shadow:
+        inset 0 -2px 0 rgba(0, 0, 0, 0.88),
+        0 2px 3px rgba(0, 0, 0, 0.34),
+        0 5px 7px rgba(0, 0, 0, 0.22);
+      pointer-events: none;
+    }
+    /* Right arm — clipped top highlight + bottom shadow, both stopping at inner corner */
+    .new-dpad-horizontal::after {
+      content: '';
+      position: absolute;
+      top: 1px;
+      bottom: 0;
+      right: 0;
+      width: 28px;
+      background: linear-gradient(#d74f8e, #d74f8e) top / 100% 2px no-repeat;
+      border-radius: 0 6px 6px 0;
+      clip-path: inset(0 0 0 1px round 0 6px 6px 0);
+      box-shadow:
+        inset 0 -2px 0 rgba(0, 0, 0, 0.88),
+        0 2px 3px rgba(0, 0, 0, 0.34),
+        0 5px 7px rgba(0, 0, 0, 0.22);
+      pointer-events: none;
+    }
+
+    .new-dpad-center {
+      position: absolute;
+      width: 23px;
+      height: 23px;
+      background: radial-gradient(circle at 45% 38%, #97094482 8%, #a8043d78 100%);
+      border-radius: 15px;
+      top: 38px;
+      left: 38px;
+      z-index: 2;
+      box-shadow: inset 9px 7px 9px rgba(6, 0, 7, 0.413);
+    }
+
+    /* D-pad directional triangles */
+    .new-dpad-triangle-up,
+    .new-dpad-triangle-down,
+    .new-dpad-triangle-left,
+    .new-dpad-triangle-right {
+      position: absolute;
+      width: 0;
+      height: 0;
+      z-index: 3;
+    }
+
+    .new-dpad-triangle-up {
+      border-left: 8px solid transparent;
+      border-right: 8px solid transparent;
+      border-bottom: 10px solid rgba(0, 0, 0, 0.4);
+      top: 15px;
+      left: 42px;
+    }
+
+    .new-dpad-triangle-down {
+      border-left: 8px solid transparent;
+      border-right: 8px solid transparent;
+      border-top: 10px solid rgba(0, 0, 0, 0.4);
+      bottom: 15px;
+      left: 42px;
+    }
+
+    .new-dpad-triangle-left {
+      border-top: 8px solid transparent;
+      border-bottom: 8px solid transparent;
+      border-right: 10px solid rgba(0, 0, 0, 0.4);
+      left: 15px;
+      top: 42px;
+    }
+
+    .new-dpad-triangle-right {
+      border-top: 8px solid transparent;
+      border-bottom: 8px solid transparent;
+      border-left: 10px solid rgba(0, 0, 0, 0.4);
+      right: 15px;
+      top: 42px;
+    }
+
+    /* D-pad button areas */
+    .new-dpad-up,
+    .new-dpad-down,
+    .new-dpad-left,
+    .new-dpad-right {
+      position: absolute;
+      background: transparent;
+      border: none;
+      cursor: pointer;
+      z-index: 25;
+      transition: all 0.1s ease;
+    }
+
+    .new-dpad-up {
+      width: 30px;
+      height: 30px;
+      top: 0;
+      left: 35px;
+    }
+
+    .new-dpad-down {
+      width: 30px;
+      height: 30px;
+      bottom: 0;
+      left: 35px;
+    }
+
+    .new-dpad-left {
+      width: 30px;
+      height: 30px;
+      left: 0;
+      top: 35px;
+    }
+
+    .new-dpad-right {
+      width: 30px;
+      height: 30px;
+      right: 0;
+      top: 35px;
+    }
+
+    /* D-pad pressed animations */
+    /* UP: top sinks */
+    .new-dpad-up:active ~ .new-dpad-plus .new-dpad-vertical,
+    .new-dpad-up.pressed ~ .new-dpad-plus .new-dpad-vertical {
+      transform: perspective(200px) rotateX(6deg); transform-origin: center center;
+    }
+    .new-dpad-up:active ~ .new-dpad-plus .new-dpad-triangle-up,
+    .new-dpad-up.pressed ~ .new-dpad-plus .new-dpad-triangle-up {
+      transform: perspective(200px) rotateX(6deg); transform-origin: center center;
+    }
+
+    /* DOWN: bottom sinks */
+    .new-dpad-down:active ~ .new-dpad-plus .new-dpad-vertical,
+    .new-dpad-down.pressed ~ .new-dpad-plus .new-dpad-vertical {
+      transform: perspective(200px) rotateX(-6deg); transform-origin: center center;
+    }
+    .new-dpad-down:active ~ .new-dpad-plus .new-dpad-triangle-down,
+    .new-dpad-down.pressed ~ .new-dpad-plus .new-dpad-triangle-down {
+      transform: perspective(200px) rotateX(-6deg); transform-origin: center center;
+    }
+
+    /* LEFT: left sinks */
+    .new-dpad-left:active ~ .new-dpad-plus .new-dpad-horizontal,
+    .new-dpad-left.pressed ~ .new-dpad-plus .new-dpad-horizontal {
+      transform: perspective(200px) rotateY(-6deg); transform-origin: center center;
+    }
+    .new-dpad-left:active ~ .new-dpad-plus .new-dpad-triangle-left,
+    .new-dpad-left.pressed ~ .new-dpad-plus .new-dpad-triangle-left {
+      transform: perspective(200px) rotateY(-6deg); transform-origin: center center;
+    }
+
+    /* RIGHT: right sinks */
+    .new-dpad-right:active ~ .new-dpad-plus .new-dpad-horizontal,
+    .new-dpad-right.pressed ~ .new-dpad-plus .new-dpad-horizontal {
+      transform: perspective(200px) rotateY(6deg); transform-origin: center center;
+    }
+    .new-dpad-right:active ~ .new-dpad-plus .new-dpad-triangle-right,
+    .new-dpad-right.pressed ~ .new-dpad-plus .new-dpad-triangle-right {
+      transform: perspective(200px) rotateY(6deg); transform-origin: center center;
+    }
+    /* A and B buttons - FIXED with visible container */
+  .buttons-a-b {
+      position: absolute;
+      height: 60px;
+      width: 110px;
+  background: var(--stateboy-shell);
+      border-radius: 30px;
+      right: 20px;
+      top: 50%;
+      transform: translateY(-50%) rotate(-25deg);
+      z-index: 5;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 0 10px;
+      box-shadow:
+        inset 0 3px 16px rgba(0, 0, 0, 0.20),
+        inset 0 1px 6px rgba(0, 0, 0, 0.18),
+        inset 0 -2px 7px rgba(255, 255, 255, 0.06),
+        var(--control-shell-glow, 0 0 0 rgba(0, 0, 0, 0));
+      transition: background 0.4s ease, box-shadow 0.4s ease;
+    }
+
+    .button-a, .button-b {
+      position: absolute;
+      height: 42px;
+      width: 42px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #ff0080 0%, #640134 100%);
+      border: none;
+      cursor: pointer;
+      z-index: 25;
+      box-shadow: 0 4px 4px rgba(0, 0, 0, 0.8);
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      transition: all 0.1s ease;
+      top: 50%;
+      transform: translateY(-50%) rotate(25deg);
+    }
+
+    .button-a:active, .button-b:active {
+      transform: translateY(-50%) rotate(25deg) scale(0.9);
+      box-shadow: 0 2px 2px rgba(0, 0, 0, 0.8);
+    }
+
+    /* Programmatic pressed state mirrors :active for reliable touch feedback */
+    .button-a.pressed, .button-b.pressed {
+      transform: translateY(-50%) rotate(25deg) scale(0.9);
+      box-shadow: 0 2px 2px rgba(0, 0, 0, 0.8);
+    }
+
+    .button-a {
+      right: 8px;
+    }
+
+    .button-b {
+      left: 8px;
+    }
+
+    /* Button labels */
+    .button-a-label, .button-b-label {
+      position: absolute;
+      font-size: 16px !important;
+      font-weight: 700 !important;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace !important;
+      color: rgba(0, 0, 0, 0.6);
+      text-shadow: 0 1px 1px rgba(255, 255, 255, 0.3);
+      pointer-events: none;
+      z-index: 100;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      width: 42px;
+      height: 42px;
+      top: 50%;
+      /* Counter-rotate labels to remain upright despite container tilt */
+      transform: translateY(-50%) rotate(25deg);
+    }
+
+    .button-a-label {
+      right: 8px;
+    }
+
+    .button-b-label {
+      left: 8px;
+    }
+
+    .start-housing,.select-housing{position:absolute;left:50%;transform:translateX(-50%);width:48px;height:12px;border-radius:6px;background:var(--stateboy-shell);box-shadow:inset 0 3px 10px rgba(0,0,0,0.75),inset 0 1px 4px rgba(0,0,0,0.20),inset 0 -2px 6px rgba(255,255,255,0.05),var(--control-shell-glow, 0 0 0 rgba(0,0,0,0));z-index:60;pointer-events:none;transition:background .4s ease,box-shadow .4s ease}
+    .start-housing{top:calc(50% - 19px)}.select-housing{top:calc(50% + 16px)}
+    .select,.start{position:absolute;width:55px;height:14px;background:transparent;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:61;left:50%;transform:translateX(-50%)}
+    .start{top:calc(50% - 20px)}.select{top:calc(50% + 15px)}
+    .select div,.start div{width:45px;height:8px;border-radius:4px;background:linear-gradient(135deg,#4fd7d0 0,#12b7a4 52%,#0c7571 100%);border-top:2px solid #84ece6;box-shadow:0 2px 5px rgba(0,0,0,.28),inset 0 -1px 2px rgba(0,0,0,.18);transition:all .1s}
+    .select:active div,.start:active div{transform:translateY(1px) scale(.95);box-shadow:none}
+    .select-button-label,.start-button-label{position:absolute;font-size:9px !important;font-weight:700 !important;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace !important;color:var(--shell-label-color, var(--accent-yellow)) !important;text-shadow:0 1px 2px rgba(0,0,0,.8);pointer-events:none;z-index:62;width:55px;text-align:center;left:50%;transform:translateX(-50%);letter-spacing:1px}
+    .start-button-label{top:calc(50% - 38px)}.select-button-label{top:calc(50% - 3px)}
+    .dsm-content{color:var(--text-dark);font-size:12px;line-height:1.8;display:flex;flex-direction:column;align-items:center;padding-top:40px}
+    .dsm-logo-placeholder{width:200px;height:100px;background:transparent;border:none;border-radius:8px;display:flex;align-items:center;justify-content:center;margin-bottom:30px;font-size:10px;color:var(--text-disabled)}
+    .dsm-menu{display:flex;flex-direction:column;gap:10px;margin-top:20px;width:100%;max-width:300px}
+    .dsm-menu-item{background:transparent;border:2px solid var(--text-dark);padding:12px;color:var(--text-dark);font-size:10px;cursor:pointer;transition:all .2s;position:relative}
+    .dsm-menu-item.focused,.dsm-menu-item:hover{background:#0a2a0a;color:var(--bg);transform:scale(1.02);border-color:#0a2a0a}
+    .dsm-menu-item:active{transform:scale(.98)}
+    .status-text{margin-top:30px;font-size:8px;color:var(--text-disabled)}
+    .wallet-section{margin-bottom:15px;width:100%;max-width:280px;text-align:left}
+    .wallet-header{font-size:8px;color:var(--text-dark);margin-bottom:5px;font-weight:bold;letter-spacing:1px}
+    .wallet-info-grid{display:flex;flex-direction:column;gap:3px}
+    .info-row{display:flex;justify-content:space-between;align-items:center;padding:2px 0}
+    .info-label{font-size:7px;color:var(--text-disabled);flex:1}
+    .info-value{font-size:7px;color:var(--text-dark);font-family:'Martian Mono',monospace;text-align:right;flex:1;max-width:120px;overflow:hidden;text-overflow:ellipsis}
+    .contact-selector{margin-bottom:8px}
+    .contact-dropdown{width:100%;background:var(--stateboy-gray);border:1px solid var(--border);color:var(--text-dark);font-size:8px;padding:3px;font-family:'Martian Mono',monospace}
+    .chain-tip-display{margin-top:5px}
+    .balances-list{display:flex;flex-direction:column;gap:4px}
+    .balance-item{display:flex;justify-content:space-between;align-items:center;padding:3px 0;border-bottom:1px solid var(--border)}
+    .balance-symbol{font-size:8px;color:var(--text-dark);font-weight:bold}
+    .balance-amount{font-size:8px;color:var(--text-dark);font-family:'Martian Mono',monospace}
+    .navigation-hint{margin-top:15px;font-size:7px;color:var(--text-disabled);text-align:center}
+    .transaction-list,.contacts-list,.accounts-list,.storage-info{display:flex;flex-direction:column;gap:5px;margin-top:10px}
+    .transaction-item,.contact-item,.account-item,.storage-item{display:flex;justify-content:space-between;align-items:center;padding:5px;background:rgba(0,0,0,0.1);border-radius:3px;font-size:8px}
+    .settings-list{display:flex;flex-direction:column;gap:8px;margin-top:10px}
+    .setting-item{display:flex;justify-content:space-between;align-items:center;padding:6px;background:rgba(0,0,0,0.1);border-radius:3px;font-size:8px}
+    .settings-action-btn{position:relative;-webkit-appearance:none;appearance:none;background:linear-gradient(0deg,rgba(var(--text-rgb),0.12),rgba(var(--text-rgb),0.04)),repeating-linear-gradient(45deg,rgba(var(--text-rgb),0.14) 0px,rgba(var(--text-rgb),0.14) 2px,transparent 2px,transparent 4px)!important;image-rendering:pixelated;border:2px solid var(--border)!important;border-radius:12px!important;padding:12px!important;color:var(--text-dark)!important;font-size:10px!important;cursor:pointer;transition:all 0.2s ease;box-shadow:inset 0 -2px 0 rgba(var(--text-rgb),0.18),inset 0 2px 0 rgba(var(--text-dark-rgb),0.08)!important;font-family:'Martian Mono',monospace;text-transform:uppercase;background-clip:padding-box;width:100%}
+    .settings-action-btn:hover{transform:scale(1.02)}
+    .settings-action-btn:active{transform:scale(0.98)}
+    .settings-action-btn:disabled{opacity:0.6;cursor:not-allowed;transform:none}
+    @keyframes powerOn{0%{background-color:#07180a;opacity:.5}20%{background-color:#0f380f;opacity:.7}50%{background-color:#306230;opacity:.8}100%{background-color:#9bbc0f;opacity:1}}
+  </style>
+
+  <style>
+/* Contact Management Styles */
+.contact-management { width: 100%; max-width: 320px; }
+.contact-form { display: flex; flex-direction: column; gap: 8px; margin-bottom: 15px; }
+.contact-input { width: 100%; padding: 6px; background: var(--stateboy-gray); border: 1px solid var(--border); color: var(--text-dark); font-size: 8px; font-family: 'Martian Mono', monospace; border-radius: 3px; }
+.contact-input:focus { outline: 2px solid var(--accent-cyan); }
+.contact-button { padding: 6px 12px; background: var(--accent-cyan); border: 1px solid var(--border); color: var(--text-dark); font-size: 8px; font-weight: 700; cursor: pointer; border-radius: 3px; transition: all 0.2s; }
+.contact-button:hover { background: var(--accent-yellow); }
+.contact-button:disabled { background: var(--text-disabled); cursor: not-allowed; }
+.contact-list { display: flex; flex-direction: column; gap: 4px; max-height: 200px; overflow-y: auto; }
+.contact-item { display: flex; justify-content: space-between; align-items: center; padding: 6px; background: rgba(0,0,0,0.1); border-radius: 3px; font-size: 7px; }
+.contact-name { color: var(--text-dark); font-weight: 700; }
+.contact-id { color: var(--text-disabled); font-family: 'Martian Mono', monospace; }
+.contact-remove { background: var(--error); color: white; border: none; padding: 2px 6px; font-size: 6px; cursor: pointer; border-radius: 2px; }
+
+/* Transaction List Styles */
+.transaction-list { width: 100%; max-width: 320px; }
+.transaction-item { display: flex; justify-content: space-between; align-items: center; padding: 6px; background: rgba(0,0,0,0.1); border-radius: 3px; font-size: 7px; margin-bottom: 4px; }
+.transaction-type { color: var(--text-dark); font-weight: 700; }
+.transaction-amount { color: var(--accent-cyan); font-family: 'Martian Mono', monospace; }
+.transaction-status { color: var(--text-disabled); font-size: 6px; }
+.transaction-pending { border-left: 3px solid var(--warning); }
+.transaction-confirmed { border-left: 3px solid var(--success); }
+
+/* Settings Styles */
+.settings-container { width: 100%; max-width: 320px; }
+.setting-group { margin-bottom: 15px; }
+.setting-group-title { font-size: 8px; color: var(--text-dark); font-weight: 700; margin-bottom: 8px; letter-spacing: 1px; }
+.setting-item { display: flex; justify-content: space-between; align-items: center; padding: 6px; background: rgba(0,0,0,0.1); border-radius: 3px; font-size: 8px; margin-bottom: 4px; }
+.setting-label { color: var(--text-dark); }
+.setting-value { color: var(--accent-cyan); font-family: 'Martian Mono', monospace; }
+
+/* Toggle Switch Styles */
+.toggle-switch { position: relative; display: inline-block; width: 40px; height: 20px; }
+.toggle-switch input { opacity: 0; width: 0; height: 0; }
+.toggle-slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: var(--text-disabled); transition: 0.3s; border-radius: 20px; }
+.toggle-slider:before { position: absolute; content: ""; height: 16px; width: 16px; left: 2px; bottom: 2px; background-color: white; transition: 0.3s; border-radius: 50%; }
+input:checked + .toggle-slider { background-color: var(--accent-cyan); }
+input:checked + .toggle-slider:before { transform: translateX(20px); }
+
+/* Select Dropdown Styles */
+.setting-select { background: var(--stateboy-gray); border: 1px solid var(--border); color: var(--text-dark); font-size: 7px; padding: 4px; font-family: 'Martian Mono', monospace; border-radius: 3px; min-width: 80px; }
+.setting-select:focus { outline: 2px solid var(--accent-cyan); }
+
+/* Accounts/Balances Styles */
+.accounts-container { width: 100%; max-width: 320px; }
+.balance-item { display: flex; justify-content: space-between; align-items: center; padding: 6px; background: rgba(0,0,0,0.1); border-radius: 3px; font-size: 8px; margin-bottom: 4px; }
+.balance-symbol { color: var(--text-dark); font-weight: 700; }
+.balance-amount { color: var(--accent-cyan); font-family: 'Martian Mono', monospace; }
+.faucet-button { background: var(--accent-yellow); color: var(--text-dark); border: 1px solid var(--border); padding: 6px 12px; font-size: 8px; font-weight: 700; cursor: pointer; border-radius: 3px; margin-top: 10px; transition: all 0.2s; }
+.faucet-button:hover { background: var(--accent-cyan); }
+.faucet-button:disabled { background: var(--text-disabled); cursor: not-allowed; }
+
+/* Storage Styles */
+.storage-container { width: 100%; max-width: 320px; }
+.storage-status { display: flex; justify-content: space-between; align-items: center; padding: 6px; background: rgba(0,0,0,0.1); border-radius: 3px; font-size: 8px; margin-bottom: 8px; }
+.storage-label { color: var(--text-dark); }
+.storage-value { color: var(--accent-cyan); font-family: 'Martian Mono', monospace; }
+.backup-section { margin-top: 15px; }
+.backup-input { width: 100%; padding: 6px; background: var(--stateboy-gray); border: 1px solid var(--border); color: var(--text-dark); font-size: 8px; font-family: 'Martian Mono', monospace; border-radius: 3px; margin-bottom: 8px; }
+.backup-button { background: var(--warning); color: var(--text-dark); border: 1px solid var(--border); padding: 8px 16px; font-size: 8px; font-weight: 700; cursor: pointer; border-radius: 3px; width: 100%; transition: all 0.2s; }
+.backup-button:hover { background: var(--accent-yellow); }
+.backup-button:disabled { background: var(--text-disabled); cursor: not-allowed; }
+
+/* Loading and Error States */
+.loading { text-align: center; padding: 20px; color: var(--text-disabled); font-size: 8px; }
+.error { background: rgba(255,68,68,0.1); border: 1px solid var(--error); padding: 8px; border-radius: 3px; font-size: 7px; color: var(--error); margin-bottom: 10px; }
+.success { background: rgba(68,255,68,0.1); border: 1px solid var(--success); padding: 8px; border-radius: 3px; font-size: 7px; color: var(--success); margin-bottom: 10px; }
+
+/* Screen Header Styles */
+.screen-header { text-align: center; margin-bottom: 15px; padding: 10px; background: rgba(0,0,0,0.1); border-radius: 6px; }
+.screen-title { font-size: 10px; color: var(--text-dark); font-weight: 700; letter-spacing: 2px; margin-bottom: 5px; }
+.screen-subtitle { font-size: 7px; color: var(--text-disabled); }
+
+/* Responsive adjustments for small screens */
+@media (max-width: 400px) {
+  .contact-management, .transaction-list, .settings-container,
+  .accounts-container, .storage-container {
+    max-width: 280px;
+  }
+  .contact-input, .backup-input { font-size: 7px; }
+  .contact-button, .faucet-button, .backup-button { font-size: 7px; padding: 5px 10px; }
+}
+  </style>
+
+  <style>
+/* Home Screen Brick Buttons - CRITICAL STYLING */
+@keyframes brickPulse {
+  0%, 100% { box-shadow: 0 0 0 2px var(--stateboy-dark), 0 0 15px var(--text-dark); }
+  50% { box-shadow: 0 0 0 2px var(--stateboy-dark), 0 0 25px var(--text); }
+}
+.dsm-content--home .dsm-menu {
+  gap: 8px !important;
+  max-width: 320px !important;
+}
+.dsm-content--home .dsm-menu .dsm-menu-item.home-brick {
+  /* Exact-fit brick background, no vertical gaps */
+  background-image: var(--bricks-bg, url('images/vaulthunters/bricks2.svg')) !important;
+  background-position: center !important;
+  background-repeat: no-repeat !important;
+  background-size: 100% 100% !important; /* fill the box exactly */
+  background-origin: border-box !important;
+  background-clip: border-box !important;
+  border: 3px solid var(--stateboy-dark) !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  min-height: 0 !important;
+  height: 0 !important;
+  width: 100% !important;
+  /* SVG aspect ratio: height/width = 276/1475 ≈ 18.71% */
+  padding-bottom: 18.71% !important;
+  position: relative !important;
+  border-radius: 12px !important;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.3) !important;
+  overflow: hidden !important;
+}
+.dsm-content--home .dsm-menu .dsm-menu-item.home-brick.focused,
+.dsm-content--home .dsm-menu .dsm-menu-item.home-brick:hover {
+  /* Keep the same sizing; add theme-colored dark overlay for selected item */
+  background-image: linear-gradient(var(--text-dark), var(--text-dark)), var(--bricks-bg, url('images/vaulthunters/bricks2.svg')) !important;
+  background-position: center, center !important;
+  background-repeat: no-repeat, no-repeat !important;
+  background-size: 100% 100%, 100% 100% !important;
+  background-origin: border-box !important;
+  background-clip: border-box !important;
+  transform: translateY(-1px) !important;
+  filter: brightness(0.9) contrast(1.15) !important;
+  animation: brickPulse 1.6s ease-in-out infinite !important;
+}
+.dsm-content--home .dsm-menu .dsm-menu-item.home-brick:active {
+  transform: translateY(1px) !important;
+  filter: brightness(0.75) !important;
+}
+.dsm-menu-item.home-brick .brick-label {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  font-family: 'Martian Mono', monospace;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dark);
+  z-index: 2;
+  text-align: center;
+  pointer-events: none;
+}
+.dsm-menu-item.home-brick.focused .brick-label {
+  color: var(--bg);
+  font-weight: 900;
+  text-shadow: 0 0 8px rgba(155,188,15,0.8);
+}
+  </style>
+
+  <style>
+/* Spinning ERA Token Animation */
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* Enhanced UI Sizing */
+.dsm-content {
+  font-size: 10px;
+}
+
+.wallet-section, .contact-form, .accounts-list, .settings-container, .storage-container {
+  font-size: 9px;
+}
+
+.account-item, .contact-item, .balance-item {
+  padding: 12px !important;
+  margin-bottom: 10px !important;
+}
+
+.balance-symbol, .contact-name {
+  font-size: 11px !important;
+  font-weight: 700 !important;
+}
+
+.balance-amount {
+  font-size: 14px !important;
+  font-family: 'Martian Mono', monospace !important;
+}
+
+.faucet-button, .contact-button {
+  font-size: 9px !important;
+  padding: 8px 16px !important;
+  min-height: 32px !important;
+}
+
+.contact-input {
+  font-size: 9px !important;
+  padding: 8px !important;
+  min-height: 36px !important;
+}
+
+/* ERA Token Special Styling */
+.era-token-visual {
+  position: relative;
+}
+
+.era-token-visual::before {
+  content: '';
+  position: absolute;
+  top: -2px;
+  left: -2px;
+  right: -2px;
+  bottom: -2px;
+  border-radius: 50%;
+  background: linear-gradient(45deg, var(--accent-yellow), var(--accent-cyan), var(--accent-magenta));
+  z-index: -1;
+  animation: spin 4s linear infinite reverse;
+}
+
+.era-token-visual::after {
+  content: 'J';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 10px;
+  font-weight: 900;
+  color: var(--text-dark);
+  text-shadow: 1px 1px 0px rgba(255,255,255,0.5);
+}
+  </style>
+
+  <style>
+    
+/* ── TRANSLUCENT SHELL THEME SYSTEM ─────────────────────────
+   Hold SELECT to cycle: purple → green → blue → smoke → pink
+   ─────────────────────────────────────────────────────────── */
+
+html {
+  --control-shell-glow: 0 0 0 rgba(0, 0, 0, 0);
+}
+
+/* Smoke theme */
+html[data-shell-theme="smoke"] {
+  --shell-tint:       rgba(40, 40, 40, 0.57);
+  --shell-bar-color:  #1B1B1B;
+  --trim-bg:          #888888;
+  --trim-border:      #aaaaaa;
+  --housing-bg:       rgba(51, 51, 51, 0.664);
+  --btn-grad-light:   #d8d8d8;
+  --btn-grad-dark:    #b0b0b0;
+  --ab-btn-grad-light:#ff0080;
+  --ab-btn-grad-dark: #640134;
+  --btn-border:       #cccccc;
+  --label-color:      #ffffff;
+  --edge-glow:        rgba(200, 200, 200, 0.20);
+  --dpad-center-shadow: rgba(10, 10, 10, 0.396);
+}
+
+/* Optional Purple theme (not default) */
+html[data-shell-theme="purple"] {
+  --shell-tint:       rgba(45, 8, 75, 0.50);
+  --trim-bg:          #b5aec7;
+  --trim-border:      #c8c2d4;
+  --housing-bg:       rgba(57, 33, 77, 0.744);
+  --btn-grad-light:   #e2dded;
+  --btn-grad-dark:    #c8c2d4;
+  --btn-border:       #dbd6e6;
+  --label-color:      #ffffff;
+  --edge-glow:        rgba(180, 100, 255, 0.35);
+  --dpad-center-shadow: rgba(15, 0, 15, 0.35);
+}
+
+/* White theme */
+html[data-shell-theme="white"] {
+  --shell-tint:       rgb(254, 254, 254);
+  --trim-bg:          #080808;
+  --trim-border:      #1e1e1e;
+  --housing-bg:       rgba(255, 255, 255, 0.02);
+  --btn-grad-light:   #fafa90;
+  --btn-grad-dark:    #a0820b;
+  --btn-border:       #d0cb7f;
+  --label-color:      #000000;
+  --edge-glow:        rgba(29, 29, 29, 0.735);
+  --dpad-center-shadow: rgba(103, 85, 3, 0.468);
+}
+
+/* Blue theme */
+html[data-shell-theme="blue"] {
+  --shell-tint:       rgba(8, 40, 120, 0.50);
+  --trim-bg:          #b8bfd0;
+  --trim-border:      #ccd3e4;
+  --housing-bg:       rgba(8, 30, 100, 0.7);
+  --btn-grad-light:   #f5f6fa;
+  --btn-grad-dark:    #dde0ec;
+  --btn-border:       #eceef8;
+  --label-color:      #ffffff;
+  --edge-glow:        rgba(80, 140, 255, 0.35);
+  --dpad-center-shadow: rgba(0, 5, 20, 0.313);
+}
+
+/* Pink theme */
+html[data-shell-theme="pink"] {
+  --shell-tint:       rgba(180, 20, 169, 0.5);
+  --trim-bg:          #ffffff;
+  --trim-border:      #f0f0f0;
+  --housing-bg:       rgba(148, 12, 119, 0.731);
+  --btn-grad-light:   #f8f0f4;
+  --btn-grad-dark:    #eedde8;
+  --btn-border:       #f4e8f0;
+  --label-color:      #ffffff;
+  --edge-glow:        rgba(201, 132, 206, 0.35);
+  --dpad-center-shadow: rgba(20, 0, 15, 0.267);
+}
+
+/* Bitcoin theme */
+html[data-shell-theme="bitcoin"] {
+  --shell-tint:       rgb(239, 152, 23);
+  --trim-bg:          #ffffff;
+  --trim-border:      #fcf8f8;
+  --housing-bg:       rgba(208, 117, 13, 0.023);
+  --btn-grad-light:   #ffffff;
+  --btn-grad-dark:    #e8e8e8;
+  --ab-btn-grad-light:#ffffff;
+  --ab-btn-grad-dark: #ececec;
+  --btn-border:       #ffffff;
+  --label-color:      #131313;
+  --edge-glow:        rgba(144, 85, 13, 0.714);
+  --dpad-center-shadow: rgba(15, 7, 0, 0.225);
+}
+
+/* Violet shell theme */
+html[data-shell-theme="violet"] {
+  --shell-tint:       #5c4ea3;
+  --shell-bar-color:  #171717;
+  --trim-bg:          #0f0f12;
+  --trim-border:      #303038;
+  --housing-bg:       rgba(77, 65, 138, 0.95);
+  --btn-grad-light:   #c4c7cf;
+  --btn-grad-dark:    #7f8694;
+  --btn-border:       #d6d9e0;
+  --dpad-grad-light:  #aeb4bf;
+  --dpad-grad-dark:   #6d7483;
+  --dpad-border:      #d8dce4;
+  --ab-btn-grad-light:#c8ccd5;
+  --ab-btn-grad-dark: #7b8291;
+  --label-color:      #e8ebf5;
+  --edge-glow:        rgba(124, 110, 210, 0.55);
+  --dpad-center-shadow: rgba(8, 8, 12, 0.42);
+  --nav-lit-color:    #d9dcff;
+}
+
+/* Red shell theme — solid red housing, black trim, black buttons */
+html[data-shell-theme="red"] {
+  --shell-tint:       #d82d55;
+  --shell-bar-color:  #080808;
+  --trim-bg:          #0f0f12;
+  --trim-border:      #7e3131;
+  --housing-bg:       rgba(210, 41, 72, 0.97);
+  --btn-grad-light:   #ffc800;
+  --btn-grad-dark:    #ffd900;
+  --btn-border:       #e19c42;
+  --dpad-grad-light:  #ffc800;
+  --dpad-grad-dark:   #ffd900;
+  --dpad-border:      #e9c185;
+  --ab-btn-grad-light:#ffc800;
+  --ab-btn-grad-dark: #ffd900;
+  --label-color:      #f0f0f0;
+  --edge-glow:        rgba(12, 1, 1, 0.55);
+  --dpad-center-shadow: rgba(148, 86, 9, 0.52);
+  --nav-lit-color:    #ff4040;
+}
+
+/* Sunburst StateBoy Color theme */
+html[data-shell-theme="sunburst"] {
+  --shell-tint:       #f3c303;
+  --shell-bar-color:  #101010;
+  --trim-bg:          #050505;
+  --trim-border:      #232323;
+  --housing-bg:       rgba(246, 196, 0, 0.92);
+  --btn-grad-light:   #4c4c50;
+  --btn-grad-dark:    #17181c;
+  --btn-border:       #5e6068;
+  --dpad-grad-light:  #1f6fe0;
+  --dpad-grad-dark:   #0a2e95;
+  --dpad-border:      #4a97ff;
+  --label-color:      #161616;
+  --edge-glow:        rgba(255, 214, 38, 0.42);
+  --dpad-center-shadow: rgba(0, 10, 45, 0.45);
+  --nav-lit-color:    #fff2a8;
+}
+
+/* Original DMG-01 (1989) – warm cream shell, charcoal screen surround,
+   near-black D-pad, maroon A/B buttons, black labels */
+html[data-shell-theme="dmg"] {
+  --shell-tint:       #d8d9b9;
+  --shell-bar-color:  #807285;
+  --trim-bg:          #756c79;
+  --trim-border:      #2e2e2e;
+  --housing-bg:       rgba(216, 216, 190, 0.93);
+  /* Start/Select: medium grey */
+  --btn-grad-light:   #6e6e6e;
+  --btn-grad-dark:    #484848;
+  --btn-border:       #7a7a7a;
+  /* D-pad: near-black, independent from Start/Select */
+  --dpad-grad-light:  #1d1d1d;
+  --dpad-grad-dark:   #2c2c2c;
+  --dpad-border:      #444444;
+  --ab-btn-grad-light:#ac2051;
+  --ab-btn-grad-dark: #4a0a21;
+  --label-color:      #1a1a1a;
+  --edge-glow:        rgba(75, 73, 68, 0.849);
+  --dpad-bottom-shadow: rgba(0, 0, 0, 0.85);
+  --dpad-cast-shadow: rgba(0, 0, 0, 0.42);
+  --dpad-cast-shadow-long: rgba(0, 0, 0, 0.24);
+  --dpad-center-shadow: rgba(0, 0, 0, 0.98);
+}
+
+html[data-shell-theme] body { background-color: #000000 !important; }
+
+html[data-shell-theme="smoke"] .stateboy,
+html[data-shell-theme="purple"] .stateboy,
+html[data-shell-theme="blue"] .stateboy,
+html[data-shell-theme="pink"] .stateboy {
+  background: url('images/hardshell/motherboard.jpg') center center / cover no-repeat !important;
+}
+
+html[data-shell-theme="green"] .stateboy,
+html[data-shell-theme="bitcoin"] .stateboy {
+  background: #000000 !important;
+}
+
+html[data-shell-theme="violet"] .stateboy {
+  background: #5c4ea3 !important;
+}
+
+html[data-shell-theme="red"] .stateboy {
+  background: #c41212 !important;
+}
+
+html[data-shell-theme="sunburst"] .stateboy {
+  background: #f6c400 !important;
+}
+
+html[data-shell-theme="dmg"] .stateboy {
+  background: #c0bcb4 !important;
+}
+
+/* DMG: Start/Select are authentic medium-gray ovals, distinct from the near-black D-pad */
+html[data-shell-theme="dmg"] .select div,
+html[data-shell-theme="dmg"] .start div {
+  background: linear-gradient(180deg, var(--btn-grad-light) 0%, var(--btn-grad-light) 28%, var(--btn-grad-dark) 100%) !important;
+  border-top-color: var(--btn-border) !important;
+}
+
+html[data-shell-theme="bitcoin"] .dsm-shell-logo img {
+  width: auto !important;
+  height: 100% !important;
+  max-width: 100% !important;
+}
+
+html[data-shell-theme] .front-plate {
+  background-color: var(--shell-tint) !important;
+  box-shadow:
+    inset 0 1px 1px -2px rgba(0,0,0,.6),
+    inset 0 -4px 16px 0 rgba(0,0,0,.25),
+    0 40px 60px 0 rgba(0,0,0,.5) !important;
+  transition: background-color 0.4s ease !important;
+}
+
+html[data-shell-theme] .screen-container {
+  background-color: var(--trim-bg) !important;
+  transition: background-color 0.4s ease !important;
+}
+
+html[data-shell-theme] .screen-nav-bar {
+  background: var(--trim-bg) !important;
+  border-top: 2px solid var(--trim-border) !important;
+  transition: background-color 0.4s ease !important;
+}
+
+html[data-shell-theme] .new-dpad-background {
+  background: var(--housing-bg) !important;
+  transition: background 0.4s ease, box-shadow 0.4s ease !important;
+}
+
+html[data-shell-theme] .buttons-a-b {
+  background: var(--housing-bg) !important;
+  transition: background 0.4s ease, box-shadow 0.4s ease !important;
+}
+
+html[data-shell-theme] .new-dpad-vertical,
+html[data-shell-theme] .new-dpad-horizontal,
+html[data-shell-theme] .new-dpad-center {
+  background: linear-gradient(135deg, var(--dpad-grad-light, var(--btn-grad-light)) 0%, var(--dpad-grad-dark, var(--btn-grad-dark)) 100%) !important;
+  border-top-color: var(--dpad-border, var(--btn-border)) !important;
+  transition: background 0.4s ease !important;
+}
+/* Split arm highlights/shadows: top uses dpad-border, bottom stays dark */
+html[data-shell-theme] .new-dpad-horizontal::before,
+html[data-shell-theme] .new-dpad-horizontal::after {
+  background: linear-gradient(var(--dpad-border, var(--btn-border)), var(--dpad-border, var(--btn-border))) top / 100% 2px no-repeat !important;
+  box-shadow:
+    inset 0 -2px 0 var(--dpad-bottom-shadow, rgba(54, 54, 54, 0.85)),
+    0 2px 3px var(--dpad-cast-shadow, rgba(28, 28, 28, 0.34)),
+    0 5px 7px var(--dpad-cast-shadow-long, rgba(0, 0, 0, 0.22)) !important;
+  transition: background 0.4s ease, box-shadow 0.4s ease !important;
+}
+/* Center dimple shadow adapts per theme */
+html[data-shell-theme] .new-dpad-center {
+  box-shadow: inset 9px 7px 9px var(--dpad-center-shadow, rgba(6, 0, 7, 0.95)) !important;
+}
+
+html[data-shell-theme] .button-a, html[data-shell-theme] .button-b {
+  background: linear-gradient(135deg, var(--ab-btn-grad-light, var(--btn-grad-light)) 0%, var(--ab-btn-grad-dark, var(--btn-grad-dark)) 100%) !important;
+  transition: background 0.4s ease !important;
+}
+
+html[data-shell-theme="sunburst"] .buttons-a-b {
+  background: rgba(246, 196, 0, 0.78) !important;
+}
+
+html[data-shell-theme="sunburst"] .button-b {
+  background: linear-gradient(135deg, #ff3a2f 0%, #b30000 100%) !important;
+}
+
+html[data-shell-theme="sunburst"] .button-a {
+  background: linear-gradient(135deg, #57a702 0%, #54a516 100%) !important;
+}
+
+html[data-shell-theme="sunburst"] .button-a-label,
+html[data-shell-theme="sunburst"] .button-b-label,
+html[data-shell-theme="sunburst"] .select-button-label,
+html[data-shell-theme="sunburst"] .start-button-label {
+  color: #121212 !important;
+  text-shadow: 0 1px 1px rgba(255, 240, 170, 0.45) !important;
+}
+
+html[data-shell-theme] .select div, html[data-shell-theme] .start div {
+  background: linear-gradient(180deg, var(--btn-grad-light) 0%, var(--btn-grad-light) 28%, var(--btn-grad-dark) 100%) !important;
+  border-top-color: var(--btn-border) !important;
+  transition: background 0.4s ease !important;
+}
+
+html[data-shell-theme] .start-housing, html[data-shell-theme] .select-housing {
+  background: var(--housing-bg) !important;
+  transition: background 0.4s ease, box-shadow 0.4s ease !important;
+}
+
+html[data-shell-theme="smoke"],
+html[data-shell-theme="purple"],
+html[data-shell-theme="blue"],
+html[data-shell-theme="pink"] {
+  --control-shell-glow:
+    0 0 0 1px var(--edge-glow),
+    0 0 10px var(--edge-glow),
+    0 0 18px var(--edge-glow);
+}
+
+html[data-shell-theme] .select-button-label, html[data-shell-theme] .start-button-label {
+  color: var(--label-color) !important;
+  transition: color 0.4s ease !important;
+}
+
+html[data-shell-theme] .stateboy::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  border-radius: inherit;
+  box-shadow:
+    inset 0 0 0 1px var(--edge-glow),
+    inset 0 2px 8px var(--edge-glow);
+  z-index: 9999;
+  transition: box-shadow 0.4s ease;
+}
+
+#theme-flash {
+  position: fixed;
+  bottom: 22%;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0,0,0,0.7);
+  color: #fff;
+  font-family: 'Martian Mono', monospace;
+  font-size: 9px;
+  letter-spacing: 1px;
+  padding: 4px 12px;
+  border-radius: 8px;
+  z-index: 99999;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+
+  </style>
+
+  <script>
+    // Prevent pinch-zoom gesture to keep the StateBoy UI stable
+    document.addEventListener('gesturestart', function (e) { e.preventDefault(); return false; });
+
+    // Debug signal for mount
+    document.addEventListener('DOMContentLoaded', function () {
+      console.log('🧪 HTML DOMContentLoaded fired - React will take over shortly');
+    });
+  // Navigation system
+    let currentFocus = 0;
+    let menuItems = document.querySelectorAll('.dsm-menu-item');
+    let navItems = document.querySelectorAll('.screen-nav-icon');
+    let isInNavBar = false;
+
+    // Update focus
+    function updateFocus() {
+      if (isInNavBar) {
+        navItems.forEach((item, index) => {
+          item.classList.toggle('active', index === currentFocus);
+        });
+      } else {
+        menuItems.forEach((item, index) => {
+          item.classList.toggle('focused', index === currentFocus);
+        });
+      }
+    }
+    // Click navigation mapping to React routes
+    navItems.forEach((item) => {
+      item.addEventListener('click', () => {
+        // Light up the tapped icon, dim the rest
+        navItems.forEach(ni => ni.classList.remove('active'));
+        item.classList.add('active');
+        const nav = item.getAttribute('data-nav');
+        let detail = 'home';
+        switch (nav) {
+          case 'home': detail = 'home'; break;
+          case 'wallet': detail = 'home'; break; // wallet maps to home wallet screen
+          case 'bluetooth': detail = 'bluetooth'; break;
+          case 'settings': detail = 'settings'; break;
+          case 'qr': detail = 'qr'; break;
+          default: detail = 'home';
+        }
+        try { window.dispatchEvent(new CustomEvent('sb-nav', { detail })); } catch {}
+      });
+    });
+    // Keep the lit icon in sync when React navigates programmatically
+    window.addEventListener('sb-nav', function(e) {
+      var d = e.detail;
+      navItems.forEach(function(ni) {
+        var n = ni.getAttribute('data-nav');
+        ni.classList.toggle('active', n === d || (d === 'home' && n === 'wallet') || (d === 'wallet' && n === 'home'));
+      });
+    });
+    // Home icon lit by default on load
+    if (navItems[0]) navItems[0].classList.add('active');
+ // Initialize battery monitoring after DOM is ready to ensure elements exist
+   document.addEventListener('DOMContentLoaded', initBatteryMonitoring);
+
+    // Wire physical StateBoy buttons → 'sb-btn' CustomEvent for combo/lock input
+    document.addEventListener('DOMContentLoaded', function() {
+      var btnMap = {
+        'dpad-up': 'up', 'dpad-down': 'down', 'dpad-left': 'left', 'dpad-right': 'right',
+        'button-a': 'a', 'button-b': 'b', 'button-start': 'start', 'button-select': 'select'
+      };
+      Object.keys(btnMap).forEach(function(id) {
+        var el = document.getElementById(id);
+        if (el) el.addEventListener('click', function() {
+          try { window.dispatchEvent(new CustomEvent('sb-btn', { detail: btnMap[id] })); } catch (e) {}
+        });
+      });
+    });
+
+// Battery monitoring functionality
+    function syncShellThemeAssets() {
+      const theme = document.documentElement.getAttribute('data-shell-theme') || 'default';
+      const shellLogo = document.getElementById('shell-logo-image');
+      if (!shellLogo) return;
+
+      if (theme === 'bitcoin') {
+        // Bitcoin is special — keeps its own branded logo
+        shellLogo.src = 'images/logos/bitcoin-trim-logo.png';
+        shellLogo.alt = 'Bitcoin Trim Logo';
+      } else if (theme === 'sunburst') {
+        // Sunburst theme: near-black trim but uses gold logo
+        shellLogo.src = 'images/logos/dsm-screen-trim-logo-gold.png';
+        shellLogo.alt = 'DSM Logo';
+      } else if (theme === 'white' || theme === 'violet' || theme === 'red') {
+        // Actual black trim (#080808 / #0f0f12) — white logo for contrast
+        shellLogo.src = 'images/logos/dsm-screen-trim-logo-white.png';
+        shellLogo.alt = 'DSM Logo';
+      } else if (theme === 'default') {
+        // Default shell (no theme set) — white logo
+        shellLogo.src = 'images/logos/dsm-screen-trim-logo-white.png';
+        shellLogo.alt = 'DSM Logo';
+      } else {
+        // All other trims (grays, lights) — black logo
+        shellLogo.src = 'images/logos/dsm-screen-trim-logo-black.png';
+        shellLogo.alt = 'DSM Logo';
+      }
+    }
+
+    function initBatteryMonitoring() {
+      const batteryLight = document.querySelector('.battery-light');
+      if (!batteryLight) {
+        console.warn('Battery light element not found - skipping battery monitoring');
+        return;
+      }
+      
+      if ('getBattery' in navigator) {
+        // Modern Battery API
+        navigator.getBattery().then(function(battery) {
+          updateBatteryDisplay(battery, batteryLight);
+          
+          // Listen for battery events
+          battery.addEventListener('chargingchange', () => updateBatteryDisplay(battery, batteryLight));
+          battery.addEventListener('levelchange', () => updateBatteryDisplay(battery, batteryLight));
+        }).catch(function(error) {
+          console.log('Battery API not supported:', error);
+          // Fallback to charging detection
+          fallbackChargingDetection(batteryLight);
+        });
+      } else {
+        // Fallback for browsers without Battery API
+        fallbackChargingDetection(batteryLight);
+      }
+    }
+    
+    function updateBatteryDisplay(battery, batteryLight) {
+      // Remove all battery classes
+      batteryLight.classList.remove('charging', 'full', 'medium', 'low');
+      const lightSpan = batteryLight.querySelector('span');
+      if (!lightSpan) return;
+      function setLedGlow(color, glow) {
+        lightSpan.style.background = color;
+        lightSpan.style.boxShadow = '0 0 4px ' + glow + ', 0 0 8px ' + glow + ', 0 0 14px ' + glow;
+        lightSpan.style.transform = 'scale(1.02)';
+      }
+      lightSpan.style.background = '#222';
+      lightSpan.style.boxShadow = '0 0 3px rgba(0,0,0,.35), inset 0 1px 1px rgba(255,255,255,.18)';
+      lightSpan.style.transform = 'scale(1)';
+      if (battery.charging) {
+        batteryLight.classList.add('charging');
+        // Charging animation handles both color and glow via keyframes.
+        lightSpan.style.background = '';
+        lightSpan.style.boxShadow = '';
+        lightSpan.style.transform = 'scale(1.04)';
+        console.log('Battery charging - showing animation');
+      } else {
+        if (battery.level > 0.8) {
+          batteryLight.classList.add('full');
+          setLedGlow('#44ffe3', 'rgba(68,255,227,.78)');
+        } else if (battery.level > 0.3) {
+          batteryLight.classList.add('medium');
+          setLedGlow('#ff00ea', 'rgba(255,0,234,.72)');
+        } else {
+          batteryLight.classList.add('low');
+          setLedGlow('#ffe344', 'rgba(255,227,68,.78)');
+        }
+        console.log(`Battery level: ${Math.round(battery.level * 100)}%`);
+      }
+    }
+
+    function fallbackChargingDetection(batteryLight) {
+      if (!batteryLight) {
+        console.warn('Battery light element not available for fallback detection');
+        return;
+      }
+      // Fallback method using connection API and periodic checks
+      let lastKnownCharging = false;
+      
+      function checkCharging() {
+        if (!batteryLight) return;
+        const lightSpan = batteryLight.querySelector('span');
+        batteryLight.classList.remove('charging', 'full', 'medium', 'low');
+        if (lightSpan) {
+          lightSpan.style.background = '#222';
+          lightSpan.style.boxShadow = '0 0 3px rgba(0,0,0,.35), inset 0 1px 1px rgba(255,255,255,.18)';
+          lightSpan.style.transform = 'scale(1)';
+        }
+        // Default to full battery (green) when we can't detect
+        batteryLight.classList.add('full');
+        if (lightSpan) {
+          lightSpan.style.background = '#44ffe3';
+          lightSpan.style.boxShadow = '0 0 4px rgba(68,255,227,.78), 0 0 8px rgba(68,255,227,.78), 0 0 14px rgba(68,255,227,.48)';
+          lightSpan.style.transform = 'scale(1.02)';
+        }
+        if (window.DSMBridge && window.DSMBridge.getBatteryStatus) {
+          try {
+            const batteryStatus = window.DSMBridge.getBatteryStatus();
+            if (batteryStatus.charging) {
+              batteryLight.classList.remove('full');
+              batteryLight.classList.add('charging');
+              if (lightSpan) {
+                lightSpan.style.background = '';
+                lightSpan.style.boxShadow = '';
+                lightSpan.style.transform = 'scale(1.04)';
+              }
+              console.log('Charging detected via native bridge');
+            }
+          } catch (e) {
+            console.log('Native battery status not available');
+          }
+        }
+      }
+      
+      // Perform a single check on load; avoid periodic timers for strict determinism.
+      checkCharging();
+    }
+  </script>
+</head>
+<body>
+  <div class="stateboy power-on">
+    <div class="front-plate">
+      <div class="screen-container">
+        <div class="battery-light full"><span></span></div>
+        <div class="dsm-shell-logo">
+          <img id="shell-logo-image" src="images/logos/dsm-screen-trim-logo-white.png" alt="DSM Logo" />
+        </div>
+        <div class="screen-wrapper">
+          <div class="screen" id="stateboy-screen">
+            <div class="scanlines"></div>
+            <div class="screen-content">
+              
+              <div id="dsm-app-root">
+                <!-- React App Content - Rendered by React components -->
+              </div>
+            </div>
+            <div class="screen-inner-shadow"></div>
+            <div class="screen-depth-sheen"></div>
+          </div>
+                    <!-- Navigation bar seamlessly integrated -->
+          <div class="screen-nav-bar">
+            <div class="screen-nav-icon" data-nav="home">
+              <img src="./images/icons/Homeicon.svg" alt="Home" class="nav-icon-svg" width="24" height="24">
+            </div>
+            <div class="screen-nav-icon" data-nav="wallet">
+              <img src=./images/icons/geo_vault.svg alt="Wallet" class="nav-icon-svg" width="24" height="24">
+            </div>
+            <div class="screen-nav-icon" data-nav="bluetooth">
+              <img src="./images/icons/bluetoothicon.svg" alt="Bluetooth" class="nav-icon-svg" width="24" height="24">
+            </div>
+            <div class="screen-nav-icon" data-nav="qr">
+              <img src="./images/icons/Icon-Qrscan.svg" alt="QR" class="nav-icon-svg" width="24" height="24">
+            </div>
+          </div>
+    
+        </div>
+      </div>
+    </div>
+    <div id="controller">
+      <div class="new-dpad">
+        <button class="new-dpad-up" id="dpad-up"></button>
+        <button class="new-dpad-down" id="dpad-down"></button>
+        <button class="new-dpad-left" id="dpad-left"></button>
+        <button class="new-dpad-right" id="dpad-right"></button>
+        <div class="new-dpad-plus">
+          <div class="new-dpad-background"></div>
+          <div class="new-dpad-vertical"></div>
+          <div class="new-dpad-horizontal"></div>
+          <div class="new-dpad-center"></div>
+          <div class="new-dpad-triangle-up"></div>
+          <div class="new-dpad-triangle-down"></div>
+          <div class="new-dpad-triangle-left"></div>
+          <div class="new-dpad-triangle-right"></div>
+        </div>
+      </div>
+      <div class="buttons-a-b">
+        <button class="button-b" id="button-b"></button>
+        <button class="button-a" id="button-a"></button>
+        <div class="button-b-label">B</div>
+        <div class="button-a-label">A</div>
+      </div>
+      <div class="start-housing"></div>
+      <div class="select-housing"></div>
+      <button class="start" id="button-start"><div></div></button>
+      <div class="start-button-label">START</div>
+      <button class="select" id="button-select"><div></div></button>
+      <div class="select-button-label">SELECT</div>
+    </div>
+  </div>
+
+  <!-- Theme flash indicator -->
+  <div id="theme-flash"></div>
+
+  <!-- SELECT long-press shell theme cycler -->
+  <script>
+    (function () {
+      var themes = [
+        { key: 'default', label: 'DEFAULT' },
+        { key: 'smoke',  label: 'SMOKE'  },
+        { key: 'purple', label: 'PURPLE' },
+        { key: 'violet', label: 'VIOLET' },
+        { key: 'red',    label: 'RED'    },
+        { key: 'sunburst', label: 'SUNBURST' },
+        { key: 'white',  label: 'WHITE'  },
+        { key: 'blue',   label: 'BLUE'   },
+        { key: 'pink',   label: 'PINK'   },
+        { key: 'bitcoin', label: 'BITCOIN' },
+        { key: 'dmg',    label: 'DMG-01' }
+      ];
+      var current = 0;
+      var holdTimer = null;
+      var HOLD_MS = 600;
+      var flash = document.getElementById('theme-flash');
+      var flashTimer = null;
+
+      function applyTheme(idx) {
+        var t = themes[idx];
+        if (t.key === 'default') {
+          document.documentElement.removeAttribute('data-shell-theme');
+        } else {
+          document.documentElement.setAttribute('data-shell-theme', t.key);
+        }
+        syncShellThemeAssets();
+        if (flash) {
+          flash.textContent = t.label;
+          flash.style.opacity = '1';
+          clearTimeout(flashTimer);
+          flashTimer = setTimeout(function () { flash.style.opacity = '0'; }, 1200);
+        }
+        try { localStorage.setItem('dsm-shell-theme', String(idx)); } catch(e) {}
+        window.dispatchEvent(new CustomEvent('dsm-shell-theme-changed'));
+      }
+
+      function cycleTheme() {
+        current = (current + 1) % themes.length;
+        applyTheme(current);
+      }
+
+      function onHoldStart(e) {
+        holdTimer = setTimeout(function () {
+          holdTimer = null;
+          cycleTheme();
+        }, HOLD_MS);
+      }
+
+      function onHoldEnd(e) {
+        clearTimeout(holdTimer);
+        holdTimer = null;
+      }
+
+      function init() {
+        try {
+          var saved = parseInt(localStorage.getItem('dsm-shell-theme'), 10);
+          if (!isNaN(saved) && saved >= 0 && saved < themes.length) {
+            current = saved;
+            applyTheme(current);
+          }
+        } catch(e) {}
+
+        syncShellThemeAssets();
+
+        var sel = document.getElementById('button-select');
+        if (!sel) return;
+        sel.addEventListener('mousedown',   onHoldStart);
+        sel.addEventListener('mouseup',     onHoldEnd);
+        sel.addEventListener('mouseleave',  onHoldEnd);
+        sel.addEventListener('touchstart',  onHoldStart, { passive: true });
+        sel.addEventListener('touchend',    onHoldEnd,   { passive: true });
+        sel.addEventListener('touchcancel', onHoldEnd,   { passive: true });
+      }
+
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+      } else {
+        init();
+      }
+    })();
+  </script>
+
+  <!-- QR Code Portal - renders above everything -->
+  <div id="qr-portal-root" style="position:fixed;top:0;left:0;right:0;bottom:0;z-index:999999;pointer-events:none;"></div>
+
+  <!-- Android MessagePort Bridge Bootstrap -->
+  <script>
+    (function(){
+      // Event-driven MessagePort bridge setup for Android WebView
+      // This runs in the same context as React, ensuring window.DsmBridge is accessible
+      if (window.DsmBridge && window.DsmBridge.__binary) return; // Already installed
+      
+      let port = null;
+      window.__DSM_EVENT_BUFFER__ = [];
+      try { console.log('[DSM] Waiting for MessagePort from Android...'); } catch (_) {}
+      
+      function ensurePort() {
+        if (!port) throw new Error('DSM binary bridge not ready');
+        return port;
+      }
+      
+      function encodeVarint32(n) {
+        const out = [];
+        let v = n >>> 0;
+        while (v >= 0x80) {
+          out.push((v & 0x7f) | 0x80);
+          v >>>= 7;
+        }
+        out.push(v);
+        return new Uint8Array(out);
+      }
+
+      function encodeLengthDelimited(tag, bytes) {
+        const len = encodeVarint32(bytes.length);
+        const out = new Uint8Array(1 + len.length + bytes.length);
+        out[0] = tag;
+        out.set(len, 1);
+        out.set(bytes, 1 + len.length);
+        return out;
+      }
+
+      function encodeBridgeRequest(method, payload) {
+        const enc = new TextEncoder();
+        const m = enc.encode(method);
+        const p = payload instanceof Uint8Array ? payload : new Uint8Array(0);
+
+        const methodField = encodeLengthDelimited(0x0A, m); // field 1
+
+        if (!p || p.length === 0) {
+          // EmptyPayload field 2 (length 0)
+          const empty = new Uint8Array([0x12, 0x00]);
+          const out = new Uint8Array(methodField.length + empty.length);
+          out.set(methodField, 0);
+          out.set(empty, methodField.length);
+          return out;
+        }
+
+        // BytesPayload: message { bytes data = 1 }
+        const bytesPayload = encodeLengthDelimited(0x0A, p);
+        const payloadField = encodeLengthDelimited(0x1A, bytesPayload); // field 3
+        const out = new Uint8Array(methodField.length + payloadField.length);
+        out.set(methodField, 0);
+        out.set(payloadField, methodField.length);
+        return out;
+      }
+      
+      const TAG_RESPONSE = 0x01;
+
+      function readVarint(buf, start) {
+        let shift = 0;
+        let result = 0;
+        let off = start;
+        while (off < buf.length) {
+          const b = buf[off++] & 0xff;
+          result |= (b & 0x7f) << shift;
+          if ((b & 0x80) === 0) return { value: result >>> 0, off };
+          shift += 7;
+          if (shift > 35) return null;
+        }
+        return null;
+      }
+
+      function readLenDelimited(buf, start) {
+        const v = readVarint(buf, start);
+        if (!v) return null;
+        const len = v.value >>> 0;
+        const end = v.off + len;
+        if (end > buf.length) return null;
+        return { bytes: buf.slice(v.off, end), off: end };
+      }
+
+      function dispatchEventPayload(bytes) {
+        let off = 0;
+        let topic = '';
+        let payload = new Uint8Array(0);
+        while (off < bytes.length) {
+          const k = readVarint(bytes, off);
+          if (!k) return false;
+          off = k.off;
+          const field = k.value >>> 3;
+          const wire = k.value & 0x07;
+          if (wire !== 2) return false;
+          const ld = readLenDelimited(bytes, off);
+          if (!ld) return false;
+          off = ld.off;
+          if (field === 1) {
+            topic = new TextDecoder().decode(ld.bytes);
+          } else if (field === 2) {
+            payload = ld.bytes;
+          }
+        }
+        if (!topic) return false;
+        if (window.__DSM_EVENT_BUFFER__) {
+          window.__DSM_EVENT_BUFFER__.push({ topic, payload });
+        }
+        try {
+          window.dispatchEvent(new CustomEvent('dsm-event-bin', { detail: { topic, payload } }));
+        } catch (_) {}
+        return true;
+      }
+      
+      // ============================================================================
+      // DETERMINISTIC MESSAGE-PORT BRIDGE (BigInt counter + ID-based routing)
+      // ============================================================================
+      let nextMsgId = 1n; // Monotonic BigInt counter (deterministic, no Math.random())
+      const pending = new Map(); // Map<bigint, {resolve, reject, timeout}>
+
+      // Single shared MessagePort onmessage handler (ID-based routing)
+      function installPortHandler(p) {
+        p.onmessage = (e) => {
+          try {
+            let bytes;
+            const data = e.data;
+            
+            // Extract bytes from event (support multiple shapes)
+            if (data && data.data instanceof ArrayBuffer) {
+              bytes = new Uint8Array(data.data);
+            } else if (data && data.data instanceof Uint8Array) {
+              bytes = data.data;
+            } else if (data instanceof ArrayBuffer) {
+              bytes = new Uint8Array(data);
+            } else if (data instanceof Uint8Array) {
+              bytes = data;
+            } else {
+              return;
+            }
+            if (!bytes || bytes.length < 1) return;
+            
+            // Canonical async event payload is protobuf AppRouterPayload(method_name, args)
+            // and does not carry an 8-byte request id prefix.
+            if (bytes.length > 0 && bytes.length < 8) {
+              dispatchEventPayload(bytes);
+              return;
+            }
+
+            // Heuristic: non-response messages without pending id are treated as event payloads.
+            const idViewMaybe = bytes.length >= 8 ? new DataView(bytes.buffer, bytes.byteOffset, 8) : null;
+            if (idViewMaybe) {
+              const hiMaybe = idViewMaybe.getUint32(0, false);
+              const loMaybe = idViewMaybe.getUint32(4, false);
+              const maybeId = (BigInt(hiMaybe) << 32n) | BigInt(loMaybe);
+              if (!pending.has(maybeId) && dispatchEventPayload(bytes)) {
+                return;
+              }
+            }
+            
+            if (bytes.length < 8) return;
+            
+            // First 8 bytes are big-endian u64 message id (BigInt)
+            const idView = new DataView(bytes.buffer, bytes.byteOffset, 8);
+            const hi = idView.getUint32(0, false); // big-endian high 32 bits
+            const lo = idView.getUint32(4, false); // big-endian low 32 bits
+            const respId = (BigInt(hi) << 32n) | BigInt(lo);
+            
+            // Lookup pending request by ID
+            const state = pending.get(respId);
+            if (!state) {
+              console.warn('[Bridge] Received response for unknown id:', respId.toString());
+              return;
+            }
+            
+            // Strip 8-byte id prefix for payload processing
+            const payload = bytes.slice(8);
+            
+            // Resolve and clean up
+            clearTimeout(state.timeout);
+            pending.delete(respId);
+            state.resolve(payload);
+          } catch (err) {
+            console.error('[Bridge] onmessage error:', err);
+            // Clean up the pending entry if we identified the respId before the error
+            if (typeof respId !== 'undefined') {
+              const orphan = pending.get(respId);
+              if (orphan) {
+                clearTimeout(orphan.timeout);
+                pending.delete(respId);
+                orphan.reject(err instanceof Error ? err : new Error(String(err)));
+              }
+            }
+          }
+        };
+        p.start && p.start();
+        console.log('[Bridge] Deterministic handler installed (BigInt counter)');
+      }
+      
+      async function sendMessageBin(requestBytes) {
+        const p = ensurePort();
+        
+        // Install shared handler if first call
+        if (!p.onmessage) {
+          installPortHandler(p);
+        }
+        
+        const msg = requestBytes instanceof Uint8Array ? requestBytes : new Uint8Array(0);
+        const id = nextMsgId++; // Monotonic BigInt counter (deterministic)
+        
+        return new Promise((resolve, reject) => {
+          // Create timeout with proper cleanup
+          const timeout = setTimeout(() => {
+            pending.delete(id);
+            console.warn('[Bridge] Timeout for id:', id.toString());
+            reject(new Error(`Bridge timeout (id=${id})`));
+          }, 120000);
+
+          // Register pending state (ID-based routing)
+          pending.set(id, { resolve, reject, timeout });
+
+          // Post ArrayBuffer (bytes-only) prefixed with 8-byte big-endian u64 id
+          const msgWithId = new Uint8Array(8 + msg.length);
+          const v = new DataView(msgWithId.buffer);
+          const hi = Number(id >> 32n); // high 32 bits
+          const lo = Number(id & 0xFFFFFFFFn); // low 32 bits
+          v.setUint32(0, hi, false); // big-endian
+          v.setUint32(4, lo, false); // big-endian
+          msgWithId.set(msg, 8);
+
+          p.postMessage(msgWithId.buffer, [msgWithId.buffer]);
+        });
+      }
+
+      // Async wrapper for hasIdentityDirect (calls through binary bridge)
+      async function hasIdentityDirect() {
+        if (!port) return false;
+        try {
+          const req = encodeBridgeRequest('hasIdentityDirect', new Uint8Array(0));
+          const response = await sendMessageBin(req);
+          // Response is a single byte: 1 for true, 0 for false
+          return response.length > 0 && response[0] === 1;
+        } catch (err) {
+          console.error('[DSM] hasIdentityDirect error:', err);
+          return false;
+        }
+      }
+      
+      // Expose bridge interface immediately (even before port arrives)
+      window.DsmBridge = {
+        __binary: true,
+        isAvailable: () => !!port,
+        sendMessageBin,
+        getBridgeStatus: () => (port ? 3 : 0),
+        hasIdentityDirect,
+      };
+      
+      try { console.log('[DSM] Bridge interface installed, waiting for port...'); } catch (_) {}
+      
+      // Listen for MessagePort from Android
+      window.addEventListener('message', (ev) => {
+        if (ev.ports && ev.ports[0]) {
+          port = ev.ports[0];
+          installPortHandler(port);
+          window.dispatchEvent(new Event('dsm-bridge-ready'));
+        }
+      });
+    })();
+  </script>
+
+  <!-- React App Bundle - Injected by webpack HtmlWebpackPlugin -->
+</body>
+</html>

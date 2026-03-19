@@ -1,0 +1,53 @@
+{
+  "preset": "ts-jest",
+  "testEnvironment": "jsdom",
+  "clearMocks": true,
+  "restoreMocks": true,
+  "maxWorkers": "50%",
+  "workerIdleMemoryLimit": "512MB",
+  "roots": ["<rootDir>/src"],
+  "testMatch": [
+    "**/__tests__/**/*.ts?(x)",
+    "**/?(*.)+(spec|test).ts?(x)"
+  ],
+  "testPathIgnorePatterns": [
+    "/node_modules/",
+    "ScreenRouter-old.tsx",
+    ".*\\.d\\.ts$"
+  ],
+  "transform": {
+    "^.+\\.(ts|tsx)$": [
+      "ts-jest",
+      {
+        "diagnostics": false,
+        "isolatedModules": true
+      }
+    ]
+  },
+  "transformIgnorePatterns": [
+    "node_modules/(?!(styled-components)/)"
+  ],
+  "collectCoverageFrom": [
+    "src/**/*.{ts,tsx}",
+    "!src/**/*.d.ts",
+    "!src/**/ScreenRouter-old.tsx",
+    "!src/proto/**"
+  ],
+  "coverageDirectory": "coverage",
+  "coverageReporters": ["text-summary", "lcov", "html"],
+  "coverageThreshold": {
+    "global": {
+      "branches": 40,
+      "functions": 40,
+      "lines": 50,
+      "statements": 50
+    }
+  },
+  "setupFilesAfterEnv": ["<rootDir>/src/setupTests.ts"],
+  "moduleNameMapper": {
+    "^@/services/DsmClient$": "<rootDir>/src/dsm/index.ts",
+    "^@/(.*)$": "<rootDir>/src/$1",
+    "^\\.\\./proto/dsm_app_pb\\.js$": "<rootDir>/src/proto/dsm_app_pb.ts",
+    "\\.(css|less|scss|sass)$": "<rootDir>/src/test/__mocks__/styleMock.js"
+  }
+}

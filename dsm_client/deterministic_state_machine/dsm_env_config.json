@@ -1,0 +1,35 @@
+{
+  "_generated": {
+    "config_version": 1,
+    "generator": "manual_fix_for_storage_nodes",
+    "environment": "dev",
+    "platform": "android",
+    "detected_ip": "127.0.0.1",
+    "network_type": "localhost"
+  },
+  "protocol": "http",
+  "lan_ip": "127.0.0.1",
+  "ports": [8080, 8081, 8082, 8083, 8084],
+  "nodes": [
+    {
+      "name": "node1",
+      "endpoint": "http://localhost:8080"
+    },
+    {
+      "name": "node2",
+      "endpoint": "http://localhost:8081"
+    },
+    {
+      "name": "node3",
+      "endpoint": "http://localhost:8082"
+    },
+    {
+      "name": "node4",
+      "endpoint": "http://localhost:8083"
+    },
+    {
+      "name": "node5",
+      "endpoint": "http://localhost:8084"
+    }
+  ]
+}

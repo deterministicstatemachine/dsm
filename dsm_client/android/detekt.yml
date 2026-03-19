@@ -1,0 +1,64 @@
+build:
+  maxIssues: 0
+  excludeCorrectable: false
+
+complexity:
+  LongMethod:
+    threshold: 80
+  LongParameterList:
+    functionThreshold: 8
+    constructorThreshold: 10
+  ComplexMethod:
+    threshold: 20
+  TooManyFunctions:
+    thresholdInFiles: 30
+    thresholdInClasses: 25
+  NestedBlockDepth:
+    threshold: 5
+
+style:
+  MagicNumber:
+    active: false
+  ReturnCount:
+    max: 5
+  MaxLineLength:
+    maxLineLength: 140
+  WildcardImport:
+    active: true
+  ForbiddenComment:
+    active: true
+    values:
+      - "TODO"
+      - "FIXME"
+      - "HACK"
+      - "XXX"
+    allowedPatterns: ""
+
+naming:
+  FunctionNaming:
+    functionPattern: "[a-zA-Z][a-zA-Z0-9]*"
+  VariableNaming:
+    variablePattern: "[a-zA-Z_][a-zA-Z0-9_]*"
+
+potential-bugs:
+  UnsafeCast:
+    active: true
+  UselessPostfixExpression:
+    active: true
+
+performance:
+  SpreadOperator:
+    active: false
+
+exceptions:
+  TooGenericExceptionCaught:
+    active: true
+    exceptionNames:
+      - "ArrayIndexOutOfBoundsException"
+      - "Error"
+      - "IllegalMonitorStateException"
+      - "IndexOutOfBoundsException"
+      - "NullPointerException"
+  SwallowedException:
+    active: true
+    allowedExceptionNameRegex: "_|(ignore|expected).*"

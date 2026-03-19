@@ -1,0 +1,23 @@
+{
+  "presets": [
+    "@babel/preset-env",
+    "@babel/preset-react",
+    "@babel/preset-typescript"
+  ],
+  "plugins": [
+    "styled-components",
+    "@babel/plugin-transform-runtime"
+  ],
+  "env": {
+    "development": {
+      "plugins": [
+        ["transform-remove-console", { "exclude": ["log", "warn", "error", "info", "debug"] }]
+      ]
+    },
+    "production": {
+      "plugins": [
+        ["transform-remove-console", { "exclude": ["warn", "error"] }]
+      ]
+    }
+  }
+}

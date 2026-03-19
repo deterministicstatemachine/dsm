@@ -1,0 +1,203 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+//! Wallet initialization from verified genesis and wallet verification.
+
+use std::collections::HashMap;
+
+use anyhow::Result;
+use log::{info, warn};
+use rusqlite::{
+    params,
+    types::{Type, ValueRef},
+    OptionalExtension,
+};
+
+use super::get_connection;
+use super::types::{GenesisRecord, VerificationResult, WalletState};
+use crate::storage::codecs::{generate_hash_chain_proof_bytes, meta_to_blob, smt_proof_bytes};
+use crate::util::deterministic_time::tick;
+
+fn read_hashish_column_as_text(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+    label: &str,
+) -> rusqlite::Result<String> {
+    match row.get_ref(index)? {
+        ValueRef::Null => Ok(String::new()),
+        ValueRef::Text(text) => String::from_utf8(text.to_vec())
+            .map_err(|e| rusqlite::Error::FromSqlConversionFailure(index, Type::Text, Box::new(e))),
+        ValueRef::Blob(bytes) => {
+            if bytes.is_empty() {
+                Ok(String::new())
+            } else {
+                Ok(crate::util::text_id::encode_base32_crockford(bytes))
+            }
+        }
+        value => Err(rusqlite::Error::InvalidColumnType(
+            index,
+            label.to_string(),
+            value.data_type(),
+        )),
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct WalletInitInfo {
+    pub wallet_id: String,
+    pub genesis_id: Option<String>,
+    pub device_id: String,
+    pub initialized_at: u64,
+    pub status: String,
+    pub merkle_root: String,
+    pub protocol_version: String,
+    pub chain_height: u64,
+    pub balance: u64,
+}
+
+pub fn initialize_wallet_from_verified_genesis(gen: &GenesisRecord) -> Result<WalletInitInfo> {
+    info!("Initializing wallet from Genesis - ID: {}", gen.genesis_id);
+
+    let wallet_id = format!("wallet_{}", gen.device_id);
+    let now = tick();
+
+    let mut metadata: HashMap<String, Vec<u8>> = HashMap::new();
+    metadata.insert(
+        "protocol_version".to_string(),
+        gen.protocol_version.as_bytes().to_vec(),
+    );
+    metadata.insert(
+        "genesis_progress".to_string(),
+        gen.progress_marker.as_bytes().to_vec(),
+    );
+
+    let wallet_state = WalletState {
+        wallet_id: wallet_id.clone(),
+        device_id: gen.device_id.clone(),
+        genesis_id: Some(gen.genesis_id.clone()),
+        chain_tip: crate::util::text_id::encode_base32_crockford(&[0u8; 32]),
+        chain_height: 0,
+        merkle_root: gen.merkle_root.clone(),
+        balance: 0,
+        created_at: now,
+        updated_at: now,
+        status: "initialized_from_genesis".to_string(),
+        metadata,
+    };
+
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|poisoned| {
+        log::warn!("DB lock poisoned, recovering");
+        poisoned.into_inner()
+    });
+    conn.execute(
+        "INSERT OR REPLACE INTO wallet_state (
+            wallet_id, device_id, genesis_id, chain_tip, chain_height,
+            merkle_root, balance, created_at, updated_at, status, metadata
+        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+        params![
+            wallet_state.wallet_id,
+            wallet_state.device_id,
+            wallet_state.genesis_id,
+            wallet_state.chain_tip,
+            wallet_state.chain_height as i64,
+            wallet_state.merkle_root,
+            wallet_state.balance as i64,
+            wallet_state.created_at as i64,
+            wallet_state.updated_at as i64,
+            wallet_state.status,
+            meta_to_blob(&wallet_state.metadata),
+        ],
+    )?;
+
+    info!("Wallet initialized successfully");
+    Ok(WalletInitInfo {
+        wallet_id: wallet_state.wallet_id,
+        genesis_id: wallet_state.genesis_id,
+        device_id: wallet_state.device_id,
+        initialized_at: wallet_state.created_at,
+        status: wallet_state.status,
+        merkle_root: wallet_state.merkle_root,
+        protocol_version: gen.protocol_version.clone(),
+        chain_height: wallet_state.chain_height,
+        balance: wallet_state.balance,
+    })
+}
+
+pub fn verify_wallet_against_stored_genesis() -> Result<VerificationResult> {
+    info!("Verifying wallet against stored Genesis");
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|poisoned| {
+        log::warn!("DB lock poisoned, recovering");
+        poisoned.into_inner()
+    });
+
+    let row_opt: Option<(String, String, Option<String>, String, String)> = conn
+        .query_row(
+            "SELECT wallet_id, device_id, genesis_id, chain_tip, merkle_root
+               FROM wallet_state
+           ORDER BY updated_at DESC
+              LIMIT 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    read_hashish_column_as_text(row, 3, "chain_tip")?,
+                    read_hashish_column_as_text(row, 4, "merkle_root")?,
+                ))
+            },
+        )
+        .optional()?;
+
+    if let Some((wallet_id, device_id, Some(genesis_id), chain_tip, wallet_merkle_root)) = row_opt {
+        let gen_row: Option<(String, String)> = conn
+            .query_row(
+                "SELECT genesis_id, merkle_root FROM genesis_records WHERE genesis_id = ?1",
+                params![genesis_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+
+        if let Some((_, genesis_merkle_root)) = gen_row {
+            let verified = wallet_merkle_root == genesis_merkle_root;
+            let wallet_hash = generate_hash_chain_proof_bytes(wallet_id.as_bytes());
+            let genesis_hash = generate_hash_chain_proof_bytes(genesis_id.as_bytes());
+            let merkle_proof =
+                smt_proof_bytes(genesis_merkle_root.as_bytes(), chain_tip.as_bytes());
+
+            let mut details = HashMap::new();
+            details.insert(
+                "status".to_string(),
+                if verified {
+                    b"verified".to_vec()
+                } else {
+                    b"failed".to_vec()
+                },
+            );
+            details.insert("device_id".to_string(), device_id.into_bytes());
+            details.insert("chain_tip".to_string(), chain_tip.into_bytes());
+
+            info!("Wallet verification completed");
+            return Ok(VerificationResult {
+                verified,
+                genesis_hash: Some(genesis_hash.to_vec()),
+                wallet_hash: Some(wallet_hash.to_vec()),
+                merkle_proof: Some(merkle_proof.to_vec()),
+                verification_step: tick(),
+                details,
+            });
+        }
+    }
+
+    warn!("No wallet or Genesis record found");
+    let mut details = HashMap::new();
+    details.insert("status".to_string(), b"no_wallet_or_genesis".to_vec());
+    Ok(VerificationResult {
+        verified: false,
+        genesis_hash: None,
+        wallet_hash: None,
+        merkle_proof: None,
+        verification_step: tick(),
+        details,
+    })
+}

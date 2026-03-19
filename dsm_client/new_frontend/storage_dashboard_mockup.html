@@ -1,0 +1,868 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Storage Dashboard Mockup — All Tabs (Inverted)</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg: #9bbc0f;
+    --bg2: #8bac0f;
+    --txt: #0f380f;
+    --txt-dark: #071f07;
+    --border: #306230;
+    --panel: #0f380f;
+    --panel-txt: #9bbc0f;
+    --panel-dim: rgba(155,188,15,0.5);
+    --panel-border: rgba(155,188,15,0.2);
+    --panel-border-strong: rgba(155,188,15,0.35);
+  }
+
+  body {
+    background: #0b0b0b;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 24px;
+    padding: 20px;
+    font-family: 'Share Tech Mono', monospace;
+  }
+
+  .col {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+  }
+  .col-label {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: #9bbc0f;
+    opacity: 0.6;
+  }
+
+  /* Phone frame — hatched background on the OUTSIDE */
+  .phone {
+    width: 320px;
+    min-height: 580px;
+    background:
+      linear-gradient(0deg, rgba(15,56,15,0.08), rgba(15,56,15,0.02)),
+      repeating-linear-gradient(45deg, rgba(15,56,15,0.10) 0px, rgba(15,56,15,0.10) 2px, transparent 2px, transparent 4px),
+      var(--bg);
+    border-radius: 8px;
+    padding: 12px 10px 20px;
+    overflow-y: auto;
+    image-rendering: pixelated;
+  }
+
+  /* ─── Cards: solid dark green, inverted text ─── */
+  .card {
+    border: 2px solid var(--border);
+    border-radius: 4px;
+    background: var(--panel);
+    margin-bottom: 8px;
+    overflow: hidden;
+  }
+
+  /* ─── Header ─── */
+  .header {
+    text-align: center;
+    padding: 8px 0 4px;
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--txt-dark);
+    letter-spacing: 2px;
+    text-transform: uppercase;
+  }
+
+  /* ─── Tabs ─── */
+  .tabs {
+    display: flex;
+    gap: 0;
+    margin-bottom: 8px;
+    border: 2px solid var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .tab {
+    flex: 1;
+    padding: 6px 4px;
+    font-size: 7px;
+    font-weight: 700;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    text-align: center;
+    color: var(--panel-txt);
+    background: var(--panel);
+    border-right: 1px solid var(--border);
+    cursor: pointer;
+    opacity: 0.6;
+  }
+  .tab:last-child { border-right: none; }
+  .tab.active {
+    background: var(--bg);
+    color: var(--txt-dark);
+    opacity: 1;
+  }
+
+  /* ═══ STAT GRID ═══ */
+  .stat-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0;
+  }
+  .stat-grid .stat-cell {
+    padding: 10px 6px 8px;
+    text-align: center;
+    border-right: 1px solid var(--panel-border);
+    border-bottom: 1px solid var(--panel-border);
+  }
+  .stat-grid .stat-cell:nth-child(3n) { border-right: none; }
+  .stat-grid .stat-cell:nth-child(n+4) { border-bottom: none; }
+
+  .stat-grid-2 {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 0;
+  }
+  .stat-grid-2 .stat-cell {
+    padding: 10px 6px 8px;
+    text-align: center;
+    border-right: 1px solid var(--panel-border);
+    border-bottom: 1px solid var(--panel-border);
+  }
+  .stat-grid-2 .stat-cell:nth-child(2n) { border-right: none; }
+  .stat-grid-2 .stat-cell:nth-child(n+3) { border-bottom: none; }
+
+  .stat-val {
+    font-size: 22px;
+    font-weight: 900;
+    color: var(--panel-txt);
+    line-height: 1;
+  }
+  .stat-val-sm {
+    font-size: 14px;
+    font-weight: 900;
+    color: var(--panel-txt);
+    line-height: 1;
+  }
+  .stat-label {
+    font-size: 6px;
+    font-weight: 700;
+    letter-spacing: 1.5px;
+    color: var(--panel-dim);
+    margin-top: 3px;
+    text-transform: uppercase;
+  }
+
+  /* ═══ THROUGHPUT BAR ═══ */
+  .throughput {
+    display: flex;
+    justify-content: space-around;
+    padding: 6px 10px;
+    font-size: 7px;
+    font-weight: 700;
+    color: var(--panel-dim);
+    letter-spacing: 0.3px;
+    border-top: 1px solid var(--panel-border);
+  }
+
+  /* ═══ NODE TABLE ═══ */
+  .node-table { width: 100%; padding: 0; }
+
+  .table-header {
+    display: grid;
+    grid-template-columns: 14px 1fr 56px 30px;
+    gap: 4px;
+    padding: 5px 10px;
+    font-size: 6px;
+    font-weight: 700;
+    letter-spacing: 1.2px;
+    color: var(--panel-dim);
+    text-transform: uppercase;
+    border-bottom: 2px solid var(--panel-border-strong);
+  }
+
+  .node-row {
+    display: grid;
+    grid-template-columns: 14px 1fr 56px 30px;
+    gap: 4px;
+    padding: 7px 10px;
+    font-size: 8px;
+    color: var(--panel-txt);
+    border-bottom: 1px solid var(--panel-border);
+    cursor: pointer;
+    align-items: center;
+  }
+  .node-row:last-child { border-bottom: none; }
+  .node-row:active { background: rgba(155,188,15,0.06); }
+  .node-row.offline { opacity: 0.35; }
+  .node-row.degraded { opacity: 0.6; }
+
+  /* Status indicator — inverted colors */
+  .status-dot {
+    width: 8px;
+    height: 8px;
+    border: 2px solid var(--panel-txt);
+    display: inline-block;
+  }
+  .status-dot.on { background: var(--panel-txt); }
+  .status-dot.warn {
+    background: repeating-linear-gradient(45deg, var(--panel-txt) 0px, var(--panel-txt) 2px, transparent 2px, transparent 4px);
+  }
+
+  .node-name {
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    text-transform: uppercase;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .node-region {
+    font-size: 7px;
+    opacity: 0.5;
+    text-align: right;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .node-ms {
+    font-size: 7px;
+    text-align: right;
+    opacity: 0.6;
+  }
+
+  /* ═══ EXPANDED DETAIL ═══ */
+  .node-detail {
+    padding: 4px 10px 8px 28px;
+    font-size: 7px;
+    color: var(--panel-txt);
+    border-bottom: 1px solid var(--panel-border);
+    background: rgba(155,188,15,0.05);
+  }
+  .detail-url {
+    opacity: 0.4;
+    word-break: break-all;
+    margin-bottom: 3px;
+  }
+  .detail-stats {
+    display: flex;
+    gap: 10px;
+    opacity: 0.5;
+    font-weight: 700;
+  }
+  .detail-remove {
+    margin-top: 4px;
+    font-size: 6px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    opacity: 0.3;
+    color: var(--panel-txt);
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    font-family: inherit;
+  }
+
+  /* ═══ BUTTONS ═══ */
+  .actions { display: flex; gap: 6px; }
+  .btn {
+    flex: 1;
+    appearance: none;
+    -webkit-appearance: none;
+    padding: 8px 10px;
+    font-family: inherit;
+    font-size: 8px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    color: var(--panel-txt);
+    border: 2px solid var(--border);
+    border-radius: 4px;
+    background: var(--panel);
+    cursor: pointer;
+    text-align: center;
+  }
+  .btn:active { transform: translateY(1px); }
+
+  /* ─── Footer hint ─── */
+  .hint {
+    text-align: center;
+    font-size: 7px;
+    color: var(--txt);
+    opacity: 0.4;
+    padding: 6px 0 0;
+  }
+
+  /* ─── Section label (on hatched bg) ─── */
+  .section-label {
+    font-size: 6px;
+    font-weight: 700;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: var(--txt);
+    opacity: 0.4;
+    padding: 4px 0 2px;
+  }
+  /* Section label inside dark panel */
+  .section-label-inv {
+    font-size: 6px;
+    font-weight: 700;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: var(--panel-dim);
+    padding: 6px 10px 2px;
+  }
+
+  /* ═══ OVERVIEW ═══ */
+  .info-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px;
+    font-size: 8px;
+    color: var(--panel-txt);
+    border-bottom: 1px solid var(--panel-border);
+  }
+  .info-row:last-child { border-bottom: none; }
+  .info-row .info-label {
+    opacity: 0.5;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+  }
+  .info-row .info-val { font-weight: 900; }
+
+  .input-field {
+    width: 100%;
+    padding: 8px 10px;
+    font-family: inherit;
+    font-size: 8px;
+    color: var(--panel-txt);
+    background: rgba(155,188,15,0.08);
+    border: 1px solid var(--panel-border-strong);
+    border-radius: 4px;
+    outline: none;
+    appearance: none;
+    -webkit-appearance: none;
+  }
+  .input-field::placeholder {
+    color: var(--panel-dim);
+  }
+  .add-form { padding: 10px; }
+
+  /* ═══ DLV ═══ */
+  .dlv-item {
+    padding: 10px;
+    border-bottom: 1px solid var(--panel-border);
+    color: var(--panel-txt);
+  }
+  .dlv-item:last-child { border-bottom: none; }
+  .dlv-item-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+  }
+  .dlv-name {
+    font-size: 9px;
+    font-weight: 700;
+    color: var(--panel-txt);
+  }
+  .dlv-kind {
+    font-size: 7px;
+    color: var(--panel-dim);
+    margin-top: 1px;
+  }
+  .dlv-status {
+    font-size: 8px;
+    font-weight: 700;
+    color: var(--panel-txt);
+    text-align: right;
+  }
+  .dlv-replication {
+    font-size: 7px;
+    color: var(--panel-dim);
+    text-align: right;
+    margin-top: 1px;
+  }
+  .dlv-nodes {
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid var(--panel-border);
+  }
+  .dlv-node-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 7px;
+    color: var(--panel-txt);
+    opacity: 0.6;
+    padding: 2px 0;
+  }
+
+  /* ═══ DIAGNOSTICS ═══ */
+  .diag-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 6px 10px;
+    font-size: 8px;
+    color: var(--panel-txt);
+    border-bottom: 1px solid var(--panel-border);
+  }
+  .diag-row:last-child { border-bottom: none; }
+  .diag-row .diag-label { opacity: 0.5; font-weight: 700; }
+  .diag-row .diag-val { font-weight: 900; }
+
+  .diag-table-header {
+    display: grid;
+    grid-template-columns: 14px 1fr 60px;
+    gap: 4px;
+    padding: 5px 10px;
+    font-size: 6px;
+    font-weight: 700;
+    letter-spacing: 1.2px;
+    color: var(--panel-dim);
+    text-transform: uppercase;
+    border-bottom: 2px solid var(--panel-border-strong);
+  }
+  .diag-node-row {
+    display: grid;
+    grid-template-columns: 14px 1fr 60px;
+    gap: 4px;
+    padding: 7px 10px;
+    font-size: 8px;
+    color: var(--panel-txt);
+    border-bottom: 1px solid var(--panel-border);
+    align-items: center;
+  }
+  .diag-node-row:last-child { border-bottom: none; }
+  .diag-status { font-size: 7px; font-weight: 700; text-align: right; }
+
+  .error-box {
+    padding: 8px 10px;
+    font-size: 7px;
+    color: var(--panel-txt);
+    opacity: 0.6;
+    max-height: 80px;
+    overflow-y: auto;
+    line-height: 1.5;
+  }
+</style>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- TAB 1: OVERVIEW                                                -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="col">
+  <div class="col-label">1. Overview</div>
+  <div class="phone">
+    <div class="header">Storage Nodes</div>
+
+    <div class="tabs">
+      <div class="tab active">Overview</div>
+      <div class="tab">DLVs</div>
+      <div class="tab">Nodes</div>
+      <div class="tab">Diag</div>
+    </div>
+
+    <!-- Status summary -->
+    <div class="card">
+      <div class="stat-grid-2">
+        <div class="stat-cell">
+          <div class="stat-val">5/6</div>
+          <div class="stat-label">Connected</div>
+        </div>
+        <div class="stat-cell">
+          <div class="stat-val-sm">12.3 MB</div>
+          <div class="stat-label">Data Size</div>
+        </div>
+        <div class="stat-cell">
+          <div class="stat-val-sm">Sync #47</div>
+          <div class="stat-label">Last Sync</div>
+        </div>
+        <div class="stat-cell">
+          <div class="stat-val-sm">OK</div>
+          <div class="stat-label">Backup</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Key/value detail -->
+    <div class="card">
+      <div class="info-row">
+        <span class="info-label">Storage Nodes</span>
+        <span class="info-val">5/6 connected</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">Data Size</span>
+        <span class="info-val">12.3 MB</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">Last Sync</span>
+        <span class="info-val">Sync #47</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">Backup Status</span>
+        <span class="info-val">Up to date</span>
+      </div>
+    </div>
+
+    <!-- Create backup -->
+    <div class="card add-form">
+      <div class="section-label-inv" style="padding-left:0;">Create Backup</div>
+      <input type="text" class="input-field" placeholder="Backup password (optional)">
+      <div style="margin-top: 6px;">
+        <div class="btn">Create Backup</div>
+      </div>
+    </div>
+
+    <div class="hint">Press B to go back</div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- TAB 2: DLVs                                                    -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="col">
+  <div class="col-label">2. DLVs</div>
+  <div class="phone">
+    <div class="header">Storage Nodes</div>
+
+    <div class="tabs">
+      <div class="tab">Overview</div>
+      <div class="tab active">DLVs</div>
+      <div class="tab">Nodes</div>
+      <div class="tab">Diag</div>
+    </div>
+
+    <div class="section-label" style="padding: 4px 2px 6px;">Vaults (DLVs)</div>
+
+    <!-- DLV summary -->
+    <div class="card">
+      <div class="stat-grid">
+        <div class="stat-cell">
+          <div class="stat-val">3</div>
+          <div class="stat-label">Active</div>
+        </div>
+        <div class="stat-cell">
+          <div class="stat-val">1</div>
+          <div class="stat-label">Historical</div>
+        </div>
+        <div class="stat-cell">
+          <div class="stat-val">2/3</div>
+          <div class="stat-label">Replicated</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- DLV list -->
+    <div class="card">
+      <!-- Vault 1 -->
+      <div class="dlv-item">
+        <div class="dlv-item-header">
+          <div>
+            <div class="dlv-name">Savings Vault</div>
+            <div class="dlv-kind">dBTC &bull; 7c4f...a91e</div>
+          </div>
+          <div>
+            <div class="dlv-status">LIVE</div>
+            <div class="dlv-replication">storage: 3/3</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Vault 2 — expanded -->
+      <div class="dlv-item" style="background: rgba(155,188,15,0.05);">
+        <div class="dlv-item-header">
+          <div>
+            <div class="dlv-name">Daily Wallet</div>
+            <div class="dlv-kind">dBTC &bull; e3a1...02bf</div>
+          </div>
+          <div>
+            <div class="dlv-status">LOCKED</div>
+            <div class="dlv-replication">storage: 2/3</div>
+          </div>
+        </div>
+        <div class="dlv-nodes">
+          <div class="dlv-node-row">
+            <span>dsm-node-1 (us-east-1)</span>
+            <span>up &bull; desc: yes &bull; state: yes</span>
+          </div>
+          <div class="dlv-node-row">
+            <span>dsm-node-3 (eu-west-1)</span>
+            <span>up &bull; desc: yes &bull; state: yes</span>
+          </div>
+          <div class="dlv-node-row">
+            <span>dsm-node-5 (ap-se-1)</span>
+            <span>down &bull; desc: &#x2014; &bull; state: &#x2014;</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Vault 3 -->
+      <div class="dlv-item">
+        <div class="dlv-item-header">
+          <div>
+            <div class="dlv-name">dBTC Bridge</div>
+            <div class="dlv-kind">dBTC &bull; 1b88...5f3c</div>
+          </div>
+          <div>
+            <div class="dlv-status">UNLOCKABLE</div>
+            <div class="dlv-replication">storage: 3/3</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Vault 4 — historical -->
+      <div class="dlv-item" style="opacity: 0.35;">
+        <div class="dlv-item-header">
+          <div>
+            <div class="dlv-name">Old Vault</div>
+            <div class="dlv-kind">ERA &bull; 9d22...78ab</div>
+          </div>
+          <div>
+            <div class="dlv-status">SPENT</div>
+            <div class="dlv-replication">storage: 1</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="hint">Press B to go back</div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- TAB 3: NODES                                                   -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="col">
+  <div class="col-label">3. Nodes</div>
+  <div class="phone">
+    <div class="header">Storage Nodes</div>
+
+    <div class="tabs">
+      <div class="tab">Overview</div>
+      <div class="tab">DLVs</div>
+      <div class="tab active">Nodes</div>
+      <div class="tab">Diag</div>
+    </div>
+
+    <!-- Stat grid -->
+    <div class="card">
+      <div class="stat-grid">
+        <div class="stat-cell">
+          <div class="stat-val">6</div>
+          <div class="stat-label">Nodes</div>
+        </div>
+        <div class="stat-cell">
+          <div class="stat-val">6</div>
+          <div class="stat-label">Online</div>
+        </div>
+        <div class="stat-cell">
+          <div class="stat-val">0</div>
+          <div class="stat-label">Offline</div>
+        </div>
+        <div class="stat-cell">
+          <div class="stat-val">3</div>
+          <div class="stat-label">Regions</div>
+        </div>
+        <div class="stat-cell">
+          <div class="stat-val">1.2K</div>
+          <div class="stat-label">Objects</div>
+        </div>
+        <div class="stat-cell">
+          <div class="stat-val">48M</div>
+          <div class="stat-label">Written</div>
+        </div>
+      </div>
+      <div class="throughput">
+        <span>PUT 847</span>
+        <span>GET 391</span>
+        <span>W 48.2 MB</span>
+        <span>R 12.1 MB</span>
+      </div>
+    </div>
+
+    <!-- Node table -->
+    <div class="card node-table">
+      <div class="table-header">
+        <span></span>
+        <span>Node</span>
+        <span style="text-align:right">Region</span>
+        <span style="text-align:right">Ms</span>
+      </div>
+
+      <div class="node-row">
+        <span class="status-dot on"></span>
+        <span class="node-name">dsm-node-1</span>
+        <span class="node-region">us-east-1</span>
+        <span class="node-ms">13</span>
+      </div>
+      <div class="node-row">
+        <span class="status-dot on"></span>
+        <span class="node-name">dsm-node-2</span>
+        <span class="node-region">us-east-1</span>
+        <span class="node-ms">15</span>
+      </div>
+
+      <!-- Expanded row -->
+      <div class="node-row" style="background: rgba(155,188,15,0.06);">
+        <span class="status-dot on"></span>
+        <span class="node-name">dsm-node-3</span>
+        <span class="node-region">eu-west-1</span>
+        <span class="node-ms">55</span>
+      </div>
+      <div class="node-detail">
+        <div class="detail-url">https://54.74.145.172:8080</div>
+        <div class="detail-stats">
+          <span>PUT 142</span>
+          <span>GET 67</span>
+          <span>W 8.1 MB</span>
+          <span>R 2.3 MB</span>
+        </div>
+        <button class="detail-remove">Remove Node</button>
+      </div>
+
+      <div class="node-row">
+        <span class="status-dot on"></span>
+        <span class="node-name">dsm-node-4</span>
+        <span class="node-region">eu-west-1</span>
+        <span class="node-ms">38</span>
+      </div>
+      <div class="node-row">
+        <span class="status-dot on"></span>
+        <span class="node-name">dsm-node-5</span>
+        <span class="node-region">ap-se-1</span>
+        <span class="node-ms">118</span>
+      </div>
+      <div class="node-row">
+        <span class="status-dot on"></span>
+        <span class="node-name">dsm-node-6</span>
+        <span class="node-region">ap-se-1</span>
+        <span class="node-ms">178</span>
+      </div>
+    </div>
+
+    <!-- Actions -->
+    <div class="actions">
+      <div class="btn">+ Add Node</div>
+      <div class="btn">Refresh</div>
+    </div>
+
+    <div class="hint">Press B to go back</div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- TAB 4: DIAGNOSTICS                                             -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="col">
+  <div class="col-label">4. Diagnostics</div>
+  <div class="phone">
+    <div class="header">Storage Nodes</div>
+
+    <div class="tabs">
+      <div class="tab">Overview</div>
+      <div class="tab">DLVs</div>
+      <div class="tab">Nodes</div>
+      <div class="tab active">Diag</div>
+    </div>
+
+    <div class="section-label" style="padding: 4px 2px 6px;">Diagnostics</div>
+
+    <!-- Summary -->
+    <div class="card">
+      <div class="diag-row">
+        <span class="diag-label">Nodes</span>
+        <span class="diag-val">6</span>
+      </div>
+      <div class="diag-row">
+        <span class="diag-label">Online / Warn / Offline</span>
+        <span class="diag-val">4 / 1 / 1</span>
+      </div>
+      <div class="diag-row">
+        <span class="diag-label">Platform</span>
+        <span class="diag-val">android</span>
+      </div>
+    </div>
+
+    <!-- Node health table -->
+    <div class="card node-table">
+      <div class="diag-table-header">
+        <span></span>
+        <span>Node</span>
+        <span style="text-align:right">Status</span>
+      </div>
+
+      <div class="diag-node-row">
+        <span class="status-dot on"></span>
+        <span class="node-name">dsm-node-1</span>
+        <span class="diag-status">ONLINE</span>
+      </div>
+      <div class="diag-node-row">
+        <span class="status-dot on"></span>
+        <span class="node-name">dsm-node-2</span>
+        <span class="diag-status">ONLINE</span>
+      </div>
+      <div class="diag-node-row">
+        <span class="status-dot on"></span>
+        <span class="node-name">dsm-node-3</span>
+        <span class="diag-status">ONLINE</span>
+      </div>
+      <div class="diag-node-row">
+        <span class="status-dot on"></span>
+        <span class="node-name">dsm-node-4</span>
+        <span class="diag-status">ONLINE</span>
+      </div>
+      <div class="diag-node-row degraded" style="opacity: 0.6;">
+        <span class="status-dot warn"></span>
+        <span class="node-name">dsm-node-5</span>
+        <span class="diag-status">WARN</span>
+      </div>
+      <div class="diag-node-row offline" style="opacity: 0.35;">
+        <span class="status-dot"></span>
+        <span class="node-name">dsm-node-6</span>
+        <span class="diag-status">OFFLINE</span>
+      </div>
+    </div>
+
+    <!-- Recent errors -->
+    <div class="card">
+      <div class="section-label-inv">Errors (3)</div>
+      <div class="error-box">
+        <div>dsm-node-5: connection timeout after 5000ms</div>
+        <div>dsm-node-6: ECONNREFUSED 13.215.175.231:8080</div>
+        <div>dsm-node-5: TLS handshake failed (cert expired)</div>
+      </div>
+    </div>
+
+    <!-- Actions -->
+    <div class="actions">
+      <div class="btn">Export</div>
+      <div class="btn">Refresh</div>
+      <div class="btn">Clear</div>
+    </div>
+
+    <div class="hint">Press B to go back</div>
+
+    <!-- Before-run state -->
+    <div style="margin-top: 20px; padding-top: 12px; border-top: 2px dashed rgba(15,56,15,0.2);">
+      <div class="section-label" style="text-align:center; margin-bottom: 8px; opacity: 0.3;">── before diagnostics run ──</div>
+    </div>
+
+    <div class="section-label" style="padding: 4px 2px 6px;">Diagnostics</div>
+    <div class="btn">Run Diagnostics</div>
+  </div>
+</div>
+
+</body>
+</html>

@@ -1,0 +1,31 @@
+# Workspace-level Cargo configuration for the DSM NDK build.
+#
+# arm64-v8a (aarch64) compiles fine with codegen-units=1 + opt-level=3.
+# armeabi-v7a (armv7) hangs at the final LLVM codegen/link pass when the
+# entire dsm_sdk cdylib is emitted as a single translation unit — the 32-bit
+# LLVM backend stalls on very large monolithic units at opt-level=3.
+#
+# Fix: break armv7 into 16 codegen units and drop to opt-level=2.
+# opt-level=2 still enables all major optimizations (inlining, vectorization,
+# loop transforms) but skips the most expensive inter-procedural passes that
+# LLVM runs only at level 3, which are the ones that deadlock on large 32-bit
+# targets. 16 codegen-units split the crate across 16 parallel LLVM sessions,
+# eliminating the monolithic stall.
+#
+# No change is needed for aarch64 or x86_64 — they keep the workspace profile
+# defaults (codegen-units=1, opt-level=3).
+
+[target.armv7-linux-androideabi]
+rustflags = [
+    "-C", "codegen-units=16",
+    "-C", "opt-level=2",
+]
+
+# x86_64 Android (emulator target) exhibits the same monolithic LLVM codegen
+# stall as armv7 when building the large dsm_sdk cdylib at opt-level=3 with
+# a single codegen unit. Same fix: split into 16 units and drop to opt-level=2.
+[target.x86_64-linux-android]
+rustflags = [
+    "-C", "codegen-units=16",
+    "-C", "opt-level=2",
+]

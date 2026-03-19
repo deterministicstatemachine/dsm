@@ -1,0 +1,35 @@
+type: "vault"
+name: "LoanVault"
+version: "1.0.0"
+description: "A sample DLV-style vault used for generator validation"
+
+fulfillment_condition:
+  type: "multi_signature"
+  public_keys:
+    - "OWNERKEY1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    - "OWNERKEY2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    - "OWNERKEY3AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  threshold: 2
+
+assets:
+  - asset_id: "DSM"
+    amount: 1500
+    metadata:
+      purpose: "loan_collateral"
+
+tick_lock:
+  duration_iterations: 86400
+  tick_lock_action:
+    type: "return_to_owner"
+
+recovery:
+  mechanism:
+    type: "multi_sig_recovery"
+    required_signatures: 2
+    recovery_keys:
+      - "RECOVERYKEY1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      - "RECOVERYKEY2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+metadata:
+  author: "DSM Protocol Team"
+  workflow: "loan_collateral"

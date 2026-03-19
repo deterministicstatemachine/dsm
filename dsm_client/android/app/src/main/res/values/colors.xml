@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="teal_700">#FF018786</color>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+    
+    <!-- DSM brand colors for production -->
+    <color name="dsm_primary">#000000</color>
+    <color name="dsm_primary_variant">#000000</color>
+    <color name="ic_launcher_bg">#FF000000</color>
+    <color name="dsm_secondary">#00BCD4</color>
+    <color name="dsm_surface">#FFFFFF</color>
+    <!-- dsm_background removed (unused); rely on window background defaults -->
+</resources>

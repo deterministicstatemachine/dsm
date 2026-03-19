@@ -1,0 +1,25 @@
+# Android specific
+*.iml
+.gradle/
+local.properties
+.idea/
+.DS_Store
+build/
+captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+vendor
+/vendor
+*.aab
+*.ap_
+*.dex
+*.class
+bin/
+gen/
+out/
+proguard/
+*.log
+.navigation/
+*.jks
+*.keystore

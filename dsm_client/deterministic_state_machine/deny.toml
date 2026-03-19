@@ -1,0 +1,80 @@
+# DSM License Policy Configuration
+# Schema compatible with cargo-deny v0.18.1
+
+[licenses]
+# Essential license allowlist for quantum-resistant cryptographic primitives
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "BSD-2-Clause",
+    "CC0-1.0", 
+    "ISC",
+    "Zlib",
+    "MPL-2.0",
+    "Unicode-3.0"
+]
+confidence-threshold = 0.8
+clarify = [
+    { name = "unicode-ident", expression = "(MIT OR Apache-2.0) AND Unicode-3.0", license-files = [
+        { path = "LICENSE-UNICODE", hash = 0 },
+        { path = "LICENSE-APACHE", hash = 0 },
+        { path = "LICENSE-MIT", hash = 0 }
+    ] },
+    { name = "arrayref", expression = "BSD-2-Clause", license-files = [{ path = "LICENSE", hash = 0 }] },
+    { name = "cloudabi", expression = "BSD-2-Clause", license-files = [{ path = "LICENSE", hash = 0 }] },
+    { name = "bip39", expression = "CC0-1.0", license-files = [{ path = "COPYING", hash = 0 }] },
+    { name = "bitcoin-internals", expression = "CC0-1.0", license-files = [{ path = "COPYING", hash = 0 }] },
+    { name = "bitcoin_hashes", expression = "CC0-1.0", license-files = [{ path = "COPYING", hash = 0 }] },
+    { name = "hex-conservative", expression = "CC0-1.0", license-files = [{ path = "COPYING", hash = 0 }] },
+    { name = "option-ext", expression = "MPL-2.0", license-files = [{ path = "LICENSE", hash = 0 }] },
+]
+exceptions = [
+    { name = "webpki", allow = ["ISC"] },
+]
+
+# Version duplication configuration
+[bans]
+multiple-versions = "warn"
+skip = [
+    # Quantum-resistant cryptographic dependency version exemptions
+    { name = "getrandom" },
+    { name = "rand" },
+    { name = "rand_core" },
+    { name = "bitflags" },
+    { name = "regex-automata" },
+    { name = "regex-syntax" },
+    { name = "hashbrown" },
+    { name = "num-bigint" },
+    { name = "wasi" },
+    { name = "rustc-hash" },
+    { name = "zerocopy" },
+    
+    # Platform-specific dependency exemptions
+    { name = "windows-sys" },
+    { name = "windows-targets" },
+    { name = "windows_aarch64_gnullvm" },
+    { name = "windows_aarch64_msvc" },
+    { name = "windows_i686_gnu" },
+    { name = "windows_i686_msvc" },
+    { name = "windows_x86_64_gnu" },
+    { name = "windows_x86_64_gnullvm" },
+    { name = "windows_x86_64_msvc" },
+    { name = "base64" },
+    { name = "bindgen" },
+]
+
+# Advisories configuration with yaml-rust exception
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+ignore = [
+    # Explicitly ignore the unmaintained yaml-rust advisory (from config crate)
+    "RUSTSEC-2024-0320"
+]
+
+# Source registry validation
+[sources]
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

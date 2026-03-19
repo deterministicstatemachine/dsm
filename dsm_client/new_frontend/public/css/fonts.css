@@ -1,0 +1,70 @@
+/* Local font mappings to avoid any external font requests.
+   We alias the expected font-family names to system monospace stacks.
+   This preserves the UI layout and avoids network access in WebView. */
+
+/* Press Start 2P → pixel/monospace system stack */
+@font-face {
+  font-family: 'Press Start 2P';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  /* Use local monospace fonts if available; fallback to generic monospace */
+  src: local('Press Start 2P'),
+       local('ui-monospace'),
+       local('SFMono-Regular'),
+       local('Menlo'),
+       local('Consolas'),
+       local('Liberation Mono'),
+       local('Courier New');
+}
+
+/* Martian Mono → rich monospace system stack */
+@font-face {
+  font-family: 'Martian Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: local('Martian Mono'),
+       local('ui-monospace'),
+       local('SFMono-Regular'),
+       local('Menlo'),
+       local('Consolas'),
+       local('Liberation Mono'),
+       local('Courier New');
+}
+
+@font-face {
+  font-family: 'Martian Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: local('Martian Mono Medium'),
+       local('Martian Mono'),
+       local('ui-monospace'),
+       local('SFMono-Regular'),
+       local('Menlo'),
+       local('Consolas'),
+       local('Liberation Mono'),
+       local('Courier New');
+}
+
+@font-face {
+  font-family: 'Martian Mono';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: local('Martian Mono Bold'),
+       local('Martian Mono'),
+       local('ui-monospace'),
+       local('SFMono-Regular'),
+       local('Menlo'),
+       local('Consolas'),
+       local('Liberation Mono'),
+       local('Courier New');
+}
+
+/* Provide CSS variables as an extra escape hatch wherever possible */
+:root {
+  --font-family-mono: 'Martian Mono', 'ui-monospace', 'SFMono-Regular', Menlo, Consolas, 'Liberation Mono', 'Courier New', monospace;
+  --font-family-pixel: 'Press Start 2P', 'ui-monospace', monospace;
+}

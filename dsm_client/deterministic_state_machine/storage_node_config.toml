@@ -1,0 +1,82 @@
+# DSM Storage Node Configuration
+# This configuration dynamically loads endpoints from ../dsm_env_config.json
+
+# API configuration
+[api]
+bind_address = "0.0.0.0"
+port = 8766
+enable_cors = true
+enable_rate_limits = false
+max_body_size = 10485760  # 10 MB
+enable_tls = true
+post_quantum_transport = true
+
+# Node information
+[node]
+id = "dsm-storage-node-1"
+name = "DSM Storage Node"
+region = "local-dev"
+operator = "Irrefutable Labs"
+version = "0.1.0-beta.1"
+description = "DSM Protocol storage node"
+endpoint = "DYNAMIC_FROM_ENV_CONFIG"  # Loaded from ../dsm_env_config.json
+public_key = "YOUR_NODE_PUBLIC_KEY_HERE"  # Generate with: openssl genrsa 2048 | openssl rsa -pubout
+
+# Storage configuration
+[storage]
+engine = "sqlite"
+capacity = 1073741824  # 1 GB
+data_dir = "./data"  # Relative to working directory
+database_path = "./data/storage.db"  # Relative to working directory
+assignment_strategy = "DeterministicHashing"
+replication_strategy = "FixedReplicas"
+replica_count = 1
+min_regions = 1
+default_ttl = 0  # No expiration by default
+enable_pruning = true
+pruning_interval = 3600  # 1 hour
+
+# Network configuration
+[network]
+listen_addr = "0.0.0.0"
+public_endpoint = "DYNAMIC_FROM_ENV_CONFIG"  # Loaded from ../dsm_env_config.json
+port = 8766
+max_connections = 100
+connection_timeout = 30
+bootstrap_nodes = "DYNAMIC_FROM_ENV_CONFIG"  # Loaded from ../dsm_env_config.json
+enable_discovery = false
+discovery_interval = 300
+max_peers = 10
+
+# Security configuration
+[security]
+private_key_path = "./keys/node.key"  # Relative to working directory
+public_key_path = "./keys/node.pub"  # Relative to working directory
+enable_tls = true
+require_auth = false
+authorized_keys_path = "./keys/authorized_keys.json"  # Relative to working directory
+post_quantum_transport = true
+enable_rate_limits = false
+rate_limit = 1000
+
+# Genesis/MPC/Auxiliary
+[genesis]
+aux_domain = "dsm-genesis"
+protocol_version = "2.1"
+network = "mainnet"
+mpc_threshold = 3
+mpc_max_participants = 5
+mpc_session_timeout = 300000
+
+[device_binding]
+enable_dbrw = true
+entropy_source = "hybrid"
+
+# Logging configuration
+[logging]
+level = "info"
+
+# Environment configuration loading
+[env_config]
+path = "../dsm_env_config.json"
+note = "Network endpoints are loaded dynamically from the central environment config"

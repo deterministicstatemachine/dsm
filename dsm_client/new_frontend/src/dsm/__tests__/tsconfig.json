@@ -1,0 +1,9 @@
+{
+  "extends": "../../../tsconfig.json",
+  "compilerOptions": {
+    "types": ["react", "react-dom", "node", "jest"],
+    "isolatedModules": false
+  },
+  "include": ["./**/*.ts", "./**/*.tsx", "../../../src/setupTests.ts"],
+  "exclude": ["../../../node_modules", "../../../dist"]
+}

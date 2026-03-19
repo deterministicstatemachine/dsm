@@ -1,0 +1,10 @@
+dist/
+node_modules/
+src/generated/ 
+src/**/*.broken.backup.tsx
+# Exclude tests from production linting to keep CI noise-free
+src/**/__tests__/**
+src/**/*.test.ts
+src/**/*.test.tsx
+src/**/*.spec.ts
+src/**/*.spec.tsx

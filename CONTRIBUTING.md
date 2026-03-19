@@ -1,141 +1,127 @@
-# Contributing to DSM
+# Contributing to DSM Protocol
 
-Thank you for your interest in contributing to DSM! This document provides guidelines and instructions for contributing.
+Thank you for taking part in the beta. This document covers how to report issues, suggest improvements, and (if you'd like) contribute code.
 
-## Code of Conduct
+---
 
-This project adheres to the [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.md). By participating, you are expected to uphold this code.
+## Before You Start
 
-## How to Contribute
+- Follow the [Code of Conduct](CODE_OF_CONDUCT.md).
+- Use [SUPPORT.md](SUPPORT.md) for general help and [SECURITY.md](SECURITY.md) for private vulnerability reports.
+- If your change touches DLV specs, policy specs, or generated clients, read [dsm-gen/README.md](dsm-gen/README.md) and [Chapter 16 of the developer handbook](docs/book/16-code-generation.md) first.
 
-### Finding Issues
+---
 
-- Look for issues labeled [`good-first-issue`](https://github.com/deterministicstatemachine/dsm/labels/good-first-issue) if you're new
-- Issues labeled [`help-wanted`](https://github.com/deterministicstatemachine/dsm/labels/help-wanted) are ready for contribution
-- Comment on an issue before starting work to avoid duplicate effort
+## Beta Testing
 
-### Development Setup
+### Reporting Bugs
 
-1. Fork and clone the repository:
+1. Open an issue at **Issues → New Issue**
+2. Use the **Bug Report** template if available, otherwise include:
+   - Device model and Android version
+   - DSM Protocol app version (visible in Settings → About)
+   - Steps to reproduce
+   - What you expected vs. what happened
+   - Attach the diagnostics file: in-app **Settings → Export Diagnostics**
+   - Attach `adb logcat` output if you have it: `adb logcat -d > logcat.txt`
 
-   ```bash
-   git clone https://github.com/YOUR_USERNAME/dsm.git
-   cd dsm
-   ```
+### Reporting Security Issues
 
-2. Ensure you have Rust 1.85.0+ installed:
+Do **not** open a public issue for security vulnerabilities. Follow [SECURITY.md](SECURITY.md) and email **team@irrefutablelabs.org** with details. We will respond within 48 hours.
 
-   ```bash
-   rustup update stable
-   ```
+### Feature Requests
 
-   The `rust-toolchain.toml` will automatically install required components (rustfmt, clippy, rust-analyzer).
+Open an issue with the **Enhancement** label. Describe the use case, not just the feature.
 
-3. Build and test:
+---
 
-   ```bash
-   cargo build --workspace
-   cargo test --workspace
-   ```
+## Development
 
-4. Install additional tools for local checks:
+### Prerequisites
 
-   ```bash
-   cargo install cargo-deny
-   cargo install cargo-audit
-   ```
+See [Chapter 3 — Development Setup](docs/book/03-development-setup.md) for the full environment setup guide.
+
+```
+Base development: Rust stable (rustup), Node.js 20+ (via nvm recommended), protoc
+Android work only: cargo-ndk, Android NDK 27.x, Android SDK with platform-tools (adb), Java 17+, ANDROID_NDK_HOME
+```
+
+### Branching
+
+| Branch | Purpose |
+|---|---|
+| `master` | Stable; all PRs target this |
+| `release/x.y.z` | Release preparation; created from `master` |
+| `fix/short-description` | Bug fixes |
+| `feat/short-description` | New features |
 
 ### Making Changes
 
-1. Create a branch from `main`:
-
-   ```bash
-   git checkout -b feat/your-feature-name
-   ```
-
-2. Make your changes, following the [code style](#code-style) guidelines.
-
-3. Add or update tests for your changes.
-
-4. Ensure all checks pass locally:
-
-   ```bash
-   cargo fmt --all -- --check
-   cargo clippy --workspace --all-targets -- -D warnings
-   cargo test --workspace
-   cargo deny check
-   ```
-
-5. Commit your changes using [Conventional Commits](#commit-messages).
-
-6. Push and open a pull request against `main`.
-
-## Code Style
-
-- **Formatting**: All code must pass `cargo fmt`. Configuration is in `rustfmt.toml`.
-- **Linting**: All code must pass `cargo clippy` with zero warnings. Pedantic and nursery lints are enabled.
-- **No panics**: `unwrap()` is denied in library code. Use proper error handling with `thiserror`.
-- **No unsafe code**: `unsafe` is denied workspace-wide.
-- **Documentation**: All public items should have doc comments.
-- **Line width**: 100 characters maximum.
-- **Imports**: Group by std, external, then crate. Use crate-level granularity.
-
-## Commit Messages
-
-We use [Conventional Commits](https://www.conventionalcommits.org/):
-
-```
-<type>[optional scope]: <description>
-
-[optional body]
-
-[optional footer(s)]
+```bash
+git checkout -b fix/your-description
+# make changes
+make lint
+make build
+make typecheck
+# then run the targeted tests for the area you changed
+git push origin fix/your-description
+# open a PR against master
 ```
 
-Types: `feat`, `fix`, `docs`, `chore`, `refactor`, `test`, `ci`, `perf`
+Targeted validation examples:
+- Rust / SDK / storage work: `make test-rust` or focused `cargo test --package ...`
+- Frontend work: `make test-frontend`
+- Android / JNI work: `make android`
 
-Examples:
-- `feat(core): add state transition validation`
-- `fix(crypto): handle empty input in hash function`
-- `docs: update architecture overview`
-
-## Developer Certificate of Origin (DCO)
-
-All commits must be signed off, certifying that you wrote the code or have the right to submit it under the project's license.
-
-Add `Signed-off-by` to your commits:
+If you are changing vault or policy specifications, validate and regenerate through `dsm-gen` instead of hand-editing generated clients:
 
 ```bash
-git commit -s -m "feat: your feature description"
+cargo run -p dsm-gen -- validate path/to/spec.yaml
+cargo run -p dsm-gen -- client path/to/spec.yaml --lang ts
 ```
 
-Or configure git to always sign off:
+### Primitive Changes
 
-```bash
-git config --local commit.signoff true
+Treat the DSM primitive as closed by default.
+
+- Do not expand the primitive for convenience, flexibility, or future-proofing.
+- New capabilities should be modeled above the primitive as composed protocols.
+- Primitive changes are reserved for soundness fixes, ambiguity removal, simplification without
+  expanding acceptance, or replacement of a broken assumption.
+
+If your change touches acceptance, ordering, proof verification, identity binding, or fork
+exclusion, read [Chapter 17 — DSM Primitive](docs/book/17-dsm-primitive.md) first.
+
+### PR Checklist
+
+- [ ] `make lint` passes (no clippy warnings, fmt clean)
+- [ ] `make build` passes
+- [ ] `make typecheck` passes for frontend-affecting changes
+- [ ] Relevant targeted tests ran for the surfaces touched (`make test-rust`, `make test-frontend`, focused package tests, or Android build/install checks)
+- [ ] `make android` produces a working APK if Android or JNI surfaces changed
+- [ ] No personal paths, keys, or credentials in any file
+- [ ] `git grep -r "TODO\|FIXME\|HACK\|XXX"` returns zero results (these are banned — no exceptions)
+
+### Commit Style
+
+Use conventional commits:
+```
+fix: bluetooth pairing state not reset on disconnect
+feat: add diagnostics export button to settings screen
+chore: bump cargo dependencies
+docs: update SETUP.md with Linux NDK path example
 ```
 
-## Pull Request Process
+---
 
-1. Fill out the pull request template completely.
-2. Ensure all CI checks pass.
-3. At least **2 reviewers** must approve before merging.
-4. Keep PRs focused — one logical change per PR.
-5. Rebase on `main` before requesting review (linear history required).
-6. For security-sensitive changes, tag `@deterministicstatemachine/security-team` in the PR description.
+## License
 
-## Testing Requirements
+This project is dual-licensed under [MIT](LICENSE-MIT) and [Apache 2.0](LICENSE-APACHE). By submitting a pull request, you agree that your contribution will be dual-licensed under these same terms, without any additional conditions.
 
-- All new code must include tests.
-- Unit tests go in the same file as the code (`#[cfg(test)]` module).
-- Integration tests go in the crate's `tests/` directory.
-- Tests must pass on both Ubuntu and macOS (CI matrix).
-- Maintain or improve test coverage.
+---
 
-## Security
+## Contact
 
-**Do not file public issues for security vulnerabilities.** See [SECURITY.md](SECURITY.md) for responsible disclosure instructions.
-
-## Questions?
-
-Open a [discussion](https://github.com/deterministicstatemachine/dsm/discussions) or reach out to the maintainers.
+- Issues: GitHub Issues on this repo
+- Security: team@irrefutablelabs.org
+- General: see [SUPPORT.md](SUPPORT.md)

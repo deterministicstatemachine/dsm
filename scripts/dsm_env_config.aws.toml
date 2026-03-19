@@ -1,0 +1,45 @@
+# DSM environment config — AWS storage nodes (6-node, 3-region)
+# Push to device with: scripts/push_env_override.sh --aws
+#
+# Nodes:
+#   us-east-1:       13.218.83.69, 44.223.31.184
+#   eu-west-1:       54.74.145.172, 3.249.79.215
+#   ap-southeast-1:  18.141.56.252, 13.215.175.231
+
+protocol = "https"
+lan_ip = "0.0.0.0"
+allow_localhost = false
+storage_node_mode = "remote"
+ports = [8080]
+
+bitcoin_network = "signet"
+dbtc_min_confirmations = 1
+mempool_api_url = "https://mempool.space"
+
+# Self-signed CA for AWS storage node TLS certs
+# Path is relative to this config file's directory (resolved by SDK).
+custom_ca_certs = ["ca.crt"]
+
+[[nodes]]
+name = "us-east-1a"
+endpoint = "https://13.218.83.69:8080"
+
+[[nodes]]
+name = "us-east-1b"
+endpoint = "https://44.223.31.184:8080"
+
+[[nodes]]
+name = "eu-west-1a"
+endpoint = "https://54.74.145.172:8080"
+
+[[nodes]]
+name = "eu-west-1b"
+endpoint = "https://3.249.79.215:8080"
+
+[[nodes]]
+name = "ap-southeast-1a"
+endpoint = "https://18.141.56.252:8080"
+
+[[nodes]]
+name = "ap-southeast-1b"
+endpoint = "https://13.215.175.231:8080"

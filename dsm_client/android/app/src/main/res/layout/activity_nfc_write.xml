@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- NFC ring write activity - simple fullscreen UI with status text -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#000000"
+    android:padding="24dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:orientation="vertical"
+        android:gravity="center">
+
+        <TextView
+            android:id="@+id/nfc_write_status"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="READY"
+            android:textSize="32sp"
+            android:textColor="#00FF00"
+            android:fontFamily="monospace"
+            android:textStyle="bold"
+            android:paddingBottom="24dp"/>
+
+        <TextView
+            android:id="@+id/nfc_write_instruction"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Hold your NFC ring near the back of your phone"
+            android:textSize="14sp"
+            android:textColor="#FFFFFF"
+            android:fontFamily="monospace"
+            android:textAlignment="center"
+            android:gravity="center"/>
+
+    </LinearLayout>
+
+</FrameLayout>

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Android 12+ splash customization.
+         This prevents the system from scaling/cropping the launcher adaptive icon in a way that
+         looks clipped during the splash-to-activity transition. -->
+    <style name="Theme.DsmClient.Splash" parent="Theme.DsmClient">
+        <item name="android:windowBackground">@drawable/splash_screen</item>
+        <item name="android:windowSplashScreenBackground">@color/ic_launcher_bg</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/splash_logo_inset</item>
+        <item name="android:windowSplashScreenIconBackgroundColor">@android:color/transparent</item>
+    </style>
+</resources>

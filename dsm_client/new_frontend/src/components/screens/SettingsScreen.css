@@ -1,0 +1,236 @@
+.settings-shell {
+  --settings-bleed: 20px;
+  --settings-shell-bg: var(--bg, #9bbc0f);
+  --settings-shell-text: var(--text-dark, #071f07);
+  --settings-shell-border: var(--border, #306230);
+  --settings-shell-surface: rgba(var(--text-rgb), 0.08);
+  --settings-shell-surface-strong: rgba(var(--text-rgb), 0.14);
+  --settings-shell-surface-soft: rgba(var(--text-rgb), 0.05);
+
+  width: calc(100% + (var(--settings-bleed) * 2));
+  min-height: calc(100% + var(--settings-bleed));
+  margin: calc(var(--settings-bleed) * -1) calc(var(--settings-bleed) * -1) 0;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 8px 8px;
+  overflow-x: hidden;
+  color: var(--settings-shell-text);
+  text-align: left;
+  font-family: "Martian Mono", monospace;
+  background:
+    linear-gradient(180deg, rgba(var(--text-rgb), 0.08), rgba(var(--text-rgb), 0.02)),
+    repeating-linear-gradient(
+      45deg,
+      rgba(var(--text-rgb), 0.08) 0px,
+      rgba(var(--text-rgb), 0.08) 2px,
+      transparent 2px,
+      transparent 4px
+    ),
+    var(--settings-shell-bg);
+}
+
+.settings-shell--lock {
+  justify-content: flex-start;
+}
+
+.settings-shell__title {
+  margin: 0;
+  padding: 6px 0 2px;
+  text-align: center;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+}
+
+.settings-shell__stack {
+  display: grid;
+  gap: 8px;
+}
+
+.settings-shell__panel {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 2px solid var(--settings-shell-border);
+  border-radius: 8px;
+  background:
+    linear-gradient(180deg, rgba(var(--text-rgb), 0.12), rgba(var(--text-rgb), 0.07)),
+    var(--settings-shell-surface);
+  box-shadow: inset 0 1px 0 rgba(var(--bg-rgb), 0.14);
+}
+
+.settings-shell__button-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.settings-shell__button-row > * {
+  flex: 1 1 120px;
+}
+
+.settings-shell__button {
+  width: 100%;
+  min-width: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 2px solid var(--settings-shell-border);
+  border-radius: 12px;
+  background:
+    linear-gradient(180deg, rgba(var(--bg-rgb), 0.38), rgba(var(--bg-rgb), 0.18)),
+    repeating-linear-gradient(
+      45deg,
+      rgba(var(--text-rgb), 0.08) 0px,
+      rgba(var(--text-rgb), 0.08) 2px,
+      transparent 2px,
+      transparent 4px
+    ),
+    var(--settings-shell-surface);
+  color: var(--settings-shell-text);
+  font: inherit;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  text-align: center;
+  cursor: pointer;
+  box-shadow:
+    inset 0 1px 0 rgba(var(--bg-rgb), 0.2),
+    inset 0 -2px 0 rgba(var(--text-rgb), 0.14);
+  transition: transform 0.12s ease, background 0.12s ease;
+}
+
+.settings-shell__button:hover {
+  transform: translateY(-1px);
+}
+
+.settings-shell__button:active {
+  transform: translateY(1px);
+}
+
+.settings-shell__button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.settings-shell__button--stack {
+  align-items: flex-start;
+  text-align: left;
+}
+
+.settings-shell__button.focused {
+  outline: 2px solid var(--settings-shell-text);
+  outline-offset: 2px;
+}
+
+.settings-shell__status {
+  padding: 8px;
+  border: 1px solid var(--settings-shell-border);
+  border-radius: 6px;
+  background: var(--settings-shell-surface-strong);
+  color: var(--settings-shell-text);
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.settings-shell__status--center {
+  text-align: center;
+}
+
+.settings-shell__status--flush {
+  margin-top: 4px;
+}
+
+.settings-shell__info {
+  padding: 8px;
+  border: 1px solid rgba(var(--text-rgb), 0.16);
+  border-radius: 6px;
+  background: var(--settings-shell-surface-soft);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.settings-shell__mono {
+  font-family: "Martian Mono", monospace;
+  word-break: break-all;
+}
+
+.settings-shell__hint {
+  margin-top: auto;
+  padding-top: 4px;
+  text-align: center;
+  font-size: 7px;
+  opacity: 0.45;
+}
+
+.settings-shell .settings-input,
+.settings-shell input[type="text"],
+.settings-shell input[type="password"],
+.settings-shell textarea,
+.settings-shell select {
+  width: 100%;
+  box-sizing: border-box;
+  appearance: none;
+  -webkit-appearance: none;
+  padding: 10px 12px;
+  border: 2px solid var(--settings-shell-border);
+  border-radius: 10px;
+  outline: none;
+  background: rgba(var(--bg-rgb), 0.78);
+  color: var(--settings-shell-text);
+  font: inherit;
+  font-size: 9px;
+  line-height: 1.5;
+  letter-spacing: 0.5px;
+  box-shadow: inset 0 1px 0 rgba(var(--text-rgb), 0.08);
+}
+
+.settings-shell textarea {
+  resize: vertical;
+  min-height: 88px;
+}
+
+.settings-shell .settings-input:focus,
+.settings-shell input[type="text"]:focus,
+.settings-shell input[type="password"]:focus,
+.settings-shell textarea:focus,
+.settings-shell select:focus {
+  border-color: var(--settings-shell-text);
+  box-shadow: 0 0 0 1px var(--settings-shell-text);
+}
+
+.settings-shell .settings-input::placeholder,
+.settings-shell input[type="text"]::placeholder,
+.settings-shell input[type="password"]::placeholder,
+.settings-shell textarea::placeholder {
+  color: var(--settings-shell-text);
+  opacity: 0.48;
+}
+
+.settings-shell code {
+  padding: 0 2px;
+  background: rgba(var(--text-rgb), 0.12);
+  color: inherit;
+}
+
+@media (min-height: 640px) {
+  .settings-shell {
+    gap: 10px;
+    padding: 12px 10px 10px;
+  }
+
+  .settings-shell__panel {
+    gap: 10px;
+    padding: 12px;
+  }
+}

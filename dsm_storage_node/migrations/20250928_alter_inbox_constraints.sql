@@ -1,0 +1,1 @@
+-- No-op: clockless inbox uses inbox_spool with indexes created at init.

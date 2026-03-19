@@ -1,0 +1,30 @@
+# DSM Storage Node — Local Development Configuration
+#
+# Usage:
+#   cargo run --package dsm_storage_node --features local-dev --no-default-features \
+#       -- --config dsm_storage_node/config/local-dev.toml
+#
+# This starts a single storage node with:
+#   - SQLite backend (no PostgreSQL required)
+#   - Bound to 127.0.0.1 only (not externally reachable)
+#   - TLS disabled
+#   - Replication disabled (single node)
+
+[node]
+id = "local-dev-0"
+
+[network]
+listen_addr = "127.0.0.1"
+port = 8080
+max_connections = 64
+
+[tls]
+enabled = false
+
+[database]
+# In local-dev mode the PostgreSQL URL is ignored; SQLite uses this as a file path.
+# The SQLite file will be created automatically.
+url = "dsm-storage-local.db"
+
+[http]
+body_limit_bytes = 1048576   # 1 MiB
