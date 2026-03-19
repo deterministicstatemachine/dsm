@@ -141,11 +141,9 @@ pub fn get_latest_capsule_metadata() -> Result<Option<CapsuleMetadata>> {
             // Use recovery_sync_status count as counterparty count if available,
             // otherwise fall back to the contacts table.
             let count: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM recovery_sync_status",
-                    [],
-                    |row| row.get(0),
-                )
+                .query_row("SELECT COUNT(*) FROM recovery_sync_status", [], |row| {
+                    row.get(0)
+                })
                 .unwrap_or(0);
             if count > 0 {
                 meta.counterparty_count = count as u64;
@@ -469,8 +467,7 @@ pub fn store_capsule_counterparty_ids(device_ids: &[[u8; 32]]) -> Result<()> {
 
 /// Get the counterparty device IDs stored during capsule decryption.
 pub fn get_capsule_counterparty_ids() -> Result<Vec<[u8; 32]>> {
-    let blob = get_recovery_pref("capsule_counterparty_ids")?
-        .unwrap_or_default();
+    let blob = get_recovery_pref("capsule_counterparty_ids")?.unwrap_or_default();
     if blob.len() % 32 != 0 {
         return Err(anyhow!(
             "capsule_counterparty_ids blob length {} not divisible by 32",
@@ -524,10 +521,7 @@ pub fn store_tombstoned_device(
         params![device_id.as_slice(), tombstone_hash, tick as i64],
     )?;
 
-    debug!(
-        "[CLIENT_DB] Stored tombstoned device at tick {}",
-        tick
-    );
+    debug!("[CLIENT_DB] Stored tombstoned device at tick {}", tick);
     Ok(())
 }
 

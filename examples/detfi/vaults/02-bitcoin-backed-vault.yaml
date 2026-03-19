@@ -1,0 +1,51 @@
+# DeTFi Pattern: Bitcoin-Backed Vault (dBTC Tap)
+#
+# A DLV that unlocks when a Bitcoin HTLC is fulfilled on-chain.
+# The depositor locks BTC into a P2WSH HTLC address; once the preimage
+# is revealed and SPV-proven with 100 confirmations, the vault unlocks
+# and dBTC is minted 1:1. If the deposit never confirms, the refund
+# path activates after 1000 chain iterations.
+#
+# Implements dBTC spec sections 6.2-6.4 (dual-hashlock tap construction).
+#
+# Fulfillment: BitcoinHTLC
+# Difficulty:  Intermediate
+#
+# NOTE: All Base32 placeholder keys are for readability only and contain characters
+#   outside the Crockford alphabet. Replace with real values before use.
+#
+# Usage:
+#   dsm-gen validate examples/detfi/vaults/02-bitcoin-backed-vault.yaml
+#   dsm-gen client  examples/detfi/vaults/02-bitcoin-backed-vault.yaml --lang rust
+
+type: "vault"
+name: "BitcoinBackedVault"
+version: "1.0.0"
+description: "dBTC tap vault — Bitcoin HTLC fulfillment mints deterministic BTC"
+
+fulfillment_condition:
+  type: "bitcoin_htlc"
+  hash_lock: "HASHLOCKHASH000000000000000000000000000000000000000000"
+  refund_hash_lock: "REFUNDHASHLOCK0000000000000000000000000000000000000000"
+  refund_iterations: 1000
+  bitcoin_pubkey: "BTCCOMPRESSEDPUBKEY00000000000000000000000000000000000"
+  expected_btc_amount_sats: 100000
+  network: "testnet"
+  min_confirmations: 100
+
+assets:
+  - asset_id: "dBTC"
+    amount: 100000
+    metadata:
+      purpose: "btc_collateral"
+      denomination: "satoshis"
+
+tick_lock:
+  duration_iterations: 50000
+  tick_lock_action:
+    type: "return_to_owner"
+
+metadata:
+  pattern: "dbtc_tap"
+  difficulty: "intermediate"
+  dbtc_spec_ref: "sections_6.2_to_6.4"

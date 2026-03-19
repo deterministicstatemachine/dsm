@@ -1,3 +1,4 @@
+/// <reference types="jest" />
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // SPDX-License-Identifier: Apache-2.0
 // E2E-style test: start offlineSend and simulate a BilateralPrepareResponse arriving over BLE
@@ -165,7 +166,7 @@ describe('E2E: Offline BLE exchange -> wallet refresh', () => {
     };
 
     // Start offline send
-    const offlineSendPromise = offlineSend({ to: recipient, amount: '1', tokenId: 'ERA', bleAddress: 'AA:BB:CC:DD:EE:FF' });
+    const offlineSendPromise = offlineSend({ to: base32CrockfordEncode(recipient), amount: '1', tokenId: 'ERA', bleAddress: 'AA:BB:CC:DD:EE:FF' });
 
     // Emit TRANSFER_COMPLETE event to resolve offlineSend
     await new Promise((r) => setTimeout(r, 0));
@@ -199,7 +200,7 @@ describe('E2E: Offline BLE exchange -> wallet refresh', () => {
     }));
 
     expect(handler).toHaveBeenCalled();
-    const calledWith = handler.mock.calls.find(c => c && c[0] && typeof c[0].source === 'string' && c[0].source.indexOf('bilateral') >= 0);
+    const calledWith = handler.mock.calls.find((c: any) => c && c[0] && typeof c[0].source === 'string' && c[0].source.indexOf('bilateral') >= 0);
     expect(Boolean(calledWith)).toBe(true);
     unsubscribe();
   });

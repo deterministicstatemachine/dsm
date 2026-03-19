@@ -201,7 +201,11 @@ impl AppRouterImpl {
                 // Default to ERA when no token_id provided; canonicalize for consistent SQLite lookups.
                 let token_for_query_raw = token_id_opt.as_deref().unwrap_or("ERA");
                 let token_for_query_owned = canonicalize_token_id(token_for_query_raw);
-                let token_for_query = if token_for_query_owned.is_empty() { token_for_query_raw } else { &token_for_query_owned };
+                let token_for_query = if token_for_query_owned.is_empty() {
+                    token_for_query_raw
+                } else {
+                    &token_for_query_owned
+                };
 
                 // For non-ERA tokens, prefer SQLite (authoritative after bilateral transfers).
                 // Bilateral send/recv update SQLite only, not the in-memory wallet cache.
@@ -487,11 +491,12 @@ impl AppRouterImpl {
                     let mut seen_tokens: std::collections::HashSet<String> =
                         std::collections::HashSet::new();
                     for k in cs.token_balances.keys() {
-                        let token_id = canonicalize_token_id(&if let Some((_, t)) = k.split_once('|') {
-                            t.to_string()
-                        } else {
-                            k.clone()
-                        });
+                        let token_id =
+                            canonicalize_token_id(&if let Some((_, t)) = k.split_once('|') {
+                                t.to_string()
+                            } else {
+                                k.clone()
+                            });
                         if token_id == "ERA" {
                             continue;
                         }
@@ -782,7 +787,7 @@ impl AppRouterImpl {
                                 .await;
                             return err(
                                 "wallet.sendOffline: Java VM unavailable for BLE dispatch".into()
-                            )
+                            );
                         }
                     };
                     // JNI AttachGuard is !Send — do all JNI work in a sync block,
@@ -828,13 +833,13 @@ impl AppRouterImpl {
                             return err(
                                 "wallet.sendOffline: BLE bridge rejected the prepared chunks"
                                     .into(),
-                            )
+                            );
                         }
                         Err(e) => {
                             coordinator
                                 .cancel_prepared_session_for_counterparty(counterparty_device_id)
                                 .await;
-                            return err(e)
+                            return err(e);
                         }
                     }
 

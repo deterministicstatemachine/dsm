@@ -420,7 +420,8 @@ impl RecoverySDK {
             Ok((idx, size)) => {
                 log::info!(
                     "[NFC_BACKUP] Auto-refreshed capsule index={} size={}",
-                    idx, size,
+                    idx,
+                    size,
                 );
             }
             Err(e) => {
@@ -440,9 +441,8 @@ impl RecoverySDK {
         };
 
         // Read current state
-        let smt_root = crate::sdk::app_state::AppState::get_smt_root().ok_or_else(|| {
-            DsmError::InvalidState("SMT root not available".to_string())
-        })?;
+        let smt_root = crate::sdk::app_state::AppState::get_smt_root()
+            .ok_or_else(|| DsmError::InvalidState("SMT root not available".to_string()))?;
 
         // Gather counterparty tips
         let mut counterparty_tips: HashMap<String, (u64, Vec<u8>)> = HashMap::new();

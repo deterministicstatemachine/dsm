@@ -549,7 +549,10 @@ mod tests {
 
         // Encoding is deterministic: re-encode must produce identical bytes
         let bytes2 = decoded.to_bytes();
-        assert_eq!(bytes, bytes2, "re-encoding must be identical (deterministic)");
+        assert_eq!(
+            bytes, bytes2,
+            "re-encoding must be identical (deterministic)"
+        );
 
         Ok(())
     }

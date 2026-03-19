@@ -1517,7 +1517,8 @@ impl LimboVault {
         let mut same_chain_anchored = true;
         if let Some(ref entry_hdr) = self.entry_header {
             use crate::bitcoin::header_chain::verify_entry_anchor;
-            same_chain_anchored = verify_entry_anchor(entry_hdr, block_header, header_chain, btc_network)?;
+            same_chain_anchored =
+                verify_entry_anchor(entry_hdr, block_header, header_chain, btc_network)?;
             if !same_chain_anchored {
                 return Err(DsmError::invalid_operation(
                     "Exit block does not chain from entry header anchor (Invariant 19)",

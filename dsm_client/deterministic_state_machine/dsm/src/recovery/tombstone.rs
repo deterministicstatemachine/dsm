@@ -106,19 +106,34 @@ impl TombstoneReceipt {
         let mut pos = 0;
         let device_id_bytes = Self::decode_field(data, &mut pos)?;
         let device_id = String::from_utf8(device_id_bytes).map_err(|e| {
-            DsmError::serialization_error("Invalid UTF-8 in device_id", "tombstone", None::<&str>, Some(e))
+            DsmError::serialization_error(
+                "Invalid UTF-8 in device_id",
+                "tombstone",
+                None::<&str>,
+                Some(e),
+            )
         })?;
         let old_smt_root = Self::decode_field(data, &mut pos)?;
         if pos + 8 > data.len() {
-            return Err(DsmError::serialization_error("Truncated old_counter", "tombstone", None::<&str>, None::<std::io::Error>));
+            return Err(DsmError::serialization_error(
+                "Truncated old_counter",
+                "tombstone",
+                None::<&str>,
+                None::<std::io::Error>,
+            ));
         }
-        let old_counter = u64::from_le_bytes(data[pos..pos + 8].try_into().expect("8 bytes"));
+        let old_counter = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap_or_default());
         pos += 8;
         let old_rollup_hash = Self::decode_field(data, &mut pos)?;
         if pos + 8 > data.len() {
-            return Err(DsmError::serialization_error("Truncated tick", "tombstone", None::<&str>, None::<std::io::Error>));
+            return Err(DsmError::serialization_error(
+                "Truncated tick",
+                "tombstone",
+                None::<&str>,
+                None::<std::io::Error>,
+            ));
         }
-        let tick = u64::from_le_bytes(data[pos..pos + 8].try_into().expect("8 bytes"));
+        let tick = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap_or_default());
         pos += 8;
         let signature = Self::decode_field(data, &mut pos)?;
         let tombstone_hash = Self::decode_field(data, &mut pos)?;
@@ -141,12 +156,22 @@ impl TombstoneReceipt {
 
     fn decode_field(data: &[u8], pos: &mut usize) -> Result<Vec<u8>, DsmError> {
         if *pos + 4 > data.len() {
-            return Err(DsmError::serialization_error("Truncated field length", "tombstone", None::<&str>, None::<std::io::Error>));
+            return Err(DsmError::serialization_error(
+                "Truncated field length",
+                "tombstone",
+                None::<&str>,
+                None::<std::io::Error>,
+            ));
         }
-        let len = u32::from_be_bytes(data[*pos..*pos + 4].try_into().expect("4 bytes")) as usize;
+        let len = u32::from_be_bytes(data[*pos..*pos + 4].try_into().unwrap_or_default()) as usize;
         *pos += 4;
         if *pos + len > data.len() {
-            return Err(DsmError::serialization_error("Truncated field data", "tombstone", None::<&str>, None::<std::io::Error>));
+            return Err(DsmError::serialization_error(
+                "Truncated field data",
+                "tombstone",
+                None::<&str>,
+                None::<std::io::Error>,
+            ));
         }
         let field = data[*pos..*pos + len].to_vec();
         *pos += len;

@@ -17,6 +17,15 @@ function btcError(route: string, msg: string): never {
   logger.error(`[BitcoinTap] ${full}`);
   throw new Error(full);
 }
+
+/** Safe decode: returns null for empty/insufficient bridge responses instead of throwing. */
+function safeDecodeEnvelope(route: string, res: Uint8Array) {
+  if (!res || res.length < 2) {
+    logger.warn(`[BitcoinTap] ${route}: empty response (${res?.length ?? 0} bytes), skipping decode`);
+    return null;
+  }
+  return decodeFramedEnvelopeV3(res);
+}
 import {
   AppStateRequest,
   ArgPack,
@@ -179,7 +188,8 @@ export interface BitcoinWalletHealth {
  */
 export async function getDbtcBalance(): Promise<DbtcBalance> {
   const res = await appRouterQueryBin('bitcoin.balance');
-  const env = decodeFramedEnvelopeV3(res);
+  const env = safeDecodeEnvelope('bitcoin.balance', res);
+  if (!env) return { available: BigInt(0), locked: BigInt(0), source: 'UNKNOWN' };
   const payload = env.payload;
   if (payload.case === 'balanceGetResponse') {
     const resp = payload.value as BalanceGetResponse;
@@ -202,7 +212,8 @@ export async function getDbtcBalance(): Promise<DbtcBalance> {
  */
 export async function getNativeBtcBalance(): Promise<NativeBtcBalance> {
   const res = await appRouterQueryBin('bitcoin.wallet.balance');
-  const env = decodeFramedEnvelopeV3(res);
+  const env = safeDecodeEnvelope('bitcoin.wallet.balance', res);
+  if (!env) return { available: BigInt(0), locked: BigInt(0), source: 'UNKNOWN' };
   const payload = env.payload;
   if (payload.case === 'balanceGetResponse') {
     const resp = payload.value as BalanceGetResponse;

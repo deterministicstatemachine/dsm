@@ -48,7 +48,7 @@ assert_pattern "$SDK_ROUTER" "process_online_transfer_logic" "sdk online transfe
 
 # Offline bilateral prepare path
 assert_pattern "$FRONT_TX" "offlineSend(" "frontend offline send entrypoint missing"
-assert_pattern "$FRONT_TX" "bilateralOfflineSendBin(" "frontend offline send must call bilateral bridge"
+assert_pattern "$FRONT_TX" "appRouterInvokeBin('wallet.sendOffline'" "frontend offline send must route via wallet.sendOffline"
 assert_pattern "$FRONT_BRIDGE" "methodName: 'bilateralOfflineSend'" "bridge must route bilateral offline send method"
 assert_pattern "$JNI_BRIDGE" "Java_com_dsm_wallet_bridge_UnifiedNativeApi_bilateralOfflineSend" "jni bilateral offline entrypoint missing"
 

@@ -1,0 +1,37 @@
+# DSM Code Owners
+# These owners will be requested for review on PRs touching their areas.
+
+# Default: core team reviews everything
+* @deterministicstatemachine/core
+
+# Cryptography (requires crypto-aware review)
+dsm_client/deterministic_state_machine/dsm/src/crypto/ @deterministicstatemachine/core
+dsm_client/deterministic_state_machine/dsm/src/recovery/ @deterministicstatemachine/core
+
+# Protocol core
+dsm_client/deterministic_state_machine/dsm/src/core/ @deterministicstatemachine/core
+dsm_client/deterministic_state_machine/dsm/src/types/ @deterministicstatemachine/core
+
+# SDK / JNI bridge
+dsm_client/deterministic_state_machine/dsm_sdk/ @deterministicstatemachine/core
+
+# Frontend
+dsm_client/new_frontend/ @deterministicstatemachine/core
+
+# Android
+dsm_client/android/ @deterministicstatemachine/core
+
+# Storage nodes
+dsm_storage_node/ @deterministicstatemachine/core
+
+# CI/CD and infrastructure
+.github/ @deterministicstatemachine/core
+ci/ @deterministicstatemachine/core
+scripts/ @deterministicstatemachine/core
+
+# Documentation
+docs/ @deterministicstatemachine/core
+*.md @deterministicstatemachine/core
+
+# Protocol definition
+proto/ @deterministicstatemachine/core

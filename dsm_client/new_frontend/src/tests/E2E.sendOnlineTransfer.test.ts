@@ -1,5 +1,7 @@
+/// <reference types="jest" />
 import * as dsm from '../dsm/index';
 import * as pb from '../proto/dsm_app_pb';
+import { encodeBase32Crockford } from '../utils/textId';
 
 // Helper to wrap response in DSM_BRIDGE format
 function wrapSuccessEnvelope(data: Uint8Array): Uint8Array {
@@ -19,7 +21,7 @@ function wrapSuccessEnvelope(data: Uint8Array): Uint8Array {
 function wrapSuccessRaw(data: Uint8Array): Uint8Array {
   // Return BridgeRpcResponse with raw data (for direct bridge methods)
   const br = new pb.BridgeRpcResponse({
-    result: { case: 'success', value: { data } }
+    result: { case: 'success', value: { data: data as Uint8Array<ArrayBuffer> } }
   });
   return br.toBinary();
 }
@@ -87,7 +89,7 @@ describe('E2E: sendOnlineTransfer (unit-level, mocked storage)', () => {
     jest.spyOn(require('../dsm/WebViewBridge'), 'appRouterInvokeBin').mockImplementation(mockAppRouterInvoke);
 
     // Run sendOnlineTransfer
-    const res = await dsm.sendOnlineTransfer({ to: devB, amount: 1n, tokenId: 'ERA' });
+    const res = await dsm.sendOnlineTransfer({ to: encodeBase32Crockford(devB), amount: 1n, tokenId: 'ERA' });
     expect(res.accepted).toBe(true);
     expect(res.newBalance).toBe(1n);
     // Verify it called appRouterInvokeBin with 'wallet.send'

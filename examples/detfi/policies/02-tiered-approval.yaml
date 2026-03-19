@@ -1,0 +1,69 @@
+# DeTFi Pattern: Tiered Approval Policy
+#
+# A multi-rule CPTA for corporate treasury management. Transfers are
+# evaluated against rules in priority order:
+#
+#   1. Flagged accounts are always blocked                (priority 400)
+#   2. Whitelisted partners bypass all other checks       (priority 300)
+#   3. Large transfers require dual-signature approval    (priority 200)
+#   4. Small transfers auto-approved within daily limit   (priority 100)
+#
+# Difficulty: Intermediate
+#
+# Usage:
+#   dsm-gen validate examples/detfi/policies/02-tiered-approval.yaml
+#   dsm-gen client  examples/detfi/policies/02-tiered-approval.yaml --lang kotlin
+
+type: "policy"
+name: "TieredApprovalPolicy"
+version: "1.0.0"
+description: "Corporate treasury policy with tiered approval thresholds"
+
+rules:
+  - name: "flagged_account_block"
+    condition:
+      condition_type: "custom"
+      parameters:
+        check: "account_flag"
+        flag_type: "frozen"
+        action_on_match: "block"
+    action:
+      type: "deny"
+    priority: 400
+
+  - name: "trusted_partner_bypass"
+    condition:
+      condition_type: "whitelist"
+      parameters:
+        partners: "PARTNER_A_DEVICEID,PARTNER_B_DEVICEID,PARTNER_C_DEVICEID"
+        match_field: "recipient"
+    action:
+      type: "allow"
+    priority: 300
+
+  - name: "large_transfer_approval"
+    condition:
+      condition_type: "signature_required"
+      parameters:
+        count: "2"
+        reason: "dual_authorization"
+        threshold_amount: "25000"
+    action:
+      type: "require_approval"
+    priority: 200
+
+  - name: "small_transfer_auto"
+    condition:
+      condition_type: "amount_limit"
+      parameters:
+        max_amount: "5000"
+        currency: "DSM"
+        window_iterations: "43200"
+    action:
+      type: "allow"
+    priority: 100
+
+metadata:
+  department: "treasury"
+  pattern: "tiered_approval"
+  difficulty: "intermediate"

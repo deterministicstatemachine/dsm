@@ -251,10 +251,7 @@ impl SessionStore {
     // -- Persistence ---------------------------------------------------------
 
     /// Serialize a session to SQLite.
-    pub async fn persist_session(
-        &self,
-        session: &BilateralBleSession,
-    ) -> Result<(), DsmError> {
+    pub async fn persist_session(&self, session: &BilateralBleSession) -> Result<(), DsmError> {
         let record = BilateralSessionRecord {
             commitment_hash: session.commitment_hash.to_vec(),
             counterparty_device_id: session.counterparty_device_id.to_vec(),
@@ -361,8 +358,9 @@ impl SessionStore {
 
     /// Reconcile in-memory state with SQLite. Returns count of changes applied.
     pub async fn reconcile_with_storage(&self) -> Result<usize, DsmError> {
-        let db_sessions = get_all_bilateral_sessions()
-            .map_err(|e| DsmError::invalid_operation(format!("Failed to load sessions for reconcile: {e}")))?;
+        let db_sessions = get_all_bilateral_sessions().map_err(|e| {
+            DsmError::invalid_operation(format!("Failed to load sessions for reconcile: {e}"))
+        })?;
         let mut count = 0;
         let mut sessions = self.sessions.lock().await;
         for record in db_sessions {
@@ -396,8 +394,9 @@ impl SessionStore {
     /// Does NOT run recovery finalization — the handler calls
     /// `find_recoverable_sessions()` + its own finalization logic for that.
     pub async fn restore_from_storage(&self) -> Result<usize, DsmError> {
-        let records = get_all_bilateral_sessions()
-            .map_err(|e| DsmError::invalid_operation(format!("Failed to load bilateral sessions: {e}")))?;
+        let records = get_all_bilateral_sessions().map_err(|e| {
+            DsmError::invalid_operation(format!("Failed to load bilateral sessions: {e}"))
+        })?;
 
         let mut restored = 0;
         let mut sessions = self.sessions.lock().await;
@@ -413,10 +412,7 @@ impl SessionStore {
                 restored += 1;
             }
         }
-        info!(
-            "[SessionStore] Restored {} sessions from storage",
-            restored
-        );
+        info!("[SessionStore] Restored {} sessions from storage", restored);
         Ok(restored)
     }
 

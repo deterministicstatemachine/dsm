@@ -1,3 +1,4 @@
+/// <reference types="jest" />
 /* eslint-disable no-console */
 // E2E Test: Online transaction full cycle (submit -> recipient retrieve)
 // Run with: DSM_RUN_STORAGE_NODES=1 npm test -- src/tests/E2E.online.fullcycle.test.ts -i
