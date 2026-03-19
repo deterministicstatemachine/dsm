@@ -110,7 +110,7 @@ ff = "0.13.0"
 # Post-quantum cryptography (pqcrypto-mlkem used via smart_commitment_sdk)
 
 # Networking
-rustls = { version = "0.21.10", features = ["dangerous_configuration"] }
+rustls = { version = "0.21.10" }
 rustls-pki-types = "0.2.1"
 webpki = "0.22.2"
 reqwest = { version = "0.12.2", default-features = false, features = ["rustls-tls", "json"] }

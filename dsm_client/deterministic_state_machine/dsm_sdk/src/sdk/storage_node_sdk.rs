@@ -313,6 +313,7 @@ pub struct GenesisCreationResponse {
 }
 
 #[derive(Debug, Clone)]
+#[derive(PartialEq)]
 pub enum StorageNodeErrorKind {
     Network,
     Timeout,
@@ -329,8 +330,7 @@ pub enum StorageNodeErrorKind {
 #[derive(Debug, Clone)]
 pub struct StorageNodeError {
     message: String,
-    #[allow(dead_code)]
-    kind: StorageNodeErrorKind,
+    pub(crate) kind: StorageNodeErrorKind,
 }
 
 impl StorageNodeError {
@@ -2386,6 +2386,42 @@ impl StorageNodeSDK {
             event_counter: dt::tick(),
         };
         Ok(resp)
+    }
+}
+
+// ────────────────────────────────────────────────────────────────
+// Blocking convenience helpers for recovery route handlers.
+// These create a short-lived runtime + SDK to perform a single
+// storage operation synchronously.  Used by recovery_routes.rs.
+// ────────────────────────────────────────────────────────────────
+
+/// Store data at a key on the first available storage node (blocking).
+pub fn put_to_storage(key: &str, data: &[u8]) -> Result<(), StorageNodeError> {
+    let rt = tokio::runtime::Runtime::new()
+        .map_err(|e| StorageNodeError::new(format!("Failed to create tokio runtime: {e}")))?;
+    let cfg = rt.block_on(StorageNodeConfig::from_env_config())?;
+    let sdk = rt
+        .block_on(StorageNodeSDK::new(cfg))
+        .map_err(|e| StorageNodeError::new(format!("SDK init failed: {e}")))?;
+
+    rt.block_on(sdk.inner.put(key, data, None))?;
+    Ok(())
+}
+
+/// Retrieve data by key from the first available storage node (blocking).
+/// Returns `Ok(None)` if the key is not found.
+pub fn get_from_storage(key: &str) -> Result<Option<Vec<u8>>, StorageNodeError> {
+    let rt = tokio::runtime::Runtime::new()
+        .map_err(|e| StorageNodeError::new(format!("Failed to create tokio runtime: {e}")))?;
+    let cfg = rt.block_on(StorageNodeConfig::from_env_config())?;
+    let sdk = rt
+        .block_on(StorageNodeSDK::new(cfg))
+        .map_err(|e| StorageNodeError::new(format!("SDK init failed: {e}")))?;
+
+    match rt.block_on(sdk.inner.get(key)) {
+        Ok(data) => Ok(Some(data)),
+        Err(e) if e.kind == StorageNodeErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
     }
 }
 

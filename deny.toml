@@ -9,7 +9,13 @@ highlight = "all"
 # If you want to enforce "no serde/json/base64/etc" in *specific crates or paths*,
 # do it with crate-level lints, feature flags, or workspace policy checks.
 # Cargo-deny bans are global (including transitive deps) and will cause noisy failures.
-deny = []
+deny = [
+    # pqcrypto umbrella crate removed in favour of pure-Rust ml-kem + custom SPHINCS+.
+    # Ban prevents accidental re-introduction (C-compiled, caused SIGILL on ARM).
+    { name = "pqcrypto" },
+    { name = "pqcrypto-mlkem" },
+    { name = "pqcrypto-sphincsplus" },
+]
 
 [sources]
 unknown-registry = "deny"
@@ -50,9 +56,6 @@ yanked = "deny"
 # We fail the build only on vulnerabilities. Unmaintained crates are tracked here
 # so cargo-deny can remain strict without blocking development.
 ignore = [
-    # Transitive via pqcrypto-*; no fixed upgrade currently.
-    "RUSTSEC-2024-0436", # paste: unmaintained
-
     # Transitive; rustls recommends migrating to rustls-pki-types PEM APIs.
     "RUSTSEC-2025-0134", # rustls-pemfile: unmaintained
 
