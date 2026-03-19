@@ -21,7 +21,7 @@
 - [ ] I updated docs or comments when behavior changed
 - [ ] I did not include secrets, local paths, or machine-specific config
 - [ ] I kept unrelated changes out of this PR
-- [ ] `git grep -r "TODO\|FIXME\|HACK\|XXX"` returns zero results
+- [ ] `git grep -r -E 'TODO|FIXME|HACK|XXX'` returns zero results
 
 ## Notes
 
