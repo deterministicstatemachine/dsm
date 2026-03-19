@@ -77,8 +77,14 @@ if (typeof (global as any).window !== 'undefined') {
       }
       
       if (method === 'appRouterInvoke') {
-        // Return empty success for router calls
+        // Return empty success for router invoke calls
         return createDsmBridgeSuccessResponse(new Uint8Array(0));
+      }
+
+      if (method === 'appRouterQuery') {
+        // Return empty success with 8-byte router request-ID prefix for router query calls
+        const prefix = new Uint8Array(8);
+        return createDsmBridgeSuccessResponse(prefix);
       }
 
       // Default: return an error for unmocked methods

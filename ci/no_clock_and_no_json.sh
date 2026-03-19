@@ -54,10 +54,13 @@ allow_globs=(
   --glob '!**/cpta/migrations/**'                 # offline migrations may reference deprecated encodings
   --glob '!**/Cargo.lock'                         # dependency lockfiles may mention banned libs
   --glob '!**/handlers/app_router_impl.rs'        # Bitcoin Core JSON-RPC boundary (external API)
+  --glob '!**/handlers/mempool_api.rs'             # mempool.space REST API boundary (external JSON API)
   --glob '!**/bluetooth/**'                       # BLE session staleness (permitted per §4 wall-clock rule)
   --glob '!**/jni/ble_events.rs'                  # BLE event buffering (permitted operational use)
   --glob '!**/api/rate_limit.rs'                  # transport-layer DoS rate limiting (permitted)
   --glob '!**/api/unilateral_api.rs'              # transport-layer rate limiting (permitted)
+  --glob '!**/handlers/storage_routes.rs'          # transport-layer performance timing (Instant::now for latency measurement)
+  --glob '!**/bridge/ble/BleCoordinator.kt'        # BLE scan interval timing (operational, not protocol)
   --glob '!**/chaos_testing.rs'                   # testing/benchmarks
   --glob '!**/crypto/dbrw.rs'                     # DBRW internal migration state (bincode at-rest, not protocol)
   --glob '!**/jni/dbrw.rs'                        # DBRW JNI bridge (bincode for migration snapshot)

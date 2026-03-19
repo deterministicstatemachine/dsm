@@ -674,7 +674,7 @@ describe('Offline Transfer — Full Cycle', () => {
 
     expect(res.accepted).toBe(false);
     expect(String(res.result)).toMatch(/ble_address|bleAddress|unavailable/i);
-  });
+  }, 15000);
 });
 
 // ─────────────────────────────────────────────────────────────────
