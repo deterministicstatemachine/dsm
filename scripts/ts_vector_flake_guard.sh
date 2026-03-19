@@ -19,7 +19,7 @@ printf "🔁 TS vector flake guard: loops=%s threads=%s\n" "$LOOPS" "$THREADS"
 
 for i in $(seq 1 "$LOOPS"); do
   printf "\n== Loop %s/%s ==\n" "$i" "$LOOPS"
-  pnpm -w --filter dsm-wallet run test -- --runTestsByPath "${TESTS[@]}" --maxWorkers="${THREADS}"
+  (cd dsm_client/new_frontend && npx jest --runTestsByPath "${TESTS[@]}" --maxWorkers="${THREADS}")
 done
 
 printf "\n✅ TS vector flake guard complete (%s loops).\n" "$LOOPS"
