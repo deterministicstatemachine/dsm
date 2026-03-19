@@ -484,7 +484,8 @@ pub fn deserialize_inclusion_proof(
             "inclusion proof truncated at sibling count",
         ));
     }
-    let count = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+    let count =
+        u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap_or_default()) as usize;
     offset += 4;
     if data.len() < offset + count * 32 {
         return Err(DsmError::invalid_operation(

@@ -39,35 +39,6 @@ impl CodeGenerator for RustGenerator {
 }
 
 impl RustGenerator {
-    fn sanitize_identifier(name: &str) -> String {
-        let sanitized: String = name
-            .chars()
-            .map(|c| {
-                if c.is_alphanumeric() || c == '_' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
-        if sanitized.is_empty() {
-            "Vault".to_string()
-        } else {
-            sanitized
-        }
-    }
-
-    fn base_vault_name(spec: &VaultSpecification) -> String {
-        let sanitized = Self::sanitize_identifier(&spec.name);
-        let suffix = "vault";
-
-        if sanitized.len() >= suffix.len() && sanitized.to_lowercase().ends_with(suffix) {
-            sanitized[..sanitized.len() - suffix.len()].to_string()
-        } else {
-            sanitized
-        }
-    }
-
     fn generate_header(&self) -> String {
         // Clockless/deterministic: never include wall-clock markers in generated output.
         let marker_suffix = String::new();
@@ -139,7 +110,7 @@ impl RustGenerator {
     }
 
     fn generate_vault_types(&self, spec: &VaultSpecification) -> Result<String> {
-        let class_name = Self::base_vault_name(spec);
+        let class_name = super::base_vault_name(spec);
         let mut code = String::new();
 
         // FulfillmentCondition mirrors FulfillmentMechanism oneof in dsm_app.proto.
@@ -198,8 +169,8 @@ impl RustGenerator {
         code.push_str("    MultiSignature(MultiSignature),           // proto tag 4\n");
         code.push_str("    StateReference(StateReference),          // proto tag 5\n");
         code.push_str("    RandomWalkVerification(RandomWalkVerification), // proto tag 6\n");
-        code.push_str("    And(Vec<FulfillmentCondition>),          // proto tag 7\n");
-        code.push_str("    Or(Vec<FulfillmentCondition>),           // proto tag 8\n");
+        code.push_str("    And(Vec<Box<FulfillmentCondition>>),     // proto tag 7\n");
+        code.push_str("    Or(Vec<Box<FulfillmentCondition>>),      // proto tag 8\n");
         code.push_str("    BitcoinHtlc(BitcoinHtlc),               // proto tag 9\n");
         code.push_str("}\n\n");
 
@@ -305,7 +276,7 @@ impl RustGenerator {
     }
 
     fn generate_vault_client_struct(&self, spec: &VaultSpecification) -> Result<String> {
-        let class_name = Self::base_vault_name(spec);
+        let class_name = super::base_vault_name(spec);
         let mut code = String::new();
 
         code.push_str(&format!(
@@ -320,7 +291,7 @@ impl RustGenerator {
     }
 
     fn generate_vault_client_impl(&self, spec: &VaultSpecification) -> Result<String> {
-        let class_name = Self::base_vault_name(spec);
+        let class_name = super::base_vault_name(spec);
         let mut code = String::new();
 
         code.push_str(&format!(
@@ -465,10 +436,15 @@ impl RustGenerator {
         // carried in the transaction/context (not wall-clock).
         code.push_str("    fn evaluate_iteration_window(\n");
         code.push_str("        &self,\n");
-        code.push_str("        _condition: &RuleCondition,\n");
-        code.push_str("        _context: &TransactionContext,\n");
+        code.push_str("        condition: &RuleCondition,\n");
+        code.push_str("        context: &TransactionContext,\n");
         code.push_str("    ) -> Result<bool> {\n");
-        code.push_str("        // Fail-closed by default in generated code.\n");
+        code.push_str("        // Deterministic tick-based window check (no wall-clock).\n");
+        code.push_str("        if let Some(max_str) = condition.parameters.get(\"maxIterations\") {\n");
+        code.push_str("            if let Ok(max_tick) = max_str.parse::<u64>() {\n");
+        code.push_str("                return Ok(context.tick <= max_tick);\n");
+        code.push_str("            }\n");
+        code.push_str("        }\n");
         code.push_str("        Ok(false)\n");
         code.push_str("    }\n\n");
 
@@ -578,7 +554,7 @@ impl RustGenerator {
     }
 
     fn generate_factory_struct(&self, spec: &VaultSpecification) -> Result<String> {
-        let class_name = Self::base_vault_name(spec);
+        let class_name = super::base_vault_name(spec);
         let mut code = String::new();
 
         code.push_str(&format!(
@@ -592,7 +568,7 @@ impl RustGenerator {
     }
 
     fn generate_factory_impl(&self, spec: &VaultSpecification) -> Result<String> {
-        let class_name = Self::base_vault_name(spec);
+        let class_name = super::base_vault_name(spec);
         let mut code = String::new();
 
         code.push_str(&format!(
