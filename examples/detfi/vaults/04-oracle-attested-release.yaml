@@ -12,6 +12,12 @@
 # Fulfillment: Or(CryptoCondition, StateReference)
 # Difficulty:  Advanced
 #
+# NOTE: All Base32 placeholder keys are for readability only and contain characters
+#   outside the Crockford alphabet. Replace with real values before use.
+#
+# Recovery is intentionally omitted — the burn tick-lock action makes recovery
+# inappropriate for this insurance pattern (no-claim = no payout).
+#
 # Usage:
 #   dsm-gen validate examples/detfi/vaults/04-oracle-attested-release.yaml
 #   dsm-gen client  examples/detfi/vaults/04-oracle-attested-release.yaml --lang swift

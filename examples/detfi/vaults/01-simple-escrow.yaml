@@ -7,6 +7,10 @@
 # Fulfillment: Payment (single condition)
 # Difficulty:  Beginner
 #
+# NOTE: All Base32 placeholder keys (e.g., ALICEDEVICEID...) are for readability
+#   only and contain characters outside the Crockford alphabet. Replace with real
+#   SPHINCS+ public keys or BLAKE3 hashes (Base32 Crockford encoded) before use.
+#
 # Usage:
 #   dsm-gen validate examples/detfi/vaults/01-simple-escrow.yaml
 #   dsm-gen client  examples/detfi/vaults/01-simple-escrow.yaml --lang ts,kotlin

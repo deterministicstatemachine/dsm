@@ -8,7 +8,8 @@
 #   1. Blacklisted jurisdictions are always denied       (priority 300)
 #   2. High-value transfers require manual approval      (priority 200)
 #   3. Standard transfers within limits are allowed      (priority 100)
-#   4. Off-hours transfers are delayed by iterations     (priority 75)
+#   4. Transfers in a specific iteration range are delayed (priority 75)
+#      (iteration range, not wall-clock hours — DSM is clockless)
 #
 # Difficulty: Beginner
 #
