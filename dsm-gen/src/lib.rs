@@ -5,6 +5,7 @@
 
 pub mod generators;
 pub mod schema;
+pub mod base32;
 
 // Re-export commonly used types
 pub use generators::*;
