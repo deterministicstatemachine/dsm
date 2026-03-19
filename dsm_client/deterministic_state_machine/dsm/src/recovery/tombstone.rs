@@ -122,7 +122,7 @@ impl TombstoneReceipt {
                 None::<std::io::Error>,
             ));
         }
-        let old_counter = u64::from_le_bytes(data[pos..pos + 8].try_into().expect("8 bytes"));
+        let old_counter = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap_or_default());
         pos += 8;
         let old_rollup_hash = Self::decode_field(data, &mut pos)?;
         if pos + 8 > data.len() {
@@ -133,7 +133,7 @@ impl TombstoneReceipt {
                 None::<std::io::Error>,
             ));
         }
-        let tick = u64::from_le_bytes(data[pos..pos + 8].try_into().expect("8 bytes"));
+        let tick = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap_or_default());
         pos += 8;
         let signature = Self::decode_field(data, &mut pos)?;
         let tombstone_hash = Self::decode_field(data, &mut pos)?;
@@ -163,7 +163,7 @@ impl TombstoneReceipt {
                 None::<std::io::Error>,
             ));
         }
-        let len = u32::from_be_bytes(data[*pos..*pos + 4].try_into().expect("4 bytes")) as usize;
+        let len = u32::from_be_bytes(data[*pos..*pos + 4].try_into().unwrap_or_default()) as usize;
         *pos += 4;
         if *pos + len > data.len() {
             return Err(DsmError::serialization_error(

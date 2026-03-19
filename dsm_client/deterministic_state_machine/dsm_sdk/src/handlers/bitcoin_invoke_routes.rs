@@ -2750,26 +2750,25 @@ impl AppRouterImpl {
                     return err("bitcoin.full.sweep: no destination address available".to_string());
                 }
 
-                let client = match super::mempool_api::MempoolClient::from_config_for_network(
-                    network,
-                ) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        log::error!("[bitcoin.full.sweep] mempool client init failed: {e}");
-                        if let Err(e2) = crate::storage::client_db::release_locked_to_available(
-                            &dev,
-                            dbtc_id,
-                            burn_amount,
-                        ) {
-                            log::error!(
+                let client =
+                    match super::mempool_api::MempoolClient::from_config_for_network(network) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            log::error!("[bitcoin.full.sweep] mempool client init failed: {e}");
+                            if let Err(e2) = crate::storage::client_db::release_locked_to_available(
+                                &dev,
+                                dbtc_id,
+                                burn_amount,
+                            ) {
+                                log::error!(
                                 "[bitcoin.full.sweep] CRITICAL: failed to release dBTC lock: {e2}"
                             );
+                            }
+                            return err(format!(
+                                "bitcoin.full.sweep: mempool client init failed: {e}"
+                            ));
                         }
-                        return err(format!(
-                            "bitcoin.full.sweep: mempool client init failed: {e}"
-                        ));
-                    }
-                };
+                    };
 
                 let utxos = match client.list_address_utxos(std::slice::from_ref(addr)).await {
                     Ok(u) if !u.is_empty() => u,
