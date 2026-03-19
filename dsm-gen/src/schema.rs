@@ -26,7 +26,7 @@ pub mod proto {
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 // ---------------------------------------------------------------------------
 // Top-level spec discriminant
@@ -65,7 +65,7 @@ pub struct VaultSpecification {
     pub recovery: Option<RecoveryConfig>,
 
     /// Arbitrary string metadata (no serde_json::Value).
-    pub metadata: Option<HashMap<String, String>>,
+    pub metadata: Option<BTreeMap<String, String>>,
 
     /// Deployment mode: posted (storage nodes) or local (bilateral).
     /// Default: posted. Only used by `dsm-gen compile`.
@@ -235,7 +235,7 @@ pub struct AssetDefinition {
     pub chain_state_hash: Option<String>,
     /// Reference state number paired with `chain_state_hash`.
     pub chain_state_number: Option<u64>,
-    pub metadata: Option<HashMap<String, String>>,
+    pub metadata: Option<BTreeMap<String, String>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -302,7 +302,7 @@ pub struct PolicySpecification {
     pub version: String,
     pub description: Option<String>,
     pub rules: Vec<TransferRule>,
-    pub metadata: Option<HashMap<String, String>>,
+    pub metadata: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -317,7 +317,7 @@ pub struct TransferRule {
 pub struct RuleCondition {
     pub condition_type: ConditionType,
     /// String-keyed parameters — no `serde_json::Value` (Invariant #2).
-    pub parameters: HashMap<String, String>,
+    pub parameters: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -465,7 +465,7 @@ impl VaultSpecification {
 
 impl PolicySpecification {
     pub fn example(name: String) -> Self {
-        let mut params = HashMap::new();
+        let mut params = BTreeMap::new();
         params.insert("max_amount".to_string(), "1000".to_string());
 
         Self {
