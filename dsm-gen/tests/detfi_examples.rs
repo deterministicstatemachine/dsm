@@ -63,11 +63,11 @@ fn test_simple_escrow_parses() {
             assert_eq!(v.assets[0].amount, 500);
 
             // Tick lock (clockless)
-            let tl = v.tick_lock.as_ref().expect("tick_lock required");
+            let Some(tl) = v.tick_lock.as_ref() else { panic!("tick_lock required") };
             assert_eq!(tl.duration_iterations, 14400);
 
             // Recovery
-            let rec = v.recovery.as_ref().expect("recovery required");
+            let Some(rec) = v.recovery.as_ref() else { panic!("recovery required") };
             match &rec.mechanism {
                 dsm_gen::schema::RecoveryMechanism::SocialRecovery {
                     trustees,
@@ -147,7 +147,7 @@ fn test_conditional_multisig_parses() {
             assert_eq!(v.assets.len(), 2);
 
             // Tick lock with release_to_recipient
-            let tl = v.tick_lock.as_ref().expect("tick_lock required");
+            let Some(tl) = v.tick_lock.as_ref() else { panic!("tick_lock required") };
             assert_eq!(tl.duration_iterations, 100_000);
 
             // Recovery present
@@ -186,7 +186,7 @@ fn test_oracle_attested_release_parses() {
             }
 
             // Tick lock with burn action
-            let tl = v.tick_lock.as_ref().expect("tick_lock required");
+            let Some(tl) = v.tick_lock.as_ref() else { panic!("tick_lock required") };
             assert_eq!(tl.duration_iterations, 200_000);
         }
         _ => panic!("Expected Vault spec"),
@@ -214,7 +214,7 @@ fn test_stablecoin_policy_parses() {
             assert!(names.contains(&"off_hours_delay"));
 
             // Highest priority rule is the deny
-            let highest = p.rules.iter().max_by_key(|r| r.priority).unwrap();
+            let Some(highest) = p.rules.iter().max_by_key(|r| r.priority) else { panic!("rules must not be empty") };
             assert_eq!(highest.name, "jurisdiction_block");
         }
         _ => panic!("Expected Policy spec"),
