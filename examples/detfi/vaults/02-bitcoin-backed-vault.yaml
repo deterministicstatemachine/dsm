@@ -11,6 +11,9 @@
 # Fulfillment: BitcoinHTLC
 # Difficulty:  Intermediate
 #
+# NOTE: All Base32 placeholder keys are for readability only and contain characters
+#   outside the Crockford alphabet. Replace with real values before use.
+#
 # Usage:
 #   dsm-gen validate examples/detfi/vaults/02-bitcoin-backed-vault.yaml
 #   dsm-gen client  examples/detfi/vaults/02-bitcoin-backed-vault.yaml --lang rust

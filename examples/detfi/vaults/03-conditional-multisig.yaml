@@ -11,6 +11,9 @@
 # Fulfillment: And(MultiSignature, CryptoCondition)
 # Difficulty:  Advanced
 #
+# NOTE: All Base32 placeholder keys are for readability only and contain characters
+#   outside the Crockford alphabet. Replace with real values before use.
+#
 # Usage:
 #   dsm-gen validate examples/detfi/vaults/03-conditional-multisig.yaml
 #   dsm-gen client  examples/detfi/vaults/03-conditional-multisig.yaml --lang kotlin --factory
