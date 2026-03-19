@@ -43,7 +43,7 @@ num-integer = "0.1.46"
 num-primes = "0.3.0"
 
 # Async runtime
-tokio = { version = "1.36.0", features = ["macros", "rt-multi-thread", "time", "fs", "io-util", "sync", "net", "signal"] }
+tokio = { version = "1.36.0", features = ["macros", "rt-multi-thread", "time", "fs", "io-util", "sync"] }
 async-trait = "0.1.77"
 futures = { version = "0.3.30", default-features = false, features = ["std", "executor"] }
 
@@ -150,7 +150,7 @@ env_logger = "0.10.0"
 # Type safety and validation
 derive_more = { version = "1.0.0", features = ["from", "display", "error", "debug", "into"] }
 
-# Property-based testing
+# Property-based testing (used by verification module)
 proptest = "1.4.0"
 
 # Web framework and middleware (optional; core must be network-agnostic by default; no JSON feature)
@@ -161,7 +161,6 @@ tower = { version = "0.4.13", features = ["util", "timeout", "load-shed", "limit
 if-addrs = "0.13.3"
 local-ip-address = "0.6.1"
 num_cpus = "1.16.0"
-pqcrypto = "0.18.1"
 
 [dev-dependencies]
 criterion = { version = "0.5.1", features = ["async_tokio", "html_reports"] }

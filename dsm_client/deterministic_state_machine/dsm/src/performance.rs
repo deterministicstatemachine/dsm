@@ -391,7 +391,9 @@ pub mod crypto_ops {
     }
 }
 
-/// I/O-intensive operations (clockless)
+/// I/O-intensive operations (clockless).
+/// Gated behind `perf` feature to keep core I/O-free by default.
+#[cfg(feature = "perf")]
 pub mod io_ops {
     use super::*;
     use std::path::Path;

@@ -83,6 +83,75 @@ impl TombstoneReceipt {
         // Verify SPHINCS+ signature over the tombstone hash using the default variant
         sphincs_verify(public_key, &self.tombstone_hash, &self.signature)
     }
+
+    /// Encode tombstone receipt to canonical bytes.
+    ///
+    /// Format: `[device_id_len:u32 BE][device_id][old_smt_root_len:u32 BE][old_smt_root]`
+    ///         `[old_counter:u64 LE][old_rollup_hash_len:u32 BE][old_rollup_hash]`
+    ///         `[tick:u64 LE][sig_len:u32 BE][signature][hash_len:u32 BE][tombstone_hash]`
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        Self::encode_field(&mut buf, self.device_id.as_bytes());
+        Self::encode_field(&mut buf, &self.old_smt_root);
+        buf.extend_from_slice(&self.old_counter.to_le_bytes());
+        Self::encode_field(&mut buf, &self.old_rollup_hash);
+        buf.extend_from_slice(&self.tick.to_le_bytes());
+        Self::encode_field(&mut buf, &self.signature);
+        Self::encode_field(&mut buf, &self.tombstone_hash);
+        buf
+    }
+
+    /// Decode tombstone receipt from canonical bytes.
+    pub fn from_bytes(data: &[u8]) -> Result<Self, DsmError> {
+        let mut pos = 0;
+        let device_id_bytes = Self::decode_field(data, &mut pos)?;
+        let device_id = String::from_utf8(device_id_bytes).map_err(|e| {
+            DsmError::serialization_error("Invalid UTF-8 in device_id", "tombstone", None::<&str>, Some(e))
+        })?;
+        let old_smt_root = Self::decode_field(data, &mut pos)?;
+        if pos + 8 > data.len() {
+            return Err(DsmError::serialization_error("Truncated old_counter", "tombstone", None::<&str>, None::<std::io::Error>));
+        }
+        let old_counter = u64::from_le_bytes(data[pos..pos + 8].try_into().expect("8 bytes"));
+        pos += 8;
+        let old_rollup_hash = Self::decode_field(data, &mut pos)?;
+        if pos + 8 > data.len() {
+            return Err(DsmError::serialization_error("Truncated tick", "tombstone", None::<&str>, None::<std::io::Error>));
+        }
+        let tick = u64::from_le_bytes(data[pos..pos + 8].try_into().expect("8 bytes"));
+        pos += 8;
+        let signature = Self::decode_field(data, &mut pos)?;
+        let tombstone_hash = Self::decode_field(data, &mut pos)?;
+
+        Ok(Self {
+            device_id,
+            old_smt_root,
+            old_counter,
+            old_rollup_hash,
+            tick,
+            signature,
+            tombstone_hash,
+        })
+    }
+
+    fn encode_field(buf: &mut Vec<u8>, data: &[u8]) {
+        buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        buf.extend_from_slice(data);
+    }
+
+    fn decode_field(data: &[u8], pos: &mut usize) -> Result<Vec<u8>, DsmError> {
+        if *pos + 4 > data.len() {
+            return Err(DsmError::serialization_error("Truncated field length", "tombstone", None::<&str>, None::<std::io::Error>));
+        }
+        let len = u32::from_be_bytes(data[*pos..*pos + 4].try_into().expect("4 bytes")) as usize;
+        *pos += 4;
+        if *pos + len > data.len() {
+            return Err(DsmError::serialization_error("Truncated field data", "tombstone", None::<&str>, None::<std::io::Error>));
+        }
+        let field = data[*pos..*pos + len].to_vec();
+        *pos += len;
+        Ok(field)
+    }
 }
 
 impl SuccessionReceipt {
