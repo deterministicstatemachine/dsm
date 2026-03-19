@@ -1,5 +1,10 @@
 //! SPHINCS+ (BLAKE3-only) — DSM Module
 //!
+//! **SECURITY NOTICE:** This is a custom SPHINCS+ implementation using BLAKE3
+//! instead of SHA2/SHAKE. It has NOT been formally audited by a third party.
+//! Do NOT use in production for financial or security-critical applications
+//! until a formal cryptographic audit has been completed.
+//!
 //! This module implements SPHINCS+ using **BLAKE3** for all hash, PRF,
 //! and thash operations. The structure (FORS + WOTS+ + Hypertree) and
 //! sizes match the standardized parameter sets. We expose six presets:

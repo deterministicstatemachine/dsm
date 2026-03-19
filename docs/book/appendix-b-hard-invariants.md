@@ -17,6 +17,7 @@ The sole wire container is Envelope v3 with a `0x03` framing byte prefix. No oth
 `JSON.stringify`, `JSON.parse`, `serde_json` (in protocol code), `Gson`, `Moshi`, and `JSONObject` are banned from all protocol-layer code. All transport uses Protocol Buffers.
 
 JSON is permitted only in:
+- SDK HTTP API boundaries (e.g., `dsm_sdk` uses `serde_json` for REST responses to frontends)
 - Storage-node observability or admin endpoints outside the protocol data path
 - Build configuration files (`package.json`, `tsconfig.json`, etc.)
 - Non-protocol logging and diagnostics

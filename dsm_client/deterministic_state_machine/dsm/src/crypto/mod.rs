@@ -59,6 +59,10 @@ mod determinism_pbt_tests;
 #[cfg(test)]
 mod sphincs_pbt_tests;
 
+// SPHINCS+ Known Answer Tests (deterministic keygen stability, cross-key rejection).
+#[cfg(test)]
+mod sphincs_kat_tests;
+
 // ML-KEM-768 / AES-GCM property-based tests (KEM round-trip, det keygen, AES tamper).
 #[cfg(test)]
 mod kyber_pbt_tests;

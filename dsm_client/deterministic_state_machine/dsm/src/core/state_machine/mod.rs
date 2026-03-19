@@ -590,7 +590,8 @@ fn is_operation_allowed(operation: &Operation, current_state: &State) -> Result<
                 .flags
                 .contains(&crate::types::state_types::StateFlag::Compromised))
         }
-        _ => Ok(true), // Other operations always allowed
+        // All other operations require an initialized chain (post-genesis)
+        _ => Ok(current_state.state_number > 0),
     }
 }
 

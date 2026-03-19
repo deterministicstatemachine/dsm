@@ -158,29 +158,19 @@ impl KyberKeyPair {
         kyber_decapsulate(&self.secret_key, ciphertext)
     }
 
-    /// Domain-separated Blake3 KDF (XOF-style expansion)
+    /// Domain-separated Blake3 KDF (XOF-style expansion via BLAKE3 finalize_xof)
     pub fn derive_symmetric_key(
         shared_secret: &[u8],
         key_size: usize,
         context: Option<&str>,
     ) -> Vec<u8> {
-        let _ctx = context.unwrap_or("DSM_SYMMETRIC_KEY");
+        let ctx = context.unwrap_or("DSM_SYMMETRIC_KEY");
         let mut hasher = dsm_domain_hasher("DSM/ml-kem-derive");
-
+        hasher.update(ctx.as_bytes());
         hasher.update(shared_secret);
-
-        let mut key_bytes = Vec::with_capacity(key_size);
-        let mut current_hash = hasher.finalize();
-
-        while key_bytes.len() < key_size {
-            key_bytes.extend_from_slice(current_hash.as_bytes());
-            hasher = dsm_domain_hasher("DSM/ml-kem-derive");
-            hasher.update(current_hash.as_bytes());
-            current_hash = hasher.finalize();
-        }
-
-        key_bytes.truncate(key_size);
-        key_bytes
+        let mut out = vec![0u8; key_size];
+        hasher.finalize_xof().fill(&mut out);
+        out
     }
 }
 
@@ -503,18 +493,9 @@ pub fn derive_bytes_from_context(
     hasher.update(context.context.as_bytes());
     hasher.update(purpose.as_bytes());
     hasher.update(&context.entropy);
-
-    let mut output = Vec::with_capacity(length);
-    let mut current_hash = hasher.finalize();
-
-    while output.len() < length {
-        output.extend_from_slice(current_hash.as_bytes());
-        hasher = dsm_domain_hasher("DSM/ml-kem-ctx-derive");
-        hasher.update(current_hash.as_bytes());
-        current_hash = hasher.finalize();
-    }
-    output.truncate(length);
-    output
+    let mut out = vec![0u8; length];
+    hasher.finalize_xof().fill(&mut out);
+    out
 }
 
 // ------------------ KEM ops ------------------
@@ -726,7 +707,10 @@ fn encode_u32(buf: &mut Vec<u8>, v: u32) {
     buf.extend_from_slice(&v.to_be_bytes());
 }
 fn encode_bytes(buf: &mut Vec<u8>, bytes: &[u8]) {
-    let len: u32 = bytes.len().try_into().unwrap_or(u32::MAX);
+    let len: u32 = bytes
+        .len()
+        .try_into()
+        .expect("encode_bytes: input exceeds u32::MAX length");
     encode_u32(buf, len);
     buf.extend_from_slice(bytes);
 }
