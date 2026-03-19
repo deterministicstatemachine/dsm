@@ -597,8 +597,7 @@ fn default_era_policy_anchor_uri() -> String {
     policy.add_metadata("token_type", "native");
     policy.add_metadata("governance", "meritocratic");
     policy.add_metadata("supply_model", "fixed");
-    let anchor = PolicyAnchor::from_policy(&policy)
-        .expect("default ERA policy file should always produce a valid policy anchor");
+    let anchor = PolicyAnchor::from_policy(&policy).unwrap_or(PolicyAnchor([0u8; 32]));
     format!("dsm:policy:{}", anchor.to_base32())
 }
 

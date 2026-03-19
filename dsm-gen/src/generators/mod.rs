@@ -2,7 +2,7 @@
 //!
 //! Each generator implements language-specific code generation from DSM specifications.
 
-use crate::schema::DsmSpecification;
+use crate::schema::{DsmSpecification, VaultSpecification, PolicySpecification};
 use crate::TargetLanguage;
 use anyhow::Result;
 
@@ -51,5 +51,41 @@ pub fn create_generator(
             include_factory,
             include_test_vectors,
         )),
+    }
+}
+
+/// Sanitize a spec name into a valid identifier across all target languages.
+/// Non-alphanumeric characters become `_` (consistent across TS/Kotlin/Swift/Rust).
+pub fn sanitize_identifier(name: &str) -> String {
+    let sanitized: String = name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+        .collect();
+    if sanitized.is_empty() {
+        "Vault".to_string()
+    } else {
+        sanitized
+    }
+}
+
+/// Extract the base name from a vault spec, stripping the "Vault" suffix if present.
+pub fn base_vault_name(spec: &VaultSpecification) -> String {
+    let sanitized = sanitize_identifier(&spec.name);
+    let suffix = "vault";
+    if sanitized.len() >= suffix.len() && sanitized.to_lowercase().ends_with(suffix) {
+        sanitized[..sanitized.len() - suffix.len()].to_string()
+    } else {
+        sanitized
+    }
+}
+
+/// Extract the base name from a policy spec, stripping the "Policy" suffix if present.
+pub fn base_policy_name(spec: &PolicySpecification) -> String {
+    let sanitized = sanitize_identifier(&spec.name);
+    let suffix = "policy";
+    if sanitized.len() >= suffix.len() && sanitized.to_lowercase().ends_with(suffix) {
+        sanitized[..sanitized.len() - suffix.len()].to_string()
+    } else {
+        sanitized
     }
 }

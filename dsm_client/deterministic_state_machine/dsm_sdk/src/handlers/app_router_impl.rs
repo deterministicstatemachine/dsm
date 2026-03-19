@@ -1308,8 +1308,7 @@ impl AppRouterImpl {
 
         // SMT-Replace: update shared Per-Device SMT leaf h_n → h_{n+1}
         // §4.2: Terminal error on SMT failure — no silent degradation.
-        let smt = crate::security::shared_smt::get_shared_smt();
-        if smt.is_none() {
+        let Some(smt) = crate::security::shared_smt::get_shared_smt() else {
             // §4.3#8: SMT not initialized is a terminal error, not silent degradation.
             // Without Per-Device SMT, we cannot produce verifiable ReceiptCommit.
             crate::security::shared_smt::clear_pending_online(&smt_key).await;
@@ -1320,8 +1319,7 @@ impl AppRouterImpl {
                 "wallet.send: Per-Device SMT not initialized — cannot produce verifiable receipt"
                     .to_string(),
             );
-        }
-        let smt = smt.unwrap();
+        };
 
         let (receipt_commit_bytes, receipt_canonical_bytes) = {
             let mut smt_guard = smt.write().await;
