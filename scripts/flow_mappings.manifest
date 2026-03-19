@@ -3,20 +3,20 @@
 # Frontend invoke/query mappings
 dsm_client/new_frontend/src/dsm/transactions.ts|appRouterInvokeBin('wallet.sendSmart'|frontend online transfer maps to wallet.sendSmart
 dsm_client/new_frontend/src/dsm/transactions.ts|appRouterInvokeBin('message.send'|frontend online message maps to message.send
-dsm_client/new_frontend/src/dsm/transactions.ts|bilateralOfflineSendBin(new Uint8Array(env.toBinary()), bleAddr, 'prepare')|frontend bilateral prepare uses offline bridge entry
+dsm_client/new_frontend/src/dsm/transactions.ts|appRouterInvokeBin('wallet.sendOffline'|frontend bilateral prepare routes via wallet.sendOffline
 dsm_client/new_frontend/src/dsm/WebViewBridge.ts|methodName: 'bilateralOfflineSend'|bridge payload methodName for bilateral offline send
 dsm_client/new_frontend/src/dsm/WebViewBridge.ts|method: 'appRouterInvoke'|bridge rpc invoke method anchor
 dsm_client/new_frontend/src/dsm/WebViewBridge.ts|method: 'appRouterQuery'|bridge rpc query method anchor
 
 # JNI framed/native entrypoints
-dsm_client/decentralized_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.rs|Java_com_dsm_wallet_bridge_UnifiedNativeApi_appRouterInvokeFramed|jni invoke framed export exists
-dsm_client/decentralized_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.rs|Java_com_dsm_wallet_bridge_UnifiedNativeApi_appRouterQueryFramed|jni query framed export exists
-dsm_client/decentralized_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.rs|Java_com_dsm_wallet_bridge_UnifiedNativeApi_bilateralOfflineSend|jni bilateral offline export exists
+dsm_client/deterministic_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.rs|Java_com_dsm_wallet_bridge_UnifiedNativeApi_appRouterInvokeFramed|jni invoke framed export exists
+dsm_client/deterministic_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.rs|Java_com_dsm_wallet_bridge_UnifiedNativeApi_appRouterQueryFramed|jni query framed export exists
+dsm_client/deterministic_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.rs|Java_com_dsm_wallet_bridge_UnifiedNativeApi_bilateralOfflineSend|jni bilateral offline export exists
 
 # SDK router method handlers
-dsm_client/decentralized_state_machine/dsm_sdk/src/handlers/app_router_impl.rs|"wallet.send" => {|sdk router invoke handler for wallet.send exists
-dsm_client/decentralized_state_machine/dsm_sdk/src/handlers/app_router_impl.rs|"message.send" => {|sdk router invoke handler for message.send exists
-dsm_client/decentralized_state_machine/dsm_sdk/src/handlers/app_router_impl.rs|"contacts.handle_contact_qr_v3" => {|sdk router query handler for contacts.handle_contact_qr_v3 exists
-dsm_client/decentralized_state_machine/dsm_sdk/src/handlers/app_router_impl.rs|"inbox.pull" => {|sdk router query handler for inbox.pull exists
-dsm_client/decentralized_state_machine/dsm_sdk/src/handlers/app_router_impl.rs|"bilateral.pending_list" => {|sdk router query handler for bilateral.pending_list exists
-dsm_client/decentralized_state_machine/dsm_sdk/src/handlers/app_router_impl.rs|"storage.sync" => {|sdk router query handler for storage.sync exists
+dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/app_router_impl.rs|"wallet.send" | "wallet.sendSmart"|sdk router invoke handler for wallet.send exists
+dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/app_router_impl.rs|"message.send" =>|sdk router invoke handler for message.send exists
+dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/app_router_impl.rs|"contacts.handle_contact_qr_v3"|sdk router query handler for contacts.handle_contact_qr_v3 exists
+dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/app_router_impl.rs|"inbox.pull"|sdk router query handler for inbox.pull exists
+dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/app_router_impl.rs|"bilateral.pending_list"|sdk router query handler for bilateral.pending_list exists
+dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/app_router_impl.rs|"storage.sync"|sdk router query handler for storage.sync exists
