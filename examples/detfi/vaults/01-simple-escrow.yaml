@@ -1,0 +1,49 @@
+# DeTFi Pattern: Simple Payment Escrow
+#
+# Alice locks 500 DSM tokens into a DLV. Bob can claim them by proving
+# a payment of 500 DSM to Alice's device. If Bob doesn't pay within
+# 14400 chain iterations, the tokens return to Alice automatically.
+#
+# Fulfillment: Payment (single condition)
+# Difficulty:  Beginner
+#
+# Usage:
+#   dsm-gen validate examples/detfi/vaults/01-simple-escrow.yaml
+#   dsm-gen client  examples/detfi/vaults/01-simple-escrow.yaml --lang ts,kotlin
+
+type: "vault"
+name: "SimpleEscrow"
+version: "1.0.0"
+description: "Payment-locked escrow vault — Bob proves payment to Alice to unlock"
+
+fulfillment_condition:
+  type: "payment"
+  amount: 500
+  token_id: "DSM"
+  recipient: "ALICEDEVICEID0000000000000000000000000000000000000"
+  verification_state: "GENESISHASH000000000000000000000000000000000000000000"
+
+assets:
+  - asset_id: "DSM"
+    amount: 500
+    metadata:
+      purpose: "escrow_deposit"
+
+tick_lock:
+  duration_iterations: 14400
+  tick_lock_action:
+    type: "return_to_owner"
+
+recovery:
+  mechanism:
+    type: "social_recovery"
+    trustees:
+      - "TRUSTEE1DEVICEID0000000000000000000000000000000000000"
+      - "TRUSTEE2DEVICEID0000000000000000000000000000000000000"
+      - "TRUSTEE3DEVICEID0000000000000000000000000000000000000"
+    threshold: 2
+
+metadata:
+  pattern: "escrow"
+  difficulty: "beginner"
+  author: "DSM Protocol Team"

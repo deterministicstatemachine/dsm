@@ -1,0 +1,51 @@
+# DeTFi Pattern: Oracle-Attested Release
+#
+# A vault that unlocks if EITHER condition is satisfied (OR composition):
+#   1. An oracle provides a signed attestation (crypto-condition preimage)
+#   2. A specific DSM state is reached (state-reference verification)
+#
+# Models an insurance payout: either the oracle attests that the insured
+# event occurred, OR the on-chain state itself proves it. If neither
+# triggers within 200000 iterations, the locked tokens are burned
+# (no-claim expiry).
+#
+# Fulfillment: Or(CryptoCondition, StateReference)
+# Difficulty:  Advanced
+#
+# Usage:
+#   dsm-gen validate examples/detfi/vaults/04-oracle-attested-release.yaml
+#   dsm-gen client  examples/detfi/vaults/04-oracle-attested-release.yaml --lang swift
+
+type: "vault"
+name: "OracleAttestedRelease"
+version: "1.0.0"
+description: "Insurance payout vault — oracle attestation OR state proof triggers release"
+
+fulfillment_condition:
+  type: "or"
+  conditions:
+    - type: "crypto_condition"
+      condition_hash: "ORACLEATTESTATIONHASH00000000000000000000000000000000"
+      public_params: "ORACLEVERIFIERPARAMS000000000000000000000000000000000"
+
+    - type: "state_reference"
+      reference_states:
+        - "TARGETSTATEHASH10000000000000000000000000000000000000000"
+        - "TARGETSTATEHASH20000000000000000000000000000000000000000"
+      parameters: "STATEVERIFYPARAMS0000000000000000000000000000000000000"
+
+assets:
+  - asset_id: "DSM"
+    amount: 10000
+    metadata:
+      purpose: "insurance_reserve"
+
+tick_lock:
+  duration_iterations: 200000
+  tick_lock_action:
+    type: "burn"
+
+metadata:
+  pattern: "oracle_or_state"
+  difficulty: "advanced"
+  use_case: "insurance_payout"
