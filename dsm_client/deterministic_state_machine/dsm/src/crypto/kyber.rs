@@ -707,10 +707,7 @@ fn encode_u32(buf: &mut Vec<u8>, v: u32) {
     buf.extend_from_slice(&v.to_be_bytes());
 }
 fn encode_bytes(buf: &mut Vec<u8>, bytes: &[u8]) {
-    let len: u32 = bytes
-        .len()
-        .try_into()
-        .expect("encode_bytes: input exceeds u32::MAX length");
+    let len = bytes.len() as u32;
     encode_u32(buf, len);
     buf.extend_from_slice(bytes);
 }
