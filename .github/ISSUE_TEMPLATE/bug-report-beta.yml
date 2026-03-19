@@ -1,0 +1,250 @@
+name: Bug Report (Beta)
+description: Report a bug or issue in the DSM beta release
+title: "[BUG] "
+labels: ["bug", "beta"]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Before filing:** If this involves a security vulnerability, key compromise, or vault fund loss, **do not open a public issue**. Email `team@irrefutablelabs.org` instead.
+
+        For hash-chain forks, stuck bilateral sessions, or vault state corruption, include as much chain-state context as possible — it makes the difference between a quick fix and a week of guessing.
+
+  - type: dropdown
+    id: subsystem
+    attributes:
+      label: Subsystem
+      description: Which part of DSM is affected?
+      options:
+        - "dBTC / Bitcoin Bridge (deposit, withdraw, vault lifecycle)"
+        - "BLE Bilateral (offline transfers, prepare/accept/finalize)"
+        - "Storage Nodes (replication, object store, vault advertisements)"
+        - "Hash Chain (state transitions, fork detection, tripwire)"
+        - "Frontend / UI (React, balance display, swap cards)"
+        - "Wallet (key derivation, address generation, UTXO selection)"
+        - "C-DBRW / Hardware Identity (silicon fingerprint, enrollment)"
+        - "SPV / Bitcoin Verification (headers, merkle proofs, confirmations)"
+        - "DLV / Vault Operations (create, lock, unlock, claim)"
+        - "Token System (mint, burn, balance, token_balances table)"
+        - "Network / Config (TOML, storage node discovery, TLS)"
+        - "Android / JNI (protobuf bridge, BLE native, WebView)"
+        - "Other / Unknown"
+    validations:
+      required: true
+
+  - type: textarea
+    id: bug_description
+    attributes:
+      label: Bug description
+      description: A clear and concise description of the bug. Include error messages verbatim if possible.
+      placeholder: |
+        What happened? Include exact error text if you saw one.
+        e.g. "Deposit shows 'completed' in UI but dBTC balance is still 0"
+        e.g. "BLE transfer stuck at 'Prepared' for counterparty — never reaches Accept"
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps_to_reproduce
+    attributes:
+      label: Steps to reproduce
+      description: What were you doing when this happened? Be specific about amounts, directions, and timing.
+      placeholder: |
+        1. Open dBTC tab
+        2. Initiate deposit of 50,000 sats to HTLC address tb1q...
+        3. Fund HTLC via mempool.space (txid: abc123...)
+        4. Wait for 1 confirmation (signet)
+        5. Tap "Complete Swap" — spinner runs forever, no balance update
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected_behavior
+    attributes:
+      label: Expected behavior
+      description: What should have happened?
+      placeholder: |
+        dBTC balance should increase by 50,000 sats after swap completion.
+        Swap card should transition from "Confirming" to "Complete".
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual_behavior
+    attributes:
+      label: Actual behavior
+      description: What actually happened? Include any error text from the UI or logs.
+      placeholder: |
+        Swap card shows "Complete" but balance remains 0.
+        adb logcat shows: "[AWAIT_AND_COMPLETE] token operation failed: insufficient state"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      description: How bad is this?
+      options:
+        - "Critical — funds at risk, chain fork, vault corruption"
+        - "High — feature completely broken, no workaround"
+        - "Medium — feature degraded but workaround exists"
+        - "Low — cosmetic, minor UX issue"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: bitcoin_network
+    attributes:
+      label: Bitcoin network
+      description: Which Bitcoin network were you using?
+      options:
+        - signet
+        - testnet
+        - regtest (local)
+        - mainnet
+        - "N/A (not Bitcoin-related)"
+    validations:
+      required: true
+
+  - type: input
+    id: device
+    attributes:
+      label: Device
+      placeholder: "Galaxy A54, Galaxy A16, Pixel 8, emulator (API 34)"
+    validations:
+      required: true
+
+  - type: input
+    id: operating_system
+    attributes:
+      label: OS version
+      placeholder: "Android 14 (API 34), Android 13"
+    validations:
+      required: true
+
+  - type: input
+    id: dsm_version
+    attributes:
+      label: DSM version / commit
+      description: Run `adb shell dumpsys package com.dsm.wallet | grep versionName` or check Settings in the app. Git short-hash is even better.
+      placeholder: "0.1.0-beta.1 / commit abc1234"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: build_type
+    attributes:
+      label: Build type
+      options:
+        - release
+        - debug
+        - unknown
+    validations:
+      required: true
+
+  - type: textarea
+    id: chain_state
+    attributes:
+      label: Chain state context
+      description: |
+        If you can access diagnostics or logs, include relevant chain state. This is critical for state-transition bugs.
+        Find this in the app's Settings → Diagnostics, or via `adb logcat | grep state_number`.
+      placeholder: |
+        state_number: 47
+        device_id (first 8): A3B7C9D2
+        genesis_hash (first 8): 1F2E3D4C
+        token_balances: dBTC available=50000 locked=0
+        active vault count: 2
+        pending swaps: 1 (swap_id: bilateral-received-XXXX)
+
+  - type: textarea
+    id: transaction_context
+    attributes:
+      label: Transaction / swap context
+      description: If this involves a specific deposit, withdrawal, or bilateral transfer, include identifiers.
+      placeholder: |
+        swap_id: btc-deposit-A3B7C9D2
+        vault_id: (first 12 chars)
+        HTLC address: tb1q...
+        funding_txid: (mempool.space link)
+        direction: BTC→dBTC / dBTC→BTC
+        amount: 50,000 sats
+        withdrawal ρ: wd-XXXX (if withdrawal)
+
+  - type: textarea
+    id: ble_context
+    attributes:
+      label: BLE context (bilateral transfers only)
+      description: If this involves a Bluetooth bilateral transfer, include connection details.
+      placeholder: |
+        Peer device: Galaxy A16
+        BLE address: AA:BB:CC:DD:EE:FF
+        Role: sender / receiver
+        Session phase: Prepared / Accepted / Finalized / Stuck
+        Chunk transfer: 3/7 chunks sent before failure
+
+  - type: textarea
+    id: storage_node_context
+    attributes:
+      label: Storage node context
+      description: If this involves vault publication, discovery, or replication, include node info.
+      placeholder: |
+        Connected nodes: dsm-node-1 (13.218.83.69), dsm-node-3 (54.74.145.172)
+        Vault advertisement published: yes/no
+        Discovery query returned: 0 vaults / 3 vaults
+        Replication status: 4/6 nodes ACK
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / diagnostics
+      description: |
+        Attach relevant log output. Best sources:
+        - `adb logcat -s dsm_sdk,RustStdoutStderr,BleBridge | head -200`
+        - App Settings → Export Diagnostics (if available)
+        - Browser DevTools console (for frontend issues)
+        - Storage node logs (`journalctl -u dsm-node-1 --since "5 min ago"`)
+      render: shell
+      placeholder: |
+        Paste log output here. Wrap long output in <details> tags:
+        <details><summary>Full logcat</summary>
+        ...paste here...
+        </details>
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots / screen recordings
+      description: If applicable, attach screenshots or screen recordings. Especially useful for UI bugs, stuck states, and balance display issues.
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: Workaround (if any)
+      description: Did you find a way to get past this?
+      placeholder: |
+        Killing and restarting the app resolved the stuck swap.
+        Clearing app data and re-importing wallet fixed the balance.
+        No workaround found.
+
+  - type: checkboxes
+    id: reproducibility
+    attributes:
+      label: Reproducibility
+      options:
+        - label: "I can reproduce this consistently"
+        - label: "This happened once and I haven't been able to reproduce it"
+        - label: "This is intermittent / timing-dependent"
+
+  - type: checkboxes
+    id: data_loss
+    attributes:
+      label: Data impact
+      description: Check all that apply.
+      options:
+        - label: "Funds affected (dBTC balance incorrect, vault state wrong)"
+        - label: "Chain state corrupted (fork detected, state_number mismatch)"
+        - label: "Data loss (swap records missing, wallet wiped)"
+        - label: "No data impact (UI/UX only)"

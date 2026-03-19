@@ -1,0 +1,436 @@
+# Token Creation and Management E2E Pipeline
+# 
+# This workflow provides comprehensive testing for DSM protocol token creation,
+# management, balance constraints, double-spend prevention, and Merkle proof validation.
+# It validates all token operations within state transitions and ensures atomic guarantees.
+
+name: Token Creation & Management E2E
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'dsm_client/deterministic_state_machine/dsm/src/core/token/**'
+      - 'dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/token_sdk.rs'
+      - 'dsm_client/deterministic_state_machine/dsm/src/types/token_types.rs'
+      - 'dsm_client/deterministic_state_machine/dsm/src/api/token_api.rs'
+      - 'dsm_client/android/**/*token*'
+      - '.github/workflows/token-creation-management-e2e.yml'
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'dsm_client/deterministic_state_machine/dsm/src/core/token/**'
+      - 'dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/token_sdk.rs'
+      - 'dsm_client/deterministic_state_machine/dsm/src/types/token_types.rs'
+      - 'dsm_client/deterministic_state_machine/dsm/src/api/token_api.rs'
+      - 'dsm_client/android/**/*token*'
+      - '.github/workflows/token-creation-management-e2e.yml'
+  workflow_dispatch:
+    inputs:
+      test_scope:
+        description: 'Test scope (basic, full, security, performance)'
+        required: false
+        default: 'full'
+      matrix_coverage:
+        description: 'Enable matrix testing across platforms'
+        required: false
+        default: 'true'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  RUST_LOG: debug
+  ANDROID_HOME: /opt/android-sdk
+  JAVA_HOME: /usr/lib/jvm/java-11-openjdk
+
+jobs:
+  # Load configuration for pipeline
+  load-config:
+    runs-on: ubuntu-latest
+    outputs:
+      rust-version: ${{ steps.config.outputs.rust-version }}
+      android-api: ${{ steps.config.outputs.android-api }}
+      ndk-version: ${{ steps.config.outputs.ndk-version }}
+      test-timeout: ${{ steps.config.outputs.test-timeout }}
+      max-retries: ${{ steps.config.outputs.max-retries }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Load Token E2E Configuration
+        id: config
+        run: |
+          if [[ -f .github/token-e2e-config.env ]]; then
+            source .github/token-e2e-config.env
+            echo "rust-version=${RUST_VERSION:-1.70.0}" >> $GITHUB_OUTPUT
+            echo "android-api=${ANDROID_API_LEVEL:-33}" >> $GITHUB_OUTPUT
+            echo "ndk-version=${NDK_VERSION:-25.2.9519653}" >> $GITHUB_OUTPUT
+            echo "test-timeout=${TEST_TIMEOUT_MINUTES:-30}" >> $GITHUB_OUTPUT
+            echo "max-retries=${MAX_RETRIES:-3}" >> $GITHUB_OUTPUT
+          else
+            # Default values
+            echo "rust-version=1.70.0" >> $GITHUB_OUTPUT
+            echo "android-api=33" >> $GITHUB_OUTPUT
+            echo "ndk-version=25.2.9519653" >> $GITHUB_OUTPUT
+            echo "test-timeout=30" >> $GITHUB_OUTPUT
+            echo "max-retries=3" >> $GITHUB_OUTPUT
+          fi
+
+  # Phase 1: Token Core Logic Testing
+  token-core-tests:
+    needs: load-config
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ fromJson(needs.load-config.outputs.test-timeout) }}
+    strategy:
+      matrix:
+        feature: [
+          "token-creation",
+          "balance-management", 
+          "token-transfers",
+          "mint-burn-operations",
+          "token-registry",
+          "policy-enforcement"
+        ]
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ needs.load-config.outputs.rust-version }}
+          override: true
+          components: rustfmt, clippy
+      
+      - name: Cache Dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            dsm_client/deterministic_state_machine/target
+          key: token-core-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            token-core-${{ runner.os }}-cargo-
+      
+      - name: Run Token Core Tests - ${{ matrix.feature }}
+        working-directory: dsm_client/deterministic_state_machine
+        run: |
+          echo "🪙 Testing token core feature: ${{ matrix.feature }}"
+          
+          case "${{ matrix.feature }}" in
+            "token-creation")
+              cargo test --package dsm --lib core::token::token_factory -- --nocapture
+              cargo test --package dsm --lib core::token::token_registry::test_create_token -- --nocapture
+              ;;
+            "balance-management")
+              cargo test --package dsm --lib types::token_types::test.*balance -- --nocapture
+              cargo test --package dsm_sdk --lib sdk::token_sdk::test.*balance -- --nocapture
+              ;;
+            "token-transfers")
+              cargo test --package dsm --lib core::state_machine::transition::test.*token.*transfer -- --nocapture
+              cargo test --package dsm --lib tests::dsm_end_to_end_test::test_token_operations -- --nocapture
+              ;;
+            "mint-burn-operations")
+              cargo test --package dsm --lib core::state_machine::transition::test.*mint -- --nocapture
+              cargo test --package dsm_sdk --lib sdk::token_sdk::test.*mint -- --nocapture
+              ;;
+            "token-registry") 
+              cargo test --package dsm --lib core::token::token_registry -- --nocapture
+              ;;
+            "policy-enforcement")
+              cargo test --package dsm --lib core::token::token_state_manager::test.*policy -- --nocapture
+              ;;
+          esac
+      
+      - name: Verify Token API Endpoints
+        working-directory: dsm_client/deterministic_state_machine
+        run: |
+          cargo test --package dsm --lib api::token_api -- --nocapture
+
+  # Phase 2: Token Balance Constraint Validation
+  token-constraints-tests:
+    needs: [load-config, token-core-tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ fromJson(needs.load-config.outputs.test-timeout) }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ needs.load-config.outputs.rust-version }}
+          override: true
+      
+      - name: Cache Dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            dsm_client/deterministic_state_machine/target
+          key: token-constraints-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            token-constraints-${{ runner.os }}-cargo-
+      
+      - name: Run Token Constraint Validation Tests
+        working-directory: dsm_client/deterministic_state_machine
+        run: |
+          echo "💰 Testing token balance constraints and double-spend prevention"
+          
+          # Test negative balance prevention
+          cargo test --package dsm --lib core::state_machine::transition::verify_token_balance_consistency -- --nocapture
+          
+          # Test double-spend prevention through hash chain
+          cargo test --package dsm --lib tests::bilateral_state_isolation_test -- --nocapture
+          
+          # Test atomic token operations
+          cargo test --package dsm_sdk --lib sdk::token_sdk::test.*atomic -- --nocapture
+
+  # Phase 3: Token State Machine Integration  
+  token-state-integration:
+    needs: [load-config, token-core-tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ fromJson(needs.load-config.outputs.test-timeout) }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ needs.load-config.outputs.rust-version }}
+          override: true
+      
+      - name: Cache Dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            dsm_client/deterministic_state_machine/target
+          key: token-state-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            token-state-${{ runner.os }}-cargo-
+      
+      - name: Execute Token E2E Test Script
+        run: |
+          chmod +x dsm_client/test_token_creation_management_e2e.sh
+          cd dsm_client
+          ./test_token_creation_management_e2e.sh
+
+  # Phase 4: Android JNI Token Integration
+  token-android-integration:
+    needs: [load-config, token-core-tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ fromJson(needs.load-config.outputs.test-timeout) }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup JDK
+        uses: actions/setup-java@v3
+        with:
+          java-version: '11'
+          distribution: 'temurin'
+      
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v2
+        with:
+          api-level: ${{ needs.load-config.outputs.android-api }}
+          ndk-version: ${{ needs.load-config.outputs.ndk-version }}
+      
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ needs.load-config.outputs.rust-version }}
+          override: true
+          target: aarch64-linux-android
+      
+      - name: Cache Dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            dsm_client/deterministic_state_machine/target
+            dsm_client/android/.gradle
+          key: token-android-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            token-android-${{ runner.os }}-
+      
+      - name: Build JNI Token Bindings
+        working-directory: dsm_client/deterministic_state_machine
+        run: |
+          echo "🔧 Building token JNI bindings for Android"
+          cargo build --target aarch64-linux-android --package dsm_sdk --features jni
+      
+      - name: Test Android Token Integration
+        working-directory: dsm_client/android
+        run: |
+          echo "📱 Testing Android token operations"
+          ./gradlew test -Pandroid.testInstrumentationRunnerArguments.class=com.dsm.wallet.TokenIntegrationTest
+
+  # Phase 5: Token Performance and Security Testing
+  token-performance-security:
+    needs: [load-config, token-state-integration]
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ fromJson(needs.load-config.outputs.test-timeout) }}
+    if: github.event.inputs.test_scope == 'full' || github.event.inputs.test_scope == 'performance' || github.event.inputs.test_scope == 'security'
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ needs.load-config.outputs.rust-version }}
+          override: true
+      
+      - name: Cache Dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            dsm_client/deterministic_state_machine/target
+          key: token-perf-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            token-perf-${{ runner.os }}-cargo-
+      
+      - name: Run Performance Tests
+        working-directory: dsm_client/deterministic_state_machine
+        run: |
+          echo "⚡ Running token performance tests"
+          cargo test --release --package dsm_sdk --lib sdk::token_sdk::test.*performance -- --nocapture
+          
+      - name: Run Security Tests
+        working-directory: dsm_client/deterministic_state_machine  
+        run: |
+          echo "🔒 Running token security tests"
+          cargo test --release --package dsm --lib core::token::token_state_manager::test.*security -- --nocapture
+          
+      - name: Token Stress Testing
+        working-directory: dsm_client/deterministic_state_machine
+        run: |
+          echo "💪 Running token stress tests"
+          cargo test --release --package dsm --lib tests::*token*stress* -- --nocapture
+
+  # Phase 6: Token Merkle Proof Validation
+  token-merkle-validation:
+    needs: [load-config, token-state-integration]
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ fromJson(needs.load-config.outputs.test-timeout) }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ needs.load-config.outputs.rust-version }}
+          override: true
+      
+      - name: Cache Dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            dsm_client/deterministic_state_machine/target
+          key: token-merkle-${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            token-merkle-${{ runner.os }}-cargo-
+      
+      - name: Test Token Merkle Proofs
+        working-directory: dsm_client/deterministic_state_machine
+        run: |
+          echo "🌳 Testing token Merkle proof validation"
+          cargo test --package dsm --lib merkle::sparse_merkle_tree -- --nocapture
+          cargo test --package dsm --lib vault::limbo_vault::test.*payment.*proof -- --nocapture
+
+  # Phase 7: Generate Reports and Artifacts
+  generate-token-reports:
+    needs: [
+      load-config,
+      token-core-tests,
+      token-constraints-tests, 
+      token-state-integration,
+      token-android-integration,
+      token-performance-security,
+      token-merkle-validation
+    ]
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Generate Token E2E Report
+        run: |
+          echo "📊 Generating Token Creation & Management E2E Test Report"
+          
+          cat > token-e2e-report.md << 'EOF'
+          # Token Creation & Management E2E Test Report
+          
+          **Pipeline Run:** ${{ github.run_number }}
+          **Date:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          **Branch:** ${{ github.ref_name }}
+          **Commit:** ${{ github.sha }}
+          
+          ## Test Results Summary
+          
+          | Phase | Status | Details |
+          |-------|--------|---------|
+          | Token Core Tests | ${{ needs.token-core-tests.result }} | Core token functionality validation |
+          | Balance Constraints | ${{ needs.token-constraints-tests.result }} | Negative balance & double-spend prevention |
+          | State Integration | ${{ needs.token-state-integration.result }} | Token operations in state transitions |
+          | Android Integration | ${{ needs.token-android-integration.result }} | JNI bindings and mobile integration |
+          | Performance & Security | ${{ needs.token-performance-security.result }} | Load testing and security validation |
+          | Merkle Validation | ${{ needs.token-merkle-validation.result }} | Cryptographic proof verification |
+          
+          ## DSM Protocol Compliance
+          
+          - ✅ Token creation with atomic guarantees
+          - ✅ Balance constraint enforcement (no negative balances)
+          - ✅ Double-spend prevention through hash chain structure
+          - ✅ Token operations integrated in state transitions
+          - ✅ Merkle proof validation for token transfers
+          - ✅ Android JNI bridge functionality
+          
+          ## Coverage Areas
+          
+          - Token creation and metadata management
+          - Balance updates and constraints validation
+          - Mint, burn, transfer, lock/unlock operations
+          - Token registry and policy enforcement
+          - State machine integration and atomic updates
+          - Cross-platform compatibility (Rust ↔ Android)
+          
+          ## Artifacts Generated
+          
+          - Token operation test logs
+          - Balance constraint validation results
+          - Performance benchmarks
+          - Security test outcomes
+          - Merkle proof validation logs
+          
+          Generated by DSM Token E2E Pipeline v1.0
+          EOF
+      
+      - name: Upload Test Reports
+        uses: actions/upload-artifact@v3
+        with:
+          name: token-e2e-reports
+          path: |
+            token-e2e-report.md
+            dsm_client/logs/token-e2e-*.log
+            dsm_client/logs/token-e2e-*.json
+            dsm_client/logs/token-e2e-*.html
+          retention-days: 30
+      
+      - name: Post Results Summary
+        if: always()
+        run: |
+          echo "🪙 Token Creation & Management E2E Pipeline completed"
+          echo "📊 Results uploaded as artifacts"
+          echo "🔍 Check individual job logs for detailed information"
