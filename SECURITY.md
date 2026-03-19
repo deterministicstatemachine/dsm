@@ -8,7 +8,7 @@ publicly until they have been reviewed.
 
 We currently review security issues for:
 
-- The `master` branch
+- The `main` branch
 - The latest tagged beta or release candidate
 
 Older snapshots may not receive fixes.
