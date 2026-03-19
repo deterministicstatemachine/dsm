@@ -1,0 +1,65 @@
+name: General Feedback (Beta)
+description: Share general feedback, questions, or discussion about DSM
+title: "[FEEDBACK] "
+labels: ["feedback", "beta"]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for general feedback, discussion, and broad impressions of DSM.
+  - type: dropdown
+    id: feedback_type
+    attributes:
+      label: Feedback type
+      options:
+        - General impression
+        - Documentation question
+        - Setup or installation issue
+        - Protocol question
+        - Cryptography question
+        - Development experience
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: background
+    attributes:
+      label: Your background
+      description: Briefly describe your background.
+      placeholder: Cryptography researcher, mobile developer, DeFi builder, etc.
+  - type: textarea
+    id: feedback
+    attributes:
+      label: Feedback
+      description: Share your thoughts, questions, or suggestions about DSM.
+      placeholder: Be as specific as possible.
+    validations:
+      required: true
+  - type: textarea
+    id: strengths
+    attributes:
+      label: What impressed you?
+      description: What stood out positively?
+      placeholder: Post-quantum crypto, clockless design, bilateral transfers, etc.
+  - type: textarea
+    id: improvements
+    attributes:
+      label: Areas for improvement
+      description: What could be better or was confusing?
+      placeholder: The part that was confusing or difficult was...
+  - type: dropdown
+    id: contribution_interest
+    attributes:
+      label: Would you contribute?
+      options:
+        - Yes, I would like to help develop DSM
+        - Maybe, depending on the area
+        - No, but I am interested in the project
+        - Not sure yet
+  - type: textarea
+    id: extra_context
+    attributes:
+      label: Additional context
+      description: Anything else you'd like to share?
+      placeholder: Additional context

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security report
+    url: mailto:team@irrefutablelabs.org
+    about: Report vulnerabilities privately instead of opening a public issue.
+  - name: Support and docs
+    url: https://github.com/DSM-Deterministic-State-Machine/deterministic-state-machine/blob/master/SUPPORT.md
+    about: Read support guidance and common entry points before filing an issue.

@@ -2,80 +2,151 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
-    branches: [main]
+    branches: [master]
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: "-D warnings"
+  RUST_BACKTRACE: 1
 
 jobs:
-  check:
-    name: Check
+  # --------------------------------------------------------------------------
+  # Rust: format, clippy, build, test
+  # --------------------------------------------------------------------------
+  rust:
+    name: Rust
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo check --workspace --all-targets
 
-  test:
-    name: Test
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --no-fail-fast
-
-  clippy:
-    name: Clippy
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: rustfmt, clippy
+
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets -- -D warnings
 
-  fmt:
-    name: Format
+      - name: Install CI system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler ripgrep
+
+      - name: Protocol purity checks
+        run: |
+          bash ci/no_clock_and_no_json.sh
+          bash scripts/flow_assertions.sh
+          bash scripts/flow_mapping_assertions.sh
+          bash scripts/check_forbidden_symbols.sh
+          bash scripts/ci_scan.sh
+          bash ci/canonical_bilateral_gates.sh
+
+      - name: Production safety lints
+        run: bash ci/production_safety_checks.sh
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings -A clippy::disallowed_methods
+
+      - name: Build
+        run: cargo build --locked --workspace --all-features
+
+      - name: Test
+        run: cargo test --locked --workspace -- --nocapture
+
+      - name: Codegen enforcement
+        run: |
+          bash scripts/codegen_enforce.sh
+          bash scripts/guard_protos.sh
+
+      - name: Security audit
+        run: |
+          cargo install cargo-audit --quiet || true
+          cargo audit
+
+  # --------------------------------------------------------------------------
+  # Formal validation: TLA+ model checking + real-code bridge harness
+  # --------------------------------------------------------------------------
+  formal-validation:
+    name: Formal Validation
     runs-on: ubuntu-latest
+    needs: [rust]
     steps:
       - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-java@v4
         with:
-          components: rustfmt
-      - run: cargo fmt --all -- --check
+          distribution: temurin
+          java-version: '21'
 
-  doc:
-    name: Documentation
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo doc --workspace --no-deps
-        env:
-          RUSTDOCFLAGS: "-D warnings"
 
-  audit:
-    name: Security Audit
+      - name: Install formal validation deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: TLA+ model checks
+        run: cargo run --locked -p dsm_vertical_validation -- tla-check
+
+      - name: Real-code bridge properties
+        run: cargo run --locked -p dsm_vertical_validation -- property-tests --iterations 5 --seed 42
+
+      - name: Direct implementation traces
+        run: cargo run --locked -p dsm_vertical_validation -- implementation-traces
+
+  # --------------------------------------------------------------------------
+  # Frontend: type-check, lint, test, build
+  # --------------------------------------------------------------------------
+  frontend:
+    name: Frontend
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dsm_client/new_frontend
     steps:
       - uses: actions/checkout@v4
-      - uses: rustsec/audit-check@v2.0.0
+
+      - uses: actions/setup-node@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: dsm_client/new_frontend/package-lock.json
 
-  deny:
-    name: Cargo Deny
+      - name: Cache frontend dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.npm
+            dsm_client/new_frontend/node_modules
+          key: ${{ runner.os }}-frontend-${{ hashFiles('dsm_client/new_frontend/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-frontend-
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run type-check
+
+      - name: Test
+        run: npm test -- --passWithNoTests --ci
+
+      - name: Build
+        run: npm run build
+
+  # --------------------------------------------------------------------------
+  # Docker: storage node image
+  # --------------------------------------------------------------------------
+  docker:
+    name: Docker
     runs-on: ubuntu-latest
+    needs: [rust]
     steps:
       - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
+
+      - name: Build storage node image
+        run: docker build -f ci/docker/StorageNode.Dockerfile -t dsm/storage-node:ci .

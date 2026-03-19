@@ -1,0 +1,57 @@
+name: Feature Request (Beta)
+description: Suggest a new feature or enhancement for DSM
+title: "[FEATURE] "
+labels: ["enhancement", "beta"]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for feature requests, product improvements, and protocol or developer-experience enhancements.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Feature summary
+      description: Brief description of the feature you'd like to see.
+      placeholder: I would like DSM to...
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What problem does this solve?
+      placeholder: This would help because...
+    validations:
+      required: true
+  - type: textarea
+    id: proposed_solution
+    attributes:
+      label: Proposed solution
+      description: Describe your proposed solution and how it would work.
+      placeholder: The proposed solution is...
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternative solutions
+      description: Have you considered any alternatives?
+      placeholder: Alternatives considered...
+  - type: textarea
+    id: protocol_context
+    attributes:
+      label: Additional context
+      description: Explain how this fits DSM's design. Include protocol, cryptographic, or UX considerations if relevant.
+      placeholder: Include tradeoffs, invariants, mockups, diagrams, or examples if helpful.
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options:
+        - Nice to have
+        - Would be helpful
+        - Important for adoption
+        - Critical for mainnet
+    validations:
+      required: true

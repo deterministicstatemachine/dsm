@@ -1,0 +1,62 @@
+name: Developer Onboarding (Beta)
+description: Questions or issues with getting started as a developer
+title: "[ONBOARDING] "
+labels: ["onboarding", "beta", "documentation"]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for onboarding blockers, setup confusion, and documentation gaps.
+  - type: textarea
+    id: goal
+    attributes:
+      label: What are you trying to do?
+      description: Describe what you're trying to build or understand with DSM.
+      placeholder: I am trying to...
+    validations:
+      required: true
+  - type: textarea
+    id: blocker
+    attributes:
+      label: Where did you get stuck?
+      description: What step in the process caused issues?
+      placeholder: I got blocked when...
+    validations:
+      required: true
+  - type: checkboxes
+    id: setup_path
+    attributes:
+      label: Environment setup path
+      description: Which setup path were you following?
+      options:
+        - label: QUICKSTART.md
+        - label: docs/book/README.md
+        - label: Custom setup
+        - label: Other
+  - type: textarea
+    id: errors
+    attributes:
+      label: Error messages
+      description: Paste any relevant error output here.
+      render: shell
+      placeholder: Paste any error messages here
+  - type: checkboxes
+    id: questions
+    attributes:
+      label: What do you need help with?
+      options:
+        - label: Building the codebase
+        - label: Understanding the protocol
+        - label: Cryptographic primitives
+        - label: Android/WebView integration
+        - label: BLE bilateral transfers
+        - label: Storage nodes
+        - label: Testing
+        - label: Other
+  - type: textarea
+    id: suggestions
+    attributes:
+      label: Suggestions for improvement
+      description: How could the onboarding experience be better?
+      placeholder: The docs or setup flow would be clearer if...
