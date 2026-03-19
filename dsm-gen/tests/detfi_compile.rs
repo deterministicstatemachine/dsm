@@ -71,7 +71,10 @@ fn test_vault_blob_base32_roundtrip() {
         &detfi_vault_path("01-simple-escrow.yaml"),
         Some(DeploymentMode::Posted),
     );
-    let decoded = base32::decode(&blob.base32).expect("Base32 decode failed");
+    let decoded = match base32::decode(&blob.base32) {
+        Some(decoded) => decoded,
+        None => panic!("Base32 decode failed"),
+    };
     assert_eq!(decoded, blob.bytes, "Base32 round-trip mismatch");
 }
 
@@ -81,7 +84,10 @@ fn test_policy_blob_base32_roundtrip() {
         &detfi_policy_path("01-stablecoin-transfer.yaml"),
         None,
     );
-    let decoded = base32::decode(&blob.base32).expect("Base32 decode failed");
+    let decoded = match base32::decode(&blob.base32) {
+        Some(decoded) => decoded,
+        None => panic!("Base32 decode failed"),
+    };
     assert_eq!(decoded, blob.bytes, "Base32 round-trip mismatch");
 }
 
