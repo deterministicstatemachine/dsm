@@ -59,10 +59,6 @@
     "src/services/bleBridge.ts",
     "src/services/dsmClientNew.ts",
     "src/services/headerService.ts",
-    "**/__tests__/**",
-    "**/*.spec.ts",
-    "**/*.spec.tsx",
-    "**/*.test.ts",
     "**/__mocks__/**"
   ]
 }

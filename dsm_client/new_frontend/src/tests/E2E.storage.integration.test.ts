@@ -1,3 +1,4 @@
+/// <reference types="jest" />
 /* eslint-disable no-console */
 // E2E integration test against local dev storage nodes.
 // Run locally with: DSM_RUN_STORAGE_NODES=1 npm test -- src/tests/E2E.storage.integration.test.ts -i
