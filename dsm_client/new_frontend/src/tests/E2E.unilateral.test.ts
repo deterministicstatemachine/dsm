@@ -1,3 +1,4 @@
+/// <reference types="jest" />
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /* E2E Test: Unilateral (Online) Transaction Flow
  * Simulates exact user journey: QR scan → add contact → send → verify

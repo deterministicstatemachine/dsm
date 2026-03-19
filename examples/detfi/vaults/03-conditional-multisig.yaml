@@ -1,0 +1,68 @@
+# DeTFi Pattern: Conditional Multi-Signature Release
+#
+# A vault that requires BOTH conditions to be satisfied (AND composition):
+#   1. A 2-of-3 multi-signature from authorized signers (e.g., borrower + lender + arbiter)
+#   2. A cryptographic condition proving collateral was posted (hash preimage)
+#
+# Models a loan disbursement: funds release only when both the required
+# parties sign AND collateral proof is provided. If neither condition is
+# met within 100000 iterations, funds go to a designated recipient.
+#
+# Fulfillment: And(MultiSignature, CryptoCondition)
+# Difficulty:  Advanced
+#
+# NOTE: All Base32 placeholder keys are for readability only and contain characters
+#   outside the Crockford alphabet. Replace with real values before use.
+#
+# Usage:
+#   dsm-gen validate examples/detfi/vaults/03-conditional-multisig.yaml
+#   dsm-gen client  examples/detfi/vaults/03-conditional-multisig.yaml --lang kotlin --factory
+
+type: "vault"
+name: "ConditionalMultiSigVault"
+version: "1.0.0"
+description: "Loan disbursement vault — requires multi-sig AND collateral proof"
+
+fulfillment_condition:
+  type: "and"
+  conditions:
+    - type: "multi_signature"
+      public_keys:
+        - "BORROWERSPHINCSKEY00000000000000000000000000000000000"
+        - "LENDERSPHINCSKEY000000000000000000000000000000000000"
+        - "ARBITERSPHINCSKEY00000000000000000000000000000000000"
+      threshold: 2
+
+    - type: "crypto_condition"
+      condition_hash: "COLLATERALPROOFHASH000000000000000000000000000000000"
+      public_params: "COLLATERALPARAMS0000000000000000000000000000000000000"
+
+assets:
+  - asset_id: "DSM"
+    amount: 10000
+    metadata:
+      purpose: "loan_principal"
+
+  - asset_id: "DSM"
+    amount: 2000
+    metadata:
+      purpose: "collateral_reserve"
+
+tick_lock:
+  duration_iterations: 100000
+  tick_lock_action:
+    type: "release_to_recipient"
+    recipient: "LENDERDEVICEID00000000000000000000000000000000000000"
+
+recovery:
+  mechanism:
+    type: "multi_sig_recovery"
+    required_signatures: 2
+    recovery_keys:
+      - "RECOVERYKEY1000000000000000000000000000000000000000000"
+      - "RECOVERYKEY2000000000000000000000000000000000000000000"
+
+metadata:
+  pattern: "conditional_release"
+  difficulty: "advanced"
+  use_case: "loan_disbursement"

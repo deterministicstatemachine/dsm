@@ -39,37 +39,6 @@ impl CodeGenerator for TypeScriptGenerator {
 }
 
 impl TypeScriptGenerator {
-    fn sanitize_identifier(name: &str) -> String {
-        let sanitized: String = name.chars().filter(|c| c.is_alphanumeric()).collect();
-        if sanitized.is_empty() {
-            "Vault".to_string()
-        } else {
-            sanitized
-        }
-    }
-
-    fn base_vault_name(spec: &VaultSpecification) -> String {
-        let sanitized = Self::sanitize_identifier(&spec.name);
-        let suffix = "vault";
-
-        if sanitized.len() >= suffix.len() && sanitized.to_lowercase().ends_with(suffix) {
-            sanitized[..sanitized.len() - suffix.len()].to_string()
-        } else {
-            sanitized
-        }
-    }
-
-    fn base_policy_name(spec: &PolicySpecification) -> String {
-        let sanitized = Self::sanitize_identifier(&spec.name);
-        let suffix = "policy";
-
-        if sanitized.len() >= suffix.len() && sanitized.to_lowercase().ends_with(suffix) {
-            sanitized[..sanitized.len() - suffix.len()].to_string()
-        } else {
-            sanitized
-        }
-    }
-
     fn generate_vault_client(&self, spec: &VaultSpecification) -> Result<String> {
         let mut code = String::new();
 
@@ -244,7 +213,7 @@ impl TypeScriptGenerator {
     }
 
     fn generate_vault_client_class(&self, spec: &VaultSpecification) -> Result<String> {
-        let base_name = Self::base_vault_name(spec);
+        let base_name = super::base_vault_name(spec);
         let class_name = format!("{base_name}VaultClient");
 
         Ok(format!(
@@ -341,10 +310,6 @@ export class {class_name} {{
 
   /* ------------ Private Methods ------------ */
   
-  private static validateCreateConfig(_cfg: CreateCfg): void {{
-    // validation is inline in create()
-  }}
-  
   private async validateUnlockProof(proof: UnlockProof): Promise<void> {{
     const status = await this.status();
 
@@ -394,7 +359,7 @@ export class {class_name} {{
     }
 
     fn generate_factory_class(&self, spec: &VaultSpecification) -> Result<String> {
-        let base_name = Self::base_vault_name(spec);
+        let base_name = super::base_vault_name(spec);
         let class_name = format!("{base_name}VaultFactory");
         let vault_class_name = format!("{base_name}VaultClient");
 
@@ -486,13 +451,8 @@ export class {class_name} {{
     }
 
     fn generate_policy_client_class(&self, spec: &PolicySpecification) -> Result<String> {
-        let class_name = format!(
-            "{}PolicyClient",
-            spec.name
-                .chars()
-                .filter(|c| c.is_alphanumeric())
-                .collect::<String>()
-        );
+        let base_name = super::sanitize_identifier(&spec.name);
+        let class_name = format!("{base_name}PolicyClient");
 
         Ok(format!(
             r#"/**
@@ -549,14 +509,13 @@ export class {class_name} {{
     }
 
     fn generate_factory_class_for_policy(&self, spec: &PolicySpecification) -> Result<String> {
-        let base_name = Self::base_policy_name(spec);
+        let base_name = super::base_policy_name(spec);
         let class_name = format!("{base_name}PolicyFactory");
         let policy_class_name = format!("{base_name}PolicyClient");
 
         Ok(format!(
             r#"/**
  * Factory for managing {base_name} policy instances
- * Policies are typically singletons, but this factory allows for multiple configurations
  */
 export class {class_name} {{
   private policies = new Map<string, {policy_class_name}>();
@@ -564,24 +523,19 @@ export class {class_name} {{
   constructor(private readonly sdk: DsmSdk) {{}}
 
   /**
-   * Create a new policy instance
+   * Create a new policy instance and register it by name
    */
-  async createPolicy(cfg: PolicyConfig): Promise<{policy_class_name}> {{
-    const policy = await {policy_class_name}.create(this.sdk, cfg);
-    const policyId = policy.getId();
-
-    if (policyId) {{
-      this.policies.set(policyId, policy);
-    }}
-
+  createPolicy(name: string): {policy_class_name} {{
+    const policy = new {policy_class_name}(this.sdk);
+    this.policies.set(name, policy);
     return policy;
   }}
 
   /**
-   * Get an existing policy by ID
+   * Get an existing policy by name
    */
-  getPolicy(policyId: string): {policy_class_name} | undefined {{
-    return this.policies.get(policyId);
+  getPolicy(name: string): {policy_class_name} | undefined {{
+    return this.policies.get(name);
   }}
 
   /**
@@ -594,8 +548,8 @@ export class {class_name} {{
   /**
    * Remove a policy from management
    */
-  removePolicy(policyId: string): boolean {{
-    return this.policies.delete(policyId);
+  removePolicy(name: string): boolean {{
+    return this.policies.delete(name);
   }}
 
   /**

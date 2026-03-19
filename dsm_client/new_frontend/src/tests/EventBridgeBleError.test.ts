@@ -1,3 +1,4 @@
+/// <reference types="jest" />
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // SPDX-License-Identifier: Apache-2.0
 // Minimal unit test for BLE error envelope parsing in EventBridge.parseBleEnvelope
@@ -7,16 +8,16 @@ import * as pb from '../proto/dsm_app_pb';
 
 function buildBleErrorEnvelope(deviceId: string, code: number, message: string): Uint8Array {
   // Construct BleTransactionError
-  const bleErr = new pb.BleTransactionError({ deviceId, errorCode: code, message });
+  const bleErr = new pb.BleTransactionError({ deviceId: new TextEncoder().encode(deviceId) as Uint8Array<ArrayBuffer>, errorCode: code, message });
   const bleErrBytes = bleErr.toBinary();
 
   // Wrap in DsmBtMessage (message_type = BTMSG_TYPE_ERROR)
   const btMsg = new pb.DsmBtMessage({
     messageId: 'test-id',
     messageType: pb.BtMessageType.BTMSG_TYPE_ERROR,
-    senderId: '',
-    recipientId: '',
-    payload: bleErrBytes,
+    senderId: new Uint8Array(0) as Uint8Array<ArrayBuffer>,
+    recipientId: new Uint8Array(0) as Uint8Array<ArrayBuffer>,
+    payload: bleErrBytes as Uint8Array<ArrayBuffer>,
     sequence: BigInt(0),
     requiresAck: false,
     checksum: 0,

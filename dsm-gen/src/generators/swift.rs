@@ -39,29 +39,6 @@ impl CodeGenerator for SwiftGenerator {
 }
 
 impl SwiftGenerator {
-    fn sanitize_identifier(name: &str) -> String {
-        let sanitized: String = name
-            .chars()
-            .map(|c| if c.is_alphanumeric() { c } else { '_' })
-            .collect();
-        if sanitized.is_empty() {
-            "Vault".to_string()
-        } else {
-            sanitized
-        }
-    }
-
-    fn base_vault_name(spec: &VaultSpecification) -> String {
-        let sanitized = Self::sanitize_identifier(&spec.name);
-        let suffix = "vault";
-
-        if sanitized.len() >= suffix.len() && sanitized.to_lowercase().ends_with(suffix) {
-            sanitized[..sanitized.len() - suffix.len()].to_string()
-        } else {
-            sanitized
-        }
-    }
-
     fn generate_header(&self) -> String {
         // Clockless/deterministic: never include wall-clock markers in generated output.
         let marker_suffix = String::new();
@@ -76,7 +53,7 @@ impl SwiftGenerator {
     }
 
     fn generate_imports(&self) -> String {
-        "import Foundation\nimport BigInt\n\n".to_string()
+        "import Foundation\n\n".to_string()
     }
 
     fn generate_vault_client(&self, spec: &VaultSpecification) -> Result<String> {
@@ -126,7 +103,7 @@ impl SwiftGenerator {
     }
 
     fn generate_vault_types(&self, spec: &VaultSpecification) -> Result<String> {
-        let class_name = Self::base_vault_name(spec);
+        let class_name = super::base_vault_name(spec);
         let mut code = String::new();
 
         // FulfillmentCondition indirect enum — mirrors FulfillmentMechanism oneof in dsm_app.proto.
@@ -235,7 +212,7 @@ impl SwiftGenerator {
         // Rule condition
         code.push_str("struct RuleCondition {\n");
         code.push_str("    let conditionType: ConditionType\n");
-        code.push_str("    let parameters: [String: Any]\n");
+        code.push_str("    let parameters: [String: String]\n");
         code.push_str("}\n\n");
 
         // Condition types enum
@@ -266,7 +243,7 @@ impl SwiftGenerator {
     }
 
     fn generate_vault_client_class(&self, spec: &VaultSpecification) -> Result<String> {
-        let class_name = Self::base_vault_name(spec);
+        let class_name = super::base_vault_name(spec);
         let mut code = String::new();
 
         code.push_str(&format!("class {}VaultClient {{\n", class_name));
@@ -373,27 +350,30 @@ impl SwiftGenerator {
         code.push_str("    }\n\n");
 
         code.push_str("    private func evaluateAmountLimit(_ condition: RuleCondition, context: TransactionContext) -> Bool {\n");
-        code.push_str("        guard let maxAmount = condition.parameters[\"maxAmount\"] as? BigInt else { return false }\n");
+        code.push_str("        guard let maxStr = condition.parameters[\"maxAmount\"], let maxAmount = UInt64(maxStr) else { return false }\n");
         code.push_str("        return context.amount <= maxAmount\n");
         code.push_str("    }\n\n");
 
         code.push_str("    private func evaluateIterationWindow(_ condition: RuleCondition, context: TransactionContext) -> Bool {\n");
-        code.push_str("        // Fail-closed by default in generated code.\n");
-        code.push_str("        return false\n");
+        code.push_str("        // Deterministic tick-based window check (no wall-clock).\n");
+        code.push_str("        guard let maxStr = condition.parameters[\"maxIterations\"], let maxIterations = UInt64(maxStr) else { return false }\n");
+        code.push_str("        return context.tick <= maxIterations\n");
         code.push_str("    }\n\n");
 
         code.push_str("    private func evaluateWhitelist(_ condition: RuleCondition, context: TransactionContext) -> Bool {\n");
-        code.push_str("        guard let allowedRecipients = condition.parameters[\"recipients\"] as? [Data] else { return false }\n");
-        code.push_str("        return allowedRecipients.contains(context.recipient)\n");
+        code.push_str("        guard let recipientList = condition.parameters[\"recipients\"] else { return false }\n");
+        code.push_str("        let recipientStr = String(data: context.recipient, encoding: .utf8) ?? \"\"\n");
+        code.push_str("        return recipientList.split(separator: \",\").map { $0.trimmingCharacters(in: .whitespaces) }.contains(recipientStr)\n");
         code.push_str("    }\n\n");
 
         code.push_str("    private func evaluateBlacklist(_ condition: RuleCondition, context: TransactionContext) -> Bool {\n");
-        code.push_str("        guard let blockedRecipients = condition.parameters[\"recipients\"] as? [Data] else { return true }\n");
-        code.push_str("        return !blockedRecipients.contains(context.recipient)\n");
+        code.push_str("        guard let recipientList = condition.parameters[\"recipients\"] else { return true }\n");
+        code.push_str("        let recipientStr = String(data: context.recipient, encoding: .utf8) ?? \"\"\n");
+        code.push_str("        return !recipientList.split(separator: \",\").map { $0.trimmingCharacters(in: .whitespaces) }.contains(recipientStr)\n");
         code.push_str("    }\n\n");
 
         code.push_str("    private func evaluateSignatureRequired(_ condition: RuleCondition, context: TransactionContext) -> Bool {\n");
-        code.push_str("        guard let requiredSignatures = condition.parameters[\"count\"] as? Int else { return false }\n");
+        code.push_str("        guard let countStr = condition.parameters[\"count\"], let requiredSignatures = Int(countStr) else { return false }\n");
         code.push_str("        return context.signatureCount >= requiredSignatures\n");
         code.push_str("    }\n\n");
 
@@ -423,10 +403,10 @@ impl SwiftGenerator {
         code.push_str("struct TransactionContext {\n");
         code.push_str("    let sender: Data\n");
         code.push_str("    let recipient: Data\n");
-        code.push_str("    let amount: BigInt\n");
+        code.push_str("    let amount: UInt64\n");
         code.push_str("    let signatureCount: Int\n");
         code.push_str("    let tick: UInt64\n");
-        code.push_str("    let metadata: [String: Any]\n");
+        code.push_str("    let metadata: [String: String]\n");
         code.push_str("}\n\n");
 
         // Policy info
@@ -441,7 +421,7 @@ impl SwiftGenerator {
     }
 
     fn generate_factory_class(&self, spec: &VaultSpecification) -> Result<String> {
-        let class_name = Self::base_vault_name(spec);
+        let class_name = super::base_vault_name(spec);
         let mut code = String::new();
 
         code.push_str(&format!("class {}VaultFactory {{\n", class_name));

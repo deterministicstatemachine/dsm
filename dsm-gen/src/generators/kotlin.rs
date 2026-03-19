@@ -39,35 +39,6 @@ impl CodeGenerator for KotlinGenerator {
 }
 
 impl KotlinGenerator {
-    fn sanitize_identifier(name: &str) -> String {
-        let sanitized: String = name
-            .chars()
-            .map(|c| {
-                if c.is_alphanumeric() || c == '_' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
-        if sanitized.is_empty() {
-            "Vault".to_string()
-        } else {
-            sanitized
-        }
-    }
-
-    fn base_vault_name(spec: &VaultSpecification) -> String {
-        let sanitized = Self::sanitize_identifier(&spec.name);
-        let suffix = "vault";
-
-        if sanitized.len() >= suffix.len() && sanitized.to_lowercase().ends_with(suffix) {
-            sanitized[..sanitized.len() - suffix.len()].to_string()
-        } else {
-            sanitized
-        }
-    }
-
     fn generate_header(&self) -> String {
         // Clockless/deterministic: never include wall-clock markers in generated output.
         let marker_suffix = String::new();
@@ -139,7 +110,7 @@ impl KotlinGenerator {
     }
 
     fn generate_vault_types(&self, spec: &VaultSpecification) -> Result<String> {
-        let class_name = Self::base_vault_name(spec);
+        let class_name = super::base_vault_name(spec);
         let mut code = String::new();
 
         // FulfillmentCondition sealed class — mirrors FulfillmentMechanism oneof in dsm_app.proto.
@@ -250,7 +221,7 @@ impl KotlinGenerator {
         // Rule condition
         code.push_str("data class RuleCondition(\n");
         code.push_str("    val conditionType: ConditionType,\n");
-        code.push_str("    val parameters: Map<String, Any>\n");
+        code.push_str("    val parameters: Map<String, String>\n");
         code.push_str(")\n\n");
 
         // Condition types enum
@@ -281,7 +252,7 @@ impl KotlinGenerator {
     }
 
     fn generate_vault_client_class(&self, spec: &VaultSpecification) -> Result<String> {
-        let class_name = Self::base_vault_name(spec);
+        let class_name = super::base_vault_name(spec);
         let mut code = String::new();
 
         code.push_str(&format!("class {}VaultClient(\n", class_name));
@@ -390,7 +361,7 @@ impl KotlinGenerator {
         code.push_str("    }\n\n");
 
         code.push_str("    private fun evaluateAmountLimit(condition: RuleCondition, context: TransactionContext): Boolean {\n");
-        code.push_str("        val maxAmount = condition.parameters[\"maxAmount\"] as? BigInteger ?: return false\n");
+        code.push_str("        val maxAmount = condition.parameters[\"maxAmount\"]?.toBigIntegerOrNull() ?: return false\n");
         code.push_str("        return context.amount <= maxAmount\n");
         code.push_str("    }\n\n");
 
@@ -400,22 +371,25 @@ impl KotlinGenerator {
         // If iteration-window semantics are needed, they must be expressed in deterministic ticks
         // carried in the transaction/context (not wall-clock).
         code.push_str("    private fun evaluateIterationWindow(condition: RuleCondition, context: TransactionContext): Boolean {\n");
-        code.push_str("        // Fail-closed by default in generated code.\n");
-        code.push_str("        return false\n");
+        code.push_str("        // Deterministic tick-based window check (no wall-clock).\n");
+        code.push_str("        val maxIterations = condition.parameters[\"maxIterations\"]?.toLongOrNull() ?: return false\n");
+        code.push_str("        return context.tick <= maxIterations\n");
         code.push_str("    }\n\n");
 
         code.push_str("    private fun evaluateWhitelist(condition: RuleCondition, context: TransactionContext): Boolean {\n");
-        code.push_str("        val allowedRecipients = condition.parameters[\"recipients\"] as? List<*> ?: return false\n");
-        code.push_str("        return context.recipient in allowedRecipients\n");
+        code.push_str("        val recipientList = condition.parameters[\"recipients\"] ?: return false\n");
+        code.push_str("        val recipientStr = String(context.recipient)\n");
+        code.push_str("        return recipientList.split(\",\").any { it.trim() == recipientStr }\n");
         code.push_str("    }\n\n");
 
         code.push_str("    private fun evaluateBlacklist(condition: RuleCondition, context: TransactionContext): Boolean {\n");
-        code.push_str("        val blockedRecipients = condition.parameters[\"recipients\"] as? List<*> ?: return true\n");
-        code.push_str("        return context.recipient !in blockedRecipients\n");
+        code.push_str("        val recipientList = condition.parameters[\"recipients\"] ?: return true\n");
+        code.push_str("        val recipientStr = String(context.recipient)\n");
+        code.push_str("        return recipientList.split(\",\").none { it.trim() == recipientStr }\n");
         code.push_str("    }\n\n");
 
         code.push_str("    private fun evaluateSignatureRequired(condition: RuleCondition, context: TransactionContext): Boolean {\n");
-        code.push_str("        val requiredSignatures = condition.parameters[\"count\"] as? Int ?: return false\n");
+        code.push_str("        val requiredSignatures = condition.parameters[\"count\"]?.toIntOrNull() ?: return false\n");
         code.push_str("        return context.signatureCount >= requiredSignatures\n");
         code.push_str("    }\n\n");
 
@@ -452,7 +426,7 @@ impl KotlinGenerator {
         code.push_str("    val amount: BigInteger,\n");
         code.push_str("    val signatureCount: Int,\n");
         code.push_str("    val tick: Long,\n");
-        code.push_str("    val metadata: Map<String, Any>\n");
+        code.push_str("    val metadata: Map<String, String>\n");
         code.push_str(")\n\n");
 
         // Policy info
@@ -467,7 +441,7 @@ impl KotlinGenerator {
     }
 
     fn generate_factory_class(&self, spec: &VaultSpecification) -> Result<String> {
-        let class_name = Self::base_vault_name(spec);
+        let class_name = super::base_vault_name(spec);
         let mut code = String::new();
 
         code.push_str(&format!("class {}VaultFactory(\n", class_name));

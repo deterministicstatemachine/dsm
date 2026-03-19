@@ -80,10 +80,6 @@ enum Commands {
     Init {
         /// Project name
         name: String,
-
-        /// Project template type
-        #[arg(long, default_value = "minimal")]
-        template: String,
     },
 
     /// Validate specification files
@@ -152,8 +148,8 @@ fn main() -> Result<()> {
             generate_schema(schema_type, output, cli.output_dir)?;
         }
 
-        Commands::Init { name, template } => {
-            init_project(name, template, cli.output_dir)?;
+        Commands::Init { name } => {
+            init_project(name, cli.output_dir)?;
         }
 
         Commands::Validate { spec_file } => {
@@ -172,6 +168,10 @@ fn generate_client_code(
     test_vectors: bool,
     output_dir: Option<PathBuf>,
 ) -> Result<()> {
+    if languages.is_empty() {
+        anyhow::bail!("No target language specified. Use --lang (ts|kotlin|swift|rust)");
+    }
+
     println!("Generating client code from: {spec_file:?}");
 
     // Load and validate specification
@@ -272,13 +272,16 @@ fn generate_schema(
 
 fn init_project(
     name: String,
-    template: String,
-    #[allow(unused_variables)] output_dir: Option<PathBuf>,
+    output_dir: Option<PathBuf>,
 ) -> Result<()> {
-    println!("Initializing DSM project: {name} (template: {template})");
+    println!("Initializing DSM project: {name}");
 
     // Create project directory structure
-    let project_dir = PathBuf::from(&name);
+    let project_dir = if let Some(ref dir) = output_dir {
+        dir.join(&name)
+    } else {
+        PathBuf::from(&name)
+    };
     std::fs::create_dir_all(&project_dir)
         .with_context(|| format!("Failed to create project directory: {}", name))?;
 
@@ -344,7 +347,7 @@ rules:
     let readme_content = format!(
         r#"# {name}
 
-A DSM (Deterministic State Machine) project using template: {template}
+A DSM (Deterministic State Machine) project.
 
 ## Project Structure
 
@@ -423,25 +426,99 @@ fn validate_specification(spec_file: PathBuf) -> Result<()> {
         serde_yaml::from_str(&content).with_context(|| "Failed to parse YAML specification")?
     };
 
-    println!("✓ Specification is valid: {spec_file:?}");
-    match spec {
+    let mut errors: Vec<String> = Vec::new();
+
+    match &spec {
         DsmSpecification::Vault(vault) => {
             println!("  Type: Vault");
-            let name = &vault.name;
-            let version = &vault.version;
-            println!("  Name: {name}");
-            println!("  Version: {version}");
+            println!("  Name: {}", vault.name);
+            println!("  Version: {}", vault.version);
+
+            if vault.assets.is_empty() {
+                errors.push("Vault must have at least one asset".into());
+            }
+            for asset in &vault.assets {
+                if asset.amount == 0 {
+                    errors.push(format!("Asset '{}': amount must be > 0", asset.asset_id));
+                }
+            }
+            validate_fulfillment_condition(&vault.fulfillment_condition, &mut errors);
         }
         DsmSpecification::Policy(policy) => {
             println!("  Type: Policy");
-            let name = &policy.name;
-            let version = &policy.version;
-            println!("  Name: {name}");
-            println!("  Version: {version}");
+            println!("  Name: {}", policy.name);
+            println!("  Version: {}", policy.version);
+
+            if policy.rules.is_empty() {
+                errors.push("Policy must have at least one rule".into());
+            }
+            let mut seen_names = std::collections::HashSet::new();
+            for rule in &policy.rules {
+                if !seen_names.insert(&rule.name) {
+                    errors.push(format!("Duplicate rule name: '{}'", rule.name));
+                }
+            }
         }
     }
 
-    Ok(())
+    if errors.is_empty() {
+        println!("✓ Specification is valid: {spec_file:?}");
+        Ok(())
+    } else {
+        for e in &errors {
+            eprintln!("  ✗ {e}");
+        }
+        anyhow::bail!(
+            "Specification has {} validation error(s)",
+            errors.len()
+        )
+    }
+}
+
+fn validate_fulfillment_condition(
+    cond: &dsm_gen::schema::FulfillmentConditionSpec,
+    errors: &mut Vec<String>,
+) {
+    use dsm_gen::schema::FulfillmentConditionSpec;
+    match cond {
+        FulfillmentConditionSpec::MultiSignature(ms) => {
+            if ms.threshold == 0 {
+                errors.push("MultiSignature: threshold must be > 0".into());
+            }
+            if ms.public_keys.is_empty() {
+                errors.push("MultiSignature: public_keys must not be empty".into());
+            }
+            if ms.threshold as usize > ms.public_keys.len() {
+                errors.push(format!(
+                    "MultiSignature: threshold ({}) exceeds number of keys ({})",
+                    ms.threshold,
+                    ms.public_keys.len()
+                ));
+            }
+        }
+        FulfillmentConditionSpec::BitcoinHtlc(h) => {
+            if h.min_confirmations == 0 {
+                errors.push("BitcoinHtlc: min_confirmations must be > 0".into());
+            }
+        }
+        FulfillmentConditionSpec::And(a) => {
+            if a.conditions.is_empty() {
+                errors.push("And: conditions must not be empty".into());
+            }
+            for c in &a.conditions {
+                validate_fulfillment_condition(c, errors);
+            }
+        }
+        FulfillmentConditionSpec::Or(o) => {
+            if o.conditions.is_empty() {
+                errors.push("Or: conditions must not be empty".into());
+            }
+            for c in &o.conditions {
+                validate_fulfillment_condition(c, errors);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn ensure_parent_dir(path: &Path) -> Result<()> {

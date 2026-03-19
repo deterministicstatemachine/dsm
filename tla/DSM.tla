@@ -822,11 +822,6 @@ Core == INSTANCE DSM_ProtocolCore
        commit <- Core_commit,
        step <- Core_step
 
-ProofGlue ==
-    /\ DJTESafety
-    /\ RefinementStrengthening
-    /\ SourceVaultBounded
-
 \* Safety properties
 NoDuplicateDevices ==
     \A g1,g2 \in GenesisIds, d \in DeviceIds :
@@ -1033,6 +1028,11 @@ DJTE_Inv7_NoMoreSpentThanActivated == (phase >= 1 => NoMoreSpentThanActivated)
 
 \* Concrete vault bounds (loud failure if conservation is violated).
 SourceVaultBounded == sourceRemaining \in 0..MaxSupply
+
+ProofGlue ==
+    /\ DJTESafety
+    /\ RefinementStrengthening
+    /\ SourceVaultBounded
 
 \* ============================================================================
 \* TRIPWIRE & FORK EXCLUSION (Atomic Interlock)

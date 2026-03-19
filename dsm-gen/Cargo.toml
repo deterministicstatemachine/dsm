@@ -13,9 +13,8 @@ categories = ["development-tools", "template-engine"]
 # CLI framework
 clap = { version = "4.5", features = ["derive", "env"] }
 
-# Schema generation and validation
-schemars = { version = "0.8", features = ["chrono"] }
-jsonschema = "0.17"
+# Schema generation
+schemars = "0.8"
 
 # YAML/JSON processing
 serde = { version = "1.0", features = ["derive"] }
@@ -26,20 +25,12 @@ serde_yaml = "0.9"
 anyhow = "1.0"
 thiserror = "1.0"
 
-# File system operations
-walkdir = "2.4"
-
 # Hashing for reproducible builds
 blake3 = "1.5"
-sha2 = "0.10"
 
 # Proto runtime (mirrors dsm_app.proto types for compile-time drift detection)
 prost = "0.13"
 prost-types = "0.13"
-
-# Utilities
-chrono = { version = "0.4", features = ["serde"] }
-regex = "1.10"
 
 # Logging
 log = "0.4"
@@ -54,5 +45,4 @@ name = "dsm_gen"
 path = "src/lib.rs"
 
 [build-dependencies]
-built = { version = "0.7", features = ["git2"] }
 prost-build = "0.13"

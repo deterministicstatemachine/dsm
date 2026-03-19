@@ -1,3 +1,4 @@
+/// <reference types="jest" />
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /* E2E Test: Bilateral (Offline/Bluetooth) Transaction Flow
  * Simulates offline transaction patterns and Bluetooth encoding

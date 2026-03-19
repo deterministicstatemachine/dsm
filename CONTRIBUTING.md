@@ -50,8 +50,8 @@ Android work only: cargo-ndk, Android NDK 27.x, Android SDK with platform-tools 
 
 | Branch | Purpose |
 |---|---|
-| `master` | Stable; all PRs target this |
-| `release/x.y.z` | Release preparation; created from `master` |
+| `main` | Stable; all PRs target this |
+| `release/x.y.z` | Release preparation; created from `main` |
 | `fix/short-description` | Bug fixes |
 | `feat/short-description` | New features |
 
@@ -65,7 +65,7 @@ make build
 make typecheck
 # then run the targeted tests for the area you changed
 git push origin fix/your-description
-# open a PR against master
+# open a PR against main
 ```
 
 Targeted validation examples:
