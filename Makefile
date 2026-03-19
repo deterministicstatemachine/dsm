@@ -31,6 +31,7 @@ JNILIBS_DIR := $(ANDROID_DIR)/app/src/main/jniLibs
 REPO_JNILIBS_DIR := $(NDK_DIR)/jniLibs
 CARGO_CONFIG := $(NDK_DIR)/dsm_sdk/.cargo/config.toml
 CARGO_CONFIG_TEMPLATE := $(NDK_DIR)/dsm_sdk/.cargo/config.toml.template
+ANDROID_LOCAL_PROPERTIES := $(ANDROID_DIR)/local.properties
 
 .DEFAULT_GOAL := help
 
@@ -77,6 +78,19 @@ doctor: ## Check local prerequisites and repo state without changing files
 	else \
 		echo "    android ndk: not configured (run make setup before Android builds)"; \
 	fi
+	@SDK=""; \
+	if [ -n "$$ANDROID_HOME" ] && [ -d "$$ANDROID_HOME" ]; then \
+		SDK="$$ANDROID_HOME"; \
+	elif [ -n "$$ANDROID_SDK_ROOT" ] && [ -d "$$ANDROID_SDK_ROOT" ]; then \
+		SDK="$$ANDROID_SDK_ROOT"; \
+	elif [ -f "$(ANDROID_LOCAL_PROPERTIES)" ]; then \
+		SDK="$$(sed -n 's/^sdk.dir=//p' "$(ANDROID_LOCAL_PROPERTIES)" | tail -1 | sed 's/\\\\/\\/g; s/\\:/:/g; s/\\ / /g')"; \
+	fi; \
+	if [ -n "$$SDK" ] && [ -d "$$SDK" ]; then \
+		echo "    android sdk: $$SDK"; \
+	else \
+		echo "    android sdk: not configured (make setup will try to detect it)"; \
+	fi
 	@if [ -d "$(FRONTEND_DIR)/node_modules" ]; then \
 		echo "    frontend deps: present"; \
 	else \
@@ -88,13 +102,38 @@ doctor: ## Check local prerequisites and repo state without changing files
 		echo "    android cargo config: missing (run make setup)"; \
 	fi
 
+.PHONY: android-sdk-config
+android-sdk-config: ## Detect Android SDK and write ignored local.properties for Gradle
+	@SDK=""; \
+	if [ -n "$$ANDROID_HOME" ] && [ -d "$$ANDROID_HOME" ]; then \
+		SDK="$$ANDROID_HOME"; \
+	elif [ -n "$$ANDROID_SDK_ROOT" ] && [ -d "$$ANDROID_SDK_ROOT" ]; then \
+		SDK="$$ANDROID_SDK_ROOT"; \
+	elif [ -d "$$HOME/Library/Android/sdk" ]; then \
+		SDK="$$HOME/Library/Android/sdk"; \
+	elif [ -d "$$HOME/Android/sdk" ]; then \
+		SDK="$$HOME/Android/sdk"; \
+	fi; \
+	if [ -z "$$SDK" ]; then \
+		echo "WARNING: Android SDK not found. Set ANDROID_HOME or ANDROID_SDK_ROOT, or install the SDK in a standard location."; \
+		exit 0; \
+	fi; \
+	ESCAPED_SDK="$$SDK"; \
+	ESCAPED_SDK="$${ESCAPED_SDK//\\/\\\\}"; \
+	ESCAPED_SDK="$${ESCAPED_SDK//:/\\:}"; \
+	ESCAPED_SDK="$${ESCAPED_SDK// /\\ }"; \
+	mkdir -p "$(ANDROID_DIR)"; \
+	printf 'sdk.dir=%s\n' "$$ESCAPED_SDK" > "$(ANDROID_LOCAL_PROPERTIES)"; \
+	echo "    Android SDK configured for Gradle: $$SDK"
+
 .PHONY: setup
-setup: ## First-time developer setup: check deps, install frontend deps, write .cargo/config.toml
+setup: ## First-time developer setup: check deps, auto-configure Android, install frontend deps
 	@echo "==> Checking prerequisites..."
 	@command -v cargo >/dev/null 2>&1 || { echo "ERROR: Rust/cargo not found. Install from https://rustup.rs"; exit 1; }
 	@command -v npm >/dev/null 2>&1 || { echo "ERROR: npm not found. Install Node.js 20+"; exit 1; }
 	@command -v protoc >/dev/null 2>&1 || { echo "ERROR: protoc not found. Install protobuf compiler"; exit 1; }
 	@command -v adb >/dev/null 2>&1 || echo "WARNING: adb not found — install Android Platform Tools for device installs"
+	@$(MAKE) android-sdk-config
 	@if [ -z "$$ANDROID_NDK_HOME" ] && [ -z "$$ANDROID_NDK_ROOT" ]; then \
 		echo "WARNING: ANDROID_NDK_HOME is not set — skipping Android cargo config generation."; \
 		echo "  Set it later and re-run 'make setup' before Android builds."; \
@@ -140,7 +179,10 @@ android-libs: ## Build native .so libs for all Android ABIs (requires NDK)
 	@echo "==> Building Android native libs..."
 	@rm -f $(JNILIBS_DIR)/arm64-v8a/libdsm_sdk.so \
 	        $(JNILIBS_DIR)/armeabi-v7a/libdsm_sdk.so \
-	        $(JNILIBS_DIR)/x86_64/libdsm_sdk.so
+	        $(JNILIBS_DIR)/x86_64/libdsm_sdk.so \
+	        $(REPO_JNILIBS_DIR)/arm64-v8a/libdsm_sdk.so \
+	        $(REPO_JNILIBS_DIR)/armeabi-v7a/libdsm_sdk.so \
+	        $(REPO_JNILIBS_DIR)/x86_64/libdsm_sdk.so
 	@mkdir -p $(REPO_JNILIBS_DIR)/arm64-v8a \
 	          $(REPO_JNILIBS_DIR)/armeabi-v7a \
 	          $(REPO_JNILIBS_DIR)/x86_64
@@ -158,23 +200,23 @@ android-libs: ## Build native .so libs for all Android ABIs (requires NDK)
 
 .PHONY: frontend
 frontend: ## Build the React frontend (copies assets into Android)
-	@echo "==> Building frontend..."
+	@echo "==> Building fresh frontend bundle and deploying assets into Android..."
 	cd $(FRONTEND_DIR) && \
 		[ -s $$HOME/.nvm/nvm.sh ] && . $$HOME/.nvm/nvm.sh; \
 		nvm use --silent 2>/dev/null || true; \
-		npm run build
+		npm run build:full-deploy
 	@echo "==> Frontend built."
 
 .PHONY: android
-android: android-libs frontend ## Build debug APK (native libs + frontend + gradle)
-	@echo "==> Assembling Android debug APK..."
-	cd $(ANDROID_DIR) && ./gradlew :app:assembleDebug --no-daemon --console=plain
+android: android-sdk-config android-libs frontend ## Build fresh debug APK (native libs + frontend + clean gradle)
+	@echo "==> Assembling fresh Android debug APK..."
+	cd $(ANDROID_DIR) && ./gradlew clean :app:assembleDebug --no-daemon --console=plain
 	@echo "==> APK: $(ANDROID_DIR)/app/build/outputs/apk/debug/app-debug.apk"
 
 .PHONY: android-release
-android-release: android-libs frontend ## Build release APK
-	@echo "==> Assembling Android release APK..."
-	cd $(ANDROID_DIR) && ./gradlew :app:assembleRelease --no-daemon --console=plain
+android-release: android-sdk-config android-libs frontend ## Build fresh release APK
+	@echo "==> Assembling fresh Android release APK..."
+	cd $(ANDROID_DIR) && ./gradlew clean :app:assembleRelease --no-daemon --console=plain
 	@echo "==> APK: $(ANDROID_DIR)/app/build/outputs/apk/release/app-release.apk"
 
 # ---------------------------------------------------------------------------

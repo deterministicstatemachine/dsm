@@ -5,11 +5,13 @@ export interface AndroidBridgeV3 {
   __binary?: boolean;
   sendMessageBin?: (payload: Uint8Array) => Promise<Uint8Array>;
   __callBin?: (payload: Uint8Array) => Promise<Uint8Array>;
+  isAvailable?: () => boolean;
 
   // Optional bridge error helper
   lastError?: () => string | null | undefined;
   // Router helpers
   getAppRouterStatus?: () => number;
+  getBridgeStatus?: () => number;
 
   // Misc utilities
   computeB0xAddress?: (genesis: Uint8Array, deviceId: Uint8Array, tip: Uint8Array) => string;

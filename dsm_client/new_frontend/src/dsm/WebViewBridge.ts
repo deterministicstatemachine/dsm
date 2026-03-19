@@ -200,6 +200,33 @@ const sendBridgeRequestBytes = async (
 ): Promise<Uint8Array> => {
   const b = mustBridge();
 
+  const waitForBinaryBridgeReady = async (): Promise<void> => {
+    const maybeBridge = b as unknown as { isAvailable?: () => boolean };
+    if (typeof maybeBridge.isAvailable !== 'function' || maybeBridge.isAvailable()) {
+      return;
+    }
+
+    await new Promise<void>((resolve) => {
+      let done = false;
+      const finish = () => {
+        if (!done) {
+          done = true;
+          resolve();
+        }
+      };
+      const onReady = () => finish();
+      if (typeof window !== 'undefined') {
+        window.addEventListener('dsm-bridge-ready', onReady, { once: true });
+      }
+      setTimeout(() => {
+        if (typeof window !== 'undefined') {
+          window.removeEventListener('dsm-bridge-ready', onReady);
+        }
+        finish();
+      }, 2500);
+    });
+  };
+
   // Test harness / node environment hook: allow unit tests to provide a minimal
   // bytes-only bridge without MessagePort plumbing.
   // Contract: __callBin(BridgeRpcRequest bytes) -> Promise<Uint8Array>.
@@ -217,6 +244,8 @@ const sendBridgeRequestBytes = async (
   }
 
   if (b.__binary === true && typeof b.sendMessageBin === 'function') {
+    await waitForBinaryBridgeReady();
+
     // MessagePort bridge
     // sendMessageBin expects (method: string, payload: Uint8Array).
     // The page-level sendMessageBin (index.html) now handles message correlation

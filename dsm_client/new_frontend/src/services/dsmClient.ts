@@ -5,6 +5,7 @@
   - Bridge and schema failures are surfaced to callers instead of being converted to synthetic defaults.
 */
 import { hasIdentity } from '../utils/identity';
+import { getBridgeInstance } from '../bridge/BridgeRegistry';
 import { mapBalanceList, mapContactList, mapIdentity } from '../domain/mappers';
 import type { DomainBalance, DomainContact, DomainIdentity, DomainTransaction } from '../domain/types';
 import { fromBase32Crockford } from '../dsm/decoding';
@@ -17,9 +18,26 @@ export type ContactsResponse = {
   contacts: DomainContact[];
 };
 
+function isBinaryBridgeReady(): boolean {
+  const bridge = getBridgeInstance();
+  if (!bridge || bridge.__binary !== true) {
+    return false;
+  }
+
+  if (typeof bridge.isAvailable === 'function') {
+    return bridge.isAvailable();
+  }
+
+  return typeof bridge.sendMessageBin === 'function' || typeof bridge.__callBin === 'function';
+}
+
 export class DsmClient {
   // Identity helpers
   async isReady(): Promise<boolean> {
+    if (!isBinaryBridgeReady()) {
+      return false;
+    }
+
     const session = nativeSessionStore.getSnapshot();
     if (session.received) {
       return session.identity_status === 'ready';

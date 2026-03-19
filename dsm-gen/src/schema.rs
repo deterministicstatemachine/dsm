@@ -35,6 +35,7 @@ use std::collections::BTreeMap;
 /// Top-level DSM specification — either a vault or a policy.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type")]
+#[allow(clippy::large_enum_variant)]
 pub enum DsmSpecification {
     #[serde(rename = "vault")]
     Vault(VaultSpecification),

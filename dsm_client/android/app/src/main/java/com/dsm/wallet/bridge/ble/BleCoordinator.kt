@@ -434,8 +434,8 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
 
     /**
      * Called by GattServerHost when the advertiser side processes a PairingConfirm
-     * (Rust returns empty after the confirm envelope). Stops advertising so this
-     * device is no longer discoverable as an incoming-identity target.
+     * (Rust returns empty after the confirm envelope). Keep advertising active so
+     * already-paired peers can reconnect later for offline bilateral transfers.
      *
      * Does NOT add to pairedBleAddresses — the bilateral protocol requires this
      * device's scanner to still connect to the peer (Direction 2: send our identity
@@ -444,14 +444,13 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
      */
     fun notifyAdvertiserPairingComplete(bleAddress: String) {
         runOperation {
-            advertiser.stopAdvertising()
             // Clear session state after pairing so the bilateral send uses a fresh
             // on-demand connection instead of the pairing session. The active session
             // (activeSessions) is kept alive; connectToDevice() will clean it up if
             // needed when the send is initiated.
             sessionStates.remove(bleAddress)
             pendingConnectionAddresses.remove(bleAddress)
-            Log.i("BleCoordinator", "Stopped advertising after pairing complete for $bleAddress (session kept active)")
+            Log.i("BleCoordinator", "Advertiser pairing complete for $bleAddress — keeping advertising active for reconnects")
         }
     }
 
