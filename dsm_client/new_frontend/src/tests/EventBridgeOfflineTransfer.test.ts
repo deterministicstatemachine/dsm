@@ -1,3 +1,4 @@
+/// <reference types="jest" />
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // SPDX-License-Identifier: Apache-2.0
 // Unit test: parseBleEnvelope should detect offline bilateral transfer (wallet.receive invoke)
