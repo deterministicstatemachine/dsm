@@ -9,6 +9,7 @@
 //! * `file`: File system operations and helpers
 //! * `time`: Time-related utilities and formatting functions
 
+#[cfg(test)]
 pub mod file;
 pub mod time;
 pub mod timeout;
