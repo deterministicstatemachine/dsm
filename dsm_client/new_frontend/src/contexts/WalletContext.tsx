@@ -103,7 +103,7 @@ export const WalletProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     },
     onIdentityReady: async () => {
       try {
-        await walletStore.refreshAll();
+        await walletStore.initialize();
       } catch (error) {
         console.warn('[WalletProvider] identity refresh failed:', error);
       }

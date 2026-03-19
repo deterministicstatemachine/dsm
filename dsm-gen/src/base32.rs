@@ -63,14 +63,20 @@ mod tests {
     fn roundtrip() {
         let data = vec![0u8; 32];
         let encoded = encode(&data);
-        let decoded = decode(&encoded).unwrap();
+        let decoded = match decode(&encoded) {
+            Some(decoded) => decoded,
+            None => panic!("decode failed for encoded roundtrip data"),
+        };
         assert_eq!(decoded, data);
     }
     #[test]
     fn roundtrip_nonzero() {
         let data: Vec<u8> = (0..160).map(|i| i as u8).collect();
         let encoded = encode(&data);
-        let decoded = decode(&encoded).unwrap();
+        let decoded = match decode(&encoded) {
+            Some(decoded) => decoded,
+            None => panic!("decode failed for nonzero roundtrip data"),
+        };
         assert_eq!(decoded, data);
     }
 }
