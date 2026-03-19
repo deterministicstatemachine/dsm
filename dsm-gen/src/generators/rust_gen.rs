@@ -642,6 +642,9 @@ mod tests {
             tick_lock: None,
             recovery: None,
             metadata: None,
+            deployment_mode: None,
+            external_commits: None,
+            fork_group: None,
         };
 
         let spec = DsmSpecification::Vault(vault_spec);

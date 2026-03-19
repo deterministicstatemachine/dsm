@@ -581,8 +581,9 @@ fn verify_entropy_evolution(state1: &State, state2: &State) -> Result<bool, DsmE
 fn is_operation_allowed(operation: &Operation, current_state: &State) -> Result<bool, DsmError> {
     match operation {
         Operation::Genesis => {
-            // Genesis only allowed as first state
-            Ok(current_state.state_number == 0)
+            // Genesis is materialized via State::new_genesis()/SDK bootstrap, not as a
+            // transition from an already-present current state.
+            Ok(false)
         }
         Operation::Recovery { .. } => {
             // Recovery only allowed if state is marked as compromised
@@ -590,8 +591,10 @@ fn is_operation_allowed(operation: &Operation, current_state: &State) -> Result<
                 .flags
                 .contains(&crate::types::state_types::StateFlag::Compromised))
         }
-        // All other operations require an initialized chain (post-genesis)
-        _ => Ok(current_state.state_number > 0),
+        // Any non-genesis operation is allowed once a current state exists.
+        // The first post-genesis transition runs from the materialized genesis
+        // baseline, which is state #0 in the live chain.
+        _ => Ok(true),
     }
 }
 
@@ -750,6 +753,24 @@ mod state_machine_tests {
 
         // Verification should now fail
         assert!(verify_state_chain(&broken_states).is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_first_post_genesis_transition_is_allowed() -> Result<(), DsmError> {
+        let (genesis_state, _pk, sk) = create_test_genesis_state_with_keypair();
+        let device_id = genesis_state.device_info.device_id;
+        let op = signed_transfer(&sk, &genesis_state, vec![0u8; 8], "first post-genesis transfer");
+
+        let mut state_machine = StateMachine::new_with_strategy_and_device_id(
+            KeyDerivationStrategy::Canonical,
+            device_id,
+        );
+        state_machine.set_state(genesis_state);
+
+        let next_state = state_machine.execute_transition(op)?;
+        assert_eq!(next_state.state_number, 1);
 
         Ok(())
     }

@@ -23,10 +23,11 @@ typed client code from, and use as templates for your own DeTFi applications.
 6. [Walkthrough: Bitcoin-Backed Vault](#walkthrough-bitcoin-backed-vault)
 7. [Walkthrough: Composed Conditions](#walkthrough-composed-conditions)
 8. [Walkthrough: Transfer Policies](#walkthrough-transfer-policies)
-9. [Pattern Reference](#pattern-reference)
-10. [Building Your Own](#building-your-own)
-11. [Fulfillment Condition Reference](#fulfillment-condition-reference)
-12. [FAQ](#faq)
+9. [Walkthrough: Compile to Base32 Blob](#walkthrough-compile-to-base32-blob)
+10. [Pattern Reference](#pattern-reference)
+11. [Building Your Own](#building-your-own)
+12. [Fulfillment Condition Reference](#fulfillment-condition-reference)
+13. [FAQ](#faq)
 
 ---
 
@@ -438,6 +439,56 @@ cargo run -p dsm-gen -- client examples/detfi/policies/01-stablecoin-transfer.ya
 
 Generates a `StablecoinTransferPolicyClient` with `evaluateTransaction()` that
 applies all rules in priority order and returns the verdict.
+
+---
+
+## Walkthrough: Compile to Base32 Blob
+
+The `dsm-gen compile` command converts a YAML spec into a Base32 protobuf blob
+that can be pasted directly into the DSM phone app.
+
+### Step 1: Compile a Vault
+
+```bash
+# Compile to Base32 (output to stdout)
+dsm-gen compile examples/detfi/vaults/01-simple-escrow.yaml
+
+# Compile with explicit mode
+dsm-gen compile examples/detfi/vaults/01-simple-escrow.yaml --mode posted
+dsm-gen compile examples/detfi/vaults/01-simple-escrow.yaml --mode local
+
+# Compile to file
+dsm-gen compile examples/detfi/vaults/01-simple-escrow.yaml --output escrow.b32
+```
+
+### Step 2: Understand the Blob
+
+The blob is a 3-byte header + protobuf payload, Base32 Crockford encoded:
+
+| Byte | Field | Values |
+|------|-------|--------|
+| 0 | Version | `1` (current) |
+| 1 | Mode | `0` = local, `1` = posted |
+| 2 | Type | `0` = vault, `1` = policy |
+| 3+ | Proto | `DlvCreateV3` or `TokenPolicyV3` bytes |
+
+### Step 3: Paste into the Phone
+
+1. Copy the Base32 string from stdout or the `.b32` file
+2. Open the DSM app → Settings → Developer Options → DeTFi Launch
+3. Paste the blob
+4. The app auto-detects the type (vault/policy) and mode (posted/local)
+5. Tap "Launch" — the app fills in your device identity and creates the vault
+
+### Step 4: Compile a Policy
+
+```bash
+dsm-gen compile examples/detfi/policies/01-stablecoin-transfer.yaml
+```
+
+Policies are always posted (they're content-addressed and immutable).
+The blob contains the full policy definition. Paste it into the app
+to publish the policy and get its anchor hash.
 
 ---
 

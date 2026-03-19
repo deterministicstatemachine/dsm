@@ -85,6 +85,8 @@ Android prerequisites (only for `make android`, `make android-libs`, or `make in
 - Android SDK/NDK + Java 17
 - Optional: cargo-ndk for building native Android libs
 
+`make setup` will try to detect the Android SDK from `ANDROID_HOME`, `ANDROID_SDK_ROOT`, or standard macOS/Linux install locations and write the ignored Android `local.properties` file for Gradle automatically.
+
 Build everything (Rust + TypeScript)
 ```bash
 make build
@@ -111,10 +113,12 @@ The Android app is a Kotlin container that:
 - Serves the React bundle from assets/web/
 - Bridges UI ↔ SDK via a binary MessagePort channel carrying Envelope v3 protobuf bytes
 
-Build the WebView bundle and assemble a debug APK:
+Build the WebView bundle and assemble a fresh debug APK:
 ```bash
 make android
 ```
+
+This target removes stale native `libdsm_sdk.so` outputs first, rebuilds the JNI libraries, rebuilds and recopies the frontend assets, then runs a clean Gradle assemble.
 
 Optionally build the native library for all ABIs with cargo-ndk (if you need to refresh JNI libs):
 ```bash

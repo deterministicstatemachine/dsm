@@ -87,6 +87,24 @@ enum Commands {
         /// Path to specification file
         spec_file: PathBuf,
     },
+
+    /// Compile specification to Base32 protobuf blob
+    Compile {
+        /// Path to vault.yaml or policy.yaml specification
+        spec_file: PathBuf,
+
+        /// Deployment mode (posted = storage nodes, local = bilateral)
+        #[arg(long, value_enum, default_value = "posted")]
+        mode: CompileMode,
+
+        /// Policy anchor (Base32 Crockford, 32 bytes) to bind vault to
+        #[arg(long)]
+        policy_anchor: Option<String>,
+
+        /// Output file path (default: stdout)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -110,6 +128,12 @@ impl From<Language> for TargetLanguage {
             Language::Rust => TargetLanguage::Rust,
         }
     }
+}
+
+#[derive(Debug, Clone, ValueEnum)]
+enum CompileMode {
+    Posted,
+    Local,
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -154,6 +178,15 @@ fn main() -> Result<()> {
 
         Commands::Validate { spec_file } => {
             validate_specification(spec_file)?;
+        }
+
+        Commands::Compile {
+            spec_file,
+            mode,
+            policy_anchor: _policy_anchor,
+            output,
+        } => {
+            compile_specification(spec_file, mode, output, cli.output_dir)?;
         }
     }
 
@@ -473,6 +506,50 @@ fn validate_specification(spec_file: PathBuf) -> Result<()> {
             errors.len()
         )
     }
+}
+
+fn compile_specification(
+    spec_file: PathBuf,
+    mode: CompileMode,
+    output: Option<PathBuf>,
+    output_dir: Option<PathBuf>,
+) -> Result<()> {
+    let content = fs::read_to_string(&spec_file)
+        .with_context(|| format!("Failed to read specification file: {spec_file:?}"))?;
+
+    let spec: DsmSpecification = if spec_file.extension().and_then(|s| s.to_str()) == Some("json") {
+        serde_json::from_str(&content).with_context(|| "Failed to parse JSON specification")?
+    } else {
+        serde_yaml::from_str(&content).with_context(|| "Failed to parse YAML specification")?
+    };
+
+    let mode_override = Some(match mode {
+        CompileMode::Posted => dsm_gen::schema::DeploymentMode::Posted,
+        CompileMode::Local => dsm_gen::schema::DeploymentMode::Local,
+    });
+
+    let blob = dsm_gen::compiler::compile(&spec, mode_override)
+        .with_context(|| "Compilation failed")?;
+
+    // Output
+    if let Some(out_path) = output.or_else(|| output_dir.map(|d| {
+        let stem = spec_file.file_stem().unwrap_or_default().to_string_lossy();
+        d.join(format!("{stem}.b32"))
+    })) {
+        ensure_parent_dir(&out_path)?;
+        fs::write(&out_path, &blob.base32)
+            .with_context(|| format!("Failed to write blob to {out_path:?}"))?;
+        eprintln!("Compiled {} blob: {out_path:?}", blob.artifact_type);
+    } else {
+        // stdout
+        println!("{}", blob.base32);
+    }
+
+    let hash_hex = blake3::Hash::from(blob.hash).to_hex();
+    eprintln!("Blob hash (BLAKE3): {hash_hex}");
+    eprintln!("Blob size: {} bytes ({} Base32 chars)", blob.bytes.len(), blob.base32.len());
+
+    Ok(())
 }
 
 fn validate_fulfillment_condition(
