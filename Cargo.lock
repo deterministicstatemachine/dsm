@@ -1506,8 +1506,8 @@ dependencies = [
  "prost-build 0.12.6",
  "prost-types 0.12.6",
  "quickcheck",
- "rand 0.8.5",
- "rand_chacha 0.3.1",
+ "rand 0.9.2",
+ "rand_chacha",
  "rcgen",
  "rocksdb",
  "rstest",
@@ -1611,8 +1611,8 @@ dependencies = [
  "prost-types 0.12.6",
  "protoc-bin-vendored",
  "quickcheck",
- "rand 0.8.5",
- "rand_chacha 0.3.1",
+ "rand 0.9.2",
+ "rand_chacha",
  "rcgen",
  "reqwest 0.12.24",
  "rstest",
@@ -1666,7 +1666,7 @@ dependencies = [
  "ml-kem",
  "once_cell",
  "prost 0.12.6",
- "rand 0.8.5",
+ "rand 0.9.2",
  "reqwest 0.12.24",
  "rusqlite",
  "rustls 0.23.34",
@@ -1717,8 +1717,8 @@ dependencies = [
  "dsm",
  "instant",
  "prost 0.12.6",
- "rand 0.8.5",
- "rand_chacha 0.3.1",
+ "rand 0.9.2",
+ "rand_chacha",
  "regex",
  "reqwest 0.11.27",
  "serde",
@@ -4079,7 +4079,7 @@ dependencies = [
  "bitflags 2.10.0",
  "num-traits",
  "rand 0.9.2",
- "rand_chacha 0.9.0",
+ "rand_chacha",
  "rand_xorshift",
  "regex-syntax",
  "rusty-fork",
@@ -4384,8 +4384,6 @@ version = "0.8.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "34af8d1a0e25924bc5b7c43c079c942339d8f0a8b57c39049bef581b46327404"
 dependencies = [
- "libc",
- "rand_chacha 0.3.1",
  "rand_core 0.6.4",
 ]
 
@@ -4395,18 +4393,8 @@ version = "0.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6db2770f06117d490610c7488547d543617b21bfa07796d7a12f6f1bd53850d1"
 dependencies = [
- "rand_chacha 0.9.0",
+ "rand_chacha",
  "rand_core 0.9.3",
-]
-
-[[package]]
-name = "rand_chacha"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e6c10a63a0fa32252be49d21e7709d4d4baf8d231c2dbce1eaa8141b9b127d88"
-dependencies = [
- "ppv-lite86",
- "rand_core 0.6.4",
 ]
 
 [[package]]
