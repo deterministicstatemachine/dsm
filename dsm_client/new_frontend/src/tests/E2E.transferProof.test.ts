@@ -639,9 +639,22 @@ describe('Offline Transfer — Full Cycle', () => {
     // the Rust layer rejects with a bilateralPrepareReject error.
     const origCallBin = (global as any).window.DsmBridge.__callBin;
     (global as any).window.DsmBridge.__callBin = async (reqBytes: Uint8Array) => {
-      const { method } = decodeBridgeReq(reqBytes);
-      if (method === 'resolveBleAddressForDeviceId') {
-        return wrapSuccess(new Uint8Array(0));
+      const { method, payload, appRouterMethodName } = decodeBridgeReq(reqBytes);
+      if (method === 'appRouterInvoke' && appRouterMethodName === 'wallet.sendOffline') {
+        // Check if bleAddress is empty in the request
+        try {
+          const argPack = pb.ArgPack.fromBinary(payload);
+          const prep = pb.BilateralPrepareRequest.fromBinary(argPack.body);
+          if (!prep.bleAddress) {
+            // Simulate Rust-side rejection for missing BLE address
+            const reject = new pb.BilateralPrepareReject({ reason: 'bleAddress unavailable' } as any);
+            const env = new pb.Envelope({
+              version: 3,
+              payload: { case: 'bilateralPrepareReject', value: reject },
+            } as any);
+            return wrapSuccess(withRouterPrefix(frameEnvelope(env)));
+          }
+        } catch { /* fall through */ }
       }
       return origCallBin(reqBytes);
     };
