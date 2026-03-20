@@ -37,7 +37,7 @@ rg_search() {
     local pattern="$1"
     local dir="$2"
     if command -v rg >/dev/null 2>&1; then
-        rg -n --no-messages --hidden --glob '!node_modules/**' --glob '!target/**' --glob '!pgdata*/**' --glob '!**/bluetooth/**' --glob '!**/ble/**' "$pattern" "$dir"
+        rg -n --no-messages --hidden --glob '!node_modules/**' --glob '!target/**' --glob '!pgdata*/**' --glob '!**/bluetooth/**' --glob '!**/ble/**' --glob '!**/assets/**' "$pattern" "$dir"
     else
         grep -r -n "$pattern" "$dir" | grep -v "bluetooth" | grep -v "/ble/" || true
     fi
