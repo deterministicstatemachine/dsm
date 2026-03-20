@@ -149,80 +149,59 @@ internal object UnifiedBleBridge {
                         false
                     }
                 }
-            } else if (svc.isGattServerClient(deviceAddress)) {
-                Log.i("UnifiedBleBridge", "requestGattWriteChunks: target is GATT server client — establishing reverse client connection for $deviceAddress")
+            } else if (svc.isGattServerClient(deviceAddress) && svc.isServerClientSubscribedToTxResponse(deviceAddress)) {
+                Log.i("UnifiedBleBridge", "requestGattWriteChunks: target is GATT server client AND subscribed — using server notifications immediately for $deviceAddress")
+                runBlocking {
+                    val ok = svc.sendViaServerNotifications(deviceAddress, chunks)
+                    if (!ok) {
+                        UnifiedBleEvents.onConnectionFailed(deviceAddress, "server_notify_failed")
+                    }
+                    ok
+                }
+            } else {
+                // No active session — ensure BLE infrastructure is up, then attempt on-demand connection.
+                // Start GATT server + advertising so the peer can discover us while we also try to connect to them.
+                Log.i("UnifiedBleBridge", "requestGattWriteChunks: no route for $deviceAddress — priming BLE and attempting on-demand connection")
+                svc.ensureGattServerStarted()
+                publishLocalIdentityIfAvailable(svc)
+                svc.startAdvertising()
                 runBlocking {
                     try {
-                        // Step 1: Establish lightweight GATT client connection (no re-pairing)
-                        val connected = withTimeoutOrNull(8000L) {
+                        // Attempt 1: direct on-demand GATT client connect (works if peer is connectable)
+                        var connected = withTimeoutOrNull(8000L) {
                             svc.connectToDevice(deviceAddress).await()
                         } ?: false
                         if (!connected) {
-                            // Fall back to server notifications if client connect fails
-                            Log.w("UnifiedBleBridge", "requestGattWriteChunks: reverse client connect failed for $deviceAddress — falling back to server notifications")
-                            val ok = svc.sendViaServerNotifications(deviceAddress, chunks)
-                            Log.i("UnifiedBleBridge", "requestGattWriteChunks: server notification fallback result=$ok for $deviceAddress")
-                            if (!ok) {
-                                UnifiedBleEvents.onConnectionFailed(deviceAddress, "path2_connect_failed_notify_fallback_failed")
+                            Log.w("UnifiedBleBridge", "requestGattWriteChunks: first connect attempt failed for $deviceAddress — checking reverse path")
+                            // While we were trying to connect, the peer may have connected to our GATT server and subscribed.
+                            if (svc.isGattServerClient(deviceAddress) && svc.isServerClientSubscribedToTxResponse(deviceAddress)) {
+                                Log.i("UnifiedBleBridge", "requestGattWriteChunks: peer connected to our GATT server and subscribed during wait — using server notifications for $deviceAddress")
+                                val ok = svc.sendViaServerNotifications(deviceAddress, chunks)
+                                if (!ok) {
+                                    UnifiedBleEvents.onConnectionFailed(deviceAddress, "on_demand_server_notify_fallback_failed")
+                                }
+                                return@runBlocking ok
                             }
-                            return@runBlocking ok
-                        }
-
-                        // Step 2: Ensure TX_RESPONSE is subscribed for receiving responses
-                        var subscribed = false
-                        for (attempt in 1..TX_RESPONSE_SUBSCRIBE_MAX_ATTEMPTS) {
-                            subscribed = withTimeoutOrNull(TX_RESPONSE_SUBSCRIBE_TIMEOUT_MS) {
-                                svc.ensureClientTxResponseSubscribed(deviceAddress).await()
-                            } ?: false
-                            if (subscribed) {
-                                Log.i("UnifiedBleBridge", "requestGattWriteChunks: TX_RESPONSE subscribed for $deviceAddress (attempt $attempt)")
-                                break
-                            }
-                            Log.w("UnifiedBleBridge", "requestGattWriteChunks: TX_RESPONSE subscription attempt $attempt/$TX_RESPONSE_SUBSCRIBE_MAX_ATTEMPTS failed for $deviceAddress")
-                            if (attempt < TX_RESPONSE_SUBSCRIBE_MAX_ATTEMPTS) {
-                                delay(200L * attempt)
-                            }
-                        }
-                        if (!subscribed) {
-                            Log.e("UnifiedBleBridge", "requestGattWriteChunks: TX_RESPONSE subscription failed for $deviceAddress — falling back to server notifications")
-                            val ok = svc.sendViaServerNotifications(deviceAddress, chunks)
-                            if (!ok) {
-                                UnifiedBleEvents.onConnectionFailed(deviceAddress, "path2_subscribe_failed_notify_fallback_failed")
-                            }
-                            return@runBlocking ok
-                        }
-
-                        // Step 3: Send via client writes (to peer's TX_REQUEST)
-                        Log.i("UnifiedBleBridge", "requestGattWriteChunks: sending ${chunks.size} chunks via client writes to $deviceAddress")
-                        var sentCount = 0
-                        chunks.forEachIndexed { index, chunk ->
-                            val sent = svc.sendTransactionRequest(deviceAddress, chunk)
-                            if (sent) {
-                                sentCount += 1
+                            // Attempt 2: start scanning to discover the peer, then retry connect
+                            Log.i("UnifiedBleBridge", "requestGattWriteChunks: starting scan + retry connect for $deviceAddress")
+                            svc.startScanning()
+                            delay(3000L) // Allow 3s for scan results + peer discovery
+                            svc.stopScanning()
+                            // Re-check: peer may have connected to us during scan
+                            if (svc.hasActiveClientSession(deviceAddress)) {
+                                connected = true
+                            } else if (svc.isGattServerClient(deviceAddress) && svc.isServerClientSubscribedToTxResponse(deviceAddress)) {
+                                val ok = svc.sendViaServerNotifications(deviceAddress, chunks)
+                                if (!ok) {
+                                    UnifiedBleEvents.onConnectionFailed(deviceAddress, "on_demand_scan_server_notify_failed")
+                                }
+                                return@runBlocking ok
                             } else {
-                                Log.e("UnifiedBleBridge", "requestGattWriteChunks: chunk ${index + 1}/${chunks.size} failed for $deviceAddress")
+                                connected = withTimeoutOrNull(8000L) {
+                                    svc.connectToDevice(deviceAddress).await()
+                                } ?: false
                             }
                         }
-                        if (sentCount != chunks.size) {
-                            UnifiedBleEvents.onConnectionFailed(deviceAddress, "tx_chunk_send_partial:$sentCount/${chunks.size}")
-                        }
-                        sentCount == chunks.size
-                    } catch (t: Throwable) {
-                        Log.e("UnifiedBleBridge", "requestGattWriteChunks: Path 2 error for $deviceAddress", t)
-                        UnifiedBleEvents.onConnectionFailed(deviceAddress, "path2_connect_send_exception")
-                        false
-                    }
-                }
-            } else {
-                // No active session — attempt on-demand GATT connection before sending.
-                // connectToDevice() connects directly to a known BLE address without scanning,
-                // so scan rate-limits do not apply.
-                Log.i("UnifiedBleBridge", "requestGattWriteChunks: no route for $deviceAddress — attempting on-demand GATT connection")
-                runBlocking {
-                    try {
-                        val connected = withTimeoutOrNull(8000L) {
-                            svc.connectToDevice(deviceAddress).await()
-                        } ?: false
                         if (!connected) {
                             Log.e("UnifiedBleBridge", "requestGattWriteChunks: on-demand GATT connection failed for $deviceAddress")
                             UnifiedBleEvents.onConnectionFailed(deviceAddress, "on_demand_connect_failed")
@@ -307,11 +286,12 @@ internal object UnifiedBleBridge {
 
     /**
      * Ensure BLE transport infrastructure is primed for a bilateral transfer.
-     * Starts GATT server, publishes identity, and starts advertising so the
-     * peer device can discover and connect to us. Returns true if BLE is ready.
+     * Starts GATT server + advertising so the peer can connect to us, and starts
+     * scanning so we can also actively find and connect to the peer.
+     * Returns true if a connection (in either direction) is established.
      *
-     * Called by Rust before sending bilateral chunks to give the peer a chance
-     * to re-establish a GATT connection if the previous session dropped.
+     * Called by Rust before sending bilateral chunks to give both sides a chance
+     * to (re-)establish a GATT connection if the previous session dropped.
      */
     fun ensureBleTransportReady(deviceAddress: String): Boolean {
         val svc = bleCoordinator ?: return false
@@ -319,26 +299,42 @@ internal object UnifiedBleBridge {
             svc.ensureGattServerStarted()
             publishLocalIdentityIfAvailable(svc)
             svc.startAdvertising()
-            // If we already have a connection, we're ready
+            // Fast path: already connected in either direction
             if (svc.hasActiveClientSession(deviceAddress) || svc.isGattServerClient(deviceAddress)) {
                 Log.i("UnifiedBleBridge", "ensureBleTransportReady: already connected to $deviceAddress")
                 return true
             }
-            // Give the peer a moment to discover our advertisement and connect
-            Log.i("UnifiedBleBridge", "ensureBleTransportReady: advertising started for $deviceAddress, waiting for connection")
+            Log.i("UnifiedBleBridge", "ensureBleTransportReady: priming BLE for $deviceAddress — advertising + scanning + direct connect")
             runBlocking {
-                // Wait up to 5s for the peer to connect to our GATT server
-                val deadline = 5000L
-                val start = android.os.SystemClock.elapsedRealtime()
-                while (android.os.SystemClock.elapsedRealtime() - start < deadline) {
-                    if (svc.hasActiveClientSession(deviceAddress) || svc.isGattServerClient(deviceAddress)) {
-                        Log.i("UnifiedBleBridge", "ensureBleTransportReady: peer connected during wait for $deviceAddress")
-                        return@runBlocking true
-                    }
-                    delay(200L)
+                // Attempt 1: direct on-demand GATT client connect (works if peer is already advertising)
+                var connected = withTimeoutOrNull(5000L) {
+                    svc.connectToDevice(deviceAddress).await()
+                } ?: false
+                if (connected) {
+                    Log.i("UnifiedBleBridge", "ensureBleTransportReady: direct connect succeeded for $deviceAddress")
+                    return@runBlocking true
                 }
-                Log.w("UnifiedBleBridge", "ensureBleTransportReady: peer did not connect within ${deadline}ms for $deviceAddress")
-                false
+                // Check reverse: peer may have connected to our GATT server during the attempt
+                if (svc.isGattServerClient(deviceAddress)) {
+                    Log.i("UnifiedBleBridge", "ensureBleTransportReady: peer connected to our server during wait for $deviceAddress")
+                    return@runBlocking true
+                }
+                // Attempt 2: scan to discover the peer + retry connect
+                Log.i("UnifiedBleBridge", "ensureBleTransportReady: direct connect failed — scanning for $deviceAddress")
+                svc.startScanning()
+                delay(3000L) // Allow 3s for scan + peer to appear
+                svc.stopScanning()
+                if (svc.hasActiveClientSession(deviceAddress) || svc.isGattServerClient(deviceAddress)) {
+                    Log.i("UnifiedBleBridge", "ensureBleTransportReady: connected after scan for $deviceAddress")
+                    return@runBlocking true
+                }
+                connected = withTimeoutOrNull(5000L) {
+                    svc.connectToDevice(deviceAddress).await()
+                } ?: false
+                if (!connected) {
+                    Log.w("UnifiedBleBridge", "ensureBleTransportReady: peer did not connect within budget for $deviceAddress")
+                }
+                connected || svc.isGattServerClient(deviceAddress)
             }
         } catch (_: Throwable) { false }
     }
