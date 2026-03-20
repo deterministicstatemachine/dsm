@@ -16,7 +16,7 @@ use crate::types::{
     policy_types::{PolicyCondition, PolicyFile, PolicyRole, VaultCondition},
     token_types::TokenMetadata,
 };
-use crate::util::deterministic_time as dt;
+use crate::utils::deterministic_time as dt;
 use prost::Message;
 use base32; // Add base32 import
 

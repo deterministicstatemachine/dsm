@@ -13,31 +13,31 @@
 //! - The CORE (`dsm`) owns the canonical deterministic tick chain.
 //! - The SDK must mirror core behavior; do not introduce a second counter.
 //!
-//! This module delegates to `dsm::util::deterministic_time` so iOS/Android/host
+//! This module delegates to `dsm::utils::deterministic_time` so iOS/Android/host
 //! builds share the same tick behavior.
 
 #[inline]
 pub fn tick() -> u64 {
-    dsm::util::deterministic_time::current_commit_height_blocking()
+    dsm::utils::deterministic_time::current_commit_height_blocking()
 }
 
 #[inline]
 pub fn tick_index() -> u64 {
-    dsm::util::deterministic_time::current_commit_height_blocking()
+    dsm::utils::deterministic_time::current_commit_height_blocking()
 }
 
 #[inline]
 pub fn clean_tick_index() -> u64 {
-    dsm::util::deterministic_time::current_commit_height_blocking()
+    dsm::utils::deterministic_time::current_commit_height_blocking()
 }
 
 #[inline]
 pub fn peek() -> u64 {
-    dsm::util::deterministic_time::current_commit_height_blocking()
+    dsm::utils::deterministic_time::current_commit_height_blocking()
 }
 
 #[cfg(test)]
 #[inline]
 pub fn reset() {
-    dsm::util::deterministic_time::reset_for_tests();
+    dsm::utils::deterministic_time::reset_for_tests();
 }

@@ -326,6 +326,8 @@ dependencies {
     implementation("com.google.android.material:material:1.10.0")
     implementation("androidx.webkit:webkit:1.8.0")
     implementation("androidx.work:work-runtime-ktx:2.9.0")
+    implementation("no.nordicsemi.android:ble:2.7.1")
+    implementation("no.nordicsemi.android:ble-ktx:2.7.1")
     
     // Jetpack Compose (for IncompatibleDeviceScreen and future UI components)
     implementation(platform("androidx.compose:compose-bom:2024.02.00"))

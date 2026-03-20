@@ -12,6 +12,7 @@ use dsm::recovery::{
     verify_rollup, init_recovery, EncryptedCapsule, RecoveryCapsule, ReceiptRollup,
     TombstoneReceipt, SuccessionReceipt,
 };
+use dsm::recovery::capsule::decrypt_capsule_with_key;
 use dsm::types::error::DsmError;
 
 /// In-memory cached recovery key (derived from mnemonic via Argon2id + HKDF-BLAKE3).
@@ -270,6 +271,10 @@ impl RecoverySDK {
             &smt_root_32,
         )
         .map_err(|e| DsmError::InvalidState(format!("Failed to persist capsule: {e}")))?;
+        crate::storage::client_db::recovery::set_latest_capsule_counterparty_count(
+            tip_count as u64,
+        )
+        .map_err(|e| DsmError::InvalidState(format!("Failed to persist capsule preview: {e}")))?;
 
         // 9. Prune old capsules (keep latest 5)
         let _ = crate::storage::client_db::recovery::prune_old_capsules(5);
@@ -359,6 +364,23 @@ impl RecoverySDK {
     /// Check if a recovery key is currently cached in memory.
     pub fn has_cached_key() -> bool {
         RECOVERY_KEY.lock().map(|g| g.is_some()).unwrap_or(false)
+    }
+
+    /// Decrypt an encrypted capsule using the in-memory cached recovery key.
+    ///
+    /// Used by the ring-import flow so mnemonic handling stays in Rust.
+    pub fn decrypt_capsule_with_cached_key_bytes(
+        capsule_bytes: &[u8],
+    ) -> Result<RecoveryCapsule, DsmError> {
+        let key = {
+            let guard = RECOVERY_KEY
+                .lock()
+                .map_err(|_| DsmError::InvalidState("Recovery key mutex poisoned".into()))?;
+            guard.ok_or_else(|| DsmError::InvalidState("No cached recovery key".into()))?
+        };
+
+        let encrypted = EncryptedCapsule::from_bytes(capsule_bytes)?;
+        decrypt_capsule_with_key(&encrypted, &key)
     }
 
     /// Internal: derive the 32-byte recovery key from a mnemonic.
@@ -461,6 +483,7 @@ impl RecoverySDK {
         let next_index = crate::storage::client_db::recovery::get_max_capsule_index()
             .map_err(|e| DsmError::InvalidState(format!("Failed to read capsule index: {e}")))?
             .saturating_add(1);
+        let tip_count = counterparty_tips.len();
 
         // Build capsule metadata
         let metadata = dsm::recovery::CapsuleMetadata {
@@ -532,6 +555,10 @@ impl RecoverySDK {
             &smt_root_32,
         )
         .map_err(|e| DsmError::InvalidState(format!("Failed to persist capsule: {e}")))?;
+        crate::storage::client_db::recovery::set_latest_capsule_counterparty_count(
+            tip_count as u64,
+        )
+        .map_err(|e| DsmError::InvalidState(format!("Failed to persist capsule preview: {e}")))?;
 
         let _ = crate::storage::client_db::recovery::prune_old_capsules(5);
 

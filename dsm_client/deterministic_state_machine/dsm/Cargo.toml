@@ -95,15 +95,6 @@ ml-kem = { version = "0.2.0", features = ["deterministic"] }  # Pure Rust FIPS 2
 
 jni = { version = "0.21", optional = true }
 
-# Networking
-# reqwest removed from core - networking belongs in SDK
-# reqwest = { version = "0.12.2", default-features = false, features = ["rustls-tls", "json"] }
-# url removed from core - networking belongs in SDK
-# url = "2.4.0"
-# urlencoding removed from core - networking belongs in SDK
-# urlencoding = "2.1.3"
-rcgen = "0.12" # For certificate generation
-
 # Bluetooth support (optional)
 tokio-stream = { version = "0.1.14", optional = true, features = ["sync"] }
 
@@ -125,8 +116,6 @@ metrics = "0.21.1"
 # Utilities
 log = "0.4.20"
 bytes = "1.5.0"
-hostname = "0.3.1"
-tokio-util = { version = "0.7.10", features = ["codec"] }
 lazy_static = "1.4.0"
 lru = "0.7"
 parking_lot = { version = "0.12.1", features = ["serde"] }
@@ -134,7 +123,6 @@ zerocopy = "0.8.46"
 bitflags = "2.4.2"
 arrayref = "0.3.9"
 argon2 = "0.5.3"
-time = { version = "0.3.41", features = ["macros"] }
 
 rand = "0.8.5"
 uuid = { version = "1.9", features = ["std"] }
@@ -142,24 +130,14 @@ uuid = { version = "1.9", features = ["std"] }
 # Prefer stable crypto crates to reduce duplicate dependency versions across workspace.
 aes-gcm = "0.10.3"
 
-# Server dependencies
-actix-web = { version = "4.4.0", optional = true }
 env_logger = "0.10.0"
 
 # Type safety and validation
 derive_more = { version = "1.0.0", features = ["from", "display", "error", "debug", "into"] }
 
-# Property-based testing (used by verification module)
-proptest = "1.4.0"
-
 # Web framework and middleware (optional; core must be network-agnostic by default; no JSON feature)
 axum = { version = "0.8", features = ["tracing"], optional = true }
 tower = { version = "0.4.13", features = ["util", "timeout", "load-shed", "limit"], optional = true }
-
-# Network utilities
-if-addrs = "0.13.3"
-local-ip-address = "0.6.1"
-num_cpus = "1.16.0"
 
 [dev-dependencies]
 criterion = { version = "0.5.1", features = ["async_tokio", "html_reports"] }
@@ -167,6 +145,7 @@ mockall = "0.12.1"
 tempfile = "3.10.0"
 test-log = { version = "0.2.14", features = ["trace"] }
 quickcheck = "1.0.3"
+proptest = "1.4.0"
 rstest = "0.18.2"
 serial_test = "3.0.0"
 

@@ -15,28 +15,16 @@ pub mod receipt_verification;
 pub mod smt_replace_witness;
 
 use futures::Stream;
-use proptest::prelude::*;
-use proptest::strategy::Strategy;
 use std::collections::HashMap;
 
-use crate::crypto::blake3::domain_hash_bytes;
 use crate::types::unified_error::{DsmResult, UnifiedDsmError};
 use crate::types::{SessionId, TransactionId, VaultId};
-
-/// Property-based testing configuration
-#[derive(Debug, Clone)]
-pub struct PropertyTestConfig {
-    /// Number of test cases to generate
-    pub cases: u32,
-    /// Maximum size of generated data (interpreted as a deterministic bound, not time)
-    pub max_size: usize,
-    /// Enable shrinking of failing cases
-    pub shrink: bool,
-    /// Deterministic step budget per test case (NOT wall-clock seconds)
-    pub timeout_seconds: u64,
-    /// Enable verbose output
-    pub verbose: bool,
-}
+#[cfg(test)]
+use crate::crypto::blake3::domain_hash_bytes;
+#[cfg(test)]
+use proptest::prelude::*;
+#[cfg(test)]
+use proptest::strategy::Strategy;
 
 /// Invariant checker for system properties
 pub struct InvariantChecker {
@@ -317,6 +305,23 @@ impl Invariant for SessionValidityInvariant {
     }
 }
 
+#[cfg(test)]
+/// Property-based testing configuration
+#[derive(Debug, Clone)]
+pub struct PropertyTestConfig {
+    /// Number of test cases to generate
+    pub cases: u32,
+    /// Maximum size of generated data (interpreted as a deterministic bound, not time)
+    pub max_size: usize,
+    /// Enable shrinking of failing cases
+    pub shrink: bool,
+    /// Deterministic step budget per test case (NOT wall-clock seconds)
+    pub timeout_seconds: u64,
+    /// Enable verbose output
+    pub verbose: bool,
+}
+
+#[cfg(test)]
 /// Deterministic test generator: counter + BLAKE3 domain hashing
 #[derive(Clone, Debug)]
 struct DeterministicRng {
@@ -324,6 +329,7 @@ struct DeterministicRng {
     ctr: u64,
 }
 
+#[cfg(test)]
 impl DeterministicRng {
     fn new(seed: [u8; 32]) -> Self {
         Self { seed, ctr: 0 }
@@ -367,6 +373,7 @@ impl DeterministicRng {
     }
 }
 
+#[cfg(test)]
 /// Property-based test strategies
 pub mod strategies {
     use super::*;
@@ -614,11 +621,13 @@ pub mod strategies {
     }
 }
 
+#[cfg(test)]
 /// Property-based test runner
 pub struct PropertyTestRunner {
     config: PropertyTestConfig,
 }
 
+#[cfg(test)]
 impl PropertyTestRunner {
     pub fn new(config: PropertyTestConfig) -> Self {
         Self { config }
@@ -691,6 +700,7 @@ impl PropertyTestRunner {
     }
 }
 
+#[cfg(test)]
 /// Test result types
 #[derive(Debug, Clone)]
 pub enum TestResult {
@@ -699,17 +709,20 @@ pub enum TestResult {
     Skipped(String),
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub struct TestResults {
     pub tests: HashMap<String, TestResult>,
 }
 
+#[cfg(test)]
 impl Default for TestResults {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(test)]
 impl TestResults {
     pub fn new() -> Self {
         Self {
