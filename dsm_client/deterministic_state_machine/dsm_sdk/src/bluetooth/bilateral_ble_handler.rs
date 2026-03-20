@@ -3499,9 +3499,115 @@ impl BilateralBleHandler {
         &self.per_device_smt
     }
 
+    /// Handle a BLE peer disconnect event for a given BLE address.
+    ///
+    /// When the BLE link drops, in-flight sessions in early phases (Preparing,
+    /// Prepared, PendingUserAction) cannot be resumed automatically — the sender
+    /// must re-initiate the prepare. Marking them `Failed` immediately unblocks
+    /// the 120-second stale timeout and allows the next attempt without delay.
+    ///
+    /// Sessions in late phases (Accepted, ConfirmPending, Committed) are left
+    /// untouched: they carry all cryptographic material needed for recovery
+    /// on the next connection.
+    ///
+    /// Returns the number of sessions transitioned to Failed.
+    pub async fn handle_peer_disconnected(&self, ble_address: &str) -> usize {
+        let mut failed_count = 0usize;
+
+        // Collect sessions that should be failed on disconnect.
+        let to_fail: Vec<([u8; 32], [u8; 32])> = {
+            let sessions = self.sessions.sessions.lock().await;
+            sessions
+                .iter()
+                .filter(|(_, s)| {
+                    // Match by sender_ble_address (receiver-side sessions) or any
+                    // early-phase session for the counterparty (sender-side sessions have
+                    // no ble_address stored on the session itself).
+                    let addr_match = s
+                        .sender_ble_address
+                        .as_deref()
+                        .is_some_and(|a| a == ble_address);
+                    let early_phase = matches!(
+                        s.phase,
+                        BilateralPhase::Preparing
+                            | BilateralPhase::Prepared
+                            | BilateralPhase::PendingUserAction
+                    );
+                    addr_match && early_phase
+                })
+                .map(|(k, s)| (*k, s.counterparty_device_id))
+                .collect()
+        };
+
+        for (commitment_hash, counterparty_device_id) in to_fail {
+            warn!(
+                "[BLE_HANDLER] Peer {} disconnected — failing early-phase session {}",
+                ble_address,
+                bytes_to_base32(&commitment_hash[..8])
+            );
+
+            let local_pending_key: Option<[u8; 32]> = {
+                let mut sessions = self.sessions.sessions.lock().await;
+                if let Some(session) = sessions.get_mut(&commitment_hash) {
+                    let pending_key = session.local_commitment_hash;
+                    session.phase = BilateralPhase::Failed;
+                    pending_key
+                } else {
+                    None
+                }
+            };
+
+            // Clean up core manager pending commitment (if any).
+            if let Some(pending_key) = local_pending_key {
+                let mut mgr = self.bilateral_tx_manager.write().await;
+                let _ = mgr.remove_pending_commitment(&pending_key);
+            }
+            {
+                let mut mgr = self.bilateral_tx_manager.write().await;
+                let _ = mgr.remove_pending_commitment(&commitment_hash);
+            }
+
+            // Remove from persistent storage so no stale record lingers.
+            let _ = delete_bilateral_session(&commitment_hash);
+
+            // Emit failure event so the UI can update immediately.
+            self.emit_event(&generated::BilateralEventNotification {
+                event_type: generated::BilateralEventType::BilateralEventFailed.into(),
+                counterparty_device_id: counterparty_device_id.to_vec(),
+                commitment_hash: commitment_hash.to_vec(),
+                transaction_hash: None,
+                amount: None,
+                token_id: None,
+                status: "failed".to_string(),
+                message: format!("BLE link to {ble_address} dropped before transfer completed"),
+                sender_ble_address: Some(ble_address.to_string()),
+                failure_reason: Some(
+                    generated::BilateralFailureReason::FailureReasonUnspecified.into(),
+                ),
+            });
+
+            failed_count += 1;
+        }
+
+        if failed_count > 0 {
+            info!(
+                "[BLE_HANDLER] Marked {} early-phase session(s) Failed on disconnect from {}",
+                failed_count, ble_address
+            );
+        } else {
+            debug!(
+                "[BLE_HANDLER] Peer {} disconnected — no early-phase sessions to fail (late-phase sessions preserved for recovery)",
+                ble_address
+            );
+        }
+
+        failed_count
+    }
+
     /// Test helper: insert a fully constructed session (bypassing normal flow).
-    /// Only compiled in test builds.
-    #[cfg(test)]
+    /// Marked `#[doc(hidden)]` to discourage production use; primarily for
+    /// integration tests that need to seed specific session states.
+    #[doc(hidden)]
     pub async fn test_insert_session(&self, session: BilateralBleSession) {
         let mut sessions = self.sessions.sessions.lock().await;
         sessions.insert(session.commitment_hash, session);
