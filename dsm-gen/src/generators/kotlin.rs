@@ -377,15 +377,23 @@ impl KotlinGenerator {
         code.push_str("    }\n\n");
 
         code.push_str("    private fun evaluateWhitelist(condition: RuleCondition, context: TransactionContext): Boolean {\n");
-        code.push_str("        val recipientList = condition.parameters[\"recipients\"] ?: return false\n");
+        code.push_str(
+            "        val recipientList = condition.parameters[\"recipients\"] ?: return false\n",
+        );
         code.push_str("        val recipientStr = String(context.recipient)\n");
-        code.push_str("        return recipientList.split(\",\").any { it.trim() == recipientStr }\n");
+        code.push_str(
+            "        return recipientList.split(\",\").any { it.trim() == recipientStr }\n",
+        );
         code.push_str("    }\n\n");
 
         code.push_str("    private fun evaluateBlacklist(condition: RuleCondition, context: TransactionContext): Boolean {\n");
-        code.push_str("        val recipientList = condition.parameters[\"recipients\"] ?: return true\n");
+        code.push_str(
+            "        val recipientList = condition.parameters[\"recipients\"] ?: return true\n",
+        );
         code.push_str("        val recipientStr = String(context.recipient)\n");
-        code.push_str("        return recipientList.split(\",\").none { it.trim() == recipientStr }\n");
+        code.push_str(
+            "        return recipientList.split(\",\").none { it.trim() == recipientStr }\n",
+        );
         code.push_str("    }\n\n");
 
         code.push_str("    private fun evaluateSignatureRequired(condition: RuleCondition, context: TransactionContext): Boolean {\n");
