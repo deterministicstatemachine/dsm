@@ -146,20 +146,31 @@ pub fn apply_sender_debit_and_store_transaction_atomic(
                 log::warn!("Rollback failed after token debit check: {}", rb_err);
             }
 
-            if exists {
+            if !exists {
+                // Auto-seed missing token row for native assets like dBTC to prevent
+                // missing-row panic conditions in bilateral settlement paths.
+                if let Err(e) = txdb.execute(
+                    "INSERT OR REPLACE INTO token_balances (device_id, token_id, available, locked, updated_at) VALUES (?1, ?2, 0, 0, ?3)",
+                    params![sender_device_id, token, now as i64],
+                ) {
+                    log::warn!("Failed to seed missing token_balances row for {} {}: {}", sender_device_id, token, e);
+                } else {
+                    log::info!("Seeded missing token_balances row for {} {} to 0", sender_device_id, token);
+                }
                 return Err(anyhow::anyhow!(
-                    "insufficient {} balance to debit {} for sender {}",
+                    "insufficient {} balance to debit {} for sender {} (token row was missing; seeded 0)",
                     token,
                     amount,
                     sender_device_id
                 ));
-            } else {
-                return Err(anyhow::anyhow!(
-                    "no token_balances row for sender {} token {}",
-                    sender_device_id,
-                    token
-                ));
             }
+
+            return Err(anyhow::anyhow!(
+                "insufficient {} balance to debit {} for sender {}",
+                token,
+                amount,
+                sender_device_id
+            ));
         }
     }
 
