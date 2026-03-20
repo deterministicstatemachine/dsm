@@ -388,6 +388,10 @@ impl BleFrameCoordinator {
                 info!("Processing bilateral prepare request");
                 match self.bilateral_handler.handle_prepare_request(payload).await {
                     Ok((response, _meta)) => Ok(Some(response)),
+                    Err(e) if e.to_string().contains("silent_drop_duplicate_packet") => {
+                        log::warn!("Silently dropping duplicate Prepare request.");
+                        Ok(None)
+                    }
                     Err(e) => {
                         warn!("BilateralPrepare rejected: {}. Ensure contact is added/verified and synced to BluetoothManager.", e);
                         Err(e)
@@ -413,12 +417,17 @@ impl BleFrameCoordinator {
                 }
 
                 info!("Processing bilateral prepare response (validated payload)");
-                let (commit_envelope, _meta) = self
-                    .bilateral_handler
-                    .handle_prepare_response(payload)
-                    .await?;
-                info!("Bilateral prepare response processed; emitting commit request envelope ({} bytes)", commit_envelope.len());
-                Ok(Some(commit_envelope))
+                match self.bilateral_handler.handle_prepare_response(payload).await {
+                    Ok((commit_envelope, _meta)) => {
+                        info!("Bilateral prepare response processed; emitting commit request envelope ({} bytes)", commit_envelope.len());
+                        Ok(Some(commit_envelope))
+                    },
+                    Err(e) if e.to_string().contains("silent_drop_duplicate_packet") => {
+                        log::warn!("Silently dropping duplicate Prepare Response.");
+                        Ok(None)
+                    },
+                    Err(e) => Err(e)
+                }
             }
 
             BleFrameType::BilateralPrepareReject => {
@@ -479,15 +488,19 @@ impl BleFrameCoordinator {
                 info!("Processing bilateral confirm request (3-step protocol step 3)");
 
                 // Receiver processes the confirm — no response needed (protocol complete)
-                let _meta = self
-                    .bilateral_handler
-                    .handle_confirm_request(payload)
-                    .await?;
-
-                // Return None: 3-step protocol is complete, no response message needed.
-                // The TRANSFER_COMPLETE event is emitted by handle_confirm_request
-                // so the UI will update via the bilateral event bridge.
-                Ok(None)
+                match self.bilateral_handler.handle_confirm_request(payload).await {
+                    Ok(_meta) => {
+                        // Return None: 3-step protocol is complete, no response message needed.
+                        // The TRANSFER_COMPLETE event is emitted by handle_confirm_request
+                        // so the UI will update via the bilateral event bridge.
+                        Ok(None)
+                    }
+                    Err(e) if e.to_string().contains("silent_drop_duplicate_packet") => {
+                        log::warn!("Silently dropping duplicate Confirm Request.");
+                        Ok(None)
+                    }
+                    Err(e) => Err(e)
+                }
             }
 
             BleFrameType::Unspecified => {

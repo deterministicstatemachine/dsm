@@ -1071,11 +1071,10 @@ export async function completeExitDeposit(vaultOpId: string): Promise<string> {
 
 /**
  * Poll Bitcoin for confirmation depth on all committed in-flight withdrawals.
- * Settles (finalizes burn) when sweep txids reach d_min confirmations.
- * Refunds (restores balance) when a sweep tx drops out of mempool.
+ * Finalizes the deferred burn when sweep txids reach d_min confirmations.
  *
  * Called automatically on every data refresh cycle (app foreground, pull-to-refresh).
- * Returns a human-readable summary: "Checked N withdrawal(s): X settled, Y refunded, Z pending"
+ * Returns a human-readable summary: "Checked N withdrawal(s): X finalized, Y pending"
  */
 export async function settleWithdrawals(): Promise<string> {
   const req = new AppStateRequest({ key: 'settle' });
@@ -1088,7 +1087,7 @@ export async function settleWithdrawals(): Promise<string> {
     const env = decodeFramedEnvelopeV3(res);
     const payload = env.payload;
     if (payload.case === 'appStateResponse') {
-      const msg = (payload.value as any).value || 'No committed withdrawals';
+      const msg = (payload.value as any).value || 'No committed withdrawals to finalize';
       logger.info(`[BitcoinTap] withdraw.settle: ${msg}`);
       return msg;
     }
@@ -1103,7 +1102,7 @@ export async function settleWithdrawals(): Promise<string> {
     console.warn(`[BitcoinTap] withdraw.settle exception: ${msg}`);
     return msg;
   }
-  return 'No committed withdrawals';
+  return 'No committed withdrawals to finalize';
 }
 
 // ---- Explorer URL ----

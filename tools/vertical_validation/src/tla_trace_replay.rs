@@ -259,7 +259,7 @@ struct DsmImplementationHarness {
 
 impl DsmImplementationHarness {
     fn new(initial: &TlaState) -> anyhow::Result<Self> {
-        dsm::util::deterministic_time::reset_for_tests();
+        dsm::utils::deterministic_time::reset_for_tests();
 
         let key_map = map_var(initial, "keys")?;
         let mut device_values: Vec<TlaValue> = key_map.keys().cloned().collect();

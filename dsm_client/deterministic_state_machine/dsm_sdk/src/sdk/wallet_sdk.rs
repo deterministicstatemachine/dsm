@@ -1,7 +1,7 @@
 //! # Wallet SDK Module (no JSON, no Base64/b64, no hex, no wall clock)
 //!
 //! Deterministic, offline-capable wallet operations for DSM.
-//! - All time uses deterministic logical ticks from `util::deterministic_time`.
+//! - All time uses deterministic logical ticks from `utils::deterministic_time`.
 //! - UI/debug-friendly representations may exist, but protocol text IDs are base32.
 //! - No serde_json anywhere.
 

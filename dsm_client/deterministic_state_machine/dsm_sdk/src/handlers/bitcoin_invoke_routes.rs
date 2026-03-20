@@ -48,7 +48,7 @@ struct SweepBroadcastRequest<'a> {
 
 #[derive(Default)]
 struct WithdrawalResolutionSummary {
-    settled: u32,
+    finalized: u32,
     pending: u32,
 }
 
@@ -87,6 +87,97 @@ fn ensure_dbtc_exit_balance(
         ));
     }
     Ok(())
+}
+
+fn decode_policy_commit(route: &str, label: &str, policy_commit: &[u8]) -> Result<[u8; 32], String> {
+    if policy_commit.len() != 32 {
+        return Err(format!(
+            "{route}: {label} policy_commit must be 32 bytes (got {})",
+            policy_commit.len()
+        ));
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(policy_commit);
+    Ok(out)
+}
+
+fn policy_commit_label(policy_commit: &[u8; 32]) -> String {
+    crate::util::text_id::encode_base32_crockford(policy_commit)
+}
+
+fn ensure_policy_commit_match(
+    route: &str,
+    subject: &str,
+    expected_policy_commit: &[u8; 32],
+    actual_policy_commit: &[u8; 32],
+) -> Result<(), String> {
+    if expected_policy_commit == actual_policy_commit {
+        return Ok(());
+    }
+    Err(format!(
+        "{route}: {subject} policy_commit mismatch (expected {}, got {})",
+        policy_commit_label(expected_policy_commit),
+        policy_commit_label(actual_policy_commit)
+    ))
+}
+
+fn persisted_withdrawal_policy_commit(
+    route: &str,
+    withdrawal_id: &str,
+) -> Result<[u8; 32], String> {
+    let withdrawal = crate::storage::client_db::get_withdrawal(withdrawal_id)
+        .map_err(|e| format!("{route}: withdrawal metadata lookup failed: {e}"))?
+        .ok_or_else(|| format!("{route}: withdrawal metadata not found for {withdrawal_id}"))?;
+    decode_policy_commit(route, "persisted withdrawal", &withdrawal.policy_commit)
+}
+
+fn ensure_exec_data_matches_withdrawal_policy(
+    route: &str,
+    withdrawal_id: &str,
+    source_vault_id: &str,
+    exec_data: &crate::sdk::bitcoin_tap_sdk::VaultExecutionData,
+) -> Result<(), String> {
+    let expected_policy_commit = persisted_withdrawal_policy_commit(route, withdrawal_id)?;
+    ensure_policy_commit_match(
+        route,
+        &format!("source vault {}", &source_vault_id[..source_vault_id.len().min(12)]),
+        &expected_policy_commit,
+        &exec_data.policy_commit,
+    )
+}
+
+fn persist_withdrawal_leg(
+    withdrawal_id: &str,
+    leg_index: u32,
+    vault_id: &str,
+    leg_kind: &str,
+    amount_sats: u64,
+    estimated_fee_sats: u64,
+    estimated_net_sats: u64,
+    sweep_txid: Option<&str>,
+    successor_vault_id: Option<&str>,
+    successor_vault_op_id: Option<&str>,
+    exit_vault_op_id: Option<&str>,
+) -> Result<(), String> {
+    let now = crate::util::deterministic_time::tick();
+    crate::storage::client_db::upsert_withdrawal_leg(&crate::storage::client_db::InFlightWithdrawalLeg {
+        withdrawal_id: withdrawal_id.to_string(),
+        leg_index,
+        vault_id: vault_id.to_string(),
+        leg_kind: leg_kind.to_string(),
+        amount_sats,
+        estimated_fee_sats,
+        estimated_net_sats,
+        sweep_txid: sweep_txid.map(str::to_string),
+        successor_vault_id: successor_vault_id.map(str::to_string),
+        successor_vault_op_id: successor_vault_op_id.map(str::to_string),
+        exit_vault_op_id: exit_vault_op_id.map(str::to_string),
+        state: "broadcast".to_string(),
+        proof_digest: None,
+        created_at: now,
+        updated_at: now,
+    })
+    .map_err(|e| format!("withdrawal leg persistence failed: {e}"))
 }
 
 fn persist_committed_withdrawal_metadata(
@@ -560,7 +651,7 @@ impl AppRouterImpl {
                     let execution_leg = generated::BitcoinWithdrawalExecutionLeg {
                         vault_id: leg.vault_id.clone(),
                         kind: leg.kind.as_str().to_string(),
-                        status: "completed".to_string(),
+                        status: "broadcast".to_string(),
                         gross_exit_sats: leg.gross_exit_sats,
                         estimated_fee_sats: leg.estimated_fee_sats,
                         estimated_net_sats: leg.estimated_net_sats,
@@ -572,33 +663,22 @@ impl AppRouterImpl {
                     };
 
                     let leg_index = executed_legs.len() as u32;
-                    let now = crate::util::deterministic_time::tick();
-                    crate::storage::client_db::upsert_withdrawal_leg(
-                        &crate::storage::client_db::InFlightWithdrawalLeg {
-                            withdrawal_id: withdrawal_id.clone(),
-                            leg_index,
-                            vault_id: execution_leg.vault_id.clone(),
-                            leg_kind: execution_leg.kind.clone(),
-                            amount_sats: execution_leg.gross_exit_sats,
-                            estimated_fee_sats: execution_leg.estimated_fee_sats,
-                            estimated_net_sats: execution_leg.estimated_net_sats,
-                            sweep_txid: (!execution_leg.sweep_txid.is_empty())
-                                .then(|| execution_leg.sweep_txid.clone()),
-                            successor_vault_id: (!execution_leg.successor_vault_id.is_empty())
-                                .then(|| execution_leg.successor_vault_id.clone()),
-                            successor_vault_op_id: (!execution_leg
-                                .successor_vault_op_id
-                                .is_empty())
-                            .then(|| execution_leg.successor_vault_op_id.clone()),
-                            exit_vault_op_id: (!execution_leg.exit_vault_op_id.is_empty())
-                                .then(|| execution_leg.exit_vault_op_id.clone()),
-                            state: "broadcast".to_string(),
-                            proof_digest: None,
-                            created_at: now,
-                            updated_at: now,
-                        },
-                    )
-                    .map_err(|e| format!("withdrawal leg persistence failed: {e}"))?;
+                    persist_withdrawal_leg(
+                        &withdrawal_id,
+                        leg_index,
+                        &execution_leg.vault_id,
+                        &execution_leg.kind,
+                        execution_leg.gross_exit_sats,
+                        execution_leg.estimated_fee_sats,
+                        execution_leg.estimated_net_sats,
+                        (!execution_leg.sweep_txid.is_empty()).then_some(execution_leg.sweep_txid.as_str()),
+                        (!execution_leg.successor_vault_id.is_empty())
+                            .then_some(execution_leg.successor_vault_id.as_str()),
+                        (!execution_leg.successor_vault_op_id.is_empty())
+                            .then_some(execution_leg.successor_vault_op_id.as_str()),
+                        (!execution_leg.exit_vault_op_id.is_empty())
+                            .then_some(execution_leg.exit_vault_op_id.as_str()),
+                    )?;
 
                     // Mark vault as AwaitingSettlement to block grid routing
                     if let Err(e) = crate::storage::client_db::update_vault_record_state(
@@ -624,11 +704,6 @@ impl AppRouterImpl {
                     executed_legs.push(execution_leg);
                 }
                 Err(message) => {
-                    let status = if executed_legs.is_empty() {
-                        "failed"
-                    } else {
-                        "partial_failure"
-                    };
                     if executed_legs.is_empty() {
                         // Total failure: no legs executed, no handler-level locks were acquired.
                         // (Each handler's own lock_dbtc_for_exit already releases on failure.)
@@ -648,15 +723,15 @@ impl AppRouterImpl {
                     } else {
                         if let Err(e) = crate::storage::client_db::set_withdrawal_state(
                             &withdrawal_id,
-                            "partial_failure",
+                            "committed",
                         ) {
                             log::error!(
-                                "[bitcoin.withdraw.execute] failed to mark ρ={} as partial_failure: {e}",
+                                "[bitcoin.withdraw.execute] failed to mark ρ={} as committed after partial execution: {e}",
                                 withdrawal_id
                             );
                         }
                         log::warn!(
-                            "[bitcoin.withdraw.execute] partial failure, ρ={} needs recovery",
+                            "[bitcoin.withdraw.execute] partial execution committed, ρ={} needs recovery",
                             withdrawal_id
                         );
                     }
@@ -664,8 +739,20 @@ impl AppRouterImpl {
                     return Ok(generated::BitcoinWithdrawalExecuteResponse {
                         plan_id: plan.plan_id,
                         plan_class: plan.plan_class,
-                        status: status.to_string(),
-                        message,
+                        status: if executed_legs.is_empty() {
+                            "failed".to_string()
+                        } else {
+                            "committed".to_string()
+                        },
+                        message: if executed_legs.is_empty() {
+                            message
+                        } else {
+                            format!(
+                                "{}. {} leg(s) already broadcast; withdrawal remains committed for recovery.",
+                                message,
+                                executed_legs.len()
+                            )
+                        },
                         requested_net_sats: plan.requested_net_sats,
                         planned_net_sats: plan.planned_net_sats,
                         total_gross_exit_sats: plan.total_gross_exit_sats,
@@ -693,13 +780,18 @@ impl AppRouterImpl {
             withdrawal_id,
             sweep_txids.join(",")
         );
+        crate::storage::client_db::set_withdrawal_state(&withdrawal_id, "committed")
+            .map_err(|e| format!("withdrawal commit transition failed: {e}"))?;
 
         #[allow(deprecated)]
         Ok(generated::BitcoinWithdrawalExecuteResponse {
             plan_id: plan.plan_id,
             plan_class: plan.plan_class,
-            status: "completed".to_string(),
-            message: format!("Executed {} withdrawal leg(s)", executed_legs.len()),
+            status: "committed".to_string(),
+            message: format!(
+                "Broadcast {} withdrawal leg(s). Final burn will complete after confirmation depth is reached.",
+                executed_legs.len()
+            ),
             requested_net_sats: plan.requested_net_sats,
             planned_net_sats: plan.planned_net_sats,
             total_gross_exit_sats: plan.total_gross_exit_sats,
@@ -793,15 +885,78 @@ impl AppRouterImpl {
             }
 
             if all_confirmed {
+                let expected_policy_commit =
+                    match decode_policy_commit(log_prefix, "persisted withdrawal", &wd.policy_commit)
+                    {
+                        Ok(policy_commit) => policy_commit,
+                        Err(message) => {
+                            log::warn!("[{}] ρ={} {}", log_prefix, wd.withdrawal_id, message);
+                            summary.pending += 1;
+                            continue;
+                        }
+                    };
+                let legs =
+                    match crate::storage::client_db::list_withdrawal_legs(&wd.withdrawal_id) {
+                        Ok(legs) if !legs.is_empty() => legs,
+                        Ok(_) => {
+                            log::warn!(
+                                "[{}] ρ={} has no persisted withdrawal legs; refusing finalization without source policy metadata",
+                                log_prefix,
+                                wd.withdrawal_id
+                            );
+                            summary.pending += 1;
+                            continue;
+                        }
+                        Err(e) => {
+                            log::warn!(
+                                "[{}] failed to load withdrawal legs for ρ={}: {}",
+                                log_prefix,
+                                wd.withdrawal_id,
+                                e
+                            );
+                            summary.pending += 1;
+                            continue;
+                        }
+                    };
+                let mut policy_mismatch = false;
+                for leg in &legs {
+                    let exec_data = match self.bitcoin_tap.fetch_vault_execution_data(&leg.vault_id).await {
+                        Ok(exec_data) => exec_data,
+                        Err(e) => {
+                            log::warn!(
+                                "[{}] failed to fetch execution data for vault {} while finalizing ρ={}: {}",
+                                log_prefix,
+                                leg.vault_id,
+                                wd.withdrawal_id,
+                                e
+                            );
+                            policy_mismatch = true;
+                            break;
+                        }
+                    };
+                    if let Err(message) = ensure_policy_commit_match(
+                        log_prefix,
+                        &format!("withdrawal leg {}", leg.vault_id),
+                        &expected_policy_commit,
+                        &exec_data.policy_commit,
+                    ) {
+                        log::warn!("[{}] ρ={} {}", log_prefix, wd.withdrawal_id, message);
+                        policy_mismatch = true;
+                        break;
+                    }
+                }
+                if policy_mismatch {
+                    summary.pending += 1;
+                    continue;
+                }
+
                 // ATOMIC STATE GUARD: re-read state to prevent double-burn if
                 // the settlement poller fires twice in rapid succession.
                 let current_state = crate::storage::client_db::get_withdrawal(&wd.withdrawal_id)
                     .ok()
                     .flatten()
                     .map(|w| w.state);
-                if current_state.as_deref() != Some("committed")
-                    && current_state.as_deref() != Some("partial_failure")
-                {
+                if current_state.as_deref() != Some("committed") {
                     log::warn!(
                         "[{}] ρ={} state is {:?}, expected committed — skipping (race guard)",
                         log_prefix,
@@ -871,9 +1026,9 @@ impl AppRouterImpl {
                     }
                 }
 
-                if let Err(e) = crate::storage::client_db::settle_withdrawal(&wd.withdrawal_id) {
+                if let Err(e) = crate::storage::client_db::finalize_withdrawal(&wd.withdrawal_id) {
                     log::error!(
-                        "[{}] failed to mark ρ={} as settled: {}",
+                        "[{}] failed to mark ρ={} as finalized: {}",
                         log_prefix,
                         wd.withdrawal_id,
                         e
@@ -882,7 +1037,7 @@ impl AppRouterImpl {
                     continue;
                 }
                 log::info!(
-                    "[{}] settled ρ={} (all recorded txids at d_min)",
+                    "[{}] finalized ρ={} (all recorded txids at d_min)",
                     log_prefix,
                     wd.withdrawal_id
                 );
@@ -890,47 +1045,44 @@ impl AppRouterImpl {
                 // Flip successor vault advertisements to green (routeable).
                 // After settlement, each leg's successor vault has confirmed burial
                 // and should be advertised as available liquidity.
-                if let Ok(legs) = crate::storage::client_db::list_withdrawal_legs(&wd.withdrawal_id)
-                {
-                    for leg in &legs {
-                        if let Some(ref succ_vault_id) = leg.successor_vault_id {
-                            if let Err(e) = self
-                                .bitcoin_tap
-                                .publish_vault_advertisement(succ_vault_id, &self.device_id_bytes)
-                                .await
-                            {
-                                log::warn!(
-                                    "[{}] successor ad re-publish for {} failed: {}",
-                                    log_prefix,
-                                    succ_vault_id,
-                                    e
-                                );
-                            } else {
-                                log::info!(
-                                    "[{}] re-advertised successor vault {} as routeable",
-                                    log_prefix,
-                                    succ_vault_id
-                                );
-                            }
-                        }
-
-                        // Prune spent source vault from storage nodes.
-                        // Settlement is final — the UTXO is buried, no one
-                        // needs the source advertisement anymore.
-                        if let Err(e) = crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::delete_vault_from_storage_nodes(
-                            &leg.vault_id,
-                        ).await {
+                for leg in &legs {
+                    if let Some(ref succ_vault_id) = leg.successor_vault_id {
+                        if let Err(e) = self
+                            .bitcoin_tap
+                            .publish_vault_advertisement(succ_vault_id, &self.device_id_bytes)
+                            .await
+                        {
                             log::warn!(
-                                "[{}] vault prune failed for {}: {}",
+                                "[{}] successor ad re-publish for {} failed: {}",
                                 log_prefix,
-                                leg.vault_id,
+                                succ_vault_id,
                                 e
+                            );
+                        } else {
+                            log::info!(
+                                "[{}] re-advertised successor vault {} as routeable",
+                                log_prefix,
+                                succ_vault_id
                             );
                         }
                     }
+
+                    // Prune spent source vault from storage nodes.
+                    // Finalization is terminal — the UTXO is buried, no one
+                    // needs the source advertisement anymore.
+                    if let Err(e) = crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::delete_vault_from_storage_nodes(
+                        &leg.vault_id,
+                    ).await {
+                        log::warn!(
+                            "[{}] vault prune failed for {}: {}",
+                            log_prefix,
+                            leg.vault_id,
+                            e
+                        );
+                    }
                 }
 
-                summary.settled += 1;
+                summary.finalized += 1;
             } else {
                 // Not yet confirmed — increment poll counter and check for refund threshold.
                 let poll_count =
@@ -1934,21 +2086,6 @@ impl AppRouterImpl {
                     Err(_) => crate::sdk::runtime_config::RuntimeConfig::get_bitcoin_network(),
                 };
 
-                // Derive math-owned claim keypair from preimage + hash_lock
-                let (claim_privkey, _claim_pubkey) =
-                    match crate::sdk::bitcoin_tx_builder::derive_claim_keypair(
-                        &preimage,
-                        &record.hash_lock,
-                    ) {
-                        Ok(kp) => kp,
-                        Err(e) => {
-                            return err(format!(
-                                "bitcoin.claim.build: derive_claim_keypair failed: {e}"
-                            ))
-                        }
-                    };
-
-                let keys = self.bitcoin_keys.lock().await;
                 let tx = match crate::sdk::bitcoin_tx_builder::build_htlc_claim_tx(
                     &crate::sdk::bitcoin_tx_builder::ClaimTxParams {
                         outpoint_txid: &outpoint_txid,
@@ -1958,10 +2095,10 @@ impl AppRouterImpl {
                         destination_addr: &req.destination_address,
                         amount_sats: record.btc_amount_sats,
                         fee_rate_sat_vb: req.fee_rate_sat_vb.max(1),
-                        key_store: &keys,
-                        signing_index: req.signing_index,
+                        signer: crate::sdk::bitcoin_tx_builder::HtlcSpendSigner::MathOwned {
+                            hash_lock: &record.hash_lock,
+                        },
                         network: network.to_bitcoin_network(),
-                        claim_privkey: Some(&claim_privkey),
                     },
                 ) {
                     Ok(t) => t,
@@ -2070,22 +2207,7 @@ impl AppRouterImpl {
                     Err(_) => crate::sdk::runtime_config::RuntimeConfig::get_bitcoin_network(),
                 };
 
-                // 3. Derive math-owned claim keypair from preimage + hash_lock
-                let (claim_privkey, _claim_pubkey) =
-                    match crate::sdk::bitcoin_tx_builder::derive_claim_keypair(
-                        &preimage,
-                        &record.hash_lock,
-                    ) {
-                        Ok(kp) => kp,
-                        Err(e) => {
-                            return err(format!(
-                                "bitcoin.claim.auto: derive_claim_keypair failed: {e}"
-                            ))
-                        }
-                    };
-
                 // 4. Build claim transaction
-                let keys = self.bitcoin_keys.lock().await;
                 let tx = match crate::sdk::bitcoin_tx_builder::build_htlc_claim_tx(
                     &crate::sdk::bitcoin_tx_builder::ClaimTxParams {
                         outpoint_txid: &outpoint_txid,
@@ -2095,10 +2217,10 @@ impl AppRouterImpl {
                         destination_addr: &req.destination_address,
                         amount_sats: record.btc_amount_sats,
                         fee_rate_sat_vb: req.fee_rate_sat_vb.max(1),
-                        key_store: &keys,
-                        signing_index: req.signing_index,
+                        signer: crate::sdk::bitcoin_tx_builder::HtlcSpendSigner::MathOwned {
+                            hash_lock: &record.hash_lock,
+                        },
                         network: network.to_bitcoin_network(),
-                        claim_privkey: Some(&claim_privkey),
                     },
                 ) {
                     Ok(t) => t,
@@ -2108,8 +2230,6 @@ impl AppRouterImpl {
                         ))
                     }
                 };
-                drop(keys);
-
                 let raw_tx = crate::sdk::bitcoin_tx_builder::serialize_raw_tx(&tx);
 
                 let txid = match self.broadcast_raw_tx(&raw_tx, network).await {
@@ -2275,6 +2395,16 @@ impl AppRouterImpl {
                     ))
                     }
                 };
+                if !req.plan_id.is_empty() {
+                    if let Err(message) = ensure_exec_data_matches_withdrawal_policy(
+                        "bitcoin.fractional.exit",
+                        &req.plan_id,
+                        &req.source_vault_id,
+                        &exec_data,
+                    ) {
+                        return err(message);
+                    }
+                }
 
                 let dev = crate::util::text_id::encode_base32_crockford(&self.device_id_bytes);
                 let dbtc_id = crate::sdk::bitcoin_tap_sdk::DBTC_TOKEN_ID;
@@ -2320,6 +2450,7 @@ impl AppRouterImpl {
                     .bitcoin_tap
                     .pour_partial(
                         &req.source_vault_id,
+                        &exec_data.policy_commit,
                         exec_data.amount_sats,
                         exec_data.successor_depth,
                         req.exit_amount_sats,
@@ -2568,6 +2699,25 @@ impl AppRouterImpl {
                         String::new()
                     }
                 };
+                if let Some(wd_id) = &standalone_wd_id {
+                    if let Err(e) = persist_withdrawal_leg(
+                        wd_id,
+                        0,
+                        &req.source_vault_id,
+                        "partial",
+                        burn_amount,
+                        crate::sdk::bitcoin_tap_sdk::estimated_partial_withdrawal_fee_sats(),
+                        burn_amount.saturating_sub(
+                            crate::sdk::bitcoin_tap_sdk::estimated_partial_withdrawal_fee_sats(),
+                        ),
+                        Some(&sweep_txid),
+                        Some(&result.successor_vault_id),
+                        Some(&result.successor_vault_op_id),
+                        (!exit_vault_op_id.is_empty()).then_some(exit_vault_op_id.as_str()),
+                    ) {
+                        log::error!("[bitcoin.fractional.exit] withdrawal leg persistence failed: {e}");
+                    }
+                }
 
                 let resp = generated::BitcoinFractionalExitResponse {
                     source_vault_id: req.source_vault_id.clone(),
@@ -2634,6 +2784,16 @@ impl AppRouterImpl {
                         ))
                     }
                 };
+                if !req.plan_id.is_empty() {
+                    if let Err(message) = ensure_exec_data_matches_withdrawal_policy(
+                        "bitcoin.full.sweep",
+                        &req.plan_id,
+                        &req.source_vault_id,
+                        &exec_data,
+                    ) {
+                        return err(message);
+                    }
+                }
 
                 let burn_amount = exec_data.amount_sats;
                 let dev = crate::util::text_id::encode_base32_crockford(&self.device_id_bytes);
@@ -2696,6 +2856,7 @@ impl AppRouterImpl {
                 let derived_preimage =
                     match crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::derive_preimage_from_deposit_nonce(
                         &exec_data.deposit_nonce,
+                        &exec_data.policy_commit,
                     ) {
                         Ok(p) => p,
                         Err(e) => {
@@ -2829,31 +2990,22 @@ impl AppRouterImpl {
                 }
 
                 let lib_network = network.to_bitcoin_network();
-                let claim_kp =
-                    crate::sdk::bitcoin_tx_builder::derive_claim_keypair(pre, &exec_data.hash_lock);
-                let btc_keys = self.bitcoin_keys.lock().await;
-                let tx_result = match &claim_kp {
-                    Ok((privkey, _)) => crate::sdk::bitcoin_tx_builder::build_htlc_claim_tx(
-                        &crate::sdk::bitcoin_tx_builder::ClaimTxParams {
-                            outpoint_txid: &outpoint_txid,
-                            outpoint_vout: utxo.vout,
-                            htlc_script: script,
-                            preimage: pre,
-                            destination_addr: &claim_dest,
-                            amount_sats: burn_amount,
-                            fee_rate_sat_vb:
-                                crate::sdk::bitcoin_tap_sdk::withdrawal_fee_rate_sat_vb(),
-                            key_store: &btc_keys,
-                            signing_index: 0,
-                            network: lib_network,
-                            claim_privkey: Some(privkey),
+                let tx_result = crate::sdk::bitcoin_tx_builder::build_htlc_claim_tx(
+                    &crate::sdk::bitcoin_tx_builder::ClaimTxParams {
+                        outpoint_txid: &outpoint_txid,
+                        outpoint_vout: utxo.vout,
+                        htlc_script: script,
+                        preimage: pre,
+                        destination_addr: &claim_dest,
+                        amount_sats: burn_amount,
+                        fee_rate_sat_vb:
+                            crate::sdk::bitcoin_tap_sdk::withdrawal_fee_rate_sat_vb(),
+                        signer: crate::sdk::bitcoin_tx_builder::HtlcSpendSigner::MathOwned {
+                            hash_lock: &exec_data.hash_lock,
                         },
-                    ),
-                    Err(e) => Err(dsm::types::error::DsmError::invalid_operation(format!(
-                        "derive_claim_keypair: {e}"
-                    ))),
-                };
-                drop(btc_keys);
+                        network: lib_network,
+                    },
+                );
 
                 let claim_tx = match tx_result {
                     Ok(tx) => tx,
@@ -2974,6 +3126,25 @@ impl AppRouterImpl {
                         String::new()
                     }
                 };
+                if let Some(wd_id) = &standalone_wd_id {
+                    if let Err(e) = persist_withdrawal_leg(
+                        wd_id,
+                        0,
+                        &req.source_vault_id,
+                        "full",
+                        burn_amount,
+                        crate::sdk::bitcoin_tap_sdk::estimated_full_withdrawal_fee_sats(),
+                        burn_amount.saturating_sub(
+                            crate::sdk::bitcoin_tap_sdk::estimated_full_withdrawal_fee_sats(),
+                        ),
+                        Some(&sweep_txid),
+                        None,
+                        None,
+                        (!exit_vault_op_id.is_empty()).then_some(exit_vault_op_id.as_str()),
+                    ) {
+                        log::error!("[bitcoin.full.sweep] withdrawal leg persistence failed: {e}");
+                    }
+                }
 
                 // Set exit deposit to AwaitingConfirmation with funding_txid so the
                 // frontend polls check_confirmations for exit burial (dBTC §6.4.3).
@@ -4092,7 +4263,7 @@ impl AppRouterImpl {
             // Checks unresolved in-flight withdrawals for this device.
             // For each withdrawal with recorded sweep txid(s), queries Bitcoin
             // for confirmation depth. If all recorded txids reach d_min, the
-            // withdrawal is marked settled. Missing txids or API errors remain pending.
+            // withdrawal is finalized. Missing txids or API errors remain pending.
             //
             // SAFETY (dBTC §13.1, Definition 15, Property 9 — No Stranded Value):
             // The settlement monitor is FAIL-CLOSED: it never emits a compensating
@@ -4118,7 +4289,7 @@ impl AppRouterImpl {
                 if unresolved.is_empty() {
                     let resp = generated::AppStateResponse {
                         key: "withdraw_settle".to_string(),
-                        value: Some("No unresolved withdrawals to check".to_string()),
+                        value: Some("No committed withdrawals to finalize".to_string()),
                     };
                     return pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp));
                 }
@@ -4159,9 +4330,9 @@ impl AppRouterImpl {
                 let resp = generated::AppStateResponse {
                     key: "withdraw_settle".to_string(),
                     value: Some(format!(
-                        "Checked {} withdrawal(s): {} settled, {} pending",
+                        "Checked {} withdrawal(s): {} finalized, {} pending",
                         unresolved.len(),
-                        summary.settled,
+                        summary.finalized,
                         summary.pending
                     )),
                 };
@@ -4311,9 +4482,9 @@ impl AppRouterImpl {
             )
             .await;
         log::info!(
-            "[auto-resolve] checked {} withdrawal(s): {} settled, {} pending",
+            "[auto-resolve] checked {} withdrawal(s): {} finalized, {} pending",
             unresolved.len(),
-            summary.settled,
+            summary.finalized,
             summary.pending
         );
     }
@@ -4346,6 +4517,7 @@ async fn sweep_and_broadcast(req: SweepBroadcastRequest<'_>) -> Result<String, S
     let htlc_address = &source_exec_data.htlc_address;
     let preimage = crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::derive_preimage_from_deposit_nonce(
         &source_exec_data.deposit_nonce,
+        &source_exec_data.policy_commit,
     )
     .map_err(|e| format!("derive preimage: {e}"))?;
     let total_sats = source_exec_data.amount_sats;
@@ -4391,16 +4563,8 @@ async fn sweep_and_broadcast(req: SweepBroadcastRequest<'_>) -> Result<String, S
         addr
     };
 
-    // Derive math-owned claim keypair from preimage + hash_lock
-    let (claim_privkey, _claim_pubkey) = crate::sdk::bitcoin_tx_builder::derive_claim_keypair(
-        &preimage,
-        &source_exec_data.hash_lock,
-    )
-    .map_err(|e| format!("derive_claim_keypair: {e}"))?;
-
     // Build sweep-and-change tx
     let lib_network = network.to_bitcoin_network();
-    let keys = bitcoin_keys.lock().await;
     let sweep_tx = crate::sdk::bitcoin_tx_builder::build_sweep_and_change_tx(
         &crate::sdk::bitcoin_tx_builder::SweepTxParams {
             outpoint_txid: &outpoint_txid,
@@ -4412,14 +4576,13 @@ async fn sweep_and_broadcast(req: SweepBroadcastRequest<'_>) -> Result<String, S
             successor_htlc_script,
             total_sats,
             fee_rate_sat_vb: crate::sdk::bitcoin_tap_sdk::withdrawal_fee_rate_sat_vb(),
-            key_store: &keys,
-            signing_index: 0,
+            signer: crate::sdk::bitcoin_tx_builder::HtlcSpendSigner::MathOwned {
+                hash_lock: &source_exec_data.hash_lock,
+            },
             network: lib_network,
-            claim_privkey: Some(&claim_privkey),
         },
     )
     .map_err(|e| format!("build sweep tx: {e}"))?;
-    drop(keys);
 
     // Broadcast via mempool.space
     let raw_bytes = crate::sdk::bitcoin_tx_builder::serialize_raw_tx(&sweep_tx);
@@ -4461,12 +4624,10 @@ async fn sweep_and_broadcast(req: SweepBroadcastRequest<'_>) -> Result<String, S
 /// On success, updates the vault record's `funding_txid` in both memory and SQLite.
 pub(super) async fn try_claim_full_sweep_exit(
     bitcoin_tap: &std::sync::Arc<crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk>,
-    bitcoin_keys: &std::sync::Arc<
-        tokio::sync::Mutex<crate::sdk::bitcoin_key_store::BitcoinKeyStore>,
-    >,
     vault_op_id: &str,
     record: &crate::sdk::bitcoin_tap_sdk::VaultOperation,
     network: dsm::bitcoin::types::BitcoinNetwork,
+    expected_policy_commit: Option<[u8; 32]>,
 ) -> Result<String, String> {
     let vault_id = record
         .vault_id
@@ -4478,9 +4639,18 @@ pub(super) async fn try_claim_full_sweep_exit(
         .fetch_vault_execution_data(vault_id)
         .await
         .map_err(|e| format!("fetch vault data from storage nodes: {e}"))?;
+    if let Some(expected_policy_commit) = expected_policy_commit {
+        ensure_policy_commit_match(
+            "bitcoin.deposit.check_confirmations",
+            "full-sweep auto-claim",
+            &expected_policy_commit,
+            &exec_data.policy_commit,
+        )?;
+    }
 
     let preimage = crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::derive_preimage_from_deposit_nonce(
         &exec_data.deposit_nonce,
+        &exec_data.policy_commit,
     )
     .map_err(|e| format!("derive preimage: {e}"))?;
 
@@ -4511,12 +4681,7 @@ pub(super) async fn try_claim_full_sweep_exit(
         outpoint_txid[31 - i] = *b;
     }
 
-    let (claim_privkey, _claim_pubkey) =
-        crate::sdk::bitcoin_tx_builder::derive_claim_keypair(&preimage, &exec_data.hash_lock)
-            .map_err(|e| format!("derive_claim_keypair: {e}"))?;
-
     let lib_network = network.to_bitcoin_network();
-    let keys = bitcoin_keys.lock().await;
     let claim_tx = crate::sdk::bitcoin_tx_builder::build_htlc_claim_tx(
         &crate::sdk::bitcoin_tx_builder::ClaimTxParams {
             outpoint_txid: &outpoint_txid,
@@ -4526,14 +4691,13 @@ pub(super) async fn try_claim_full_sweep_exit(
             destination_addr: &dest,
             amount_sats: exec_data.amount_sats,
             fee_rate_sat_vb: crate::sdk::bitcoin_tap_sdk::withdrawal_fee_rate_sat_vb(),
-            key_store: &keys,
-            signing_index: 0,
+            signer: crate::sdk::bitcoin_tx_builder::HtlcSpendSigner::MathOwned {
+                hash_lock: &exec_data.hash_lock,
+            },
             network: lib_network,
-            claim_privkey: Some(&claim_privkey),
         },
     )
     .map_err(|e| format!("build_htlc_claim_tx: {e}"))?;
-    drop(keys);
 
     let raw = crate::sdk::bitcoin_tx_builder::serialize_raw_tx(&claim_tx);
     let txid = mempool
@@ -4679,6 +4843,45 @@ mod tests {
             deposit_nonce: Some(vec![0x55; 32]),
         })
         .expect("store vault record");
+    }
+
+    fn seed_vault_execution_advertisement(vault_id: &str, amount_sats: u64, policy_commit: [u8; 32]) {
+        let ad_key = format!(
+            "dbtc/manifold/{}/vault/{}",
+            crate::util::text_id::encode_base32_crockford(&policy_commit),
+            vault_id
+        );
+        let redeem_params = generated::DbtcRedeemParams {
+            htlc_script: vec![0x66; 64],
+            claim_pubkey: vec![0x03; 33],
+            hash_lock: vec![0x33; 32],
+            refund_hash_lock: vec![0x22; 32],
+            refund_iterations: 42,
+        }
+        .encode_to_vec();
+        let advertisement = generated::DbtcVaultAdvertisementV1 {
+            version: 1,
+            policy_commit: policy_commit.to_vec(),
+            vault_id: vault_id.to_string(),
+            controller_device_id: vec![0xA1; 32],
+            amount_sats,
+            successor_depth: 0,
+            lifecycle_state: "active".to_string(),
+            routeable: true,
+            busy_reason: String::new(),
+            updated_state_number: 1,
+            vault_proto_key: String::new(),
+            vault_proto_digest: vec![0x99; 32],
+            entry_txid: vec![0x88; 32],
+            htlc_address: "tb1qtest".to_string(),
+            script_commit: vec![0x77; 32],
+            redeem_params,
+            deposit_nonce: vec![0x55; 32],
+        };
+        crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::seed_dbtc_storage_object(
+            ad_key,
+            advertisement.encode_to_vec(),
+        );
     }
 
     /// Seed dBTC available balance for the test device ([0xA1; 32]).
@@ -4982,13 +5185,14 @@ mod tests {
             Some(generated::envelope::Payload::BitcoinWithdrawalExecuteResponse(resp)) => resp,
             other => panic!("unexpected execute payload: {other:?}"),
         };
-        assert_eq!(execute_resp.status, "completed");
+        assert_eq!(execute_resp.status, "committed");
         assert_eq!(execute_resp.executed_legs.len(), 1);
         assert_eq!(
             execute_resp.executed_legs[0].vault_id,
             expected_leg.vault_id
         );
         assert_eq!(execute_resp.executed_legs[0].kind, expected_leg.kind);
+        assert_eq!(execute_resp.executed_legs[0].status, "broadcast");
         assert_eq!(execute_resp.executed_legs[0].sweep_txid, "txid-1");
 
         let device_id_b32 = crate::util::text_id::encode_base32_crockford(&[0xA1; 32]);
@@ -4996,7 +5200,7 @@ mod tests {
             .expect("list unresolved withdrawals");
         assert_eq!(unresolved.len(), 1, "expected one persisted withdrawal row");
         let persisted = &unresolved[0];
-        assert_eq!(persisted.state, "executing");
+        assert_eq!(persisted.state, "committed");
         assert_eq!(persisted.redemption_txid.as_deref(), Some("txid-1"));
 
         let legs = crate::storage::client_db::list_withdrawal_legs(&persisted.withdrawal_id)
@@ -5162,6 +5366,60 @@ mod tests {
             persisted.policy_commit, plan_resp.policy_commit,
             "persisted policy_commit must match the plan's routed value"
         );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn bitcoin_full_sweep_rejects_policy_mismatch_against_committed_withdrawal() {
+        let router = init_withdrawal_invoke_test_router("full_sweep_policy_mismatch");
+        let amount_sats = 125_000;
+        let device_id_b32 = crate::util::text_id::encode_base32_crockford(&[0xA1; 32]);
+        let actual_policy_commit = *crate::policy::builtins::DBTC_POLICY_COMMIT;
+        let mismatched_policy_commit = [0xAB; 32];
+
+        seed_dbtc_balance(amount_sats);
+        seed_vault_execution_advertisement("vault-policy-mismatch", amount_sats, actual_policy_commit);
+        client_db::create_withdrawal(client_db::CreateWithdrawalParams {
+            withdrawal_id: "wd-policy-mismatch",
+            device_id: &device_id_b32,
+            amount_sats,
+            dest_address: "tb1qpolicymismatch",
+            policy_commit: &mismatched_policy_commit,
+            state: "committed",
+            burn_token_id: Some("dBTC"),
+            burn_amount_sats: amount_sats,
+        })
+        .expect("create committed withdrawal row");
+
+        let execute = router
+            .invoke(AppInvoke {
+                method: "bitcoin.full.sweep".to_string(),
+                args: pack_proto(&generated::BitcoinFractionalExitRequest {
+                    source_vault_id: "vault-policy-mismatch".to_string(),
+                    destination_address: "tb1qpolicymismatch".to_string(),
+                    plan_id: "wd-policy-mismatch".to_string(),
+                    ..Default::default()
+                }),
+            })
+            .await;
+
+        assert!(
+            !execute.success,
+            "full sweep should fail closed on policy mismatch"
+        );
+        let err = execute
+            .error_message
+            .expect("expected policy mismatch error");
+        assert!(
+            err.contains("policy_commit mismatch"),
+            "unexpected error: {err}"
+        );
+
+        let persisted = client_db::get_withdrawal("wd-policy-mismatch")
+            .expect("load persisted withdrawal")
+            .expect("withdrawal must exist");
+        assert_eq!(persisted.state, "committed");
+        assert!(persisted.redemption_txid.is_none());
     }
 
     #[tokio::test]

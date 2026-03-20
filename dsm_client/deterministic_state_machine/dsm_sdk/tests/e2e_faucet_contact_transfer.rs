@@ -104,7 +104,7 @@ async fn e2e_flow_faucet_contact_transfer() {
     // Initialize deterministic time progress context at genesis (before any transactions)
     // Use zero SMT root at genesis (no state transitions yet)
     let alice_smt_root = [0u8; 32];
-    dsm::util::deterministic_time::update_progress_context(alice_smt_root, 0)
+    dsm::utils::deterministic_time::update_progress_context(alice_smt_root, 0)
         .unwrap_or_else(|e| panic!("Failed to initialize progress context at genesis: {e}"));
 
     let config = SdkConfig {
@@ -297,7 +297,7 @@ async fn e2e_flow_faucet_contact_transfer() {
     }
 
     let bob_smt_root = [0u8; 32];
-    dsm::util::deterministic_time::update_progress_context(bob_smt_root, 0)
+    dsm::utils::deterministic_time::update_progress_context(bob_smt_root, 0)
         .unwrap_or_else(|e| panic!("Failed to initialize Bob progress context: {e}"));
 
     AppState::set_identity_info(
