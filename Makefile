@@ -74,20 +74,28 @@ doctor: ## Check local prerequisites and repo state without changing files
 	@command -v psql >/dev/null 2>&1 && echo "    psql: available" || echo "    psql: optional until you run local storage nodes"
 	@command -v java >/dev/null 2>&1 && echo "    java: $$(java -version 2>&1 | head -1)" || echo "    java: optional until Android builds"
 	@if [ -n "$$ANDROID_NDK_HOME$$ANDROID_NDK_ROOT" ]; then \
-		echo "    android ndk: $${ANDROID_NDK_HOME:-$$ANDROID_NDK_ROOT}"; \
+		if [ -n "$$ANDROID_NDK_HOME" ]; then \
+			echo "    android ndk: configured via ANDROID_NDK_HOME"; \
+		else \
+			echo "    android ndk: configured via ANDROID_NDK_ROOT"; \
+		fi; \
 	else \
 		echo "    android ndk: not configured (run make setup before Android builds)"; \
 	fi
 	@SDK=""; \
+	SDK_SOURCE=""; \
 	if [ -n "$$ANDROID_HOME" ] && [ -d "$$ANDROID_HOME" ]; then \
 		SDK="$$ANDROID_HOME"; \
+		SDK_SOURCE="ANDROID_HOME"; \
 	elif [ -n "$$ANDROID_SDK_ROOT" ] && [ -d "$$ANDROID_SDK_ROOT" ]; then \
 		SDK="$$ANDROID_SDK_ROOT"; \
+		SDK_SOURCE="ANDROID_SDK_ROOT"; \
 	elif [ -f "$(ANDROID_LOCAL_PROPERTIES)" ]; then \
 		SDK="$$(sed -n 's/^sdk.dir=//p' "$(ANDROID_LOCAL_PROPERTIES)" | tail -1 | sed 's/\\\\/\\/g; s/\\:/:/g; s/\\ / /g')"; \
+		SDK_SOURCE="local.properties"; \
 	fi; \
 	if [ -n "$$SDK" ] && [ -d "$$SDK" ]; then \
-		echo "    android sdk: $$SDK"; \
+		echo "    android sdk: configured via $$SDK_SOURCE"; \
 	else \
 		echo "    android sdk: not configured (make setup will try to detect it)"; \
 	fi
@@ -124,7 +132,7 @@ android-sdk-config: ## Detect Android SDK and write ignored local.properties for
 	ESCAPED_SDK="$${ESCAPED_SDK// /\\ }"; \
 	mkdir -p "$(ANDROID_DIR)"; \
 	printf 'sdk.dir=%s\n' "$$ESCAPED_SDK" > "$(ANDROID_LOCAL_PROPERTIES)"; \
-	echo "    Android SDK configured for Gradle: $$SDK"
+	echo "    Android SDK configured for Gradle (local.properties updated)"
 
 .PHONY: setup
 setup: ## First-time developer setup: check deps, auto-configure Android, install frontend deps
@@ -140,16 +148,14 @@ setup: ## First-time developer setup: check deps, auto-configure Android, instal
 	else \
 		command -v cargo-ndk >/dev/null 2>&1 || { echo "Installing cargo-ndk..."; cargo install cargo-ndk; }; \
 		NDK="$${ANDROID_NDK_HOME:-$$ANDROID_NDK_ROOT}"; \
-		if [ ! -f "$(CARGO_CONFIG)" ]; then \
-			echo "==> Writing $(CARGO_CONFIG) from template..."; \
-			sed \
-				-e "s|__NDK_ROOT__|$$NDK|g" \
-				-e "s|__NDK_HOST_TAG__|$$(ls $$NDK/toolchains/llvm/prebuilt/ | head -1)|g" \
-				$(CARGO_CONFIG_TEMPLATE) > $(CARGO_CONFIG); \
-			echo "    Written: $(CARGO_CONFIG)"; \
-		else \
-			echo "    $(CARGO_CONFIG) already exists — skipping (delete it to regenerate)"; \
-		fi; \
+		mkdir -p "$$(dirname "$(CARGO_CONFIG)")"; \
+		echo "==> Refreshing dsm_client/deterministic_state_machine/dsm_sdk/.cargo/config.toml from template..."; \
+		sed \
+			-e "s|__NDK_ROOT__|$$NDK|g" \
+			-e "s|__NDK_HOST_TAG__|$$(ls $$NDK/toolchains/llvm/prebuilt/ | head -1)|g" \
+			$(CARGO_CONFIG_TEMPLATE) > "$(CARGO_CONFIG).tmp"; \
+		mv "$(CARGO_CONFIG).tmp" "$(CARGO_CONFIG)"; \
+		echo "    Refreshed: dsm_client/deterministic_state_machine/dsm_sdk/.cargo/config.toml"; \
 	fi
 	@if [ ! -d "$(FRONTEND_DIR)/node_modules" ]; then \
 		echo "==> Installing frontend dependencies..."; \

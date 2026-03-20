@@ -241,9 +241,8 @@ mod tests {
     impl TestDb {
         async fn new() -> Self {
             // Use test database or skip tests if not configured
-            let database_url = std::env::var("DSM_DATABASE_URL").unwrap_or_else(|_| {
-                "postgresql://dsm:dsm@localhost:5432/dsm_storage_node1".to_string()
-            });
+            let database_url = std::env::var("DSM_DATABASE_URL")
+                .unwrap_or_else(|_| "postgresql://localhost:5432/dsm_storage_node1".to_string());
 
             let pool = crate::db::create_pool(&database_url, false)
                 .unwrap_or_else(|e| panic!("Failed to connect to test database: {e}"));
