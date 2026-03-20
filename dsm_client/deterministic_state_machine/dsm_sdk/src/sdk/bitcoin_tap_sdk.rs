@@ -45,6 +45,7 @@ use std::sync::{Arc, OnceLock};
 use tokio::sync::RwLock;
 
 use prost::Message;
+use rand::{rngs::OsRng, RngCore};
 
 use dsm::{
     bitcoin::{
@@ -1337,8 +1338,8 @@ impl BitcoinTapSdk {
                 DsmError::storage(format!("manifold_seed: {e}"), None::<std::io::Error>)
             })?;
         let mut deposit_nonce = [0u8; 32];
-        getrandom::getrandom(&mut deposit_nonce)
-            .map_err(|e| DsmError::crypto(format!("RNG: {e}"), None::<String>))?;
+        let mut os_rng = OsRng;
+        os_rng.fill_bytes(&mut deposit_nonce);
         let eta = Self::derive_bearer_eta(&manifold_seed, &deposit_nonce);
         let preimage = Self::derive_preimage_from_eta(&eta);
         let hash_lock = sha256_hash_lock(&preimage);
@@ -1578,8 +1579,8 @@ impl BitcoinTapSdk {
             DsmError::storage(format!("manifold_seed: {e}"), None::<std::io::Error>)
         })?;
         let mut successor_deposit_nonce = [0u8; 32];
-        getrandom::getrandom(&mut successor_deposit_nonce)
-            .map_err(|e| DsmError::crypto(format!("RNG: {e}"), None::<String>))?;
+        let mut os_rng = OsRng;
+        os_rng.fill_bytes(&mut successor_deposit_nonce);
         let successor_eta = Self::derive_bearer_eta(&manifold_seed, &successor_deposit_nonce);
         let successor_preimage = Self::derive_preimage_from_eta(&successor_eta);
         let successor_hash_lock = sha256_hash_lock(&successor_preimage);

@@ -15,7 +15,7 @@ use dsm_sdk::storage::client_db::{
 };
 use std::process::Command;
 use std::collections::HashMap;
-use getrandom::getrandom;
+use rand::{rngs::OsRng, RngCore};
 use tokio::time::{timeout, Duration};
 
 fn persist_live_genesis_record(
@@ -98,9 +98,9 @@ async fn e2e_online_transfer_era_and_custom_token() {
         .await
         .unwrap_or_else(|e| panic!("Failed to create StorageNodeSDK: {e}"));
 
+    let mut os_rng = OsRng;
     let mut alice_entropy = vec![0u8; 32];
-    getrandom(&mut alice_entropy)
-        .unwrap_or_else(|e| panic!("Failed to generate Alice entropy: {e}"));
+    os_rng.fill_bytes(&mut alice_entropy);
 
     println!("Creating Alice genesis via MPC...");
     let alice_genesis = timeout(
@@ -199,7 +199,7 @@ async fn e2e_online_transfer_era_and_custom_token() {
         .await
         .unwrap_or_else(|e| panic!("Failed to init Bob StorageNodeSDK: {e}"));
     let mut bob_entropy = vec![0u8; 32];
-    getrandom(&mut bob_entropy).unwrap_or_else(|e| panic!("Failed to generate Bob entropy: {e}"));
+    os_rng.fill_bytes(&mut bob_entropy);
 
     println!("Creating Bob genesis via MPC...");
     let bob_genesis = timeout(
@@ -483,10 +483,10 @@ async fn live_aws_online_transfer_recipient_storage_sync() {
         .unwrap_or_else(|e| panic!("Failed to create live AWS StorageNodeSDK: {e}"));
     let (receiver_pk, receiver_sk) = dsm::crypto::sphincs::generate_sphincs_keypair()
         .unwrap_or_else(|e| panic!("Failed to generate receiver keys: {e}"));
+    let mut os_rng = OsRng;
     let (receiver_device_id, receiver_genesis) = {
         let mut receiver_entropy = vec![0u8; 32];
-        getrandom(&mut receiver_entropy)
-            .unwrap_or_else(|e| panic!("Failed to generate receiver entropy: {e}"));
+        os_rng.fill_bytes(&mut receiver_entropy);
         let receiver_genesis = storage_sdk
             .create_genesis_with_mpc(Some(3), Some(receiver_entropy.clone()))
             .await
@@ -537,8 +537,7 @@ async fn live_aws_online_transfer_recipient_storage_sync() {
 
     let (sender_device_id, sender_genesis, relationship_tip, expected_route) = {
         let mut sender_entropy = vec![0u8; 32];
-        getrandom(&mut sender_entropy)
-            .unwrap_or_else(|e| panic!("Failed to generate sender entropy: {e}"));
+        os_rng.fill_bytes(&mut sender_entropy);
         let sender_genesis_record = storage_sdk
             .create_genesis_with_mpc(Some(3), Some(sender_entropy.clone()))
             .await
