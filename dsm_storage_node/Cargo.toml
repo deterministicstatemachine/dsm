@@ -61,10 +61,10 @@ async-trait = "0.1"
 # Deterministic tick sources live in dsm core
 
 # DSM Core (for SPHINCS+ and shared types)
-dsm = { path = "../dsm_client/deterministic_state_machine/dsm" }
+dsm = { version = "0.1.0-beta.1", path = "../dsm_client/deterministic_state_machine/dsm" }
 
 # DSM SDK (for centralized utilities like base32 Crockford)
-dsm_sdk = { path = "../dsm_client/deterministic_state_machine/dsm_sdk" }
+dsm_sdk = { version = "0.1.0-beta.1", path = "../dsm_client/deterministic_state_machine/dsm_sdk" }
 
 # Protobuf support
 prost = "0.12"
