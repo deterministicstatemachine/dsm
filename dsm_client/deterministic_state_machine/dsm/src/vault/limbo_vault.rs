@@ -1544,7 +1544,8 @@ impl LimboVault {
         }
 
         debug_assert!(
-            verifier_evidence.runtime_acceptance_implies_formal_mainnet(),
+            !matches!(btc_network, BitcoinNetwork::Mainnet)
+                || verifier_evidence.runtime_acceptance_implies_formal_mainnet(),
             "mainnet dBTC acceptance must imply the formal RustVerifierAccepted predicate"
         );
 
