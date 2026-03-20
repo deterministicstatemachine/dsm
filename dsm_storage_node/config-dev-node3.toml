@@ -34,7 +34,7 @@ data_dir = "./data-dev-node3"
 database_path = "./data-dev-node3/storage.db"
 
 [database]
-url = "postgresql://dsm:dsm@localhost:5432/dsm_storage_node3"
+url = "postgresql://localhost:5432/dsm_storage_node3"
 assignment_strategy = "DeterministicHashing"
 replication_strategy = "FixedReplicas"
 replica_count = 3

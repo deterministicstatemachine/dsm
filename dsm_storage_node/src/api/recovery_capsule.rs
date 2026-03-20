@@ -149,7 +149,7 @@ mod tests {
             return None;
         }
         let database_url = std::env::var("DSM_DATABASE_URL")
-            .unwrap_or_else(|_| "postgresql://dsm:dsm@localhost:5432/dsm_storage".to_string());
+            .unwrap_or_else(|_| "postgresql://localhost:5432/dsm_storage".to_string());
         let pool = crate::db::create_pool(&database_url, false).ok()?;
         crate::db::init_db(&pool).await.ok()?;
         let replication_config = ReplicationConfig {

@@ -138,6 +138,7 @@ fn main() {
     write_min_schema_hash_module();
 
     // Prefer vendored protoc to avoid system dependency differences
+    let vendored_include = protoc_bin_vendored::include_path().ok();
     if let Ok(protoc_path) = protoc_bin_vendored::protoc_bin_path() {
         std::env::set_var("PROTOC", &protoc_path);
         println!(
@@ -161,12 +162,23 @@ fn main() {
     println!("cargo:rerun-if-changed={}", canonical_proto.display());
 
     // Emit a single OUT_DIR/dsm.rs include file that re-exports all packages
-    if let Err(e) = tonic_build::configure()
+    let config = tonic_build::configure()
         .build_client(false)
         .build_server(false)
-        .include_file("pb.rs")
-        .compile_protos(&[canonical_proto], &[proto_root.as_path()])
+        .include_file("pb.rs");
+
+    let include_paths: Vec<&std::path::Path> = if let Some(ref vendored_include) = vendored_include
     {
+        println!(
+            "cargo:warning=dsm@0.1.0: Using vendored protoc include {}",
+            vendored_include.display()
+        );
+        vec![proto_root.as_path(), vendored_include.as_path()]
+    } else {
+        vec![proto_root.as_path()]
+    };
+
+    if let Err(e) = config.compile_protos(&[canonical_proto], &include_paths) {
         eprintln!("prost/tonic proto compilation failed: {}", e);
         std::process::exit(1);
     }
