@@ -153,7 +153,7 @@ jobs:
       - name: 🧪 Run unit tests
         working-directory: dsm_storage_node
         env:
-          DATABASE_URL: postgres://postgres:postgres@localhost:5432/dsm_test
+          DATABASE_URL: postgresql://localhost:5432/dsm_test
         run: |
           cargo test --verbose --all-features
           

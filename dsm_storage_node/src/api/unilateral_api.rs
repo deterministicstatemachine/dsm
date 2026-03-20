@@ -583,7 +583,7 @@ mod tests {
             return None;
         }
         let database_url = std::env::var("DSM_DATABASE_URL")
-            .unwrap_or_else(|_| "postgresql://dsm:dsm@localhost:5432/dsm_storage".to_string());
+            .unwrap_or_else(|_| "postgresql://localhost:5432/dsm_storage".to_string());
 
         let pool = match crate::db::create_pool(&database_url, false) {
             Ok(p) => p,

@@ -177,7 +177,7 @@ fi
 
 echo ""
 echo "==> Database setup complete!"
-echo "    Connection string: postgresql://$DB_USER:$DB_PASS@$DB_HOST:$DB_PORT/$DB_NAME"
+echo "    Database endpoint: $DB_HOST:$DB_PORT/$DB_NAME"
 echo ""
 echo "To connect manually:"
 echo "  psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME"

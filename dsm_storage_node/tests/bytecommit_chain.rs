@@ -37,7 +37,7 @@ async fn bytecommit_chain_records_parent_link() -> anyhow::Result<()> {
     ensure_rustls_provider_installed();
     // Note: build_app_for_tests uses DSM_DATABASE_URL or defaults.
     let database_url = std::env::var("DSM_DATABASE_URL")
-        .unwrap_or_else(|_| "postgresql://dsm:dsm@localhost:5432/dsm_storage".to_string());
+        .unwrap_or_else(|_| "postgresql://localhost:5432/dsm_storage".to_string());
     let pool = db::create_pool(&database_url, true)?;
     db::init_db(&pool).await?;
 

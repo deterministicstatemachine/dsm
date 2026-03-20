@@ -92,7 +92,7 @@ EXTEOF
     done
 
     # --- Node config from template ---
-    DB_URL="postgresql://dsm:${PG_PASS}@postgres:5432/dsm_storage"
+    DB_URL="postgresql://postgres:5432/dsm_storage?user=dsm&password=${PG_PASS}"
     sed -e "s|__NODE_ID__|${NODE_ID}|g" \
         -e "s|__LISTEN_ADDR__|0.0.0.0|g" \
         -e "s|__PORT__|8080|g" \
