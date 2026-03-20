@@ -3,8 +3,9 @@ name = "dsm_vector_builder"
 version = "0.1.0"
 edition = "2021"
 publish = false
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 anyhow = "1"
 prost = "0.12"
-dsm = { path = "../../dsm_client/deterministic_state_machine/dsm" }
+dsm = { version = "0.1.0-beta.1", path = "../../dsm_client/deterministic_state_machine/dsm" }

@@ -48,6 +48,8 @@ exceptions = [
     { allow = ["MPL-2.0", "CDLA-Permissive-2.0"], name = "webpki-roots" },
     # Used transitively by tokio-postgres-rustls.
     { allow = ["MPL-2.0"], name = "x509-certificate" },
+    # Pulled transitively by bitcoin; acceptable for current release train.
+    { allow = ["MITNFA"], name = "hex_lit" },
 ]
 
 [advisories]
@@ -61,4 +63,11 @@ ignore = [
 
     # Transitive via config; evaluate yaml-rust2 migration later.
     "RUSTSEC-2024-0320", # yaml-rust: unmaintained
+
+    # Bincode is frozen/unmaintained upstream, but current usage is intentional
+    # and tracked for future migration.
+    "RUSTSEC-2025-0141", # bincode: unmaintained
+
+    # Used only in vertical validation tooling for operational timing.
+    "RUSTSEC-2024-0384", # instant: unmaintained
 ]

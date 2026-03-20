@@ -3,6 +3,7 @@ name = "dsm_vertical_validation"
 version = "0.1.0"
 edition = "2021"
 publish = false
+license = "MIT OR Apache-2.0"
 description = "Vertical Validation: TLA+ model checking + scaling benchmarks + investor report"
 
 [[bin]]
@@ -39,7 +40,7 @@ regex = "1.10"
 instant = "0.1"
 
 # Direct access to core DSM types, state machine, and crypto primitives
-dsm = { path = "../../dsm_client/deterministic_state_machine/dsm" }
+dsm = { version = "0.1.0-beta.1", path = "../../dsm_client/deterministic_state_machine/dsm" }
 
 # Deterministic seeded RNG for reproducible property tests
 rand = "0.8"
