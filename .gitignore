@@ -187,3 +187,7 @@ dsm_client/deterministic_state_machine/test_balance_fix.rs
 # Claude IDE
 .claude/
 /.github/instructions
+
+# Claude Agents
+.agents/
+.agents/
