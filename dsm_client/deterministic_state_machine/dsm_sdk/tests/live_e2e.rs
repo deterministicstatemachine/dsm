@@ -4,6 +4,7 @@
 #![allow(clippy::disallowed_methods)]
 
 use prost::Message;
+use rand::{rngs::OsRng, RngCore};
 use reqwest::Client;
 
 fn base32_encode(bytes: &[u8]) -> String {
@@ -58,6 +59,7 @@ async fn live_registration_and_submit() -> Result<(), Box<dyn std::error::Error>
     // 1) Register device using protobuf body
     let url = format!("{}/api/v2/device/register", endpoint);
     let http = Client::new();
+    let mut os_rng = OsRng;
     // Try initial registration
     #[allow(unused_assignments)]
     let mut token_opt: Option<String> = None;
@@ -86,12 +88,12 @@ async fn live_registration_and_submit() -> Result<(), Box<dyn std::error::Error>
         } else if resp.status().as_u16() == 409 {
             // Already exists: always create a fresh identity so token/device_id pair matches
             let mut rand32 = [0u8; 32];
-            getrandom::getrandom(&mut rand32)?;
+            os_rng.fill_bytes(&mut rand32);
             device_id_bytes = rand32.to_vec();
             device_id_b32 = base32_encode(&rand32);
-            getrandom::getrandom(&mut rand32)?;
+            os_rng.fill_bytes(&mut rand32);
             let pubkey_bytes_new = rand32.to_vec();
-            getrandom::getrandom(&mut rand32)?;
+            os_rng.fill_bytes(&mut rand32);
             genesis_bytes = rand32.to_vec();
             genesis_b32 = base32_encode(&rand32);
             let req2 = dsm_sdk::generated::RegisterDeviceRequest {
@@ -137,7 +139,7 @@ async fn live_registration_and_submit() -> Result<(), Box<dyn std::error::Error>
 
     // 3) Submit a minimal Envelope v3 directly to b0x spool
     let mut msg_id = [0u8; 16];
-    getrandom::getrandom(&mut msg_id)?;
+    os_rng.fill_bytes(&mut msg_id);
     let env = dsm_sdk::generated::Envelope {
         version: 3,
         headers: Some(dsm_sdk::generated::Headers {
@@ -172,7 +174,7 @@ async fn live_registration_and_submit() -> Result<(), Box<dyn std::error::Error>
     // 4) Retrieve from b0x spool
     let retrieve_url = format!("{}/api/v2/b0x/retrieve", endpoint);
     let mut retrieve_msg_id = [0u8; 16];
-    getrandom::getrandom(&mut retrieve_msg_id)?;
+    os_rng.fill_bytes(&mut retrieve_msg_id);
     let retrieve_resp = http
         .get(&retrieve_url)
         .header("content-type", "application/protobuf")
@@ -222,7 +224,7 @@ async fn live_registration_and_submit() -> Result<(), Box<dyn std::error::Error>
     };
     let ack_body = ack_batch.encode_to_vec();
     let mut ack_msg_id = [0u8; 16];
-    getrandom::getrandom(&mut ack_msg_id)?;
+    os_rng.fill_bytes(&mut ack_msg_id);
     let ack_resp = http
         .post(format!("{}/api/v2/b0x/ack", endpoint))
         .header("content-type", "application/protobuf")

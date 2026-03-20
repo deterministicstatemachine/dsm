@@ -15,6 +15,7 @@ use dsm_sdk::bluetooth::ble_frame_coordinator::{BleFrameCoordinator, BleFrameTyp
 use dsm_sdk::storage_utils;
 use dsm_sdk::generated;
 use prost::Message;
+use rand::{rngs::OsRng, RngCore};
 
 use dsm::core::bilateral_transaction_manager::BilateralTransactionManager;
 use dsm::core::contact_manager::DsmContactManager;
@@ -90,15 +91,16 @@ async fn verify_frontend_event_guarantees() {
         .expect("StorageNodeSDK init failed");
 
     // Alice & Bob Genesis
+    let mut os_rng = OsRng;
     let mut alice_entropy = vec![10u8; 32];
-    getrandom::getrandom(&mut alice_entropy).expect("entropy a");
+    os_rng.fill_bytes(&mut alice_entropy);
     let alice_genesis = storage_sdk
         .create_genesis_with_mpc(Some(3), Some(alice_entropy))
         .await
         .expect("alice MPC genesis");
 
     let mut bob_entropy = vec![11u8; 32];
-    getrandom::getrandom(&mut bob_entropy).expect("entropy b");
+    os_rng.fill_bytes(&mut bob_entropy);
     let bob_genesis = storage_sdk
         .create_genesis_with_mpc(Some(3), Some(bob_entropy))
         .await

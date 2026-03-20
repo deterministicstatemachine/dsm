@@ -18,6 +18,7 @@ use crate::util::{deterministic_time as dt, text_id};
 
 use log::{info, warn, debug};
 use prost::Message;
+use rand::{rngs::OsRng, RngCore};
 use reqwest;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -1215,12 +1216,8 @@ impl B0xSDK {
 
         // 2) Build Envelope v3 with proper request payload
         let mut rand_bytes = [0u8; 16];
-        getrandom::getrandom(&mut rand_bytes).map_err(|e| {
-            DsmError::internal(
-                format!("message_id RNG failed: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
+        let mut os_rng = OsRng;
+        os_rng.fill_bytes(&mut rand_bytes);
         let mut msgid_buf = Vec::with_capacity(11 + 16 + 8 + self.device_id.len());
         msgid_buf.extend_from_slice(b"DSM/b0x-msgid\0");
         msgid_buf.extend_from_slice(&rand_bytes);
@@ -2003,12 +2000,8 @@ impl B0xSDK {
         // Multi-node retrieve: query all healthy endpoints; merge unique entries by id.
         // Generate a unique message ID for this retrieve request (required by auth middleware)
         let mut msg_id_bytes = [0u8; 16];
-        getrandom::getrandom(&mut msg_id_bytes).map_err(|e| {
-            DsmError::internal(
-                format!("message_id RNG failed: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
+        let mut os_rng = OsRng;
+        os_rng.fill_bytes(&mut msg_id_bytes);
         let msg_id_b32 = text_id::encode_base32_crockford(&msg_id_bytes);
 
         if b0x_address.is_empty() {
@@ -2185,12 +2178,8 @@ impl B0xSDK {
         }
 
         let mut request_msg_id = [0u8; 16];
-        getrandom::getrandom(&mut request_msg_id).map_err(|e| {
-            DsmError::internal(
-                format!("message_id RNG failed: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
+        let mut os_rng = OsRng;
+        os_rng.fill_bytes(&mut request_msg_id);
         let request_msg_id_b32 = text_id::encode_base32_crockford(&request_msg_id);
 
         let endpoints: Vec<String> = self
@@ -2287,12 +2276,8 @@ impl B0xSDK {
         // Multi-node ack: broadcast; require quorum_k successes.
         // Generate a unique message ID for this ack request (required by auth middleware)
         let mut msg_id_bytes = [0u8; 16];
-        getrandom::getrandom(&mut msg_id_bytes).map_err(|e| {
-            DsmError::internal(
-                format!("message_id RNG failed: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
+        let mut os_rng = OsRng;
+        os_rng.fill_bytes(&mut msg_id_bytes);
         let msg_id_b32 = text_id::encode_base32_crockford(&msg_id_bytes);
 
         // ACK scoping:

@@ -15,6 +15,7 @@ use dsm_sdk::storage_utils;
 use dsm_sdk::util::text_id;
 use dsm_sdk::generated;
 use prost::Message;
+use rand::{rngs::OsRng, RngCore};
 
 use dsm::core::bilateral_transaction_manager::BilateralTransactionManager;
 use dsm::core::contact_manager::DsmContactManager;
@@ -240,8 +241,9 @@ async fn offline_real_protocol_ble_mock_roundtrip() {
         .expect("StorageNodeSDK init failed");
 
     // Create Alice genesis via MPC
+    let mut os_rng = OsRng;
     let mut alice_entropy = vec![0u8; 32];
-    getrandom::getrandom(&mut alice_entropy).expect("entropy a");
+    os_rng.fill_bytes(&mut alice_entropy);
     let alice_genesis = storage_sdk
         .create_genesis_with_mpc(Some(3), Some(alice_entropy))
         .await
@@ -255,7 +257,7 @@ async fn offline_real_protocol_ble_mock_roundtrip() {
 
     // Create Bob genesis via MPC
     let mut bob_entropy = vec![1u8; 32];
-    getrandom::getrandom(&mut bob_entropy).expect("entropy b");
+    os_rng.fill_bytes(&mut bob_entropy);
     let bob_genesis = storage_sdk
         .create_genesis_with_mpc(Some(3), Some(bob_entropy))
         .await
@@ -508,12 +510,13 @@ async fn offline_real_protocol_ble_mock_multi_relationship_multi_tx() {
         .await
         .expect("StorageNodeSDK init failed");
 
+    let mut os_rng = OsRng;
     let mut alice_entropy = vec![0u8; 32];
     let mut bob_entropy = vec![1u8; 32];
     let mut carol_entropy = vec![2u8; 32];
-    getrandom::getrandom(&mut alice_entropy).expect("entropy a");
-    getrandom::getrandom(&mut bob_entropy).expect("entropy b");
-    getrandom::getrandom(&mut carol_entropy).expect("entropy c");
+    os_rng.fill_bytes(&mut alice_entropy);
+    os_rng.fill_bytes(&mut bob_entropy);
+    os_rng.fill_bytes(&mut carol_entropy);
 
     let alice_genesis = storage_sdk
         .create_genesis_with_mpc(Some(3), Some(alice_entropy))
