@@ -303,10 +303,7 @@ fn generate_schema(
     Ok(())
 }
 
-fn init_project(
-    name: String,
-    output_dir: Option<PathBuf>,
-) -> Result<()> {
+fn init_project(name: String, output_dir: Option<PathBuf>) -> Result<()> {
     println!("Initializing DSM project: {name}");
 
     // Create project directory structure
@@ -501,10 +498,7 @@ fn validate_specification(spec_file: PathBuf) -> Result<()> {
         for e in &errors {
             eprintln!("  ✗ {e}");
         }
-        anyhow::bail!(
-            "Specification has {} validation error(s)",
-            errors.len()
-        )
+        anyhow::bail!("Specification has {} validation error(s)", errors.len())
     }
 }
 
@@ -528,14 +522,16 @@ fn compile_specification(
         CompileMode::Local => dsm_gen::schema::DeploymentMode::Local,
     });
 
-    let blob = dsm_gen::compiler::compile(&spec, mode_override)
-        .with_context(|| "Compilation failed")?;
+    let blob =
+        dsm_gen::compiler::compile(&spec, mode_override).with_context(|| "Compilation failed")?;
 
     // Output
-    if let Some(out_path) = output.or_else(|| output_dir.map(|d| {
-        let stem = spec_file.file_stem().unwrap_or_default().to_string_lossy();
-        d.join(format!("{stem}.b32"))
-    })) {
+    if let Some(out_path) = output.or_else(|| {
+        output_dir.map(|d| {
+            let stem = spec_file.file_stem().unwrap_or_default().to_string_lossy();
+            d.join(format!("{stem}.b32"))
+        })
+    }) {
         ensure_parent_dir(&out_path)?;
         fs::write(&out_path, &blob.base32)
             .with_context(|| format!("Failed to write blob to {out_path:?}"))?;
@@ -547,7 +543,11 @@ fn compile_specification(
 
     let hash_hex = blake3::Hash::from(blob.hash).to_hex();
     eprintln!("Blob hash (BLAKE3): {hash_hex}");
-    eprintln!("Blob size: {} bytes ({} Base32 chars)", blob.bytes.len(), blob.base32.len());
+    eprintln!(
+        "Blob size: {} bytes ({} Base32 chars)",
+        blob.bytes.len(),
+        blob.base32.len()
+    );
 
     Ok(())
 }

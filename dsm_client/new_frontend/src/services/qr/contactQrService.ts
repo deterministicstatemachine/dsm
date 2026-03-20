@@ -13,11 +13,11 @@ const MAX_QR_BYTES = 900; // generous headroom for Level-M
  * Generate SDK fingerprint: 32-byte quantum-resistant hash of build/version info.
  * Matches Rust implementation using BLAKE3, but uses deterministic quantum-resistant construction in browser.
  * Used for ContactQrV3 protobuf field validation.
- * No JSON, no timestamps, no SHA-256 - only deterministic bytes and Base32 Crockford.
+ * No JSON, no unix_tss, no SHA-256 - only deterministic bytes and Base32 Crockford.
  */
 async function generateSdkFingerprint(): Promise<Uint8Array> {
   // Build deterministic bytes: version + platform + sdk identifier
-  // No JSON, no timestamps - only fixed identifying information
+  // No JSON, no unix_tss - only fixed identifying information
   const encoder = new TextEncoder();
   const versionBytes = encoder.encode('1.0.0'); // from package.json
   const platformBytes = encoder.encode('web'); // identifies this as web frontend

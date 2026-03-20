@@ -24,7 +24,7 @@ pub struct HealthCheck {
     pub component: String,
     pub status: HealthStatus,
     pub message: String,
-    pub timestamp_tick: u64,
+    pub unix_ts_tick: u64,
     pub duration_ticks: u64,
 }
 
@@ -58,7 +58,7 @@ pub struct Alert {
     pub severity: AlertSeverity,
     pub component: String,
     pub message: String,
-    pub timestamp_tick: u64,
+    pub unix_ts_tick: u64,
     pub resolved: bool,
 }
 
@@ -272,7 +272,7 @@ impl AlertManager {
                 severity: AlertSeverity::Critical,
                 component: "system".to_string(),
                 message: format!("CPU usage is {:.1}%", metrics.cpu_usage_percent),
-                timestamp_tick: dt::tick_index(),
+                unix_ts_tick: dt::tick_index(),
                 resolved: false,
             })
             .await;
@@ -285,7 +285,7 @@ impl AlertManager {
                 severity: AlertSeverity::Error,
                 component: "storage".to_string(),
                 message: format!("Error rate is {:.1}%", storage_metrics.error_rate * 100.0),
-                timestamp_tick: dt::tick_index(),
+                unix_ts_tick: dt::tick_index(),
                 resolved: false,
             })
             .await;
@@ -451,14 +451,14 @@ impl HealthCheckFn for DatabaseHealthCheck {
                             component: "database".to_string(),
                             status: HealthStatus::Healthy,
                             message: "Database connection healthy".to_string(),
-                            timestamp_tick: dt::tick_index(),
+                            unix_ts_tick: dt::tick_index(),
                             duration_ticks: duration,
                         },
                         Err(e) => HealthCheck {
                             component: "database".to_string(),
                             status: HealthStatus::Unhealthy,
                             message: format!("Database query failed: {}", e),
-                            timestamp_tick: dt::tick_index(),
+                            unix_ts_tick: dt::tick_index(),
                             duration_ticks: duration,
                         },
                     }
@@ -467,7 +467,7 @@ impl HealthCheckFn for DatabaseHealthCheck {
                     component: "database".to_string(),
                     status: HealthStatus::Critical,
                     message: format!("Database connection failed: {}", e),
-                    timestamp_tick: dt::tick_index(),
+                    unix_ts_tick: dt::tick_index(),
                     duration_ticks: duration,
                 },
             }
@@ -491,7 +491,7 @@ mod tests {
                     component: "test".to_string(),
                     status: HealthStatus::Healthy,
                     message: "Test passed".to_string(),
-                    timestamp_tick: 1234567890,
+                    unix_ts_tick: 1234567890,
                     duration_ticks: 10,
                 }
             });
@@ -510,14 +510,14 @@ mod tests {
                 component: "cpu".to_string(),
                 status: HealthStatus::Healthy,
                 message: "OK".to_string(),
-                timestamp_tick: 0,
+                unix_ts_tick: 0,
                 duration_ticks: 0,
             },
             HealthCheck {
                 component: "memory".to_string(),
                 status: HealthStatus::Degraded,
                 message: "High usage".to_string(),
-                timestamp_tick: 0,
+                unix_ts_tick: 0,
                 duration_ticks: 0,
             },
         ];

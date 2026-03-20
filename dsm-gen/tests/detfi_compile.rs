@@ -5,7 +5,7 @@
 
 use dsm_gen::base32;
 use dsm_gen::compiler::{self, CompiledBlob};
-use dsm_gen::schema::{DsmSpecification, DeploymentMode};
+use dsm_gen::schema::{DeploymentMode, DsmSpecification};
 use std::path::PathBuf;
 
 fn detfi_vault_path(name: &str) -> PathBuf {
@@ -54,10 +54,7 @@ fn test_vault_blob_header_local() {
 
 #[test]
 fn test_policy_blob_header() {
-    let blob = load_and_compile(
-        &detfi_policy_path("01-stablecoin-transfer.yaml"),
-        None,
-    );
+    let blob = load_and_compile(&detfi_policy_path("01-stablecoin-transfer.yaml"), None);
     assert_eq!(blob.bytes[0], 1, "Version should be 1");
     assert_eq!(blob.bytes[1], 1, "Mode should be 1 (posted) for policies");
     assert_eq!(blob.bytes[2], 1, "Type should be 1 (policy)");
@@ -80,10 +77,7 @@ fn test_vault_blob_base32_roundtrip() {
 
 #[test]
 fn test_policy_blob_base32_roundtrip() {
-    let blob = load_and_compile(
-        &detfi_policy_path("01-stablecoin-transfer.yaml"),
-        None,
-    );
+    let blob = load_and_compile(&detfi_policy_path("01-stablecoin-transfer.yaml"), None);
     let decoded = match base32::decode(&blob.base32) {
         Some(decoded) => decoded,
         None => panic!("Base32 decode failed"),
@@ -104,7 +98,10 @@ fn test_vault_compilation_is_deterministic() {
         Some(DeploymentMode::Posted),
     );
     assert_eq!(blob1.hash, blob2.hash, "Same input must produce same hash");
-    assert_eq!(blob1.base32, blob2.base32, "Same input must produce same blob");
+    assert_eq!(
+        blob1.base32, blob2.base32,
+        "Same input must produce same blob"
+    );
 }
 
 #[test]
@@ -117,7 +114,10 @@ fn test_different_modes_produce_different_blobs() {
         &detfi_vault_path("01-simple-escrow.yaml"),
         Some(DeploymentMode::Local),
     );
-    assert_ne!(posted.hash, local.hash, "Different modes must produce different hashes");
+    assert_ne!(
+        posted.hash, local.hash,
+        "Different modes must produce different hashes"
+    );
 }
 
 // ---- Vault template tests ----
@@ -144,7 +144,10 @@ fn test_vault_blob_has_nonzero_precommit() {
     // Field 3 (precommit): starts at byte 3 + 34 + 34 = 71
     // tag(1) + len(1) + data(32) = 34 per field
     let precommit = &blob.bytes[73..105]; // 71+2 to 71+2+32
-    assert_ne!(precommit, &[0u8; 32], "precommit must be nonzero (derived from spec hash)");
+    assert_ne!(
+        precommit, &[0u8; 32],
+        "precommit must be nonzero (derived from spec hash)"
+    );
 }
 
 // ---- All examples compile ----
@@ -170,10 +173,7 @@ fn test_all_vault_examples_compile() {
 
 #[test]
 fn test_all_policy_examples_compile() {
-    let policies = vec![
-        "01-stablecoin-transfer.yaml",
-        "02-tiered-approval.yaml",
-    ];
+    let policies = vec!["01-stablecoin-transfer.yaml", "02-tiered-approval.yaml"];
     for name in policies {
         let blob = load_and_compile(&detfi_policy_path(name), None);
         assert!(!blob.base32.is_empty(), "{name}: empty blob");

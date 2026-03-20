@@ -572,25 +572,25 @@ fn ensure_bilateral_sessions_created_at_step(conn: &Connection) -> Result<()> {
 
 fn replace_incompatible_transactions_schema(conn: &Connection) -> Result<()> {
     let mut has_created_at = false;
-    let mut has_timestamp = false;
+    let mut has_unix_ts = false;
 
     let mut stmt = conn.prepare("PRAGMA table_info(transactions)")?;
     let cols = stmt.query_map([], |row| row.get::<_, String>(1))?;
     for col in cols {
         match col?.as_str() {
             "created_at" => has_created_at = true,
-            "timestamp" => has_timestamp = true,
+            "unix_ts" => has_unix_ts = true,
             _ => {}
         }
     }
 
-    if has_created_at && !has_timestamp {
+    if has_created_at && !has_unix_ts {
         return Ok(());
     }
 
     warn!(
-        "Replacing incompatible transactions schema (created_at={}, timestamp={})",
-        has_created_at, has_timestamp
+        "Replacing incompatible transactions schema (created_at={}, unix_ts={})",
+        has_created_at, has_unix_ts
     );
     conn.execute_batch(
         r#"
@@ -851,7 +851,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_replace_incompatible_transactions_schema_removes_timestamp_column() {
+    fn test_replace_incompatible_transactions_schema_removes_unix_ts_column() {
         unsafe {
             std::env::set_var("DSM_SDK_TEST_MODE", "1");
         }
@@ -879,11 +879,11 @@ mod tests {
                 commitment_hash TEXT,
                 proof_data      BLOB,
                 metadata        BLOB,
-                timestamp       INTEGER NOT NULL
+                unix_ts       INTEGER NOT NULL
             );
             INSERT INTO transactions(
                 tx_id, tx_hash, from_device, to_device, amount, tx_type, status,
-                chain_height, step_index, commitment_hash, proof_data, metadata, timestamp
+                chain_height, step_index, commitment_hash, proof_data, metadata, unix_ts
             ) VALUES (
                 'legacy-tx', 'hash', 'from', 'to', 1, 'legacy', 'confirmed',
                 1, 1, NULL, NULL, NULL, 123
@@ -903,7 +903,7 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .expect("collect cols");
         assert!(cols.iter().any(|col| col == "created_at"));
-        assert!(!cols.iter().any(|col| col == "timestamp"));
+        assert!(!cols.iter().any(|col| col == "unix_ts"));
 
         let tx_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM transactions", [], |row| row.get(0))
