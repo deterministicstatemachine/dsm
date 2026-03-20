@@ -175,7 +175,7 @@ tempfile = "3.10.0"
 test-log = { version = "0.2.14", features = ["trace"] }
 proptest = "1.4.0"
 quickcheck = "1.0.3"
-rstest = "0.18.2"
+rstest = "0.26.1"
 serial_test = "3.0.0"
 dsm = { version = "0.1.0-beta.1", path = "../dsm", default-features = false, features = ["testing"] }
 
