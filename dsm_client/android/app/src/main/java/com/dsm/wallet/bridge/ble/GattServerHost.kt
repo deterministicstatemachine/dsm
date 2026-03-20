@@ -350,6 +350,14 @@ class GattServerHost(private val context: Context) {
     fun isServerClient(address: String): Boolean = connectedServerClients.containsKey(address)
 
     /**
+     * Check if a device address is subscribed to the TX_RESPONSE characteristic on our GATT server.
+     * Required to know if we can send them server notifications.
+     */
+    fun isServerClientSubscribedToTxResponse(address: String): Boolean {
+        return isCccdEnabled(address, BleConstants.TX_RESPONSE_UUID)
+    }
+
+    /**
      * Send chunked data as GATT server notifications on the TX_RESPONSE characteristic.
      * Each chunk is sent as a separate notification, waiting for onNotificationSent
      * before proceeding to the next chunk.
