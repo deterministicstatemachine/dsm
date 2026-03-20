@@ -3,10 +3,10 @@
 Date: 2026-03-16
 
 Primary baseline:
-- `/Users/cryptskii/Documents/dBTC_implement.pdf`
+- `docs/papers/dBTC_implement.pdf`
 
 Supporting reference only:
-- `/Users/cryptskii/Documents/DSM__A_Concise__Post_Quantum_Specification.pdf`
+- `docs/papers/DSM__A_Concise__Post_Quantum_Specification.pdf`
 
 ## Scope
 
