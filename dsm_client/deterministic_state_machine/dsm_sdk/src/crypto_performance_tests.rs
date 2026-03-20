@@ -276,7 +276,7 @@ fn get_memory_usage_estimate() -> usize {
 #[ignore] // only run in perf CI
 async fn perf_ci_release_only() {
     // Assert we are in an optimized, native build
-    assert!(!cfg!(debug_assertions), "perf must run with --release");
+    const { assert!(!cfg!(debug_assertions), "perf must run with --release") };
     let tcpu = option_env!("CARGO_CFG_TARGET_CPU").unwrap_or("generic");
     assert_ne!(tcpu, "generic", "use -C target-cpu=native for perf lane");
 
