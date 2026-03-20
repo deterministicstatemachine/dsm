@@ -10,7 +10,7 @@ use tower::ServiceExt; // for .oneshot
 async fn build_policy_app() -> Option<axum::Router> {
     // Create a pool; it won't connect until used.
     let database_url = std::env::var("DSM_DATABASE_URL")
-        .unwrap_or_else(|_| "postgresql://dsm:dsm@localhost:5432/dsm_storage".to_string());
+        .unwrap_or_else(|_| "postgresql://localhost:5432/dsm_storage".to_string());
     let pool = match dsm_storage_node::db::create_pool(&database_url, true) {
         Ok(p) => p,
         Err(_) => return None,

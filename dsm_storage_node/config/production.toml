@@ -4,14 +4,14 @@
 #   __NODE_ID__         — e.g. "dsm-node-1"
 #   __LISTEN_ADDR__     — e.g. "0.0.0.0"
 #   __PORT__            — e.g. 8080
-#   __DATABASE_URL__    — e.g. "postgresql://dsm:PASSWORD@postgres:5432/dsm_storage"
+#   __DATABASE_URL__    — injected at deploy time from operator-provided settings
 
 [node]
 id = "__NODE_ID__"
 
 [network]
 listen_addr = "__LISTEN_ADDR__"
-port = __PORT__
+port = 8080
 max_connections = 256
 
 [tls]

@@ -1561,6 +1561,7 @@ dependencies = [
  "prost 0.12.6",
  "prost-build 0.12.6",
  "prost-types 0.12.6",
+ "protoc-bin-vendored",
  "quickcheck",
  "rand 0.8.5",
  "rand_chacha 0.3.1",

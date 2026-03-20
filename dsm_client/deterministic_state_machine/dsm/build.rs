@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
+    let vendored_include = protoc_bin_vendored::include_path()?;
 
     // Canonical schema location is the repository root at `proto/`.
     // Allow override via DSM_PROTO_ROOT, but default to the repo-root canonical path.
@@ -41,7 +42,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match prost_build::Config::new()
         .out_dir(&out_dir)
-        .compile_protos(&[&proto_file], &[&proto_root])
+        .compile_protos(&[&proto_file], &[&proto_root, &vendored_include])
     {
         Ok(_) => println!("cargo:warning=Prost compilation succeeded"),
         Err(e) => {
@@ -54,5 +55,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed={}", proto_file.display());
     println!("cargo:warning=Proto file: {}", proto_file.display());
     println!("cargo:warning=Proto root: {}", proto_root.display());
+    println!(
+        "cargo:warning=Vendored protoc include: {}",
+        vendored_include.display()
+    );
     Ok(())
 }

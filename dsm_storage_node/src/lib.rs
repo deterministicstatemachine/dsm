@@ -48,7 +48,7 @@ impl AppState {
 pub async fn build_app_for_tests() -> anyhow::Result<axum::Router> {
     // Create a lazy pool; it won't connect until used.
     let database_url = std::env::var("DSM_DATABASE_URL")
-        .unwrap_or_else(|_| "postgresql://dsm:dsm@localhost:5432/dsm_storage".to_string());
+        .unwrap_or_else(|_| "postgresql://localhost:5432/dsm_storage".to_string());
     let pool = db::create_pool(&database_url, true)?;
 
     // Initialize DB schema for tests

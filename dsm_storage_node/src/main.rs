@@ -103,7 +103,7 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
 
     let database_url = settings
         .get_string("database.url")
-        .unwrap_or_else(|_| "postgresql://dsm:dsm@localhost:5432/dsm_storage".to_string());
+        .unwrap_or_else(|_| "postgresql://localhost:5432/dsm_storage".to_string());
 
     // Interval (seconds) for automatic expired object cleanup. Defaults to 1 hour.
 

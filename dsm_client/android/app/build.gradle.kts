@@ -1,5 +1,6 @@
 import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
+import com.google.protobuf.gradle.proto
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 
 plugins {
@@ -115,6 +116,9 @@ android {
         getByName("main") {
             java.srcDirs("src/main/java")
             jniLibs.srcDir("src/main/jniLibs")
+            proto {
+                srcDir("../../../proto")
+            }
         }
     }
 
