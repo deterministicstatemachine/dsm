@@ -44,7 +44,7 @@ dsm = { version = "0.1.0-beta.1", path = "../../dsm_client/deterministic_state_m
 
 # Deterministic seeded RNG for reproducible property tests
 rand = "0.8"
-rand_chacha = "0.3"
+rand_chacha = "0.9"
 
 [lints]
 workspace = true
