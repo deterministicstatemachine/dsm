@@ -13,8 +13,9 @@ Verify that all 3 ABI builds of `libdsm_sdk.so` contain the expected number of J
 ### 1. Check all 3 ABIs exist
 
 ```bash
+REPO_ROOT=$(git rev-parse --show-toplevel)
 for ABI in arm64-v8a armeabi-v7a x86_64; do
-  SO="/Users/cryptskii/Desktop/claude_workspace/dsm/dsm_client/android/app/src/main/jniLibs/$ABI/libdsm_sdk.so"
+  SO="$REPO_ROOT/dsm_client/android/app/src/main/jniLibs/$ABI/libdsm_sdk.so"
   if [ -f "$SO" ]; then
     SIZE=$(ls -lh "$SO" | awk '{print $5}')
     MOD=$(stat -f '%Sm' -t '%Y-%m-%d %H:%M' "$SO")
@@ -28,10 +29,11 @@ done
 ### 2. Count Java_ symbols per ABI
 
 ```bash
+REPO_ROOT=$(git rev-parse --show-toplevel)
 EXPECTED=87
 FAIL=0
 for ABI in arm64-v8a armeabi-v7a x86_64; do
-  SO="/Users/cryptskii/Desktop/claude_workspace/dsm/dsm_client/android/app/src/main/jniLibs/$ABI/libdsm_sdk.so"
+  SO="$REPO_ROOT/dsm_client/android/app/src/main/jniLibs/$ABI/libdsm_sdk.so"
   if [ ! -f "$SO" ]; then
     echo "SKIP: $ABI (file not found)"
     FAIL=1
@@ -59,10 +61,11 @@ fi
 Verify both copy locations have identical files:
 
 ```bash
+REPO_ROOT=$(git rev-parse --show-toplevel)
 MISMATCH=0
 for ABI in arm64-v8a armeabi-v7a x86_64; do
-  APP_SO="/Users/cryptskii/Desktop/claude_workspace/dsm/dsm_client/android/app/src/main/jniLibs/$ABI/libdsm_sdk.so"
-  REPO_SO="/Users/cryptskii/Desktop/claude_workspace/dsm/jniLibs/$ABI/libdsm_sdk.so"
+  APP_SO="$REPO_ROOT/dsm_client/android/app/src/main/jniLibs/$ABI/libdsm_sdk.so"
+  REPO_SO="$REPO_ROOT/jniLibs/$ABI/libdsm_sdk.so"
   if [ ! -f "$APP_SO" ] || [ ! -f "$REPO_SO" ]; then
     echo "SKIP: $ABI (one or both files missing)"
     continue
@@ -89,7 +92,8 @@ fi
 For reference, list all exported Java_ symbols:
 
 ```bash
-SO="/Users/cryptskii/Desktop/claude_workspace/dsm/dsm_client/android/app/src/main/jniLibs/arm64-v8a/libdsm_sdk.so"
+REPO_ROOT=$(git rev-parse --show-toplevel)
+SO="$REPO_ROOT/dsm_client/android/app/src/main/jniLibs/arm64-v8a/libdsm_sdk.so"
 if [ -f "$SO" ]; then
   echo "Exported JNI symbols:"
   nm -gU "$SO" | grep "Java_" | awk '{print $NF}' | sort
