@@ -21,7 +21,7 @@ reqwest = { version = "0.11", default-features = false, features = ["rustls-tls"
 clap = { version = "4.4", features = ["derive"] }
 
 # Protobuf encoding for ByteCommitV3
-prost = "0.12"
+prost = "0.13"
 
 # BLAKE3 hashing with domain separation for test data
 blake3 = "1.4"

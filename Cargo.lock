@@ -1596,7 +1596,7 @@ dependencies = [
  "parking_lot 0.12.5",
  "pbkdf2",
  "proptest",
- "prost 0.12.6",
+ "prost 0.13.5",
  "prost-build 0.12.6",
  "prost-types 0.12.6",
  "protoc-bin-vendored",
@@ -1695,7 +1695,7 @@ dependencies = [
  "once_cell",
  "parking_lot 0.12.5",
  "proptest",
- "prost 0.12.6",
+ "prost 0.13.5",
  "prost-build 0.12.6",
  "prost-types 0.12.6",
  "protoc-bin-vendored",
@@ -1754,7 +1754,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "ml-kem",
  "once_cell",
- "prost 0.12.6",
+ "prost 0.13.5",
  "rand 0.8.5",
  "reqwest 0.12.28",
  "rusqlite",
@@ -1783,7 +1783,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dsm",
- "prost 0.12.6",
+ "prost 0.13.5",
 ]
 
 [[package]]
@@ -1792,7 +1792,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dsm",
- "prost 0.12.6",
+ "prost 0.13.5",
  "walkdir",
 ]
 
@@ -1805,7 +1805,7 @@ dependencies = [
  "clap",
  "dsm",
  "instant",
- "prost 0.12.6",
+ "prost 0.13.5",
  "rand 0.8.5",
  "rand_chacha 0.9.0",
  "regex",
@@ -2895,15 +2895,6 @@ name = "itertools"
 version = "0.10.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b0fd2260e829bddf4cb6ea802289de2f86d6a7a690192fbe91b3f46e0f2c8473"
-dependencies = [
- "either",
-]
-
-[[package]]
-name = "itertools"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba291022dbbd398a455acf126c1e341954079855bc60dfdda641363bd6922569"
 dependencies = [
  "either",
 ]
@@ -4119,7 +4110,7 @@ checksum = "22505a5c94da8e3b7c2996394d1c933236c4d743e81a410bcca4e6989fc066a4"
 dependencies = [
  "bytes",
  "heck 0.5.0",
- "itertools 0.12.1",
+ "itertools 0.10.5",
  "log",
  "multimap",
  "once_cell",
@@ -4159,7 +4150,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "81bddcdb20abf9501610992b6759a4c888aef7d1a7247ef75e2404275ac24af1"
 dependencies = [
  "anyhow",
- "itertools 0.12.1",
+ "itertools 0.10.5",
  "proc-macro2",
  "quote",
  "syn",
