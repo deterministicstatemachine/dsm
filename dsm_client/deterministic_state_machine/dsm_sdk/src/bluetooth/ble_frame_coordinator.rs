@@ -792,8 +792,6 @@ mod tests {
     fn prepare_reject_marks_sender_rejected() {
         use dsm::types::contact_types::DsmVerifiedContact;
         use dsm::types::operations::Operation;
-        let mut dev_id = [0u8; 32];
-        dev_id[0] = 1;
         let mut counterparty = [0u8; 32];
         counterparty[0] = 9;
 
