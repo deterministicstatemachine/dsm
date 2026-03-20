@@ -615,7 +615,7 @@ impl IdentitySDK {
                 public_key: genesis_state.signing_key.public_key.clone(),
                 threshold: eff_threshold,
                 participants: test_nodes,
-                created_at_ticks: dsm::util::deterministic_time::tick_index(),
+                created_at_ticks: dsm::utils::deterministic_time::tick_index(),
             };
 
             log::info!(

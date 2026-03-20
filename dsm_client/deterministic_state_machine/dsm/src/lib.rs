@@ -90,7 +90,6 @@ pub mod serialization;
 pub mod storage;
 pub mod telemetry;
 pub mod types;
-pub mod util;
 pub mod utils;
 pub mod vault;
 pub mod verification;

@@ -101,12 +101,11 @@ print(json.dumps([l.strip() for l in lines if l.strip()]))
 # ============================================================================
 # Helper: run Lean 4, return JSON line
 # ============================================================================
-run_lean() {
-  local label="Lean4_DSMCardinality" file="DSMCardinality.lean"
-  local theorems_json='"fresh_insert_cardinality","empty_card_zero","card_le_succ_of_le","card_succ_le_of_lt","supply_conservation_emit","commit_shape_emit","unspent_budget_emit","subset_preserved_ack","unspent_budget_activate"'
+run_lean_module() {
+  local label="$1" file="$2" theorems_json="$3" obligations_total="$4"
 
   if ! command -v lean &>/dev/null; then
-    echo "{\"module\":\"$label\",\"file\":\"$file\",\"prover\":\"Lean4\",\"passed\":false,\"obligations_proved\":0,\"obligations_total\":9,\"duration_ms\":0,\"theorems\":[$theorems_json],\"errors\":[\"lean not found\"]}"
+    echo "{\"module\":\"$label\",\"file\":\"$file\",\"prover\":\"Lean4\",\"passed\":false,\"obligations_proved\":0,\"obligations_total\":$obligations_total,\"duration_ms\":0,\"theorems\":[$theorems_json],\"errors\":[\"lean not found\"]}"
     return
   fi
 
@@ -125,7 +124,7 @@ run_lean() {
   local passed=false obligations=0 errors_json="[]"
   if [ "$rc" -eq 0 ]; then
     passed=true
-    obligations=9
+    obligations="$obligations_total"
   else
     errors_json=$(python3 -c "
 import json, sys
@@ -137,7 +136,7 @@ print(json.dumps(lines if lines else ['lean exited with non-zero status']))
   local verdict="FAIL"; $passed && verdict="PASS"
   log "    $verdict: $obligations theorems type-checked (${duration_ms}ms)"
 
-  echo "{\"module\":\"$label\",\"file\":\"$file\",\"prover\":\"Lean4\",\"passed\":$passed,\"obligations_proved\":$obligations,\"obligations_total\":9,\"duration_ms\":$duration_ms,\"theorems\":[$theorems_json],\"errors\":$errors_json}"
+  echo "{\"module\":\"$label\",\"file\":\"$file\",\"prover\":\"Lean4\",\"passed\":$passed,\"obligations_proved\":$obligations,\"obligations_total\":$obligations_total,\"duration_ms\":$duration_ms,\"theorems\":[$theorems_json],\"errors\":$errors_json}"
 }
 
 # ============================================================================
@@ -155,7 +154,8 @@ RESULTS=()
 RESULTS+=("$(run_tlapm "DSM_Abstract" "DSM_Abstract.tla" '"AbstractInit","AbstractStep","AbstractSafetyTheorem","AbstractSpentMonotone","AbstractCommitMonotone"')")
 RESULTS+=("$(run_tlapm "DSM_ProtocolCore" "DSM_ProtocolCore.tla" '"CoreInit","CoreStep","CoreSafety","CoreImplementsAbstract"')")
 RESULTS+=("$(run_tlapm "DSM_InitProof" "DSM_InitProof.tla" '"ConcreteInitRefinesCore"')")
-RESULTS+=("$(run_lean)")
+RESULTS+=("$(run_lean_module "Lean4_DSMCardinality" "DSMCardinality.lean" '"fresh_insert_cardinality","empty_card_zero","card_le_succ_of_le","card_succ_le_of_lt","supply_conservation_emit","commit_shape_emit","unspent_budget_emit","subset_preserved_ack","unspent_budget_activate"' 9)")
+RESULTS+=("$(run_lean_module "Lean4_DSMCryptoBinding" "DSMCryptoBinding.lean" '"signed_digest_verifies","signature_retargeting_requires_same_digest","cross_domain_signature_retargeting_impossible","math_owned_claim_retargeting_impossible"' 4)")
 
 log ""
 log "JSON report written to: $REPORT_JSON"

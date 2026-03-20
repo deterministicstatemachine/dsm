@@ -268,7 +268,7 @@ impl StateMachine {
         self.set_state(new_state.clone());
 
         // Advance the global deterministic tick on successful state transition
-        let _ = crate::util::deterministic_time::tick_raw();
+        let _ = crate::utils::deterministic_time::tick_raw();
 
         tracing::info!(
             "State transition executed: {} -> {}",

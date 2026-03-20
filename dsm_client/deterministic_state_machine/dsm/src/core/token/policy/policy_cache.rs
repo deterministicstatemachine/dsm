@@ -10,7 +10,7 @@ use crate::types::error::DsmError;
 pub struct PolicyCacheConfig {
     pub max_entries: usize,
     /// Maximum age in deterministic ticks before an entry is eligible for LRU eviction.
-    /// Uses `crate::util::deterministic_time::tick_index()` — not wall-clock time.
+    /// Uses `crate::utils::deterministic_time::tick_index()` — not wall-clock time.
     pub ttl_ticks: u64,
 }
 
@@ -48,7 +48,7 @@ impl PolicyCache {
     pub async fn get_policy(&self, anchor: &PolicyAnchor) -> Result<Option<TokenPolicy>, DsmError> {
         let mut entries = self.entries.write();
         if let Some(entry) = entries.get_mut(anchor) {
-            entry.last_accessed = crate::util::deterministic_time::tick_index();
+            entry.last_accessed = crate::utils::deterministic_time::tick_index();
             return Ok(Some(entry.policy.clone()));
         }
         Ok(None)
@@ -71,7 +71,7 @@ impl PolicyCache {
             anchor,
             PolicyCacheEntry {
                 policy,
-                last_accessed: crate::util::deterministic_time::tick_index(),
+                last_accessed: crate::utils::deterministic_time::tick_index(),
             },
         );
     }

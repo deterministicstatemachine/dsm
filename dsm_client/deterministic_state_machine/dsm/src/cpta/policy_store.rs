@@ -4,7 +4,7 @@
 //! in-memory LRU cache that uses deterministic ticks (no wall clocks) for TTL.
 //!
 //! Notes:
-//! - No wall clocks: all timing is based on `crate::util::deterministic_time`.
+//! - No wall clocks: all timing is based on `crate::utils::deterministic_time`.
 //! - No hex/base64 in filenames or logs: anchors are encoded as raw path bytes on Unix.
 //! - On non-Unix platforms we fall back to a debug-ish string that avoids hex/base64.
 
@@ -16,7 +16,7 @@ use std::{
 use async_trait::async_trait;
 use parking_lot::RwLock;
 
-use crate::util::deterministic_time as dt;
+use crate::utils::deterministic_time as dt;
 use crate::types::{
     error::DsmError,
     policy_types::{PolicyAnchor, TokenPolicy},

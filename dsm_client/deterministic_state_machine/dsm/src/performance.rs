@@ -38,13 +38,13 @@ use crate::telemetry;
 /// Get current commit height (cryptographic progress anchor)
 #[inline]
 pub fn mono_commit_height() -> u64 {
-    crate::util::deterministic_time::current_commit_height_blocking()
+    crate::utils::deterministic_time::current_commit_height_blocking()
 }
 
 /// Get current progress hash for deterministic operations
 #[inline]
 pub fn mono_progress_hash(context: &[u8]) -> [u8; 32] {
-    crate::util::deterministic_time::derive_progress_hash(context)
+    crate::utils::deterministic_time::derive_progress_hash(context)
 }
 
 // -------------------- Configuration --------------------

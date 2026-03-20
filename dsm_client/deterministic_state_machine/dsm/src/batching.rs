@@ -10,7 +10,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use futures::future::BoxFuture;
 use tokio::sync::{RwLock, Semaphore};
-use crate::util::deterministic_time;
+use crate::utils::deterministic_time;
 
 /// Batch configuration
 #[derive(Debug, Clone)]

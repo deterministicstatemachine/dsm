@@ -7,6 +7,7 @@ mod tests {
     use proptest::prelude::*;
     use proptest::prelude::ProptestConfig;
 
+    use crate::crypto::blake3::domain_hash;
     use crate::crypto::sphincs::{
         generate_keypair, generate_keypair_from_seed, sign, sizes, verify, SphincsVariant,
     };
@@ -97,6 +98,38 @@ mod tests {
             let kp2 = generate_keypair_from_seed(v, &seed).expect("keygen2");
             prop_assert_eq!(&kp1.public_key, &kp2.public_key, "pk must be deterministic");
             prop_assert_eq!(&kp1.secret_key, &kp2.secret_key, "sk must be deterministic");
+        }
+
+        /// Deterministic signing: same key + same message yields identical signature bytes.
+        #[test]
+        fn pbt_sphincs_signature_is_deterministic(msg in proptest::collection::vec(any::<u8>(), 1..=256)) {
+            let v = test_variant();
+            let kp = generate_keypair(v).expect("keygen");
+            let sig1 = sign(v, &kp.secret_key, &msg).expect("sign1");
+            let sig2 = sign(v, &kp.secret_key, &msg).expect("sign2");
+            prop_assert_eq!(sig1, sig2, "signature must be deterministic for identical inputs");
+        }
+
+        /// Cross-domain retargeting must fail: a signature over one domain-separated
+        /// BLAKE3 digest cannot verify under a different DSM domain tag.
+        #[test]
+        fn pbt_sphincs_rejects_cross_domain_digest_retargeting(
+            msg in proptest::collection::vec(any::<u8>(), 0..=256),
+            suffix_a in "[a-z0-9_-]{1,12}",
+            suffix_b in "[a-z0-9_-]{1,12}",
+        ) {
+            prop_assume!(suffix_a != suffix_b);
+
+            let v = test_variant();
+            let kp = generate_keypair(v).expect("keygen");
+            let tag_a = format!("DSM/pbt/{suffix_a}");
+            let tag_b = format!("DSM/pbt/{suffix_b}");
+            let digest_a = domain_hash(&tag_a, &msg);
+            let digest_b = domain_hash(&tag_b, &msg);
+
+            let sig = sign(v, &kp.secret_key, digest_a.as_bytes()).expect("sign");
+            let valid = verify(v, &kp.public_key, digest_b.as_bytes(), &sig).expect("verify");
+            prop_assert!(!valid, "signature must not verify across distinct domain tags");
         }
     }
 }

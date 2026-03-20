@@ -118,7 +118,7 @@ async fn e2e_online_transfer_era_and_custom_token() {
     println!("✅ Alice genesis created");
 
     let alice_smt_root = [0u8; 32];
-    dsm::util::deterministic_time::update_progress_context(alice_smt_root, 0)
+    dsm::utils::deterministic_time::update_progress_context(alice_smt_root, 0)
         .unwrap_or_else(|e| panic!("Failed to init Alice progress context: {e}"));
 
     let config = SdkConfig {
@@ -368,7 +368,7 @@ async fn e2e_online_transfer_era_and_custom_token() {
     }
 
     let bob_smt_root = [0u8; 32];
-    dsm::util::deterministic_time::update_progress_context(bob_smt_root, 0)
+    dsm::utils::deterministic_time::update_progress_context(bob_smt_root, 0)
         .unwrap_or_else(|e| panic!("Failed to init Bob progress context: {e}"));
 
     AppState::set_identity_info(
@@ -520,7 +520,7 @@ async fn live_aws_online_transfer_recipient_storage_sync() {
             zero_root.to_vec(),
         );
         AppState::set_has_identity(true);
-        dsm::util::deterministic_time::update_progress_context(zero_root, 0)
+        dsm::utils::deterministic_time::update_progress_context(zero_root, 0)
             .unwrap_or_else(|e| panic!("Failed to init receiver progress context: {e}"));
 
         let receiver_router = AppRouterImpl::new(config.clone())
@@ -572,7 +572,7 @@ async fn live_aws_online_transfer_recipient_storage_sync() {
             zero_root.to_vec(),
         );
         AppState::set_has_identity(true);
-        dsm::util::deterministic_time::update_progress_context(zero_root, 0)
+        dsm::utils::deterministic_time::update_progress_context(zero_root, 0)
             .unwrap_or_else(|e| panic!("Failed to init sender progress context: {e}"));
 
         let sender_router = AppRouterImpl::new(config.clone())
@@ -681,7 +681,7 @@ async fn live_aws_online_transfer_recipient_storage_sync() {
         zero_root.to_vec(),
     );
     AppState::set_has_identity(true);
-    dsm::util::deterministic_time::update_progress_context(zero_root, 0)
+    dsm::utils::deterministic_time::update_progress_context(zero_root, 0)
         .unwrap_or_else(|e| panic!("Failed to init receiver progress context: {e}"));
 
     let receiver_router = AppRouterImpl::new(config)

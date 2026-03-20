@@ -92,8 +92,8 @@ pub const DBTC_MAX_SUCCESSOR_DEPTH: u32 = 5;
 /// dBTC paper §12.1.2 worked example uses 100,000 sats.
 pub const DBTC_MIN_VAULT_BALANCE_SATS: u64 = 100_000;
 
-/// Maximum settlement poll iterations before a withdrawal is refunded.
-/// dBTC §15 Definition 15: FailBeforeSettlement triggers automatic refund.
+/// Maximum settlement poll iterations before the resolver starts warning loudly.
+/// Committed withdrawals remain pending until they are explicitly finalized or refunded.
 pub const DBTC_MAX_SETTLEMENT_POLLS: u32 = 200;
 
 /// Conservative on-chain dust floor used by SDK guard rails.
@@ -1485,6 +1485,7 @@ impl BitcoinTapSdk {
     pub async fn pour_partial(
         &self,
         source_vault_id: &str,
+        policy_commit: &[u8; 32],
         source_amount_sats: u64,
         source_successor_depth: u32,
         exit_amount_sats: u64,
@@ -1572,11 +1573,8 @@ impl BitcoinTapSdk {
 
         // Bearer-derived η for successor: fresh deposit_nonce, same manifold_seed.
         // η = BLAKE3("DSM/dbtc-bearer-eta\0" || manifold_seed || deposit_nonce)
-        let manifold_seed =
-            crate::storage::client_db::get_or_create_manifold_seed(&Self::dbtc_policy_commit())
-                .map_err(|e| {
-                    DsmError::storage(format!("manifold_seed: {e}"), None::<std::io::Error>)
-                })?;
+        let manifold_seed = crate::storage::client_db::get_or_create_manifold_seed(policy_commit)
+            .map_err(|e| DsmError::storage(format!("manifold_seed: {e}"), None::<std::io::Error>))?;
         let mut successor_deposit_nonce = [0u8; 32];
         getrandom::getrandom(&mut successor_deposit_nonce)
             .map_err(|e| DsmError::crypto(format!("RNG: {e}"), None::<String>))?;
@@ -4013,6 +4011,10 @@ impl BitcoinTapSdk {
         let mut policy_commit = [0u8; 32];
         if ad.policy_commit.len() == 32 {
             policy_commit.copy_from_slice(&ad.policy_commit);
+        } else {
+            return Err(DsmError::invalid_operation(
+                "vault advertisement missing 32-byte policy_commit",
+            ));
         }
 
         let vault_content_hash = {
@@ -4040,9 +4042,9 @@ impl BitcoinTapSdk {
     /// storage node advertisements (not local vault records).
     pub fn derive_preimage_from_deposit_nonce(
         deposit_nonce: &[u8; 32],
+        policy_commit: &[u8; 32],
     ) -> Result<Vec<u8>, DsmError> {
-        let policy_commit = Self::dbtc_policy_commit();
-        let manifold_seed = crate::storage::client_db::get_or_create_manifold_seed(&policy_commit)
+        let manifold_seed = crate::storage::client_db::get_or_create_manifold_seed(policy_commit)
             .map_err(|e| {
                 DsmError::storage(format!("manifold_seed: {e}"), None::<std::io::Error>)
             })?;

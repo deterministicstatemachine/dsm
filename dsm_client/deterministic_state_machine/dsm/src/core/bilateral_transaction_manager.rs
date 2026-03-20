@@ -27,13 +27,13 @@ use crate::core::utility::labeling;
 // -------------------- Cryptographic Progress (strictly increasing, clockless) --------------------
 #[inline]
 fn mono_commit_height() -> u64 {
-    crate::util::deterministic_time::current_commit_height_blocking()
+    crate::utils::deterministic_time::current_commit_height_blocking()
 }
 
 /// Public wrapper for clockless monotone commit height (used by BLE handler for SMT proof fields).
 #[inline]
 pub fn mono_commit_height_pub() -> u64 {
-    crate::util::deterministic_time::current_commit_height_blocking()
+    crate::utils::deterministic_time::current_commit_height_blocking()
 }
 
 // -------------------- Relationship Anchor (bytes-only, single shared tip) --------------------
@@ -1189,7 +1189,7 @@ mod tests {
 
     fn make_manager() -> (BilateralTransactionManager, SignatureKeyPair) {
         // Initialize progress context for test
-        crate::util::deterministic_time::reset_for_tests();
+        crate::utils::deterministic_time::reset_for_tests();
 
         let (local_device_id, local_genesis_hash) = make_manager_ids();
         let contact_manager = DsmContactManager::new(local_device_id, vec![]);
@@ -1405,7 +1405,7 @@ mod tests {
 
     #[tokio::test]
     async fn update_anchor_persists_shared_tip_for_contact() {
-        crate::util::deterministic_time::reset_for_tests();
+        crate::utils::deterministic_time::reset_for_tests();
 
         let (local_device_id, local_genesis_hash) = make_manager_ids();
         let contact_manager = DsmContactManager::new(local_device_id, vec![]);
