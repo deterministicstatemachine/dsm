@@ -33,7 +33,7 @@ export interface Transaction {
   stitchedReceipt?: Uint8Array;
   receiptVerified?: boolean;
   localReceivedAt?: number; // Deterministic local counter when first observed
-  createdAt?: number;      // unix timestamp (seconds) from backend
+  createdAt?: number;      // unix unix_ts (seconds) from backend
   memo?: string;           // optional memo/note
   tokenId?: string;        // token identifier from backend (e.g. "ERA", "dBTC")
 }
@@ -243,7 +243,7 @@ export function useTransactions() {
       // status default: 'confirmed'
       const status: TransactionStatus = (anyT.status as TransactionStatus) ?? 'confirmed';
 
-      // Parse created_at timestamp (proto camelCase)
+      // Parse created_at unix_ts (proto camelCase)
       let createdAtNum: number | undefined;
       const createdAtRaw = anyT.createdAt ?? anyT.created_at;
       if (createdAtRaw !== undefined && createdAtRaw !== null) {

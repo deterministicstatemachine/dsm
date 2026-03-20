@@ -12,12 +12,12 @@ import { bridgeEvents } from '../../../bridge/bridgeEvents';
 
 // ---------------------------------------------------------------------------
 // Notification record — persisted so it survives app restarts.
-// timestamp is display-only; it never enters any hash preimage.
+// unix_ts is display-only; it never enters any hash preimage.
 // ---------------------------------------------------------------------------
 type NotificationRecord = {
   id: string;
   count: number;
-  timestamp: number;
+  unix_ts: number;
 };
 
 const RECORDS_KEY = 'dsm_inbox_notifications_v1';
@@ -88,7 +88,7 @@ function InboxOverlayInner({ headerHeight, loadWalletData }: Props): JSX.Element
         const rec: NotificationRecord = {
           id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
           count: processed,
-          timestamp: Date.now(),
+          unix_ts: Date.now(),
         };
         setRecords((prev) => { const next = [rec, ...prev]; saveRecords(next); return next; });
         void loadWalletData();
@@ -179,7 +179,7 @@ function InboxOverlayInner({ headerHeight, loadWalletData }: Props): JSX.Element
                         {rec.count === 1 ? '1 transfer received and applied' : `${rec.count} transfers received and applied`}
                       </div>
                       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-                        <span style={{ ...mono, fontSize: 10, opacity: 0.55 }}>{formatTime(rec.timestamp)}</span>
+                        <span style={{ ...mono, fontSize: 10, opacity: 0.55 }}>{formatTime(rec.unix_ts)}</span>
                         <button onClick={() => handleGotIt(rec.id)} className="button-brick" style={{ ...mono, fontSize: 11, padding: '4px 10px', borderRadius: 8, border: '1px solid var(--border)', background: 'transparent', color: 'inherit', cursor: 'pointer' }}>
                           Okay
                         </button>

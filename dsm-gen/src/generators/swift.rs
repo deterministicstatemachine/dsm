@@ -362,13 +362,17 @@ impl SwiftGenerator {
 
         code.push_str("    private func evaluateWhitelist(_ condition: RuleCondition, context: TransactionContext) -> Bool {\n");
         code.push_str("        guard let recipientList = condition.parameters[\"recipients\"] else { return false }\n");
-        code.push_str("        let recipientStr = String(data: context.recipient, encoding: .utf8) ?? \"\"\n");
+        code.push_str(
+            "        let recipientStr = String(data: context.recipient, encoding: .utf8) ?? \"\"\n",
+        );
         code.push_str("        return recipientList.split(separator: \",\").map { $0.trimmingCharacters(in: .whitespaces) }.contains(recipientStr)\n");
         code.push_str("    }\n\n");
 
         code.push_str("    private func evaluateBlacklist(_ condition: RuleCondition, context: TransactionContext) -> Bool {\n");
         code.push_str("        guard let recipientList = condition.parameters[\"recipients\"] else { return true }\n");
-        code.push_str("        let recipientStr = String(data: context.recipient, encoding: .utf8) ?? \"\"\n");
+        code.push_str(
+            "        let recipientStr = String(data: context.recipient, encoding: .utf8) ?? \"\"\n",
+        );
         code.push_str("        return !recipientList.split(separator: \",\").map { $0.trimmingCharacters(in: .whitespaces) }.contains(recipientStr)\n");
         code.push_str("    }\n\n");
 

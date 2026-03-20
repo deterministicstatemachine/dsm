@@ -16734,7 +16734,7 @@ export class TransactionInfo extends Message<TransactionInfo> {
   stitchedReceipt = new Uint8Array(0);
 
   /**
-   * DISPLAY-ONLY: unix timestamp (seconds) for UI history ordering. MUST NOT be used in hash preimages, ReceiptCommit fields, acceptance predicates, or protocol ordering.
+   * DISPLAY-ONLY: unix unix_ts (seconds) for UI history ordering. MUST NOT be used in hash preimages, ReceiptCommit fields, acceptance predicates, or protocol ordering.
    *
    * @generated from field: uint64 created_at = 14;
    */

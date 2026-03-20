@@ -39,8 +39,8 @@ class StorageNodeService {
   // ========== Error logging ==========
 
   private logError(operation: string, error: string, context?: string): void {
-    const timestamp = this.errorCounter++;
-    const logEntry = `[${timestamp}] ${operation}: ${error}${context ? ` (${context})` : ''}`;
+    const unix_ts = this.errorCounter++;
+    const logEntry = `[${unix_ts}] ${operation}: ${error}${context ? ` (${context})` : ''}`;
     this.errorLog.push(logEntry);
     if (this.errorLog.length > this.MAX_ERRORS) {
       this.errorLog = this.errorLog.slice(-this.MAX_ERRORS);

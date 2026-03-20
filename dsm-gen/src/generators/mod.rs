@@ -2,7 +2,7 @@
 //!
 //! Each generator implements language-specific code generation from DSM specifications.
 
-use crate::schema::{DsmSpecification, VaultSpecification, PolicySpecification};
+use crate::schema::{DsmSpecification, PolicySpecification, VaultSpecification};
 use crate::TargetLanguage;
 use anyhow::Result;
 
@@ -59,7 +59,13 @@ pub fn create_generator(
 pub fn sanitize_identifier(name: &str) -> String {
     let sanitized: String = name
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     if sanitized.is_empty() {
         "Vault".to_string()

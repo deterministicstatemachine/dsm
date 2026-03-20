@@ -62,7 +62,7 @@ COPY dsm_storage_node/src/ dsm_storage_node/src/
 COPY dsm_client/deterministic_state_machine/dsm/src/ dsm_client/deterministic_state_machine/dsm/src/
 COPY dsm_client/deterministic_state_machine/dsm_sdk/src/ dsm_client/deterministic_state_machine/dsm_sdk/src/
 
-# Force cargo to detect source changes (COPY preserves original timestamps,
+# Force cargo to detect source changes (COPY preserves original unix_tss,
 # so cargo's fingerprint check may skip recompilation of the stub binary).
 RUN rm -f target/release/storage_node target/release/deps/storage_node-* \
     && touch dsm_storage_node/src/main.rs \
