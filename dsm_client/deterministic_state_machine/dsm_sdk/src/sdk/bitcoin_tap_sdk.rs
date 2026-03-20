@@ -1574,7 +1574,9 @@ impl BitcoinTapSdk {
         // Bearer-derived η for successor: fresh deposit_nonce, same manifold_seed.
         // η = BLAKE3("DSM/dbtc-bearer-eta\0" || manifold_seed || deposit_nonce)
         let manifold_seed = crate::storage::client_db::get_or_create_manifold_seed(policy_commit)
-            .map_err(|e| DsmError::storage(format!("manifold_seed: {e}"), None::<std::io::Error>))?;
+            .map_err(|e| {
+            DsmError::storage(format!("manifold_seed: {e}"), None::<std::io::Error>)
+        })?;
         let mut successor_deposit_nonce = [0u8; 32];
         getrandom::getrandom(&mut successor_deposit_nonce)
             .map_err(|e| DsmError::crypto(format!("RNG: {e}"), None::<String>))?;
@@ -4046,8 +4048,8 @@ impl BitcoinTapSdk {
     ) -> Result<Vec<u8>, DsmError> {
         let manifold_seed = crate::storage::client_db::get_or_create_manifold_seed(policy_commit)
             .map_err(|e| {
-                DsmError::storage(format!("manifold_seed: {e}"), None::<std::io::Error>)
-            })?;
+            DsmError::storage(format!("manifold_seed: {e}"), None::<std::io::Error>)
+        })?;
         let eta = Self::derive_bearer_eta(&manifold_seed, deposit_nonce);
         Ok(Self::derive_preimage_from_eta(&eta))
     }

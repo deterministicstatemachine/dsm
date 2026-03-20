@@ -1,186 +1,125 @@
 // SPDX-License-Identifier: Apache-2.0
-// RecoveryScreen — GameBoy-themed NFC ring recovery wizard.
-// States: MNEMONIC_ENTRY → TAP_RING → PREVIEW → TOMBSTONE → SUCCESSION → RESUMING → COMPLETE
 
-import React, { useCallback, useEffect, useState } from 'react';
-import { useDpadNav } from '../../hooks/useDpadNav';
-import { useUX } from '../../contexts/UXContext';
+import React, { memo, useCallback, useEffect, useRef, useState } from 'react';
 import * as EventBridge from '../../dsm/EventBridge';
 import {
-  createTombstone,
-  createSuccession,
-  resumeRecovery,
-  getSyncStatus,
+  capsuleBytesToBase32,
+  capsulePreviewFromBase32,
+  decryptCapsuleBytes,
+  type DecryptedCapsulePreview,
 } from '../../services/recovery/nfcRecoveryService';
-import { decryptCapsuleFromBase32, capsuleBytesToBase32 } from '../../services/recovery/nfcRecoveryService';
 import './StorageScreen.css';
 
-type WizardState =
-  | 'MNEMONIC_ENTRY'
-  | 'TAP_RING'
-  | 'PREVIEW'
-  | 'TOMBSTONE'
-  | 'SUCCESSION'
-  | 'RESUMING'
-  | 'COMPLETE';
+type Step = 'mnemonic' | 'tap' | 'preview';
 
-export default function RecoveryScreen() {
-  const { notifyToast } = useUX();
+interface RecoveryScreenProps {
+  onNavigate?: (screen: string) => void;
+}
 
-  const [wizardState, setWizardState] = useState<WizardState>('MNEMONIC_ENTRY');
+const RecoveryScreen: React.FC<RecoveryScreenProps> = ({ onNavigate }) => {
+  const [step, setStep] = useState<Step>('mnemonic');
   const [mnemonic, setMnemonic] = useState('');
   const [busy, setBusy] = useState(false);
   const [statusMsg, setStatusMsg] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
+  const [capsulePreview, setCapsulePreview] = useState<DecryptedCapsulePreview | null>(null);
+  const [capsuleBase32, setCapsuleBase32] = useState('');
+  const mountedRef = useRef(true);
+  const importInFlightRef = useRef(false);
 
-  // Preview data from decrypted capsule
-  const [previewData, setPreviewData] = useState<{
-    smtRoot: string;
-    counterpartyCount: number;
-    capsuleIndex: number;
-    rollupHash: string;
-  } | null>(null);
+  const formatError = useCallback((error: unknown): string => {
+    if (error instanceof Error && error.message) return error.message;
+    return String(error);
+  }, []);
 
-  // Sync progress for RESUMING state
-  const [syncProgress, setSyncProgress] = useState<{ synced: number; total: number; pending: string[] }>({
-    synced: 0,
-    total: 0,
-    pending: [],
-  });
+  const reset = useCallback(() => {
+    setStep('mnemonic');
+    setBusy(false);
+    setStatusMsg('');
+    setErrorMsg('');
+    setCapsulePreview(null);
+    setCapsuleBase32('');
+  }, []);
 
-  // Listen for NFC capsule read events
   useEffect(() => {
-    try { EventBridge.initializeEventBridge(); } catch { /* safe */ }
+    mountedRef.current = true;
+    try {
+      EventBridge.initializeEventBridge();
+    } catch {
+      /* safe */
+    }
 
     const unsub = EventBridge.on('nfc-recovery-capsule', (bytes) => {
-      if (wizardState !== 'TAP_RING') return;
-      const b32 = capsuleBytesToBase32(bytes as Uint8Array);
-      setStatusMsg(`Capsule read (${(bytes as Uint8Array).length} bytes). Decrypting...`);
-      handleDecrypt(b32);
+      if (step !== 'tap' || importInFlightRef.current) return;
+
+      const payload = bytes as Uint8Array;
+      if (!(payload instanceof Uint8Array) || payload.length === 0) {
+        setErrorMsg('Recovery capsule read was empty. Tap the ring again.');
+        return;
+      }
+
+      importInFlightRef.current = true;
+      setBusy(true);
+      setErrorMsg('');
+      setCapsuleBase32(capsuleBytesToBase32(payload));
+      setStatusMsg(`Capsule read (${payload.length} bytes). Decrypting in Rust...`);
+
+      void decryptCapsuleBytes(payload, mnemonic.trim())
+        .then((preview) => {
+          if (!mountedRef.current) return;
+          setCapsulePreview(preview);
+          setStep('preview');
+          setStatusMsg('Capsule imported. The saved bilateral tips are now staged on this device for tombstone handoff and resume.');
+        })
+        .catch((error: unknown) => {
+          if (!mountedRef.current) return;
+          setErrorMsg(`Capsule import failed: ${formatError(error)}`);
+          setStatusMsg('Tap the ring again with the correct mnemonic to retry.');
+        })
+        .finally(() => {
+          importInFlightRef.current = false;
+          if (!mountedRef.current) return;
+          setBusy(false);
+        });
     });
 
-    return () => { try { unsub(); } catch { /* safe */ } };
-  }, [wizardState, mnemonic, handleDecrypt]);
-
-  // Poll sync status while in RESUMING state
-  useEffect(() => {
-    if (wizardState !== 'RESUMING') return;
-    let cancelled = false;
-
-    const poll = async () => {
-      while (!cancelled) {
-        try {
-          const status = await getSyncStatus();
-          if (!cancelled) {
-            setSyncProgress(status);
-            if (status.synced >= status.total && status.total > 0) {
-              setWizardState('COMPLETE');
-              return;
-            }
-          }
-        } catch { /* retry */ }
-        // Wait ~5 seconds between polls using a promise (not setTimeout for ordering)
-        await new Promise<void>((r) => { const id = setTimeout(r, 5000); if (cancelled) clearTimeout(id); });
+    return () => {
+      mountedRef.current = false;
+      importInFlightRef.current = false;
+      try {
+        unsub();
+      } catch {
+        /* safe */
       }
     };
+  }, [formatError, mnemonic, step]);
 
-    poll();
-    return () => { cancelled = true; };
-  }, [wizardState]);
-
-  const handleDecrypt = useCallback(async (capsuleBase32: string) => {
-    try {
-      setBusy(true);
-      setErrorMsg('');
-      const result = await decryptCapsuleFromBase32({
-        capsuleBase32,
-        mnemonic: mnemonic.trim(),
-      });
-      setPreviewData({
-        smtRoot: result?.smtRoot || 'unknown',
-        counterpartyCount: result?.counterpartyCount ?? 0,
-        capsuleIndex: result?.capsuleIndex ?? 0,
-        rollupHash: result?.rollupHash || 'unknown',
-      });
-      setWizardState('PREVIEW');
-      setStatusMsg('Capsule decrypted. Review and confirm.');
-    } catch (e) {
-      setErrorMsg(`Decrypt failed: ${e instanceof Error ? e.message : String(e)}`);
-      notifyToast('error', 'Capsule decryption failed');
-    } finally {
-      setBusy(false);
-    }
-  }, [mnemonic, notifyToast]);
-
-  const handleConfirmRecovery = useCallback(async () => {
-    try {
-      setBusy(true);
-      setErrorMsg('');
-
-      // Step 1: Tombstone old device
-      setWizardState('TOMBSTONE');
-      setStatusMsg('Creating tombstone receipt...');
-      await createTombstone(mnemonic.trim());
-
-      // Step 2: Succession — bind new device
-      setWizardState('SUCCESSION');
-      setStatusMsg('Creating succession receipt...');
-      await createSuccession(mnemonic.trim());
-
-      // Step 3: Resume — gated on full sync
-      setWizardState('RESUMING');
-      setStatusMsg('Waiting for all contacts to acknowledge tombstone...');
-      try {
-        await resumeRecovery(mnemonic.trim());
-        setWizardState('COMPLETE');
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        if (msg.includes('pending') || msg.includes('synced')) {
-          // Expected — sync gate not yet met, stay in RESUMING
-          setStatusMsg(msg);
-        } else {
-          throw e;
-        }
-      }
-    } catch (e) {
-      setErrorMsg(`Recovery failed: ${e instanceof Error ? e.message : String(e)}`);
-      notifyToast('error', 'Recovery failed');
-      setWizardState('MNEMONIC_ENTRY');
-    } finally {
-      setBusy(false);
-    }
-  }, [mnemonic, notifyToast]);
-
-  const handleMnemonicSubmit = useCallback(() => {
-    const words = mnemonic.trim().split(/\s+/);
-    if (words.length < 12) {
-      setErrorMsg('Mnemonic must be at least 12 words');
+  const onBeginRead = useCallback(() => {
+    if (mnemonic.trim().split(/\s+/).length < 12) {
+      setErrorMsg('Enter your mnemonic first.');
       return;
     }
-    setErrorMsg('');
-    setWizardState('TAP_RING');
-    setStatusMsg('Tap your NFC ring to read the backup capsule.');
-  }, [mnemonic]);
 
-  // D-pad navigation for action buttons
-  const actionCount = wizardState === 'MNEMONIC_ENTRY' ? 1 : wizardState === 'PREVIEW' ? 2 : 0;
-  const { focusedIndex } = useDpadNav({
-    itemCount: actionCount,
-    onSelect: (idx) => {
-      if (wizardState === 'MNEMONIC_ENTRY' && idx === 0) handleMnemonicSubmit();
-      if (wizardState === 'PREVIEW' && idx === 0) handleConfirmRecovery();
-    },
-  });
+    setErrorMsg('');
+    setStatusMsg('Touch the ring to the phone. The capsule will decrypt after it is read.');
+    setStep('tap');
+  }, [mnemonic]);
 
   return (
     <main className="settings-shell settings-shell--dev" role="main">
       <h2 style={{ textAlign: 'center', marginBottom: 12 }}>RECOVER FROM RING</h2>
 
-      {/* === MNEMONIC ENTRY === */}
-      {wizardState === 'MNEMONIC_ENTRY' && (
+      <div className="snd-card">
+        <div className="snd-info-note">
+          The ring carries the latest saved chain tips. Read it, decrypt it, and this device gets
+          the last backed-up bilateral view needed for the tombstone handoff.
+        </div>
+      </div>
+
+      {step === 'mnemonic' && (
         <div className="snd-card">
           <div className="snd-info-row">
-            <span className="snd-info-label">Enter your 24-word recovery mnemonic</span>
+            <span className="snd-info-label">ENTER YOUR RECOVERY MNEMONIC</span>
           </div>
           <textarea
             value={mnemonic}
@@ -189,10 +128,11 @@ export default function RecoveryScreen() {
             rows={4}
             style={{
               width: '100%',
-              fontFamily: 'monospace',
-              fontSize: 13,
-              padding: 8,
+              boxSizing: 'border-box',
+              padding: '10px 12px',
               marginTop: 8,
+              fontFamily: "'Martian Mono', monospace",
+              fontSize: 12,
               background: 'var(--gb-bg)',
               color: 'var(--gb-fg)',
               border: '2px solid var(--gb-border)',
@@ -203,121 +143,84 @@ export default function RecoveryScreen() {
           />
           <div className="snd-actions">
             <button
-              className={`snd-btn${focusedIndex === 0 ? ' focused' : ''}`}
-              onClick={handleMnemonicSubmit}
+              className="snd-btn"
+              onClick={onBeginRead}
               disabled={busy || mnemonic.trim().split(/\s+/).length < 12}
             >
-              NEXT: TAP RING
+              READ THE RING
             </button>
           </div>
         </div>
       )}
 
-      {/* === TAP RING === */}
-      {wizardState === 'TAP_RING' && (
+      {step === 'tap' && (
         <div className="snd-card">
           <div className="snd-info-row">
-            <span className="snd-info-label">Tap your NFC ring to the phone</span>
+            <span className="snd-info-label">TAP THE RING TO THE PHONE</span>
           </div>
-          <div style={{ textAlign: 'center', padding: 24, fontSize: 32 }}>
+          <div style={{ textAlign: 'center', padding: 24, fontSize: 28 }}>
             {busy ? 'DECRYPTING...' : 'WAITING FOR RING...'}
           </div>
           <div className="snd-info-note">
-            Hold the ring near the NFC antenna on the back of your phone.
+            Hold the ring near the NFC antenna. Once the tag is read, the capsule decrypts in Rust.
           </div>
         </div>
       )}
 
-      {/* === PREVIEW === */}
-      {wizardState === 'PREVIEW' && previewData && (
+      {step === 'preview' && capsulePreview && (
         <div className="snd-card">
           <div className="snd-stat-grid-2">
             <div className="snd-stat-cell">
-              <div className="snd-stat-val">{previewData.counterpartyCount}</div>
-              <div className="snd-stat-label">Contacts</div>
+              <div className="snd-stat-val">{capsulePreview.counterpartyCount}</div>
+              <div className="snd-stat-label">Recovered Peers</div>
             </div>
             <div className="snd-stat-cell">
-              <div className="snd-stat-val">#{previewData.capsuleIndex}</div>
+              <div className="snd-stat-val">
+                {capsuleBase32 ? capsulePreviewFromBase32(capsuleBase32, 10) : '--'}
+              </div>
               <div className="snd-stat-label">Capsule</div>
             </div>
           </div>
           <div className="snd-info-row">
             <span className="snd-info-label">SMT Root</span>
             <span className="snd-info-val" style={{ fontFamily: 'monospace', fontSize: 11 }}>
-              {previewData.smtRoot.slice(0, 16)}...
+              {capsulePreview.smtRoot.slice(0, 20)}...
             </span>
           </div>
           <div className="snd-info-row">
             <span className="snd-info-label">Rollup</span>
             <span className="snd-info-val" style={{ fontFamily: 'monospace', fontSize: 11 }}>
-              {previewData.rollupHash.slice(0, 16)}...
+              {capsulePreview.rollupHash.slice(0, 20)}...
             </span>
           </div>
+          {capsulePreview.counterparties.length > 0 && (
+            <div className="snd-info-note">
+              {capsulePreview.counterparties
+                .slice(0, 3)
+                .map((id) => id.slice(0, 16))
+                .join(', ')}
+              {capsulePreview.counterparties.length > 3 ? '…' : ''}
+            </div>
+          )}
+          <div className="snd-info-note">
+            The last backed-up bilateral tips are staged on this device so the tombstone flow can
+            advance from saved state instead of re-harvesting those tips from peers.
+          </div>
           <div className="snd-actions">
+            <button className="snd-btn" onClick={reset}>
+              READ AGAIN
+            </button>
             <button
-              className={`snd-btn${focusedIndex === 0 ? ' focused' : ''}`}
-              onClick={handleConfirmRecovery}
-              disabled={busy}
+              className="snd-btn"
+              onClick={() => onNavigate?.('nfc_recovery')}
+              style={{ marginTop: 4 }}
             >
-              {busy ? 'RECOVERING...' : 'CONFIRM RECOVERY'}
+              BACK TO BACKUP
             </button>
           </div>
         </div>
       )}
 
-      {/* === TOMBSTONE === */}
-      {wizardState === 'TOMBSTONE' && (
-        <div className="snd-card">
-          <div style={{ textAlign: 'center', padding: 24 }}>
-            <div style={{ fontSize: 18, marginBottom: 8 }}>TOMBSTONING OLD DEVICE</div>
-            <div className="snd-info-note">Marking previous device identity as revoked...</div>
-          </div>
-        </div>
-      )}
-
-      {/* === SUCCESSION === */}
-      {wizardState === 'SUCCESSION' && (
-        <div className="snd-card">
-          <div style={{ textAlign: 'center', padding: 24 }}>
-            <div style={{ fontSize: 18, marginBottom: 8 }}>CREATING SUCCESSION</div>
-            <div className="snd-info-note">Binding new device identity to your state...</div>
-          </div>
-        </div>
-      )}
-
-      {/* === RESUMING (sync gate) === */}
-      {wizardState === 'RESUMING' && (
-        <div className="snd-card">
-          <div className="snd-stat-grid-2">
-            <div className="snd-stat-cell">
-              <div className="snd-stat-val">{syncProgress.synced}/{syncProgress.total}</div>
-              <div className="snd-stat-label">Contacts Synced</div>
-            </div>
-            <div className="snd-stat-cell">
-              <div className="snd-stat-val">{syncProgress.total - syncProgress.synced}</div>
-              <div className="snd-stat-label">Waiting</div>
-            </div>
-          </div>
-          <div className="snd-info-note">
-            All counterparties must acknowledge the tombstone before recovery can complete.
-            Waiting for {syncProgress.total - syncProgress.synced} contact(s) to come online.
-          </div>
-        </div>
-      )}
-
-      {/* === COMPLETE === */}
-      {wizardState === 'COMPLETE' && (
-        <div className="snd-card">
-          <div style={{ textAlign: 'center', padding: 24 }}>
-            <div style={{ fontSize: 18, marginBottom: 8 }}>RECOVERY COMPLETE</div>
-            <div className="snd-info-note">
-              All contacts synced. Your wallet state has been restored.
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Status / Error messages */}
       {statusMsg && !errorMsg && (
         <div className="settings-shell__status">{statusMsg}</div>
       )}
@@ -328,4 +231,6 @@ export default function RecoveryScreen() {
       )}
     </main>
   );
-}
+};
+
+export default memo(RecoveryScreen);

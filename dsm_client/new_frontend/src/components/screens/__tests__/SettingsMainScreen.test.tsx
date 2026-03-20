@@ -23,9 +23,12 @@ jest.mock('../../../services/settings/backupService', () => ({
 }));
 
 jest.mock('../../../services/recovery/nfcRecoveryService', () => ({
-  capsuleBytesToBase32: jest.fn(() => ''),
-  capsulePreviewFromBase32: jest.fn(() => ''),
-  decryptCapsuleFromBase32: jest.fn(),
+  getNfcBackupStatus: jest.fn(async () => ({
+    enabled: false,
+    configured: false,
+    capsuleCount: 0,
+    lastCapsuleIndex: 0,
+  })),
 }));
 
 describe('SettingsMainScreen developer unlock', () => {

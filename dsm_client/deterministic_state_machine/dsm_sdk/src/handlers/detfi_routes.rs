@@ -84,16 +84,14 @@ impl AppRouterImpl {
                         let dlv_bytes = &blob[3..];
                         if dlv_bytes.is_empty() {
                             return err(
-                                "detfi.launch: empty DlvCreateV3 payload after header".into(),
+                                "detfi.launch: empty DlvCreateV3 payload after header".into()
                             );
                         }
 
                         let create = match generated::DlvCreateV3::decode(dlv_bytes) {
                             Ok(c) => c,
                             Err(e) => {
-                                return err(format!(
-                                    "detfi.launch: decode DlvCreateV3 failed: {e}"
-                                ))
+                                return err(format!("detfi.launch: decode DlvCreateV3 failed: {e}"))
                             }
                         };
 
@@ -112,15 +110,14 @@ impl AppRouterImpl {
                         }
                         if !create.parent_digest.is_empty() && create.parent_digest.len() != 32 {
                             return err(
-                                "detfi.launch: parent_digest must be 32 bytes when set".into(),
+                                "detfi.launch: parent_digest must be 32 bytes when set".into()
                             );
                         }
 
                         // Resolve device_id: template blob has all-zeros; fill
                         // from app-state when available.
                         let device_id = {
-                            let stored =
-                                app_state_get("dsm.device_id");
+                            let stored = app_state_get("dsm.device_id");
                             if stored.is_empty() {
                                 // Dev mode: keep the zero device_id from the template.
                                 create.device_id.clone()
@@ -129,7 +126,7 @@ impl AppRouterImpl {
                                     Some(id) => id,
                                     None => {
                                         return err(
-                                            "detfi.launch: failed to decode dsm.device_id".into(),
+                                            "detfi.launch: failed to decode dsm.device_id".into()
                                         )
                                     }
                                 }
@@ -151,10 +148,8 @@ impl AppRouterImpl {
                         };
 
                         let filled_bytes = filled.encode_to_vec();
-                        let vault_id_b32 =
-                            crate::util::text_id::encode_base32_crockford(&vault_id);
-                        let encoded =
-                            crate::util::text_id::encode_base32_crockford(&filled_bytes);
+                        let vault_id_b32 = crate::util::text_id::encode_base32_crockford(&vault_id);
+                        let encoded = crate::util::text_id::encode_base32_crockford(&filled_bytes);
 
                         // Persist under detfi namespace.
                         let detfi_key = format!("{DETFI_PREFIX}{vault_id_b32}");
@@ -208,19 +203,15 @@ impl AppRouterImpl {
                     1 => {
                         let policy_bytes = &blob[3..];
                         if policy_bytes.is_empty() {
-                            return err(
-                                "detfi.launch: empty policy payload after header".into(),
-                            );
+                            return err("detfi.launch: empty policy payload after header".into());
                         }
 
                         let anchor = blake3::hash(policy_bytes);
-                        let anchor_b32 = crate::util::text_id::encode_base32_crockford(
-                            anchor.as_bytes(),
-                        );
+                        let anchor_b32 =
+                            crate::util::text_id::encode_base32_crockford(anchor.as_bytes());
 
                         let key = format!("{DETFI_POLICY_PREFIX}{anchor_b32}");
-                        let encoded =
-                            crate::util::text_id::encode_base32_crockford(policy_bytes);
+                        let encoded = crate::util::text_id::encode_base32_crockford(policy_bytes);
                         app_state_set(&key, &encoded);
 
                         log::info!(

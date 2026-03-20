@@ -148,6 +148,32 @@ impl AppRouterImpl {
                 pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
             }
 
+            // -------- recovery.cacheMnemonic --------
+            // Derives the recovery key and keeps it in Rust memory for follow-on
+            // ring decrypt/import or lazy capsule refresh.
+            "recovery.cacheMnemonic" => {
+                let mnemonic = match Self::decode_recovery_string_param(&i.args) {
+                    Ok(m) => m,
+                    Err(e) => return err(format!("recovery.cacheMnemonic: {e}")),
+                };
+
+                if mnemonic.split_whitespace().count() < 12 {
+                    return err("recovery.cacheMnemonic: mnemonic must be at least 12 words".into());
+                }
+
+                if let Err(e) =
+                    crate::sdk::recovery_sdk::RecoverySDK::derive_and_cache_key(&mnemonic)
+                {
+                    return err(format!("recovery.cacheMnemonic failed: {e}"));
+                }
+
+                let resp = generated::AppStateResponse {
+                    key: "recovery.cacheMnemonic".to_string(),
+                    value: Some("cached=true".to_string()),
+                };
+                pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
+            }
+
             // -------- recovery.createCapsule --------
             // Expects ArgPack with AppStateRequest { value: "mnemonic words..." }
             "recovery.createCapsule" => {
@@ -170,6 +196,125 @@ impl AppRouterImpl {
                     }
                     Err(e) => err(format!("recovery.createCapsule failed: {e}")),
                 }
+            }
+
+            // -------- recovery.decryptCapsule --------
+            // Decrypts a ring capsule using the cached recovery key so mnemonic
+            // handling stays inside Rust.
+            "recovery.decryptCapsule" => {
+                let capsule = match Self::decode_nfc_capsule_payload(&i.args) {
+                    Ok(payload) => payload,
+                    Err(e) => return err(format!("recovery.decryptCapsule: {e}")),
+                };
+
+                let decrypted =
+                    match crate::sdk::recovery_sdk::RecoverySDK::decrypt_capsule_with_cached_key_bytes(
+                        &capsule,
+                    ) {
+                        Ok(v) => v,
+                        Err(e) => return err(format!("recovery.decryptCapsule failed: {e}")),
+                    };
+
+                if decrypted.smt_root.len() != 32 {
+                    return err("recovery.decryptCapsule: invalid SMT root length".into());
+                }
+                if decrypted.rollup_hash.len() != 32 {
+                    return err("recovery.decryptCapsule: invalid rollup hash length".into());
+                }
+
+                let mut chain_tips = Vec::new();
+                let mut recovered_tips = Vec::new();
+                for (device_id_str, (height, head_hash)) in decrypted.counterparty_tips {
+                    let device_id_bytes =
+                        match crate::util::text_id::decode_base32_crockford(&device_id_str) {
+                            Some(v) => v,
+                            None => {
+                                return err(
+                                    "recovery.decryptCapsule: invalid counterparty device_id"
+                                        .into(),
+                                )
+                            }
+                        };
+
+                    if device_id_bytes.len() != 32 {
+                        return err(
+                            "recovery.decryptCapsule: invalid counterparty device_id length".into(),
+                        );
+                    }
+                    if head_hash.len() != 32 {
+                        return err(
+                            "recovery.decryptCapsule: invalid counterparty head_hash length".into(),
+                        );
+                    }
+
+                    let mut device_id_arr = [0u8; 32];
+                    device_id_arr.copy_from_slice(&device_id_bytes);
+                    let mut head_hash_arr = [0u8; 32];
+                    head_hash_arr.copy_from_slice(&head_hash);
+                    recovered_tips.push(crate::storage::client_db::recovery::RecoveredChainTip {
+                        device_id: device_id_arr,
+                        height,
+                        head_hash: head_hash_arr,
+                    });
+
+                    chain_tips.push(generated::ChainTip {
+                        counterparty_device_id: device_id_bytes,
+                        height,
+                        head_hash: Some(generated::Hash32 { v: head_hash }),
+                    });
+                }
+
+                Self::clear_staged_recovery_state();
+
+                if let Err(e) = crate::storage::client_db::recovery::set_recovery_pref(
+                    "capsule_smt_root",
+                    &decrypted.smt_root,
+                ) {
+                    log::warn!("[RECOVERY] Failed to persist capsule SMT root: {e}");
+                }
+                if let Err(e) = crate::storage::client_db::recovery::set_recovery_pref(
+                    "capsule_rollup_hash",
+                    &decrypted.rollup_hash,
+                ) {
+                    log::warn!("[RECOVERY] Failed to persist capsule rollup hash: {e}");
+                }
+
+                if let Err(e) =
+                    crate::storage::client_db::recovery::store_recovered_chain_tips(&recovered_tips)
+                {
+                    log::warn!("[RECOVERY] Failed to persist recovered chain tips: {e}");
+                }
+
+                let counterparty_ids: Vec<[u8; 32]> =
+                    recovered_tips.iter().map(|tip| tip.device_id).collect();
+                if !counterparty_ids.is_empty() {
+                    if let Err(e) =
+                        crate::storage::client_db::recovery::store_capsule_counterparty_ids(
+                            &counterparty_ids,
+                        )
+                    {
+                        log::warn!("[RECOVERY] Failed to persist counterparty IDs: {e}");
+                    }
+                }
+
+                let mut metadata = Vec::with_capacity(20);
+                metadata.extend_from_slice(&decrypted.metadata.version.to_le_bytes());
+                metadata.extend_from_slice(&decrypted.metadata.flags.to_le_bytes());
+                metadata.extend_from_slice(&decrypted.metadata.logical_time.to_le_bytes());
+                metadata.extend_from_slice(&decrypted.metadata.counter.to_le_bytes());
+
+                let resp = generated::RecoveryCapsuleDecryptResponse {
+                    success: true,
+                    global_root: Some(generated::Hash32 {
+                        v: decrypted.smt_root,
+                    }),
+                    chain_tips,
+                    receipt_rollup: Some(generated::Hash32 {
+                        v: decrypted.rollup_hash,
+                    }),
+                    meta_data: metadata,
+                };
+                pack_envelope_ok(generated::envelope::Payload::RecoveryCapsuleDecryptResponse(resp))
             }
 
             // -------- recovery.tombstone --------
@@ -370,9 +515,12 @@ impl AppRouterImpl {
                     );
                 }
 
-                // Check a capsule is pending (must call recovery.createCapsule first).
+                // Check a latest capsule is available for transport to Kotlin.
                 if crate::sdk::recovery_sdk::RecoverySDK::get_pending_capsule().is_none() {
-                    return err("No pending capsule. Call recovery.createCapsule first.".into());
+                    return err(
+                        "No recovery capsule is available. Enable backup or rebuild the latest capsule first."
+                            .into(),
+                    );
                 }
 
                 // Authorization granted — Kotlin will launch NfcWriteActivity.
@@ -630,6 +778,9 @@ impl AppRouterImpl {
                 if let Err(e) = crate::storage::client_db::recovery::clear_recovery_sync_status() {
                     log::warn!("[RECOVERY] Failed to clear sync status: {e}");
                 }
+                if let Err(e) = crate::storage::client_db::recovery::clear_recovered_chain_tips() {
+                    log::warn!("[RECOVERY] Failed to clear recovered chain tips: {e}");
+                }
                 // Clear tombstone-related prefs
                 let _ = crate::storage::client_db::recovery::set_recovery_pref(
                     "tombstone_receipt",
@@ -691,5 +842,45 @@ impl AppRouterImpl {
         }
 
         Err("expected ArgPack(AppStateRequest) or raw UTF-8 string in args".to_string())
+    }
+
+    fn decode_nfc_capsule_payload(args: &[u8]) -> Result<Vec<u8>, String> {
+        if let Ok(msg) = generated::NfcRecoveryCapsule::decode(args) {
+            if !msg.payload.is_empty() {
+                return Ok(msg.payload);
+            }
+        }
+
+        if let Ok(pack) = generated::ArgPack::decode(args) {
+            if let Ok(msg) = generated::NfcRecoveryCapsule::decode(&*pack.body) {
+                if !msg.payload.is_empty() {
+                    return Ok(msg.payload);
+                }
+            }
+        }
+
+        Err("expected NfcRecoveryCapsule protobuf in args".to_string())
+    }
+
+    fn clear_staged_recovery_state() {
+        if let Err(e) = crate::storage::client_db::recovery::clear_recovery_sync_status() {
+            log::warn!("[RECOVERY] Failed to clear sync status before import: {e}");
+        }
+        if let Err(e) = crate::storage::client_db::recovery::clear_recovered_chain_tips() {
+            log::warn!("[RECOVERY] Failed to clear recovered chain tips before import: {e}");
+        }
+
+        for key in [
+            "tombstone_receipt",
+            "tombstone_hash",
+            "capsule_counterparty_ids",
+            "capsule_smt_root",
+            "capsule_rollup_hash",
+            "succession_receipt",
+        ] {
+            if let Err(e) = crate::storage::client_db::recovery::set_recovery_pref(key, &[]) {
+                log::warn!("[RECOVERY] Failed to clear recovery pref {}: {}", key, e);
+            }
+        }
     }
 }

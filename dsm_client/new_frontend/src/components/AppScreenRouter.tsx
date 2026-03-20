@@ -89,7 +89,7 @@ export default function AppScreenRouter({
     case 'accounts':
       return <MemoAccounts eraTokenSrc={eraTokenSrc} btcLogoSrc={btcLogoSrc} />;
     case 'recovery':
-      return <MemoRecovery />;
+      return <MemoRecovery onNavigate={onNavigate} />;
     case 'nfc_recovery':
       return <MemoNfcRecovery onNavigate={onNavigate} />;
     default:
