@@ -3,11 +3,9 @@
 
 use async_trait::async_trait;
 use dsm::types::error::DsmError;
-use rustls::client::ServerName;
-use rustls::Certificate;
 use rustls::ClientConfig;
-use rustls::PrivateKey;
 use rustls::RootCertStore;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use thiserror::Error;
@@ -125,18 +123,18 @@ fn normalize_pins(pins: Vec<Vec<u8>>) -> Result<Vec<[u8; 32]>, DsmError> {
 #[derive(Debug)]
 pub struct TlsTransport {
     cfg: Arc<ClientConfig>,
-    server_name: ServerName,
+    server_name: ServerName<'static>,
     pins: Vec<[u8; 32]>,
 }
 
 impl TlsTransport {
     pub fn from_config(config: TlsConfig) -> Result<Self, DsmError> {
-        let server_name = ServerName::try_from(config.server_name.as_str())
+        let server_name = ServerName::try_from(config.server_name.clone())
             .map_err(|_| DsmError::invalid_parameter("invalid tls server_name"))?;
 
         let mut roots = RootCertStore::empty();
         for der in config.root_ca_der.iter() {
-            roots.add(&Certificate(der.clone())).map_err(|e| {
+            roots.add(CertificateDer::from(der.clone())).map_err(|e| {
                 DsmError::network(
                     format!("tls root ca add failed: {e}"),
                     None::<std::io::Error>,
@@ -151,15 +149,16 @@ impl TlsTransport {
             });
         }
 
-        let builder = ClientConfig::builder()
-            .with_safe_defaults()
-            .with_root_certificates(roots);
+        let builder = ClientConfig::builder().with_root_certificates(roots);
 
         let client_cfg = if let (Some(chain), Some(key_der)) =
             (config.client_cert_chain_der, config.client_key_der)
         {
-            let certs = chain.into_iter().map(Certificate).collect::<Vec<_>>();
-            let key = PrivateKey(key_der);
+            let certs = chain
+                .into_iter()
+                .map(CertificateDer::from)
+                .collect::<Vec<_>>();
+            let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_der));
             builder.with_client_auth_cert(certs, key).map_err(|e| {
                 DsmError::network(
                     format!("tls client identity invalid: {e}"),
@@ -210,7 +209,7 @@ impl TlsTransport {
                 DsmError::network("tls peer certificate missing", None::<std::io::Error>)
             })?;
             let cert_hash =
-                *dsm::crypto::blake3::domain_hash("DSM/tls-cert-hash", end_entity.0.as_ref())
+                *dsm::crypto::blake3::domain_hash("DSM/tls-cert-hash", end_entity.as_ref())
                     .as_bytes();
             if !self.pins.contains(&cert_hash) {
                 return Err(DsmError::network(

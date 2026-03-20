@@ -4,6 +4,51 @@
 multiple-versions = "warn"
 wildcards = "deny"
 highlight = "all"
+skip = [
+    # Legacy transitive support crates still pinned by upstream libraries.
+    { crate = "heck@0.4.1", reason = "legacy codegen stack retained by prost/cbindgen toolchain split" },
+    { crate = "http@0.2.12", reason = "legacy hyper 0.14 branch retained by external dependencies" },
+    { crate = "http-body@0.4.6", reason = "legacy hyper 0.14 branch retained by external dependencies" },
+    { crate = "hyper@0.14.32", reason = "legacy hyper stack retained by metrics exporter and test-only paths" },
+    { crate = "indexmap@1.9.3", reason = "older map implementation retained by legacy transitive dependencies" },
+    { crate = "itertools@0.14.0", reason = "tooling-only prost 0.13 codegen branch retained by dsm-gen and tonic-build" },
+    { crate = "num-bigint@0.2.6", reason = "legacy big integer branch pinned by num-primes" },
+    { crate = "petgraph@0.7.1", reason = "tooling-only prost 0.13 codegen branch retained by dsm-gen and tonic-build" },
+    { crate = "prost@0.13.5", reason = "tooling-only prost branch retained by dsm-gen and tonic-build" },
+    { crate = "prost-build@0.13.5", reason = "tooling-only prost branch retained by dsm-gen and tonic-build" },
+    { crate = "prost-derive@0.13.5", reason = "tooling-only prost branch retained by dsm-gen and tonic-build" },
+    { crate = "prost-types@0.13.5", reason = "tooling-only prost branch retained by dsm-gen and tonic-build" },
+    { crate = "r-efi@5.3.0", reason = "legacy EFI support crate retained by older getrandom consumers" },
+    { crate = "rand@0.5.6", reason = "legacy RNG branch pinned by num-primes" },
+    { crate = "rand@0.9.2", reason = "transitive RNG branch retained by postgres/proptest ecosystem" },
+    { crate = "rand@0.10.0", reason = "test-only RNG branch retained by quickcheck/tempfile ecosystem" },
+    { crate = "rand_core@0.3.1", reason = "legacy RNG core retained by rand 0.5" },
+    { crate = "rand_core@0.4.2", reason = "legacy RNG core retained by rand 0.5 compatibility layer" },
+    { crate = "rand_core@0.9.5", reason = "transitive RNG core retained by postgres/proptest ecosystem" },
+    { crate = "rand_core@0.10.0", reason = "test-only RNG core retained by quickcheck/tempfile ecosystem" },
+    { crate = "socket2@0.5.10", reason = "transitive legacy hyper branch; runtime graph already prefers socket2 0.6" },
+    { crate = "thiserror@1.0.69", reason = "transitive legacy error stack from external crates not yet on thiserror 2" },
+    { crate = "thiserror-impl@1.0.69", reason = "proc-macro companion to transitive legacy thiserror 1" },
+    { crate = "tokio-rustls@0.24.1", reason = "legacy rustls 0.21 transport branch retained by SDK TLS transport until coordinated rustls migration" },
+    { crate = "toml@0.5.11", reason = "transitive parser version pinned by config crate" },
+    { crate = "wasi@0.11.1+wasi-snapshot-preview1", reason = "transitive WASI support crate retained by older getrandom consumers" },
+
+    # Old Windows target import-lib crates still arrive transitively through
+    # upstream `winapi-util` / `winreg` branches. These are target-only shims,
+    # not runtime protocol crates, so we suppress duplicate-version noise until
+    # the ecosystem converges on a single windows-targets line.
+    { crate = "windows-sys@0.48.0", reason = "transitive target support crate via upstream Windows compatibility branches" },
+    { crate = "windows-sys@0.52.0", reason = "transitive target support crate via upstream Windows compatibility branches" },
+    { crate = "windows-sys@0.59.0", reason = "transitive target support crate via upstream Windows compatibility branches" },
+    { crate = "windows-targets@0.48.5", reason = "transitive target support crate via upstream Windows compatibility branches" },
+    { crate = "windows_aarch64_gnullvm@0.48.5", reason = "transitive target-only import lib via upstream Windows support crates" },
+    { crate = "windows_aarch64_msvc@0.48.5", reason = "transitive target-only import lib via upstream Windows support crates" },
+    { crate = "windows_i686_gnu@0.48.5", reason = "transitive target-only import lib via upstream Windows support crates" },
+    { crate = "windows_i686_msvc@0.48.5", reason = "transitive target-only import lib via upstream Windows support crates" },
+    { crate = "windows_x86_64_gnu@0.48.5", reason = "transitive target-only import lib via upstream Windows support crates" },
+    { crate = "windows_x86_64_gnullvm@0.48.5", reason = "transitive target-only import lib via upstream Windows support crates" },
+    { crate = "windows_x86_64_msvc@0.48.5", reason = "transitive target-only import lib via upstream Windows support crates" },
+]
 
 # NOTE: Avoid overly broad bans here.
 # If you want to enforce "no serde/json/base64/etc" in *specific crates or paths*,
