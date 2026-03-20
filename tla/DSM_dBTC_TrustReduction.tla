@@ -58,12 +58,12 @@ VARIABLES
   powValid,
   checkpointed,
   sameChain,
-  settled,
+  finalizedCount,
   step
 
 vars == <<spendable, inflight, gridBacking, withdrawalStatus, confDepth,
           bitcoinSpend, spvValid, powValid, checkpointed, sameChain,
-          settled, step>>
+          finalizedCount, step>>
 
 TypeInv ==
   /\ spendable \in Nat
@@ -76,7 +76,7 @@ TypeInv ==
   /\ powValid \in BOOLEAN
   /\ checkpointed \in BOOLEAN
   /\ sameChain \in BOOLEAN
-  /\ settled \in Nat
+  /\ finalizedCount \in Nat
   /\ step \in Nat
 
 ConservationInvariant == spendable + inflight = gridBacking
@@ -108,8 +108,8 @@ FinalizedImpliesMainnetAssumptions ==
 WeakenedNetworkNeverFinalizes ==
   ~MainnetMode => withdrawalStatus # "Finalized"
 
-SettledCountTracksFinalization ==
-  (withdrawalStatus = "Finalized") => settled = 1
+FinalizedCountTracksStatus ==
+  (withdrawalStatus = "Finalized") => finalizedCount = 1
 
 Init ==
   /\ spendable = 1
@@ -122,7 +122,7 @@ Init ==
   /\ powValid = FALSE
   /\ checkpointed = FALSE
   /\ sameChain = FALSE
-  /\ settled = 0
+  /\ finalizedCount = 0
   /\ step = 0
 
 Commit ==
@@ -133,7 +133,7 @@ Commit ==
   /\ gridBacking' = gridBacking
   /\ withdrawalStatus' = "Committed"
   /\ UNCHANGED <<confDepth, bitcoinSpend, spvValid, powValid, checkpointed,
-                 sameChain, settled>>
+                 sameChain, finalizedCount>>
   /\ step' = step + 1
 
 ObserveBitcoinSpend ==
@@ -141,7 +141,7 @@ ObserveBitcoinSpend ==
   /\ ~bitcoinSpend
   /\ bitcoinSpend' = TRUE
   /\ UNCHANGED <<spendable, inflight, gridBacking, withdrawalStatus, confDepth,
-                 spvValid, powValid, checkpointed, sameChain, settled>>
+                 spvValid, powValid, checkpointed, sameChain, finalizedCount>>
   /\ step' = step + 1
 
 ObserveSpv ==
@@ -149,7 +149,7 @@ ObserveSpv ==
   /\ ~spvValid
   /\ spvValid' = TRUE
   /\ UNCHANGED <<spendable, inflight, gridBacking, withdrawalStatus, confDepth,
-                 bitcoinSpend, powValid, checkpointed, sameChain, settled>>
+                 bitcoinSpend, powValid, checkpointed, sameChain, finalizedCount>>
   /\ step' = step + 1
 
 ObservePow ==
@@ -157,7 +157,7 @@ ObservePow ==
   /\ ~powValid
   /\ powValid' = TRUE
   /\ UNCHANGED <<spendable, inflight, gridBacking, withdrawalStatus, confDepth,
-                 bitcoinSpend, spvValid, checkpointed, sameChain, settled>>
+                 bitcoinSpend, spvValid, checkpointed, sameChain, finalizedCount>>
   /\ step' = step + 1
 
 ObserveCheckpoint ==
@@ -165,7 +165,7 @@ ObserveCheckpoint ==
   /\ ~checkpointed
   /\ checkpointed' = TRUE
   /\ UNCHANGED <<spendable, inflight, gridBacking, withdrawalStatus, confDepth,
-                 bitcoinSpend, spvValid, powValid, sameChain, settled>>
+                 bitcoinSpend, spvValid, powValid, sameChain, finalizedCount>>
   /\ step' = step + 1
 
 ObserveSameChain ==
@@ -173,7 +173,7 @@ ObserveSameChain ==
   /\ ~sameChain
   /\ sameChain' = TRUE
   /\ UNCHANGED <<spendable, inflight, gridBacking, withdrawalStatus, confDepth,
-                 bitcoinSpend, spvValid, powValid, checkpointed, settled>>
+                 bitcoinSpend, spvValid, powValid, checkpointed, finalizedCount>>
   /\ step' = step + 1
 
 AdvanceConfirmations ==
@@ -181,7 +181,7 @@ AdvanceConfirmations ==
   /\ confDepth' = confDepth + 1
   /\ UNCHANGED <<spendable, inflight, gridBacking, withdrawalStatus,
                  bitcoinSpend, spvValid, powValid, checkpointed, sameChain,
-                 settled>>
+                 finalizedCount>>
   /\ step' = step + 1
 
 FinalBurn ==
@@ -192,7 +192,7 @@ FinalBurn ==
   /\ withdrawalStatus' = "Finalized"
   /\ UNCHANGED <<confDepth, bitcoinSpend, spvValid, powValid, checkpointed,
                  sameChain>>
-  /\ settled' = settled + 1
+  /\ finalizedCount' = finalizedCount + 1
   /\ step' = step + 1
 
 Refund ==
@@ -203,13 +203,13 @@ Refund ==
   /\ gridBacking' = gridBacking
   /\ withdrawalStatus' = "Refunded"
   /\ UNCHANGED <<confDepth, bitcoinSpend, spvValid, powValid, checkpointed,
-                 sameChain, settled>>
+                 sameChain, finalizedCount>>
   /\ step' = step + 1
 
 NoOp ==
   /\ UNCHANGED <<spendable, inflight, gridBacking, withdrawalStatus, confDepth,
                  bitcoinSpend, spvValid, powValid, checkpointed, sameChain,
-                 settled>>
+                 finalizedCount>>
   /\ step' = step + 1
 
 Next ==

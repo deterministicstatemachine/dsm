@@ -3,7 +3,7 @@
 //! This module provides production-grade observability with structured logging,
 //! metrics collection, and tracing — without wall clocks, UUIDs, hex, JSON, or base64.
 //! All IDs are deterministic counters; durations are measured in deterministic ticks from
-//! `util::deterministic_time` (not std::time).
+//! `utils::deterministic_time` (not std::time).
 //!
 //! Constraints enforced:
 //! - No wall-clock time types from std::time
@@ -19,7 +19,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, trace, warn};
 
 // Deterministic tick source (event-driven), not wall clock.
-use crate::util::deterministic_time;
+use crate::utils::deterministic_time;
 
 /// Telemetry configuration
 #[derive(Debug, Clone)]

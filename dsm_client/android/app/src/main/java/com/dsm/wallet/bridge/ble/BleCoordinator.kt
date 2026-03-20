@@ -913,6 +913,22 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                         diagnostics.recordEvent(BleDiagEvent(phase = "coordinator_pairing_confirm_sent", device = event.deviceAddress))
                     }
                     is BleSessionEvent.ErrorOccurred -> {
+                        if (event.status == 133) {
+                            Log.w("BleCoordinator", "GATT 133 observed. Scheduling delay recovery...")
+                            kotlinx.coroutines.GlobalScope.launch {
+                                kotlinx.coroutines.delay(1500)
+                                getOrCreateSession(event.deviceAddress).connect()
+                            }
+                        }
+
+                        if (event.status == 133) {
+                            Log.w("BleCoordinator", "GATT 133 observed. Scheduling delay recovery...")
+                            kotlinx.coroutines.GlobalScope.launch {
+                                kotlinx.coroutines.delay(1500)
+                                getOrCreateSession(event.deviceAddress).connect()
+                            }
+                        }
+
                         pendingConnectionAddresses.remove(event.deviceAddress)
                         state.lastError = event
                         // Clear current transaction on error and try to process next item

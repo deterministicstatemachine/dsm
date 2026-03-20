@@ -250,7 +250,7 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
     // 1.5) Initialize progress context for deterministic time (sys.tick queries)
     // This must happen before any handlers are installed that might need timing.
     // Initialize with default values - will be updated during bilateral interactions.
-    if let Err(e) = dsm::util::deterministic_time::update_progress_context([0u8; 32], 0) {
+    if let Err(e) = dsm::utils::deterministic_time::update_progress_context([0u8; 32], 0) {
         log::warn!("[SDK Init] Failed to initialize progress context: {:?}", e);
     } else {
         log::info!("[SDK Init] Progress context initialized with defaults");

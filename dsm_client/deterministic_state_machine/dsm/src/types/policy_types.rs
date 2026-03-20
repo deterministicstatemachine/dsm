@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use crate::util::deterministic_time as dt;
+use crate::utils::deterministic_time as dt;
 use crate::{
     crypto::blake3,
     types::{error::DsmError, operations::VerificationType},

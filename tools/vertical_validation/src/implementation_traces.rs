@@ -1276,7 +1276,7 @@ where
 
 fn build_bilateral_trace_manager(
 ) -> Result<(BilateralTransactionManager, SignatureKeyPair, [u8; 32]), String> {
-    dsm::util::deterministic_time::reset_for_tests();
+    dsm::utils::deterministic_time::reset_for_tests();
 
     let local_device_id = [0x21; 32];
     let local_genesis_hash = [0x22; 32];

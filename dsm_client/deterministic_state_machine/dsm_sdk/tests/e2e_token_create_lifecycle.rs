@@ -80,7 +80,7 @@ async fn e2e_token_create_lifecycle() {
     println!("✅ Genesis created");
 
     let smt_root = [0u8; 32];
-    dsm::util::deterministic_time::update_progress_context(smt_root, 0)
+    dsm::utils::deterministic_time::update_progress_context(smt_root, 0)
         .expect("Failed to init progress context");
 
     let config = SdkConfig {

@@ -33,3 +33,21 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 ## [Unreleased]
 
 _Changes on `master` not yet tagged._
+
+### Added
+- `dsm-gen` generator and validation workflow improvements for protocol assets and developer tooling
+- Expanded machine-checked proof coverage with an additional Lean 4 crypto-binding module alongside the existing TLAPS/Lean verification harness
+- Additional SPHINCS+/BLAKE3 audit coverage via property tests for deterministic signing and cross-domain digest retarget rejection
+
+### Changed
+- dBTC withdrawal execution paths were restructured around persisted plans, in-flight settlement tracking, and clearer sweep/full-exit recovery behavior
+- Math-owned HTLC claim/sweep signing is now derived inside the Bitcoin tx builder API, removing route-level raw-key wiring and hardening sweep authority against regression
+- Core deterministic-time helpers were consolidated under `src/utils/`, removing the parallel `src/util/` module layout
+- Core verification code now keeps invariant/runtime types in production while moving `proptest`-driven generators and runners to test-only builds
+
+### Fixed
+- Successor-vault publication and withdrawal metadata persistence were tightened around sweep execution and settlement follow-up
+
+### Security
+- Reduced the dependency surface of the `dsm` core crate by removing unused certificate-generation, host/network-discovery, async utility, and wall-clock crates from normal builds
+- Incorporated follow-up dBTC audit hardening for vault sweep authority and custom BLAKE3/SPHINCS+ verification coverage
