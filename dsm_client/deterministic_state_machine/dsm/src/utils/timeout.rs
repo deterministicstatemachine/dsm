@@ -43,7 +43,7 @@ pub fn get_device_calibration() -> &'static DeviceCalibration {
 /// Run device performance calibration (call during app initialization)
 /// Returns the calibration data that was stored globally
 pub async fn calibrate_device_performance() -> Result<&'static DeviceCalibration, String> {
-    use crate::util::deterministic_time as dt;
+    use crate::utils::deterministic_time as dt;
 
     // Adaptive calibration:
     // Run work in batches until we have a statistically significant duration (in ticks).

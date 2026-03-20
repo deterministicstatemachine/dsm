@@ -6,7 +6,8 @@ use dsm_sdk::sdk::tls_transport_sdk::{TlsConfig, TlsTransportSDK};
 // rcgen API is kept minimal here to avoid depending on private fields.
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio_rustls::rustls::{Certificate, PrivateKey, ServerConfig};
+use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::TlsAcceptor;
 
 fn cert_pin(cert_der: &[u8]) -> Vec<u8> {
@@ -24,11 +25,10 @@ async fn spawn_tls_echo_server() -> (SocketAddr, Vec<u8>, Vec<u8>, Vec<u8>) {
     let pin = cert_pin(&cert_der);
 
     let cfg = ServerConfig::builder()
-        .with_safe_defaults()
         .with_no_client_auth()
         .with_single_cert(
-            vec![Certificate(cert_der.clone())],
-            PrivateKey(key_der.clone()),
+            vec![CertificateDer::from(cert_der.clone())],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_der.clone())),
         )
         .unwrap();
 

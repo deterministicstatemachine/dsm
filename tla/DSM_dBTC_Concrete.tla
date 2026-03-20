@@ -13,15 +13,16 @@ EXTENDS Naturals, FiniteSets, TLAPS
   - Devices hold per-device spendable dBTC balances.
   - Vaults are Bitcoin HTLCs with a lifecycle:
       Funding -> Live -> InRedemption -> Spent
+      PendingAdmission -> Live
       Live -> Expired  (CLTV timeout)
-  - Withdrawals track the commit/settle/refund lifecycle:
-      InFlight -> Settled | Refunded
+  - Withdrawals track the commit/finalize/refund lifecycle:
+      Committed -> Finalized | Refunded
 
   Refinement mapping to DSM_dBTC_Abstract:
   - spendable   = sum of all device balances
-  - inflight    = sum of InFlight withdrawal amounts
-  - gridBacking = sum of vault amounts where status in {Live, InRedemption}
-  - settled     = count of Settled withdrawals
+  - inflight    = sum of Committed withdrawal amounts
+  - gridBacking = sum of vault amounts where status in {Live, PendingAdmission, InRedemption}
+  - finalized   = count of Finalized withdrawals
 
   Scope note:
   - These aggregate views remain as refinement vocabulary for the abstract dBTC
@@ -38,8 +39,9 @@ EXTENDS Naturals, FiniteSets, TLAPS
   - Funding vaults are NOT in gridBacking (not yet at d_min depth).
   - InRedemption vaults ARE in gridBacking (UTXO still live during
     the redemption confirmation window).
-  - Fractional exit creates successor vault directly in Live state
-    (both outputs share the same sweep tx, confirm together).
+  - Fractional exit creates a successor vault in PendingAdmission first.
+    It contributes backing immediately, but is not in the live routing set
+    until an explicit AdmitSuccessor step after burial is checked.
   - VaultExpire requires creator to hold sufficient balance (burns dBTC).
 
   dBTC spec references:
@@ -58,6 +60,7 @@ EXTENDS Naturals, FiniteSets, TLAPS
 
 CONSTANTS
   DeviceIds,       \* Finite set of device identifiers
+  PolicyIds,       \* Finite set of policy-class identifiers
   VaultIds,        \* Finite set of vault identifiers
   WithdrawalIds,   \* Finite set of withdrawal identifiers (rho)
   MaxSupply,       \* Maximum dBTC supply in satoshis
@@ -67,24 +70,26 @@ CONSTANTS
 
 ASSUME ConcreteConstants ==
   /\ IsFiniteSet(DeviceIds)
+  /\ IsFiniteSet(PolicyIds)
   /\ IsFiniteSet(VaultIds)
   /\ IsFiniteSet(WithdrawalIds)
   /\ DeviceIds /= {}
+  /\ PolicyIds /= {}
   /\ MaxSupply \in Nat /\ MaxSupply > 0
   /\ DMin \in Nat /\ DMin > 0
   /\ MaxStep \in Nat
 
 \* Vault status values
-VaultStatus == {"Funding", "Live", "InRedemption", "Spent", "Expired"}
+VaultStatus == {"Funding", "PendingAdmission", "Live", "InRedemption", "Spent", "Expired"}
 
 \* Grid-contributing statuses (UTXO is live on Bitcoin)
-GridStatus == {"Live", "InRedemption"}
+GridStatus == {"PendingAdmission", "Live", "InRedemption"}
 
 \* Withdrawal status values
-WdStatus == {"InFlight", "Settled", "Refunded"}
+WdStatus == {"Committed", "Finalized", "Refunded"}
 
 \* Terminal withdrawal statuses (never revert)
-TerminalWdStatus == {"Settled", "Refunded"}
+TerminalWdStatus == {"Finalized", "Refunded"}
 
 \* ========================================================================
 \* VARIABLES
@@ -94,7 +99,7 @@ VARIABLES
   balance,       \* [DeviceIds -> Nat] per-device spendable dBTC
   vault,         \* [VaultIds -> VaultRecord | NULL]
   withdrawal,    \* [WithdrawalIds -> WdRecord | NULL]
-  settled,       \* Nat: monotone count of settled withdrawals
+  settled,       \* Nat: monotone count of finalized withdrawals
   step           \* Nat: logical transition counter
 
 vars == <<balance, vault, withdrawal, settled, step>>
@@ -138,9 +143,9 @@ CountWd(S, st) ==
 \* ========================================================================
 
 Abs_spendable   == SumBal(DeviceIds)
-Abs_inflight    == SumWdAmounts(WithdrawalIds, "InFlight")
+Abs_inflight    == SumWdAmounts(WithdrawalIds, "Committed")
 Abs_gridBacking == SumVaultAmounts(VaultIds, GridStatus)
-Abs_settled     == CountWd(WithdrawalIds, "Settled")
+Abs_finalizedCount == CountWd(WithdrawalIds, "Finalized")
 
 \* Pending supply from Funding vaults (not yet in gridBacking, will mint on confirmation)
 PendingFunding == SumVaultAmounts(VaultIds, {"Funding"})
@@ -153,7 +158,7 @@ A == INSTANCE DSM_dBTC_Abstract
   WITH spendable   <- Abs_spendable,
        inflight    <- Abs_inflight,
        gridBacking <- Abs_gridBacking,
-       settled     <- Abs_settled,
+       finalizedCount <- Abs_finalizedCount,
        step        <- step
 
 \* ========================================================================
@@ -168,12 +173,14 @@ TypeOK ==
         /\ vault[vid].amount \in 1..MaxSupply
         /\ vault[vid].depth \in Nat
         /\ vault[vid].creator \in DeviceIds
+        /\ vault[vid].policy \in PolicyIds
         /\ vault[vid].boundTo \in WithdrawalIds \cup {NULL})
   /\ \A wid \in WithdrawalIds :
        withdrawal[wid] = NULL \/
        (/\ withdrawal[wid].status \in WdStatus
         /\ withdrawal[wid].amount \in 1..MaxSupply
         /\ withdrawal[wid].device \in DeviceIds
+        /\ withdrawal[wid].policy \in PolicyIds
         /\ withdrawal[wid].vaultId \in VaultIds \cup {NULL})
   /\ settled \in Nat
   /\ step \in Nat
@@ -192,14 +199,14 @@ ConservationInvariant == Abs_spendable + Abs_inflight = Abs_gridBacking
 \* Bounded supply (21M * 10^8 satoshis)
 BoundedSupply == Abs_spendable + Abs_inflight <= MaxSupply
 
-\* Each vault bound to at most one active (InFlight) withdrawal
+\* Each vault bound to at most one active (Committed) withdrawal
 NoDoubleSelect ==
   \A vid \in VaultIds :
     vault[vid] /= NULL /\ vault[vid].status = "InRedemption"
     => \A w1 \in WithdrawalIds, w2 \in WithdrawalIds :
-         (/\ withdrawal[w1] /= NULL /\ withdrawal[w1].status = "InFlight"
+         (/\ withdrawal[w1] /= NULL /\ withdrawal[w1].status = "Committed"
           /\ withdrawal[w1].vaultId = vid
-          /\ withdrawal[w2] /= NULL /\ withdrawal[w2].status = "InFlight"
+          /\ withdrawal[w2] /= NULL /\ withdrawal[w2].status = "Committed"
           /\ withdrawal[w2].vaultId = vid)
          => w1 = w2
 
@@ -215,10 +222,10 @@ FundingVaultsUnbound ==
     vault[vid] /= NULL /\ vault[vid].status = "Funding"
     => vault[vid].boundTo = NULL
 
-\* Settled withdrawals always reference a vault (§14 Invariant 8)
+\* Finalized withdrawals always reference a vault (§14 Invariant 8)
 WithdrawalTerminality ==
   \A wid \in WithdrawalIds :
-    withdrawal[wid] /= NULL /\ withdrawal[wid].status = "Settled"
+    withdrawal[wid] /= NULL /\ withdrawal[wid].status = "Finalized"
     => withdrawal[wid].vaultId /= NULL
 
 \* Every InRedemption vault has a non-NULL boundTo (§6 Definition 7)
@@ -228,13 +235,14 @@ InRedemptionImpliesBound ==
     => vault[vid].boundTo /= NULL
 
 \* Vault-withdrawal binding consistency: if vault points to withdrawal
-\* and the withdrawal is InFlight, then withdrawal points back to vault
+\* and the withdrawal is Committed, then withdrawal points back to vault
 \* (§12 step 5, §14 Definition 14)
 BoundConsistency ==
   \A vid \in VaultIds, wid \in WithdrawalIds :
     vault[vid] /= NULL /\ vault[vid].boundTo = wid
-    /\ withdrawal[wid] /= NULL /\ withdrawal[wid].status = "InFlight"
-    => withdrawal[wid].vaultId = vid
+    /\ withdrawal[wid] /= NULL /\ withdrawal[wid].status = "Committed"
+    => /\ withdrawal[wid].vaultId = vid
+       /\ withdrawal[wid].policy = vault[vid].policy
 
 \* Concrete state satisfies the abstract structural checks still enforced here.
 \* Abstract conservation is intentionally not imported into the active concrete
@@ -266,7 +274,7 @@ Init ==
   Abstract mapping: stutter (Funding vaults not in gridBacking).
   dBTC spec: §4 Definition 5, steps 1-3.
 ------------------------------------------------------------------------*)
-FundVault(vid, d, amount) ==
+FundVault(vid, d, policy, amount) ==
   /\ vault[vid] = NULL
   /\ amount > 0
   /\ Abs_spendable + Abs_inflight + PendingFunding + amount <= MaxSupply
@@ -275,6 +283,7 @@ FundVault(vid, d, amount) ==
         amount  |-> amount,
         depth   |-> 0,
         creator |-> d,
+        policy  |-> policy,
         boundTo |-> NULL]]
   /\ UNCHANGED <<balance, withdrawal, settled>>
   /\ step' = step + 1
@@ -288,7 +297,7 @@ FundVault(vid, d, amount) ==
 ------------------------------------------------------------------------*)
 BitcoinTick(vid) ==
   /\ vault[vid] /= NULL
-  /\ vault[vid].status \in {"Funding", "Live", "InRedemption"}
+  /\ vault[vid].status \in {"Funding", "PendingAdmission", "Live", "InRedemption"}
   /\ LET v == vault[vid]
          newDepth == v.depth + 1
      IN IF v.status = "Funding" /\ newDepth = DMin
@@ -298,6 +307,7 @@ BitcoinTick(vid) ==
                 amount  |-> v.amount,
                 depth   |-> newDepth,
                 creator |-> v.creator,
+                policy  |-> v.policy,
                 boundTo |-> NULL]]
           /\ balance' = [balance EXCEPT ![v.creator] = @ + v.amount]
           /\ UNCHANGED <<withdrawal, settled>>
@@ -307,6 +317,7 @@ BitcoinTick(vid) ==
                 amount  |-> v.amount,
                 depth   |-> newDepth,
                 creator |-> v.creator,
+                policy  |-> v.policy,
                 boundTo |-> v.boundTo]]
           /\ UNCHANGED <<balance, withdrawal, settled>>
   /\ step' = step + 1
@@ -333,22 +344,23 @@ TransferDbtc(sender, receiver, amount) ==
   Abstract mapping: Commit(amount).
   dBTC spec: §9 Definition 10, §13 state machine.
 ------------------------------------------------------------------------*)
-CommitWithdrawal(d, wid, amount) ==
+CommitWithdrawal(d, wid, policy, amount) ==
   /\ amount > 0
   /\ balance[d] >= amount
   /\ withdrawal[wid] = NULL
   /\ balance' = [balance EXCEPT ![d] = @ - amount]
   /\ withdrawal' = [withdrawal EXCEPT ![wid] =
-       [status  |-> "InFlight",
+       [status  |-> "Committed",
         amount  |-> amount,
         device  |-> d,
+        policy  |-> policy,
         vaultId |-> NULL]]
   /\ UNCHANGED <<vault, settled>>
   /\ step' = step + 1
 
 (*------------------------------------------------------------------------
   Action 5: SelectVault
-  Bind an InFlight withdrawal to a Live vault for redemption.
+  Bind a Committed withdrawal to a Live vault for redemption.
   Vault transitions to InRedemption (still counts toward gridBacking).
   Vault amount must cover the withdrawal (§6 Three Facts).
   Abstract mapping: stutter (gridBacking unchanged).
@@ -356,37 +368,40 @@ CommitWithdrawal(d, wid, amount) ==
 ------------------------------------------------------------------------*)
 SelectVault(wid, vid) ==
   /\ withdrawal[wid] /= NULL
-  /\ withdrawal[wid].status = "InFlight"
+  /\ withdrawal[wid].status = "Committed"
   /\ withdrawal[wid].vaultId = NULL
   /\ vault[vid] /= NULL
   /\ vault[vid].status = "Live"
   /\ vault[vid].depth >= DMin
   /\ vault[vid].boundTo = NULL
   /\ vault[vid].amount >= withdrawal[wid].amount
+  /\ vault[vid].policy = withdrawal[wid].policy
   /\ vault' = [vault EXCEPT ![vid] =
        [status  |-> "InRedemption",
         amount  |-> vault[vid].amount,
         depth   |-> vault[vid].depth,
         creator |-> vault[vid].creator,
+        policy  |-> vault[vid].policy,
         boundTo |-> wid]]
   /\ withdrawal' = [withdrawal EXCEPT ![wid] =
        [status  |-> withdrawal[wid].status,
         amount  |-> withdrawal[wid].amount,
         device  |-> withdrawal[wid].device,
+        policy  |-> withdrawal[wid].policy,
         vaultId |-> vid]]
   /\ UNCHANGED <<balance, settled>>
   /\ step' = step + 1
 
 (*------------------------------------------------------------------------
-  Action 6: SettleWithdrawal (full exit)
-  Bitcoin redemption reaches d_min. Vault -> Spent, withdrawal -> Settled.
+  Action 6: FinalizeWithdrawal (full exit)
+  Bitcoin redemption reaches d_min. Vault -> Spent, withdrawal -> Finalized.
   The vault amount exactly matches the withdrawal (full drain).
-  Abstract mapping: Settle(amount).
+  Abstract mapping: Finalize(amount).
   dBTC spec: §14 Definition 14 steps 6-7, Invariant 8.
 ------------------------------------------------------------------------*)
-SettleWithdrawal(wid) ==
+FinalizeWithdrawal(wid) ==
   /\ withdrawal[wid] /= NULL
-  /\ withdrawal[wid].status = "InFlight"
+  /\ withdrawal[wid].status = "Committed"
   /\ withdrawal[wid].vaultId /= NULL
   /\ LET vid == withdrawal[wid].vaultId
          amt == withdrawal[wid].amount
@@ -398,28 +413,31 @@ SettleWithdrawal(wid) ==
               amount  |-> vault[vid].amount,
               depth   |-> vault[vid].depth,
               creator |-> vault[vid].creator,
+              policy  |-> vault[vid].policy,
               boundTo |-> vault[vid].boundTo]]
         /\ withdrawal' = [withdrawal EXCEPT ![wid] =
-             [status  |-> "Settled",
+             [status  |-> "Finalized",
               amount  |-> amt,
               device  |-> withdrawal[wid].device,
+              policy  |-> withdrawal[wid].policy,
               vaultId |-> vid]]
         /\ settled' = settled + 1
   /\ UNCHANGED <<balance>>
   /\ step' = step + 1
 
 (*------------------------------------------------------------------------
-  Action 7: SettleFractional (partial exit)
+  Action 7: FinalizeFractional (partial exit)
   Partial withdrawal: original vault -> Spent, successor vault created
-  in Live state with the remainder. Both outputs share the same sweep tx,
-  so successor is born at the same depth (confirmed together).
+  in PendingAdmission state with the remainder. Both outputs share the same
+  sweep tx, so successor is born at the same depth, but only enters the live
+  routing set after explicit admission.
   Net gridBacking change = -(original) + (remainder) = -(exitAmt).
-  Abstract mapping: Settle(exitAmt).
+  Abstract mapping: Finalize(exitAmt).
   dBTC spec: §16 Definition 16, Invariant 10, Property 10.
 ------------------------------------------------------------------------*)
-SettleFractional(wid, successorVid) ==
+FinalizeFractional(wid, successorVid) ==
   /\ withdrawal[wid] /= NULL
-  /\ withdrawal[wid].status = "InFlight"
+  /\ withdrawal[wid].status = "Committed"
   /\ withdrawal[wid].vaultId /= NULL
   /\ successorVid /= withdrawal[wid].vaultId
   /\ vault[successorVid] = NULL  \* successor slot is free
@@ -436,24 +454,46 @@ SettleFractional(wid, successorVid) ==
                    amount  |-> v.amount,
                    depth   |-> v.depth,
                    creator |-> v.creator,
+                   policy  |-> v.policy,
                    boundTo |-> v.boundTo],
                 ![successorVid] =
-                  [status  |-> "Live",
+                  [status  |-> "PendingAdmission",
                    amount  |-> remainder,
                    depth   |-> v.depth,  \* same tx, same depth
                    creator |-> v.creator,
+                   policy  |-> v.policy,
                    boundTo |-> NULL]]
         /\ withdrawal' = [withdrawal EXCEPT ![wid] =
-             [status  |-> "Settled",
+             [status  |-> "Finalized",
               amount  |-> exitAmt,
               device  |-> withdrawal[wid].device,
+              policy  |-> withdrawal[wid].policy,
               vaultId |-> vid]]
         /\ settled' = settled + 1
   /\ UNCHANGED <<balance>>
   /\ step' = step + 1
 
 (*------------------------------------------------------------------------
-  Action 8: FailWithdrawal
+  Action 8: AdmitSuccessor
+  A buried successor vault becomes routeable after explicit admission.
+  Abstract mapping: stutter (PendingAdmission already contributes backing).
+------------------------------------------------------------------------*)
+AdmitSuccessor(vid) ==
+  /\ vault[vid] /= NULL
+  /\ vault[vid].status = "PendingAdmission"
+  /\ vault[vid].depth >= DMin
+  /\ vault' = [vault EXCEPT ![vid] =
+       [status  |-> "Live",
+        amount  |-> vault[vid].amount,
+        depth   |-> vault[vid].depth,
+        creator |-> vault[vid].creator,
+        policy  |-> vault[vid].policy,
+        boundTo |-> NULL]]
+  /\ UNCHANGED <<balance, withdrawal, settled>>
+  /\ step' = step + 1
+
+(*------------------------------------------------------------------------
+  Action 9: FailWithdrawal
   Bitcoin redemption fails before d_min. Vault returns to Live.
   Automatic inbox refund restores dBTC to withdrawing device.
   Abstract mapping: Refund(amount).
@@ -461,7 +501,7 @@ SettleFractional(wid, successorVid) ==
 ------------------------------------------------------------------------*)
 FailWithdrawal(wid) ==
   /\ withdrawal[wid] /= NULL
-  /\ withdrawal[wid].status = "InFlight"
+  /\ withdrawal[wid].status = "Committed"
   /\ LET amt == withdrawal[wid].amount
          d == withdrawal[wid].device
          vid == withdrawal[wid].vaultId
@@ -470,6 +510,7 @@ FailWithdrawal(wid) ==
              [status  |-> "Refunded",
               amount  |-> amt,
               device  |-> d,
+              policy  |-> withdrawal[wid].policy,
               vaultId |-> vid]]
         /\ IF vid /= NULL /\ vault[vid] /= NULL
               /\ vault[vid].status = "InRedemption"
@@ -478,13 +519,14 @@ FailWithdrawal(wid) ==
                    amount  |-> vault[vid].amount,
                    depth   |-> vault[vid].depth,
                    creator |-> vault[vid].creator,
+                   policy  |-> vault[vid].policy,
                    boundTo |-> NULL]]
            ELSE UNCHANGED vault
   /\ UNCHANGED <<settled>>
   /\ step' = step + 1
 
 (*------------------------------------------------------------------------
-  Action 9: ExpireVault
+  Action 10: ExpireVault
   CLTV timeout on a live vault. The depositor reclaims their BTC.
   The corresponding dBTC must be burned from the creator's balance.
   This is the concrete realization of the abstract VaultExpire precondition.
@@ -505,12 +547,13 @@ ExpireVault(vid) ==
               amount  |-> vault[vid].amount,
               depth   |-> vault[vid].depth,
               creator |-> creator,
+              policy  |-> vault[vid].policy,
               boundTo |-> NULL]]
   /\ UNCHANGED <<withdrawal, settled>>
   /\ step' = step + 1
 
 (*------------------------------------------------------------------------
-  Action 10: NoOp
+  Action 11: NoOp
   Step advance with no state change. Abstract mapping: NoOp.
 ------------------------------------------------------------------------*)
 NoOp ==
@@ -522,20 +565,22 @@ NoOp ==
 \* ========================================================================
 
 Next ==
-  \/ \E vid \in VaultIds, d \in DeviceIds, a \in 1..MaxSupply :
-       FundVault(vid, d, a)
+  \/ \E vid \in VaultIds, d \in DeviceIds, p \in PolicyIds, a \in 1..MaxSupply :
+       FundVault(vid, d, p, a)
   \/ \E vid \in VaultIds :
        BitcoinTick(vid)
   \/ \E s \in DeviceIds, r \in DeviceIds, a \in 1..MaxSupply :
        TransferDbtc(s, r, a)
-  \/ \E d \in DeviceIds, wid \in WithdrawalIds, a \in 1..MaxSupply :
-       CommitWithdrawal(d, wid, a)
+  \/ \E d \in DeviceIds, wid \in WithdrawalIds, p \in PolicyIds, a \in 1..MaxSupply :
+       CommitWithdrawal(d, wid, p, a)
   \/ \E wid \in WithdrawalIds, vid \in VaultIds :
        SelectVault(wid, vid)
   \/ \E wid \in WithdrawalIds :
-       SettleWithdrawal(wid)
+       FinalizeWithdrawal(wid)
   \/ \E wid \in WithdrawalIds, svid \in VaultIds :
-       SettleFractional(wid, svid)
+       FinalizeFractional(wid, svid)
+  \/ \E vid \in VaultIds :
+       AdmitSuccessor(vid)
   \/ \E wid \in WithdrawalIds :
        FailWithdrawal(wid)
   \/ \E vid \in VaultIds :
@@ -550,9 +595,11 @@ Fairness ==
   /\ \A vid \in VaultIds :
        WF_vars(BitcoinTick(vid))
   /\ \A wid \in WithdrawalIds :
-       WF_vars(SettleWithdrawal(wid))
+       WF_vars(FinalizeWithdrawal(wid))
   /\ \A wid \in WithdrawalIds, svid \in VaultIds :
-       WF_vars(SettleFractional(wid, svid))
+       WF_vars(FinalizeFractional(wid, svid))
+  /\ \A vid \in VaultIds :
+       WF_vars(AdmitSuccessor(vid))
   /\ \A wid \in WithdrawalIds :
        WF_vars(FailWithdrawal(wid))
 
@@ -564,10 +611,10 @@ StepBound == step \in 0..MaxStep
 \* LIVENESS PROPERTIES
 \* ========================================================================
 
-\* Every InFlight withdrawal eventually settles or is refunded (§15 Property 9)
+\* Every Committed withdrawal eventually finalizes or is refunded (§15 Property 9)
 WithdrawalResolution ==
   \A wid \in WithdrawalIds :
-    [](withdrawal[wid] /= NULL /\ withdrawal[wid].status = "InFlight"
+    [](withdrawal[wid] /= NULL /\ withdrawal[wid].status = "Committed"
        => <>(withdrawal[wid] = NULL
              \/ withdrawal[wid].status \in TerminalWdStatus))
 
@@ -578,7 +625,7 @@ FundingReachesDMin ==
        => <>(vault[vid] = NULL \/ vault[vid].status /= "Funding"))
 
 \* Settlement count is monotone
-SettledNeverDecreasesConcrete == [][settled <= settled']_vars
+FinalizedNeverDecreasesConcrete == [][settled <= settled']_vars
 
 \* Once a vault reaches Spent or Expired, it never returns to any active status
 \* (content-addressed immutability, §3 Invariant 1)
@@ -587,12 +634,12 @@ SpentVaultsIrreversible ==
     [][vault[vid] /= NULL /\ vault[vid].status \in {"Spent", "Expired"}
        => vault'[vid] /= NULL /\ vault'[vid].status \in {"Spent", "Expired"}]_vars
 
-\* Once a withdrawal reaches Settled or Refunded, it never changes status
+\* Once a withdrawal reaches Finalized or Refunded, it never changes status
 \* (§14 Invariant 7)
 WithdrawalIrreversible ==
   \A wid \in WithdrawalIds :
-    [][withdrawal[wid] /= NULL /\ withdrawal[wid].status \in {"Settled", "Refunded"}
-       => withdrawal'[wid] /= NULL /\ withdrawal'[wid].status \in {"Settled", "Refunded"}]_vars
+    [][withdrawal[wid] /= NULL /\ withdrawal[wid].status \in {"Finalized", "Refunded"}
+       => withdrawal'[wid] /= NULL /\ withdrawal'[wid].status \in {"Finalized", "Refunded"}]_vars
 
 \* A vault's amount field never changes after creation (content-addressed, §3 Invariant 1)
 VaultAmountImmutable ==
@@ -623,8 +670,8 @@ THEOREM ConcreteInit == Init => TypeOK /\ ConservationInvariant /\ BoundedSupply
 
 THEOREM FundVaultPreservesConservation ==
   ASSUME TypeOK, ConservationInvariant,
-         NEW vid \in VaultIds, NEW d \in DeviceIds, NEW a \in 1..MaxSupply,
-         FundVault(vid, d, a)
+         NEW vid \in VaultIds, NEW d \in DeviceIds, NEW p \in PolicyIds, NEW a \in 1..MaxSupply,
+         FundVault(vid, d, p, a)
   PROVE ConservationInvariant'
   \* Depends on recursive SumVaultAmounts: Funding status not in GridStatus, so
   \* gridBacking unchanged; balance unchanged so spendable unchanged; inflight unchanged.
@@ -658,11 +705,11 @@ THEOREM TransferPreservesConservation ==
 
 THEOREM CommitPreservesConservation ==
   ASSUME TypeOK, ConservationInvariant,
-         NEW d \in DeviceIds, NEW wid \in WithdrawalIds, NEW a \in 1..MaxSupply,
-         CommitWithdrawal(d, wid, a)
+         NEW d \in DeviceIds, NEW wid \in WithdrawalIds, NEW p \in PolicyIds, NEW a \in 1..MaxSupply,
+         CommitWithdrawal(d, wid, p, a)
   PROVE ConservationInvariant'
   \* Depends on recursive SumBal/SumWdAmounts: spendable -= a (balance deducted),
-  \* inflight += a (new InFlight withdrawal). Sum preserved. gridBacking unchanged.
+  \* inflight += a (new Committed withdrawal). Sum preserved. gridBacking unchanged.
   \* TLAPS cannot unfold RECURSIVE operators over finite sets (no FiniteSetTheorems).
   \* Lean4-verified in DSM_dBTC_Conservation.lean (theorem commit_preserves).
   \* TLC-verified on all bounded configs.
@@ -680,27 +727,27 @@ THEOREM SelectVaultPreservesConservation ==
   \* TLC-verified on all bounded configs.
   OMITTED
 
-THEOREM SettlePreservesConservation ==
+THEOREM FinalizePreservesConservation ==
   ASSUME TypeOK, ConservationInvariant,
-         NEW wid \in WithdrawalIds, SettleWithdrawal(wid)
+         NEW wid \in WithdrawalIds, FinalizeWithdrawal(wid)
   PROVE ConservationInvariant'
   \* Depends on recursive SumVaultAmounts/SumWdAmounts: vault goes InRedemption->Spent
-  \* (gridBacking -= amt), withdrawal goes InFlight->Settled (inflight -= amt).
+  \* (gridBacking -= amt), withdrawal goes Committed->Finalized (inflight -= amt).
   \* vault.amount = withdrawal.amount (full exit), so both sides drop by same amount.
   \* TLAPS cannot unfold RECURSIVE operators over finite sets (no FiniteSetTheorems).
   \* Lean4-verified in DSM_dBTC_Conservation.lean (theorem settle_preserves).
   \* TLC-verified on all bounded configs.
   OMITTED
 
-THEOREM SettleFractionalPreservesConservation ==
+THEOREM FinalizeFractionalPreservesConservation ==
   ASSUME TypeOK, ConservationInvariant,
          NEW wid \in WithdrawalIds, NEW svid \in VaultIds,
-         SettleFractional(wid, svid)
+         FinalizeFractional(wid, svid)
   PROVE ConservationInvariant'
   \* Depends on recursive SumVaultAmounts/SumWdAmounts: original vault (InRedemption->Spent)
-  \* removes vault.amount from gridBacking; successor vault (Live, remainder) adds remainder.
+  \* removes vault.amount from gridBacking; successor vault (PendingAdmission, remainder) adds remainder.
   \* Net gridBacking change = -(vault.amount) + remainder = -(exitAmt).
-  \* Withdrawal InFlight->Settled removes exitAmt from inflight. Both sides drop by exitAmt.
+  \* Withdrawal Committed->Finalized removes exitAmt from inflight. Both sides drop by exitAmt.
   \* TLAPS cannot unfold RECURSIVE operators over finite sets (no FiniteSetTheorems).
   \* Lean4-verified in DSM_dBTC_Conservation.lean (theorem settle_fractional_preserves).
   \* TLC-verified on all bounded configs.
@@ -711,7 +758,7 @@ THEOREM FailPreservesConservation ==
          NEW wid \in WithdrawalIds, FailWithdrawal(wid)
   PROVE ConservationInvariant'
   \* Depends on recursive SumBal/SumWdAmounts/SumVaultAmounts: balance += amt (spendable += a),
-  \* withdrawal InFlight->Refunded (inflight -= a). If vault was InRedemption, it returns to Live
+  \* withdrawal Committed->Refunded (inflight -= a). If vault was InRedemption, it returns to Live
   \* (both in GridStatus, gridBacking unchanged). Sum preserved.
   \* TLAPS cannot unfold RECURSIVE operators over finite sets (no FiniteSetTheorems).
   \* Lean4-verified in DSM_dBTC_Conservation.lean (theorem fail_preserves).
@@ -769,7 +816,7 @@ THEOREM ConcreteInitRefinesAbstract == Init => A!AbstractSafety
 
 THEOREM ConcreteStepRefinesAbstract ==
   ASSUME TypeOK, ConservationInvariant, [Next]_vars
-  PROVE [A!Next]_(<<Abs_spendable, Abs_inflight, Abs_gridBacking, Abs_settled, step>>)
+  PROVE [A!Next]_(<<Abs_spendable, Abs_inflight, Abs_gridBacking, Abs_finalizedCount, step>>)
   \* Per-action case analysis: each concrete action maps to an abstract action or stutter.
   \* Depends on recursive SumBal/SumVaultAmounts/SumWdAmounts to show that concrete
   \* aggregate changes match abstract action preconditions and effects.
@@ -782,7 +829,7 @@ THEOREM ConcreteRefinesAbstractSpec == Spec => A!Spec
 <1>1. Init => A!AbstractSafety
   BY ConcreteInitRefinesAbstract
 <1>2. TypeOK /\ ConservationInvariant /\ [Next]_vars
-      => [A!Next]_(<<Abs_spendable, Abs_inflight, Abs_gridBacking, Abs_settled, step>>)
+      => [A!Next]_(<<Abs_spendable, Abs_inflight, Abs_gridBacking, Abs_finalizedCount, step>>)
   BY ConcreteStepRefinesAbstract
 <1> QED
   \* PTL composition of <1>1 and <1>2 with fairness correspondence.

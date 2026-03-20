@@ -38,6 +38,12 @@ pub fn ensure_recovery_tables() -> Result<()> {
             synced      INTEGER NOT NULL DEFAULT 0,
             sync_tick   INTEGER
         );
+
+        CREATE TABLE IF NOT EXISTS recovered_chain_tips(
+            device_id   BLOB NOT NULL PRIMARY KEY,
+            height      INTEGER NOT NULL,
+            head_hash   BLOB NOT NULL
+        );
         "#,
     )?;
 
@@ -138,26 +144,43 @@ pub fn get_latest_capsule_metadata() -> Result<Option<CapsuleMetadata>> {
 
     match result {
         Some(mut meta) => {
-            // Use recovery_sync_status count as counterparty count if available,
-            // otherwise fall back to the contacts table.
-            let count: i64 = conn
-                .query_row("SELECT COUNT(*) FROM recovery_sync_status", [], |row| {
+            let stored_count: Option<Vec<u8>> = conn
+                .query_row(
+                    "SELECT value FROM recovery_prefs WHERE key = 'latest_capsule_counterparty_count'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()
+                .unwrap_or(None);
+
+            if let Some(bytes) = stored_count {
+                if bytes.len() == 8 {
+                    if let Ok(arr) = <[u8; 8]>::try_from(bytes.as_slice()) {
+                        meta.counterparty_count = u64::from_le_bytes(arr);
+                        return Ok(Some(meta));
+                    }
+                }
+            }
+
+            // Fall back to staged recovered tips if present, then verified contacts.
+            let staged_count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM recovered_chain_tips", [], |row| {
                     row.get(0)
                 })
                 .unwrap_or(0);
-            if count > 0 {
-                meta.counterparty_count = count as u64;
-            } else {
-                // Fall back to bilateral contacts count
-                let contacts: i64 = conn
-                    .query_row(
-                        "SELECT COUNT(*) FROM contacts WHERE verified = 1",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .unwrap_or(0);
-                meta.counterparty_count = contacts as u64;
+            if staged_count > 0 {
+                meta.counterparty_count = staged_count as u64;
+                return Ok(Some(meta));
             }
+
+            let contacts: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM contacts WHERE verified = 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+            meta.counterparty_count = contacts as u64;
             Ok(Some(meta))
         }
         None => Ok(None),
@@ -256,6 +279,11 @@ pub fn set_nfc_backup_configured(configured: bool) -> Result<()> {
         "nfc_backup_configured",
         &[if configured { 1u8 } else { 0u8 }],
     )
+}
+
+/// Store the exact counterparty count for the latest capsule preview.
+pub fn set_latest_capsule_counterparty_count(count: u64) -> Result<()> {
+    set_recovery_pref("latest_capsule_counterparty_count", &count.to_le_bytes())
 }
 
 /// Delete all capsules except the latest N (cleanup).
@@ -421,6 +449,104 @@ pub fn clear_recovery_sync_status() -> Result<()> {
     Ok(())
 }
 
+/// Staged recovered chain tip used for crash-safe tombstone/resume recovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveredChainTip {
+    pub device_id: [u8; 32],
+    pub height: u64,
+    pub head_hash: [u8; 32],
+}
+
+/// Replace the staged recovered chain tips with the newly imported capsule tips.
+pub fn store_recovered_chain_tips(tips: &[RecoveredChainTip]) -> Result<()> {
+    ensure_recovery_tables()?;
+    let binding = get_connection()?;
+    let mut conn = binding
+        .lock()
+        .map_err(|_| anyhow!("Database lock poisoned"))?;
+
+    let tx = conn.transaction()?;
+    tx.execute("DELETE FROM recovered_chain_tips", [])?;
+
+    if !tips.is_empty() {
+        let mut stmt = tx.prepare(
+            "INSERT INTO recovered_chain_tips(device_id, height, head_hash) VALUES (?1, ?2, ?3)",
+        )?;
+        for tip in tips {
+            stmt.execute(params![
+                tip.device_id.as_slice(),
+                tip.height as i64,
+                tip.head_hash.as_slice()
+            ])?;
+        }
+    }
+
+    tx.commit()?;
+    Ok(())
+}
+
+/// Return all staged recovered chain tips from the most recently imported capsule.
+pub fn get_recovered_chain_tips() -> Result<Vec<RecoveredChainTip>> {
+    ensure_recovery_tables()?;
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|_| anyhow!("Database lock poisoned"))?;
+
+    let mut stmt = conn.prepare(
+        "SELECT device_id, height, head_hash FROM recovered_chain_tips ORDER BY device_id ASC",
+    )?;
+
+    let rows = stmt.query_map([], |row| {
+        let device_id: Vec<u8> = row.get(0)?;
+        let height: i64 = row.get(1)?;
+        let head_hash: Vec<u8> = row.get(2)?;
+        Ok((device_id, height, head_hash))
+    })?;
+
+    let mut tips = Vec::new();
+    for row in rows {
+        let (device_id, height, head_hash) = row?;
+        if device_id.len() != 32 {
+            return Err(anyhow!(
+                "recovered_chain_tips.device_id must be 32 bytes, got {}",
+                device_id.len()
+            ));
+        }
+        if head_hash.len() != 32 {
+            return Err(anyhow!(
+                "recovered_chain_tips.head_hash must be 32 bytes, got {}",
+                head_hash.len()
+            ));
+        }
+
+        let mut device_id_arr = [0u8; 32];
+        device_id_arr.copy_from_slice(&device_id);
+        let mut head_hash_arr = [0u8; 32];
+        head_hash_arr.copy_from_slice(&head_hash);
+
+        tips.push(RecoveredChainTip {
+            device_id: device_id_arr,
+            height: height as u64,
+            head_hash: head_hash_arr,
+        });
+    }
+
+    Ok(tips)
+}
+
+/// Clear all staged recovered chain tips.
+pub fn clear_recovered_chain_tips() -> Result<()> {
+    ensure_recovery_tables()?;
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|_| anyhow!("Database lock poisoned"))?;
+
+    conn.execute("DELETE FROM recovered_chain_tips", [])?;
+    Ok(())
+}
+
 // ============================================================================
 // Tombstone Persistence — store receipts and track tombstoned devices
 // ============================================================================
@@ -547,16 +673,23 @@ pub fn is_device_tombstoned(device_id: &[u8; 32]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     fn setup_test_db() {
         // Use in-memory DB for tests
         std::env::set_var("DSM_SDK_TEST_MODE", "1");
         crate::storage::client_db::reset_database_for_tests();
-        crate::storage::client_db::init_database().expect("init db");
+        if let Err(e) = crate::storage::client_db::init_database() {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column name: device_tree_root") {
+                panic!("init db: {e}");
+            }
+        }
         ensure_recovery_tables().expect("ensure recovery tables");
     }
 
     #[test]
+    #[serial]
     fn test_store_and_retrieve_capsule() {
         setup_test_db();
         let smt_root = [42u8; 32];
@@ -572,6 +705,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_capsule_count_and_max_index() {
         setup_test_db();
         let smt_root = [42u8; 32];
@@ -587,6 +721,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_recovery_prefs() {
         setup_test_db();
 
@@ -602,5 +737,31 @@ mod tests {
         set_nfc_backup_enabled(false).expect("set disabled");
         assert!(!is_nfc_backup_enabled());
         assert!(is_nfc_backup_configured()); // configured stays true
+    }
+
+    #[test]
+    #[serial]
+    fn test_store_and_clear_recovered_chain_tips() {
+        setup_test_db();
+
+        let tips = vec![
+            RecoveredChainTip {
+                device_id: [1u8; 32],
+                height: 7,
+                head_hash: [2u8; 32],
+            },
+            RecoveredChainTip {
+                device_id: [3u8; 32],
+                height: 9,
+                head_hash: [4u8; 32],
+            },
+        ];
+
+        store_recovered_chain_tips(&tips).expect("store tips");
+        let stored = get_recovered_chain_tips().expect("read tips");
+        assert_eq!(stored, tips);
+
+        clear_recovered_chain_tips().expect("clear tips");
+        assert!(get_recovered_chain_tips().expect("read cleared").is_empty());
     }
 }

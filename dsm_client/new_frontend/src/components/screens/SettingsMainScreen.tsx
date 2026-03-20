@@ -428,6 +428,14 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
               POLICY TOOLS
             </button>
 
+            <button
+              type="button"
+              className="settings-shell__button"
+              style={{ fontSize: '9px' }}
+              onClick={() => onNavigate?.('dev_detfi_launch')}
+            >
+              DETFI LAUNCH
+            </button>
 
           </div>
         </section>

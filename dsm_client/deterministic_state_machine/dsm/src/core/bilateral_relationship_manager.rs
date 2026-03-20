@@ -1,7 +1,7 @@
 //! Bilateral Relationship Manager - Contact Establishment and Genesis Anchoring (STRICT, no wall-clock)
 //!
 //! - No wall-clock APIs anywhere. All time references use deterministic, global ticks (u64)
-//!   from `util::deterministic_time::peek()`.
+//!   from `utils::deterministic_time::peek()`.
 //! - No placeholders or alternate paths: signature verification is enforced; state wiring is strict.
 //! - Bytes-only boundaries; no hex/base64 in state or logs.
 
@@ -17,7 +17,7 @@ use crate::crypto::signatures::SignatureKeyPair;
 use crate::types::contact_types::DsmVerifiedContact;
 use crate::types::error::DsmError;
 
-use crate::util::deterministic_time; // global deterministic tick source
+use crate::utils::deterministic_time; // global deterministic tick source
 
 #[inline]
 fn now_commit_height() -> u64 {
@@ -694,7 +694,7 @@ mod tests {
     #[tokio::test]
     async fn test_contact_establishment_request_creation_no_wallclock() {
         // Initialize progress context for test
-        crate::util::deterministic_time::reset_for_tests();
+        crate::utils::deterministic_time::reset_for_tests();
 
         // Generate proper cryptographic keypair based on test device/genesis identity
         let device_id = [1u8; 32];
@@ -723,7 +723,7 @@ mod tests {
     #[tokio::test]
     async fn test_contact_establishment_response_creation() {
         // Initialize progress context for test
-        crate::util::deterministic_time::reset_for_tests();
+        crate::utils::deterministic_time::reset_for_tests();
 
         // Generate proper cryptographic keypairs based on test identities
         let device1 = [1u8; 32];

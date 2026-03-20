@@ -2,7 +2,7 @@
 //! ERA Token Faucet
 //!
 //! Provides test tokens on testnet with deterministic cooldown + optional deterministic gating.
-//! - No wall-clock time: uses `util::deterministic_time` tick counter only.
+//! - No wall-clock time: uses `utils::deterministic_time` tick counter only.
 //! - No network IO.
 //! - No hex/base64/JSON/serde in core.
 //!
@@ -16,7 +16,7 @@ use std::collections::{HashMap, VecDeque};
 
 use crate::types::error::DsmError;
 use crate::types::policy_types::{PolicyCondition, TokenPolicy};
-use crate::util::deterministic_time as dt;
+use crate::utils::deterministic_time as dt;
 
 use super::era_token::{EraTokenManager, NetworkType};
 
@@ -333,7 +333,7 @@ mod tests {
     #[serial]
     fn test_faucet_cooldown_blocks_immediate_reclaim() {
         // Initialize progress context for test
-        crate::util::deterministic_time::reset_for_tests();
+        crate::utils::deterministic_time::reset_for_tests();
 
         let mut faucet = EraFaucet::new(FaucetConfig {
             claim_amount: 1000,
@@ -358,7 +358,7 @@ mod tests {
 
         // Advance commit height deterministically
         for i in 0..20 {
-            crate::util::deterministic_time::update_progress_context([0x42u8; 32], 1 + i as u64)
+            crate::utils::deterministic_time::update_progress_context([0x42u8; 32], 1 + i as u64)
                 .unwrap();
         }
 
@@ -433,7 +433,7 @@ mod tests {
     #[serial]
     fn test_rate_limit_window() {
         // Initialize progress context for test
-        crate::util::deterministic_time::reset_for_tests();
+        crate::utils::deterministic_time::reset_for_tests();
 
         let mut faucet = EraFaucet::new(FaucetConfig {
             claim_amount: 1000,
@@ -460,7 +460,7 @@ mod tests {
 
         // Advance ticks beyond window, then allow again
         for i in 0..10 {
-            crate::util::deterministic_time::update_progress_context([0x42u8; 32], 1 + i as u64)
+            crate::utils::deterministic_time::update_progress_context([0x42u8; 32], 1 + i as u64)
                 .unwrap();
         }
         assert!(faucet

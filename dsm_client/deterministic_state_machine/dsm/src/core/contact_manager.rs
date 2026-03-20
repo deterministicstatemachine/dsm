@@ -3,7 +3,7 @@
 //! DSM Contact Manager - Production Implementation (STRICT, bytes-only, no wall-clock)
 //!
 //! Invariants:
-//! - No wall-clock APIs anywhere. Use deterministic, system-wide ticks from util::deterministic_time.
+//! - No wall-clock APIs anywhere. Use deterministic, system-wide ticks from utils::deterministic_time.
 //! - No JSON/GSON at any boundary. No hex/base64 in data structures or logs; bytes-only.
 //! - Mandatory online genesis verification is enforced by the SDK layer; core only exposes bytes APIs.
 //! - Chain tip tracking is bytes-based with deterministic SMT proofs.
@@ -19,7 +19,7 @@ use crate::core::utility::labeling;
 use crate::types::contact_types::{ChainTipSmtProof, DsmVerifiedContact};
 use crate::types::error::DsmError;
 use crate::types::identifiers::NodeId;
-use crate::util::deterministic_time;
+use crate::utils::deterministic_time;
 
 // -------------------- Deterministic ticks (strictly monotone, clockless) --------------------
 // We use the global deterministic tick source for "now". For strictly increasing per-event

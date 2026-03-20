@@ -2483,6 +2483,8 @@ impl AppRouter for AppRouterImpl {
             "token.create" | "tokens.publishPolicy" => self.handle_token_invoke(i).await,
             // DLV
             m if m.starts_with("dlv.") => self.handle_dlv_invoke(i).await,
+            // DeTFi
+            m if m.starts_with("detfi.") => self.handle_detfi_invoke(i).await,
             // BLE
             "ble.command" => self.handle_ble_invoke(i).await,
             // Bilateral reconcile

@@ -10,7 +10,7 @@
 use crate::crypto::blake3::dsm_domain_hasher;
 use crate::crypto::sphincs::{sphincs_sign, sphincs_verify};
 use crate::types::error::DsmError;
-use crate::util::deterministic_time as dt;
+use crate::utils::deterministic_time as dt;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static TOMBSTONE_SYSTEM_INITIALIZED: AtomicBool = AtomicBool::new(false);

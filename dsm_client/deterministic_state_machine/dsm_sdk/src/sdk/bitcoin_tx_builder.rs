@@ -39,6 +39,21 @@ pub const ESTIMATED_CLAIM_VSIZE: u64 = 210;
 /// Estimated virtual size for a 2-output claim (sweep + change to successor HTLC).
 pub const ESTIMATED_SWEEP_VSIZE: u64 = 260;
 
+/// Signing authority for spending an HTLC claim path.
+///
+/// `MathOwned` vaults derive the spend key deterministically from the revealed
+/// preimage plus the vault's hash lock, so the builder computes that key
+/// internally instead of depending on the caller to hand in raw secret material.
+pub enum HtlcSpendSigner<'a> {
+    /// Sign with a wallet-managed Bitcoin key.
+    Wallet {
+        key_store: &'a BitcoinKeyStore,
+        signing_index: u32,
+    },
+    /// Derive the math-owned claim key from `preimage || hash_lock`.
+    MathOwned { hash_lock: &'a [u8; 32] },
+}
+
 /// Parameters for building an HTLC claim transaction.
 pub struct ClaimTxParams<'a> {
     /// Transaction ID containing the HTLC output
@@ -55,15 +70,10 @@ pub struct ClaimTxParams<'a> {
     pub amount_sats: u64,
     /// Fee rate in sat/vbyte
     pub fee_rate_sat_vb: u64,
-    /// Key store for signing (used when `claim_privkey` is None)
-    pub key_store: &'a BitcoinKeyStore,
-    /// Address index to use for signing
-    pub signing_index: u32,
+    /// Signing authority for the claim path.
+    pub signer: HtlcSpendSigner<'a>,
     /// Expected Bitcoin network — used to validate the destination address
     pub network: bitcoin::Network,
-    /// Math-owned claim private key (derived via `derive_claim_keypair`).
-    /// When `Some`, signs directly with this key instead of using `key_store`.
-    pub claim_privkey: Option<&'a [u8; 32]>,
 }
 
 /// Build a claim transaction that spends an HTLC output by revealing the preimage.
@@ -131,14 +141,7 @@ pub fn build_htlc_claim_tx(params: &ClaimTxParams<'_>) -> Result<Transaction, Ds
         Amount::from_sat(params.amount_sats),
     )?;
 
-    // Sign — prefer math-owned claim privkey when available
-    let sig_der = if let Some(privkey) = params.claim_privkey {
-        sign_with_raw_privkey(privkey, &sighash)?
-    } else {
-        params
-            .key_store
-            .sign_hash(0, params.signing_index, &sighash)?
-    };
+    let sig_der = sign_claim_sighash(&params.signer, params.preimage, &sighash)?;
 
     // Build witness: [sig+sighash_type, preimage, TRUE, redeemScript]
     let mut sig_with_hashtype = sig_der;
@@ -175,15 +178,10 @@ pub struct SweepTxParams<'a> {
     pub total_sats: u64,
     /// Fee rate
     pub fee_rate_sat_vb: u64,
-    /// Key store for signing (used when `claim_privkey` is None)
-    pub key_store: &'a BitcoinKeyStore,
-    /// Address index
-    pub signing_index: u32,
+    /// Signing authority for the claim path.
+    pub signer: HtlcSpendSigner<'a>,
     /// Expected Bitcoin network — used to validate the destination address
     pub network: bitcoin::Network,
-    /// Math-owned claim private key (derived via `derive_claim_keypair`).
-    /// When `Some`, signs directly with this key instead of using `key_store`.
-    pub claim_privkey: Option<&'a [u8; 32]>,
 }
 
 /// Build a sweep transaction with change back to a successor HTLC.
@@ -275,14 +273,7 @@ pub fn build_sweep_and_change_tx(params: &SweepTxParams<'_>) -> Result<Transacti
         Amount::from_sat(params.total_sats),
     )?;
 
-    // Sign — prefer math-owned claim privkey when available
-    let sig_der = if let Some(privkey) = params.claim_privkey {
-        sign_with_raw_privkey(privkey, &sighash)?
-    } else {
-        params
-            .key_store
-            .sign_hash(0, params.signing_index, &sighash)?
-    };
+    let sig_der = sign_claim_sighash(&params.signer, params.preimage, &sighash)?;
     let mut sig_with_hashtype = sig_der;
     sig_with_hashtype.push(0x01); // SIGHASH_ALL
 
@@ -661,6 +652,23 @@ fn sign_with_raw_privkey(privkey: &[u8; 32], sighash: &[u8; 32]) -> Result<Vec<u
     Ok(signature.serialize_der().to_vec())
 }
 
+fn sign_claim_sighash(
+    signer: &HtlcSpendSigner<'_>,
+    preimage: &[u8],
+    sighash: &[u8; 32],
+) -> Result<Vec<u8>, DsmError> {
+    match signer {
+        HtlcSpendSigner::Wallet {
+            key_store,
+            signing_index,
+        } => key_store.sign_hash(0, *signing_index, sighash),
+        HtlcSpendSigner::MathOwned { hash_lock } => {
+            let (claim_privkey, _) = derive_claim_keypair(preimage, hash_lock)?;
+            sign_with_raw_privkey(&claim_privkey, sighash)
+        }
+    }
+}
+
 /// Compute BIP143 sighash for P2WPKH spending.
 ///
 /// In `bitcoin` crate 0.32+, `p2wpkh_signature_hash` expects the P2WPKH
@@ -798,10 +806,11 @@ mod tests {
             destination_addr: dest,
             amount_sats: 100_000,
             fee_rate_sat_vb: 2, // 2 sat/vbyte
-            key_store: &ks,
-            signing_index: 0,
+            signer: HtlcSpendSigner::Wallet {
+                key_store: &ks,
+                signing_index: 0,
+            },
             network: bitcoin::Network::Signet,
-            claim_privkey: None,
         }) {
             Ok(t) => t,
             Err(e) => panic!("build_htlc_claim_tx failed: {:?}", e),
@@ -849,10 +858,11 @@ mod tests {
             destination_addr: "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx",
             amount_sats: 100,     // very small amount
             fee_rate_sat_vb: 100, // high fee rate — 100 * 210 = 21000 > 100
-            key_store: &ks,
-            signing_index: 0,
+            signer: HtlcSpendSigner::Wallet {
+                key_store: &ks,
+                signing_index: 0,
+            },
             network: bitcoin::Network::Signet,
-            claim_privkey: None,
         });
 
         assert!(result.is_err());
@@ -947,10 +957,11 @@ mod tests {
             successor_htlc_script: &successor_script,
             total_sats: 200_000, // total 200k sats in HTLC
             fee_rate_sat_vb: 2,  // 2 sat/vbyte
-            key_store: &ks,
-            signing_index: 0,
+            signer: HtlcSpendSigner::Wallet {
+                key_store: &ks,
+                signing_index: 0,
+            },
             network: bitcoin::Network::Signet,
-            claim_privkey: None,
         }) {
             Ok(t) => t,
             Err(e) => panic!("build_sweep_and_change_tx failed: {:?}", e),
@@ -997,10 +1008,11 @@ mod tests {
             destination_addr: "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx",
             amount_sats: 100_000,
             fee_rate_sat_vb: 1,
-            key_store: &ks,
-            signing_index: 0,
+            signer: HtlcSpendSigner::Wallet {
+                key_store: &ks,
+                signing_index: 0,
+            },
             network: bitcoin::Network::Signet,
-            claim_privkey: None,
         }) {
             Ok(t) => t,
             Err(e) => panic!("build_htlc_claim_tx failed: {:?}", e),
@@ -1010,5 +1022,44 @@ mod tests {
         let txid2 = compute_txid(&tx);
         assert_eq!(txid1, txid2);
         assert_ne!(txid1, [0u8; 32]);
+    }
+
+    #[test]
+    fn math_owned_claim_signer_derives_spend_key_inside_builder() {
+        let preimage = b"math-owned claim preimage for builder";
+        let hash_lock = sha256_hash_lock(preimage);
+        let (_, claim_pubkey) = match derive_claim_keypair(preimage, &hash_lock) {
+            Ok(kp) => kp,
+            Err(e) => panic!("derive_claim_keypair failed: {:?}", e),
+        };
+        let refund_hash = test_refund_hash(&hash_lock);
+        let htlc_script =
+            match build_htlc_script(&hash_lock, &refund_hash, &claim_pubkey, &[0x03; 33]) {
+                Ok(s) => s,
+                Err(e) => panic!("build_htlc_script failed: {:?}", e),
+            };
+
+        let tx = match build_htlc_claim_tx(&ClaimTxParams {
+            outpoint_txid: &[0xAB; 32],
+            outpoint_vout: 1,
+            htlc_script: &htlc_script,
+            preimage,
+            destination_addr: "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx",
+            amount_sats: 120_000,
+            fee_rate_sat_vb: 2,
+            signer: HtlcSpendSigner::MathOwned {
+                hash_lock: &hash_lock,
+            },
+            network: bitcoin::Network::Signet,
+        }) {
+            Ok(tx) => tx,
+            Err(e) => panic!("build_htlc_claim_tx failed: {:?}", e),
+        };
+
+        assert_eq!(tx.input[0].witness.len(), 4);
+        assert_eq!(
+            tx.input[0].witness.iter().nth(1).unwrap().to_vec(),
+            preimage
+        );
     }
 }

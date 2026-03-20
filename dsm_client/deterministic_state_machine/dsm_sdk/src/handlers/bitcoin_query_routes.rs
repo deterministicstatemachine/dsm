@@ -248,12 +248,28 @@ impl AppRouterImpl {
                                     ),
                                 Err(_) => crate::sdk::runtime_config::RuntimeConfig::get_bitcoin_network(),
                             };
+                            let expected_policy_commit = crate::storage::client_db::find_withdrawal_by_exit_vault_op_id(&req.vault_op_id)
+                                .ok()
+                                .flatten()
+                                .and_then(|withdrawal| {
+                                    if withdrawal.policy_commit.len() != 32 {
+                                        log::warn!(
+                                            "[CHECK_CONFIRMATIONS] exit {} has non-32-byte withdrawal policy_commit ({} bytes); skipping policy-bound auto-claim check",
+                                            req.vault_op_id,
+                                            withdrawal.policy_commit.len()
+                                        );
+                                        return None;
+                                    }
+                                    let mut policy_commit = [0u8; 32];
+                                    policy_commit.copy_from_slice(&withdrawal.policy_commit);
+                                    Some(policy_commit)
+                                });
                             match super::bitcoin_invoke_routes::try_claim_full_sweep_exit(
                                 &self.bitcoin_tap,
-                                &self.bitcoin_keys,
                                 &req.vault_op_id,
                                 &record,
                                 network,
+                                expected_policy_commit,
                             )
                             .await
                             {
