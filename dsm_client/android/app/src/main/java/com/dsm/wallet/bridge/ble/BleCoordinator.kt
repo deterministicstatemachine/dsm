@@ -260,7 +260,10 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                 if (staleAddresses.isNotEmpty()) {
                     Log.i("BleCoordinator", "Evicting ${staleAddresses.size} stale session(s), keeping ${activeSessions.size - staleAddresses.size} active")
                     for (addr in staleAddresses) {
-                        activeSessions.remove(addr)?.disconnect()
+                        val session = activeSessions.remove(addr)
+                        if (!gattServer.isServerClient(addr)) {
+                            session?.disconnect()
+                        }
                         sessionStates.remove(addr)
                         pendingConnectionAddresses.remove(addr)
                     }
@@ -921,10 +924,14 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                             operationChannel.send { processNextOutboxItem(event.deviceAddress) }
                         }
                         diagnostics.recordError(event.category, event.details, event.deviceAddress, event.status)
-                        if (!pairedBleAddresses.contains(event.deviceAddress)) {
+                        
+                        val alreadyPaired = try { com.dsm.wallet.bridge.Unified.isBleAddressPaired(event.deviceAddress) } catch (_: Throwable) { false }
+                        if (!pairedBleAddresses.contains(event.deviceAddress) && !alreadyPaired) {
                             activeSessions.remove(event.deviceAddress)?.closeQuietly()
                             sessionStates.remove(event.deviceAddress)
                             resumePairingScan(event.deviceAddress, event.details)
+                        } else {
+                            Log.w("BleCoordinator", "ErrorOccurred for ${event.deviceAddress} (${event.category}), but device is already paired. Not closing session aggressively.")
                         }
                     }
                 }
@@ -946,6 +953,32 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
         return hasSession && isConn
     }
 
+    private fun dropClientSession(address: String, reason: String) {
+        val removed = activeSessions.remove(address)
+        sessionStates.remove(address)
+        pendingConnectionAddresses.remove(address)
+        
+        // If the peer is connected to our GATT server, do not forcefully close the client
+        // session object right away, as it can cause Android to tear down the entire
+        // underlying ACL link and break the server notifications.
+        if (gattServer.isServerClient(address)) {
+            Log.w(
+                "BleCoordinator",
+                "dropClientSession($address): reason=$reason removedSession=${removed != null} (avoiding closeQuietly because peer is GATT server client)"
+            )
+            // Just disconnect so we don't leak it indefinitely, but don't close until we know
+            // the server notifications are done, or let system GC handle the stale Gatt.
+            // Actually, even disconnect() might drop the link. Let's just do nothing to the 
+            // physical Gatt layer since the server relies on the shared BLE radio link.
+        } else {
+            removed?.closeQuietly()
+            Log.w(
+                "BleCoordinator",
+                "dropClientSession($address): reason=$reason removedSession=${removed != null}"
+            )
+        }
+    }
+
     /**
      * Establish an on-demand GATT client connection to a device.
      * Used when bilateral send needs to subscribe to TX_RESPONSE on the
@@ -964,8 +997,7 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
             }
             // Clean up stale session
             if (activeSessions.containsKey(address)) {
-                activeSessions.remove(address)?.disconnect()
-                sessionStates.remove(address)
+                dropClientSession(address, "pre_connect_stale_session")
             }
             // Ensure GATT server is running
             if (!gattStartInFlight) {
@@ -977,8 +1009,7 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
             // Bilateral reconnect — identity read skip is determined by Rust pairing status
             val connected = session.connect()
             if (!connected) {
-                pendingConnectionAddresses.remove(address)
-                activeSessions.remove(address)
+                dropClientSession(address, "connect_init_failed")
                 deferred.complete(false)
                 return@runOperation
             }
@@ -993,13 +1024,17 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                         return@launch
                     }
                     if (state == null || (!state.isConnected && !activeSessions.containsKey(address))) {
-                        pendingConnectionAddresses.remove(address)
+                        runOperation {
+                            dropClientSession(address, "connect_aborted_before_ready")
+                        }
                         deferred.complete(false)
                         return@launch
                     }
                     kotlinx.coroutines.delay(100)
                 }
-                pendingConnectionAddresses.remove(address)
+                runOperation {
+                    dropClientSession(address, "connect_ready_timeout")
+                }
                 deferred.complete(false)
             }
         }
@@ -1037,6 +1072,12 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
      * Used to route outgoing data through server notifications instead of client writes.
      */
     fun isGattServerClient(address: String): Boolean = gattServer.isServerClient(address)
+
+    /**
+     * Check if a device address is subscribed to our TX_RESPONSE notifications.
+     */
+    fun isServerClientSubscribedToTxResponse(address: String): Boolean = 
+        gattServer.isServerClientSubscribedToTxResponse(address)
 
     /**
      * Send data chunks via GATT server notifications to a connected server client.
