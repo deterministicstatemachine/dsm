@@ -12,7 +12,7 @@ use std::{
 
 use crate::crypto::blake3::dsm_domain_hasher;
 use base32;
-use zerocopy::AsBytes;
+use zerocopy::IntoBytes;
 
 use crate::{
     core::state_machine::utils::{constant_time_eq, verify_state_hash},
