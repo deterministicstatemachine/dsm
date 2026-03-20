@@ -69,9 +69,9 @@ internal object BridgeLogger {
     private fun appendLine(message: String) {
         logFile?.let { file ->
             try {
-                val timestamp = SystemClock.elapsedRealtime()
+                val unix_ts = SystemClock.elapsedRealtime()
                 PrintWriter(FileOutputStream(file, true)).use { writer ->
-                    writer.println("$timestamp $message")
+                    writer.println("$unix_ts $message")
                 }
                 trimLogFile(file)
             } catch (_: Exception) {

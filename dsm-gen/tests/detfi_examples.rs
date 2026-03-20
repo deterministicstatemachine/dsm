@@ -63,11 +63,15 @@ fn test_simple_escrow_parses() {
             assert_eq!(v.assets[0].amount, 500);
 
             // Tick lock (clockless)
-            let Some(tl) = v.tick_lock.as_ref() else { panic!("tick_lock required") };
+            let Some(tl) = v.tick_lock.as_ref() else {
+                panic!("tick_lock required")
+            };
             assert_eq!(tl.duration_iterations, 14400);
 
             // Recovery
-            let Some(rec) = v.recovery.as_ref() else { panic!("recovery required") };
+            let Some(rec) = v.recovery.as_ref() else {
+                panic!("recovery required")
+            };
             match &rec.mechanism {
                 dsm_gen::schema::RecoveryMechanism::SocialRecovery {
                     trustees,
@@ -97,7 +101,10 @@ fn test_bitcoin_backed_vault_parses() {
                     assert_eq!(h.refund_iterations, 1000);
                     assert!(!h.bitcoin_pubkey.is_empty());
                     assert_eq!(h.expected_btc_amount_sats, 100_000);
-                    assert!(matches!(h.network, dsm_gen::schema::BitcoinNetwork::Testnet));
+                    assert!(matches!(
+                        h.network,
+                        dsm_gen::schema::BitcoinNetwork::Testnet
+                    ));
                     assert_eq!(h.min_confirmations, 100);
                 }
                 other => panic!("Expected BitcoinHtlc, got {other:?}"),
@@ -128,7 +135,9 @@ fn test_conditional_multisig_parses() {
                             assert_eq!(ms.public_keys.len(), 3);
                             assert_eq!(ms.threshold, 2);
                         }
-                        other => panic!("Expected MultiSignature as first And condition, got {other:?}"),
+                        other => {
+                            panic!("Expected MultiSignature as first And condition, got {other:?}")
+                        }
                     }
 
                     // Second: CryptoCondition
@@ -137,7 +146,9 @@ fn test_conditional_multisig_parses() {
                             assert!(!cc.condition_hash.is_empty());
                             assert!(!cc.public_params.is_empty());
                         }
-                        other => panic!("Expected CryptoCondition as second And condition, got {other:?}"),
+                        other => panic!(
+                            "Expected CryptoCondition as second And condition, got {other:?}"
+                        ),
                     }
                 }
                 other => panic!("Expected And, got {other:?}"),
@@ -147,7 +158,9 @@ fn test_conditional_multisig_parses() {
             assert_eq!(v.assets.len(), 2);
 
             // Tick lock with release_to_recipient
-            let Some(tl) = v.tick_lock.as_ref() else { panic!("tick_lock required") };
+            let Some(tl) = v.tick_lock.as_ref() else {
+                panic!("tick_lock required")
+            };
             assert_eq!(tl.duration_iterations, 100_000);
 
             // Recovery present
@@ -186,7 +199,9 @@ fn test_oracle_attested_release_parses() {
             }
 
             // Tick lock with burn action
-            let Some(tl) = v.tick_lock.as_ref() else { panic!("tick_lock required") };
+            let Some(tl) = v.tick_lock.as_ref() else {
+                panic!("tick_lock required")
+            };
             assert_eq!(tl.duration_iterations, 200_000);
         }
         _ => panic!("Expected Vault spec"),
@@ -214,7 +229,9 @@ fn test_stablecoin_policy_parses() {
             assert!(names.contains(&"off_hours_delay"));
 
             // Highest priority rule is the deny
-            let Some(highest) = p.rules.iter().max_by_key(|r| r.priority) else { panic!("rules must not be empty") };
+            let Some(highest) = p.rules.iter().max_by_key(|r| r.priority) else {
+                panic!("rules must not be empty")
+            };
             assert_eq!(highest.name, "jurisdiction_block");
         }
         _ => panic!("Expected Policy spec"),

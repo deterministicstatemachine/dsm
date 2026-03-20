@@ -5,7 +5,7 @@
 //! fills in identity at instantiation time.
 
 use crate::base32;
-use crate::schema::{DsmSpecification, DeploymentMode, VaultSpecification, PolicySpecification};
+use crate::schema::{DeploymentMode, DsmSpecification, PolicySpecification, VaultSpecification};
 use anyhow::{Context, Result};
 
 /// Blob header bytes prepended to every compiled artifact.
@@ -32,7 +32,10 @@ pub struct CompiledBlob {
 }
 
 /// Compile a DsmSpecification into a Base32 blob.
-pub fn compile(spec: &DsmSpecification, mode_override: Option<DeploymentMode>) -> Result<CompiledBlob> {
+pub fn compile(
+    spec: &DsmSpecification,
+    mode_override: Option<DeploymentMode>,
+) -> Result<CompiledBlob> {
     match spec {
         DsmSpecification::Vault(vault) => compile_vault(vault, mode_override),
         DsmSpecification::Policy(policy) => compile_policy(policy),
@@ -46,7 +49,10 @@ pub fn compile(spec: &DsmSpecification, mode_override: Option<DeploymentMode>) -
 /// - policy_digest: from --policy-anchor or [0u8; 32]
 /// - precommit: BLAKE3("DSM/dlv/precommit\0" || spec_hash)
 /// - vault_id: BLAKE3("DSM/dlv\0" || device_id || policy_digest || precommit)
-fn compile_vault(vault: &VaultSpecification, mode_override: Option<DeploymentMode>) -> Result<CompiledBlob> {
+fn compile_vault(
+    vault: &VaultSpecification,
+    mode_override: Option<DeploymentMode>,
+) -> Result<CompiledBlob> {
     let mode = mode_override
         .or_else(|| vault.deployment_mode.clone())
         .unwrap_or(DeploymentMode::Posted);
@@ -56,8 +62,8 @@ fn compile_vault(vault: &VaultSpecification, mode_override: Option<DeploymentMod
     };
 
     // Compute a deterministic spec hash for precommit derivation
-    let spec_yaml = serde_yaml::to_string(vault)
-        .context("Failed to re-serialize vault spec for hashing")?;
+    let spec_yaml =
+        serde_yaml::to_string(vault).context("Failed to re-serialize vault spec for hashing")?;
     let spec_hash = blake3::hash(spec_yaml.as_bytes());
 
     // Derive precommit: BLAKE3("DSM/dlv/precommit\0" || spec_hash)
@@ -122,15 +128,14 @@ fn compile_vault(vault: &VaultSpecification, mode_override: Option<DeploymentMod
 /// Compile a policy spec into a TokenPolicyV3 blob.
 fn compile_policy(policy: &PolicySpecification) -> Result<CompiledBlob> {
     // Serialize the policy spec as canonical YAML (deterministic)
-    let policy_yaml = serde_yaml::to_string(policy)
-        .context("Failed to serialize policy spec")?;
+    let policy_yaml = serde_yaml::to_string(policy).context("Failed to serialize policy spec")?;
     let policy_bytes = policy_yaml.as_bytes();
 
     // Build TokenPolicyV3 proto: field 1 = bytes policy_bytes
     // Tag 0x0A (field 1, wire type 2) + varint length + data
     let mut proto_bytes = Vec::with_capacity(5 + policy_bytes.len());
     proto_bytes.push(0x0A); // field 1, wire type 2
-    // Varint encode the length
+                            // Varint encode the length
     encode_varint(&mut proto_bytes, policy_bytes.len() as u64);
     proto_bytes.extend_from_slice(policy_bytes);
 

@@ -4,7 +4,7 @@
 //! desktop via `env_logger`) and a chained panic hook that captures Rust
 //! panics with full backtraces before forwarding to the previous hook.
 //!
-//! Log format omits wall-clock timestamps to comply with the DSM determinism
+//! Log format omits wall-clock unix_tss to comply with the DSM determinism
 //! invariant. Structured helper functions (`log_jni_call`, `log_crypto_operation`,
 //! `log_bluetooth_operation`, etc.) provide consistent observability across
 //! the SDK without coupling to any specific log framework.

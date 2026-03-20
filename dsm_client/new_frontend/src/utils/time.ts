@@ -1,4 +1,4 @@
-/** Format a unix timestamp (seconds) as a relative time string. */
+/** Format a unix unix_ts (seconds) as a relative time string. */
 export function formatTimeAgo(unixSec: number): string {
   if (!unixSec || unixSec <= 0) return '';
   const now = Math.floor(Date.now() / 1000);
@@ -11,7 +11,7 @@ export function formatTimeAgo(unixSec: number): string {
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
-/** Format a unix timestamp (seconds) as a full date/time string. */
+/** Format a unix unix_ts (seconds) as a full date/time string. */
 export function formatDateTime(unixSec: number): string {
   if (!unixSec || unixSec <= 0) return 'Unknown';
   const d = new Date(unixSec * 1000);
