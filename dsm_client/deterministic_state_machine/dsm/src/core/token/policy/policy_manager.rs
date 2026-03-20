@@ -18,7 +18,7 @@ use crate::types::{
     error::DsmError,
     policy_types::{PolicyAnchor, PolicyCondition, PolicyFile, PolicyRole, VaultCondition},
 };
-use crate::util::deterministic_time as dt;
+use crate::utils::deterministic_time as dt;
 
 #[inline]
 fn now_tick() -> u64 {

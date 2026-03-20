@@ -112,6 +112,7 @@ pub fn init_database() -> Result<()> {
     ensure_bitcoin_accounts_active_receive_index(&conn)?;
     ensure_contacts_device_tree_root(&conn)?;
     ensure_stitched_receipts_sig_b_nullable(&conn)?;
+    migrate_legacy_withdrawal_states(&conn)?;
 
     {
         let mut guard = DB_CONNECTION
@@ -747,6 +748,22 @@ fn ensure_contacts_device_tree_root(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn migrate_legacy_withdrawal_states(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "UPDATE in_flight_withdrawals
+         SET state = 'finalized'
+         WHERE state = 'settled'",
+        [],
+    )?;
+    conn.execute(
+        "UPDATE in_flight_withdrawals
+         SET state = 'committed'
+         WHERE state = 'partial_failure'",
+        [],
+    )?;
+    Ok(())
+}
+
 /// Migrate existing `stitched_receipts` tables where `sig_b` was created as `NOT NULL`.
 /// Fresh schemas (post-solo-signature) define `sig_b BLOB` (nullable), but
 /// `CREATE TABLE IF NOT EXISTS` is a no-op on existing databases. SQLite does not
@@ -929,6 +946,75 @@ mod tests {
             created_at: 0,
         })
         .expect("store transaction with replacement schema");
+    }
+
+    #[test]
+    #[serial]
+    fn test_migrate_legacy_withdrawal_states_rewrites_settled_and_partial_failure() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        reset_database_for_tests();
+        init_database().expect("init db");
+
+        let binding = get_connection().expect("db connection");
+        let conn = binding.lock().expect("db lock");
+        conn.execute(
+            "INSERT INTO in_flight_withdrawals(
+                withdrawal_id, device_id, amount_sats, dest_address, policy_commit,
+                state, burn_token_id, burn_amount_sats, created_at, updated_at
+            ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+            params![
+                "legacy-settled",
+                "device-a",
+                1_000i64,
+                "tb1qlegacy",
+                crate::policy::builtins::DBTC_POLICY_COMMIT.as_slice(),
+                "settled",
+                "dBTC",
+                1_000i64,
+                1i64
+            ],
+        )
+        .expect("insert settled row");
+        conn.execute(
+            "INSERT INTO in_flight_withdrawals(
+                withdrawal_id, device_id, amount_sats, dest_address, policy_commit,
+                state, burn_token_id, burn_amount_sats, created_at, updated_at
+            ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+            params![
+                "legacy-partial",
+                "device-a",
+                2_000i64,
+                "tb1qlegacy",
+                crate::policy::builtins::DBTC_POLICY_COMMIT.as_slice(),
+                "partial_failure",
+                "dBTC",
+                2_000i64,
+                2i64
+            ],
+        )
+        .expect("insert partial_failure row");
+
+        migrate_legacy_withdrawal_states(&conn).expect("migrate legacy withdrawal states");
+
+        let settled_state: String = conn
+            .query_row(
+                "SELECT state FROM in_flight_withdrawals WHERE withdrawal_id = 'legacy-settled'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("load settled row");
+        let partial_state: String = conn
+            .query_row(
+                "SELECT state FROM in_flight_withdrawals WHERE withdrawal_id = 'legacy-partial'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("load partial row");
+
+        assert_eq!(settled_state, "finalized");
+        assert_eq!(partial_state, "committed");
     }
 
     #[test]

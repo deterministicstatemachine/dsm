@@ -2,7 +2,7 @@
 //! Operational Tooling for DSM Storage Nodes
 //! Provides monitoring, health checks, metrics collection, and operational utilities.
 
-use dsm::util::deterministic_time as dt;
+use dsm::utils::deterministic_time as dt;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;

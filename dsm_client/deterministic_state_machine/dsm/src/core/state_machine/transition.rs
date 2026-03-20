@@ -91,8 +91,8 @@ impl StateTransition {
         };
 
         // Determine deterministic logical tick once.
-        // crate::util::deterministic_time::tick() returns (hash: [u8;32], tick: u64).
-        let (_dt_hash, tick) = crate::util::deterministic_time::tick();
+        // crate::utils::deterministic_time::tick() returns (hash: [u8;32], tick: u64).
+        let (_dt_hash, tick) = crate::utils::deterministic_time::tick();
 
         Self {
             operation,

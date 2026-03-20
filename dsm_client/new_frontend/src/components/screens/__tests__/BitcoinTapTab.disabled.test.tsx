@@ -124,8 +124,8 @@ function setupMocks(opts: {
   mockExecuteWithdrawalPlan.mockResolvedValue({
     planId: 'withdraw-1',
     planClass: 'multiple_full_plus_partial',
-    status: 'completed',
-    message: 'Executed 1 withdrawal leg(s)',
+    status: 'committed',
+    message: 'Broadcast 1 withdrawal leg(s). Final burn will complete after confirmation depth is reached.',
     requestedNetSats: 250_000n,
     plannedNetSats: 250_000n,
     totalGrossExitSats: 251_000n,
@@ -134,7 +134,7 @@ function setupMocks(opts: {
     executedLegs: [{
       vaultId: 'vault-a',
       kind: 'partial',
-      status: 'completed',
+      status: 'broadcast',
       grossExitSats: 251_000n,
       estimatedFeeSats: 1_000n,
       estimatedNetSats: 250_000n,
@@ -229,7 +229,7 @@ describe('BitcoinTapTab withdrawal planner flow', () => {
         'tb1qwithdrawdest',
       );
     });
-    expect(await screen.findByText(/Execution: completed/i)).toBeInTheDocument();
+    expect(await screen.findByText(/Execution: committed/i)).toBeInTheDocument();
   });
 
   it('does not render manual exit claim controls in deposit cards', async () => {
