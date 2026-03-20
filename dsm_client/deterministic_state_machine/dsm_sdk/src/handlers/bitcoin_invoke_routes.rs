@@ -3491,7 +3491,7 @@ impl AppRouterImpl {
 
                     // Select UTXOs (greedy largest-first) and build SelectedUtxo list
                     let mut sorted_utxos = confirmed_utxos;
-                    sorted_utxos.sort_by(|a, b| b.amount_sats.cmp(&a.amount_sats));
+                    sorted_utxos.sort_by_key(|b| std::cmp::Reverse(b.amount_sats));
 
                     let mut selected: Vec<crate::sdk::bitcoin_tx_builder::SelectedUtxo> =
                         Vec::new();

@@ -573,10 +573,8 @@ fn validate_fulfillment_condition(
                 ));
             }
         }
-        FulfillmentConditionSpec::BitcoinHtlc(h) => {
-            if h.min_confirmations == 0 {
-                errors.push("BitcoinHtlc: min_confirmations must be > 0".into());
-            }
+        FulfillmentConditionSpec::BitcoinHtlc(h) if h.min_confirmations == 0 => {
+            errors.push("BitcoinHtlc: min_confirmations must be > 0".into());
         }
         FulfillmentConditionSpec::And(a) => {
             if a.conditions.is_empty() {
