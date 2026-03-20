@@ -332,7 +332,7 @@ pub async fn trigger_registry_update(
                 (rank, addr.clone(), seed_app.clone())
             })
             .collect();
-        ranked.sort_by(|a, b| a.0.cmp(&b.0));
+        ranked.sort_by_key(|a| a.0);
 
         // Add top |ΔP| winners
         let to_add = delta_p.min(ranked.len() as i64) as usize;

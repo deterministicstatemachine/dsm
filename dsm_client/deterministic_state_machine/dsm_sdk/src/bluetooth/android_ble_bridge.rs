@@ -538,9 +538,7 @@ impl AndroidBleBridge {
                     let new_count = pending_followups.len();
                     let mut devices = self.connected_devices.write().await;
                     if let Some(connection) = devices.get_mut(address) {
-                        connection
-                            .pending_commands
-                            .extend(pending_followups.into_iter());
+                        connection.pending_commands.extend(pending_followups);
                         debug!(
                             "Queued {new_count} follow-up BLE commands for {addr} (total pending: {total})",
                             new_count = new_count,
@@ -724,7 +722,7 @@ impl AndroidBleBridge {
         if !addr.is_empty() {
             let mut devices = self.connected_devices.write().await;
             if let Some(conn) = devices.get_mut(&addr) {
-                conn.pending_commands.extend(cmds.into_iter());
+                conn.pending_commands.extend(cmds);
             }
         }
         Ok(())
