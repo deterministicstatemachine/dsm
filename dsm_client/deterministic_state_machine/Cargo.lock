@@ -1012,7 +1012,7 @@ dependencies = [
  "constant_time_eq 0.3.1",
  "crc32fast",
  "criterion",
- "derive_more",
+ "derive_more 1.0.0",
  "env_logger 0.10.2",
  "ff",
  "flate2",

@@ -201,6 +201,26 @@ impl AndroidBleBridge {
             Some(Ev::DeviceDisconnected(dev)) => {
                 let address = dev.address;
                 info!("BLE device disconnected (proto): {address}");
+
+                // Fail any early-phase bilateral sessions for this address before removing
+                // from the connected set.  Late-phase sessions (Accepted, ConfirmPending)
+                // retain all cryptographic material for automatic recovery on reconnect.
+                let failed = self
+                    .bilateral_handler
+                    .handle_peer_disconnected(&address)
+                    .await;
+                if failed > 0 {
+                    info!(
+                        "BLE disconnect {address}: failed {failed} early-phase session(s); late-phase sessions preserved"
+                    );
+                }
+
+                // Notify the pairing orchestrator so stale pairing sessions for this
+                // address are reset immediately (no need to wait for the 90-second timeout).
+                crate::bluetooth::get_pairing_orchestrator()
+                    .handle_peer_disconnected(&address)
+                    .await;
+
                 {
                     let mut devices = self.connected_devices.write().await;
                     devices.remove(&address);
@@ -236,8 +256,23 @@ impl AndroidBleBridge {
             }
             Some(Ev::ConnectionFailed(msg)) => {
                 warn!("BLE connection failed (proto): {msg}");
-            }
-            Some(Ev::PairingRequest(req)) => {
+                // Fail any early-phase bilateral sessions associated with this address.
+                let failed = self.bilateral_handler.handle_peer_disconnected(&msg).await;
+                if failed > 0 {
+                    warn!(
+                        "BLE connection failure for {msg}: failed {failed} early-phase session(s)"
+                    );
+                }
+                // Reset stale pairing sessions for this address immediately.
+                crate::bluetooth::get_pairing_orchestrator()
+                    .handle_peer_disconnected(&msg)
+                    .await;
+                // Remove from connected set if it was registered.
+                {
+                    let mut devices = self.connected_devices.write().await;
+                    devices.remove(&msg);
+                }
+            }            Some(Ev::PairingRequest(req)) => {
                 info!(
                     "BLE pairing request received from {}: alias={}",
                     req.address, req.alias
