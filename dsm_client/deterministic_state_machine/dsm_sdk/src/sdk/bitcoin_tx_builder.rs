@@ -1033,15 +1033,11 @@ mod tests {
             Err(e) => panic!("derive_claim_keypair failed: {:?}", e),
         };
         let refund_hash = test_refund_hash(&hash_lock);
-        let htlc_script = match build_htlc_script(
-            &hash_lock,
-            &refund_hash,
-            &claim_pubkey,
-            &[0x03; 33],
-        ) {
-            Ok(s) => s,
-            Err(e) => panic!("build_htlc_script failed: {:?}", e),
-        };
+        let htlc_script =
+            match build_htlc_script(&hash_lock, &refund_hash, &claim_pubkey, &[0x03; 33]) {
+                Ok(s) => s,
+                Err(e) => panic!("build_htlc_script failed: {:?}", e),
+            };
 
         let tx = match build_htlc_claim_tx(&ClaimTxParams {
             outpoint_txid: &[0xAB; 32],
@@ -1061,6 +1057,9 @@ mod tests {
         };
 
         assert_eq!(tx.input[0].witness.len(), 4);
-        assert_eq!(tx.input[0].witness.iter().nth(1).unwrap().to_vec(), preimage);
+        assert_eq!(
+            tx.input[0].witness.iter().nth(1).unwrap().to_vec(),
+            preimage
+        );
     }
 }

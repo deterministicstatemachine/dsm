@@ -2147,12 +2147,24 @@ impl BilateralBleHandler {
             );
             if let Some(session) = sessions.get_mut(&commitment_hash) {
                 session.counterparty_signature = Some(prepare_response.local_signature.clone());
-                if session.phase == BilateralPhase::Accepted || session.phase == BilateralPhase::Committed || session.phase == BilateralPhase::ConfirmPending {
-                    log::warn!("[BLE_HANDLER] ⚠️ Duplicate prepare response for {}. Dropping silently.", bytes_to_base32(&commitment_hash));
+                if session.phase == BilateralPhase::Accepted
+                    || session.phase == BilateralPhase::Committed
+                    || session.phase == BilateralPhase::ConfirmPending
+                {
+                    log::warn!(
+                        "[BLE_HANDLER] ⚠️ Duplicate prepare response for {}. Dropping silently.",
+                        bytes_to_base32(&commitment_hash)
+                    );
                     return Err(DsmError::invalid_operation("silent_drop_duplicate_packet"));
                 }
-                if session.phase == BilateralPhase::Accepted || session.phase == BilateralPhase::Committed || session.phase == BilateralPhase::ConfirmPending {
-                    log::warn!("[BLE_HANDLER] ⚠️ Duplicate prepare response for {}. Dropping silently.", bytes_to_base32(&commitment_hash));
+                if session.phase == BilateralPhase::Accepted
+                    || session.phase == BilateralPhase::Committed
+                    || session.phase == BilateralPhase::ConfirmPending
+                {
+                    log::warn!(
+                        "[BLE_HANDLER] ⚠️ Duplicate prepare response for {}. Dropping silently.",
+                        bytes_to_base32(&commitment_hash)
+                    );
                     return Err(DsmError::invalid_operation("silent_drop_duplicate_packet"));
                 }
                 session.phase = BilateralPhase::Accepted;
@@ -3037,11 +3049,17 @@ impl BilateralBleHandler {
             let mut sessions = self.sessions.sessions.lock().await;
             if let Some(session) = sessions.get_mut(&commitment_hash) {
                 if session.phase == BilateralPhase::Committed {
-                    log::warn!("[BLE_HANDLER] ⚠️ Duplicate confirm request for {}. Dropping silently.", bytes_to_base32(&commitment_hash));
+                    log::warn!(
+                        "[BLE_HANDLER] ⚠️ Duplicate confirm request for {}. Dropping silently.",
+                        bytes_to_base32(&commitment_hash)
+                    );
                     return Err(DsmError::invalid_operation("silent_drop_duplicate_packet"));
                 }
                 if session.phase == BilateralPhase::Committed {
-                    log::warn!("[BLE_HANDLER] ⚠️ Duplicate confirm request for {}. Dropping silently.", bytes_to_base32(&commitment_hash));
+                    log::warn!(
+                        "[BLE_HANDLER] ⚠️ Duplicate confirm request for {}. Dropping silently.",
+                        bytes_to_base32(&commitment_hash)
+                    );
                     return Err(DsmError::invalid_operation("silent_drop_duplicate_packet"));
                 }
                 session.phase = BilateralPhase::Committed;

@@ -417,16 +417,20 @@ impl BleFrameCoordinator {
                 }
 
                 info!("Processing bilateral prepare response (validated payload)");
-                match self.bilateral_handler.handle_prepare_response(payload).await {
+                match self
+                    .bilateral_handler
+                    .handle_prepare_response(payload)
+                    .await
+                {
                     Ok((commit_envelope, _meta)) => {
                         info!("Bilateral prepare response processed; emitting commit request envelope ({} bytes)", commit_envelope.len());
                         Ok(Some(commit_envelope))
-                    },
+                    }
                     Err(e) if e.to_string().contains("silent_drop_duplicate_packet") => {
                         log::warn!("Silently dropping duplicate Prepare Response.");
                         Ok(None)
-                    },
-                    Err(e) => Err(e)
+                    }
+                    Err(e) => Err(e),
                 }
             }
 
@@ -499,7 +503,7 @@ impl BleFrameCoordinator {
                         log::warn!("Silently dropping duplicate Confirm Request.");
                         Ok(None)
                     }
-                    Err(e) => Err(e)
+                    Err(e) => Err(e),
                 }
             }
 

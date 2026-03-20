@@ -89,7 +89,11 @@ fn ensure_dbtc_exit_balance(
     Ok(())
 }
 
-fn decode_policy_commit(route: &str, label: &str, policy_commit: &[u8]) -> Result<[u8; 32], String> {
+fn decode_policy_commit(
+    route: &str,
+    label: &str,
+    policy_commit: &[u8],
+) -> Result<[u8; 32], String> {
     if policy_commit.len() != 32 {
         return Err(format!(
             "{route}: {label} policy_commit must be 32 bytes (got {})",
@@ -140,7 +144,10 @@ fn ensure_exec_data_matches_withdrawal_policy(
     let expected_policy_commit = persisted_withdrawal_policy_commit(route, withdrawal_id)?;
     ensure_policy_commit_match(
         route,
-        &format!("source vault {}", &source_vault_id[..source_vault_id.len().min(12)]),
+        &format!(
+            "source vault {}",
+            &source_vault_id[..source_vault_id.len().min(12)]
+        ),
         &expected_policy_commit,
         &exec_data.policy_commit,
     )
@@ -160,23 +167,25 @@ fn persist_withdrawal_leg(
     exit_vault_op_id: Option<&str>,
 ) -> Result<(), String> {
     let now = crate::util::deterministic_time::tick();
-    crate::storage::client_db::upsert_withdrawal_leg(&crate::storage::client_db::InFlightWithdrawalLeg {
-        withdrawal_id: withdrawal_id.to_string(),
-        leg_index,
-        vault_id: vault_id.to_string(),
-        leg_kind: leg_kind.to_string(),
-        amount_sats,
-        estimated_fee_sats,
-        estimated_net_sats,
-        sweep_txid: sweep_txid.map(str::to_string),
-        successor_vault_id: successor_vault_id.map(str::to_string),
-        successor_vault_op_id: successor_vault_op_id.map(str::to_string),
-        exit_vault_op_id: exit_vault_op_id.map(str::to_string),
-        state: "broadcast".to_string(),
-        proof_digest: None,
-        created_at: now,
-        updated_at: now,
-    })
+    crate::storage::client_db::upsert_withdrawal_leg(
+        &crate::storage::client_db::InFlightWithdrawalLeg {
+            withdrawal_id: withdrawal_id.to_string(),
+            leg_index,
+            vault_id: vault_id.to_string(),
+            leg_kind: leg_kind.to_string(),
+            amount_sats,
+            estimated_fee_sats,
+            estimated_net_sats,
+            sweep_txid: sweep_txid.map(str::to_string),
+            successor_vault_id: successor_vault_id.map(str::to_string),
+            successor_vault_op_id: successor_vault_op_id.map(str::to_string),
+            exit_vault_op_id: exit_vault_op_id.map(str::to_string),
+            state: "broadcast".to_string(),
+            proof_digest: None,
+            created_at: now,
+            updated_at: now,
+        },
+    )
     .map_err(|e| format!("withdrawal leg persistence failed: {e}"))
 }
 
@@ -671,7 +680,8 @@ impl AppRouterImpl {
                         execution_leg.gross_exit_sats,
                         execution_leg.estimated_fee_sats,
                         execution_leg.estimated_net_sats,
-                        (!execution_leg.sweep_txid.is_empty()).then_some(execution_leg.sweep_txid.as_str()),
+                        (!execution_leg.sweep_txid.is_empty())
+                            .then_some(execution_leg.sweep_txid.as_str()),
                         (!execution_leg.successor_vault_id.is_empty())
                             .then_some(execution_leg.successor_vault_id.as_str()),
                         (!execution_leg.successor_vault_op_id.is_empty())
@@ -885,42 +895,48 @@ impl AppRouterImpl {
             }
 
             if all_confirmed {
-                let expected_policy_commit =
-                    match decode_policy_commit(log_prefix, "persisted withdrawal", &wd.policy_commit)
-                    {
-                        Ok(policy_commit) => policy_commit,
-                        Err(message) => {
-                            log::warn!("[{}] ρ={} {}", log_prefix, wd.withdrawal_id, message);
-                            summary.pending += 1;
-                            continue;
-                        }
-                    };
-                let legs =
-                    match crate::storage::client_db::list_withdrawal_legs(&wd.withdrawal_id) {
-                        Ok(legs) if !legs.is_empty() => legs,
-                        Ok(_) => {
-                            log::warn!(
+                let expected_policy_commit = match decode_policy_commit(
+                    log_prefix,
+                    "persisted withdrawal",
+                    &wd.policy_commit,
+                ) {
+                    Ok(policy_commit) => policy_commit,
+                    Err(message) => {
+                        log::warn!("[{}] ρ={} {}", log_prefix, wd.withdrawal_id, message);
+                        summary.pending += 1;
+                        continue;
+                    }
+                };
+                let legs = match crate::storage::client_db::list_withdrawal_legs(&wd.withdrawal_id)
+                {
+                    Ok(legs) if !legs.is_empty() => legs,
+                    Ok(_) => {
+                        log::warn!(
                                 "[{}] ρ={} has no persisted withdrawal legs; refusing finalization without source policy metadata",
                                 log_prefix,
                                 wd.withdrawal_id
                             );
-                            summary.pending += 1;
-                            continue;
-                        }
-                        Err(e) => {
-                            log::warn!(
-                                "[{}] failed to load withdrawal legs for ρ={}: {}",
-                                log_prefix,
-                                wd.withdrawal_id,
-                                e
-                            );
-                            summary.pending += 1;
-                            continue;
-                        }
-                    };
+                        summary.pending += 1;
+                        continue;
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "[{}] failed to load withdrawal legs for ρ={}: {}",
+                            log_prefix,
+                            wd.withdrawal_id,
+                            e
+                        );
+                        summary.pending += 1;
+                        continue;
+                    }
+                };
                 let mut policy_mismatch = false;
                 for leg in &legs {
-                    let exec_data = match self.bitcoin_tap.fetch_vault_execution_data(&leg.vault_id).await {
+                    let exec_data = match self
+                        .bitcoin_tap
+                        .fetch_vault_execution_data(&leg.vault_id)
+                        .await
+                    {
                         Ok(exec_data) => exec_data,
                         Err(e) => {
                             log::warn!(
@@ -1070,9 +1086,12 @@ impl AppRouterImpl {
                     // Prune spent source vault from storage nodes.
                     // Finalization is terminal — the UTXO is buried, no one
                     // needs the source advertisement anymore.
-                    if let Err(e) = crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::delete_vault_from_storage_nodes(
-                        &leg.vault_id,
-                    ).await {
+                    if let Err(e) =
+                        crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::delete_vault_from_storage_nodes(
+                            &leg.vault_id,
+                        )
+                        .await
+                    {
                         log::warn!(
                             "[{}] vault prune failed for {}: {}",
                             log_prefix,
@@ -2715,7 +2734,9 @@ impl AppRouterImpl {
                         Some(&result.successor_vault_op_id),
                         (!exit_vault_op_id.is_empty()).then_some(exit_vault_op_id.as_str()),
                     ) {
-                        log::error!("[bitcoin.fractional.exit] withdrawal leg persistence failed: {e}");
+                        log::error!(
+                            "[bitcoin.fractional.exit] withdrawal leg persistence failed: {e}"
+                        );
                     }
                 }
 
@@ -2998,8 +3019,7 @@ impl AppRouterImpl {
                         preimage: pre,
                         destination_addr: &claim_dest,
                         amount_sats: burn_amount,
-                        fee_rate_sat_vb:
-                            crate::sdk::bitcoin_tap_sdk::withdrawal_fee_rate_sat_vb(),
+                        fee_rate_sat_vb: crate::sdk::bitcoin_tap_sdk::withdrawal_fee_rate_sat_vb(),
                         signer: crate::sdk::bitcoin_tx_builder::HtlcSpendSigner::MathOwned {
                             hash_lock: &exec_data.hash_lock,
                         },
@@ -4845,7 +4865,11 @@ mod tests {
         .expect("store vault record");
     }
 
-    fn seed_vault_execution_advertisement(vault_id: &str, amount_sats: u64, policy_commit: [u8; 32]) {
+    fn seed_vault_execution_advertisement(
+        vault_id: &str,
+        amount_sats: u64,
+        policy_commit: [u8; 32],
+    ) {
         let ad_key = format!(
             "dbtc/manifold/{}/vault/{}",
             crate::util::text_id::encode_base32_crockford(&policy_commit),
@@ -5378,7 +5402,11 @@ mod tests {
         let mismatched_policy_commit = [0xAB; 32];
 
         seed_dbtc_balance(amount_sats);
-        seed_vault_execution_advertisement("vault-policy-mismatch", amount_sats, actual_policy_commit);
+        seed_vault_execution_advertisement(
+            "vault-policy-mismatch",
+            amount_sats,
+            actual_policy_commit,
+        );
         client_db::create_withdrawal(client_db::CreateWithdrawalParams {
             withdrawal_id: "wd-policy-mismatch",
             device_id: &device_id_b32,

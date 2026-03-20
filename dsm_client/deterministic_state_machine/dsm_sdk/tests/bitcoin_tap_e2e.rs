@@ -2300,9 +2300,7 @@ const SEQUENCE_RBF: u32 = 0xFFFF_FFFD;
 fn claim_tx_input_opts_in_to_rbf() {
     use dsm_sdk::sdk::bitcoin_key_store::BitcoinKeyStore;
     use dsm_sdk::sdk::bitcoin_tap_sdk::WITHDRAWAL_FEE_RATE_SAT_VB;
-    use dsm_sdk::sdk::bitcoin_tx_builder::{
-        build_htlc_claim_tx, ClaimTxParams, HtlcSpendSigner,
-    };
+    use dsm_sdk::sdk::bitcoin_tx_builder::{build_htlc_claim_tx, ClaimTxParams, HtlcSpendSigner};
 
     let ks =
         BitcoinKeyStore::from_entropy(&[0x42; 32], dsm::bitcoin::types::BitcoinNetwork::Signet)
