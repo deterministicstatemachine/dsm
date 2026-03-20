@@ -440,7 +440,9 @@ impl RustGenerator {
         code.push_str("        context: &TransactionContext,\n");
         code.push_str("    ) -> Result<bool> {\n");
         code.push_str("        // Deterministic tick-based window check (no wall-clock).\n");
-        code.push_str("        if let Some(max_str) = condition.parameters.get(\"maxIterations\") {\n");
+        code.push_str(
+            "        if let Some(max_str) = condition.parameters.get(\"maxIterations\") {\n",
+        );
         code.push_str("            if let Ok(max_tick) = max_str.parse::<u64>() {\n");
         code.push_str("                return Ok(context.tick <= max_tick);\n");
         code.push_str("            }\n");

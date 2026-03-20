@@ -1751,7 +1751,7 @@ async fn check_single_node_stats(
 }
 
 /// Parse Prometheus exposition text format into metric_name → value map.
-/// Handles simple gauge/counter lines: `metric_name value [timestamp]`.
+/// Handles simple gauge/counter lines: `metric_name value [unix_ts]`.
 /// This is display-only operational data — not protocol.
 fn parse_prometheus_text(text: &str) -> std::collections::HashMap<String, f64> {
     let mut metrics = std::collections::HashMap::new();

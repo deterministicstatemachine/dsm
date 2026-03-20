@@ -761,7 +761,12 @@ mod state_machine_tests {
     fn test_first_post_genesis_transition_is_allowed() -> Result<(), DsmError> {
         let (genesis_state, _pk, sk) = create_test_genesis_state_with_keypair();
         let device_id = genesis_state.device_info.device_id;
-        let op = signed_transfer(&sk, &genesis_state, vec![0u8; 8], "first post-genesis transfer");
+        let op = signed_transfer(
+            &sk,
+            &genesis_state,
+            vec![0u8; 8],
+            "first post-genesis transfer",
+        );
 
         let mut state_machine = StateMachine::new_with_strategy_and_device_id(
             KeyDerivationStrategy::Canonical,

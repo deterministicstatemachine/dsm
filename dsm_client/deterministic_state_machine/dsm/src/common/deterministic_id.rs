@@ -5,7 +5,7 @@
 //!
 //! Constraints:
 //! - No UUID::new_v4() or UUID::now_v7() (non-deterministic)
-//! - No wall-clock timestamps
+//! - No wall-clock unix_tss
 //! - All IDs are reproducible from inputs or monotonic counters
 
 use crate::crypto::blake3::dsm_domain_hasher;
@@ -73,7 +73,7 @@ pub fn generate_batch_id(batch_hash: &[u8]) -> String {
     derive_id_from_hash("DSM/batch-id", &[batch_hash])
 }
 
-/// Generate a deterministic session ID from participants and timestamp-free context
+/// Generate a deterministic session ID from participants and unix_ts-free context
 pub fn generate_session_id(context: &[u8]) -> String {
     derive_id_from_hash("DSM/session-id", &[context])
 }
