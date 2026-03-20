@@ -1419,6 +1419,63 @@ async fn token_balance_sqlite_roundtrip() {
     assert!(era.is_none(), "ERA should not be in token_balances table");
 }
 
+#[tokio::test]
+async fn token_balance_sender_debit_seeds_missing_row() {
+    init_test_db();
+    let device_id = format!("test_device_bal_{}", std::process::id());
+
+    // Ensure dBTC row is missing to simulate an edge case (new device ID, no existing row).
+
+    let tx_record = client_db::TransactionRecord {
+        tx_id: "tx1".to_string(),
+        tx_hash: "hash1".to_string(),
+        from_device: device_id.clone(),
+        to_device: "dest".to_string(),
+        amount: 1000,
+        tx_type: "test".to_string(),
+        status: "pending".to_string(),
+        chain_height: 0,
+        step_index: 0,
+        commitment_hash: None,
+        proof_data: None,
+        metadata: std::collections::HashMap::new(),
+        created_at: 0,
+    };
+
+    let result = client_db::apply_sender_debit_and_store_transaction_atomic(
+        &device_id,
+        Some("dBTC"),
+        1000,
+        &tx_record,
+    );
+
+    assert!(result.is_err(), "Expected debit to fail on zero balance");
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("insufficient dBTC balance"));
+
+    let row = client_db::get_token_balance(&device_id, "dBTC").expect("get dBTC");
+    assert!(row.is_some(), "dBTC row should have been seeded");
+    let (available, locked) = row.unwrap();
+    assert_eq!(available, 0);
+    assert_eq!(locked, 0);
+}
+
+#[tokio::test]
+async fn wallet_bootstrap_seeds_dbtc_row() {
+    init_test_db();
+    let device_id = format!("bootstrap_device_{}", std::process::id());
+
+    client_db::ensure_wallet_state_for_device(&device_id).expect("ensure wallet state");
+
+    let row = client_db::get_token_balance(&device_id, "dBTC").expect("get dBTC row");
+    assert!(row.is_some(), "dBTC row should exist after wallet bootstrap");
+    let (available, locked) = row.unwrap();
+    assert_eq!(available, 0);
+    assert_eq!(locked, 0);
+}
+
 /// Regression guard: list_vault_records_db returns destination_address correctly
 /// for records both with and without the field set.
 #[tokio::test]

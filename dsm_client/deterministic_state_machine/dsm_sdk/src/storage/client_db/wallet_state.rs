@@ -10,9 +10,17 @@ use rusqlite::{
 };
 
 use super::get_connection;
+use super::upsert_token_balance;
 use super::types::WalletState;
 use crate::storage::codecs::{meta_from_blob, meta_to_blob};
 use crate::util::deterministic_time::tick;
+
+fn seed_builtin_token_rows_for_device(device_id: &str) -> Result<()> {
+    // dBTC is treated as a canonical built-in token. Seed a zero row early so
+    // downstream balance reads and bilateral debit paths never depend on a
+    // missing SQLite row.
+    upsert_token_balance(device_id, "dBTC", 0, 0)
+}
 
 fn read_hashish_column_as_text(
     row: &rusqlite::Row<'_>,
@@ -48,14 +56,15 @@ pub fn ensure_wallet_state_for_device(device_id: &str) -> Result<()> {
                 "ensure_wallet_state_for_device: wallet exists for {}",
                 device_id
             );
-            Ok(())
+            seed_builtin_token_rows_for_device(device_id)
         }
         Ok(None) => {
             debug!(
                 "ensure_wallet_state_for_device: creating wallet for {}",
                 device_id
             );
-            update_wallet_balance(device_id, 0)
+            update_wallet_balance(device_id, 0)?;
+            seed_builtin_token_rows_for_device(device_id)
         }
         Err(e) => Err(e),
     }
