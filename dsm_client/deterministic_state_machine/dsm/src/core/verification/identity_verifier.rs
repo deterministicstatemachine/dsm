@@ -4,7 +4,7 @@
 //! centralized identity verification methods. All time references use
 //! deterministic ticks, not wall-clock time.
 
-use crate::util::deterministic_time as dt;
+use crate::utils::deterministic_time as dt;
 use crate::types::error::DsmError;
 use crate::types::identity::{IdentityAnchor, IdentityClaim};
 

@@ -9,7 +9,7 @@ use crate::core::state_machine::RelationshipStatePair;
 use crate::types::error::DsmError;
 use crate::types::operations::TransactionMode;
 use crate::types::state_types::{PreCommitment, State as StateTypesState};
-use crate::util::deterministic_time::{attempt_resync, detect_drift, ResyncResult};
+use crate::utils::deterministic_time::{attempt_resync, detect_drift, ResyncResult};
 
 // No extension trait needed, we'll use the direct method
 
@@ -27,7 +27,7 @@ impl SyncManager {
             // Check for excessive clock drift before allowing bilateral
             if let Some(peer_height) = peer_commit_height {
                 if detect_drift(
-                    crate::util::deterministic_time::current_commit_height_blocking(),
+                    crate::utils::deterministic_time::current_commit_height_blocking(),
                     peer_height,
                 ) == ResyncResult::ExcessiveDrift
                 {
@@ -181,7 +181,7 @@ impl SyncManager {
         let success = attempt_resync(peer_smt_root, peer_commit_height)?;
         if !success {
             // Log drift status for diagnostics
-            let local_height = crate::util::deterministic_time::current_commit_height();
+            let local_height = crate::utils::deterministic_time::current_commit_height();
             let drift = detect_drift(local_height, peer_commit_height);
             match drift {
                 ResyncResult::ExcessiveDrift => {

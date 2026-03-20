@@ -2,7 +2,7 @@
 //! DSM Genesis MPC Protocol Implementation (STRICT, bytes-only)
 //!
 //! Invariants:
-//! - No wall-clock APIs. Use deterministic ticks (u64) from util::deterministic_time.
+//! - No wall-clock APIs. Use deterministic ticks (u64) from utils::deterministic_time.
 //! - No hex/base64 in data structures; bytes-only at boundaries.
 //! - ≥3 storage nodes and threshold ≥3 (no 2-of-N), no alternate-path entropy.
 //! - Storage/publishing is trait-only (SDK implements I/O).
@@ -20,7 +20,7 @@ use crate::crypto::kyber;
 use crate::crypto::sphincs;
 use crate::types::error::DsmError;
 use crate::types::identifiers::NodeId;
-use crate::util::deterministic_time;
+use crate::utils::deterministic_time;
 
 // -------------------- Deterministic ticks --------------------
 

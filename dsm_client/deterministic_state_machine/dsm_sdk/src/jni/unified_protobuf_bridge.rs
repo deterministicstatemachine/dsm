@@ -50,7 +50,7 @@ use tokio::runtime::Handle;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use dsm::crypto::blake3::dsm_domain_hasher;
-use dsm::util::deterministic_time as dt;
+use dsm::utils::deterministic_time as dt;
 use crate::storage::client_db::{get_contact_by_device_id, get_contact_chain_tip};
 use crate::sdk::session_manager::SDK_READY;
 use crate::jni::state::{DEVICE_ID_TO_ADDR, parse_hex_32, register_ble_address_mapping};

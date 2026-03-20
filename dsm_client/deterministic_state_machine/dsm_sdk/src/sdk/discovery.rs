@@ -13,7 +13,7 @@ use reqwest::Client;
 use prost::Message;
 use log::{debug, error, info, warn};
 use std::collections::HashSet;
-use dsm::util::deterministic_time::tick_index;
+use dsm::utils::deterministic_time::tick_index;
 
 /// Configuration for node discovery
 #[derive(Debug, Clone)]

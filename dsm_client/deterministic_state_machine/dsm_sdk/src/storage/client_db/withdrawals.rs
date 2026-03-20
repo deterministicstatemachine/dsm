@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! In-flight withdrawal persistence (dBTC paper §13: execution metadata + settlement)
+//! In-flight withdrawal persistence (dBTC paper §13: execution metadata + final burn)
 //!
 //! State machine:
-//!   Executing → Committed | PartialFailure | Failed | Settled | Refunded
+//!   Executing → Committed | Failed | Finalized | Refunded
 //!
 //! This table is metadata only. Token accounting is handled by DSM state
 //! transitions, not direct SQLite balance mutation.
@@ -223,11 +223,11 @@ pub fn increment_settlement_poll_count(withdrawal_id: &str) -> Result<u32> {
     Ok(count as u32)
 }
 
-/// Settle a committed withdrawal (burn finalized, Bitcoin redemption confirmed).
+/// Finalize a committed withdrawal (burn finalized, Bitcoin redemption confirmed).
 ///
-/// Metadata only: marks the recorded withdrawal as settled.
-pub fn settle_withdrawal(withdrawal_id: &str) -> Result<()> {
-    set_withdrawal_state(withdrawal_id, "settled")
+/// Metadata only: marks the recorded withdrawal as finalized.
+pub fn finalize_withdrawal(withdrawal_id: &str) -> Result<()> {
+    set_withdrawal_state(withdrawal_id, "finalized")
 }
 
 /// Get a withdrawal by ID.
@@ -310,7 +310,7 @@ pub fn list_unresolved_withdrawals(device_id: &str) -> Result<Vec<InFlightWithdr
                 FROM in_flight_withdrawals
                 WHERE device_id = ?1
                  AND (
-                     state IN ('committed', 'partial_failure')
+                     state = 'committed'
                      OR (state = 'executing' AND redemption_txid IS NOT NULL AND redemption_txid != '')
                  )
                 ORDER BY created_at ASC "
@@ -336,4 +336,44 @@ pub fn list_unresolved_withdrawals(device_id: &str) -> Result<Vec<InFlightWithdr
         .filter_map(|r| r.ok())
         .collect();
     Ok(rows)
+}
+
+/// Look up the withdrawal row associated with a persisted exit deposit.
+pub fn find_withdrawal_by_exit_vault_op_id(
+    exit_vault_op_id: &str,
+) -> Result<Option<InFlightWithdrawal>> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    let row = conn
+        .query_row(
+            "SELECT w.withdrawal_id, w.device_id, w.amount_sats, w.dest_address, w.policy_commit,
+                    w.state, w.redemption_txid, w.vault_content_hash, w.burn_token_id,
+                    w.burn_amount_sats, w.settlement_poll_count, w.created_at, w.updated_at
+             FROM in_flight_withdrawals w
+             INNER JOIN in_flight_withdrawal_legs l
+                 ON l.withdrawal_id = w.withdrawal_id
+             WHERE l.exit_vault_op_id = ?1
+             ORDER BY w.created_at DESC
+             LIMIT 1",
+            params![exit_vault_op_id],
+            |row| {
+                Ok(InFlightWithdrawal {
+                    withdrawal_id: row.get(0)?,
+                    device_id: row.get(1)?,
+                    amount_sats: row.get::<_, i64>(2)? as u64,
+                    dest_address: row.get(3)?,
+                    policy_commit: row.get(4)?,
+                    state: row.get(5)?,
+                    redemption_txid: row.get(6)?,
+                    vault_content_hash: row.get(7)?,
+                    burn_token_id: row.get(8)?,
+                    burn_amount_sats: row.get::<_, i64>(9).unwrap_or(0) as u64,
+                    settlement_poll_count: row.get::<_, i64>(10).unwrap_or(0) as u32,
+                    created_at: row.get::<_, i64>(11)? as u64,
+                    updated_at: row.get::<_, i64>(12)? as u64,
+                })
+            },
+        )
+        .optional()?;
+    Ok(row)
 }

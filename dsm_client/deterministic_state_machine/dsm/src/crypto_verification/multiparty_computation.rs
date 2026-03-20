@@ -12,7 +12,7 @@ use crate::crypto::hash::{blake3, HashOutput};
 use crate::crypto::kyber::KyberKeyPair;
 use crate::crypto::signatures::SignatureKeyPair;
 use crate::types::error::DsmError;
-use crate::util::deterministic_time as dt;
+use crate::utils::deterministic_time as dt;
 
 /// A single party's MPC contribution (privacy-preserving).
 #[derive(Debug, Clone)]

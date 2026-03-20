@@ -107,10 +107,10 @@ export default function WithdrawView({
       setExecutionResult(result);
       await onRefresh();
       bridgeEvents.emit('wallet.refresh', { source: 'bitcoin.tap' });
-      bridgeEvents.emit('wallet.exitCompleted', { source: 'bitcoin.tap' });
-      if (result.status === 'completed') {
+      if (result.status === 'committed') {
         setWithdrawAmount('');
         setWithdrawDest('');
+        setMessage('Withdrawal broadcast. Keep refreshing until the burn is finalized.');
       }
     } catch (e) {
       setExecutionResult(null);
@@ -310,7 +310,7 @@ export default function WithdrawView({
       )}
 
       {executionResult && (
-        <div style={{ marginTop: 12, padding: '10px 12px', border: '1px solid var(--border)', borderRadius: 8, background: executionResult.status === 'completed' ? 'var(--bg)' : 'var(--bg-secondary)', color: 'var(--text-dark)' }}>
+        <div style={{ marginTop: 12, padding: '10px 12px', border: '1px solid var(--border)', borderRadius: 8, background: executionResult.status === 'committed' ? 'var(--bg)' : 'var(--bg-secondary)', color: 'var(--text-dark)' }}>
           <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8 }}>
             Execution: {executionResult.status}
           </div>

@@ -680,6 +680,52 @@ impl PairingOrchestrator {
         Ok(())
     }
 
+    /// Reset any in-progress pairing session for a peer that just disconnected.
+    ///
+    /// When the BLE link drops during a pairing handshake the pairing loop normally
+    /// waits up to 90 s (STALE_SECS) before retrying.  Calling this method resets
+    /// the session to `Failed` immediately so the next loop iteration re-initiates
+    /// pairing without delay.
+    ///
+    /// Completed (`Complete`) sessions are never reset — an already-paired contact
+    /// does not need to be re-paired just because the transport layer disconnected.
+    pub async fn handle_peer_disconnected(&self, ble_address: &str) {
+        let mut sessions = self.sessions.write().await;
+        let mut reset_count = 0usize;
+        for session in sessions.values_mut() {
+            if session.ble_address.as_deref() == Some(ble_address) {
+                match &session.state {
+                    PairingState::Complete => {
+                        // Already paired — no action needed.
+                    }
+                    PairingState::Failed(_) => {
+                        // Already in a terminal retry-eligible state.
+                    }
+                    _ => {
+                        let old_state = format!("{:?}", session.state);
+                        session.state =
+                            PairingState::Failed("BLE link dropped".to_string());
+                        session.last_activity = Instant::now();
+                        log::info!(
+                            "[PairingOrchestrator] Peer {} disconnected — reset pairing session {:02x}{:02x}... ({} → Failed)",
+                            ble_address,
+                            session.contact_device_id[0],
+                            session.contact_device_id[1],
+                            old_state,
+                        );
+                        reset_count += 1;
+                    }
+                }
+            }
+        }
+        drop(sessions);
+        if reset_count > 0 {
+            // Wake the pairing loop so it retries immediately instead of waiting
+            // for the next organic state-change notification.
+            self.signal_state_change();
+        }
+    }
+
     /// Stop the pairing loop. Safe to call even if no loop is running.
     pub fn stop_pairing_loop(&self) {
         self.loop_stop.store(true, Ordering::SeqCst);
@@ -694,7 +740,7 @@ impl PairingOrchestrator {
     /// 2. Filters to unpaired (no ble_address)
     /// 3. For each, calls initiate_pairing() which determines role and starts BLE
     /// 4. Emits PairingStatusUpdate envelopes for each state change
-    /// 5. Waits for actual pairing state changes instead of timer-based retries
+    /// 5. Waits for actual pairing state changes or a periodic retry timeout
     /// 6. Loops until all contacts are paired or stop_pairing_loop() is called
     ///
     /// Designed to be spawned on the tokio runtime (fire-and-forget from JNI).
@@ -711,6 +757,13 @@ impl PairingOrchestrator {
 
         log::info!("[PairingOrchestrator] start_pairing_all_unpaired: loop started");
 
+        /// Maximum time the pairing loop waits for a state-change notification
+        /// before re-evaluating sessions regardless.  This ensures stale or
+        /// silently-dropped BLE sessions are recovered even when no explicit
+        /// disconnect event fires.
+        const PAIRING_LOOP_WAKE_TIMEOUT: std::time::Duration =
+            std::time::Duration::from_secs(30);
+
         loop {
             let state_changed = self.state_change.notified();
 
@@ -722,12 +775,20 @@ impl PairingOrchestrator {
                 break;
             }
 
-            // Query all contacts from SQLite
+            // Query all contacts from SQLite.
+            // A transient SQLite failure is non-fatal: wait for the next state change
+            // or the periodic retry timeout and try again rather than exiting the loop.
             let contacts = match crate::storage::client_db::get_all_contacts() {
                 Ok(c) => c,
                 Err(e) => {
-                    log::warn!("[PairingOrchestrator] start_pairing_all_unpaired: get_all_contacts failed: {}", e);
-                    break;
+                    log::warn!(
+                        "[PairingOrchestrator] start_pairing_all_unpaired: get_all_contacts failed (will retry): {}",
+                        e
+                    );
+                    // Wait with a bounded timeout so we retry automatically instead of
+                    // blocking forever if no state-change notification arrives.
+                    let _ = tokio::time::timeout(PAIRING_LOOP_WAKE_TIMEOUT, state_changed).await;
+                    continue;
                 }
             };
 
@@ -759,7 +820,9 @@ impl PairingOrchestrator {
                     log::info!(
                         "[PairingOrchestrator] All contacts paired in SQLite but sessions still in-flight — waiting for state change"
                     );
-                    state_changed.await;
+                    // Use a bounded timeout: if the BLE link drops silently the
+                    // in-flight check will still time out and re-evaluate.
+                    let _ = tokio::time::timeout(PAIRING_LOOP_WAKE_TIMEOUT, state_changed).await;
                     continue;
                 }
                 log::info!("[PairingOrchestrator] start_pairing_all_unpaired: no unpaired contacts and no in-flight sessions, loop ending");
@@ -855,7 +918,12 @@ impl PairingOrchestrator {
                     }
                 }
             }
-            state_changed.await;
+
+            // Wait for the next state-change event or a periodic timeout, whichever
+            // arrives first.  The timeout ensures that stale sessions that were
+            // not detected via a disconnect notification are still re-evaluated within
+            // a reasonable window rather than waiting indefinitely.
+            let _ = tokio::time::timeout(PAIRING_LOOP_WAKE_TIMEOUT, state_changed).await;
         }
 
         // Stop BLE radios on loop exit to prevent lingering scan/advertise that

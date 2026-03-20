@@ -15,7 +15,7 @@ use crate::merkle::tree::MerkleTree;
 
 use crate::types::error::DsmError;
 
-use crate::util::deterministic_time as dt;
+use crate::utils::deterministic_time as dt;
 
 /// Checkpoint represents a validated state at a specific point
 /// in the state hash chain that has been posted to decentralized storage

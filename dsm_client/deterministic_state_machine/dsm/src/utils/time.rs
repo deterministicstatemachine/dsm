@@ -68,6 +68,6 @@ impl core::ops::Mul<u32> for Duration {
 #[inline]
 pub fn now() -> u64 {
     // Provided by deterministic logical counter.
-    let (_hash, tick) = crate::util::deterministic_time::peek();
+    let (_hash, tick) = crate::utils::deterministic_time::peek();
     tick
 }

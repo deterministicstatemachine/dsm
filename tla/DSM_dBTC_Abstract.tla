@@ -13,7 +13,7 @@ EXTENDS Naturals, FiniteSets, TLAPS
   - No stranded value: a failed in-flight withdrawal never destroys value.
     It either settles or refunds. (dBTC paper §15, Property 9)
   - Bounded supply: total dBTC never exceeds MaxSupply. (21M BTC)
-  - Monotone settlement: settled withdrawals never un-settle.
+  - Monotone finalization: finalized withdrawals never un-finalize.
 
   The concrete DSM_dBTC model should refine this module via a mapping.
 
@@ -23,7 +23,7 @@ EXTENDS Naturals, FiniteSets, TLAPS
   - We keep everything clockless. "step" is a logical counter.
   - Bitcoin is modeled as an abstract oracle that confirms or rejects.
     See DSM_dBTC_TrustReduction.tla for the focused model that makes the
-    mainnet settlement assumptions explicit.
+    mainnet final-burn assumptions explicit.
   - Cryptographic operations are assumed sound (same convention as
     DSM_Tripwire.tla).
 ***************************************************************************)
@@ -47,19 +47,19 @@ VARIABLES
   \* Confirmed means depth >= d_min.
   gridBacking,
 
-  \* Total settled (finalized burn) count — monotone counter
-  settled,
+  \* Total finalized (final-burn complete) withdrawal count — monotone counter
+  finalizedCount,
 
   \* Monotone transition counter for bounded TLC exploration
   step
 
-vars == <<spendable, inflight, gridBacking, settled, step>>
+vars == <<spendable, inflight, gridBacking, finalizedCount, step>>
 
 TypeInv ==
   /\ spendable \in Nat
   /\ inflight \in Nat
   /\ gridBacking \in Nat
-  /\ settled \in Nat
+  /\ finalizedCount \in Nat
   /\ step \in Nat
 
 \* =========================================================================
@@ -84,7 +84,7 @@ Init ==
   /\ spendable = 0
   /\ inflight = 0
   /\ gridBacking = 0
-  /\ settled = 0
+  /\ finalizedCount = 0
   /\ step = 0
 
 (***************************************************************************
@@ -101,13 +101,13 @@ Deposit(amount) ==
   /\ spendable + inflight + amount <= MaxSupply
   /\ spendable' = spendable + amount
   /\ gridBacking' = gridBacking + amount
-  /\ UNCHANGED <<inflight, settled>>
+  /\ UNCHANGED <<inflight, finalizedCount>>
   /\ step' = step + 1
 
 \* Transfer: move dBTC between bearers. Grid unchanged.
 \* At the abstract level this is a no-op on aggregates.
 Transfer ==
-  /\ UNCHANGED <<spendable, inflight, gridBacking, settled>>
+  /\ UNCHANGED <<spendable, inflight, gridBacking, finalizedCount>>
   /\ step' = step + 1
 
 \* Commit: dBTC moves from spendable to in-flight.
@@ -117,18 +117,18 @@ Commit(amount) ==
   /\ spendable >= amount
   /\ spendable' = spendable - amount
   /\ inflight' = inflight + amount
-  /\ UNCHANGED <<gridBacking, settled>>
+  /\ UNCHANGED <<gridBacking, finalizedCount>>
   /\ step' = step + 1
 
-\* Settle: in-flight dBTC is burned, BTC leaves the grid.
+\* Finalize: in-flight dBTC is burned, BTC leaves the grid.
 \* Both sides decrease by the same amount. (Spec §14, Definition 14)
-Settle(amount) ==
+Finalize(amount) ==
   /\ amount > 0
   /\ inflight >= amount
   /\ gridBacking >= amount
   /\ inflight' = inflight - amount
   /\ gridBacking' = gridBacking - amount
-  /\ settled' = settled + 1
+  /\ finalizedCount' = finalizedCount + 1
   /\ UNCHANGED <<spendable>>
   /\ step' = step + 1
 
@@ -139,12 +139,12 @@ Refund(amount) ==
   /\ inflight >= amount
   /\ inflight' = inflight - amount
   /\ spendable' = spendable + amount
-  /\ UNCHANGED <<gridBacking, settled>>
+  /\ UNCHANGED <<gridBacking, finalizedCount>>
   /\ step' = step + 1
 
 \* VaultExpire: a live vault's BTC is reclaimed (e.g., CLTV timeout).
 \* Grid backing decreases but no dBTC was in-flight for this vault.
-\* This can only happen if the corresponding dBTC has already been settled
+\* This can only happen if the corresponding dBTC has already been finalized
 \* or was never minted. For conservation: only allowed when no dBTC
 \* references this backing. Modeled as gridBacking decrease paired with
 \* an equal spendable decrease (depositor reclaims and burns their dBTC).
@@ -154,25 +154,25 @@ VaultExpire(amount) ==
   /\ spendable >= amount
   /\ gridBacking' = gridBacking - amount
   /\ spendable' = spendable - amount
-  /\ UNCHANGED <<inflight, settled>>
+  /\ UNCHANGED <<inflight, finalizedCount>>
   /\ step' = step + 1
 
 NoOp ==
-  /\ UNCHANGED <<spendable, inflight, gridBacking, settled>>
+  /\ UNCHANGED <<spendable, inflight, gridBacking, finalizedCount>>
   /\ step' = step + 1
 
 Stutter ==
   /\ spendable' = spendable
   /\ inflight' = inflight
   /\ gridBacking' = gridBacking
-  /\ settled' = settled
+  /\ finalizedCount' = finalizedCount
   /\ step' = step
 
 Next ==
   \/ \E a \in 1..MaxSupply : Deposit(a)
   \/ Transfer
   \/ \E a \in 1..MaxSupply : Commit(a)
-  \/ \E a \in 1..MaxSupply : Settle(a)
+  \/ \E a \in 1..MaxSupply : Finalize(a)
   \/ \E a \in 1..MaxSupply : Refund(a)
   \/ \E a \in 1..MaxSupply : VaultExpire(a)
   \/ NoOp
@@ -186,10 +186,10 @@ StepBound == step \in 0..MaxStep
   Temporal properties
 ***************************************************************************)
 
-\* Settlement is monotone — settled count never decreases.
-SettledNeverDecreases == [][settled <= settled']_vars
+\* Finalization is monotone — finalized count never decreases.
+FinalizedNeverDecreases == [][finalizedCount <= finalizedCount']_vars
 
-\* In-flight can only change via Commit (+), Settle (-), or Refund (-).
+\* In-flight can only change via Commit (+), Finalize (-), or Refund (-).
 \* It never goes negative.
 InFlightNonNegative == inflight >= 0
 
@@ -215,10 +215,10 @@ LEMMA CommitPreservesAbstractSafety ==
   PROVE AbstractSafety'
   BY SMT DEF AbstractSafety, TypeInv, ConservationInvariant, BoundedSupply, Commit
 
-LEMMA SettlePreservesAbstractSafety ==
-  ASSUME AbstractSafety, NEW a \in Nat, a > 0, Settle(a)
+LEMMA FinalizePreservesAbstractSafety ==
+  ASSUME AbstractSafety, NEW a \in Nat, a > 0, Finalize(a)
   PROVE AbstractSafety'
-  BY SMT DEF AbstractSafety, TypeInv, ConservationInvariant, BoundedSupply, Settle
+  BY SMT DEF AbstractSafety, TypeInv, ConservationInvariant, BoundedSupply, Finalize
 
 LEMMA RefundPreservesAbstractSafety ==
   ASSUME AbstractSafety, NEW a \in Nat, a > 0, Refund(a)
@@ -249,8 +249,8 @@ THEOREM AbstractStep ==
   BY <1>2, TransferPreservesAbstractSafety
 <1>3. CASE \E a \in 1..MaxSupply : Commit(a)
   BY <1>3, CommitPreservesAbstractSafety
-<1>4. CASE \E a \in 1..MaxSupply : Settle(a)
-  BY <1>4, SettlePreservesAbstractSafety
+<1>4. CASE \E a \in 1..MaxSupply : Finalize(a)
+  BY <1>4, FinalizePreservesAbstractSafety
 <1>5. CASE \E a \in 1..MaxSupply : Refund(a)
   BY <1>5, RefundPreservesAbstractSafety
 <1>6. CASE \E a \in 1..MaxSupply : VaultExpire(a)

@@ -757,7 +757,7 @@ async fn fractional_exit_creates_successor_vault() {
     let keys = test_keys();
     let state = test_state(1);
     let total_amount_sats = 100_000_000; // 1 BTC
-    let exit_amount_sats = 50_000_000; // 0.5 BTC fractional exit
+    let exit_amount_sats: u64 = 50_000_000; // 0.5 BTC fractional exit
 
     // Initiate and complete a BTC→dBTC deposit to have dBTC
     let initiation = bridge
@@ -803,11 +803,12 @@ async fn fractional_exit_creates_successor_vault() {
     let fractional = bridge
         .pour_partial(
             &initiation.vault_id,
+            dsm_sdk::policy::builtins::DBTC_POLICY_COMMIT,
             total_amount_sats,
             0,
             exit_amount_sats,
             100,
-            (&keys.sphincs_pk, &keys.sphincs_sk),
+            (&keys.sphincs_pk[..], &keys.sphincs_sk[..]),
             &state,
             dsm::bitcoin::types::BitcoinNetwork::Signet,
             &keys.kyber_pk,
@@ -2299,26 +2300,27 @@ const SEQUENCE_RBF: u32 = 0xFFFF_FFFD;
 fn claim_tx_input_opts_in_to_rbf() {
     use dsm_sdk::sdk::bitcoin_key_store::BitcoinKeyStore;
     use dsm_sdk::sdk::bitcoin_tap_sdk::WITHDRAWAL_FEE_RATE_SAT_VB;
-    use dsm_sdk::sdk::bitcoin_tx_builder::{build_htlc_claim_tx, ClaimTxParams};
+    use dsm_sdk::sdk::bitcoin_tx_builder::{build_htlc_claim_tx, ClaimTxParams, HtlcSpendSigner};
 
     let ks =
         BitcoinKeyStore::from_entropy(&[0x42; 32], dsm::bitcoin::types::BitcoinNetwork::Signet)
             .expect("keygen");
     let (addr, _) = ks.peek_receive_address(0).expect("address 0");
     let dummy_script = vec![0x51u8];
-    let privkey = [0x01u8; 32];
+    let preimage = b"preimage";
+    let hash_lock = dsm::bitcoin::script::sha256_hash_lock(preimage);
     let tx = build_htlc_claim_tx(&ClaimTxParams {
         outpoint_txid: &[0xAA; 32],
         outpoint_vout: 0,
         htlc_script: &dummy_script,
-        preimage: b"preimage",
+        preimage,
         destination_addr: &addr,
         amount_sats: 100_000,
         fee_rate_sat_vb: WITHDRAWAL_FEE_RATE_SAT_VB,
-        key_store: &ks,
-        signing_index: 0,
+        signer: HtlcSpendSigner::MathOwned {
+            hash_lock: &hash_lock,
+        },
         network: bitcoin::Network::Signet,
-        claim_privkey: Some(&privkey),
     })
     .expect("claim tx must build");
     assert_eq!(tx.input.len(), 1);
@@ -2536,7 +2538,7 @@ async fn concurrent_pour_partial_only_one_succeeds() {
     let keys = test_keys();
     let state = test_state(6);
     let total_amount_sats = 100_000_000;
-    let exit_amount = 10_000_000;
+    let exit_amount: u64 = 10_000_000;
 
     let initiation = bridge
         .open_tap(
@@ -2592,11 +2594,12 @@ async fn concurrent_pour_partial_only_one_succeeds() {
         bridge1
             .pour_partial(
                 &vid1,
+                dsm_sdk::policy::builtins::DBTC_POLICY_COMMIT,
                 total_amount_sats,
                 0,
                 exit_amount,
                 100,
-                (&pk1, &sk1),
+                (&pk1[..], &sk1[..]),
                 &s1,
                 dsm::bitcoin::types::BitcoinNetwork::Signet,
                 &kpk1,
@@ -2607,11 +2610,12 @@ async fn concurrent_pour_partial_only_one_succeeds() {
         bridge2
             .pour_partial(
                 &vid2,
+                dsm_sdk::policy::builtins::DBTC_POLICY_COMMIT,
                 total_amount_sats,
                 0,
                 exit_amount,
                 100,
-                (&pk2, &sk2),
+                (&pk2[..], &sk2[..]),
                 &s2,
                 dsm::bitcoin::types::BitcoinNetwork::Signet,
                 &kpk2,

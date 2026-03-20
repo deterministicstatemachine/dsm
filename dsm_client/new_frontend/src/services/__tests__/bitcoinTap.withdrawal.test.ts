@@ -73,8 +73,8 @@ describe('bitcoinTap withdrawal planner service', () => {
     const executeResponse = new BitcoinWithdrawalExecuteResponse({
       planId: 'withdraw-1',
       planClass: 'single_full_sweep',
-      status: 'completed',
-      message: 'Executed 1 withdrawal leg(s)',
+      status: 'committed',
+      message: 'Broadcast 1 withdrawal leg(s). Final burn will complete after confirmation depth is reached.',
       requestedNetSats: 250_000n as any,
       plannedNetSats: 250_000n as any,
       totalGrossExitSats: 251_000n as any,
@@ -119,7 +119,7 @@ describe('bitcoinTap withdrawal planner service', () => {
     const req = BitcoinWithdrawalExecuteRequest.fromBinary(argPack.body as Uint8Array);
     expect(req.planId).toBe('withdraw-1');
     expect(req.destinationAddress).toBe('tb1qexecutedest');
-    expect(result.status).toBe('completed');
+    expect(result.status).toBe('committed');
     expect(result.planId).toBe('withdraw-1');
   });
 });
