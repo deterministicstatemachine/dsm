@@ -153,33 +153,35 @@ fn ensure_exec_data_matches_withdrawal_policy(
     )
 }
 
-fn persist_withdrawal_leg(
-    withdrawal_id: &str,
+struct WithdrawalLegParams<'a> {
+    withdrawal_id: &'a str,
     leg_index: u32,
-    vault_id: &str,
-    leg_kind: &str,
+    vault_id: &'a str,
+    leg_kind: &'a str,
     amount_sats: u64,
     estimated_fee_sats: u64,
     estimated_net_sats: u64,
-    sweep_txid: Option<&str>,
-    successor_vault_id: Option<&str>,
-    successor_vault_op_id: Option<&str>,
-    exit_vault_op_id: Option<&str>,
-) -> Result<(), String> {
+    sweep_txid: Option<&'a str>,
+    successor_vault_id: Option<&'a str>,
+    successor_vault_op_id: Option<&'a str>,
+    exit_vault_op_id: Option<&'a str>,
+}
+
+fn persist_withdrawal_leg(params: &WithdrawalLegParams<'_>) -> Result<(), String> {
     let now = crate::util::deterministic_time::tick();
     crate::storage::client_db::upsert_withdrawal_leg(
         &crate::storage::client_db::InFlightWithdrawalLeg {
-            withdrawal_id: withdrawal_id.to_string(),
-            leg_index,
-            vault_id: vault_id.to_string(),
-            leg_kind: leg_kind.to_string(),
-            amount_sats,
-            estimated_fee_sats,
-            estimated_net_sats,
-            sweep_txid: sweep_txid.map(str::to_string),
-            successor_vault_id: successor_vault_id.map(str::to_string),
-            successor_vault_op_id: successor_vault_op_id.map(str::to_string),
-            exit_vault_op_id: exit_vault_op_id.map(str::to_string),
+            withdrawal_id: params.withdrawal_id.to_string(),
+            leg_index: params.leg_index,
+            vault_id: params.vault_id.to_string(),
+            leg_kind: params.leg_kind.to_string(),
+            amount_sats: params.amount_sats,
+            estimated_fee_sats: params.estimated_fee_sats,
+            estimated_net_sats: params.estimated_net_sats,
+            sweep_txid: params.sweep_txid.map(str::to_string),
+            successor_vault_id: params.successor_vault_id.map(str::to_string),
+            successor_vault_op_id: params.successor_vault_op_id.map(str::to_string),
+            exit_vault_op_id: params.exit_vault_op_id.map(str::to_string),
             state: "broadcast".to_string(),
             proof_digest: None,
             created_at: now,
@@ -672,23 +674,23 @@ impl AppRouterImpl {
                     };
 
                     let leg_index = executed_legs.len() as u32;
-                    persist_withdrawal_leg(
-                        &withdrawal_id,
+                    persist_withdrawal_leg(&WithdrawalLegParams {
+                        withdrawal_id: &withdrawal_id,
                         leg_index,
-                        &execution_leg.vault_id,
-                        &execution_leg.kind,
-                        execution_leg.gross_exit_sats,
-                        execution_leg.estimated_fee_sats,
-                        execution_leg.estimated_net_sats,
-                        (!execution_leg.sweep_txid.is_empty())
+                        vault_id: &execution_leg.vault_id,
+                        leg_kind: &execution_leg.kind,
+                        amount_sats: execution_leg.gross_exit_sats,
+                        estimated_fee_sats: execution_leg.estimated_fee_sats,
+                        estimated_net_sats: execution_leg.estimated_net_sats,
+                        sweep_txid: (!execution_leg.sweep_txid.is_empty())
                             .then_some(execution_leg.sweep_txid.as_str()),
-                        (!execution_leg.successor_vault_id.is_empty())
+                        successor_vault_id: (!execution_leg.successor_vault_id.is_empty())
                             .then_some(execution_leg.successor_vault_id.as_str()),
-                        (!execution_leg.successor_vault_op_id.is_empty())
+                        successor_vault_op_id: (!execution_leg.successor_vault_op_id.is_empty())
                             .then_some(execution_leg.successor_vault_op_id.as_str()),
-                        (!execution_leg.exit_vault_op_id.is_empty())
+                        exit_vault_op_id: (!execution_leg.exit_vault_op_id.is_empty())
                             .then_some(execution_leg.exit_vault_op_id.as_str()),
-                    )?;
+                    })?;
 
                     // Mark vault as AwaitingSettlement to block grid routing
                     if let Err(e) = crate::storage::client_db::update_vault_record_state(
@@ -2719,21 +2721,21 @@ impl AppRouterImpl {
                     }
                 };
                 if let Some(wd_id) = &standalone_wd_id {
-                    if let Err(e) = persist_withdrawal_leg(
-                        wd_id,
-                        0,
-                        &req.source_vault_id,
-                        "partial",
-                        burn_amount,
-                        crate::sdk::bitcoin_tap_sdk::estimated_partial_withdrawal_fee_sats(),
-                        burn_amount.saturating_sub(
+                    if let Err(e) = persist_withdrawal_leg(&WithdrawalLegParams {
+                        withdrawal_id: wd_id,
+                        leg_index: 0,
+                        vault_id: &req.source_vault_id,
+                        leg_kind: "partial",
+                        amount_sats: burn_amount,
+                        estimated_fee_sats: crate::sdk::bitcoin_tap_sdk::estimated_partial_withdrawal_fee_sats(),
+                        estimated_net_sats: burn_amount.saturating_sub(
                             crate::sdk::bitcoin_tap_sdk::estimated_partial_withdrawal_fee_sats(),
                         ),
-                        Some(&sweep_txid),
-                        Some(&result.successor_vault_id),
-                        Some(&result.successor_vault_op_id),
-                        (!exit_vault_op_id.is_empty()).then_some(exit_vault_op_id.as_str()),
-                    ) {
+                        sweep_txid: Some(&sweep_txid),
+                        successor_vault_id: Some(&result.successor_vault_id),
+                        successor_vault_op_id: Some(&result.successor_vault_op_id),
+                        exit_vault_op_id: (!exit_vault_op_id.is_empty()).then_some(exit_vault_op_id.as_str()),
+                    }) {
                         log::error!(
                             "[bitcoin.fractional.exit] withdrawal leg persistence failed: {e}"
                         );
@@ -3147,21 +3149,21 @@ impl AppRouterImpl {
                     }
                 };
                 if let Some(wd_id) = &standalone_wd_id {
-                    if let Err(e) = persist_withdrawal_leg(
-                        wd_id,
-                        0,
-                        &req.source_vault_id,
-                        "full",
-                        burn_amount,
-                        crate::sdk::bitcoin_tap_sdk::estimated_full_withdrawal_fee_sats(),
-                        burn_amount.saturating_sub(
+                    if let Err(e) = persist_withdrawal_leg(&WithdrawalLegParams {
+                        withdrawal_id: wd_id,
+                        leg_index: 0,
+                        vault_id: &req.source_vault_id,
+                        leg_kind: "full",
+                        amount_sats: burn_amount,
+                        estimated_fee_sats: crate::sdk::bitcoin_tap_sdk::estimated_full_withdrawal_fee_sats(),
+                        estimated_net_sats: burn_amount.saturating_sub(
                             crate::sdk::bitcoin_tap_sdk::estimated_full_withdrawal_fee_sats(),
                         ),
-                        Some(&sweep_txid),
-                        None,
-                        None,
-                        (!exit_vault_op_id.is_empty()).then_some(exit_vault_op_id.as_str()),
-                    ) {
+                        sweep_txid: Some(&sweep_txid),
+                        successor_vault_id: None,
+                        successor_vault_op_id: None,
+                        exit_vault_op_id: (!exit_vault_op_id.is_empty()).then_some(exit_vault_op_id.as_str()),
+                    }) {
                         log::error!("[bitcoin.full.sweep] withdrawal leg persistence failed: {e}");
                     }
                 }

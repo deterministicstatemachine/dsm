@@ -394,69 +394,70 @@ async fn test_disconnect_then_retry_succeeds() {
 // =============================================================================
 // Test 4: Multiple sequential back-and-forth transfers (A→B repeated 3×)
 // =============================================================================
+struct TransferParticipant<'a> {
+    handler: &'a BilateralBleHandler,
+    dev: [u8; 32],
+    gen: [u8; 32],
+    pubkey: Vec<u8>,
+}
+
 async fn run_one_transfer(
-    sender: &BilateralBleHandler,
-    receiver: &BilateralBleHandler,
-    sender_dev: [u8; 32],
-    sender_gen: [u8; 32],
-    sender_pub: Vec<u8>,
-    receiver_dev: [u8; 32],
-    receiver_gen: [u8; 32],
-    receiver_pub: Vec<u8>,
+    sender: &TransferParticipant<'_>,
+    receiver: &TransferParticipant<'_>,
     nonce: u8,
 ) {
     sdk::sdk::app_state::AppState::set_identity_info(
-        sender_dev.to_vec(),
-        sender_pub.clone(),
-        sender_gen.to_vec(),
+        sender.dev.to_vec(),
+        sender.pubkey.clone(),
+        sender.gen.to_vec(),
         vec![0u8; 32],
     );
     sdk::sdk::app_state::AppState::set_has_identity(true);
 
-    let op = make_transfer_op(receiver_dev, nonce);
-    let (prep, commit) = sender
-        .prepare_bilateral_transaction(receiver_dev, op, 300)
+    let op = make_transfer_op(receiver.dev, nonce);
+    let (prep, commit) = sender.handler
+        .prepare_bilateral_transaction(receiver.dev, op, 300)
         .await
         .unwrap_or_else(|e| panic!("prepare nonce={nonce}: {e}"));
 
-    receiver
+    receiver.handler
         .handle_prepare_request(&prep)
         .await
         .unwrap_or_else(|e| panic!("recv prepare nonce={nonce}: {e}"));
 
-    let accept = receiver
+    let accept = receiver.handler
         .create_prepare_accept_envelope(commit)
         .await
         .unwrap_or_else(|e| panic!("accept nonce={nonce}: {e}"));
 
     sdk::sdk::app_state::AppState::set_identity_info(
-        sender_dev.to_vec(),
-        sender_pub,
-        sender_gen.to_vec(),
+        sender.dev.to_vec(),
+        sender.pubkey.clone(),
+        sender.gen.to_vec(),
         vec![0u8; 32],
     );
-    let (confirm, _) = sender
+    let (confirm, _) = sender.handler
         .handle_prepare_response(&accept)
         .await
         .unwrap_or_else(|e| panic!("handle_response nonce={nonce}: {e}"));
 
     sdk::sdk::app_state::AppState::set_identity_info(
-        receiver_dev.to_vec(),
-        receiver_pub,
-        receiver_gen.to_vec(),
+        receiver.dev.to_vec(),
+        receiver.pubkey.clone(),
+        receiver.gen.to_vec(),
         vec![0u8; 32],
     );
-    receiver
+    receiver.handler
         .handle_confirm_request(&confirm)
         .await
         .unwrap_or_else(|e| panic!("handle_confirm nonce={nonce}: {e}"));
 
-    sender
+    sender.handler
         .mark_confirm_delivered(commit)
         .await
         .unwrap_or_else(|e| panic!("mark_delivered nonce={nonce}: {e}"));
 
-    let phase = sender.get_session_phase(&commit).await;
+    let phase = sender.handler.get_session_phase(&commit).await;
     assert_eq!(
         phase,
         Some(BilateralPhase::Committed),
@@ -487,19 +488,20 @@ async fn test_multiple_sequential_transfers() {
 
     // Run 3 sequential A→B transfers with increasing nonces (simulating repeated
     // back-and-forth sessions on the same BLE connection without disconnect).
+    let participant_a = TransferParticipant {
+        handler: &handler_a,
+        dev: a_dev,
+        gen: a_gen,
+        pubkey: a_kp.public_key().to_vec(),
+    };
+    let participant_b = TransferParticipant {
+        handler: &handler_b,
+        dev: b_dev,
+        gen: b_gen,
+        pubkey: b_kp.public_key().to_vec(),
+    };
     for nonce in [10u8, 11, 12] {
-        run_one_transfer(
-            &handler_a,
-            &handler_b,
-            a_dev,
-            a_gen,
-            a_kp.public_key().to_vec(),
-            b_dev,
-            b_gen,
-            b_kp.public_key().to_vec(),
-            nonce,
-        )
-        .await;
+        run_one_transfer(&participant_a, &participant_b, nonce).await;
     }
 }
 

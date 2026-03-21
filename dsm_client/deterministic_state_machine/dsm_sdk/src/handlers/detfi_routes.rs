@@ -144,7 +144,6 @@ impl AppRouterImpl {
                             policy_digest: create.policy_digest.clone(),
                             precommit: create.precommit.clone(),
                             parent_digest: create.parent_digest.clone(),
-                            ..create
                         };
 
                         let filled_bytes = filled.encode_to_vec();
