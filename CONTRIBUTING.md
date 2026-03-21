@@ -123,5 +123,6 @@ This project is dual-licensed under [MIT](LICENSE-MIT) and [Apache 2.0](LICENSE-
 ## Contact
 
 - Issues: GitHub Issues on this repo
-- Security: team@irrefutablelabs.org
+- Security: info@irrefutablelabs.org
 - General: see [SUPPORT.md](SUPPORT.md)
+- Telegram Dev Group: https://t.me/+nQsx8Or2YQo1MDcx

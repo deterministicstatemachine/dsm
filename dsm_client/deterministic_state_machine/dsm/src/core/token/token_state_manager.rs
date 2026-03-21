@@ -36,6 +36,23 @@ pub trait PolicyCommitResolver: Send + Sync {
     fn resolve(&self, token_id: &str) -> Result<[u8; 32], DsmError>;
 }
 
+/// Derive the stable canonical balance key for a token position.
+///
+/// `balance_key` is the identity of the canonical balance entry. Freshness and
+/// versioning belong to projection rows, not to the balance identity itself.
+pub fn derive_canonical_balance_key(
+    policy_commit: &[u8; 32],
+    owner_pk: &[u8],
+    token_id: &str,
+) -> String {
+    let digest = crate::crypto::blake3::token_domain_hash(policy_commit, "balance-key", owner_pk);
+    let bytes = digest.as_bytes();
+    let mut le = [0u8; 16];
+    le.copy_from_slice(&bytes[..16]);
+    let prefix = u128::from_le_bytes(le);
+    format!("{prefix}|{token_id}")
+}
+
 #[derive(Debug, Default)]
 pub struct TokenStateManager {
     token_store: Arc<RwLock<HashMap<String, Token>>>,
@@ -424,13 +441,11 @@ impl TokenStateManager {
     /// domains. This prevents cross-token confusion (e.g., dBTC credited to ERA).
     pub fn make_balance_key(&self, owner_pk: &[u8], token_id: &str) -> Result<String, DsmError> {
         let policy_commit = self.resolve_policy_commit(token_id)?;
-        let digest =
-            crate::crypto::blake3::token_domain_hash(&policy_commit, "balance-key", owner_pk);
-        let bytes = digest.as_bytes();
-        let mut le = [0u8; 16];
-        le.copy_from_slice(&bytes[..16]);
-        let prefix = u128::from_le_bytes(le);
-        Ok(format!("{prefix}|{token_id}"))
+        Ok(derive_canonical_balance_key(
+            &policy_commit,
+            owner_pk,
+            token_id,
+        ))
     }
 
     fn verify_mint_authorization(
@@ -908,5 +923,41 @@ impl TokenStateManager {
             amount,
             token_id: token_id.to_string(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::derive_canonical_balance_key;
+
+    #[test]
+    fn canonical_balance_key_is_stable_for_same_semantic_input() {
+        let policy_commit = [0x11; 32];
+        let owner_pk = [0x22; 32];
+
+        let a = derive_canonical_balance_key(&policy_commit, &owner_pk, "dBTC");
+        let b = derive_canonical_balance_key(&policy_commit, &owner_pk, "dBTC");
+
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn canonical_balance_key_changes_when_policy_commit_changes() {
+        let owner_pk = [0x22; 32];
+
+        let a = derive_canonical_balance_key(&[0x11; 32], &owner_pk, "dBTC");
+        let b = derive_canonical_balance_key(&[0x33; 32], &owner_pk, "dBTC");
+
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn canonical_balance_key_changes_when_owner_binding_changes() {
+        let policy_commit = [0x11; 32];
+
+        let a = derive_canonical_balance_key(&policy_commit, &[0x22; 32], "dBTC");
+        let b = derive_canonical_balance_key(&policy_commit, &[0x44; 32], "dBTC");
+
+        assert_ne!(a, b);
     }
 }

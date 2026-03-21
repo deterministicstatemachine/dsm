@@ -343,15 +343,6 @@ impl EraToken {
     }
 }
 
-fn balance_key_from_commit(owner_pk: &[u8], token_id: &str, policy_commit: &[u8; 32]) -> String {
-    let digest = dsm::crypto::blake3::token_domain_hash(policy_commit, "balance-key", owner_pk);
-    let bytes = digest.as_bytes();
-    let mut le = [0u8; 16];
-    le.copy_from_slice(&bytes[..16]);
-    let prefix = u128::from_le_bytes(le);
-    format!("{prefix}|{token_id}")
-}
-
 // ---------- Token SDK ----------
 
 pub struct TokenSDK<I: Send + Sync> {
@@ -473,7 +464,7 @@ impl<I: Send + Sync> TokenSDK<I> {
         }
     }
 
-    fn resolve_policy_commit_strict(&self, token_id: &str) -> Result<[u8; 32], DsmError> {
+    pub(crate) fn resolve_policy_commit_strict(&self, token_id: &str) -> Result<[u8; 32], DsmError> {
         if let Some(commit) = crate::policy::builtin_policy_commit(token_id) {
             return Ok(commit);
         }
@@ -517,6 +508,103 @@ impl<I: Send + Sync> TokenSDK<I> {
             ),
             _ => None,
         }
+    }
+
+    fn sync_projection_from_state(
+        &self,
+        device_id: &[u8; 32],
+        state: &State,
+        token_id: &str,
+        policy_commit: &[u8; 32],
+        balance: &Balance,
+    ) {
+        let device_id_txt = crate::util::text_id::encode_base32_crockford(device_id);
+        let state_hash = match state.hash() {
+            Ok(hash) => hash,
+            Err(e) => {
+                log::warn!(
+                    "[TokenSDK] Failed to compute state hash while syncing projection for {}: {}",
+                    token_id,
+                    e
+                );
+                return;
+            }
+        };
+
+        let record = crate::storage::client_db::BalanceProjectionRecord {
+            balance_key: dsm::core::token::derive_canonical_balance_key(
+                policy_commit,
+                &state.device_info.public_key,
+                token_id,
+            ),
+            device_id: device_id_txt,
+            token_id: token_id.to_string(),
+            policy_commit: crate::util::text_id::encode_base32_crockford(policy_commit),
+            available: balance.available(),
+            locked: balance.locked(),
+            source_state_hash: crate::util::text_id::encode_base32_crockford(&state_hash),
+            source_state_number: state.state_number,
+            updated_at: crate::util::deterministic_time::tick(),
+        };
+
+        if let Err(e) = crate::storage::client_db::upsert_balance_projection(&record) {
+            log::warn!(
+                "[TokenSDK] Failed to sync projection row for {}: {}",
+                token_id,
+                e
+            );
+        }
+    }
+
+    fn read_projected_non_era_balance(&self, device_id: &[u8; 32], token_id: &str) -> Option<Balance> {
+        let state = self.core_sdk.get_current_state().ok()?;
+        let policy_commit = self.resolve_policy_commit_strict(token_id).ok()?;
+        let canonical = dsm::core::token::derive_canonical_balance_key(
+            &policy_commit,
+            &state.device_info.public_key,
+            token_id,
+        );
+        let device_id_txt = crate::util::text_id::encode_base32_crockford(device_id);
+        let policy_commit_txt = crate::util::text_id::encode_base32_crockford(&policy_commit);
+
+        match crate::storage::client_db::get_validated_balance_projection(
+            &device_id_txt,
+            token_id,
+            &canonical,
+            &policy_commit_txt,
+        ) {
+            Ok(Some(record)) => {
+                let state_hash = crate::util::text_id::decode_base32_crockford(
+                    &record.source_state_hash,
+                )
+                .and_then(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).ok())
+                .unwrap_or_else(|| state.hash().unwrap_or([0u8; 32]));
+                let mut balance = Balance::from_state(
+                    record.available,
+                    state_hash,
+                    record.source_state_number,
+                );
+                if record.locked > 0 {
+                    let _ = balance.lock(record.locked);
+                }
+                return Some(balance);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                log::warn!(
+                    "[TokenSDK] Ignoring invalid projection row for {}: {}",
+                    token_id,
+                    e
+                );
+            }
+        }
+
+        if let Some(balance) = state.token_balances.get(&canonical).cloned() {
+            self.sync_projection_from_state(device_id, &state, token_id, &policy_commit, &balance);
+            return Some(balance);
+        }
+
+        None
     }
 
     fn cache_token_metadata_strict(
@@ -1403,84 +1491,21 @@ impl<I: Send + Sync> TokenSDK<I> {
     }
 
     /// dBTC lane: canonical key via make_balance_key(pk, "dBTC").
-    /// dBTC is SQLite-authoritative after bilateral transfers.
+    /// dBTC reads prefer validated canonical projection rows, then canonical state.
     fn get_dbtc_balance(&self, device_id: &[u8; 32]) -> Balance {
         let balances = self.balances.read();
         if let Some(b) = balances.get(device_id).and_then(|m| m.get("dBTC")).cloned() {
             return b;
         }
 
-        // For dBTC, prefer SQLite balance (authoritative after bilateral transfers).
-        // Bilateral send/recv update SQLite only, not the in-memory wallet cache.
-        let device_id_txt = crate::util::text_id::encode_base32_crockford(device_id);
-        match crate::storage::client_db::get_token_balance(&device_id_txt, "dBTC") {
-            Ok(Some((available, _locked))) => {
-                let balance = Balance::from_state(available, *device_id, 0);
-                drop(balances);
-                self.balances
-                    .write()
-                    .entry(*device_id)
-                    .or_default()
-                    .insert("dBTC".to_string(), balance.clone());
-                return balance;
-            }
-            Ok(None) => {
-                // No SQLite balance - will fall back to core state
-                log::debug!("[TokenSDK] No dBTC balance in SQLite for device {}, falling back to core state", device_id_txt);
-            }
-            Err(e) => {
-                log::warn!(
-                    "[TokenSDK] Failed to query dBTC balance from SQLite for device {}: {}",
-                    device_id_txt,
-                    e
-                );
-                // Continue to fall back to core state rather than failing
-            }
-        }
-
-        // Fall back to core state for bootstrap/early cases
-        if let Ok(cs) = self.core_sdk.get_current_state() {
-            let canonical = match self.resolve_policy_commit_strict("dBTC") {
-                Ok(policy_commit) => {
-                    balance_key_from_commit(&cs.device_info.public_key, "dBTC", &policy_commit)
-                }
-                Err(err) => {
-                    log::warn!(
-                        "[TokenSDK] Refusing dBTC balance lookup without policy commit: {err}"
-                    );
-                    return Balance::zero();
-                }
-            };
-            if let Some(b) = cs.token_balances.get(&canonical).cloned() {
-                // Ensure SQLite has a row for dBTC so offline bilateral send can succeed.
-                // The SDK’s offline bilateral debit path relies on token_balances rows
-                // being present, while the ledger state is canonical.
-                let device_id_txt = crate::util::text_id::encode_base32_crockford(device_id);
-                if let Ok(None) =
-                    crate::storage::client_db::get_token_balance(&device_id_txt, "dBTC")
-                {
-                    if let Err(e) = crate::storage::client_db::upsert_token_balance(
-                        &device_id_txt,
-                        "dBTC",
-                        b.available(),
-                        b.locked(),
-                    ) {
-                        log::warn!(
-                            "[TokenSDK] Failed to seed sqlite dBTC balance row for {}: {}",
-                            device_id_txt,
-                            e
-                        );
-                    }
-                }
-
-                drop(balances);
-                self.balances
-                    .write()
-                    .entry(*device_id)
-                    .or_default()
-                    .insert("dBTC".to_string(), b.clone());
-                return b;
-            }
+        if let Some(balance) = self.read_projected_non_era_balance(device_id, "dBTC") {
+            drop(balances);
+            self.balances
+                .write()
+                .entry(*device_id)
+                .or_default()
+                .insert("dBTC".to_string(), balance.clone());
+            return balance;
         }
         Balance::zero()
     }
@@ -1495,29 +1520,14 @@ impl<I: Send + Sync> TokenSDK<I> {
         {
             return b;
         }
-        if let Ok(cs) = self.core_sdk.get_current_state() {
-            let canonical = match self.resolve_policy_commit_strict(token_id) {
-                Ok(policy_commit) => {
-                    balance_key_from_commit(&cs.device_info.public_key, token_id, &policy_commit)
-                }
-                Err(err) => {
-                    log::warn!(
-                        "[TokenSDK] Refusing balance lookup for token {} without policy commit: {}",
-                        token_id,
-                        err
-                    );
-                    return Balance::zero();
-                }
-            };
-            if let Some(b) = cs.token_balances.get(&canonical).cloned() {
-                drop(balances);
-                self.balances
-                    .write()
-                    .entry(*device_id)
-                    .or_default()
-                    .insert(token_id.to_string(), b.clone());
-                return b;
-            }
+        if let Some(balance) = self.read_projected_non_era_balance(device_id, token_id) {
+            drop(balances);
+            self.balances
+                .write()
+                .entry(*device_id)
+                .or_default()
+                .insert(token_id.to_string(), balance.clone());
+            return balance;
         }
         Balance::zero()
     }
@@ -1765,8 +1775,19 @@ impl<I: Send + Sync> TokenSDK<I> {
             );
         }
 
-        // Reload all token balances
-        if let Ok(token_balances) = crate::storage::client_db::get_token_balances(&device_id_str) {
+        // Reload all non-ERA token balances, preferring canonical projection rows.
+        if let Ok(token_balances) = crate::storage::client_db::list_balance_projections(&device_id_str) {
+            for record in token_balances {
+                let mut balance = Balance::from_state(record.available, state_hash, state_number);
+                if record.locked > 0 {
+                    let _ = balance.lock(record.locked);
+                }
+                device_balances.insert(
+                    record.token_id,
+                    balance,
+                );
+            }
+        } else if let Ok(token_balances) = crate::storage::client_db::get_token_balances(&device_id_str) {
             for (token_id, available, _locked) in token_balances {
                 device_balances.insert(
                     token_id,

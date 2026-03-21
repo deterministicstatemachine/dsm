@@ -295,6 +295,22 @@ fn create_schema(conn: &Connection) -> Result<()> {
             PRIMARY KEY (device_id, token_id)
         );
 
+        CREATE TABLE IF NOT EXISTS balance_projections(
+            balance_key         TEXT NOT NULL PRIMARY KEY,
+            device_id           TEXT NOT NULL,
+            token_id            TEXT NOT NULL,
+            policy_commit       TEXT NOT NULL,
+            available           INTEGER NOT NULL DEFAULT 0 CHECK(available >= 0),
+            locked              INTEGER NOT NULL DEFAULT 0 CHECK(locked >= 0),
+            source_state_hash   TEXT NOT NULL,
+            source_state_number INTEGER NOT NULL,
+            updated_at          INTEGER NOT NULL,
+            UNIQUE (device_id, token_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_balance_projections_device_token
+            ON balance_projections(device_id, token_id);
+
         CREATE TABLE IF NOT EXISTS spent_nonces(
             nonce_hash  BLOB PRIMARY KEY,
             tx_id       TEXT NOT NULL,

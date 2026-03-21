@@ -347,27 +347,15 @@ impl UnilateralOpsSDK {
             }
         }
 
-        // Debit non-ERA tokens to the token_balances SQLite table
+        // Non-ERA balances must be materialized from canonical state by the caller's
+        // state-transition path. This transport helper no longer performs manual
+        // SQLite arithmetic for non-ERA assets.
         if amount > 0 && token_id != "ERA" {
-            let (prev, existing_locked) =
-                match crate::storage::client_db::get_token_balance(sender_id, token_id) {
-                    Ok(Some((a, l))) => (a, l),
-                    Ok(None) => (0, 0),
-                    Err(e) => {
-                        log::error!(
-                            "[unilateral] CRITICAL: failed to read {token_id} balance: {e}"
-                        );
-                        (0, 0)
-                    }
-                };
-            if let Err(e) = crate::storage::client_db::upsert_token_balance(
-                sender_id,
+            log::info!(
+                "[unilateral] skipped legacy non-ERA SQLite arithmetic for {} on sender {}",
                 token_id,
-                prev.saturating_sub(amount),
-                existing_locked,
-            ) {
-                log::error!("[unilateral] CRITICAL: failed to debit {token_id} balance: {e}");
-            }
+                sender_id
+            );
         }
 
         // Store Transaction Record

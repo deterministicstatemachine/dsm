@@ -3804,17 +3804,26 @@ impl BitcoinTapSdk {
             log::warn!("[withdraw.plan] advertisement refresh failed: {e}");
         }
 
-        // Query bearer's dBTC balance from SQLite for early warning
+        // Query bearer's dBTC balance from canonical projection rows for early warning.
         let device_id_str = crate::util::text_id::encode_base32_crockford(planner_device_id);
-        let available_dbtc_sats =
-            match crate::storage::client_db::get_token_balance(&device_id_str, DBTC_TOKEN_ID) {
+        let available_dbtc_sats = match crate::storage::client_db::get_balance_projection(
+            &device_id_str,
+            DBTC_TOKEN_ID,
+        ) {
+            Ok(Some(record)) => record.available,
+            Ok(None) => match crate::storage::client_db::get_token_balance(&device_id_str, DBTC_TOKEN_ID) {
                 Ok(Some((available, _locked))) => available,
                 Ok(None) => 0,
                 Err(e) => {
-                    log::error!("[withdraw.plan] failed to read dBTC balance: {e}");
+                    log::error!("[withdraw.plan] failed to read fallback dBTC balance: {e}");
                     0
                 }
-            };
+            },
+            Err(e) => {
+                log::error!("[withdraw.plan] failed to read dBTC projection: {e}");
+                0
+            }
+        };
 
         // dBTC Definition 7: construct mempool client for UTXO liveness verification.
         // The bearer's device must verify all 3 facts before planning a withdrawal.

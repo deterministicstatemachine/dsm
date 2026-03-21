@@ -207,31 +207,8 @@ impl AppRouterImpl {
                     &token_for_query_owned
                 };
 
-                // For non-ERA tokens, prefer SQLite (authoritative after bilateral transfers).
-                // Bilateral send/recv update SQLite only, not the in-memory wallet cache.
-                if token_for_query != "ERA" {
-                    let device_id_txt =
-                        crate::util::text_id::encode_base32_crockford(&self.device_id_bytes);
-                    if let Ok(Some((available, locked))) =
-                        crate::storage::client_db::get_token_balance(
-                            &device_id_txt,
-                            token_for_query,
-                        )
-                    {
-                        let mut reply = generated::BalanceGetResponse {
-                            token_id: token_for_query.to_string(),
-                            available,
-                            locked,
-                            ..Default::default()
-                        };
-                        enrich_balance_metadata(&mut reply);
-                        return pack_envelope_ok(generated::envelope::Payload::BalanceGetResponse(
-                            reply,
-                        ));
-                    }
-                }
-
-                // Fall through to in-memory path for ERA or when SQLite has no row.
+                // Use the wallet lane router, which prefers validated canonical projection rows
+                // for non-ERA tokens and falls back to canonical state.
                 match self.wallet.get_balance(Some(token_for_query)) {
                     Ok(bal) => {
                         let mut reply = generated::BalanceGetResponse {
@@ -520,10 +497,8 @@ impl AppRouterImpl {
                     }
                 }
 
-                // Seed-on-read: flush any in-memory-only token balances into SQLite so that the
-                // bilateral debit path (which reads from SQLite) always has a valid baseline.
-                // This runs before the SQLite merge below so that the seeded rows are immediately
-                // visible if merged back in the same pass.
+                // Legacy token_balances rows still exist for in-flight bilateral plumbing, but
+                // UI reads should prefer canonical projection rows materialized from state.
                 // ERA is excluded because it uses the separate wallet_state.balance column.
                 for item in items.iter() {
                     if item.token_id == "ERA" || item.available == 0 {
@@ -568,12 +543,32 @@ impl AppRouterImpl {
                     }
                 }
 
-                // Merge persisted token balances from SQLite (authoritative for bilateral transfers).
-                // The bilateral send path always writes to SQLite and never updates the in-memory
-                // wallet, so SQLite wins unconditionally for any token it has a row for.
-                // ERA is excluded because it uses the separate wallet_state.balance column.
-                if let Ok(persisted) = crate::storage::client_db::get_token_balances(&device_id_txt)
+                // Merge canonical projection rows first.
+                if let Ok(projected) =
+                    crate::storage::client_db::list_balance_projections(&device_id_txt)
                 {
+                    for record in projected {
+                        let tok_id = canonicalize_token_id(&record.token_id);
+                        if tok_id == "ERA" || tok_id == "BTC_CHAIN" {
+                            continue;
+                        }
+                        if let Some(existing) = items.iter_mut().find(|i| i.token_id == tok_id) {
+                            existing.available = record.available;
+                            existing.locked = record.locked;
+                        } else {
+                            items.push(generated::BalanceGetResponse {
+                                token_id: tok_id,
+                                available: record.available,
+                                locked: record.locked,
+                                ..Default::default()
+                            });
+                        }
+                    }
+                }
+
+                // Fall back to legacy token_balances only for tokens that do not yet have a
+                // canonical projection row.
+                if let Ok(persisted) = crate::storage::client_db::get_token_balances(&device_id_txt) {
                     for (tok_id, available, locked) in persisted {
                         if tok_id == "ERA" {
                             continue;
@@ -584,11 +579,7 @@ impl AppRouterImpl {
                         if tok_id == "BTC_CHAIN" {
                             continue;
                         }
-                        if let Some(existing) = items.iter_mut().find(|i| i.token_id == tok_id) {
-                            // SQLite is authoritative — always overwrite the in-memory value.
-                            existing.available = available;
-                            existing.locked = locked;
-                        } else {
+                        if !items.iter().any(|i| i.token_id == tok_id) {
                             items.push(generated::BalanceGetResponse {
                                 token_id: tok_id,
                                 available,

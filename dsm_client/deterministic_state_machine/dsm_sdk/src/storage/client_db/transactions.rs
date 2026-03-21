@@ -58,14 +58,13 @@ fn upsert_transaction_row(conn: &Connection, tx: &TransactionRecord, now: u64) -
     Ok(affected)
 }
 
-/// Atomically apply sender-side balance debit and transaction history write.
+/// Atomically apply sender-side projection debit and transaction history write.
 ///
-/// Mirrors `apply_receiver_confirm_full_atomic()` but performs
-/// a **debit** (subtraction) instead of credit (addition). Enforces the token
-/// conservation invariant `B >= 0` at the SQL level — the UPDATE only succeeds
-/// if the current balance is sufficient. If the row is missing or balance is
-/// insufficient, the function returns an error and the SQLite transaction is
-/// rolled back (no partial writes).
+/// Mirrors `apply_receiver_confirm_full_atomic()` but performs a projection-side
+/// **debit** (subtraction) instead of credit (addition). The UPDATE guards the
+/// local materialized view from going negative. If the row is missing or the
+/// projection is insufficient, the function returns an error and the SQLite
+/// transaction aborts without partial writes.
 pub fn apply_sender_debit_and_store_transaction_atomic(
     sender_device_id: &str,
     token_id: Option<&str>,
@@ -105,11 +104,6 @@ pub fn apply_sender_debit_and_store_transaction_atomic(
                 .map(|c| c > 0)
                 .unwrap_or(false);
 
-            // Explicit rollback before returning error
-            if let Err(rb_err) = txdb.execute_batch("ROLLBACK") {
-                log::warn!("Rollback failed after debit check: {}", rb_err);
-            }
-
             if exists {
                 return Err(anyhow::anyhow!(
                     "insufficient ERA balance to debit {} for sender {}",
@@ -142,26 +136,11 @@ pub fn apply_sender_debit_and_store_transaction_atomic(
                 .map(|c| c > 0)
                 .unwrap_or(false);
 
-            if let Err(rb_err) = txdb.execute_batch("ROLLBACK") {
-                log::warn!("Rollback failed after token debit check: {}", rb_err);
-            }
-
             if !exists {
-                // Auto-seed missing token row for native assets like dBTC to prevent
-                // missing-row panic conditions in bilateral settlement paths.
-                if let Err(e) = txdb.execute(
-                    "INSERT OR REPLACE INTO token_balances (device_id, token_id, available, locked, updated_at) VALUES (?1, ?2, 0, 0, ?3)",
-                    params![sender_device_id, token, now as i64],
-                ) {
-                    log::warn!("Failed to seed missing token_balances row for {} {}: {}", sender_device_id, token, e);
-                } else {
-                    log::info!("Seeded missing token_balances row for {} {} to 0", sender_device_id, token);
-                }
                 return Err(anyhow::anyhow!(
-                    "insufficient {} balance to debit {} for sender {} (token row was missing; seeded 0)",
-                    token,
-                    amount,
-                    sender_device_id
+                    "no token_balances row for sender {} token {}",
+                    sender_device_id,
+                    token
                 ));
             }
 

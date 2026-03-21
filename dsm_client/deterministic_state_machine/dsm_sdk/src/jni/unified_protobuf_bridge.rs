@@ -4546,8 +4546,11 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_initializeSdk
                     let seed = hasher.finalize();
                     let public_key = seed.as_bytes()[0..32].to_vec();
 
-                    // Use empty SMT root (same as bootstrap adapter)
-                    let smt_root = dsm::merkle::sparse_merkle_tree::empty_leaf().to_vec();
+                    // Use the canonical empty SMT root (same as bootstrap adapter)
+                    let smt_root = dsm::merkle::sparse_merkle_tree::empty_root(
+                        dsm::merkle::sparse_merkle_tree::DEFAULT_SMT_HEIGHT,
+                    )
+                    .to_vec();
 
                     // Set identity info in AppState (idempotent)
                     crate::sdk::app_state::AppState::set_identity_info_if_empty(

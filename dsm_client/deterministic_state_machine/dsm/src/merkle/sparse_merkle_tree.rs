@@ -12,27 +12,30 @@ use crate::types::state_types::{
 use blake3::Hash;
 use std::collections::HashMap;
 
-/// Domain-separated empty leaf tag (versioned).
-pub const EMPTY_LEAF_TAG: &[u8] = b"DSM_EMPTY_LEAF_V2";
+/// Canonical zero leaf value for absent SMT entries.
+pub const ZERO_LEAF: [u8; 32] = [0u8; 32];
 
-/// Compute the domain-separated empty leaf value.
+/// Default sparse-tree height used by bootstrap identity paths.
+pub const DEFAULT_SMT_HEIGHT: u32 = 32;
+
+/// Return the canonical empty leaf value.
 pub fn empty_leaf() -> [u8; 32] {
-    let mut h = dsm_domain_hasher("DSM/smt-empty-leaf");
-    h.update(EMPTY_LEAF_TAG);
-    let out = h.finalize();
-    let mut bytes = [0u8; 32];
-    bytes.copy_from_slice(out.as_bytes());
-    bytes
+    ZERO_LEAF
 }
 
 /// Default node values for SMT levels (precomputed sparse defaults).
 pub fn default_node(level: u32) -> Hash {
     if level == 0 {
-        Hash::from([0u8; 32]) // Base case for sparse defaults
+        Hash::from(ZERO_LEAF)
     } else {
         let child = default_node(level - 1);
         hash_smt_node(&child, &child)
     }
+}
+
+/// Canonical empty SMT root for a given tree height.
+pub fn empty_root(height: u32) -> [u8; 32] {
+    *default_node(height).as_bytes()
 }
 
 /// Domain-separated SMT node hash: H(TAG_SMT_NODE || left || right)
@@ -54,8 +57,9 @@ pub struct SparseMerkleTreeImpl {
 
 impl SparseMerkleTreeImpl {
     pub fn new(height: u32) -> Self {
+        let root = default_node(height);
         let mut smt = SparseMerkleTreeImpl {
-            root: Hash::from(empty_leaf()),
+            root,
             leaves: HashMap::new(),
             nodes: HashMap::new(),
             height,
@@ -67,7 +71,7 @@ impl SparseMerkleTreeImpl {
                 level: height,
                 index: 0,
             },
-            Hash::from(empty_leaf()),
+            root,
         );
         smt
     }

@@ -1092,7 +1092,7 @@ impl CoreSDK {
         }
 
         // First, execute the operation through the state machine for validation and state transition
-        let _new_state = self.execute_dsm_operation(op.clone()).map_err(|e| {
+        let new_state = self.execute_dsm_operation(op.clone()).map_err(|e| {
             DsmError::invalid_operation(format!(
                 "apply_operation_with_replay_protection: state machine execution failed: {}",
                 e
@@ -1196,28 +1196,25 @@ impl CoreSDK {
                 })?;
 
                 // atomic_receive_transfer only credits wallet_state.balance (ERA).
-                // For non-ERA tokens, credit the token_balances table and reverse
-                // the incorrect ERA credit. Matches pattern in unilateral_ops_sdk.rs:644-655.
+                // For non-ERA tokens, reverse the ERA credit and materialize the canonical
+                // token projection from the new state instead of doing SQLite arithmetic.
                 let token_id_str = String::from_utf8_lossy(&token_id);
                 if !token_id.is_empty() && token_id.as_slice() != b"ERA" {
-                    let (prev, existing_locked) = match client_db::get_token_balance(
-                        &local_b32,
-                        &token_id_str,
-                    ) {
-                        Ok(Some((a, l))) => (a, l),
-                        Ok(None) => (0, 0),
+                    let existing_locked = match client_db::get_locked_balance(&local_b32, &token_id_str) {
+                        Ok(l) => l,
                         Err(e) => {
                             log::error!("[apply_operation] CRITICAL: failed to read {token_id_str} balance: {e}");
-                            (0, 0)
+                            0
                         }
                     };
-                    if let Err(e) = client_db::upsert_token_balance(
+                    if let Err(e) = client_db::sync_token_projection_from_state(
                         &local_b32,
                         &token_id_str,
-                        prev.saturating_add(amount_val),
+                        &pc,
+                        &new_state,
                         existing_locked,
                     ) {
-                        log::error!("[apply_operation] CRITICAL: failed to credit {token_id_str} balance: {e}");
+                        log::error!("[apply_operation] CRITICAL: failed to sync {token_id_str} projection: {e}");
                     }
                     // Reverse the ERA credit that atomic_receive_transfer applied
                     if let Ok(Some(ws)) = client_db::get_wallet_state(&local_b32) {
@@ -1226,11 +1223,7 @@ impl CoreSDK {
                             log::error!("[apply_operation] failed to reverse ERA credit: {e}");
                         }
                     }
-                    log::info!(
-                        "[apply_operation] token balance corrected: {} +{} (ERA reversed)",
-                        token_id_str,
-                        amount_val
-                    );
+                    log::info!("[apply_operation] token projection synced: {} state_number={} (ERA reversed)", token_id_str, new_state.state_number);
                 }
 
                 log::info!(
@@ -1343,28 +1336,25 @@ impl CoreSDK {
                     )
                 })?;
 
-                // For non-ERA tokens, credit the token_balances table and reverse
-                // the incorrect ERA credit. Matches pattern in unilateral_ops_sdk.rs:644-655.
+                // For non-ERA tokens, reverse the ERA credit and materialize the canonical
+                // token projection from the new state instead of doing SQLite arithmetic.
                 let token_id_str = String::from_utf8_lossy(&token_id);
                 if !token_id.is_empty() && token_id.as_slice() != b"ERA" {
-                    let (prev, existing_locked) = match client_db::get_token_balance(
-                        &local_b32,
-                        &token_id_str,
-                    ) {
-                        Ok(Some((a, l))) => (a, l),
-                        Ok(None) => (0, 0),
+                    let existing_locked = match client_db::get_locked_balance(&local_b32, &token_id_str) {
+                        Ok(l) => l,
                         Err(e) => {
                             log::error!("[apply_operation] CRITICAL: failed to read {token_id_str} balance: {e}");
-                            (0, 0)
+                            0
                         }
                     };
-                    if let Err(e) = client_db::upsert_token_balance(
+                    if let Err(e) = client_db::sync_token_projection_from_state(
                         &local_b32,
                         &token_id_str,
-                        prev.saturating_add(amount_val),
+                        &pc,
+                        &new_state,
                         existing_locked,
                     ) {
-                        log::error!("[apply_operation] CRITICAL: failed to credit {token_id_str} balance: {e}");
+                        log::error!("[apply_operation] CRITICAL: failed to sync {token_id_str} projection: {e}");
                     }
                     if let Ok(Some(ws)) = client_db::get_wallet_state(&local_b32) {
                         let corrected = ws.balance.saturating_sub(amount_val);
@@ -1372,11 +1362,7 @@ impl CoreSDK {
                             log::error!("[apply_operation] failed to reverse ERA credit: {e}");
                         }
                     }
-                    log::info!(
-                        "[apply_operation] token balance corrected: {} +{} (ERA reversed)",
-                        token_id_str,
-                        amount_val
-                    );
+                    log::info!("[apply_operation] token projection synced: {} state_number={} (ERA reversed)", token_id_str, new_state.state_number);
                 }
 
                 log::info!(

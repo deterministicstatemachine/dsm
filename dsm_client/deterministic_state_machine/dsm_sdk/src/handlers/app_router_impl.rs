@@ -275,6 +275,16 @@ impl AppRouterImpl {
                 ),
             }
         } else {
+            if let Err(e) = crate::storage::client_db::delete_balance_projection(
+                sender_device_id_str,
+                token_id,
+            ) {
+                log::warn!(
+                    "[wallet.send] failed to clear stale {} projection during rollback: {}",
+                    token_id,
+                    e
+                );
+            }
             match crate::storage::client_db::upsert_token_balance(
                 sender_device_id_str,
                 token_id,
@@ -2870,7 +2880,10 @@ mod tests {
         let device_id = vec![0x21u8; 32];
         let genesis_hash = vec![0x31u8; 32];
         let public_key = vec![0x41u8; 32];
-        let smt_root = vec![0u8; 32];
+        let smt_root = dsm::merkle::sparse_merkle_tree::empty_root(
+            dsm::merkle::sparse_merkle_tree::DEFAULT_SMT_HEIGHT,
+        )
+        .to_vec();
 
         crate::sdk::app_state::AppState::set_identity_info(
             device_id,

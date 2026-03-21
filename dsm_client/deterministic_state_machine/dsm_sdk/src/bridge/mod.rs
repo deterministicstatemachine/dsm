@@ -263,24 +263,44 @@ pub fn get_all_balances_strict() -> Result<Vec<crate::generated::TokenBalanceEnt
     };
     entries.push(("ERA".to_string(), era_balance));
 
-    // 2. Non-ERA tokens from token_balances table (dBTC, custom tokens, etc.)
-    match crate::storage::client_db::get_token_balances(&device_id_b32) {
-        Ok(persisted) => {
-            for (tok_id, available, _locked) in persisted {
+    // 2. Non-ERA tokens from canonical projection rows; fall back to legacy token_balances.
+    match crate::storage::client_db::list_balance_projections(&device_id_b32) {
+        Ok(projected) => {
+            for record in projected {
+                let tok_id = record.token_id;
                 if tok_id == "ERA" {
                     continue;
                 }
                 if let Some(existing) = entries.iter_mut().find(|(t, _)| t == &tok_id) {
-                    if available > existing.1 {
-                        existing.1 = available;
+                    if record.available > existing.1 {
+                        existing.1 = record.available;
                     }
                 } else {
-                    entries.push((tok_id, available));
+                    entries.push((tok_id, record.available));
                 }
             }
         }
         Err(e) => {
-            log::warn!("[getAllBalancesStrict] get_token_balances failed: {}", e);
+            log::warn!("[getAllBalancesStrict] list_balance_projections failed: {}", e);
+            match crate::storage::client_db::get_token_balances(&device_id_b32) {
+                Ok(persisted) => {
+                    for (tok_id, available, _locked) in persisted {
+                        if tok_id == "ERA" {
+                            continue;
+                        }
+                        if let Some(existing) = entries.iter_mut().find(|(t, _)| t == &tok_id) {
+                            if available > existing.1 {
+                                existing.1 = available;
+                            }
+                        } else {
+                            entries.push((tok_id, available));
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::warn!("[getAllBalancesStrict] get_token_balances failed: {}", e);
+                }
+            }
         }
     }
 

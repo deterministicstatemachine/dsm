@@ -176,7 +176,12 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_createGenesis<'a>(
                         v: genesis_hash_bytes.clone(),
                     }),
                     public_key,
-                    smt_root: Some(pb::Hash32 { v: vec![0u8; 32] }),
+                    smt_root: Some(pb::Hash32 {
+                        v: dsm::merkle::sparse_merkle_tree::empty_root(
+                            dsm::merkle::sparse_merkle_tree::DEFAULT_SMT_HEIGHT,
+                        )
+                        .to_vec(),
+                    }),
                     device_entropy: entropy.clone(),
                     session_id: session_id.clone(),
                     threshold: threshold_usize as u32,
@@ -216,7 +221,12 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_createGenesis<'a>(
                         .smt_root
                         .as_ref()
                         .map(|h| h.v.clone())
-                        .unwrap_or_else(|| vec![0u8; 32]);
+                        .unwrap_or_else(|| {
+                            dsm::merkle::sparse_merkle_tree::empty_root(
+                                dsm::merkle::sparse_merkle_tree::DEFAULT_SMT_HEIGHT,
+                            )
+                            .to_vec()
+                        });
                     crate::sdk::app_state::AppState::set_identity_info(
                         gc.device_id.clone(),
                         pubkey,
