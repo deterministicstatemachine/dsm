@@ -406,9 +406,8 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_createGenesis<'a>(
                         }
                     }
 
-                    // Ensure wallet_state exists for newly-created identity so calls like
-                    // getAllBalancesStrict return a valid (possibly empty) balances list
-                    // instead of failing with "No wallet state found".
+                    // Ensure wallet metadata exists for the newly-created identity.
+                    // Token balances are derived later from canonical state/projection sync.
                     match crate::storage::client_db::ensure_wallet_state_for_device(
                         &genesis_record.device_id,
                     ) {

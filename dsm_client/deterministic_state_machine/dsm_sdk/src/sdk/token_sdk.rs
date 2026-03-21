@@ -1541,21 +1541,7 @@ impl<I: Send + Sync> TokenSDK<I> {
     /// dBTC lane: canonical key via make_balance_key(pk, "dBTC").
     /// dBTC reads prefer canonical state and only fall back to validated projections.
     fn get_dbtc_balance(&self, device_id: &[u8; 32]) -> Balance {
-        let balances = self.balances.read();
-        if let Some(b) = balances.get(device_id).and_then(|m| m.get("dBTC")).cloned() {
-            return b;
-        }
-
-        if let Some(balance) = self.read_projected_balance(device_id, "dBTC") {
-            drop(balances);
-            self.balances
-                .write()
-                .entry(*device_id)
-                .or_default()
-                .insert("dBTC".to_string(), balance.clone());
-            return balance;
-        }
-        Balance::zero()
+        self.get_canonical_token_balance(device_id, "dBTC")
     }
 
     pub fn has_sufficient_era(&self, device_id: &str, required_amount: u64) -> bool {

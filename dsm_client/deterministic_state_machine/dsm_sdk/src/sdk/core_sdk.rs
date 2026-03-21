@@ -125,38 +125,6 @@ fn encode_dsm_operation_det(op: &dsm::types::operations::Operation) -> Vec<u8> {
             &u64_le(amount.value()),
         ]
         .concat(),
-        O::Receive {
-            token_id,
-            from_device_id,
-            amount,
-            recipient,
-            ..
-        } => [
-            &b"dsm_op/receive"[..],
-            token_id.as_slice(),
-            from_device_id.as_slice(),
-            recipient.as_slice(),
-            &u64_le(amount.value()),
-        ]
-        .concat(),
-        O::Create {
-            message,
-            identity_data,
-            public_key,
-            metadata,
-            commitment,
-            proof,
-            ..
-        } => [
-            &b"dsm_op/create"[..],
-            message.as_bytes(),
-            identity_data.as_slice(),
-            public_key.as_slice(),
-            metadata.as_slice(),
-            commitment.as_slice(),
-            proof.as_slice(),
-        ]
-        .concat(),
         O::Generic {
             operation_type,
             data,
@@ -180,6 +148,38 @@ fn encode_dsm_operation_det(op: &dsm::types::operations::Operation) -> Vec<u8> {
 /* ------------------------------- Impl ----------------------------------- */
 
 impl CoreSDK {
+    fn restore_latest_archived_state(
+        state_machine: &Mutex<StateMachine>,
+        device_id: &[u8; 32],
+    ) -> Result<(), DsmError> {
+        let archived_states = crate::storage::client_db::get_bcr_states(device_id, false)
+            .map_err(|e| {
+                DsmError::state_machine(format!(
+                    "Failed to load archived states during startup restore: {e}"
+                ))
+            })?;
+
+        if let Some(latest_state) = archived_states.last() {
+            state_machine.lock().set_state(latest_state.clone());
+            log::info!(
+                "[CoreSDK] restored archived canonical state_number={} for device {}",
+                latest_state.state_number,
+                crate::util::text_id::encode_base32_crockford(device_id)
+            );
+        }
+
+        Ok(())
+    }
+
+    fn archive_state_snapshot(state: &State) -> Result<(), DsmError> {
+        crate::storage::client_db::store_bcr_state(state, false).map_err(|e| {
+            DsmError::state_machine(format!(
+                "Failed to archive canonical state {} for sparse replay: {e}",
+                state.state_number
+            ))
+        })
+    }
+
     /// Initialize CoreSDK with default device identity
     pub fn new() -> Result<Self, DsmError> {
         Self::new_with_device(DeviceInfo::from_hashed_label("default_device", vec![0; 32]))
@@ -199,11 +199,15 @@ impl CoreSDK {
         // Preload standard token policies (ERA) synchronously
         policy_system.preload_standard_policies_blocking()?;
 
+        let state_machine = Mutex::new(StateMachine::new_with_strategy_and_device_id(
+            KeyDerivationStrategy::Canonical,
+            device_info.device_id,
+        ));
+
+        Self::restore_latest_archived_state(&state_machine, &device_info.device_id)?;
+
         Ok(Self {
-            state_machine: Mutex::new(StateMachine::new_with_strategy_and_device_id(
-                KeyDerivationStrategy::Canonical,
-                device_info.device_id,
-            )),
+            state_machine,
             device_info,
             policy_system,
             audit_ctr: AtomicU64::new(0),
@@ -565,6 +569,7 @@ impl CoreSDK {
 
                 reconciled_state.hash = reconciled_state.compute_hash()?;
                 sm.set_state(reconciled_state.clone());
+                Self::archive_state_snapshot(&reconciled_state)?;
                 Ok(reconciled_state)
             }
             dsm::types::operations::Operation::Mint { .. }
@@ -640,9 +645,13 @@ impl CoreSDK {
                 }
                 reconciled_state.hash = reconciled_state.compute_hash()?;
                 sm.set_state(reconciled_state.clone());
+                Self::archive_state_snapshot(&reconciled_state)?;
                 Ok(reconciled_state)
             }
-            _ => Ok(next_state),
+            _ => {
+                Self::archive_state_snapshot(&next_state)?;
+                Ok(next_state)
+            }
         }
     }
 
@@ -1936,6 +1945,7 @@ impl CoreSDK {
 mod tests {
     use super::*;
     use dsm::types::operations::Operation as DsmOperation;
+    use serial_test::serial;
 
     fn rt() -> tokio::runtime::Runtime {
         match tokio::runtime::Runtime::new() {
@@ -2015,6 +2025,47 @@ mod tests {
         assert_eq!(
             sig1, sig2,
             "signing must be deterministic for identical input"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn execute_operation_archives_and_restores_latest_state() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+
+        let device = DeviceInfo::from_hashed_label("archived_state_device", vec![3u8; 32]);
+        let sdk = CoreSDK::new_with_device(device.clone()).expect("init sdk");
+
+        let op = DsmOperation::Generic {
+            operation_type: b"archive.test".to_vec(),
+            data: vec![0xAB, 0xCD],
+            message: "persist state".to_string(),
+            signature: vec![],
+        };
+
+        let executed = sdk.execute_dsm_operation(op).expect("execute operation");
+        assert!(executed.state_number > 0, "state number should advance");
+
+        let archived = crate::storage::client_db::get_bcr_states(&device.device_id, false)
+            .expect("load archived states");
+        assert!(
+            archived.iter().any(|state| state.state_number == executed.state_number),
+            "executed canonical state must be archived for sparse replay"
+        );
+
+        let restored = CoreSDK::new_with_device(device).expect("restore sdk from archive");
+        let restored_state = restored.get_current_state().expect("current state");
+        assert_eq!(
+            restored_state.state_number, executed.state_number,
+            "CoreSDK startup must restore the latest archived canonical state"
+        );
+        assert_eq!(
+            restored_state.hash, executed.hash,
+            "restored canonical state hash must match archived state"
         );
     }
 }

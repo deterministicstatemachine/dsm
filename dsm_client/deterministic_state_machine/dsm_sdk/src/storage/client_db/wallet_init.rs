@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Wallet initialization from verified genesis and wallet verification.
+//! Wallet metadata initialization from verified genesis and wallet verification.
 
 use std::collections::HashMap;
 
@@ -100,7 +100,7 @@ pub fn initialize_wallet_from_verified_genesis(gen: &GenesisRecord) -> Result<Wa
             wallet_state.chain_tip,
             wallet_state.chain_height as i64,
             wallet_state.merkle_root,
-            wallet_state.balance as i64,
+            0i64,
             wallet_state.created_at as i64,
             wallet_state.updated_at as i64,
             wallet_state.status,

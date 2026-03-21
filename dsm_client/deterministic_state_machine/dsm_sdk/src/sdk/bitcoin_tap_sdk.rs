@@ -601,6 +601,26 @@ pub struct BitcoinTapSdk {
 }
 
 impl BitcoinTapSdk {
+    fn canonical_archived_dbtc_balance(device_id: &[u8; 32]) -> Option<u64> {
+        let latest_state = crate::storage::client_db::get_bcr_states(device_id, false)
+            .ok()?
+            .into_iter()
+            .last()?;
+        let balance_key = dsm::core::token::derive_canonical_balance_key(
+            crate::policy::builtins::DBTC_POLICY_COMMIT,
+            &latest_state.device_info.public_key,
+            DBTC_TOKEN_ID,
+        );
+        Some(
+            latest_state
+                .token_balances
+                .get(&balance_key)
+                .cloned()
+                .unwrap_or_else(dsm::types::token_types::Balance::zero)
+                .available(),
+        )
+    }
+
     pub fn new(dlv_manager: Arc<DLVManager>) -> Self {
         Self {
             dlv_manager,
@@ -3804,19 +3824,23 @@ impl BitcoinTapSdk {
             log::warn!("[withdraw.plan] advertisement refresh failed: {e}");
         }
 
-        // Query bearer's dBTC balance from canonical projection rows for early warning.
+        // Query bearer's dBTC balance from canonical archived state for early warning.
+        // Fallback to the validated projection row only if this device has not yet archived
+        // a canonical state snapshot locally.
         let device_id_str = crate::util::text_id::encode_base32_crockford(planner_device_id);
-        let available_dbtc_sats = match crate::storage::client_db::get_balance_projection(
-            &device_id_str,
-            DBTC_TOKEN_ID,
-        ) {
-            Ok(Some(record)) => record.available,
-            Ok(None) => 0,
-            Err(e) => {
-                log::error!("[withdraw.plan] failed to read dBTC projection: {e}");
-                0
-            }
-        };
+        let available_dbtc_sats = Self::canonical_archived_dbtc_balance(planner_device_id)
+            .or_else(|| {
+                match crate::storage::client_db::get_balance_projection(&device_id_str, DBTC_TOKEN_ID)
+                {
+                    Ok(Some(record)) => Some(record.available),
+                    Ok(None) => None,
+                    Err(e) => {
+                        log::error!("[withdraw.plan] failed to read fallback dBTC projection: {e}");
+                        None
+                    }
+                }
+            })
+            .unwrap_or(0);
 
         // dBTC Definition 7: construct mempool client for UTXO liveness verification.
         // The bearer's device must verify all 3 facts before planning a withdrawal.

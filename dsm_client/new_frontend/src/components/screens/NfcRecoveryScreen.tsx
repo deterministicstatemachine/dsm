@@ -13,12 +13,19 @@ import {
   type CapsulePreview,
   type NfcBackupStatus,
 } from '../../services/recovery/nfcRecoveryService';
+import { getNfcBackupUiModel } from '../../services/recovery/nfcBackupUi';
 import './StorageScreen.css';
 
 type SetupMode = 'idle' | 'choose' | 'generate' | 'enable' | 'refresh';
 
 interface NfcRecoveryScreenProps {
   onNavigate?: (screen: string) => void;
+}
+
+function shortenValue(value: string, size = 20): string {
+  if (!value) return '--';
+  if (value === 'UNKNOWN') return value;
+  return value.length > size ? `${value.slice(0, size)}...` : value;
 }
 
 const emptyStatus: NfcBackupStatus = {
@@ -70,7 +77,9 @@ const NfcRecoveryScreen: React.FC<NfcRecoveryScreenProps> = ({ onNavigate }) => 
     const unsubWritten = EventBridge.on('nfc.backup_written', () => {
       void refresh();
       if (!mountedRef.current) return;
-      setStatusMsg('Ring write committed. Vibration means the latest capsule is backed up.');
+      setStatusMsg(
+        'Ring write committed. The ring now holds that capsule. This phone will arm another one after the next accepted state change or manual rebuild.',
+      );
       setSetupMode('idle');
       setMnemonicInput('');
     });
@@ -99,10 +108,12 @@ const NfcRecoveryScreen: React.FC<NfcRecoveryScreenProps> = ({ onNavigate }) => 
       try {
         if (mode === 'enable') {
           await enableNfcBackup(trimmed);
-          setStatusMsg('Backup enabled. The latest capsule now stays armed for the ring.');
+          setStatusMsg(
+            'Backup enabled. A capsule is now armed. Write it to the ring now, or let the next accepted state change re-arm a newer one later.',
+          );
         } else {
           await createCapsule(trimmed);
-          setStatusMsg('Fresh capsule queued. Touch the ring until the phone vibrates.');
+          setStatusMsg('Fresh capsule armed. Press write, then hold the ring to the phone until it vibrates.');
         }
         setGeneratedMnemonic('');
         setMnemonicInput('');
@@ -180,6 +191,12 @@ const NfcRecoveryScreen: React.FC<NfcRecoveryScreenProps> = ({ onNavigate }) => 
   const latestCapsuleLabel = status.capsuleCount > 0
     ? `#${status.lastCapsuleIndex}`
     : '--';
+  const nfcUi = getNfcBackupUiModel(status);
+  const writeButtonLabel = !status.enabled
+    ? 'WRITE LATEST CAPSULE'
+    : status.pendingCapsule
+      ? 'WRITE ARMED CAPSULE'
+      : 'REBUILD CAPSULE';
 
   return (
     <main className="settings-shell settings-shell--dev" role="main">
@@ -188,20 +205,33 @@ const NfcRecoveryScreen: React.FC<NfcRecoveryScreenProps> = ({ onNavigate }) => 
       <div className="snd-card">
         <div className="snd-stat-grid-2">
           <div className="snd-stat-cell">
-            <div className="snd-stat-val">
-              {status.enabled ? 'ARMED' : status.configured ? 'OFF' : 'NOT SET'}
+            <div className="snd-stat-val-sm">
+              {nfcUi.backupLabel}
             </div>
             <div className="snd-stat-label">Backup</div>
+          </div>
+          <div className="snd-stat-cell">
+            <div className="snd-stat-val-sm">{nfcUi.writeStateLabel}</div>
+            <div className="snd-stat-label">Write State</div>
           </div>
           <div className="snd-stat-cell">
             <div className="snd-stat-val">{latestCapsuleLabel}</div>
             <div className="snd-stat-label">Latest Capsule</div>
           </div>
+          <div className="snd-stat-cell">
+            <div className="snd-stat-val-sm">{nfcUi.nextActionLabel}</div>
+            <div className="snd-stat-label">Next Step</div>
+          </div>
         </div>
 
         <div className="snd-info-note" style={{ marginTop: 12 }}>
-          Every state change overwrites the armed capsule in place. It waits there for the ring.
-          Vibration means the latest state committed to the tag.
+          {nfcUi.detailSummary}
+        </div>
+        <div className="snd-info-note" style={{ marginTop: 8 }}>
+          1. Enter or confirm your recovery mnemonic. 2. Arm a capsule. 3. Press write and hold
+          the ring to the phone. A vibration means the write committed. After a successful write,
+          the ring keeps that capsule; this phone re-arms only after the next accepted state
+          change or a manual rebuild.
         </div>
 
         <div className="snd-actions">
@@ -214,7 +244,7 @@ const NfcRecoveryScreen: React.FC<NfcRecoveryScreenProps> = ({ onNavigate }) => 
             disabled={busy || !status.enabled}
             style={{ marginTop: 4 }}
           >
-            WRITE LATEST CAPSULE
+            {writeButtonLabel}
           </button>
         </div>
       </div>
@@ -237,7 +267,7 @@ const NfcRecoveryScreen: React.FC<NfcRecoveryScreenProps> = ({ onNavigate }) => 
           <div className="snd-info-row">
             <span className="snd-info-label">SMT Root</span>
             <span className="snd-info-val" style={{ fontFamily: 'monospace', fontSize: 11 }}>
-              {preview.smtRoot || 'UNKNOWN'}
+              {shortenValue(preview.smtRoot || 'UNKNOWN')}
             </span>
           </div>
           <div className="snd-info-row">
@@ -271,7 +301,7 @@ const NfcRecoveryScreen: React.FC<NfcRecoveryScreenProps> = ({ onNavigate }) => 
         <div className="snd-card">
           <div className="snd-info-row">
             <span className="snd-info-label">
-              WRITE THESE WORDS DOWN. THIS KEY KEEPS THE CAPSULE LAZY AND REWRITABLE.
+              WRITE THESE WORDS DOWN. THIS MNEMONIC ENCRYPTS THE RING CAPSULE AND IS REQUIRED TO REBUILD OR RECOVER IT.
             </span>
           </div>
           <div
@@ -336,13 +366,17 @@ const NfcRecoveryScreen: React.FC<NfcRecoveryScreenProps> = ({ onNavigate }) => 
               {busy ? 'WORKING...' : setupMode === 'refresh' ? 'REBUILD CAPSULE' : 'ENABLE BACKUP'}
             </button>
           </div>
+          <div className="snd-info-note" style={{ marginTop: 8 }}>
+            Rebuilding arms a fresh capsule in Rust. It does not write to the ring until you press
+            the write action.
+          </div>
         </div>
       )}
 
       <div className="snd-card">
         <div className="snd-actions">
           <button className="snd-btn" onClick={() => onNavigate?.('recovery')}>
-            READ RING ON THIS DEVICE
+            INSPECT OR RECOVER RING
           </button>
         </div>
       </div>

@@ -10,7 +10,6 @@
 import { bridgeEvents } from '../bridge/bridgeEvents';
 import * as EventBridge from './EventBridge';
 import {
-  getCapsulePreview,
   getNfcBackupStatus,
   writeToNfcRing,
 } from '../services/recovery/nfcRecoveryService';
@@ -30,8 +29,7 @@ export async function isNfcBackupEnabled(): Promise<boolean> {
 export async function hasPendingCapsule(): Promise<boolean> {
   try {
     const status = await getNfcBackupStatus();
-    if (status.pendingCapsule) return true;
-    return (await getCapsulePreview()) !== null;
+    return status.pendingCapsule;
   } catch {
     return false;
   }

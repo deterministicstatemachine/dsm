@@ -9,7 +9,7 @@ use log::warn;
 use dsm::types::serialization::{put_bytes, put_str, put_u32, put_u64, put_u8};
 use super::contacts::{get_all_contacts, store_contact};
 use super::genesis::get_verified_genesis_record;
-use super::tokens::{get_balance_projection, upsert_balance_projection, BalanceProjectionRecord};
+use super::tokens::get_balance_projection;
 use super::transactions::{get_transaction_history, store_transaction};
 use super::wallet_state::{ensure_wallet_state_for_device, get_wallet_state};
 use super::types::{ContactRecord, TransactionRecord};
@@ -162,39 +162,23 @@ pub fn import_state_blob(blob: &[u8]) -> Result<(bool, String)> {
         let _genesis_id = read_string(&mut wr).unwrap_or_default();
         let _chain_tip = read_string(&mut wr).unwrap_or_default();
         let _merkle_root = read_string(&mut wr).unwrap_or_default();
-        let balance = read_u64(&mut wr).unwrap_or(0);
+        let imported_balance = read_u64(&mut wr).unwrap_or(0);
         let _chain_height = read_u64(&mut wr).unwrap_or(0);
-        // Only apply balance if we have a wallet state
         if let Some(gen) = get_verified_genesis_record()? {
             let dev_id = gen.device_id;
-            if get_wallet_state(&dev_id)?.is_some() {
-                if let Some(public_key) = AppState::get_public_key() {
-                    let record = BalanceProjectionRecord {
-                        balance_key: dsm::core::token::derive_canonical_balance_key(
-                            crate::policy::builtins::NATIVE_POLICY_COMMIT,
-                            &public_key,
-                            "ERA",
-                        ),
-                        device_id: dev_id,
-                        token_id: "ERA".to_string(),
-                        policy_commit: crate::util::text_id::encode_base32_crockford(
-                            crate::policy::builtins::NATIVE_POLICY_COMMIT,
-                        ),
-                        available: balance,
-                        locked: 0,
-                        source_state_hash: crate::util::text_id::encode_base32_crockford(
-                            &[0u8; 32],
-                        ),
-                        source_state_number: 0,
-                        updated_at: crate::util::deterministic_time::tick(),
-                    };
-                    let _ = upsert_balance_projection(&record);
-                    applied_any = true;
-                }
+            let had_wallet = get_wallet_state(&dev_id)?.is_some();
+            ensure_wallet_state_for_device(&dev_id)?;
+            if imported_balance != 0 {
+                warn!(
+                    "Ignoring imported wallet balance={} for device={}; balance rebuild must come from canonical state/projection sync",
+                    imported_balance,
+                    dev_id
+                );
             }
+            applied_any = applied_any || had_wallet || imported_balance != 0;
         }
     } else {
-        // Ensure a zero balance wallet state for the genesis device (if any)
+        // Ensure a wallet metadata row for the genesis device (if any).
         if let Some(gen) = get_verified_genesis_record()? {
             let _ = ensure_wallet_state_for_device(&gen.device_id);
         }
@@ -323,6 +307,82 @@ pub fn import_state_blob(blob: &[u8]) -> Result<(bool, String)> {
             "no_changes".into()
         },
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::client_db::{
+        get_balance_projection, initialize_wallet_from_verified_genesis,
+        reset_database_for_tests, store_genesis_record_with_verification, GenesisRecord,
+    };
+    use serial_test::serial;
+
+    #[test]
+    #[serial]
+    fn import_wallet_backup_does_not_seed_unverifiable_balance_projection() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+
+        let gen = GenesisRecord {
+            genesis_id: "gid-import".into(),
+            device_id: "did-import".into(),
+            mpc_proof: "mpc".into(),
+            dbrw_binding: "bind".into(),
+            merkle_root: "root".into(),
+            participant_count: 2,
+            progress_marker: "P".into(),
+            publication_hash: "pub".into(),
+            storage_nodes: vec!["n1".into()],
+            entropy_hash: "ent".into(),
+            protocol_version: "1.0".into(),
+            hash_chain_proof: None,
+            smt_proof: None,
+            verification_step: None,
+        };
+        store_genesis_record_with_verification(&gen).expect("store genesis");
+        initialize_wallet_from_verified_genesis(&gen).expect("init wallet");
+
+        let mut blob = Vec::new();
+        blob.extend_from_slice(b"DSMBKP\0");
+        put_u8(&mut blob, 1);
+        put_u8(&mut blob, 0);
+        put_u8(&mut blob, 1);
+
+        let mut wallet = Vec::new();
+        put_str(&mut wallet, "wallet_did-import");
+        put_str(&mut wallet, &gen.device_id);
+        put_str(&mut wallet, &gen.genesis_id);
+        put_str(&mut wallet, "tip");
+        put_str(&mut wallet, "root");
+        put_u64(&mut wallet, 777);
+        put_u64(&mut wallet, 9);
+        put_bytes(&mut blob, &wallet);
+        put_u32(&mut blob, 0);
+        put_u32(&mut blob, 0);
+        put_u32(&mut blob, 0);
+
+        let (applied, status) = import_state_blob(&blob).expect("import blob");
+        assert!(applied, "wallet metadata import should be recognized");
+        assert_eq!(status, "ok");
+        assert!(
+            get_balance_projection(&gen.device_id, "ERA")
+                .expect("read ERA projection")
+                .is_none(),
+            "wallet backup must not seed an unverifiable balance projection"
+        );
+        assert_eq!(
+            get_wallet_state(&gen.device_id)
+                .expect("read wallet state")
+                .expect("wallet row")
+                .balance,
+            0,
+            "wallet_state balance must remain metadata-only after import"
+        );
+    }
 }
 
 /// Produce a structured state summary for state.info QueryOp

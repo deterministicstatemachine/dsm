@@ -1238,7 +1238,7 @@ mod tests {
             wallet.merkle_root,
             crate::util::text_id::encode_base32_crockford(&merkle_root)
         );
-        assert_eq!(wallet.balance, 99);
+        assert_eq!(wallet.balance, 0);
     }
 
     fn seed_contact_for_chain_tip_tests(device_id: [u8; 32], genesis_hash: [u8; 32], status: &str) {
