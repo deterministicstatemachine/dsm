@@ -2727,14 +2727,16 @@ impl AppRouterImpl {
                         vault_id: &req.source_vault_id,
                         leg_kind: "partial",
                         amount_sats: burn_amount,
-                        estimated_fee_sats: crate::sdk::bitcoin_tap_sdk::estimated_partial_withdrawal_fee_sats(),
+                        estimated_fee_sats:
+                            crate::sdk::bitcoin_tap_sdk::estimated_partial_withdrawal_fee_sats(),
                         estimated_net_sats: burn_amount.saturating_sub(
                             crate::sdk::bitcoin_tap_sdk::estimated_partial_withdrawal_fee_sats(),
                         ),
                         sweep_txid: Some(&sweep_txid),
                         successor_vault_id: Some(&result.successor_vault_id),
                         successor_vault_op_id: Some(&result.successor_vault_op_id),
-                        exit_vault_op_id: (!exit_vault_op_id.is_empty()).then_some(exit_vault_op_id.as_str()),
+                        exit_vault_op_id: (!exit_vault_op_id.is_empty())
+                            .then_some(exit_vault_op_id.as_str()),
                     }) {
                         log::error!(
                             "[bitcoin.fractional.exit] withdrawal leg persistence failed: {e}"
@@ -3155,14 +3157,16 @@ impl AppRouterImpl {
                         vault_id: &req.source_vault_id,
                         leg_kind: "full",
                         amount_sats: burn_amount,
-                        estimated_fee_sats: crate::sdk::bitcoin_tap_sdk::estimated_full_withdrawal_fee_sats(),
+                        estimated_fee_sats:
+                            crate::sdk::bitcoin_tap_sdk::estimated_full_withdrawal_fee_sats(),
                         estimated_net_sats: burn_amount.saturating_sub(
                             crate::sdk::bitcoin_tap_sdk::estimated_full_withdrawal_fee_sats(),
                         ),
                         sweep_txid: Some(&sweep_txid),
                         successor_vault_id: None,
                         successor_vault_op_id: None,
-                        exit_vault_op_id: (!exit_vault_op_id.is_empty()).then_some(exit_vault_op_id.as_str()),
+                        exit_vault_op_id: (!exit_vault_op_id.is_empty())
+                            .then_some(exit_vault_op_id.as_str()),
                     }) {
                         log::error!("[bitcoin.full.sweep] withdrawal leg persistence failed: {e}");
                     }

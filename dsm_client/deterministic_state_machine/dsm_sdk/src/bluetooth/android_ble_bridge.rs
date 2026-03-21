@@ -272,7 +272,8 @@ impl AndroidBleBridge {
                     let mut devices = self.connected_devices.write().await;
                     devices.remove(&msg);
                 }
-            }            Some(Ev::PairingRequest(req)) => {
+            }
+            Some(Ev::PairingRequest(req)) => {
                 info!(
                     "BLE pairing request received from {}: alias={}",
                     req.address, req.alias

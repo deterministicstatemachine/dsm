@@ -1470,7 +1470,10 @@ async fn wallet_bootstrap_seeds_dbtc_row() {
     client_db::ensure_wallet_state_for_device(&device_id).expect("ensure wallet state");
 
     let row = client_db::get_token_balance(&device_id, "dBTC").expect("get dBTC row");
-    assert!(row.is_some(), "dBTC row should exist after wallet bootstrap");
+    assert!(
+        row.is_some(),
+        "dBTC row should exist after wallet bootstrap"
+    );
     let (available, locked) = row.unwrap();
     assert_eq!(available, 0);
     assert_eq!(locked, 0);
