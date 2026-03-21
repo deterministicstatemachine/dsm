@@ -936,26 +936,32 @@ impl WalletSDK {
             }
         }
 
-        // Persist to SQLite: updated balance and transaction record
-        // Read the CURRENT balance from SQLite (authoritative) and subtract the transfer amount.
-        // The in-memory TokenSDK cache may not reflect offline (BLE) transactions, so reading
-        // from it would overwrite the correct SQLite balance with a stale value.
+        // Persist canonical balance projection + transaction record.
         let sender = self.device_id_string();
-        let current_db_balance = crate::storage::client_db::get_wallet_state(&sender)
-            .ok()
-            .flatten()
-            .map(|ws| ws.balance)
-            .unwrap_or(0);
-        let available_u64 = current_db_balance.saturating_sub(transaction.amount);
-        log::info!(
-            "[WALLET] send_transaction: persisting balance: db_before={} - amount={} = {}",
-            current_db_balance,
-            transaction.amount,
-            available_u64
-        );
-        crate::storage::client_db::update_wallet_balance(&sender, available_u64).map_err(|e| {
+        let token_id = if transaction.token_id.is_empty() {
+            "ERA"
+        } else {
+            transaction.token_id.as_str()
+        };
+        let existing_locked = match crate::storage::client_db::get_locked_balance(&sender, token_id)
+        {
+            Ok(l) => l,
+            Err(e) => {
+                log::error!("[WALLET] send_transaction: failed to read locked balance: {e}");
+                0
+            }
+        };
+        let policy_commit = self.token_sdk.resolve_policy_commit_strict(token_id)?;
+        crate::storage::client_db::sync_token_projection_from_state(
+            &sender,
+            token_id,
+            &policy_commit,
+            &new_state,
+            existing_locked,
+        )
+        .map_err(|e| {
             DsmError::internal(
-                format!("Failed to persist wallet balance: {e}"),
+                format!("Failed to persist canonical balance projection: {e}"),
                 None::<std::io::Error>,
             )
         })?;
@@ -1051,75 +1057,44 @@ impl WalletSDK {
         // (app_router_impl or bilateral_sdk) persists the correct relationship tip
         // using compute_precommit + compute_successor_tip with the shared nonce.
 
-        // Persist balance + transaction record
+        // Persist canonical balance projection + transaction record
         let sender = self.device_id_string();
-
-        // Debit ERA to wallet_state.balance ONLY for ERA transfers.
-        // Non-ERA tokens (e.g. dBTC) are tracked in the token_balances table, not here.
-        // This mirrors the correct pattern in unilateral_ops_sdk.rs:306-328.
-        if transaction.token_id.is_empty() || transaction.token_id == "ERA" {
-            let current_db_balance = crate::storage::client_db::get_wallet_state(&sender)
-                .ok()
-                .flatten()
-                .map(|ws| ws.balance)
-                .unwrap_or(0);
-            let available_u64 = current_db_balance.saturating_sub(transaction.amount);
-            log::info!(
-                "[WALLET] send_transfer_op: persisting ERA balance: db_before={} - amount={} = {}",
-                current_db_balance,
-                transaction.amount,
-                available_u64
-            );
-            crate::storage::client_db::update_wallet_balance(&sender, available_u64).map_err(
-                |e| {
-                    DsmError::internal(
-                        format!("Failed to persist wallet balance: {e}"),
-                        None::<std::io::Error>,
-                    )
-                },
-            )?;
-        }
-
-        // Materialize non-ERA projection rows from the canonical post-transition state.
-        if !transaction.token_id.is_empty()
-            && transaction.token_id != "ERA"
-            && transaction.amount > 0
+        let token_id = if transaction.token_id.is_empty() {
+            "ERA"
+        } else {
+            transaction.token_id.as_str()
+        };
+        let existing_locked = match crate::storage::client_db::get_locked_balance(&sender, token_id)
         {
-            let existing_locked = match crate::storage::client_db::get_locked_balance(
-                &sender,
-                &transaction.token_id,
-            ) {
-                Ok(l) => l,
-                Err(e) => {
-                    log::error!("[WALLET] send_transfer_op: failed to read token balance: {e}");
-                    0
-                }
-            };
-
-            let policy_commit = self.token_sdk.resolve_policy_commit_strict(&transaction.token_id)?;
-            if let Err(e) = crate::storage::client_db::sync_token_projection_from_state(
-                &sender,
-                &transaction.token_id,
-                &policy_commit,
-                &new_state,
-                existing_locked,
-            ) {
-                log::error!(
-                    "[WALLET] send_transfer_op: CRITICAL: failed to sync token projection for {}: {}",
-                    transaction.token_id,
-                    e
-                );
-                return Err(DsmError::invalid_operation(format!(
-                    "failed to sync token projection: {e}"
-                )));
-            } else {
-                log::info!(
-                    "[WALLET] send_transfer_op: token projection synced from canonical state: {}:{} state_number={}",
-                    sender,
-                    transaction.token_id,
-                    new_state.state_number
-                );
+            Ok(l) => l,
+            Err(e) => {
+                log::error!("[WALLET] send_transfer_op: failed to read locked balance: {e}");
+                0
             }
+        };
+        let policy_commit = self.token_sdk.resolve_policy_commit_strict(token_id)?;
+        if let Err(e) = crate::storage::client_db::sync_token_projection_from_state(
+            &sender,
+            token_id,
+            &policy_commit,
+            &new_state,
+            existing_locked,
+        ) {
+            log::error!(
+                "[WALLET] send_transfer_op: CRITICAL: failed to sync token projection for {}: {}",
+                transaction.token_id,
+                e
+            );
+            return Err(DsmError::invalid_operation(format!(
+                "failed to sync token projection: {e}"
+            )));
+        } else {
+            log::info!(
+                "[WALLET] send_transfer_op: token projection synced from canonical state: {}:{} state_number={}",
+                sender,
+                transaction.token_id,
+                new_state.state_number
+            );
         }
 
         {
@@ -1564,6 +1539,10 @@ impl WalletSDK {
         self.update_activity_sync();
 
         let token = token_id.unwrap_or("ERA").to_string();
+        let pre_mint_available = self
+            .get_balance(Some(&token))
+            .map(|b| b.available())
+            .unwrap_or(0);
         let recipient = self.device_id_array();
         let op = TokenOperation::Mint {
             token_id: token.clone(),
@@ -1573,84 +1552,46 @@ impl WalletSDK {
         // Execute through TokenSDK (updates canonical state)
         let new_state = self.token_sdk.execute_token_operation(op).await?;
 
-        // Keep SQLite in sync — route by token type.
-        //
-        // ERA → `wallet_state.balance` (single-field, authoritative for bilateral ERA transfers)
-        // Non-ERA (dBTC, custom) → `token_balances` table (per-token, keyed by (device_id, token_id))
+        // Keep canonical balance projections in sync for every token, including ERA.
         {
-            use crate::storage::client_db::{get_wallet_state, store_wallet_state, WalletState};
-
             let device_id_txt = self.device_id_base32();
-            let now = crate::util::deterministic_time::tick();
-
-            if token == "ERA" {
-                // ERA: update the single-field wallet_state.balance
-                let mut ws = match get_wallet_state(&device_id_txt).ok().flatten() {
-                    Some(existing) => existing,
-                    None => WalletState {
-                        wallet_id: device_id_txt.clone(),
-                        device_id: device_id_txt.clone(),
-                        genesis_id: None,
-                        chain_tip: String::new(),
-                        chain_height: 0,
-                        merkle_root: String::new(),
-                        balance: 0,
-                        created_at: now,
-                        updated_at: now,
-                        status: "active".to_string(),
-                        metadata: std::collections::HashMap::new(),
-                    },
+            let existing_locked =
+                match crate::storage::client_db::get_locked_balance(&device_id_txt, &token) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        log::error!(
+                            "[wallet.mint_for_self] failed to read {} locked balance: {}",
+                            token,
+                            e
+                        );
+                        0
+                    }
                 };
+            let policy_commit = self.token_sdk.resolve_policy_commit_strict(&token)?;
 
-                ws.balance = ws.balance.saturating_add(amount);
-                ws.updated_at = now;
-
-                log::info!(
-                    "[wallet.mint_for_self] ERA wallet_state: device={} old={} +{}={}",
-                    &device_id_txt[..device_id_txt.len().min(16)],
-                    ws.balance.saturating_sub(amount),
-                    amount,
-                    ws.balance
+            if let Err(e) = crate::storage::client_db::sync_token_projection_from_state(
+                &device_id_txt,
+                &token,
+                &policy_commit,
+                &new_state,
+                existing_locked,
+            ) {
+                log::error!(
+                    "[wallet.mint_for_self] FAILED to sync {} projection from state: {}",
+                    token,
+                    e
                 );
-
-                if let Err(e) = store_wallet_state(&ws) {
-                    log::error!("[wallet.mint_for_self] FAILED to persist ERA wallet_state: {e}");
-                }
             } else {
-                let existing_locked =
-                    match crate::storage::client_db::get_locked_balance(&device_id_txt, &token) {
-                        Ok(l) => l,
-                        Err(e) => {
-                            log::error!(
-                                "[wallet.mint_for_self] failed to read {} locked balance: {}",
-                                token,
-                                e
-                            );
-                            0
-                        }
-                    };
-                let policy_commit = self.token_sdk.resolve_policy_commit_strict(&token)?;
-
-                if let Err(e) = crate::storage::client_db::sync_token_projection_from_state(
-                    &device_id_txt,
-                    &token,
-                    &policy_commit,
-                    &new_state,
-                    existing_locked,
-                ) {
-                    log::error!(
-                        "[wallet.mint_for_self] FAILED to sync {} projection from state: {}",
-                        token,
-                        e
-                    );
-                } else {
-                    log::info!(
-                        "[wallet.mint_for_self] {} projection synced from canonical state_number={}",
-                        token,
-                        new_state.state_number
-                    );
-                }
+                log::info!(
+                    "[wallet.mint_for_self] {} projection synced from canonical state_number={}",
+                    token,
+                    new_state.state_number
+                );
             }
+
+            let expected_available = pre_mint_available.saturating_add(amount);
+            self.token_sdk
+                .force_set_balance(self.device_id_array(), &token, expected_available);
         }
 
         // Record a history entry so wallet.history surfaces faucet claims
@@ -1739,18 +1680,7 @@ impl WalletSDK {
             }
         }
 
-        // Persist to SQLite: wallet balance and transaction record (canonical, binary-first)
-        let available_u64 = self
-            .get_balance(Some(&token))
-            .map(|b| b.available())
-            .unwrap_or(0);
-        crate::storage::client_db::update_wallet_balance(&self.device_id_base32(), available_u64)
-            .map_err(|e| {
-            DsmError::internal(
-                format!("Failed to persist wallet balance after faucet: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
+        // Persist canonical transaction record only; balance projection was already synced.
         {
             // CRITICAL FIX: Use state_number + tick to ensure uniqueness
             // (state_number is monotonically increasing, tick provides additional entropy)

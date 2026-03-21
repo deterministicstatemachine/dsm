@@ -58,6 +58,21 @@ fn configure_local_identity_for_receipts(
     );
 }
 
+fn seed_era_projection(device_txt: &str, available: u64) {
+    client_db::upsert_balance_projection(&client_db::BalanceProjectionRecord {
+        balance_key: format!("test:{device_txt}:ERA"),
+        device_id: device_txt.to_string(),
+        token_id: "ERA".to_string(),
+        policy_commit: text_id::encode_base32_crockford(dsm_sdk::policy::builtins::NATIVE_POLICY_COMMIT),
+        available,
+        locked: 0,
+        source_state_hash: text_id::encode_base32_crockford(&[0u8; 32]),
+        source_state_number: 0,
+        updated_at: 0,
+    })
+    .expect("seed ERA projection");
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn offline_transfer_roundtrip(
     coord_sender: Arc<BleFrameCoordinator>,
@@ -321,10 +336,9 @@ async fn offline_real_protocol_ble_mock_roundtrip() {
     let alice_mgr = Arc::new(RwLock::new(alice_mgr));
     let bob_mgr = Arc::new(RwLock::new(bob_mgr));
 
-    // Seed Alice's wallet with sufficient ERA balance for the transfer.
-    // The atomic sender debit enforces B >= 0 at the SQL level.
+    // Seed Alice's ERA balance via projection storage.
     let alice_device_txt = text_id::encode_base32_crockford(&alice_dev_id);
-    client_db::update_wallet_balance(&alice_device_txt, 10_000).expect("seed alice wallet balance");
+    seed_era_projection(&alice_device_txt, 10_000);
 
     // BLE handler + frame coordinators (mock transport via direct chunk exchange)
     let handler_a = Arc::new(BilateralBleHandler::new(alice_mgr.clone(), alice_dev_id));
@@ -620,10 +634,9 @@ async fn offline_real_protocol_ble_mock_multi_relationship_multi_tx() {
     let bob_mgr = Arc::new(RwLock::new(bob_mgr));
     let carol_mgr = Arc::new(RwLock::new(carol_mgr));
 
-    // Seed Alice's wallet with sufficient ERA balance for all transfers.
-    // The atomic sender debit enforces B >= 0 at the SQL level.
+    // Seed Alice's ERA balance via projection storage.
     let alice_device_txt = text_id::encode_base32_crockford(&alice_dev_id);
-    client_db::update_wallet_balance(&alice_device_txt, 10_000).expect("seed alice wallet balance");
+    seed_era_projection(&alice_device_txt, 10_000);
 
     let handler_a = Arc::new(BilateralBleHandler::new(alice_mgr.clone(), alice_dev_id));
     let handler_b = Arc::new(BilateralBleHandler::new(bob_mgr.clone(), bob_dev_id));

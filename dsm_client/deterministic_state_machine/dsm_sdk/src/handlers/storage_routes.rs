@@ -1063,8 +1063,8 @@ impl AppRouterImpl {
                                                         // Withdrawal discovery happens later against storage-node
                                                         // advertisements and Bitcoin liveness.
 
-                                                        // §11.1 Balance already credited by apply_operation_with_replay_protection
-                                                        // → atomic_receive_transfer (ERA: wallet_state.balance, non-ERA: token_balances).
+                                                        // §11.1 Balance already materialized from canonical state by apply_operation_with_replay_protection
+                                                        // → atomic_receive_transfer + projection sync for the relevant token lane.
                                                         // Sync in-memory cache so subsequent balance queries reflect the credit.
                                                         if let Some(router) = crate::bridge::app_router() {
                                                             router.sync_balance_cache();

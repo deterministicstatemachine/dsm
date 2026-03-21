@@ -24,6 +24,7 @@ interface NfcRecoveryScreenProps {
 const emptyStatus: NfcBackupStatus = {
   enabled: false,
   configured: false,
+  pendingCapsule: false,
   capsuleCount: 0,
   lastCapsuleIndex: 0,
 };
@@ -158,7 +159,7 @@ const NfcRecoveryScreen: React.FC<NfcRecoveryScreenProps> = ({ onNavigate }) => 
       setStatusMsg('Enable NFC backup first.');
       return;
     }
-    if (status.capsuleCount === 0) {
+    if (!status.pendingCapsule) {
       setSetupMode('refresh');
       setStatusMsg('No latest capsule is armed right now. Rebuild one with your mnemonic.');
       return;
@@ -174,7 +175,7 @@ const NfcRecoveryScreen: React.FC<NfcRecoveryScreenProps> = ({ onNavigate }) => 
     } finally {
       setBusy(false);
     }
-  }, [busy, formatError, refresh, status.capsuleCount, status.enabled]);
+  }, [busy, formatError, refresh, status.enabled, status.pendingCapsule]);
 
   const latestCapsuleLabel = status.capsuleCount > 0
     ? `#${status.lastCapsuleIndex}`

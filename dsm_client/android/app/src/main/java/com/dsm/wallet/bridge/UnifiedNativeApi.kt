@@ -177,6 +177,7 @@ internal object UnifiedNativeApi {
     @Keep @JvmStatic external fun createGenesisSecuringAbortedEnvelope(): ByteArray
     @Keep @JvmStatic external fun createBlePermissionDeniedEnvelope(operation: String): ByteArray
     @Keep @JvmStatic external fun createNfcRecoveryCapsuleEnvelope(payload: ByteArray): ByteArray
+    @Keep @JvmStatic external fun createNfcBackupWrittenEnvelope(): ByteArray
 
     // BLE pairing orchestration (Rust-driven loop)
     @Keep @JvmStatic external fun startPairingAll()
@@ -191,7 +192,6 @@ internal object UnifiedNativeApi {
     // NFC Ring Backup — Rust owns all capsule creation/content; Kotlin writes raw bytes to NFC tag
     @Keep @JvmStatic external fun getPendingRecoveryCapsule(): ByteArray
     @Keep @JvmStatic external fun prepareNfcWritePayload(capsuleBytes: ByteArray): ByteArray
-    @Keep @JvmStatic external fun isNfcBackupEnabled(): Boolean
     @Keep @JvmStatic external fun clearPendingRecoveryCapsule()
     /** Silently refresh pending NFC capsule after state mutations. No-op if backup disabled. */
     @Keep @JvmStatic external fun maybeRefreshNfcCapsule()

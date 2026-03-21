@@ -339,15 +339,32 @@ impl CoreSDK {
         let mut updated = state;
         let mut changed = false;
 
+        let canonical_era_key = dsm::core::token::derive_canonical_balance_key(
+            crate::policy::builtins::NATIVE_POLICY_COMMIT,
+            &updated.device_info.public_key,
+            "ERA",
+        );
+
         // Collect keys to remove and entries to migrate
         let mut keys_to_remove: Vec<String> = Vec::new();
         let mut era_max: Option<dsm::types::token_types::Balance> = None;
 
         for (key, balance) in &updated.token_balances {
+            if key == "ERA" {
+                keys_to_remove.push(key.clone());
+                era_max = Some(match era_max {
+                    Some(existing) if existing.value() >= balance.value() => existing,
+                    _ => balance.clone(),
+                });
+                continue;
+            }
+
             // Detect pipe-format ERA keys like "{u128}|ERA"
             if let Some((_, token_id)) = key.split_once('|') {
                 if token_id == "ERA" {
-                    keys_to_remove.push(key.clone());
+                    if key != &canonical_era_key {
+                        keys_to_remove.push(key.clone());
+                    }
                     era_max = Some(match era_max {
                         Some(existing) if existing.value() >= balance.value() => existing,
                         _ => balance.clone(),
@@ -366,15 +383,15 @@ impl CoreSDK {
             changed = true;
         }
 
-        // Merge migrated ERA balance with any existing plain "ERA" entry
+        // Merge migrated ERA balance into the canonical balance-key entry
         if let Some(migrated) = era_max {
             let existing = updated
                 .token_balances
-                .get("ERA")
+                .get(&canonical_era_key)
                 .map(|b| b.value())
                 .unwrap_or(0);
             if migrated.value() > existing {
-                updated.token_balances.insert("ERA".to_string(), migrated);
+                updated.token_balances.insert(canonical_era_key, migrated);
                 changed = true;
             }
         }
@@ -470,7 +487,163 @@ impl CoreSDK {
         &self,
         dsm_operation: dsm::types::operations::Operation,
     ) -> Result<State, DsmError> {
-        self.state_machine.lock().execute_transition(dsm_operation)
+        let mut sm = self.state_machine.lock();
+        let current_state = sm
+            .current_state()
+            .cloned()
+            .ok_or_else(|| DsmError::state_machine("No current state available"))?;
+
+        let next_state = sm.execute_transition(dsm_operation.clone())?;
+
+        match &dsm_operation {
+            dsm::types::operations::Operation::Transfer {
+                amount,
+                token_id,
+                recipient,
+                to_device_id,
+                ..
+            } => {
+                let mut reconciled_state = next_state;
+                let policy_commit = self.resolve_policy_commit_strict(token_id)?;
+                let token_id = std::str::from_utf8(token_id)
+                    .map_err(|_| DsmError::invalid_operation("token_id must be valid UTF-8"))?;
+                let sender_key = dsm::core::token::derive_canonical_balance_key(
+                    &policy_commit,
+                    &current_state.device_info.public_key,
+                    token_id,
+                );
+                let recipient_owner = if recipient.is_empty() {
+                    to_device_id.as_slice()
+                } else {
+                    recipient.as_slice()
+                };
+                let recipient_key = dsm::core::token::derive_canonical_balance_key(
+                    &policy_commit,
+                    recipient_owner,
+                    token_id,
+                );
+
+                let sender_balance = current_state
+                    .token_balances
+                    .get(&sender_key)
+                    .cloned()
+                    .unwrap_or_else(dsm::types::token_types::Balance::zero);
+                if sender_balance.value() < amount.value() {
+                    return Err(DsmError::insufficient_balance(
+                        token_id.to_string(),
+                        sender_balance.value(),
+                        amount.value(),
+                    ));
+                }
+
+                let recipient_balance = current_state
+                    .token_balances
+                    .get(&recipient_key)
+                    .cloned()
+                    .unwrap_or_else(dsm::types::token_types::Balance::zero);
+                let recipient_value = recipient_balance
+                    .value()
+                    .checked_add(amount.value())
+                    .ok_or_else(|| DsmError::invalid_operation("Balance overflow on transfer credit"))?;
+
+                reconciled_state.token_balances.insert(
+                    sender_key,
+                    dsm::types::token_types::Balance::from_state(
+                        sender_balance.value() - amount.value(),
+                        current_state.hash,
+                        current_state.state_number,
+                    ),
+                );
+                reconciled_state.token_balances.insert(
+                    recipient_key,
+                    dsm::types::token_types::Balance::from_state(
+                        recipient_value,
+                        current_state.hash,
+                        current_state.state_number,
+                    ),
+                );
+
+                reconciled_state.hash = reconciled_state.compute_hash()?;
+                sm.set_state(reconciled_state.clone());
+                Ok(reconciled_state)
+            }
+            dsm::types::operations::Operation::Mint { .. }
+            | dsm::types::operations::Operation::Burn { .. } => {
+                let mut reconciled_state = next_state;
+                match &dsm_operation {
+                    dsm::types::operations::Operation::Mint {
+                        amount, token_id, ..
+                    } => {
+                        let policy_commit = self.resolve_policy_commit_strict(token_id)?;
+                        let token_id = std::str::from_utf8(token_id).map_err(|_| {
+                            DsmError::invalid_operation("token_id must be valid UTF-8")
+                        })?;
+                        let balance_key = dsm::core::token::derive_canonical_balance_key(
+                            &policy_commit,
+                            &current_state.device_info.public_key,
+                            token_id,
+                        );
+                        let current_balance = current_state
+                            .token_balances
+                            .get(&balance_key)
+                            .cloned()
+                            .unwrap_or_else(dsm::types::token_types::Balance::zero);
+                        let new_value = current_balance
+                            .value()
+                            .checked_add(amount.value())
+                            .ok_or_else(|| {
+                                DsmError::invalid_operation("Balance overflow on mint")
+                            })?;
+                        reconciled_state.token_balances.insert(
+                            balance_key,
+                            dsm::types::token_types::Balance::from_state(
+                                new_value,
+                                current_state.hash,
+                                current_state.state_number,
+                            ),
+                        );
+                    }
+                    dsm::types::operations::Operation::Burn {
+                        amount, token_id, ..
+                    } => {
+                        let policy_commit = self.resolve_policy_commit_strict(token_id)?;
+                        let token_id = std::str::from_utf8(token_id).map_err(|_| {
+                            DsmError::invalid_operation("token_id must be valid UTF-8")
+                        })?;
+                        let balance_key = dsm::core::token::derive_canonical_balance_key(
+                            &policy_commit,
+                            &current_state.device_info.public_key,
+                            token_id,
+                        );
+                        let current_balance = current_state
+                            .token_balances
+                            .get(&balance_key)
+                            .cloned()
+                            .unwrap_or_else(dsm::types::token_types::Balance::zero);
+                        if current_balance.value() < amount.value() {
+                            return Err(DsmError::insufficient_balance(
+                                token_id.to_string(),
+                                current_balance.value(),
+                                amount.value(),
+                            ));
+                        }
+                        reconciled_state.token_balances.insert(
+                            balance_key,
+                            dsm::types::token_types::Balance::from_state(
+                                current_balance.value() - amount.value(),
+                                current_state.hash,
+                                current_state.state_number,
+                            ),
+                        );
+                    }
+                    _ => {}
+                }
+                reconciled_state.hash = reconciled_state.compute_hash()?;
+                sm.set_state(reconciled_state.clone());
+                Ok(reconciled_state)
+            }
+            _ => Ok(next_state),
+        }
     }
 
     pub fn register_token_manager(
@@ -1171,9 +1344,7 @@ impl CoreSDK {
                     ));
                 }
 
-                // Apply atomically in SQLite: marks nonce spent and credits wallet balance.
-                // atomic_receive_transfer always credits wallet_state.balance (ERA).
-                // For non-ERA tokens we correct this below.
+                // Apply atomically in SQLite: marks nonce spent and records receive metadata.
                 let local_b32 =
                     crate::util::text_id::encode_base32_crockford(&local_device_id_bytes);
                 // Resolve policy_commit for hierarchical domain separation in chain tip.
@@ -1195,35 +1366,36 @@ impl CoreSDK {
                     )
                 })?;
 
-                // atomic_receive_transfer only credits wallet_state.balance (ERA).
-                // For non-ERA tokens, reverse the ERA credit and materialize the canonical
-                // token projection from the new state instead of doing SQLite arithmetic.
                 let token_id_str = String::from_utf8_lossy(&token_id);
-                if !token_id.is_empty() && token_id.as_slice() != b"ERA" {
-                    let existing_locked = match client_db::get_locked_balance(&local_b32, &token_id_str) {
-                        Ok(l) => l,
-                        Err(e) => {
-                            log::error!("[apply_operation] CRITICAL: failed to read {token_id_str} balance: {e}");
-                            0
-                        }
-                    };
-                    if let Err(e) = client_db::sync_token_projection_from_state(
-                        &local_b32,
-                        &token_id_str,
-                        &pc,
-                        &new_state,
-                        existing_locked,
-                    ) {
-                        log::error!("[apply_operation] CRITICAL: failed to sync {token_id_str} projection: {e}");
+                let canonical_token_id = if token_id_str.trim().is_empty() {
+                    "ERA"
+                } else {
+                    token_id_str.as_ref()
+                };
+                let existing_locked = match client_db::get_locked_balance(
+                    &local_b32,
+                    canonical_token_id,
+                ) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        log::error!("[apply_operation] CRITICAL: failed to read {canonical_token_id} locked balance: {e}");
+                        0
                     }
-                    // Reverse the ERA credit that atomic_receive_transfer applied
-                    if let Ok(Some(ws)) = client_db::get_wallet_state(&local_b32) {
-                        let corrected = ws.balance.saturating_sub(amount_val);
-                        if let Err(e) = client_db::update_wallet_balance(&local_b32, corrected) {
-                            log::error!("[apply_operation] failed to reverse ERA credit: {e}");
-                        }
-                    }
-                    log::info!("[apply_operation] token projection synced: {} state_number={} (ERA reversed)", token_id_str, new_state.state_number);
+                };
+                if let Err(e) = client_db::sync_token_projection_from_state(
+                    &local_b32,
+                    canonical_token_id,
+                    &pc,
+                    &new_state,
+                    existing_locked,
+                ) {
+                    log::error!("[apply_operation] CRITICAL: failed to sync {canonical_token_id} projection: {e}");
+                } else {
+                    log::info!(
+                        "[apply_operation] token projection synced: {} state_number={}",
+                        canonical_token_id,
+                        new_state.state_number
+                    );
                 }
 
                 log::info!(
@@ -1312,9 +1484,7 @@ impl CoreSDK {
                     ));
                 }
 
-                // Apply atomically in SQLite: marks nonce spent and credits wallet balance.
-                // atomic_receive_transfer always credits wallet_state.balance (ERA).
-                // For non-ERA tokens we correct this below.
+                // Apply atomically in SQLite: marks nonce spent and records receive metadata.
                 let local_b32 =
                     crate::util::text_id::encode_base32_crockford(&local_device_id_bytes);
                 // Resolve policy_commit for hierarchical domain separation in chain tip.
@@ -1336,33 +1506,36 @@ impl CoreSDK {
                     )
                 })?;
 
-                // For non-ERA tokens, reverse the ERA credit and materialize the canonical
-                // token projection from the new state instead of doing SQLite arithmetic.
                 let token_id_str = String::from_utf8_lossy(&token_id);
-                if !token_id.is_empty() && token_id.as_slice() != b"ERA" {
-                    let existing_locked = match client_db::get_locked_balance(&local_b32, &token_id_str) {
-                        Ok(l) => l,
-                        Err(e) => {
-                            log::error!("[apply_operation] CRITICAL: failed to read {token_id_str} balance: {e}");
-                            0
-                        }
-                    };
-                    if let Err(e) = client_db::sync_token_projection_from_state(
-                        &local_b32,
-                        &token_id_str,
-                        &pc,
-                        &new_state,
-                        existing_locked,
-                    ) {
-                        log::error!("[apply_operation] CRITICAL: failed to sync {token_id_str} projection: {e}");
+                let canonical_token_id = if token_id_str.trim().is_empty() {
+                    "ERA"
+                } else {
+                    token_id_str.as_ref()
+                };
+                let existing_locked = match client_db::get_locked_balance(
+                    &local_b32,
+                    canonical_token_id,
+                ) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        log::error!("[apply_operation] CRITICAL: failed to read {canonical_token_id} locked balance: {e}");
+                        0
                     }
-                    if let Ok(Some(ws)) = client_db::get_wallet_state(&local_b32) {
-                        let corrected = ws.balance.saturating_sub(amount_val);
-                        if let Err(e) = client_db::update_wallet_balance(&local_b32, corrected) {
-                            log::error!("[apply_operation] failed to reverse ERA credit: {e}");
-                        }
-                    }
-                    log::info!("[apply_operation] token projection synced: {} state_number={} (ERA reversed)", token_id_str, new_state.state_number);
+                };
+                if let Err(e) = client_db::sync_token_projection_from_state(
+                    &local_b32,
+                    canonical_token_id,
+                    &pc,
+                    &new_state,
+                    existing_locked,
+                ) {
+                    log::error!("[apply_operation] CRITICAL: failed to sync {canonical_token_id} projection: {e}");
+                } else {
+                    log::info!(
+                        "[apply_operation] token projection synced: {} state_number={}",
+                        canonical_token_id,
+                        new_state.state_number
+                    );
                 }
 
                 log::info!(

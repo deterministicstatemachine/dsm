@@ -14,6 +14,7 @@ import {
 export type NfcBackupStatus = {
   enabled: boolean;
   configured: boolean;
+  pendingCapsule: boolean;
   capsuleCount: number;
   lastCapsuleIndex: number;
 };
@@ -136,6 +137,7 @@ export async function getNfcBackupStatus(): Promise<NfcBackupStatus> {
   return {
     enabled: pairs.enabled === 'true',
     configured: pairs.configured === 'true',
+    pendingCapsule: pairs.pending === 'true',
     capsuleCount: parseInt(pairs.capsule_count ?? '0', 10),
     lastCapsuleIndex: parseInt(pairs.last_capsule_index ?? '0', 10),
   };

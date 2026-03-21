@@ -50,6 +50,27 @@ fn configure_local_identity_for_receipts(
     );
 }
 
+fn seed_era_projection(device_txt: &str, available: u64) {
+    client_db::upsert_balance_projection(&client_db::BalanceProjectionRecord {
+        balance_key: format!("test:{device_txt}:ERA"),
+        device_id: device_txt.to_string(),
+        token_id: "ERA".to_string(),
+        policy_commit: text_id::encode_base32_crockford(dsm_sdk::policy::builtins::NATIVE_POLICY_COMMIT),
+        available,
+        locked: 0,
+        source_state_hash: text_id::encode_base32_crockford(&[0u8; 32]),
+        source_state_number: 0,
+        updated_at: 0,
+    })
+    .expect("seed ERA projection");
+}
+
+fn get_projected_balance(device_txt: &str, token_id: &str) -> Option<(u64, u64)> {
+    client_db::get_balance_projection(device_txt, token_id)
+        .expect("get balance projection")
+        .map(|record| (record.available, record.locked))
+}
+
 #[tokio::test]
 #[serial]
 async fn bilateral_offline_prepare_accept_commit_finalize_flow() {
@@ -138,10 +159,9 @@ async fn bilateral_offline_prepare_accept_commit_finalize_flow() {
     let a = Arc::new(RwLock::new(mgr_a));
     let b = Arc::new(RwLock::new(mgr_b));
 
-    // Seed sender's wallet with sufficient ERA balance for the transfer.
-    // The atomic sender debit enforces B >= 0 at the SQL level.
+    // Seed sender's ERA balance via projection storage.
     let a_device_txt = text_id::encode_base32_crockford(&a_dev);
-    client_db::update_wallet_balance(&a_device_txt, 10_000).expect("seed sender wallet balance");
+    seed_era_projection(&a_device_txt, 10_000);
 
     let delegate = Arc::new(DefaultBilateralSettlementDelegate);
     let mut handler_a = BilateralBleHandler::new(a.clone(), a_dev);
@@ -209,22 +229,11 @@ async fn bilateral_offline_prepare_accept_commit_finalize_flow() {
         assert!(!ma.has_pending_commitment(&commitment));
     }
 
-    // Ensure receiver saw ERA balance update via wallet_state
+    // Ensure receiver saw ERA balance update via projection storage.
     let device_txt = text_id::encode_base32_crockford(&b_dev);
-    let ws = match client_db::get_wallet_state(&device_txt) {
-        Ok(ws) => ws,
-        Err(e) => panic!("get_wallet_state failed: {:?}", e),
-    };
+    let wallet = get_projected_balance(&device_txt, "ERA").expect("receiver ERA projection missing");
     assert!(
-        ws.is_some(),
-        "receiver wallet_state should exist after bilateral ERA transfer"
-    );
-    let wallet = match ws {
-        Some(wallet) => wallet,
-        None => panic!("receiver wallet_state missing"),
-    };
-    assert!(
-        wallet.balance >= 10,
+        wallet.0 >= 10,
         "receiver ERA balance should be updated"
     );
 }
@@ -314,12 +323,6 @@ async fn bilateral_offline_state_consistency_across_peers() {
 
     let a = Arc::new(RwLock::new(mgr_a));
     let b = Arc::new(RwLock::new(mgr_b));
-
-    // Seed sender's wallet with sufficient token balance for the transfer.
-    // The atomic sender debit enforces B >= 0 at the SQL level.
-    let a_device_txt = text_id::encode_base32_crockford(&a_dev);
-    client_db::upsert_token_balance(&a_device_txt, "TOK", 10_000, 0)
-        .expect("seed sender token balance");
 
     let delegate = Arc::new(DefaultBilateralSettlementDelegate);
     let mut handler_a = BilateralBleHandler::new(a.clone(), a_dev);

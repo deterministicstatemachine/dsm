@@ -13,9 +13,7 @@
 #![allow(clippy::disallowed_methods)] // Workaround for known clippy false-positive on match/expect patterns.
 
 use crate::sdk::b0x_sdk::{B0xEntry, B0xSDK, B0xSubmissionParams};
-use crate::storage::client_db::{
-    self, get_wallet_state, store_transaction, update_wallet_balance, TransactionRecord,
-}; // Added imports
+use crate::storage::client_db::{self, get_balance_projection, store_transaction, TransactionRecord}; // Added imports
 use crate::util::text_id::decode_base32_crockford;
 
 use dsm::core::contact_manager::{DsmContactManager, UnilateralTransactionPayload};
@@ -222,26 +220,31 @@ impl UnilateralOpsSDK {
             // Helper: store uses base32 string for device_id lookup usually.
             // We have self.device_id (base32 string).
             let amount_val = amount.value();
-            if let Some(state) =
-                get_wallet_state(&self.device_id).map_err(|e| DsmError::Internal {
+            let token_id = match &operation {
+                dsm::types::operations::Operation::Transfer { token_id, .. } => {
+                    let tid = String::from_utf8_lossy(token_id);
+                    if tid.trim().is_empty() {
+                        "ERA".to_string()
+                    } else {
+                        tid.into_owned()
+                    }
+                }
+                _ => "ERA".to_string(),
+            };
+            let available = get_balance_projection(&self.device_id, &token_id)
+                .map_err(|e| DsmError::Internal {
                     context: e.to_string(),
                     source: None,
                 })?
-            {
-                if state.balance < amount_val {
+                .map(|record| record.available)
+                .unwrap_or(0);
+            if available < amount_val {
+                if amount_val > 0 {
                     return Err(DsmError::Internal {
                         context: format!(
                             "Insufficient funds: balance={} needed={}",
-                            state.balance, amount_val
+                            available, amount_val
                         ),
-                        source: None,
-                    });
-                }
-            } else {
-                // No wallet state implies 0 balance
-                if amount_val > 0 {
-                    return Err(DsmError::Internal {
-                        context: "Insufficient funds: no wallet state".to_string(),
                         source: None,
                     });
                 }
@@ -320,39 +323,9 @@ impl UnilateralOpsSDK {
         };
         let token_id = token_id.as_str();
 
-        // Debit only ERA to SQLite wallet_state.balance.
-        // Non-ERA tokens (e.g. dBTC) are tracked in the core state machine's
-        // token_balances HashMap, not in the SQLite balance column.
-        if amount > 0 && token_id == "ERA" {
-            // Re-read state to ensure atomic-ish update
-            // We use client_db sync calls here.
-            match get_wallet_state(sender_id) {
-                Ok(Some(state)) => {
-                    let new_bal = state.balance.saturating_sub(amount); // saturating to be safe, though pre-flight checks
-                    update_wallet_balance(sender_id, new_bal).map_err(|e| DsmError::Internal {
-                        context: e.to_string(),
-                        source: None,
-                    })?;
-                }
-                Ok(None) => {
-                    // Should be caught by pre-flight, but if here...
-                    warn!("UnilateralOpsSDK: sender has no wallet state but sent non-zero amount?");
-                }
-                Err(e) => {
-                    return Err(DsmError::Internal {
-                        context: e.to_string(),
-                        source: None,
-                    })
-                }
-            }
-        }
-
-        // Non-ERA balances must be materialized from canonical state by the caller's
-        // state-transition path. This transport helper no longer performs manual
-        // SQLite arithmetic for non-ERA assets.
-        if amount > 0 && token_id != "ERA" {
+        if amount > 0 {
             log::info!(
-                "[unilateral] skipped legacy non-ERA SQLite arithmetic for {} on sender {}",
+                "[unilateral] sender-side settlement metadata stored only; canonical state/projection remains authoritative for {} on {}",
                 token_id,
                 sender_id
             );

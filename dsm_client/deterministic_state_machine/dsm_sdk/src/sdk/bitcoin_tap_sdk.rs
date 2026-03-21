@@ -3811,14 +3811,7 @@ impl BitcoinTapSdk {
             DBTC_TOKEN_ID,
         ) {
             Ok(Some(record)) => record.available,
-            Ok(None) => match crate::storage::client_db::get_token_balance(&device_id_str, DBTC_TOKEN_ID) {
-                Ok(Some((available, _locked))) => available,
-                Ok(None) => 0,
-                Err(e) => {
-                    log::error!("[withdraw.plan] failed to read fallback dBTC balance: {e}");
-                    0
-                }
-            },
+            Ok(None) => 0,
             Err(e) => {
                 log::error!("[withdraw.plan] failed to read dBTC projection: {e}");
                 0

@@ -113,30 +113,21 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
         if ctx.is_sender {
             if transfer_amount > 0 {
                 let debit_result =
-                    crate::storage::client_db::apply_sender_debit_and_store_transaction_atomic(
+                    crate::storage::client_db::apply_sender_settlement_and_store_transaction_atomic(
                         &local_txt,
                         token_for_atomic,
                         transfer_amount,
                         &tx_record,
                     );
 
-                // Enhanced error handling for dBTC transfers
                 if let Err(e) = &debit_result {
-                    if token_id_str == "dBTC" {
-                        if e.to_string().contains("insufficient") {
-                            error!("[BilateralSettlement] ❌ dBTC transfer failed: insufficient dBTC balance. Amount: {} sats, Error: {}", transfer_amount, e);
-                            return Err(format!("dBTC transfer failed: insufficient balance (need {} sats). This may indicate a balance sync issue - try checking balance again", transfer_amount));
-                        } else if e.to_string().contains("no token_balances row") {
-                            error!("[BilateralSettlement] ❌ dBTC transfer failed: no dBTC balance record found. This indicates dBTC was never received/mined. Amount: {} sats", transfer_amount);
-                            return Err("dBTC transfer failed: no dBTC balance found. dBTC must be received from Bitcoin before transferring".to_string());
-                        } else {
-                            error!("[BilateralSettlement] ❌ dBTC transfer failed: database error. Amount: {} sats, Error: {}", transfer_amount, e);
-                            return Err(format!("dBTC transfer failed: database error ({})", e));
-                        }
-                    } else {
-                        // Generic error for other tokens
-                        debit_result.map_err(|e| format!("atomic sender debit failed: {e}"))?;
-                    }
+                    error!(
+                        "[BilateralSettlement] sender settlement persistence failed: token={} amount={} error={}",
+                        token_id_str,
+                        transfer_amount,
+                        e
+                    );
+                    debit_result.map_err(|e| format!("atomic sender settlement failed: {e}"))?;
                 }
 
                 if let Some(router) = crate::bridge::app_router() {
@@ -146,33 +137,30 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
                 warn!("[BilateralSettlement] Failed to store zero-amount sender tx history: {e}");
             }
         } else {
-            // Receiver: credit balance + persist chain tip atomically.
-            let confirm_result = crate::storage::client_db::apply_receiver_confirm_full_atomic(
-                &ctx.counterparty_device_id,
-                &ctx.new_chain_tip,
-                &local_txt,
-                token_for_atomic,
-                transfer_amount,
-                &tx_record,
-            );
+            // Receiver: persist chain tip + transaction history atomically.
+            let confirm_result =
+                crate::storage::client_db::apply_receiver_confirm_and_store_transaction_atomic(
+                    &ctx.counterparty_device_id,
+                    &ctx.new_chain_tip,
+                    &local_txt,
+                    token_for_atomic,
+                    transfer_amount,
+                    &tx_record,
+                );
 
-            // Enhanced error handling for dBTC transfers
             if let Err(e) = &confirm_result {
-                if token_id_str == "dBTC" {
-                    error!("[BilateralSettlement] ❌ dBTC receive failed: database error during credit. Amount: {} sats, Error: {}", transfer_amount, e);
-                    return Err(format!(
-                        "dBTC receive failed: database error during balance credit ({})",
-                        e
-                    ));
-                } else {
-                    // Generic error for other tokens
-                    confirm_result.map_err(|e| {
-                        format!(
-                            "atomic receiver confirm failed (device={}, token={:?}, amount={}): {e}",
-                            local_txt, token_for_atomic, transfer_amount
-                        )
-                    })?;
-                }
+                error!(
+                    "[BilateralSettlement] receiver settlement persistence failed: token={} amount={} error={}",
+                    token_id_str,
+                    transfer_amount,
+                    e
+                );
+                confirm_result.map_err(|e| {
+                    format!(
+                        "atomic receiver confirm failed (device={}, token={:?}, amount={}): {e}",
+                        local_txt, token_for_atomic, transfer_amount
+                    )
+                })?;
             }
 
             if let Some(router) = crate::bridge::app_router() {

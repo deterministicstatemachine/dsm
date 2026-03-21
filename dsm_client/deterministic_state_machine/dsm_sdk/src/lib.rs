@@ -82,8 +82,6 @@ pub mod prelude;
 #[cfg(all(target_os = "android", feature = "jni"))]
 pub mod jni;
 
-pub mod recovery;
-
 pub mod bridge;
 pub mod crypto_performance;
 pub mod envelope;

@@ -286,15 +286,6 @@ fn create_schema(conn: &Connection) -> Result<()> {
             metadata        BLOB
         );
 
-        CREATE TABLE IF NOT EXISTS token_balances(
-            device_id   TEXT NOT NULL,
-            token_id    TEXT NOT NULL,
-            available   INTEGER NOT NULL DEFAULT 0 CHECK(available >= 0),
-            locked      INTEGER NOT NULL DEFAULT 0 CHECK(locked >= 0),
-            updated_at  INTEGER NOT NULL,
-            PRIMARY KEY (device_id, token_id)
-        );
-
         CREATE TABLE IF NOT EXISTS balance_projections(
             balance_key         TEXT NOT NULL PRIMARY KEY,
             device_id           TEXT NOT NULL,

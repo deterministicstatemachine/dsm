@@ -129,8 +129,10 @@ class NfcWriteActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                     vibrate()
                 }
 
-                // 7. Notify TypeScript frontend
-                BleEventRelay.dispatchEventEmpty("nfc.backup_written")
+                // 7. Notify the frontend through a Rust-authored protobuf envelope.
+                UnifiedNativeApi.createNfcBackupWrittenEnvelope()
+                    .takeIf { it.isNotEmpty() }
+                    ?.let { BleEventRelay.dispatchEnvelope(it) }
 
                 Log.i(TAG, "NFC write committed, ${ndefBytes.size} bytes")
 

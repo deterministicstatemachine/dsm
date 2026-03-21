@@ -9,8 +9,9 @@ use log::warn;
 use dsm::types::serialization::{put_bytes, put_str, put_u32, put_u64, put_u8};
 use super::contacts::{get_all_contacts, store_contact};
 use super::genesis::get_verified_genesis_record;
+use super::tokens::{get_balance_projection, upsert_balance_projection, BalanceProjectionRecord};
 use super::transactions::{get_transaction_history, store_transaction};
-use super::wallet_state::{ensure_wallet_state_for_device, get_wallet_state, update_wallet_balance};
+use super::wallet_state::{ensure_wallet_state_for_device, get_wallet_state};
 use super::types::{ContactRecord, TransactionRecord};
 use crate::generated;
 use crate::sdk::app_state::AppState;
@@ -61,6 +62,7 @@ pub fn export_state_blob() -> Result<Vec<u8>> {
     // wallet (derive via genesis device_id if present)
     if let Some(gen) = get_verified_genesis_record()? {
         if let Some(ws) = get_wallet_state(&gen.device_id)? {
+            let era_projection = get_balance_projection(&gen.device_id, "ERA")?;
             put_u8(&mut out, 1);
             let mut w = Vec::new();
             put_str(&mut w, &ws.wallet_id);
@@ -68,7 +70,7 @@ pub fn export_state_blob() -> Result<Vec<u8>> {
             put_str(&mut w, &ws.genesis_id.unwrap_or_default());
             put_str(&mut w, &ws.chain_tip);
             put_str(&mut w, &ws.merkle_root);
-            put_u64(&mut w, ws.balance);
+            put_u64(&mut w, era_projection.map(|r| r.available).unwrap_or(0));
             put_u64(&mut w, ws.chain_height);
             put_bytes(&mut out, &w);
         } else {
@@ -166,8 +168,29 @@ pub fn import_state_blob(blob: &[u8]) -> Result<(bool, String)> {
         if let Some(gen) = get_verified_genesis_record()? {
             let dev_id = gen.device_id;
             if get_wallet_state(&dev_id)?.is_some() {
-                let _ = update_wallet_balance(&dev_id, balance);
-                applied_any = true;
+                if let Some(public_key) = AppState::get_public_key() {
+                    let record = BalanceProjectionRecord {
+                        balance_key: dsm::core::token::derive_canonical_balance_key(
+                            crate::policy::builtins::NATIVE_POLICY_COMMIT,
+                            &public_key,
+                            "ERA",
+                        ),
+                        device_id: dev_id,
+                        token_id: "ERA".to_string(),
+                        policy_commit: crate::util::text_id::encode_base32_crockford(
+                            crate::policy::builtins::NATIVE_POLICY_COMMIT,
+                        ),
+                        available: balance,
+                        locked: 0,
+                        source_state_hash: crate::util::text_id::encode_base32_crockford(
+                            &[0u8; 32],
+                        ),
+                        source_state_number: 0,
+                        updated_at: crate::util::deterministic_time::tick(),
+                    };
+                    let _ = upsert_balance_projection(&record);
+                    applied_any = true;
+                }
             }
         }
     } else {

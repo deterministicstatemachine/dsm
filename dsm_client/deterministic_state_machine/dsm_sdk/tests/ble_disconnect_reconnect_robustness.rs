@@ -59,6 +59,23 @@ fn reset_db() {
     }
 }
 
+fn seed_era_projection(device_txt: &str, available: u64) {
+    client_db::upsert_balance_projection(&client_db::BalanceProjectionRecord {
+        balance_key: format!("test:{device_txt}:ERA"),
+        device_id: device_txt.to_string(),
+        token_id: "ERA".to_string(),
+        policy_commit: sdk::util::text_id::encode_base32_crockford(
+            dsm_sdk::policy::builtins::NATIVE_POLICY_COMMIT,
+        ),
+        available,
+        locked: 0,
+        source_state_hash: sdk::util::text_id::encode_base32_crockford(&[0u8; 32]),
+        source_state_number: 0,
+        updated_at: 0,
+    })
+    .expect("seed ERA projection");
+}
+
 /// Build a symmetric pair of handlers for two devices A and B,
 /// with contacts and relationships established on both sides.
 async fn make_handler_pair(
@@ -295,9 +312,9 @@ async fn test_disconnect_then_retry_succeeds() {
     );
     sdk::sdk::app_state::AppState::set_has_identity(true);
 
-    // Seed sender wallet
+    // Seed sender ERA projection.
     let a_txt = sdk::util::text_id::encode_base32_crockford(&a_dev);
-    client_db::update_wallet_balance(&a_txt, 10_000).expect("seed wallet");
+    seed_era_projection(&a_txt, 10_000);
 
     // --- Attempt 1: prepare then simulate disconnect before receiver responds ---
     let op1 = make_transfer_op(b_dev, 1);
@@ -487,11 +504,11 @@ async fn test_multiple_sequential_transfers() {
 
     let (handler_a, handler_b) = make_handler_pair(a_dev, a_gen, b_dev, b_gen, &a_kp, &b_kp).await;
 
-    // Seed both wallets
+    // Seed both ERA projections.
     let a_txt = sdk::util::text_id::encode_base32_crockford(&a_dev);
     let b_txt = sdk::util::text_id::encode_base32_crockford(&b_dev);
-    client_db::update_wallet_balance(&a_txt, 50_000).expect("seed A");
-    client_db::update_wallet_balance(&b_txt, 50_000).expect("seed B");
+    seed_era_projection(&a_txt, 50_000);
+    seed_era_projection(&b_txt, 50_000);
 
     // Run 3 sequential A→B transfers with increasing nonces (simulating repeated
     // back-and-forth sessions on the same BLE connection without disconnect).
@@ -684,7 +701,7 @@ async fn test_stale_session_superseded_on_prepare() {
     );
     sdk::sdk::app_state::AppState::set_has_identity(true);
     let a_txt = sdk::util::text_id::encode_base32_crockford(&a_dev);
-    client_db::update_wallet_balance(&a_txt, 10_000).expect("seed wallet");
+    seed_era_projection(&a_txt, 10_000);
 
     // A fresh prepare must supersede the stale session immediately
     let op = make_transfer_op(b_dev, 99);

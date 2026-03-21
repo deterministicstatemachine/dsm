@@ -2852,8 +2852,8 @@ impl BilateralBleHandler {
             )?;
 
             // Advance shared chain tip in-memory only — SQLite persistence is deferred
-            // to apply_receiver_confirm_full_atomic() so that chain tip, balance credit,
-            // and transaction history commit as a single atomic unit (§4.2).
+            // to apply_receiver_confirm_and_store_transaction_atomic() so that chain tip,
+            // ERA settlement (when applicable), and transaction history commit atomically (§4.2).
             manager.update_anchor_in_memory_public(
                 &session.counterparty_device_id,
                 &mut anchor,
@@ -2934,8 +2934,8 @@ impl BilateralBleHandler {
         };
 
         // Chain tip h_{n+1} is NOT yet persisted to SQLite — update_anchor_in_memory_public
-        // only updated in-memory state. The SQLite persistence happens atomically with the
-        // balance credit inside the settlement delegate below.
+        // only updated in-memory state. The SQLite persistence happens atomically with
+        // settlement metadata inside the delegate below.
 
         let pending_key = session.local_commitment_hash.unwrap_or(commitment_hash);
 

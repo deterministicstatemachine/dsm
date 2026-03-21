@@ -11,12 +11,31 @@ use dsm_sdk::storage_utils;
 use dsm_sdk::sdk::storage_node_sdk::{StorageNodeConfig, StorageNodeSDK};
 use dsm_sdk::storage::client_db::{
     ensure_wallet_state_for_device, store_contact, update_local_bilateral_chain_tip,
-    update_wallet_balance, ContactRecord, GenesisRecord, store_genesis_record_with_verification,
+    ContactRecord, GenesisRecord, store_genesis_record_with_verification,
 };
 use std::process::Command;
 use std::collections::HashMap;
 use rand::{rngs::OsRng, RngCore};
 use tokio::time::{timeout, Duration};
+
+fn seed_era_projection(device_txt: &str, available: u64) {
+    dsm_sdk::storage::client_db::upsert_balance_projection(
+        &dsm_sdk::storage::client_db::BalanceProjectionRecord {
+            balance_key: format!("test:{device_txt}:ERA"),
+            device_id: device_txt.to_string(),
+            token_id: "ERA".to_string(),
+            policy_commit: dsm_sdk::util::text_id::encode_base32_crockford(
+                dsm_sdk::policy::builtins::NATIVE_POLICY_COMMIT,
+            ),
+            available,
+            locked: 0,
+            source_state_hash: dsm_sdk::util::text_id::encode_base32_crockford(&[0u8; 32]),
+            source_state_number: 0,
+            updated_at: 0,
+        },
+    )
+    .unwrap_or_else(|e| panic!("Failed to seed ERA projection: {e}"));
+}
 
 fn persist_live_genesis_record(
     genesis_device_id: &[u8],
@@ -590,8 +609,7 @@ async fn live_aws_online_transfer_recipient_storage_sync() {
         ensure_b0x_tokens(&sender_router, &storage_nodes).await;
 
         let sender_device_b32 = dsm_sdk::util::text_id::encode_base32_crockford(&sender_device_id);
-        update_wallet_balance(&sender_device_b32, 1_000)
-            .unwrap_or_else(|e| panic!("Failed to seed sender ERA balance: {e}"));
+        seed_era_projection(&sender_device_b32, 1_000);
 
         let relationship_tip = compute_initial_chain_tip(
             &sender_device_id,
@@ -798,9 +816,6 @@ async fn live_aws_online_transfer_recipient_storage_sync() {
     println!("live storage.sync response: {:?}", sync_res);
 
     receiver_router.sync_balance_cache();
-    let receiver_wallet_state = dsm_sdk::storage::client_db::get_wallet_state(&receiver_device_b32)
-        .unwrap_or_else(|e| panic!("wallet_state lookup failed: {e}"));
-    println!("live receiver wallet_state: {:?}", receiver_wallet_state);
     let receiver_balances = fetch_balances(&receiver_router).await;
     println!("live receiver balances: {:?}", receiver_balances);
     let receiver_era = get_era_balance(&receiver_balances).unwrap_or(0);

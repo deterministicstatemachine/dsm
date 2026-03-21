@@ -663,9 +663,27 @@ mod state_machine_tests {
             state.hash = hash;
         }
 
+        let mut era_policy = crate::types::policy_types::PolicyFile::new(
+            "ERA Token Policy",
+            "1.0.0",
+            "system",
+        );
+        era_policy.with_description("Default policy for the ERA token in DSM ecosystem");
+        era_policy.add_metadata("token_type", "native");
+        era_policy.add_metadata("governance", "meritocratic");
+        era_policy.add_metadata("supply_model", "fixed");
+        let era_policy_commit = crate::types::policy_types::PolicyAnchor::from_policy(&era_policy)
+            .expect("derive ERA policy anchor for test state")
+            .0;
+
+        let era_key = crate::core::token::derive_canonical_balance_key(
+            &era_policy_commit,
+            &state.device_info.public_key,
+            "ERA",
+        );
         state
             .token_balances
-            .insert("ERA".to_string(), Balance::from_state(1000, state.hash, 0));
+            .insert(era_key, Balance::from_state(1000, state.hash, 0));
 
         (state, pk, sk)
     }

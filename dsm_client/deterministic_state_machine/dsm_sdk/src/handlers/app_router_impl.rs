@@ -260,49 +260,22 @@ impl AppRouterImpl {
     /// Restore the sender's SQLite balance to `pre_send_balance` after a
     /// failed b0x submission so that tokens are not silently lost.
     fn rollback_balance(sender_device_id_str: &str, token_id: &str, pre_send_balance: u64) {
-        if token_id == "ERA" || token_id.is_empty() {
-            match crate::storage::client_db::update_wallet_balance(
-                sender_device_id_str,
+        let canonical_token_id = if token_id.is_empty() { "ERA" } else { token_id };
+        if let Err(e) = crate::storage::client_db::delete_balance_projection(
+            sender_device_id_str,
+            canonical_token_id,
+        ) {
+            log::warn!(
+                "[wallet.send] failed to clear stale {} projection during rollback to pre-send {}: {}",
+                canonical_token_id,
                 pre_send_balance,
-            ) {
-                Ok(_) => log::info!(
-                    "[wallet.send] 🔄 ERA balance rolled back to {}",
-                    pre_send_balance
-                ),
-                Err(e) => log::error!(
-                    "[wallet.send] ‼️ CRITICAL: ERA rollback failed (balance may be lost): {}",
-                    e
-                ),
-            }
-        } else {
-            if let Err(e) = crate::storage::client_db::delete_balance_projection(
-                sender_device_id_str,
-                token_id,
-            ) {
-                log::warn!(
-                    "[wallet.send] failed to clear stale {} projection during rollback: {}",
-                    token_id,
-                    e
-                );
-            }
-            match crate::storage::client_db::upsert_token_balance(
-                sender_device_id_str,
-                token_id,
-                pre_send_balance,
-                0,
-            ) {
-                Ok(_) => log::info!(
-                    "[wallet.send] 🔄 {} balance rolled back to {}",
-                    token_id,
-                    pre_send_balance
-                ),
-                Err(e) => log::error!(
-                    "[wallet.send] ‼️ CRITICAL: {} rollback failed (balance may be lost): {}",
-                    token_id,
-                    e
-                ),
-            }
+                e
+            );
         }
+        log::info!(
+            "[wallet.send] cleared stale {} projection during rollback; canonical state and in-memory cache remain authoritative",
+            canonical_token_id
+        );
     }
 
     async fn repair_contact_identity_from_quorum(

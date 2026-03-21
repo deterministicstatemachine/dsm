@@ -5741,25 +5741,6 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_prepareNfcWri
     )
 }
 
-/// Check if NFC backup is currently enabled.
-/// Returns 1 (true) or 0 (false) as a single-byte array.
-#[no_mangle]
-pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_isNfcBackupEnabled(
-    _env: jni::sys::JNIEnv,
-    _clazz: jni::sys::jclass,
-) -> jni::sys::jboolean {
-    crate::jni::bridge_utils::jni_catch_unwind_jboolean(
-        "isNfcBackupEnabled",
-        std::panic::AssertUnwindSafe(|| {
-            if crate::sdk::recovery_sdk::RecoverySDK::is_nfc_backup_enabled() {
-                jni::sys::JNI_TRUE
-            } else {
-                jni::sys::JNI_FALSE
-            }
-        }),
-    )
-}
-
 /// Clear the pending recovery capsule after a successful NFC write.
 /// Called by Kotlin after `Ndef.writeNdefMessage()` succeeds.
 #[no_mangle]
@@ -5767,10 +5748,11 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_clearPendingR
     _env: jni::sys::JNIEnv,
     _clazz: jni::sys::jclass,
 ) {
-    // Prune all but the latest capsule (effectively clearing the "pending" state
-    // since the latest has been written). We keep the latest for reference/re-write.
-    let _ = crate::storage::client_db::recovery::prune_old_capsules(1);
-    log::info!("[NFC_BACKUP] Pending capsule cleared after successful NFC write");
+    if let Err(e) = crate::storage::client_db::recovery::clear_pending_recovery_capsule() {
+        log::warn!("[NFC_BACKUP] Failed to clear pending capsule marker: {e}");
+    } else {
+        log::info!("[NFC_BACKUP] Pending capsule cleared after successful NFC write");
+    }
 }
 
 /// Derive a 4-byte NFC hardware password from device identity.

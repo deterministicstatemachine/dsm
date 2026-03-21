@@ -23,9 +23,10 @@ impl AppRouterImpl {
                 let resp = generated::AppStateResponse {
                     key: "recovery.status".to_string(),
                     value: Some(format!(
-                        "enabled={},configured={},capsule_count={},last_capsule_index={}",
+                        "enabled={},configured={},pending={},capsule_count={},last_capsule_index={}",
                         status.enabled,
                         status.configured,
+                        status.pending_capsule,
                         status.capsule_count,
                         status.last_capsule_index,
                     )),
