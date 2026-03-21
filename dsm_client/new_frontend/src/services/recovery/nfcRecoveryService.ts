@@ -275,6 +275,14 @@ export async function getCapsulePreview(): Promise<CapsulePreview> {
   }
 }
 
+export async function readNfcRing(): Promise<void> {
+  const res = await appRouterInvokeBin('nfc.ring.read', new Uint8Array(0));
+  const env = decodeFramedEnvelopeV3(res);
+  if (env.payload.case === 'error') {
+    throw new Error(env.payload.value.message || 'NFC read failed');
+  }
+}
+
 export async function writeToNfcRing(): Promise<void> {
   const res = await appRouterInvokeBin('nfc.ring.write', new Uint8Array(0));
   const env = decodeFramedEnvelopeV3(res);

@@ -422,9 +422,15 @@ impl RecoverySDK {
             }
         }
 
-        let next_index = crate::storage::client_db::recovery::get_max_capsule_index()
-            .map_err(|e| DsmError::InvalidState(format!("Failed to read capsule index: {e}")))?
-            .saturating_add(1);
+        // If there's already a pending (unconsumed) capsule, reuse its index —
+        // we only care about the newest state. Index only advances after the ring
+        // actually consumes a capsule and clears pending.
+        let next_index = match crate::storage::client_db::recovery::get_pending_recovery_capsule() {
+            Ok(Some((idx, _))) => idx,
+            _ => crate::storage::client_db::recovery::get_max_capsule_index()
+                .map_err(|e| DsmError::InvalidState(format!("Failed to read capsule index: {e}")))?
+                .saturating_add(1),
+        };
 
         Ok(RecoveryCapsuleState {
             smt_root,

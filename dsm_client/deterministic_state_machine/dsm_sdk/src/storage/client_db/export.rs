@@ -309,6 +309,41 @@ pub fn import_state_blob(blob: &[u8]) -> Result<(bool, String)> {
     ))
 }
 
+/// Produce a structured state summary for state.info QueryOp
+pub fn export_state_info() -> Result<generated::StateInfoResponse> {
+    let (has_genesis, has_wallet) = if let Some(gen) = get_verified_genesis_record()? {
+        let wallet = get_wallet_state(&gen.device_id)?.is_some();
+        (true, wallet)
+    } else {
+        (false, false)
+    };
+    let contacts = get_all_contacts().unwrap_or_default().len();
+    let txs = get_transaction_history(None, Some(500))
+        .unwrap_or_default()
+        .len();
+    let mut prefs_non_empty = 0usize;
+    for k in [
+        "has_identity",
+        "sdk_initialized",
+        "theme",
+        "default_token",
+        "qr_sound",
+        "notifications_enabled",
+    ] {
+        let v = AppState::handle_app_state_request(k, "get", "");
+        if !v.is_empty() {
+            prefs_non_empty += 1;
+        }
+    }
+    Ok(generated::StateInfoResponse {
+        has_genesis,
+        has_wallet,
+        contacts_count: contacts as u64,
+        transactions_count: txs as u64,
+        preferences_count: prefs_non_empty as u64,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -383,39 +418,4 @@ mod tests {
             "wallet_state balance must remain metadata-only after import"
         );
     }
-}
-
-/// Produce a structured state summary for state.info QueryOp
-pub fn export_state_info() -> Result<generated::StateInfoResponse> {
-    let (has_genesis, has_wallet) = if let Some(gen) = get_verified_genesis_record()? {
-        let wallet = get_wallet_state(&gen.device_id)?.is_some();
-        (true, wallet)
-    } else {
-        (false, false)
-    };
-    let contacts = get_all_contacts().unwrap_or_default().len();
-    let txs = get_transaction_history(None, Some(500))
-        .unwrap_or_default()
-        .len();
-    let mut prefs_non_empty = 0usize;
-    for k in [
-        "has_identity",
-        "sdk_initialized",
-        "theme",
-        "default_token",
-        "qr_sound",
-        "notifications_enabled",
-    ] {
-        let v = AppState::handle_app_state_request(k, "get", "");
-        if !v.is_empty() {
-            prefs_non_empty += 1;
-        }
-    }
-    Ok(generated::StateInfoResponse {
-        has_genesis,
-        has_wallet,
-        contacts_count: contacts as u64,
-        transactions_count: txs as u64,
-        preferences_count: prefs_non_empty as u64,
-    })
 }

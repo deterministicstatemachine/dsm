@@ -2532,14 +2532,6 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bilateralOffl
                                         use crate::jni::jni_common::get_java_vm_borrowed;
                                         ble_send_ok = if let Some(vm) = get_java_vm_borrowed() {
                                             if let Ok(mut jni_env) = vm.attach_current_thread() {
-                                                // Prime BLE transport before sending
-                                                match crate::jni::unified_protobuf_bridge::ensure_ble_transport_ready(
-                                                    &mut jni_env, &ble_address,
-                                                ) {
-                                                    Ok(true) => log::info!("[bilateralOfflineSend] BLE transport ready for {}", &ble_address),
-                                                    Ok(false) => log::warn!("[bilateralOfflineSend] BLE transport not ready for {} — trying send anyway", &ble_address),
-                                                    Err(e) => log::warn!("[bilateralOfflineSend] BLE prime error: {e}"),
-                                                }
                                                 match crate::jni::unified_protobuf_bridge::send_ble_chunks_via_unified(
                                                     &mut jni_env, &ble_address, &chunks,
                                                 ) {
@@ -2933,28 +2925,6 @@ fn empty_byte_array_2d<'a>(env: &mut JNIEnv<'a>) -> jni::objects::JObjectArray<'
             }),
         None => unsafe { jni::objects::JObjectArray::from_raw(std::ptr::null_mut()) },
     }
-}
-
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
-pub(crate) fn ensure_ble_transport_ready<'a>(
-    env: &mut JNIEnv<'a>,
-    device_address: &str,
-) -> Result<bool, String> {
-    let addr_j = env
-        .new_string(device_address)
-        .map_err(|e| format!("new_string failed: {e}"))?;
-    let class_name = "com/dsm/wallet/bridge/Unified";
-    let addr_obj = JObject::from(addr_j);
-    let args = [JValue::Object(&addr_obj)];
-    let result = env
-        .call_static_method(
-            class_name,
-            "ensureBleTransportReady",
-            "(Ljava/lang/String;)Z",
-            &args,
-        )
-        .map_err(|e| format!("call_static_method ensureBleTransportReady failed: {e}"))?;
-    Ok(result.z().unwrap_or(false))
 }
 
 #[cfg(all(target_os = "android", feature = "bluetooth"))]

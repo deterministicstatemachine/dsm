@@ -109,6 +109,31 @@ internal object BridgeRouterHandler {
                 }}
                 return result
             }
+            "nfc.ring.read" -> {
+                // NFC ring read flow (Invariant: Rust first, Kotlin operates hardware).
+                //
+                // 1. Forward to Rust for authorization.
+                // 2. If authorized, launch NfcRecoveryActivity (enableReaderMode).
+                // 3. Return the Rust FramedEnvelopeV3 to the caller.
+
+                val nativeFramedPayload2 = BridgeEnvelopeCodec.encodeAppRouterPayload(name, args)
+                val rustResponse = Unified.appRouterInvokeFramedSafe(nativeFramedPayload2)
+
+                val isError = Unified.isErrorEnvelope(rustResponse) != 0
+                if (!isError) {
+                    val ctx = com.dsm.wallet.ui.MainActivity.getActiveInstance()
+                    val intent = android.content.Intent(ctx, com.dsm.wallet.recovery.NfcRecoveryActivity::class.java)
+                    ctx?.startActivity(intent)
+                    Log.i(logTag, "nfc.ring.read: Launched NfcRecoveryActivity per Rust authorization")
+                } else {
+                    Log.w(logTag, "nfc.ring.read: Rust rejected read request")
+                }
+
+                val result = ByteArray(reqId.size + rustResponse.size)
+                System.arraycopy(reqId, 0, result, 0, reqId.size)
+                System.arraycopy(rustResponse, 0, result, reqId.size, rustResponse.size)
+                return result
+            }
             "nfc.ring.write" -> {
                 // NFC ring write flow (Invariant: Rust first, Kotlin operates hardware).
                 //

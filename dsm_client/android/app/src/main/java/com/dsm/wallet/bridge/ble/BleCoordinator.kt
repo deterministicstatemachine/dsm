@@ -795,11 +795,11 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
 
                             // If Rust produced follow-up chunks, send them outside the actor
                             // to avoid self-deadlock (requestGattWriteChunks uses runBlocking).
-                            if (chunks.isNotEmpty() && useReliableWrite) {
+                            if (chunks.isNotEmpty()) {
                                 val addr = event.deviceAddress
                                 bleScope.launch {
-                                    val queued = com.dsm.wallet.bridge.Unified.requestGattWriteChunks(addr, chunks)
-                                    Log.i("BleCoordinator", "Queued follow-up to $addr: chunks=${chunks.size}, queued=$queued")
+                                    val queued = com.dsm.wallet.bridge.Unified.dispatchRustBleFollowUp(addr, chunks, useReliableWrite)
+                                    Log.i("BleCoordinator", "Queued follow-up to $addr: chunks=${chunks.size}, queued=$queued reliableWrite=$useReliableWrite")
                                     if (!queued) {
                                         diagnostics.recordError(
                                             BleErrorCategory.CHARACTERISTIC_WRITE_FAILED,

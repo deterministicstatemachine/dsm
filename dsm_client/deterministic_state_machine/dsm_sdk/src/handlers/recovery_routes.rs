@@ -469,6 +469,19 @@ impl AppRouterImpl {
                 }
             }
 
+            // -------- nfc.ring.read --------
+            // Authorizes Kotlin to launch NfcRecoveryActivity (enableReaderMode).
+            // No capsule validation — we are reading from the ring, not writing.
+            // Kotlin must call this route first, check for an error response,
+            // and only launch NfcRecoveryActivity on success.
+            "nfc.ring.read" => {
+                let resp = generated::AppStateResponse {
+                    key: "nfc.ring.read".to_string(),
+                    value: Some("authorized=true".to_string()),
+                };
+                pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
+            }
+
             // -------- nfc.ring.write --------
             // Validates NFC backup state (Rust is the authoritative source).
             // Returns a proper FramedEnvelopeV3 so Kotlin knows whether to launch

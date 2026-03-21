@@ -238,16 +238,14 @@ impl UnilateralOpsSDK {
                 })?
                 .map(|record| record.available)
                 .unwrap_or(0);
-            if available < amount_val {
-                if amount_val > 0 {
-                    return Err(DsmError::Internal {
-                        context: format!(
-                            "Insufficient funds: balance={} needed={}",
-                            available, amount_val
-                        ),
-                        source: None,
-                    });
-                }
+            if available < amount_val && amount_val > 0 {
+                return Err(DsmError::Internal {
+                    context: format!(
+                        "Insufficient funds: balance={} needed={}",
+                        available, amount_val
+                    ),
+                    source: None,
+                });
             }
         }
 

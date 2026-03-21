@@ -355,7 +355,11 @@ impl TlaRunner {
                     "BalancesNonNegative".into(),
                 ],
                 properties: vec![],
-                linked_implementation_traces: vec![],
+                linked_implementation_traces: vec![
+                    "bilateral_full_offline_finality".into(),
+                ],
+                // No literal TLC trace replay (no simulation trace file);
+                // linked implementation traces provide the code-level bridge.
                 supports_trace_replay: false,
             },
             // --- Non-Interference (Paper Lemma 3.1, 3.2, Theorem 3.1) ---
@@ -373,7 +377,9 @@ impl TlaRunner {
                     "ZeroRefreshForInactive".into(),
                 ],
                 properties: vec![],
-                linked_implementation_traces: vec![],
+                linked_implementation_traces: vec![
+                    "bilateral_pair_non_interference".into(),
+                ],
                 supports_trace_replay: false,
             },
         ]

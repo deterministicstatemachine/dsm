@@ -8,10 +8,11 @@ import {
   decryptCapsuleBytes,
   getCapsulePreview,
   inspectCapsuleBytes,
+  readNfcRing,
   type CapsulePreview,
   type DecryptedCapsulePreview,
 } from '../../services/recovery/nfcRecoveryService';
-import './StorageScreen.css';
+import './NfcRecoveryScreen.css';
 
 type Step = 'mnemonic' | 'tap' | 'preview';
 
@@ -175,9 +176,18 @@ const RecoveryScreen: React.FC<RecoveryScreenProps> = ({ onNavigate }) => {
         });
     });
 
+    // Auto-refresh when screen becomes visible
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void refreshLocalPreview();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
     return () => {
       mountedRef.current = false;
       inspectInFlightRef.current = false;
+      document.removeEventListener('visibilitychange', onVisibilityChange);
       try {
         unsub();
       } catch {
@@ -186,7 +196,7 @@ const RecoveryScreen: React.FC<RecoveryScreenProps> = ({ onNavigate }) => {
     };
   }, [formatError, mnemonic, refreshLocalPreview, step]);
 
-  const onBeginRead = useCallback(() => {
+  const onBeginRead = useCallback(async () => {
     if (mnemonic.trim().split(/\s+/).length < 12) {
       setErrorMsg('Enter your mnemonic first.');
       return;
@@ -195,7 +205,15 @@ const RecoveryScreen: React.FC<RecoveryScreenProps> = ({ onNavigate }) => {
     setErrorMsg('');
     setStatusMsg('Touch the ring to the phone. Rust will inspect the capsule after it is read.');
     setStep('tap');
-  }, [mnemonic]);
+
+    try {
+      await readNfcRing();
+    } catch (error: unknown) {
+      setErrorMsg(`NFC read launch failed: ${formatError(error)}`);
+      setStep('mnemonic');
+      setStatusMsg('');
+    }
+  }, [formatError, mnemonic]);
 
   const onStageCapsule = useCallback(async () => {
     if (busy || !capsuleBytes) return;
@@ -225,211 +243,211 @@ const RecoveryScreen: React.FC<RecoveryScreenProps> = ({ onNavigate }) => {
   const comparison = describeComparison(capsulePreview, localPreview);
 
   return (
-    <main className="settings-shell settings-shell--dev" role="main">
-      <h2 style={{ textAlign: 'center', marginBottom: 12 }}>INSPECT OR RECOVER FROM RING</h2>
-
-      <div className="snd-card">
-        <div className="snd-info-note">
-          1. Enter the recovery mnemonic that encrypted the ring capsule. 2. Hold the ring to the
-          phone when prompted. 3. Rust inspects and decrypts the ring contents for review. 4.
-          Stage the backup on this device only if it matches what you expect.
-        </div>
+    <div className="nfc-shell" role="main">
+      <div className="nfc-header">
+        <h2>INSPECT OR RECOVER FROM RING</h2>
       </div>
 
-      {step === 'mnemonic' && (
-        <div className="snd-card">
-          <div className="snd-info-row">
-            <span className="snd-info-label">ENTER YOUR RECOVERY MNEMONIC</span>
-          </div>
-          <textarea
-            value={mnemonic}
-            onChange={(e) => setMnemonic(e.target.value)}
-            placeholder="word1 word2 word3 ..."
-            rows={4}
-            style={{
-              width: '100%',
-              boxSizing: 'border-box',
-              padding: '10px 12px',
-              marginTop: 8,
-              fontFamily: "'Martian Mono', monospace",
-              fontSize: 12,
-              background: 'var(--gb-bg)',
-              color: 'var(--gb-fg)',
-              border: '2px solid var(--gb-border)',
-              borderRadius: 4,
-              resize: 'none',
-            }}
-            disabled={busy}
-          />
-          <div className="snd-info-note" style={{ marginTop: 8 }}>
-            The mnemonic stays in the Rust-authoritative path. Android only transports the raw ring
-            bytes to Rust for inspection or staging.
-          </div>
-          <div className="snd-actions">
-            <button
-              className="snd-btn"
-              onClick={onBeginRead}
-              disabled={busy || mnemonic.trim().split(/\s+/).length < 12}
-            >
-              INSPECT THE RING
-            </button>
+      <div className="nfc-stage">
+        {/* Instructions card */}
+        <div className="nfc-card">
+          <div className="nfc-note">
+            1. Enter the recovery mnemonic that encrypted the ring capsule. 2. Hold the ring to the
+            phone when prompted. 3. Rust inspects and decrypts the ring contents for review. 4.
+            Stage the backup on this device only if it matches what you expect.
           </div>
         </div>
-      )}
 
-      {step === 'tap' && (
-        <div className="snd-card">
-          <div className="snd-info-row">
-            <span className="snd-info-label">TAP THE RING TO THE PHONE</span>
-          </div>
-          <div style={{ textAlign: 'center', padding: 24, fontSize: 28 }}>
-            {busy ? 'INSPECTING...' : 'WAITING FOR RING...'}
-          </div>
-          <div className="snd-info-note">
-            Hold the ring near the NFC antenna. Once the tag is read, Rust decrypts the capsule and
-            returns a preview through the protobuf envelope path.
-          </div>
-          <div className="snd-actions">
-            <button className="snd-btn" onClick={backToMnemonic} disabled={busy}>
-              BACK TO MNEMONIC
-            </button>
-          </div>
-        </div>
-      )}
-
-      {step === 'preview' && capsulePreview && (
-        <>
-          <div className="snd-card">
-            <div className="snd-stat-grid-2">
-              <div className="snd-stat-cell">
-                <div className="snd-stat-val">#{capsulePreview.capsuleIndex}</div>
-                <div className="snd-stat-label">Ring Capsule</div>
-              </div>
-              <div className="snd-stat-cell">
-                <div className="snd-stat-val">{capsulePreview.counterpartyCount}</div>
-                <div className="snd-stat-label">Peers</div>
-              </div>
-              <div className="snd-stat-cell">
-                <div className="snd-stat-val-sm">{comparison.label}</div>
-                <div className="snd-stat-label">Vs Local</div>
-              </div>
-              <div className="snd-stat-cell">
-                <div className="snd-stat-val-sm">{staged ? 'STAGED' : 'INSPECTED'}</div>
-                <div className="snd-stat-label">State</div>
-              </div>
+        {step === 'mnemonic' && (
+          <div className="nfc-card">
+            <div className="nfc-info-row">
+              <span className="nfc-info-label">ENTER YOUR RECOVERY MNEMONIC</span>
             </div>
-            <div className="snd-info-note" style={{ marginTop: 8 }}>
-              {comparison.note}
-            </div>
-            <div className="snd-info-note" style={{ marginTop: 8 }}>
-              {staged
-                ? 'This backup is already staged on this device.'
-                : 'Inspection does not mutate recovery state. Use the stage action only if this ring contains the backup you want to recover from.'}
-            </div>
-          </div>
-
-          <div className="snd-card">
-            <div className="snd-info-row">
-              <span className="snd-info-label">SMT Root</span>
-              <span className="snd-info-val" style={{ fontFamily: 'monospace', fontSize: 11 }}>
-                {shortenValue(capsulePreview.smtRoot)}
-              </span>
-            </div>
-            <div className="snd-info-row">
-              <span className="snd-info-label">Rollup</span>
-              <span className="snd-info-val" style={{ fontFamily: 'monospace', fontSize: 11 }}>
-                {shortenValue(capsulePreview.rollupHash)}
-              </span>
-            </div>
-            <div className="snd-info-row">
-              <span className="snd-info-label">Version / Flags</span>
-              <span className="snd-info-val">
-                {capsulePreview.capsuleVersion} / {capsulePreview.capsuleFlags}
-              </span>
-            </div>
-            <div className="snd-info-row">
-              <span className="snd-info-label">Logical Time</span>
-              <span className="snd-info-val">{capsulePreview.logicalTime}</span>
-            </div>
-            <div className="snd-info-row">
-              <span className="snd-info-label">Payload</span>
-              <span className="snd-info-val">
-                {capsuleBytes ? `${capsuleBytes.length} bytes` : '--'}
-              </span>
-            </div>
-          </div>
-
-          {capsulePreview.chainTips.length > 0 && (
-            <div className="snd-card">
-              <div className="snd-info-row">
-                <span className="snd-info-label">CHAIN TIPS ON THE RING</span>
-              </div>
-              <div className="snd-info-note">
-                {capsulePreview.chainTips.map((tip) => (
-                  <div key={`${tip.counterpartyId}:${tip.height}`}>
-                    {tip.counterpartyId.slice(0, 16)}... h={tip.height} {shortenValue(tip.headHash, 16)}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {capsuleBase32 && (
-            <div className="snd-card">
-              <div className="snd-info-row">
-                <span className="snd-info-label">ENCRYPTED PAYLOAD (BASE32)</span>
-                <span className="snd-info-val">{capsulePreviewFromBase32(capsuleBase32, 10)}</span>
-              </div>
+            <div style={{ padding: '0 10px 8px' }}>
               <textarea
-                value={capsuleBase32}
-                readOnly
-                rows={5}
-                style={{
-                  width: '100%',
-                  boxSizing: 'border-box',
-                  padding: '10px 12px',
-                  marginTop: 8,
-                  fontFamily: "'Martian Mono', monospace",
-                  fontSize: 9,
-                  background: 'var(--gb-bg)',
-                  color: 'var(--gb-fg)',
-                  border: '2px solid var(--gb-border)',
-                  borderRadius: 4,
-                  resize: 'vertical',
-                }}
+                className="nfc-input"
+                value={mnemonic}
+                onChange={(e) => setMnemonic(e.target.value)}
+                placeholder="word1 word2 word3 ..."
+                rows={4}
+                style={{ marginTop: 8 }}
+                disabled={busy}
               />
             </div>
-          )}
-
-          <div className="snd-card">
-            <div className="snd-actions">
-              <button className="snd-btn" onClick={onStageCapsule} disabled={busy || staged || !capsuleBytes}>
-                {busy ? 'WORKING...' : staged ? 'ALREADY STAGED' : 'STAGE ON THIS DEVICE'}
-              </button>
-              <button className="snd-btn" onClick={reset} style={{ marginTop: 4 }}>
-                READ AGAIN
-              </button>
+            <div className="nfc-note">
+              The mnemonic stays in the Rust-authoritative path. Android only transports the raw ring
+              bytes to Rust for inspection or staging.
+            </div>
+            <div className="nfc-actions">
               <button
-                className="snd-btn"
-                onClick={() => onNavigate?.('nfc_recovery')}
-                style={{ marginTop: 4 }}
+                className="nfc-btn"
+                onClick={onBeginRead}
+                disabled={busy || mnemonic.trim().split(/\s+/).length < 12}
               >
-                BACK TO BACKUP
+                INSPECT THE RING
               </button>
             </div>
           </div>
-        </>
-      )}
+        )}
 
-      {statusMsg && !errorMsg && (
-        <div className="settings-shell__status">{statusMsg}</div>
-      )}
-      {errorMsg && (
-        <div className="settings-shell__status" style={{ color: 'var(--gb-error, #c00)' }}>
-          {errorMsg}
-        </div>
-      )}
-    </main>
+        {step === 'tap' && (
+          <div className="nfc-card">
+            <div className="nfc-info-row">
+              <span className="nfc-info-label">TAP THE RING TO THE PHONE</span>
+            </div>
+            <div className="nfc-tap-prompt">
+              {busy ? 'INSPECTING...' : 'WAITING FOR RING...'}
+            </div>
+            <div className="nfc-note">
+              Hold the ring near the NFC antenna. Once the tag is read, Rust decrypts the capsule and
+              returns a preview through the protobuf envelope path.
+            </div>
+            <div className="nfc-actions">
+              <button className="nfc-btn" onClick={backToMnemonic} disabled={busy}>
+                BACK TO MNEMONIC
+              </button>
+            </div>
+          </div>
+        )}
+
+        {step === 'preview' && capsulePreview && (
+          <>
+            {/* Ring capsule stats */}
+            <div className="nfc-card">
+              <div className="nfc-stat-grid">
+                <div className="nfc-stat-cell">
+                  <div className="nfc-stat-val">#{capsulePreview.capsuleIndex}</div>
+                  <div className="nfc-stat-label">Ring Capsule</div>
+                </div>
+                <div className="nfc-stat-cell">
+                  <div className="nfc-stat-val">{capsulePreview.counterpartyCount}</div>
+                  <div className="nfc-stat-label">Peers</div>
+                </div>
+                <div className="nfc-stat-cell">
+                  <div className="nfc-stat-val-sm">{comparison.label}</div>
+                  <div className="nfc-stat-label">Vs Local</div>
+                </div>
+                <div className="nfc-stat-cell">
+                  <div className="nfc-stat-val-sm">{staged ? 'STAGED' : 'INSPECTED'}</div>
+                  <div className="nfc-stat-label">State</div>
+                </div>
+              </div>
+              <div className="nfc-note">
+                {comparison.note}
+              </div>
+              <div className="nfc-note">
+                {staged
+                  ? 'This backup is already staged on this device.'
+                  : 'Inspection does not mutate recovery state. Use the stage action only if this ring contains the backup you want to recover from.'}
+              </div>
+            </div>
+
+            {/* Detailed fields */}
+            <div className="nfc-card">
+              <div className="nfc-info-row">
+                <span className="nfc-info-label">SMT Root</span>
+                <span className="nfc-info-val" style={{ fontFamily: 'monospace', fontSize: 11 }}>
+                  {shortenValue(capsulePreview.smtRoot)}
+                </span>
+              </div>
+              <div className="nfc-info-row">
+                <span className="nfc-info-label">Rollup</span>
+                <span className="nfc-info-val" style={{ fontFamily: 'monospace', fontSize: 11 }}>
+                  {shortenValue(capsulePreview.rollupHash)}
+                </span>
+              </div>
+              <div className="nfc-info-row">
+                <span className="nfc-info-label">Version / Flags</span>
+                <span className="nfc-info-val">
+                  {capsulePreview.capsuleVersion} / {capsulePreview.capsuleFlags}
+                </span>
+              </div>
+              <div className="nfc-info-row">
+                <span className="nfc-info-label">Logical Time</span>
+                <span className="nfc-info-val">{capsulePreview.logicalTime}</span>
+              </div>
+              <div className="nfc-info-row">
+                <span className="nfc-info-label">Payload</span>
+                <span className="nfc-info-val">
+                  {capsuleBytes ? `${capsuleBytes.length} bytes` : '--'}
+                </span>
+              </div>
+            </div>
+
+            {/* Chain tips */}
+            {capsulePreview.chainTips.length > 0 && (
+              <div className="nfc-card">
+                <div className="nfc-info-row">
+                  <span className="nfc-info-label">CHAIN TIPS ON THE RING</span>
+                </div>
+                <div className="nfc-note" style={{ opacity: 0.6 }}>
+                  {capsulePreview.chainTips.map((tip) => (
+                    <div key={`${tip.counterpartyId}:${tip.height}`}>
+                      {tip.counterpartyId.slice(0, 16)}... h={tip.height} {shortenValue(tip.headHash, 16)}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Encrypted payload base32 */}
+            {capsuleBase32 && (
+              <div className="nfc-card">
+                <div className="nfc-info-row">
+                  <span className="nfc-info-label">ENCRYPTED PAYLOAD (BASE32)</span>
+                  <span className="nfc-info-val">{capsulePreviewFromBase32(capsuleBase32, 10)}</span>
+                </div>
+                <div style={{ padding: '0 10px 8px' }}>
+                  <textarea
+                    className="nfc-input"
+                    value={capsuleBase32}
+                    readOnly
+                    rows={5}
+                    style={{ resize: 'vertical', marginTop: 8, fontSize: 7 }}
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Action buttons */}
+            <div className="nfc-card">
+              <div className="nfc-actions">
+                <button className="nfc-btn" onClick={onStageCapsule} disabled={busy || staged || !capsuleBytes}>
+                  {busy ? 'WORKING...' : staged ? 'ALREADY STAGED' : 'STAGE ON THIS DEVICE'}
+                </button>
+              </div>
+              <div className="nfc-actions">
+                <button className="nfc-btn" onClick={reset}>
+                  READ AGAIN
+                </button>
+              </div>
+              <div className="nfc-actions">
+                <button
+                  className="nfc-btn"
+                  onClick={() => onNavigate?.('nfc_recovery')}
+                >
+                  BACK TO BACKUP
+                </button>
+              </div>
+            </div>
+          </>
+        )}
+
+        {/* Status / error messages */}
+        {statusMsg && !errorMsg && (
+          <div className="nfc-card">
+            <div className="nfc-note nfc-note--strong">{statusMsg}</div>
+          </div>
+        )}
+        {errorMsg && (
+          <div className="nfc-card">
+            <div className="nfc-note nfc-note--strong" style={{ color: 'var(--gb-error, #c00)' }}>
+              {errorMsg}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
   );
 };
 

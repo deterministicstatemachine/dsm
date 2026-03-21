@@ -209,11 +209,13 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
   return (
     <div className="dsm-content" style={{
       alignSelf: 'stretch',
-      width: '100%',
-      minHeight: '100%',
+      width: 'calc(100% + 40px)',
+      minHeight: 'calc(100% + 20px)',
+      height: 'calc(100% + 20px)',
       boxSizing: 'border-box',
-      padding: '0 6px',
-      margin: 0,
+      padding: '0 8px',
+      margin: '-20px -20px 0',
+      overflow: 'hidden',
       background: 'linear-gradient(0deg, rgba(var(--text-rgb),0.08), rgba(var(--text-rgb),0.02)), repeating-linear-gradient(45deg, rgba(var(--text-rgb),0.1) 0px, rgba(var(--text-rgb),0.1) 2px, transparent 2px, transparent 4px)',
     }}>
       {/* Header */}

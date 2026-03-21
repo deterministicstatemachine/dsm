@@ -787,7 +787,7 @@ class GattServerHost(private val context: Context) {
                 val addr = deviceAddress
                 txResponseScope.launch {
                     try {
-                        val queued = com.dsm.wallet.bridge.Unified.requestGattWriteChunks(addr, chunks)
+                        val queued = com.dsm.wallet.bridge.Unified.dispatchRustBleFollowUp(addr, chunks, useReliableWrite)
                         Log.i("GattServerHost", "Follow-up queued=$queued, chunks=${chunks.size}, reliableWrite=$useReliableWrite for $addr")
                         if (pairingComplete && queued) {
                             try {

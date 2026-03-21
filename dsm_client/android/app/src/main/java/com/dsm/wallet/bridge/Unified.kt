@@ -424,13 +424,8 @@ object Unified {
         return UnifiedBleBridge.requestGattWriteChunks(deviceAddress, chunks)
     }
 
-    /**
-     * Prime BLE transport for a bilateral transfer to the given peer address.
-     * Starts GATT server + advertising so the peer can reconnect.
-     * Called by Rust before sending bilateral chunks.
-     */
-    @Keep @JvmStatic fun ensureBleTransportReady(deviceAddress: String): Boolean {
-        return UnifiedBleBridge.ensureBleTransportReady(deviceAddress)
+    @Keep @JvmStatic fun dispatchRustBleFollowUp(deviceAddress: String, chunks: Array<ByteArray>, useReliableWrite: Boolean): Boolean {
+        return UnifiedBleBridge.dispatchRustFollowUp(deviceAddress, chunks, useReliableWrite)
     }
 
     /**

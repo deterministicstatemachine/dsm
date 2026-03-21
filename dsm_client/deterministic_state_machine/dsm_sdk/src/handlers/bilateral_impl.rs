@@ -30,98 +30,6 @@ use dsm::types::error::DsmError;
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
 use crate::bluetooth::ble_frame_coordinator::BleFrameCoordinator;
 
-/// Helper to send BLE chunks via Android BLE service through JNI
-#[cfg(all(target_os = "android", feature = "jni"))]
-fn send_ble_chunks_jni(device_address: &str, chunks: &[Vec<u8>]) -> Result<(), DsmError> {
-    use jni::objects::{JString, JValue, JObject};
-
-    // Get JavaVM
-    let jvm = crate::jni::jni_common::get_java_vm()
-        .ok_or_else(|| DsmError::internal("JavaVM not initialized", None::<std::io::Error>))?;
-
-    let mut env = jvm.attach_current_thread().map_err(|e| {
-        DsmError::internal(format!("JNI attach failed: {e}"), None::<std::io::Error>)
-    })?;
-
-    // Convert device address to JString
-    let device_addr_j = env.new_string(device_address).map_err(|e| {
-        DsmError::internal(
-            format!("JNI new_string failed: {e}"),
-            None::<std::io::Error>,
-        )
-    })?;
-
-    // Create Java byte[][] array for chunks
-    let byte_array_class = env.find_class("[B").map_err(|e| {
-        DsmError::internal(
-            format!("Failed to find byte array class: {e}"),
-            None::<std::io::Error>,
-        )
-    })?;
-
-    let chunks_array = env
-        .new_object_array(chunks.len() as i32, &byte_array_class, JObject::null())
-        .map_err(|e| {
-            DsmError::internal(
-                format!("Failed to create chunks array: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
-
-    // Populate chunks array
-    for (i, chunk) in chunks.iter().enumerate() {
-        let chunk_bytes = env.byte_array_from_slice(chunk).map_err(|e| {
-            DsmError::internal(
-                format!("Failed to create byte array for chunk {}: {}", i, e),
-                None::<std::io::Error>,
-            )
-        })?;
-        env.set_object_array_element(&chunks_array, i as i32, chunk_bytes)
-            .map_err(|e| {
-                DsmError::internal(
-                    format!("Failed to set chunk {} in array: {}", i, e),
-                    None::<std::io::Error>,
-                )
-            })?;
-    }
-
-    // Call Unified.requestGattWriteChunks(String, byte[][]) - the actual Kotlin method
-    let class_name = "com/dsm/wallet/bridge/Unified";
-    let jstr_addr = JString::from(device_addr_j);
-    let jobj_addr = JObject::from(jstr_addr);
-    let jobj_chunks = JObject::from(chunks_array);
-
-    let args = [JValue::Object(&jobj_addr), JValue::Object(&jobj_chunks)];
-    let result = env
-        .call_static_method(
-            class_name,
-            "requestGattWriteChunks",
-            "(Ljava/lang/String;[[B)Z",
-            &args,
-        )
-        .map_err(|e| {
-            DsmError::internal(
-                format!("JNI call requestGattWriteChunks failed: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
-
-    let ok = result.z().unwrap_or(false);
-    if ok {
-        log::info!(
-            "[BiImpl] Successfully sent {} BLE chunks to {}",
-            chunks.len(),
-            device_address
-        );
-        Ok(())
-    } else {
-        Err(DsmError::network(
-            "requestGattWriteChunks returned false",
-            None::<std::io::Error>,
-        ))
-    }
-}
-
 /// Bilateral (offline) protocol handler.
 ///
 /// Implements the bilateral transaction flow at the protobuf boundary.
@@ -271,10 +179,44 @@ impl BilateralHandler for BiImpl {
                             );
                             log::info!("[BiImpl] Bilateral prepare created {} BLE chunks for device {} (commitment={})", chunks.len(), ble_address, commitment_txt);
 
-                            // Send chunks via Android BLE service
+                            // Send chunks via the shared JNI BLE dispatch helper.
                             #[cfg(all(target_os = "android", feature = "jni"))]
                             {
-                                if let Err(e) = send_ble_chunks_jni(&ble_address, &chunks) {
+                                let jvm = crate::jni::jni_common::get_java_vm()
+                                    .ok_or_else(|| {
+                                        DsmError::internal(
+                                            "JavaVM not initialized",
+                                            None::<std::io::Error>,
+                                        )
+                                    });
+                                let send_result = jvm.and_then(|jvm| {
+                                    let mut env = jvm.attach_current_thread().map_err(|e| {
+                                        DsmError::internal(
+                                            format!("JNI attach failed: {e}"),
+                                            None::<std::io::Error>,
+                                        )
+                                    })?;
+                                    crate::jni::unified_protobuf_bridge::send_ble_chunks_via_unified(
+                                        &mut env,
+                                        &ble_address,
+                                        &chunks,
+                                    )
+                                    .map_err(|e| {
+                                        DsmError::internal(e, None::<std::io::Error>)
+                                    })
+                                    .and_then(|sent| {
+                                        if sent {
+                                            Ok(())
+                                        } else {
+                                            Err(DsmError::network(
+                                                "requestGattWriteChunks returned false",
+                                                None::<std::io::Error>,
+                                            ))
+                                        }
+                                    })
+                                });
+
+                                if let Err(e) = send_result {
                                     return BiResult {
                                         success: false,
                                         result_data: vec![],

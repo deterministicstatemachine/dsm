@@ -125,6 +125,26 @@ fn enrich_balance_metadata(reply: &mut generated::BalanceGetResponse) {
     reply.decimals = meta.decimals;
 }
 
+fn ensure_default_visible_balances(items: &mut Vec<generated::BalanceGetResponse>) {
+    for token_id in ["ERA", "dBTC"] {
+        if items
+            .iter()
+            .any(|item| item.token_id.eq_ignore_ascii_case(token_id))
+        {
+            continue;
+        }
+
+        let mut reply = generated::BalanceGetResponse {
+            token_id: token_id.to_string(),
+            available: 0,
+            locked: 0,
+            ..Default::default()
+        };
+        enrich_balance_metadata(&mut reply);
+        items.push(reply);
+    }
+}
+
 fn canonicalize_token_id(token_id: &str) -> String {
     let trimmed = token_id.trim();
     if trimmed.is_empty() {
@@ -198,7 +218,7 @@ impl AppRouterImpl {
                     _ => return err("balance.get: expected ArgPack(codec=PROTO)".into()),
                 };
 
-                // Default to ERA when no token_id provided; canonicalize for consistent SQLite lookups.
+                // Default to ERA when no token_id is provided; canonicalize for consistent balance lookup.
                 let token_for_query_raw = token_id_opt.as_deref().unwrap_or("ERA");
                 let token_for_query_owned = canonicalize_token_id(token_for_query_raw);
                 let token_for_query = if token_for_query_owned.is_empty() {
@@ -473,6 +493,20 @@ impl AppRouterImpl {
                     }
                 }
 
+                // Ensure built-in tokens always appear (even at zero balance).
+                for builtin in &["ERA", "dBTC"] {
+                    if !items.iter().any(|i| i.token_id == *builtin) {
+                        items.push(generated::BalanceGetResponse {
+                            token_id: builtin.to_string(),
+                            available: 0,
+                            locked: 0,
+                            ..Default::default()
+                        });
+                    }
+                }
+
+                ensure_default_visible_balances(&mut items);
+
                 // Deterministic order by token_id
                 for item in &mut items {
                     enrich_balance_metadata(item);
@@ -667,25 +701,7 @@ impl AppRouterImpl {
                     // JNI AttachGuard is !Send — do all JNI work in a sync block,
                     // drop the guard, THEN handle errors with async.
                     //
-                    // Step 1: Prime BLE transport — start GATT server + advertising
-                    // so the peer can reconnect if the session dropped after pairing.
-                    let _ble_primed: Result<bool, String> = (|| {
-                        let mut jni_env = vm.attach_current_thread().map_err(|e| {
-                            format!("wallet.sendOffline: attach for BLE prime failed: {e}")
-                        })?;
-                        let ready = crate::jni::unified_protobuf_bridge::ensure_ble_transport_ready(
-                            &mut jni_env,
-                            &ble_address,
-                        );
-                        if let Ok(false) = &ready {
-                            log::warn!(
-                                "[wallet.sendOffline] BLE transport not ready for {} — will try send anyway",
-                                &ble_address
-                            );
-                        }
-                        ready
-                    })();
-                    // Step 2: Send the bilateral prepare chunks via BLE.
+                    // Send the bilateral prepare chunks via the single BLE dispatch path.
                     let ble_send_result: Result<bool, String> = (|| {
                         let mut jni_env = vm.attach_current_thread().map_err(|e| {
                             format!("wallet.sendOffline: attach_current_thread failed: {e}")
@@ -896,7 +912,11 @@ impl AppRouterImpl {
 
 #[cfg(test)]
 mod tests {
-    use super::{canonicalize_token_id, encode_offline_transfer_operation_canonical};
+    use super::{
+        canonicalize_token_id, encode_offline_transfer_operation_canonical,
+        ensure_default_visible_balances,
+    };
+    use dsm::types::proto as generated;
     use dsm::types::operations::Operation;
 
     #[test]
@@ -919,5 +939,14 @@ mod tests {
             }
             other => panic!("expected transfer op, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn ensure_default_visible_balances_adds_era_and_dbtc() {
+        let mut items = Vec::<generated::BalanceGetResponse>::new();
+        ensure_default_visible_balances(&mut items);
+
+        assert!(items.iter().any(|item| item.token_id == "ERA"));
+        assert!(items.iter().any(|item| item.token_id == "dBTC"));
     }
 }

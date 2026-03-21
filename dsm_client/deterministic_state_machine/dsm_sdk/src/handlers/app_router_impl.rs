@@ -2485,8 +2485,8 @@ impl AppRouter for AppRouterImpl {
             "inbox.startPoller" | "inbox.stopPoller" | "inbox.resume" => {
                 self.handle_inbox_invoke(i).await
             }
-            // Recovery invoke routes (includes nfc.ring.write)
-            m if m.starts_with("recovery.") || m == "nfc.ring.write" => {
+            // Recovery invoke routes (includes nfc.ring.write, nfc.ring.read)
+            m if m.starts_with("recovery.") || m == "nfc.ring.write" || m == "nfc.ring.read" => {
                 self.handle_recovery_invoke(i).await
             }
             // Bitcoin invoke routes

@@ -2039,6 +2039,8 @@ mod tests {
 
         let device = DeviceInfo::from_hashed_label("archived_state_device", vec![3u8; 32]);
         let sdk = CoreSDK::new_with_device(device.clone()).expect("init sdk");
+        sdk.initialize_with_genesis_state()
+            .expect("initialize genesis state");
 
         let op = DsmOperation::Generic {
             operation_type: b"archive.test".to_vec(),
