@@ -515,63 +515,25 @@ impl CoreSDK {
             } => {
                 let mut reconciled_state = next_state;
                 let policy_commit = self.resolve_policy_commit_strict(token_id)?;
-                let token_id = std::str::from_utf8(token_id)
+                let token_id_str = std::str::from_utf8(token_id)
                     .map_err(|_| DsmError::invalid_operation("token_id must be valid UTF-8"))?;
-                let sender_key = dsm::core::token::derive_canonical_balance_key(
-                    &policy_commit,
-                    &current_state.device_info.public_key,
-                    token_id,
-                );
                 let recipient_owner = if recipient.is_empty() {
                     to_device_id.as_slice()
                 } else {
                     recipient.as_slice()
                 };
-                let recipient_key = dsm::core::token::derive_canonical_balance_key(
+
+                crate::sdk::token_state::apply_transfer_debit_credit(
+                    &mut reconciled_state.token_balances,
                     &policy_commit,
+                    &current_state.device_info.public_key,
                     recipient_owner,
-                    token_id,
-                );
-
-                let sender_balance = current_state
-                    .token_balances
-                    .get(&sender_key)
-                    .cloned()
-                    .unwrap_or_else(dsm::types::token_types::Balance::zero);
-                if sender_balance.value() < amount.value() {
-                    return Err(DsmError::insufficient_balance(
-                        token_id.to_string(),
-                        sender_balance.value(),
-                        amount.value(),
-                    ));
-                }
-
-                let recipient_balance = current_state
-                    .token_balances
-                    .get(&recipient_key)
-                    .cloned()
-                    .unwrap_or_else(dsm::types::token_types::Balance::zero);
-                let recipient_value = recipient_balance
-                    .value()
-                    .checked_add(amount.value())
-                    .ok_or_else(|| DsmError::invalid_operation("Balance overflow on transfer credit"))?;
-
-                reconciled_state.token_balances.insert(
-                    sender_key,
-                    dsm::types::token_types::Balance::from_state(
-                        sender_balance.value() - amount.value(),
-                        current_state.hash,
-                        current_state.state_number,
-                    ),
-                );
-                reconciled_state.token_balances.insert(
-                    recipient_key,
-                    dsm::types::token_types::Balance::from_state(
-                        recipient_value,
-                        current_state.hash,
-                        current_state.state_number,
-                    ),
-                );
+                    token_id_str,
+                    amount.value(),
+                    current_state.hash,
+                    current_state.state_number,
+                )
+                .map_err(DsmError::invalid_operation)?;
 
                 reconciled_state.hash = reconciled_state.compute_hash()?;
                 sm.set_state(reconciled_state.clone());

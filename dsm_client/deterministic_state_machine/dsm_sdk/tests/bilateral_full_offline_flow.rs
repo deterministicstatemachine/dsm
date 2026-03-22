@@ -50,19 +50,44 @@ fn configure_local_identity_for_receipts(
     );
 }
 
-fn seed_era_projection(device_txt: &str, available: u64) {
-    client_db::upsert_balance_projection(&client_db::BalanceProjectionRecord {
-        balance_key: format!("test:{device_txt}:ERA"),
-        device_id: device_txt.to_string(),
-        token_id: "ERA".to_string(),
-        policy_commit: text_id::encode_base32_crockford(dsm_sdk::policy::builtins::NATIVE_POLICY_COMMIT),
-        available,
-        locked: 0,
-        source_state_hash: text_id::encode_base32_crockford(&[0u8; 32]),
-        source_state_number: 0,
-        updated_at: 0,
-    })
-    .expect("seed ERA projection");
+/// Archive a genesis state with ERA balance to BCR so that the settlement
+/// layer's `latest_archived_state` returns a state with funds.
+fn seed_bcr_genesis_with_era(device_id: [u8; 32], public_key: &[u8], era_balance: u64) {
+    use dsm::types::state_builder::StateBuilder;
+    use dsm::types::state_types::DeviceInfo;
+
+    let policy_commit = *dsm_sdk::policy::builtins::NATIVE_POLICY_COMMIT;
+    let balance_key =
+        dsm::core::token::derive_canonical_balance_key(&policy_commit, public_key, "ERA");
+
+    let mut balances = std::collections::HashMap::new();
+    balances.insert(
+        balance_key,
+        Balance::from_state(era_balance, [0u8; 32], 0),
+    );
+
+    let mut state = StateBuilder::new()
+        .with_id("genesis".to_string())
+        .with_state_number(0)
+        .with_entropy(vec![0u8; 32])
+        .with_prev_state_hash([0u8; 32])
+        .with_operation(Operation::Generic {
+            operation_type: b"genesis".to_vec(),
+            data: vec![],
+            message: String::new(),
+            signature: vec![],
+        })
+        .with_device_info(DeviceInfo {
+            device_id,
+            public_key: public_key.to_vec(),
+            metadata: Vec::new(),
+        })
+        .with_token_balances(balances)
+        .build()
+        .expect("genesis state should build");
+
+    state.hash = state.compute_hash().expect("compute hash");
+    client_db::store_bcr_state(&state, true).expect("seed BCR genesis");
 }
 
 #[tokio::test]
@@ -153,9 +178,10 @@ async fn bilateral_offline_prepare_accept_commit_finalize_flow() {
     let a = Arc::new(RwLock::new(mgr_a));
     let b = Arc::new(RwLock::new(mgr_b));
 
-    // Seed sender's ERA balance via projection storage.
-    let a_device_txt = text_id::encode_base32_crockford(&a_dev);
-    seed_era_projection(&a_device_txt, 10_000);
+    // Seed sender's ERA balance in BCR (authoritative for settlement).
+    // The balance projection is synced automatically by the settlement layer
+    // after reconciliation, using the canonical balance key.
+    seed_bcr_genesis_with_era(a_dev, a_kp.public_key(), 10_000);
 
     let delegate = Arc::new(DefaultBilateralSettlementDelegate);
     let mut handler_a = BilateralBleHandler::new(a.clone(), a_dev);
@@ -325,6 +351,9 @@ async fn bilateral_offline_state_consistency_across_peers() {
 
     let a = Arc::new(RwLock::new(mgr_a));
     let b = Arc::new(RwLock::new(mgr_b));
+
+    // Seed sender's ERA balance in BCR (authoritative for settlement).
+    seed_bcr_genesis_with_era(a_dev, a_kp.public_key(), 1_000);
 
     let delegate = Arc::new(DefaultBilateralSettlementDelegate);
     let mut handler_a = BilateralBleHandler::new(a.clone(), a_dev);

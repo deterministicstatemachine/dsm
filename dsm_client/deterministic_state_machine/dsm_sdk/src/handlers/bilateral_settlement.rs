@@ -9,33 +9,12 @@
 use crate::bluetooth::bilateral_ble_handler::{
     BilateralSettlementContext, BilateralSettlementDelegate, BilateralSettlementOutcome,
 };
+use crate::sdk::token_state::{self, canonicalize_token_id, TransferFields};
 use crate::sdk::transfer_hooks::TransferMeta;
 use crate::util::text_id::encode_base32_crockford;
 use dsm::types::operations::Operation;
 use dsm::types::state_types::State;
-use dsm::types::token_types::Balance;
 use log::{error, warn};
-
-#[derive(Debug, Clone)]
-struct TransferFields {
-    amount: u64,
-    token_id: String,
-    recipient: Vec<u8>,
-    to_device_id: Vec<u8>,
-}
-
-fn canonicalize_token_id(token_id: &str) -> String {
-    let trimmed = token_id.trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-
-    match trimmed.to_ascii_uppercase().as_str() {
-        "ERA" => "ERA".to_string(),
-        "DBTC" => "dBTC".to_string(),
-        _ => trimmed.to_string(),
-    }
-}
 
 /// Parse `(amount, token_id)` from raw operation bytes.
 ///
@@ -114,60 +93,26 @@ fn reconcile_sender_state(
     } else {
         transfer.token_id.as_str()
     };
-    let sender_key = dsm::core::token::derive_canonical_balance_key(
-        policy_commit,
-        &prior_state.device_info.public_key,
-        token_id,
-    );
     let recipient_owner = if transfer.recipient.is_empty() {
         transfer.to_device_id.as_slice()
     } else {
         transfer.recipient.as_slice()
     };
-    let recipient_key = dsm::core::token::derive_canonical_balance_key(
-        policy_commit,
-        recipient_owner,
-        token_id,
-    );
-
-    let sender_balance = prior_state
-        .token_balances
-        .get(&sender_key)
-        .cloned()
-        .unwrap_or_else(Balance::zero);
-    if sender_balance.value() < transfer.amount {
-        return Err(format!(
-            "insufficient {} balance: have {}, need {}",
-            token_id,
-            sender_balance.value(),
-            transfer.amount
-        ));
-    }
-
-    let recipient_balance = prior_state
-        .token_balances
-        .get(&recipient_key)
-        .cloned()
-        .unwrap_or_else(Balance::zero);
-    let recipient_value = recipient_balance
-        .value()
-        .checked_add(transfer.amount)
-        .ok_or_else(|| format!("{token_id} balance overflow on sender settlement"))?;
 
     let mut settled_state = base_state.clone();
     settled_state.token_balances = prior_state.token_balances.clone();
-    settled_state.token_balances.insert(
-        sender_key,
-        Balance::from_state(
-            sender_balance.value() - transfer.amount,
-            prior_state.hash,
-            prior_state.state_number,
-        ),
-    );
-    settled_state.token_balances.insert(
-        recipient_key,
-        Balance::from_state(recipient_value, prior_state.hash, prior_state.state_number),
-    );
+
+    token_state::apply_transfer_debit_credit(
+        &mut settled_state.token_balances,
+        policy_commit,
+        &prior_state.device_info.public_key,
+        recipient_owner,
+        token_id,
+        transfer.amount,
+        prior_state.hash,
+        prior_state.state_number,
+    )?;
+
     settled_state.hash = settled_state
         .compute_hash()
         .map_err(|e| format!("sender settled-state hash failed: {e}"))?;
@@ -185,27 +130,20 @@ fn reconcile_receiver_state(
     } else {
         transfer.token_id.as_str()
     };
-    let local_key = dsm::core::token::derive_canonical_balance_key(
-        policy_commit,
-        &prior_state.device_info.public_key,
-        token_id,
-    );
-    let local_balance = prior_state
-        .token_balances
-        .get(&local_key)
-        .cloned()
-        .unwrap_or_else(Balance::zero);
-    let credited_value = local_balance
-        .value()
-        .checked_add(transfer.amount)
-        .ok_or_else(|| format!("{token_id} balance overflow on receiver settlement"))?;
 
     let mut settled_state = base_state.clone();
     settled_state.token_balances = prior_state.token_balances.clone();
-    settled_state.token_balances.insert(
-        local_key,
-        Balance::from_state(credited_value, prior_state.hash, prior_state.state_number),
-    );
+
+    token_state::apply_transfer_credit(
+        &mut settled_state.token_balances,
+        policy_commit,
+        &prior_state.device_info.public_key,
+        token_id,
+        transfer.amount,
+        prior_state.hash,
+        prior_state.state_number,
+    )?;
+
     settled_state.hash = settled_state
         .compute_hash()
         .map_err(|e| format!("receiver settled-state hash failed: {e}"))?;
@@ -387,10 +325,8 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        canonicalize_token_id, parse_transfer_fields, reconcile_receiver_state,
-        reconcile_sender_state, TransferFields,
-    };
+    use super::{parse_transfer_fields, reconcile_receiver_state, reconcile_sender_state};
+    use crate::sdk::token_state::{canonicalize_token_id, TransferFields};
     use dsm::types::operations::{Operation, TransactionMode, VerificationType};
     use dsm::types::state_builder::StateBuilder;
     use dsm::types::state_types::{DeviceInfo, State};
