@@ -79,7 +79,6 @@
   border-radius: 4px;
   background: var(--nfc-panel-bg);
   color: var(--nfc-panel-text);
-  overflow: hidden;
 }
 
 /* Stat grids */

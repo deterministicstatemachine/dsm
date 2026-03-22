@@ -130,9 +130,6 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
                     debit_result.map_err(|e| format!("atomic sender settlement failed: {e}"))?;
                 }
 
-                if let Some(router) = crate::bridge::app_router() {
-                    router.sync_balance_cache();
-                }
             } else if let Err(e) = crate::storage::client_db::store_transaction(&tx_record) {
                 warn!("[BilateralSettlement] Failed to store zero-amount sender tx history: {e}");
             }
@@ -161,10 +158,6 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
                         local_txt, token_for_atomic, transfer_amount
                     )
                 })?;
-            }
-
-            if let Some(router) = crate::bridge::app_router() {
-                router.sync_balance_cache();
             }
         }
 

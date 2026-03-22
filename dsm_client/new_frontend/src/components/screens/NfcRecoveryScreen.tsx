@@ -242,68 +242,6 @@ const NfcRecoveryScreen: React.FC<NfcRecoveryScreenProps> = ({ onNavigate }) => 
           </div>
         </div>
 
-        {/* How-it-works card */}
-        <div className="nfc-card">
-          <div className="nfc-info-row">
-            <span className="nfc-info-label">HOW IT WORKS</span>
-          </div>
-          <div className="nfc-note">
-            1. Enter or confirm your recovery mnemonic. 2. Arm a capsule. 3. Press write and hold
-            the ring to the phone. A vibration means the write committed. After a successful write,
-            the ring keeps that capsule; this phone re-arms only after the next accepted state
-            change or a manual rebuild.
-          </div>
-        </div>
-
-        {/* Main action buttons card */}
-        <div className="nfc-card">
-          <div className="nfc-actions">
-            <button className="nfc-btn" onClick={onToggleBackup} disabled={busy}>
-              {busy ? '...' : status.enabled ? 'DISABLE BACKUP' : status.configured ? 'RE-ENABLE' : 'SET UP'}
-            </button>
-          </div>
-          {status.enabled && (
-            <div className="nfc-actions">
-              <button
-                className="nfc-btn"
-                onClick={onWriteNow}
-                disabled={busy || !status.enabled}
-              >
-                {writeButtonLabel}
-              </button>
-            </div>
-          )}
-        </div>
-
-        {/* Local capsule snapshot */}
-        {preview && (
-          <div className="nfc-card">
-            <div className="nfc-info-row">
-              <span className="nfc-info-label">LOCAL CAPSULE SNAPSHOT</span>
-            </div>
-            <div className="nfc-stat-grid">
-              <div className="nfc-stat-cell">
-                <div className="nfc-stat-val">#{preview.capsuleIndex}</div>
-                <div className="nfc-stat-label">Capsule</div>
-              </div>
-              <div className="nfc-stat-cell">
-                <div className="nfc-stat-val">{preview.counterpartyCount}</div>
-                <div className="nfc-stat-label">Peers</div>
-              </div>
-            </div>
-            <div className="nfc-info-row">
-              <span className="nfc-info-label">SMT Root</span>
-              <span className="nfc-info-val" style={{ fontFamily: 'monospace', fontSize: 11 }}>
-                {shortenValue(preview.smtRoot || 'UNKNOWN')}
-              </span>
-            </div>
-            <div className="nfc-info-row">
-              <span className="nfc-info-label">Tick</span>
-              <span className="nfc-info-val">{preview.createdTick}</span>
-            </div>
-          </div>
-        )}
-
         {/* First-time setup: choose flow */}
         {setupMode === 'choose' && (
           <div className="nfc-card">
@@ -334,8 +272,22 @@ const NfcRecoveryScreen: React.FC<NfcRecoveryScreenProps> = ({ onNavigate }) => 
                 WRITE THESE WORDS DOWN — REQUIRED TO REBUILD OR RECOVER
               </span>
             </div>
-            <div className="nfc-mnemonic-box">
-              {generatedMnemonic}
+            <div style={{ padding: '0 10px 8px' }}>
+              <textarea
+                className="nfc-input"
+                value={generatedMnemonic}
+                readOnly
+                rows={4}
+                style={{ marginTop: 8 }}
+              />
+            </div>
+            <div className="nfc-actions">
+              <button
+                className="nfc-btn"
+                onClick={() => { void navigator.clipboard.writeText(generatedMnemonic); setStatusMsg('Copied to clipboard.'); }}
+              >
+                COPY TO CLIPBOARD
+              </button>
             </div>
             <div className="nfc-actions">
               <button
@@ -383,14 +335,72 @@ const NfcRecoveryScreen: React.FC<NfcRecoveryScreenProps> = ({ onNavigate }) => 
           </div>
         )}
 
-        {/* Navigate to inspect/recover screen */}
-        <div className="nfc-card">
-          <div className="nfc-actions">
-            <button className="nfc-btn" onClick={() => onNavigate?.('recovery')}>
-              INSPECT OR RECOVER RING
-            </button>
+        {/* Main action buttons card — only when idle */}
+        {setupMode === 'idle' && (
+          <div className="nfc-card">
+            <div className="nfc-actions">
+              <button className="nfc-btn" onClick={onToggleBackup} disabled={busy}>
+                {busy ? '...' : status.enabled ? 'DISABLE BACKUP' : status.configured ? 'RE-ENABLE' : 'SET UP'}
+              </button>
+            </div>
+            {status.enabled && (
+              <div className="nfc-actions">
+                <button
+                  className="nfc-btn"
+                  onClick={onWriteNow}
+                  disabled={busy || !status.enabled}
+                >
+                  {writeButtonLabel}
+                </button>
+              </div>
+            )}
+            <div className="nfc-actions">
+              <button className="nfc-btn" onClick={() => onNavigate?.('recovery')}>
+                INSPECT OR RECOVER RING
+              </button>
+            </div>
           </div>
-        </div>
+        )}
+
+        {/* Local capsule snapshot — only when idle */}
+        {setupMode === 'idle' && preview && (
+          <div className="nfc-card">
+            <div className="nfc-info-row">
+              <span className="nfc-info-label">LOCAL CAPSULE SNAPSHOT</span>
+            </div>
+            <div className="nfc-stat-grid">
+              <div className="nfc-stat-cell">
+                <div className="nfc-stat-val">#{preview.capsuleIndex}</div>
+                <div className="nfc-stat-label">Capsule</div>
+              </div>
+              <div className="nfc-stat-cell">
+                <div className="nfc-stat-val">{preview.counterpartyCount}</div>
+                <div className="nfc-stat-label">Peers</div>
+              </div>
+            </div>
+            <div className="nfc-info-row">
+              <span className="nfc-info-label">SMT Root</span>
+              <span className="nfc-info-val" style={{ fontFamily: 'monospace', fontSize: 11 }}>
+                {shortenValue(preview.smtRoot || 'UNKNOWN')}
+              </span>
+            </div>
+          </div>
+        )}
+
+        {/* How-it-works card — only when idle */}
+        {setupMode === 'idle' && (
+          <div className="nfc-card">
+            <div className="nfc-info-row">
+              <span className="nfc-info-label">HOW IT WORKS</span>
+            </div>
+            <div className="nfc-note">
+              1. Enter or confirm your recovery mnemonic. 2. Arm a capsule. 3. Press write and hold
+              the ring to the phone. A vibration means the write committed. After a successful write,
+              the ring keeps that capsule; this phone re-arms only after the next accepted state
+              change or a manual rebuild.
+            </div>
+          </div>
+        )}
 
         {/* Status message */}
         {statusMsg && (

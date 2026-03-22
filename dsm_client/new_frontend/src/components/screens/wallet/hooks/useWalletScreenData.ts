@@ -2,7 +2,7 @@
 // Data loading hook for the wallet screen — identity, balances, contacts, transactions.
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { dsmClient } from '../../../../services/dsmClient';
-import { formatBtc, getDbtcBalance } from '../../../../services/bitcoinTap';
+import { formatBtc } from '../../../../services/bitcoinTap';
 import { encodeBase32Crockford } from '../../../../utils/textId';
 import { useWalletRefreshListener } from '../../../../hooks/useWalletRefreshListener';
 import { bridgeEvents } from '../../../../bridge/bridgeEvents';
@@ -105,10 +105,7 @@ export function useWalletScreenData(activeTab: string): WalletScreenData {
       }
 
       try {
-        const [bal, dbtcBal] = await Promise.all([
-          dsmClient.getAllBalances(),
-          getDbtcBalance(),
-        ]);
+        const bal = await dsmClient.getAllBalances();
         const raw = Array.isArray(bal) ? bal : [];
         const eraTokens: Balance[] = raw
           .filter((b) => b.tokenId.toUpperCase() !== 'BTC_CHAIN')
@@ -120,16 +117,7 @@ export function useWalletScreenData(activeTab: string): WalletScreenData {
               : b.balance,
             decimals: b.decimals,
           }));
-        const mapped: Balance[] = eraTokens;
-        const available = typeof dbtcBal.available === 'bigint' ? dbtcBal.available : BigInt(0);
-        const dbtcIdx = mapped.findIndex((b) => b.tokenId.toUpperCase() === 'DBTC');
-        const dbtcEntry: Balance = { tokenId: 'dBTC', symbol: 'dBTC', balance: formatBtc(available), decimals: 8 };
-        if (dbtcIdx >= 0) {
-          mapped[dbtcIdx] = dbtcEntry;
-        } else {
-          mapped.unshift(dbtcEntry);
-        }
-        setBalances(mapped);
+        setBalances(eraTokens);
       } catch (e) {
         warnings.push(e instanceof Error ? e.message : 'Failed to load balances');
       }

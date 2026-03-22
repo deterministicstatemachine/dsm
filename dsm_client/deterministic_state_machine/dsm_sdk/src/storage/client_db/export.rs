@@ -17,9 +17,11 @@ use crate::generated;
 use crate::sdk::app_state::AppState;
 use crate::storage::codecs::{read_len_u32, read_string, read_u64, read_u8, read_vec};
 
+const BACKUP_MAGIC: &[u8] = b"DSMBKP\0";
+
 /// Export a deterministic binary snapshot of local state for backup.
 /// Layout (little-endian):
-/// [8 bytes magic "DSMBKP\0"]
+/// [backup magic bytes "DSMBKP\0"]
 /// [u8 version=1]
 /// [genesis_present u8]
 ///   if 1 => `[len genesis_bytes u32][genesis_bytes]`
@@ -33,7 +35,7 @@ use crate::storage::codecs::{read_len_u32, read_string, read_u64, read_u8, read_
 pub fn export_state_blob() -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(4096);
     // magic & version
-    out.extend_from_slice(b"DSMBKP\0");
+    out.extend_from_slice(BACKUP_MAGIC);
     put_u8(&mut out, 1);
 
     // genesis
@@ -134,13 +136,13 @@ pub fn export_state_blob() -> Result<Vec<u8>> {
 /// Import a previously exported blob. Partial application allowed.
 pub fn import_state_blob(blob: &[u8]) -> Result<(bool, String)> {
     let mut r = blob;
-    if r.len() < 9 {
+    if r.len() < BACKUP_MAGIC.len() + 1 {
         return Ok((false, "blob_too_small".into()));
     }
-    if &r[..7] != b"DSMBKP\0" {
+    if &r[..BACKUP_MAGIC.len()] != BACKUP_MAGIC {
         return Ok((false, "bad_magic".into()));
     }
-    r = &r[8..];
+    r = &r[BACKUP_MAGIC.len()..];
     let _version = read_u8(&mut r).map_err(|e| anyhow!("version: {e}"))?;
 
     let mut applied_any = false;
@@ -382,7 +384,7 @@ mod tests {
         initialize_wallet_from_verified_genesis(&gen).expect("init wallet");
 
         let mut blob = Vec::new();
-        blob.extend_from_slice(b"DSMBKP\0");
+        blob.extend_from_slice(BACKUP_MAGIC);
         put_u8(&mut blob, 1);
         put_u8(&mut blob, 0);
         put_u8(&mut blob, 1);

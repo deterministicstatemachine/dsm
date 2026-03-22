@@ -110,7 +110,7 @@ ff = "0.13.0"
 # Post-quantum cryptography (pqcrypto-mlkem used via smart_commitment_sdk)
 
 # Networking
-rustls = { version = "0.23.37" }
+rustls = { version = "0.23.37", features = ["ring"] }
 reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls", "json"] }
 rcgen = "0.12"
 tokio-rustls = "0.26.4"

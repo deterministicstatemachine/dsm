@@ -1746,23 +1746,17 @@ impl WalletSDK {
     }
 
     /// Execute a token operation directly through TokenSDK.
-    /// Seed the in-memory token balance for this device from SQLite (or any
-    /// authoritative u64) without advancing the state machine.
-    ///
-    /// Silently no-ops if the in-memory value is already >= `amount`, so it is
-    /// safe to call unconditionally before a Burn to ensure the map reflects
-    /// bilaterally-received tokens (bilateral receive updates SQLite only).
-    /// Unconditionally set the in-memory balance cache for the local device.
-    /// Used by the atomic b0x rollback to undo the in-memory deduction after
-    /// a failed storage-node delivery.
+    /// Unconditionally set the local in-memory balance cache without advancing
+    /// the state machine. Used by the b0x rollback path to restore the cached
+    /// pre-send value after a failed storage-node delivery.
     pub fn force_set_balance_for_self(&self, token_id: &str, amount: u64) {
         let device_id = self.device_id_array();
         self.token_sdk
             .force_set_balance(device_id, token_id, amount);
     }
 
-    /// Reload the in-memory balance cache from SQLite for the local device.
-    /// Used to synchronize the cache after rollbacks or external changes.
+    /// Reload the local in-memory balance cache from canonical reads and any
+    /// derived projections needed to hydrate the cache.
     pub fn reload_balance_cache_for_self(&self) -> Result<(), DsmError> {
         let device_id = self.device_id_array();
         self.token_sdk.reload_balance_cache_for_self(device_id)

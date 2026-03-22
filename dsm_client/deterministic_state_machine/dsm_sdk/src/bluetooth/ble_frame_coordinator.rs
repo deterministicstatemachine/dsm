@@ -12,9 +12,11 @@
 //! - This module never serializes domain enums/structs directly — only protobuf messages.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::convert::TryFrom;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+use bitflags::bitflags;
 use log::{debug, info, warn};
 use prost::Message;
 use tokio::sync::Mutex;
@@ -37,6 +39,160 @@ fn short_id(bytes: &[u8]) -> String {
 /// Prost-generated aliases (codegen from .proto)
 pub type BleFrameHeader = crate::generated::BleFrameHeader;
 pub type BleFrameType = crate::generated::BleFrameType;
+pub type BleTransportHeader = crate::generated::BleTransportHeader;
+pub type BleTransportChunk = crate::generated::BleTransportChunk;
+pub type BleTransportAck = crate::generated::BleTransportAck;
+
+bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct BleTransportFlags: u32 {
+        const DATA = 0x01;
+        const SYN = 0x02;
+        const ACK = 0x04;
+        const NACK = 0x08;
+        const FIN = 0x10;
+        const KEEPALIVE = 0x20;
+    }
+}
+
+pub const BLE_TRANSPORT_VERSION: u32 = 1;
+pub const DEFAULT_TRANSPORT_WINDOW_SIZE: usize = 4;
+pub const DEFAULT_TRANSPORT_MAX_COMPLETED_CACHE: usize = 256;
+
+/// Transport-only timing and retry controls.
+///
+/// These settings govern BLE delivery behavior only. They never alter DSM
+/// protocol semantics, acceptance predicates, or commitment bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransportConfig {
+    pub ack_timeout: Duration,
+    pub idle_timeout: Duration,
+    pub reassembly_timeout: Duration,
+    pub connect_timeout: Duration,
+    pub max_retries: u8,
+    pub window_size: usize,
+    pub max_completed_cache: usize,
+}
+
+impl Default for TransportConfig {
+    fn default() -> Self {
+        Self {
+            ack_timeout: Duration::from_millis(500),
+            idle_timeout: Duration::from_secs(15),
+            reassembly_timeout: Duration::from_secs(10),
+            connect_timeout: Duration::from_secs(8),
+            max_retries: 5,
+            window_size: DEFAULT_TRANSPORT_WINDOW_SIZE,
+            max_completed_cache: DEFAULT_TRANSPORT_MAX_COMPLETED_CACHE,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TransportMessageKey {
+    pub session_id: u64,
+    pub message_id: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboundTransportMessage {
+    pub key: TransportMessageKey,
+    pub chunks: Vec<Vec<u8>>,
+    pub acked: Vec<bool>,
+    pub retries: u8,
+    pub next_send_index: usize,
+    pub last_progress_at: Instant,
+}
+
+impl OutboundTransportMessage {
+    #[must_use]
+    pub fn new(key: TransportMessageKey, chunks: Vec<Vec<u8>>, now: Instant) -> Self {
+        let acked = vec![false; chunks.len()];
+        Self {
+            key,
+            chunks,
+            acked,
+            retries: 0,
+            next_send_index: 0,
+            last_progress_at: now,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartialTransportMessage {
+    pub key: TransportMessageKey,
+    pub chunk_count: u16,
+    pub chunks: Vec<Option<Vec<u8>>>,
+    pub received: Vec<bool>,
+    pub first_seen_at: Instant,
+    pub last_updated_at: Instant,
+}
+
+impl PartialTransportMessage {
+    #[must_use]
+    pub fn new(key: TransportMessageKey, chunk_count: u16, now: Instant) -> Self {
+        let len = usize::from(chunk_count);
+        Self {
+            key,
+            chunk_count,
+            chunks: vec![None; len],
+            received: vec![false; len],
+            first_seen_at: now,
+            last_updated_at: now,
+        }
+    }
+
+    pub fn insert_chunk(&mut self, chunk_index: u16, payload: Vec<u8>, now: Instant) -> Result<(), DsmError> {
+        let idx = usize::from(chunk_index);
+        if idx >= self.chunks.len() {
+            return Err(DsmError::invalid_operation("transport chunk index out of bounds"));
+        }
+        self.chunks[idx] = Some(payload);
+        self.received[idx] = true;
+        self.last_updated_at = now;
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.received.iter().all(|received| *received)
+    }
+
+    pub fn reassemble(&self) -> Result<Vec<u8>, DsmError> {
+        let total_size = self
+            .chunks
+            .iter()
+            .map(|chunk| chunk.as_ref().map_or(0usize, Vec::len))
+            .sum();
+        let mut payload = Vec::with_capacity(total_size);
+        for chunk in &self.chunks {
+            let bytes = chunk
+                .as_ref()
+                .ok_or_else(|| DsmError::invalid_operation("transport message missing chunk"))?;
+            payload.extend_from_slice(bytes);
+        }
+        Ok(payload)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransportError {
+    PeerDisconnected,
+    AckTimeout,
+    RetryExceeded,
+    ChecksumMismatch,
+    SessionMismatch,
+    ReassemblyExpired,
+    MtuTooSmall,
+    InvalidFrame(&'static str),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum BleTransportFrame {
+    Chunk(BleTransportChunk),
+    Ack(BleTransportAck),
+}
 
 /// Chunk record used only within this module (reassembly queue).
 #[derive(Debug, Clone)]
@@ -108,6 +264,158 @@ pub struct BleFrameCoordinator {
 }
 
 impl BleFrameCoordinator {
+    fn transport_checksum(payload: &[u8]) -> u32 {
+        crc32fast::hash(payload)
+    }
+
+    fn selective_ack_bitmap(received: &[bool], ack_base_chunk: u16) -> Vec<u8> {
+        let start = usize::from(ack_base_chunk);
+        if start >= received.len() {
+            return Vec::new();
+        }
+
+        let mut bitmap = vec![0u8; (received.len() - start).div_ceil(8)];
+        for (offset, chunk_received) in received.iter().enumerate().skip(start) {
+            if *chunk_received {
+                let rel = offset - start;
+                bitmap[rel / 8] |= 1u8 << (rel % 8);
+            }
+        }
+        bitmap
+    }
+
+    #[must_use]
+    pub fn highest_contiguous_chunk(received: &[bool]) -> u16 {
+        let mut highest = 0u16;
+        for (idx, chunk_received) in received.iter().enumerate() {
+            if !*chunk_received {
+                break;
+            }
+            highest = u16::try_from(idx + 1).unwrap_or(u16::MAX);
+        }
+        highest
+    }
+
+    /// Chunk a transport payload into `BleTransportChunk` messages.
+    ///
+    /// The caller supplies the negotiated payload budget after MTU and GATT overhead.
+    /// This preserves the protocol payload as opaque Envelope bytes above transport.
+    pub fn chunk_transport_payload(
+        &self,
+        session_id: u64,
+        message_id: u64,
+        payload: &[u8],
+        max_chunk_payload: usize,
+    ) -> Result<Vec<Vec<u8>>, DsmError> {
+        if payload.is_empty() {
+            return Err(DsmError::invalid_operation("empty payload for transport chunking"));
+        }
+        if max_chunk_payload == 0 {
+            return Err(DsmError::invalid_operation("transport chunk size must be > 0"));
+        }
+
+        let chunk_count = u32::try_from(payload.len().div_ceil(max_chunk_payload))
+            .map_err(|_| DsmError::invalid_operation("payload too large for transport chunking"))?;
+        let mut chunks = Vec::with_capacity(chunk_count as usize);
+
+        for chunk_index in 0..chunk_count {
+            let start = (chunk_index as usize) * max_chunk_payload;
+            let end = ((chunk_index as usize + 1) * max_chunk_payload).min(payload.len());
+            let chunk_payload = payload[start..end].to_vec();
+            let header = BleTransportHeader {
+                version: BLE_TRANSPORT_VERSION,
+                flags: BleTransportFlags::DATA.bits(),
+                session_id,
+                message_id,
+                chunk_index,
+                chunk_count,
+                payload_len: u32::try_from(chunk_payload.len())
+                    .map_err(|_| DsmError::invalid_operation("transport chunk payload too large"))?,
+                checksum: Self::transport_checksum(&chunk_payload),
+            };
+            let chunk = BleTransportChunk {
+                header: Some(header),
+                payload: chunk_payload,
+            };
+            let mut buf = Vec::with_capacity(chunk.encoded_len());
+            chunk.encode(&mut buf).map_err(|e| {
+                DsmError::serialization_error(
+                    "BleTransportChunk",
+                    "protobuf",
+                    Some(e.to_string()),
+                    Some(e),
+                )
+            })?;
+            chunks.push(buf);
+        }
+
+        Ok(chunks)
+    }
+
+    pub fn build_transport_ack(
+        &self,
+        session_id: u64,
+        message_id: u64,
+        received: &[bool],
+    ) -> BleTransportAck {
+        let ack_base_chunk = Self::highest_contiguous_chunk(received);
+        BleTransportAck {
+            session_id,
+            message_id,
+            ack_base_chunk: u32::from(ack_base_chunk),
+            ack_bitmap: Self::selective_ack_bitmap(received, ack_base_chunk),
+        }
+    }
+
+    pub fn encode_transport_ack(
+        &self,
+        session_id: u64,
+        message_id: u64,
+        received: &[bool],
+    ) -> Result<Vec<u8>, DsmError> {
+        let ack = self.build_transport_ack(session_id, message_id, received);
+        let mut buf = Vec::with_capacity(ack.encoded_len());
+        ack.encode(&mut buf).map_err(|e| {
+            DsmError::serialization_error(
+                "BleTransportAck",
+                "protobuf",
+                Some(e.to_string()),
+                Some(e),
+            )
+        })?;
+        Ok(buf)
+    }
+
+    pub fn decode_transport_frame(frame_bytes: &[u8]) -> Result<BleTransportFrame, DsmError> {
+        if let Ok(chunk) = BleTransportChunk::decode(frame_bytes) {
+            let header = chunk
+                .header
+                .as_ref()
+                .ok_or_else(|| DsmError::invalid_operation("missing transport chunk header"))?;
+            if header.version != BLE_TRANSPORT_VERSION {
+                return Err(DsmError::invalid_operation("unsupported transport chunk version"));
+            }
+            if header.payload_len != u32::try_from(chunk.payload.len()).unwrap_or(u32::MAX) {
+                return Err(DsmError::invalid_operation("transport chunk payload length mismatch"));
+            }
+            let checksum = Self::transport_checksum(&chunk.payload);
+            if header.checksum != checksum {
+                return Err(DsmError::invalid_operation("transport chunk checksum mismatch"));
+            }
+            return Ok(BleTransportFrame::Chunk(chunk));
+        }
+
+        let ack = BleTransportAck::decode(frame_bytes).map_err(|e| {
+            DsmError::serialization_error(
+                "BleTransportFrame",
+                "protobuf",
+                Some(e.to_string()),
+                Some(e),
+            )
+        })?;
+        Ok(BleTransportFrame::Ack(ack))
+    }
+
     pub fn new(bilateral_handler: Arc<BilateralBleHandler>, device_id: [u8; 32]) -> Self {
         Self {
             bilateral_handler,
@@ -1028,6 +1336,65 @@ mod tests {
             assert!(chunk_result.response.is_some());
             let response_data = chunk_result.response.unwrap();
             assert!(!response_data.is_empty());
+        });
+    }
+
+    #[test]
+    fn transport_chunk_round_trip_uses_session_and_message_ids() {
+        let rt = Runtime::new().expect("runtime");
+        rt.block_on(async {
+            let coordinator = test_coordinator();
+
+            let payload = vec![0xAB; 513];
+            let chunks = coordinator
+                .chunk_transport_payload(55, 99, &payload, 180)
+                .expect("transport chunks");
+
+            assert_eq!(chunks.len(), 3);
+
+            let decoded = BleFrameCoordinator::decode_transport_frame(&chunks[0])
+                .expect("decode transport chunk");
+            match decoded {
+                BleTransportFrame::Chunk(chunk) => {
+                    let header = chunk.header.expect("header");
+                    assert_eq!(header.version, BLE_TRANSPORT_VERSION);
+                    assert_eq!(header.session_id, 55);
+                    assert_eq!(header.message_id, 99);
+                    assert_eq!(header.chunk_index, 0);
+                    assert_eq!(header.chunk_count, 3);
+                    assert_eq!(header.flags, BleTransportFlags::DATA.bits());
+                }
+                BleTransportFrame::Ack(_) => panic!("expected transport chunk"),
+            }
+        });
+    }
+
+    #[test]
+    fn transport_ack_bitmap_tracks_sparse_progress() {
+        let rt = Runtime::new().expect("runtime");
+        rt.block_on(async {
+            let coordinator = test_coordinator();
+
+            let received = vec![true, true, false, true, false, true];
+            let ack = coordinator.build_transport_ack(7, 11, &received);
+
+            assert_eq!(ack.session_id, 7);
+            assert_eq!(ack.message_id, 11);
+            assert_eq!(ack.ack_base_chunk, 2);
+            assert_eq!(ack.ack_bitmap, vec![0b0000_1010]);
+
+            let encoded = coordinator
+                .encode_transport_ack(7, 11, &received)
+                .expect("encode ack");
+            let decoded = BleFrameCoordinator::decode_transport_frame(&encoded)
+                .expect("decode ack");
+            match decoded {
+                BleTransportFrame::Ack(decoded_ack) => {
+                    assert_eq!(decoded_ack.ack_base_chunk, 2);
+                    assert_eq!(decoded_ack.ack_bitmap, vec![0b0000_1010]);
+                }
+                BleTransportFrame::Chunk(_) => panic!("expected ack"),
+            }
         });
     }
 }

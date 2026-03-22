@@ -204,6 +204,9 @@ impl AppRouterImpl {
     pub(crate) async fn handle_wallet_query(&self, q: AppQuery) -> AppResult {
         match q.path.as_str() {
             "balance.get" => {
+                if let Err(e) = self.core_sdk.restore_latest_archived_state_for_device() {
+                    log::warn!("[balance.get] archive refresh failed: {}", e);
+                }
                 let token_id_opt: Option<String> = match generated::ArgPack::decode(&*q.params) {
                     Ok(pack) if pack.codec == generated::Codec::Proto as i32 => {
                         if pack.body.is_empty() {
@@ -421,6 +424,9 @@ impl AppRouterImpl {
 
             // -------- balance.list --------
             "balance.list" => {
+                if let Err(e) = self.core_sdk.restore_latest_archived_state_for_device() {
+                    log::warn!("[balance.list] archive refresh failed: {}", e);
+                }
                 log::debug!("[balance.list] query handler entered");
 
                 // Enumerate token balances from the canonical token cache/projection path.

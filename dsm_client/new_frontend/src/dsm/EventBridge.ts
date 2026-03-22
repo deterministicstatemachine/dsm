@@ -374,8 +374,9 @@ export function initializeEventBridge(): void {
       if (topic === 'inbox.updated') {
         try {
           const resp = pb.StorageSyncResponse.fromBinary(bytes);
+          const unreadCount = Math.max((resp.pulled ?? 0) - (resp.processed ?? 0), 0);
           bridgeEvents.emit('inbox.updated', {
-            unreadCount: resp.pulled,
+            unreadCount,
             newItems: resp.processed,
             source: 'rust_poller',
           });

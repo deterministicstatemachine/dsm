@@ -9,6 +9,7 @@ import {
   getCapsulePreview,
   inspectCapsuleBytes,
   readNfcRing,
+  stopNfcRead,
   type CapsulePreview,
   type DecryptedCapsulePreview,
 } from '../../services/recovery/nfcRecoveryService';
@@ -103,6 +104,7 @@ const RecoveryScreen: React.FC<RecoveryScreenProps> = ({ onNavigate }) => {
   }, []);
 
   const reset = useCallback(() => {
+    void stopNfcRead();
     setStep('mnemonic');
     setBusy(false);
     setStatusMsg('');
@@ -114,6 +116,7 @@ const RecoveryScreen: React.FC<RecoveryScreenProps> = ({ onNavigate }) => {
   }, []);
 
   const backToMnemonic = useCallback(() => {
+    void stopNfcRead();
     setStep('mnemonic');
     setBusy(false);
     setStatusMsg('');
@@ -187,6 +190,7 @@ const RecoveryScreen: React.FC<RecoveryScreenProps> = ({ onNavigate }) => {
     return () => {
       mountedRef.current = false;
       inspectInFlightRef.current = false;
+      void stopNfcRead();
       document.removeEventListener('visibilitychange', onVisibilityChange);
       try {
         unsub();

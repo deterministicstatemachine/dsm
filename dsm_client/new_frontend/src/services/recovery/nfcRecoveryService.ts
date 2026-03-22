@@ -283,6 +283,14 @@ export async function readNfcRing(): Promise<void> {
   }
 }
 
+export async function stopNfcRead(): Promise<void> {
+  try {
+    await appRouterInvokeBin('nfc.ring.stopRead', new Uint8Array(0));
+  } catch {
+    // Best-effort teardown — ignore errors.
+  }
+}
+
 export async function writeToNfcRing(): Promise<void> {
   const res = await appRouterInvokeBin('nfc.ring.write', new Uint8Array(0));
   const env = decodeFramedEnvelopeV3(res);

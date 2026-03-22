@@ -328,6 +328,12 @@ impl CoreSDK {
             .ok_or_else(|| DsmError::state_machine("No current state available"))
     }
 
+    /// Refresh the in-memory canonical tip from the latest archived sparse-replay
+    /// snapshot for this device.
+    pub fn restore_latest_archived_state_for_device(&self) -> Result<(), DsmError> {
+        Self::restore_latest_archived_state(&self.state_machine, &self.device_info.device_id)
+    }
+
     /// Normalize stale balance key formats in the current state.
     ///
     /// Migrates:
@@ -2042,12 +2048,19 @@ mod tests {
         sdk.initialize_with_genesis_state()
             .expect("initialize genesis state");
 
-        let op = DsmOperation::Generic {
+        let (pk, sk) =
+            dsm::crypto::sphincs::generate_sphincs_keypair().expect("generate test keypair");
+        sdk.set_signing_key(sk);
+        sdk.update_signing_public_key(pk);
+
+        let op = sdk
+            .sign_operation_sphincs(DsmOperation::Generic {
             operation_type: b"archive.test".to_vec(),
             data: vec![0xAB, 0xCD],
             message: "persist state".to_string(),
             signature: vec![],
-        };
+        })
+            .expect("sign operation");
 
         let executed = sdk.execute_dsm_operation(op).expect("execute operation");
         assert!(executed.state_number > 0, "state number should advance");

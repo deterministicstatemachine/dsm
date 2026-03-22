@@ -3040,6 +3040,10 @@ impl BilateralBleHandler {
         self.record_bcr_state_and_scan(&tx_result.local_state, true)
             .await;
 
+        if let Some(router) = crate::bridge::app_router() {
+            router.sync_balance_cache();
+        }
+
         {
             let mut mgr = self.bilateral_tx_manager.write().await;
             let _ = mgr.remove_pending_commitment(&pending_key);
@@ -3374,6 +3378,10 @@ impl BilateralBleHandler {
 
                 self.record_bcr_state_and_scan(&result.local_state, true)
                     .await;
+
+                if let Some(router) = crate::bridge::app_router() {
+                    router.sync_balance_cache();
+                }
 
                 // Update session phase and cleanup storage
                 drop(manager);
