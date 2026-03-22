@@ -65,12 +65,6 @@ fn seed_era_projection(device_txt: &str, available: u64) {
     .expect("seed ERA projection");
 }
 
-fn get_projected_balance(device_txt: &str, token_id: &str) -> Option<(u64, u64)> {
-    client_db::get_balance_projection(device_txt, token_id)
-        .expect("get balance projection")
-        .map(|record| (record.available, record.locked))
-}
-
 #[tokio::test]
 #[serial]
 async fn bilateral_offline_prepare_accept_commit_finalize_flow() {
@@ -229,12 +223,23 @@ async fn bilateral_offline_prepare_accept_commit_finalize_flow() {
         assert!(!ma.has_pending_commitment(&commitment));
     }
 
-    // Ensure receiver saw ERA balance update via projection storage.
+    // Receiver settlement is persisted as bilateral chain advancement plus
+    // transaction history. Balance projections are derived lazily from
+    // canonical state/cache reads and are no longer required to exist here.
     let device_txt = text_id::encode_base32_crockford(&b_dev);
-    let wallet = get_projected_balance(&device_txt, "ERA").expect("receiver ERA projection missing");
+    let history = client_db::get_transaction_history(Some(&device_txt), Some(20))
+        .expect("receiver transaction history");
     assert!(
-        wallet.0 >= 10,
-        "receiver ERA balance should be updated"
+        history.iter().any(|tx| {
+            tx.amount == 10
+                && tx.from_device == text_id::encode_base32_crockford(&a_dev)
+                && tx.to_device == device_txt
+                && tx
+                    .metadata
+                    .get("token_id")
+                    .is_some_and(|token| token.as_slice() == b"ERA")
+        }),
+        "receiver transaction history should record the settled ERA transfer"
     );
 }
 

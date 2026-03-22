@@ -16,7 +16,12 @@ pub use bilateral_ble_handler::{
     BilateralBleHandler, BilateralBleSession, BilateralPhase, BilateralSettlementContext,
     BilateralSettlementDelegate,
 };
-pub use ble_frame_coordinator::{BleFrameCoordinator, BleFrameHeader, BleFrameType};
+pub use ble_frame_coordinator::{
+    BLE_TRANSPORT_VERSION, BleFrameCoordinator, BleFrameHeader, BleFrameType,
+    BleTransportAck, BleTransportChunk, BleTransportFlags, BleTransportFrame,
+    BleTransportHeader, OutboundTransportMessage, PartialTransportMessage, TransportConfig,
+    TransportError, TransportMessageKey,
+};
 pub use pairing_orchestrator::{PairingOrchestrator, PairingSession, PairingState};
 
 #[cfg(all(target_os = "android", feature = "bluetooth"))]

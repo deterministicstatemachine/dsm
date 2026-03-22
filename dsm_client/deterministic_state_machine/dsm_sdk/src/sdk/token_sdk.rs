@@ -1710,8 +1710,8 @@ impl<I: Send + Sync> TokenSDK<I> {
         Ok(())
     }
 
-    /// Seed the in-memory balance for a device/token from an authoritative external
-    /// source (e.g., SQLite) WITHOUT advancing the state machine.
+    /// Seed the in-memory balance for a device/token from a validated external
+    /// source without advancing the state machine.
     ///
     /// Only seeds upward: if the map already has a value >= `amount` it is left
     /// unchanged — a tracked in-memory spend must not be wiped by a stale read.
@@ -1719,10 +1719,10 @@ impl<I: Send + Sync> TokenSDK<I> {
     /// it is set to `amount`.
     ///
     /// This is the correct fix for bilateral-receive tokens: bilateral receive
-    /// updates SQLite but not the in-memory map. Without seeding, the first Burn
+    /// may hydrate derived storage before the in-memory map is refreshed. Without seeding, the first Burn
     /// of a bilaterally-received token would hit an "Insufficient balance" error
     /// *after* `execute_dsm_operation` has already advanced the state machine,
-    /// leaving state and SQLite out of sync.
+    /// leaving canonical state and the cache out of sync.
     pub fn seed_in_memory_balance(
         &self,
         device_id: DevId,
@@ -1767,8 +1767,8 @@ impl<I: Send + Sync> TokenSDK<I> {
         );
     }
 
-    /// Reload the in-memory balance cache from SQLite for the local device.
-    /// Used to synchronize the cache after rollbacks or external balance changes.
+    /// Reload the local in-memory balance cache from canonical state reads,
+    /// re-materializing any missing derived projection rows along the way.
     pub fn reload_balance_cache_for_self(&self, device_id: DevId) -> Result<(), DsmError> {
         let device_id_str = crate::util::text_id::encode_base32_crockford(&device_id);
         let current_state = self.core_sdk.get_current_state().ok();

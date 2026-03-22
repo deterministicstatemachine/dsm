@@ -19,6 +19,11 @@ import kotlinx.coroutines.withTimeoutOrNull
  * This is the single entry point for all BLE operations. It owns the actor pattern
  * for serializing BLE operations and coordinates between internal components.
  *
+ * Wall-clock and elapsed-time checks are allowed here for BLE transport control
+ * such as scan throttling, connect readiness, retry pacing, and actor safety
+ * timeouts. They are operational only and never change protobuf contents,
+ * commitment bytes, or DSM protocol acceptance.
+ *
  * No BLE implementation details leak through this API.
  */
 class BleCoordinator private constructor(private val context: Context) : BleScanner.Callback {
@@ -33,7 +38,8 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
     private val operationChannel = Channel<suspend () -> Unit>(Channel.UNLIMITED)
     // Note: Operation serialization is handled via `operationChannel` and `runOperation`.
 
-    // Rate limit protection: Android allows max 5 scan start/stop within 30s window
+    // Rate limit protection: Android allows max 5 scan start/stop within 30s window.
+    // This is transport-runtime pacing only, not protocol state.
     private val scanStartTimestamps = mutableListOf<Long>()
     private val SCAN_RATE_LIMIT_WINDOW_MS = 30_000L  // 30 seconds
     private val MAX_SCANS_PER_WINDOW = 5
@@ -553,9 +559,10 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
             return false
         }
         // Block the caller until the actor processes this operation and produces the
-        // real Boolean result.  The actor runs on Dispatchers.Default (SupervisorJob),
-        // so this will not deadlock even when the caller is the main thread — BLE ops
-        // complete in < 1 s.  The 5 s timeout is a safety net against actor stalls.
+        // real Boolean result. The actor runs on Dispatchers.Default (SupervisorJob),
+        // so this will not deadlock even when the caller is the main thread. The 5 s
+        // timeout is an operational safety net against actor stalls, not a protocol
+        // deadline.
         return runBlocking {
             withTimeoutOrNull(5_000L) { deferred.await() } ?: false
         }
@@ -571,7 +578,8 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
             return
         }
 
-        // Rate limit check before attempting resume
+        // Rate limit check before attempting resume. This gates Android BLE radio
+        // behavior only and must not be interpreted as protocol timing.
         val now = System.currentTimeMillis()
         val timeSinceLastStop = now - lastScanStopTimestamp
         if (lastScanStopTimestamp > 0 && timeSinceLastStop < MIN_SCAN_GAP_MS) {
@@ -1029,7 +1037,9 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                 deferred.complete(false)
                 return@runOperation
             }
-            // Poll for MTU negotiation completion (connection ready)
+            // Poll for MTU negotiation completion (connection ready). The elapsed-time
+            // window is transport readiness control only and does not affect protocol
+            // semantics.
             bleScope.launch {
                 val startTime = android.os.SystemClock.elapsedRealtime()
                 while (android.os.SystemClock.elapsedRealtime() - startTime < 6000L) {

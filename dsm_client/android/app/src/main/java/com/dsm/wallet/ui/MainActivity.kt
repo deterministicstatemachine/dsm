@@ -8,6 +8,11 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.net.Uri
+import android.nfc.NdefMessage
+import android.nfc.NdefRecord
+import android.nfc.NfcAdapter
+import android.nfc.Tag
+import android.nfc.tech.Ndef
 import android.os.Build
 import android.os.IBinder
 import android.os.Bundle
@@ -60,7 +65,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Locale
 
-class MainActivity : AppCompatActivity() {
+class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
     @Volatile private var mcpStarted = false
 
     // Dedicated single-thread executor for long-running genesis/enrollment work.
@@ -93,6 +98,9 @@ class MainActivity : AppCompatActivity() {
     @Volatile private var qrScannerActive = false
     @Volatile private var walletRefreshHint = 0L
     @Volatile private var isAppForeground = true
+    // NFC inline reader state (ring reads happen on MainActivity, not a separate Activity)
+    @Volatile private var nfcReaderActive = false
+    private var nfcAdapter: NfcAdapter? = null
     // Bluetooth enable prompt launcher
     lateinit var btEnableLauncher: ActivityResultLauncher<Intent>
 
@@ -199,6 +207,121 @@ class MainActivity : AppCompatActivity() {
     fun dispatchCustomEventToWebView(eventName: String, detail: String) {
         val safeName = sanitizeEventName(eventName)
         dispatchDsmEventOnUi(safeName, detail.toByteArray(Charsets.UTF_8))
+    }
+
+    /**
+     * Enable NFC reader mode on this activity so the ring can be read inline
+     * without leaving the WebView. Called from BridgeRouterHandler on nfc.ring.read.
+     */
+    fun startNfcReader() {
+        runOnUiThread {
+            val adapter = nfcAdapter ?: NfcAdapter.getDefaultAdapter(this)
+            nfcAdapter = adapter
+            if (adapter == null || !adapter.isEnabled) {
+                Log.w(tag, "startNfcReader: NFC not available or disabled")
+                return@runOnUiThread
+            }
+            if (nfcReaderActive) {
+                Log.d(tag, "startNfcReader: already active")
+                return@runOnUiThread
+            }
+            nfcReaderActive = true
+            adapter.enableReaderMode(
+                this,
+                this,
+                NfcAdapter.FLAG_READER_NFC_A or NfcAdapter.FLAG_READER_NFC_B,
+                null
+            )
+            Log.i(tag, "startNfcReader: reader mode enabled")
+        }
+    }
+
+    /**
+     * Disable NFC reader mode. Called when the user navigates away from the
+     * "WAITING FOR RING" screen, or when a read completes.
+     */
+    fun stopNfcReader() {
+        runOnUiThread {
+            if (!nfcReaderActive) return@runOnUiThread
+            nfcReaderActive = false
+            try {
+                nfcAdapter?.disableReaderMode(this)
+            } catch (t: Throwable) {
+                Log.w(tag, "stopNfcReader: disableReaderMode failed", t)
+            }
+            Log.i(tag, "stopNfcReader: reader mode disabled")
+        }
+    }
+
+    /**
+     * NfcAdapter.ReaderCallback — called on a binder thread when a tag is discovered.
+     * Reads the NDEF capsule record and dispatches it through BleEventRelay → WebView.
+     * The user never leaves the WebView.
+     */
+    override fun onTagDiscovered(tag: Tag) {
+        if (!nfcReaderActive) return
+
+        bridgeExecutor.execute {
+            try {
+                val ndef = Ndef.get(tag)
+                if (ndef == null) {
+                    Log.w(this.tag, "onTagDiscovered: tag has no NDEF support")
+                    return@execute
+                }
+
+                ndef.connect()
+                val ndefMessage: NdefMessage? = try {
+                    ndef.ndefMessage
+                } finally {
+                    ndef.close()
+                }
+
+                if (ndefMessage == null) {
+                    Log.w(this.tag, "onTagDiscovered: tag has no NDEF message")
+                    return@execute
+                }
+
+                val record = extractCapsuleRecord(listOf(ndefMessage))
+                if (record == null) {
+                    Log.w(this.tag, "onTagDiscovered: no matching capsule record")
+                    return@execute
+                }
+
+                val payload = record.payload
+                val envelope = com.dsm.wallet.bridge.UnifiedNativeApi.createNfcRecoveryCapsuleEnvelope(payload)
+                if (envelope.isNotEmpty()) {
+                    BleEventRelay.dispatchEnvelope(envelope)
+                }
+                Log.i(this.tag, "onTagDiscovered: dispatched recovery capsule (${payload.size} bytes)")
+
+                // Auto-stop reader after successful read
+                runOnUiThread {
+                    nfcReaderActive = false
+                    try {
+                        nfcAdapter?.disableReaderMode(this)
+                    } catch (_: Throwable) {}
+                }
+            } catch (e: Exception) {
+                Log.w(this.tag, "onTagDiscovered: NFC read failed: ${e.message}")
+            }
+        }
+    }
+
+    private fun extractCapsuleRecord(messages: List<NdefMessage>): NdefRecord? {
+        for (m in messages) {
+            for (r in m.records) {
+                if (r.tnf == NdefRecord.TNF_WELL_KNOWN && r.type.contentEquals(NdefRecord.RTD_TEXT)) {
+                    return r
+                }
+                if (r.tnf == NdefRecord.TNF_MIME_MEDIA) {
+                    val mime = try { String(r.type, Charsets.US_ASCII) } catch (_: Throwable) { "" }
+                    if (mime.equals("application/vnd.dsm.recovery", ignoreCase = true)) {
+                        return r
+                    }
+                }
+            }
+        }
+        return null
     }
 
     private fun dispatchDsmEventOnUi(topic: String, payload: ByteArray) {
@@ -790,6 +913,12 @@ class MainActivity : AppCompatActivity() {
     override fun onPause() {
         super.onPause()
         isAppForeground = false
+
+        // Stop NFC reader mode so the ring never triggers when the app is backgrounded.
+        if (nfcReaderActive) {
+            nfcReaderActive = false
+            try { nfcAdapter?.disableReaderMode(this) } catch (_: Throwable) {}
+        }
 
         try {
             if (::bridge.isInitialized) {

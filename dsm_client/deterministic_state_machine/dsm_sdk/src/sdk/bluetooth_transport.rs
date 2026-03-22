@@ -1,7 +1,11 @@
-//! Bluetooth Transport Module (Protobuf-only, Clockless, Production)
+//! Bluetooth Transport Module (Protobuf-only, Transport Timers Allowed, Production)
 //!
 //! - Encodes/decodes `pb::Envelope` (prost) for BLE transport.
-//! - No JSON, no bincode, no wall clocks, no periodic timers.
+//! - No JSON and no bincode; BLE transport remains raw protobuf bytes only.
+//! - Wall-clock timing is allowed for transport concerns such as retries, ACK timeouts,
+//!   reconnect backoff, pacing, and idle expiry.
+//! - Protocol semantics remain clockless: no wall-clock data in envelopes, receipt
+//!   commits, ordering decisions, or acceptance predicates.
 //! - IO is abstracted behind `BleLink` so platform bridges (Android/iOS) can plug in.
 //!
 //! Integration expectations:
@@ -10,8 +14,8 @@
 //!
 //! Notes:
 //! - This transport does *not* invent custom message enums; protobuf is the source of truth.
-//! - Keep-alives, retries, etc. must be *state-driven* (hash-chain adjacency / iteration budgets),
-//!   not wall-clock driven.
+//! - BLE keep-alives, retries, and timeout windows may be wall-clock driven at the
+//!   transport layer, but they must never influence DSM protocol semantics.
 
 #![forbid(unsafe_code)]
 #![deny(warnings, clippy::all, clippy::pedantic)]
@@ -310,7 +314,10 @@ impl<L: BleLink> BluetoothTransport<L> {
         self.mode
     }
 
-    /// Start role-appropriate services (no timers, no clocks).
+    /// Start role-appropriate services.
+    ///
+    /// Operational transport timers such as scan pacing or reconnect backoff are
+    /// permitted outside this API boundary, but protocol semantics remain clockless.
     ///
     /// # Errors
     /// Returns an error if the platform link fails to start scanning/advertising.
