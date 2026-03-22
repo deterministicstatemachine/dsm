@@ -224,11 +224,36 @@ fn build_canonical_settled_state(ctx: &BilateralSettlementContext) -> Result<Opt
         return Ok(None);
     }
 
-    let prior_state = latest_archived_state(&ctx.local_device_id)?.unwrap_or_else(|| base_state.clone());
-    if prior_state.state_number >= base_state.state_number {
-        return Ok(Some(prior_state));
+    let prior_state_opt = latest_archived_state(&ctx.local_device_id)?;
+    if let Some(ref prior_state) = prior_state_opt {
+        if prior_state.state_number >= base_state.state_number {
+            return Ok(Some(prior_state.clone()));
+        }
     }
 
+    if prior_state_opt.is_none() {
+        let token_for_policy = if transfer.token_id.is_empty() {
+            "ERA"
+        } else {
+            transfer.token_id.as_str()
+        };
+        let policy_commit = resolve_policy_commit(token_for_policy)?;
+        let local_txt = encode_base32_crockford(&ctx.local_device_id);
+        let locked = crate::storage::client_db::get_locked_balance(&local_txt, token_for_policy)
+            .map_err(|e| format!("read locked balance failed: {e}"))?;
+        crate::storage::client_db::sync_token_projection_from_state(
+            &local_txt,
+            token_for_policy,
+            &policy_commit,
+            base_state,
+            locked,
+        )
+        .map_err(|e| format!("sync balance projection failed: {e}"))?;
+
+        return Ok(Some(base_state.clone()));
+    }
+
+    let prior_state = prior_state_opt.unwrap();
     let token_for_policy = if transfer.token_id.is_empty() {
         "ERA"
     } else {

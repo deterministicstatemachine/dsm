@@ -168,7 +168,7 @@ async fn bilateral_offline_prepare_accept_commit_finalize_flow() {
     let transfer_op = Operation::Transfer {
         to_device_id: b"to_b".to_vec(),
         amount: balance,
-        token_id: b"ERA".to_vec(),
+        token_id: b"".to_vec(),
         mode: dsm::types::operations::TransactionMode::Bilateral,
         nonce: vec![0u8; 8],
         verification: dsm::types::operations::VerificationType::Standard,
@@ -234,10 +234,7 @@ async fn bilateral_offline_prepare_accept_commit_finalize_flow() {
             tx.amount == 10
                 && tx.from_device == text_id::encode_base32_crockford(&a_dev)
                 && tx.to_device == device_txt
-                && tx
-                    .metadata
-                    .get("token_id")
-                    .is_some_and(|token| token.as_slice() == b"ERA")
+                && !tx.metadata.contains_key("token_id")
         }),
         "receiver transaction history should record the settled ERA transfer"
     );
@@ -339,7 +336,7 @@ async fn bilateral_offline_state_consistency_across_peers() {
     let transfer_op = Operation::Transfer {
         to_device_id: b"to_b".to_vec(),
         amount: balance,
-        token_id: b"TOK".to_vec(),
+        token_id: b"".to_vec(),
         mode: dsm::types::operations::TransactionMode::Bilateral,
         nonce: vec![0u8; 8],
         verification: dsm::types::operations::VerificationType::Standard,
