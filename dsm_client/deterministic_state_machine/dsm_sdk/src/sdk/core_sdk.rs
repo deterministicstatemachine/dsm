@@ -756,12 +756,17 @@ impl CoreSDK {
             crate::util::text_id::encode_base32_crockford(&genesis_state.hash)
         );
 
-        // Install the new genesis as current state
+        // Install the new genesis as current state and archive it so that
+        // bilateral settlement always has a prior BCR state to reconcile against
+        // (the contact-add handshake anchors the chain tip; the genesis archive
+        // ensures latest_archived_state() is never None).
         {
             let mut sm = self.state_machine.lock();
             let mut s = State::new_genesis(genesis_state.initial_entropy, self.device_info.clone());
             s.hash = genesis_state.hash;
+            let snapshot = s.clone();
             sm.set_state(s);
+            Self::archive_state_snapshot(&snapshot)?;
         }
 
         // Optional dev-only seeding (idempotent)
