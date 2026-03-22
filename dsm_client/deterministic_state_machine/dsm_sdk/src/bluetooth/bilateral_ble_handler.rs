@@ -21,8 +21,8 @@ use crate::jni::state::DEVICE_ID_TO_ADDR;
 // Re-export types from bilateral_session so existing import paths still work.
 pub use super::bilateral_session::{
     BilateralBleSession, BilateralEventCallback, BilateralPhase, BilateralSettlementContext,
-    BilateralSettlementDelegate, SessionStore, is_inflight_phase, phase_to_str, phase_from_str,
-    MAX_TERMINAL_SESSIONS_PER_COUNTERPARTY,
+    BilateralSettlementDelegate, BilateralSettlementOutcome, SessionStore, is_inflight_phase,
+    phase_to_str, phase_from_str, MAX_TERMINAL_SESSIONS_PER_COUNTERPARTY,
 };
 
 /// Base32 Crockford encoding helper for logging
@@ -2401,6 +2401,7 @@ impl BilateralBleHandler {
                 is_sender: true,
                 tx_type: "bilateral_offline",
                 new_chain_tip: [0u8; 32],
+                canonical_state: None,
             };
             delegate.settle(ctx).map_err(|e| {
                 DsmError::invalid_operation(format!(
@@ -2408,7 +2409,7 @@ impl BilateralBleHandler {
                 ))
             })?
         } else {
-            crate::sdk::transfer_hooks::TransferMeta::default()
+            BilateralSettlementOutcome::default()
         };
 
         // 11. Build BilateralConfirmRequest
@@ -2491,7 +2492,7 @@ impl BilateralBleHandler {
         }
 
         info!("[BILATERAL] send_bilateral_confirm: confirm envelope built ({} bytes), session ConfirmPending until delivery", buffer.len());
-        Ok((buffer, confirm_meta))
+        Ok((buffer, confirm_meta.transfer_meta))
     }
 
     /// Mark a ConfirmPending sender session as Committed after the BilateralConfirm
@@ -2950,7 +2951,7 @@ impl BilateralBleHandler {
 
         // §4.2 Full-persistence atomic boundary: delegate applies chain tip + balance +
         // history in one SQLite transaction.
-        let (confirm_meta, persistence_error) = if let Some(ref delegate) = self.settlement_delegate
+        let (confirm_outcome, persistence_error) = if let Some(ref delegate) = self.settlement_delegate
         {
             let ctx = BilateralSettlementContext {
                 local_device_id: self.device_id,
@@ -2963,9 +2964,10 @@ impl BilateralBleHandler {
                 is_sender: false,
                 tx_type: "bilateral_offline",
                 new_chain_tip,
+                canonical_state: Some(tx_result.local_state.clone()),
             };
             match delegate.settle(ctx) {
-                Ok(meta) => (meta, None),
+                Ok(outcome) => (outcome, None),
                 Err(e) => {
                     warn!(
                         "[BILATERAL] Receiver settlement failed (device={}, amount={:?}): {}",
@@ -2973,11 +2975,11 @@ impl BilateralBleHandler {
                         amount_opt,
                         e
                     );
-                    (crate::sdk::transfer_hooks::TransferMeta::default(), Some(e))
+                    (BilateralSettlementOutcome::default(), Some(e))
                 }
             }
         } else {
-            (crate::sdk::transfer_hooks::TransferMeta::default(), None)
+            (BilateralSettlementOutcome::default(), None)
         };
 
         if let Some(persist_error) = persistence_error {
@@ -3037,7 +3039,11 @@ impl BilateralBleHandler {
             )));
         }
 
-        self.record_bcr_state_and_scan(&tx_result.local_state, true)
+        let state_to_record = confirm_outcome
+            .canonical_state
+            .as_ref()
+            .unwrap_or(&tx_result.local_state);
+        self.record_bcr_state_and_scan(state_to_record, true)
             .await;
 
         if let Some(router) = crate::bridge::app_router() {
@@ -3115,7 +3121,7 @@ impl BilateralBleHandler {
 
         info!("[BILATERAL] handle_confirm_request: receiver finalized successfully");
 
-        Ok(confirm_meta)
+        Ok(confirm_outcome.transfer_meta)
     }
 
     /// Clean up expired sessions
@@ -3352,7 +3358,7 @@ impl BilateralBleHandler {
                     )
                 };
 
-                let _settlement_meta = if let Some(ref delegate) = self.settlement_delegate {
+                let settlement_outcome = if let Some(ref delegate) = self.settlement_delegate {
                     let ctx = BilateralSettlementContext {
                         local_device_id: self.device_id,
                         counterparty_device_id,
@@ -3364,19 +3370,24 @@ impl BilateralBleHandler {
                         is_sender: true,
                         tx_type: "bilateral_offline",
                         new_chain_tip: [0u8; 32],
+                        canonical_state: Some(result.local_state.clone()),
                     };
                     match delegate.settle(ctx) {
-                        Ok(meta) => meta,
+                        Ok(outcome) => outcome,
                         Err(e) => {
                             warn!("[BILATERAL] Sender settlement failed (post-delivery): {e}");
-                            crate::sdk::transfer_hooks::TransferMeta::default()
+                            BilateralSettlementOutcome::default()
                         }
                     }
                 } else {
-                    crate::sdk::transfer_hooks::TransferMeta::default()
+                    BilateralSettlementOutcome::default()
                 };
 
-                self.record_bcr_state_and_scan(&result.local_state, true)
+                let state_to_record = settlement_outcome
+                    .canonical_state
+                    .as_ref()
+                    .unwrap_or(&result.local_state);
+                self.record_bcr_state_and_scan(state_to_record, true)
                     .await;
 
                 if let Some(router) = crate::bridge::app_router() {
@@ -3483,6 +3494,7 @@ impl BilateralBleHandler {
                         is_sender: true,
                         tx_type: "bilateral_offline_recovered",
                         new_chain_tip: [0u8; 32],
+                        canonical_state: None,
                     };
                     if let Err(e) = delegate.settle(ctx) {
                         warn!("[BILATERAL RECOVERY] Sender settlement failed (recovery path): {e}");

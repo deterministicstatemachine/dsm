@@ -418,6 +418,28 @@ pub async fn inject_ble_coordinator(
     Ok(())
 }
 
+/// Inject the bilateral transport adapter into the bilateral handler (Android only).
+#[cfg(all(target_os = "android", feature = "bluetooth"))]
+pub async fn inject_ble_transport_adapter(
+    adapter: std::sync::Arc<crate::bluetooth::bilateral_transport_adapter::BilateralTransportAdapter>,
+) -> Result<(), String> {
+    use crate::handlers::BiImpl;
+
+    let handler = BILATERAL_HANDLER
+        .get()
+        .ok_or_else(|| "Bilateral handler not installed".to_string())?;
+
+    let bi_impl = handler
+        .as_ref()
+        .as_any()
+        .downcast_ref::<BiImpl>()
+        .ok_or_else(|| "Bilateral handler is not BiImpl".to_string())?;
+
+    bi_impl.set_ble_transport_adapter(adapter).await;
+    log::info!("Ble transport adapter injected into BiImpl via bridge");
+    Ok(())
+}
+
 /// Get the BleFrameCoordinator from the bilateral handler (Android only).
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
 pub async fn get_ble_coordinator(
@@ -438,6 +460,31 @@ pub async fn get_ble_coordinator(
         .get_ble_coordinator()
         .await
         .ok_or_else(|| "BleFrameCoordinator not injected yet".to_string())
+}
+
+/// Get the bilateral transport adapter from the bilateral handler (Android only).
+#[cfg(all(target_os = "android", feature = "bluetooth"))]
+pub async fn get_ble_transport_adapter(
+) -> Result<
+    std::sync::Arc<crate::bluetooth::bilateral_transport_adapter::BilateralTransportAdapter>,
+    String,
+> {
+    use crate::handlers::BiImpl;
+
+    let handler = BILATERAL_HANDLER
+        .get()
+        .ok_or_else(|| "Bilateral handler not installed".to_string())?;
+
+    let bi_impl = handler
+        .as_ref()
+        .as_any()
+        .downcast_ref::<BiImpl>()
+        .ok_or_else(|| "Bilateral handler is not BiImpl".to_string())?;
+
+    bi_impl
+        .get_ble_transport_adapter()
+        .await
+        .ok_or_else(|| "Ble transport adapter not injected yet".to_string())
 }
 
 #[cfg(test)]

@@ -8,6 +8,7 @@ pub mod android_ble_bridge;
 pub mod bilateral_ble_handler;
 pub mod bilateral_envelope;
 pub mod bilateral_session;
+pub mod bilateral_transport_adapter;
 pub mod ble_frame_coordinator;
 pub mod pairing_orchestrator;
 
@@ -16,11 +17,15 @@ pub use bilateral_ble_handler::{
     BilateralBleHandler, BilateralBleSession, BilateralPhase, BilateralSettlementContext,
     BilateralSettlementDelegate,
 };
+pub use bilateral_transport_adapter::{
+    BilateralTransportAdapter, BleTransportDelegate, TransportInboundMessage, TransportOutbound,
+};
 pub use ble_frame_coordinator::{
     BLE_TRANSPORT_VERSION, BleFrameCoordinator, BleFrameHeader, BleFrameType,
     BleTransportAck, BleTransportChunk, BleTransportFlags, BleTransportFrame,
-    BleTransportHeader, OutboundTransportMessage, PartialTransportMessage, TransportConfig,
-    TransportError, TransportMessageKey,
+    BleTransportHeader, BleTransportMessage, FrameControlMessage, FrameIngressResult,
+    OutboundTransportMessage, PartialTransportMessage, TransportConfig, TransportError,
+    TransportMessageKey,
 };
 pub use pairing_orchestrator::{PairingOrchestrator, PairingSession, PairingState};
 
@@ -81,6 +86,8 @@ pub fn set_manual_accept_enabled(v: bool) {
 pub struct BluetoothManager {
     /// BLE frame coordinator for chunking
     frame_coordinator: Arc<BleFrameCoordinator>,
+    /// Protocol adapter that sits above transport
+    transport_adapter: Arc<BilateralTransportAdapter>,
     /// Android BLE bridge
     android_bridge: Arc<android_ble_bridge::AndroidBleBridge>,
     /// Local device information
@@ -162,13 +169,13 @@ impl BluetoothManager {
             });
         });
 
-        let frame_coordinator = Arc::new(BleFrameCoordinator::new(
-            Arc::clone(&bilateral_handler),
-            device_id_bytes,
-        ));
+        let transport_adapter = Arc::new(BilateralTransportAdapter::new(Arc::clone(
+            &bilateral_handler,
+        )));
+        let frame_coordinator = Arc::new(BleFrameCoordinator::new(device_id_bytes));
         let android_bridge = Arc::new(android_ble_bridge::AndroidBleBridge::new(
             Arc::clone(&frame_coordinator),
-            Arc::clone(&bilateral_handler),
+            transport_adapter.clone(),
             device_id_bytes,
         ));
 
@@ -181,6 +188,7 @@ impl BluetoothManager {
 
         BluetoothManager {
             frame_coordinator,
+            transport_adapter,
             android_bridge,
             local_device_id: device_id,
             device_id_bytes,
@@ -206,6 +214,11 @@ impl BluetoothManager {
         &self.frame_coordinator
     }
 
+    /// Get transport adapter for bilateral authoring/dispatch above transport.
+    pub fn transport_adapter(&self) -> &Arc<BilateralTransportAdapter> {
+        &self.transport_adapter
+    }
+
     /// Get android bridge for direct access if needed
     pub fn android_bridge(&self) -> &Arc<android_ble_bridge::AndroidBleBridge> {
         &self.android_bridge
@@ -217,7 +230,7 @@ impl BluetoothManager {
         &self,
         contact: dsm::types::contact_types::DsmVerifiedContact,
     ) -> Result<(), dsm::types::error::DsmError> {
-        self.frame_coordinator
+        self.transport_adapter
             .bilateral_handler()
             .add_verified_contact(contact)
             .await
@@ -225,7 +238,7 @@ impl BluetoothManager {
 
     /// Check if a contact exists in the BLE bilateral handler
     pub async fn has_verified_contact(&self, device_id: &[u8; 32]) -> bool {
-        self.frame_coordinator
+        self.transport_adapter
             .bilateral_handler()
             .has_verified_contact(device_id)
             .await
@@ -325,12 +338,21 @@ pub async fn ensure_bluetooth_manager_and_sync_contact(
     // BilateralBleHandler instance. Without this, sessions created by one path
     // are invisible to the other, causing "NO SESSION FOUND" failures.
     let coordinator = mgr_arc.frame_coordinator().clone();
+    let transport_adapter = mgr_arc.transport_adapter().clone();
     match crate::bridge::inject_ble_coordinator(coordinator).await {
         Ok(_) => log::info!(
             "[BLE] ensure_bluetooth_manager_and_sync_contact: coordinator injected into BiImpl"
         ),
         Err(e) => log::warn!(
             "[BLE] ensure_bluetooth_manager_and_sync_contact: coordinator injection failed: {e}"
+        ),
+    }
+    match crate::bridge::inject_ble_transport_adapter(transport_adapter).await {
+        Ok(_) => log::info!(
+            "[BLE] ensure_bluetooth_manager_and_sync_contact: transport adapter injected into BiImpl"
+        ),
+        Err(e) => log::warn!(
+            "[BLE] ensure_bluetooth_manager_and_sync_contact: transport adapter injection failed: {e}"
         ),
     }
 

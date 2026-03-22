@@ -668,6 +668,14 @@ impl AppRouterImpl {
                     } else {
                         req.validity_iterations
                     };
+                    let transport_adapter = match crate::bridge::get_ble_transport_adapter().await {
+                        Ok(adapter) => adapter,
+                        Err(e) => {
+                            return err(format!(
+                                "wallet.sendOffline: BLE transport adapter not ready: {e}"
+                            ))
+                        }
+                    };
                     let coordinator = match crate::bridge::get_ble_coordinator().await {
                         Ok(c) => c,
                         Err(e) => {
@@ -676,7 +684,7 @@ impl AppRouterImpl {
                             ))
                         }
                     };
-                    let (chunks, commitment_hash) = match coordinator
+                    let (prepare_envelope, commitment_hash) = match transport_adapter
                         .create_prepare_message_with_commitment(
                             counterparty_device_id,
                             operation,
@@ -691,12 +699,26 @@ impl AppRouterImpl {
                             ))
                         }
                     };
+                    let chunks = match coordinator.encode_message(
+                        crate::bluetooth::BleFrameType::BilateralPrepare,
+                        &prepare_envelope,
+                    ) {
+                        Ok(chunks) => chunks,
+                        Err(e) => {
+                            transport_adapter
+                                .cancel_prepared_session_for_counterparty(counterparty_device_id)
+                                .await;
+                            return err(format!(
+                                "wallet.sendOffline: failed to frame BLE prepare payload: {e}"
+                            ));
+                        }
+                    };
 
                     use crate::jni::jni_common::get_java_vm_borrowed;
                     let vm = match get_java_vm_borrowed() {
                         Some(vm) => vm,
                         None => {
-                            coordinator
+                            transport_adapter
                                 .cancel_prepared_session_for_counterparty(counterparty_device_id)
                                 .await;
                             return err(
@@ -723,7 +745,7 @@ impl AppRouterImpl {
                     match ble_send_result {
                         Ok(true) => {}
                         Ok(false) => {
-                            coordinator
+                            transport_adapter
                                 .cancel_prepared_session_for_counterparty(counterparty_device_id)
                                 .await;
                             return err(
@@ -732,7 +754,7 @@ impl AppRouterImpl {
                             );
                         }
                         Err(e) => {
-                            coordinator
+                            transport_adapter
                                 .cancel_prepared_session_for_counterparty(counterparty_device_id)
                                 .await;
                             return err(e);

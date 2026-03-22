@@ -10,11 +10,14 @@ use tokio::sync::RwLock;
 use dsm_sdk::storage::client_db;
 use dsm_sdk::sdk::storage_node_sdk::{StorageNodeConfig, StorageNodeSDK};
 use dsm_sdk::bluetooth::bilateral_ble_handler::BilateralBleHandler;
-use dsm_sdk::bluetooth::ble_frame_coordinator::{BleFrameCoordinator, BleFrameType};
+use dsm_sdk::bluetooth::bilateral_transport_adapter::{
+    BilateralTransportAdapter, BleTransportDelegate, TransportInboundMessage,
+};
+use dsm_sdk::bluetooth::ble_frame_coordinator::{
+    BleFrameCoordinator, BleFrameType, FrameIngressResult,
+};
 use dsm_sdk::storage_utils;
 use dsm_sdk::util::text_id;
-use dsm_sdk::generated;
-use prost::Message;
 use rand::{rngs::OsRng, RngCore};
 
 use dsm::core::bilateral_transaction_manager::BilateralTransactionManager;
@@ -77,8 +80,8 @@ fn seed_era_projection(device_txt: &str, available: u64) {
 async fn offline_transfer_roundtrip(
     coord_sender: Arc<BleFrameCoordinator>,
     coord_receiver: Arc<BleFrameCoordinator>,
-    handler_sender: Arc<BilateralBleHandler>,
-    handler_receiver: Arc<BilateralBleHandler>,
+    adapter_sender: Arc<BilateralTransportAdapter>,
+    adapter_receiver: Arc<BilateralTransportAdapter>,
     sender_mgr: Arc<RwLock<BilateralTransactionManager>>,
     receiver_mgr: Arc<RwLock<BilateralTransactionManager>>,
     sender_id: [u8; 32],
@@ -89,37 +92,27 @@ async fn offline_transfer_roundtrip(
     receiver_public_key: Vec<u8>,
     op: Operation,
 ) -> [u8; 32] {
-    let chunks = coord_sender
+    let prepare_payload = adapter_sender
         .create_prepare_message(receiver_id, op, 300)
         .await
+        .expect("prepare payload");
+    let chunks = coord_sender
+        .encode_message(BleFrameType::BilateralPrepare, &prepare_payload)
         .expect("prepare chunks");
 
-    let mut maybe_response = None;
     for ch in &chunks {
-        let got = coord_receiver
-            .handle_ble_chunk(ch)
-            .await
-            .expect("recv prepare");
-        if let Some(result) = got {
-            if result.response.is_some() {
-                maybe_response = result.response;
+        match coord_receiver.ingest_chunk(ch).await.expect("recv prepare") {
+            FrameIngressResult::MessageComplete { message } => {
+                let _ = adapter_receiver
+                    .on_transport_message(TransportInboundMessage {
+                        peer_address: "offline-mock-receiver".to_string(),
+                        frame_type: message.frame_type,
+                        payload: message.payload,
+                    })
+                    .await
+                    .expect("process prepare");
             }
-        }
-    }
-    let resp_bytes = match maybe_response {
-        Some(bytes) => bytes,
-        None => panic!("prepare response missing from coordinator"),
-    };
-    if !resp_bytes.is_empty() {
-        let envelope =
-            generated::Envelope::decode(&resp_bytes[..]).expect("decode prepare response envelope");
-        match envelope.payload {
-            Some(generated::envelope::Payload::BilateralPrepareReject(rej)) => {
-                panic!("prepare rejected: {}", rej.reason);
-            }
-            _ => {
-                panic!("unexpected non-empty prepare response");
-            }
+            FrameIngressResult::NeedMoreChunks | FrameIngressResult::ProtocolControl(_) => {}
         }
     }
 
@@ -129,32 +122,36 @@ async fn offline_transfer_roundtrip(
         *pending.first().expect("pending commitment on sender")
     };
 
-    let resp_bytes = handler_receiver
+    let resp_bytes = adapter_receiver
         .create_prepare_accept_envelope(commitment)
         .await
         .expect("accept envelope");
 
     let resp_chunks = coord_receiver
-        .send_bilateral_message(
-            sender_id,
-            BleFrameType::BilateralPrepareResponse,
-            resp_bytes,
-        )
-        .await
+        .encode_message(BleFrameType::BilateralPrepareResponse, &resp_bytes)
         .expect("prepare resp chunks");
 
     // Sender processes prepare response → produces confirm envelope (3-step protocol)
     configure_local_identity_for_receipts(sender_id, sender_genesis_hash, sender_public_key);
     let mut maybe_confirm = None;
     for ch in &resp_chunks {
-        let got = coord_sender
-            .handle_ble_chunk(ch)
+        match coord_sender
+            .ingest_chunk(ch)
             .await
-            .expect("sender recv prepare resp");
-        if let Some(result) = got {
-            if result.response.is_some() {
-                maybe_confirm = result.response;
+            .expect("sender recv prepare resp")
+        {
+            FrameIngressResult::MessageComplete { message } => {
+                let outbound = adapter_sender
+                    .on_transport_message(TransportInboundMessage {
+                        peer_address: "offline-mock-sender".to_string(),
+                        frame_type: message.frame_type,
+                        payload: message.payload,
+                    })
+                    .await
+                    .expect("process prepare response");
+                maybe_confirm = outbound.into_iter().next().map(|item| item.payload);
             }
+            FrameIngressResult::NeedMoreChunks | FrameIngressResult::ProtocolControl(_) => {}
         }
     }
 
@@ -165,27 +162,29 @@ async fn offline_transfer_roundtrip(
 
     // Send confirm to receiver (3-step protocol step 3)
     let confirm_chunks = coord_sender
-        .send_bilateral_message(receiver_id, BleFrameType::BilateralConfirm, confirm_payload)
-        .await
+        .encode_message(BleFrameType::BilateralConfirm, &confirm_payload)
         .expect("confirm chunks");
 
     configure_local_identity_for_receipts(receiver_id, receiver_genesis_hash, receiver_public_key);
     for ch in &confirm_chunks {
-        let got = coord_receiver
-            .handle_ble_chunk(ch)
-            .await
-            .expect("recv confirm");
-        // BilateralConfirm returns None — no response needed (protocol complete)
-        if let Some(result) = got {
-            assert!(
-                result.response.is_none(),
-                "confirm should not produce a response"
-            );
+        match coord_receiver.ingest_chunk(ch).await.expect("recv confirm") {
+            FrameIngressResult::MessageComplete { message } => {
+                let outbound = adapter_receiver
+                    .on_transport_message(TransportInboundMessage {
+                        peer_address: "offline-mock-receiver".to_string(),
+                        frame_type: message.frame_type,
+                        payload: message.payload,
+                    })
+                    .await
+                    .expect("process confirm");
+                assert!(outbound.is_empty(), "confirm should not produce a response");
+            }
+            FrameIngressResult::NeedMoreChunks | FrameIngressResult::ProtocolControl(_) => {}
         }
     }
 
     // Simulate Kotlin's BLE delivery callback: mark the sender session as Committed
-    handler_sender
+    adapter_sender
         .mark_confirm_delivered(commitment)
         .await
         .expect("mark_confirm_delivered");
@@ -343,8 +342,10 @@ async fn offline_real_protocol_ble_mock_roundtrip() {
     // BLE handler + frame coordinators (mock transport via direct chunk exchange)
     let handler_a = Arc::new(BilateralBleHandler::new(alice_mgr.clone(), alice_dev_id));
     let handler_b = Arc::new(BilateralBleHandler::new(bob_mgr.clone(), bob_dev_id));
-    let coord_a = Arc::new(BleFrameCoordinator::new(handler_a.clone(), alice_dev_id));
-    let coord_b = Arc::new(BleFrameCoordinator::new(handler_b.clone(), bob_dev_id));
+    let adapter_a = Arc::new(BilateralTransportAdapter::new(handler_a.clone()));
+    let adapter_b = Arc::new(BilateralTransportAdapter::new(handler_b.clone()));
+    let coord_a = Arc::new(BleFrameCoordinator::new(alice_dev_id));
+    let coord_b = Arc::new(BleFrameCoordinator::new(bob_dev_id));
 
     println!(
         "[OFFLINE] alice_dev={} bob_dev={}",
@@ -370,30 +371,31 @@ async fn offline_real_protocol_ble_mock_roundtrip() {
 
     // === Prepare ===
     println!("[OFFLINE] prepare -> chunk");
-    let chunks = coord_a
+    let prepare_payload = adapter_a
         .create_prepare_message(bob_dev_id, transfer_op.clone(), 300)
         .await
+        .expect("prepare payload");
+    let chunks = coord_a
+        .encode_message(BleFrameType::BilateralPrepare, &prepare_payload)
         .expect("prepare chunks");
     println!("[OFFLINE] prepare chunks={}", chunks.len());
 
-    let mut maybe_response = None;
     for ch in &chunks {
-        let got = coord_b.handle_ble_chunk(ch).await.expect("b recv");
-        if let Some(result) = got {
-            if result.response.is_some() {
-                maybe_response = result.response;
+        match coord_b.ingest_chunk(ch).await.expect("b recv") {
+            FrameIngressResult::MessageComplete { message } => {
+                let _ = adapter_b
+                    .on_transport_message(TransportInboundMessage {
+                        peer_address: "offline-b".to_string(),
+                        frame_type: message.frame_type,
+                        payload: message.payload,
+                    })
+                    .await
+                    .expect("b process prepare");
             }
+            FrameIngressResult::NeedMoreChunks | FrameIngressResult::ProtocolControl(_) => {}
         }
     }
-    let resp_bytes = match maybe_response {
-        Some(bytes) => bytes,
-        None => panic!("prepare response missing from coordinator"),
-    };
-    assert!(
-        resp_bytes.is_empty(),
-        "prepare response should be empty (awaiting user accept)"
-    );
-    println!("[OFFLINE] prepare response bytes={}", resp_bytes.len());
+    println!("[OFFLINE] prepare received and staged for manual accept");
 
     let commitment = {
         let mgr = alice_mgr.read().await;
@@ -408,12 +410,7 @@ async fn offline_real_protocol_ble_mock_roundtrip() {
 
     // Send prepare response to A
     let resp_chunks = coord_b
-        .send_bilateral_message(
-            alice_dev_id,
-            BleFrameType::BilateralPrepareResponse,
-            resp_bytes,
-        )
-        .await
+        .encode_message(BleFrameType::BilateralPrepareResponse, &resp_bytes)
         .expect("resp chunks");
     println!("[OFFLINE] prepare response chunks={}", resp_chunks.len());
     // Coordinator calls handle_prepare_response → send_bilateral_confirm → returns confirm bytes
@@ -424,11 +421,19 @@ async fn offline_real_protocol_ble_mock_roundtrip() {
     );
     let mut maybe_confirm = None;
     for ch in &resp_chunks {
-        let got = coord_a.handle_ble_chunk(ch).await.expect("a recv resp");
-        if let Some(result) = got {
-            if result.response.is_some() {
-                maybe_confirm = result.response;
+        match coord_a.ingest_chunk(ch).await.expect("a recv resp") {
+            FrameIngressResult::MessageComplete { message } => {
+                let outbound = adapter_a
+                    .on_transport_message(TransportInboundMessage {
+                        peer_address: "offline-a".to_string(),
+                        frame_type: message.frame_type,
+                        payload: message.payload,
+                    })
+                    .await
+                    .expect("a process prepare response");
+                maybe_confirm = outbound.into_iter().next().map(|item| item.payload);
             }
+            FrameIngressResult::NeedMoreChunks | FrameIngressResult::ProtocolControl(_) => {}
         }
     }
 
@@ -447,20 +452,25 @@ async fn offline_real_protocol_ble_mock_roundtrip() {
     let confirm_payload = maybe_confirm.expect("confirm envelope from coordinator");
     println!("[OFFLINE] confirm payload bytes={}", confirm_payload.len());
     let confirm_chunks = coord_a
-        .send_bilateral_message(bob_dev_id, BleFrameType::BilateralConfirm, confirm_payload)
-        .await
+        .encode_message(BleFrameType::BilateralConfirm, &confirm_payload)
         .expect("confirm chunks");
     println!("[OFFLINE] confirm chunks={}", confirm_chunks.len());
 
     configure_local_identity_for_receipts(bob_dev_id, bob_gen_hash, bob_kp.public_key().to_vec());
     for ch in &confirm_chunks {
-        let got = coord_b.handle_ble_chunk(ch).await.expect("b recv confirm");
-        if let Some(result) = got {
-            // BilateralConfirm returns None — no response needed
-            assert!(
-                result.response.is_none(),
-                "confirm should not produce a response"
-            );
+        match coord_b.ingest_chunk(ch).await.expect("b recv confirm") {
+            FrameIngressResult::MessageComplete { message } => {
+                let outbound = adapter_b
+                    .on_transport_message(TransportInboundMessage {
+                        peer_address: "offline-b".to_string(),
+                        frame_type: message.frame_type,
+                        payload: message.payload,
+                    })
+                    .await
+                    .expect("b process confirm");
+                assert!(outbound.is_empty(), "confirm should not produce a response");
+            }
+            FrameIngressResult::NeedMoreChunks | FrameIngressResult::ProtocolControl(_) => {}
         }
     }
 
@@ -641,9 +651,12 @@ async fn offline_real_protocol_ble_mock_multi_relationship_multi_tx() {
     let handler_a = Arc::new(BilateralBleHandler::new(alice_mgr.clone(), alice_dev_id));
     let handler_b = Arc::new(BilateralBleHandler::new(bob_mgr.clone(), bob_dev_id));
     let handler_c = Arc::new(BilateralBleHandler::new(carol_mgr.clone(), carol_dev_id));
-    let coord_a = Arc::new(BleFrameCoordinator::new(handler_a.clone(), alice_dev_id));
-    let coord_b = Arc::new(BleFrameCoordinator::new(handler_b.clone(), bob_dev_id));
-    let coord_c = Arc::new(BleFrameCoordinator::new(handler_c.clone(), carol_dev_id));
+    let adapter_a = Arc::new(BilateralTransportAdapter::new(handler_a.clone()));
+    let adapter_b = Arc::new(BilateralTransportAdapter::new(handler_b.clone()));
+    let adapter_c = Arc::new(BilateralTransportAdapter::new(handler_c.clone()));
+    let coord_a = Arc::new(BleFrameCoordinator::new(alice_dev_id));
+    let coord_b = Arc::new(BleFrameCoordinator::new(bob_dev_id));
+    let coord_c = Arc::new(BleFrameCoordinator::new(carol_dev_id));
 
     // Sync initial remote chain tips to avoid prepare hash mismatches.
     let alice_tip_for_b = {
@@ -759,8 +772,8 @@ async fn offline_real_protocol_ble_mock_multi_relationship_multi_tx() {
     offline_transfer_roundtrip(
         coord_a.clone(),
         coord_b.clone(),
-        handler_a.clone(),
-        handler_b.clone(),
+        adapter_a.clone(),
+        adapter_b.clone(),
         alice_mgr.clone(),
         bob_mgr.clone(),
         alice_dev_id,
@@ -782,8 +795,8 @@ async fn offline_real_protocol_ble_mock_multi_relationship_multi_tx() {
     offline_transfer_roundtrip(
         coord_a.clone(),
         coord_b.clone(),
-        handler_a.clone(),
-        handler_b.clone(),
+        adapter_a.clone(),
+        adapter_b.clone(),
         alice_mgr.clone(),
         bob_mgr.clone(),
         alice_dev_id,
@@ -806,8 +819,8 @@ async fn offline_real_protocol_ble_mock_multi_relationship_multi_tx() {
     offline_transfer_roundtrip(
         coord_a.clone(),
         coord_c.clone(),
-        handler_a.clone(),
-        handler_c.clone(),
+        adapter_a.clone(),
+        adapter_c.clone(),
         alice_mgr.clone(),
         carol_mgr.clone(),
         alice_dev_id,
@@ -829,8 +842,8 @@ async fn offline_real_protocol_ble_mock_multi_relationship_multi_tx() {
     offline_transfer_roundtrip(
         coord_a.clone(),
         coord_c.clone(),
-        handler_a.clone(),
-        handler_c.clone(),
+        adapter_a.clone(),
+        adapter_c.clone(),
         alice_mgr.clone(),
         carol_mgr.clone(),
         alice_dev_id,

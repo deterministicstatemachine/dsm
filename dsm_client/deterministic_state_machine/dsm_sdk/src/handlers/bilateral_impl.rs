@@ -28,6 +28,9 @@ use crate::generated as pb;
 use dsm::types::error::DsmError;
 
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
+use crate::bluetooth::bilateral_transport_adapter::BilateralTransportAdapter;
+
+#[cfg(all(target_os = "android", feature = "bluetooth"))]
 use crate::bluetooth::ble_frame_coordinator::BleFrameCoordinator;
 
 /// Bilateral (offline) protocol handler.
@@ -38,6 +41,8 @@ pub struct BiImpl {
     _config: SdkConfig,
     #[cfg(all(target_os = "android", feature = "bluetooth"))]
     ble_coordinator: Arc<tokio::sync::RwLock<Option<Arc<BleFrameCoordinator>>>>,
+    #[cfg(all(target_os = "android", feature = "bluetooth"))]
+    ble_transport_adapter: Arc<tokio::sync::RwLock<Option<Arc<BilateralTransportAdapter>>>>,
     storage: Option<Arc<BilateralStorageSDK>>,
 }
 
@@ -59,6 +64,8 @@ impl BiImpl {
             _config: config,
             #[cfg(all(target_os = "android", feature = "bluetooth"))]
             ble_coordinator: Arc::new(tokio::sync::RwLock::new(None)),
+            #[cfg(all(target_os = "android", feature = "bluetooth"))]
+            ble_transport_adapter: Arc::new(tokio::sync::RwLock::new(None)),
             storage,
         }
     }
@@ -75,6 +82,19 @@ impl BiImpl {
     #[cfg(all(target_os = "android", feature = "bluetooth"))]
     pub async fn get_ble_coordinator(&self) -> Option<Arc<BleFrameCoordinator>> {
         let guard = self.ble_coordinator.read().await;
+        guard.clone()
+    }
+
+    #[cfg(all(target_os = "android", feature = "bluetooth"))]
+    pub async fn set_ble_transport_adapter(&self, adapter: Arc<BilateralTransportAdapter>) {
+        let mut guard = self.ble_transport_adapter.write().await;
+        *guard = Some(adapter);
+        log::info!("[BiImpl] BLE transport adapter injected successfully");
+    }
+
+    #[cfg(all(target_os = "android", feature = "bluetooth"))]
+    pub async fn get_ble_transport_adapter(&self) -> Option<Arc<BilateralTransportAdapter>> {
+        let guard = self.ble_transport_adapter.read().await;
         guard.clone()
     }
 }
@@ -152,6 +172,18 @@ impl BilateralHandler for BiImpl {
                         };
                     }
 
+                    let adapter_guard = self.ble_transport_adapter.read().await;
+                    let transport_adapter = match adapter_guard.as_ref() {
+                        Some(adapter) => adapter,
+                        None => {
+                            return BiResult {
+                                success: false,
+                                result_data: vec![],
+                                error_message: Some("BLE transport adapter not initialized".into()),
+                            };
+                        }
+                    };
+
                     let coord_guard = self.ble_coordinator.read().await;
                     let coordinator = match coord_guard.as_ref() {
                         Some(c) => c,
@@ -164,8 +196,7 @@ impl BilateralHandler for BiImpl {
                         }
                     };
 
-                    // Create prepare message via BilateralBleHandler
-                    match coordinator
+                    match transport_adapter
                         .create_prepare_message_with_commitment(
                             counterparty_id,
                             operation,
@@ -173,7 +204,22 @@ impl BilateralHandler for BiImpl {
                         )
                         .await
                     {
-                        Ok((chunks, commitment_hash_bytes)) => {
+                        Ok((prepare_envelope, commitment_hash_bytes)) => {
+                            let chunks = match coordinator
+                                .encode_message(pb::BleFrameType::BilateralPrepare, &prepare_envelope)
+                            {
+                                Ok(chunks) => chunks,
+                                Err(e) => {
+                                    return BiResult {
+                                        success: false,
+                                        result_data: vec![],
+                                        error_message: Some(format!(
+                                            "Failed to frame BLE prepare payload: {}",
+                                            e
+                                        )),
+                                    };
+                                }
+                            };
                             let commitment_txt = crate::util::text_id::encode_base32_crockford(
                                 &commitment_hash_bytes,
                             );
