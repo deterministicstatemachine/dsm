@@ -3355,13 +3355,11 @@ impl BilateralBleHandler {
                         new_chain_tip: [0u8; 32],
                         canonical_state: Some(result.local_state.clone()),
                     };
-                    match delegate.settle(ctx) {
-                        Ok(outcome) => outcome,
-                        Err(e) => {
-                            warn!("[BILATERAL] Sender settlement failed (post-delivery): {e}");
-                            BilateralSettlementOutcome::default()
-                        }
-                    }
+                    delegate.settle(ctx).map_err(|e| {
+                        DsmError::invalid_operation(format!(
+                            "mark_confirm_delivered: sender settlement failed (post-delivery): {e}"
+                        ))
+                    }).ok()?
                 } else {
                     BilateralSettlementOutcome::default()
                 };

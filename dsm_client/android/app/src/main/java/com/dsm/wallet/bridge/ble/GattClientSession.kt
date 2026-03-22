@@ -34,9 +34,13 @@ class GattClientSession(
     private val permissionsGate: BlePermissionsGate = BlePermissionsGate(context)
 ) {
 
-    // Shared flow for state changes - BleCoordinator collects from this
+    // Shared flow for state changes - BleCoordinator collects from this.
+    // extraBufferCapacity must be large enough to absorb a full chunked
+    // notification burst (168+ chunks at 10ms pacing) without dropping
+    // events before the collector can call processIncomingBleData.
     private val _events = MutableSharedFlow<BleSessionEvent>(
-        replay = 1,
+        replay = 0,
+        extraBufferCapacity = 256,
         onBufferOverflow = BufferOverflow.DROP_OLDEST
     )
     val events: SharedFlow<BleSessionEvent> = _events.asSharedFlow()
