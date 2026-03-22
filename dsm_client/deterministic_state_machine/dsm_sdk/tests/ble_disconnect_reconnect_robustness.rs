@@ -365,7 +365,7 @@ async fn test_disconnect_then_retry_succeeds() {
 
     // Receiver handles the second attempt
     handler_b
-        .handle_prepare_request(&prepare2)
+        .handle_prepare_request(&prepare2, None)
         .await
         .expect("receiver handles 2nd prepare");
 
@@ -442,7 +442,7 @@ async fn run_one_transfer(
 
     receiver
         .handler
-        .handle_prepare_request(&prep)
+        .handle_prepare_request(&prep, None)
         .await
         .unwrap_or_else(|e| panic!("recv prepare nonce={nonce}: {e}"));
 

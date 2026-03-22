@@ -397,6 +397,10 @@ object Unified {
     @Keep @JvmStatic fun bleDataResponseGetFlags(responseProto: ByteArray): Int =
         UnifiedNativeApi.bleDataResponseGetFlags(responseProto)
 
+    /** Extract exact BilateralConfirm commitment hash from a BleIncomingDataResponse proto, if present. */
+    @Keep @JvmStatic fun bleDataResponseExtractConfirmCommitmentHash(responseProto: ByteArray): ByteArray =
+        UnifiedNativeApi.bleDataResponseExtractConfirmCommitmentHash(responseProto)
+
     /** Extract success flag from a BleGattIdentityReadResult proto (returned by processGattIdentityRead). */
     @Keep @JvmStatic fun identityReadResultGetSuccess(responseProto: ByteArray): Boolean =
         UnifiedNativeApi.identityReadResultGetSuccess(responseProto)

@@ -903,6 +903,7 @@ class GattServerHost(private val context: Context) {
             // Extract response fields via JNI helpers (no proto codegen in Kotlin).
             val chunks = com.dsm.wallet.bridge.Unified.bleDataResponseExtractChunks(responseProto)
             val flags = com.dsm.wallet.bridge.Unified.bleDataResponseGetFlags(responseProto)
+            val confirmCommitmentHash = com.dsm.wallet.bridge.Unified.bleDataResponseExtractConfirmCommitmentHash(responseProto)
             val pairingComplete = (flags and 1) != 0
             val useReliableWrite = (flags and 2) != 0
 
@@ -917,10 +918,14 @@ class GattServerHost(private val context: Context) {
                         Log.i("GattServerHost", "Follow-up queued=$queued, chunks=${chunks.size}, reliableWrite=$useReliableWrite for $addr")
                         if (pairingComplete && queued) {
                             try {
-                                val n = com.dsm.wallet.bridge.Unified.markAnyBilateralConfirmDelivered()
-                                Log.i("GattServerHost", "markAnyBilateralConfirmDelivered: $n session(s) committed after confirm to $addr")
+                                if (confirmCommitmentHash.size == 32) {
+                                    val ok = com.dsm.wallet.bridge.Unified.markBilateralConfirmDelivered(confirmCommitmentHash)
+                                    Log.i("GattServerHost", "markBilateralConfirmDelivered: ok=$ok after confirm to $addr")
+                                } else {
+                                    Log.w("GattServerHost", "Missing confirm commitment hash after confirm to $addr; refusing broad ConfirmPending sweep")
+                                }
                             } catch (t: Throwable) {
-                                Log.w("GattServerHost", "markAnyBilateralConfirmDelivered failed for $addr: ${t.message}")
+                                Log.w("GattServerHost", "markBilateralConfirmDelivered failed for $addr: ${t.message}")
                             }
                         }
                     } catch (e: Throwable) {

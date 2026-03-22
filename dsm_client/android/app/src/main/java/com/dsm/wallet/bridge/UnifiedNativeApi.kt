@@ -121,6 +121,8 @@ internal object UnifiedNativeApi {
     @Keep @JvmStatic external fun bleDataResponseExtractChunks(responseProto: ByteArray): Array<ByteArray>
     /** Extract flags from a BleIncomingDataResponse proto. Bit 0 = pairing_complete, bit 1 = use_reliable_write. */
     @Keep @JvmStatic external fun bleDataResponseGetFlags(responseProto: ByteArray): Int
+    /** Extract exact BilateralConfirm commitment hash from a BleIncomingDataResponse proto, if present. */
+    @Keep @JvmStatic external fun bleDataResponseExtractConfirmCommitmentHash(responseProto: ByteArray): ByteArray
     /** Extract success flag from a BleGattIdentityReadResult proto. */
     @Keep @JvmStatic external fun identityReadResultGetSuccess(responseProto: ByteArray): Boolean
     /** Extract write_back_envelope bytes from a BleGattIdentityReadResult proto. */

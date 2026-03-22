@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use log::{debug, info, warn, error};
 use prost::Message;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 
 #[cfg(all(target_os = "android", feature = "jni"))]
 use crate::jni::state::DEVICE_ID_TO_ADDR;
@@ -58,8 +58,6 @@ pub struct BilateralBleHandler {
     sessions: SessionStore,
     device_id: [u8; 32],
     event_callback: Option<BilateralEventCallback>,
-    /// Current sender's BLE address (set by coordinator before handle_prepare_request)
-    current_sender_ble_address: Arc<Mutex<Option<String>>>,
     /// Per-Device SMT for relationship chain tips (§2.2, §4.3).
     /// Shared singleton — same instance is used by both BLE and online transfer paths.
     per_device_smt: Arc<RwLock<crate::security::bounded_smt::BoundedSmt>>,
@@ -81,7 +79,6 @@ impl BilateralBleHandler {
             sessions: SessionStore::new(),
             device_id,
             event_callback: None,
-            current_sender_ble_address: Arc::new(Mutex::new(None)),
             per_device_smt,
             settlement_delegate: None,
         }
@@ -95,18 +92,6 @@ impl BilateralBleHandler {
     /// synchronisation).
     pub fn set_settlement_delegate(&mut self, delegate: Arc<dyn BilateralSettlementDelegate>) {
         self.settlement_delegate = Some(delegate);
-    }
-
-    /// Set the current sender's BLE address (called by coordinator before processing)
-    pub async fn set_current_sender_ble_address(&self, address: Option<String>) {
-        let mut guard = self.current_sender_ble_address.lock().await;
-        *guard = address;
-    }
-
-    /// Get the current sender's BLE address
-    pub async fn get_current_sender_ble_address(&self) -> Option<String> {
-        let guard = self.current_sender_ble_address.lock().await;
-        guard.clone()
     }
 
     /// Set the event callback for bilateral transaction notifications
@@ -1162,6 +1147,7 @@ impl BilateralBleHandler {
     pub async fn handle_prepare_request(
         &self,
         envelope_bytes: &[u8],
+        sender_ble_address: Option<String>,
     ) -> Result<(Vec<u8>, crate::sdk::transfer_hooks::TransferMeta), DsmError> {
         debug!("Handling bilateral prepare request");
 
@@ -1623,9 +1609,6 @@ impl BilateralBleHandler {
                 )
                 .await?
         };
-
-        // Get sender's BLE address for session and event emission
-        let sender_ble_address = self.get_current_sender_ble_address().await;
 
         let counterparty_genesis_hash = if let Some(hash) = prepare_request
             .expected_genesis_hash

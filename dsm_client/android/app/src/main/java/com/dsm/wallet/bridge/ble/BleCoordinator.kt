@@ -797,6 +797,7 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                             val responseProto = com.dsm.wallet.bridge.Unified.processIncomingBleData(event.deviceAddress, event.data)
                             val chunks = com.dsm.wallet.bridge.Unified.bleDataResponseExtractChunks(responseProto)
                             val flags = com.dsm.wallet.bridge.Unified.bleDataResponseGetFlags(responseProto)
+                            val confirmCommitmentHash = com.dsm.wallet.bridge.Unified.bleDataResponseExtractConfirmCommitmentHash(responseProto)
                             val pairingComplete = (flags and 1) != 0
                             val useReliableWrite = (flags and 2) != 0
                             Log.d("BleCoordinator", "Response processed from ${event.deviceAddress}: chunks=${chunks.size}, flags=$flags")
@@ -816,10 +817,14 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                                     }
                                     if (pairingComplete && queued) {
                                         try {
-                                            val n = com.dsm.wallet.bridge.Unified.markAnyBilateralConfirmDelivered()
-                                            Log.i("BleCoordinator", "markAnyBilateralConfirmDelivered: $n session(s) committed after confirm to $addr")
+                                            if (confirmCommitmentHash.size == 32) {
+                                                val ok = com.dsm.wallet.bridge.Unified.markBilateralConfirmDelivered(confirmCommitmentHash)
+                                                Log.i("BleCoordinator", "markBilateralConfirmDelivered: ok=$ok after confirm to $addr")
+                                            } else {
+                                                Log.w("BleCoordinator", "Missing confirm commitment hash after confirm to $addr; refusing broad ConfirmPending sweep")
+                                            }
                                         } catch (t: Throwable) {
-                                            Log.w("BleCoordinator", "markAnyBilateralConfirmDelivered failed for $addr: ${t.message}")
+                                            Log.w("BleCoordinator", "markBilateralConfirmDelivered failed for $addr: ${t.message}")
                                         }
                                     }
                                 }

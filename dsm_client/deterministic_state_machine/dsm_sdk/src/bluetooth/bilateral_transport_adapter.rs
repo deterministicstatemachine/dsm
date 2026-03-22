@@ -163,14 +163,13 @@ impl BleTransportDelegate for BilateralTransportAdapter {
     ) -> DelegateFuture<Result<Vec<TransportOutbound>, DsmError>> {
         let bilateral_handler = Arc::clone(&self.bilateral_handler);
         Box::pin(async move {
-            bilateral_handler
-                .set_current_sender_ble_address(Some(message.peer_address.clone()))
-                .await;
-
             match message.frame_type {
                 BleFrameType::BilateralPrepare => {
                     info!("Processing bilateral prepare request via transport adapter");
-                    match bilateral_handler.handle_prepare_request(&message.payload).await {
+                    match bilateral_handler
+                        .handle_prepare_request(&message.payload, Some(message.peer_address.clone()))
+                        .await
+                    {
                         Ok((response, _meta)) => {
                             if crate::bluetooth::manual_accept_enabled() {
                                 debug!(

@@ -3358,6 +3358,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_processIncomi
         let mut response_chunks: Vec<Vec<u8>> = Vec::new();
         let mut pairing_complete = false;
         let mut use_reliable_write = false;
+        let mut confirm_commitment_hash: Vec<u8> = Vec::new();
 
         if let Some(outbounds) = maybe_response {
             for outbound in outbounds {
@@ -3374,6 +3375,9 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_processIncomi
                     use_reliable_write = true;
                     if frame_type == crate::generated::BleFrameType::BilateralConfirm as i32 {
                         pairing_complete = true;
+                        confirm_commitment_hash = extract_confirm_commitment_hash(&outbound.payload)
+                            .map(|hash| hash.to_vec())
+                            .unwrap_or_default();
                     }
                     match crate::runtime::get_runtime()
                         .block_on(crate::bridge::get_ble_coordinator())
@@ -3404,6 +3408,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_processIncomi
             response_chunks,
             pairing_complete,
             use_reliable_write,
+            confirm_commitment_hash,
         };
         let encoded = prost::Message::encode_to_vec(&out);
         env.byte_array_from_slice(&encoded)
@@ -3428,6 +3433,37 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_processIncomi
             .into_raw()
         }
     }
+}
+
+fn extract_confirm_commitment_hash(payload: &[u8]) -> Option<[u8; 32]> {
+    let envelope = crate::generated::Envelope::decode(&mut std::io::Cursor::new(payload)).ok()?;
+    let tx = match envelope.payload? {
+        crate::generated::envelope::Payload::UniversalTx(tx) => tx,
+        _ => return None,
+    };
+    let op = tx.ops.first()?;
+    let invoke = match &op.kind {
+        Some(crate::generated::universal_op::Kind::Invoke(invoke)) if invoke.method == "bilateral.confirm" => invoke,
+        _ => return None,
+    };
+
+    if let Some(op_id) = &op.op_id {
+        if op_id.v.len() == 32 {
+            let mut hash = [0u8; 32];
+            hash.copy_from_slice(&op_id.v);
+            return Some(hash);
+        }
+    }
+
+    let args = invoke.args.as_ref()?;
+    let confirm = crate::generated::BilateralConfirmRequest::decode(args.body.as_slice()).ok()?;
+    let hash32 = confirm.commitment_hash?;
+    if hash32.v.len() != 32 {
+        return None;
+    }
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&hash32.v);
+    Some(hash)
 }
 
 /// Extract `response_chunks` from a `BleIncomingDataResponse` proto.
@@ -3518,6 +3554,38 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bleDataRespon
                 flags |= 2;
             }
             flags
+        }),
+    )
+}
+
+/// Extract exact BilateralConfirm commitment hash from a `BleIncomingDataResponse` proto.
+#[no_mangle]
+#[cfg(all(target_os = "android", feature = "bluetooth"))]
+pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bleDataResponseExtractConfirmCommitmentHash(
+    env: jni::sys::JNIEnv,
+    _clazz: jni::sys::jclass,
+    response_proto: jni::sys::jbyteArray,
+) -> jni::sys::jbyteArray {
+    crate::jni::bridge_utils::jni_catch_unwind_jbytearray(
+        "bleDataResponseExtractConfirmCommitmentHash",
+        std::panic::AssertUnwindSafe(|| {
+            let mut env = match unsafe { env_from(env) } {
+                Some(e) => e,
+                None => return std::ptr::null_mut(),
+            };
+            let jba = unsafe { jba_from(response_proto) };
+            let bytes = match env.convert_byte_array(&jba) {
+                Ok(v) => v,
+                Err(_) => return empty_byte_array_or_empty(&mut env).into_raw(),
+            };
+            let resp: crate::generated::BleIncomingDataResponse =
+                match prost::Message::decode(bytes.as_slice()) {
+                    Ok(r) => r,
+                    Err(_) => return empty_byte_array_or_empty(&mut env).into_raw(),
+                };
+            env.byte_array_from_slice(&resp.confirm_commitment_hash)
+                .map(|a| a.into_raw())
+                .unwrap_or_else(|_| empty_byte_array_or_empty(&mut env).into_raw())
         }),
     )
 }

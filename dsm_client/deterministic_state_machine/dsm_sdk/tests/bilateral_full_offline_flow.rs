@@ -193,7 +193,7 @@ async fn bilateral_offline_prepare_accept_commit_finalize_flow() {
 
     // Receiver handles prepare request
     handler_b
-        .handle_prepare_request(&prepare_bytes)
+        .handle_prepare_request(&prepare_bytes, None)
         .await
         .unwrap_or_else(|e| panic!("handle_prepare_request failed: {e}"));
 
@@ -356,7 +356,7 @@ async fn bilateral_offline_state_consistency_across_peers() {
         .unwrap_or_else(|e| panic!("prepare failed: {e}"));
 
     handler_b
-        .handle_prepare_request(&prepare_bytes)
+        .handle_prepare_request(&prepare_bytes, None)
         .await
         .unwrap_or_else(|e| panic!("handle_prepare_request failed: {e}"));
 
