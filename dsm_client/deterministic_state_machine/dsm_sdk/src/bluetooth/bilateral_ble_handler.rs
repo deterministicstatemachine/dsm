@@ -2339,8 +2339,11 @@ impl BilateralBleHandler {
             )
         })?;
 
-        // 7. Finalize sender: execute state transition
-        {
+        // 7. Finalize sender: execute state transition.
+        // Capture the finalized local_state so it can be threaded into settlement
+        // and BCR archive — the same canonical commit path used by recovery
+        // (mark_sender_committed_with_post_state_hash).
+        let finalized_local_state = {
             let mut manager = self.bilateral_tx_manager.write().await;
             match manager
                 .finalize_offline_transfer_with_entropy(
@@ -2359,6 +2362,7 @@ impl BilateralBleHandler {
                     // Chain tip already advanced and persisted to SQLite inside
                     // finalize_offline_transfer_with_entropy → update_anchor →
                     // chain_tip_store.set_contact_chain_tip(). No redundant CAS needed.
+                    result.local_state
                 }
                 Err(e) => {
                     return Err(DsmError::invalid_operation(format!(
@@ -2366,31 +2370,53 @@ impl BilateralBleHandler {
                     )));
                 }
             }
-        }
+        };
 
         // 9+10. Delegate sender settlement (balance debit + transaction history) to the
         // application layer.  If settlement fails the confirm envelope is never built —
         // the receiver will not get a confirm for a transfer the sender could not debit.
         // Session stays Accepted so the caller can retry.
+        //
+        // The finalized local_state is passed as canonical_state so that
+        // build_canonical_settled_state can reconcile the ERA debit and produce a
+        // canonical settled state.  After settlement, archive to BCR and sync the
+        // balance cache — converging on the same canonical commit path that recovery
+        // (mark_sender_committed_with_post_state_hash) already depends on.
         let confirm_meta = if let Some(ref delegate) = self.settlement_delegate {
             let ctx = BilateralSettlementContext {
                 local_device_id: self.device_id,
                 counterparty_device_id: session.counterparty_device_id,
                 commitment_hash,
                 transaction_hash: h_n_plus_1,
-                chain_height: 0,
+                chain_height: finalized_local_state.state_number,
                 operation_bytes: session.operation.to_bytes(),
                 proof_data: Some(receipt_bytes.clone()),
                 is_sender: true,
                 tx_type: "bilateral_offline",
                 new_chain_tip: [0u8; 32],
-                canonical_state: None,
+                canonical_state: Some(finalized_local_state.clone()),
             };
-            delegate.settle(ctx).map_err(|e| {
+            let outcome = delegate.settle(ctx).map_err(|e| {
                 DsmError::invalid_operation(format!(
                     "send_bilateral_confirm: sender settlement failed: {e}"
                 ))
-            })?
+            })?;
+
+            // Canonical post-settlement persistence: archive to BCR and sync
+            // balance cache.  Matches mark_sender_committed_with_post_state_hash
+            // so there is exactly one sender-side canonical commit path.
+            let state_to_record = outcome
+                .canonical_state
+                .as_ref()
+                .unwrap_or(&finalized_local_state);
+            self.record_bcr_state_and_scan(state_to_record, true)
+                .await;
+
+            if let Some(router) = crate::bridge::app_router() {
+                router.sync_balance_cache();
+            }
+
+            outcome
         } else {
             BilateralSettlementOutcome::default()
         };
