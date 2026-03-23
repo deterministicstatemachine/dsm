@@ -178,12 +178,12 @@ fn golden_empty_root_core_height32() {
 fn golden_default_node_0_is_zero() {
     let node = default_node(0);
     assert_eq!(
-        to_b32(node.as_bytes()),
+        to_b32(&node),
         GOLDEN_DEFAULT_NODE_0,
         "default_node(0) must be ZERO_LEAF (all zeros)"
     );
     assert_eq!(
-        *node.as_bytes(),
+        node,
         ZERO_LEAF,
         "default_node(0) must equal ZERO_LEAF constant"
     );
@@ -193,7 +193,7 @@ fn golden_default_node_0_is_zero() {
 fn golden_default_node_1() {
     let node = default_node(1);
     assert_eq!(
-        to_b32(node.as_bytes()),
+        to_b32(&node),
         GOLDEN_DEFAULT_NODE_1,
         "default_node(1) drifted — H(ZERO_LEAF || ZERO_LEAF) changed"
     );
@@ -290,15 +290,12 @@ fn cross_impl_node_hash_core_vs_witness() {
         right[0] = i.wrapping_add(50);
         right[15] = i.wrapping_mul(11);
 
-        let core_hash = hash_smt_node(
-            &blake3::Hash::from(left),
-            &blake3::Hash::from(right),
-        );
+        let core_hash = hash_smt_node(&left, &right);
         let witness_hash = witness_hash_node(&left, &right);
 
         assert_eq!(
-            core_hash.as_bytes(),
-            &witness_hash,
+            core_hash,
+            witness_hash,
             "sparse_merkle_tree::hash_smt_node and smt_replace_witness::hash_smt_node diverge for pair {i}"
         );
     }

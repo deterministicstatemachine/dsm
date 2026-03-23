@@ -11,11 +11,28 @@
 //! - Exact-uniform sampling over [0, N) using Lemire-style rejection on u64
 //! - Winner selection returns the selected activation leaf hash:
 //!   leaf = H("DJTE.ACTIVE", winner_id)
+//!
+//! # Module Organization
+//!
+//! - [`shard_count_smt`] — ShardCountSMT (§3.5): prefix-keyed count tree for O(b) rank descent
+//! - [`spent_proof_smt`] — SpentProofSMT (§3.6): tracks consumed JAP hashes
+//! - [`shard_activation_accumulator`] — SAA (§3.4): per-shard append-only activated identity list
+//!
+//! # Storage
+//!
+//! All emission data structures (ShardCountSMT, SpentProofSMT, SAA) live on storage
+//! nodes as part of the Source DLV state. Devices verify proofs against committed roots.
 
-use crate::crypto::blake3::{dsm_domain_hasher, domain_hash_bytes};
-use crate::merkle::sparse_merkle_tree::SparseMerkleTreeImpl;
+pub mod shard_activation_accumulator;
+pub mod shard_count_smt;
+pub mod spent_proof_smt;
+
+pub use shard_activation_accumulator::ShardActivationAccumulator;
+pub use shard_count_smt::ShardCountSmt;
+pub use spent_proof_smt::SpentProofSmt;
+
+use crate::crypto::blake3::domain_hash_bytes;
 use crate::types::error::DsmError;
-use std::collections::HashMap;
 
 const DJTE_MAX_RESEEDS: usize = 128;
 
@@ -58,175 +75,6 @@ impl EmissionReceipt {
         buf.extend_from_slice(&self.amount.to_le_bytes());
         buf.extend_from_slice(&self.jap_hash);
         domain_hash_bytes("DJTE.RCPT", &buf)
-    }
-}
-
-/// Shard Count SMT
-///
-/// Maps prefix (as heap index) to count.
-/// Heap index: 1 is root. 2 is left child, 3 is right child, etc.
-/// Leaves for shards live at depth `shard_depth`: heap = 2^b + shard_idx.
-#[derive(Clone, Debug)]
-pub struct ShardCountSmt {
-    pub tree: SparseMerkleTreeImpl,
-    pub shard_depth: u8,
-    pub counts: HashMap<u64, u64>, // heap_index -> count
-}
-
-impl ShardCountSmt {
-    pub fn new(shard_depth: u8) -> Self {
-        Self {
-            tree: SparseMerkleTreeImpl::new((shard_depth + 2) as u32),
-            shard_depth,
-            counts: HashMap::new(),
-        }
-    }
-
-    pub fn root(&self) -> [u8; 32] {
-        let h = self.tree.root();
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(h.as_bytes());
-        arr
-    }
-
-    pub fn get_count(&self, heap_index: u64) -> u64 {
-        *self.counts.get(&heap_index).unwrap_or(&0)
-    }
-
-    pub fn total(&self) -> u64 {
-        self.get_count(1)
-    }
-
-    pub fn increment(&mut self, shard_index: u64) -> Result<(), DsmError> {
-        let mut current_val = shard_index;
-        for len in (0..=self.shard_depth).rev() {
-            let heap_index = (1u64 << len) + current_val;
-
-            let new_count = self.get_count(heap_index).saturating_add(1);
-            self.counts.insert(heap_index, new_count);
-
-            let mut val_bytes = [0u8; 32];
-            val_bytes[0..8].copy_from_slice(&new_count.to_le_bytes());
-
-            self.tree.insert(heap_index, &val_bytes)?;
-            current_val >>= 1;
-        }
-        Ok(())
-    }
-}
-
-/// Shard Activation Accumulator
-///
-/// Append-only list of activated identities, stored as:
-///   leaf = H("DJTE.ACTIVE", id)
-#[derive(Clone, Debug)]
-pub struct ShardActivationAccumulator {
-    pub leaves: Vec<[u8; 32]>,
-}
-
-impl ShardActivationAccumulator {
-    pub fn new() -> Self {
-        Self { leaves: Vec::new() }
-    }
-
-    pub fn append(&mut self, id: [u8; 32]) {
-        let leaf = domain_hash_bytes("DJTE.ACTIVE", &id);
-        self.leaves.push(leaf);
-    }
-
-    pub fn root(&self) -> [u8; 32] {
-        if self.leaves.is_empty() {
-            return [0u8; 32];
-        }
-        let mut current_level = self.leaves.clone();
-        while current_level.len() > 1 {
-            let mut next_level = Vec::with_capacity(current_level.len().div_ceil(2));
-            for chunk in current_level.chunks(2) {
-                let mut hasher = dsm_domain_hasher("DSM/djte-shard-merkle");
-                hasher.update(&chunk[0]);
-                if chunk.len() == 2 {
-                    hasher.update(&chunk[1]);
-                } else {
-                    hasher.update(&chunk[0]);
-                }
-                let res = hasher.finalize();
-                let mut h = [0u8; 32];
-                h.copy_from_slice(res.as_bytes());
-                next_level.push(h);
-            }
-            current_level = next_level;
-        }
-        current_level[0]
-    }
-
-    pub fn get_leaf(&self, index: usize) -> Option<[u8; 32]> {
-        self.leaves.get(index).cloned()
-    }
-
-    pub fn len(&self) -> usize {
-        self.leaves.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.leaves.is_empty()
-    }
-}
-
-impl Default for ShardActivationAccumulator {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Spent Proof SMT
-///
-/// Maps jap_hash -> 1 (represented as a deterministic commitment over sorted keys).
-#[derive(Clone, Debug)]
-pub struct SpentProofSmt {
-    pub spent: HashMap<[u8; 32], bool>,
-}
-
-impl SpentProofSmt {
-    pub fn new() -> Self {
-        Self {
-            spent: HashMap::new(),
-        }
-    }
-
-    pub fn mark_spent(&mut self, jap_hash: [u8; 32]) {
-        self.spent.insert(jap_hash, true);
-    }
-
-    pub fn is_spent(&self, jap_hash: &[u8; 32]) -> bool {
-        self.spent.contains_key(jap_hash)
-    }
-
-    pub fn len(&self) -> usize {
-        self.spent.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.spent.is_empty()
-    }
-
-    pub fn root(&self) -> [u8; 32] {
-        let mut keys: Vec<[u8; 32]> = self.spent.keys().cloned().collect();
-        keys.sort();
-
-        let mut hasher = dsm_domain_hasher("DSM/djte-spent-proof");
-        for k in keys {
-            hasher.update(&k);
-        }
-        let res = hasher.finalize();
-        let mut h = [0u8; 32];
-        h.copy_from_slice(res.as_bytes());
-        h
-    }
-}
-
-impl Default for SpentProofSmt {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -638,7 +486,7 @@ mod tests {
         temp.add_activation(&jap).unwrap();
 
         let emission_index = prev.emission_index + 1;
-        let winner_leaf = select_winner_for_event(&temp, emission_index, &jap_hash).unwrap();
+        let _winner_leaf = select_winner_for_event(&temp, emission_index, &jap_hash).unwrap();
 
         let receipt = EmissionReceipt {
             emission_index,
@@ -667,7 +515,7 @@ mod tests {
         );
 
         assert_eq!(
-            winner_leaf,
+            _winner_leaf,
             domain_hash_bytes("DJTE.ACTIVE", &receipt.winner_id)
         );
         assert!(verify_emission(&prev, &next, &jap, &receipt).unwrap());

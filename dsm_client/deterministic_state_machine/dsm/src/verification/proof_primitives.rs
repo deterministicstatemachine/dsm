@@ -108,8 +108,8 @@ pub fn verify_smt_inclusion_proof_bytes(
     if proof_bytes.is_empty() {
         // Empty proof is valid only if tree is empty.
         // Core SMT uses ZERO_LEAF ([0u8; 32]) as empty sentinel.
-        // BoundedSmt (SDK) uses a different computed empty root — its proofs
-        // go through BoundedSmt::verify_proof_against_root() instead.
+        // SparseMerkleTree uses a computed empty root — its proofs
+        // go through SparseMerkleTree::verify_proof_against_root() instead.
         return Ok(root.iter().all(|&b| b == 0));
     }
 
