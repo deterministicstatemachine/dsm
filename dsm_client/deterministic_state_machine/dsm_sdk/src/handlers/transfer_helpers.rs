@@ -19,7 +19,7 @@ pub(crate) fn build_protocol_transition_commitment(
 
 /// Build receipt with real SMT roots and inclusion proofs (§4.2 compliant).
 ///
-/// Use this variant when the caller has access to the `BoundedSmt` and has
+/// Use this variant when the caller has access to the `SparseMerkleTree` and has
 /// already performed the SMT-Replace, collecting pre/post roots and proofs.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_online_receipt_with_smt(

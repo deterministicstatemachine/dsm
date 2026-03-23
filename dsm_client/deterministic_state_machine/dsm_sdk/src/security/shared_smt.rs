@@ -13,10 +13,10 @@ use std::sync::Arc;
 use once_cell::sync::OnceCell;
 use tokio::sync::RwLock;
 
-use super::bounded_smt::BoundedSmt;
+use dsm::merkle::sparse_merkle_tree::SparseMerkleTree;
 
 /// Process-wide Per-Device SMT instance.
-static SHARED_SMT: OnceCell<Arc<RwLock<BoundedSmt>>> = OnceCell::new();
+static SHARED_SMT: OnceCell<Arc<RwLock<SparseMerkleTree>>> = OnceCell::new();
 
 /// §5.4 Modal lock: set of relationship SMT keys with pending online projections.
 static PENDING_ONLINE: OnceCell<Arc<RwLock<HashSet<[u8; 32]>>>> = OnceCell::new();
@@ -27,15 +27,15 @@ static PENDING_ONLINE: OnceCell<Arc<RwLock<HashSet<[u8; 32]>>>> = OnceCell::new(
 
 /// Initialize the shared Per-Device SMT. Called once during SDK bootstrap.
 /// Subsequent calls return the existing instance (idempotent).
-pub fn init_shared_smt(max_leaves: usize) -> Arc<RwLock<BoundedSmt>> {
+pub fn init_shared_smt(max_leaves: usize) -> Arc<RwLock<SparseMerkleTree>> {
     SHARED_SMT
-        .get_or_init(|| Arc::new(RwLock::new(BoundedSmt::new(max_leaves))))
+        .get_or_init(|| Arc::new(RwLock::new(SparseMerkleTree::new(max_leaves))))
         .clone()
 }
 
 /// Get the shared Per-Device SMT instance.  Returns `None` only if
 /// `init_shared_smt()` has never been called.
-pub fn get_shared_smt() -> Option<Arc<RwLock<BoundedSmt>>> {
+pub fn get_shared_smt() -> Option<Arc<RwLock<SparseMerkleTree>>> {
     SHARED_SMT.get().cloned()
 }
 
