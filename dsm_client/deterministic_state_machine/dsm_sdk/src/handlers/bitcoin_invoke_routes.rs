@@ -20,7 +20,7 @@ use std::sync::Arc;
 use crate::bridge::{AppInvoke, AppResult};
 use super::app_router_impl::AppRouterImpl;
 use super::response_helpers::{pack_envelope_ok, err};
-use super::transfer_helpers::{build_online_receipt, build_online_receipt_and_sigma};
+use super::transfer_helpers::build_protocol_transition_commitment;
 
 #[derive(Clone)]
 struct DepositCompletionPrep {
@@ -28,8 +28,8 @@ struct DepositCompletionPrep {
     requester_key: Vec<u8>,
     signing_public_key: Vec<u8>,
     recipient: [u8; 32],
-    receipt_bytes: Vec<u8>,
-    stitched_receipt_sigma: [u8; 32],
+    protocol_transition_bytes: Vec<u8>,
+    protocol_transition_commitment: [u8; 32],
     pre_applied_token_op: Option<dsm::types::token_types::TokenOperation>,
     pre_applied_token_state: Option<dsm::types::state_types::State>,
 }
@@ -589,24 +589,25 @@ impl AppRouterImpl {
             current_state.clone()
         };
 
-        let (receipt_bytes, stitched_receipt_sigma): (Vec<u8>, [u8; 32]) =
-            build_online_receipt_and_sigma(
-                &sigma_state,
-                &self.device_id_bytes,
-                &recipient,
-                crate::sdk::app_state::AppState::get_device_tree_root(),
-            )
-            .ok_or_else(|| {
-                format!("{route}: failed to build canonical stitched receipt commitment")
-            })?;
+        let state_number_bytes = sigma_state.state_number.to_le_bytes();
+        let (protocol_transition_bytes, protocol_transition_commitment) =
+            build_protocol_transition_commitment(
+                route.as_bytes(),
+                &[
+                    vault_op_id.as_bytes(),
+                    &recipient,
+                    &sigma_state.hash,
+                    &state_number_bytes,
+                ],
+            );
 
         Ok(DepositCompletionPrep {
             current_state,
             requester_key,
             signing_public_key,
             recipient,
-            receipt_bytes,
-            stitched_receipt_sigma,
+            protocol_transition_bytes,
+            protocol_transition_commitment,
             pre_applied_token_op,
             pre_applied_token_state,
         })
@@ -1816,8 +1817,8 @@ impl AppRouterImpl {
                         &prep.signing_public_key,
                         prep.recipient,
                         &prep.current_state,
-                        Some(prep.receipt_bytes),
-                        Some(prep.stitched_receipt_sigma),
+                        Some(prep.protocol_transition_bytes.clone()),
+                        Some(prep.protocol_transition_commitment),
                     )
                     .await
                 {
@@ -1954,6 +1955,22 @@ impl AppRouterImpl {
                                 completion.vault_op_id.as_bytes().to_vec(),
                             );
                             metadata.insert("token_id".to_string(), token_id.as_bytes().to_vec());
+                            metadata.insert(
+                                "protocol_transition_payload".to_string(),
+                                prep.protocol_transition_bytes.clone(),
+                            );
+                            metadata.insert(
+                                "protocol_transition_digest".to_string(),
+                                prep.protocol_transition_commitment.to_vec(),
+                            );
+                            metadata.insert(
+                                "source_state_hash".to_string(),
+                                applied_state.hash.to_vec(),
+                            );
+                            metadata.insert(
+                                "source_state_number".to_string(),
+                                applied_state.state_number.to_le_bytes().to_vec(),
+                            );
                             let rec = crate::storage::client_db::TransactionRecord {
                                 tx_id: format!("deposit_{}", completion.vault_op_id),
                                 tx_hash: tx_hash_txt,
@@ -1964,13 +1981,8 @@ impl AppRouterImpl {
                                 status: "completed".to_string(),
                                 chain_height: applied_state.state_number,
                                 step_index: 0,
-                                commitment_hash: Some(applied_state.hash.to_vec()),
-                                proof_data: build_online_receipt(
-                                    &applied_state,
-                                    &self.device_id_bytes,
-                                    &self.device_id_bytes,
-                                    crate::sdk::app_state::AppState::get_device_tree_root(),
-                                ),
+                                commitment_hash: Some(prep.protocol_transition_commitment.to_vec()),
+                                proof_data: None,
                                 metadata,
                                 created_at: crate::util::deterministic_time::tick(),
                             };
@@ -3968,8 +3980,8 @@ impl AppRouterImpl {
                         &prep.signing_public_key,
                         prep.recipient,
                         &prep.current_state,
-                        Some(prep.receipt_bytes),
-                        Some(prep.stitched_receipt_sigma),
+                        Some(prep.protocol_transition_bytes.clone()),
+                        Some(prep.protocol_transition_commitment),
                     )
                     .await
                 {
@@ -4111,6 +4123,22 @@ impl AppRouterImpl {
                                     "funding_txid".to_string(),
                                     funding_txid_hex.as_bytes().to_vec(),
                                 );
+                                metadata.insert(
+                                    "protocol_transition_payload".to_string(),
+                                    prep.protocol_transition_bytes.clone(),
+                                );
+                                metadata.insert(
+                                    "protocol_transition_digest".to_string(),
+                                    prep.protocol_transition_commitment.to_vec(),
+                                );
+                                metadata.insert(
+                                    "source_state_hash".to_string(),
+                                    applied_state.hash.to_vec(),
+                                );
+                                metadata.insert(
+                                    "source_state_number".to_string(),
+                                    applied_state.state_number.to_le_bytes().to_vec(),
+                                );
                                 let rec = crate::storage::client_db::TransactionRecord {
                                     tx_id: format!("deposit_{}", completion.vault_op_id),
                                     tx_hash: tx_hash_txt,
@@ -4121,13 +4149,10 @@ impl AppRouterImpl {
                                     status: "completed".to_string(),
                                     chain_height: applied_state.state_number,
                                     step_index: 0,
-                                    commitment_hash: Some(applied_state.hash.to_vec()),
-                                    proof_data: build_online_receipt(
-                                        &applied_state,
-                                        &device_id_bytes,
-                                        &device_id_bytes,
-                                        crate::sdk::app_state::AppState::get_device_tree_root(),
+                                    commitment_hash: Some(
+                                        prep.protocol_transition_commitment.to_vec(),
                                     ),
+                                    proof_data: None,
                                     metadata,
                                     created_at: crate::util::deterministic_time::tick(),
                                 };

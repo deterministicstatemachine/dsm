@@ -182,17 +182,17 @@ fn mock_header_chain(count: usize) -> Vec<[u8; 80]> {
     vec![[0u8; 80]; count]
 }
 
-/// Generate valid stitched_receipt + sigma for draw_tap.
+/// Generate valid protocol-transition bytes + commitment for draw_tap.
 ///
 /// The `draw_tap` fail-closed gate requires:
-/// - `stitched_receipt`: non-empty bytes
-/// - `stitched_receipt_sigma`: BLAKE3("DSM/receipt-commit" || receipt_bytes)
+/// - non-empty protocol bytes
+/// - commitment = BLAKE3("DSM/protocol-transition" || protocol_bytes)
 ///
-/// Returns (receipt_bytes, sigma) ready for `Some(...)` wrapping.
+/// Returns `(payload_bytes, commitment)` ready for `Some(...)` wrapping.
 fn test_stitched_receipt() -> (Vec<u8>, [u8; 32]) {
-    let receipt = b"test-stitched-receipt-canonical-bytes".to_vec();
-    let sigma = dsm::crypto::blake3::domain_hash_bytes("DSM/receipt-commit", &receipt);
-    (receipt, sigma)
+    let payload = b"test-protocol-transition-canonical-bytes".to_vec();
+    let sigma = dsm::crypto::blake3::domain_hash_bytes("DSM/protocol-transition", &payload);
+    (payload, sigma)
 }
 
 // --------------------------------------------------------------------------
@@ -1439,13 +1439,15 @@ async fn token_balance_sqlite_roundtrip() {
     upsert_test_balance(&device_id, "dBTC", 500_000, 0);
 
     // Read back
-    let (available, locked) = get_test_balance(&device_id, "dBTC").expect("dBTC balance should exist");
+    let (available, locked) =
+        get_test_balance(&device_id, "dBTC").expect("dBTC balance should exist");
     assert_eq!(available, 500_000, "available should be 500_000");
     assert_eq!(locked, 0, "locked should be 0");
 
     upsert_test_balance(&device_id, "dBTC", 750_000, 50_000);
 
-    let (available2, locked2) = get_test_balance(&device_id, "dBTC").expect("dBTC balance should still exist");
+    let (available2, locked2) =
+        get_test_balance(&device_id, "dBTC").expect("dBTC balance should still exist");
     assert_eq!(
         available2, 750_000,
         "available should be updated to 750_000"
@@ -1486,9 +1488,15 @@ async fn token_balance_sender_settlement_does_not_seed_projection() {
         &tx_record,
     );
 
-    assert!(result.is_ok(), "sender settlement is metadata-only for dBTC");
+    assert!(
+        result.is_ok(),
+        "sender settlement is metadata-only for dBTC"
+    );
     let row = get_test_balance(&device_id, "dBTC");
-    assert!(row.is_none(), "dBTC projection should not be implicitly seeded");
+    assert!(
+        row.is_none(),
+        "dBTC projection should not be implicitly seeded"
+    );
 }
 
 #[tokio::test]
@@ -1499,7 +1507,10 @@ async fn wallet_bootstrap_does_not_seed_dbtc_projection() {
     client_db::ensure_wallet_state_for_device(&device_id).expect("ensure wallet state");
 
     let row = get_test_balance(&device_id, "dBTC");
-    assert!(row.is_none(), "dBTC projection should not exist after wallet bootstrap");
+    assert!(
+        row.is_none(),
+        "dBTC projection should not exist after wallet bootstrap"
+    );
 }
 
 /// Regression guard: list_vault_records_db returns destination_address correctly

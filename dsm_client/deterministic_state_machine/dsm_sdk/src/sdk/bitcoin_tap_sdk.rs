@@ -1803,24 +1803,24 @@ impl BitcoinTapSdk {
         stitched_receipt: Option<Vec<u8>>,
         stitched_receipt_sigma: Option<[u8; 32]>,
     ) -> Result<DepositCompletion, DsmError> {
-        // Strict fail-closed gate: deposit completion requires canonical stitched receipt bytes
-        // and matching sigma commitment on all supported networks.
+        // Strict fail-closed gate: deposit completion requires canonical
+        // protocol-transition bytes and matching sovereign commitment.
         let stitched_receipt = stitched_receipt.ok_or_else(|| {
-            DsmError::invalid_operation("draw_tap requires canonical stitched_receipt bytes")
+            DsmError::invalid_operation("draw_tap requires canonical protocol transition bytes")
         })?;
         if stitched_receipt.is_empty() {
             return Err(DsmError::invalid_operation(
-                "draw_tap stitched_receipt must be non-empty",
+                "draw_tap protocol transition bytes must be non-empty",
             ));
         }
         let stitched_receipt_sigma = stitched_receipt_sigma.ok_or_else(|| {
-            DsmError::invalid_operation("draw_tap requires stitched_receipt_sigma")
+            DsmError::invalid_operation("draw_tap requires protocol transition commitment")
         })?;
         let computed_sigma =
-            crate::crypto::blake3::domain_hash("DSM/receipt-commit", &stitched_receipt);
-        if computed_sigma.as_bytes() != &stitched_receipt_sigma {
+            crate::sdk::receipts::compute_protocol_transition_commitment(&stitched_receipt);
+        if computed_sigma != stitched_receipt_sigma {
             return Err(DsmError::invalid_operation(
-                "draw_tap stitched_receipt_sigma mismatch",
+                "draw_tap protocol transition commitment mismatch",
             ));
         }
 
@@ -3830,8 +3830,10 @@ impl BitcoinTapSdk {
         let device_id_str = crate::util::text_id::encode_base32_crockford(planner_device_id);
         let available_dbtc_sats = Self::canonical_archived_dbtc_balance(planner_device_id)
             .or_else(|| {
-                match crate::storage::client_db::get_balance_projection(&device_id_str, DBTC_TOKEN_ID)
-                {
+                match crate::storage::client_db::get_balance_projection(
+                    &device_id_str,
+                    DBTC_TOKEN_ID,
+                ) {
                     Ok(Some(record)) => Some(record.available),
                     Ok(None) => None,
                     Err(e) => {

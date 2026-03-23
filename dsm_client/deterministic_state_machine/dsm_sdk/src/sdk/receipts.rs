@@ -521,3 +521,26 @@ pub fn derive_stitched_receipt_sigma(parts: &[&[u8]]) -> [u8; 32] {
     }
     *hasher.finalize().as_bytes()
 }
+
+/// Deterministically encode a protocol-only transition payload.
+///
+/// This is used for sovereign DLV/faucet/bitcoin transitions that need a stable
+/// commitment domain but are not bilateral stitched receipts.
+pub fn encode_protocol_transition_payload(label: &[u8], parts: &[&[u8]]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&(label.len() as u32).to_le_bytes());
+    out.extend_from_slice(label);
+    for part in parts {
+        out.extend_from_slice(&(part.len() as u32).to_le_bytes());
+        out.extend_from_slice(part);
+    }
+    out
+}
+
+/// Deterministically derive a protocol-transition commitment.
+///
+/// This must be used for sovereign protocol actors instead of the bilateral
+/// `DSM/receipt-commit` domain.
+pub fn compute_protocol_transition_commitment(payload_bytes: &[u8]) -> [u8; 32] {
+    dsm::crypto::blake3::domain_hash_bytes("DSM/protocol-transition", payload_bytes)
+}

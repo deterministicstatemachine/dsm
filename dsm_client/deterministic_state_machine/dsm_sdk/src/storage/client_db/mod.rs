@@ -351,6 +351,34 @@ fn create_schema(conn: &Connection) -> Result<()> {
             updated_at                INTEGER NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS system_peers(
+            peer_key       TEXT PRIMARY KEY,
+            device_id      BLOB NOT NULL UNIQUE,
+            display_name   TEXT NOT NULL,
+            peer_type      TEXT NOT NULL,
+            chain_tip      BLOB,
+            created_at     INTEGER NOT NULL,
+            updated_at     INTEGER NOT NULL,
+            metadata       BLOB
+        );
+        CREATE INDEX IF NOT EXISTS idx_system_peers_type ON system_peers(peer_type);
+
+        CREATE TABLE IF NOT EXISTS system_peer_events(
+            peer_key             TEXT NOT NULL,
+            peer_type            TEXT NOT NULL,
+            parent_tip           BLOB NOT NULL,
+            child_tip            BLOB NOT NULL,
+            transition_digest    BLOB NOT NULL,
+            source_state_hash    BLOB NOT NULL,
+            source_state_number  INTEGER NOT NULL,
+            payload_bytes        BLOB NOT NULL,
+            created_at           INTEGER NOT NULL,
+            PRIMARY KEY(peer_key, child_tip),
+            FOREIGN KEY(peer_key) REFERENCES system_peers(peer_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_system_peer_events_created
+            ON system_peer_events(peer_key, created_at ASC);
+
         CREATE TABLE IF NOT EXISTS transactions(
             tx_id              TEXT PRIMARY KEY,
             tx_hash            TEXT NOT NULL,
@@ -1382,6 +1410,65 @@ mod tests {
         assert_eq!(pending.message_id, "0Q4T3ZGMVR8JKPGS");
         assert_eq!(pending.parent_tip, parent_tip.to_vec());
         assert_eq!(pending.next_tip, next_tip.to_vec());
+    }
+
+    #[test]
+    #[serial]
+    fn test_advance_system_peer_tip_tracks_sovereign_lineage() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        reset_database_for_tests();
+        init_database().expect("init db");
+
+        let peer = SystemPeerRecord {
+            peer_key: "era-source-dlv".to_string(),
+            device_id: [0xABu8; 32].to_vec(),
+            display_name: "ERA Source DLV".to_string(),
+            peer_type: SystemPeerType::Dlv,
+            current_chain_tip: None,
+            created_at: 1,
+            updated_at: 1,
+            metadata: HashMap::new(),
+        };
+        store_system_peer(&peer).expect("store peer");
+
+        let payload_one = b"faucet.claim:first".to_vec();
+        let payload_two = b"faucet.claim:second".to_vec();
+        let source_hash_one = [0x11u8; 32];
+        let source_hash_two = [0x22u8; 32];
+
+        let first = advance_system_peer_tip(
+            "era-source-dlv",
+            SystemPeerType::Dlv,
+            &payload_one,
+            &source_hash_one,
+            5,
+        )
+        .expect("advance first event");
+        let second = advance_system_peer_tip(
+            "era-source-dlv",
+            SystemPeerType::Dlv,
+            &payload_two,
+            &source_hash_two,
+            6,
+        )
+        .expect("advance second event");
+
+        assert_eq!(first.parent_tip, vec![0u8; 32]);
+        assert_ne!(first.child_tip, source_hash_one.to_vec());
+        assert_eq!(second.parent_tip, first.child_tip);
+        assert_ne!(second.child_tip, source_hash_two.to_vec());
+
+        let stored = get_system_peer("era-source-dlv")
+            .expect("load peer")
+            .expect("peer exists");
+        assert_eq!(stored.current_chain_tip, Some(second.child_tip.clone()));
+
+        let events = get_system_peer_events("era-source-dlv").expect("load events");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].child_tip, first.child_tip);
+        assert_eq!(events[1].child_tip, second.child_tip);
     }
 
     #[test]
