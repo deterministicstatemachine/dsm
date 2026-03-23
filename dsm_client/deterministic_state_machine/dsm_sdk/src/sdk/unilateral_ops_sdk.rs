@@ -20,7 +20,7 @@ use dsm::core::contact_manager::{DsmContactManager, UnilateralTransactionPayload
 use dsm::types::contact_types::ChainTipSmtProof;
 use dsm::types::error::DsmError;
 
-use log::{debug, info, warn};
+use log::{debug, info};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 

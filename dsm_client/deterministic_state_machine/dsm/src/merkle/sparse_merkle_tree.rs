@@ -11,6 +11,7 @@ use crate::types::state_types::{
 };
 use blake3::Hash;
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 /// Canonical zero leaf value for absent SMT entries.
 pub const ZERO_LEAF: [u8; 32] = [0u8; 32];
@@ -23,11 +24,30 @@ pub fn empty_leaf() -> [u8; 32] {
     ZERO_LEAF
 }
 
-/// Default node values for SMT levels (precomputed sparse defaults).
+/// Precomputed default node hashes for SMT levels 0..=DEFAULT_SMT_HEIGHT.
+/// Level 0 = ZERO_LEAF, level n = hash_smt_node(default[n-1], default[n-1]).
+static DEFAULT_NODES: OnceLock<Vec<Hash>> = OnceLock::new();
+
+fn precompute_defaults() -> Vec<Hash> {
+    let max = (DEFAULT_SMT_HEIGHT + 1) as usize;
+    let mut table = Vec::with_capacity(max);
+    table.push(Hash::from(ZERO_LEAF));
+    for _ in 1..max {
+        let child = table.last().unwrap();
+        table.push(hash_smt_node(child, child));
+    }
+    table
+}
+
+/// Default node value for SMT at the given level.
+/// Uses a precomputed table for levels 0..=DEFAULT_SMT_HEIGHT;
+/// falls back to recursive computation for larger levels.
 pub fn default_node(level: u32) -> Hash {
-    if level == 0 {
-        Hash::from(ZERO_LEAF)
+    let table = DEFAULT_NODES.get_or_init(precompute_defaults);
+    if (level as usize) < table.len() {
+        table[level as usize]
     } else {
+        // Fallback for levels beyond the precomputed table
         let child = default_node(level - 1);
         hash_smt_node(&child, &child)
     }
@@ -212,7 +232,7 @@ impl SparseMerkleTreeImpl {
     }
 }
 
-// Standalone functions for compatibility
+// Module-level convenience functions (used by batch, batch_proof, and index modules).
 pub fn create_tree(height: u32) -> SparseMerkleTreeImpl {
     SparseMerkleTreeImpl::new(height)
 }

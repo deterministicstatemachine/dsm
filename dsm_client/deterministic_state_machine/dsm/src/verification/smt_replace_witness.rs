@@ -93,8 +93,9 @@ pub fn compute_relationship_key(devid_a: &[u8; 32], devid_b: &[u8; 32]) -> [u8; 
 
 /// Hash an SMT leaf deterministically.
 ///
-/// Binds the leaf value to the canonical relationship key.
-pub fn hash_smt_leaf(_rel_key: &[u8; 32], tip: &[u8; 32]) -> [u8; 32] {
+/// Per spec §2.2: `Leaf(X) := BLAKE3("DSM/smt-leaf\0" ∥ X)`.
+/// The relationship key is NOT part of the leaf hash.
+pub fn hash_smt_leaf(tip: &[u8; 32]) -> [u8; 32] {
     let mut hasher = crate::crypto::blake3::dsm_domain_hasher("DSM/smt-leaf");
     hasher.update(tip);
     *hasher.finalize().as_bytes()
@@ -136,9 +137,9 @@ pub fn verify_tripwire_smt_replace(
         DsmError::InvalidOperation("Failed to parse SMT replace witness".to_string())
     })?;
 
-    let rel_key = compute_relationship_key(devid_a, devid_b);
-    let old_leaf = hash_smt_leaf(&rel_key, parent_tip);
-    let new_leaf = hash_smt_leaf(&rel_key, child_tip);
+    let _rel_key = compute_relationship_key(devid_a, devid_b);
+    let old_leaf = hash_smt_leaf(parent_tip);
+    let new_leaf = hash_smt_leaf(child_tip);
 
     let recomputed_parent = witness.recompute_root(&old_leaf);
     if &recomputed_parent != parent_root {
