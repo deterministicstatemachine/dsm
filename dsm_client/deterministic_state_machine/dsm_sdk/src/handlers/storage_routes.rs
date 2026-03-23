@@ -5,7 +5,6 @@
 
 use dsm::types::proto as generated;
 use dsm::types::identifiers::TransactionId;
-use dsm::batching::{BatchConfig, BatchHandler, BatchProcessor};
 use prost::Message;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -385,23 +384,14 @@ impl AppRouterImpl {
                                 let batch_state = Arc::new(Mutex::new(InboxBatchState::default()));
                                 let core_sdk = self.core_sdk.clone();
                                 let device_id_bytes = self.device_id_bytes;
-                                let batch_state_for_handler = batch_state.clone();
-                                let core_sdk_for_handler = core_sdk.clone();
 
-                                let batch_handler: BatchHandler<crate::sdk::b0x_sdk::B0xEntry> =
-                                    Arc::new(move |batch_items| {
-                                        let batch_state = batch_state_for_handler.clone();
-                                        let core_sdk = core_sdk_for_handler.clone();
-                                        Box::pin(async move {
-                                            for batch_item in batch_items {
-                                                {
-                                                    let state_guard = batch_state.lock().await;
-                                                    if state_guard.fatal_error.is_some() {
-                                                        break;
-                                                    }
-                                                }
-
-                                                let entry = batch_item.data;
+                                for entry in items.iter().cloned() {
+                                    {
+                                        let state_guard = batch_state.lock().await;
+                                        if state_guard.fatal_error.is_some() {
+                                            break;
+                                        }
+                                    }
 
                                                 if let dsm::types::operations::Operation::Transfer {
                                                 amount,
@@ -1106,44 +1096,12 @@ impl AppRouterImpl {
                                                         }
                                                     }
                                                 }
-                                            } else {
-                                                log::warn!(
-                                                    "[storage.sync] Unexpected transaction type: {:?}",
-                                                    entry.transaction
-                                                );
-                                            }
-                                            }
-                                        })
-                                    });
-
-                                let mut batch_config = BatchConfig::default();
-                                batch_config.max_concurrent_batches = 1;
-                                batch_config.priority_levels = 1;
-                                batch_config.adaptive_sizing = false;
-                                batch_config.max_batch_size = std::cmp::min(50, limit.max(1));
-                                batch_config.min_batch_size =
-                                    std::cmp::min(10, batch_config.max_batch_size);
-                                batch_config.max_wait_ticks = 50;
-
-                                let batcher =
-                                    BatchProcessor::new_with_handler(batch_config, batch_handler);
-                                for entry in items.iter().cloned() {
-                                    if let Err(e) = batcher.submit(entry, 0).await {
-                                        let mut state_guard = batch_state.lock().await;
-                                        state_guard
-                                            .errors
-                                            .push(format!("batch submit failed: {e}"));
+                                    } else {
+                                        log::warn!(
+                                            "[storage.sync] Unexpected transaction type: {:?}",
+                                            entry.transaction
+                                        );
                                     }
-                                    let fatal = {
-                                        let state_guard = batch_state.lock().await;
-                                        state_guard.fatal_error.clone()
-                                    };
-                                    if fatal.is_some() {
-                                        break;
-                                    }
-                                }
-                                if let Err(e) = batcher.flush(0).await {
-                                    errors.push(format!("Batch flush failed: {}", e));
                                 }
 
                                 let (processed_entries, fatal_error) = {

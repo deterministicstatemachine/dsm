@@ -36,7 +36,7 @@ use dsm::types::state_types::{DeviceInfo, State};
 use dsm::types::token_types::Balance;
 use dsm::vault::{DLVManager, FulfillmentMechanism, VaultState};
 use dsm::verification::receipt_verification::verify_stitched_receipt;
-use dsm::verification::smt_replace_witness::{compute_relationship_key, hash_smt_leaf};
+use dsm::verification::smt_replace_witness::{compute_smt_key, hash_smt_leaf};
 
 const TRACE_VARIANT: SphincsVariant = SphincsVariant::SPX256f;
 const TRACE_TOKEN_ID: &str = "VVTRACE";
@@ -1920,9 +1920,9 @@ fn build_signed_receipt(
     keypair_a: &SignatureKeyPair,
     keypair_b: Option<&SignatureKeyPair>,
 ) -> StitchedReceiptV2 {
-    let rel_key = compute_relationship_key(&devid_a, &devid_b);
-    let parent_root = hash_smt_leaf(&rel_key, &parent_tip);
-    let child_root = hash_smt_leaf(&rel_key, &child_tip);
+    let smt_key = compute_smt_key(&devid_a, &devid_b);
+    let parent_root = hash_smt_leaf(&parent_tip);
+    let child_root = hash_smt_leaf(&child_tip);
 
     let mut receipt = StitchedReceiptV2::new(
         genesis,
@@ -1932,8 +1932,8 @@ fn build_signed_receipt(
         child_tip,
         parent_root,
         child_root,
-        encode_single_leaf_smt_proof(rel_key, parent_tip),
-        encode_single_leaf_smt_proof(rel_key, child_tip),
+        encode_single_leaf_smt_proof(smt_key, parent_tip),
+        encode_single_leaf_smt_proof(smt_key, child_tip),
         dev_proof,
     );
     receipt.set_rel_replace_witness(0u32.to_le_bytes().to_vec());

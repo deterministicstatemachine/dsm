@@ -438,8 +438,6 @@ pub enum DsmError {
     ExternalCommitment(String),
     /// Identity anchor or claim operation failure.
     Identity(String),
-    /// Batch processing error (state batch, proof batch).
-    Batch(String),
     /// Inter-node or inter-device communication failure.
     Communication {
         /// Description of the communication failure.
@@ -1427,7 +1425,6 @@ impl Display for DsmError {
             DsmError::Relationship(msg) => write!(f, "Relationship error: {msg}"),
             DsmError::ExternalCommitment(msg) => write!(f, "External commitment error: {msg}"),
             DsmError::Identity(msg) => write!(f, "Identity error: {msg}"),
-            DsmError::Batch(msg) => write!(f, "Batch error: {msg}"),
             DsmError::Communication { context, source } => {
                 write!(f, "Communication error: {context}")?;
                 if let Some(s) = source {
@@ -1712,7 +1709,6 @@ impl Error for DsmError {
             DsmError::Relationship(_) => None,
             DsmError::ExternalCommitment(_) => None,
             DsmError::Identity(_) => None,
-            DsmError::Batch(_) => None,
             DsmError::Communication { source, .. } => {
                 source.as_ref().map(|s| s.as_ref() as &dyn Error)
             }

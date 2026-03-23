@@ -75,21 +75,8 @@ impl SmtReplaceWitness {
     }
 }
 
-/// Compute canonical relationship key.
-///
-/// Per protocol: H("DSM/smt-key\0" || min(devid_a, devid_b) || max(devid_a, devid_b))
-pub fn compute_relationship_key(devid_a: &[u8; 32], devid_b: &[u8; 32]) -> [u8; 32] {
-    let (min_id, max_id) = if devid_a < devid_b {
-        (devid_a, devid_b)
-    } else {
-        (devid_b, devid_a)
-    };
-
-    let mut hasher = crate::crypto::blake3::dsm_domain_hasher("DSM/smt-key");
-    hasher.update(min_id);
-    hasher.update(max_id);
-    *hasher.finalize().as_bytes()
-}
+/// Re-export canonical SMT key computation from its single home.
+pub use crate::core::bilateral_transaction_manager::compute_smt_key;
 
 /// Hash an SMT leaf deterministically.
 ///
@@ -119,8 +106,6 @@ pub fn verify_tripwire_smt_replace(
     child_root: &[u8; 32],
     parent_tip: &[u8; 32],
     child_tip: &[u8; 32],
-    devid_a: &[u8; 32],
-    devid_b: &[u8; 32],
     witness_bytes: &[u8],
 ) -> Result<bool, DsmError> {
     if parent_root == child_root {
@@ -137,7 +122,6 @@ pub fn verify_tripwire_smt_replace(
         DsmError::InvalidOperation("Failed to parse SMT replace witness".to_string())
     })?;
 
-    let _rel_key = compute_relationship_key(devid_a, devid_b);
     let old_leaf = hash_smt_leaf(parent_tip);
     let new_leaf = hash_smt_leaf(child_tip);
 
@@ -183,12 +167,12 @@ mod tests {
     }
 
     #[test]
-    fn relationship_key_is_order_invariant() {
+    fn smt_key_is_order_invariant() {
         let a = [1u8; 32];
         let b = [2u8; 32];
         assert_eq!(
-            compute_relationship_key(&a, &b),
-            compute_relationship_key(&b, &a)
+            compute_smt_key(&a, &b),
+            compute_smt_key(&b, &a)
         );
     }
 }

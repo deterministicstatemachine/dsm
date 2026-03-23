@@ -2,7 +2,7 @@
 //! Configurable Limits for DSM Operations (clockless, deterministic)
 //!
 //! This module provides configurable limits for various DSM operations including
-//! request sizes, batch sizes, concurrency limits, and resource constraints.
+//! request sizes, concurrency limits, and resource constraints.
 //! All limits are expressed in deterministic units (counts, sizes, ticks) with
 //! no wall-clock dependencies.
 
@@ -13,8 +13,6 @@ use std::collections::HashMap;
 pub struct LimitsConfig {
     /// Maximum size of a single request payload (bytes)
     pub max_request_size_bytes: usize,
-    /// Maximum number of operations in a single batch
-    pub max_batch_size: usize,
     /// Maximum concurrent operations per component
     pub max_concurrent_operations: usize,
     /// Maximum number of active connections
@@ -37,7 +35,6 @@ impl Default for LimitsConfig {
     fn default() -> Self {
         Self {
             max_request_size_bytes: 1024 * 1024, // 1MB
-            max_batch_size: 100,
             max_concurrent_operations: 10,
             max_connections: 100,
             max_memory_per_operation: 10 * 1024 * 1024, // 10MB
@@ -97,17 +94,6 @@ impl LimitsEnforcer {
             return Err(LimitsError::RequestTooLarge {
                 size,
                 max_size: self.config.max_request_size_bytes,
-            });
-        }
-        Ok(())
-    }
-
-    /// Check if batch size is within limits
-    pub fn check_batch_size(&self, batch_size: usize) -> Result<(), LimitsError> {
-        if batch_size > self.config.max_batch_size {
-            return Err(LimitsError::BatchTooLarge {
-                size: batch_size,
-                max_size: self.config.max_batch_size,
             });
         }
         Ok(())
@@ -220,9 +206,6 @@ pub enum LimitsError {
     #[error("Request size {size} exceeds maximum {max_size} bytes")]
     RequestTooLarge { size: usize, max_size: usize },
 
-    #[error("Batch size {size} exceeds maximum {max_size}")]
-    BatchTooLarge { size: usize, max_size: usize },
-
     #[error("Too many concurrent operations for component {component}: {current}/{max}")]
     TooManyConcurrentOperations {
         component: String,
@@ -251,17 +234,6 @@ mod tests {
 
         // Should reject requests over limit
         assert!(enforcer.check_request_size(2 * 1024 * 1024).is_err());
-    }
-
-    #[test]
-    fn test_batch_size_limits() {
-        let enforcer = LimitsEnforcer::new(LimitsConfig::default());
-
-        // Should allow batches within limit
-        assert!(enforcer.check_batch_size(50).is_ok());
-
-        // Should reject batches over limit
-        assert!(enforcer.check_batch_size(200).is_err());
     }
 
     #[tokio::test]

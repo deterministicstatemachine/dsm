@@ -522,22 +522,6 @@ impl PolicyEnforcer {
         }
     }
 
-    pub async fn batch_enforce(
-        &self,
-        policies: &[TokenPolicy],
-        operation_type: &str,
-        context_data: &HashMap<String, Vec<u8>>,
-    ) -> Result<Vec<EnforcementResult>, DsmError> {
-        let mut out = Vec::with_capacity(policies.len());
-        for p in policies {
-            out.push(self.enforce_policy(p, operation_type, context_data).await?);
-        }
-        Ok(out)
-    }
-
-    pub fn is_batch_allowed(results: &[EnforcementResult]) -> bool {
-        results.iter().all(|r| r.allowed)
-    }
 }
 
 #[cfg(test)]

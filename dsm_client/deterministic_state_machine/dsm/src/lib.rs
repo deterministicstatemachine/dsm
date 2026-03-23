@@ -66,7 +66,6 @@
 //! - All secrets use `Zeroize` + `ZeroizeOnDrop` for memory safety
 //! - Feature-gated optional modules (perf, telemetry, bluetooth)
 
-pub mod batching;
 pub mod bilateral;
 pub mod commitments;
 pub mod common;

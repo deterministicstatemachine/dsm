@@ -91,7 +91,7 @@ pub fn build_receipt_struct(
 ) -> Option<StitchedReceiptV2> {
     use dsm::common::device_tree;
     use dsm::verification::smt_replace_witness::{
-        compute_relationship_key, hash_smt_leaf, verify_tripwire_smt_replace,
+        compute_smt_key, hash_smt_leaf, verify_tripwire_smt_replace,
     };
 
     // 1. Real genesis hash from AppState.
@@ -116,7 +116,7 @@ pub fn build_receipt_struct(
     //    siblings. The BLE offline path uses `build_bilateral_receipt_with_smt()`
     //    with real BoundedSmt roots instead. This stub path is for online receipts
     //    that don't yet track the full Per-Device SMT.
-    let rel_key = compute_relationship_key(&devid_a, &devid_b);
+    let smt_key = compute_smt_key(&devid_a, &devid_b);
     let parent_root = hash_smt_leaf(&parent_tip);
     let child_root = hash_smt_leaf(&child_tip);
 
@@ -124,13 +124,13 @@ pub fn build_receipt_struct(
     //    (zero-depth SMT: rel_key is the key, tip is the value, no siblings).
     let rel_proof_parent =
         serialize_inclusion_proof(&crate::security::bounded_smt::BoundedInclusionProof {
-            key: rel_key,
+            key: smt_key,
             value: Some(parent_tip),
             siblings: Vec::new(),
         });
     let rel_proof_child =
         serialize_inclusion_proof(&crate::security::bounded_smt::BoundedInclusionProof {
-            key: rel_key,
+            key: smt_key,
             value: Some(child_tip),
             siblings: Vec::new(),
         });
@@ -178,8 +178,6 @@ pub fn build_receipt_struct(
         &child_root,
         &parent_tip,
         &child_tip,
-        &devid_a,
-        &devid_b,
         &witness,
     )
     .ok()?
@@ -323,7 +321,7 @@ pub fn build_bilateral_receipt_with_smt(
 pub fn verify_receipt_bytes(receipt_bytes: &[u8], device_tree_root: Option<[u8; 32]>) -> bool {
     use crate::security::bounded_smt::{BoundedInclusionProof, BoundedSmt};
     use dsm::common::device_tree;
-    use dsm::verification::smt_replace_witness::compute_relationship_key;
+    use dsm::verification::smt_replace_witness::compute_smt_key;
 
     // 1. Decode the canonical protobuf into a StitchedReceiptV2.
     let receipt = match StitchedReceiptV2::from_canonical_protobuf(receipt_bytes) {
@@ -347,7 +345,7 @@ pub fn verify_receipt_bytes(receipt_bytes: &[u8], device_tree_root: Option<[u8; 
     // 3–4. §4.3#2+#4: Both counterparties share an IDENTICAL chain tip.
     //   π_rel proves h_n ∈ r_A, π'_rel proves h_{n+1} ∈ r'_A.
     //   Leaf-replace recomputation (same siblings, swap h_n→h_{n+1}) must yield r'_A.
-    let rel_key = compute_relationship_key(&receipt.devid_a, &receipt.devid_b);
+    let smt_key = compute_smt_key(&receipt.devid_a, &receipt.devid_b);
 
     let parent_proof = deserialize_inclusion_proof(&receipt.rel_proof_parent).ok();
     let child_proof = match deserialize_inclusion_proof(&receipt.rel_proof_child) {
@@ -356,7 +354,7 @@ pub fn verify_receipt_bytes(receipt_bytes: &[u8], device_tree_root: Option<[u8; 
     };
 
     // §4.3#2: π'_rel proves h_{n+1} ∈ r'_A
-    if child_proof.key != rel_key {
+    if child_proof.key != smt_key {
         return false;
     }
     if child_proof.value != Some(receipt.child_tip) {
@@ -368,7 +366,7 @@ pub fn verify_receipt_bytes(receipt_bytes: &[u8], device_tree_root: Option<[u8; 
 
     if let Some(pp) = parent_proof {
         // Full verification: parent proof exists.
-        if pp.key != rel_key {
+        if pp.key != smt_key {
             return false;
         }
         if pp.value != Some(receipt.parent_tip) {
@@ -384,7 +382,7 @@ pub fn verify_receipt_bytes(receipt_bytes: &[u8], device_tree_root: Option<[u8; 
         // Single leaf change ⇒ sibling path is identical.
         // Replace h_n with h_{n+1} using parent's siblings → must yield r'_A.
         let replace_proof = BoundedInclusionProof {
-            key: rel_key,
+            key: smt_key,
             value: Some(receipt.child_tip),
             siblings: pp.siblings,
         };

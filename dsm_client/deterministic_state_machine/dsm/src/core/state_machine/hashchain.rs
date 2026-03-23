@@ -3,9 +3,8 @@
 //! Implements the forward-only hash chain described in whitepaper Section 3.1.
 //! Each state commits to its predecessor via `H_n = BLAKE3("DSM/state-hash\0" || S_n)`,
 //! forming an append-only, tamper-evident chain. The [`HashChain`] struct manages
-//! state progression, sparse index maintenance, batch processing, and SMT updates.
+//! state progression and sparse index maintenance.
 
-use crate::core::state_machine::batch::{BatchManager, StateBatch};
 use crate::core::state_machine::transition::StateTransition;
 use crate::merkle::sparse_merkle_tree::SparseMerkleTreeImpl;
 use crate::types::error::DsmError;
@@ -103,21 +102,6 @@ impl MerkleProof {
     }
 }
 
-/// Status of a batch in the hash chain
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BatchStatus {
-    /// Batch is being built, transitions can be added
-    Pending,
-
-    /// Batch has been finalized with Merkle root, no more transitions allowed
-    Finalized,
-
-    /// Batch has been committed to the chain, state transitions have been applied
-    Committed,
-
-    /// Batch processing failed
-    Failed(String),
-}
 
 /// HashChain maintains a sequence of states that cryptographically reference each other.
 ///
@@ -136,36 +120,6 @@ pub struct HashChain {
 
     /// Sparse index checkpoints for efficient lookups
     sparse_checkpoints: HashMap<u64, State>,
-
-    /// Batch manager for efficient transaction batching
-    batch_manager: BatchManager,
-
-    /// Map of batch IDs to batches
-    batches: HashMap<u64, StateBatch>,
-
-    /// Cached transitions for batches
-    /// Key: batch_id, Value: `Vec<StateTransition>`
-    cached_transitions: HashMap<u64, Vec<StateTransition>>,
-
-    /// Next batch ID
-    next_batch_id: u64,
-
-    /// Track batch statuses separately since StateBatch doesn't have a status field
-    batch_statuses: HashMap<u64, BatchStatus>,
-
-    /// Map of batch IDs to their validation state
-    batch_validation_state: HashMap<u64, BatchValidationState>,
-}
-
-/// Represents the validation state of a batch
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct BatchValidationState {
-    /// Number of validations received
-    validation_count: u32,
-    /// Required number of validations before commitment
-    required_validations: u32,
-    /// Validation signatures received
-    validation_signatures: Vec<Vec<u8>>,
 }
 
 #[allow(dead_code)]
@@ -182,12 +136,6 @@ impl HashChain {
             states: HashMap::new(),
             current_state: None,
             sparse_checkpoints: HashMap::new(),
-            batch_manager: BatchManager::new(),
-            batches: HashMap::new(),
-            cached_transitions: HashMap::new(),
-            next_batch_id: 0,
-            batch_statuses: HashMap::new(),
-            batch_validation_state: HashMap::new(),
         }
     }
 
@@ -216,17 +164,10 @@ impl HashChain {
             let sparse_indices = &state.sparse_index.indices;
 
             if !sparse_indices.contains(&prev_state_num) {
-                // Check if this state is part of a batch
-                let state_in_batch = self.cached_transitions.iter().any(|(_, transitions)| {
-                    transitions
-                        .iter()
-                        .any(|t| t.prev_state_hash.as_ref() == Some(&state.prev_state_hash))
-                });
-
-                // Also allow genesis references (index 0) to bypass this check for test flexibility
+                // Allow genesis references (index 0) to bypass this check
                 let has_genesis_reference = sparse_indices.contains(&0);
 
-                if !state_in_batch && !has_genesis_reference {
+                if !has_genesis_reference {
                     return Err(DsmError::invalid_operation("Sparse index must include previous state reference for proper chain traversal"));
                 }
             }
@@ -506,360 +447,13 @@ impl HashChain {
             &state.hash,
         ))
     }
-
-    /// Create a new batch for transaction batching (clockless)
-    pub fn create_batch(&mut self) -> Result<u64, DsmError> {
-        // Generate a new batch ID
-        let batch_id = self.next_batch_id;
-        self.next_batch_id += 1;
-
-        // Get the previous state hash
-        let prev_hash = match &self.current_state {
-            Some(state) => state.hash,
-            None => [0u8; 32], // Default for empty chain
-        };
-
-        // Create a new batch using StateBatch (no time fields, no cached fields)
-        let batch = StateBatch {
-            batch_number: batch_id,
-            prev_state_hash: prev_hash,
-            transitions_root: [0u8; 32], // keep Vec<u8> to match callers/tests
-            transition_count: 0,
-            commitments: Vec::new(),
-            forward_commitment: None,
-        };
-
-        // Store the batch
-        self.batches.insert(batch_id, batch);
-
-        // Set initial status to Pending
-        self.batch_statuses.insert(batch_id, BatchStatus::Pending);
-
-        // Initialize empty cached transitions for this batch
-        self.cached_transitions.insert(batch_id, Vec::new());
-
-        // Initialize the batch manager's internal state machine
-        self.batch_manager
-            .start_batch(self.current_state.as_ref())?;
-
-        Ok(batch_id)
-    }
-
-    /// Get a batch's current status
-    pub fn get_batch_status(&self, batch_id: u64) -> Result<BatchStatus, DsmError> {
-        match self.batch_statuses.get(&batch_id) {
-            Some(status) => Ok(status.clone()),
-            None => Err(DsmError::not_found(
-                "BatchStatus",
-                Some(format!("Batch {batch_id} not found")),
-            )),
-        }
-    }
-
-    /// Get a batch by its number
-    pub fn get_batch(&self, batch_number: u64) -> Result<&StateBatch, DsmError> {
-        self.batches.get(&batch_number).ok_or_else(|| {
-            DsmError::not_found(
-                "Batch",
-                Some(format!("Batch number {batch_number} not found")),
-            )
-        })
-    }
-
-    /// Add a transition to a batch
-    pub fn add_transition_to_batch(
-        &mut self,
-        batch_id: u64,
-        transition: StateTransition,
-    ) -> Result<u64, DsmError> {
-        // Get the batch and ensure it's not finalized
-        let batch_status = self.batch_statuses.get(&batch_id).cloned().ok_or_else(|| {
-            DsmError::not_found("Batch", Some(format!("Batch ID {batch_id} not found")))
-        })?;
-
-        // Check if batch is already finalized
-        if batch_status != BatchStatus::Pending {
-            return Err(DsmError::invalid_operation(format!(
-                "Cannot add transition to a batch that is not in Pending state: {batch_status:?}"
-            )));
-        }
-
-        // Get the current transition index
-        let transition_index = {
-            let batch = self.batches.get(&batch_id).ok_or_else(|| {
-                DsmError::internal(
-                    "Batch exists in status map but not in batches map",
-                    Some(Box::new(std::io::Error::new(
-                        std::io::ErrorKind::NotFound,
-                        "Batch not found",
-                    ))),
-                )
-            })?;
-            batch.transition_count
-        };
-
-        // Update cached transitions
-        let cached_transitions = self.cached_transitions.entry(batch_id).or_default();
-        cached_transitions.push(transition.clone());
-
-        // Update the batch transition count
-        {
-            let batch = self.batches.get_mut(&batch_id).ok_or_else(|| {
-                DsmError::internal(
-                    "Batch exists in status map but not in batches map",
-                    Some(Box::new(std::io::Error::new(
-                        std::io::ErrorKind::NotFound,
-                        "Batch not found",
-                    ))),
-                )
-            })?;
-            batch.transition_count += 1;
-        }
-
-        // Store transition in the batch manager
-        self.batch_manager.add_transition(transition)?;
-
-        Ok(transition_index)
-    }
-
-    /// Compute Merkle root for transitions in a batch
-    pub fn compute_batch_merkle_root(&self, batch_id: u64) -> Result<[u8; 32], DsmError> {
-        // Get the transitions for this batch
-        let transitions = self.cached_transitions.get(&batch_id).ok_or_else(|| {
-            DsmError::not_found(
-                "BatchTransitions",
-                Some(format!("No cached transitions for batch {batch_id}")),
-            )
-        })?;
-
-        if transitions.is_empty() {
-            // Return zero hash for empty batch
-            return Ok([0u8; 32]);
-        }
-
-        let height = (transitions.len() as f64).log2().ceil() as u32;
-
-        // Create a Merkle tree for the transitions
-        let mut tree = SparseMerkleTree::new(height);
-
-        // Add all transitions to the tree
-        for (idx, transition) in transitions.iter().enumerate() {
-            // Use canonical wire bytes for transitions (no Serde)
-            let transition_bytes = transition.to_wire_bytes();
-
-            // Hash the transition data
-            let hash = crate::crypto::blake3::domain_hash("DSM/merkle-leaf", &transition_bytes);
-
-            // Store in the tree
-            tree.leaves.insert(idx as u64, hash);
-        }
-
-        // Build the Merkle tree and get the root hash
-        let tree_impl = SparseMerkleTreeImpl::from_sparse_merkle_tree(&tree);
-        let root_hash = tree_impl.compute_root()?;
-        tree.root = root_hash;
-        tree.compute_root()?;
-
-        Ok(*tree.root.as_bytes())
-    }
-
-    /// Internal: reconstruct a merkle tree from transitions
-    fn reconstruct_merkle_tree(
-        &self,
-        transitions: &[StateTransition],
-        height: u32,
-    ) -> Result<SparseMerkleTree, DsmError> {
-        let mut tree_impl = SparseMerkleTreeImpl::new(height);
-
-        // Add all transitions to the tree
-        for (idx, transition) in transitions.iter().enumerate() {
-            // Use canonical wire bytes for transitions (no Serde)
-            let transition_bytes = transition.to_wire_bytes();
-
-            // Insert into implementation which handles hashing and path updates
-            tree_impl.insert(idx as u64, &transition_bytes)?;
-        }
-
-        // Convert back to Serializable SparseMerkleTree
-        Ok(tree_impl.to_sparse_merkle_tree())
-    }
-
-    /// Finalize a batch by computing its Merkle root
-    pub fn finalize_batch(&mut self, batch_id: u64) -> Result<(), DsmError> {
-        // Verify batch is in pending state
-        match self.batch_statuses.get(&batch_id) {
-            Some(BatchStatus::Pending) => {}
-            Some(status) => {
-                return Err(DsmError::invalid_operation(format!(
-                    "Cannot finalize a batch that is not in Pending state: {status:?}"
-                )))
-            }
-            None => {
-                return Err(DsmError::not_found(
-                    "Batch",
-                    Some(format!("Batch {batch_id} not found")),
-                ))
-            }
-        }
-
-        // Retrieve the transitions first to avoid ownership issues
-        let transitions = {
-            if let Some(cached) = self.cached_transitions.get(&batch_id) {
-                cached.clone()
-            } else {
-                // If not cached, return an empty vector since batch has no transitions
-                Vec::new()
-            }
-        };
-
-        // If there are no transitions, just set an empty root and return
-        if transitions.is_empty() {
-            if let Some(batch) = self.batches.get_mut(&batch_id) {
-                batch.transitions_root = [0u8; 32];
-            }
-        } else {
-            // Calculate the Merkle tree height
-            let height = (transitions.len() as f64).log2().ceil() as u32;
-
-            // Build the Merkle tree
-            let tree = self.reconstruct_merkle_tree(&transitions, height)?;
-
-            // Get the computed root hash
-            let root_hash = *tree.root.as_bytes();
-
-            // Update the batch's root hash
-            if let Some(batch) = self.batches.get_mut(&batch_id) {
-                batch.transitions_root = root_hash;
-            }
-        }
-
-        // Update batch status to Finalized
-        self.batch_statuses.insert(batch_id, BatchStatus::Finalized);
-
-        Ok(())
-    }
-
-    /// Commit a batch to the hash chain, applying all transitions
-    ///
-    /// This takes a finalized batch and applies all its transitions to create
-    /// new states in the chain, effectively committing the entire batch atomically.
-    /// As described in the whitepaper Section 3.1, this maintains the straight hash chain
-    /// verification system while supporting efficient batch operations.
-    pub fn commit_batch(&mut self, batch_id: u64) -> Result<(), DsmError> {
-        // Verify batch exists and validate state transition
-        self.transition_batch_state(batch_id, BatchStatus::Committed)?;
-
-        // Get cached transitions for this batch
-        let transitions = self
-            .cached_transitions
-            .get(&batch_id)
-            .cloned()
-            .ok_or_else(|| {
-                DsmError::not_found(
-                    "BatchTransitions",
-                    Some(format!("No cached transitions for batch {batch_id}")),
-                )
-            })?;
-
-        // Get the latest state to start applying transitions from
-        let current_state = self.get_latest_state()?;
-        let mut new_state = current_state.clone();
-
-        // Apply each transition in the batch to create new states
-        for transition in transitions {
-            // Apply transition to create new state
-            // The apply function signature is project-local; keep as used in your tree.
-            let op = transition.operation.clone();
-            let new_entropy = transition.new_entropy.clone().unwrap_or_default();
-
-            new_state = crate::core::state_machine::transition::create_next_state(
-                &new_state,
-                op,
-                &new_entropy,
-                &crate::core::state_machine::transition::VerificationType::Standard,
-                false,
-            )?;
-
-            // Add the new state to the chain
-            self.add_state(new_state.clone())?;
-        }
-
-        Ok(())
-    }
-
-    /// Validate a batch and update its state
-    pub fn validate_batch(
-        &mut self,
-        batch_id: u64,
-        validator_signature: Vec<u8>,
-    ) -> Result<(), DsmError> {
-        // Get current batch status
-        let status = self.get_batch_status(batch_id)?;
-
-        if status != BatchStatus::Finalized {
-            return Err(DsmError::invalid_operation(format!(
-                "Cannot validate batch that is not Finalized: {status:?}"
-            )));
-        }
-
-        // Get or create validation state
-        let validation_state =
-            self.batch_validation_state
-                .entry(batch_id)
-                .or_insert(BatchValidationState {
-                    validation_count: 0,
-                    required_validations: 2, // Configurable requirement
-                    validation_signatures: Vec::new(),
-                });
-
-        // Add validation
-        validation_state
-            .validation_signatures
-            .push(validator_signature);
-        validation_state.validation_count += 1;
-
-        // Check if enough validations received
-        if validation_state.validation_count >= validation_state.required_validations {
-            // Update status to Committed when validation threshold met
-            self.commit_batch(batch_id)?;
-        }
-
-        Ok(())
-    }
-
-    /// Internal helper to transition batch state
-    fn transition_batch_state(
-        &mut self,
-        batch_id: u64,
-        new_status: BatchStatus,
-    ) -> Result<(), DsmError> {
-        // Get current status
-        let current_status = self.get_batch_status(batch_id)?;
-
-        // Validate state transition
-        match (current_status, &new_status) {
-            // Valid transitions
-            (BatchStatus::Pending, BatchStatus::Finalized) => Ok(()),
-            (BatchStatus::Finalized, BatchStatus::Committed) => Ok(()),
-
-            // Invalid transitions
-            (current, new) => Err(DsmError::invalid_operation(format!(
-                "Invalid batch state transition from {current:?} to {new:?}"
-            ))),
-        }?;
-
-        // Update status
-        self.batch_statuses.insert(batch_id, new_status);
-        Ok(())
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::state_machine::transition::StateTransition;
-    use crate::types::state_types::State;
     use crate::core::state_machine::utils::create_test_transition as utils_create_test_transition;
+    use crate::types::state_types::State;
 
     fn create_test_state(state_number: u64, prev_hash: [u8; 32]) -> State {
         use crate::types::state_types::DeviceInfo;
@@ -867,46 +461,26 @@ mod tests {
         let device_info = DeviceInfo::new(device_id, vec![1, 2, 3, 4]);
 
         if state_number == 0 {
-            // For genesis state, use the standard genesis creation
             let mut state = State::new_genesis(prev_hash, device_info);
-            // Compute hash for genesis state since it won't be modified
             state.hash = state.compute_hash().unwrap_or([0; 32]);
             state
         } else {
-            // For non-genesis states, create a normal state but don't compute hash yet
-            // Tests will modify sparse index and then compute hash
             let mut state = State::new_genesis(
-                [
-                    1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                    0, 0, 0, 0, 0, 0,
-                ],
+                [1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
                 device_info,
             );
             state.state_number = state_number;
             state.id = format!("state_{}", state_number);
             state.prev_state_hash = prev_hash;
-
-            // Don't compute hash here - let tests do it after modifications
             state
         }
     }
-    // Use the create_test_transition function from utils.rs, but we need a compatible wrapper
-    fn create_test_transition(from_state: &State, to_state: &State) -> StateTransition {
-        let mut transition = utils_create_test_transition();
-        let _ = to_state;
-        transition.prev_state_hash = Some(from_state.hash);
-        transition
-    }
-
     #[test]
     fn test_new_hash_chain() {
         let chain = HashChain::new();
 
         assert_eq!(chain.states.len(), 0);
         assert!(chain.current_state.is_none());
-        assert_eq!(chain.next_batch_id, 0);
-        assert!(chain.batches.is_empty());
-        assert!(chain.cached_transitions.is_empty());
     }
 
     #[test]
@@ -1158,238 +732,6 @@ mod tests {
     }
 
     #[test]
-    fn test_create_batch() -> Result<(), DsmError> {
-        let mut chain = HashChain::new();
-
-        let batch_id = chain.create_batch()?;
-        assert_eq!(batch_id, 0);
-        assert_eq!(chain.next_batch_id, 1);
-
-        let status = chain.get_batch_status(batch_id)?;
-        assert_eq!(status, BatchStatus::Pending);
-
-        let batch = chain.get_batch(batch_id)?;
-        assert_eq!(batch.batch_number, batch_id);
-        assert_eq!(batch.transition_count, 0);
-        Ok(())
-    }
-
-    #[test]
-    fn test_add_transition_to_batch() -> Result<(), DsmError> {
-        let mut chain = HashChain::new();
-
-        // Setup states
-        let genesis = create_test_state(0, [0; 32]);
-        let mut state1 = create_test_state(1, genesis.hash);
-        state1.sparse_index.indices = vec![0];
-        state1.hash = state1.compute_hash()?; // Compute hash after modifications
-
-        chain.add_state(genesis.clone())?;
-
-        let batch_id = chain.create_batch()?;
-        let transition = create_test_transition(&genesis, &state1);
-
-        let transition_index = chain.add_transition_to_batch(batch_id, transition)?;
-        assert_eq!(transition_index, 0);
-
-        let batch = chain.get_batch(batch_id)?;
-        assert_eq!(batch.transition_count, 1);
-
-        let cached = chain.cached_transitions.get(&batch_id).ok_or_else(|| {
-            DsmError::internal(
-                "Missing cached transitions".to_string(),
-                None::<std::convert::Infallible>,
-            )
-        })?;
-        assert_eq!(cached.len(), 1);
-        Ok(())
-    }
-
-    #[test]
-    fn test_add_transition_to_finalized_batch() -> Result<(), DsmError> {
-        let mut chain = HashChain::new();
-
-        let genesis = create_test_state(0, [0; 32]);
-        let mut state1 = create_test_state(1, genesis.hash);
-        state1.sparse_index.indices = vec![0];
-        state1.hash = state1.compute_hash()?; // Compute hash after modifications
-
-        chain.add_state(genesis.clone())?;
-
-        let batch_id = chain.create_batch()?;
-        chain.finalize_batch(batch_id)?;
-
-        let transition = create_test_transition(&genesis, &state1);
-        let result = chain.add_transition_to_batch(batch_id, transition);
-
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("not in Pending state"));
-        Ok(())
-    }
-
-    #[test]
-    fn test_compute_batch_merkle_root_empty() -> Result<(), DsmError> {
-        let mut chain = HashChain::new();
-        let batch_id = chain.create_batch()?;
-
-        let root = chain.compute_batch_merkle_root(batch_id)?;
-        assert_eq!(root, [0u8; 32]);
-        Ok(())
-    }
-
-    #[test]
-    fn test_finalize_batch() -> Result<(), DsmError> {
-        let mut chain = HashChain::new();
-
-        let genesis = create_test_state(0, [0; 32]);
-        let mut state1 = create_test_state(1, genesis.hash);
-        state1.sparse_index.indices = vec![0];
-        state1.hash = state1.compute_hash()?; // Compute hash after modifications
-
-        chain.add_state(genesis.clone())?;
-
-        let batch_id = chain.create_batch()?;
-        let transition = create_test_transition(&genesis, &state1);
-
-        chain.add_transition_to_batch(batch_id, transition)?;
-        chain.finalize_batch(batch_id)?;
-
-        let status = chain.get_batch_status(batch_id)?;
-        assert_eq!(status, BatchStatus::Finalized);
-
-        let batch = chain.get_batch(batch_id)?;
-        assert_ne!(batch.transitions_root, [0; 32]);
-        Ok(())
-    }
-
-    #[test]
-    fn test_finalize_empty_batch() -> Result<(), DsmError> {
-        let mut chain = HashChain::new();
-        let batch_id = chain.create_batch()?;
-
-        chain.finalize_batch(batch_id)?;
-
-        let status = chain.get_batch_status(batch_id)?;
-        assert_eq!(status, BatchStatus::Finalized);
-
-        let batch = chain.get_batch(batch_id)?;
-        assert_eq!(batch.transitions_root, [0; 32]);
-        Ok(())
-    }
-
-    #[test]
-    fn test_validate_batch() -> Result<(), DsmError> {
-        let mut chain = HashChain::new();
-
-        // Add a genesis state so commit_batch has a state to work from
-        let genesis = create_test_state(0, [0; 32]);
-        chain.add_state(genesis)?;
-
-        let batch_id = chain.create_batch()?;
-
-        chain.finalize_batch(batch_id)?;
-
-        let signature1 = vec![1, 2, 3];
-        let signature2 = vec![4, 5, 6];
-
-        // First validation
-        chain.validate_batch(batch_id, signature1)?;
-        let status = chain.get_batch_status(batch_id)?;
-        assert_eq!(status, BatchStatus::Finalized); // Still finalized, need more validations
-
-        // Second validation should commit
-        chain.validate_batch(batch_id, signature2)?;
-        let status = chain.get_batch_status(batch_id)?;
-        assert_eq!(status, BatchStatus::Committed);
-        Ok(())
-    }
-
-    #[test]
-    fn test_validate_non_finalized_batch() -> Result<(), DsmError> {
-        let mut chain = HashChain::new();
-        let batch_id = chain.create_batch()?;
-
-        let signature = vec![1, 2, 3];
-        let result = chain.validate_batch(batch_id, signature);
-
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not Finalized"));
-        Ok(())
-    }
-
-    #[test]
-    fn test_merkle_proof_generation_and_verification() -> Result<(), DsmError> {
-        // Create a simple sparse merkle tree
-        let mut tree = SparseMerkleTree::new(3);
-
-        // Add some test data
-        let test_data = b"test_leaf_data";
-        let leaf_hash = blake3::hash(test_data);
-        tree.leaves.insert(0, leaf_hash);
-
-        // Generate proof
-        let proof = MerkleProof::generate(&tree, 0)?;
-
-        assert_eq!(proof.index, 0);
-        assert_eq!(proof.height, 3);
-        // The leaf_data should contain the hash of the test data, not the raw data
-        assert_eq!(proof.leaf_data, leaf_hash.as_bytes().to_vec());
-
-        // For verification, we need the root hash
-        // Production verify() uses domain-separated hashing, so we must match here
-        let mut computed_hash =
-            *crate::crypto::blake3::domain_hash("DSM/merkle-leaf", &proof.leaf_data).as_bytes();
-        for level in 0..proof.siblings.len() {
-            let bit = (proof.index >> level) & 1;
-            let mut combined = Vec::with_capacity(64);
-
-            if bit == 0 {
-                combined.extend_from_slice(&computed_hash);
-                combined.extend_from_slice(&proof.siblings[level]);
-            } else {
-                combined.extend_from_slice(&proof.siblings[level]);
-                combined.extend_from_slice(&computed_hash);
-            }
-
-            computed_hash =
-                *crate::crypto::blake3::domain_hash("DSM/merkle-node", &combined).as_bytes();
-        }
-
-        // Verify the proof
-        assert!(proof.verify(&computed_hash));
-
-        // Test with wrong root
-        let wrong_root = [99u8; 32];
-        assert!(!proof.verify(&wrong_root));
-        Ok(())
-    }
-
-    #[test]
-    fn test_batch_status_transitions() -> Result<(), DsmError> {
-        let mut chain = HashChain::new();
-
-        // Add a genesis state so commit_batch has a state to work from
-        let genesis = create_test_state(0, [0; 32]);
-        chain.add_state(genesis)?;
-
-        let batch_id = chain.create_batch()?;
-
-        // Test valid transition: Pending -> Finalized
-        assert_eq!(chain.get_batch_status(batch_id)?, BatchStatus::Pending);
-        chain.finalize_batch(batch_id)?;
-        assert_eq!(chain.get_batch_status(batch_id)?, BatchStatus::Finalized);
-
-        // Test valid transition: Finalized -> Committed (via validation)
-        let signature1 = vec![1, 2, 3];
-        let signature2 = vec![4, 5, 6];
-        chain.validate_batch(batch_id, signature1)?;
-        chain.validate_batch(batch_id, signature2)?;
-        assert_eq!(chain.get_batch_status(batch_id)?, BatchStatus::Committed);
-        Ok(())
-    }
 
     #[test]
     fn test_get_latest_state_empty_chain() {
@@ -1415,22 +757,5 @@ mod tests {
         assert_eq!(latest.state_number, 1);
         assert_eq!(latest.id, state1.id);
         Ok(())
-    }
-
-    #[test]
-    fn test_nonexistent_batch_operations() {
-        let mut chain = HashChain::new();
-
-        // Test getting non-existent batch
-        let result = chain.get_batch(999);
-        assert!(result.is_err());
-
-        // Test getting status of non-existent batch
-        let result = chain.get_batch_status(999);
-        assert!(result.is_err());
-
-        // Test finalizing non-existent batch
-        let result = chain.finalize_batch(999);
-        assert!(result.is_err());
     }
 }
