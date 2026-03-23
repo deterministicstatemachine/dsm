@@ -5,8 +5,6 @@
 //! forming an append-only, tamper-evident chain. The [`HashChain`] struct manages
 //! state progression and sparse index maintenance.
 
-use crate::core::state_machine::transition::StateTransition;
-use crate::merkle::sparse_merkle_tree::SparseMerkleTreeImpl;
 use crate::types::error::DsmError;
 use crate::types::state_types::{SparseMerkleTree, State};
 use constant_time_eq;
@@ -452,7 +450,6 @@ impl HashChain {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::state_machine::utils::create_test_transition as utils_create_test_transition;
     use crate::types::state_types::State;
 
     fn create_test_state(state_number: u64, prev_hash: [u8; 32]) -> State {
@@ -730,8 +727,6 @@ mod tests {
         assert!(checkpoints.contains_key(&4));
         Ok(())
     }
-
-    #[test]
 
     #[test]
     fn test_get_latest_state_empty_chain() {
