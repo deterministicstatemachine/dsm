@@ -3,7 +3,7 @@
 //! This module implements the sparse index functionality described in whitepaper Section 10.2.
 //! It provides efficient state lookups through checkpoint storage and management.
 
-use crate::merkle::sparse_merkle_tree::{self, SparseMerkleTreeImpl};
+use crate::merkle::sparse_merkle_tree::SparseMerkleTreeImpl;
 use crate::types::error::DsmError;
 use crate::types::state_types::State;
 use std::collections::HashMap;
@@ -51,7 +51,7 @@ impl SparseIndexManager {
         max_checkpoint_age: Option<u64>,
     ) -> Self {
         let merkle_tree = if with_merkle_tree {
-            Some(Arc::new(RwLock::new(sparse_merkle_tree::create_tree(
+            Some(Arc::new(RwLock::new(SparseMerkleTreeImpl::new(
                 merkle_tree_height.unwrap_or(20),
             ))))
         } else {
@@ -289,7 +289,7 @@ impl SparseIndexManager {
             let state_hash = state.hash()?;
             let root_hash = tree.root();
 
-            sparse_merkle_tree::verify_proof(*root_hash, &state_hash, proof)
+            crate::merkle::sparse_merkle_tree::verify_proof(*root_hash, &state_hash, proof)
         } else {
             Ok(false)
         }

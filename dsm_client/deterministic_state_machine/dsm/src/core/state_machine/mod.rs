@@ -9,8 +9,6 @@
 //! The state machine ensures that all transitions maintain the system's security properties
 //! as described in the whitepaper.
 
-pub mod batch;
-pub mod batch_proof;
 pub mod bilateral;
 pub mod checkpoint;
 pub mod hashchain;
@@ -40,7 +38,6 @@ pub use random_walk::algorithms::{
     Position, RandomWalkConfig,
 };
 
-pub use batch::{BatchBuilder, BatchCommitment, BatchManager, StateBatch};
 pub use hashchain::HashChain;
 pub use relationship::{RelationshipManager, RelationshipStatePair};
 pub use transition::{create_transition, generate_position_sequence, StateTransition};

@@ -232,23 +232,7 @@ impl SparseMerkleTreeImpl {
     }
 }
 
-// Module-level convenience functions (used by batch, batch_proof, and index modules).
-pub fn create_tree(height: u32) -> SparseMerkleTreeImpl {
-    SparseMerkleTreeImpl::new(height)
-}
-
-pub fn insert(tree: &mut SparseMerkleTreeImpl, index: u64, value: &[u8]) -> Result<(), DsmError> {
-    tree.insert(index, value)
-}
-
-pub fn get_root(tree: &SparseMerkleTreeImpl) -> Hash {
-    *tree.root()
-}
-
-pub fn generate_proof(tree: &SparseMerkleTreeImpl, index: u64) -> Result<MerkleProof, DsmError> {
-    tree.get_proof(index)
-}
-
+/// Verify an SMT inclusion proof against a known root (free function, no tree instance needed).
 pub fn verify_proof(root: Hash, leaf_hash: &[u8], proof: &MerkleProof) -> Result<bool, DsmError> {
     let mut current_hash = if leaf_hash.len() == 32 {
         let mut arr = [0u8; 32];
