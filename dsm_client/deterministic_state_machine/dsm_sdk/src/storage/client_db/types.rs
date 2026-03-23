@@ -176,6 +176,23 @@ pub struct SystemPeerRecord {
     pub metadata: HashMap<String, Vec<u8>>,
 }
 
+/// Persisted protocol-actor transition under a stable `SystemPeerRecord`.
+///
+/// These events track sovereign DLV/faucet/protocol progression and are never
+/// interpreted as bilateral relationship receipts or contact chain tips.
+#[derive(Debug, Clone)]
+pub struct SystemPeerEvent {
+    pub peer_key: String,
+    pub peer_type: SystemPeerType,
+    pub parent_tip: Vec<u8>,
+    pub child_tip: Vec<u8>,
+    pub transition_digest: Vec<u8>,
+    pub source_state_hash: Vec<u8>,
+    pub source_state_number: u64,
+    pub payload_bytes: Vec<u8>,
+    pub created_at: u64,
+}
+
 /// Type of system peer for categorization
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SystemPeerType {
@@ -221,6 +238,8 @@ pub struct TransactionRecord {
     pub chain_height: u64,
     pub step_index: u64,
     pub commitment_hash: Option<Vec<u8>>,
+    /// Bilateral stitched receipt bytes only. Protocol-actor transitions must
+    /// use metadata or dedicated protocol event rows instead.
     pub proof_data: Option<Vec<u8>>,
     pub metadata: HashMap<String, Vec<u8>>,
     pub created_at: u64,

@@ -15,7 +15,7 @@ use dsm::{
     types::{error::DsmError, state_types::State},
     vault::{DLVManager, FulfillmentMechanism, FulfillmentProof, VaultState},
 };
-use crate::sdk::receipts::derive_stitched_receipt_sigma;
+use crate::sdk::receipts::{compute_protocol_transition_commitment, encode_protocol_transition_payload};
 
 /// High-level SDK for DLV-enhanced pre-commitments
 pub struct DlvPreCommitmentSdk {
@@ -351,12 +351,13 @@ impl DlvPreCommitmentSdk {
                     raw.len()
                 )));
             }
-            None => Some(derive_stitched_receipt_sigma(&[
-                b"dlv.precommit.execute",
-                fork_id.as_bytes(),
-                st,
-                mp,
-            ])),
+            None => {
+                let payload = encode_protocol_transition_payload(
+                    b"dlv.precommit.execute",
+                    &[fork_id.as_bytes(), st, mp],
+                );
+                Some(compute_protocol_transition_commitment(&payload))
+            }
         };
 
         Ok(FulfillmentProof::PaymentProof {

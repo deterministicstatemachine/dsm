@@ -155,12 +155,12 @@ fn build_canonical_settled_state(ctx: &BilateralSettlementContext) -> Result<Opt
         return Ok(None);
     };
 
-    let Some(transfer) = parse_transfer(&ctx.operation_bytes) else {
-        return Ok(None);
-    };
-    if transfer.amount == 0 {
-        return Ok(None);
+    let transfer_opt = parse_transfer(&ctx.operation_bytes);
+    if transfer_opt.as_ref().map(|t| t.amount == 0).unwrap_or(true) {
+        return Ok(ctx.canonical_state.clone());
     }
+
+    let transfer = transfer_opt.unwrap();
 
     let prior_state_opt = latest_archived_state(&ctx.local_device_id)?;
     if let Some(ref prior_state) = prior_state_opt {
@@ -223,6 +223,35 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
         let (transfer_amount, token_id_opt) = parse_transfer_fields(&ctx.operation_bytes);
         let token_id_str = token_id_opt.clone().unwrap_or_default();
         let canonical_state = build_canonical_settled_state(&ctx)?;
+
+        // Log the canonical state for debugging
+        match &canonical_state {
+            Some(state) => {
+                let era_balance = state.token_balances.values().find_map(|b| {
+                    if b.value() > 0 { Some(b.value()) } else { None }
+                }).unwrap_or(0);
+                log::info!(
+                    "[BILATERAL][settle] canonical_state=Some hash={} state_number={} era_balance={}",
+                    encode_base32_crockford(&state.hash),
+                    state.state_number,
+                    era_balance
+                );
+            }
+            None => {
+                log::warn!("[BILATERAL][settle] canonical_state=None");
+            }
+        }
+
+        // Archive the settled state to BCR so balance.list reflects the updated balances
+        if let Some(ref settled_state) = canonical_state {
+            crate::storage::client_db::store_bcr_state(settled_state, true)
+                .map_err(|e| format!("archive settled state failed: {e}"))?;
+            log::info!(
+                "[BILATERAL][settle] archived settled state hash={} state_number={}",
+                encode_base32_crockford(&settled_state.hash),
+                settled_state.state_number
+            );
+        }
 
         let local_txt = encode_base32_crockford(&ctx.local_device_id);
         let counterparty_txt = encode_base32_crockford(&ctx.counterparty_device_id);

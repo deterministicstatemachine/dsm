@@ -429,6 +429,21 @@ impl AppRouterImpl {
                 }
                 log::debug!("[balance.list] query handler entered");
 
+                // Log the restored BCR state for debugging
+                if let Some(cs) = self.core_sdk.get_current_state().ok().as_ref() {
+                    let era_balance = cs.token_balances.values().find_map(|b| {
+                        if b.value() > 0 { Some(b.value()) } else { None }
+                    }).unwrap_or(0);
+                    log::info!(
+                        "[balance.list] restored BCR state hash={} state_number={} era_balance={}",
+                        crate::util::text_id::encode_base32_crockford(&cs.hash),
+                        cs.state_number,
+                        era_balance
+                    );
+                } else {
+                    log::warn!("[balance.list] no current state after restore");
+                }
+
                 // Enumerate token balances from the canonical token cache/projection path.
                 let mut items: Vec<generated::BalanceGetResponse> = Vec::new();
 
