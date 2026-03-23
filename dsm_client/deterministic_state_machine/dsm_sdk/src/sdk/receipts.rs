@@ -18,8 +18,11 @@ pub fn derive_relationship_key(counterparty_pk: &[u8]) -> [u8; 32] {
     dsm::crypto::blake3::domain_hash_bytes("DSM/relationship-key", counterparty_pk)
 }
 
-/// Verify a stitched receipt with signatures
-/// Wrapper around the canonical verification that adds monotonic counter checking
+/// Verify a stitched receipt with signatures.
+///
+/// Delegates to the canonical core verifier. Replay protection is enforced
+/// by the `ParentConsumptionTracker` (one-time parent-tip lock per relationship),
+/// NOT by sequence numbers — the protocol is clockless (§4.3).
 #[allow(clippy::too_many_arguments)]
 pub fn verify_stitched_receipt(
     receipt: &StitchedReceiptV2,
@@ -27,20 +30,8 @@ pub fn verify_stitched_receipt(
     sig_b: &[u8],
     pk_a: &[u8],
     pk_b: &[u8],
-    t_local: u64,
     guard: Option<&mut ReceiptGuard>,
 ) -> Result<(), DsmError> {
-    // Monotonic counter check (application-level logic)
-    // Note: The receipt's child_tip encodes the sequence number
-    // For bilateral flows, we extract and verify monotonic progression
-    // This prevents replay attacks at the application layer
-    let receipt_seq = extract_sequence_from_tip(&receipt.child_tip);
-    if receipt_seq <= t_local {
-        return Err(DsmError::invalid_operation(
-            "Non-incrementing receipt counter",
-        ));
-    }
-
     // Create verification context
     let ctx = ReceiptVerificationContext::new(
         receipt.genesis,
@@ -79,22 +70,13 @@ pub fn verify_stitched_receipt(
     }
 }
 
-/// Extract sequence number from tip hash
-/// In practice, tips encode transaction data including sequence numbers
-/// For now, we use a simple extraction (would be replaced with proper decoding)
-fn extract_sequence_from_tip(tip: &[u8; 32]) -> u64 {
-    let mut bytes = [0u8; 8];
-    bytes.copy_from_slice(&tip[0..8]);
-    u64::from_le_bytes(bytes)
-}
-
 /// Build a complete `StitchedReceiptV2` struct with real cryptographic material.
 ///
 /// **This is the SINGLE authoritative receipt constructor for the entire SDK.**
 /// All receipt construction — bilateral, unilateral, faucet, BLE, online —
 /// MUST go through this function. It computes:
 /// - Real genesis hash from `AppState`
-/// - Real parent/child SMT roots via `hash_smt_leaf()`
+/// - Stub parent/child SMT roots via `hash_smt_leaf()` (zero-depth, leaf=root)
 /// - Parseable `SerializableMerkleProof` envelopes for relation proofs
 /// - Canonical `DevTreeProof` for device binding
 /// - Zero-depth SMT replace witness (verified against tripwire)
@@ -129,10 +111,14 @@ pub fn build_receipt_struct(
         g
     };
 
-    // 2. Compute SMT roots from relationship key + tips.
+    // 2. STUB: Compute degenerate single-leaf SMT roots (leaf hash = root).
+    //    This creates a zero-depth tree where the leaf IS the root, with no
+    //    siblings. The BLE offline path uses `build_bilateral_receipt_with_smt()`
+    //    with real BoundedSmt roots instead. This stub path is for online receipts
+    //    that don't yet track the full Per-Device SMT.
     let rel_key = compute_relationship_key(&devid_a, &devid_b);
-    let parent_root = hash_smt_leaf(&rel_key, &parent_tip);
-    let child_root = hash_smt_leaf(&rel_key, &child_tip);
+    let parent_root = hash_smt_leaf(&parent_tip);
+    let child_root = hash_smt_leaf(&child_tip);
 
     // 3. Build parseable relation proofs in BoundedInclusionProof format
     //    (zero-depth SMT: rel_key is the key, tip is the value, no siblings).

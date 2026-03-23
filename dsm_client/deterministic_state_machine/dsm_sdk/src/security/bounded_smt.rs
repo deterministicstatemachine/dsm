@@ -3,8 +3,10 @@
 //!
 //! 256-bit sparse Merkle tree with bounded leaf count. Each leaf represents
 //! one bilateral relationship's chain tip `h_n^{A↔B}`. Leaves are stored
-//! in a HashMap (never evicted for proof correctness); internal nodes are
-//! recomputed on demand from leaves + precomputed default hashes.
+//! in a HashMap; when the leaf count exceeds `max_leaves`, the oldest leaf
+//! is evicted (FIFO). Eviction changes the root — callers must ensure
+//! proofs are generated before any eviction that would affect them.
+//! Internal nodes are recomputed on demand from leaves + precomputed default hashes.
 //!
 //! Domain separation matches core (`dsm/src/merkle/sparse_merkle_tree.rs`):
 //!   leaf:     `BLAKE3("DSM/smt-leaf\0" || value)`
@@ -67,7 +69,11 @@ impl BoundedSmt {
         }
     }
 
-    /// Domain-separated empty leaf value, matching core's `empty_leaf()`.
+    /// Domain-separated empty leaf sentinel for this 256-bit SMT.
+    ///
+    /// NOTE: This is NOT the same as core's `empty_leaf()` (`[0u8; 32]`).
+    /// Core SMT uses raw zero bytes; this tree uses a domain-separated hash.
+    /// The two trees serve different purposes and do not interoperate.
     fn empty_leaf_value() -> [u8; 32] {
         let mut hasher = dsm_domain_hasher("DSM/smt-empty-leaf");
         hasher.update(b"DSM_EMPTY_LEAF_V2");

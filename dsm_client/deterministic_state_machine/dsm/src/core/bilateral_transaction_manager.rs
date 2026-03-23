@@ -232,7 +232,7 @@ impl BilateralPreCommitment {
     }
     fn signing_message(&self) -> Result<Vec<u8>, DsmError> {
         let mut m = Vec::new();
-        m.extend_from_slice(b"DSM_BILATERAL_PRE_COMMITMENT\0");
+        m.extend_from_slice(b"DSM/bilateral-pre-commitment\0");
 
         // Canonical LP delimiting for variable-length fields.
         // NOTE: Vec encoding must match canonical LP: u32-le length prefix + bytes.
