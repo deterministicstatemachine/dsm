@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)]
 //! # SMT Tripwire Fork-Exclusion Theorem Tests
 //!
 //! Proves that the tripwire theorem (§6.1) holds in the implementation:

@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)]
 //! Frozen golden-vector tests for SMT (Sparse Merkle Tree) primitives.
 //!
 //! Every `GOLDEN_*` constant was computed once from the real BLAKE3 domain-separated
