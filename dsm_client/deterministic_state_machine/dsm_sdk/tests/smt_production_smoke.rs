@@ -257,8 +257,8 @@ async fn smoke_multi_relationship_3_peers() {
 
     let mut a = TestDevice::from_seed(0x10);
     let mut b = TestDevice::from_seed(0x20);
-    let mut c = TestDevice::from_seed(0x30);
-    let mut d = TestDevice::from_seed(0x40);
+    let c = TestDevice::from_seed(0x30);
+    let d = TestDevice::from_seed(0x40);
 
     let key_ab = compute_smt_key(&a.device_id, &b.device_id);
     let key_ac = compute_smt_key(&a.device_id, &c.device_id);
@@ -476,7 +476,7 @@ async fn smoke_tripwire_witness_roundtrip() {
     let b = TestDevice::from_seed(0x20);
 
     let h_0 = compute_h0(&a, &b);
-    let rel_key = compute_smt_key(&a.device_id, &b.device_id);
+    let _rel_key = compute_smt_key(&a.device_id, &b.device_id);
 
     // Compute h_1
     let op = Operation::Transfer {

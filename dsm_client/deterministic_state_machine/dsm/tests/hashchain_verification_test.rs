@@ -2,7 +2,7 @@
 //! from the whitepaper, specifically the formula: S(n+1).prev_hash = H(S(n))
 
 use dsm::core::state_machine::hashchain::HashChain;
-use dsm::crypto::sphincs::{generate_sphincs_keypair, sphincs_sign};
+use dsm::crypto::sphincs::generate_sphincs_keypair;
 use dsm::types::error::DsmError;
 use dsm::types::operations::Operation;
 use dsm::types::state_types::{DeviceInfo, SparseIndex, State, StateParams};
@@ -13,7 +13,7 @@ fn test_hash_chain_mathematical_model() -> Result<(), DsmError> {
     let mut chain = HashChain::new();
 
     // Create a device info with real SPHINCS+ keypair for signature verification
-    let (pk, sk) =
+    let (pk, _sk) =
         generate_sphincs_keypair().unwrap_or_else(|e| panic!("keypair generation failed: {e}"));
     let device_info = DeviceInfo::new(*blake3::hash(b"test_device").as_bytes(), pk);
 

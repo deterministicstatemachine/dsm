@@ -166,7 +166,7 @@ fn theorem2_divergent_roots_detected() {
     let alice = TestDevice::from_seed(10);
     let bob = TestDevice::from_seed(20);
 
-    let rel_key = compute_smt_key(&alice.device_id, &bob.device_id);
+    let _rel_key = compute_smt_key(&alice.device_id, &bob.device_id);
 
     // Parent tip and child tip.
     let parent_tip = domain_hash_bytes("DSM/test-tip", &[0x01; 32]);
@@ -287,8 +287,8 @@ fn theorem2_transitive_tripwire_web() {
 
     // Bob's SMT must commit to BOTH relationships.
     // Build a 2-level tree where ab is left, bc is right.
-    let rel_key_ab = compute_smt_key(&alice.device_id, &bob.device_id);
-    let rel_key_bc = compute_smt_key(&bob.device_id, &charlie.device_id);
+    let _rel_key_ab = compute_smt_key(&alice.device_id, &bob.device_id);
+    let _rel_key_bc = compute_smt_key(&bob.device_id, &charlie.device_id);
     let leaf_ab = hash_smt_leaf(&h_1_ab);
     let leaf_bc = hash_smt_leaf(&h_1_bc);
     let bob_root = hash_smt_node(&leaf_ab, &leaf_bc);
@@ -453,7 +453,7 @@ fn predicate_5_smt_replace_recomputation() {
     let alice = TestDevice::from_seed(70);
     let bob = TestDevice::from_seed(71);
 
-    let rel_key = compute_smt_key(&alice.device_id, &bob.device_id);
+    let _rel_key = compute_smt_key(&alice.device_id, &bob.device_id);
 
     let h_n = domain_hash_bytes("DSM/test-tip", &[0xA0; 32]);
     let h_n1 = domain_hash_bytes("DSM/test-tip", &[0xA1; 32]);
