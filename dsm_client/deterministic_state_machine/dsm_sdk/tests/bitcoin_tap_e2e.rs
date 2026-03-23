@@ -651,6 +651,61 @@ async fn wrong_preimage_rejected() {
 }
 
 #[tokio::test]
+async fn legacy_receipt_commit_domain_is_rejected_for_draw_tap() {
+    init_test_db();
+    let bridge = BitcoinTapSdk::new(Arc::new(DLVManager::new()));
+    let keys = test_keys();
+    let state = test_state(1);
+
+    let initiation = bridge
+        .open_tap(
+            100_000,
+            &[0x02; 33],
+            100,
+            (&keys.sphincs_pk, &keys.sphincs_sk),
+            &state,
+            dsm::bitcoin::types::BitcoinNetwork::Signet,
+            &keys.kyber_pk,
+        )
+        .await
+        .unwrap();
+
+    let preimage = bridge
+        .get_claim_preimage(&initiation.vault_op_id)
+        .await
+        .unwrap();
+
+    let htlc_spk = htlc_p2wsh_script_pubkey(initiation.htlc_script.as_ref().unwrap());
+    let (mock_txid, mock_raw_tx, mock_spv_bytes, mock_header) = mock_spv_data(100_000, &htlc_spk);
+    let payload = b"legacy-receipt-commit-payload".to_vec();
+    let legacy_commitment = dsm::crypto::blake3::domain_hash_bytes("DSM/receipt-commit", &payload);
+
+    let result = bridge
+        .draw_tap(
+            &initiation.vault_op_id,
+            &preimage,
+            mock_txid,
+            &mock_raw_tx,
+            &mock_spv_bytes,
+            mock_header,
+            &mock_header_chain((DBTC_MIN_CONFIRMATIONS as usize).saturating_sub(1)),
+            &keys.kyber_pk,
+            &keys.sphincs_pk,
+            [0; 32],
+            &state,
+            Some(payload),
+            Some(legacy_commitment),
+        )
+        .await;
+
+    assert!(result.is_err());
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("protocol transition commitment mismatch"));
+}
+
+#[tokio::test]
 async fn list_vault_ops_tracks_all() {
     let bridge = BitcoinTapSdk::new(Arc::new(DLVManager::new()));
     let keys = test_keys();

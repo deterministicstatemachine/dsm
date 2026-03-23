@@ -10,7 +10,10 @@ use super::types::{SystemPeerEvent, SystemPeerRecord, SystemPeerType};
 use crate::storage::codecs::{meta_from_blob, meta_to_blob};
 use crate::util::deterministic_time::tick;
 
-/// Store or update a system peer record.
+/// Store a system peer record if it does not already exist.
+///
+/// This is intentionally insert-only for identity-bearing fields. Existing
+/// protocol peers must advance only through `advance_system_peer_tip(...)`.
 /// System peers are protocol-controlled actors (DLV, Faucet) that do NOT have public keys
 /// and CANNOT be used for bilateral verification.
 pub fn store_system_peer(peer: &SystemPeerRecord) -> Result<()> {
@@ -25,26 +28,46 @@ pub fn store_system_peer(peer: &SystemPeerRecord) -> Result<()> {
         return Err(anyhow!("SystemPeerRecord requires 32-byte device_id"));
     }
 
+    if peer.peer_key.trim().is_empty() {
+        return Err(anyhow!("SystemPeerRecord requires non-empty peer_key"));
+    }
+    if peer.current_chain_tip.is_some() {
+        return Err(anyhow!(
+            "SystemPeerRecord creation must not seed current_chain_tip; advance through advance_system_peer_tip"
+        ));
+    }
+
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|poisoned| {
         log::warn!("DB lock poisoned, recovering");
         poisoned.into_inner()
     });
 
-    let now = tick();
+    let existing: Option<(Vec<u8>, String)> = conn
+        .query_row(
+            "SELECT device_id, peer_type FROM system_peers WHERE peer_key = ?1",
+            params![peer.peer_key],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if let Some((device_id, peer_type)) = existing {
+        let stored_peer_type = peer_type
+            .parse::<SystemPeerType>()
+            .unwrap_or(SystemPeerType::Protocol);
+        return Err(anyhow!(
+            "System peer {} already exists (device_id_match={}, stored_type={})",
+            peer.peer_key,
+            device_id == peer.device_id,
+            stored_peer_type.as_str()
+        ));
+    }
 
+    let now = tick();
     conn.execute(
         "INSERT INTO system_peers (
             peer_key, device_id, display_name, peer_type, chain_tip,
             created_at, updated_at, metadata
-        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
-         ON CONFLICT(peer_key) DO UPDATE SET
-            device_id = excluded.device_id,
-            display_name = excluded.display_name,
-            peer_type = excluded.peer_type,
-            chain_tip = excluded.chain_tip,
-            updated_at = excluded.updated_at,
-            metadata = excluded.metadata",
+        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
         params![
             peer.peer_key,
             peer.device_id,
@@ -81,15 +104,29 @@ fn parse_event_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SystemPeerEvent>
 ///
 /// The resulting child tip is namespaced away from canonical entity state:
 /// `H("DSM/system-peer-tip" || peer_key || parent_tip || transition_digest)`.
+/// The caller must supply the exact expected parent tip; this path never infers
+/// authority to advance from storage alone.
 pub fn advance_system_peer_tip(
     peer_key: &str,
     peer_type: SystemPeerType,
+    expected_parent_tip: &[u8],
     payload_bytes: &[u8],
     source_state_hash: &[u8],
     source_state_number: u64,
 ) -> Result<SystemPeerEvent> {
+    if peer_key.trim().is_empty() {
+        return Err(anyhow!(
+            "System peer transition requires non-empty peer_key"
+        ));
+    }
     if payload_bytes.is_empty() {
         return Err(anyhow!("System peer transition payload must be non-empty"));
+    }
+    if expected_parent_tip.len() != 32 {
+        return Err(anyhow!(
+            "System peer expected_parent_tip must be 32 bytes (got {})",
+            expected_parent_tip.len()
+        ));
     }
     if source_state_hash.len() != 32 {
         return Err(anyhow!(
@@ -127,8 +164,71 @@ pub fn advance_system_peer_tip(
         ));
     }
 
+    let last_state_number: Option<u64> = tx
+        .query_row(
+            "SELECT source_state_number
+               FROM system_peer_events
+              WHERE peer_key = ?1
+              ORDER BY created_at DESC, rowid DESC
+              LIMIT 1",
+            params![peer_key],
+            |row| Ok(row.get::<_, i64>(0)? as u64),
+        )
+        .optional()?;
+    if let Some(last_state_number) = last_state_number {
+        if source_state_number <= last_state_number {
+            return Err(anyhow!(
+                "System peer {} must advance monotonically: {} <= {}",
+                peer_key,
+                source_state_number,
+                last_state_number
+            ));
+        }
+    }
+
+    let last_child_tip: Option<Vec<u8>> = tx
+        .query_row(
+            "SELECT child_tip
+               FROM system_peer_events
+              WHERE peer_key = ?1
+              ORDER BY created_at DESC, rowid DESC
+              LIMIT 1",
+            params![peer_key],
+            |row| row.get(0),
+        )
+        .optional()?;
+
     let had_current_tip = current_tip.is_some();
-    let parent_tip = current_tip.unwrap_or_else(|| vec![0u8; 32]);
+    let parent_tip = match current_tip {
+        Some(parent_tip) if parent_tip.len() == 32 => parent_tip,
+        Some(parent_tip) => {
+            return Err(anyhow!(
+                "System peer {} has invalid stored chain_tip length {}",
+                peer_key,
+                parent_tip.len()
+            ));
+        }
+        None => vec![0u8; 32],
+    };
+    if parent_tip != expected_parent_tip {
+        return Err(anyhow!(
+            "System peer {} expected parent tip does not match stored chain tip",
+            peer_key
+        ));
+    }
+    if let Some(last_child_tip) = last_child_tip {
+        if last_child_tip != parent_tip {
+            return Err(anyhow!(
+                "System peer {} current tip does not match append-only event head",
+                peer_key
+            ));
+        }
+    } else if expected_parent_tip.iter().any(|byte| *byte != 0) {
+        return Err(anyhow!(
+            "System peer {} expected parent tip is non-zero but event history is empty",
+            peer_key
+        ));
+    }
     let transition_digest = {
         let mut hasher = dsm::crypto::blake3::dsm_domain_hasher("DSM/system-peer-transition");
         hasher.update(peer_key.as_bytes());
@@ -281,37 +381,6 @@ pub fn get_system_peer_by_device_id(device_id: &[u8]) -> Result<Option<SystemPee
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(anyhow!("Failed to get system peer by device_id: {}", e)),
     }
-}
-
-/// Update chain tip for a system peer.
-pub fn update_system_peer_chain_tip(peer_key: &str, new_chain_tip: &[u8]) -> Result<()> {
-    if new_chain_tip.len() != 32 {
-        return Err(anyhow!("Invalid chain_tip length: {}", new_chain_tip.len()));
-    }
-
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|poisoned| {
-        log::warn!("DB lock poisoned, recovering");
-        poisoned.into_inner()
-    });
-
-    let now = tick();
-
-    let rows = conn.execute(
-        "UPDATE system_peers SET chain_tip = ?1, updated_at = ?2 WHERE peer_key = ?3",
-        params![new_chain_tip, now as i64, peer_key],
-    )?;
-
-    if rows == 0 {
-        return Err(anyhow!("System peer not found: {}", peer_key));
-    }
-
-    info!(
-        "Updated system peer chain tip: {} -> {:?}",
-        peer_key,
-        &new_chain_tip[..8]
-    );
-    Ok(())
 }
 
 /// Load the sovereign event history for a single system peer.

@@ -514,7 +514,9 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
         })
         .join();
         match ble_inject_result {
-            Ok(Ok(_)) => log::info!("[SDK Init] BLE coordinator and transport adapter injected into bilateral handler"),
+            Ok(Ok(_)) => log::info!(
+                "[SDK Init] BLE coordinator and transport adapter injected into bilateral handler"
+            ),
             Ok(Err(e)) => log::warn!("[SDK Init] BLE injection failed: {e}"),
             Err(_) => log::warn!("[SDK Init] BLE injection thread panicked"),
         }

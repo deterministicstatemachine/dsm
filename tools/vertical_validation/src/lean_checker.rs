@@ -104,9 +104,7 @@ pub fn collect_lean_results(project_root: &Path) -> LeanSuiteResult {
         let has_sorry = source.contains("sorry");
 
         // Run `lean <file>` and capture result
-        let output = std::process::Command::new("lean")
-            .arg(path)
-            .output();
+        let output = std::process::Command::new("lean").arg(path).output();
 
         let (passed, errors) = match output {
             Ok(out) => {
@@ -177,10 +175,7 @@ fn extract_declarations(source: &str, keyword: &str) -> Vec<String> {
         // Also handles: `theorem foo_bar (args...)` and `private theorem ...`
         let search_line = if trimmed.starts_with("private ") || trimmed.starts_with("protected ") {
             // Skip visibility modifier
-            trimmed
-                .splitn(2, ' ')
-                .nth(1)
-                .unwrap_or("")
+            trimmed.splitn(2, ' ').nth(1).unwrap_or("")
         } else {
             trimmed
         };
@@ -191,7 +186,12 @@ fn extract_declarations(source: &str, keyword: &str) -> Vec<String> {
                     // Extract the name (first word after keyword)
                     if let Some(name) = rest.trim().split_whitespace().next() {
                         // Skip if it's a keyword continuation (e.g., "theorem" in a comment)
-                        if !name.is_empty() && name.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_') {
+                        if !name.is_empty()
+                            && name
+                                .chars()
+                                .next()
+                                .map_or(false, |c| c.is_alphabetic() || c == '_')
+                        {
                             names.push(name.to_string());
                         }
                     }

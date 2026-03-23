@@ -11,7 +11,9 @@ use tokio::sync::RwLock;
 use dsm_sdk::storage::client_db;
 use dsm_sdk::sdk::storage_node_sdk::{StorageNodeConfig, StorageNodeSDK};
 use dsm_sdk::bluetooth::bilateral_ble_handler::BilateralBleHandler;
-use dsm_sdk::bluetooth::bilateral_transport_adapter::{BilateralTransportAdapter, BleTransportDelegate, TransportInboundMessage};
+use dsm_sdk::bluetooth::bilateral_transport_adapter::{
+    BilateralTransportAdapter, BleTransportDelegate, TransportInboundMessage,
+};
 use dsm_sdk::bluetooth::ble_frame_coordinator::{BleFrameCoordinator, BleFrameType, FrameIngressResult};
 use dsm_sdk::storage_utils;
 use dsm_sdk::generated;
@@ -249,7 +251,9 @@ async fn verify_frontend_event_guarantees() {
 
     // Transport A -> B
     for ch in &chunks {
-        if let FrameIngressResult::MessageComplete { message } = coord_b.ingest_chunk(ch).await.expect("b ingest prepare") {
+        if let FrameIngressResult::MessageComplete { message } =
+            coord_b.ingest_chunk(ch).await.expect("b ingest prepare")
+        {
             let _ = adapter_b
                 .on_transport_message(TransportInboundMessage {
                     peer_address: "event-test-b".to_string(),

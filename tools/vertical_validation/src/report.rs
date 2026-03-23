@@ -694,9 +694,12 @@ impl VerticalValidationReport {
         scaling_cache: Option<&ScalingCacheInfo>,
     ) -> String {
         let mut out = String::with_capacity(16384);
-        let verdict = self.overall_verdict()
-            && lean_results.map(|l| l.all_passed).unwrap_or(true);
-        let verdict_str = if verdict { "ALL PASS" } else { "FAILURES DETECTED" };
+        let verdict = self.overall_verdict() && lean_results.map(|l| l.all_passed).unwrap_or(true);
+        let verdict_str = if verdict {
+            "ALL PASS"
+        } else {
+            "FAILURES DETECTED"
+        };
 
         // ── Header ──────────────────────────────────────────────────
         out.push_str("# DSM Formal Verification Report\n\n");
@@ -734,7 +737,11 @@ impl VerticalValidationReport {
         if let Some(lean) = lean_results {
             for lr in &lean.results {
                 let (level, paper_ref, scope) = classify_lean_file(&lr.file);
-                let v = if lr.passed && !lr.has_sorry { "PASS" } else { "**FAIL**" };
+                let v = if lr.passed && !lr.has_sorry {
+                    "PASS"
+                } else {
+                    "**FAIL**"
+                };
                 out.push_str(&format!(
                     "| {} | {} | {} | {} | {} |\n",
                     lr.file, level, paper_ref, scope, v
@@ -781,14 +788,20 @@ impl VerticalValidationReport {
         out.push_str("- **Abstract Model** \u{2014} TLA+ specs verified by bounded TLC model checking. Finite state space.\n");
         out.push_str("- **Protocol Mechanics** \u{2014} TLA+ specs modeling specific protocol claims (finality, isolation).\n");
         out.push_str("- **Implementation** \u{2014} Deterministic traces through real Rust code (SPHINCS+ signing, BLAKE3 hashing).\n");
-        out.push_str("- **Integration** \u{2014} Randomized and adversarial tests across the full stack.\n");
+        out.push_str(
+            "- **Integration** \u{2014} Randomized and adversarial tests across the full stack.\n",
+        );
         out.push_str("- **Primitive** \u{2014} Known-answer tests for individual cryptographic primitives.\n\n");
 
         // ── TLA+ Model Checking ─────────────────────────────────────
         if !self.tla_results.is_empty() {
             out.push_str("## TLA+ Model Checking\n\n");
-            out.push_str("| Spec | States | Distinct | Depth | Invariants | Linked Traces | Verdict |\n");
-            out.push_str("|------|--------|----------|-------|------------|---------------|---------|\n");
+            out.push_str(
+                "| Spec | States | Distinct | Depth | Invariants | Linked Traces | Verdict |\n",
+            );
+            out.push_str(
+                "|------|--------|----------|-------|------------|---------------|---------|\n",
+            );
             for tla in &self.tla_results {
                 let v = if tla.passed { "PASS" } else { "**FAIL**" };
                 let linked = if tla.linked_implementation_traces.is_empty() {
@@ -813,7 +826,11 @@ impl VerticalValidationReport {
             out.push_str("### Invariants Checked\n\n");
             for tla in &self.tla_results {
                 if !tla.invariants_checked.is_empty() {
-                    out.push_str(&format!("**{}**: {}\n\n", tla.label, tla.invariants_checked.join(", ")));
+                    out.push_str(&format!(
+                        "**{}**: {}\n\n",
+                        tla.label,
+                        tla.invariants_checked.join(", ")
+                    ));
                 }
             }
         }
@@ -826,7 +843,11 @@ impl VerticalValidationReport {
             out.push_str("|------|----------|--------|--------|---------|\n");
             for lr in &lean.results {
                 let sorry = if lr.has_sorry { "**Yes**" } else { "No" };
-                let v = if lr.passed && !lr.has_sorry { "PASS" } else { "**FAIL**" };
+                let v = if lr.passed && !lr.has_sorry {
+                    "PASS"
+                } else {
+                    "**FAIL**"
+                };
                 out.push_str(&format!(
                     "| {} | {} | {} | {} | {} |\n",
                     lr.file,
@@ -839,7 +860,9 @@ impl VerticalValidationReport {
             out.push('\n');
 
             // Axiom inventory
-            let all_axioms: Vec<_> = lean.results.iter()
+            let all_axioms: Vec<_> = lean
+                .results
+                .iter()
                 .flat_map(|r| r.axioms.iter().map(move |a| (a.as_str(), r.file.as_str())))
                 .collect();
             if !all_axioms.is_empty() {
@@ -867,16 +890,29 @@ impl VerticalValidationReport {
             out.push_str("|-------|-------|-------------------|---------|------|\n");
 
             // Build linked spec map from TLA results
-            let linked_map: std::collections::HashMap<&str, &str> = self.tla_results.iter()
-                .flat_map(|tla| tla.linked_implementation_traces.iter().map(move |t| (t.as_str(), tla.label.as_str())))
+            let linked_map: std::collections::HashMap<&str, &str> = self
+                .tla_results
+                .iter()
+                .flat_map(|tla| {
+                    tla.linked_implementation_traces
+                        .iter()
+                        .map(move |t| (t.as_str(), tla.label.as_str()))
+                })
                 .collect();
 
             for tr in &traces.results {
                 let v = if tr.passed { "PASS" } else { "**FAIL**" };
-                let linked = linked_map.get(tr.trace_name.as_str()).copied().unwrap_or("\u{2014}");
+                let linked = linked_map
+                    .get(tr.trace_name.as_str())
+                    .copied()
+                    .unwrap_or("\u{2014}");
                 out.push_str(&format!(
                     "| {} | {} | {} | {} | {:.1}s |\n",
-                    tr.trace_name, tr.steps, linked, v, tr.duration_ms / 1000.0
+                    tr.trace_name,
+                    tr.steps,
+                    linked,
+                    v,
+                    tr.duration_ms / 1000.0
                 ));
             }
             out.push('\n');
@@ -921,10 +957,7 @@ impl VerticalValidationReport {
             out.push_str("|-----------|------|---------|\n");
             for k in &kat.results {
                 let v = if k.passed { "PASS" } else { "**FAIL**" };
-                out.push_str(&format!(
-                    "| {} | {} | {} |\n",
-                    k.primitive, k.test_name, v
-                ));
+                out.push_str(&format!("| {} | {} | {} |\n", k.primitive, k.test_name, v));
             }
             out.push('\n');
         }
@@ -941,8 +974,10 @@ impl VerticalValidationReport {
             ));
             out.push_str(&format!(
                 "| Without signing | {:.0} | {:.0}\u{00b5}s | {:.0}\u{00b5}s | {:.0}\u{00b5}s |\n",
-                bt.without_signing.ops_per_sec, bt.without_signing.p50_us,
-                bt.without_signing.p95_us, bt.without_signing.p99_us,
+                bt.without_signing.ops_per_sec,
+                bt.without_signing.p50_us,
+                bt.without_signing.p95_us,
+                bt.without_signing.p99_us,
             ));
             out.push_str(&format!(
                 "\nKeygen: {:.0}ms | Avg sign: {:.1}ms | Avg BLAKE3: {:.1}\u{00b5}s\n\n",
@@ -962,8 +997,12 @@ impl VerticalValidationReport {
                     ));
                 }
             }
-            out.push_str("| Writers | Throughput (ops/s) | Per-Writer | Success Rate | P50 | P95 | P99 |\n");
-            out.push_str("|---------|-------------------|------------|--------------|-----|-----|-----|\n");
+            out.push_str(
+                "| Writers | Throughput (ops/s) | Per-Writer | Success Rate | P50 | P95 | P99 |\n",
+            );
+            out.push_str(
+                "|---------|-------------------|------------|--------------|-----|-----|-----|\n",
+            );
             for dp in &scaling.data_points {
                 out.push_str(&format!(
                     "| {} | {:.1} | {:.1} | {:.1}% | {:.1}ms | {:.1}ms | {:.1}ms |\n",
@@ -992,16 +1031,26 @@ impl VerticalValidationReport {
         out.push_str("## Assumptions & Scope\n\n");
 
         out.push_str("### What is proved\n\n");
-        out.push_str("- Settlement irreversibility under honest-but-unreliable model \
-            (Whitepaper Theorems 4.1, 4.2; *Statelessness Reframed* \u{00a7}4)\n");
-        out.push_str("- Bilateral non-interference / additive scaling \
-            (*Statelessness Reframed* Lemma 3.1, Theorem 3.1)\n");
-        out.push_str("- Token conservation and fork exclusion \
-            (Whitepaper \u{00a7}16.6, DSM_Abstract.tla)\n");
-        out.push_str("- dBTC bridge conservation \u{2014} 11 actions \
-            (dBTC Paper \u{00a7}19, DSM_dBTC_Conservation.lean)\n");
-        out.push_str("- Tripwire fork-exclusion \
-            (Whitepaper Theorem 2, DSM_Tripwire.tla)\n\n");
+        out.push_str(
+            "- Settlement irreversibility under honest-but-unreliable model \
+            (Whitepaper Theorems 4.1, 4.2; *Statelessness Reframed* \u{00a7}4)\n",
+        );
+        out.push_str(
+            "- Bilateral non-interference / additive scaling \
+            (*Statelessness Reframed* Lemma 3.1, Theorem 3.1)\n",
+        );
+        out.push_str(
+            "- Token conservation and fork exclusion \
+            (Whitepaper \u{00a7}16.6, DSM_Abstract.tla)\n",
+        );
+        out.push_str(
+            "- dBTC bridge conservation \u{2014} 11 actions \
+            (dBTC Paper \u{00a7}19, DSM_dBTC_Conservation.lean)\n",
+        );
+        out.push_str(
+            "- Tripwire fork-exclusion \
+            (Whitepaper Theorem 2, DSM_Tripwire.tla)\n\n",
+        );
 
         out.push_str("### What is axiomatized (not proved)\n\n");
         out.push_str("- BLAKE3 collision resistance (standard assumption)\n");
@@ -1018,13 +1067,19 @@ impl VerticalValidationReport {
         out.push_str("## Paper References\n\n");
         out.push_str("| Document | Relevant Sections |\n");
         out.push_str("|----------|---------|\n");
-        out.push_str("| DSM Whitepaper | \u{00a7}3.4 (bilateral isolation), \u{00a7}15.1 (CAP escape), \
-            \u{00a7}16.6 (forward-only chains), Thm 2 (Tripwire), Thm 4 (conservation) |\n");
-        out.push_str("| *Statelessness Reframed* (Ramsay, 2025) | Def 2.1 (PRLSM), \
+        out.push_str(
+            "| DSM Whitepaper | \u{00a7}3.4 (bilateral isolation), \u{00a7}15.1 (CAP escape), \
+            \u{00a7}16.6 (forward-only chains), Thm 2 (Tripwire), Thm 4 (conservation) |\n",
+        );
+        out.push_str(
+            "| *Statelessness Reframed* (Ramsay, 2025) | Def 2.1 (PRLSM), \
             Lemma 3.1 (non-interference), Lemma 3.2 (locality), Thm 3.1 (separation), \
-            Thm 4.1 (pending-online lock), Thm 4.2 (atomic interlock tripwire) |\n");
-        out.push_str("| dBTC Bridge Paper | \u{00a7}14 Invariant 7, \u{00a7}15 Property 9, \
-            \u{00a7}19 Property 12 (conservation) |\n\n");
+            Thm 4.1 (pending-online lock), Thm 4.2 (atomic interlock tripwire) |\n",
+        );
+        out.push_str(
+            "| dBTC Bridge Paper | \u{00a7}14 Invariant 7, \u{00a7}15 Property 9, \
+            \u{00a7}19 Property 12 (conservation) |\n\n",
+        );
 
         // ── Auditor Notes ───────────────────────────────────────────
         out.push_str("## Auditor Notes\n\n");
@@ -1205,9 +1260,7 @@ fn describe_axiom(name: &str) -> &'static str {
         n if n.contains("successor_tip") || n.contains("successorTip") => {
             "Hash chain successor produces a value distinct from its input"
         }
-        n if n.contains("sign_verify") => {
-            "Sign-then-verify roundtrip succeeds"
-        }
+        n if n.contains("sign_verify") => "Sign-then-verify roundtrip succeeds",
         n if n.contains("claim_key") => {
             "dBTC claim key derivation is binding on (preimage, hash_lock)"
         }

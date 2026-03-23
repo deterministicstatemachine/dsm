@@ -150,7 +150,9 @@ fn reconcile_receiver_state(
     Ok(settled_state)
 }
 
-fn build_canonical_settled_state(ctx: &BilateralSettlementContext) -> Result<Option<State>, String> {
+fn build_canonical_settled_state(
+    ctx: &BilateralSettlementContext,
+) -> Result<Option<State>, String> {
     let Some(base_state) = ctx.canonical_state.as_ref() else {
         return Ok(None);
     };
@@ -219,7 +221,10 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
     /// Called by the transport layer after the 3-phase BLE protocol completes.
     /// Returns [`TransferMeta`] (token_id + amount) for upstream hooks, or an
     /// error message string if persistence fails.
-    fn settle(&self, ctx: BilateralSettlementContext) -> Result<BilateralSettlementOutcome, String> {
+    fn settle(
+        &self,
+        ctx: BilateralSettlementContext,
+    ) -> Result<BilateralSettlementOutcome, String> {
         let (transfer_amount, token_id_opt) = parse_transfer_fields(&ctx.operation_bytes);
         let token_id_str = token_id_opt.clone().unwrap_or_default();
         let canonical_state = build_canonical_settled_state(&ctx)?;
@@ -227,9 +232,11 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
         // Log the canonical state for debugging
         match &canonical_state {
             Some(state) => {
-                let era_balance = state.token_balances.values().find_map(|b| {
-                    if b.value() > 0 { Some(b.value()) } else { None }
-                }).unwrap_or(0);
+                let era_balance = state
+                    .token_balances
+                    .values()
+                    .find_map(|b| if b.value() > 0 { Some(b.value()) } else { None })
+                    .unwrap_or(0);
                 log::info!(
                     "[BILATERAL][settle] canonical_state=Some hash={} state_number={} era_balance={}",
                     encode_base32_crockford(&state.hash),
@@ -310,7 +317,6 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
                     );
                     debit_result.map_err(|e| format!("atomic sender settlement failed: {e}"))?;
                 }
-
             } else if let Err(e) = crate::storage::client_db::store_transaction(&tx_record) {
                 warn!("[BilateralSettlement] Failed to store zero-amount sender tx history: {e}");
             }
@@ -424,9 +430,10 @@ mod tests {
             dsm::core::token::derive_canonical_balance_key(&policy_commit, &sender_pk, "ERA");
         let recipient_key =
             dsm::core::token::derive_canonical_balance_key(&policy_commit, &recipient, "ERA");
-        prior
-            .token_balances
-            .insert(sender_key.clone(), Balance::from_state(10, prior.hash, prior.state_number));
+        prior.token_balances.insert(
+            sender_key.clone(),
+            Balance::from_state(10, prior.hash, prior.state_number),
+        );
 
         let settled = reconcile_sender_state(
             &prior,
@@ -447,7 +454,10 @@ mod tests {
             Some(6)
         );
         assert_eq!(
-            settled.token_balances.get(&recipient_key).map(Balance::value),
+            settled
+                .token_balances
+                .get(&recipient_key)
+                .map(Balance::value),
             Some(4)
         );
     }

@@ -1434,20 +1434,21 @@ impl BilateralBleHandler {
                     );
                     // Update in-memory view of sender's chain tip
                     mgr.advance_chain_tip(&counterparty_device_id, sender_chain_tip_bytes);
-                    // Persist to SQLite for durability across restarts
-                    if let Err(e) =
-                        crate::storage::client_db::update_contact_chain_tip_after_bilateral(
-                            &counterparty_device_id,
-                            &sender_chain_tip_bytes,
-                        )
-                    {
+                    // Persist to SQLite in the observed-tip namespace for
+                    // durability across restarts without mutating canonical state.
+                    if let Err(e) = crate::storage::client_db::record_observed_remote_chain_tip(
+                        &counterparty_device_id,
+                        &sender_chain_tip_bytes,
+                    ) {
                         log::warn!(
-                            "[BilateralBleHandler] ⚠️ Failed to persist remote chain tip to SQLite: {}",
+                            "[BilateralBleHandler] ⚠️ Failed to persist observed remote chain tip to SQLite: {}",
                             e
                         );
                         // Non-fatal - in-memory update still happened
                     } else {
-                        log::info!("[BilateralBleHandler] ✅ Persisted remote chain tip to SQLite");
+                        log::info!(
+                            "[BilateralBleHandler] ✅ Persisted observed remote chain tip to SQLite"
+                        );
                     }
                 } else {
                     log::warn!(
@@ -2409,8 +2410,7 @@ impl BilateralBleHandler {
                 .canonical_state
                 .as_ref()
                 .unwrap_or(&finalized_local_state);
-            self.record_bcr_state_and_scan(state_to_record, true)
-                .await;
+            self.record_bcr_state_and_scan(state_to_record, true).await;
 
             if let Some(router) = crate::bridge::app_router() {
                 router.sync_balance_cache();
@@ -2960,36 +2960,36 @@ impl BilateralBleHandler {
 
         // §4.2 Full-persistence atomic boundary: delegate applies chain tip + balance +
         // history in one SQLite transaction.
-        let (confirm_outcome, persistence_error) = if let Some(ref delegate) = self.settlement_delegate
-        {
-            let ctx = BilateralSettlementContext {
-                local_device_id: self.device_id,
-                counterparty_device_id: session.counterparty_device_id,
-                commitment_hash,
-                transaction_hash: tx_result.transaction_hash,
-                chain_height: tx_result.local_state.state_number,
-                operation_bytes: op_bytes.clone(),
-                proof_data: receipt_bytes,
-                is_sender: false,
-                tx_type: "bilateral_offline",
-                new_chain_tip,
-                canonical_state: Some(tx_result.local_state.clone()),
-            };
-            match delegate.settle(ctx) {
-                Ok(outcome) => (outcome, None),
-                Err(e) => {
-                    warn!(
-                        "[BILATERAL] Receiver settlement failed (device={}, amount={:?}): {}",
-                        bytes_to_base32(&self.device_id[..8]),
-                        amount_opt,
-                        e
-                    );
-                    (BilateralSettlementOutcome::default(), Some(e))
+        let (confirm_outcome, persistence_error) =
+            if let Some(ref delegate) = self.settlement_delegate {
+                let ctx = BilateralSettlementContext {
+                    local_device_id: self.device_id,
+                    counterparty_device_id: session.counterparty_device_id,
+                    commitment_hash,
+                    transaction_hash: tx_result.transaction_hash,
+                    chain_height: tx_result.local_state.state_number,
+                    operation_bytes: op_bytes.clone(),
+                    proof_data: receipt_bytes,
+                    is_sender: false,
+                    tx_type: "bilateral_offline",
+                    new_chain_tip,
+                    canonical_state: Some(tx_result.local_state.clone()),
+                };
+                match delegate.settle(ctx) {
+                    Ok(outcome) => (outcome, None),
+                    Err(e) => {
+                        warn!(
+                            "[BILATERAL] Receiver settlement failed (device={}, amount={:?}): {}",
+                            bytes_to_base32(&self.device_id[..8]),
+                            amount_opt,
+                            e
+                        );
+                        (BilateralSettlementOutcome::default(), Some(e))
+                    }
                 }
-            }
-        } else {
-            (BilateralSettlementOutcome::default(), None)
-        };
+            } else {
+                (BilateralSettlementOutcome::default(), None)
+            };
 
         if let Some(persist_error) = persistence_error {
             {
@@ -3052,8 +3052,7 @@ impl BilateralBleHandler {
             .canonical_state
             .as_ref()
             .unwrap_or(&tx_result.local_state);
-        self.record_bcr_state_and_scan(state_to_record, true)
-            .await;
+        self.record_bcr_state_and_scan(state_to_record, true).await;
 
         if let Some(router) = crate::bridge::app_router() {
             router.sync_balance_cache();
@@ -3289,14 +3288,12 @@ impl BilateralBleHandler {
                         "[BILATERAL] Sender using receiver-reported post_state_hash as counterparty chain tip: {}",
                         bytes_to_base32(&post_tip[..8])
                     );
-                    if let Err(e) =
-                        crate::storage::client_db::update_contact_chain_tip_after_bilateral(
-                            &counterparty_device_id,
-                            &post_tip,
-                        )
-                    {
+                    if let Err(e) = crate::storage::client_db::record_observed_remote_chain_tip(
+                        &counterparty_device_id,
+                        &post_tip,
+                    ) {
                         warn!(
-                            "[BILATERAL] Failed to persist post_state_hash as counterparty chain tip: {}",
+                            "[BILATERAL] Failed to persist post_state_hash as observed counterparty chain tip: {}",
                             e
                         );
                     }
@@ -3308,14 +3305,12 @@ impl BilateralBleHandler {
                         "[BILATERAL] No post_state_hash from commit-response; using shared chain_tip: {}",
                         bytes_to_base32(&shared_tip[..8])
                     );
-                    if let Err(e) =
-                        crate::storage::client_db::update_contact_chain_tip_after_bilateral(
-                            &counterparty_device_id,
-                            &shared_tip,
-                        )
-                    {
+                    if let Err(e) = crate::storage::client_db::record_observed_remote_chain_tip(
+                        &counterparty_device_id,
+                        &shared_tip,
+                    ) {
                         warn!(
-                            "[BILATERAL] Failed to persist counterparty chain tip: {}",
+                            "[BILATERAL] Failed to persist observed counterparty chain tip: {}",
                             e
                         );
                     }
@@ -3381,11 +3376,14 @@ impl BilateralBleHandler {
                         new_chain_tip: [0u8; 32],
                         canonical_state: Some(result.local_state.clone()),
                     };
-                    delegate.settle(ctx).map_err(|e| {
-                        DsmError::invalid_operation(format!(
+                    delegate
+                        .settle(ctx)
+                        .map_err(|e| {
+                            DsmError::invalid_operation(format!(
                             "mark_confirm_delivered: sender settlement failed (post-delivery): {e}"
                         ))
-                    }).ok()?
+                        })
+                        .ok()?
                 } else {
                     BilateralSettlementOutcome::default()
                 };
@@ -3394,8 +3392,7 @@ impl BilateralBleHandler {
                     .canonical_state
                     .as_ref()
                     .unwrap_or(&result.local_state);
-                self.record_bcr_state_and_scan(state_to_record, true)
-                    .await;
+                self.record_bcr_state_and_scan(state_to_record, true).await;
 
                 if let Some(router) = crate::bridge::app_router() {
                     router.sync_balance_cache();
@@ -3465,14 +3462,12 @@ impl BilateralBleHandler {
                         "[BILATERAL RECOVERY] Applying commit-response post_state_hash to counterparty tip: {}",
                         bytes_to_base32(&post_tip[..8])
                     );
-                    if let Err(e) =
-                        crate::storage::client_db::update_contact_chain_tip_after_bilateral(
-                            &counterparty_device_id,
-                            &post_tip,
-                        )
-                    {
+                    if let Err(e) = crate::storage::client_db::record_observed_remote_chain_tip(
+                        &counterparty_device_id,
+                        &post_tip,
+                    ) {
                         warn!(
-                            "[BILATERAL RECOVERY] Failed to persist post_state_hash as counterparty chain tip: {}",
+                            "[BILATERAL RECOVERY] Failed to persist post_state_hash as observed counterparty chain tip: {}",
                             e
                         );
                     }

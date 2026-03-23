@@ -895,7 +895,9 @@ impl AppRouterImpl {
                 ));
             }
             if head_hash.len() != 32 {
-                return Err(format!("{route_name}: invalid counterparty head_hash length"));
+                return Err(format!(
+                    "{route_name}: invalid counterparty head_hash length"
+                ));
             }
 
             let mut device_id_arr = [0u8; 32];

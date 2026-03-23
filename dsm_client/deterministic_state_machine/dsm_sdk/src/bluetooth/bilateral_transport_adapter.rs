@@ -138,21 +138,22 @@ impl BilateralTransportAdapter {
             .filter(|address| !address.is_empty())
     }
 
-    pub async fn counterparty_for_commitment(
-        &self,
-        commitment_hash: [u8; 32],
-    ) -> Option<[u8; 32]> {
+    pub async fn counterparty_for_commitment(&self, commitment_hash: [u8; 32]) -> Option<[u8; 32]> {
         self.bilateral_handler
             .get_counterparty_for_commitment(&commitment_hash)
             .await
     }
 
     pub async fn mark_confirm_delivered(&self, commitment_hash: [u8; 32]) -> Result<(), DsmError> {
-        self.bilateral_handler.mark_confirm_delivered(commitment_hash).await
+        self.bilateral_handler
+            .mark_confirm_delivered(commitment_hash)
+            .await
     }
 
     pub async fn mark_any_confirm_pending_delivered(&self) -> Result<usize, DsmError> {
-        self.bilateral_handler.mark_any_confirm_pending_delivered().await
+        self.bilateral_handler
+            .mark_any_confirm_pending_delivered()
+            .await
     }
 }
 
@@ -167,7 +168,10 @@ impl BleTransportDelegate for BilateralTransportAdapter {
                 BleFrameType::BilateralPrepare => {
                     info!("Processing bilateral prepare request via transport adapter");
                     match bilateral_handler
-                        .handle_prepare_request(&message.payload, Some(message.peer_address.clone()))
+                        .handle_prepare_request(
+                            &message.payload,
+                            Some(message.peer_address.clone()),
+                        )
                         .await
                     {
                         Ok((response, _meta)) => {
@@ -195,14 +199,15 @@ impl BleTransportDelegate for BilateralTransportAdapter {
                     }
                 }
                 BleFrameType::BilateralPrepareResponse => {
-                    let is_prepare_response =
-                        match crate::generated::Envelope::decode(&mut std::io::Cursor::new(&message.payload)) {
-                            Ok(env) => matches!(
-                                env.payload,
-                                Some(crate::generated::envelope::Payload::BilateralPrepareResponse(_))
-                            ),
-                            Err(_) => false,
-                        };
+                    let is_prepare_response = match crate::generated::Envelope::decode(
+                        &mut std::io::Cursor::new(&message.payload),
+                    ) {
+                        Ok(env) => matches!(
+                            env.payload,
+                            Some(crate::generated::envelope::Payload::BilateralPrepareResponse(_))
+                        ),
+                        Err(_) => false,
+                    };
                     if !is_prepare_response {
                         debug!(
                             "Pass-through BilateralPrepareResponse frame (non-prepare-response envelope detected) size={}",
@@ -214,7 +219,10 @@ impl BleTransportDelegate for BilateralTransportAdapter {
                         )]);
                     }
 
-                    match bilateral_handler.handle_prepare_response(&message.payload).await {
+                    match bilateral_handler
+                        .handle_prepare_response(&message.payload)
+                        .await
+                    {
                         Ok((commit_envelope, _meta)) => Ok(vec![TransportOutbound::new(
                             BleFrameType::BilateralConfirm,
                             commit_envelope,
@@ -227,14 +235,17 @@ impl BleTransportDelegate for BilateralTransportAdapter {
                     }
                 }
                 BleFrameType::BilateralPrepareReject => {
-                    let is_prepare_reject =
-                        match crate::generated::Envelope::decode(&mut std::io::Cursor::new(&message.payload)) {
-                            Ok(env) => matches!(
-                                env.payload,
-                                Some(crate::generated::envelope::Payload::BilateralPrepareReject(_))
-                            ),
-                            Err(_) => false,
-                        };
+                    let is_prepare_reject = match crate::generated::Envelope::decode(
+                        &mut std::io::Cursor::new(&message.payload),
+                    ) {
+                        Ok(env) => matches!(
+                            env.payload,
+                            Some(crate::generated::envelope::Payload::BilateralPrepareReject(
+                                _
+                            ))
+                        ),
+                        Err(_) => false,
+                    };
                     if !is_prepare_reject {
                         debug!(
                             "Pass-through BilateralPrepareReject frame (non-reject envelope detected) size={}",
@@ -246,30 +257,35 @@ impl BleTransportDelegate for BilateralTransportAdapter {
                         )]);
                     }
 
-                    bilateral_handler.handle_prepare_reject(&message.payload).await?;
+                    bilateral_handler
+                        .handle_prepare_reject(&message.payload)
+                        .await?;
                     Ok(Vec::new())
                 }
                 BleFrameType::BilateralConfirm => {
-                    let is_confirm_request =
-                        match crate::generated::Envelope::decode(&mut std::io::Cursor::new(&message.payload)) {
-                            Ok(env) => {
-                                if let Some(crate::generated::envelope::Payload::UniversalTx(tx)) = env.payload {
-                                    if let Some(op) = tx.ops.first() {
-                                        match &op.kind {
-                                            Some(crate::generated::universal_op::Kind::Invoke(invoke)) => {
-                                                invoke.method == "bilateral.confirm"
-                                            }
-                                            _ => false,
-                                        }
-                                    } else {
-                                        false
+                    let is_confirm_request = match crate::generated::Envelope::decode(
+                        &mut std::io::Cursor::new(&message.payload),
+                    ) {
+                        Ok(env) => {
+                            if let Some(crate::generated::envelope::Payload::UniversalTx(tx)) =
+                                env.payload
+                            {
+                                if let Some(op) = tx.ops.first() {
+                                    match &op.kind {
+                                        Some(crate::generated::universal_op::Kind::Invoke(
+                                            invoke,
+                                        )) => invoke.method == "bilateral.confirm",
+                                        _ => false,
                                     }
                                 } else {
                                     false
                                 }
+                            } else {
+                                false
                             }
-                            Err(_) => false,
-                        };
+                        }
+                        Err(_) => false,
+                    };
                     if !is_confirm_request {
                         debug!(
                             "Pass-through BilateralConfirm frame (non-confirm UniversalTx detected) size={}",
@@ -281,7 +297,10 @@ impl BleTransportDelegate for BilateralTransportAdapter {
                         )]);
                     }
 
-                    match bilateral_handler.handle_confirm_request(&message.payload).await {
+                    match bilateral_handler
+                        .handle_confirm_request(&message.payload)
+                        .await
+                    {
                         Ok(_meta) => Ok(Vec::new()),
                         Err(e) if e.to_string().contains("silent_drop_duplicate_packet") => {
                             warn!("Silently dropping duplicate Confirm Request.");
@@ -305,7 +324,9 @@ impl BleTransportDelegate for BilateralTransportAdapter {
     fn on_peer_disconnected(&self, peer_address: String) -> DelegateFuture<()> {
         let bilateral_handler = Arc::clone(&self.bilateral_handler);
         Box::pin(async move {
-            let failed = bilateral_handler.handle_peer_disconnected(&peer_address).await;
+            let failed = bilateral_handler
+                .handle_peer_disconnected(&peer_address)
+                .await;
             if failed > 0 {
                 info!(
                     "BLE disconnect {peer_address}: failed {failed} early-phase session(s); late-phase sessions preserved"

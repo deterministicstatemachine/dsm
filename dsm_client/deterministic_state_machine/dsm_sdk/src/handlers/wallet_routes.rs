@@ -431,9 +431,11 @@ impl AppRouterImpl {
 
                 // Log the restored BCR state for debugging
                 if let Some(cs) = self.core_sdk.get_current_state().ok().as_ref() {
-                    let era_balance = cs.token_balances.values().find_map(|b| {
-                        if b.value() > 0 { Some(b.value()) } else { None }
-                    }).unwrap_or(0);
+                    let era_balance = cs
+                        .token_balances
+                        .values()
+                        .find_map(|b| if b.value() > 0 { Some(b.value()) } else { None })
+                        .unwrap_or(0);
                     log::info!(
                         "[balance.list] restored BCR state hash={} state_number={} era_balance={}",
                         crate::util::text_id::encode_base32_crockford(&cs.hash),

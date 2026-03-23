@@ -747,20 +747,28 @@ impl ContactManager {
     pub async fn update_contact_chain_tip_unilateral(
         &mut self,
         contact_device_id: [u8; 32],
+        expected_parent_tip: [u8; 32],
         new_chain_tip: [u8; 32],
     ) -> Result<(), ContactError> {
         let mut mgr = self.dsm_manager.write().await;
         mgr.update_contact_chain_tip_unilateral(&contact_device_id, new_chain_tip)?;
 
-        // Persist to SDK storage (unified chain evolution write path)
-        if let Err(e) = crate::storage::client_db::update_finalized_bilateral_chain_tip(
+        match crate::storage::client_db::try_advance_finalized_bilateral_chain_tip(
             &contact_device_id,
+            &expected_parent_tip,
             &new_chain_tip,
         ) {
-            log::warn!(
-                "Failed to persist finalized unilateral chain tip update: {}",
-                e
-            );
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(ContactError::InvalidChainTip(
+                    "Finalized unilateral chain tip parent mismatch".to_string(),
+                ));
+            }
+            Err(e) => {
+                return Err(ContactError::InvalidChainTip(format!(
+                    "Failed to persist finalized unilateral chain tip update: {e}"
+                )));
+            }
         }
 
         Ok(())

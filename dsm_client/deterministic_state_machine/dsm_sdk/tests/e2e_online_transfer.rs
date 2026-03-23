@@ -10,8 +10,8 @@ use prost::Message;
 use dsm_sdk::storage_utils;
 use dsm_sdk::sdk::storage_node_sdk::{StorageNodeConfig, StorageNodeSDK};
 use dsm_sdk::storage::client_db::{
-    ensure_wallet_state_for_device, store_contact, update_local_bilateral_chain_tip,
-    ContactRecord, GenesisRecord, store_genesis_record_with_verification,
+    ensure_wallet_state_for_device, store_contact, update_local_bilateral_chain_tip, ContactRecord,
+    GenesisRecord, store_genesis_record_with_verification,
 };
 use std::process::Command;
 use std::collections::HashMap;

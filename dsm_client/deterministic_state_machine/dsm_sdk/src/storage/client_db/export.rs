@@ -350,8 +350,8 @@ pub fn export_state_info() -> Result<generated::StateInfoResponse> {
 mod tests {
     use super::*;
     use crate::storage::client_db::{
-        get_balance_projection, initialize_wallet_from_verified_genesis,
-        reset_database_for_tests, store_genesis_record_with_verification, GenesisRecord,
+        get_balance_projection, initialize_wallet_from_verified_genesis, reset_database_for_tests,
+        store_genesis_record_with_verification, GenesisRecord,
     };
     use serial_test::serial;
 

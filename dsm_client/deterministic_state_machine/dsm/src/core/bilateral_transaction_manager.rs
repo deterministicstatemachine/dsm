@@ -878,6 +878,7 @@ impl BilateralTransactionManager {
         anchor: &mut BilateralRelationshipAnchor,
         new_chain_tip: [u8; 32],
     ) -> Result<(), DsmError> {
+        let expected_parent_tip = anchor.chain_tip;
         // Use the unilateral path: contact manager generates and verifies its own
         // internal per-device SMT proof for the new chain tip (§4.2 Per-Device SMT Replace).
         // The BLE handler may later call store_anchor_smt_proof() to override this with the
@@ -892,9 +893,21 @@ impl BilateralTransactionManager {
         // store_anchor_smt_proof() can override this with the full bilateral proof.
         anchor.smt_proof = Some(payload.smt_proof);
         self.relationships.insert(*remote_device_id, anchor.clone());
-        // Persist the shared relationship chain tip
-        self.chain_tip_store
-            .set_contact_chain_tip(remote_device_id, new_chain_tip);
+        // Persist the shared relationship chain tip under the same parent the
+        // verified transition consumed. Canonical storage must stay forward-only.
+        match self.chain_tip_store.set_contact_chain_tip(
+            remote_device_id,
+            expected_parent_tip,
+            new_chain_tip,
+        )? {
+            true => {}
+            false => {
+                return Err(DsmError::deterministic_safety(
+                    DeterministicSafetyClass::ParentConsumed,
+                    "Tripwire: finalized relationship chain tip parent no longer matches storage",
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -1172,10 +1185,23 @@ mod tests {
                 .and_then(|m| m.get(device_id).copied())
         }
 
-        fn set_contact_chain_tip(&self, device_id: &[u8; 32], new_tip: [u8; 32]) {
+        fn set_contact_chain_tip(
+            &self,
+            device_id: &[u8; 32],
+            expected_parent_tip: [u8; 32],
+            new_tip: [u8; 32],
+        ) -> Result<bool, DsmError> {
             if let Ok(mut m) = self.tips.lock() {
+                let current = m.get(device_id).copied().unwrap_or([0u8; 32]);
+                if current != expected_parent_tip {
+                    return Ok(false);
+                }
                 m.insert(*device_id, new_tip);
+                return Ok(true);
             }
+            Err(DsmError::InvalidState(
+                "TestChainTipStore mutex poisoned".to_string(),
+            ))
         }
     }
 

@@ -2430,7 +2430,10 @@ async fn fetch_quorum_device_identity(
 impl AppRouter for AppRouterImpl {
     fn sync_balance_cache(&self) {
         if let Err(e) = self.core_sdk.restore_latest_archived_state_for_device() {
-            log::warn!("[AppRouter] restore_latest_archived_state_for_device failed: {}", e);
+            log::warn!(
+                "[AppRouter] restore_latest_archived_state_for_device failed: {}",
+                e
+            );
         }
         if let Err(e) = self.wallet.reload_balance_cache_for_self() {
             log::warn!("[AppRouter] sync_balance_cache failed: {}", e);

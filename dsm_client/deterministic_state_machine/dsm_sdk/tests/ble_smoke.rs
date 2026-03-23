@@ -132,7 +132,10 @@ async fn ble_smoke_prepare_roundtrip() {
         })
         .await
         .unwrap_or_else(|e| panic!("prepare processing failed: {e}"));
-    assert!(!response.is_empty(), "assembled prepare should produce a response");
+    assert!(
+        !response.is_empty(),
+        "assembled prepare should produce a response"
+    );
 
     // Verify we can frame a response (even if we don't process it fully)
     let mock_response = vec![0x01, 0x02, 0x03]; // minimal payload
@@ -189,7 +192,10 @@ async fn ble_smoke_multi_chunk_roundtrip() {
                 "intermediate chunk should not assemble yet"
             );
         } else {
-            assert!(matches!(maybe, FrameIngressResult::MessageComplete { .. }), "last chunk should assemble");
+            assert!(
+                matches!(maybe, FrameIngressResult::MessageComplete { .. }),
+                "last chunk should assemble"
+            );
             if let FrameIngressResult::MessageComplete { message } = maybe {
                 assembled = Some(message);
             }
