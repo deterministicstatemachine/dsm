@@ -4,7 +4,6 @@
 //! All sensitive data is encrypted at rest while preserving full offline transaction
 //! creation, validation, and queuing functionality.
 
-pub mod bounded_smt;
 pub mod cdbrw_verifier;
 pub mod identity;
 pub mod offline_security;
@@ -16,4 +15,3 @@ pub use offline_security::{
     SecureAppState, SensitiveAppData,
 };
 pub use wal_transaction_queue::WalTransactionQueue;
-pub use bounded_smt::{BoundedSmt, BoundedInclusionProof};

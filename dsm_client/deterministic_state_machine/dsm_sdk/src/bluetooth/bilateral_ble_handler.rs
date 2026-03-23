@@ -60,7 +60,7 @@ pub struct BilateralBleHandler {
     event_callback: Option<BilateralEventCallback>,
     /// Per-Device SMT for relationship chain tips (§2.2, §4.3).
     /// Shared singleton — same instance is used by both BLE and online transfer paths.
-    per_device_smt: Arc<RwLock<crate::security::bounded_smt::BoundedSmt>>,
+    per_device_smt: Arc<RwLock<dsm::merkle::sparse_merkle_tree::SparseMerkleTree>>,
     /// Application-layer settlement delegate.  Handles all token- and
     /// balance-specific logic so the transport layer stays coin-agnostic.
     settlement_delegate: Option<Arc<dyn BilateralSettlementDelegate>>,
@@ -2745,7 +2745,7 @@ impl BilateralBleHandler {
                 &confirm_request.rel_proof_child,
             )?;
 
-            if !crate::security::bounded_smt::BoundedSmt::verify_proof_against_root(
+            if !dsm::merkle::sparse_merkle_tree::SparseMerkleTree::verify_proof_against_root(
                 &child_proof,
                 &sender_root,
             ) {
@@ -2772,7 +2772,7 @@ impl BilateralBleHandler {
                 let parent_proof = crate::sdk::receipts::deserialize_inclusion_proof(
                     &confirm_request.rel_proof_parent,
                 )?;
-                if !crate::security::bounded_smt::BoundedSmt::verify_proof_against_root(
+                if !dsm::merkle::sparse_merkle_tree::SparseMerkleTree::verify_proof_against_root(
                     &parent_proof,
                     &old_root,
                 ) {
@@ -3579,7 +3579,7 @@ impl BilateralBleHandler {
     }
 
     /// Per-Device SMT for relationship chain tips (§18.1)
-    pub fn per_device_smt(&self) -> &Arc<RwLock<crate::security::bounded_smt::BoundedSmt>> {
+    pub fn per_device_smt(&self) -> &Arc<RwLock<dsm::merkle::sparse_merkle_tree::SparseMerkleTree>> {
         &self.per_device_smt
     }
 

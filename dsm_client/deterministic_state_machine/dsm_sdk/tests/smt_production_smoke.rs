@@ -12,7 +12,7 @@ use dsm::common::device_tree::DeviceTree;
 use dsm::types::operations::{Operation, TransactionMode, VerificationType};
 use dsm::types::token_types::Balance;
 
-use dsm_sdk::security::bounded_smt::{BoundedSmt, BoundedInclusionProof};
+use dsm::merkle::sparse_merkle_tree::{SparseMerkleTree, SmtInclusionProof};
 use dsm_sdk::security::shared_smt;
 use dsm_sdk::sdk::app_state::AppState;
 use dsm_sdk::sdk::receipts::{
@@ -38,7 +38,7 @@ struct TestDevice {
     device_id: [u8; 32],
     genesis_hash: [u8; 32],
     keypair: SignatureKeyPair,
-    smt: BoundedSmt,
+    smt: SparseMerkleTree,
     device_tree_root: [u8; 32],
 }
 
@@ -54,7 +54,7 @@ impl TestDevice {
         let genesis_hash =
             domain_hash_bytes("DSM/genesis", &[&device_id[..], &entropy[..]].concat());
         let device_tree_root = DeviceTree::single(device_id).root();
-        let smt = BoundedSmt::new(256);
+        let smt = SparseMerkleTree::new(256);
         Self {
             device_id,
             genesis_hash,
@@ -107,8 +107,8 @@ struct TransferResult {
     h_n_plus_1: [u8; 32],
     pre_root: [u8; 32],
     post_root: [u8; 32],
-    parent_proof: BoundedInclusionProof,
-    child_proof: BoundedInclusionProof,
+    parent_proof: SmtInclusionProof,
+    child_proof: SmtInclusionProof,
     receipt_bytes: Vec<u8>,
 }
 
@@ -204,12 +204,12 @@ async fn smoke_full_smt_roundtrip() {
 
     // Verify child proof against post_root
     assert!(
-        BoundedSmt::verify_proof_against_root(&result.child_proof, &result.post_root),
+        SparseMerkleTree::verify_proof_against_root(&result.child_proof, &result.post_root),
         "child proof must verify against post_root"
     );
     // Verify parent proof against pre_root
     assert!(
-        BoundedSmt::verify_proof_against_root(&result.parent_proof, &result.pre_root),
+        SparseMerkleTree::verify_proof_against_root(&result.parent_proof, &result.pre_root),
         "parent proof must verify against pre_root"
     );
     // Receipt bytes non-empty
@@ -236,7 +236,7 @@ async fn smoke_receiver_verifies_sender_proofs() {
     let result = execute_transfer(&mut a, &mut b, &smt_key, &h_0, 0, 50);
 
     // Receiver verifies child proof against post_root
-    assert!(BoundedSmt::verify_proof_against_root(
+    assert!(SparseMerkleTree::verify_proof_against_root(
         &result.child_proof,
         &result.post_root
     ));
@@ -245,7 +245,7 @@ async fn smoke_receiver_verifies_sender_proofs() {
     let mut tampered_root = result.post_root;
     tampered_root[0] ^= 0xFF;
     assert!(
-        !BoundedSmt::verify_proof_against_root(&result.child_proof, &tampered_root),
+        !SparseMerkleTree::verify_proof_against_root(&result.child_proof, &tampered_root),
         "tampered root must fail verification"
     );
 }
@@ -281,19 +281,19 @@ async fn smoke_multi_relationship_3_peers() {
     // A<->C proof still verifies against A's new root
     let proof_ac = a.smt.get_inclusion_proof(&key_ac, 256).unwrap();
     assert!(
-        BoundedSmt::verify_proof_against_root(&proof_ac, &new_root),
+        SparseMerkleTree::verify_proof_against_root(&proof_ac, &new_root),
         "A<->C proof must still verify after A<->B update"
     );
 
     // A<->D proof still verifies against A's new root
     let proof_ad = a.smt.get_inclusion_proof(&key_ad, 256).unwrap();
     assert!(
-        BoundedSmt::verify_proof_against_root(&proof_ad, &new_root),
+        SparseMerkleTree::verify_proof_against_root(&proof_ad, &new_root),
         "A<->D proof must still verify after A<->B update"
     );
 
     // Sanity: A<->B child proof verifies against new root
-    assert!(BoundedSmt::verify_proof_against_root(
+    assert!(SparseMerkleTree::verify_proof_against_root(
         &result.child_proof,
         &result.post_root
     ));
@@ -322,7 +322,7 @@ async fn smoke_10_roundtrip_transfers() {
         let root = *a.smt.root();
         let proof = a.smt.get_inclusion_proof(&smt_key, 256).unwrap();
         assert!(
-            BoundedSmt::verify_proof_against_root(&proof, &root),
+            SparseMerkleTree::verify_proof_against_root(&proof, &root),
             "proof must verify at round {i}"
         );
 
@@ -365,7 +365,7 @@ async fn smoke_10_roundtrip_transfers() {
 async fn smoke_eviction_boundary() {
     setup_test_env();
 
-    let mut smt = BoundedSmt::new(256);
+    let mut smt = SparseMerkleTree::new(256);
 
     // Generate 257 distinct keys
     let mut keys: Vec<[u8; 32]> = Vec::with_capacity(257);
@@ -385,7 +385,7 @@ async fn smoke_eviction_boundary() {
     for key in &keys[..256] {
         let proof = smt.get_inclusion_proof(key, 256).unwrap();
         assert!(
-            BoundedSmt::verify_proof_against_root(&proof, &root_256),
+            SparseMerkleTree::verify_proof_against_root(&proof, &root_256),
             "all 256 proofs must verify"
         );
     }
@@ -398,14 +398,14 @@ async fn smoke_eviction_boundary() {
     for key in &keys[1..256] {
         let proof = smt.get_inclusion_proof(key, 256).unwrap();
         assert!(
-            BoundedSmt::verify_proof_against_root(&proof, &root_257),
+            SparseMerkleTree::verify_proof_against_root(&proof, &root_257),
             "surviving proofs must verify after eviction"
         );
     }
 
     // The 257th key also verifies
     let proof_257 = smt.get_inclusion_proof(&keys[256], 256).unwrap();
-    assert!(BoundedSmt::verify_proof_against_root(
+    assert!(SparseMerkleTree::verify_proof_against_root(
         &proof_257,
         &root_257
     ));
@@ -461,7 +461,7 @@ async fn smoke_concurrent_5_relationships() {
     for (i, key) in smt_keys.iter().enumerate() {
         let proof = a.smt.get_inclusion_proof(key, 256).unwrap();
         assert!(
-            BoundedSmt::verify_proof_against_root(&proof, &final_root),
+            SparseMerkleTree::verify_proof_against_root(&proof, &final_root),
             "relationship {i} proof must verify against final root"
         );
     }
@@ -650,7 +650,7 @@ async fn smoke_receipt_canonical_determinism() {
         let dev_a = TestDevice::from_seed(seed_a);
         let dev_b = TestDevice::from_seed(seed_b);
 
-        let mut smt = BoundedSmt::new(256);
+        let mut smt = SparseMerkleTree::new(256);
         smt.update_leaf(&smt_key, &h_0).unwrap();
         let pre_root = *smt.root();
         let parent_proof = smt.get_inclusion_proof(&smt_key, 256).unwrap();
@@ -694,7 +694,7 @@ async fn smoke_first_transaction_zero_leaf_edge() {
     let smt_key = compute_smt_key(&a.device_id, &b.device_id);
     let h_0 = compute_h0(&a, &b);
 
-    let mut smt = BoundedSmt::new(256);
+    let mut smt = SparseMerkleTree::new(256);
 
     // Brand new SMT: get_inclusion_proof for a non-existent key returns Err
     assert!(
@@ -708,7 +708,7 @@ async fn smoke_first_transaction_zero_leaf_edge() {
     // Now proof succeeds
     let proof_h0 = smt.get_inclusion_proof(&smt_key, 256).unwrap();
     assert!(
-        BoundedSmt::verify_proof_against_root(&proof_h0, smt.root()),
+        SparseMerkleTree::verify_proof_against_root(&proof_h0, smt.root()),
         "proof for h_0 must verify"
     );
 
@@ -738,7 +738,7 @@ async fn smoke_first_transaction_zero_leaf_edge() {
     smt.update_leaf(&smt_key, &h_1).unwrap();
     let proof_h1 = smt.get_inclusion_proof(&smt_key, 256).unwrap();
     assert!(
-        BoundedSmt::verify_proof_against_root(&proof_h1, smt.root()),
+        SparseMerkleTree::verify_proof_against_root(&proof_h1, smt.root()),
         "proof for h_1 must verify"
     );
 }
@@ -766,7 +766,7 @@ async fn smoke_appstate_device_tree_root_canonical() {
 async fn smoke_proof_serialize_deserialize_roundtrip() {
     setup_test_env();
 
-    let mut smt = BoundedSmt::new(256);
+    let mut smt = SparseMerkleTree::new(256);
     let key = domain_hash_bytes("DSM/test-key", &[0xAA]);
     let value = domain_hash_bytes("DSM/test-value", &[0xBB]);
 
@@ -782,7 +782,7 @@ async fn smoke_proof_serialize_deserialize_roundtrip() {
 
     // Verify restored proof against the same root
     assert!(
-        BoundedSmt::verify_proof_against_root(&restored, smt.root()),
+        SparseMerkleTree::verify_proof_against_root(&restored, smt.root()),
         "deserialized proof must verify against original root"
     );
 

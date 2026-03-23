@@ -114,22 +114,22 @@ pub fn build_receipt_struct(
     // 2. STUB: Compute degenerate single-leaf SMT roots (leaf hash = root).
     //    This creates a zero-depth tree where the leaf IS the root, with no
     //    siblings. The BLE offline path uses `build_bilateral_receipt_with_smt()`
-    //    with real BoundedSmt roots instead. This stub path is for online receipts
+    //    with real SparseMerkleTree roots instead. This stub path is for online receipts
     //    that don't yet track the full Per-Device SMT.
     let smt_key = compute_smt_key(&devid_a, &devid_b);
     let parent_root = hash_smt_leaf(&parent_tip);
     let child_root = hash_smt_leaf(&child_tip);
 
-    // 3. Build parseable relation proofs in BoundedInclusionProof format
+    // 3. Build parseable relation proofs in SmtInclusionProof format
     //    (zero-depth SMT: rel_key is the key, tip is the value, no siblings).
     let rel_proof_parent =
-        serialize_inclusion_proof(&crate::security::bounded_smt::BoundedInclusionProof {
+        serialize_inclusion_proof(&dsm::merkle::sparse_merkle_tree::SmtInclusionProof {
             key: smt_key,
             value: Some(parent_tip),
             siblings: Vec::new(),
         });
     let rel_proof_child =
-        serialize_inclusion_proof(&crate::security::bounded_smt::BoundedInclusionProof {
+        serialize_inclusion_proof(&dsm::merkle::sparse_merkle_tree::SmtInclusionProof {
             key: smt_key,
             value: Some(child_tip),
             siblings: Vec::new(),
@@ -222,7 +222,7 @@ pub fn build_bilateral_receipt(
 ///
 /// Unlike `build_bilateral_receipt()` which computes single-leaf stub proofs,
 /// this function accepts the actual SMT roots and serialized inclusion proofs
-/// produced by `BoundedSmt` after an `update_leaf()` call. Use this when the
+/// produced by `SparseMerkleTree` after an `update_leaf()` call. Use this when the
 /// caller has already performed the SMT-Replace and collected the proofs.
 #[allow(clippy::too_many_arguments)]
 pub fn build_bilateral_receipt_with_smt(
@@ -311,7 +311,7 @@ pub fn build_bilateral_receipt_with_smt(
 /// 1. Protobuf decodes the receipt
 /// 2. All 32-byte fixed fields (genesis, devids, tips, roots) must be non-zero
 /// 3. §4.3#2: π_rel proves h_n ∈ r_A and π'_rel proves h_{n+1} ∈ r'_A
-///    (BoundedInclusionProof deserialization + root reconstruction)
+///    (SmtInclusionProof deserialization + root reconstruction)
 /// 4. §4.3#4: Leaf-replace recomputation — replacing h_n with h_{n+1} using
 ///    the same sibling path must yield r'_A byte-exactly
 /// 5. §4.3#3: π_dev proves DevID_A ∈ R_G (Device Tree inclusion)
@@ -319,7 +319,7 @@ pub fn build_bilateral_receipt_with_smt(
 /// `device_tree_root`: explicit R_G for sender. `None` is rejected.
 /// Returns `true` only if all checks pass.
 pub fn verify_receipt_bytes(receipt_bytes: &[u8], device_tree_root: Option<[u8; 32]>) -> bool {
-    use crate::security::bounded_smt::{BoundedInclusionProof, BoundedSmt};
+    use dsm::merkle::sparse_merkle_tree::{SmtInclusionProof, SparseMerkleTree};
     use dsm::common::device_tree;
     use dsm::verification::smt_replace_witness::compute_smt_key;
 
@@ -360,7 +360,7 @@ pub fn verify_receipt_bytes(receipt_bytes: &[u8], device_tree_root: Option<[u8; 
     if child_proof.value != Some(receipt.child_tip) {
         return false;
     }
-    if !BoundedSmt::verify_proof_against_root(&child_proof, &receipt.child_root) {
+    if !SparseMerkleTree::verify_proof_against_root(&child_proof, &receipt.child_root) {
         return false;
     }
 
@@ -374,19 +374,19 @@ pub fn verify_receipt_bytes(receipt_bytes: &[u8], device_tree_root: Option<[u8; 
         }
 
         // §4.3#2: π_rel proves h_n ∈ r_A
-        if !BoundedSmt::verify_proof_against_root(&pp, &receipt.parent_root) {
+        if !SparseMerkleTree::verify_proof_against_root(&pp, &receipt.parent_root) {
             return false;
         }
 
         // §4.3#4: Leaf-replace recomputation.
         // Single leaf change ⇒ sibling path is identical.
         // Replace h_n with h_{n+1} using parent's siblings → must yield r'_A.
-        let replace_proof = BoundedInclusionProof {
+        let replace_proof = SmtInclusionProof {
             key: smt_key,
             value: Some(receipt.child_tip),
             siblings: pp.siblings,
         };
-        if !BoundedSmt::verify_proof_against_root(&replace_proof, &receipt.child_root) {
+        if !SparseMerkleTree::verify_proof_against_root(&replace_proof, &receipt.child_root) {
             return false;
         }
     }
@@ -418,11 +418,11 @@ pub fn verify_receipt_bytes(receipt_bytes: &[u8], device_tree_root: Option<[u8; 
     true
 }
 
-/// Serialize a `BoundedInclusionProof` to bytes for wire transport.
+/// Serialize a `SmtInclusionProof` to bytes for wire transport.
 ///
 /// Format: [32-byte key][1-byte has_value][optional 32-byte value][4-byte LE sibling count][32-byte siblings...]
 pub fn serialize_inclusion_proof(
-    proof: &crate::security::bounded_smt::BoundedInclusionProof,
+    proof: &dsm::merkle::sparse_merkle_tree::SmtInclusionProof,
 ) -> Vec<u8> {
     let mut buf = Vec::with_capacity(32 + 1 + 32 + 4 + proof.siblings.len() * 32);
     buf.extend_from_slice(&proof.key);
@@ -437,10 +437,10 @@ pub fn serialize_inclusion_proof(
     buf
 }
 
-/// Deserialize a `BoundedInclusionProof` from bytes.
+/// Deserialize a `SmtInclusionProof` from bytes.
 pub fn deserialize_inclusion_proof(
     data: &[u8],
-) -> Result<crate::security::bounded_smt::BoundedInclusionProof, DsmError> {
+) -> Result<dsm::merkle::sparse_merkle_tree::SmtInclusionProof, DsmError> {
     if data.len() < 33 {
         return Err(DsmError::invalid_operation(
             "inclusion proof too short: need at least 33 bytes",
@@ -482,7 +482,7 @@ pub fn deserialize_inclusion_proof(
         s.copy_from_slice(&data[offset + i * 32..offset + (i + 1) * 32]);
         siblings.push(s);
     }
-    Ok(crate::security::bounded_smt::BoundedInclusionProof {
+    Ok(dsm::merkle::sparse_merkle_tree::SmtInclusionProof {
         key,
         value,
         siblings,
