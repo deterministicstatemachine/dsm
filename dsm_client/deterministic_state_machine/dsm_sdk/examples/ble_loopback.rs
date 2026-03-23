@@ -10,9 +10,7 @@ use dsm_sdk::bluetooth::bilateral_ble_handler::BilateralBleHandler;
 use dsm_sdk::bluetooth::bilateral_transport_adapter::{
     BilateralTransportAdapter, BleTransportDelegate, TransportInboundMessage,
 };
-use dsm_sdk::bluetooth::ble_frame_coordinator::{
-    BleFrameCoordinator, BleFrameType, FrameIngressResult,
-};
+use dsm_sdk::bluetooth::ble_frame_coordinator::{BleFrameCoordinator, BleFrameType, FrameIngressResult};
 use dsm_sdk::bluetooth::android_ble_bridge::AndroidBleBridge;
 
 use dsm::core::bilateral_transaction_manager::BilateralTransactionManager;
@@ -91,7 +89,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The adapter response is the prepare response to send back to A
     if let Some(resp_bytes) = maybe_response {
         // Send response back to A (simulate BLE chunks)
-        let resp_chunks = coord_b.encode_message(BleFrameType::BilateralPrepareResponse, &resp_bytes)?;
+        let resp_chunks =
+            coord_b.encode_message(BleFrameType::BilateralPrepareResponse, &resp_bytes)?;
         // Feed response chunks back to A and process the prepare response
         for ch in &resp_chunks {
             match coord_a.ingest_chunk(ch).await? {
@@ -122,7 +121,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Produce confirm envelope on A (3-step protocol step 3) and fragment into BLE chunks
     let (confirm_payload, _meta) = handler_a.send_bilateral_confirm(commitment_hash).await?;
-    let confirm_chunks = coord_a.encode_message(BleFrameType::BilateralConfirm, &confirm_payload)?;
+    let confirm_chunks =
+        coord_a.encode_message(BleFrameType::BilateralConfirm, &confirm_payload)?;
 
     // B reassembles confirm request and processes it — no response needed
     for ch in &confirm_chunks {

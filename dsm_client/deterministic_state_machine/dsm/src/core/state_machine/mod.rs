@@ -663,11 +663,8 @@ mod state_machine_tests {
             state.hash = hash;
         }
 
-        let mut era_policy = crate::types::policy_types::PolicyFile::new(
-            "ERA Token Policy",
-            "1.0.0",
-            "system",
-        );
+        let mut era_policy =
+            crate::types::policy_types::PolicyFile::new("ERA Token Policy", "1.0.0", "system");
         era_policy.with_description("Default policy for the ERA token in DSM ecosystem");
         era_policy.add_metadata("token_type", "native");
         era_policy.add_metadata("governance", "meritocratic");

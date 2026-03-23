@@ -355,9 +355,7 @@ impl TlaRunner {
                     "BalancesNonNegative".into(),
                 ],
                 properties: vec![],
-                linked_implementation_traces: vec![
-                    "bilateral_full_offline_finality".into(),
-                ],
+                linked_implementation_traces: vec!["bilateral_full_offline_finality".into()],
                 // No literal TLC trace replay (no simulation trace file);
                 // linked implementation traces provide the code-level bridge.
                 supports_trace_replay: false,
@@ -377,9 +375,7 @@ impl TlaRunner {
                     "ZeroRefreshForInactive".into(),
                 ],
                 properties: vec![],
-                linked_implementation_traces: vec![
-                    "bilateral_pair_non_interference".into(),
-                ],
+                linked_implementation_traces: vec!["bilateral_pair_non_interference".into()],
                 supports_trace_replay: false,
             },
         ]

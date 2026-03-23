@@ -1670,10 +1670,10 @@ impl SparseMerkleTree {
     pub fn new(height: u32) -> Self {
         Self {
             root: Hash::from(crate::merkle::sparse_merkle_tree::empty_root(height)),
-            leaves: HashMap::new(),      // Start with empty leaves
-            nodes: HashMap::new(),       // Start with empty nodes
-            height,                      // Store the specified height
-            leaf_count: 0,               // Start with no leaves
+            leaves: HashMap::new(), // Start with empty leaves
+            nodes: HashMap::new(),  // Start with empty nodes
+            height,                 // Store the specified height
+            leaf_count: 0,          // Start with no leaves
         }
     }
 

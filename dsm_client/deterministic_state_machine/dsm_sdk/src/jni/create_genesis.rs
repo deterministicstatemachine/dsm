@@ -341,7 +341,8 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_createGenesis<'a>(
                         let transport_adapter = std::sync::Arc::new(
                             crate::bluetooth::BilateralTransportAdapter::new(ble_handler.clone()),
                         );
-                        let coordinator = std::sync::Arc::new(BleFrameCoordinator::new(device_id_arr));
+                        let coordinator =
+                            std::sync::Arc::new(BleFrameCoordinator::new(device_id_arr));
 
                         // Inject into BiImpl if available
                         match crate::bridge::inject_ble_coordinator(coordinator).await {
@@ -354,10 +355,15 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_createGenesis<'a>(
                         }
                         match crate::bridge::inject_ble_transport_adapter(transport_adapter).await {
                             Ok(_) => {
-                                log::info!("createGenesis: BLE transport adapter injected successfully")
+                                log::info!(
+                                    "createGenesis: BLE transport adapter injected successfully"
+                                )
                             }
                             Err(e) => {
-                                log::warn!("createGenesis: Failed to inject BLE transport adapter: {}", e)
+                                log::warn!(
+                                    "createGenesis: Failed to inject BLE transport adapter: {}",
+                                    e
+                                )
                             }
                         }
                     }

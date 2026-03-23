@@ -142,10 +142,17 @@ impl PartialTransportMessage {
         }
     }
 
-    pub fn insert_chunk(&mut self, chunk_index: u16, payload: Vec<u8>, now: Instant) -> Result<(), DsmError> {
+    pub fn insert_chunk(
+        &mut self,
+        chunk_index: u16,
+        payload: Vec<u8>,
+        now: Instant,
+    ) -> Result<(), DsmError> {
         let idx = usize::from(chunk_index);
         if idx >= self.chunks.len() {
-            return Err(DsmError::invalid_operation("transport chunk index out of bounds"));
+            return Err(DsmError::invalid_operation(
+                "transport chunk index out of bounds",
+            ));
         }
         self.chunks[idx] = Some(payload);
         self.received[idx] = true;
@@ -315,10 +322,14 @@ impl BleFrameCoordinator {
         max_chunk_payload: usize,
     ) -> Result<Vec<Vec<u8>>, DsmError> {
         if payload.is_empty() {
-            return Err(DsmError::invalid_operation("empty payload for transport chunking"));
+            return Err(DsmError::invalid_operation(
+                "empty payload for transport chunking",
+            ));
         }
         if max_chunk_payload == 0 {
-            return Err(DsmError::invalid_operation("transport chunk size must be > 0"));
+            return Err(DsmError::invalid_operation(
+                "transport chunk size must be > 0",
+            ));
         }
 
         let chunk_count = u32::try_from(payload.len().div_ceil(max_chunk_payload))
@@ -336,8 +347,9 @@ impl BleFrameCoordinator {
                 message_id,
                 chunk_index,
                 chunk_count,
-                payload_len: u32::try_from(chunk_payload.len())
-                    .map_err(|_| DsmError::invalid_operation("transport chunk payload too large"))?,
+                payload_len: u32::try_from(chunk_payload.len()).map_err(|_| {
+                    DsmError::invalid_operation("transport chunk payload too large")
+                })?,
                 checksum: Self::transport_checksum(&chunk_payload),
             };
             let chunk = BleTransportChunk {
@@ -400,14 +412,20 @@ impl BleFrameCoordinator {
                 .as_ref()
                 .ok_or_else(|| DsmError::invalid_operation("missing transport chunk header"))?;
             if header.version != BLE_TRANSPORT_VERSION {
-                return Err(DsmError::invalid_operation("unsupported transport chunk version"));
+                return Err(DsmError::invalid_operation(
+                    "unsupported transport chunk version",
+                ));
             }
             if header.payload_len != u32::try_from(chunk.payload.len()).unwrap_or(u32::MAX) {
-                return Err(DsmError::invalid_operation("transport chunk payload length mismatch"));
+                return Err(DsmError::invalid_operation(
+                    "transport chunk payload length mismatch",
+                ));
             }
             let checksum = Self::transport_checksum(&chunk.payload);
             if header.checksum != checksum {
-                return Err(DsmError::invalid_operation("transport chunk checksum mismatch"));
+                return Err(DsmError::invalid_operation(
+                    "transport chunk checksum mismatch",
+                ));
             }
             return Ok(BleTransportFrame::Chunk(chunk));
         }
@@ -524,10 +542,7 @@ impl BleFrameCoordinator {
     }
 
     /// Handle a single BLE chunk (protobuf bytes for `BleChunk`) and return transport ingress state.
-    pub async fn ingest_chunk(
-        &self,
-        chunk_bytes: &[u8],
-    ) -> Result<FrameIngressResult, DsmError> {
+    pub async fn ingest_chunk(&self, chunk_bytes: &[u8]) -> Result<FrameIngressResult, DsmError> {
         let chunk = crate::generated::BleChunk::decode(chunk_bytes).map_err(|e| {
             DsmError::serialization_error("BleChunk", "protobuf", Some(e.to_string()), Some(e))
         })?;
@@ -640,7 +655,10 @@ impl BleFrameCoordinator {
         let _ = crate::storage::client_db::delete_frame_chunks(&frame_commitment);
 
         Ok(FrameIngressResult::MessageComplete {
-            message: BleTransportMessage { frame_type, payload },
+            message: BleTransportMessage {
+                frame_type,
+                payload,
+            },
         })
     }
 
@@ -719,7 +737,10 @@ mod tests {
             chunk.encode(&mut chunk_bytes).unwrap();
 
             // Handle the chunk - should pass through to normal processing
-            let result = coord.ingest_chunk(&chunk_bytes).await.expect("ingest modern frame");
+            let result = coord
+                .ingest_chunk(&chunk_bytes)
+                .await
+                .expect("ingest modern frame");
             match result {
                 FrameIngressResult::MessageComplete { message } => {
                     assert_eq!(message.frame_type, BleFrameType::Unspecified);
@@ -777,8 +798,8 @@ mod tests {
             let encoded = coordinator
                 .encode_transport_ack(7, 11, &received)
                 .expect("encode ack");
-            let decoded = BleFrameCoordinator::decode_transport_frame(&encoded)
-                .expect("decode ack");
+            let decoded =
+                BleFrameCoordinator::decode_transport_frame(&encoded).expect("decode ack");
             match decoded {
                 BleTransportFrame::Ack(decoded_ack) => {
                     assert_eq!(decoded_ack.ack_base_chunk, 2);

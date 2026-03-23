@@ -1224,8 +1224,9 @@ impl AppRouterImpl {
                                 }
 
                                 // NOTE: Post-batch chain tip update loop REMOVED.
-                                // The per-entry update at §4.3 finalize (update_contact_chain_tip_after_bilateral
-                                // with independently recomputed expected_h_next) is authoritative. The old loop
+                                // The per-entry §4.3 finalize path that CAS-advances the
+                                // canonical bilateral tip with independently recomputed expected_h_next
+                                // is authoritative. The old loop
                                 // overwrote the correct relationship tip h_{n+1} with the state-machine entity
                                 // hash (entry.sender_chain_tip), breaking fork-exclusion detection.
 

@@ -61,10 +61,7 @@ fn seed_bcr_genesis_with_era(device_id: [u8; 32], public_key: &[u8], era_balance
         dsm::core::token::derive_canonical_balance_key(&policy_commit, public_key, "ERA");
 
     let mut balances = std::collections::HashMap::new();
-    balances.insert(
-        balance_key,
-        Balance::from_state(era_balance, [0u8; 32], 0),
-    );
+    balances.insert(balance_key, Balance::from_state(era_balance, [0u8; 32], 0));
 
     let mut state = StateBuilder::new()
         .with_id("genesis".to_string())

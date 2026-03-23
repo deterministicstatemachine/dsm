@@ -152,8 +152,8 @@ impl CoreSDK {
         state_machine: &Mutex<StateMachine>,
         device_id: &[u8; 32],
     ) -> Result<(), DsmError> {
-        let archived_states = crate::storage::client_db::get_bcr_states(device_id, false)
-            .map_err(|e| {
+        let archived_states =
+            crate::storage::client_db::get_bcr_states(device_id, false).map_err(|e| {
                 DsmError::state_machine(format!(
                     "Failed to load archived states during startup restore: {e}"
                 ))
@@ -2022,11 +2022,11 @@ mod tests {
 
         let op = sdk
             .sign_operation_sphincs(DsmOperation::Generic {
-            operation_type: b"archive.test".to_vec(),
-            data: vec![0xAB, 0xCD],
-            message: "persist state".to_string(),
-            signature: vec![],
-        })
+                operation_type: b"archive.test".to_vec(),
+                data: vec![0xAB, 0xCD],
+                message: "persist state".to_string(),
+                signature: vec![],
+            })
             .expect("sign operation");
 
         let executed = sdk.execute_dsm_operation(op).expect("execute operation");
@@ -2035,7 +2035,9 @@ mod tests {
         let archived = crate::storage::client_db::get_bcr_states(&device.device_id, false)
             .expect("load archived states");
         assert!(
-            archived.iter().any(|state| state.state_number == executed.state_number),
+            archived
+                .iter()
+                .any(|state| state.state_number == executed.state_number),
             "executed canonical state must be archived for sparse replay"
         );
 

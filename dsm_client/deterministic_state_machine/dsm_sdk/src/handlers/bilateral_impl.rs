@@ -205,9 +205,10 @@ impl BilateralHandler for BiImpl {
                         .await
                     {
                         Ok((prepare_envelope, commitment_hash_bytes)) => {
-                            let chunks = match coordinator
-                                .encode_message(pb::BleFrameType::BilateralPrepare, &prepare_envelope)
-                            {
+                            let chunks = match coordinator.encode_message(
+                                pb::BleFrameType::BilateralPrepare,
+                                &prepare_envelope,
+                            ) {
                                 Ok(chunks) => chunks,
                                 Err(e) => {
                                     return BiResult {
@@ -228,13 +229,12 @@ impl BilateralHandler for BiImpl {
                             // Send chunks via the shared JNI BLE dispatch helper.
                             #[cfg(all(target_os = "android", feature = "jni"))]
                             {
-                                let jvm = crate::jni::jni_common::get_java_vm()
-                                    .ok_or_else(|| {
-                                        DsmError::internal(
-                                            "JavaVM not initialized",
-                                            None::<std::io::Error>,
-                                        )
-                                    });
+                                let jvm = crate::jni::jni_common::get_java_vm().ok_or_else(|| {
+                                    DsmError::internal(
+                                        "JavaVM not initialized",
+                                        None::<std::io::Error>,
+                                    )
+                                });
                                 let send_result = jvm.and_then(|jvm| {
                                     let mut env = jvm.attach_current_thread().map_err(|e| {
                                         DsmError::internal(
@@ -579,8 +579,8 @@ impl BilateralHandler for BiImpl {
 
     async fn reconcile_before_send(&self, counterparty_device_id: &[u8]) -> Result<(), String> {
         // Clear the `needs_online_reconcile` flag before each send.
-        // IMPORTANT: Only clear the flag — do NOT pass a zero tip to
-        // update_contact_chain_tip_after_bilateral here. Doing so would destroy
+        // IMPORTANT: Only clear the flag — do NOT write any observed/placeholder
+        // tip into the canonical chain-tip columns here. Doing so would destroy
         // the real SQLite chain tip, causing the Prepare to go out with
         // sender_chain_tip=0000… and be rejected by the receiver every time.
         if let Err(e) =

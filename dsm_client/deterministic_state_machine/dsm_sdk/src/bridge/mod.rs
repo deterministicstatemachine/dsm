@@ -421,7 +421,9 @@ pub async fn inject_ble_coordinator(
 /// Inject the bilateral transport adapter into the bilateral handler (Android only).
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
 pub async fn inject_ble_transport_adapter(
-    adapter: std::sync::Arc<crate::bluetooth::bilateral_transport_adapter::BilateralTransportAdapter>,
+    adapter: std::sync::Arc<
+        crate::bluetooth::bilateral_transport_adapter::BilateralTransportAdapter,
+    >,
 ) -> Result<(), String> {
     use crate::handlers::BiImpl;
 
@@ -464,8 +466,7 @@ pub async fn get_ble_coordinator(
 
 /// Get the bilateral transport adapter from the bilateral handler (Android only).
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
-pub async fn get_ble_transport_adapter(
-) -> Result<
+pub async fn get_ble_transport_adapter() -> Result<
     std::sync::Arc<crate::bluetooth::bilateral_transport_adapter::BilateralTransportAdapter>,
     String,
 > {

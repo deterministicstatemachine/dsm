@@ -21,11 +21,10 @@ pub use bilateral_transport_adapter::{
     BilateralTransportAdapter, BleTransportDelegate, TransportInboundMessage, TransportOutbound,
 };
 pub use ble_frame_coordinator::{
-    BLE_TRANSPORT_VERSION, BleFrameCoordinator, BleFrameHeader, BleFrameType,
-    BleTransportAck, BleTransportChunk, BleTransportFlags, BleTransportFrame,
-    BleTransportHeader, BleTransportMessage, FrameControlMessage, FrameIngressResult,
-    OutboundTransportMessage, PartialTransportMessage, TransportConfig, TransportError,
-    TransportMessageKey,
+    BLE_TRANSPORT_VERSION, BleFrameCoordinator, BleFrameHeader, BleFrameType, BleTransportAck,
+    BleTransportChunk, BleTransportFlags, BleTransportFrame, BleTransportHeader,
+    BleTransportMessage, FrameControlMessage, FrameIngressResult, OutboundTransportMessage,
+    PartialTransportMessage, TransportConfig, TransportError, TransportMessageKey,
 };
 pub use pairing_orchestrator::{PairingOrchestrator, PairingSession, PairingState};
 

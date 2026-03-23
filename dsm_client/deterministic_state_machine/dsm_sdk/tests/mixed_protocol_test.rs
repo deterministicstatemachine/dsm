@@ -87,7 +87,7 @@ async fn test_offline_offline_tripwire() {
         alias: "Bob".into(),
         genesis_hash: bob_genesis_hash.to_vec(),
         public_key: vec![0u8; 32],
-        current_chain_tip: None,
+        current_chain_tip: Some([1u8; 32].to_vec()),
         added_at: 1,
         verified: true,
         verification_proof: None,
@@ -393,7 +393,10 @@ async fn test_mixed_protocol_modal_lock() {
         .await;
 
     // Ensure DB chain tip reflects the provided next tip for Tripwire enforcement.
-    client_db::update_contact_chain_tip_after_bilateral(&bob_device_id, &[9u8; 32]).unwrap();
+    assert_eq!(
+        client_db::get_contact_chain_tip(&bob_device_id),
+        Some([9u8; 32])
+    );
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     let _ = client_db::get_contact_chain_tip(&bob_device_id);

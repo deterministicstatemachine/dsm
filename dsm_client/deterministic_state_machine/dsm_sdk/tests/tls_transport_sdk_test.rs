@@ -2,9 +2,7 @@
 
 use std::net::SocketAddr;
 
-use dsm_sdk::sdk::tls_transport_sdk::{
-    ensure_rustls_crypto_provider, TlsConfig, TlsTransportSDK,
-};
+use dsm_sdk::sdk::tls_transport_sdk::{ensure_rustls_crypto_provider, TlsConfig, TlsTransportSDK};
 // rcgen API is kept minimal here to avoid depending on private fields.
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;

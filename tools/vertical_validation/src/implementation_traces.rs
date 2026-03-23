@@ -1251,12 +1251,8 @@ fn trace_bilateral_full_offline_finality(
         }
 
         // Step 2: First prepare + finalize (BilateralIrreversibility)
-        let op1 = build_signed_bilateral_transfer(
-            &local_kp,
-            remote_device_id,
-            "finality-trace-1",
-            0x01,
-        );
+        let op1 =
+            build_signed_bilateral_transfer(&local_kp, remote_device_id, "finality-trace-1", 0x01);
         let pre1 = match manager
             .prepare_offline_transfer(&remote_device_id, op1, 500)
             .await
@@ -1300,9 +1296,7 @@ fn trace_bilateral_full_offline_finality(
                     Ok(false) => {
                         failures.push("relationship integrity failed after first finalize".into())
                     }
-                    Err(e) => {
-                        failures.push(format!("relationship integrity errored: {e}"))
-                    }
+                    Err(e) => failures.push(format!("relationship integrity errored: {e}")),
                 }
                 result.relationship_anchor.chain_tip
             }
@@ -1310,12 +1304,8 @@ fn trace_bilateral_full_offline_finality(
         };
 
         // Step 3: Second prepare + finalize (sequential commits, distinct tips)
-        let op2 = build_signed_bilateral_transfer(
-            &local_kp,
-            remote_device_id,
-            "finality-trace-2",
-            0x02,
-        );
+        let op2 =
+            build_signed_bilateral_transfer(&local_kp, remote_device_id, "finality-trace-2", 0x02);
         let pre2 = match manager
             .prepare_offline_transfer(&remote_device_id, op2, 500)
             .await
@@ -1351,12 +1341,8 @@ fn trace_bilateral_full_offline_finality(
         };
 
         // Step 4: Tripwire test — prepare third, advance tip, attempt stale finalize
-        let op3 = build_signed_bilateral_transfer(
-            &local_kp,
-            remote_device_id,
-            "finality-trace-3",
-            0x03,
-        );
+        let op3 =
+            build_signed_bilateral_transfer(&local_kp, remote_device_id, "finality-trace-3", 0x03);
         let pre3 = match manager
             .prepare_offline_transfer(&remote_device_id, op3, 500)
             .await
@@ -1395,9 +1381,7 @@ fn trace_bilateral_full_offline_finality(
             )
             .await
         {
-            Ok(_) => {
-                failures.push("stale precommitment finalized after parent consumption".into())
-            }
+            Ok(_) => failures.push("stale precommitment finalized after parent consumption".into()),
             Err(e) => {
                 let msg = format!("{e}");
                 if !(msg.contains("Tripwire")
@@ -1475,10 +1459,7 @@ fn trace_bilateral_pair_non_interference(
 
         // Step 2: Operate on pair 1 only — prepare + finalize
         let op1 = build_signed_bilateral_transfer(&kp1, remote1, "ni-trace-pair1", 0x10);
-        let pre1 = match manager1
-            .prepare_offline_transfer(&remote1, op1, 500)
-            .await
-        {
+        let pre1 = match manager1.prepare_offline_transfer(&remote1, op1, 500).await {
             Ok(pre) => pre,
             Err(e) => return vec![format!("manager1 prepare failed: {e}")],
         };
@@ -1527,10 +1508,7 @@ fn trace_bilateral_pair_non_interference(
 
         // Step 4: Operate on pair 2
         let op2 = build_signed_bilateral_transfer(&kp2, remote2, "ni-trace-pair2", 0x20);
-        let pre2 = match manager2
-            .prepare_offline_transfer(&remote2, op2, 500)
-            .await
-        {
+        let pre2 = match manager2.prepare_offline_transfer(&remote2, op2, 500).await {
             Ok(pre) => pre,
             Err(e) => return vec![format!("manager2 prepare failed: {e}")],
         };

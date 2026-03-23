@@ -268,18 +268,39 @@ impl UnilateralOpsSDK {
 
                 let mut cm = self.contact_manager.write().await;
                 if let Err(e) = cm.update_contact_chain_tip_unilateral(&recipient, next_tip) {
-                    warn!("UnilateralOpsSDK: failed to update contact chain tip: {e}");
+                    return Err(DsmError::InvalidState(format!(
+                        "UnilateralOpsSDK: failed to update in-memory contact chain tip after submission: {e}"
+                    )));
                 }
-                if let Err(e) =
-                    client_db::update_finalized_bilateral_chain_tip(&recipient, &next_tip)
-                {
-                    warn!("UnilateralOpsSDK: failed to persist finalized chain tip: {e}");
+                match client_db::try_advance_finalized_bilateral_chain_tip(
+                    &recipient,
+                    &sender_chain_tip_arr,
+                    &next_tip,
+                ) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return Err(DsmError::InvalidState(
+                            "UnilateralOpsSDK: finalized chain tip parent mismatch after submission"
+                                .to_string(),
+                        ));
+                    }
+                    Err(e) => {
+                        return Err(DsmError::InvalidState(format!(
+                            "UnilateralOpsSDK: failed to persist finalized chain tip after submission: {e}"
+                        )));
+                    }
                 }
             } else {
-                warn!("UnilateralOpsSDK: chain tip update skipped (invalid base32 lengths)");
+                return Err(DsmError::InvalidState(
+                    "UnilateralOpsSDK: chain tip persistence failed due to invalid decoded base32 lengths"
+                        .to_string(),
+                ));
             }
         } else if next_chain_tip_b32.is_some() {
-            warn!("UnilateralOpsSDK: chain tip update skipped (decode failed)");
+            return Err(DsmError::InvalidState(
+                "UnilateralOpsSDK: chain tip persistence failed because next_chain_tip base32 decode failed"
+                    .to_string(),
+            ));
         }
 
         // 2. Post-submission: Debit and Store History

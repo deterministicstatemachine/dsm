@@ -49,13 +49,18 @@ fn build_faucet_protocol_payload(
     recipient_device_id: &[u8; 32],
     token_id: &str,
     amount: u64,
+    source_state_hash: &[u8; 32],
+    source_state_number: u64,
 ) -> Vec<u8> {
+    let source_state_number_bytes = source_state_number.to_le_bytes();
     crate::sdk::receipts::encode_protocol_transition_payload(
         b"faucet.claim",
         &[
             recipient_device_id,
             token_id.as_bytes(),
             &amount.to_le_bytes(),
+            source_state_hash,
+            &source_state_number_bytes,
         ],
     )
 }
@@ -342,7 +347,14 @@ impl WalletSDK {
         let bytes = crate::util::text_id::decode_base32_crockford(&self.device_id_string())
             .unwrap_or_default();
         let mut array = [0u8; 32];
-        array.copy_from_slice(&bytes);
+        if bytes.len() == 32 {
+            array.copy_from_slice(&bytes);
+        } else {
+            log::warn!(
+                "Wallet device_id decode produced {} bytes; using zero device id fallback",
+                bytes.len()
+            );
+        }
         array
     }
 
@@ -1293,20 +1305,59 @@ impl WalletSDK {
                 .force_set_balance(self.device_id_array(), &token, expected_available);
         }
 
-        let protocol_payload = build_faucet_protocol_payload(&recipient, &token, amount);
+        let protocol_payload = build_faucet_protocol_payload(
+            &recipient,
+            &token,
+            amount,
+            &new_state.hash,
+            new_state.state_number,
+        );
         let protocol_event = {
             use crate::storage::client_db::{
                 advance_system_peer_tip, get_system_peer, store_system_peer, SystemPeerRecord,
                 SystemPeerType,
             };
 
+            let mut expected_parent_tip = [0u8; 32];
             match get_system_peer(ERA_SOURCE_DLV_PEER_KEY).map_err(|e| {
                 DsmError::internal(
                     format!("Failed to load stable ERA source DLV peer: {e}"),
                     None::<std::io::Error>,
                 )
             })? {
-                Some(_) => {}
+                Some(existing) => {
+                    let expected_device_id = era_source_dlv_device_id().to_vec();
+                    if existing.device_id != expected_device_id {
+                        return Err(DsmError::internal(
+                            format!(
+                                "Stable ERA source DLV peer has unexpected device_id for {}",
+                                ERA_SOURCE_DLV_PEER_KEY
+                            ),
+                            None::<std::io::Error>,
+                        ));
+                    }
+                    if existing.peer_type != SystemPeerType::Dlv {
+                        return Err(DsmError::internal(
+                            format!(
+                                "Stable ERA source DLV peer has unexpected type {}",
+                                existing.peer_type.as_str()
+                            ),
+                            None::<std::io::Error>,
+                        ));
+                    }
+                    if let Some(current_tip) = existing.current_chain_tip.as_deref() {
+                        if current_tip.len() != 32 {
+                            return Err(DsmError::internal(
+                                format!(
+                                    "Stable ERA source DLV peer has invalid chain tip length {}",
+                                    current_tip.len()
+                                ),
+                                None::<std::io::Error>,
+                            ));
+                        }
+                        expected_parent_tip.copy_from_slice(current_tip);
+                    }
+                }
                 None => {
                     let rec = SystemPeerRecord {
                         peer_key: ERA_SOURCE_DLV_PEER_KEY.to_string(),
@@ -1330,6 +1381,7 @@ impl WalletSDK {
             advance_system_peer_tip(
                 ERA_SOURCE_DLV_PEER_KEY,
                 SystemPeerType::Dlv,
+                &expected_parent_tip,
                 &protocol_payload,
                 &new_state.hash,
                 new_state.state_number,

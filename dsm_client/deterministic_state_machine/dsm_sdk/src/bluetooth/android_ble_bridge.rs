@@ -12,7 +12,9 @@ use log::{info, debug, warn};
 use dsm::types::error::DsmError;
 use crate::generated;
 use prost::Message;
-use crate::bluetooth::bilateral_transport_adapter::{BleTransportDelegate, TransportInboundMessage, TransportOutbound};
+use crate::bluetooth::bilateral_transport_adapter::{
+    BleTransportDelegate, TransportInboundMessage, TransportOutbound,
+};
 use crate::bluetooth::ble_frame_coordinator::{BleFrameCoordinator, BleFrameType, FrameIngressResult};
 
 /// BLE event types from Android DsmBluetoothService
@@ -453,7 +455,9 @@ impl AndroidBleBridge {
                 let new_count = pending_followups.len();
                 let mut devices = self.connected_devices.write().await;
                 if let Some(connection) = devices.get_mut(address) {
-                    connection.pending_commands.extend(pending_followups.into_iter());
+                    connection
+                        .pending_commands
+                        .extend(pending_followups.into_iter());
                     debug!(
                         "Queued {new_count} follow-up BLE commands for {addr} (total pending: {total})",
                         new_count = new_count,
@@ -461,7 +465,9 @@ impl AndroidBleBridge {
                         total = connection.pending_commands.len()
                     );
                 } else {
-                    warn!("Attempted to queue follow-up BLE commands for unknown address {address}");
+                    warn!(
+                        "Attempted to queue follow-up BLE commands for unknown address {address}"
+                    );
                 }
             }
 
@@ -533,7 +539,10 @@ impl AndroidBleBridge {
                 .handle_inbound_transport_bytes("loopback", &chunk)
                 .await?
             {
-                final_response = outbounds.into_iter().next().map(|outbound| outbound.payload);
+                final_response = outbounds
+                    .into_iter()
+                    .next()
+                    .map(|outbound| outbound.payload);
             }
         }
 
@@ -645,7 +654,6 @@ impl AndroidBleBridge {
         }
         cleaned
     }
-
 }
 
 // JNI extern helpers for BLE (android_ble_*) are implemented in
@@ -703,7 +711,8 @@ mod tests {
         ));
         let transport_adapter = Arc::new(BilateralTransportAdapter::new(handler));
         let coordinator = Arc::new(BleFrameCoordinator::new(device_id));
-        let bridge = AndroidBleBridge::new(coordinator.clone(), transport_adapter.clone(), device_id);
+        let bridge =
+            AndroidBleBridge::new(coordinator.clone(), transport_adapter.clone(), device_id);
         (bilateral_tx_manager, transport_adapter, coordinator, bridge)
     }
 
@@ -1164,7 +1173,8 @@ mod tests {
     #[tokio::test]
     async fn test_defer_response_until_identity() {
         // Build minimal environment similar to other tests
-        let (bilateral_mgr, transport_adapter, coord, bridge) = make_test_bridge([9u8; 32], [5u8; 32]);
+        let (bilateral_mgr, transport_adapter, coord, bridge) =
+            make_test_bridge([9u8; 32], [5u8; 32]);
 
         // Establish verified contact + relationship for counterparty so prepare succeeds
         let counterparty = [7u8; 32];
@@ -1242,7 +1252,8 @@ mod tests {
             Ok(rt) => rt,
             Err(e) => panic!("failed to create tokio runtime: {}", e),
         };
-        let (bilateral_mgr, transport_adapter, coord, _bridge) = make_test_bridge([0u8; 32], [0u8; 32]);
+        let (bilateral_mgr, transport_adapter, coord, _bridge) =
+            make_test_bridge([0u8; 32], [0u8; 32]);
         // Prepare inputs
         let cp = [2u8; 32];
         // Satisfy relationship requirement: add verified contact and establish relationship
@@ -1281,10 +1292,11 @@ mod tests {
 
         // Test that we can create prepare message chunks directly from coordinator
         let op = dsm::types::operations::Operation::Noop;
-        let prepare_envelope = match rt.block_on(transport_adapter.create_prepare_message(cp, op, 100)) {
-            Ok(payload) => payload,
-            Err(e) => panic!("create_prepare_message failed in test: {}", e),
-        };
+        let prepare_envelope =
+            match rt.block_on(transport_adapter.create_prepare_message(cp, op, 100)) {
+                Ok(payload) => payload,
+                Err(e) => panic!("create_prepare_message failed in test: {}", e),
+            };
         let chunks = match coord.encode_message(BleFrameType::BilateralPrepare, &prepare_envelope) {
             Ok(c) => c,
             Err(e) => panic!("encode_message failed in test: {}", e),

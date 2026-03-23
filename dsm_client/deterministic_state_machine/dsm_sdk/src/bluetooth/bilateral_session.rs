@@ -95,10 +95,8 @@ pub trait BilateralSettlementDelegate: Send + Sync {
     /// responsible for updating balances and persisting transaction history.
     /// Returns [`TransferMeta`](crate::sdk::transfer_hooks::TransferMeta) for
     /// upstream hooks, or an error string if persistence fails.
-    fn settle(
-        &self,
-        ctx: BilateralSettlementContext,
-    ) -> Result<BilateralSettlementOutcome, String>;
+    fn settle(&self, ctx: BilateralSettlementContext)
+        -> Result<BilateralSettlementOutcome, String>;
 }
 
 // ---------------------------------------------------------------------------

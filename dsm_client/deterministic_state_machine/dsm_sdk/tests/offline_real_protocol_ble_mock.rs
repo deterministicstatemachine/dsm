@@ -13,9 +13,7 @@ use dsm_sdk::bluetooth::bilateral_ble_handler::BilateralBleHandler;
 use dsm_sdk::bluetooth::bilateral_transport_adapter::{
     BilateralTransportAdapter, BleTransportDelegate, TransportInboundMessage,
 };
-use dsm_sdk::bluetooth::ble_frame_coordinator::{
-    BleFrameCoordinator, BleFrameType, FrameIngressResult,
-};
+use dsm_sdk::bluetooth::ble_frame_coordinator::{BleFrameCoordinator, BleFrameType, FrameIngressResult};
 use dsm_sdk::storage_utils;
 use dsm_sdk::util::text_id;
 use rand::{rngs::OsRng, RngCore};
@@ -66,7 +64,9 @@ fn seed_era_projection(device_txt: &str, available: u64) {
         balance_key: format!("test:{device_txt}:ERA"),
         device_id: device_txt.to_string(),
         token_id: "ERA".to_string(),
-        policy_commit: text_id::encode_base32_crockford(dsm_sdk::policy::builtins::NATIVE_POLICY_COMMIT),
+        policy_commit: text_id::encode_base32_crockford(
+            dsm_sdk::policy::builtins::NATIVE_POLICY_COMMIT,
+        ),
         available,
         locked: 0,
         source_state_hash: text_id::encode_base32_crockford(&[0u8; 32]),

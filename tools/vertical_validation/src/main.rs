@@ -494,10 +494,11 @@ async fn run_formal_report(
             .ok();
 
     // Phase 5: Bilateral throughput (catch panics)
-    let bilateral_throughput_results =
-        std::panic::catch_unwind(|| bilateral_throughput::collect_bilateral_throughput_results(iterations))
-            .map_err(|_| eprintln!("  WARNING: Bilateral throughput panicked — skipping"))
-            .ok();
+    let bilateral_throughput_results = std::panic::catch_unwind(|| {
+        bilateral_throughput::collect_bilateral_throughput_results(iterations)
+    })
+    .map_err(|_| eprintln!("  WARNING: Bilateral throughput panicked — skipping"))
+    .ok();
 
     // Phase 6: Lean 4 proof checking
     let lean_results = if skip_lean {
@@ -526,7 +527,11 @@ async fn run_formal_report(
         if let Some(parent) = scaling_cache_path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
-        std::fs::write(&scaling_cache_path, serde_json::to_string_pretty(&cache_data)?).ok();
+        std::fs::write(
+            &scaling_cache_path,
+            serde_json::to_string_pretty(&cache_data)?,
+        )
+        .ok();
         (
             Some(results),
             Some(report::ScalingCacheInfo {
@@ -540,7 +545,10 @@ async fn run_formal_report(
         let cache_str = std::fs::read_to_string(&scaling_cache_path)?;
         let cache_json: serde_json::Value = serde_json::from_str(&cache_str)?;
         let cache_date = cache_json["date"].as_str().unwrap_or("unknown").to_string();
-        let cache_commit = cache_json["commit"].as_str().unwrap_or("unknown").to_string();
+        let cache_commit = cache_json["commit"]
+            .as_str()
+            .unwrap_or("unknown")
+            .to_string();
         let scaling: Option<crate::benchmark::ScalingBenchmarkResult> =
             serde_json::from_value(cache_json["data"].clone()).ok();
         eprintln!("  Using cached scaling data from {cache_date} (commit {cache_commit})");
@@ -596,9 +604,8 @@ async fn run_formal_report(
     markdown = markdown.replace("{{REPORT_BLAKE3}}", &blake3_hex[..64]);
 
     // Write report
-    let output_path = output.unwrap_or_else(|| {
-        format!("docs/reports/{report_date}-formal-verification-report.md")
-    });
+    let output_path = output
+        .unwrap_or_else(|| format!("docs/reports/{report_date}-formal-verification-report.md"));
     let full_output_path = root.join(&output_path);
     if let Some(parent) = full_output_path.parent() {
         std::fs::create_dir_all(parent)?;
