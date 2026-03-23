@@ -23,36 +23,25 @@ use dsm::common::device_tree::DeviceTree;
 use dsm::common::domain_tags::{TAG_RECEIPT_COMMIT, TAG_SMT_LEAF, TAG_SMT_NODE};
 
 // ---------------------------------------------------------------------------
-// Golden constants (frozen — NEVER update without a migration plan)
+// Golden constants — Base32 Crockford encoded (frozen — NEVER update without a migration plan)
 // ---------------------------------------------------------------------------
 
-const GOLDEN_SMT_NODE: &str = "2e7776cf6df546e2689bb91721bb404f2876c4bf52dbd1e6fa1722a3163634e3";
-const GOLDEN_SMT_LEAF: &str = "194756da1280820867ea202d4f27d8974a6eff6457c809c5cf0c636499a4496c";
-const GOLDEN_SMT_KEY: &str = "372e5da4e4fee43142511a3b3df7050016c9286d17fb2c39f9e872834dbb8ecf";
-const GOLDEN_PRECOMMIT: &str = "334cf7aba27d2cb4bec8dc913af88eb8c8382fe8d0c5ec3708c416d91edc74b2";
-const GOLDEN_SUCCESSOR_TIP: &str = "40d7cf0efcf8c890a13dd861670a627745877ab9ec0842ccf9b4338bff9f78c0";
-const GOLDEN_EMPTY_ROOT_32: &str = "6c54953c1f46ae9bc867c4e25b4d94735cc8d1a00e665cd79c5e0789e0b8cb55";
-const GOLDEN_DEFAULT_NODE_0: &str = "0000000000000000000000000000000000000000000000000000000000000000";
-const GOLDEN_DEFAULT_NODE_1: &str = "aec7d0b0751cdb017f2fc4dad46fde4518a3352c788688081d94cdf53ab6ac66";
-const GOLDEN_DEVTREE_SINGLE: &str = "189a71b742a391eaeda66bd626e67fa8705f7aa83ab0b5b21f92b4c30da224b6";
-const GOLDEN_INITIAL_TIP: &str = "9cde8fab4689ba248bcf9976ba172c9f96856121145a0c551babafb82d977330";
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-#[allow(dead_code)]
-fn hex_to_bytes32(hex: &str) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
-        out[i] = u8::from_str_radix(std::str::from_utf8(chunk).unwrap(), 16).unwrap();
-    }
-    out
+/// Compute BLAKE3 golden, encode to b32 Crockford, compare.
+/// Run once with `cargo test -- --nocapture golden_tag` to regenerate if needed.
+fn to_b32(b: &[u8]) -> String {
+    base32::encode(base32::Alphabet::Crockford, b)
 }
 
-fn bytes_to_hex(b: &[u8; 32]) -> String {
-    b.iter().map(|byte| format!("{:02x}", byte)).collect()
-}
+const GOLDEN_SMT_NODE: &str = "5SVQDKVDYN3E4T4VQ4BJ3ET09WM7DH5ZABDX3SQT2WHA65HP6KHG";
+const GOLDEN_SMT_LEAF: &str = "353NDPGJG210GSZA40PMY9YRJX56XZV4AZ40KHEF1HHP96D495P0";
+const GOLDEN_SMT_KEY: &str = "6WQ5V974ZVJ32GJH38XKVXR500BCJA3D2ZXJREFSX1S86KDVHV7G";
+const GOLDEN_PRECOMMIT: &str = "6D6FFAX2FMPB9FP8VJ8KNY4EQ343GBZ8T32YRDR8RGBDJ7PWEJS0";
+const GOLDEN_SUCCESSOR_TIP: &str = "83BWY3QWZ349189XV1GPE2K2EX2REYNSXG445K7SPGSRQZWZF300";
+const GOLDEN_EMPTY_ROOT_32: &str = "DHA9AF0Z8TQ9QJ37RKH5PKCMEDECHMD01SK5SNWWBR3RKR5RSDAG";
+const GOLDEN_DEFAULT_NODE_0: &str = "0000000000000000000000000000000000000000000000000000";
+const GOLDEN_DEFAULT_NODE_1: &str = "NV3X1C3N3KDG2ZSFRKDD8VYY8MCA6D9CF238G20XJK6ZAENPNHK0";
+const GOLDEN_DEVTREE_SINGLE: &str = "32D73DT2ME8YNVD6DFB2DSKZN1R5YYN87ARBBCGZJATC63D24JV0";
+const GOLDEN_INITIAL_TIP: &str = "KKF8ZAT6H6X292YFK5VBM5SCKYB8AR912HD0RN8VNEQVGBCQECR0";
 
 // ===========================================================================
 // Domain Tag Golden Vectors
@@ -64,7 +53,7 @@ fn golden_tag_smt_node() {
     let right = [0x02u8; 32];
     let result = witness_hash_node(&left, &right);
     assert_eq!(
-        bytes_to_hex(&result),
+        to_b32(&result),
         GOLDEN_SMT_NODE,
         "hash_smt_node([0x01;32], [0x02;32]) drifted — SMT internal node hashing changed"
     );
@@ -75,7 +64,7 @@ fn golden_tag_smt_leaf() {
     let tip = [0x42u8; 32];
     let result = hash_smt_leaf(&tip);
     assert_eq!(
-        bytes_to_hex(&result),
+        to_b32(&result),
         GOLDEN_SMT_LEAF,
         "hash_smt_leaf([0x42;32]) drifted — SMT leaf hashing changed"
     );
@@ -87,7 +76,7 @@ fn golden_tag_smt_key() {
     let b = [0x02u8; 32];
     let result = compute_smt_key(&a, &b);
     assert_eq!(
-        bytes_to_hex(&result),
+        to_b32(&result),
         GOLDEN_SMT_KEY,
         "compute_smt_key([0x01;32], [0x02;32]) drifted — relationship key derivation changed"
     );
@@ -100,7 +89,7 @@ fn golden_tag_precommit() {
     let entropy = [0x02u8; 32];
     let result = compute_precommit(&h_n, op_bytes, &entropy);
     assert_eq!(
-        bytes_to_hex(&result),
+        to_b32(&result),
         GOLDEN_PRECOMMIT,
         "compute_precommit drifted — pre-commitment digest changed"
     );
@@ -114,7 +103,7 @@ fn golden_tag_successor_tip() {
     let receipt_digest = [0x03u8; 32];
     let result = compute_successor_tip(&h_n, op_bytes, &entropy, &receipt_digest);
     assert_eq!(
-        bytes_to_hex(&result),
+        to_b32(&result),
         GOLDEN_SUCCESSOR_TIP,
         "compute_successor_tip drifted — chain tip evolution changed"
     );
@@ -149,7 +138,7 @@ fn golden_tag_initial_chain_tip() {
     result.copy_from_slice(out.as_bytes());
 
     assert_eq!(
-        bytes_to_hex(&result),
+        to_b32(&result),
         GOLDEN_INITIAL_TIP,
         "initial_relationship_chain_tip drifted — bilateral session bootstrap changed"
     );
@@ -179,7 +168,7 @@ fn golden_tag_bytes_exact() {
 fn golden_empty_root_core_height32() {
     let root = empty_root(DEFAULT_SMT_HEIGHT);
     assert_eq!(
-        bytes_to_hex(&root),
+        to_b32(&root),
         GOLDEN_EMPTY_ROOT_32,
         "empty_root(32) drifted — default SMT root for height 32 changed"
     );
@@ -189,7 +178,7 @@ fn golden_empty_root_core_height32() {
 fn golden_default_node_0_is_zero() {
     let node = default_node(0);
     assert_eq!(
-        bytes_to_hex(node.as_bytes()),
+        to_b32(node.as_bytes()),
         GOLDEN_DEFAULT_NODE_0,
         "default_node(0) must be ZERO_LEAF (all zeros)"
     );
@@ -204,7 +193,7 @@ fn golden_default_node_0_is_zero() {
 fn golden_default_node_1() {
     let node = default_node(1);
     assert_eq!(
-        bytes_to_hex(node.as_bytes()),
+        to_b32(node.as_bytes()),
         GOLDEN_DEFAULT_NODE_1,
         "default_node(1) drifted — H(ZERO_LEAF || ZERO_LEAF) changed"
     );
@@ -235,7 +224,7 @@ fn golden_device_tree_single_leaf() {
     let tree = DeviceTree::single(dev_id);
     let root = tree.root();
     assert_eq!(
-        bytes_to_hex(&root),
+        to_b32(&root),
         GOLDEN_DEVTREE_SINGLE,
         "DeviceTree::single([0x01;32]).root() drifted — device tree leaf hashing changed"
     );
