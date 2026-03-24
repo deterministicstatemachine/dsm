@@ -703,8 +703,7 @@ impl PairingOrchestrator {
                     }
                     _ => {
                         let old_state = format!("{:?}", session.state);
-                        session.state =
-                            PairingState::Failed("BLE link dropped".to_string());
+                        session.state = PairingState::Failed("BLE link dropped".to_string());
                         session.last_activity = Instant::now();
                         log::info!(
                             "[PairingOrchestrator] Peer {} disconnected — reset pairing session {:02x}{:02x}... ({} → Failed)",
@@ -761,8 +760,7 @@ impl PairingOrchestrator {
         /// before re-evaluating sessions regardless.  This ensures stale or
         /// silently-dropped BLE sessions are recovered even when no explicit
         /// disconnect event fires.
-        const PAIRING_LOOP_WAKE_TIMEOUT: std::time::Duration =
-            std::time::Duration::from_secs(30);
+        const PAIRING_LOOP_WAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
         loop {
             let state_changed = self.state_change.notified();

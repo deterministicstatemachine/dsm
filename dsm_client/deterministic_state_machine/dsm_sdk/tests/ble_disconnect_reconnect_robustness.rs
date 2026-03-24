@@ -51,9 +51,8 @@ fn make_transfer_op(to: [u8; 32], nonce: u8) -> Operation {
 
 fn reset_db() {
     std::env::set_var("DSM_SDK_TEST_MODE", "1");
-    let _ = dsm_sdk::storage_utils::set_storage_base_dir(std::path::PathBuf::from(
-        "./.dsm_testdata",
-    ));
+    let _ =
+        dsm_sdk::storage_utils::set_storage_base_dir(std::path::PathBuf::from("./.dsm_testdata"));
     client_db::reset_database_for_tests();
     if let Err(e) = client_db::init_database() {
         eprintln!("[ble_disconnect_reconnect] init_database skipped: {e}");
@@ -108,8 +107,14 @@ async fn make_handler_pair(
 
     mgr_a.add_verified_contact(contact_b).expect("add B to A");
     mgr_b.add_verified_contact(contact_a).expect("add A to B");
-    mgr_a.establish_relationship(&b_dev).await.expect("A->B rel");
-    mgr_b.establish_relationship(&a_dev).await.expect("B->A rel");
+    mgr_a
+        .establish_relationship(&b_dev)
+        .await
+        .expect("A->B rel");
+    mgr_b
+        .establish_relationship(&a_dev)
+        .await
+        .expect("B->A rel");
 
     let delegate = Arc::new(DefaultBilateralSettlementDelegate);
 
@@ -139,8 +144,7 @@ async fn test_disconnect_fails_early_phase_sessions() {
     let a_kp = SignatureKeyPair::generate_from_entropy(b"disconnect-test-a").expect("kp-a");
     let b_kp = SignatureKeyPair::generate_from_entropy(b"disconnect-test-b").expect("kp-b");
 
-    let (handler_a, _handler_b) =
-        make_handler_pair(a_dev, a_gen, b_dev, b_gen, &a_kp, &b_kp).await;
+    let (handler_a, _handler_b) = make_handler_pair(a_dev, a_gen, b_dev, b_gen, &a_kp, &b_kp).await;
 
     // Simulate a sender-side session stuck in Preparing phase (ble link dropped
     // before the prepare envelope was delivered to the receiver).
@@ -197,8 +201,7 @@ async fn test_disconnect_preserves_late_phase_sessions() {
     let a_kp = SignatureKeyPair::generate_from_entropy(b"late-phase-a").expect("kp-a");
     let b_kp = SignatureKeyPair::generate_from_entropy(b"late-phase-b").expect("kp-b");
 
-    let (handler_a, _handler_b) =
-        make_handler_pair(a_dev, a_gen, b_dev, b_gen, &a_kp, &b_kp).await;
+    let (handler_a, _handler_b) = make_handler_pair(a_dev, a_gen, b_dev, b_gen, &a_kp, &b_kp).await;
 
     // Insert an Accepted session (sender has receiver's signature, link dropped before confirm)
     let accepted_hash = [0xAAu8; 32];
@@ -282,8 +285,7 @@ async fn test_disconnect_then_retry_succeeds() {
     let a_kp = SignatureKeyPair::generate_from_entropy(b"retry-a").expect("kp-a");
     let b_kp = SignatureKeyPair::generate_from_entropy(b"retry-b").expect("kp-b");
 
-    let (handler_a, handler_b) =
-        make_handler_pair(a_dev, a_gen, b_dev, b_gen, &a_kp, &b_kp).await;
+    let (handler_a, handler_b) = make_handler_pair(a_dev, a_gen, b_dev, b_gen, &a_kp, &b_kp).await;
 
     sdk::sdk::app_state::AppState::set_identity_info(
         a_dev.to_vec(),
@@ -394,6 +396,7 @@ async fn test_disconnect_then_retry_succeeds() {
 // =============================================================================
 // Test 4: Multiple sequential back-and-forth transfers (A→B repeated 3×)
 // =============================================================================
+#[allow(clippy::too_many_arguments)]
 async fn run_one_transfer(
     sender: &BilateralBleHandler,
     receiver: &BilateralBleHandler,
@@ -476,8 +479,7 @@ async fn test_multiple_sequential_transfers() {
     let a_kp = SignatureKeyPair::generate_from_entropy(b"multi-a").expect("kp-a");
     let b_kp = SignatureKeyPair::generate_from_entropy(b"multi-b").expect("kp-b");
 
-    let (handler_a, handler_b) =
-        make_handler_pair(a_dev, a_gen, b_dev, b_gen, &a_kp, &b_kp).await;
+    let (handler_a, handler_b) = make_handler_pair(a_dev, a_gen, b_dev, b_gen, &a_kp, &b_kp).await;
 
     // Seed both wallets
     let a_txt = sdk::util::text_id::encode_base32_crockford(&a_dev);
@@ -521,7 +523,9 @@ async fn test_disconnect_unknown_address_is_noop() {
     let (handler_a, _) = make_handler_pair(a_dev, a_gen, b_dev, b_gen, &a_kp, &b_kp).await;
 
     // No sessions at all — should not panic
-    let failed = handler_a.handle_peer_disconnected("FF:FF:FF:FF:FF:FF").await;
+    let failed = handler_a
+        .handle_peer_disconnected("FF:FF:FF:FF:FF:FF")
+        .await;
     assert_eq!(failed, 0);
 }
 
@@ -541,8 +545,7 @@ async fn test_disconnect_fails_pending_user_action_sessions() {
     let a_kp = SignatureKeyPair::generate_from_entropy(b"pua-a").expect("kp-a");
     let b_kp = SignatureKeyPair::generate_from_entropy(b"pua-b").expect("kp-b");
 
-    let (_handler_a, handler_b) =
-        make_handler_pair(a_dev, a_gen, b_dev, b_gen, &a_kp, &b_kp).await;
+    let (_handler_a, handler_b) = make_handler_pair(a_dev, a_gen, b_dev, b_gen, &a_kp, &b_kp).await;
 
     // Simulate a receiver-side session stuck in PendingUserAction
     let pua_hash = [0xFFu8; 32];
@@ -593,8 +596,7 @@ async fn test_disconnect_fails_prepared_phase_sessions() {
     let a_kp = SignatureKeyPair::generate_from_entropy(b"prepared-a").expect("kp-a");
     let b_kp = SignatureKeyPair::generate_from_entropy(b"prepared-b").expect("kp-b");
 
-    let (handler_a, _handler_b) =
-        make_handler_pair(a_dev, a_gen, b_dev, b_gen, &a_kp, &b_kp).await;
+    let (handler_a, _handler_b) = make_handler_pair(a_dev, a_gen, b_dev, b_gen, &a_kp, &b_kp).await;
 
     // Simulate a sender-side session in the Prepared phase (prepare sent, awaiting response)
     let prepared_hash = [0xDDu8; 32];
@@ -645,8 +647,7 @@ async fn test_stale_session_superseded_on_prepare() {
     let a_kp = SignatureKeyPair::generate_from_entropy(b"stale-a").expect("kp-a");
     let b_kp = SignatureKeyPair::generate_from_entropy(b"stale-b").expect("kp-b");
 
-    let (handler_a, _handler_b) =
-        make_handler_pair(a_dev, a_gen, b_dev, b_gen, &a_kp, &b_kp).await;
+    let (handler_a, _handler_b) = make_handler_pair(a_dev, a_gen, b_dev, b_gen, &a_kp, &b_kp).await;
 
     // Insert a stale in-flight session (created 130 s ago)
     let stale_hash = [0x55u8; 32];

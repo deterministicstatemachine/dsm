@@ -153,6 +153,7 @@ fn ensure_exec_data_matches_withdrawal_policy(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn persist_withdrawal_leg(
     withdrawal_id: &str,
     leg_index: u32,
