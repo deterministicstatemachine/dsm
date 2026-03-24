@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use prost::Message;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::local_nodes::LocalNodeManager;
 
@@ -54,7 +54,7 @@ pub struct ByteCommitV3 {
 // ─── Result types ──────────────────────────────────────────────────────────────
 
 /// A single data point in the scaling series.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BenchmarkDataPoint {
     /// Number of parallel writers (1..=5)
     pub parallel_writers: usize,
@@ -79,7 +79,7 @@ pub struct BenchmarkDataPoint {
 }
 
 /// Evidence that an idle node's state was not affected by writes to other nodes.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NonInterferenceEvidence {
     /// Node index that was NOT written to
     pub idle_node_index: usize,
@@ -99,7 +99,7 @@ pub struct NonInterferenceEvidence {
 /// 1. **Deterministic addressing**: same payload always maps to same address
 /// 2. **Fork separation**: different payloads with same parent get different addresses
 /// 3. **Audit trail**: both objects are retrievable and the fork is visible
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TripwireEvidence {
     /// The parent digest used for all commits (hex, display only)
     pub parent_digest_hex: String,
@@ -137,7 +137,7 @@ pub struct TripwireEvidence {
 }
 
 /// Complete scaling benchmark results.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScalingBenchmarkResult {
     /// Data points for N = 1..5
     pub data_points: Vec<BenchmarkDataPoint>,

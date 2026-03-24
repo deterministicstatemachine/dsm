@@ -2,7 +2,7 @@
 
 use std::net::SocketAddr;
 
-use dsm_sdk::sdk::tls_transport_sdk::{TlsConfig, TlsTransportSDK};
+use dsm_sdk::sdk::tls_transport_sdk::{ensure_rustls_crypto_provider, TlsConfig, TlsTransportSDK};
 // rcgen API is kept minimal here to avoid depending on private fields.
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -24,7 +24,7 @@ fn cert_pin(cert_der: &[u8]) -> Vec<u8> {
 }
 
 async fn spawn_tls_echo_server() -> (SocketAddr, Vec<u8>, Vec<u8>, Vec<u8>) {
-    install_crypto_provider();
+    ensure_rustls_crypto_provider();
 
     // Self-signed server cert.
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();

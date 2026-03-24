@@ -28,6 +28,9 @@ use std::sync::Arc;
 use crate::util::deterministic_time as dt;
 
 // ---------- helpers: no hex/b64 ----------
+const ERA_SOURCE_DLV_PEER_KEY: &str = "era-source-dlv";
+const ERA_SOURCE_DLV_DISPLAY_NAME: &str = "ERA Source DLV";
+
 fn first8_le_u64(bytes: &[u8]) -> u64 {
     let mut buf = [0u8; 8];
     let take = bytes.len().min(8);
@@ -35,24 +38,31 @@ fn first8_le_u64(bytes: &[u8]) -> u64 {
     u64::from_le_bytes(buf)
 }
 
-/// Encode bytes as base32 Crockford text for UI/debug display.
-///
-/// NOTE: This is **UI/debug only**. It must never be used for network/auth identifiers.
-fn bytes_to_b32_text(bytes: &[u8]) -> String {
-    if bytes.is_empty() {
-        return String::new();
-    }
-    crate::util::text_id::encode_base32_crockford(bytes)
+fn era_source_dlv_device_id() -> [u8; 32] {
+    dsm::crypto::blake3::domain_hash_bytes(
+        "DSM/system-peer-device-id",
+        ERA_SOURCE_DLV_PEER_KEY.as_bytes(),
+    )
 }
 
-/// Decode base32 Crockford to bytes; invalid -> None.
-///
-/// NOTE: This is **UI/debug only**.
-fn b32_text_to_bytes(s: &str) -> Option<Vec<u8>> {
-    if s.trim().is_empty() {
-        return Some(Vec::new());
-    }
-    crate::util::text_id::decode_base32_crockford(s)
+fn build_faucet_protocol_payload(
+    recipient_device_id: &[u8; 32],
+    token_id: &str,
+    amount: u64,
+    source_state_hash: &[u8; 32],
+    source_state_number: u64,
+) -> Vec<u8> {
+    let source_state_number_bytes = source_state_number.to_le_bytes();
+    crate::sdk::receipts::encode_protocol_transition_payload(
+        b"faucet.claim",
+        &[
+            recipient_device_id,
+            token_id.as_bytes(),
+            &amount.to_le_bytes(),
+            source_state_hash,
+            &source_state_number_bytes,
+        ],
+    )
 }
 
 // ---------- TokenSDK clone wrapper ----------
@@ -337,7 +347,14 @@ impl WalletSDK {
         let bytes = crate::util::text_id::decode_base32_crockford(&self.device_id_string())
             .unwrap_or_default();
         let mut array = [0u8; 32];
-        array.copy_from_slice(&bytes);
+        if bytes.len() == 32 {
+            array.copy_from_slice(&bytes);
+        } else {
+            log::warn!(
+                "Wallet device_id decode produced {} bytes; using zero device id fallback",
+                bytes.len()
+            );
+        }
         array
     }
 
@@ -861,166 +878,6 @@ impl WalletSDK {
         })
     }
 
-    pub async fn send_transaction(
-        &self,
-        transaction: &WalletTransaction,
-    ) -> Result<State, DsmError> {
-        if *self.locked.read() {
-            return Err(DsmError::unauthorized(
-                "Wallet is locked",
-                None::<std::io::Error>,
-            ));
-        }
-        self.update_activity_sync();
-
-        if transaction.signature.is_none() {
-            return Err(DsmError::invalid_parameter("Transaction must be signed"));
-        }
-
-        let self_id = self.device_id_string();
-        if transaction.from_device_id != self_id {
-            return Err(DsmError::unauthorized(
-                format!(
-                    "Cannot send transaction from device {} using device {}",
-                    transaction.from_device_id, self_id
-                ),
-                None::<std::io::Error>,
-            ));
-        }
-
-        // Execute signed transfer ensuring authorization reaches the state machine
-        let signature = transaction
-            .signature
-            .clone()
-            .ok_or_else(|| DsmError::invalid_parameter("Transaction must be signed"))?;
-
-        log::debug!("[WALLET] send_transaction: calling execute_signed_transfer...");
-        let new_state = self
-            .token_sdk
-            .execute_signed_transfer(
-                transaction.token_id.clone(),
-                transaction.to_device_id.clone(),
-                transaction.amount,
-                transaction.memo.clone(),
-                signature,
-            )
-            .await?;
-        log::debug!("[WALLET] send_transaction: execute_signed_transfer OK");
-
-        let mut tx_copy = transaction.clone();
-        tx_copy.status = TransactionStatus::Confirmed;
-        tx_copy.state_number = Some(new_state.state_number);
-        self.transactions.write().push(tx_copy.clone());
-
-        // advance bilateral tip deterministically from new state hash
-        // (must be canonical base32 of exactly 32 bytes)
-        let new_tip_id = bytes_to_b32_text(&new_state.hash);
-
-        self.update_bilateral_chain_tip(
-            &transaction.to_device_id,
-            &new_tip_id,
-            &bytes_to_b32_text(&new_state.hash),
-            new_state.state_number,
-        )?;
-
-        // CRITICAL: Update global SDK_CONTEXT chain_tip so transport headers reflect new state
-        // This ensures getTransportHeadersV3Bin() returns the updated chain_tip for subsequent operations
-        if new_state.hash.len() == 32 {
-            if let Err(e) = crate::get_sdk_context().update_chain_tip(new_state.hash.to_vec()) {
-                log::warn!("Failed to update SDK_CONTEXT chain_tip: {}", e);
-            } else {
-                log::info!(
-                    "SDK_CONTEXT chain_tip updated to state hash (first 8 bytes): {:?}",
-                    &new_state.hash[..8]
-                );
-            }
-        }
-
-        // Persist to SQLite: updated balance and transaction record
-        // Read the CURRENT balance from SQLite (authoritative) and subtract the transfer amount.
-        // The in-memory TokenSDK cache may not reflect offline (BLE) transactions, so reading
-        // from it would overwrite the correct SQLite balance with a stale value.
-        let sender = self.device_id_string();
-        let current_db_balance = crate::storage::client_db::get_wallet_state(&sender)
-            .ok()
-            .flatten()
-            .map(|ws| ws.balance)
-            .unwrap_or(0);
-        let available_u64 = current_db_balance.saturating_sub(transaction.amount);
-        log::info!(
-            "[WALLET] send_transaction: persisting balance: db_before={} - amount={} = {}",
-            current_db_balance,
-            transaction.amount,
-            available_u64
-        );
-        crate::storage::client_db::update_wallet_balance(&sender, available_u64).map_err(|e| {
-            DsmError::internal(
-                format!("Failed to persist wallet balance: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
-        {
-            let tx_hash_txt = crate::util::text_id::encode_base32_crockford(&tx_copy.hash);
-            let mut meta: std::collections::HashMap<String, Vec<u8>> =
-                std::collections::HashMap::new();
-            meta.insert(
-                "token_id".to_string(),
-                transaction.token_id.as_bytes().to_vec(),
-            );
-            if let Some(m) = &transaction.memo {
-                meta.insert("memo".to_string(), m.as_bytes().to_vec());
-            }
-            let rec = crate::storage::client_db::TransactionRecord {
-                tx_id: tx_copy.id.clone(),
-                tx_hash: tx_hash_txt,
-                from_device: tx_copy.from_device_id.clone(),
-                to_device: tx_copy.to_device_id.clone(),
-                amount: tx_copy.amount,
-                tx_type: "online".to_string(),
-                status: "confirmed".to_string(),
-                chain_height: new_state.state_number,
-                step_index: tx_copy.tick,
-                commitment_hash: None,
-                proof_data: {
-                    let devid_b: [u8; 32] =
-                        crate::util::text_id::decode_base32_crockford(&tx_copy.to_device_id)
-                            .filter(|b| b.len() == 32)
-                            .map(|b| {
-                                let mut arr = [0u8; 32];
-                                arr.copy_from_slice(&b);
-                                arr
-                            })
-                            .unwrap_or([0u8; 32]);
-                    crate::sdk::receipts::build_bilateral_receipt(
-                        self.device_id_array(),
-                        devid_b,
-                        new_state.prev_state_hash,
-                        new_state.hash,
-                        crate::sdk::app_state::AppState::get_device_tree_root(),
-                    )
-                },
-                metadata: meta,
-                created_at: 0,
-            };
-            crate::storage::client_db::store_transaction(&rec).map_err(|e| {
-                DsmError::internal(
-                    format!("Failed to persist transaction record: {e}"),
-                    None::<std::io::Error>,
-                )
-            })?;
-        }
-
-        log::info!(
-            "Transaction completed: {} -> {}, amount: {}, token: {}",
-            transaction.from_device_id,
-            transaction.to_device_id,
-            transaction.amount,
-            transaction.token_id
-        );
-
-        Ok(new_state)
-    }
-
     /// Execute a pre-built, pre-signed Transfer Operation directly through the state machine.
     /// This bypasses the Operation-reconstruction in `execute_signed_transfer` that causes
     /// signature verification mismatch (different nonce/balance fields).
@@ -1051,79 +908,44 @@ impl WalletSDK {
         // (app_router_impl or bilateral_sdk) persists the correct relationship tip
         // using compute_precommit + compute_successor_tip with the shared nonce.
 
-        // Persist balance + transaction record
+        // Persist canonical balance projection + transaction record
         let sender = self.device_id_string();
-
-        // Debit ERA to wallet_state.balance ONLY for ERA transfers.
-        // Non-ERA tokens (e.g. dBTC) are tracked in the token_balances table, not here.
-        // This mirrors the correct pattern in unilateral_ops_sdk.rs:306-328.
-        if transaction.token_id.is_empty() || transaction.token_id == "ERA" {
-            let current_db_balance = crate::storage::client_db::get_wallet_state(&sender)
-                .ok()
-                .flatten()
-                .map(|ws| ws.balance)
-                .unwrap_or(0);
-            let available_u64 = current_db_balance.saturating_sub(transaction.amount);
-            log::info!(
-                "[WALLET] send_transfer_op: persisting ERA balance: db_before={} - amount={} = {}",
-                current_db_balance,
-                transaction.amount,
-                available_u64
-            );
-            crate::storage::client_db::update_wallet_balance(&sender, available_u64).map_err(
-                |e| {
-                    DsmError::internal(
-                        format!("Failed to persist wallet balance: {e}"),
-                        None::<std::io::Error>,
-                    )
-                },
-            )?;
-        }
-
-        // Debit non-ERA tokens (e.g. dBTC) to the token_balances SQLite table.
-        // This mirrors the pattern in unilateral_ops_sdk.rs:330-342.
-        if !transaction.token_id.is_empty()
-            && transaction.token_id != "ERA"
-            && transaction.amount > 0
+        let token_id = if transaction.token_id.is_empty() {
+            "ERA"
+        } else {
+            transaction.token_id.as_str()
+        };
+        let existing_locked = match crate::storage::client_db::get_locked_balance(&sender, token_id)
         {
-            let (prev, existing_locked) = match crate::storage::client_db::get_token_balance(
-                &sender,
-                &transaction.token_id,
-            ) {
-                Ok(Some((a, l))) => (a, l),
-                Ok(None) => (0, 0),
-                Err(e) => {
-                    log::error!("[WALLET] send_transfer_op: failed to read token balance: {e}");
-                    (0, 0)
-                }
-            };
-            let new_bal = prev.saturating_sub(transaction.amount);
-            if let Err(e) = crate::storage::client_db::upsert_token_balance(
-                &sender,
-                &transaction.token_id,
-                new_bal,
-                existing_locked,
-            ) {
-                log::error!(
-                    "[WALLET] send_transfer_op: CRITICAL: failed to debit token balance ({} {} -> {}): {}",
-                    transaction.token_id,
-                    prev,
-                    new_bal,
-                    e
-                );
-                return Err(DsmError::invalid_operation(format!(
-                    "failed to debit token balance: {e}"
-                )));
-            } else {
-                log::info!(
-                    "[WALLET] send_transfer_op: token balance debited: {}:{} {} -> {} (-{})",
-                    sender,
-                    transaction.token_id,
-                    prev,
-                    new_bal,
-                    transaction.amount
-                );
+            Ok(l) => l,
+            Err(e) => {
+                log::error!("[WALLET] send_transfer_op: failed to read locked balance: {e}");
+                0
             }
+        };
+        let policy_commit = self.token_sdk.resolve_policy_commit_strict(token_id)?;
+        if let Err(e) = crate::storage::client_db::sync_token_projection_from_state(
+            &sender,
+            token_id,
+            &policy_commit,
+            &new_state,
+            existing_locked,
+        ) {
+            log::error!(
+                "[WALLET] send_transfer_op: CRITICAL: failed to sync token projection for {}: {}",
+                transaction.token_id,
+                e
+            );
+            return Err(DsmError::invalid_operation(format!(
+                "failed to sync token projection: {e}"
+            )));
+        } else {
+            log::info!(
+                "[WALLET] send_transfer_op: token projection synced from canonical state: {}:{} state_number={}",
+                sender,
+                transaction.token_id,
+                new_state.state_number
+            );
         }
 
         {
@@ -1173,54 +995,6 @@ impl WalletSDK {
         );
 
         Ok(new_state)
-    }
-
-    /// Deterministic send helper: wraps create + sign + send with default token.
-    /// This is a real path, not a stub; it drives state transitions and bilateral tips.
-    pub async fn send(
-        &mut self,
-        to_device_id: &str,
-        amount: u64,
-        memo: &str,
-    ) -> Result<(), DsmError> {
-        if *self.locked.read() {
-            return Err(DsmError::unauthorized(
-                "Wallet is locked",
-                None::<std::io::Error>,
-            ));
-        }
-        self.update_activity_sync();
-
-        // Ensure recipient exists in book and bilateral chain is initialized.
-        let to_device_id_bytes = crate::util::text_id::decode_base32_crockford(to_device_id)
-            .ok_or_else(|| DsmError::invalid_parameter("to_device_id must be base32"))?;
-        if to_device_id_bytes.len() != 32 {
-            return Err(DsmError::invalid_parameter(
-                "to_device_id must decode to 32 bytes",
-            ));
-        }
-
-        if !self.device_book.read().contains_key(to_device_id) {
-            return Err(DsmError::not_found(
-                format!("Recipient device ID {to_device_id} not found in device book"),
-                None::<String>,
-            ));
-        }
-        if !self
-            .bilateral_chains
-            .read()
-            .contains_key(&to_device_id_bytes)
-        {
-            self.initialize_bilateral_chain(to_device_id, &[])?;
-        }
-
-        // Default token for this high-level helper is ERA.
-        let tx = self
-            .create_transaction(to_device_id, amount, Some("ERA"), Some(memo), None)
-            .await?;
-        let signed = self.sign_transaction(&tx)?;
-        let _ = self.send_transaction(&signed).await?;
-        Ok(())
     }
 
     pub fn lock(&self) -> Result<(), DsmError> {
@@ -1387,98 +1161,6 @@ impl WalletSDK {
         Ok(())
     }
 
-    pub async fn execute_bilateral_transfer(
-        &self,
-        recipient_device_id: &str,
-        amount: u64,
-        token_id: Option<&str>,
-        recipient_public_key: Vec<u8>,
-        memo: Option<&str>,
-    ) -> Result<State, DsmError> {
-        if *self.locked.read() {
-            return Err(DsmError::unauthorized(
-                "Wallet is locked",
-                None::<std::io::Error>,
-            ));
-        }
-        self.update_activity_sync();
-
-        if !self.device_book.read().contains_key(recipient_device_id) {
-            self.add_counterparty(recipient_device_id, recipient_public_key.clone(), None)?;
-        }
-
-        let recipient_device_id_bytes =
-            crate::util::text_id::decode_base32_crockford(recipient_device_id)
-                .ok_or_else(|| DsmError::invalid_parameter("recipient_device_id must be base32"))?;
-        if recipient_device_id_bytes.len() != 32 {
-            return Err(DsmError::invalid_parameter(
-                "recipient_device_id must decode to 32 bytes",
-            ));
-        }
-
-        if !self
-            .bilateral_chains
-            .read()
-            .contains_key(&recipient_device_id_bytes)
-        {
-            self.initialize_bilateral_chain(recipient_device_id, &[])?;
-        }
-
-        let token_id_str = token_id.unwrap_or("ROOT").to_string();
-        let memo_string = memo.map(|s| s.to_string());
-
-        let current_state_hash = {
-            let tip = self.get_bilateral_chain_tip(&recipient_device_id_bytes)?;
-            tip.last_state_hash
-        };
-
-        let new_state = self
-            .token_sdk
-            .execute_bilateral_token_transfer(
-                token_id_str.clone(),
-                crate::util::domain_helpers::device_id_hash(recipient_device_id),
-                amount,
-                recipient_public_key,
-                memo_string.clone(),
-                current_state_hash,
-            )
-            .await?;
-
-        // record tx
-        let chain_tip = self.get_bilateral_chain_tip(&recipient_device_id_bytes)?;
-        let self_id = self.device_id_string();
-        let mut tx = WalletTransaction::new(
-            self_id.clone(),
-            recipient_device_id.to_string(),
-            amount,
-            token_id_str.clone(),
-            memo_string,
-            self.config.read().default_fee,
-            base32::encode(base32::Alphabet::Crockford, &chain_tip.chain_tip_id),
-        );
-        tx.status = TransactionStatus::Confirmed;
-        tx.state_number = Some(new_state.state_number);
-        self.transactions.write().push(tx);
-
-        // update tip (canonical base32 of exactly 32 bytes)
-        let new_tip_id = bytes_to_b32_text(&new_state.hash);
-        self.update_bilateral_chain_tip(
-            recipient_device_id,
-            &new_tip_id,
-            &bytes_to_b32_text(&new_state.hash),
-            new_state.state_number,
-        )?;
-
-        log::info!(
-            "Bilateral transfer: {} -> {}, amount: {}, token: {}",
-            self_id,
-            recipient_device_id,
-            amount,
-            token_id_str
-        );
-        Ok(new_state)
-    }
-
     pub fn verify_transaction(&self, transaction: &WalletTransaction) -> Result<bool, DsmError> {
         if *self.locked.read() {
             return Err(DsmError::unauthorized(
@@ -1568,6 +1250,10 @@ impl WalletSDK {
         self.update_activity_sync();
 
         let token = token_id.unwrap_or("ERA").to_string();
+        let pre_mint_available = self
+            .get_balance(Some(&token))
+            .map(|b| b.available())
+            .unwrap_or(0);
         let recipient = self.device_id_array();
         let op = TokenOperation::Mint {
             token_id: token.clone(),
@@ -1577,95 +1263,139 @@ impl WalletSDK {
         // Execute through TokenSDK (updates canonical state)
         let new_state = self.token_sdk.execute_token_operation(op).await?;
 
-        // Keep SQLite in sync — route by token type.
-        //
-        // ERA → `wallet_state.balance` (single-field, authoritative for bilateral ERA transfers)
-        // Non-ERA (dBTC, custom) → `token_balances` table (per-token, keyed by (device_id, token_id))
+        // Keep canonical balance projections in sync for every token, including ERA.
         {
-            use crate::storage::client_db::{get_wallet_state, store_wallet_state, WalletState};
-
             let device_id_txt = self.device_id_base32();
-            let now = crate::util::deterministic_time::tick();
-
-            if token == "ERA" {
-                // ERA: update the single-field wallet_state.balance
-                let mut ws = match get_wallet_state(&device_id_txt).ok().flatten() {
-                    Some(existing) => existing,
-                    None => WalletState {
-                        wallet_id: device_id_txt.clone(),
-                        device_id: device_id_txt.clone(),
-                        genesis_id: None,
-                        chain_tip: String::new(),
-                        chain_height: 0,
-                        merkle_root: String::new(),
-                        balance: 0,
-                        created_at: now,
-                        updated_at: now,
-                        status: "active".to_string(),
-                        metadata: std::collections::HashMap::new(),
-                    },
+            let existing_locked =
+                match crate::storage::client_db::get_locked_balance(&device_id_txt, &token) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        log::error!(
+                            "[wallet.mint_for_self] failed to read {} locked balance: {}",
+                            token,
+                            e
+                        );
+                        0
+                    }
                 };
+            let policy_commit = self.token_sdk.resolve_policy_commit_strict(&token)?;
 
-                ws.balance = ws.balance.saturating_add(amount);
-                ws.updated_at = now;
-
-                log::info!(
-                    "[wallet.mint_for_self] ERA wallet_state: device={} old={} +{}={}",
-                    &device_id_txt[..device_id_txt.len().min(16)],
-                    ws.balance.saturating_sub(amount),
-                    amount,
-                    ws.balance
-                );
-
-                if let Err(e) = store_wallet_state(&ws) {
-                    log::error!("[wallet.mint_for_self] FAILED to persist ERA wallet_state: {e}");
-                }
-            } else {
-                // Non-ERA (dBTC, custom tokens): update the per-token token_balances table
-                let (prev, existing_locked) =
-                    match crate::storage::client_db::get_token_balance(&device_id_txt, &token) {
-                        Ok(Some((a, l))) => (a, l),
-                        Ok(None) => (0, 0),
-                        Err(e) => {
-                            log::error!(
-                                "[wallet.mint_for_self] failed to read {token} balance: {e}"
-                            );
-                            (0, 0)
-                        }
-                    };
-                let new_available = prev.saturating_add(amount);
-
-                log::info!(
-                    "[wallet.mint_for_self] {} token_balances: device={} old={} +{}={}",
+            if let Err(e) = crate::storage::client_db::sync_token_projection_from_state(
+                &device_id_txt,
+                &token,
+                &policy_commit,
+                &new_state,
+                existing_locked,
+            ) {
+                log::error!(
+                    "[wallet.mint_for_self] FAILED to sync {} projection from state: {}",
                     token,
-                    &device_id_txt[..device_id_txt.len().min(16)],
-                    prev,
-                    amount,
-                    new_available
+                    e
                 );
-
-                if let Err(e) = crate::storage::client_db::upsert_token_balance(
-                    &device_id_txt,
-                    &token,
-                    new_available,
-                    existing_locked,
-                ) {
-                    log::error!(
-                        "[wallet.mint_for_self] FAILED to persist {} token_balance: {e}",
-                        token
-                    );
-                }
+            } else {
+                log::info!(
+                    "[wallet.mint_for_self] {} projection synced from canonical state_number={}",
+                    token,
+                    new_state.state_number
+                );
             }
+
+            let expected_available = pre_mint_available.saturating_add(amount);
+            self.token_sdk
+                .force_set_balance(self.device_id_array(), &token, expected_available);
         }
 
-        // Record a history entry so wallet.history surfaces faucet claims
-        // Use a self→self confirmed transaction with zero fee and current chain tip (if any)
-        let chain_tip_id = {
-            // Try to reuse any existing bilateral tip with self; else synthesize from new_state.hash
-            let mut h = dsm::crypto::blake3::dsm_domain_hasher("DSM/faucet-claim");
-            h.update(&new_state.hash);
-            format!("tip_{}", first8_le_u64(h.finalize().as_bytes()))
+        let protocol_payload = build_faucet_protocol_payload(
+            &recipient,
+            &token,
+            amount,
+            &new_state.hash,
+            new_state.state_number,
+        );
+        let protocol_event = {
+            use crate::storage::client_db::{
+                advance_system_peer_tip, get_system_peer, store_system_peer, SystemPeerRecord,
+                SystemPeerType,
+            };
+
+            let mut expected_parent_tip = [0u8; 32];
+            match get_system_peer(ERA_SOURCE_DLV_PEER_KEY).map_err(|e| {
+                DsmError::internal(
+                    format!("Failed to load stable ERA source DLV peer: {e}"),
+                    None::<std::io::Error>,
+                )
+            })? {
+                Some(existing) => {
+                    let expected_device_id = era_source_dlv_device_id().to_vec();
+                    if existing.device_id != expected_device_id {
+                        return Err(DsmError::internal(
+                            format!(
+                                "Stable ERA source DLV peer has unexpected device_id for {}",
+                                ERA_SOURCE_DLV_PEER_KEY
+                            ),
+                            None::<std::io::Error>,
+                        ));
+                    }
+                    if existing.peer_type != SystemPeerType::Dlv {
+                        return Err(DsmError::internal(
+                            format!(
+                                "Stable ERA source DLV peer has unexpected type {}",
+                                existing.peer_type.as_str()
+                            ),
+                            None::<std::io::Error>,
+                        ));
+                    }
+                    if let Some(current_tip) = existing.current_chain_tip.as_deref() {
+                        if current_tip.len() != 32 {
+                            return Err(DsmError::internal(
+                                format!(
+                                    "Stable ERA source DLV peer has invalid chain tip length {}",
+                                    current_tip.len()
+                                ),
+                                None::<std::io::Error>,
+                            ));
+                        }
+                        expected_parent_tip.copy_from_slice(current_tip);
+                    }
+                }
+                None => {
+                    let rec = SystemPeerRecord {
+                        peer_key: ERA_SOURCE_DLV_PEER_KEY.to_string(),
+                        device_id: era_source_dlv_device_id().to_vec(),
+                        display_name: ERA_SOURCE_DLV_DISPLAY_NAME.to_string(),
+                        peer_type: SystemPeerType::Dlv,
+                        current_chain_tip: None,
+                        created_at: crate::util::deterministic_time::tick(),
+                        updated_at: crate::util::deterministic_time::tick(),
+                        metadata: HashMap::new(),
+                    };
+                    store_system_peer(&rec).map_err(|e| {
+                        DsmError::internal(
+                            format!("Failed to create stable ERA source DLV peer: {e}"),
+                            None::<std::io::Error>,
+                        )
+                    })?;
+                }
+            }
+
+            advance_system_peer_tip(
+                ERA_SOURCE_DLV_PEER_KEY,
+                SystemPeerType::Dlv,
+                &expected_parent_tip,
+                &protocol_payload,
+                &new_state.hash,
+                new_state.state_number,
+            )
+            .map_err(|e| {
+                DsmError::internal(
+                    format!("Failed to advance ERA source DLV tip: {e}"),
+                    None::<std::io::Error>,
+                )
+            })?
         };
+
+        let protocol_chain_tip_id =
+            crate::util::text_id::encode_base32_crockford(&protocol_event.child_tip);
 
         let mut tx = WalletTransaction::new(
             self.device_id_base32(),    // from_device_id (self)
@@ -1674,62 +1404,17 @@ impl WalletSDK {
             token.clone(),              // token id
             Some("faucet".to_string()), // memo
             0,                          // fee
-            chain_tip_id,               // chain tip id
+            protocol_chain_tip_id,      // protocol actor child tip
         );
         tx.status = TransactionStatus::Confirmed;
         tx.state_number = Some(new_state.state_number);
-        // Mark as faucet in metadata for UI/analytics
         tx.metadata
             .insert("source".to_string(), "faucet".to_string());
+        tx.metadata.insert(
+            "protocol_peer_key".to_string(),
+            ERA_SOURCE_DLV_PEER_KEY.to_string(),
+        );
         self.transactions.write().push(tx);
-
-        // Persist DLV chain tip: the faucet is a protocol-controlled actor (DLV).
-        // Use SystemPeerRecord (NOT ContactRecord) to enforce trust boundary:
-        // - SystemPeerRecord: protocol-controlled actor, no public key, cannot be verified
-        // - ContactRecord: authenticated counterparty with public key for bilateral verification
-        {
-            use crate::storage::client_db::{
-                get_system_peer, store_system_peer, update_system_peer_chain_tip, SystemPeerRecord,
-                SystemPeerType,
-            };
-            // Deterministic DLV device id (32 bytes) derived from domain tag
-            let dlv_device_id =
-                dsm::crypto::blake3::domain_hash_bytes("DSM/dlv-era-device-id", b"").to_vec();
-
-            // If system peer doesn't exist, create it
-            let dlv_short = crate::util::text_id::short_id(&dlv_device_id, 8);
-            log::info!("DLV device id (short): {}", dlv_short);
-            match get_system_peer("dlv") {
-                Ok(Some(_rec)) => {
-                    log::info!("DLV system peer exists; will update chain_tip");
-                }
-                Ok(None) => {
-                    log::info!("DLV system peer not found; creating record");
-                    let rec = SystemPeerRecord {
-                        peer_key: "dlv".to_string(),
-                        device_id: dlv_device_id.clone(),
-                        display_name: "DLV Faucet".to_string(),
-                        peer_type: SystemPeerType::Dlv,
-                        current_chain_tip: None,
-                        created_at: crate::util::deterministic_time::tick(),
-                        updated_at: crate::util::deterministic_time::tick(),
-                        metadata: std::collections::HashMap::new(),
-                    };
-                    if let Err(e) = store_system_peer(&rec) {
-                        log::warn!("Failed to store DLV system peer: {}", e);
-                    }
-                }
-                Err(e) => {
-                    log::warn!("Failed checking DLV system peer existence: {}", e);
-                }
-            }
-
-            // Persist chain tip (raw 32-byte state hash)
-            match update_system_peer_chain_tip("dlv", &new_state.hash) {
-                Ok(_) => log::info!("📝 Persisted DLV chain tip after faucet mint"),
-                Err(e) => log::warn!("Failed to persist DLV chain tip: {}", e),
-            }
-        }
 
         // CRITICAL: Update global SDK_CONTEXT chain_tip so transport headers reflect new state
         // Per whitepaper Sec 2.1: h_{n+1} := H(S_{n+1}) - chain_tip must be 32-byte hash
@@ -1744,18 +1429,7 @@ impl WalletSDK {
             }
         }
 
-        // Persist to SQLite: wallet balance and transaction record (canonical, binary-first)
-        let available_u64 = self
-            .get_balance(Some(&token))
-            .map(|b| b.available())
-            .unwrap_or(0);
-        crate::storage::client_db::update_wallet_balance(&self.device_id_base32(), available_u64)
-            .map_err(|e| {
-            DsmError::internal(
-                format!("Failed to persist wallet balance after faucet: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
+        // Persist canonical transaction record only; balance projection was already synced.
         {
             // CRITICAL FIX: Use state_number + tick to ensure uniqueness
             // (state_number is monotonically increasing, tick provides additional entropy)
@@ -1770,18 +1444,38 @@ impl WalletSDK {
                 std::collections::HashMap::new();
             meta.insert("token_id".to_string(), token.as_bytes().to_vec());
             meta.insert("source".to_string(), b"faucet".to_vec());
-            // Build stitched receipt for faucet: local device ↔ DLV system peer
-            let faucet_receipt_bytes = {
-                let dlv_devid: [u8; 32] =
-                    dsm::crypto::blake3::domain_hash_bytes("DSM/dlv-era-device-id", b"");
-                crate::sdk::receipts::build_bilateral_receipt(
-                    self.device_id_array(),
-                    dlv_devid,
-                    new_state.prev_state_hash,
-                    new_state.hash,
-                    crate::sdk::app_state::AppState::get_device_tree_root(),
-                )
-            };
+            meta.insert(
+                "protocol_peer_key".to_string(),
+                protocol_event.peer_key.as_bytes().to_vec(),
+            );
+            meta.insert(
+                "protocol_peer_type".to_string(),
+                protocol_event.peer_type.as_str().as_bytes().to_vec(),
+            );
+            meta.insert(
+                "protocol_parent_tip".to_string(),
+                protocol_event.parent_tip.clone(),
+            );
+            meta.insert(
+                "protocol_child_tip".to_string(),
+                protocol_event.child_tip.clone(),
+            );
+            meta.insert(
+                "protocol_transition_digest".to_string(),
+                protocol_event.transition_digest.clone(),
+            );
+            meta.insert(
+                "protocol_transition_payload".to_string(),
+                protocol_event.payload_bytes.clone(),
+            );
+            meta.insert(
+                "source_state_hash".to_string(),
+                protocol_event.source_state_hash.clone(),
+            );
+            meta.insert(
+                "source_state_number".to_string(),
+                protocol_event.source_state_number.to_le_bytes().to_vec(),
+            );
             let rec = crate::storage::client_db::TransactionRecord {
                 tx_id: tx_id.clone(),
                 tx_hash: tx_hash_txt,
@@ -1792,8 +1486,8 @@ impl WalletSDK {
                 status: "confirmed".to_string(),
                 chain_height: new_state.state_number,
                 step_index: dt::tick(),
-                commitment_hash: None,
-                proof_data: faucet_receipt_bytes,
+                commitment_hash: Some(protocol_event.transition_digest.clone()),
+                proof_data: None,
                 metadata: meta,
                 created_at: 0,
             };
@@ -1821,23 +1515,17 @@ impl WalletSDK {
     }
 
     /// Execute a token operation directly through TokenSDK.
-    /// Seed the in-memory token balance for this device from SQLite (or any
-    /// authoritative u64) without advancing the state machine.
-    ///
-    /// Silently no-ops if the in-memory value is already >= `amount`, so it is
-    /// safe to call unconditionally before a Burn to ensure the map reflects
-    /// bilaterally-received tokens (bilateral receive updates SQLite only).
-    /// Unconditionally set the in-memory balance cache for the local device.
-    /// Used by the atomic b0x rollback to undo the in-memory deduction after
-    /// a failed storage-node delivery.
+    /// Unconditionally set the local in-memory balance cache without advancing
+    /// the state machine. Used by the b0x rollback path to restore the cached
+    /// pre-send value after a failed storage-node delivery.
     pub fn force_set_balance_for_self(&self, token_id: &str, amount: u64) {
         let device_id = self.device_id_array();
         self.token_sdk
             .force_set_balance(device_id, token_id, amount);
     }
 
-    /// Reload the in-memory balance cache from SQLite for the local device.
-    /// Used to synchronize the cache after rollbacks or external changes.
+    /// Reload the local in-memory balance cache from canonical reads and any
+    /// derived projections needed to hydrate the cache.
     pub fn reload_balance_cache_for_self(&self) -> Result<(), DsmError> {
         let device_id = self.device_id_array();
         self.token_sdk.reload_balance_cache_for_self(device_id)
@@ -2074,21 +1762,6 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn test_async_send_transaction_flow() -> Result<(), Box<dyn std::error::Error>> {
-        let wallet = WalletSDK::test_wallet()?;
-        wallet.unlock("")?;
-        let recipient_id = crate::util::text_id::encode_base32_crockford(&[0xCC; 32]);
-        wallet.add_counterparty(&recipient_id, vec![9, 9, 9], Some("Recipient r1"))?;
-        wallet.initialize_bilateral_chain(&recipient_id, &[0; 32])?;
-        let tx = wallet
-            .create_transaction(&recipient_id, 1, None, None, None)
-            .await?;
-        let signed = wallet.sign_transaction(&tx)?;
-        let result = wallet.send_transaction(&signed).await;
-        assert!(result.is_ok() || result.is_err());
-        Ok(())
-    }
     #[test]
     fn wallet_history_transaction_id_is_utf8_safe() {
         // WalletHistoryResponse.TransactionInfo.id is a `string` in the protobuf schema.

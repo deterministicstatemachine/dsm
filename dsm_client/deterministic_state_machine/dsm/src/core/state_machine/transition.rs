@@ -583,14 +583,6 @@ pub fn verify_transition_integrity(
 }
 
 fn token_balance_map_for_verification(state: &State, token_id: &[u8]) -> BTreeMap<String, u64> {
-    if token_id == b"ERA" {
-        let mut out = BTreeMap::new();
-        if let Some(balance) = state.token_balances.get("ERA") {
-            out.insert("ERA".to_string(), balance.value());
-        }
-        return out;
-    }
-
     let token_id_str = String::from_utf8_lossy(token_id);
     let suffix = format!("|{token_id_str}");
     state

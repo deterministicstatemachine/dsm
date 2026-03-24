@@ -174,11 +174,9 @@ fn u64_to_u128_le(val: u64) -> crate::generated::U128 {
 
 /// Fetch all token balances as a BalancesListResponse (strict, protobuf-encoded).
 ///
-/// Routes through the app router `balance.list` handler which aggregates from ALL sources:
-/// 1. ERA from `wallet_state.balance` (SQLite, authoritative for bilateral ERA)
-/// 2. Non-ERA from `core_state.token_balances` (in-memory, fresh within session)
-/// 3. Non-ERA from `token_balances` SQLite table (persisted, survives restarts)
-/// 4. Ensures dBTC always appears (even with 0) so the token picker works
+/// Routes through the app router `balance.list` handler which aggregates from authoritative sources:
+/// 1. All DSM tokens from canonical balance projection rows materialized from DSM state
+/// 2. Ensures dBTC always appears (even with 0) so the token picker works
 ///
 /// Falls back to direct SQLite reads if the app router is not yet available.
 pub fn get_all_balances_strict() -> Result<Vec<crate::generated::TokenBalanceEntry>, String> {
@@ -190,7 +188,7 @@ pub fn get_all_balances_strict() -> Result<Vec<crate::generated::TokenBalanceEnt
         &device_id_b32[..device_id_b32.len().min(16)]
     );
 
-    // Try the app router first — it aggregates from in-memory AND SQLite (most complete).
+    // Try the app router first — it aggregates from the live authoritative paths.
     if let Some(router) = app_router() {
         let query = AppQuery {
             path: "balance.list".to_string(),
@@ -239,49 +237,30 @@ pub fn get_all_balances_strict() -> Result<Vec<crate::generated::TokenBalanceEnt
     log::info!("[getAllBalancesStrict] falling back to direct SQLite reads");
     let mut entries: Vec<(String, u64)> = Vec::new();
 
-    // 1. ERA from wallet_state (authoritative for bilateral ERA transfers)
-    let era_balance = match crate::storage::client_db::get_wallet_state(&device_id_b32) {
-        Ok(Some(ws)) => {
-            log::info!(
-                "[getAllBalancesStrict] wallet_state ERA balance={}",
-                ws.balance
-            );
-            ws.balance
-        }
-        Ok(None) => {
-            let _ = crate::storage::client_db::ensure_wallet_state_for_device(&device_id_b32);
-            crate::storage::client_db::get_wallet_state(&device_id_b32)
-                .ok()
-                .flatten()
-                .map(|ws| ws.balance)
-                .unwrap_or(0)
-        }
-        Err(e) => {
-            log::warn!("[getAllBalancesStrict] get_wallet_state failed: {}", e);
-            0
-        }
-    };
-    entries.push(("ERA".to_string(), era_balance));
-
-    // 2. Non-ERA tokens from token_balances table (dBTC, custom tokens, etc.)
-    match crate::storage::client_db::get_token_balances(&device_id_b32) {
-        Ok(persisted) => {
-            for (tok_id, available, _locked) in persisted {
-                if tok_id == "ERA" {
-                    continue;
-                }
+    // 1. Tokens from canonical projection rows only.
+    match crate::storage::client_db::list_balance_projections(&device_id_b32) {
+        Ok(projected) => {
+            for record in projected {
+                let tok_id = record.token_id;
                 if let Some(existing) = entries.iter_mut().find(|(t, _)| t == &tok_id) {
-                    if available > existing.1 {
-                        existing.1 = available;
+                    if record.available > existing.1 {
+                        existing.1 = record.available;
                     }
                 } else {
-                    entries.push((tok_id, available));
+                    entries.push((tok_id, record.available));
                 }
             }
         }
         Err(e) => {
-            log::warn!("[getAllBalancesStrict] get_token_balances failed: {}", e);
+            log::warn!(
+                "[getAllBalancesStrict] list_balance_projections failed: {}",
+                e
+            );
         }
+    }
+
+    if !entries.iter().any(|(token_id, _)| token_id == "ERA") {
+        entries.push(("ERA".to_string(), 0));
     }
 
     // 3. Ensure dBTC always appears (even with 0) so token picker works
@@ -439,6 +418,30 @@ pub async fn inject_ble_coordinator(
     Ok(())
 }
 
+/// Inject the bilateral transport adapter into the bilateral handler (Android only).
+#[cfg(all(target_os = "android", feature = "bluetooth"))]
+pub async fn inject_ble_transport_adapter(
+    adapter: std::sync::Arc<
+        crate::bluetooth::bilateral_transport_adapter::BilateralTransportAdapter,
+    >,
+) -> Result<(), String> {
+    use crate::handlers::BiImpl;
+
+    let handler = BILATERAL_HANDLER
+        .get()
+        .ok_or_else(|| "Bilateral handler not installed".to_string())?;
+
+    let bi_impl = handler
+        .as_ref()
+        .as_any()
+        .downcast_ref::<BiImpl>()
+        .ok_or_else(|| "Bilateral handler is not BiImpl".to_string())?;
+
+    bi_impl.set_ble_transport_adapter(adapter).await;
+    log::info!("Ble transport adapter injected into BiImpl via bridge");
+    Ok(())
+}
+
 /// Get the BleFrameCoordinator from the bilateral handler (Android only).
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
 pub async fn get_ble_coordinator(
@@ -459,6 +462,30 @@ pub async fn get_ble_coordinator(
         .get_ble_coordinator()
         .await
         .ok_or_else(|| "BleFrameCoordinator not injected yet".to_string())
+}
+
+/// Get the bilateral transport adapter from the bilateral handler (Android only).
+#[cfg(all(target_os = "android", feature = "bluetooth"))]
+pub async fn get_ble_transport_adapter() -> Result<
+    std::sync::Arc<crate::bluetooth::bilateral_transport_adapter::BilateralTransportAdapter>,
+    String,
+> {
+    use crate::handlers::BiImpl;
+
+    let handler = BILATERAL_HANDLER
+        .get()
+        .ok_or_else(|| "Bilateral handler not installed".to_string())?;
+
+    let bi_impl = handler
+        .as_ref()
+        .as_any()
+        .downcast_ref::<BiImpl>()
+        .ok_or_else(|| "Bilateral handler is not BiImpl".to_string())?;
+
+    bi_impl
+        .get_ble_transport_adapter()
+        .await
+        .ok_or_else(|| "Ble transport adapter not injected yet".to_string())
 }
 
 #[cfg(test)]

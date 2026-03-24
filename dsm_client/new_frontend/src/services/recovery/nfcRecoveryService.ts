@@ -14,6 +14,7 @@ import {
 export type NfcBackupStatus = {
   enabled: boolean;
   configured: boolean;
+  pendingCapsule: boolean;
   capsuleCount: number;
   lastCapsuleIndex: number;
 };
@@ -28,8 +29,17 @@ export type CapsulePreview = {
 export type DecryptedCapsulePreview = {
   smtRoot: string;
   rollupHash: string;
+  capsuleVersion: number;
+  capsuleFlags: number;
+  logicalTime: number;
+  capsuleIndex: number;
   counterpartyCount: number;
   counterparties: string[];
+  chainTips: Array<{
+    counterpartyId: string;
+    height: number;
+    headHash: string;
+  }>;
 };
 
 function toBytes(data: Uint8Array): Uint8Array<ArrayBuffer> {
@@ -70,6 +80,33 @@ function encodeHash(bytes?: Uint8Array): string {
   return encodeBase32Crockford(bytes);
 }
 
+function decodeMetadata(metaData: Uint8Array): {
+  capsuleVersion: number;
+  capsuleFlags: number;
+  logicalTime: number;
+  capsuleIndex: number;
+} {
+  if (!(metaData instanceof Uint8Array) || metaData.length < 20) {
+    return {
+      capsuleVersion: 0,
+      capsuleFlags: 0,
+      logicalTime: 0,
+      capsuleIndex: 0,
+    };
+  }
+
+  const view = new DataView(metaData.buffer, metaData.byteOffset, metaData.byteLength);
+  const logicalTime = Number(view.getBigUint64(4, true));
+  const capsuleIndex = Number(view.getBigUint64(12, true));
+
+  return {
+    capsuleVersion: view.getUint16(0, true),
+    capsuleFlags: view.getUint16(2, true),
+    logicalTime: Number.isSafeInteger(logicalTime) ? logicalTime : 0,
+    capsuleIndex: Number.isSafeInteger(capsuleIndex) ? capsuleIndex : 0,
+  };
+}
+
 function normalizeMnemonic(mnemonic: string): string {
   const trimmed = String(mnemonic || '').trim();
   if (trimmed.split(/\s+/).length < 12) {
@@ -87,13 +124,25 @@ function assertCapsuleBytes(capsuleBytes: Uint8Array): void {
 function mapDecryptResponse(
   response: RecoveryCapsuleDecryptResponse,
 ): DecryptedCapsulePreview {
+  const metadata = decodeMetadata(response.metaData);
   return {
     smtRoot: encodeHash(response.globalRoot?.v),
     rollupHash: encodeHash(response.receiptRollup?.v),
+    capsuleVersion: metadata.capsuleVersion,
+    capsuleFlags: metadata.capsuleFlags,
+    logicalTime: metadata.logicalTime,
+    capsuleIndex: metadata.capsuleIndex,
     counterpartyCount: response.chainTips.length,
     counterparties: response.chainTips
       .filter((tip) => tip.counterpartyDeviceId.length === 32)
       .map((tip) => encodeBase32Crockford(tip.counterpartyDeviceId)),
+    chainTips: response.chainTips
+      .filter((tip) => tip.counterpartyDeviceId.length === 32)
+      .map((tip) => ({
+        counterpartyId: encodeBase32Crockford(tip.counterpartyDeviceId),
+        height: Number(tip.height),
+        headHash: encodeHash(tip.headHash?.v),
+      })),
   };
 }
 
@@ -136,6 +185,7 @@ export async function getNfcBackupStatus(): Promise<NfcBackupStatus> {
   return {
     enabled: pairs.enabled === 'true',
     configured: pairs.configured === 'true',
+    pendingCapsule: pairs.pending === 'true',
     capsuleCount: parseInt(pairs.capsule_count ?? '0', 10),
     lastCapsuleIndex: parseInt(pairs.last_capsule_index ?? '0', 10),
   };
@@ -178,6 +228,28 @@ export async function decryptCapsuleBytes(
   return mapDecryptResponse(env.payload.value);
 }
 
+export async function inspectCapsuleBytes(
+  capsuleBytes: Uint8Array,
+  mnemonic: string,
+): Promise<DecryptedCapsulePreview> {
+  assertCapsuleBytes(capsuleBytes);
+  await cacheRecoveryMnemonic(normalizeMnemonic(mnemonic));
+
+  const req = new NfcRecoveryCapsule({
+    payload: toBytes(capsuleBytes),
+  });
+  const res = await appRouterInvokeBin('recovery.inspectCapsule', req.toBinary());
+  const env = decodeFramedEnvelopeV3(res);
+  if (env.payload.case === 'error') {
+    throw new Error(env.payload.value.message || 'inspectCapsule failed');
+  }
+  if (env.payload.case !== 'recoveryCapsuleDecryptResponse') {
+    throw new Error(`Unexpected payload: ${env.payload.case}`);
+  }
+
+  return mapDecryptResponse(env.payload.value);
+}
+
 export async function decryptCapsuleFromBase32(params: {
   capsuleBase32: string;
   mnemonic: string;
@@ -200,6 +272,22 @@ export async function getCapsulePreview(): Promise<CapsulePreview> {
     };
   } catch {
     return null;
+  }
+}
+
+export async function readNfcRing(): Promise<void> {
+  const res = await appRouterInvokeBin('nfc.ring.read', new Uint8Array(0));
+  const env = decodeFramedEnvelopeV3(res);
+  if (env.payload.case === 'error') {
+    throw new Error(env.payload.value.message || 'NFC read failed');
+  }
+}
+
+export async function stopNfcRead(): Promise<void> {
+  try {
+    await appRouterInvokeBin('nfc.ring.stopRead', new Uint8Array(0));
+  } catch {
+    // Best-effort teardown — ignore errors.
   }
 }
 

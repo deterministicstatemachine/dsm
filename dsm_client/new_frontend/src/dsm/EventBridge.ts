@@ -369,20 +369,14 @@ export function initializeEventBridge(): void {
         return;
       }
 
-      // NFC domain: backup write committed (Kotlin vibrated = state wrote to tag)
-      if (topic === 'nfc.backup_written') {
-        try { bridgeEvents.emit('nfc.backupWritten', undefined as any); } catch {}
-        emit(topic, bytes);
-        return;
-      }
-
       // Inbox sync result pushed from Rust inbox_poller (Invariant #7 compliant).
       // Payload is StorageSyncResponse protobuf bytes.
       if (topic === 'inbox.updated') {
         try {
           const resp = pb.StorageSyncResponse.fromBinary(bytes);
+          const unreadCount = Math.max((resp.pulled ?? 0) - (resp.processed ?? 0), 0);
           bridgeEvents.emit('inbox.updated', {
-            unreadCount: resp.pulled,
+            unreadCount,
             newItems: resp.processed,
             source: 'rust_poller',
           });
@@ -506,6 +500,12 @@ export function initializeEventBridge(): void {
         try {
           const env = decodeFramedEnvelopeV3(bytes);
           const p: any = env?.payload ?? env;
+
+          if (p?.case === 'appStateResponse' && p.value?.key === 'nfc.backup_written') {
+            try { bridgeEvents.emit('nfc.backupWritten', undefined as any); } catch {}
+            emit('nfc.backup_written', bytes);
+            return;
+          }
 
           // BLE state events -> parse BleEvent oneof and emit to bridgeEvents
           const bleEvent: any = (p?.case === 'bleEvent' ? p.value : p?.bleEvent);

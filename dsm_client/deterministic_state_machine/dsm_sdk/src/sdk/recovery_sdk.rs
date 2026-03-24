@@ -7,12 +7,12 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 use dsm::recovery::{
-    create_recovery_capsule, decrypt_recovery_capsule, create_tombstone_receipt,
-    create_succession_receipt, verify_tombstone_receipt, verify_succession_receipt, update_rollup,
-    verify_rollup, init_recovery, EncryptedCapsule, RecoveryCapsule, ReceiptRollup,
-    TombstoneReceipt, SuccessionReceipt,
+    create_recovery_capsule, create_recovery_capsule_with_key, decrypt_recovery_capsule,
+    create_tombstone_receipt, create_succession_receipt, verify_tombstone_receipt,
+    verify_succession_receipt, update_rollup, verify_rollup, init_recovery, EncryptedCapsule,
+    RecoveryCapsule, ReceiptRollup, TombstoneReceipt, SuccessionReceipt,
 };
-use dsm::recovery::capsule::decrypt_capsule_with_key;
+use dsm::recovery::capsule::{decrypt_capsule_with_key, derive_recovery_key};
 use dsm::types::error::DsmError;
 
 /// In-memory cached recovery key (derived from mnemonic via Argon2id + HKDF-BLAKE3).
@@ -21,6 +21,13 @@ static RECOVERY_KEY: Mutex<Option<[u8; 32]>> = Mutex::new(None);
 
 /// SDK for DSM recovery operations
 pub struct RecoverySDK;
+
+struct RecoveryCapsuleState {
+    smt_root: Vec<u8>,
+    counterparty_tips: HashMap<String, (u64, Vec<u8>)>,
+    rollup: ReceiptRollup,
+    next_index: u64,
+}
 
 impl RecoverySDK {
     /// Initialize the recovery subsystem
@@ -35,7 +42,6 @@ impl RecoverySDK {
     /// * `counterparty_tips` - Map of counterparty_id -> (height, head_hash) for bilateral chains
     /// * `rollup` - Current receipt rollup accumulator
     /// * `mnemonic` - 24-word BIP39 mnemonic for key derivation
-    /// * `device_id` - Unique device identifier
     /// * `counter` - Recovery capsule counter/version
     ///
     /// # Returns
@@ -45,17 +51,9 @@ impl RecoverySDK {
         counterparty_tips: HashMap<String, (u64, Vec<u8>)>,
         rollup: &ReceiptRollup,
         mnemonic: &str,
-        device_id: &str,
         counter: u64,
     ) -> Result<EncryptedCapsule, DsmError> {
-        create_recovery_capsule(
-            smt_root,
-            counterparty_tips,
-            rollup,
-            mnemonic,
-            device_id,
-            counter,
-        )
+        create_recovery_capsule(smt_root, counterparty_tips, rollup, mnemonic, counter)
     }
 
     /// Decrypt and verify a recovery capsule from NFC ring
@@ -63,16 +61,14 @@ impl RecoverySDK {
     /// # Arguments
     /// * `encrypted_capsule` - Encrypted capsule from NFC ring
     /// * `mnemonic` - 24-word BIP39 mnemonic for key derivation
-    /// * `device_id` - Device identifier for verification
     ///
     /// # Returns
     /// Decrypted recovery capsule with SMT root and peer tips
     pub fn decrypt_recovery_capsule(
         encrypted_capsule: &EncryptedCapsule,
         mnemonic: &str,
-        device_id: &str,
     ) -> Result<RecoveryCapsule, DsmError> {
-        decrypt_recovery_capsule(encrypted_capsule, mnemonic, device_id)
+        decrypt_recovery_capsule(encrypted_capsule, mnemonic)
     }
 
     /// Create tombstone receipt to invalidate old device binding
@@ -206,93 +202,14 @@ impl RecoverySDK {
     /// # Returns
     /// Tuple of (capsule_index, encrypted capsule bytes serialized for NFC)
     pub fn create_capsule_from_current_state(mnemonic: &str) -> Result<(u64, Vec<u8>), DsmError> {
-        // 1. Read current SMT root from AppState
-        let smt_root = crate::sdk::app_state::AppState::get_smt_root().ok_or_else(|| {
-            DsmError::InvalidState(
-                "SMT root not available — run genesis before creating recovery capsule".to_string(),
-            )
-        })?;
-
-        // 2. Read device_id
-        let device_id_bytes = crate::sdk::app_state::AppState::get_device_id()
-            .ok_or_else(|| DsmError::InvalidState("Device ID not available".to_string()))?;
-        let device_id_str = crate::util::text_id::encode_base32_crockford(&device_id_bytes);
-
-        // 3. Gather counterparty bilateral chain tips from contacts SQLite
-        let mut counterparty_tips: HashMap<String, (u64, Vec<u8>)> = HashMap::new();
-        if let Ok(contacts) = crate::storage::client_db::get_all_contacts() {
-            for contact in contacts {
-                // Only include contacts that have an established bilateral chain tip
-                if let Some(ref tip) = contact.current_chain_tip {
-                    if tip.len() == 32 && contact.device_id.len() == 32 {
-                        let counterparty_id =
-                            crate::util::text_id::encode_base32_crockford(&contact.device_id);
-                        // Use added_at as height proxy (chain height for this relationship)
-                        counterparty_tips.insert(counterparty_id, (contact.added_at, tip.clone()));
-                    }
-                }
-            }
-        }
-
-        // 4. Get or create a fresh rollup accumulator
-        let rollup = ReceiptRollup::new();
-
-        // 5. Determine next capsule index (monotonic counter, not wall-clock)
-        let next_index = crate::storage::client_db::recovery::get_max_capsule_index()
-            .map_err(|e| DsmError::InvalidState(format!("Failed to read capsule index: {e}")))?
-            .saturating_add(1);
-
-        // 6. Create the encrypted capsule via core
-        let tip_count = counterparty_tips.len();
-        let encrypted = create_recovery_capsule(
-            &smt_root,
-            counterparty_tips,
-            &rollup,
-            mnemonic,
-            &device_id_str,
-            next_index,
-        )?;
-
-        // 7. Serialize the encrypted capsule to bytes for NFC storage
-        let capsule_bytes = encrypted.to_bytes();
-
-        // 8. Persist to SQLite for pending NFC write
-        let smt_root_32: [u8; 32] = if smt_root.len() == 32 {
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&smt_root);
-            arr
-        } else {
-            [0u8; 32]
-        };
-
-        crate::storage::client_db::recovery::store_recovery_capsule(
-            next_index,
-            &capsule_bytes,
-            &smt_root_32,
-        )
-        .map_err(|e| DsmError::InvalidState(format!("Failed to persist capsule: {e}")))?;
-        crate::storage::client_db::recovery::set_latest_capsule_counterparty_count(
-            tip_count as u64,
-        )
-        .map_err(|e| DsmError::InvalidState(format!("Failed to persist capsule preview: {e}")))?;
-
-        // 9. Prune old capsules (keep latest 5)
-        let _ = crate::storage::client_db::recovery::prune_old_capsules(5);
-
-        log::info!(
-            "[RECOVERY_SDK] Created recovery capsule index={} size={} counterparties={}",
-            next_index,
-            capsule_bytes.len(),
-            tip_count,
-        );
-
-        Ok((next_index, capsule_bytes))
+        let key = derive_recovery_key(mnemonic)?;
+        Self::create_capsule_from_current_state_with_key(&key)
     }
 
     /// Get the latest pending recovery capsule bytes for NFC write.
     /// Returns None if no capsule is pending.
     pub fn get_pending_capsule() -> Option<(u64, Vec<u8>)> {
-        crate::storage::client_db::recovery::get_latest_recovery_capsule()
+        crate::storage::client_db::recovery::get_pending_recovery_capsule()
             .ok()
             .flatten()
     }
@@ -320,6 +237,8 @@ impl RecoverySDK {
     pub fn disable_nfc_backup() -> Result<(), DsmError> {
         crate::storage::client_db::recovery::set_nfc_backup_enabled(false)
             .map_err(|e| DsmError::InvalidState(format!("Failed to set disabled: {e}")))?;
+        crate::storage::client_db::recovery::clear_pending_recovery_capsule()
+            .map_err(|e| DsmError::InvalidState(format!("Failed to clear pending capsule: {e}")))?;
         Ok(())
     }
 
@@ -340,9 +259,9 @@ impl RecoverySDK {
 
     /// Derive recovery key from mnemonic and cache it in memory.
     /// Key derivation: S_mn = Argon2id("DSM/recovery-ring\0", mnemonic)
-    ///                 K_R  = BLAKE3-keyed("DSM/recovery-aead\0", S_mn)
+    ///                 K_R  = BLAKE3 derive-key("DSM/recovery-aead\0", S_mn)
     pub fn derive_and_cache_key(mnemonic: &str) -> Result<(), DsmError> {
-        let key = Self::derive_recovery_key(mnemonic)?;
+        let key = derive_recovery_key(mnemonic)?;
         let mut guard = RECOVERY_KEY
             .lock()
             .map_err(|_| DsmError::InvalidState("Recovery key mutex poisoned".into()))?;
@@ -383,33 +302,6 @@ impl RecoverySDK {
         decrypt_capsule_with_key(&encrypted, &key)
     }
 
-    /// Internal: derive the 32-byte recovery key from a mnemonic.
-    fn derive_recovery_key(mnemonic: &str) -> Result<[u8; 32], DsmError> {
-        use argon2::Argon2;
-
-        // Step 1: S_mn = Argon2id("DSM/recovery-ring\0", mnemonic_bytes)
-        let salt_bytes = b"DSM/recovery-ring\0";
-        // Use Argon2id with default params (19 MiB, 2 iterations, 1 lane)
-        let argon2 = Argon2::default();
-        let mut s_mn = [0u8; 32];
-        argon2
-            .hash_password_into(mnemonic.as_bytes(), salt_bytes, &mut s_mn)
-            .map_err(|e| {
-                DsmError::crypto(format!("Argon2id failed: {e}"), None::<std::io::Error>)
-            })?;
-
-        // Step 2: K_R = BLAKE3-keyed("DSM/recovery-aead\0", S_mn)
-        let domain = b"DSM/recovery-aead\0";
-        let mut hasher = blake3::Hasher::new_keyed(&s_mn);
-        hasher.update(domain);
-        let k_r: [u8; 32] = *hasher.finalize().as_bytes();
-
-        // Zeroize intermediate
-        s_mn.iter_mut().for_each(|b| *b = 0);
-
-        Ok(k_r)
-    }
-
     /// Silently refresh the pending NFC capsule if backup is enabled and a key is cached.
     ///
     /// Called by the transport layer (Kotlin) after every state-mutating operation.
@@ -421,29 +313,19 @@ impl RecoverySDK {
     /// the NFC ring comes into range, at which point Kotlin writes it, vibrates,
     /// and clears pending.
     pub fn maybe_refresh_nfc_capsule() {
-        // Gate 1: is NFC backup enabled?
         if !Self::is_nfc_backup_enabled() {
             return;
         }
-
-        // Gate 2: is a recovery key cached in memory?
         if !Self::has_cached_key() {
             return;
         }
 
-        // Gate 3: extract the cached key and derive mnemonic-equivalent
-        // We can't re-derive from mnemonic (not stored), but the capsule creation
-        // path uses mnemonic directly. Since we can't recover the mnemonic from
-        // the key, we need a different approach: use the cached key directly.
-        //
-        // For now, use create_capsule_from_current_state_with_key which encrypts
-        // using the pre-derived key instead of re-deriving from mnemonic.
         match Self::create_capsule_from_current_state_with_cached_key() {
-            Ok((idx, size)) => {
+            Ok((idx, capsule_bytes)) => {
                 log::info!(
                     "[NFC_BACKUP] Auto-refreshed capsule index={} size={}",
                     idx,
-                    size,
+                    capsule_bytes.len(),
                 );
             }
             Err(e) => {
@@ -454,121 +336,24 @@ impl RecoverySDK {
 
     /// Create a capsule using the cached recovery key (no mnemonic needed).
     /// Used by `maybe_refresh_nfc_capsule` for automatic post-transition capsule creation.
-    fn create_capsule_from_current_state_with_cached_key() -> Result<(u64, usize), DsmError> {
+    fn create_capsule_from_current_state_with_cached_key() -> Result<(u64, Vec<u8>), DsmError> {
         let key = {
             let guard = RECOVERY_KEY
                 .lock()
                 .map_err(|_| DsmError::InvalidState("Recovery key mutex poisoned".into()))?;
             guard.ok_or_else(|| DsmError::InvalidState("No cached recovery key".into()))?
         };
-
-        // Read current state
-        let smt_root = crate::sdk::app_state::AppState::get_smt_root()
-            .ok_or_else(|| DsmError::InvalidState("SMT root not available".to_string()))?;
-
-        // Gather counterparty tips
-        let mut counterparty_tips: HashMap<String, (u64, Vec<u8>)> = HashMap::new();
-        if let Ok(contacts) = crate::storage::client_db::get_all_contacts() {
-            for contact in contacts {
-                if let Some(ref tip) = contact.current_chain_tip {
-                    if tip.len() == 32 && contact.device_id.len() == 32 {
-                        let cid = crate::util::text_id::encode_base32_crockford(&contact.device_id);
-                        counterparty_tips.insert(cid, (contact.added_at, tip.clone()));
-                    }
-                }
-            }
-        }
-
-        let rollup = dsm::recovery::ReceiptRollup::new();
-        let next_index = crate::storage::client_db::recovery::get_max_capsule_index()
-            .map_err(|e| DsmError::InvalidState(format!("Failed to read capsule index: {e}")))?
-            .saturating_add(1);
-        let tip_count = counterparty_tips.len();
-
-        // Build capsule metadata
-        let metadata = dsm::recovery::CapsuleMetadata {
-            version: 1,
-            flags: 0,
-            logical_time: next_index,
-            counter: next_index,
-        };
-
-        let capsule = dsm::recovery::RecoveryCapsule {
-            smt_root: smt_root.clone(),
-            counterparty_tips,
-            rollup_hash: rollup.current_hash().to_vec(),
-            metadata,
-        };
-
-        // Serialize via canonical RecoveryCapsule::to_bytes (single source of truth in core)
-        let plaintext = capsule.to_bytes();
-
-        // Encrypt with cached key using ChaCha20-Poly1305 (or AES-256-GCM)
-        use aes_gcm::{Aes256Gcm, Nonce};
-        use aes_gcm::aead::{Aead, KeyInit};
-        use rand::RngCore;
-
-        let cipher = Aes256Gcm::new_from_slice(&key)
-            .map_err(|_| DsmError::crypto("Invalid cached key", None::<String>))?;
-
-        let mut nonce_bytes = [0u8; 12];
-        rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
-        let nonce = Nonce::from(nonce_bytes);
-
-        let ciphertext = cipher
-            .encrypt(&nonce, plaintext.as_slice())
-            .map_err(|_| DsmError::verification("Failed to encrypt capsule"))?;
-
-        let tag_start = ciphertext.len().saturating_sub(16);
-        let tag = ciphertext[tag_start..].to_vec();
-        let ct = ciphertext[..tag_start].to_vec();
-
-        // Build EncryptedCapsule and serialize
-        let encrypted = dsm::recovery::EncryptedCapsule {
-            ciphertext: ct,
-            tag,
-            nonce: nonce_bytes.to_vec(),
-            salt: vec![], // No salt needed — key is pre-derived
-            metadata: dsm::recovery::CapsuleMetadata {
-                version: 1,
-                flags: 0,
-                logical_time: next_index,
-                counter: next_index,
-            },
-        };
-
-        let capsule_bytes = encrypted.to_bytes();
-        let size = capsule_bytes.len();
-
-        // Persist
-        let smt_root_32: [u8; 32] = if smt_root.len() == 32 {
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&smt_root);
-            arr
-        } else {
-            [0u8; 32]
-        };
-
-        crate::storage::client_db::recovery::store_recovery_capsule(
-            next_index,
-            &capsule_bytes,
-            &smt_root_32,
-        )
-        .map_err(|e| DsmError::InvalidState(format!("Failed to persist capsule: {e}")))?;
-        crate::storage::client_db::recovery::set_latest_capsule_counterparty_count(
-            tip_count as u64,
-        )
-        .map_err(|e| DsmError::InvalidState(format!("Failed to persist capsule preview: {e}")))?;
-
-        let _ = crate::storage::client_db::recovery::prune_old_capsules(5);
-
-        Ok((next_index, size))
+        Self::create_capsule_from_current_state_with_key(&key)
     }
 
     /// Get recovery status for frontend display.
     pub fn get_recovery_status() -> RecoveryStatus {
         let enabled = crate::storage::client_db::recovery::is_nfc_backup_enabled();
         let configured = crate::storage::client_db::recovery::is_nfc_backup_configured();
+        let pending_capsule = crate::storage::client_db::recovery::get_pending_recovery_capsule()
+            .ok()
+            .flatten()
+            .is_some();
         let capsule_count = crate::storage::client_db::recovery::get_capsule_count().unwrap_or(0);
         let last_capsule_index =
             crate::storage::client_db::recovery::get_max_capsule_index().unwrap_or(0);
@@ -576,9 +361,176 @@ impl RecoverySDK {
         RecoveryStatus {
             enabled,
             configured,
+            pending_capsule,
             capsule_count,
             last_capsule_index,
         }
+    }
+
+    fn create_capsule_from_current_state_with_key(
+        key: &[u8; 32],
+    ) -> Result<(u64, Vec<u8>), DsmError> {
+        let RecoveryCapsuleState {
+            smt_root,
+            counterparty_tips,
+            rollup,
+            next_index,
+        } = Self::build_capsule_state()?;
+        let tip_count = counterparty_tips.len();
+        let encrypted = create_recovery_capsule_with_key(
+            &smt_root,
+            counterparty_tips,
+            &rollup,
+            key,
+            next_index,
+        )?;
+        let capsule_bytes = encrypted.to_bytes();
+        Self::persist_capsule(next_index, &smt_root, &capsule_bytes, tip_count)?;
+        log::info!(
+            "[RECOVERY_SDK] Created recovery capsule index={} size={} counterparties={}",
+            next_index,
+            capsule_bytes.len(),
+            tip_count,
+        );
+        Ok((next_index, capsule_bytes))
+    }
+
+    fn build_capsule_state() -> Result<RecoveryCapsuleState, DsmError> {
+        let smt_root = crate::sdk::app_state::AppState::get_smt_root().ok_or_else(|| {
+            DsmError::InvalidState(
+                "SMT root not available — run genesis before creating recovery capsule".to_string(),
+            )
+        })?;
+
+        let device_id_bytes = crate::sdk::app_state::AppState::get_device_id()
+            .ok_or_else(|| DsmError::InvalidState("Device ID not available".to_string()))?;
+        let local_device_id = crate::util::text_id::encode_base32_crockford(&device_id_bytes);
+        let rollup = Self::derive_recovery_rollup(&local_device_id)?;
+
+        let mut counterparty_tips = HashMap::new();
+        if let Ok(contacts) = crate::storage::client_db::get_all_contacts() {
+            for contact in contacts {
+                if let Some(ref tip) = contact.current_chain_tip {
+                    if tip.len() == 32 && contact.device_id.len() == 32 {
+                        let counterparty_id =
+                            crate::util::text_id::encode_base32_crockford(&contact.device_id);
+                        // The SMT-backed relationship tip is authoritative. Height is a transport
+                        // placeholder until a canonical per-relationship counter is persisted.
+                        counterparty_tips.insert(counterparty_id, (0, tip.clone()));
+                    }
+                }
+            }
+        }
+
+        // If there's already a pending (unconsumed) capsule, reuse its index —
+        // we only care about the newest state. Index only advances after the ring
+        // actually consumes a capsule and clears pending.
+        let next_index = match crate::storage::client_db::recovery::get_pending_recovery_capsule() {
+            Ok(Some((idx, _))) => idx,
+            _ => crate::storage::client_db::recovery::get_max_capsule_index()
+                .map_err(|e| DsmError::InvalidState(format!("Failed to read capsule index: {e}")))?
+                .saturating_add(1),
+        };
+
+        Ok(RecoveryCapsuleState {
+            smt_root,
+            counterparty_tips,
+            rollup,
+            next_index,
+        })
+    }
+
+    fn derive_recovery_rollup(local_device_id: &str) -> Result<ReceiptRollup, DsmError> {
+        let binding = crate::storage::client_db::get_connection().map_err(|e| {
+            DsmError::InvalidState(format!("Failed to open transaction history: {e}"))
+        })?;
+        let conn = binding
+            .lock()
+            .map_err(|_| DsmError::InvalidState("Database lock poisoned".into()))?;
+        let mut stmt = conn
+            .prepare(
+                // Rebuild the rollup from deterministic transaction ordering only.
+                "SELECT tx_id, from_device, to_device, chain_height, proof_data
+                 FROM transactions
+                 ORDER BY step_index ASC, tx_id ASC",
+            )
+            .map_err(|e| {
+                DsmError::InvalidState(format!("Failed to query transaction history: {e}"))
+            })?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)? as u64,
+                    row.get::<_, Option<Vec<u8>>>(4)?,
+                ))
+            })
+            .map_err(|e| {
+                DsmError::InvalidState(format!("Failed to iterate transaction history: {e}"))
+            })?;
+
+        let mut rollup = ReceiptRollup::new();
+
+        for row in rows {
+            let (tx_id, from_device, to_device, chain_height, proof_data) = row.map_err(|e| {
+                DsmError::InvalidState(format!("Failed to decode transaction row: {e}"))
+            })?;
+
+            let counterparty_id = if from_device == local_device_id && to_device != local_device_id
+            {
+                to_device
+            } else if to_device == local_device_id && from_device != local_device_id {
+                from_device
+            } else {
+                continue;
+            };
+
+            let Some(receipt_bytes) = proof_data.filter(|bytes| !bytes.is_empty()) else {
+                continue;
+            };
+
+            let mut receipt_hasher = dsm::crypto::blake3::dsm_domain_hasher("DSM/receipt");
+            receipt_hasher.update(&receipt_bytes);
+            let receipt_hash = *receipt_hasher.finalize().as_bytes();
+            update_rollup(
+                &mut rollup,
+                tx_id.as_bytes(),
+                &receipt_hash,
+                &counterparty_id,
+                chain_height,
+            )?;
+        }
+
+        Ok(rollup)
+    }
+
+    fn persist_capsule(
+        capsule_index: u64,
+        smt_root: &[u8],
+        capsule_bytes: &[u8],
+        tip_count: usize,
+    ) -> Result<(), DsmError> {
+        let smt_root_32: [u8; 32] = smt_root
+            .try_into()
+            .map_err(|_| DsmError::InvalidState("Recovery SMT root must be 32 bytes".into()))?;
+
+        crate::storage::client_db::recovery::store_recovery_capsule(
+            capsule_index,
+            capsule_bytes,
+            &smt_root_32,
+        )
+        .map_err(|e| DsmError::InvalidState(format!("Failed to persist capsule: {e}")))?;
+        crate::storage::client_db::recovery::mark_pending_recovery_capsule(capsule_index)
+            .map_err(|e| DsmError::InvalidState(format!("Failed to mark capsule pending: {e}")))?;
+        crate::storage::client_db::recovery::set_latest_capsule_counterparty_count(
+            tip_count as u64,
+        )
+        .map_err(|e| DsmError::InvalidState(format!("Failed to persist capsule preview: {e}")))?;
+        let _ = crate::storage::client_db::recovery::prune_old_capsules(5);
+        Ok(())
     }
 }
 
@@ -587,6 +539,7 @@ impl RecoverySDK {
 pub struct RecoveryStatus {
     pub enabled: bool,
     pub configured: bool,
+    pub pending_capsule: bool,
     pub capsule_count: u64,
     pub last_capsule_index: u64,
 }

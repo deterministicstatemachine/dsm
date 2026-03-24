@@ -6,7 +6,7 @@
 //! domain-separated BLAKE3 hashing.
 //!
 //! Also included are supporting types for Sparse Merkle Tree proofs
-//! ([`MerkleProof`], [`NonInclusionProof`], [`SparseMerkleTree`]),
+//! ([`MerkleProof`], [`NonInclusionProof`]),
 //! forward commitments ([`PreCommitment`]), device identification ([`DeviceInfo`]),
 //! sparse indexing ([`SparseIndex`]), and bilateral relationship tracking
 //! ([`RelationshipContext`]).
@@ -16,7 +16,6 @@
 
 use crate::common::canonical_encoding::CanonicalEncode;
 use crate::crypto::blake3::{domain_hash, dsm_domain_hasher};
-use crate::merkle::sparse_merkle_tree::SparseMerkleTreeImpl;
 use crate::types::error::DsmError;
 use crate::types::operations::Operation;
 use crate::types::operations::TransactionMode;
@@ -1279,57 +1278,31 @@ pub struct MerkleProof {
 }
 
 impl MerkleProof {
-    /// Generate a Merkle proof for the specified leaf index in the tree
+    /// Generate a MerkleProof from a Per-Device SMT inclusion proof.
     ///
-    /// # Arguments
-    /// * `tree` - The Sparse Merkle Tree containing the data
-    /// * `index` - The index of the leaf to generate a proof for
-    ///
-    /// # Returns
-    /// * `Result<Self, DsmError>` - The generated proof or an error
-    pub fn generate(tree: &SparseMerkleTree, index: u64) -> Result<Self, DsmError> {
-        let height = tree.height;
-        let mut siblings = Vec::with_capacity(height as usize);
+    /// Converts the compact `SmtInclusionProof` from `merkle::sparse_merkle_tree`
+    /// into the full `MerkleProof` format used by the rest of the codebase.
+    pub fn from_smt_proof(
+        proof: &crate::merkle::sparse_merkle_tree::SmtInclusionProof,
+        root: &[u8; 32],
+    ) -> Self {
+        let siblings: Vec<SerializableHash> = proof
+            .siblings
+            .iter()
+            .map(|s| SerializableHash::new(blake3::Hash::from_bytes(*s)))
+            .collect();
 
-        // Traverse the tree from leaf to root, collecting sibling hashes
-        let mut current_index = index;
+        let value_bytes = proof
+            .value
+            .unwrap_or(crate::merkle::sparse_merkle_tree::ZERO_LEAF);
 
-        for level in (0..height).rev() {
-            // Calculate sibling index (flip the bit at current level)
-            let sibling_index = current_index ^ (1u64 << level);
-
-            // Get hash from tree's nodes HashMap if available
-            let sibling_hash = tree
-                .nodes
-                .get(&crate::types::state_types::NodeId {
-                    level,
-                    index: sibling_index,
-                })
-                .map(|h| *h.as_bytes())
-                .unwrap_or([0u8; 32]);
-
-            siblings.push(SerializableHash::new(blake3::Hash::from_bytes(
-                sibling_hash,
-            )));
-
-            // Update current_index for next level (clear the bit we just processed)
-            current_index &= !(1u64 << level);
-        }
-
-        // Get leaf data from leaves HashMap
-        let leaf_hash = match tree.leaves.get(&index) {
-            Some(hash) => SerializableHash::new(*hash),
-            None => return Err(DsmError::merkle("Leaf data not found")),
-        };
-
-        // Create the proof parameters
         let params = MerkleProofParams {
             path: siblings,
-            index,
-            leaf_hash,
-            root_hash: SerializableHash::new(tree.root),
-            height,
-            leaf_count: tree.leaf_count,
+            index: 0, // 256-bit key SMT doesn't use u64 indices
+            leaf_hash: SerializableHash::new(blake3::Hash::from_bytes(value_bytes)),
+            root_hash: SerializableHash::new(blake3::Hash::from_bytes(*root)),
+            height: crate::merkle::sparse_merkle_tree::DEFAULT_SMT_HEIGHT,
+            leaf_count: 0,
             device_id: String::new(),
             public_key: Vec::new(),
             sparse_index: SparseIndex::new(vec![]),
@@ -1339,7 +1312,7 @@ impl MerkleProof {
             params: Vec::new(),
         };
 
-        Ok(Self::new(params))
+        Self::new(params)
     }
     /// Add proof_bytes method for MerkleProof
     ///
@@ -1447,47 +1420,37 @@ pub struct NonInclusionProof {
 }
 
 impl NonInclusionProof {
-    /// Generate a non-inclusion proof for the specified leaf index
+    /// Construct a non-inclusion proof from a Per-Device SMT.
     ///
-    /// # Arguments
-    /// * `tree` - The Sparse Merkle Tree
-    /// * `index` - The index to prove non-inclusion for
-    ///
-    /// # Returns
-    /// * `Result<Self, DsmError>` - The generated proof or an error
-    pub fn generate(tree: &SparseMerkleTreeImpl, index: u64) -> Result<Self, DsmError> {
-        // Ensure index is within tree capacity
-        let max_leaves = 1u64 << tree.height();
-        if index >= max_leaves {
-            return Err(DsmError::InvalidOperation(format!(
-                "Index {index} exceeds tree capacity of {max_leaves}"
-            )));
+    /// Uses the 256-bit key SMT from `merkle::sparse_merkle_tree` to generate
+    /// a proof that the given key maps to `ZERO_LEAF` (i.e., is absent).
+    pub fn from_smt(
+        smt: &crate::merkle::sparse_merkle_tree::SparseMerkleTree,
+        key: &[u8; 32],
+    ) -> Result<Self, DsmError> {
+        // For non-inclusion, try to get the proof. If the key IS found, that's an error.
+        // If not found, we construct a proof showing the path leads to ZERO_LEAF.
+        match smt.get_inclusion_proof(key, 256) {
+            Ok(_proof) => {
+                // Key exists — cannot prove non-inclusion
+                Err(DsmError::merkle(
+                    "Key is present in tree — cannot generate non-inclusion proof",
+                ))
+            }
+            Err(_) => {
+                // Key absent — construct non-inclusion proof from the root
+                // For now, return a proof with the root hash. Full sibling path
+                // collection for absent keys requires walking the SMT structure.
+                // TODO: Implement proper non-inclusion proof path collection
+                // by walking the SMT for the absent key's bit path.
+                Ok(NonInclusionProof {
+                    path: Vec::new(),
+                    index: 0,
+                    root_hash: SerializableHash::new(blake3::Hash::from_bytes(*smt.root())),
+                    height: crate::merkle::sparse_merkle_tree::DEFAULT_SMT_HEIGHT,
+                })
+            }
         }
-
-        // Generate proof path
-        let mut path = Vec::with_capacity(tree.height() as usize);
-        let mut current_index = index;
-
-        for level in 0..tree.height() {
-            // Get sibling index
-            let sibling_index = current_index ^ 1; // Flip the lowest bit
-
-            // Get sibling hash
-            let sibling_hash = tree.get_node_hash(level, sibling_index)?;
-
-            // Add sibling hash to proof path
-            path.push(SerializableHash::new(sibling_hash));
-
-            // Move up to parent
-            current_index >>= 1; // Divide by 2
-        }
-
-        Ok(NonInclusionProof {
-            path,
-            index,
-            root_hash: SerializableHash::new(*tree.root()),
-            height: tree.height(),
-        })
     }
 
     /// Verify a non-inclusion proof
@@ -1504,7 +1467,7 @@ impl NonInclusionProof {
         let mut current_index = self.index;
 
         for sibling_hash in &self.path {
-            let sibling = sibling_hash.inner();
+            let sibling = sibling_hash.inner().as_bytes();
 
             // Compute parent hash based on position
             current_hash = if current_index & 1 == 0 {
@@ -1520,188 +1483,18 @@ impl NonInclusionProof {
         }
 
         // Check if reconstructed root matches expected root
-        current_hash == *self.root_hash.inner()
+        current_hash == *self.root_hash.inner().as_bytes()
     }
 }
 
-/// Sparse Merkle Tree implementation for efficient inclusion proofs
-/// as described in whitepaper Section 3.3
-pub struct SparseMerkleTree {
-    /// Root hash of the tree
-    pub root: Hash,
+// NOTE: The old u64-indexed SparseMerkleTree struct that was here has been removed.
+// The canonical Per-Device SMT implementation is in merkle::sparse_merkle_tree::SparseMerkleTree
+// which uses 256-bit keys, ZERO_LEAF = [0u8; 32], and spec-compliant domain separation (§2.2).
+//
+// MerkleProof::from_smt_proof() and NonInclusionProof::from_smt() bridge the new SMT
+// into the legacy MerkleProof format used by the rest of the codebase.
 
-    /// Map of indexes to leaf hashes
-    pub leaves: HashMap<u64, Hash>,
-
-    /// Map of node identifiers to their hash values
-    pub nodes: HashMap<NodeId, Hash>,
-
-    /// Height of the tree
-    pub height: u32,
-
-    /// Total number of leaves in the tree
-    pub leaf_count: u64,
-}
-
-impl SparseMerkleTree {
-    /// Compute Merkle root hash
-    pub fn compute_root(&self) -> Result<Hash, DsmError> {
-        let tree_impl = SparseMerkleTreeImpl::from_sparse_merkle_tree(self);
-        let root_hash = tree_impl.compute_root()?;
-        Ok(root_hash)
-    }
-
-    /// Insert a state into the Merkle tree
-    pub fn insert(&mut self, key: Vec<u8>, value: State) -> Result<(), DsmError> {
-        // Hash the key to get a deterministic index
-        let mut hasher = dsm_domain_hasher("DSM/smt-key");
-        hasher.update(&key);
-        let hash = hasher.finalize();
-
-        // Use the first 8 bytes as a u64 index
-        let mut index_bytes = [0u8; 8];
-        index_bytes.copy_from_slice(&hash.as_bytes()[0..8]);
-        let index = u64::from_le_bytes(index_bytes);
-
-        // Hash the state to get a leaf hash
-        let state_hash = if key.is_empty() {
-            // Convert the vector to a Hash object
-            let hash_bytes = value.hash()?;
-            let mut bytes = [0u8; 32];
-            bytes.copy_from_slice(&hash_bytes);
-            blake3::Hash::from_bytes(bytes)
-        } else {
-            // Already returns a Hash
-            domain_hash("DSM/merkle-leaf", &key)
-        };
-
-        // Store in the tree
-        self.leaves.insert(index, state_hash);
-
-        Ok(())
-    }
-
-    /// Generate proof for a specific key
-    pub fn generate_proof(&self, key: &[u8]) -> Result<Vec<u8>, DsmError> {
-        // Hash the key to get a deterministic index
-        let mut hasher = dsm_domain_hasher("DSM/smt-key");
-        hasher.update(key);
-        let hash = hasher.finalize();
-
-        // Use the first 8 bytes as a u64 index
-        let mut index_bytes = [0u8; 8];
-        index_bytes.copy_from_slice(&hash.as_bytes()[0..8]);
-        let index = u64::from_le_bytes(index_bytes);
-
-        // Create MerkleProof and serialize deterministically
-        let proof = MerkleProof::generate(self, index)?;
-        Ok(proof.serialize())
-    }
-
-    /// Verify a Merkle proof
-    pub fn verify_proof(&self, key: &[u8], proof_bytes: &[u8]) -> Result<bool, DsmError> {
-        // Parse the proof from bytes using our serializer contract
-        let proof = SerializableMerkleProof::from_bytes(proof_bytes).ok_or_else(|| {
-            DsmError::serialization_error(
-                "Invalid merkle proof bytes",
-                "proof",
-                None::<&str>,
-                None::<std::io::Error>,
-            )
-        })?;
-        // Bridge into MerkleProof minimal check
-        let leaf_hash_ser = SerializableHash::new(domain_hash("DSM/merkle-leaf", key));
-        let mp = MerkleProof {
-            path: Vec::new(),
-            index: 0,
-            leaf_hash: leaf_hash_ser.clone(),
-            root_hash: SerializableHash::new(domain_hash("DSM/proof-root", &proof.root)),
-            height: 0,
-            leaf_count: 0,
-            device_id: String::new(),
-            public_key: Vec::new(),
-            sparse_index: SparseIndex::new(vec![]),
-            token_balances: HashMap::new(),
-            mode: TransactionMode::Bilateral,
-            root: SerializableHash::new(domain_hash("DSM/proof-root", &proof.root)),
-            siblings: Vec::new(),
-            data: Vec::new(),
-            proof: Vec::new(),
-            proof_leaf_count: 0,
-            proof_index: 0,
-            proof_height: 0,
-            proof_token_balances: HashMap::new(),
-            proof_device_id: String::new(),
-        };
-
-        // Hash the key to get its leaf hash
-        let mut hasher = dsm_domain_hasher("DSM/smt-key");
-        hasher.update(key);
-        let hash = hasher.finalize().as_bytes().to_vec();
-
-        // Verify the proof
-        // The verify method doesn't take arguments but works with the internal state
-        let verified = mp.verify();
-
-        // Additionally check if leaf hash matches our expected hash
-        let leaf_hash_matches = leaf_hash_ser.inner().as_bytes() == hash.as_slice();
-
-        Ok(verified && leaf_hash_matches)
-    }
-
-    /// Get the root hash
-    pub fn root_hash(&self) -> Vec<u8> {
-        self.root.as_bytes().to_vec()
-    }
-}
-
-/// Internal node identifier for efficient tree operations
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct NodeId {
-    /// Level in the tree (0 = leaves)
-    pub level: u32,
-
-    /// Index within the level
-    pub index: u64,
-}
-
-impl SparseMerkleTree {
-    /// Create a new Sparse Merkle Tree with a given height
-    pub fn new(height: u32) -> Self {
-        Self {
-            root: Hash::from([0u8; 32]), // Initialize root with empty hash
-            leaves: HashMap::new(),      // Start with empty leaves
-            nodes: HashMap::new(),       // Start with empty nodes
-            height,                      // Store the specified height
-            leaf_count: 0,               // Start with no leaves
-        }
-    }
-
-    /// Verify a Merkle proof against a root and leaf hash
-    ///
-    /// This implementation is called as a standalone function
-    pub fn verify_proof_static(
-        root: &Hash,
-        leaf_hash: &[u8],
-        proof: &MerkleProof,
-    ) -> Result<bool, DsmError> {
-        if !proof.verify() {
-            return Ok(false);
-        }
-
-        // Verify leaf hash matches
-        if proof.leaf_hash.inner().as_bytes() != leaf_hash {
-            return Ok(false);
-        }
-
-        // Verify root hash matches
-        if proof.root_hash.inner() != root {
-            return Ok(false);
-        }
-
-        Ok(true)
-    }
-}
+// Old SparseMerkleTree impl blocks and NodeId removed — see merkle::sparse_merkle_tree
 
 /// PreCommitment represents a commitment to a future state transition
 /// Represents a forward commitment for future state transitions

@@ -103,16 +103,16 @@ impl AppRouterImpl {
                             amount
                         );
 
-                        // Verify the balance was actually updated in SQLite
+                        // Verify the canonical projection row was updated.
                         let device_id_txt =
                             crate::util::text_id::encode_base32_crockford(&self.device_id_bytes);
-                        if let Ok(Some(ws)) =
-                            crate::storage::client_db::get_wallet_state(&device_id_txt)
+                        if let Ok(Some(record)) =
+                            crate::storage::client_db::get_balance_projection(&device_id_txt, "ERA")
                         {
-                            log::error!("[faucet.claim] ❗ Post-mint SQLite balance verification: device_id={} balance={}", 
-                                device_id_txt, ws.balance);
+                            log::error!("[faucet.claim] ❗ Post-mint ERA projection verification: device_id={} available={} locked={}", 
+                                device_id_txt, record.available, record.locked);
                         } else {
-                            log::error!("[faucet.claim] ❌ Post-mint SQLite balance verification FAILED: wallet_state not found");
+                            log::error!("[faucet.claim] ❌ Post-mint ERA projection verification FAILED: projection not found");
                         }
 
                         let resp = generated::FaucetClaimResponse {

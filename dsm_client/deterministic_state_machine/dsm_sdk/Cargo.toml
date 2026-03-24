@@ -49,7 +49,7 @@ anyhow = "1.0"
 prost = "0.13"
 prost-build = "0.12"
 prost-types = "0.12"
-tonic-build = { version = "0.12", default-features = false, features = ["prost"] }
+tonic-build = { version = "0.13", default-features = false, features = ["prost"] }
 protoc-bin-vendored = "3"
 glob = "0.3"
 
@@ -99,8 +99,8 @@ blake3 = "1.5.0"
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc", "std"] }
 hmac = "0.12.1"
 rand = "0.8.5"
-rand_chacha = "0.3"
-getrandom = "0.2"
+rand_chacha = "0.3.1"
+getrandom = "0.4.2"
 merlin = "3.0.0"
 zeroize = { version = "1.7.0", features = ["zeroize_derive"] }
 
@@ -170,7 +170,7 @@ criterion = { version = "0.5.1", features = ["async_tokio", "html_reports"] }
 mockall = "0.12.1"
 tempfile = "3.10.0"
 test-log = { version = "0.2.14", features = ["trace"] }
-proptest = "1.4.0"
+proptest = "1.11.0"
 quickcheck = "1.0.3"
 rstest = "0.26.1"
 serial_test = "3.0.0"

@@ -33,7 +33,6 @@ pub mod contact_manager;
 pub mod debug_helpers;
 pub mod error;
 pub mod identity;
-pub mod index;
 pub mod security;
 pub mod state_machine;
 pub mod token;

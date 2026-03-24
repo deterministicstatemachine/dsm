@@ -189,7 +189,6 @@ fn map_error_code(error: &DsmError) -> ErrorCode {
         | DsmError::DeviceHierarchy(_)
         | DsmError::ExternalCommitment(_)
         | DsmError::Identity(_)
-        | DsmError::Batch(_)
         | DsmError::TokenError { .. } => ErrorCode::Crypto,
 
         DsmError::Security { .. } => ErrorCode::Crypto,

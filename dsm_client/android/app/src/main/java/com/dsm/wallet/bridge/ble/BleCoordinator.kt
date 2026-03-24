@@ -19,6 +19,11 @@ import kotlinx.coroutines.withTimeoutOrNull
  * This is the single entry point for all BLE operations. It owns the actor pattern
  * for serializing BLE operations and coordinates between internal components.
  *
+ * Wall-clock and elapsed-time checks are allowed here for BLE transport control
+ * such as scan throttling, connect readiness, retry pacing, and actor safety
+ * timeouts. They are operational only and never change protobuf contents,
+ * commitment bytes, or DSM protocol acceptance.
+ *
  * No BLE implementation details leak through this API.
  */
 class BleCoordinator private constructor(private val context: Context) : BleScanner.Callback {
@@ -33,7 +38,8 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
     private val operationChannel = Channel<suspend () -> Unit>(Channel.UNLIMITED)
     // Note: Operation serialization is handled via `operationChannel` and `runOperation`.
 
-    // Rate limit protection: Android allows max 5 scan start/stop within 30s window
+    // Rate limit protection: Android allows max 5 scan start/stop within 30s window.
+    // This is transport-runtime pacing only, not protocol state.
     private val scanStartTimestamps = mutableListOf<Long>()
     private val SCAN_RATE_LIMIT_WINDOW_MS = 30_000L  // 30 seconds
     private val MAX_SCANS_PER_WINDOW = 5
@@ -553,9 +559,10 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
             return false
         }
         // Block the caller until the actor processes this operation and produces the
-        // real Boolean result.  The actor runs on Dispatchers.Default (SupervisorJob),
-        // so this will not deadlock even when the caller is the main thread — BLE ops
-        // complete in < 1 s.  The 5 s timeout is a safety net against actor stalls.
+        // real Boolean result. The actor runs on Dispatchers.Default (SupervisorJob),
+        // so this will not deadlock even when the caller is the main thread. The 5 s
+        // timeout is an operational safety net against actor stalls, not a protocol
+        // deadline.
         return runBlocking {
             withTimeoutOrNull(5_000L) { deferred.await() } ?: false
         }
@@ -571,7 +578,8 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
             return
         }
 
-        // Rate limit check before attempting resume
+        // Rate limit check before attempting resume. This gates Android BLE radio
+        // behavior only and must not be interpreted as protocol timing.
         val now = System.currentTimeMillis()
         val timeSinceLastStop = now - lastScanStopTimestamp
         if (lastScanStopTimestamp > 0 && timeSinceLastStop < MIN_SCAN_GAP_MS) {
@@ -789,17 +797,18 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                             val responseProto = com.dsm.wallet.bridge.Unified.processIncomingBleData(event.deviceAddress, event.data)
                             val chunks = com.dsm.wallet.bridge.Unified.bleDataResponseExtractChunks(responseProto)
                             val flags = com.dsm.wallet.bridge.Unified.bleDataResponseGetFlags(responseProto)
+                            val confirmCommitmentHash = com.dsm.wallet.bridge.Unified.bleDataResponseExtractConfirmCommitmentHash(responseProto)
                             val pairingComplete = (flags and 1) != 0
                             val useReliableWrite = (flags and 2) != 0
                             Log.d("BleCoordinator", "Response processed from ${event.deviceAddress}: chunks=${chunks.size}, flags=$flags")
 
                             // If Rust produced follow-up chunks, send them outside the actor
                             // to avoid self-deadlock (requestGattWriteChunks uses runBlocking).
-                            if (chunks.isNotEmpty() && useReliableWrite) {
+                            if (chunks.isNotEmpty()) {
                                 val addr = event.deviceAddress
                                 bleScope.launch {
-                                    val queued = com.dsm.wallet.bridge.Unified.requestGattWriteChunks(addr, chunks)
-                                    Log.i("BleCoordinator", "Queued follow-up to $addr: chunks=${chunks.size}, queued=$queued")
+                                    val queued = com.dsm.wallet.bridge.Unified.dispatchRustBleFollowUp(addr, chunks, useReliableWrite)
+                                    Log.i("BleCoordinator", "Queued follow-up to $addr: chunks=${chunks.size}, queued=$queued reliableWrite=$useReliableWrite")
                                     if (!queued) {
                                         diagnostics.recordError(
                                             BleErrorCategory.CHARACTERISTIC_WRITE_FAILED,
@@ -808,10 +817,14 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                                     }
                                     if (pairingComplete && queued) {
                                         try {
-                                            val n = com.dsm.wallet.bridge.Unified.markAnyBilateralConfirmDelivered()
-                                            Log.i("BleCoordinator", "markAnyBilateralConfirmDelivered: $n session(s) committed after confirm to $addr")
+                                            if (confirmCommitmentHash.size == 32) {
+                                                val ok = com.dsm.wallet.bridge.Unified.markBilateralConfirmDelivered(confirmCommitmentHash)
+                                                Log.i("BleCoordinator", "markBilateralConfirmDelivered: ok=$ok after confirm to $addr")
+                                            } else {
+                                                Log.w("BleCoordinator", "Missing confirm commitment hash after confirm to $addr; refusing broad ConfirmPending sweep")
+                                            }
                                         } catch (t: Throwable) {
-                                            Log.w("BleCoordinator", "markAnyBilateralConfirmDelivered failed for $addr: ${t.message}")
+                                            Log.w("BleCoordinator", "markBilateralConfirmDelivered failed for $addr: ${t.message}")
                                         }
                                     }
                                 }
@@ -1029,7 +1042,9 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                 deferred.complete(false)
                 return@runOperation
             }
-            // Poll for MTU negotiation completion (connection ready)
+            // Poll for MTU negotiation completion (connection ready). The elapsed-time
+            // window is transport readiness control only and does not affect protocol
+            // semantics.
             bleScope.launch {
                 val startTime = android.os.SystemClock.elapsedRealtime()
                 while (android.os.SystemClock.elapsedRealtime() - startTime < 6000L) {

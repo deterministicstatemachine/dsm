@@ -11,7 +11,7 @@ use crate::verification::proof_primitives::{
     verify_device_tree_inclusion_proof_bytes, verify_smt_inclusion_proof_bytes,
 };
 use crate::verification::smt_replace_witness::verify_tripwire_smt_replace;
-use crate::verification::smt_replace_witness::compute_relationship_key;
+use crate::verification::smt_replace_witness::compute_smt_key;
 
 /// Verify a stitched receipt against all acceptance predicates
 ///
@@ -79,12 +79,12 @@ pub fn verify_stitched_receipt(
     }
 
     // Rule 3: Verify inclusion proofs
-    let relationship_key = compute_relationship_key(&receipt.devid_a, &receipt.devid_b);
+    let smt_key = compute_smt_key(&receipt.devid_a, &receipt.devid_b);
 
     // 3a: Parent tip in parent root (rel_proof_parent)
     if !verify_smt_inclusion(
         &receipt.parent_root,
-        &relationship_key,
+        &smt_key,
         &receipt.parent_tip,
         &receipt.rel_proof_parent,
     )? {
@@ -96,7 +96,7 @@ pub fn verify_stitched_receipt(
     // 3b: Child tip in child root (rel_proof_child)
     if !verify_smt_inclusion(
         &receipt.child_root,
-        &relationship_key,
+        &smt_key,
         &receipt.child_tip,
         &receipt.rel_proof_child,
     )? {
@@ -119,8 +119,6 @@ pub fn verify_stitched_receipt(
         &receipt.child_root,
         &receipt.parent_tip,
         &receipt.child_tip,
-        &receipt.devid_a,
-        &receipt.devid_b,
         &receipt.rel_replace_witness,
     )? {
         return Ok(ReceiptAcceptance::reject(
@@ -151,11 +149,11 @@ pub fn verify_stitched_receipt(
 /// Checks that `leaf` is included in `root` via `proof`.
 fn verify_smt_inclusion(
     root: &[u8; 32],
-    relationship_key: &[u8; 32],
+    smt_key: &[u8; 32],
     value: &[u8; 32],
     proof_bytes: &[u8],
 ) -> Result<bool, DsmError> {
-    verify_smt_inclusion_proof_bytes(root, relationship_key, value, proof_bytes)
+    verify_smt_inclusion_proof_bytes(root, smt_key, value, proof_bytes)
 }
 
 /// Verify Device Tree inclusion proof
@@ -181,8 +179,6 @@ fn verify_smt_replace(
     child_root: &[u8; 32],
     parent_tip: &[u8; 32],
     child_tip: &[u8; 32],
-    devid_a: &[u8; 32],
-    devid_b: &[u8; 32],
     witness_bytes: &[u8],
 ) -> Result<bool, DsmError> {
     verify_tripwire_smt_replace(
@@ -190,8 +186,6 @@ fn verify_smt_replace(
         child_root,
         parent_tip,
         child_tip,
-        devid_a,
-        devid_b,
         witness_bytes,
     )
 }
@@ -249,7 +243,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_relationship_key_ordering() {
+    fn test_smt_key_ordering() {
         // Relationship key computation is enforced in the SMT module, not here.
         // Tripwire interlock will move to a true SMT replace-witness verifier.
         // Smoke test: module compiles under tests.

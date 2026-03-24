@@ -118,26 +118,32 @@ async fn test_complete_bilateral_transaction_flow() {
         .await
         .expect("handle contact request");
 
+    let mut smt_bob = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
     let (_ok, contact_response) = bob_manager
-        .accept_contact_request_with_response(&request_hash, Some("Welcome Alice!".to_string()))
+        .accept_contact_request_with_response(
+            &request_hash,
+            Some("Welcome Alice!".to_string()),
+            &mut smt_bob,
+        )
         .await
         .expect("accept contact");
 
+    let mut smt_alice = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
     alice_manager
-        .handle_contact_establishment_response(contact_response)
+        .handle_contact_establishment_response(contact_response, &mut smt_alice)
         .await
         .expect("alice finalize contact");
 
     // 2) Relationship establishment
     let alice_relationship = alice_manager
         .get_bilateral_tx_manager_mut()
-        .establish_relationship(&bob_device_id)
+        .establish_relationship(&bob_device_id, &mut smt_alice)
         .await
         .expect("alice establish relationship");
 
     let bob_relationship = bob_manager
         .get_bilateral_tx_manager_mut()
-        .establish_relationship(&alice_device_id)
+        .establish_relationship(&alice_device_id, &mut smt_bob)
         .await
         .expect("bob establish relationship");
 
@@ -188,15 +194,16 @@ async fn test_complete_bilateral_transaction_flow() {
     assert!(bob_precommitment.verify().expect("bob pc verify"));
 
     // 4) Bilateral transaction execution (Bluetooth)
+    let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
     let alice_tx_result = alice_manager
         .get_bilateral_tx_manager_mut()
-        .execute_bilateral_transaction(&bob_device_id, transfer_operation.clone(), true)
+        .execute_bilateral_transaction(&bob_device_id, transfer_operation.clone(), true, &mut smt)
         .await
         .expect("alice exec");
 
     let bob_tx_result = bob_manager
         .get_bilateral_tx_manager_mut()
-        .execute_bilateral_transaction(&alice_device_id, transfer_operation, true)
+        .execute_bilateral_transaction(&alice_device_id, transfer_operation, true, &mut smt)
         .await
         .expect("bob exec");
 
