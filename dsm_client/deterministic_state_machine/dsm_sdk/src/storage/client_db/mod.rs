@@ -744,8 +744,11 @@ fn ensure_contacts_device_tree_root(conn: &Connection) -> Result<()> {
             return Ok(());
         }
     }
-    conn.execute("ALTER TABLE contacts ADD COLUMN device_tree_root BLOB", [])?;
-    Ok(())
+    match conn.execute("ALTER TABLE contacts ADD COLUMN device_tree_root BLOB", []) {
+        Ok(_) => Ok(()),
+        Err(e) if e.to_string().contains("duplicate column name") => Ok(()),
+        Err(e) => Err(e.into()),
+    }
 }
 
 fn migrate_legacy_withdrawal_states(conn: &Connection) -> Result<()> {
@@ -1080,6 +1083,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_pending_tx_lifecycle() {
         let _ = init_database();
         // Use a unique tx_id to avoid race conditions with parallel tests
@@ -1107,6 +1111,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_genesis_store_and_read() {
         let _ = init_database();
         cleanup_test_genesis();
@@ -1143,6 +1148,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_wallet_init_and_verify() {
         let _ = init_database();
         cleanup_test_genesis();

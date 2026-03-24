@@ -4916,6 +4916,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn persist_committed_withdrawal_metadata_transitions_existing_row() {
         let _router = init_withdrawal_invoke_test_router("withdraw_metadata_transition");
         let device_id_b32 = crate::util::text_id::encode_base32_crockford(&[0xA1; 32]);
