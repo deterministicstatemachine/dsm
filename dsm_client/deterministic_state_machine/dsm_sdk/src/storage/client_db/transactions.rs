@@ -100,8 +100,9 @@ pub fn apply_sender_settlement_and_store_transaction_atomic(
 /// Canonical DSM state is authoritative for every token, including ERA. This
 /// function persists bilateral chain-tip advancement plus transaction history.
 ///
-/// Callers should use `update_anchor_in_memory_public()` for the in-memory anchor
-/// update and then call this function for all SQLite writes.
+/// Callers must have a `SmtReplaceResult` from `commit_bilateral_smt_update()`
+/// and use `update_anchor_in_memory_from_replace_public()` for the in-memory
+/// anchor update before calling this function for all SQLite writes.
 pub fn apply_receiver_confirm_and_store_transaction_atomic(
     counterparty_device_id: &[u8],
     new_chain_tip: &[u8],

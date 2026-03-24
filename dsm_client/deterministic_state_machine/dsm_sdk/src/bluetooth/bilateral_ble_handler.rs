@@ -2299,7 +2299,6 @@ impl BilateralBleHandler {
             let mut smt = self.per_device_smt.write().await;
             manager.commit_bilateral_smt_update(
                 &mut smt,
-                &self.device_id,
                 &session.counterparty_device_id,
                 &h_n_plus_1,
             )?
@@ -2333,6 +2332,7 @@ impl BilateralBleHandler {
         // and BCR archive — the same canonical commit path used by recovery
         // (mark_sender_committed_with_post_state_hash).
         let finalized_local_state = {
+            let mut smt = self.per_device_smt.write().await;
             let mut manager = self.bilateral_tx_manager.write().await;
             match manager
                 .finalize_offline_transfer_with_entropy(
@@ -2340,6 +2340,7 @@ impl BilateralBleHandler {
                     &commitment_hash,
                     counterparty_sig,
                     Some(pre_entropy),
+                    &mut smt,
                 )
                 .await
             {
@@ -2849,13 +2850,22 @@ impl BilateralBleHandler {
                 entropy,
             )?;
 
-            // Advance shared chain tip in-memory only — SQLite persistence is deferred
-            // to apply_receiver_confirm_and_store_transaction_atomic() so that chain tip,
-            // ERA settlement (when applicable), and transaction history commit atomically (§4.2).
-            manager.update_anchor_in_memory_public(
+            // §4.2: SMT-Replace FIRST, then anchor update from the replace result.
+            // No speculative proofs — the anchor only gets a chain tip backed by a real replace.
+            let mut smt = self.per_device_smt.write().await;
+            let replace_result = manager.commit_bilateral_smt_update(
+                &mut smt,
+                &session.counterparty_device_id,
+                &new_chain_tip,
+            )?;
+
+            // Now update anchor from the real replace result (in-memory only —
+            // SQLite persistence deferred to atomic commit with balance writes).
+            manager.update_anchor_in_memory_from_replace_public(
                 &session.counterparty_device_id,
                 &mut anchor,
                 new_chain_tip,
+                &replace_result,
             )?;
 
             let tx_hash =
@@ -2872,17 +2882,25 @@ impl BilateralBleHandler {
             (result, h_n)
         };
 
-        // Receiver: SMT-Replace via core, then build receipt with real proofs (§4.2)
+        // Build receipt with real proofs from the replace result (§4.2)
         let receipt_bytes = {
             let result = {
-                let mut manager = self.bilateral_tx_manager.write().await;
-                let mut smt = self.per_device_smt.write().await;
-                manager.commit_bilateral_smt_update(
-                    &mut smt,
+                // Re-read the SMT to get current root for receipt construction
+                let smt = self.per_device_smt.read().await;
+                let smt_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
                     &self.device_id,
                     &session.counterparty_device_id,
-                    &new_chain_tip,
-                )?
+                );
+                let proof = smt.get_inclusion_proof(&smt_key, 256)
+                    .map_err(|e| DsmError::merkle(format!("Post-replace proof failed: {e}")))?;
+                dsm::merkle::sparse_merkle_tree::SmtReplaceResult {
+                    pre_root: [0u8; 32], // Not needed for receipt — only post_root matters
+                    post_root: *smt.root(),
+                    parent_proof: dsm::merkle::sparse_merkle_tree::SmtInclusionProof {
+                        key: smt_key, value: None, siblings: Vec::new(),
+                    },
+                    child_proof: proof,
+                }
             };
             let local_r_g = crate::sdk::app_state::AppState::get_device_tree_root();
             crate::sdk::receipts::build_bilateral_receipt_with_smt(
@@ -2898,7 +2916,7 @@ impl BilateralBleHandler {
             )
         };
 
-        // Chain tip h_{n+1} is NOT yet persisted to SQLite — update_anchor_in_memory_public
+        // Chain tip h_{n+1} is NOT yet persisted to SQLite — update_anchor_in_memory_from_replace_public
         // only updated in-memory state. The SQLite persistence happens atomically with
         // settlement metadata inside the delegate below.
 
@@ -3215,6 +3233,7 @@ impl BilateralBleHandler {
 
         // Finalize the sender's transaction using pre-generated entropy (if available)
         // so that the actual post-finalize tip matches what was sent in the CommitRequest.
+        let mut smt = self.per_device_smt.write().await;
         let mut manager = self.bilateral_tx_manager.write().await;
         match manager
             .finalize_offline_transfer_with_entropy(
@@ -3222,6 +3241,7 @@ impl BilateralBleHandler {
                 commitment_hash,
                 &counterparty_sig,
                 pre_entropy,
+                &mut smt,
             )
             .await
         {

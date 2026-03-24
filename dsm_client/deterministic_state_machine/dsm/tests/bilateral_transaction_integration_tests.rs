@@ -188,15 +188,16 @@ async fn test_complete_bilateral_transaction_flow() {
     assert!(bob_precommitment.verify().expect("bob pc verify"));
 
     // 4) Bilateral transaction execution (Bluetooth)
+    let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
     let alice_tx_result = alice_manager
         .get_bilateral_tx_manager_mut()
-        .execute_bilateral_transaction(&bob_device_id, transfer_operation.clone(), true)
+        .execute_bilateral_transaction(&bob_device_id, transfer_operation.clone(), true, &mut smt)
         .await
         .expect("alice exec");
 
     let bob_tx_result = bob_manager
         .get_bilateral_tx_manager_mut()
-        .execute_bilateral_transaction(&alice_device_id, transfer_operation, true)
+        .execute_bilateral_transaction(&alice_device_id, transfer_operation, true, &mut smt)
         .await
         .expect("bob exec");
 

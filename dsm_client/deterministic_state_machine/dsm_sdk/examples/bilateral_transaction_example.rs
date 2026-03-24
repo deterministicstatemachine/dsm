@@ -306,10 +306,11 @@ impl BilateralTransactionExample {
         };
 
         // Alice executes via Bluetooth
+        let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
         let alice_exec = self
             .alice_manager
             .get_bilateral_tx_manager_mut()
-            .execute_bilateral_transaction(&self.bob_device_id, op.clone(), true)
+            .execute_bilateral_transaction(&self.bob_device_id, op.clone(), true, &mut smt)
             .await?;
 
         println!(
@@ -322,7 +323,7 @@ impl BilateralTransactionExample {
         let bob_exec = self
             .bob_manager
             .get_bilateral_tx_manager_mut()
-            .execute_bilateral_transaction(&self.alice_device_id, op, true)
+            .execute_bilateral_transaction(&self.alice_device_id, op, true, &mut smt)
             .await?;
 
         println!("   Bob   tx: {}", id_preview(&bob_exec.transaction_hash));
