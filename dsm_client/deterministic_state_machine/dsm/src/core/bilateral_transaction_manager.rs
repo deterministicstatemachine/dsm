@@ -430,88 +430,54 @@ impl BilateralTransactionManager {
         )
     }
 
-    /// Update relationship anchor after state transition (public wrapper for receiver-side finalize).
-    /// §4.2: Requires the Per-Device SMT for proof generation.
-    pub fn update_anchor_public(
+    /// Update anchor from a real SMT-Replace result (§4.2).
+    ///
+    /// The `replace_result` MUST come from `commit_bilateral_smt_update()` for the
+    /// same transition. Validates the result matches before mutating state.
+    pub fn update_anchor_from_replace_public(
         &mut self,
         remote_device_id: &[u8; 32],
         anchor: &mut BilateralRelationshipAnchor,
         new_chain_tip: [u8; 32],
-        smt: &crate::merkle::sparse_merkle_tree::SparseMerkleTree,
+        replace_result: &SmtReplaceResult,
     ) -> Result<(), DsmError> {
-        self.update_anchor(remote_device_id, anchor, new_chain_tip, smt)
+        self.update_anchor_from_replace(remote_device_id, anchor, new_chain_tip, replace_result)
     }
 
-    /// Update anchor in-memory only — public wrapper for BLE receiver confirm (§4.2).
+    /// Update anchor in-memory from a real SMT-Replace result (§4.2).
     ///
-    /// Caller MUST persist the chain tip to SQLite atomically with the balance write
-    /// via `apply_receiver_confirm_full_atomic()`. If the caller does not persist, the
-    /// in-memory state will be ahead of SQLite until the next app restart.
-    /// §4.2: Requires the Per-Device SMT for proof generation.
-    pub fn update_anchor_in_memory_public(
+    /// Same validation as `update_anchor_from_replace_public` but skips SQLite.
+    /// Caller MUST persist atomically with balance writes afterward.
+    /// The `replace_result` MUST come from `commit_bilateral_smt_update()`.
+    pub fn update_anchor_in_memory_from_replace_public(
         &mut self,
         remote_device_id: &[u8; 32],
         anchor: &mut BilateralRelationshipAnchor,
         new_chain_tip: [u8; 32],
-        smt: &crate::merkle::sparse_merkle_tree::SparseMerkleTree,
+        replace_result: &SmtReplaceResult,
     ) -> Result<(), DsmError> {
-        self.update_anchor_in_memory(remote_device_id, anchor, new_chain_tip, smt)
+        self.update_anchor_in_memory_from_replace(remote_device_id, anchor, new_chain_tip, replace_result)
     }
 
     /// Store real Per-Device SMT proof in the relationship anchor after BLE SMT-Replace.
     /// Called by BLE handler after computing the genuine inclusion proof (§B3).
-    pub fn store_anchor_smt_proof(
-        &mut self,
-        remote_device_id: &[u8; 32],
-        smt_proof: ChainTipSmtProof,
-    ) {
-        if let Some(anchor) = self.relationships.get_mut(remote_device_id) {
-            anchor.smt_proof = Some(smt_proof.clone());
-        }
-        // Also update contact manager's stored proof
-        if let Some(anchor) = self.relationships.get(remote_device_id) {
-            let tip = anchor.chain_tip;
-            let _ = self.contact_manager.update_contact_chain_tip_bilateral(
-                remote_device_id,
-                tip,
-                smt_proof,
-            );
-        }
-    }
-
     /// Perform atomic SMT-Replace for a bilateral relationship (§4.2).
     ///
-    /// Updates the Per-Device SMT leaf from h_n to `new_chain_tip`, captures
-    /// pre/post roots and inclusion proofs, and stores the proof in the
-    /// relationship anchor. Returns the `SmtReplaceResult` for receipt construction.
-    ///
-    /// Hard-fails if the SMT update fails — §4.2 requires receipt to contain
-    /// valid r'_A.
+    /// Pure SMT mutation: computes the relationship key, calls `smt_replace`,
+    /// and returns the result. No anchor updates, no proof storage, no side
+    /// effects. The caller consumes the `SmtReplaceResult` via
+    /// `update_anchor_from_replace()` to advance anchor/contact state.
     pub fn commit_bilateral_smt_update(
         &mut self,
         smt: &mut SparseMerkleTree,
-        local_device_id: &[u8; 32],
         remote_device_id: &[u8; 32],
         new_chain_tip: &[u8; 32],
     ) -> Result<SmtReplaceResult, DsmError> {
-        let smt_key = compute_smt_key(local_device_id, remote_device_id);
+        let smt_key = compute_smt_key(&self.local_device_id, remote_device_id);
 
-        let result = smt.smt_replace(&smt_key, new_chain_tip).map_err(|e| {
+        smt.smt_replace(&smt_key, new_chain_tip).map_err(|e| {
             DsmError::merkle(format!("SMT-Replace failed (§4.2): {e}"))
-        })?;
-
-        // Store proof in the relationship anchor
-        let proof = ChainTipSmtProof {
-            smt_root: result.post_root,
-            state_hash: *new_chain_tip,
-            smt_key,
-            proof_path: result.child_proof.siblings.clone(),
-            state_index: mono_commit_height_pub(),
-            proof_commit_height: mono_commit_height_pub(),
-        };
-        self.store_anchor_smt_proof(remote_device_id, proof);
-
-        Ok(result)
+        })
     }
 
     /// Compute transaction hash from state pair (public wrapper for receiver-side finalize)
@@ -661,6 +627,16 @@ impl BilateralTransactionManager {
         );
         anchor.chain_tip = tip;
         self.relationships.insert(*remote_device_id, anchor.clone());
+
+        // Seed the chain tip store so the first set_contact_chain_tip succeeds.
+        // The store expects expected_parent == stored; if no entry exists yet,
+        // stored defaults to [0u8;32], so we must write the initial tip first.
+        let _ = self.chain_tip_store.set_contact_chain_tip(
+            remote_device_id,
+            [0u8; 32], // no previous tip in store
+            tip,
+        );
+
         Ok(anchor)
     }
 
@@ -788,11 +764,16 @@ impl BilateralTransactionManager {
         Ok(bilateral)
     }
 
+    /// Execute a bilateral transaction with real SMT-Replace (§4.2).
+    ///
+    /// The caller MUST provide `&mut SparseMerkleTree`. The replace happens
+    /// atomically with the anchor update — no speculative proofs.
     pub async fn execute_bilateral_transaction(
         &mut self,
         remote_device_id: &[u8; 32],
         operation: Operation,
         offline: bool,
+        smt: &mut SparseMerkleTree,
     ) -> Result<BilateralTransactionResult, DsmError> {
         let mut anchor = self
             .relationships
@@ -800,10 +781,10 @@ impl BilateralTransactionManager {
             .ok_or_else(|| DsmError::RelationshipNotFound("remote device".into()))?
             .clone();
         if offline {
-            self.exec_offline(remote_device_id, operation, &mut anchor)
+            self.exec_offline(remote_device_id, operation, &mut anchor, smt)
                 .await
         } else {
-            self.exec_online(remote_device_id, operation, &mut anchor)
+            self.exec_online(remote_device_id, operation, &mut anchor, smt)
                 .await
         }
     }
@@ -813,6 +794,7 @@ impl BilateralTransactionManager {
         remote_device_id: &[u8; 32],
         operation: Operation,
         anchor: &mut BilateralRelationshipAnchor,
+        smt: &mut SparseMerkleTree,
     ) -> Result<BilateralTransactionResult, DsmError> {
         // Tripwire: shared chain_tip must match persisted contact tip
         if let Some(contact) = self.contact_manager.get_contact(remote_device_id) {
@@ -841,8 +823,6 @@ impl BilateralTransactionManager {
             entropy,
         )?;
         let current_tip = anchor.chain_tip;
-        // §16.6: σ = Cpre = BLAKE3("DSM/pre\0" || h_n || op || entropy) — symmetric,
-        // both parties derive identical h_{n+1} from the same shared inputs.
         let receipt_sigma = compute_precommit(&current_tip, &operation.to_bytes(), &entropy);
         let new_tip = compute_successor_tip(
             &current_tip,
@@ -851,7 +831,11 @@ impl BilateralTransactionManager {
             &receipt_sigma,
         );
         let tx_hash = self.tx_hash(&sp.entity_state, &sp.counterparty_state)?;
-        self.update_anchor(remote_device_id, anchor, new_tip)?;
+
+        // §4.2: SMT-Replace FIRST, then anchor update from the result.
+        let replace_result = self.commit_bilateral_smt_update(smt, remote_device_id, &new_tip)?;
+        self.update_anchor_from_replace(remote_device_id, anchor, new_tip, &replace_result)?;
+
         Ok(BilateralTransactionResult {
             local_state: sp.entity_state,
             remote_state: sp.counterparty_state,
@@ -866,6 +850,7 @@ impl BilateralTransactionManager {
         remote_device_id: &[u8; 32],
         operation: Operation,
         anchor: &mut BilateralRelationshipAnchor,
+        smt: &mut SparseMerkleTree,
     ) -> Result<BilateralTransactionResult, DsmError> {
         // Tripwire: shared chain_tip must match persisted contact tip
         if let Some(contact) = self.contact_manager.get_contact(remote_device_id) {
@@ -891,8 +876,6 @@ impl BilateralTransactionManager {
             entropy,
         )?;
         let current_tip = anchor.chain_tip;
-        // §16.6: σ = Cpre = BLAKE3("DSM/pre\0" || h_n || op || entropy) — symmetric,
-        // both parties derive identical h_{n+1} from the same shared inputs.
         let receipt_sigma = compute_precommit(&current_tip, &operation.to_bytes(), &entropy);
         let new_tip = compute_successor_tip(
             &current_tip,
@@ -901,7 +884,11 @@ impl BilateralTransactionManager {
             &receipt_sigma,
         );
         let tx_hash = self.tx_hash(&sp.entity_state, &sp.counterparty_state)?;
-        self.update_anchor(remote_device_id, anchor, new_tip)?;
+
+        // §4.2: SMT-Replace FIRST, then anchor update from the result.
+        let replace_result = self.commit_bilateral_smt_update(smt, remote_device_id, &new_tip)?;
+        self.update_anchor_from_replace(remote_device_id, anchor, new_tip, &replace_result)?;
+
         Ok(BilateralTransactionResult {
             local_state: sp.entity_state,
             remote_state: sp.counterparty_state,
@@ -911,28 +898,54 @@ impl BilateralTransactionManager {
         })
     }
 
-    fn update_anchor(
+    /// Update anchor from a real `SmtReplaceResult` (§4.2).
+    ///
+    /// The replace result MUST come from `commit_bilateral_smt_update()` for the
+    /// same transition. This method validates the result matches the expected
+    /// transition before mutating anchor/contact state.
+    fn update_anchor_from_replace(
         &mut self,
         remote_device_id: &[u8; 32],
         anchor: &mut BilateralRelationshipAnchor,
         new_chain_tip: [u8; 32],
-        smt: &crate::merkle::sparse_merkle_tree::SparseMerkleTree,
+        replace_result: &SmtReplaceResult,
     ) -> Result<(), DsmError> {
         let expected_parent_tip = anchor.chain_tip;
-        let smt_key = compute_smt_key(&self.local_device_id, remote_device_id);
-        // §4.2: Every state transition requires real SMT proof.
-        let payload = self
-            .contact_manager
-            .update_contact_chain_tip_unilateral(remote_device_id, new_chain_tip, smt, &smt_key)
+        let expected_key = compute_smt_key(&self.local_device_id, remote_device_id);
+
+        // Validate the replace result matches this transition — invariant with teeth
+        if replace_result.child_proof.value != Some(new_chain_tip) {
+            return Err(DsmError::merkle(
+                "SmtReplaceResult child value != new_chain_tip",
+            ));
+        }
+        if replace_result.child_proof.key != expected_key {
+            return Err(DsmError::merkle(
+                "SmtReplaceResult key != expected smt_key",
+            ));
+        }
+
+        // Build proof from the real replace result
+        let smt_proof = ChainTipSmtProof {
+            smt_root: replace_result.post_root,
+            state_hash: new_chain_tip,
+            smt_key: expected_key,
+            proof_path: replace_result.child_proof.siblings.clone(),
+            state_index: mono_commit_height_pub(),
+            proof_commit_height: mono_commit_height_pub(),
+        };
+
+        // Update contact manager with real proof
+        self.contact_manager
+            .update_contact_chain_tip_bilateral(remote_device_id, new_chain_tip, smt_proof.clone())
             .map_err(|e| DsmError::InvalidContact(format!("{e:?}")))?;
+
         anchor.chain_tip = new_chain_tip;
         anchor.last_sync_at = mono_commit_height();
-        // Store the internal per-device SMT proof so is_synchronized() returns true.
-        // store_anchor_smt_proof() can override this with the full bilateral proof.
-        anchor.smt_proof = Some(payload.smt_proof);
+        anchor.smt_proof = Some(smt_proof);
         self.relationships.insert(*remote_device_id, anchor.clone());
-        // Persist the shared relationship chain tip under the same parent the
-        // verified transition consumed. Canonical storage must stay forward-only.
+
+        // Persist chain tip (forward-only)
         match self.chain_tip_store.set_contact_chain_tip(
             remote_device_id,
             expected_parent_tip,
@@ -949,29 +962,48 @@ impl BilateralTransactionManager {
         Ok(())
     }
 
-    /// Update anchor in-memory only — caller is responsible for persisting the
-    /// chain tip to SQLite via an atomic transaction that also covers balance writes.
+    /// Update anchor in-memory from a real `SmtReplaceResult` (§4.2).
     ///
-    /// This is used by the BLE receiver confirm path (§4.2) to ensure that the
-    /// chain-tip advancement, balance credit, and transaction history are committed
-    /// as a single atomic unit. If any sub-write fails, nothing is persisted and
-    /// in-memory state is ahead of SQLite only for the current session (SQLite is
-    /// authoritative on restart).
-    fn update_anchor_in_memory(
+    /// Same as `update_anchor_from_replace` but skips SQLite persistence.
+    /// Caller MUST persist the chain tip to SQLite atomically with balance writes
+    /// via the atomic persistence helper.
+    fn update_anchor_in_memory_from_replace(
         &mut self,
         remote_device_id: &[u8; 32],
         anchor: &mut BilateralRelationshipAnchor,
         new_chain_tip: [u8; 32],
-        smt: &crate::merkle::sparse_merkle_tree::SparseMerkleTree,
+        replace_result: &SmtReplaceResult,
     ) -> Result<(), DsmError> {
-        let smt_key = compute_smt_key(&self.local_device_id, remote_device_id);
-        let payload = self
-            .contact_manager
-            .update_contact_chain_tip_unilateral(remote_device_id, new_chain_tip, smt, &smt_key)
+        let expected_key = compute_smt_key(&self.local_device_id, remote_device_id);
+
+        // Validate the replace result
+        if replace_result.child_proof.value != Some(new_chain_tip) {
+            return Err(DsmError::merkle(
+                "SmtReplaceResult child value != new_chain_tip",
+            ));
+        }
+        if replace_result.child_proof.key != expected_key {
+            return Err(DsmError::merkle(
+                "SmtReplaceResult key != expected smt_key",
+            ));
+        }
+
+        let smt_proof = ChainTipSmtProof {
+            smt_root: replace_result.post_root,
+            state_hash: new_chain_tip,
+            smt_key: expected_key,
+            proof_path: replace_result.child_proof.siblings.clone(),
+            state_index: mono_commit_height_pub(),
+            proof_commit_height: mono_commit_height_pub(),
+        };
+
+        self.contact_manager
+            .update_contact_chain_tip_bilateral(remote_device_id, new_chain_tip, smt_proof.clone())
             .map_err(|e| DsmError::InvalidContact(format!("{e:?}")))?;
+
         anchor.chain_tip = new_chain_tip;
         anchor.last_sync_at = mono_commit_height();
-        anchor.smt_proof = Some(payload.smt_proof);
+        anchor.smt_proof = Some(smt_proof);
         self.relationships.insert(*remote_device_id, anchor.clone());
         // Intentionally skip chain_tip_store.set_contact_chain_tip() —
         // caller persists atomically with balance write.
@@ -1047,12 +1079,14 @@ impl BilateralTransactionManager {
         remote_device_id: &[u8; 32],
         pre_commitment_hash: &[u8; 32],
         receiver_acceptance_proof: &[u8],
+        smt: &mut SparseMerkleTree,
     ) -> Result<BilateralTransactionResult, DsmError> {
         self.finalize_offline_transfer_with_entropy(
             remote_device_id,
             pre_commitment_hash,
             receiver_acceptance_proof,
             None,
+            smt,
         )
         .await
     }
@@ -1069,6 +1103,7 @@ impl BilateralTransactionManager {
         pre_commitment_hash: &[u8; 32],
         receiver_acceptance_proof: &[u8],
         pre_generated_entropy: Option<[u8; 32]>,
+        smt: &mut SparseMerkleTree,
     ) -> Result<BilateralTransactionResult, DsmError> {
         info!("Phase 2: finalize offline");
         let pre = self
@@ -1153,7 +1188,10 @@ impl BilateralTransactionManager {
             &receipt_sigma,
         );
         let tx_hash = self.tx_hash(&sp.entity_state, &sp.counterparty_state)?;
-        self.update_anchor(remote_device_id, &mut anchor, new_tip)?;
+
+        // §4.2: SMT-Replace FIRST, then anchor update from the result.
+        let replace_result = self.commit_bilateral_smt_update(smt, remote_device_id, &new_tip)?;
+        self.update_anchor_from_replace(remote_device_id, &mut anchor, new_tip, &replace_result)?;
         self.pending_commitments.remove(pre_commitment_hash);
         Ok(BilateralTransactionResult {
             local_state: sp.entity_state,
@@ -1445,28 +1483,19 @@ mod tests {
         assert_eq!(anchor.chain_tip, initial_tip);
 
         let op = signed_transfer_op(&manager.signature_keypair, "m", 3);
+        let mut smt = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
         manager
-            .execute_bilateral_transaction(&remote_id, op, true)
+            .execute_bilateral_transaction(&remote_id, op, true, &mut smt)
             .await
             .expect("exec");
         let updated = manager.get_relationship(&remote_id).expect("rel");
         // After transition, shared chain tip must have advanced from h_0
         assert_ne!(updated.chain_tip, initial_tip);
-        // §B3: update_anchor sets smt_proof from the unilateral path (internal proof).
-        // The BLE handler may override it with the full stitched proof via store_anchor_smt_proof().
-        // Verify that store_anchor_smt_proof correctly updates the proof:
-        let dummy_proof = ChainTipSmtProof {
-            smt_root: [1u8; 32],
-            state_hash: updated.chain_tip,
-            smt_key: [0u8; 32],
-            proof_path: Vec::new(),
-            state_index: 0,
-            proof_commit_height: 0,
-        };
-        manager.store_anchor_smt_proof(&remote_id, dummy_proof);
-        let updated_with_proof = manager.get_relationship(&remote_id).expect("rel");
-        assert!(updated_with_proof.smt_proof.is_some());
-        // Contact chain tip proof should be stored via contact_manager.update_contact_chain_tip_unilateral
+        // §4.2: anchor proof is derived from SmtReplaceResult. No later override pattern.
+        assert!(updated.smt_proof.is_some(), "anchor must have real SMT proof after transition");
+        let proof = updated.smt_proof.as_ref().unwrap();
+        assert_eq!(proof.state_hash, updated.chain_tip, "proof state_hash must match chain tip");
+        assert_ne!(proof.smt_root, [0u8; 32], "proof root must not be zero");
         assert!(manager.has_verified_contact(&remote_id));
     }
 
@@ -1499,8 +1528,9 @@ mod tests {
             .expect("establish");
 
         let op = signed_transfer_op(&manager.signature_keypair, "m", 33);
+        let mut smt = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
         manager
-            .execute_bilateral_transaction(&remote_id, op, true)
+            .execute_bilateral_transaction(&remote_id, op, true, &mut smt)
             .await
             .expect("exec");
 
@@ -1530,8 +1560,9 @@ mod tests {
             .expect("prepare");
         assert!(manager.has_pending_commitment(&pre.bilateral_commitment_hash));
 
+        let mut smt = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
         let result = manager
-            .finalize_offline_transfer(&remote_id, &pre.bilateral_commitment_hash, b"accept")
+            .finalize_offline_transfer(&remote_id, &pre.bilateral_commitment_hash, b"accept", &mut smt)
             .await
             .expect("finalize");
         assert!(result.completed_offline);
