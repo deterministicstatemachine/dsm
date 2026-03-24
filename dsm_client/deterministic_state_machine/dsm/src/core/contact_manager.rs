@@ -331,9 +331,9 @@ impl DsmContactManager {
         smt: &crate::merkle::sparse_merkle_tree::SparseMerkleTree,
         smt_key: &[u8; 32],
     ) -> Result<UnilateralTransactionPayload, ContactError> {
-        let smt_proof = self
-            .local_smt_verifier
-            .create_chain_tip_proof_from_smt(&new_chain_tip, smt, smt_key);
+        let smt_proof =
+            self.local_smt_verifier
+                .create_chain_tip_proof_from_smt(&new_chain_tip, smt, smt_key);
 
         let c = self
             .contacts
@@ -372,9 +372,9 @@ impl DsmContactManager {
         smt: &crate::merkle::sparse_merkle_tree::SparseMerkleTree,
         smt_key: &[u8; 32],
     ) -> Result<ChainTipSmtProof, ContactError> {
-        let smt_proof = self
-            .local_smt_verifier
-            .create_chain_tip_proof_from_smt(&new_chain_tip, smt, smt_key);
+        let smt_proof =
+            self.local_smt_verifier
+                .create_chain_tip_proof_from_smt(&new_chain_tip, smt, smt_key);
 
         if !self.local_smt_verifier.verify_chain_tip_with_proof(
             device_id,

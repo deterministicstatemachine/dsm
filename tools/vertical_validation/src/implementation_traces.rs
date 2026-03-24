@@ -366,7 +366,10 @@ fn trace_bilateral_precommit_tripwire(
             .expect("initial relationship tip");
 
         let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-        match manager.establish_relationship(&remote_device_id, &mut smt).await {
+        match manager
+            .establish_relationship(&remote_device_id, &mut smt)
+            .await
+        {
             Ok(anchor) => {
                 if anchor.chain_tip != expected_initial_tip {
                     failures
@@ -486,11 +489,18 @@ fn trace_bilateral_precommit_tripwire(
         match manager.get_relationship(&remote_device_id) {
             Some(mut anchor) => {
                 let mut smt_anchor = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-                match manager.commit_bilateral_smt_update(&mut smt_anchor, &remote_device_id, &consumed_tip) {
+                match manager.commit_bilateral_smt_update(
+                    &mut smt_anchor,
+                    &remote_device_id,
+                    &consumed_tip,
+                ) {
                     Ok(replace_result) => {
-                        if let Err(e) =
-                            manager.update_anchor_from_replace_public(&remote_device_id, &mut anchor, consumed_tip, &replace_result)
-                        {
+                        if let Err(e) = manager.update_anchor_from_replace_public(
+                            &remote_device_id,
+                            &mut anchor,
+                            consumed_tip,
+                            &replace_result,
+                        ) {
                             failures.push(format!(
                                 "failed to advance relationship tip before stale finalize: {e}"
                             ));
@@ -560,7 +570,10 @@ fn trace_bilateral_precomputed_finalize_hash(
         };
 
         let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-        if let Err(e) = manager.establish_relationship(&remote_device_id, &mut smt).await {
+        if let Err(e) = manager
+            .establish_relationship(&remote_device_id, &mut smt)
+            .await
+        {
             return vec![format!("establish_relationship failed: {e}")];
         }
 
@@ -1255,7 +1268,10 @@ fn trace_bilateral_full_offline_finality(
             .expect("initial relationship tip");
 
         let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-        match manager.establish_relationship(&remote_device_id, &mut smt).await {
+        match manager
+            .establish_relationship(&remote_device_id, &mut smt)
+            .await
+        {
             Ok(anchor) => {
                 if anchor.chain_tip != initial_tip {
                     failures.push("establish_relationship produced unexpected initial tip".into());
@@ -1381,11 +1397,18 @@ fn trace_bilateral_full_offline_finality(
         match manager.get_relationship(&remote_device_id) {
             Some(mut anchor) => {
                 let mut smt_anchor = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-                match manager.commit_bilateral_smt_update(&mut smt_anchor, &remote_device_id, &consumed_tip) {
+                match manager.commit_bilateral_smt_update(
+                    &mut smt_anchor,
+                    &remote_device_id,
+                    &consumed_tip,
+                ) {
                     Ok(replace_result) => {
-                        if let Err(e) =
-                            manager.update_anchor_from_replace_public(&remote_device_id, &mut anchor, consumed_tip, &replace_result)
-                        {
+                        if let Err(e) = manager.update_anchor_from_replace_public(
+                            &remote_device_id,
+                            &mut anchor,
+                            consumed_tip,
+                            &replace_result,
+                        ) {
                             failures.push(format!("failed to advance tip for tripwire test: {e}"));
                         }
                     }
@@ -1491,7 +1514,12 @@ fn trace_bilateral_pair_non_interference(
         };
         let mut smt1 = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
         let _tip1_after = match manager1
-            .finalize_offline_transfer(&remote1, &pre1.bilateral_commitment_hash, b"accept-ni-1", &mut smt1)
+            .finalize_offline_transfer(
+                &remote1,
+                &pre1.bilateral_commitment_hash,
+                b"accept-ni-1",
+                &mut smt1,
+            )
             .await
         {
             Ok(result) => {
@@ -1541,7 +1569,12 @@ fn trace_bilateral_pair_non_interference(
         };
         let mut smt2 = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
         match manager2
-            .finalize_offline_transfer(&remote2, &pre2.bilateral_commitment_hash, b"accept-ni-2", &mut smt2)
+            .finalize_offline_transfer(
+                &remote2,
+                &pre2.bilateral_commitment_hash,
+                b"accept-ni-2",
+                &mut smt2,
+            )
             .await
         {
             Ok(result) => {

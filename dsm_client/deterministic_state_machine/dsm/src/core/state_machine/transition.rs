@@ -451,75 +451,51 @@ pub fn create_transition(
         Operation::Mint {
             proof_of_authorization,
             ..
-        } => {
-            if proof_of_authorization.is_empty() {
-                return Err(DsmError::invalid_operation(
-                    "Mint missing proof_of_authorization",
-                ));
-            }
+        } if proof_of_authorization.is_empty() => {
+            return Err(DsmError::invalid_operation(
+                "Mint missing proof_of_authorization",
+            ));
         }
         Operation::Burn {
             proof_of_ownership, ..
-        } => {
-            if proof_of_ownership.is_empty() {
-                return Err(DsmError::invalid_operation(
-                    "Burn missing proof_of_ownership",
-                ));
-            }
+        } if proof_of_ownership.is_empty() => {
+            return Err(DsmError::invalid_operation(
+                "Burn missing proof_of_ownership",
+            ));
         }
         // Device-key signed operations
-        Operation::CreateToken { signature, .. } => {
-            if signature.is_empty() {
-                return Err(DsmError::invalid_operation("CreateToken missing signature"));
-            }
+        Operation::CreateToken { signature, .. } if signature.is_empty() => {
+            return Err(DsmError::invalid_operation("CreateToken missing signature"));
         }
-        Operation::Lock { signature, .. } => {
-            if signature.is_empty() {
-                return Err(DsmError::invalid_operation("Lock missing signature"));
-            }
+        Operation::Lock { signature, .. } if signature.is_empty() => {
+            return Err(DsmError::invalid_operation("Lock missing signature"));
         }
-        Operation::Unlock { signature, .. } => {
-            if signature.is_empty() {
-                return Err(DsmError::invalid_operation("Unlock missing signature"));
-            }
+        Operation::Unlock { signature, .. } if signature.is_empty() => {
+            return Err(DsmError::invalid_operation("Unlock missing signature"));
         }
-        Operation::LockToken { signature, .. } => {
-            if signature.is_empty() {
-                return Err(DsmError::invalid_operation("LockToken missing signature"));
-            }
+        Operation::LockToken { signature, .. } if signature.is_empty() => {
+            return Err(DsmError::invalid_operation("LockToken missing signature"));
         }
-        Operation::UnlockToken { signature, .. } => {
-            if signature.is_empty() {
-                return Err(DsmError::invalid_operation("UnlockToken missing signature"));
-            }
+        Operation::UnlockToken { signature, .. } if signature.is_empty() => {
+            return Err(DsmError::invalid_operation("UnlockToken missing signature"));
         }
-        Operation::Generic { signature, .. } => {
-            if signature.is_empty() {
-                return Err(DsmError::invalid_operation("Generic missing signature"));
-            }
+        Operation::Generic { signature, .. } if signature.is_empty() => {
+            return Err(DsmError::invalid_operation("Generic missing signature"));
         }
         // DLV operations (embedded-key signed)
-        Operation::DlvCreate { signature, .. } => {
-            if signature.is_empty() {
-                return Err(DsmError::invalid_operation("DlvCreate missing signature"));
-            }
+        Operation::DlvCreate { signature, .. } if signature.is_empty() => {
+            return Err(DsmError::invalid_operation("DlvCreate missing signature"));
         }
-        Operation::DlvUnlock { signature, .. } => {
-            if signature.is_empty() {
-                return Err(DsmError::invalid_operation("DlvUnlock missing signature"));
-            }
+        Operation::DlvUnlock { signature, .. } if signature.is_empty() => {
+            return Err(DsmError::invalid_operation("DlvUnlock missing signature"));
         }
-        Operation::DlvClaim { signature, .. } => {
-            if signature.is_empty() {
-                return Err(DsmError::invalid_operation("DlvClaim missing signature"));
-            }
+        Operation::DlvClaim { signature, .. } if signature.is_empty() => {
+            return Err(DsmError::invalid_operation("DlvClaim missing signature"));
         }
-        Operation::DlvInvalidate { signature, .. } => {
-            if signature.is_empty() {
-                return Err(DsmError::invalid_operation(
-                    "DlvInvalidate missing signature",
-                ));
-            }
+        Operation::DlvInvalidate { signature, .. } if signature.is_empty() => {
+            return Err(DsmError::invalid_operation(
+                "DlvInvalidate missing signature",
+            ));
         }
         _ => {}
     }

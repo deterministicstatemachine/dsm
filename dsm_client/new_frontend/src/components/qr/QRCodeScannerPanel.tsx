@@ -48,7 +48,7 @@ type QRCodeScannerProps = {
   eraTokenSrc?: string;
 };
 
-export default function QRCodeScannerPanel(props: QRCodeScannerProps = {}): JSX.Element {
+export default function QRCodeScannerPanel(props: QRCodeScannerProps = {}): React.JSX.Element {
   const { eraTokenSrc = 'images/logos/era_token_gb.gif' } = props;
   const { addContact } = useContacts();
   const [phase, setPhase] = useState<ScanPhase>({ status: 'idle' });

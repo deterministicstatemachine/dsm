@@ -456,7 +456,12 @@ impl BilateralTransactionManager {
         new_chain_tip: [u8; 32],
         replace_result: &SmtReplaceResult,
     ) -> Result<(), DsmError> {
-        self.update_anchor_in_memory_from_replace(remote_device_id, anchor, new_chain_tip, replace_result)
+        self.update_anchor_in_memory_from_replace(
+            remote_device_id,
+            anchor,
+            new_chain_tip,
+            replace_result,
+        )
     }
 
     /// Store real Per-Device SMT proof in the relationship anchor after BLE SMT-Replace.
@@ -475,9 +480,8 @@ impl BilateralTransactionManager {
     ) -> Result<SmtReplaceResult, DsmError> {
         let smt_key = compute_smt_key(&self.local_device_id, remote_device_id);
 
-        smt.smt_replace(&smt_key, new_chain_tip).map_err(|e| {
-            DsmError::merkle(format!("SMT-Replace failed (§4.2): {e}"))
-        })
+        smt.smt_replace(&smt_key, new_chain_tip)
+            .map_err(|e| DsmError::merkle(format!("SMT-Replace failed (§4.2): {e}")))
     }
 
     /// Compute transaction hash from state pair (public wrapper for receiver-side finalize)
@@ -927,9 +931,7 @@ impl BilateralTransactionManager {
             ));
         }
         if replace_result.child_proof.key != expected_key {
-            return Err(DsmError::merkle(
-                "SmtReplaceResult key != expected smt_key",
-            ));
+            return Err(DsmError::merkle("SmtReplaceResult key != expected smt_key"));
         }
 
         // Build proof from the real replace result
@@ -990,9 +992,7 @@ impl BilateralTransactionManager {
             ));
         }
         if replace_result.child_proof.key != expected_key {
-            return Err(DsmError::merkle(
-                "SmtReplaceResult key != expected smt_key",
-            ));
+            return Err(DsmError::merkle("SmtReplaceResult key != expected smt_key"));
         }
 
         let smt_proof = ChainTipSmtProof {
@@ -1398,7 +1398,9 @@ mod tests {
         // Add contact (pre-verified API allows any, but BTM enforces on use)
         manager.add_verified_contact(contact.clone()).expect("add");
         let mut smt = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-        let res = manager.establish_relationship(&contact.device_id, &mut smt).await;
+        let res = manager
+            .establish_relationship(&contact.device_id, &mut smt)
+            .await;
         assert!(matches!(res, Err(DsmError::InvalidContact(_))));
     }
 
@@ -1504,9 +1506,15 @@ mod tests {
         // After transition, shared chain tip must have advanced from h_0
         assert_ne!(updated.chain_tip, initial_tip);
         // §4.2: anchor proof is derived from SmtReplaceResult. No later override pattern.
-        assert!(updated.smt_proof.is_some(), "anchor must have real SMT proof after transition");
+        assert!(
+            updated.smt_proof.is_some(),
+            "anchor must have real SMT proof after transition"
+        );
         let proof = updated.smt_proof.as_ref().unwrap();
-        assert_eq!(proof.state_hash, updated.chain_tip, "proof state_hash must match chain tip");
+        assert_eq!(
+            proof.state_hash, updated.chain_tip,
+            "proof state_hash must match chain tip"
+        );
         assert_ne!(proof.smt_root, [0u8; 32], "proof root must not be zero");
         assert!(manager.has_verified_contact(&remote_id));
     }
@@ -1576,7 +1584,12 @@ mod tests {
 
         let mut smt = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
         let result = manager
-            .finalize_offline_transfer(&remote_id, &pre.bilateral_commitment_hash, b"accept", &mut smt)
+            .finalize_offline_transfer(
+                &remote_id,
+                &pre.bilateral_commitment_hash,
+                b"accept",
+                &mut smt,
+            )
             .await
             .expect("finalize");
         assert!(result.completed_offline);

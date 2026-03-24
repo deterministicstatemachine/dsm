@@ -710,6 +710,7 @@ impl PairingOrchestrator {
                     _ => {
                         let old_state = format!("{:?}", session.state);
                         session.state = PairingState::Failed("BLE link dropped".to_string());
+                        session.state = PairingState::Failed("BLE link dropped".to_string());
                         session.last_activity = Instant::now();
                         log::info!(
                             "[PairingOrchestrator] Peer {} disconnected — reset pairing session {:02x}{:02x}... ({} → Failed)",

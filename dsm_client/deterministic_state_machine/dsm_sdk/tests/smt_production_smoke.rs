@@ -2,9 +2,7 @@
 
 use dsm::crypto::blake3::{dsm_domain_hasher, domain_hash_bytes};
 use dsm::crypto::signatures::SignatureKeyPair;
-use dsm::verification::smt_replace_witness::{
-    hash_smt_leaf, verify_tripwire_smt_replace,
-};
+use dsm::verification::smt_replace_witness::{hash_smt_leaf, verify_tripwire_smt_replace};
 use dsm::core::bilateral_transaction_manager::{
     compute_smt_key, compute_precommit, compute_successor_tip,
 };
@@ -27,9 +25,9 @@ use serial_test::serial;
 
 fn setup_test_env() {
     std::env::set_var("DSM_SDK_TEST_MODE", "1");
-    let _ = dsm_sdk::storage_utils::set_storage_base_dir(
-        std::path::PathBuf::from("./.dsm_smt_smoke_testdata"),
-    );
+    let _ = dsm_sdk::storage_utils::set_storage_base_dir(std::path::PathBuf::from(
+        "./.dsm_smt_smoke_testdata",
+    ));
     dsm_sdk::storage::client_db::reset_database_for_tests();
     let _ = dsm_sdk::storage::client_db::init_database();
 }
@@ -77,19 +75,9 @@ impl TestDevice {
 
 fn compute_h0(a: &TestDevice, b: &TestDevice) -> [u8; 32] {
     let (ga, da, gb, db) = if a.device_id < b.device_id {
-        (
-            &a.genesis_hash,
-            &a.device_id,
-            &b.genesis_hash,
-            &b.device_id,
-        )
+        (&a.genesis_hash, &a.device_id, &b.genesis_hash, &b.device_id)
     } else {
-        (
-            &b.genesis_hash,
-            &b.device_id,
-            &a.genesis_hash,
-            &a.device_id,
-        )
+        (&b.genesis_hash, &b.device_id, &a.genesis_hash, &a.device_id)
     };
     let mut h = dsm_domain_hasher("DSM/bilateral-session");
     h.update(ga);
@@ -333,18 +321,18 @@ async fn smoke_10_roundtrip_transfers() {
     let mut expected_tip = h_0;
     for i in 0..10u64 {
         let op = Operation::Transfer {
-        to_device_id: b.device_id.to_vec(),
-        amount: Balance::from_state(10, [0u8; 32], 0),
-        token_id: b"ERA".to_vec(),
-        mode: TransactionMode::Bilateral,
-        nonce: vec![0u8; 16],
-        verification: VerificationType::Standard,
-        pre_commit: None,
-        recipient: b.device_id.to_vec(),
-        to: b.device_id.to_vec(),
-        message: String::new(),
-        signature: vec![],
-    };
+            to_device_id: b.device_id.to_vec(),
+            amount: Balance::from_state(10, [0u8; 32], 0),
+            token_id: b"ERA".to_vec(),
+            mode: TransactionMode::Bilateral,
+            nonce: vec![0u8; 16],
+            verification: VerificationType::Standard,
+            pre_commit: None,
+            recipient: b.device_id.to_vec(),
+            to: b.device_id.to_vec(),
+            message: String::new(),
+            signature: vec![],
+        };
         let op_bytes = op.to_bytes();
         let entropy = domain_hash_bytes(
             "DSM/test-entropy",
@@ -406,8 +394,7 @@ async fn smoke_eviction_boundary() {
     // The 257th key also verifies
     let proof_257 = smt.get_inclusion_proof(&keys[256], 256).unwrap();
     assert!(SparseMerkleTree::verify_proof_against_root(
-        &proof_257,
-        &root_257
+        &proof_257, &root_257
     ));
 
     // Evicted key's proof returns error
@@ -424,9 +411,7 @@ async fn smoke_concurrent_5_relationships() {
     setup_test_env();
 
     let mut a = TestDevice::from_seed(0x01);
-    let mut peers: Vec<TestDevice> = (0..5)
-        .map(|i| TestDevice::from_seed(0x10 + i))
-        .collect();
+    let mut peers: Vec<TestDevice> = (0..5).map(|i| TestDevice::from_seed(0x10 + i)).collect();
 
     let mut smt_keys = Vec::new();
     let mut tips = Vec::new();
@@ -508,28 +493,20 @@ async fn smoke_tripwire_witness_roundtrip() {
     // Zero-depth witness: u32 LE path length = 0
     let witness_bytes: Vec<u8> = 0u32.to_le_bytes().to_vec();
 
-    let ok = verify_tripwire_smt_replace(
-        &parent_root,
-        &child_root,
-        &h_0,
-        &h_1,
-        &witness_bytes,
-    )
-    .expect("verify must not error");
+    let ok = verify_tripwire_smt_replace(&parent_root, &child_root, &h_0, &h_1, &witness_bytes)
+        .expect("verify must not error");
 
-    assert!(ok, "tripwire verification must succeed for zero-depth witness");
+    assert!(
+        ok,
+        "tripwire verification must succeed for zero-depth witness"
+    );
 
     // Tampered child tip must fail
     let mut bad_tip = h_1;
     bad_tip[31] ^= 0x01;
-    let bad = verify_tripwire_smt_replace(
-        &parent_root,
-        &child_root,
-        &h_0,
-        &bad_tip,
-        &witness_bytes,
-    )
-    .expect("verify must not error on bad tip");
+    let bad =
+        verify_tripwire_smt_replace(&parent_root, &child_root, &h_0, &bad_tip, &witness_bytes)
+            .expect("verify must not error on bad tip");
 
     assert!(!bad, "tampered tip must fail tripwire verification");
 }

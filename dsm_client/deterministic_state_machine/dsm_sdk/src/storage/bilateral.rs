@@ -187,10 +187,8 @@ impl BilateralStorageSDK {
         }
 
         let local_dev = crate::get_sdk_context().device_id_array();
-        let expected_key = dsm::verification::smt_replace_witness::compute_smt_key(
-            &local_dev,
-            remote_device_id,
-        );
+        let expected_key =
+            dsm::verification::smt_replace_witness::compute_smt_key(&local_dev, remote_device_id);
         if relationship_key != expected_key {
             return Err(UnifiedDsmError::Storage {
                 context: "BilateralState.relationship_key must match canonical derivation"
@@ -1123,10 +1121,8 @@ impl BilateralStorageSDK {
         let local_dev = crate::get_sdk_context().device_id_array();
         let mut remote_dev = [0u8; 32];
         remote_dev.copy_from_slice(remote_device_id);
-        let expected_key = dsm::verification::smt_replace_witness::compute_smt_key(
-            &local_dev,
-            &remote_dev,
-        );
+        let expected_key =
+            dsm::verification::smt_replace_witness::compute_smt_key(&local_dev, &remote_dev);
         if state.relationship_key.as_slice() != expected_key {
             return Err(UnifiedDsmError::Storage {
                 context: "BilateralState.relationship_key must match canonical derivation"
@@ -1262,10 +1258,8 @@ impl BilateralStorageSDK {
         let local_dev = crate::get_sdk_context().device_id_array();
         let mut remote_dev = [0u8; 32];
         remote_dev.copy_from_slice(_remote_device_id);
-        let expected_key = dsm::verification::smt_replace_witness::compute_smt_key(
-            &local_dev,
-            &remote_dev,
-        );
+        let expected_key =
+            dsm::verification::smt_replace_witness::compute_smt_key(&local_dev, &remote_dev);
         if state.relationship_key.as_slice() != expected_key {
             return Err(UnifiedDsmError::Storage {
                 context: "BilateralState.relationship_key must match canonical derivation"

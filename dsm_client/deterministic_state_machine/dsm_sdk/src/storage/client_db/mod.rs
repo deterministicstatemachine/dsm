@@ -71,59 +71,76 @@ pub use wallet_state::*;
 static DB_CONNECTION: RwLock<Option<Arc<Mutex<Connection>>>> = RwLock::new(None);
 const DB_FILE_NAME: &str = "dsm_client.db";
 
+/// Per-reset generation counter (test builds only). Incremented by
+/// `reset_database_for_tests()` so every reset+reinit cycle opens a
+/// brand-new named in-memory SQLite database, preventing
+/// SQLITE_LOCKED_SHAREDCACHE races caused by concurrent or lingering
+/// test connections that still hold the previous shared-cache handle.
+#[cfg(test)]
+static TEST_DB_GENERATION: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+#[cfg(test)]
+static TEST_DB_LIFECYCLE_LOCK: Mutex<()> = Mutex::new(());
+
 pub fn init_database() -> Result<()> {
     {
-        let guard = DB_CONNECTION
-            .read()
-            .map_err(|e| anyhow!("DB lock poisoned: {e}"))?;
-        if guard.is_some() {
-            // init_database() can be called defensively from many hot paths.
-            // Avoid log spam that drowns out protocol-critical traces.
-            return Ok(());
-        }
-    }
+        #[cfg(test)]
+        let _test_db_lifecycle_guard = TEST_DB_LIFECYCLE_LOCK
+            .lock()
+            .map_err(|e| anyhow!("Test DB lifecycle lock poisoned: {e}"))?;
 
-    let db_path = get_database_path()?;
-    info!("[DSM_SDK] Initializing database at: {:?}", db_path);
-    if let Some(parent) = db_path.parent() {
-        std::fs::create_dir_all(parent)?;
-        info!("[DSM_SDK] Created parent directory: {:?}", parent);
-    }
-
-    let conn = {
-        let db_str = db_path.to_string_lossy();
-        if db_str.starts_with("file:") {
-            // Required for SQLite URI filenames, e.g. file:...mode=memory&cache=shared
-            Connection::open_with_flags(
-                db_str.as_ref(),
-                rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
-                    | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
-                    | rusqlite::OpenFlags::SQLITE_OPEN_URI,
-            )?
-        } else {
-            Connection::open(&db_path)?
+        {
+            let guard = DB_CONNECTION
+                .read()
+                .map_err(|e| anyhow!("DB lock poisoned: {e}"))?;
+            if guard.is_some() {
+                // init_database() can be called defensively from many hot paths.
+                // Avoid log spam that drowns out protocol-critical traces.
+                return Ok(());
+            }
         }
-    };
-    info!("[DSM_SDK] Database connection opened successfully");
-    conn.execute("PRAGMA foreign_keys = ON;", [])?;
-    create_schema(&conn)?;
-    replace_incompatible_transactions_schema(&conn)?;
-    ensure_vault_records_lineage_columns(&conn)?;
-    ensure_bitcoin_accounts_active_receive_index(&conn)?;
-    ensure_contacts_device_tree_root(&conn)?;
-    ensure_contacts_observed_remote_tip_columns(&conn)?;
-    ensure_stitched_receipts_sig_b_nullable(&conn)?;
-    migrate_legacy_withdrawal_states(&conn)?;
 
-    {
-        let mut guard = DB_CONNECTION
-            .write()
-            .map_err(|e| anyhow!("DB lock poisoned: {e}"))?;
-        if guard.is_some() {
-            // Another caller initialized concurrently; reuse existing connection.
-            return Ok(());
+        let db_path = get_database_path()?;
+        info!("[DSM_SDK] Initializing database at: {:?}", db_path);
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent)?;
+            info!("[DSM_SDK] Created parent directory: {:?}", parent);
         }
-        *guard = Some(Arc::new(Mutex::new(conn)));
+
+        let conn = {
+            let db_str = db_path.to_string_lossy();
+            if db_str.starts_with("file:") {
+                // Required for SQLite URI filenames, e.g. file:...mode=memory&cache=shared
+                Connection::open_with_flags(
+                    db_str.as_ref(),
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+                        | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
+                        | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+                )?
+            } else {
+                Connection::open(&db_path)?
+            }
+        };
+        info!("[DSM_SDK] Database connection opened successfully");
+        conn.execute("PRAGMA foreign_keys = ON;", [])?;
+        create_schema(&conn)?;
+        replace_incompatible_transactions_schema(&conn)?;
+        ensure_vault_records_lineage_columns(&conn)?;
+        ensure_bitcoin_accounts_active_receive_index(&conn)?;
+        ensure_contacts_device_tree_root(&conn)?;
+        ensure_contacts_observed_remote_tip_columns(&conn)?;
+        ensure_stitched_receipts_sig_b_nullable(&conn)?;
+        migrate_legacy_withdrawal_states(&conn)?;
+
+        {
+            let mut guard = DB_CONNECTION
+                .write()
+                .map_err(|e| anyhow!("DB lock poisoned: {e}"))?;
+            if guard.is_some() {
+                // Another caller initialized concurrently; reuse existing connection.
+                return Ok(());
+            }
+            *guard = Some(Arc::new(Mutex::new(conn)));
+        }
     }
 
     // Recovery capsule + prefs tables (NFC ring backup)
@@ -149,9 +166,11 @@ pub fn is_database_initialized() -> bool {
 
 /// Reset the database connection singleton for testing.
 ///
-/// Safe replacement for the former `unsafe` version that used `std::ptr::write`.
-/// Acquires a write lock and clears the connection. Use `#[serial_test]` to
-/// ensure tests run sequentially and no other thread holds the connection.
+/// Acquires a write lock, drops the current connection, then bumps
+/// `TEST_DB_GENERATION` so the next `init_database()` call opens a
+/// completely fresh named in-memory SQLite database. This prevents
+/// SQLITE_LOCKED_SHAREDCACHE errors that occur when a concurrent test
+/// still holds an Arc clone to the previous shared-cache connection.
 pub fn reset_database_for_tests() {
     // Drop all user tables before releasing the connection so the shared
     // in-memory DB (`mode=memory&cache=shared`) starts clean for the next
@@ -176,6 +195,10 @@ pub fn reset_database_for_tests() {
     if let Ok(mut guard) = DB_CONNECTION.write() {
         *guard = None;
     }
+    #[cfg(test)]
+    {
+        TEST_DB_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 pub fn get_db_size() -> Result<u64> {
@@ -190,9 +213,14 @@ pub fn get_db_size() -> Result<u64> {
 fn get_database_path() -> Result<PathBuf> {
     if std::env::var("DSM_SDK_TEST_MODE").is_ok() {
         let pid = std::process::id();
-        return Ok(PathBuf::from(format!(
-            "file:dsm_sdk_test_{pid}?mode=memory&cache=shared"
-        )));
+        #[cfg(test)]
+        let uri = {
+            let gen = TEST_DB_GENERATION.load(std::sync::atomic::Ordering::Relaxed);
+            format!("file:dsm_sdk_test_{pid}_{gen}?mode=memory&cache=shared")
+        };
+        #[cfg(not(test))]
+        let uri = format!("file:dsm_sdk_test_{pid}?mode=memory&cache=shared");
+        return Ok(PathBuf::from(uri));
     }
 
     #[cfg(all(target_os = "android", not(test)))]
@@ -213,10 +241,13 @@ fn get_database_path() -> Result<PathBuf> {
 
     #[cfg(test)]
     {
-        // Use a per-test-process, shared in-memory DB.
+        // Each reset_database_for_tests() increments TEST_DB_GENERATION so
+        // every reset+reinit cycle uses a fresh named in-memory SQLite URI,
+        // preventing SQLITE_LOCKED_SHAREDCACHE races with other test connections.
         let pid = std::process::id();
+        let gen = TEST_DB_GENERATION.load(std::sync::atomic::Ordering::Relaxed);
         Ok(PathBuf::from(format!(
-            "file:dsm_sdk_test_{pid}?mode=memory&cache=shared"
+            "file:dsm_sdk_test_{pid}_{gen}?mode=memory&cache=shared"
         )))
     }
 }
@@ -804,8 +835,11 @@ fn ensure_contacts_device_tree_root(conn: &Connection) -> Result<()> {
             return Ok(());
         }
     }
-    conn.execute("ALTER TABLE contacts ADD COLUMN device_tree_root BLOB", [])?;
-    Ok(())
+    match conn.execute("ALTER TABLE contacts ADD COLUMN device_tree_root BLOB", []) {
+        Ok(_) => Ok(()),
+        Err(e) if e.to_string().contains("duplicate column name") => Ok(()),
+        Err(e) => Err(e.into()),
+    }
 }
 
 fn ensure_contacts_observed_remote_tip_columns(conn: &Connection) -> Result<()> {
@@ -1105,6 +1139,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_auth_tokens_purged_on_identity_binding_change() {
         // Ensure DB initialized
         let binding = match get_connection() {
@@ -1167,6 +1202,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_pending_tx_lifecycle() {
         let _ = init_database();
         // Use a unique tx_id to avoid race conditions with parallel tests
@@ -1194,6 +1230,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_genesis_store_and_read() {
         let _ = init_database();
         cleanup_test_genesis();
@@ -1230,6 +1267,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_wallet_init_and_verify() {
         let _ = init_database();
         cleanup_test_genesis();
@@ -1526,7 +1564,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_advance_system_peer_tip_tracks_sovereign_lineage() {
+    fn test_advance_system_chain_tip_tracks_sovereign_lineage() {
         unsafe {
             std::env::set_var("DSM_SDK_TEST_MODE", "1");
         }
@@ -1550,7 +1588,7 @@ mod tests {
         let source_hash_one = [0x11u8; 32];
         let source_hash_two = [0x22u8; 32];
 
-        let first = advance_system_peer_tip(
+        let first = advance_system_chain_tip(
             "era-source-dlv",
             SystemPeerType::Dlv,
             &[0u8; 32],
@@ -1559,7 +1597,7 @@ mod tests {
             5,
         )
         .expect("advance first event");
-        let second = advance_system_peer_tip(
+        let second = advance_system_chain_tip(
             "era-source-dlv",
             SystemPeerType::Dlv,
             &first.child_tip,
@@ -1605,7 +1643,7 @@ mod tests {
             metadata: HashMap::new(),
         };
         store_system_peer(&peer).expect("store peer");
-        let advanced = advance_system_peer_tip(
+        let advanced = advance_system_chain_tip(
             "era-source-dlv",
             SystemPeerType::Dlv,
             &[0u8; 32],
@@ -1639,7 +1677,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_advance_system_peer_tip_rejects_stale_expected_parent() {
+    fn test_advance_system_chain_tip_rejects_stale_expected_parent() {
         unsafe {
             std::env::set_var("DSM_SDK_TEST_MODE", "1");
         }
@@ -1658,7 +1696,7 @@ mod tests {
         };
         store_system_peer(&peer).expect("store peer");
 
-        let first = advance_system_peer_tip(
+        let first = advance_system_chain_tip(
             "era-source-dlv",
             SystemPeerType::Dlv,
             &[0u8; 32],
@@ -1668,7 +1706,7 @@ mod tests {
         )
         .expect("advance first event");
 
-        let err = advance_system_peer_tip(
+        let err = advance_system_chain_tip(
             "era-source-dlv",
             SystemPeerType::Dlv,
             &[0xEEu8; 32],
@@ -1687,7 +1725,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_advance_system_peer_tip_rejects_duplicate_source_state_number() {
+    fn test_advance_system_chain_tip_rejects_duplicate_source_state_number() {
         unsafe {
             std::env::set_var("DSM_SDK_TEST_MODE", "1");
         }
@@ -1706,7 +1744,7 @@ mod tests {
         };
         store_system_peer(&peer).expect("store peer");
 
-        let first = advance_system_peer_tip(
+        let first = advance_system_chain_tip(
             "era-source-dlv",
             SystemPeerType::Dlv,
             &[0u8; 32],
@@ -1716,7 +1754,7 @@ mod tests {
         )
         .expect("advance first event");
 
-        let err = advance_system_peer_tip(
+        let err = advance_system_chain_tip(
             "era-source-dlv",
             SystemPeerType::Dlv,
             &first.child_tip,

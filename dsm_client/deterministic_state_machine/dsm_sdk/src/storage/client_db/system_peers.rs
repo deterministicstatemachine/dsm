@@ -13,7 +13,7 @@ use crate::util::deterministic_time::tick;
 /// Store a system peer record if it does not already exist.
 ///
 /// This is intentionally insert-only for identity-bearing fields. Existing
-/// protocol peers must advance only through `advance_system_peer_tip(...)`.
+/// protocol peers must advance only through `advance_system_chain_tip(...)`.
 /// System peers are protocol-controlled actors (DLV, Faucet) that do NOT have public keys
 /// and CANNOT be used for bilateral verification.
 pub fn store_system_peer(peer: &SystemPeerRecord) -> Result<()> {
@@ -33,7 +33,7 @@ pub fn store_system_peer(peer: &SystemPeerRecord) -> Result<()> {
     }
     if peer.current_chain_tip.is_some() {
         return Err(anyhow!(
-            "SystemPeerRecord creation must not seed current_chain_tip; advance through advance_system_peer_tip"
+            "SystemPeerRecord creation must not seed current_chain_tip; advance through advance_system_chain_tip"
         ));
     }
 
@@ -106,7 +106,7 @@ fn parse_event_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SystemPeerEvent>
 /// `H("DSM/system-peer-tip" || peer_key || parent_tip || transition_digest)`.
 /// The caller must supply the exact expected parent tip; this path never infers
 /// authority to advance from storage alone.
-pub fn advance_system_peer_tip(
+pub fn advance_system_chain_tip(
     peer_key: &str,
     peer_type: SystemPeerType,
     expected_parent_tip: &[u8],
