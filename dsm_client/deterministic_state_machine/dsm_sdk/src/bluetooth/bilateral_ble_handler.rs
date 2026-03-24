@@ -84,6 +84,28 @@ impl BilateralBleHandler {
         }
     }
 
+    /// Create a handler with an explicit Per-Device SMT instance.
+    ///
+    /// Each physical device maintains its own Per-Device SMT (§2.2).  In
+    /// production the process-wide singleton is correct because one process = one
+    /// device.  In integration tests where two "devices" run in the same process,
+    /// each handler MUST receive its own SMT so that leaf updates on device A do
+    /// not corrupt device B's Merkle root.
+    pub fn new_with_smt(
+        bilateral_tx_manager: Arc<RwLock<BilateralTransactionManager>>,
+        device_id: [u8; 32],
+        per_device_smt: Arc<RwLock<dsm::merkle::sparse_merkle_tree::SparseMerkleTree>>,
+    ) -> Self {
+        Self {
+            bilateral_tx_manager,
+            sessions: SessionStore::new(),
+            device_id,
+            event_callback: None,
+            per_device_smt,
+            settlement_delegate: None,
+        }
+    }
+
     /// Install the application-layer settlement delegate.
     ///
     /// Must be called before the first bilateral transfer.  The delegate
