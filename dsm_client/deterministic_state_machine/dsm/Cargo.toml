@@ -110,7 +110,7 @@ flate2 = "1.0.28"  # For serialization_metrics benchmark
 # Metrics and instrumentation (no JSON logging)
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
-metrics = "0.21.1"
+metrics = "0.24.3"
 
 
 # Utilities

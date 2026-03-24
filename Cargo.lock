@@ -1239,7 +1239,7 @@ dependencies = [
  "log",
  "lru",
  "merlin",
- "metrics",
+ "metrics 0.24.3",
  "metrics-exporter-prometheus",
  "ml-kem",
  "mockall",
@@ -1340,7 +1340,7 @@ dependencies = [
  "log",
  "mdns-sd",
  "merlin",
- "metrics",
+ "metrics 0.24.3",
  "mockall",
  "num-integer",
  "num-primes",
@@ -1401,7 +1401,7 @@ dependencies = [
  "futures",
  "hyper 0.14.32",
  "log",
- "metrics",
+ "metrics 0.24.3",
  "metrics-exporter-prometheus",
  "ml-kem",
  "once_cell",
@@ -2815,6 +2815,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "metrics"
+version = "0.24.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d5312e9ba3771cfa961b585728215e3d972c950a3eed9252aa093d6301277e8"
+dependencies = [
+ "ahash 0.8.12",
+ "portable-atomic",
+]
+
+[[package]]
 name = "metrics-exporter-prometheus"
 version = "0.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2824,7 +2834,7 @@ dependencies = [
  "hyper 0.14.32",
  "indexmap 1.9.3",
  "ipnet",
- "metrics",
+ "metrics 0.21.1",
  "metrics-util",
  "quanta",
  "thiserror 1.0.69",
@@ -2852,7 +2862,7 @@ dependencies = [
  "crossbeam-epoch",
  "crossbeam-utils",
  "hashbrown 0.13.1",
- "metrics",
+ "metrics 0.21.1",
  "num_cpus",
  "quanta",
  "sketches-ddsketch",
@@ -3606,7 +3616,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "22505a5c94da8e3b7c2996394d1c933236c4d743e81a410bcca4e6989fc066a4"
 dependencies = [
  "bytes",
- "heck 0.4.1",
+ "heck 0.5.0",
  "itertools 0.10.5",
  "log",
  "multimap",
@@ -3626,7 +3636,7 @@ version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
 dependencies = [
- "heck 0.4.1",
+ "heck 0.5.0",
  "itertools 0.14.0",
  "log",
  "multimap",
