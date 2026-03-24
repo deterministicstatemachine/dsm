@@ -39,7 +39,11 @@ rg_search() {
     if command -v rg >/dev/null 2>&1; then
         rg -n --no-messages --hidden --glob '!node_modules/**' --glob '!target/**' --glob '!pgdata*/**' --glob '!**/bluetooth/**' --glob '!**/ble/**' --glob '!**/assets/**' --glob '!**/bridge/BleOutboxRepository.kt' "$pattern" "$dir"
     else
-        grep -r -n "$pattern" "$dir" | grep -v "bluetooth" | grep -v "/ble/" | grep -v "BleOutboxRepository.kt" || true
+        # Use -E for extended-regex so that | works as alternation (same as rg).
+        # No `|| true`: grep returns exit-1 when nothing matches; since this
+        # function is only called inside `if rg_search ...; then` conditionals,
+        # set -e does NOT apply and the caller correctly sees "no match" = false.
+        grep -r -n -E "$pattern" "$dir" | grep -v "bluetooth" | grep -v "/ble/" | grep -v "BleOutboxRepository.kt"
     fi
 }
 
