@@ -164,8 +164,9 @@ struct TwoDeviceSetup {
 }
 
 async fn setup_two_devices(a_id: u8, b_id: u8, sender_era: u64) -> TwoDeviceSetup {
+    assert_ne!(a_id, b_id, "Device IDs for A and B must be distinct");
     let a_dev = dev(a_id);
-    let b_dev = dev(a_id + 1); // distinct from a
+    let b_dev = dev(b_id);
     let a_gen = dev(a_id + 0x10);
     let b_gen = dev(b_id + 0x10);
 
