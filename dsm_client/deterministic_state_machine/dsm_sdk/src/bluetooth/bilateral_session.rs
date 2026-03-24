@@ -64,6 +64,16 @@ pub struct BilateralSettlementContext {
     /// The application layer may merge token-balance settlement into this state
     /// so the archived BCR snapshot reflects the completed wallet settlement.
     pub canonical_state: Option<State>,
+    /// Device's canonical tip state from `CoreSDK::get_current_state()`.
+    ///
+    /// Carries the authoritative `token_balances` (B_n), correct raw device_id,
+    /// correct public_key, and the device's state_number.  Settlement reads B_n
+    /// from this state and applies the bilateral transfer delta Δ_{n+1}.
+    ///
+    /// This replaces the old `latest_archived_state()` approach which mined a
+    /// BCR archive mixing faucet/mint/bilateral states under one state_number
+    /// space — violating the spec's per-relationship chain model (§2.1, §4.3).
+    pub device_canonical_state: Option<State>,
 }
 
 /// Result returned by [`BilateralSettlementDelegate::settle`].
