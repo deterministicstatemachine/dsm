@@ -15,8 +15,8 @@
 //!
 //! Bit extraction: MSB-first — `(key[bit_index / 8] >> (7 - bit_index % 8)) & 1`.
 //!
-//! Default nodes (§2.2):
-//!   `DEFAULT[0] = ZERO_LEAF`
+//! Default nodes:
+//!   `DEFAULT[0] = hash_smt_leaf(ZERO_LEAF)`
 //!   `DEFAULT[d+1] = hash_smt_node(DEFAULT[d], DEFAULT[d])  ∀d≥0`
 
 use std::collections::{HashMap, VecDeque};

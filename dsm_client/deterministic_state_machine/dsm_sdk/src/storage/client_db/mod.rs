@@ -78,60 +78,69 @@ const DB_FILE_NAME: &str = "dsm_client.db";
 /// test connections that still hold the previous shared-cache handle.
 #[cfg(test)]
 static TEST_DB_GENERATION: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+#[cfg(test)]
+static TEST_DB_LIFECYCLE_LOCK: Mutex<()> = Mutex::new(());
 
 pub fn init_database() -> Result<()> {
     {
-        let guard = DB_CONNECTION
-            .read()
-            .map_err(|e| anyhow!("DB lock poisoned: {e}"))?;
-        if guard.is_some() {
-            // init_database() can be called defensively from many hot paths.
-            // Avoid log spam that drowns out protocol-critical traces.
-            return Ok(());
-        }
-    }
+        #[cfg(test)]
+        let _test_db_lifecycle_guard = TEST_DB_LIFECYCLE_LOCK
+            .lock()
+            .map_err(|e| anyhow!("Test DB lifecycle lock poisoned: {e}"))?;
 
-    let db_path = get_database_path()?;
-    info!("[DSM_SDK] Initializing database at: {:?}", db_path);
-    if let Some(parent) = db_path.parent() {
-        std::fs::create_dir_all(parent)?;
-        info!("[DSM_SDK] Created parent directory: {:?}", parent);
-    }
-
-    let conn = {
-        let db_str = db_path.to_string_lossy();
-        if db_str.starts_with("file:") {
-            // Required for SQLite URI filenames, e.g. file:...mode=memory&cache=shared
-            Connection::open_with_flags(
-                db_str.as_ref(),
-                rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
-                    | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
-                    | rusqlite::OpenFlags::SQLITE_OPEN_URI,
-            )?
-        } else {
-            Connection::open(&db_path)?
+        {
+            let guard = DB_CONNECTION
+                .read()
+                .map_err(|e| anyhow!("DB lock poisoned: {e}"))?;
+            if guard.is_some() {
+                // init_database() can be called defensively from many hot paths.
+                // Avoid log spam that drowns out protocol-critical traces.
+                return Ok(());
+            }
         }
-    };
-    info!("[DSM_SDK] Database connection opened successfully");
-    conn.execute("PRAGMA foreign_keys = ON;", [])?;
-    create_schema(&conn)?;
-    replace_incompatible_transactions_schema(&conn)?;
-    ensure_vault_records_lineage_columns(&conn)?;
-    ensure_bitcoin_accounts_active_receive_index(&conn)?;
-    ensure_contacts_device_tree_root(&conn)?;
-    ensure_contacts_observed_remote_tip_columns(&conn)?;
-    ensure_stitched_receipts_sig_b_nullable(&conn)?;
-    migrate_legacy_withdrawal_states(&conn)?;
 
-    {
-        let mut guard = DB_CONNECTION
-            .write()
-            .map_err(|e| anyhow!("DB lock poisoned: {e}"))?;
-        if guard.is_some() {
-            // Another caller initialized concurrently; reuse existing connection.
-            return Ok(());
+        let db_path = get_database_path()?;
+        info!("[DSM_SDK] Initializing database at: {:?}", db_path);
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent)?;
+            info!("[DSM_SDK] Created parent directory: {:?}", parent);
         }
-        *guard = Some(Arc::new(Mutex::new(conn)));
+
+        let conn = {
+            let db_str = db_path.to_string_lossy();
+            if db_str.starts_with("file:") {
+                // Required for SQLite URI filenames, e.g. file:...mode=memory&cache=shared
+                Connection::open_with_flags(
+                    db_str.as_ref(),
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE
+                        | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
+                        | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+                )?
+            } else {
+                Connection::open(&db_path)?
+            }
+        };
+        info!("[DSM_SDK] Database connection opened successfully");
+        conn.execute("PRAGMA foreign_keys = ON;", [])?;
+        create_schema(&conn)?;
+        replace_incompatible_transactions_schema(&conn)?;
+        ensure_vault_records_lineage_columns(&conn)?;
+        ensure_bitcoin_accounts_active_receive_index(&conn)?;
+        ensure_contacts_device_tree_root(&conn)?;
+        ensure_contacts_observed_remote_tip_columns(&conn)?;
+        ensure_stitched_receipts_sig_b_nullable(&conn)?;
+        migrate_legacy_withdrawal_states(&conn)?;
+
+        {
+            let mut guard = DB_CONNECTION
+                .write()
+                .map_err(|e| anyhow!("DB lock poisoned: {e}"))?;
+            if guard.is_some() {
+                // Another caller initialized concurrently; reuse existing connection.
+                return Ok(());
+            }
+            *guard = Some(Arc::new(Mutex::new(conn)));
+        }
     }
 
     // Recovery capsule + prefs tables (NFC ring backup)
@@ -163,6 +172,11 @@ pub fn is_database_initialized() -> bool {
 /// SQLITE_LOCKED_SHAREDCACHE errors that occur when a concurrent test
 /// still holds an Arc clone to the previous shared-cache connection.
 pub fn reset_database_for_tests() {
+    #[cfg(test)]
+    let _test_db_lifecycle_guard = TEST_DB_LIFECYCLE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
     if let Ok(mut guard) = DB_CONNECTION.write() {
         *guard = None;
     }
@@ -1535,7 +1549,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_advance_system_peer_tip_tracks_sovereign_lineage() {
+    fn test_advance_system_chain_tip_tracks_sovereign_lineage() {
         unsafe {
             std::env::set_var("DSM_SDK_TEST_MODE", "1");
         }
@@ -1559,7 +1573,7 @@ mod tests {
         let source_hash_one = [0x11u8; 32];
         let source_hash_two = [0x22u8; 32];
 
-        let first = advance_system_peer_tip(
+        let first = advance_system_chain_tip(
             "era-source-dlv",
             SystemPeerType::Dlv,
             &[0u8; 32],
@@ -1568,7 +1582,7 @@ mod tests {
             5,
         )
         .expect("advance first event");
-        let second = advance_system_peer_tip(
+        let second = advance_system_chain_tip(
             "era-source-dlv",
             SystemPeerType::Dlv,
             &first.child_tip,
@@ -1614,7 +1628,7 @@ mod tests {
             metadata: HashMap::new(),
         };
         store_system_peer(&peer).expect("store peer");
-        let advanced = advance_system_peer_tip(
+        let advanced = advance_system_chain_tip(
             "era-source-dlv",
             SystemPeerType::Dlv,
             &[0u8; 32],
@@ -1648,7 +1662,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_advance_system_peer_tip_rejects_stale_expected_parent() {
+    fn test_advance_system_chain_tip_rejects_stale_expected_parent() {
         unsafe {
             std::env::set_var("DSM_SDK_TEST_MODE", "1");
         }
@@ -1667,7 +1681,7 @@ mod tests {
         };
         store_system_peer(&peer).expect("store peer");
 
-        let first = advance_system_peer_tip(
+        let first = advance_system_chain_tip(
             "era-source-dlv",
             SystemPeerType::Dlv,
             &[0u8; 32],
@@ -1677,7 +1691,7 @@ mod tests {
         )
         .expect("advance first event");
 
-        let err = advance_system_peer_tip(
+        let err = advance_system_chain_tip(
             "era-source-dlv",
             SystemPeerType::Dlv,
             &[0xEEu8; 32],
@@ -1696,7 +1710,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_advance_system_peer_tip_rejects_duplicate_source_state_number() {
+    fn test_advance_system_chain_tip_rejects_duplicate_source_state_number() {
         unsafe {
             std::env::set_var("DSM_SDK_TEST_MODE", "1");
         }
@@ -1715,7 +1729,7 @@ mod tests {
         };
         store_system_peer(&peer).expect("store peer");
 
-        let first = advance_system_peer_tip(
+        let first = advance_system_chain_tip(
             "era-source-dlv",
             SystemPeerType::Dlv,
             &[0u8; 32],
@@ -1725,7 +1739,7 @@ mod tests {
         )
         .expect("advance first event");
 
-        let err = advance_system_peer_tip(
+        let err = advance_system_chain_tip(
             "era-source-dlv",
             SystemPeerType::Dlv,
             &first.child_tip,

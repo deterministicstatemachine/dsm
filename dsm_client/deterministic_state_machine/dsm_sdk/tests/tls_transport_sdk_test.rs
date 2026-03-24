@@ -10,13 +10,6 @@ use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs
 use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::TlsAcceptor;
 
-/// Explicitly install the ring crypto provider so that rustls can function
-/// when both `ring` and `aws-lc-rs` features are present in the dependency graph.
-/// Safe to call multiple times — subsequent installs are silently ignored.
-fn install_crypto_provider() {
-    let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
-}
-
 fn cert_pin(cert_der: &[u8]) -> Vec<u8> {
     dsm::crypto::blake3::domain_hash("DSM/tls-cert-hash", cert_der)
         .as_bytes()

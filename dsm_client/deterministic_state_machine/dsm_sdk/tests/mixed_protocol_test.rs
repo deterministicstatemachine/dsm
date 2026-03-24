@@ -1,36 +1,80 @@
 #![allow(clippy::disallowed_methods)]
 
+use std::collections::HashMap;
 use std::env;
-use std::sync::Arc;
-use tempfile::TempDir;
-use tokio::net::TcpListener;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::RwLock;
 
 use dsm::core::bilateral_transaction_manager::BilateralTransactionManager;
-
+use dsm::core::contact_manager::DsmContactManager;
 use dsm::crypto::signatures::SignatureKeyPair;
-use dsm::types::operations::{Operation, TransactionMode, VerificationType};
-use dsm::types::token_types::Balance;
 use dsm::types::contact_types::DsmVerifiedContact;
 use dsm::types::error::DeterministicSafetyClass;
-use dsm::core::contact_manager::DsmContactManager;
-use dsm_sdk::sdk::b0x_sdk::B0xSDK;
-use dsm_sdk::sdk::core_sdk::CoreSDK;
+use dsm::types::operations::{Operation, TransactionMode, VerificationType};
+use dsm::types::token_types::Balance;
 use dsm_sdk::sdk::chain_tip_store::SqliteChainTipStore;
-use dsm_sdk::storage::client_db::{self, ContactRecord};
-use std::collections::HashMap;
-use serial_test::serial;
-use dsm_sdk::sdk::unilateral_ops_sdk::UnilateralOpsSDK;
+use dsm_sdk::storage::client_db::{
+    self, get_contact_chain_tip, get_local_bilateral_chain_tip, get_pending_online_outbox,
+    record_pending_online_transition, restore_finalized_bilateral_chain_tip, ContactRecord,
+};
 use dsm_sdk::util::text_id::encode_base32_crockford;
+use serial_test::serial;
+use tempfile::TempDir;
+
+fn make_transfer_op(
+    remote_device_id: [u8; 32],
+    amount: u64,
+    nonce: Vec<u8>,
+    message: &str,
+) -> Operation {
+    Operation::Transfer {
+        to_device_id: remote_device_id.to_vec(),
+        amount: Balance::from_state(amount, [0u8; 32], 0),
+        token_id: b"token_1".to_vec(),
+        mode: TransactionMode::Bilateral,
+        nonce,
+        verification: VerificationType::Standard,
+        pre_commit: None,
+        recipient: remote_device_id.to_vec(),
+        to: b"Bob".to_vec(),
+        message: message.into(),
+        signature: vec![0u8; 64],
+    }
+}
+
+fn store_online_capable_contact(
+    device_id: [u8; 32],
+    genesis_hash: [u8; 32],
+    alias: &str,
+) -> String {
+    let contact_id = encode_base32_crockford(&device_id);
+    let _ = client_db::remove_contact(&contact_id);
+    let contact_record = ContactRecord {
+        contact_id: contact_id.clone(),
+        device_id: device_id.to_vec(),
+        alias: alias.into(),
+        genesis_hash: genesis_hash.to_vec(),
+        public_key: vec![0u8; 32],
+        current_chain_tip: None,
+        added_at: 1,
+        verified: true,
+        verification_proof: None,
+        metadata: HashMap::new(),
+        ble_address: None,
+        status: "OnlineCapable".into(),
+        needs_online_reconcile: false,
+        last_seen_online_counter: 0,
+        last_seen_ble_counter: 0,
+        previous_chain_tip: None,
+    };
+    client_db::store_contact(&contact_record).unwrap();
+    contact_id
+}
 
 /// Test 1: Offline-vs-Offline Tripwire (same BilateralTransactionManager)
-/// This tests that if we prepare an offline tx, finalize it, then try to finalize
-/// ANOTHER offline tx prepared at the same parent hash, it fails.
+/// Two sibling precommitments may capture the same parent, but once one finalize
+/// consumes that parent, the stale sibling must be rejected by Tripwire.
 #[tokio::test]
 #[serial]
 async fn test_offline_offline_tripwire() {
-    // Setup
     let alice_dir = TempDir::new().unwrap();
     let alice_db_path = alice_dir.path().join("dsm_tripwire.db");
 
@@ -50,7 +94,7 @@ async fn test_offline_offline_tripwire() {
     let chain_tip_store = std::sync::Arc::new(SqliteChainTipStore::new());
     let mut alice_btm = BilateralTransactionManager::new_with_chain_tip_store(
         cm,
-        alice_keypair.clone(),
+        alice_keypair,
         alice_device_id,
         [0u8; 32],
         chain_tip_store,
@@ -73,86 +117,43 @@ async fn test_offline_offline_tripwire() {
         ble_address: None,
     };
     alice_btm.add_verified_contact(bob_contact).unwrap();
-    alice_btm
-        .ensure_relationship_for_sender(&bob_device_id)
+    let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
+    let anchor = alice_btm
+        .establish_relationship(&bob_device_id, &mut smt)
+        .await
         .unwrap();
+    let initial_tip = anchor.chain_tip;
+    store_online_capable_contact(bob_device_id, bob_genesis_hash, "Bob");
+    restore_finalized_bilateral_chain_tip(&bob_device_id, &initial_tip).unwrap();
 
-    // Persist Bob contact into SQLite so chain tip updates are shared.
-    let mut metadata = HashMap::new();
-    let contact_id = encode_base32_crockford(&bob_device_id);
-    let _ = client_db::remove_contact(&contact_id);
-    let contact_record = ContactRecord {
-        contact_id: contact_id.clone(),
-        device_id: bob_device_id.to_vec(),
-        alias: "Bob".into(),
-        genesis_hash: bob_genesis_hash.to_vec(),
-        public_key: vec![0u8; 32],
-        current_chain_tip: Some([1u8; 32].to_vec()),
-        added_at: 1,
-        verified: true,
-        verification_proof: None,
-        metadata: std::mem::take(&mut metadata),
-        ble_address: None,
-        status: "OnlineCapable".into(),
-        needs_online_reconcile: false,
-        last_seen_online_counter: 0,
-        last_seen_ble_counter: 0,
-        previous_chain_tip: None,
-    };
-    client_db::store_contact(&contact_record).unwrap();
-
-    // Prepare FIRST offline transfer
-    let op1 = Operation::Transfer {
-        to_device_id: bob_device_id.to_vec(),
-        amount: Balance::from_state(50, [0u8; 32], 0),
-        token_id: b"token_1".to_vec(),
-        mode: TransactionMode::Bilateral,
-        nonce: vec![1, 2, 3, 4],
-        verification: VerificationType::Standard,
-        pre_commit: None,
-        recipient: bob_device_id.to_vec(),
-        to: b"Bob".to_vec(),
-        message: "Offline tx 1".into(),
-        signature: vec![0u8; 64],
-    };
-
-    println!("Preparing FIRST offline transfer...");
     let precommit1 = alice_btm
-        .prepare_offline_transfer(&bob_device_id, op1.clone(), 3600)
+        .prepare_offline_transfer(
+            &bob_device_id,
+            make_transfer_op(bob_device_id, 50, vec![1, 2, 3, 4], "Offline tx 1"),
+            3600,
+        )
         .await
         .unwrap();
-    println!(
-        "Precommit 1 hash: {:?}",
-        &precommit1.bilateral_commitment_hash[..8]
-    );
-
-    // Prepare SECOND offline transfer (at the SAME parent tip)
-    let op2 = Operation::Transfer {
-        to_device_id: bob_device_id.to_vec(),
-        amount: Balance::from_state(30, [0u8; 32], 0),
-        token_id: b"token_1".to_vec(),
-        mode: TransactionMode::Bilateral,
-        nonce: vec![5, 6, 7, 8],
-        verification: VerificationType::Standard,
-        pre_commit: None,
-        recipient: bob_device_id.to_vec(),
-        to: b"Bob".to_vec(),
-        message: "Offline tx 2".into(),
-        signature: vec![0u8; 64],
-    };
-
-    println!("Preparing SECOND offline transfer (same parent)...");
     let precommit2 = alice_btm
-        .prepare_offline_transfer(&bob_device_id, op2.clone(), 3600)
+        .prepare_offline_transfer(
+            &bob_device_id,
+            make_transfer_op(bob_device_id, 30, vec![5, 6, 7, 8], "Offline tx 2"),
+            3600,
+        )
         .await
         .unwrap();
-    println!(
-        "Precommit 2 hash: {:?}",
-        &precommit2.bilateral_commitment_hash[..8]
+
+    assert_eq!(precommit1.local_chain_tip_at_creation, Some(initial_tip));
+    assert_eq!(precommit2.local_chain_tip_at_creation, Some(initial_tip));
+    assert!(
+        alice_btm.has_pending_commitment(&precommit1.bilateral_commitment_hash),
+        "first precommitment should remain pending until finalize"
+    );
+    assert!(
+        alice_btm.has_pending_commitment(&precommit2.bilateral_commitment_hash),
+        "second precommitment should remain pending until it is either finalized or explicitly removed"
     );
 
-    // Finalize FIRST transfer - this should succeed and advance the chain tip
-    println!("Finalizing FIRST transfer...");
     let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
     let result1 = alice_btm
         .finalize_offline_transfer(
@@ -163,13 +164,21 @@ async fn test_offline_offline_tripwire() {
         )
         .await;
 
-    match &result1 {
-        Ok(_) => println!("FIRST finalize succeeded (chain tip advanced)"),
-        Err(e) => panic!("FIRST finalize unexpectedly failed: {:?}", e),
-    }
+    let first_result = result1.expect("first finalize should consume the shared parent tip");
+    assert_ne!(
+        first_result.relationship_anchor.chain_tip, initial_tip,
+        "first finalize must advance the bilateral chain tip"
+    );
+    assert_eq!(
+        get_contact_chain_tip(&bob_device_id),
+        Some(first_result.relationship_anchor.chain_tip),
+        "successful finalize must persist the new canonical tip"
+    );
+    assert!(
+        !alice_btm.has_pending_commitment(&precommit1.bilateral_commitment_hash),
+        "finalized precommitment should be cleared from the pending set"
+    );
 
-    // Finalize SECOND transfer - this should FAIL because parent tip has advanced
-    println!("Finalizing SECOND transfer (should fail - Tripwire)...");
     let result2 = alice_btm
         .finalize_offline_transfer(
             &bob_device_id,
@@ -187,14 +196,23 @@ async fn test_offline_offline_tripwire() {
         }
         Err(e) => {
             let err_str = e.to_string();
-            println!("SECOND finalize correctly failed: {:?}", e);
             assert!(
-                err_str.contains("Deterministic safety rejection")
-                    || err_str.contains(DeterministicSafetyClass::ParentConsumed.as_str()),
-                "Error should mention deterministic safety rejection, got: {}",
+                err_str.contains("Tripwire")
+                    && (err_str.contains("advanced since precommitment creation")
+                        || err_str.contains("parent hash already consumed")
+                        || err_str.contains(DeterministicSafetyClass::ParentConsumed.as_str())),
+                "stale finalize should fail with a Tripwire / ParentConsumed error, got: {}",
                 err_str
             );
-            println!("TEST PASS: Tripwire enforced - second finalize rejected");
+            assert!(
+                alice_btm.has_pending_commitment(&precommit2.bilateral_commitment_hash),
+                "rejected stale precommitment should remain pending for explicit cleanup / inspection"
+            );
+            assert_eq!(
+                alice_btm.get_chain_tip_for(&bob_device_id),
+                Some(first_result.relationship_anchor.chain_tip),
+                "rejecting a stale sibling finalize must not mutate the current relationship tip"
+            );
         }
     }
 }
@@ -203,17 +221,15 @@ async fn test_offline_offline_tripwire() {
 ///
 /// Sequence:
 /// 1) Prepare offline precommit (captures parent tip h_n)
-/// 2) Submit unilateral online tx that advances tip to h_{n+1}
-/// 3) Finalize offline precommit should FAIL (Tripwire: parent already consumed)
+/// 2) Deliver an online transition, which now records a pending outbox gate
+///    and advances only the sender's local restore tip to h_{n+1}
+/// 3) Canonical finalized tip stays at h_n until recipient ACK / sync catch-up
 #[tokio::test]
 #[serial]
 async fn test_mixed_protocol_modal_lock() {
-    // 1. Setup Environment
     let alice_dir = TempDir::new().unwrap();
     let alice_db_path = alice_dir.path().join("dsm.db");
 
-    // SAFETY: We use a unique path, so no need to reset unless singleton cache interferes.
-    // Assuming dsm logic respects DSM_DB_PATH on init.
     unsafe {
         env::set_var("DSM_SDK_TEST_MODE", "1");
         env::set_var("DSM_DB_PATH", alice_db_path.to_str().unwrap());
@@ -221,63 +237,13 @@ async fn test_mixed_protocol_modal_lock() {
     client_db::reset_database_for_tests();
     client_db::init_database().unwrap();
 
-    // 2. Mock Server for B0x
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let endpoint = format!("127.0.0.1:{}", port);
-    unsafe {
-        env::set_var("DSM_B0X_ENDPOINT", &endpoint);
-    }
-
-    tokio::spawn(async move {
-        loop {
-            if let Ok((mut socket, _)) = listener.accept().await {
-                tokio::spawn(async move {
-                    let mut buf = [0u8; 1024];
-                    let _ = socket.read(&mut buf).await;
-                    let _ = socket.write_all(b"OK").await;
-                });
-            }
-        }
-    });
-
-    // 3. Initialize SDKs
-    // CoreSDK::new() is synchronous Result
-    let alice_core = Arc::new(CoreSDK::new().unwrap());
     let alice_keypair = SignatureKeyPair::new().unwrap();
-
-    let alice_device_id_vec = alice_core.get_device_identity().device_id;
-    let mut alice_device_id = [0u8; 32];
-    if alice_device_id_vec.len() == 32 {
-        alice_device_id.copy_from_slice(&alice_device_id_vec);
-    } else {
-        panic!("Alice device ID len is {}", alice_device_id_vec.len());
-    }
-
-    let alice_id_b32 = encode_base32_crockford(&alice_device_id_vec);
-
-    // Setup Contact Manager
-    // We need DsmContactManager for both Unilateral and Bilateral
+    let alice_device_id = [1u8; 32];
     let cm = DsmContactManager::new(alice_device_id, vec![]);
-    let cm_arc = Arc::new(RwLock::new(cm.clone()));
-
-    // B0xSDK::new takes: device_id_string, Arc<CoreSDK>, endpoints_vec
-    let alice_b0x = B0xSDK::new(
-        alice_id_b32.clone(),
-        alice_core.clone(),
-        vec![endpoint.clone()],
-    )
-    .unwrap();
-
-    // UnilateralOpsSDK::new takes: B0xSDK, Arc<RwLock<DsmContactManager>>, device_id_string
-    // Note: B0xSDK is moved, not cloned
-    let alice_online = UnilateralOpsSDK::new(alice_b0x, cm_arc.clone(), alice_id_b32.clone());
-
-    // BilateralTransactionManager takes plain DsmContactManager (clone)
     let chain_tip_store = std::sync::Arc::new(SqliteChainTipStore::new());
     let mut alice_offline = BilateralTransactionManager::new_with_chain_tip_store(
-        cm.clone(),
-        alice_keypair.clone(),
+        cm,
+        alice_keypair,
         alice_device_id,
         [0u8; 32],
         chain_tip_store,
@@ -286,7 +252,6 @@ async fn test_mixed_protocol_modal_lock() {
     let bob_device_id = [2u8; 32];
     let bob_genesis_hash = [3u8; 32];
 
-    // 4. Setup Contact and Relationship
     let bob_contact = DsmVerifiedContact {
         alias: "Bob".into(),
         device_id: bob_device_id,
@@ -302,152 +267,58 @@ async fn test_mixed_protocol_modal_lock() {
         verifying_storage_nodes: vec![],
         ble_address: None,
     };
-
-    // Add contact to the shared manager
-    // Since UnilateralOpsSDK holds Arc<RwLock<cm>>, we should write to that if we want it to see it.
-    // However, BTM holds its own clone.
-    // If they share DB via `DSM_DB_PATH`, it depends on whether `DsmContactManager` writes to DB immediately.
-    // Usually it does.
-    // We add to the one we pass to BTM to ensure BTM sees it.
-    // But `alice_offline` has `contact_manager` field. We can use `alice_offline.add_verified_contact`.
     alice_offline.add_verified_contact(bob_contact).unwrap();
-    alice_offline
-        .ensure_relationship_for_sender(&bob_device_id)
-        .unwrap();
-
-    // Persist Bob contact into SQLite so chain tip updates are shared.
-    let mut metadata = HashMap::new();
-    let contact_id = encode_base32_crockford(&bob_device_id);
-    let _ = client_db::remove_contact(&contact_id);
-    let contact_record = ContactRecord {
-        contact_id: contact_id.clone(),
-        device_id: bob_device_id.to_vec(),
-        alias: "Bob".into(),
-        genesis_hash: bob_genesis_hash.to_vec(),
-        public_key: vec![0u8; 32],
-        current_chain_tip: None,
-        added_at: 1,
-        verified: true,
-        verification_proof: None,
-        metadata: std::mem::take(&mut metadata),
-        ble_address: None,
-        status: "OnlineCapable".into(),
-        needs_online_reconcile: false,
-        last_seen_online_counter: 0,
-        last_seen_ble_counter: 0,
-        previous_chain_tip: None,
-    };
-    client_db::store_contact(&contact_record).unwrap();
-
-    // 5. Prepare Offline Transaction (captures parent h_n)
-    println!("Attempting Offline Prepare with Bob...");
-    let offline_op = Operation::Transfer {
-        to_device_id: bob_device_id.to_vec(),
-        amount: Balance::from_state(50, [0u8; 32], 0),
-        token_id: b"token_1".to_vec(),
-        mode: TransactionMode::Bilateral,
-        nonce: vec![1, 2, 3, 4],
-        verification: VerificationType::Standard,
-        pre_commit: None,
-        recipient: bob_device_id.to_vec(),
-        to: b"Bob".to_vec(),
-        message: "Offline tx".into(),
-        signature: vec![0u8; 64],
-    };
+    let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
+    let anchor = alice_offline
+        .establish_relationship(&bob_device_id, &mut smt)
+        .await;
+    let initial_tip = anchor.unwrap().chain_tip;
+    store_online_capable_contact(bob_device_id, bob_genesis_hash, "Bob");
+    restore_finalized_bilateral_chain_tip(&bob_device_id, &initial_tip).unwrap();
 
     let prepare_result = alice_offline
-        .prepare_offline_transfer(&bob_device_id, offline_op, 3600)
-        .await;
-
-    // 6. Send Online Transaction (advance tip to h_{n+1})
-    println!("Sending Online Transaction to Bob (after offline precommit)...");
-    let bob_id_b32 = encode_base32_crockford(&bob_device_id);
-    let bob_genesis_b32 = encode_base32_crockford(&bob_genesis_hash);
-    let alice_genesis_b32 = encode_base32_crockford(&alice_device_id);
-    // NOTE: For this test, sender_chain_tip is treated as the *post* tip (h_{n+1}).
-    let alice_chain_tip_b32 = encode_base32_crockford(&[9u8; 32]);
-    let alice_current_tip_b32 = encode_base32_crockford(&[1u8; 32]);
-
-    let online_op = Operation::Transfer {
-        to_device_id: bob_device_id.to_vec(),
-        amount: Balance::from_state(100, [0u8; 32], 0),
-        token_id: b"token_1".to_vec(),
-        mode: TransactionMode::Unilateral,
-        nonce: vec![1, 2, 3],
-        verification: VerificationType::Standard,
-        pre_commit: None,
-        recipient: bob_device_id.to_vec(),
-        to: b"Bob".to_vec(),
-        message: "Online tx".into(),
-        signature: vec![0u8; 64],
-    };
-
-    let _ = alice_online
-        .submit_unilateral_transaction_with_next_tip(
-            bob_id_b32,
-            bob_genesis_b32,
-            online_op,
-            vec![0u8; 64], // signature
-            alice_genesis_b32,
-            alice_current_tip_b32,
-            1, // seq
-            Some(alice_chain_tip_b32),
+        .prepare_offline_transfer(
+            &bob_device_id,
+            make_transfer_op(bob_device_id, 50, vec![1, 2, 3, 4], "Offline tx"),
+            3600,
         )
         .await;
+    let precommit =
+        prepare_result.expect("offline prepare should capture the current canonical tip");
+    assert_eq!(precommit.local_chain_tip_at_creation, Some(initial_tip));
 
-    // Ensure DB chain tip reflects the provided next tip for Tripwire enforcement.
+    let next_tip = [9u8; 32];
+    record_pending_online_transition(&bob_device_id, "MSG-1", &initial_tip, &next_tip)
+        .expect("a delivered online send should persist a single pending outbox gate");
+
     assert_eq!(
         client_db::get_contact_chain_tip(&bob_device_id),
-        Some([9u8; 32])
+        Some(initial_tip),
+        "pending online delivery must not advance the canonical finalized tip until ACK"
+    );
+    assert_eq!(
+        get_local_bilateral_chain_tip(&bob_device_id),
+        Some(next_tip),
+        "sender-side mixed-mode delivery should advance only the local restore tip"
     );
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-    let _ = client_db::get_contact_chain_tip(&bob_device_id);
+    let pending = get_pending_online_outbox(&bob_device_id)
+        .expect("pending outbox lookup should succeed")
+        .expect("pending outbox gate should exist");
+    assert_eq!(pending.message_id, "MSG-1");
+    assert_eq!(pending.parent_tip, initial_tip.to_vec());
+    assert_eq!(pending.next_tip, next_tip.to_vec());
 
-    // 7. Verify the structural invariant via FINALIZATION
-    // The prepare created a precommitment using parent h_n
-    // The online transaction advanced the tip to h_{n+1}
-    // So finalize should FAIL due to parent hash mismatch (Tripwire theorem)
-    match prepare_result {
-        Ok(precommit) => {
-            println!(
-                "Offline prepare succeeded (precommitment created). Now attempting finalize..."
-            );
-
-            // Try to finalize - this should FAIL due to chain tip mismatch
-            // because the online transaction already advanced the parent
-            let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-            let finalize_result = alice_offline
-                .finalize_offline_transfer(
-                    &bob_device_id,
-                    &precommit.bilateral_commitment_hash,
-                    &[1u8; 32], // dummy receiver acceptance proof
-                    &mut smt,
-                )
-                .await;
-
-            match finalize_result {
-                Ok(_) => {
-                    println!("TEST FAIL: Offline finalize SUCCEEDED but should have failed due to parent hash mismatch.");
-                    panic!("Invariant Violation: Tripwire missing - conflicting transactions both succeeded (same parent consumed twice)");
-                }
-                Err(e) => {
-                    let err_str = e.to_string();
-                    println!("TEST PASS: Offline finalize FAILED with error: {:?}", e);
-                    // The error should mention deterministic safety classification
-                    if err_str.contains("Deterministic safety rejection")
-                        || err_str.contains(DeterministicSafetyClass::ParentConsumed.as_str())
-                    {
-                        println!("Correct: Tripwire enforced via deterministic safety rejection.");
-                    } else {
-                        println!("Note: Failed for different reason, but still demonstrates structural protection.");
-                    }
-                }
-            }
-        }
-        Err(e) => {
-            println!("Offline prepare failed early: {:?}", e);
-            // This is also acceptable - may fail for other reasons
-        }
-    }
+    let divergent_next_tip = [7u8; 32];
+    let err = record_pending_online_transition(
+        &bob_device_id,
+        "MSG-2",
+        &initial_tip,
+        &divergent_next_tip,
+    )
+    .expect_err("a relationship may have only one outstanding online gate at a time");
+    assert!(
+        err.to_string().contains("different gate"),
+        "divergent second online gate should be rejected, got: {err}"
+    );
 }

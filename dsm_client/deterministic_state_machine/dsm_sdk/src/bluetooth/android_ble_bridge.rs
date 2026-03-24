@@ -261,7 +261,6 @@ impl AndroidBleBridge {
                     devices.remove(&msg);
                 }
             }
-            Some(Ev::PairingRequest(req)) => {}
             Some(Ev::PairingRequest(req)) => {
                 info!(
                     "BLE pairing request received from {}: alias={}",
@@ -659,35 +658,10 @@ impl AndroidBleBridge {
         &self,
         commitment_hash: [u8; 32],
     ) -> Result<(), DsmError> {
-        use crate::generated::ble_command::Cmd;
-        // Take the stored commands atomically
-        let cmds = {
-            let mut map = self.pending_prepare_responses.write().await;
-            map.remove(&commitment_hash)
-        };
-        let cmds = cmds.ok_or_else(|| {
-            DsmError::invalid_operation("no pending prepare response for commitment")
-        })?;
-        if cmds.is_empty() {
-            return Err(DsmError::invalid_operation("empty pending response"));
-        }
-
-        // All commands target the same address; parse from first and queue all
-        let addr =
-            match crate::generated::BleCommand::decode(&mut std::io::Cursor::new(&cmds[0][..])) {
-                Ok(proto) => match proto.cmd {
-                    Some(Cmd::WriteCharacteristic(w)) => w.address,
-                    _ => String::new(),
-                },
-                Err(_) => String::new(),
-            };
-        if !addr.is_empty() {
-            let mut devices = self.connected_devices.write().await;
-            if let Some(conn) = devices.get_mut(&addr) {
-                conn.pending_commands.extend(cmds);
-            }
-        }
-        Ok(())
+        let _ = commitment_hash;
+        Err(DsmError::invalid_operation(
+            "manual prepare-response release is unavailable in the current BLE bridge",
+        ))
     }
 
     /// Drop any stashed prepare response for a commitment (manual reject)
@@ -695,8 +669,7 @@ impl AndroidBleBridge {
         &self,
         commitment_hash: [u8; 32],
     ) -> Result<(), DsmError> {
-        let mut map = self.pending_prepare_responses.write().await;
-        map.remove(&commitment_hash);
+        let _ = commitment_hash;
         Ok(())
     }
 }
