@@ -458,18 +458,16 @@ async fn bilateral_offline_state_consistency_across_peers() {
         .unwrap_or_else(|e| panic!("handle_confirm_request failed: {e}"));
 
     // ── Chain tip consistency ────────────────────────────────────────────
-    let a_anchor = s
-        .a
-        .read()
-        .await
-        .get_relationship(&s.b_dev)
-        .unwrap_or_else(|| panic!("a relationship missing"));
-    let b_anchor = s
-        .b
-        .read()
-        .await
-        .get_relationship(&s.a_dev)
-        .unwrap_or_else(|| panic!("b relationship missing"));
+    let a_anchor =
+        s.a.read()
+            .await
+            .get_relationship(&s.b_dev)
+            .unwrap_or_else(|| panic!("a relationship missing"));
+    let b_anchor =
+        s.b.read()
+            .await
+            .get_relationship(&s.a_dev)
+            .unwrap_or_else(|| panic!("b relationship missing"));
 
     assert_eq!(
         a_anchor.chain_tip, b_anchor.chain_tip,
@@ -515,8 +513,7 @@ async fn bilateral_offline_state_consistency_across_peers() {
         .await
         .verify_relationship_integrity(&s.b_dev)
         .unwrap_or_else(|e| panic!("verify relationship integrity on a failed: {e}")));
-    s.b
-        .read()
+    s.b.read()
         .await
         .verify_relationship_integrity(&s.a_dev)
         .unwrap_or_else(|e| panic!("verify relationship integrity on b failed: {:?}", e));

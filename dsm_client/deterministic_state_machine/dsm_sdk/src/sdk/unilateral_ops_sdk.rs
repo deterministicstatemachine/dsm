@@ -282,7 +282,9 @@ impl UnilateralOpsSDK {
                     &recipient,
                 );
                 let mut cm = self.contact_manager.write().await;
-                if let Err(e) = cm.update_contact_chain_tip_unilateral(&recipient, next_tip, &smt, &smt_key) {
+                if let Err(e) =
+                    cm.update_contact_chain_tip_unilateral(&recipient, next_tip, &smt, &smt_key)
+                {
                     return Err(DsmError::InvalidState(format!(
                         "UnilateralOpsSDK: failed to update in-memory contact chain tip after submission: {e}"
                     )));

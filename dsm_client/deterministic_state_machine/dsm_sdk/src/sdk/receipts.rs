@@ -173,14 +173,8 @@ pub fn build_receipt_struct(
         return None;
     }
 
-    if !verify_tripwire_smt_replace(
-        &parent_root,
-        &child_root,
-        &parent_tip,
-        &child_tip,
-        &witness,
-    )
-    .ok()?
+    if !verify_tripwire_smt_replace(&parent_root, &child_root, &parent_tip, &child_tip, &witness)
+        .ok()?
     {
         log::warn!("[receipts] Tripwire SMT replace witness verification failed");
         return None;

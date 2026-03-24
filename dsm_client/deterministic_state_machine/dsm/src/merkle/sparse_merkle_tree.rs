@@ -319,10 +319,7 @@ impl SparseMerkleTree {
     /// Used by the receiver in the BLE bilateral 3-step protocol to verify the
     /// sender's SMT inclusion proofs against the sender's claimed `r'_A` root.
     /// Per §4.3 acceptance checklist items 2 + 4.
-    pub fn verify_proof_against_root(
-        proof: &SmtInclusionProof,
-        expected_root: &[u8; 32],
-    ) -> bool {
+    pub fn verify_proof_against_root(proof: &SmtInclusionProof, expected_root: &[u8; 32]) -> bool {
         let value = match proof.value {
             Some(v) => v,
             None => return false,
@@ -390,13 +387,13 @@ impl SparseMerkleTree {
 
         // Parent proof: inclusion of h_n (or ZERO_LEAF for first tx).
         // If key doesn't exist yet, construct a default non-inclusion proof.
-        let parent_proof = self.get_inclusion_proof(key, 256).unwrap_or(
-            SmtInclusionProof {
+        let parent_proof = self
+            .get_inclusion_proof(key, 256)
+            .unwrap_or(SmtInclusionProof {
                 key: *key,
                 value: None,
                 siblings: Vec::new(),
-            },
-        );
+            });
 
         self.update_leaf(key, new_value)?;
 
@@ -498,8 +495,7 @@ impl SmtInclusionProof {
         if data.len() < offset + 4 {
             return None;
         }
-        let count =
-            u32::from_le_bytes(data[offset..offset + 4].try_into().ok()?) as usize;
+        let count = u32::from_le_bytes(data[offset..offset + 4].try_into().ok()?) as usize;
         offset += 4;
         if data.len() < offset + count * 32 {
             return None;
@@ -510,7 +506,11 @@ impl SmtInclusionProof {
             s.copy_from_slice(&data[offset + i * 32..offset + (i + 1) * 32]);
             siblings.push(s);
         }
-        Some(SmtInclusionProof { key, value, siblings })
+        Some(SmtInclusionProof {
+            key,
+            value,
+            siblings,
+        })
     }
 }
 
@@ -587,7 +587,9 @@ mod tests {
 
         // Wrong root fails
         let bad_root = [0xFFu8; 32];
-        assert!(!SparseMerkleTree::verify_proof_against_root(&proof, &bad_root));
+        assert!(!SparseMerkleTree::verify_proof_against_root(
+            &proof, &bad_root
+        ));
     }
 
     #[test]
@@ -595,9 +597,21 @@ mod tests {
         let mut smt = SparseMerkleTree::new(256);
 
         let keys: [[u8; 32]; 3] = [
-            { let mut k = [0u8; 32]; k[0] = 0xAA; k },
-            { let mut k = [0u8; 32]; k[0] = 0x55; k },
-            { let mut k = [0u8; 32]; k[0] = 0xFF; k },
+            {
+                let mut k = [0u8; 32];
+                k[0] = 0xAA;
+                k
+            },
+            {
+                let mut k = [0u8; 32];
+                k[0] = 0x55;
+                k
+            },
+            {
+                let mut k = [0u8; 32];
+                k[0] = 0xFF;
+                k
+            },
         ];
         let values: [[u8; 32]; 3] = [[10u8; 32], [20u8; 32], [30u8; 32]];
 
@@ -608,7 +622,11 @@ mod tests {
         for (key, value) in keys.iter().zip(values.iter()) {
             let proof = smt.get_inclusion_proof(key, 256).unwrap();
             assert_eq!(proof.value, Some(*value));
-            assert!(smt.verify_inclusion_proof(&proof), "Proof failed for key {:?}", &key[..4]);
+            assert!(
+                smt.verify_inclusion_proof(&proof),
+                "Proof failed for key {:?}",
+                &key[..4]
+            );
 
             let root = *smt.root();
             assert!(SparseMerkleTree::verify_proof_against_root(&proof, &root));
@@ -694,22 +712,38 @@ mod tests {
         let mut key2 = [0u8; 32];
         key2[31] = 0x01; // LSB set → bit 255 = 1
 
-        assert_eq!(get_bit(&key2, 255), 1, "Bit 255 (LSB of byte 31) should be 1");
+        assert_eq!(
+            get_bit(&key2, 255),
+            1,
+            "Bit 255 (LSB of byte 31) should be 1"
+        );
         assert_eq!(get_bit(&key2, 254), 0, "Bit 254 should be 0");
     }
 
     #[test]
     fn msb_first_traversal_regression() {
         // Key with MSB set traverses LEFT at root (bit 0 = 1)
-        let key_msb: [u8; 32] = { let mut k = [0u8; 32]; k[0] = 0x80; k };
+        let key_msb: [u8; 32] = {
+            let mut k = [0u8; 32];
+            k[0] = 0x80;
+            k
+        };
         assert_eq!(get_bit(&key_msb, 0), 1);
 
         // Key with LSB set traverses at depth 255 (bit 255 = 1)
-        let key_lsb: [u8; 32] = { let mut k = [0u8; 32]; k[31] = 0x01; k };
+        let key_lsb: [u8; 32] = {
+            let mut k = [0u8; 32];
+            k[31] = 0x01;
+            k
+        };
         assert_eq!(get_bit(&key_lsb, 255), 1);
 
         // Alternating pattern 0xAA = 10101010
-        let key_alt: [u8; 32] = { let mut k = [0u8; 32]; k[0] = 0xAA; k };
+        let key_alt: [u8; 32] = {
+            let mut k = [0u8; 32];
+            k[0] = 0xAA;
+            k
+        };
         assert_eq!(get_bit(&key_alt, 0), 1);
         assert_eq!(get_bit(&key_alt, 1), 0);
         assert_eq!(get_bit(&key_alt, 2), 1);
@@ -726,8 +760,12 @@ mod tests {
             }
         }
         for (i, &expected_bit) in expected_bits.iter().enumerate() {
-            assert_eq!(get_bit(&constructed_key, i), expected_bit,
-                "Roundtrip failed at bit {}", i);
+            assert_eq!(
+                get_bit(&constructed_key, i),
+                expected_bit,
+                "Roundtrip failed at bit {}",
+                i
+            );
         }
     }
 }

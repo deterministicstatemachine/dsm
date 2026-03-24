@@ -521,7 +521,6 @@ impl PolicyEnforcer {
             _ => false,
         }
     }
-
 }
 
 #[cfg(test)]

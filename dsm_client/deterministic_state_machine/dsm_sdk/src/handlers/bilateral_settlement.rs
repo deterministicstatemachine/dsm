@@ -85,7 +85,10 @@ fn is_already_settled(commitment_hash: &[u8; 32]) -> bool {
     let tx_id = encode_base32_crockford(commitment_hash);
     crate::storage::client_db::get_transaction_history(None, Some(500))
         .ok()
-        .map(|txs| txs.iter().any(|tx| tx.tx_id == tx_id && tx.status == "completed"))
+        .map(|txs| {
+            txs.iter()
+                .any(|tx| tx.tx_id == tx_id && tx.status == "completed")
+        })
         .unwrap_or(false)
 }
 

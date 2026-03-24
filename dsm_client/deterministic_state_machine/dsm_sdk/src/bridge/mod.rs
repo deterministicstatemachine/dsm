@@ -86,7 +86,9 @@ pub trait AppRouter: Send + Sync {
     ///
     /// Used by bilateral settlement to source B_n before applying the transfer
     /// delta.  Returns `None` if no canonical state is available yet.
-    fn get_device_current_state(&self) -> Option<dsm::types::state_types::State> { None }
+    fn get_device_current_state(&self) -> Option<dsm::types::state_types::State> {
+        None
+    }
 }
 
 /// App router storage. Uses RwLock to allow replacement (MinimalBootstrapRouter → AppRouterImpl).
