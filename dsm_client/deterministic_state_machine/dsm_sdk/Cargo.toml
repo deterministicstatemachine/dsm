@@ -99,8 +99,8 @@ blake3 = "1.5.0"
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc", "std"] }
 hmac = "0.12.1"
 rand = "0.8.5"
-rand_chacha = "0.9.0"
-getrandom = "0.4.2"
+rand_chacha = "0.3"
+getrandom = "0.2"
 merlin = "3.0.0"
 zeroize = { version = "1.7.0", features = ["zeroize_derive"] }
 
@@ -110,7 +110,7 @@ ff = "0.13.0"
 # Post-quantum cryptography (pqcrypto-mlkem used via smart_commitment_sdk)
 
 # Networking
-rustls = { version = "0.23.37" }
+rustls = { version = "0.23.37", features = ["ring"] }
 reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls", "json"] }
 rcgen = "0.12"
 tokio-rustls = "0.26.4"

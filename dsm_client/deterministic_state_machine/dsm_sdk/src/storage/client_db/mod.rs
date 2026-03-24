@@ -1021,6 +1021,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_auth_tokens_purged_on_identity_binding_change() {
         // Ensure DB initialized
         let binding = match get_connection() {
