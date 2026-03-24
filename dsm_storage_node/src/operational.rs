@@ -429,10 +429,12 @@ dsm_storage_error_rate {}
 }
 
 /// Database health check
+#[cfg(not(feature = "local-dev"))]
 pub struct DatabaseHealthCheck {
     pub pool: deadpool_postgres::Pool,
 }
 
+#[cfg(not(feature = "local-dev"))]
 impl HealthCheckFn for DatabaseHealthCheck {
     fn check(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = HealthCheck> + Send>> {
         let pool = self.pool.clone();
