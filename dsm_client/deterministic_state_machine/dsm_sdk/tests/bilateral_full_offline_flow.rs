@@ -257,6 +257,8 @@ async fn setup_two_devices(a_id: u8, b_id: u8, sender_era: u64) -> TwoDeviceSetu
     let router = Arc::new(TestAppRouter::new());
     sdk::bridge::install_app_router(router.clone()).expect("install test router");
     seed_device_state_with_era(&router, a_dev, a_kp.public_key(), sender_era);
+    // Also seed receiver's canonical state so B sees its own device state during settlement.
+    seed_device_state_with_era(&router, b_dev, b_kp.public_key(), Balance::zero());
 
     let delegate = Arc::new(DefaultBilateralSettlementDelegate);
     let mut handler_a = BilateralBleHandler::new_with_smt(a.clone(), a_dev, smt_a);
