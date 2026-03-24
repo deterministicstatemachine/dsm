@@ -9,6 +9,7 @@ use axum::{
 use tower::ServiceExt; // brings `.oneshot(..)` into scope
 
 #[tokio::test]
+#[serial_test::serial]
 async fn publish_without_content_type_returns_415() {
     let app = dsm_storage_node::build_app_for_tests().await.unwrap();
 
@@ -24,6 +25,7 @@ async fn publish_without_content_type_returns_415() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn publish_with_octet_stream_returns_200_and_addr_header() {
     let app = dsm_storage_node::build_app_for_tests().await.unwrap();
 

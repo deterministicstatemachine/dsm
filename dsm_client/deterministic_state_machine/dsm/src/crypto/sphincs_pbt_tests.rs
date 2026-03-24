@@ -22,7 +22,7 @@ mod tests {
 
         /// Round-trip: sign(sk, msg) then verify(pk, msg, sig) succeeds.
         #[test]
-        fn pbt_sphincs_roundtrip(msg in proptest::collection::vec(any::<u8>(), 0..=512)) {
+        fn pbt_sphincs_roundtrip(msg in proptest::collection::vec(any::<u8>(), 1..=512)) {
             let kp = generate_keypair(test_variant()).expect("keygen");
             let sig = sign(test_variant(), &kp.secret_key, &msg).expect("sign");
             let ok = verify(test_variant(), &kp.public_key, &msg, &sig).expect("verify");

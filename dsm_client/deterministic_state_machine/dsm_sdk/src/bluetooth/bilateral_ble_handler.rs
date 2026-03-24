@@ -405,7 +405,7 @@ impl BilateralBleHandler {
             return 0;
         }
 
-        terminal_sessions.sort_by(|a, b| b.created_at_step.cmp(&a.created_at_step));
+        terminal_sessions.sort_by_key(|b| std::cmp::Reverse(b.created_at_step));
 
         let mut pruned = 0;
         for record in terminal_sessions
@@ -739,7 +739,9 @@ impl BilateralBleHandler {
                 }
                 if mgr.get_relationship(&counterparty_device_id).is_none() {
                     let mut smt = self.per_device_smt.write().await;
-                    let _ = mgr.establish_relationship(&counterparty_device_id, &mut smt).await;
+                    let _ = mgr
+                        .establish_relationship(&counterparty_device_id, &mut smt)
+                        .await;
                 }
                 drop(mgr);
             } else {
@@ -3571,7 +3573,9 @@ impl BilateralBleHandler {
     }
 
     /// Per-Device SMT for relationship chain tips (§18.1)
-    pub fn per_device_smt(&self) -> &Arc<RwLock<dsm::merkle::sparse_merkle_tree::SparseMerkleTree>> {
+    pub fn per_device_smt(
+        &self,
+    ) -> &Arc<RwLock<dsm::merkle::sparse_merkle_tree::SparseMerkleTree>> {
         &self.per_device_smt
     }
 

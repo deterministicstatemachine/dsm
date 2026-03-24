@@ -79,7 +79,7 @@ getrandom = "0.4.2"
 merlin = "3.0.0"
 zeroize = { version = "1.7.0", features = ["zeroize_derive"] }
 subtle = "2.5.0"
-constant_time_eq = "0.3.0"
+constant_time_eq = "0.4.2"
 # Security-hardened cryptographic primitives - RING REMOVED (caused SIGILL)
 # ring = { version = "0.17.14", features = ["std"] }  # REMOVED - caused SIGILL on some ARM devices
 # Use RustCrypto alternatives instead
@@ -146,7 +146,7 @@ mockall = "0.12.1"
 tempfile = "3.10.0"
 test-log = { version = "0.2.14", features = ["trace"] }
 quickcheck = "1.0.3"
-proptest = "1.4.0"
+proptest = "1.11.0"
 rstest = "0.18.2"
 serial_test = "3.0.0"
 

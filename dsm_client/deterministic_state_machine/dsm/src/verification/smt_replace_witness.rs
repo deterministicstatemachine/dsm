@@ -170,9 +170,6 @@ mod tests {
     fn smt_key_is_order_invariant() {
         let a = [1u8; 32];
         let b = [2u8; 32];
-        assert_eq!(
-            compute_smt_key(&a, &b),
-            compute_smt_key(&b, &a)
-        );
+        assert_eq!(compute_smt_key(&a, &b), compute_smt_key(&b, &a));
     }
 }

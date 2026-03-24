@@ -299,14 +299,8 @@ fn theorem2_transitive_tripwire_web() {
     let old_leaf_ab = hash_smt_leaf(&h_0_ab);
     let old_root = hash_smt_node(&old_leaf_ab, &leaf_bc);
 
-    let ok_ab = verify_tripwire_smt_replace(
-        &old_root,
-        &bob_root,
-        &h_0_ab,
-        &h_1_ab,
-        &witness_ab,
-    )
-    .expect("verify must not error");
+    let ok_ab = verify_tripwire_smt_replace(&old_root, &bob_root, &h_0_ab, &h_1_ab, &witness_ab)
+        .expect("verify must not error");
     assert!(ok_ab, "Alice<->Bob proof must verify under Bob's root");
 
     // If Bob tries a different root for Charlie, it won't match.
@@ -317,14 +311,9 @@ fn theorem2_transitive_tripwire_web() {
     let old_leaf_bc = hash_smt_leaf(&h_0_bc);
     let old_root_bc = hash_smt_node(&leaf_ab, &old_leaf_bc);
 
-    let ok_bc_fake = verify_tripwire_smt_replace(
-        &old_root_bc,
-        &fake_bob_root,
-        &h_0_bc,
-        &h_1_bc,
-        &witness_bc,
-    )
-    .expect("verify must not error");
+    let ok_bc_fake =
+        verify_tripwire_smt_replace(&old_root_bc, &fake_bob_root, &h_0_bc, &h_1_bc, &witness_bc)
+            .expect("verify must not error");
     assert!(
         !ok_bc_fake,
         "fake root must fail for Bob<->Charlie relationship"
@@ -429,7 +418,10 @@ fn predicate_2_parent_inclusion_via_witness() {
         dsm::verification::smt_replace_witness::SmtReplaceWitness::from_bytes(&witness_bytes)
             .expect("parse");
     let recomputed = witness.recompute_root(&leaf);
-    assert_eq!(recomputed, root, "witness must recompute correct parent root");
+    assert_eq!(
+        recomputed, root,
+        "witness must recompute correct parent root"
+    );
 }
 
 #[test]
@@ -446,7 +438,10 @@ fn predicate_3_child_inclusion_via_witness() {
         dsm::verification::smt_replace_witness::SmtReplaceWitness::from_bytes(&witness_bytes)
             .expect("parse");
     let recomputed = witness.recompute_root(&leaf);
-    assert_eq!(recomputed, root, "witness must recompute correct child root");
+    assert_eq!(
+        recomputed, root,
+        "witness must recompute correct child root"
+    );
 }
 
 #[test]
@@ -470,27 +465,15 @@ fn predicate_5_smt_replace_recomputation() {
     let witness_bytes = encode_witness_1step(true, &sibling);
 
     // Full verify cycle.
-    let ok = verify_tripwire_smt_replace(
-        &r_a,
-        &r_a_prime,
-        &h_n,
-        &h_n1,
-        &witness_bytes,
-    )
-    .expect("must not error");
+    let ok = verify_tripwire_smt_replace(&r_a, &r_a_prime, &h_n, &h_n1, &witness_bytes)
+        .expect("must not error");
     assert!(ok, "honest SMT replace must verify");
 
     // Tamper r_a_prime.
     let mut bad_root = r_a_prime;
     bad_root[15] ^= 0x01;
-    let fail = verify_tripwire_smt_replace(
-        &r_a,
-        &bad_root,
-        &h_n,
-        &h_n1,
-        &witness_bytes,
-    )
-    .expect("must not error");
+    let fail = verify_tripwire_smt_replace(&r_a, &bad_root, &h_n, &h_n1, &witness_bytes)
+        .expect("must not error");
     assert!(!fail, "tampered child root must fail");
 }
 
@@ -566,7 +549,10 @@ fn chain_10_sequential_tips() {
         let next = compute_successor_tip(&tip, &op_bytes, &entropy, &receipt);
 
         assert_ne!(next, tip, "tip must change on step {i}");
-        assert!(seen.insert(next), "tip must be unique at step {i} (no cycles)");
+        assert!(
+            seen.insert(next),
+            "tip must be unique at step {i} (no cycles)"
+        );
 
         // Determinism: recomputing gives the same result.
         let recomputed = compute_successor_tip(&tip, &op_bytes, &entropy, &receipt);

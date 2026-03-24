@@ -188,16 +188,20 @@ impl ContactManager {
                             mgr.add_verified_contact(verified_contact.clone())?;
                             if let Some(chain_tip) = verified_contact.chain_tip {
                                 let smt = smt_arc.blocking_read();
-                                let smt_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
-                                    &own_device_id, &device_id,
-                                );
-                                mgr.initialize_contact_chain_tip(&device_id, chain_tip, &smt, &smt_key)
-                                    .map_err(|e| {
-                                        DsmError::internal(
-                                            "Failed to initialize contact chain tip",
-                                            Some(e),
-                                        )
-                                    })?;
+                                let smt_key =
+                                    dsm::core::bilateral_transaction_manager::compute_smt_key(
+                                        &own_device_id,
+                                        &device_id,
+                                    );
+                                mgr.initialize_contact_chain_tip(
+                                    &device_id, chain_tip, &smt, &smt_key,
+                                )
+                                .map_err(|e| {
+                                    DsmError::internal(
+                                        "Failed to initialize contact chain tip",
+                                        Some(e),
+                                    )
+                                })?;
                             }
                             Ok(())
                         });
@@ -304,14 +308,19 @@ impl ContactManager {
             let smt_arc = crate::security::shared_smt::init_shared_smt(256);
             let smt = smt_arc.read().await;
             let smt_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
-                &self.device_id, &contact_device_id,
+                &self.device_id,
+                &contact_device_id,
             );
             let mut mgr = self.dsm_manager.write().await;
             mgr.add_verified_contact(verified.clone()).map_err(|e| {
                 ContactError::InvalidContactData(format!("Core add_verified_contact failed: {e}"))
             })?;
-            if let Err(e) = mgr.initialize_contact_chain_tip(&contact_device_id, initial_chain_tip, &smt, &smt_key)
-            {
+            if let Err(e) = mgr.initialize_contact_chain_tip(
+                &contact_device_id,
+                initial_chain_tip,
+                &smt,
+                &smt_key,
+            ) {
                 return Err(ContactError::InvalidChainTip(format!(
                     "Failed to initialize chain tip SMT proof: {e}"
                 )));
@@ -576,7 +585,8 @@ impl ContactManager {
             let smt_arc = crate::security::shared_smt::init_shared_smt(256);
             let smt = smt_arc.read().await;
             let smt_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
-                &self.device_id, &contact_device_id,
+                &self.device_id,
+                &contact_device_id,
             );
             let mut mgr = self.dsm_manager.write().await;
             log::info!(
@@ -586,8 +596,12 @@ impl ContactManager {
             mgr.add_verified_contact(verified.clone()).map_err(|e| {
                 ContactError::InvalidContactData(format!("Core add_verified_contact failed: {e}"))
             })?;
-            if let Err(e) = mgr.initialize_contact_chain_tip(&contact_device_id, initial_chain_tip, &smt, &smt_key)
-            {
+            if let Err(e) = mgr.initialize_contact_chain_tip(
+                &contact_device_id,
+                initial_chain_tip,
+                &smt,
+                &smt_key,
+            ) {
                 return Err(ContactError::InvalidChainTip(format!(
                     "Failed to initialize chain tip SMT proof: {e}"
                 )));
@@ -767,10 +781,11 @@ impl ContactManager {
         new_chain_tip: [u8; 32],
     ) -> Result<(), ContactError> {
         // §4.2: SMT-Replace is mandatory for every state transition.
-        let smt_arc = crate::security::shared_smt::get_shared_smt()
-            .ok_or(ContactError::InvalidContactData(
+        let smt_arc = crate::security::shared_smt::get_shared_smt().ok_or(
+            ContactError::InvalidContactData(
                 "Per-Device SMT not initialized — cannot produce valid proof (§4.2)".into(),
-            ))?;
+            ),
+        )?;
         let smt = smt_arc.read().await;
         let smt_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
             &self.device_id,
