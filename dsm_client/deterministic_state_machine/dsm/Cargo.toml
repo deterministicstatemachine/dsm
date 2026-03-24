@@ -147,7 +147,7 @@ tempfile = "3.10.0"
 test-log = { version = "0.2.14", features = ["trace"] }
 quickcheck = "1.0.3"
 proptest = "1.11.0"
-rstest = "0.18.2"
+rstest = "0.26.1"
 serial_test = "3.0.0"
 
 [build-dependencies]
