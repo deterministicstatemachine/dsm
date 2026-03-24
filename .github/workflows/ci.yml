@@ -53,7 +53,9 @@ jobs:
         run: cargo build --locked --workspace --all-features
 
       - name: Test
-        run: cargo test --locked --workspace -- --nocapture
+        run: |
+          cargo test --locked --workspace --exclude dsm_storage_node -- --nocapture
+          cargo test --locked -p dsm_storage_node --no-default-features --features local-dev,strict -- --nocapture
 
       - name: Codegen enforcement
         run: |
