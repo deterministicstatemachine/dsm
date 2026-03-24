@@ -1,6 +1,12 @@
 //! DSM specification schema definitions
 //!
 //! Defines YAML-deserializable input types for DSM vault and policy specs.
+// The `schemars::JsonSchema` derive macro generates `fn json_schema(...)` bodies
+// that call `.unwrap()` internally (e.g. `serde_json::to_value(...).unwrap()`).
+// Those calls appear in macro-expanded code attributed to this file, triggering
+// `clippy::disallowed_methods`.  There are zero hand-written `.unwrap()` calls
+// here; this allow covers only the macro-generated expansions.
+#![allow(clippy::disallowed_methods)]
 //! `FulfillmentConditionSpec` mirrors the `FulfillmentMechanism` oneof in
 //! `proto/dsm_app.proto` exactly.  When protoc is available at build time,
 //! a `From<FulfillmentConditionSpec>` impl is compiled against the prost-
