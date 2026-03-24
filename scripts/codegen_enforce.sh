@@ -39,8 +39,48 @@ rg_search() {
     if command -v rg >/dev/null 2>&1; then
         rg -n --no-messages --hidden --glob '!node_modules/**' --glob '!target/**' --glob '!pgdata*/**' --glob '!**/bluetooth/**' --glob '!**/ble/**' --glob '!**/assets/**' --glob '!**/bridge/BleOutboxRepository.kt' "$pattern" "$dir"
     else
-        grep -r -n "$pattern" "$dir" | grep -v "bluetooth" | grep -v "/ble/" | grep -v "BleOutboxRepository.kt" || true
+        # Use traversal-time excludes so fallback grep skips expensive trees
+        # instead of scanning them and filtering output afterward.
+        # No `|| true`: grep returns exit-1 when nothing matches; since this
+        # function is only called inside `if rg_search ...; then` conditionals,
+        # set -e does NOT apply and the caller correctly sees "no match" = false.
+        grep -r -n -E \
+            -I \
+            --exclude-dir=node_modules \
+            --exclude-dir=target \
+            --exclude-dir='pgdata*' \
+            --exclude-dir=bluetooth \
+            --exclude-dir=ble \
+            --exclude-dir=assets \
+            --exclude=BleOutboxRepository.kt \
+            "$pattern" "$dir"
     fi
+}
+
+search_output_matches() {
+    local search_pattern="$1"
+    local dir="$2"
+    local filter_pattern="$3"
+    local search_output
+    search_output="$(rg_search "$search_pattern" "$dir" || true)"
+    [[ -n "$search_output" ]] && printf '%s\n' "$search_output" | grep -E "$filter_pattern" >/dev/null 2>&1
+}
+
+search_output_has_nonmatching_lines() {
+    local search_pattern="$1"
+    local dir="$2"
+    local allowed_pattern="$3"
+    local search_output
+    search_output="$(rg_search "$search_pattern" "$dir" || true)"
+    [[ -n "$search_output" ]] && printf '%s\n' "$search_output" | grep -E -v "$allowed_pattern" >/dev/null 2>&1
+}
+
+search_noncomment_matches() {
+    local search_pattern="$1"
+    local dir="$2"
+    local search_output
+    search_output="$(rg_search "$search_pattern" "$dir" || true)"
+    [[ -n "$search_output" ]] && printf '%s\n' "$search_output" | grep -E -v '^[[:space:]]*([#/]{1,3}|/\*+|\*|\*/)' >/dev/null 2>&1
 }
 
 # Code directories to scan
@@ -64,12 +104,12 @@ TYPE_DATA_PATTERN="${TYPE_PATTERN}.*${DATA_PATTERN}|${DATA_PATTERN}.*${TYPE_PATT
 for dir in "${CODE_DIRS[@]}"; do
     if [[ -d "$dir" ]]; then
         # Look for JSON encoding with forbidden envelope keys (type/data)
-        if rg_search "$JSON_STRINGIFY" "$dir" | rg -n "$TYPE_DATA_PATTERN" >/dev/null 2>&1; then
+        if search_output_matches "$JSON_STRINGIFY" "$dir" "$TYPE_DATA_PATTERN"; then
             report_violation "JSON ENVELOPE USAGE" "Found JSON encode with type/data keys in $dir - must use protobuf envelopes"
             found_json=true
         fi
         # Look for fetch with JSON body containing type/data
-        if rg_search "fetch.*body.*${JSON_STRINGIFY}" "$dir" | rg -n "$TYPE_DATA_PATTERN" >/dev/null 2>&1; then
+        if search_output_matches "fetch.*body.*${JSON_STRINGIFY}" "$dir" "$TYPE_DATA_PATTERN"; then
             report_violation "JSON FETCH USAGE" "Found fetch with JSON body containing type/data in $dir - must use protobuf envelopes"
             found_json=true
         fi
@@ -85,12 +125,12 @@ version_violations=false
 for dir in "${CODE_DIRS[@]}"; do
     if [[ -d "$dir" ]]; then
         # Look for explicit Envelope version assignments that aren't 3
-        if rg_search "Envelope[^\n]*version[[:space:]]*[:=][[:space:]]*[0-9]+" "$dir" | rg -n -v "version[[:space:]]*[:=][[:space:]]*3" >/dev/null 2>&1; then
+        if search_output_has_nonmatching_lines "Envelope[^\n]*version[[:space:]]*[:=][[:space:]]*[0-9]+" "$dir" "version[[:space:]]*[:=][[:space:]]*3"; then
             report_violation "INVALID ENVELOPE VERSION" "Found Envelope version assignment other than 3 in $dir"
             version_violations=true
         fi
         # Look for Envelope version comparisons not targeting v3
-        if rg_search "Envelope[^\n]*version[[:space:]]*[!=<>]=?[[:space:]]*[0-9]+|envelope[^\n]*version[[:space:]]*[!=<>]=?[[:space:]]*[0-9]+" "$dir" | rg -n -v "version[[:space:]]*[!=<>]=?[[:space:]]*3" >/dev/null 2>&1; then
+        if search_output_has_nonmatching_lines "Envelope[^\n]*version[[:space:]]*[!=<>]=?[[:space:]]*[0-9]+|envelope[^\n]*version[[:space:]]*[!=<>]=?[[:space:]]*[0-9]+" "$dir" "version[[:space:]]*[!=<>]=?[[:space:]]*3"; then
             report_violation "INVALID ENVELOPE VERSION" "Found Envelope version comparison not targeting v3 in $dir"
             version_violations=true
         fi
@@ -109,7 +149,7 @@ forbidden_violations=false
 for field in "${forbidden_fields[@]}"; do
     for dir in "${CODE_DIRS[@]}"; do
         if [[ -d "$dir" ]]; then
-            if rg_search "$field" "$dir" >/dev/null 2>&1; then
+            if search_noncomment_matches "$field" "$dir"; then
                 report_violation "FORBIDDEN FIELD USAGE" "Found forbidden field '$field' in $dir - must use device_id, chain_tip"
                 forbidden_violations=true
             fi

@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# .githooks/pre-commit
+# Fast checks that run on every commit (<10s).
+# Install once with: bash scripts/install-hooks.sh
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+pass() { echo -e "${GREEN}✓${NC} $1"; }
+fail() { echo -e "${RED}✗${NC} $1"; exit 1; }
+info() { echo -e "${YELLOW}▶${NC} $1"; }
+
+echo ""
+echo "┌─────────────────────────────────────────┐"
+echo "│          DSM pre-commit checks          │"
+echo "└─────────────────────────────────────────┘"
+echo ""
+
+# ---------------------------------------------------------------------------
+# 1. Merge conflict markers
+# ---------------------------------------------------------------------------
+info "Checking for merge conflict markers..."
+conflict_files=$(git diff --cached --name-only | xargs grep -l "^<<<<<<< \|^=======$\|^>>>>>>> " 2>/dev/null || true)
+if [[ -n "$conflict_files" ]]; then
+  fail "Merge conflict markers found in:\n$conflict_files"
+fi
+pass "No merge conflict markers"
+
+# ---------------------------------------------------------------------------
+# 2. cargo fmt
+# ---------------------------------------------------------------------------
+info "Checking Rust formatting..."
+if ! cargo fmt --all -- --check 2>&1; then
+  fail "cargo fmt failed — run 'cargo fmt --all' to fix"
+fi
+pass "cargo fmt"
+
+# ---------------------------------------------------------------------------
+# 3. Protocol purity: no wall-clock, no JSON on protocol path
+# ---------------------------------------------------------------------------
+info "Checking protocol purity (no wall-clock / no JSON)..."
+if command -v rg &>/dev/null; then
+  bash ci/no_clock_and_no_json.sh
+  pass "Protocol purity (no_clock_and_no_json)"
+else
+  echo -e "${YELLOW}  SKIP${NC} ripgrep (rg) not found — install it for protocol purity checks"
+fi
+
+# ---------------------------------------------------------------------------
+# 4. Forbidden symbols
+# ---------------------------------------------------------------------------
+info "Checking forbidden symbols..."
+bash scripts/check_forbidden_symbols.sh
+pass "Forbidden symbols"
+
+# ---------------------------------------------------------------------------
+# 5. Flow assertions
+# ---------------------------------------------------------------------------
+info "Checking flow assertions..."
+bash scripts/flow_assertions.sh
+pass "Flow assertions"
+
+info "Checking flow mapping assertions..."
+bash scripts/flow_mapping_assertions.sh
+pass "Flow mapping assertions"
+
+# ---------------------------------------------------------------------------
+# 6. Canonical bilateral gates
+# ---------------------------------------------------------------------------
+info "Checking canonical bilateral gates..."
+bash ci/canonical_bilateral_gates.sh
+pass "Canonical bilateral gates"
+
+echo ""
+echo -e "${GREEN}All pre-commit checks passed.${NC}"
+echo ""

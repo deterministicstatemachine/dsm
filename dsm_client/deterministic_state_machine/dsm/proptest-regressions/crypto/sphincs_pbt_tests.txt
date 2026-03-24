@@ -6,3 +6,4 @@
 # everyone who runs the test benefits from these saved cases.
 cc 6d3c6dbaf98fd82e8b927e76ef4e411750d7b2340328315d5430e096bd5f10f4 # shrinks to msg = []
 cc 2256228cfe5a50b2ee3bc2727354573d6545191e702089f5be5dde8cbb4abd06 # shrinks to msg = [251, 154, 146, 166, 27, 150, 33, 10, 252, 192, 80, 139, 214, 240, 55, 66, 39, 124, 197, 218, 45, 12, 130, 208, 236, 49], flip_idx = Index(9365659942646916523)
+cc 923abe08da90c6e9b515b7ce642509c928233785d109ea264c475716408cd5a6 # shrinks to msg = []
