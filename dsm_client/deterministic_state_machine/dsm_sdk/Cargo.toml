@@ -127,7 +127,7 @@ crc32fast = "1.3.2"
 # Metrics and instrumentation
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
-metrics = "0.21.1"
+metrics = "0.24.3"
 
 # Utilities
 bip39 = "2.0.0"
