@@ -43,7 +43,7 @@ perf-metrics = []
 # opt-in: make KEK depend on STRICT env + HW timing (may vary across restarts)
 softvault-kek-strict = []
 [build-dependencies]
-cbindgen = "0.28.0"
+cbindgen = "0.29.2"
 blake3 = "1.5.0"
 anyhow = "1.0"
 prost = "0.13"
