@@ -641,7 +641,7 @@ impl State {
 
         // Token balances must be sorted for deterministic ordering
         let mut sorted_balances: Vec<(&String, &Balance)> = self.token_balances.iter().collect();
-        sorted_balances.sort_by(|(k1, _), (k2, _)| k1.cmp(k2));
+        sorted_balances.sort_by_key(|(k, _)| *k);
         for (token_id, balance) in sorted_balances {
             hasher.update(token_id.as_bytes());
             let balance_bytes = balance.to_le_bytes();
@@ -699,7 +699,7 @@ impl State {
         // Add token balances in a deterministic, canonicalized order (sorted by key)
         // This ensures balance verification while allowing pre-commitment flexibility
         let mut sorted_balances: Vec<(&String, &Balance)> = self.token_balances.iter().collect();
-        sorted_balances.sort_by(|(k1, _), (k2, _)| k1.cmp(k2));
+        sorted_balances.sort_by_key(|(k, _)| *k);
 
         for (token_id, balance) in sorted_balances {
             balance_data.extend_from_slice(token_id.as_bytes());
@@ -973,7 +973,7 @@ impl State {
 
         // Token balances (sorted by key)
         let mut entries: Vec<(&String, &Balance)> = self.token_balances.iter().collect();
-        entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+        entries.sort_by_key(|(k, _)| *k);
         put_u32(&mut out, entries.len() as u32);
         for (k, v) in entries {
             put_str(&mut out, k);

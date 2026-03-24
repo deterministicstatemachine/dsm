@@ -17,10 +17,10 @@ use dsm::core::bilateral_transaction_manager::BilateralTransactionManager;
 use dsm::types::operations::Operation;
 use dsm::types::token_types::Balance;
 use dsm_sdk as sdk;
-use sdk::bluetooth::bilateral_ble_handler::BilateralBleHandler;
-use sdk::handlers::bilateral_settlement::DefaultBilateralSettlementDelegate;
 use dsm_sdk::storage::client_db;
 use dsm_sdk::util::text_id;
+use sdk::bluetooth::bilateral_ble_handler::BilateralBleHandler;
+use sdk::handlers::bilateral_settlement::DefaultBilateralSettlementDelegate;
 use serial_test::serial;
 
 // ---------------------------------------------------------------------------
@@ -74,7 +74,7 @@ fn configure_local_identity_for_receipts(
     device_id: [u8; 32],
     genesis_hash: [u8; 32],
     public_key: Vec<u8>,
-) {
+) -> Result<(), Box<dyn std::error::Error>> {
     sdk::sdk::app_state::AppState::set_identity_info(
         device_id.to_vec(),
         public_key,
@@ -84,7 +84,7 @@ fn configure_local_identity_for_receipts(
     sdk::sdk::app_state::AppState::set_has_identity(true);
 
     let stored_root = sdk::sdk::app_state::AppState::get_device_tree_root()
-        .expect("device_tree_root must be derived from local identity");
+        .ok_or("device_tree_root must be derived from local identity")?;
     let expected_root = dsm::common::device_tree::DeviceTree::single(device_id).root();
     assert_eq!(
         stored_root.as_slice(),
@@ -96,6 +96,7 @@ fn configure_local_identity_for_receipts(
         Some(genesis_hash.to_vec()),
         "AppState must expose the local genesis hash for receipt construction"
     );
+    Ok(())
 }
 
 /// Build a genesis state with ERA balance, archive to BCR, and install as the
@@ -164,10 +165,11 @@ struct TwoDeviceSetup {
 }
 
 async fn setup_two_devices(a_id: u8, b_id: u8, sender_era: u64) -> TwoDeviceSetup {
+    assert_ne!(a_id, b_id, "Device IDs for A and B must be distinct");
     let a_dev = dev(a_id);
-    let b_dev = dev(a_id + 1); // distinct from a
-    let a_gen = dev(a_id + 0x10);
-    let b_gen = dev(b_id + 0x10);
+    let b_dev = dev(b_id);
+    let a_gen = dev(a_id.wrapping_add(0x10));
+    let b_gen = dev(b_id.wrapping_add(0x10));
 
     let a_kp = dsm::crypto::signatures::SignatureKeyPair::generate_from_entropy(b"a-kp")
         .unwrap_or_else(|e| panic!("a keypair failed: {e}"));
@@ -339,14 +341,16 @@ async fn bilateral_offline_prepare_accept_commit_finalize_flow() {
         .unwrap_or_else(|e| panic!("create_accept failed: {e}"));
 
     // Phase 3: Confirm (sender finalizes + settlement)
-    configure_local_identity_for_receipts(s.a_dev, s.a_gen, s.a_kp.public_key().to_vec());
+    configure_local_identity_for_receipts(s.a_dev, s.a_gen, s.a_kp.public_key().to_vec())
+        .unwrap_or_else(|e| panic!("configure identity for a failed: {e}"));
     let (confirm_envelope, _meta) = handler_a
         .handle_prepare_response(&accept_envelope)
         .await
         .unwrap_or_else(|e| panic!("handle_prepare_response failed: {e}"));
 
     // Phase 3: Confirm (receiver finalizes + settlement)
-    configure_local_identity_for_receipts(s.b_dev, s.b_gen, s.b_kp.public_key().to_vec());
+    configure_local_identity_for_receipts(s.b_dev, s.b_gen, s.b_kp.public_key().to_vec())
+        .unwrap_or_else(|e| panic!("configure identity for b failed: {e}"));
     let _meta = handler_b
         .handle_confirm_request(&confirm_envelope)
         .await
@@ -445,13 +449,15 @@ async fn bilateral_offline_state_consistency_across_peers() {
         .await
         .unwrap_or_else(|e| panic!("create_accept failed: {e}"));
 
-    configure_local_identity_for_receipts(s.a_dev, s.a_gen, s.a_kp.public_key().to_vec());
+    configure_local_identity_for_receipts(s.a_dev, s.a_gen, s.a_kp.public_key().to_vec())
+        .unwrap_or_else(|e| panic!("configure identity for a failed: {e}"));
     let (confirm_envelope, _meta) = handler_a
         .handle_prepare_response(&accept_envelope)
         .await
         .unwrap_or_else(|e| panic!("handle_prepare_response failed: {e}"));
 
-    configure_local_identity_for_receipts(s.b_dev, s.b_gen, s.b_kp.public_key().to_vec());
+    configure_local_identity_for_receipts(s.b_dev, s.b_gen, s.b_kp.public_key().to_vec())
+        .unwrap_or_else(|e| panic!("configure identity for b failed: {e}"));
     let _meta = handler_b
         .handle_confirm_request(&confirm_envelope)
         .await
@@ -513,8 +519,10 @@ async fn bilateral_offline_state_consistency_across_peers() {
         .await
         .verify_relationship_integrity(&s.b_dev)
         .unwrap_or_else(|e| panic!("verify relationship integrity on a failed: {e}")));
-    s.b.read()
+    assert!(s
+        .b
+        .read()
         .await
         .verify_relationship_integrity(&s.a_dev)
-        .unwrap_or_else(|e| panic!("verify relationship integrity on b failed: {:?}", e));
+        .unwrap_or_else(|e| panic!("verify relationship integrity on b failed: {:?}", e)));
 }

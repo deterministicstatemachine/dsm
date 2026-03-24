@@ -1314,7 +1314,7 @@ impl WalletSDK {
         );
         let protocol_event = {
             use crate::storage::client_db::{
-                advance_system_peer_tip, get_system_peer, store_system_peer, SystemPeerRecord,
+                advance_system_chain_tip, get_system_peer, store_system_peer, SystemPeerRecord,
                 SystemPeerType,
             };
 
@@ -1378,7 +1378,7 @@ impl WalletSDK {
                 }
             }
 
-            advance_system_peer_tip(
+            advance_system_chain_tip(
                 ERA_SOURCE_DLV_PEER_KEY,
                 SystemPeerType::Dlv,
                 &expected_parent_tip,

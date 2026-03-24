@@ -405,7 +405,7 @@ impl BilateralBleHandler {
             return 0;
         }
 
-        terminal_sessions.sort_by(|a, b| b.created_at_step.cmp(&a.created_at_step));
+        terminal_sessions.sort_by_key(|b| std::cmp::Reverse(b.created_at_step));
 
         let mut pruned = 0;
         for record in terminal_sessions
