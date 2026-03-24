@@ -2431,6 +2431,10 @@ impl AppRouter for AppRouterImpl {
         }
     }
 
+    fn get_device_current_state(&self) -> Option<dsm::types::state_types::State> {
+        self.core_sdk.get_current_state().ok()
+    }
+
     // ====================== QUERY ======================
     async fn query(&self, q: AppQuery) -> AppResult {
         self.ensure_bitcoin_tap_restored().await;

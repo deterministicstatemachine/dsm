@@ -2389,6 +2389,8 @@ impl BilateralBleHandler {
                 tx_type: "bilateral_offline",
                 new_chain_tip: [0u8; 32],
                 canonical_state: Some(finalized_local_state.clone()),
+                device_canonical_state: crate::bridge::app_router()
+                    .and_then(|r| r.get_device_current_state()),
             };
             let outcome = delegate.settle(ctx).map_err(|e| {
                 DsmError::invalid_operation(format!(
@@ -2936,6 +2938,8 @@ impl BilateralBleHandler {
                     tx_type: "bilateral_offline",
                     new_chain_tip,
                     canonical_state: Some(tx_result.local_state.clone()),
+                    device_canonical_state: crate::bridge::app_router()
+                        .and_then(|r| r.get_device_current_state()),
                 };
                 match delegate.settle(ctx) {
                     Ok(outcome) => (outcome, None),
@@ -3339,6 +3343,8 @@ impl BilateralBleHandler {
                         tx_type: "bilateral_offline",
                         new_chain_tip: [0u8; 32],
                         canonical_state: Some(result.local_state.clone()),
+                        device_canonical_state: crate::bridge::app_router()
+                            .and_then(|r| r.get_device_current_state()),
                     };
                     delegate
                         .settle(ctx)
@@ -3461,6 +3467,8 @@ impl BilateralBleHandler {
                         tx_type: "bilateral_offline_recovered",
                         new_chain_tip: [0u8; 32],
                         canonical_state: None,
+                        device_canonical_state: crate::bridge::app_router()
+                            .and_then(|r| r.get_device_current_state()),
                     };
                     if let Err(e) = delegate.settle(ctx) {
                         warn!("[BILATERAL RECOVERY] Sender settlement failed (recovery path): {e}");

@@ -172,11 +172,26 @@ pub fn is_database_initialized() -> bool {
 /// SQLITE_LOCKED_SHAREDCACHE errors that occur when a concurrent test
 /// still holds an Arc clone to the previous shared-cache connection.
 pub fn reset_database_for_tests() {
-    #[cfg(test)]
-    let _test_db_lifecycle_guard = TEST_DB_LIFECYCLE_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-
+    // Drop all user tables before releasing the connection so the shared
+    // in-memory DB (`mode=memory&cache=shared`) starts clean for the next
+    // test.  Simply clearing the connection handle is not enough because
+    // the shared cache keeps the database alive.
+    if let Ok(guard) = DB_CONNECTION.read() {
+        if let Some(ref arc_conn) = *guard {
+            if let Ok(conn) = arc_conn.lock() {
+                let tables: Vec<String> = conn
+                    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+                    .and_then(|mut stmt| {
+                        stmt.query_map([], |row| row.get::<_, String>(0))
+                            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                    })
+                    .unwrap_or_default();
+                for table in &tables {
+                    let _ = conn.execute(&format!("DELETE FROM \"{table}\""), []);
+                }
+            }
+        }
+    }
     if let Ok(mut guard) = DB_CONNECTION.write() {
         *guard = None;
     }
