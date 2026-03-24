@@ -915,32 +915,41 @@ impl AppRouterImpl {
                                                             // §4.3 finalize: Update receiver's Per-Device SMT with verified h_{n+1}
                                                             // Collect pre/post roots and inclusion proofs for receiver's archival receipt.
                                                             // Use the independently recomputed tip (not the sender's claimed value).
-                                                            let (recv_smt_pre, recv_smt_post, recv_parent_bytes, recv_child_bytes) = {
-                                                                if let Some(smt) = crate::security::shared_smt::get_shared_smt() {
-                                                                    let mut smt_guard = smt.write().await;
-                                                                    let pre_root = *smt_guard.root();
-                                                                    let parent_bytes = smt_guard.get_inclusion_proof(&smt_key, 256).ok()
-                                                                        .as_ref().map(crate::sdk::receipts::serialize_inclusion_proof)
-                                                                        .unwrap_or_default();
-                                                                    if let Err(e) = smt_guard.update_leaf(&smt_key, &expected_h_next) {
-                                                                        log::warn!(
-                                                                            "[storage.sync] §4.3 Receiver SMT update_leaf failed for tx {}: {}",
+                                                            // §4.2: Atomic SMT-Replace via core — hard-fail on error.
+                                                            let smt_result = {
+                                                                let Some(smt) = crate::security::shared_smt::get_shared_smt() else {
+                                                                    log::error!(
+                                                                        "[storage.sync] §4.3 REJECTED: Per-Device SMT not initialized — \
+                                                                         cannot verify or produce inclusion proofs for tx {}",
+                                                                        entry.transaction_id
+                                                                    );
+                                                                    continue;
+                                                                };
+                                                                let mut smt_guard = smt.write().await;
+                                                                match smt_guard.smt_replace(&smt_key, &expected_h_next) {
+                                                                    Ok(r) => {
+                                                                        log::info!(
+                                                                            "[storage.sync] §4.3 Receiver SMT updated: pre={:?}.. post={:?}.. tx={}",
+                                                                            &r.pre_root[..4], &r.post_root[..4], entry.transaction_id
+                                                                        );
+                                                                        r
+                                                                    }
+                                                                    Err(e) => {
+                                                                        log::error!(
+                                                                            "[storage.sync] §4.3 REJECTED: Receiver SMT-Replace failed for tx {}: {} \
+                                                                             — cannot produce valid receipt",
                                                                             entry.transaction_id, e
                                                                         );
+                                                                        continue;
                                                                     }
-                                                                    let post_root = *smt_guard.root();
-                                                                    let child_bytes = smt_guard.get_inclusion_proof(&smt_key, 256).ok()
-                                                                        .as_ref().map(crate::sdk::receipts::serialize_inclusion_proof)
-                                                                        .unwrap_or_default();
-                                                                    log::info!(
-                                                                        "[storage.sync] §4.3 Receiver SMT updated: pre={:?}.. post={:?}.. tx={}",
-                                                                        &pre_root[..4], &post_root[..4], entry.transaction_id
-                                                                    );
-                                                                    (pre_root, post_root, parent_bytes, child_bytes)
-                                                                } else {
-                                                                    ([0u8; 32], [0u8; 32], Vec::new(), Vec::new())
                                                                 }
                                                             };
+                                                            let (recv_smt_pre, recv_smt_post, recv_parent_bytes, recv_child_bytes) = (
+                                                                smt_result.pre_root,
+                                                                smt_result.post_root,
+                                                                smt_result.parent_proof.to_bytes(),
+                                                                smt_result.child_proof.to_bytes(),
+                                                            );
 
                                                                 // Advance shared chain tip using the verified h_{n+1}
                                                                 match crate::storage::client_db::try_advance_finalized_bilateral_chain_tip(
