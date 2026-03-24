@@ -93,7 +93,7 @@ pub fn collect_bilateral_throughput_results(iterations: u64) -> BilateralThrough
     let seed = [55u8; 32];
     eprintln!("  Measuring SPHINCS+ keygen cost...");
     let keygen_start = Instant::now();
-    let kp = generate_keypair_from_seed(SphincsVariant::SPX256s, &seed).expect("SPHINCS+ keygen");
+    let kp = generate_keypair_from_seed(SphincsVariant::SPX256f, &seed).expect("SPHINCS+ keygen");
     let keygen_cost_ms = keygen_start.elapsed().as_secs_f64() * 1000.0;
     eprintln!("    keygen: {keygen_cost_ms:.1}ms");
 
@@ -237,18 +237,29 @@ fn benchmark_with_signing(
 // ---------------------------------------------------------------------------
 
 fn benchmark_without_signing(seed: &[u8; 32], pk: &[u8], iterations: u64) -> ThroughputDataPoint {
+    // Pre-generate a signing key so Generic ops satisfy the signature requirement.
+    // The signing cost is excluded from timing below (only execute_transition is timed).
+    let kp = generate_keypair_from_seed(SphincsVariant::SPX256f, seed).expect("keygen");
+    let sk = &kp.secret_key;
+
     let (_state, mut machine) = make_genesis(seed, pk);
     let mut latencies_us = Vec::with_capacity(iterations as usize);
 
     let bench_start = Instant::now();
 
     for i in 0..iterations {
-        let op = Operation::Generic {
+        let mut op = Operation::Generic {
             operation_type: "bench".into(),
             data: i.to_le_bytes().to_vec(),
             message: String::new(),
             signature: vec![],
         };
+        // Sign before timing — we're isolating state machine cost only.
+        let bytes = op.to_bytes();
+        let sig = sphincs_sign(sk, &bytes).expect("sign");
+        if let Operation::Generic { signature, .. } = &mut op {
+            *signature = sig;
+        }
 
         let iter_start = Instant::now();
         match machine.execute_transition(op) {

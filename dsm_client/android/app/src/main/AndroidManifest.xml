@@ -99,20 +99,16 @@
             </intent-filter>
         </activity>
 
-        <!-- NFC Recovery Activity (handles NDEF capsules - READ) -->
+        <!-- NFC Recovery Activity (handles NDEF capsules - READ).
+             No NDEF_DISCOVERED intent filter — the ring must not auto-trigger
+             this activity just by being near the phone.  Reading only happens
+             when the user is on the recovery screen and Kotlin explicitly
+             launches this activity via enableReaderMode, same as NfcWriteActivity. -->
         <activity
             android:name="com.dsm.wallet.recovery.NfcRecoveryActivity"
-            android:exported="true"
+            android:exported="false"
             android:launchMode="singleTop"
-            android:configChanges="orientation|keyboardHidden|screenSize">
-            <intent-filter>
-                <action android:name="android.nfc.action.NDEF_DISCOVERED" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <!-- Accept generic text or application-specific mime types -->
-                <data android:mimeType="text/plain" />
-                <data android:mimeType="application/vnd.dsm.recovery" />
-            </intent-filter>
-        </activity>
+            android:configChanges="orientation|keyboardHidden|screenSize" />
 
         <!-- NFC Write Activity (writes recovery capsules to NFC ring - WRITE) -->
         <activity

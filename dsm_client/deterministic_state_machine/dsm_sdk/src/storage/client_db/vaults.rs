@@ -213,7 +213,7 @@ pub fn remove_oldest_active_vault(min_amount_sats: u64) -> Result<Option<String>
 }
 
 /// Delete ALL rows from vault_store, vault_records, in_flight_withdrawals,
-/// in_flight_withdrawal_legs, and zero dBTC token_balances.
+/// in_flight_withdrawal_legs, and DLV receipts.
 /// Used for full vault data wipe (e.g., after policy commit migration).
 pub fn wipe_all_vault_data() -> Result<u64> {
     let binding = get_connection()?;
@@ -226,8 +226,6 @@ pub fn wipe_all_vault_data() -> Result<u64> {
     total += conn.execute("DELETE FROM vault_records", [])? as u64;
     total += conn.execute("DELETE FROM in_flight_withdrawals", [])? as u64;
     total += conn.execute("DELETE FROM in_flight_withdrawal_legs", [])? as u64;
-    // Zero dBTC balances (token_id = 'dBTC')
-    total += conn.execute("DELETE FROM token_balances WHERE token_id = 'dBTC'", [])? as u64;
     // Delete DLV receipts (vault completion proofs from old policy)
     total += conn.execute("DELETE FROM dlv_receipts", [])? as u64;
     log::info!("[wipe] deleted {total} total rows from vault/dBTC tables");

@@ -164,7 +164,7 @@ impl BilateralStorageSDK {
     /// Enforces:
     /// - relationship_key is 32 bytes
     /// - relationship_key == smt_proof.key
-    /// - relationship_key == compute_relationship_key(local_dev, remote_dev)
+    /// - relationship_key == compute_smt_key(local_dev, remote_dev)
     #[allow(clippy::too_many_arguments)]
     pub fn build_bilateral_state_checked(
         remote_device_id: &[u8; 32],
@@ -187,7 +187,7 @@ impl BilateralStorageSDK {
         }
 
         let local_dev = crate::get_sdk_context().device_id_array();
-        let expected_key = dsm::verification::smt_replace_witness::compute_relationship_key(
+        let expected_key = dsm::verification::smt_replace_witness::compute_smt_key(
             &local_dev,
             remote_device_id,
         );
@@ -1123,7 +1123,7 @@ impl BilateralStorageSDK {
         let local_dev = crate::get_sdk_context().device_id_array();
         let mut remote_dev = [0u8; 32];
         remote_dev.copy_from_slice(remote_device_id);
-        let expected_key = dsm::verification::smt_replace_witness::compute_relationship_key(
+        let expected_key = dsm::verification::smt_replace_witness::compute_smt_key(
             &local_dev,
             &remote_dev,
         );
@@ -1262,7 +1262,7 @@ impl BilateralStorageSDK {
         let local_dev = crate::get_sdk_context().device_id_array();
         let mut remote_dev = [0u8; 32];
         remote_dev.copy_from_slice(_remote_device_id);
-        let expected_key = dsm::verification::smt_replace_witness::compute_relationship_key(
+        let expected_key = dsm::verification::smt_replace_witness::compute_smt_key(
             &local_dev,
             &remote_dev,
         );

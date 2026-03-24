@@ -1008,6 +1008,7 @@ dependencies = [
  "bitflags 2.10.0",
  "blake3",
  "bytes",
+ "chacha20poly1305",
  "clap",
  "constant_time_eq 0.3.1",
  "crc32fast",

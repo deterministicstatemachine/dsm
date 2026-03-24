@@ -2,7 +2,7 @@
 //! Persisted sender-side online transition gating.
 
 use anyhow::{anyhow, Result};
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 
 use super::get_connection;
 use super::types::PendingOnlineOutboxRecord;
@@ -26,6 +26,11 @@ pub fn store_pending_online_outbox(
     if message_id.trim().is_empty() {
         return Err(anyhow!("message_id cannot be empty"));
     }
+    if parent_tip == next_tip {
+        return Err(anyhow!(
+            "Pending online outbox requires next_tip != parent_tip"
+        ));
+    }
 
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|poisoned| {
@@ -33,15 +38,31 @@ pub fn store_pending_online_outbox(
         poisoned.into_inner()
     });
 
+    let existing: Option<(String, Vec<u8>, Vec<u8>)> = conn
+        .query_row(
+            "SELECT message_id, parent_tip, next_tip
+               FROM pending_online_outbox
+              WHERE counterparty_device_id = ?1",
+            params![counterparty_device_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    if let Some((existing_message_id, existing_parent_tip, existing_next_tip)) = existing {
+        if existing_message_id == message_id
+            && existing_parent_tip == parent_tip
+            && existing_next_tip == next_tip
+        {
+            return Ok(());
+        }
+        return Err(anyhow!(
+            "Pending online outbox already contains a different gate for this counterparty"
+        ));
+    }
+
     conn.execute(
         "INSERT INTO pending_online_outbox (
             counterparty_device_id, message_id, parent_tip, next_tip, created_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(counterparty_device_id) DO UPDATE SET
-            message_id = excluded.message_id,
-            parent_tip = excluded.parent_tip,
-            next_tip = excluded.next_tip,
-            created_at = excluded.created_at",
+         ) VALUES (?1, ?2, ?3, ?4, ?5)",
         params![
             counterparty_device_id,
             message_id,
@@ -77,6 +98,11 @@ pub fn record_pending_online_transition(
     if message_id.trim().is_empty() {
         return Err(anyhow!("message_id cannot be empty"));
     }
+    if parent_tip == next_tip {
+        return Err(anyhow!(
+            "Pending online transition requires next_tip different from parent_tip"
+        ));
+    }
 
     let binding = get_connection()?;
     let mut conn = binding.lock().unwrap_or_else(|poisoned| {
@@ -85,6 +111,73 @@ pub fn record_pending_online_transition(
     });
 
     let tx = conn.transaction()?;
+    let existing_gate: Option<(String, Vec<u8>, Vec<u8>)> = tx
+        .query_row(
+            "SELECT message_id, parent_tip, next_tip
+               FROM pending_online_outbox
+              WHERE counterparty_device_id = ?1",
+            params![counterparty_device_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let existing_gate_is_identical = matches!(
+        existing_gate.as_ref(),
+        Some((existing_message_id, existing_parent_tip, existing_next_tip))
+            if existing_message_id == message_id
+                && existing_parent_tip == parent_tip
+                && existing_next_tip == next_tip
+    );
+    if existing_gate.is_some() && !existing_gate_is_identical {
+        return Err(anyhow!(
+            "Pending online transition already exists with a different gate for this counterparty"
+        ));
+    }
+
+    let contact_row: Option<(Option<Vec<u8>>, Option<Vec<u8>>)> = tx
+        .query_row(
+            "SELECT chain_tip, local_bilateral_chain_tip
+               FROM contacts
+              WHERE device_id = ?1",
+            params![counterparty_device_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let (current_chain_tip, current_local_tip) = match contact_row {
+        Some(row) => row,
+        None => {
+            return Err(anyhow!(
+                "Cannot persist pending online transition for unknown contact"
+            ));
+        }
+    };
+
+    let stored_parent = current_chain_tip.unwrap_or_else(|| vec![0u8; 32]);
+    if stored_parent.len() != 32 {
+        return Err(anyhow!(
+            "Stored finalized chain tip has invalid length {}",
+            stored_parent.len()
+        ));
+    }
+    if stored_parent != parent_tip {
+        return Err(anyhow!(
+            "Pending online transition parent does not match finalized canonical chain tip"
+        ));
+    }
+
+    if let Some(local_tip) = current_local_tip {
+        if local_tip.len() != 32 {
+            return Err(anyhow!(
+                "Stored local bilateral chain tip has invalid length {}",
+                local_tip.len()
+            ));
+        }
+        if local_tip != parent_tip && !(existing_gate_is_identical && local_tip == next_tip) {
+            return Err(anyhow!(
+                "Pending online transition would overwrite a divergent local bilateral chain tip"
+            ));
+        }
+    }
+
     let updated = tx.execute(
         "UPDATE contacts
             SET local_bilateral_chain_tip = ?1
@@ -97,23 +190,20 @@ pub fn record_pending_online_transition(
         ));
     }
 
-    tx.execute(
-        "INSERT INTO pending_online_outbox (
-            counterparty_device_id, message_id, parent_tip, next_tip, created_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(counterparty_device_id) DO UPDATE SET
-            message_id = excluded.message_id,
-            parent_tip = excluded.parent_tip,
-            next_tip = excluded.next_tip,
-            created_at = excluded.created_at",
-        params![
-            counterparty_device_id,
-            message_id,
-            parent_tip,
-            next_tip,
-            tick() as i64,
-        ],
-    )?;
+    if existing_gate.is_none() {
+        tx.execute(
+            "INSERT INTO pending_online_outbox (
+                counterparty_device_id, message_id, parent_tip, next_tip, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                counterparty_device_id,
+                message_id,
+                parent_tip,
+                next_tip,
+                tick() as i64,
+            ],
+        )?;
+    }
 
     tx.commit()?;
     Ok(())

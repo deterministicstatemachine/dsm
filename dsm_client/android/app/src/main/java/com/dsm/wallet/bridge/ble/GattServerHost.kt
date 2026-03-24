@@ -11,6 +11,9 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
@@ -54,6 +57,26 @@ class GattServerHost(private val context: Context) {
     private val cccdEnabledByDevice = ConcurrentHashMap<String, ConcurrentHashMap<UUID, Boolean>>()
     // Completion handlers for chunked notification flow control
     private val notificationCompletions = ConcurrentHashMap<String, CompletableDeferred<Boolean>>()
+    // ACK write-back handlers: client writes [0xFF][chunk_count_hi][chunk_count_lo] to confirm receipt
+    private val chunkAckCompletions = ConcurrentHashMap<String, Channel<Int>>()
+    // Per-device serialization for outbound notification streams. A concurrent send on the same
+    // device would overwrite `notificationCompletions` / `chunkAckCompletions` and corrupt flow control.
+    private val notificationSendLocks = ConcurrentHashMap<String, Mutex>()
+
+    companion object {
+        /** Marker byte for transport-level chunk ACK frames (client → server). */
+        const val CHUNK_ACK_MARKER: Byte = 0xFF.toByte()
+        /** Number of notification chunks to send before pausing for an ACK. */
+        const val NOTIFICATION_WINDOW_SIZE = 10
+        /** Timeout waiting for client ACK write-back per window. */
+        const val ACK_TIMEOUT_MS = 5000L
+        /** Granularity for draining stale ACKs while still honoring ACK_TIMEOUT_MS overall. */
+        private const val ACK_WAIT_SLICE_MS = 250L
+        /** Maximum allowed write buffer size (64KB). Rejects oversized prepared writes to prevent OOM. */
+        private const val MAX_WRITE_BUFFER_SIZE = 65536
+        /** Android GATT max attribute value size for notifications/indications. */
+        private const val MAX_GATT_ATTRIBUTE_VALUE_BYTES = 512
+    }
 
     // GATT server callback
     private val gattServerCallback = object : BluetoothGattServerCallback() {
@@ -367,6 +390,16 @@ class GattServerHost(private val context: Context) {
      * The sender is already connected as a GATT client, so we can push data via notifications.
      */
     @SuppressLint("MissingPermission")
+    /**
+     * Send notification chunks to a GATT client using windowed flow control.
+     *
+     * Sends [NOTIFICATION_WINDOW_SIZE] chunks, then waits for the client to write
+     * back a transport-level ACK confirming receipt before continuing. This prevents
+     * silent notification drops caused by BLE buffer overflow on the remote device.
+     *
+     * The client ACKs by writing [0xFF][hi][lo] to TX_REQUEST, where hi:lo is the
+     * number of chunks received so far. The server detects this in [handleTxWrite].
+     */
     suspend fun sendChunkedNotifications(deviceAddress: String, chunks: Array<ByteArray>): Boolean {
         val server = gattServer.get()
         if (server == null) {
@@ -396,54 +429,119 @@ class GattServerHost(private val context: Context) {
             return false
         }
 
-        Log.i("GattServerHost", "sendChunkedNotifications: sending ${chunks.size} chunks to $deviceAddress")
-        for ((index, chunk) in chunks.withIndex()) {
-            val deferred = CompletableDeferred<Boolean>()
-            notificationCompletions[deviceAddress] = deferred
+        val sendLock = notificationSendLocks.getOrPut(deviceAddress) { Mutex() }
+
+        return sendLock.withLock {
+            Log.i("GattServerHost", "sendChunkedNotifications: sending ${chunks.size} chunks to $deviceAddress (window=$NOTIFICATION_WINDOW_SIZE)")
+            val ackChannel = Channel<Int>(Channel.UNLIMITED)
+            chunkAckCompletions[deviceAddress] = ackChannel
 
             try {
-                val sent: Boolean = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    server.notifyCharacteristicChanged(device, txResponseChar, false, chunk) == BluetoothStatusCodes.SUCCESS
-                } else {
-                    @Suppress("DEPRECATION") txResponseChar.setValue(chunk)
-                    @Suppress("DEPRECATION") server.notifyCharacteristicChanged(device, txResponseChar, false)
-                }
-                if (!sent) {
-                    Log.e("GattServerHost", "sendChunkedNotifications: notifyCharacteristicChanged failed for chunk $index/${chunks.size}")
-                    notificationCompletions.remove(deviceAddress)
-                    return false
-                }
+                for ((index, chunk) in chunks.withIndex()) {
+                    val deferred = CompletableDeferred<Boolean>()
+                    notificationCompletions[deviceAddress] = deferred
 
-                // Wait for onNotificationSent callback (5s timeout per chunk)
-                val success = withTimeoutOrNull(5000) { deferred.await() } ?: false
-                notificationCompletions.remove(deviceAddress)
-                if (!success) {
-                    Log.e("GattServerHost", "sendChunkedNotifications: notification delivery failed/timed out for chunk $index/${chunks.size}")
-                    return false
-                }
-                Log.d("GattServerHost", "sendChunkedNotifications: chunk ${index + 1}/${chunks.size} delivered (${chunk.size} bytes)")
+                    try {
+                        val sent: Boolean = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            server.notifyCharacteristicChanged(device, txResponseChar, false, chunk) == BluetoothStatusCodes.SUCCESS
+                        } else {
+                            @Suppress("DEPRECATION") txResponseChar.setValue(chunk)
+                            @Suppress("DEPRECATION") server.notifyCharacteristicChanged(device, txResponseChar, false)
+                        }
+                        if (!sent) {
+                            Log.e("GattServerHost", "sendChunkedNotifications: notifyCharacteristicChanged failed for chunk $index/${chunks.size}")
+                            notificationCompletions.remove(deviceAddress)
+                            return@withLock false
+                        }
 
-                // Add inter-chunk pacing delay to prevent remote-side BLE buffer overflow.
-                // onNotificationSent only confirms local BLE stack acceptance, NOT remote receipt.
-                // Without pacing, 168+ chunks can overwhelm the remote's notification buffer,
-                // causing ~15% silent drops (e.g. 27/168 chunks lost).
-                // Batch strategy: small delay every chunk, slightly longer every 20 chunks.
-                if (index < chunks.size - 1) {
-                    if ((index + 1) % 20 == 0) {
-                        kotlinx.coroutines.delay(15)  // Longer pause every 20 chunks
-                    } else {
-                        kotlinx.coroutines.delay(3)   // Brief 3ms pause per chunk
+                        // Wait for onNotificationSent callback (5s timeout per chunk). If the platform fails to deliver this callback,
+                        // continue instead of aborting; final stream progress is protected by the window ACK fallback.
+                        val success = withTimeoutOrNull(5000) { deferred.await() }
+                        notificationCompletions.remove(deviceAddress)
+                        if (success == null) {
+                            Log.w("GattServerHost", "sendChunkedNotifications: onNotificationSent timeout for chunk $index/${chunks.size}; continuing")
+                        } else if (!success) {
+                            Log.w("GattServerHost", "sendChunkedNotifications: onNotificationSent reported failure for chunk $index/${chunks.size}; continuing")
+                        }
+
+                        // Inter-chunk pacing: 10ms between chunks within a window
+                        if (index < chunks.size - 1) {
+                            kotlinx.coroutines.delay(10)
+                        }
+
+                        // Windowed flow control: after every WINDOW_SIZE chunks, wait for client ACK.
+                        // The client only emits an ACK on exact window boundaries, not on a final partial window.
+                        val chunkNum = index + 1
+                        val isWindowBoundary = chunkNum % NOTIFICATION_WINDOW_SIZE == 0
+                        val isLastChunk = chunkNum == chunks.size
+                        if (isWindowBoundary) {
+                            Log.d("GattServerHost", "sendChunkedNotifications: waiting for ACK after chunk $chunkNum/${chunks.size}")
+
+                            var ackCount: Int? = null
+                            repeat((ACK_TIMEOUT_MS / ACK_WAIT_SLICE_MS).toInt()) {
+                                if (ackCount != null) return@repeat
+
+                                val candidate = withTimeoutOrNull(ACK_WAIT_SLICE_MS) { ackChannel.receive() } ?: return@repeat
+                                if (candidate >= chunkNum) {
+                                    ackCount = candidate
+                                    return@repeat
+                                }
+
+                                Log.w(
+                                    "GattServerHost",
+                                    "sendChunkedNotifications: stale ACK $candidate while waiting for $chunkNum/${chunks.size}; continuing to wait"
+                                )
+                            }
+
+                            if (ackCount == null) {
+                                // ACK timeout — client may not support windowed ACK (older version).
+                                // Fall back to pacing-only mode for remaining chunks.
+                                Log.w("GattServerHost", "sendChunkedNotifications: ACK timeout at chunk $chunkNum/${chunks.size}; falling back to pacing-only")
+                                // Continue sending remaining chunks with aggressive pacing
+                                for (remaining in (index + 1) until chunks.size) {
+                                    val fallbackDeferred = CompletableDeferred<Boolean>()
+                                    notificationCompletions[deviceAddress] = fallbackDeferred
+
+                                    val fbSent: Boolean = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                        server.notifyCharacteristicChanged(device, txResponseChar, false, chunks[remaining]) == BluetoothStatusCodes.SUCCESS
+                                    } else {
+                                        @Suppress("DEPRECATION") txResponseChar.setValue(chunks[remaining])
+                                        @Suppress("DEPRECATION") server.notifyCharacteristicChanged(device, txResponseChar, false)
+                                    }
+                                    if (!fbSent) {
+                                        notificationCompletions.remove(deviceAddress)
+                                        return@withLock false
+                                    }
+                                    val fbOk = withTimeoutOrNull(5000) { fallbackDeferred.await() }
+                                    notificationCompletions.remove(deviceAddress)
+                                    if (fbOk == false) return@withLock false
+                                    kotlinx.coroutines.delay(15) // Conservative pacing in fallback
+                                }
+                                Log.i("GattServerHost", "sendChunkedNotifications: all ${chunks.size} chunks sent (pacing-only fallback)")
+                                return@withLock true
+                            }
+
+                            Log.d("GattServerHost", "sendChunkedNotifications: ACK confirmed $ackCount/$chunkNum")
+                        } else if (isLastChunk) {
+                            Log.d(
+                                "GattServerHost",
+                                "sendChunkedNotifications: final partial window completed at $chunkNum/${chunks.size}; no explicit ACK expected"
+                            )
+                        }
+                    } catch (e: SecurityException) {
+                        Log.e("GattServerHost", "sendChunkedNotifications: security exception at chunk $index", e)
+                        notificationCompletions.remove(deviceAddress)
+                        return@withLock false
                     }
                 }
-            } catch (e: SecurityException) {
-                Log.e("GattServerHost", "sendChunkedNotifications: security exception at chunk $index", e)
-                notificationCompletions.remove(deviceAddress)
-                return false
+
+                Log.i("GattServerHost", "sendChunkedNotifications: all ${chunks.size} chunks sent and ACK'd by $deviceAddress")
+                true
+            } finally {
+                chunkAckCompletions.remove(deviceAddress)
+                ackChannel.close()
             }
         }
-
-        Log.i("GattServerHost", "sendChunkedNotifications: all ${chunks.size} chunks sent to $deviceAddress")
-        return true
     }
 
     private fun openGattServer() {
@@ -689,10 +787,38 @@ class GattServerHost(private val context: Context) {
                 writeStatus = BluetoothGatt.GATT_FAILURE
             }
         } else {
-            // Immediate write - process directly
+            // Immediate write — MUST send the write response BEFORE processing data.
+            // ACK writes are just regular TX_REQUEST writes from the client's perspective;
+            // if we process them first and start waiting/sending more notifications before
+            // the ATT write response is returned, some Android stacks serialize the next
+            // GATT operation behind that response and the stream stalls.
             val data = value ?: ByteArray(0)
-            Log.d("GattServerHost", "TX immediate write: ${data.size} bytes from $deviceAddress")
-            processCompletedTxData(deviceAddress, data)
+
+            if (responseNeeded) {
+                try {
+                    gattServer.get()?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
+                } catch (e: SecurityException) {
+                    Log.e("GattServerHost", "Security exception sending response to ${device.address}", e)
+                    BleCoordinator.getInstance(context).let { coordinator ->
+                        coordinator.permissionsGate.recordPermissionFailure()
+                        coordinator.callback?.onBlePermissionError("Bluetooth connection permission required")
+                    }
+                    return
+                }
+            }
+
+            // Check for transport-level chunk ACK: [0xFF][hi][lo]
+            if (data.size == 3 && data[0] == CHUNK_ACK_MARKER) {
+                val ackCount = ((data[1].toInt() and 0xFF) shl 8) or (data[2].toInt() and 0xFF)
+                Log.i("GattServerHost", "Chunk ACK received from $deviceAddress: $ackCount chunks confirmed")
+                chunkAckCompletions[deviceAddress]?.trySend(ackCount)
+            } else {
+                // Regular immediate write — process as transaction data
+                Log.d("GattServerHost", "TX immediate write: ${data.size} bytes from $deviceAddress")
+                processCompletedTxData(deviceAddress, data)
+            }
+
+            return
         }
 
         if (responseNeeded) {
@@ -777,6 +903,7 @@ class GattServerHost(private val context: Context) {
             // Extract response fields via JNI helpers (no proto codegen in Kotlin).
             val chunks = com.dsm.wallet.bridge.Unified.bleDataResponseExtractChunks(responseProto)
             val flags = com.dsm.wallet.bridge.Unified.bleDataResponseGetFlags(responseProto)
+            val confirmCommitmentHash = com.dsm.wallet.bridge.Unified.bleDataResponseExtractConfirmCommitmentHash(responseProto)
             val pairingComplete = (flags and 1) != 0
             val useReliableWrite = (flags and 2) != 0
 
@@ -787,14 +914,18 @@ class GattServerHost(private val context: Context) {
                 val addr = deviceAddress
                 txResponseScope.launch {
                     try {
-                        val queued = com.dsm.wallet.bridge.Unified.requestGattWriteChunks(addr, chunks)
+                        val queued = com.dsm.wallet.bridge.Unified.dispatchRustBleFollowUp(addr, chunks, useReliableWrite)
                         Log.i("GattServerHost", "Follow-up queued=$queued, chunks=${chunks.size}, reliableWrite=$useReliableWrite for $addr")
                         if (pairingComplete && queued) {
                             try {
-                                val n = com.dsm.wallet.bridge.Unified.markAnyBilateralConfirmDelivered()
-                                Log.i("GattServerHost", "markAnyBilateralConfirmDelivered: $n session(s) committed after confirm to $addr")
+                                if (confirmCommitmentHash.size == 32) {
+                                    val ok = com.dsm.wallet.bridge.Unified.markBilateralConfirmDelivered(confirmCommitmentHash)
+                                    Log.i("GattServerHost", "markBilateralConfirmDelivered: ok=$ok after confirm to $addr")
+                                } else {
+                                    Log.w("GattServerHost", "Missing confirm commitment hash after confirm to $addr; refusing broad ConfirmPending sweep")
+                                }
                             } catch (t: Throwable) {
-                                Log.w("GattServerHost", "markAnyBilateralConfirmDelivered failed for $addr: ${t.message}")
+                                Log.w("GattServerHost", "markBilateralConfirmDelivered failed for $addr: ${t.message}")
                             }
                         }
                     } catch (e: Throwable) {
@@ -1085,13 +1216,6 @@ class GattServerHost(private val context: Context) {
         Log.i("GattServerHost", "deliverDeferredAck: ${ackBytes.size} bytes for $deviceAddress")
         storePairingAckValue(ackBytes)
         sendPairingAckIndication(deviceAddress, ackBytes)
-    }
-
-    companion object {
-        /** Maximum allowed write buffer size (64KB). Rejects oversized prepared writes to prevent OOM. */
-        private const val MAX_WRITE_BUFFER_SIZE = 65536
-        /** Android GATT max attribute value size for notifications/indications. */
-        private const val MAX_GATT_ATTRIBUTE_VALUE_BYTES = 512
     }
 
     private fun mergeWriteBuffer(existing: ByteArray?, offset: Int, value: ByteArray): ByteArray? {

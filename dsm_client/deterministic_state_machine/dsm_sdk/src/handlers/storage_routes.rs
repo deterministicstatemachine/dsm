@@ -5,7 +5,6 @@
 
 use dsm::types::proto as generated;
 use dsm::types::identifiers::TransactionId;
-use dsm::batching::{BatchConfig, BatchHandler, BatchProcessor};
 use prost::Message;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -385,23 +384,14 @@ impl AppRouterImpl {
                                 let batch_state = Arc::new(Mutex::new(InboxBatchState::default()));
                                 let core_sdk = self.core_sdk.clone();
                                 let device_id_bytes = self.device_id_bytes;
-                                let batch_state_for_handler = batch_state.clone();
-                                let core_sdk_for_handler = core_sdk.clone();
 
-                                let batch_handler: BatchHandler<crate::sdk::b0x_sdk::B0xEntry> =
-                                    Arc::new(move |batch_items| {
-                                        let batch_state = batch_state_for_handler.clone();
-                                        let core_sdk = core_sdk_for_handler.clone();
-                                        Box::pin(async move {
-                                            for batch_item in batch_items {
-                                                {
-                                                    let state_guard = batch_state.lock().await;
-                                                    if state_guard.fatal_error.is_some() {
-                                                        break;
-                                                    }
-                                                }
-
-                                                let entry = batch_item.data;
+                                for entry in items.iter().cloned() {
+                                    {
+                                        let state_guard = batch_state.lock().await;
+                                        if state_guard.fatal_error.is_some() {
+                                            break;
+                                        }
+                                    }
 
                                                 if let dsm::types::operations::Operation::Transfer {
                                                 amount,
@@ -925,32 +915,41 @@ impl AppRouterImpl {
                                                             // §4.3 finalize: Update receiver's Per-Device SMT with verified h_{n+1}
                                                             // Collect pre/post roots and inclusion proofs for receiver's archival receipt.
                                                             // Use the independently recomputed tip (not the sender's claimed value).
-                                                            let (recv_smt_pre, recv_smt_post, recv_parent_bytes, recv_child_bytes) = {
-                                                                if let Some(smt) = crate::security::shared_smt::get_shared_smt() {
-                                                                    let mut smt_guard = smt.write().await;
-                                                                    let pre_root = *smt_guard.root();
-                                                                    let parent_bytes = smt_guard.get_inclusion_proof(&smt_key, 256).ok()
-                                                                        .as_ref().map(crate::sdk::receipts::serialize_inclusion_proof)
-                                                                        .unwrap_or_default();
-                                                                    if let Err(e) = smt_guard.update_leaf(&smt_key, &expected_h_next) {
-                                                                        log::warn!(
-                                                                            "[storage.sync] §4.3 Receiver SMT update_leaf failed for tx {}: {}",
+                                                            // §4.2: Atomic SMT-Replace via core — hard-fail on error.
+                                                            let smt_result = {
+                                                                let Some(smt) = crate::security::shared_smt::get_shared_smt() else {
+                                                                    log::error!(
+                                                                        "[storage.sync] §4.3 REJECTED: Per-Device SMT not initialized — \
+                                                                         cannot verify or produce inclusion proofs for tx {}",
+                                                                        entry.transaction_id
+                                                                    );
+                                                                    continue;
+                                                                };
+                                                                let mut smt_guard = smt.write().await;
+                                                                match smt_guard.smt_replace(&smt_key, &expected_h_next) {
+                                                                    Ok(r) => {
+                                                                        log::info!(
+                                                                            "[storage.sync] §4.3 Receiver SMT updated: pre={:?}.. post={:?}.. tx={}",
+                                                                            &r.pre_root[..4], &r.post_root[..4], entry.transaction_id
+                                                                        );
+                                                                        r
+                                                                    }
+                                                                    Err(e) => {
+                                                                        log::error!(
+                                                                            "[storage.sync] §4.3 REJECTED: Receiver SMT-Replace failed for tx {}: {} \
+                                                                             — cannot produce valid receipt",
                                                                             entry.transaction_id, e
                                                                         );
+                                                                        continue;
                                                                     }
-                                                                    let post_root = *smt_guard.root();
-                                                                    let child_bytes = smt_guard.get_inclusion_proof(&smt_key, 256).ok()
-                                                                        .as_ref().map(crate::sdk::receipts::serialize_inclusion_proof)
-                                                                        .unwrap_or_default();
-                                                                    log::info!(
-                                                                        "[storage.sync] §4.3 Receiver SMT updated: pre={:?}.. post={:?}.. tx={}",
-                                                                        &pre_root[..4], &post_root[..4], entry.transaction_id
-                                                                    );
-                                                                    (pre_root, post_root, parent_bytes, child_bytes)
-                                                                } else {
-                                                                    ([0u8; 32], [0u8; 32], Vec::new(), Vec::new())
                                                                 }
                                                             };
+                                                            let (recv_smt_pre, recv_smt_post, recv_parent_bytes, recv_child_bytes) = (
+                                                                smt_result.pre_root,
+                                                                smt_result.post_root,
+                                                                smt_result.parent_proof.to_bytes(),
+                                                                smt_result.child_proof.to_bytes(),
+                                                            );
 
                                                                 // Advance shared chain tip using the verified h_{n+1}
                                                                 match crate::storage::client_db::try_advance_finalized_bilateral_chain_tip(
@@ -1063,8 +1062,8 @@ impl AppRouterImpl {
                                                         // Withdrawal discovery happens later against storage-node
                                                         // advertisements and Bitcoin liveness.
 
-                                                        // §11.1 Balance already credited by apply_operation_with_replay_protection
-                                                        // → atomic_receive_transfer (ERA: wallet_state.balance, non-ERA: token_balances).
+                                                        // §11.1 Balance already materialized from canonical state by apply_operation_with_replay_protection
+                                                        // → atomic_receive_transfer + projection sync for the relevant token lane.
                                                         // Sync in-memory cache so subsequent balance queries reflect the credit.
                                                         if let Some(router) = crate::bridge::app_router() {
                                                             router.sync_balance_cache();
@@ -1106,44 +1105,12 @@ impl AppRouterImpl {
                                                         }
                                                     }
                                                 }
-                                            } else {
-                                                log::warn!(
-                                                    "[storage.sync] Unexpected transaction type: {:?}",
-                                                    entry.transaction
-                                                );
-                                            }
-                                            }
-                                        })
-                                    });
-
-                                let mut batch_config = BatchConfig::default();
-                                batch_config.max_concurrent_batches = 1;
-                                batch_config.priority_levels = 1;
-                                batch_config.adaptive_sizing = false;
-                                batch_config.max_batch_size = std::cmp::min(50, limit.max(1));
-                                batch_config.min_batch_size =
-                                    std::cmp::min(10, batch_config.max_batch_size);
-                                batch_config.max_wait_ticks = 50;
-
-                                let batcher =
-                                    BatchProcessor::new_with_handler(batch_config, batch_handler);
-                                for entry in items.iter().cloned() {
-                                    if let Err(e) = batcher.submit(entry, 0).await {
-                                        let mut state_guard = batch_state.lock().await;
-                                        state_guard
-                                            .errors
-                                            .push(format!("batch submit failed: {e}"));
+                                    } else {
+                                        log::warn!(
+                                            "[storage.sync] Unexpected transaction type: {:?}",
+                                            entry.transaction
+                                        );
                                     }
-                                    let fatal = {
-                                        let state_guard = batch_state.lock().await;
-                                        state_guard.fatal_error.clone()
-                                    };
-                                    if fatal.is_some() {
-                                        break;
-                                    }
-                                }
-                                if let Err(e) = batcher.flush(0).await {
-                                    errors.push(format!("Batch flush failed: {}", e));
                                 }
 
                                 let (processed_entries, fatal_error) = {
@@ -1224,8 +1191,9 @@ impl AppRouterImpl {
                                 }
 
                                 // NOTE: Post-batch chain tip update loop REMOVED.
-                                // The per-entry update at §4.3 finalize (update_contact_chain_tip_after_bilateral
-                                // with independently recomputed expected_h_next) is authoritative. The old loop
+                                // The per-entry §4.3 finalize path that CAS-advances the
+                                // canonical bilateral tip with independently recomputed expected_h_next
+                                // is authoritative. The old loop
                                 // overwrote the correct relationship tip h_{n+1} with the state-machine entity
                                 // hash (entry.sender_chain_tip), breaking fork-exclusion detection.
 

@@ -36,6 +36,23 @@ pub trait PolicyCommitResolver: Send + Sync {
     fn resolve(&self, token_id: &str) -> Result<[u8; 32], DsmError>;
 }
 
+/// Derive the stable canonical balance key for a token position.
+///
+/// `balance_key` is the identity of the canonical balance entry. Freshness and
+/// versioning belong to projection rows, not to the balance identity itself.
+pub fn derive_canonical_balance_key(
+    policy_commit: &[u8; 32],
+    owner_pk: &[u8],
+    token_id: &str,
+) -> String {
+    let digest = crate::crypto::blake3::token_domain_hash(policy_commit, "balance-key", owner_pk);
+    let bytes = digest.as_bytes();
+    let mut le = [0u8; 16];
+    le.copy_from_slice(&bytes[..16]);
+    let prefix = u128::from_le_bytes(le);
+    format!("{prefix}|{token_id}")
+}
+
 #[derive(Debug, Default)]
 pub struct TokenStateManager {
     token_store: Arc<RwLock<HashMap<String, Token>>>,
@@ -191,16 +208,8 @@ impl TokenStateManager {
             } => {
                 let token_id_str = String::from_utf8_lossy(token_id);
                 let sender_pk = &current_state.device_info.public_key;
-                let sender_key = if token_id.as_slice() == b"ERA" {
-                    "ERA".to_string()
-                } else {
-                    self.make_balance_key(sender_pk, &token_id_str)?
-                };
-                let recipient_key = if token_id.as_slice() == b"ERA" {
-                    "ERA".to_string()
-                } else {
-                    self.make_balance_key(recipient.as_slice(), &token_id_str)?
-                };
+                let sender_key = self.make_balance_key(sender_pk, &token_id_str)?;
+                let recipient_key = self.make_balance_key(recipient.as_slice(), &token_id_str)?;
 
                 let sender_balance = new_balances.get(&sender_key).cloned().unwrap_or_else(|| {
                     Balance::from_state(0, current_state.hash, current_state.state_number)
@@ -264,11 +273,7 @@ impl TokenStateManager {
                 }
 
                 let owner_pk = &current_state.device_info.public_key;
-                let owner_key = if token_id.as_slice() == b"ERA" {
-                    "ERA".to_string()
-                } else {
-                    self.make_balance_key(owner_pk, &token_id_str)?
-                };
+                let owner_key = self.make_balance_key(owner_pk, &token_id_str)?;
 
                 let current_balance = new_balances.get(&owner_key).cloned().unwrap_or_else(|| {
                     Balance::from_state(0, current_state.hash, current_state.state_number)
@@ -303,11 +308,7 @@ impl TokenStateManager {
                 }
 
                 let owner_pk = &current_state.device_info.public_key;
-                let owner_key = if token_id.as_slice() == b"ERA" {
-                    "ERA".to_string()
-                } else {
-                    self.make_balance_key(owner_pk, &token_id_str)?
-                };
+                let owner_key = self.make_balance_key(owner_pk, &token_id_str)?;
 
                 let owner_balance = new_balances.get(&owner_key).cloned().unwrap_or_else(|| {
                     Balance::from_state(0, current_state.hash, current_state.state_number)
@@ -346,11 +347,8 @@ impl TokenStateManager {
                 if let (Some(tid), Some(amount)) = (token_id, locked_amount) {
                     if amount.value() > 0 {
                         let tid_str = String::from_utf8_lossy(tid);
-                        let creator_key = if tid.as_slice() == b"ERA" {
-                            "ERA".to_string()
-                        } else {
-                            self.make_balance_key(creator_public_key.as_slice(), &tid_str)?
-                        };
+                        let creator_key =
+                            self.make_balance_key(creator_public_key.as_slice(), &tid_str)?;
 
                         let creator_balance =
                             new_balances.get(&creator_key).cloned().unwrap_or_else(|| {
@@ -424,13 +422,11 @@ impl TokenStateManager {
     /// domains. This prevents cross-token confusion (e.g., dBTC credited to ERA).
     pub fn make_balance_key(&self, owner_pk: &[u8], token_id: &str) -> Result<String, DsmError> {
         let policy_commit = self.resolve_policy_commit(token_id)?;
-        let digest =
-            crate::crypto::blake3::token_domain_hash(&policy_commit, "balance-key", owner_pk);
-        let bytes = digest.as_bytes();
-        let mut le = [0u8; 16];
-        le.copy_from_slice(&bytes[..16]);
-        let prefix = u128::from_le_bytes(le);
-        Ok(format!("{prefix}|{token_id}"))
+        Ok(derive_canonical_balance_key(
+            &policy_commit,
+            owner_pk,
+            token_id,
+        ))
     }
 
     fn verify_mint_authorization(
@@ -908,5 +904,41 @@ impl TokenStateManager {
             amount,
             token_id: token_id.to_string(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::derive_canonical_balance_key;
+
+    #[test]
+    fn canonical_balance_key_is_stable_for_same_semantic_input() {
+        let policy_commit = [0x11; 32];
+        let owner_pk = [0x22; 32];
+
+        let a = derive_canonical_balance_key(&policy_commit, &owner_pk, "dBTC");
+        let b = derive_canonical_balance_key(&policy_commit, &owner_pk, "dBTC");
+
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn canonical_balance_key_changes_when_policy_commit_changes() {
+        let owner_pk = [0x22; 32];
+
+        let a = derive_canonical_balance_key(&[0x11; 32], &owner_pk, "dBTC");
+        let b = derive_canonical_balance_key(&[0x33; 32], &owner_pk, "dBTC");
+
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn canonical_balance_key_changes_when_owner_binding_changes() {
+        let policy_commit = [0x11; 32];
+
+        let a = derive_canonical_balance_key(&policy_commit, &[0x22; 32], "dBTC");
+        let b = derive_canonical_balance_key(&policy_commit, &[0x44; 32], "dBTC");
+
+        assert_ne!(a, b);
     }
 }

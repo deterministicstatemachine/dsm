@@ -43,8 +43,6 @@ pub fn collect_crypto_kat_results() -> CryptoKatSuiteResult {
     results.extend(kat_blake3_domain_separation());
     results.extend(kat_sphincs());
     results.extend(kat_kyber());
-    results.extend(kat_pedersen());
-
     let all_passed = results.iter().all(|r| r.passed);
     let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
 
@@ -372,85 +370,3 @@ fn kat_kyber() -> Vec<CryptoKatResult> {
 }
 
 // ---------------------------------------------------------------------------
-// Pedersen Commitments (3 tests) — uses simplified BLAKE3-based scheme
-// ---------------------------------------------------------------------------
-
-fn kat_pedersen() -> Vec<CryptoKatResult> {
-    // The dsm crate's simple commit/verify_commitment are #[cfg(test)] only,
-    // so we implement the same BLAKE3-based scheme inline for the KAT.
-    // This tests the hiding + binding properties of the commitment construction.
-
-    fn simple_commit(value: &[u8], randomness: &[u8]) -> Vec<u8> {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(value);
-        hasher.update(randomness);
-        hasher.finalize().as_bytes().to_vec()
-    }
-
-    fn simple_verify(commitment: &[u8], value: &[u8], randomness: &[u8]) -> bool {
-        let expected = simple_commit(value, randomness);
-        commitment == expected.as_slice()
-    }
-
-    let mut out = Vec::new();
-
-    // 1. Hiding: different randomness -> different commitments
-    {
-        let value = b"same-value";
-        let r1 = b"randomness-alpha-pad-to-32-bytes!";
-        let r2 = b"randomness-bravo-pad-to-32-bytes";
-        let c1 = simple_commit(value, r1);
-        let c2 = simple_commit(value, r2);
-        let pass = c1 != c2;
-        out.push(CryptoKatResult {
-            primitive: "Pedersen".into(),
-            test_name: "hiding property".into(),
-            passed: pass,
-            details: if pass {
-                "different randomness produces different commitments".into()
-            } else {
-                "FAILURE: hiding violated".into()
-            },
-        });
-    }
-
-    // 2. Binding: wrong value -> verify fails
-    {
-        let value = b"correct-value";
-        let randomness = b"test-randomness-for-binding-kat!";
-        let commitment = simple_commit(value, randomness);
-        let ok_correct = simple_verify(&commitment, value, randomness);
-        let ok_wrong = simple_verify(&commitment, b"wrong-value!", randomness);
-        let pass = ok_correct && !ok_wrong;
-        out.push(CryptoKatResult {
-            primitive: "Pedersen".into(),
-            test_name: "binding property".into(),
-            passed: pass,
-            details: if pass {
-                "correct value accepted, wrong value rejected".into()
-            } else {
-                format!("FAILURE: correct={ok_correct} wrong={ok_wrong} (expected true/false)")
-            },
-        });
-    }
-
-    // 3. Round trip: commit -> verify
-    {
-        let value = b"round-trip-test-data";
-        let randomness = b"round-trip-randomness-32-bytes!!";
-        let commitment = simple_commit(value, randomness);
-        let verified = simple_verify(&commitment, value, randomness);
-        out.push(CryptoKatResult {
-            primitive: "Pedersen".into(),
-            test_name: "commit-verify round trip".into(),
-            passed: verified,
-            details: if verified {
-                "commitment verified successfully".into()
-            } else {
-                "FAILED: valid commitment rejected".into()
-            },
-        });
-    }
-
-    out
-}

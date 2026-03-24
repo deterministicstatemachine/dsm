@@ -55,7 +55,7 @@ use dsm::{
         FulfillmentMechanism, FulfillmentProof, LimboVault, VaultPost, VaultState,
     },
 };
-use crate::sdk::receipts::derive_stitched_receipt_sigma;
+use crate::sdk::receipts::{compute_protocol_transition_commitment, encode_protocol_transition_payload};
 
 /// High-level SDK for Deterministic Limbo Vault operations
 pub struct DlvSdk {
@@ -444,13 +444,16 @@ impl DlvSdk {
     ) -> Result<bool, DsmError> {
         let state_hash = reference_state.hash()?;
         let stitched_receipt_sigma = options.stitched_receipt_sigma.or_else(|| {
-            Some(derive_stitched_receipt_sigma(&[
+            let payload = encode_protocol_transition_payload(
                 b"dlv.payment.unlock",
-                vault_id.as_bytes(),
-                &payment_proof,
-                &options.requester_public_key,
-                &state_hash,
-            ]))
+                &[
+                    vault_id.as_bytes(),
+                    &payment_proof,
+                    &options.requester_public_key,
+                    &state_hash,
+                ],
+            );
+            Some(compute_protocol_transition_commitment(&payload))
         });
 
         let proof = FulfillmentProof::PaymentProof {

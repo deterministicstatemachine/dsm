@@ -29,6 +29,50 @@ use dsm_sdk::sdk::bitcoin_tap_sdk::{
 };
 use dsm_sdk::storage::client_db;
 
+fn test_policy_commit(token_id: &str) -> [u8; 32] {
+    match token_id {
+        "ERA" => *dsm_sdk::policy::builtins::NATIVE_POLICY_COMMIT,
+        DBTC_TOKEN_ID => *dsm_sdk::policy::builtins::DBTC_POLICY_COMMIT,
+        _ => {
+            let mut commit = [0u8; 32];
+            for (idx, byte) in token_id.as_bytes().iter().take(32).enumerate() {
+                commit[idx] = *byte;
+            }
+            commit
+        }
+    }
+}
+
+fn upsert_test_balance(device_id: &str, token_id: &str, available: u64, locked: u64) {
+    let policy_commit = test_policy_commit(token_id);
+    client_db::upsert_balance_projection(&client_db::BalanceProjectionRecord {
+        balance_key: format!("test:{device_id}:{token_id}"),
+        device_id: device_id.to_string(),
+        token_id: token_id.to_string(),
+        policy_commit: dsm_sdk::util::text_id::encode_base32_crockford(&policy_commit),
+        available,
+        locked,
+        source_state_hash: dsm_sdk::util::text_id::encode_base32_crockford(&[0u8; 32]),
+        source_state_number: 0,
+        updated_at: 0,
+    })
+    .expect("upsert balance projection");
+}
+
+fn get_test_balance(device_id: &str, token_id: &str) -> Option<(u64, u64)> {
+    client_db::get_balance_projection(device_id, token_id)
+        .expect("get balance projection")
+        .map(|record| (record.available, record.locked))
+}
+
+fn list_test_balances(device_id: &str) -> Vec<(String, u64, u64)> {
+    client_db::list_balance_projections(device_id)
+        .expect("list balance projections")
+        .into_iter()
+        .map(|record| (record.token_id, record.available, record.locked))
+        .collect()
+}
+
 /// Test key bundle containing both SPHINCS+ (signing) and Kyber (encryption) keys.
 struct TestKeys {
     /// SPHINCS+ public key (64 bytes) — for signing/identity
@@ -138,17 +182,17 @@ fn mock_header_chain(count: usize) -> Vec<[u8; 80]> {
     vec![[0u8; 80]; count]
 }
 
-/// Generate valid stitched_receipt + sigma for draw_tap.
+/// Generate valid protocol-transition bytes + commitment for draw_tap.
 ///
 /// The `draw_tap` fail-closed gate requires:
-/// - `stitched_receipt`: non-empty bytes
-/// - `stitched_receipt_sigma`: BLAKE3("DSM/receipt-commit" || receipt_bytes)
+/// - non-empty protocol bytes
+/// - commitment = BLAKE3("DSM/protocol-transition" || protocol_bytes)
 ///
-/// Returns (receipt_bytes, sigma) ready for `Some(...)` wrapping.
+/// Returns `(payload_bytes, commitment)` ready for `Some(...)` wrapping.
 fn test_stitched_receipt() -> (Vec<u8>, [u8; 32]) {
-    let receipt = b"test-stitched-receipt-canonical-bytes".to_vec();
-    let sigma = dsm::crypto::blake3::domain_hash_bytes("DSM/receipt-commit", &receipt);
-    (receipt, sigma)
+    let payload = b"test-protocol-transition-canonical-bytes".to_vec();
+    let sigma = dsm::crypto::blake3::domain_hash_bytes("DSM/protocol-transition", &payload);
+    (payload, sigma)
 }
 
 // --------------------------------------------------------------------------
@@ -604,6 +648,61 @@ async fn wrong_preimage_rejected() {
 
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("hash lock"));
+}
+
+#[tokio::test]
+async fn legacy_receipt_commit_domain_is_rejected_for_draw_tap() {
+    init_test_db();
+    let bridge = BitcoinTapSdk::new(Arc::new(DLVManager::new()));
+    let keys = test_keys();
+    let state = test_state(1);
+
+    let initiation = bridge
+        .open_tap(
+            100_000,
+            &[0x02; 33],
+            100,
+            (&keys.sphincs_pk, &keys.sphincs_sk),
+            &state,
+            dsm::bitcoin::types::BitcoinNetwork::Signet,
+            &keys.kyber_pk,
+        )
+        .await
+        .unwrap();
+
+    let preimage = bridge
+        .get_claim_preimage(&initiation.vault_op_id)
+        .await
+        .unwrap();
+
+    let htlc_spk = htlc_p2wsh_script_pubkey(initiation.htlc_script.as_ref().unwrap());
+    let (mock_txid, mock_raw_tx, mock_spv_bytes, mock_header) = mock_spv_data(100_000, &htlc_spk);
+    let payload = b"legacy-receipt-commit-payload".to_vec();
+    let legacy_commitment = dsm::crypto::blake3::domain_hash_bytes("DSM/receipt-commit", &payload);
+
+    let result = bridge
+        .draw_tap(
+            &initiation.vault_op_id,
+            &preimage,
+            mock_txid,
+            &mock_raw_tx,
+            &mock_spv_bytes,
+            mock_header,
+            &mock_header_chain((DBTC_MIN_CONFIRMATIONS as usize).saturating_sub(1)),
+            &keys.kyber_pk,
+            &keys.sphincs_pk,
+            [0; 32],
+            &state,
+            Some(payload),
+            Some(legacy_commitment),
+        )
+        .await;
+
+    assert!(result.is_err());
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("protocol transition commitment mismatch"));
 }
 
 #[tokio::test]
@@ -1385,42 +1484,37 @@ async fn destination_address_survives_restore() {
     );
 }
 
-/// Bug 4 regression: token balance SQLite roundtrip for non-ERA tokens.
+/// Bug 4 regression: balance projection roundtrip for DSM tokens.
 #[tokio::test]
 async fn token_balance_sqlite_roundtrip() {
     init_test_db();
     let device_id = format!("test_device_bal_{}", std::process::id());
 
     // Insert dBTC balance
-    client_db::upsert_token_balance(&device_id, "dBTC", 500_000, 0).expect("upsert dBTC balance");
+    upsert_test_balance(&device_id, "dBTC", 500_000, 0);
 
     // Read back
-    let (available, locked) = client_db::get_token_balance(&device_id, "dBTC")
-        .expect("get dBTC balance")
-        .expect("dBTC balance should exist");
+    let (available, locked) =
+        get_test_balance(&device_id, "dBTC").expect("dBTC balance should exist");
     assert_eq!(available, 500_000, "available should be 500_000");
     assert_eq!(locked, 0, "locked should be 0");
 
-    // Update balance (simulates bilateral transfer updating SQLite)
-    client_db::upsert_token_balance(&device_id, "dBTC", 750_000, 50_000)
-        .expect("update dBTC balance");
+    upsert_test_balance(&device_id, "dBTC", 750_000, 50_000);
 
-    let (available2, locked2) = client_db::get_token_balance(&device_id, "dBTC")
-        .expect("get updated dBTC balance")
-        .expect("dBTC balance should still exist");
+    let (available2, locked2) =
+        get_test_balance(&device_id, "dBTC").expect("dBTC balance should still exist");
     assert_eq!(
         available2, 750_000,
         "available should be updated to 750_000"
     );
     assert_eq!(locked2, 50_000, "locked should be updated to 50_000");
 
-    // ERA should NOT exist for this device (only non-ERA tokens in token_balances)
-    let era = client_db::get_token_balance(&device_id, "ERA").expect("get ERA balance");
-    assert!(era.is_none(), "ERA should not be in token_balances table");
+    let era = get_test_balance(&device_id, "ERA");
+    assert!(era.is_none(), "ERA should not exist until projected");
 }
 
 #[tokio::test]
-async fn token_balance_sender_debit_seeds_missing_row() {
+async fn token_balance_sender_settlement_does_not_seed_projection() {
     init_test_db();
     let device_id = format!("test_device_bal_{}", std::process::id());
 
@@ -1442,38 +1536,36 @@ async fn token_balance_sender_debit_seeds_missing_row() {
         created_at: 0,
     };
 
-    let result = client_db::apply_sender_debit_and_store_transaction_atomic(
+    let result = client_db::apply_sender_settlement_and_store_transaction_atomic(
         &device_id,
         Some("dBTC"),
         1000,
         &tx_record,
     );
 
-    assert!(result.is_err(), "Expected debit to fail on zero balance");
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("insufficient dBTC balance"));
-
-    let row = client_db::get_token_balance(&device_id, "dBTC").expect("get dBTC");
-    assert!(row.is_some(), "dBTC row should have been seeded");
-    let (available, locked) = row.unwrap();
-    assert_eq!(available, 0);
-    assert_eq!(locked, 0);
+    assert!(
+        result.is_ok(),
+        "sender settlement is metadata-only for dBTC"
+    );
+    let row = get_test_balance(&device_id, "dBTC");
+    assert!(
+        row.is_none(),
+        "dBTC projection should not be implicitly seeded"
+    );
 }
 
 #[tokio::test]
-async fn wallet_bootstrap_seeds_dbtc_row() {
+async fn wallet_bootstrap_does_not_seed_dbtc_projection() {
     init_test_db();
     let device_id = format!("bootstrap_device_{}", std::process::id());
 
     client_db::ensure_wallet_state_for_device(&device_id).expect("ensure wallet state");
 
-    let row = client_db::get_token_balance(&device_id, "dBTC").expect("get dBTC row");
-    assert!(row.is_some(), "dBTC row should exist after wallet bootstrap");
-    let (available, locked) = row.unwrap();
-    assert_eq!(available, 0);
-    assert_eq!(locked, 0);
+    let row = get_test_balance(&device_id, "dBTC");
+    assert!(
+        row.is_none(),
+        "dBTC projection should not exist after wallet bootstrap"
+    );
 }
 
 /// Regression guard: list_vault_records_db returns destination_address correctly
@@ -1714,32 +1806,26 @@ async fn vector_token_balance_boundary_values() {
     let device_id = format!("vec_bal_{}", std::process::id());
 
     // Test 1: Zero balance
-    client_db::upsert_token_balance(&device_id, "dBTC", 0, 0).unwrap();
-    let (a, l) = client_db::get_token_balance(&device_id, "dBTC")
-        .unwrap()
-        .unwrap();
+    upsert_test_balance(&device_id, "dBTC", 0, 0);
+    let (a, l) = get_test_balance(&device_id, "dBTC").unwrap();
     assert_eq!(a, 0);
     assert_eq!(l, 0);
 
     // Test 2: Maximum sane BTC supply (21M BTC = 2_100_000_000_000_000 sats)
     let max_btc_sats: u64 = 2_100_000_000_000_000;
-    client_db::upsert_token_balance(&device_id, "dBTC", max_btc_sats, 0).unwrap();
-    let (a2, _) = client_db::get_token_balance(&device_id, "dBTC")
-        .unwrap()
-        .unwrap();
+    upsert_test_balance(&device_id, "dBTC", max_btc_sats, 0);
+    let (a2, _) = get_test_balance(&device_id, "dBTC").unwrap();
     assert_eq!(a2, max_btc_sats);
 
     // Test 3: Large locked amount
-    client_db::upsert_token_balance(&device_id, "dBTC", 1_000_000, 999_999).unwrap();
-    let (a3, l3) = client_db::get_token_balance(&device_id, "dBTC")
-        .unwrap()
-        .unwrap();
+    upsert_test_balance(&device_id, "dBTC", 1_000_000, 999_999);
+    let (a3, l3) = get_test_balance(&device_id, "dBTC").unwrap();
     assert_eq!(a3, 1_000_000);
     assert_eq!(l3, 999_999);
 
     // Test 4: Multiple tokens for same device (dBTC + another token)
-    client_db::upsert_token_balance(&device_id, "wETH", 500, 100).unwrap();
-    let all = client_db::get_token_balances(&device_id).unwrap();
+    upsert_test_balance(&device_id, "wETH", 500, 100);
+    let all = list_test_balances(&device_id);
     assert!(all.len() >= 2, "should have at least dBTC and wETH");
     let dbtc = all.iter().find(|(t, _, _)| t == "dBTC");
     let weth = all.iter().find(|(t, _, _)| t == "wETH");
@@ -1749,7 +1835,7 @@ async fn vector_token_balance_boundary_values() {
     assert_eq!(weth.unwrap().2, 100);
 
     // Test 5: Non-existent device returns None
-    let missing = client_db::get_token_balance("device_that_does_not_exist", "dBTC").unwrap();
+    let missing = get_test_balance("device_that_does_not_exist", "dBTC");
     assert!(missing.is_none());
 }
 
@@ -1817,36 +1903,33 @@ async fn vector_deposit_record_sdk_roundtrip() {
 // DLV + Mining + Database Balance Tests
 //
 // These tests exercise the real flow: DLV vault creation → draw_tap
-// (mining) → SQLite balance write. They replicate the handler's
-// SQLite-authoritative arithmetic (app_router_impl.rs:5836-5862) to prove
+// (mining) → projection write. They replicate the handler's
+// canonical projection arithmetic to prove
 // no doubling/zeroing occurs.
 // ==========================================================================
 
-/// Helper: run the same SQLite-authoritative arithmetic the handler uses
-/// for dBTC balance after a deposit complete (mirrors app_router_impl.rs:5836-5862).
-fn handler_sqlite_balance_sync(device_id: &str, token_op: &TokenOperation) -> u64 {
-    let current_sqlite = client_db::get_token_balance(device_id, DBTC_TOKEN_ID)
-        .ok()
-        .flatten()
+/// Helper: run the same projection arithmetic the handler uses
+/// for dBTC balance after a deposit complete.
+fn handler_projection_balance_sync(device_id: &str, token_op: &TokenOperation) -> u64 {
+    let current_projection = get_test_balance(device_id, DBTC_TOKEN_ID)
         .map(|(a, _)| a)
         .unwrap_or(0);
 
-    let new_sqlite = match token_op {
-        TokenOperation::Mint { amount, .. } => current_sqlite.saturating_add(*amount),
+    let new_projection = match token_op {
+        TokenOperation::Mint { amount, .. } => current_projection.saturating_add(*amount),
         TokenOperation::Burn { amount, .. } => {
             assert!(
-                current_sqlite >= *amount,
-                "SQLite underflow guard: current={current_sqlite} burn={amount}"
+                current_projection >= *amount,
+                "Projection underflow guard: current={current_projection} burn={amount}"
             );
-            current_sqlite - *amount
+            current_projection - *amount
         }
-        _ => current_sqlite,
+        _ => current_projection,
     };
 
-    client_db::upsert_token_balance(device_id, DBTC_TOKEN_ID, new_sqlite, 0)
-        .expect("upsert_token_balance");
+    upsert_test_balance(device_id, DBTC_TOKEN_ID, new_projection, 0);
 
-    new_sqlite
+    new_projection
 }
 
 /// Helper: run initiate → complete deposit, returning (completion, device_id_text).
@@ -1901,7 +1984,7 @@ async fn do_deposit_op(
 }
 
 // --------------------------------------------------------------------------
-// Test A: DLV deposit → draw_tap → verify dBTC credited to SQLite
+// Test A: DLV deposit → draw_tap → verify dBTC credited to projection storage
 // --------------------------------------------------------------------------
 
 #[tokio::test]
@@ -1910,8 +1993,8 @@ async fn draw_tap_credits_dbtc_to_sqlite() {
     let device_id = format!("dev_credit_{}", std::process::id());
     let amount = 500_000u64;
 
-    // Before deposit: no dBTC balance in SQLite
-    let before = client_db::get_token_balance(&device_id, DBTC_TOKEN_ID).unwrap();
+    // Before deposit: no dBTC balance projection
+    let before = get_test_balance(&device_id, DBTC_TOKEN_ID);
     assert!(
         before.is_none() || before == Some((0, 0)),
         "device should have no dBTC before deposit"
@@ -1936,16 +2019,15 @@ async fn draw_tap_credits_dbtc_to_sqlite() {
         other => panic!("Expected Mint, got {other:?}"),
     }
 
-    // Execute handler's SQLite-authoritative arithmetic
-    let final_balance = handler_sqlite_balance_sync(&device_id, &completion.token_operation);
+    // Execute handler's projection arithmetic
+    let final_balance = handler_projection_balance_sync(&device_id, &completion.token_operation);
     assert_eq!(
         final_balance, amount,
         "SQLite balance must equal deposit amount"
     );
 
-    // Verify SQLite roundtrip
-    let (available, locked) = client_db::get_token_balance(&device_id, DBTC_TOKEN_ID)
-        .unwrap()
+    // Verify projection roundtrip
+    let (available, locked) = get_test_balance(&device_id, DBTC_TOKEN_ID)
         .expect("dBTC balance should exist after deposit");
     assert_eq!(available, amount);
     assert_eq!(locked, 0);
@@ -1981,15 +2063,10 @@ async fn bilateral_receive_then_draw_tap_no_doubling() {
     let bilateral_amount = 300_000u64;
     let deposit_amount = 200_000u64;
 
-    // Step 1: Simulate bilateral receive (writes ONLY SQLite, not in-memory)
-    // This is exactly what bilateral_ble_handler.rs:2320-2338 does.
-    client_db::upsert_token_balance(&device_id, DBTC_TOKEN_ID, bilateral_amount, 0)
-        .expect("seed bilateral balance");
+    // Step 1: Simulate bilateral receive by materializing a projection row.
+    upsert_test_balance(&device_id, DBTC_TOKEN_ID, bilateral_amount, 0);
 
-    // Verify bilateral balance in SQLite
-    let (a, _) = client_db::get_token_balance(&device_id, DBTC_TOKEN_ID)
-        .unwrap()
-        .unwrap();
+    let (a, _) = get_test_balance(&device_id, DBTC_TOKEN_ID).unwrap();
     assert_eq!(a, bilateral_amount);
 
     // Step 2: Deposit via deposit (real DLV + crypto)
@@ -2000,9 +2077,8 @@ async fn bilateral_receive_then_draw_tap_no_doubling() {
 
     let (completion, _init) = do_deposit_op(&bridge, &dlv, &keys, &state, deposit_amount).await;
 
-    // Step 3: Execute handler's SQLite-authoritative arithmetic
-    // This reads CURRENT SQLite (300k from bilateral), adds mint (200k) = 500k
-    let final_balance = handler_sqlite_balance_sync(&device_id, &completion.token_operation);
+    // Step 3: Execute handler's projection arithmetic
+    let final_balance = handler_projection_balance_sync(&device_id, &completion.token_operation);
 
     // THE KEY ASSERTION: no doubling
     let expected = bilateral_amount + deposit_amount; // 300k + 200k = 500k
@@ -2015,10 +2091,7 @@ async fn bilateral_receive_then_draw_tap_no_doubling() {
         bilateral_amount * 2, // doubled bilateral
     );
 
-    // Final SQLite verification
-    let (available, locked) = client_db::get_token_balance(&device_id, DBTC_TOKEN_ID)
-        .unwrap()
-        .unwrap();
+    let (available, locked) = get_test_balance(&device_id, DBTC_TOKEN_ID).unwrap();
     assert_eq!(available, 500_000);
     assert_eq!(locked, 0);
 }
@@ -2033,23 +2106,18 @@ async fn draw_tap_then_bilateral_send_debit() {
     let device_id = format!("dev_debit_{}", std::process::id());
 
     // Credit via deposit
-    client_db::upsert_token_balance(&device_id, DBTC_TOKEN_ID, 1_000_000, 0).unwrap();
+    upsert_test_balance(&device_id, DBTC_TOKEN_ID, 1_000_000, 0);
 
     // Simulate bilateral SEND debit (mirrors bilateral_ble_handler.rs:2674-2695)
     let send_amount = 400_000u64;
-    let current = client_db::get_token_balance(&device_id, DBTC_TOKEN_ID)
-        .unwrap()
-        .unwrap()
-        .0;
+    let current = get_test_balance(&device_id, DBTC_TOKEN_ID).unwrap().0;
     assert_eq!(current, 1_000_000);
 
     let new_available = current.saturating_sub(send_amount);
-    client_db::upsert_token_balance(&device_id, DBTC_TOKEN_ID, new_available, 0).unwrap();
+    upsert_test_balance(&device_id, DBTC_TOKEN_ID, new_available, 0);
 
     // Verify debit
-    let (available, _) = client_db::get_token_balance(&device_id, DBTC_TOKEN_ID)
-        .unwrap()
-        .unwrap();
+    let (available, _) = get_test_balance(&device_id, DBTC_TOKEN_ID).unwrap();
     assert_eq!(available, 600_000, "1M - 400k = 600k");
 }
 
@@ -2073,7 +2141,7 @@ async fn sequential_deposits_accumulate_correctly() {
         let (completion, _) = do_deposit_op(&bridge, &dlv, &keys, &state, *amount).await;
 
         // Apply handler arithmetic
-        let new_balance = handler_sqlite_balance_sync(&device_id, &completion.token_operation);
+        let new_balance = handler_projection_balance_sync(&device_id, &completion.token_operation);
         running_total += amount;
 
         assert_eq!(
@@ -2085,9 +2153,7 @@ async fn sequential_deposits_accumulate_correctly() {
     }
 
     // Final verification
-    let (available, _) = client_db::get_token_balance(&device_id, DBTC_TOKEN_ID)
-        .unwrap()
-        .unwrap();
+    let (available, _) = get_test_balance(&device_id, DBTC_TOKEN_ID).unwrap();
     assert_eq!(available, 400_000, "100k + 250k + 50k = 400k");
 }
 
@@ -2254,7 +2320,7 @@ async fn vault_persistence_roundtrip_with_entry_header() {
 }
 
 // --------------------------------------------------------------------------
-// Test H: All balance query paths read consistent SQLite values
+// Test H: All balance query paths read consistent projection values
 // --------------------------------------------------------------------------
 
 #[tokio::test]
@@ -2263,29 +2329,26 @@ async fn all_balance_endpoints_consistent_after_operations() {
     let device_id = format!("dev_consist_{}", std::process::id());
 
     // Seed dBTC balance (as if from deposit complete)
-    client_db::upsert_token_balance(&device_id, DBTC_TOKEN_ID, 123_456, 0).unwrap();
+    upsert_test_balance(&device_id, DBTC_TOKEN_ID, 123_456, 0);
 
     // 1. Single-token query (used by bitcoin.balance and balance.get handlers)
-    let (a, l) = client_db::get_token_balance(&device_id, DBTC_TOKEN_ID)
-        .unwrap()
-        .expect("dBTC should exist");
+    let (a, l) = get_test_balance(&device_id, DBTC_TOKEN_ID).expect("dBTC should exist");
     assert_eq!(a, 123_456);
     assert_eq!(l, 0);
 
     // 2. Multi-token query (used by balance.list handler)
-    let all_tokens = client_db::get_token_balances(&device_id).unwrap();
+    let all_tokens = list_test_balances(&device_id);
     let dbtc_entry = all_tokens.iter().find(|(t, _, _)| t == DBTC_TOKEN_ID);
     assert!(dbtc_entry.is_some(), "dBTC must appear in multi-token list");
     assert_eq!(dbtc_entry.unwrap().1, 123_456);
     assert_eq!(dbtc_entry.unwrap().2, 0);
 
-    // 3. ERA uses wallet_state table, not token_balances
-    let era = client_db::get_token_balance(&device_id, "ERA").unwrap();
-    assert!(era.is_none(), "ERA is not in token_balances");
+    let era = get_test_balance(&device_id, "ERA");
+    assert!(era.is_none(), "ERA should not exist until projected");
 
     // 4. Add a second token — both must coexist
-    client_db::upsert_token_balance(&device_id, "wETH", 999, 100).unwrap();
-    let all2 = client_db::get_token_balances(&device_id).unwrap();
+    upsert_test_balance(&device_id, "wETH", 999, 100);
+    let all2 = list_test_balances(&device_id);
     assert!(all2.len() >= 2, "should have dBTC and wETH");
 
     let weth = all2.iter().find(|(t, _, _)| t == "wETH").unwrap();
@@ -2297,16 +2360,12 @@ async fn all_balance_endpoints_consistent_after_operations() {
     assert_eq!(dbtc2.1, 123_456);
 
     // 5. Update dBTC — wETH must not change
-    client_db::upsert_token_balance(&device_id, DBTC_TOKEN_ID, 200_000, 50_000).unwrap();
-    let (a3, l3) = client_db::get_token_balance(&device_id, DBTC_TOKEN_ID)
-        .unwrap()
-        .unwrap();
+    upsert_test_balance(&device_id, DBTC_TOKEN_ID, 200_000, 50_000);
+    let (a3, l3) = get_test_balance(&device_id, DBTC_TOKEN_ID).unwrap();
     assert_eq!(a3, 200_000);
     assert_eq!(l3, 50_000);
 
-    let (wa, wl) = client_db::get_token_balance(&device_id, "wETH")
-        .unwrap()
-        .unwrap();
+    let (wa, wl) = get_test_balance(&device_id, "wETH").unwrap();
     assert_eq!(wa, 999, "wETH available must not change when dBTC updated");
     assert_eq!(wl, 100, "wETH locked must not change when dBTC updated");
 }

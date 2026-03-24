@@ -184,15 +184,17 @@ impl BilateralTransactionExample {
             .register_outgoing_contact_request(&request)?;
 
         // Bob accepts → returns response for Alice
+        let mut bob_smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
         let (_created, response) = self
             .bob_manager
-            .accept_contact_request_with_response(&req_hash, Some("Welcome, Alice".to_string()))
+            .accept_contact_request_with_response(&req_hash, Some("Welcome, Alice".to_string()), &mut bob_smt)
             .await?;
 
         // Alice finalizes her side from Bob’s response
+        let mut alice_smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
         let _alice_verified = self
             .alice_manager
-            .handle_contact_establishment_response(response)
+            .handle_contact_establishment_response(response, &mut alice_smt)
             .await?;
 
         println!("   ✅ Contact established and anchored on both sides");
@@ -201,16 +203,17 @@ impl BilateralTransactionExample {
 
     /// 2) Create bilateral relationship and validate synchronized mutual anchor
     async fn step_relationship_creation(&mut self) -> Result<(), DsmError> {
+        let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
         let alice_rel = self
             .alice_manager
             .get_bilateral_tx_manager_mut()
-            .establish_relationship(&self.bob_device_id)
+            .establish_relationship(&self.bob_device_id, &mut smt)
             .await?;
 
         let bob_rel = self
             .bob_manager
             .get_bilateral_tx_manager_mut()
-            .establish_relationship(&self.alice_device_id)
+            .establish_relationship(&self.alice_device_id, &mut smt)
             .await?;
 
         println!(
@@ -306,10 +309,11 @@ impl BilateralTransactionExample {
         };
 
         // Alice executes via Bluetooth
+        let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
         let alice_exec = self
             .alice_manager
             .get_bilateral_tx_manager_mut()
-            .execute_bilateral_transaction(&self.bob_device_id, op.clone(), true)
+            .execute_bilateral_transaction(&self.bob_device_id, op.clone(), true, &mut smt)
             .await?;
 
         println!(
@@ -322,7 +326,7 @@ impl BilateralTransactionExample {
         let bob_exec = self
             .bob_manager
             .get_bilateral_tx_manager_mut()
-            .execute_bilateral_transaction(&self.alice_device_id, op, true)
+            .execute_bilateral_transaction(&self.alice_device_id, op, true, &mut smt)
             .await?;
 
         println!("   Bob   tx: {}", id_preview(&bob_exec.transaction_hash));

@@ -11,10 +11,14 @@ use tokio::sync::RwLock;
 use dsm_sdk::storage::client_db;
 use dsm_sdk::sdk::storage_node_sdk::{StorageNodeConfig, StorageNodeSDK};
 use dsm_sdk::bluetooth::bilateral_ble_handler::BilateralBleHandler;
-use dsm_sdk::bluetooth::ble_frame_coordinator::{BleFrameCoordinator, BleFrameType};
+use dsm_sdk::bluetooth::bilateral_transport_adapter::{
+    BilateralTransportAdapter, BleTransportDelegate, TransportInboundMessage,
+};
+use dsm_sdk::bluetooth::ble_frame_coordinator::{BleFrameCoordinator, BleFrameType, FrameIngressResult};
 use dsm_sdk::storage_utils;
 use dsm_sdk::generated;
 use prost::Message;
+use rand::{rngs::OsRng, RngCore};
 
 use dsm::core::bilateral_transaction_manager::BilateralTransactionManager;
 use dsm::core::contact_manager::DsmContactManager;
@@ -57,6 +61,23 @@ fn configure_local_identity_for_receipts(
     );
 }
 
+fn seed_era_projection(device_txt: &str, available: u64) {
+    client_db::upsert_balance_projection(&client_db::BalanceProjectionRecord {
+        balance_key: format!("test:{device_txt}:ERA"),
+        device_id: device_txt.to_string(),
+        token_id: "ERA".to_string(),
+        policy_commit: dsm_sdk::util::text_id::encode_base32_crockford(
+            dsm_sdk::policy::builtins::NATIVE_POLICY_COMMIT,
+        ),
+        available,
+        locked: 0,
+        source_state_hash: dsm_sdk::util::text_id::encode_base32_crockford(&[0u8; 32]),
+        source_state_number: 0,
+        updated_at: 0,
+    })
+    .expect("seed ERA projection");
+}
+
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn verify_frontend_event_guarantees() {
@@ -90,15 +111,16 @@ async fn verify_frontend_event_guarantees() {
         .expect("StorageNodeSDK init failed");
 
     // Alice & Bob Genesis
+    let mut os_rng = OsRng;
     let mut alice_entropy = vec![10u8; 32];
-    getrandom::getrandom(&mut alice_entropy).expect("entropy a");
+    os_rng.fill_bytes(&mut alice_entropy);
     let alice_genesis = storage_sdk
         .create_genesis_with_mpc(Some(3), Some(alice_entropy))
         .await
         .expect("alice MPC genesis");
 
     let mut bob_entropy = vec![11u8; 32];
-    getrandom::getrandom(&mut bob_entropy).expect("entropy b");
+    os_rng.fill_bytes(&mut bob_entropy);
     let bob_genesis = storage_sdk
         .create_genesis_with_mpc(Some(3), Some(bob_entropy))
         .await
@@ -164,23 +186,22 @@ async fn verify_frontend_event_guarantees() {
         .unwrap();
 
     // Establish relationships (required for Offline flow)
+    let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
     alice_mgr
-        .establish_relationship(&bob_dev_id)
+        .establish_relationship(&bob_dev_id, &mut smt)
         .await
         .expect("alice establish");
     bob_mgr
-        .establish_relationship(&alice_dev_id)
+        .establish_relationship(&alice_dev_id, &mut smt)
         .await
         .expect("bob establish");
 
     let alice_mgr_shared = Arc::new(RwLock::new(alice_mgr));
     let bob_mgr_shared = Arc::new(RwLock::new(bob_mgr));
 
-    // Seed Alice's wallet with sufficient ERA balance for the transfer.
-    // The atomic sender debit enforces B >= 0 at the SQL level — without a
-    // wallet_state row, the debit correctly fails.
+    // Seed Alice's ERA balance via projection storage.
     let alice_device_txt = dsm_sdk::util::text_id::encode_base32_crockford(&alice_dev_id);
-    client_db::update_wallet_balance(&alice_device_txt, 10_000).expect("seed alice wallet balance");
+    seed_era_projection(&alice_device_txt, 10_000);
 
     // --- CRITICAL TEST SETUP: Capture Events on Alice ---
     let captured_events = Arc::new(Mutex::new(Vec::new()));
@@ -199,9 +220,11 @@ async fn verify_frontend_event_guarantees() {
     // 3. Wrap in Arc
     let handler_a = Arc::new(handler_a_raw);
     let handler_b = Arc::new(BilateralBleHandler::new(bob_mgr_shared.clone(), bob_dev_id));
+    let adapter_a = Arc::new(BilateralTransportAdapter::new(handler_a.clone()));
+    let adapter_b = Arc::new(BilateralTransportAdapter::new(handler_b.clone()));
 
-    let coord_a = Arc::new(BleFrameCoordinator::new(handler_a.clone(), alice_dev_id));
-    let coord_b = Arc::new(BleFrameCoordinator::new(handler_b.clone(), bob_dev_id));
+    let coord_a = Arc::new(BleFrameCoordinator::new(alice_dev_id));
+    let coord_b = Arc::new(BleFrameCoordinator::new(bob_dev_id));
 
     // --- Execute Transfer ---
     let transfer_op = Operation::Transfer {
@@ -219,14 +242,28 @@ async fn verify_frontend_event_guarantees() {
     };
 
     println!("[EVENT-TEST] Alice initiating transfer...");
-    let chunks = coord_a
+    let prepare_payload = adapter_a
         .create_prepare_message(bob_dev_id, transfer_op, 60)
         .await
         .expect("prepare");
+    let chunks = coord_a
+        .encode_message(BleFrameType::BilateralPrepare, &prepare_payload)
+        .expect("prepare chunks");
 
     // Transport A -> B
     for ch in &chunks {
-        let _ = coord_b.handle_ble_chunk(ch).await;
+        if let FrameIngressResult::MessageComplete { message } =
+            coord_b.ingest_chunk(ch).await.expect("b ingest prepare")
+        {
+            let _ = adapter_b
+                .on_transport_message(TransportInboundMessage {
+                    peer_address: "event-test-b".to_string(),
+                    frame_type: message.frame_type,
+                    payload: message.payload,
+                })
+                .await
+                .expect("b process prepare");
+        }
     }
 
     // Capture commitment hash to verify event validity
@@ -242,12 +279,7 @@ async fn verify_frontend_event_guarantees() {
         .await
         .expect("b accept");
     let chunks = coord_b
-        .send_bilateral_message(
-            alice_dev_id,
-            BleFrameType::BilateralPrepareResponse,
-            accept_env,
-        )
-        .await
+        .encode_message(BleFrameType::BilateralPrepareResponse, &accept_env)
         .expect("b chunks");
 
     // Transport B -> A (Accept) — coordinator calls handle_prepare_response which
@@ -261,16 +293,23 @@ async fn verify_frontend_event_guarantees() {
 
     let mut maybe_confirm = None;
     for ch in &chunks {
-        let got = coord_a.handle_ble_chunk(ch).await;
+        let got = coord_a.ingest_chunk(ch).await;
         match got {
-            Ok(Some(result)) => {
-                if result.response.is_some() {
-                    maybe_confirm = result.response;
-                }
+            Ok(FrameIngressResult::MessageComplete { message }) => {
+                let outbound = adapter_a
+                    .on_transport_message(TransportInboundMessage {
+                        peer_address: "event-test-a".to_string(),
+                        frame_type: message.frame_type,
+                        payload: message.payload,
+                    })
+                    .await
+                    .expect("a process accept");
+                maybe_confirm = outbound.into_iter().next().map(|item| item.payload);
             }
-            Ok(None) => {} // intermediate chunk, not yet reassembled
+            Ok(FrameIngressResult::NeedMoreChunks) => {}
+            Ok(FrameIngressResult::ProtocolControl(_)) => {}
             Err(e) => {
-                panic!("[EVENT-TEST] handle_ble_chunk error on accept chunk: {e}");
+                panic!("[EVENT-TEST] ingest_chunk error on accept chunk: {e}");
             }
         }
     }
@@ -279,18 +318,25 @@ async fn verify_frontend_event_guarantees() {
 
     // Transport A -> B (Confirm) — Bob finalizes, no response needed
     let chunks = coord_a
-        .send_bilateral_message(bob_dev_id, BleFrameType::BilateralConfirm, confirm_payload)
-        .await
+        .encode_message(BleFrameType::BilateralConfirm, &confirm_payload)
         .expect("a confirm chunks");
     println!("[EVENT-TEST] Bob receiving confirmation...");
     configure_local_identity_for_receipts(bob_dev_id, bob_gen_hash, bob_kp.public_key().to_vec());
     for ch in &chunks {
-        let got = coord_b.handle_ble_chunk(ch).await.expect("b recv confirm");
-        if let Some(result) = got {
-            assert!(
-                result.response.is_none(),
-                "confirm should not produce a response"
-            );
+        match coord_b.ingest_chunk(ch).await.expect("b recv confirm") {
+            FrameIngressResult::MessageComplete { message } => {
+                let outbound = adapter_b
+                    .on_transport_message(TransportInboundMessage {
+                        peer_address: "event-test-b".to_string(),
+                        frame_type: message.frame_type,
+                        payload: message.payload,
+                    })
+                    .await
+                    .expect("b process confirm");
+                assert!(outbound.is_empty(), "confirm should not produce a response");
+            }
+            FrameIngressResult::NeedMoreChunks => {}
+            FrameIngressResult::ProtocolControl(_) => {}
         }
     }
 

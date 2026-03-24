@@ -107,7 +107,7 @@ impl QuantumResistantBinding {
 
         // Add random entropy
         let mut random_bytes = [0u8; 32];
-        getrandom::getrandom(&mut random_bytes).unwrap_or_default();
+        getrandom::fill(&mut random_bytes).unwrap_or_default();
         salt_data.extend_from_slice(&random_bytes);
 
         // Hash everything together for the final salt

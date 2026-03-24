@@ -13,16 +13,14 @@
 #![allow(clippy::disallowed_methods)] // Workaround for known clippy false-positive on match/expect patterns.
 
 use crate::sdk::b0x_sdk::{B0xEntry, B0xSDK, B0xSubmissionParams};
-use crate::storage::client_db::{
-    self, get_wallet_state, store_transaction, update_wallet_balance, TransactionRecord,
-}; // Added imports
+use crate::storage::client_db::{self, get_balance_projection, store_transaction, TransactionRecord}; // Added imports
 use crate::util::text_id::decode_base32_crockford;
 
 use dsm::core::contact_manager::{DsmContactManager, UnilateralTransactionPayload};
 use dsm::types::contact_types::ChainTipSmtProof;
 use dsm::types::error::DsmError;
 
-use log::{debug, info, warn};
+use log::{debug, info};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -33,6 +31,8 @@ pub struct UnilateralOpsSDK {
     device_id: String,
     /// Canonical device id bytes (32). All-zeros indicates "pre-genesis".
     pub(crate) device_id_bytes: [u8; 32],
+    /// Per-Device SMT (§2.2). Every state transition requires SMT-Replace (§4.2).
+    per_device_smt: Arc<RwLock<dsm::merkle::sparse_merkle_tree::SparseMerkleTree>>,
 }
 
 impl UnilateralOpsSDK {
@@ -100,6 +100,9 @@ impl UnilateralOpsSDK {
             device_id_b32,
             device_id_bytes,
         ))
+        // Note: disabled() is pre-genesis. The shared SMT singleton
+        // is initialized by init_shared_smt(256) in the constructors above.
+        // No transactions should be attempted until post-genesis.
     }
     /// Create a new UnilateralOpsSDK.
     pub fn new(
@@ -107,11 +110,13 @@ impl UnilateralOpsSDK {
         contact_manager: Arc<RwLock<DsmContactManager>>,
         device_id: String,
     ) -> Self {
+        let per_device_smt = crate::security::shared_smt::init_shared_smt(256);
         Self {
             b0x_sdk: Arc::new(RwLock::new(b0x_sdk)),
             contact_manager,
             device_id,
             device_id_bytes: [0u8; 32],
+            per_device_smt,
         }
     }
 
@@ -122,11 +127,13 @@ impl UnilateralOpsSDK {
         device_id: String,
         device_id_bytes: [u8; 32],
     ) -> Self {
+        let per_device_smt = crate::security::shared_smt::init_shared_smt(256);
         Self {
             b0x_sdk: Arc::new(RwLock::new(b0x_sdk)),
             contact_manager,
             device_id,
             device_id_bytes,
+            per_device_smt,
         }
     }
 
@@ -222,29 +229,32 @@ impl UnilateralOpsSDK {
             // Helper: store uses base32 string for device_id lookup usually.
             // We have self.device_id (base32 string).
             let amount_val = amount.value();
-            if let Some(state) =
-                get_wallet_state(&self.device_id).map_err(|e| DsmError::Internal {
+            let token_id = match &operation {
+                dsm::types::operations::Operation::Transfer { token_id, .. } => {
+                    let tid = String::from_utf8_lossy(token_id);
+                    if tid.trim().is_empty() {
+                        "ERA".to_string()
+                    } else {
+                        tid.into_owned()
+                    }
+                }
+                _ => "ERA".to_string(),
+            };
+            let available = get_balance_projection(&self.device_id, &token_id)
+                .map_err(|e| DsmError::Internal {
                     context: e.to_string(),
                     source: None,
                 })?
-            {
-                if state.balance < amount_val {
-                    return Err(DsmError::Internal {
-                        context: format!(
-                            "Insufficient funds: balance={} needed={}",
-                            state.balance, amount_val
-                        ),
-                        source: None,
-                    });
-                }
-            } else {
-                // No wallet state implies 0 balance
-                if amount_val > 0 {
-                    return Err(DsmError::Internal {
-                        context: "Insufficient funds: no wallet state".to_string(),
-                        source: None,
-                    });
-                }
+                .map(|record| record.available)
+                .unwrap_or(0);
+            if available < amount_val && amount_val > 0 {
+                return Err(DsmError::Internal {
+                    context: format!(
+                        "Insufficient funds: balance={} needed={}",
+                        available, amount_val
+                    ),
+                    source: None,
+                });
             }
         }
 
@@ -265,20 +275,47 @@ impl UnilateralOpsSDK {
                 let mut next_tip = [0u8; 32];
                 next_tip.copy_from_slice(&next_tip_bytes);
 
+                // §4.2: SMT-Replace is mandatory for every state transition.
+                let smt = self.per_device_smt.read().await;
+                let smt_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
+                    &self.device_id_bytes,
+                    &recipient,
+                );
                 let mut cm = self.contact_manager.write().await;
-                if let Err(e) = cm.update_contact_chain_tip_unilateral(&recipient, next_tip) {
-                    warn!("UnilateralOpsSDK: failed to update contact chain tip: {e}");
+                if let Err(e) = cm.update_contact_chain_tip_unilateral(&recipient, next_tip, &smt, &smt_key) {
+                    return Err(DsmError::InvalidState(format!(
+                        "UnilateralOpsSDK: failed to update in-memory contact chain tip after submission: {e}"
+                    )));
                 }
-                if let Err(e) =
-                    client_db::update_finalized_bilateral_chain_tip(&recipient, &next_tip)
-                {
-                    warn!("UnilateralOpsSDK: failed to persist finalized chain tip: {e}");
+                match client_db::try_advance_finalized_bilateral_chain_tip(
+                    &recipient,
+                    &sender_chain_tip_arr,
+                    &next_tip,
+                ) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return Err(DsmError::InvalidState(
+                            "UnilateralOpsSDK: finalized chain tip parent mismatch after submission"
+                                .to_string(),
+                        ));
+                    }
+                    Err(e) => {
+                        return Err(DsmError::InvalidState(format!(
+                            "UnilateralOpsSDK: failed to persist finalized chain tip after submission: {e}"
+                        )));
+                    }
                 }
             } else {
-                warn!("UnilateralOpsSDK: chain tip update skipped (invalid base32 lengths)");
+                return Err(DsmError::InvalidState(
+                    "UnilateralOpsSDK: chain tip persistence failed due to invalid decoded base32 lengths"
+                        .to_string(),
+                ));
             }
         } else if next_chain_tip_b32.is_some() {
-            warn!("UnilateralOpsSDK: chain tip update skipped (decode failed)");
+            return Err(DsmError::InvalidState(
+                "UnilateralOpsSDK: chain tip persistence failed because next_chain_tip base32 decode failed"
+                    .to_string(),
+            ));
         }
 
         // 2. Post-submission: Debit and Store History
@@ -320,54 +357,12 @@ impl UnilateralOpsSDK {
         };
         let token_id = token_id.as_str();
 
-        // Debit only ERA to SQLite wallet_state.balance.
-        // Non-ERA tokens (e.g. dBTC) are tracked in the core state machine's
-        // token_balances HashMap, not in the SQLite balance column.
-        if amount > 0 && token_id == "ERA" {
-            // Re-read state to ensure atomic-ish update
-            // We use client_db sync calls here.
-            match get_wallet_state(sender_id) {
-                Ok(Some(state)) => {
-                    let new_bal = state.balance.saturating_sub(amount); // saturating to be safe, though pre-flight checks
-                    update_wallet_balance(sender_id, new_bal).map_err(|e| DsmError::Internal {
-                        context: e.to_string(),
-                        source: None,
-                    })?;
-                }
-                Ok(None) => {
-                    // Should be caught by pre-flight, but if here...
-                    warn!("UnilateralOpsSDK: sender has no wallet state but sent non-zero amount?");
-                }
-                Err(e) => {
-                    return Err(DsmError::Internal {
-                        context: e.to_string(),
-                        source: None,
-                    })
-                }
-            }
-        }
-
-        // Debit non-ERA tokens to the token_balances SQLite table
-        if amount > 0 && token_id != "ERA" {
-            let (prev, existing_locked) =
-                match crate::storage::client_db::get_token_balance(sender_id, token_id) {
-                    Ok(Some((a, l))) => (a, l),
-                    Ok(None) => (0, 0),
-                    Err(e) => {
-                        log::error!(
-                            "[unilateral] CRITICAL: failed to read {token_id} balance: {e}"
-                        );
-                        (0, 0)
-                    }
-                };
-            if let Err(e) = crate::storage::client_db::upsert_token_balance(
-                sender_id,
+        if amount > 0 {
+            log::info!(
+                "[unilateral] sender-side settlement metadata stored only; canonical state/projection remains authoritative for {} on {}",
                 token_id,
-                prev.saturating_sub(amount),
-                existing_locked,
-            ) {
-                log::error!("[unilateral] CRITICAL: failed to debit {token_id} balance: {e}");
-            }
+                sender_id
+            );
         }
 
         // Store Transaction Record
@@ -509,6 +504,7 @@ impl UnilateralOpsSDK {
         let smt_proof = ChainTipSmtProof {
             smt_root: [0u8; 32],
             state_hash: id32("next_chain_tip", &entry.next_chain_tip)?,
+            smt_key: [0u8; 32],
             proof_path: vec![],
             state_index: tick,
             proof_commit_height: tick,

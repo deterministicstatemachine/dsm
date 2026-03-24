@@ -3848,6 +3848,13 @@ export class BitcoinFractionalExitRequest extends Message<BitcoinFractionalExitR
    */
   destinationAddress = "";
 
+  /**
+   * Deterministic withdrawal ID (ρ) from planning phase
+   *
+   * @generated from field: string plan_id = 6;
+   */
+  planId = "";
+
   constructor(data?: PartialMessage<BitcoinFractionalExitRequest>) {
     super();
     proto3.util.initPartial(data, this);
@@ -3861,6 +3868,7 @@ export class BitcoinFractionalExitRequest extends Message<BitcoinFractionalExitR
     { no: 3, name: "successor_locktime", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
     { no: 4, name: "refund_iterations", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 5, name: "destination_address", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 6, name: "plan_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BitcoinFractionalExitRequest {
@@ -4630,6 +4638,31 @@ export class DbtcVaultAdvertisementV1 extends Message<DbtcVaultAdvertisementV1> 
    */
   htlcAddress = "";
 
+  /**
+   * BLAKE3("DSM/script-commit" || htlc_script) — commits the spending template
+   * without revealing the full script (spec Definition 9: script_commit_k).
+   *
+   * @generated from field: bytes script_commit = 15;
+   */
+  scriptCommit = new Uint8Array(0);
+
+  /**
+   * Public construction data needed to assemble the Bitcoin spend tx (spec
+   * Definition 9: redeem_params_k). Excludes the bearer-derived witness.
+   * Encoded as DbtcRedeemParams protobuf.
+   *
+   * @generated from field: bytes redeem_params = 16;
+   */
+  redeemParams = new Uint8Array(0);
+
+  /**
+   * Random 32-byte nonce per vault — public, safe without manifold_seed.
+   * Bearer derives η = BLAKE3("DSM/dbtc-bearer-eta\0" || manifold_seed || deposit_nonce).
+   *
+   * @generated from field: bytes deposit_nonce = 17;
+   */
+  depositNonce = new Uint8Array(0);
+
   constructor(data?: PartialMessage<DbtcVaultAdvertisementV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -4652,6 +4685,9 @@ export class DbtcVaultAdvertisementV1 extends Message<DbtcVaultAdvertisementV1> 
     { no: 12, name: "vault_proto_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 13, name: "entry_txid", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 14, name: "htlc_address", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 15, name: "script_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 16, name: "redeem_params", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 17, name: "deposit_nonce", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DbtcVaultAdvertisementV1 {
@@ -4668,6 +4704,81 @@ export class DbtcVaultAdvertisementV1 extends Message<DbtcVaultAdvertisementV1> 
 
   static equals(a: DbtcVaultAdvertisementV1 | PlainMessage<DbtcVaultAdvertisementV1> | undefined, b: DbtcVaultAdvertisementV1 | PlainMessage<DbtcVaultAdvertisementV1> | undefined): boolean {
     return proto3.util.equals(DbtcVaultAdvertisementV1, a, b);
+  }
+}
+
+/**
+ * Public construction data for a vault's HTLC (spec Definition 11).
+ * Sufficient to assemble a redemption transaction structure but NOT to authorize it.
+ * The bearer-derived witness (preimage + signature) is computed locally at spend time.
+ *
+ * @generated from message dsm.DbtcRedeemParams
+ */
+export class DbtcRedeemParams extends Message<DbtcRedeemParams> {
+  /**
+   * Raw HTLC redeem script bytes.
+   *
+   * @generated from field: bytes htlc_script = 1;
+   */
+  htlcScript = new Uint8Array(0);
+
+  /**
+   * Claim public key (33 bytes compressed secp256k1).
+   *
+   * @generated from field: bytes claim_pubkey = 2;
+   */
+  claimPubkey = new Uint8Array(0);
+
+  /**
+   * Hash lock embedded in the HTLC: SHA256(preimage).
+   *
+   * @generated from field: bytes hash_lock = 3;
+   */
+  hashLock = new Uint8Array(0);
+
+  /**
+   * Refund hash lock for the time-locked refund path.
+   *
+   * @generated from field: bytes refund_hash_lock = 4;
+   */
+  refundHashLock = new Uint8Array(0);
+
+  /**
+   * Refund iteration count (maps to HTLC locktime).
+   *
+   * @generated from field: uint32 refund_iterations = 5;
+   */
+  refundIterations = 0;
+
+  constructor(data?: PartialMessage<DbtcRedeemParams>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.DbtcRedeemParams";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "htlc_script", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "claim_pubkey", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "hash_lock", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "refund_hash_lock", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "refund_iterations", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DbtcRedeemParams {
+    return new DbtcRedeemParams().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DbtcRedeemParams {
+    return new DbtcRedeemParams().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DbtcRedeemParams {
+    return new DbtcRedeemParams().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: DbtcRedeemParams | PlainMessage<DbtcRedeemParams> | undefined, b: DbtcRedeemParams | PlainMessage<DbtcRedeemParams> | undefined): boolean {
+    return proto3.util.equals(DbtcRedeemParams, a, b);
   }
 }
 
@@ -13170,6 +13281,204 @@ export class BleChunk extends Message<BleChunk> {
 }
 
 /**
+ * Phase-1 BLE transport framing: session/message scoped chunk delivery below Envelope v3.
+ * These messages are transport-only. They MUST NOT alter protocol semantics.
+ *
+ * @generated from message dsm.BleTransportHeader
+ */
+export class BleTransportHeader extends Message<BleTransportHeader> {
+  /**
+   * transport framing version (currently 1)
+   *
+   * @generated from field: uint32 version = 1;
+   */
+  version = 0;
+
+  /**
+   * bitmask: DATA/SYN/ACK/NACK/FIN/KEEPALIVE
+   *
+   * @generated from field: uint32 flags = 2;
+   */
+  flags = 0;
+
+  /**
+   * random per transport session
+   *
+   * @generated from field: fixed64 session_id = 3;
+   */
+  sessionId = protoInt64.zero;
+
+  /**
+   * monotonic within session
+   *
+   * @generated from field: fixed64 message_id = 4;
+   */
+  messageId = protoInt64.zero;
+
+  /**
+   * zero-based
+   *
+   * @generated from field: uint32 chunk_index = 5;
+   */
+  chunkIndex = 0;
+
+  /**
+   * total chunks for the message
+   *
+   * @generated from field: uint32 chunk_count = 6;
+   */
+  chunkCount = 0;
+
+  /**
+   * bytes carried in this chunk's payload field
+   *
+   * @generated from field: uint32 payload_len = 7;
+   */
+  payloadLen = 0;
+
+  /**
+   * CRC32 of the payload bytes
+   *
+   * @generated from field: uint32 checksum = 8;
+   */
+  checksum = 0;
+
+  constructor(data?: PartialMessage<BleTransportHeader>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.BleTransportHeader";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "version", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 2, name: "flags", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 3, name: "session_id", kind: "scalar", T: 6 /* ScalarType.FIXED64 */ },
+    { no: 4, name: "message_id", kind: "scalar", T: 6 /* ScalarType.FIXED64 */ },
+    { no: 5, name: "chunk_index", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 6, name: "chunk_count", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 7, name: "payload_len", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 8, name: "checksum", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BleTransportHeader {
+    return new BleTransportHeader().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): BleTransportHeader {
+    return new BleTransportHeader().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): BleTransportHeader {
+    return new BleTransportHeader().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: BleTransportHeader | PlainMessage<BleTransportHeader> | undefined, b: BleTransportHeader | PlainMessage<BleTransportHeader> | undefined): boolean {
+    return proto3.util.equals(BleTransportHeader, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.BleTransportChunk
+ */
+export class BleTransportChunk extends Message<BleTransportChunk> {
+  /**
+   * @generated from field: dsm.BleTransportHeader header = 1;
+   */
+  header?: BleTransportHeader;
+
+  /**
+   * @generated from field: bytes payload = 2;
+   */
+  payload = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<BleTransportChunk>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.BleTransportChunk";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "header", kind: "message", T: BleTransportHeader },
+    { no: 2, name: "payload", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BleTransportChunk {
+    return new BleTransportChunk().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): BleTransportChunk {
+    return new BleTransportChunk().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): BleTransportChunk {
+    return new BleTransportChunk().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: BleTransportChunk | PlainMessage<BleTransportChunk> | undefined, b: BleTransportChunk | PlainMessage<BleTransportChunk> | undefined): boolean {
+    return proto3.util.equals(BleTransportChunk, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.BleTransportAck
+ */
+export class BleTransportAck extends Message<BleTransportAck> {
+  /**
+   * @generated from field: fixed64 session_id = 1;
+   */
+  sessionId = protoInt64.zero;
+
+  /**
+   * @generated from field: fixed64 message_id = 2;
+   */
+  messageId = protoInt64.zero;
+
+  /**
+   * highest contiguous received chunk index + 1 base for bitmap
+   *
+   * @generated from field: uint32 ack_base_chunk = 3;
+   */
+  ackBaseChunk = 0;
+
+  /**
+   * @generated from field: bytes ack_bitmap = 4;
+   */
+  ackBitmap = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<BleTransportAck>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.BleTransportAck";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "session_id", kind: "scalar", T: 6 /* ScalarType.FIXED64 */ },
+    { no: 2, name: "message_id", kind: "scalar", T: 6 /* ScalarType.FIXED64 */ },
+    { no: 3, name: "ack_base_chunk", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 4, name: "ack_bitmap", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BleTransportAck {
+    return new BleTransportAck().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): BleTransportAck {
+    return new BleTransportAck().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): BleTransportAck {
+    return new BleTransportAck().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: BleTransportAck | PlainMessage<BleTransportAck> | undefined, b: BleTransportAck | PlainMessage<BleTransportAck> | undefined): boolean {
+    return proto3.util.equals(BleTransportAck, a, b);
+  }
+}
+
+/**
  * Resumable BLE chunk transfer — receiver reports persisted chunk progress
  *
  * @generated from message dsm.BleResumeRequest
@@ -16734,7 +17043,7 @@ export class TransactionInfo extends Message<TransactionInfo> {
   stitchedReceipt = new Uint8Array(0);
 
   /**
-   * DISPLAY-ONLY: unix unix_ts (seconds) for UI history ordering. MUST NOT be used in hash preimages, ReceiptCommit fields, acceptance predicates, or protocol ordering.
+   * DISPLAY-ONLY: unix wall-clock seconds for UI history ordering. MUST NOT be used in hash preimages, ReceiptCommit fields, acceptance predicates, or protocol ordering.
    *
    * @generated from field: uint64 created_at = 14;
    */
