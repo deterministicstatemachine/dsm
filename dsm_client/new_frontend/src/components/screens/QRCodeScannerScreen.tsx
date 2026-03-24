@@ -9,6 +9,6 @@ export default function QRCodeScannerScreen(props: {
   onCancel?: () => void;
   onScan?: (scannedData: string) => void | Promise<void>;
   eraTokenSrc?: string;
-}): JSX.Element {
+}): React.JSX.Element {
   return <QRCodeScannerPanel {...props} />;
 }
