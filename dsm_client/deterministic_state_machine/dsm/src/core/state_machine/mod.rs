@@ -15,8 +15,6 @@ pub mod hashchain;
 pub mod random_walk;
 pub mod relationship;
 pub mod state;
-pub mod state_projection;
-pub mod sync_manager;
 pub mod transition;
 pub mod utils;
 

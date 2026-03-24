@@ -85,7 +85,6 @@ pub mod jni;
 pub mod bridge;
 pub mod crypto_performance;
 pub mod envelope;
-pub mod envelope_guard;
 pub mod event;
 pub mod handlers;
 pub mod init;

@@ -2293,33 +2293,21 @@ impl BilateralBleHandler {
             &receipt_digest,
         );
 
-        // 5. SMT-Replace: update per_device_smt with new chain tip
-        let smt_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
-            &self.device_id,
-            &session.counterparty_device_id,
-        );
-        let (sender_smt_root, rel_proof_parent_bytes, rel_proof_child_bytes, pre_root) = {
+        // 5. SMT-Replace: atomic update via core (§4.2)
+        let result = {
+            let mut manager = self.bilateral_tx_manager.write().await;
             let mut smt = self.per_device_smt.write().await;
-            let pre_root = *smt.root();
-            // Get proof for h_n BEFORE update (parent proof — §4.3#2: π_rel)
-            let parent_proof = smt.get_inclusion_proof(&smt_key, 256).ok();
-            let parent_bytes = parent_proof
-                .as_ref()
-                .map(crate::sdk::receipts::serialize_inclusion_proof)
-                .unwrap_or_default();
-            // Perform SMT-Replace: h_n → h_{n+1}
-            if let Err(e) = smt.update_leaf(&smt_key, &h_n_plus_1) {
-                warn!("[BILATERAL] SMT update_leaf failed: {e}");
-            }
-            let new_root = *smt.root();
-            // Get proof for h_{n+1} AFTER update (child proof — §4.3#2: π'_rel)
-            let child_proof = smt.get_inclusion_proof(&smt_key, 256).ok();
-            let child_bytes = child_proof
-                .as_ref()
-                .map(crate::sdk::receipts::serialize_inclusion_proof)
-                .unwrap_or_default();
-            (new_root, parent_bytes, child_bytes, pre_root)
+            manager.commit_bilateral_smt_update(
+                &mut smt,
+                &self.device_id,
+                &session.counterparty_device_id,
+                &h_n_plus_1,
+            )?
         };
+        let pre_root = result.pre_root;
+        let sender_smt_root = result.post_root;
+        let rel_proof_parent_bytes = result.parent_proof.to_bytes();
+        let rel_proof_child_bytes = result.child_proof.to_bytes();
 
         // 6. Build stitched receipt with real SMT roots + proofs (§4.2)
         let local_r_g = crate::sdk::app_state::AppState::get_device_tree_root();
@@ -2884,61 +2872,28 @@ impl BilateralBleHandler {
             (result, h_n)
         };
 
-        // Receiver: SMT-Replace FIRST, then build receipt with real proofs (§4.2)
+        // Receiver: SMT-Replace via core, then build receipt with real proofs (§4.2)
         let receipt_bytes = {
-            let smt_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
-                &self.device_id,
-                &session.counterparty_device_id,
-            );
-            let (pre_root, post_root, parent_bytes, child_bytes) = {
-                let mut smt = self.per_device_smt.write().await;
-                let pre_root = *smt.root();
-                let parent_bytes = smt
-                    .get_inclusion_proof(&smt_key, 256)
-                    .ok()
-                    .as_ref()
-                    .map(crate::sdk::receipts::serialize_inclusion_proof)
-                    .unwrap_or_default();
-                if let Err(e) = smt.update_leaf(&smt_key, &new_chain_tip) {
-                    warn!("[BILATERAL] Receiver SMT update failed: {}", e);
-                }
-                let post_root = *smt.root();
-                let child_bytes = smt
-                    .get_inclusion_proof(&smt_key, 256)
-                    .ok()
-                    .as_ref()
-                    .map(crate::sdk::receipts::serialize_inclusion_proof)
-                    .unwrap_or_default();
-                (pre_root, post_root, parent_bytes, child_bytes)
-            };
-            // §B3: Store the real Per-Device SMT proof in the relationship anchor.
-            {
+            let result = {
                 let mut manager = self.bilateral_tx_manager.write().await;
-                let real_proof = dsm::types::contact_types::ChainTipSmtProof {
-                    smt_root: post_root,
-                    state_hash: new_chain_tip,
-                    proof_path: Vec::new(), // serialized bytes stored in receipt separately
-                    state_index: dsm::core::bilateral_transaction_manager::mono_commit_height_pub(),
-                    proof_commit_height:
-                        dsm::core::bilateral_transaction_manager::mono_commit_height_pub(),
-                };
-                manager.store_anchor_smt_proof(&session.counterparty_device_id, real_proof);
-            }
-            // §2.3: π_dev proves DevID_A ∈ R_G. devid_a = self.device_id (local), so
-            // we must supply the LOCAL device's R_G, not the counterparty's R_G.
-            // get_contact_device_tree_root returns the sender's R_G which is only
-            // needed to verify the sender's proof — not our own local π_dev.
+                let mut smt = self.per_device_smt.write().await;
+                manager.commit_bilateral_smt_update(
+                    &mut smt,
+                    &self.device_id,
+                    &session.counterparty_device_id,
+                    &new_chain_tip,
+                )?
+            };
             let local_r_g = crate::sdk::app_state::AppState::get_device_tree_root();
-            // §B2: Use relationship chain tips (h_n, h_{n+1}) NOT entity hashes.
             crate::sdk::receipts::build_bilateral_receipt_with_smt(
                 self.device_id,
                 session.counterparty_device_id,
-                h_n,           // §B2: relationship chain tip h_n (captured before transition)
-                new_chain_tip, // §B2: relationship chain tip h_{n+1} from sender's confirm
-                pre_root,
-                post_root,
-                parent_bytes,
-                child_bytes,
+                h_n,
+                new_chain_tip,
+                result.pre_root,
+                result.post_root,
+                result.parent_proof.to_bytes(),
+                result.child_proof.to_bytes(),
                 local_r_g,
             )
         };
