@@ -43,7 +43,7 @@ rg_search() {
         # No `|| true`: grep returns exit-1 when nothing matches; since this
         # function is only called inside `if rg_search ...; then` conditionals,
         # set -e does NOT apply and the caller correctly sees "no match" = false.
-        grep -r -n -E "$pattern" "$dir" | grep -v "bluetooth" | grep -v "/ble/" | grep -v "BleOutboxRepository.kt"
+        grep -r -n -E "$pattern" "$dir" | grep -v "bluetooth" | grep -v "/ble/" | grep -v "BleOutboxRepository.kt" | grep -v "/target/" | grep -v "/node_modules/" | grep -v "pgdata"
     fi
 }
 
