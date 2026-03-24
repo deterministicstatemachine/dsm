@@ -1278,14 +1278,6 @@ pub struct MerkleProof {
 }
 
 impl MerkleProof {
-    /// Generate a Merkle proof for the specified leaf index in the tree
-    ///
-    /// # Arguments
-    /// * `tree` - The Sparse Merkle Tree containing the data
-    /// * `index` - The index of the leaf to generate a proof for
-    ///
-    /// # Returns
-    /// * `Result<Self, DsmError>` - The generated proof or an error
     /// Generate a MerkleProof from a Per-Device SMT inclusion proof.
     ///
     /// Converts the compact `SmtInclusionProof` from `merkle::sparse_merkle_tree`
@@ -1426,14 +1418,6 @@ pub struct NonInclusionProof {
 }
 
 impl NonInclusionProof {
-    /// Generate a non-inclusion proof for the specified leaf index
-    ///
-    /// # Arguments
-    /// * `tree` - The Sparse Merkle Tree
-    /// * `index` - The index to prove non-inclusion for
-    ///
-    /// # Returns
-    /// * `Result<Self, DsmError>` - The generated proof or an error
     /// Construct a non-inclusion proof from a Per-Device SMT.
     ///
     /// Uses the 256-bit key SMT from `merkle::sparse_merkle_tree` to generate

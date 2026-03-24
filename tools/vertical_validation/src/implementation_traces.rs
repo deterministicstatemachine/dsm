@@ -365,7 +365,8 @@ fn trace_bilateral_precommit_tripwire(
             .initial_relationship_tip_for(&remote_device_id)
             .expect("initial relationship tip");
 
-        match manager.establish_relationship(&remote_device_id).await {
+        let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
+        match manager.establish_relationship(&remote_device_id, &mut smt).await {
             Ok(anchor) => {
                 if anchor.chain_tip != expected_initial_tip {
                     failures
@@ -558,7 +559,8 @@ fn trace_bilateral_precomputed_finalize_hash(
             Err(e) => return vec![e],
         };
 
-        if let Err(e) = manager.establish_relationship(&remote_device_id).await {
+        let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
+        if let Err(e) = manager.establish_relationship(&remote_device_id, &mut smt).await {
             return vec![format!("establish_relationship failed: {e}")];
         }
 
@@ -1252,7 +1254,8 @@ fn trace_bilateral_full_offline_finality(
             .initial_relationship_tip_for(&remote_device_id)
             .expect("initial relationship tip");
 
-        match manager.establish_relationship(&remote_device_id).await {
+        let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
+        match manager.establish_relationship(&remote_device_id, &mut smt).await {
             Ok(anchor) => {
                 if anchor.chain_tip != initial_tip {
                     failures.push("establish_relationship produced unexpected initial tip".into());
@@ -1460,11 +1463,13 @@ fn trace_bilateral_pair_non_interference(
         };
 
         // Step 1: Establish both relationships
-        let tip1_init = match manager1.establish_relationship(&remote1).await {
+        let mut smt1 = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
+        let tip1_init = match manager1.establish_relationship(&remote1, &mut smt1).await {
             Ok(anchor) => anchor.chain_tip,
             Err(e) => return vec![format!("manager1 establish failed: {e}")],
         };
-        let tip2_init = match manager2.establish_relationship(&remote2).await {
+        let mut smt2 = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
+        let tip2_init = match manager2.establish_relationship(&remote2, &mut smt2).await {
             Ok(anchor) => anchor.chain_tip,
             Err(e) => return vec![format!("manager2 establish failed: {e}")],
         };
