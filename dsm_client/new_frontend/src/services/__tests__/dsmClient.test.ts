@@ -3,6 +3,7 @@ import { DsmClient } from '../../services/dsmClient';
 import { hasIdentity } from '../../utils/identity';
 import * as dsmIndex from '../../dsm/index';
 import { encodeBase32Crockford } from '../../utils/textId';
+import * as BridgeRegistry from '../../bridge/BridgeRegistry';
 
 jest.mock('../../utils/identity', () => ({
   hasIdentity: jest.fn(),
@@ -20,14 +21,26 @@ jest.mock('../../dsm/index', () => ({
   getWalletHistory: jest.fn(),
 }));
 
+// isBinaryBridgeReady() inside dsmClient.ts checks bridge.__binary === true and
+// the presence of sendMessageBin.  Without this mock the function returns false
+// regardless of the hasIdentity mock, causing isReady() to short-circuit.
+jest.mock('../../bridge/BridgeRegistry', () => ({
+  getBridgeInstance: jest.fn(),
+  setBridgeInstance: jest.fn(),
+}));
+
 const mockedHasIdentity = hasIdentity as jest.MockedFunction<typeof hasIdentity>;
 const mockedDsm = dsmIndex as jest.Mocked<typeof dsmIndex>;
+const mockBinaryBridge = { __binary: true as const, sendMessageBin: jest.fn() };
 
 describe('DsmClient identity gating and bridge passthrough', () => {
   let client: DsmClient;
 
   beforeEach(() => {
     jest.clearAllMocks();
+    // Simulate a binary-capable bridge being registered so isBinaryBridgeReady()
+    // returns true and isReady() can delegate to hasIdentity() as expected.
+    (BridgeRegistry.getBridgeInstance as jest.Mock).mockReturnValue(mockBinaryBridge);
     client = new DsmClient();
   });
 
@@ -47,7 +60,6 @@ describe('DsmClient identity gating and bridge passthrough', () => {
       genesisHash: genesisB32,
       deviceId: deviceB32,
       signingPublicKey: keyB32,
-      storageNodes: ['http://localhost:8080', 'http://localhost:8081', 'http://localhost:8082'],
     });
     expect(res).toEqual({ ok: false });
     expect(mockedDsm.addContact).not.toHaveBeenCalled();
@@ -77,7 +89,6 @@ describe('DsmClient identity gating and bridge passthrough', () => {
       genesisHash: genesisB32,
       deviceId: deviceB32,
       signingPublicKey: keyB32,
-      storageNodes: ['http://localhost:8080', 'http://localhost:8081', 'http://localhost:8082'],
     });
     expect(added).toEqual({ ok: true });
     expect(mockedDsm.getContacts).toHaveBeenCalled();
