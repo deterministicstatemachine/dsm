@@ -110,6 +110,24 @@ pub fn set_withdrawal_state(withdrawal_id: &str, state: &str) -> Result<()> {
     Ok(())
 }
 
+/// Sum unresolved withdrawal burn reservations for a device/token pair.
+///
+/// `executing` and `committed` rows define the dBTC in-flight set.
+pub fn sum_active_withdrawal_burns(device_id: &str, token_id: &str) -> Result<u64> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    let total: Option<i64> = conn.query_row(
+        "SELECT SUM(burn_amount_sats)
+         FROM in_flight_withdrawals
+         WHERE device_id = ?1
+           AND burn_token_id = ?2
+           AND (state = 'executing' OR state = 'committed')",
+        params![device_id, token_id],
+        |row| row.get(0),
+    )?;
+    Ok(total.unwrap_or(0).max(0) as u64)
+}
+
 /// Record the redemption txid set after broadcast.
 pub fn set_withdrawal_redemption_txids(
     withdrawal_id: &str,

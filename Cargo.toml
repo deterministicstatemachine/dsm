@@ -4,7 +4,6 @@ members = [
     "dsm_client/deterministic_state_machine/dsm",
     "dsm_client/deterministic_state_machine/dsm_sdk",
     "dsm_storage_node",
-    "dsm-gen",
     "tools/vector_runner",
     "tools/vector_builder",
     "tools/vertical_validation"

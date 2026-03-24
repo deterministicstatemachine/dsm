@@ -59,6 +59,23 @@ fn reset_db() {
     }
 }
 
+fn seed_era_projection(device_txt: &str, available: u64) {
+    client_db::upsert_balance_projection(&client_db::BalanceProjectionRecord {
+        balance_key: format!("test:{device_txt}:ERA"),
+        device_id: device_txt.to_string(),
+        token_id: "ERA".to_string(),
+        policy_commit: sdk::util::text_id::encode_base32_crockford(
+            dsm_sdk::policy::builtins::NATIVE_POLICY_COMMIT,
+        ),
+        available,
+        locked: 0,
+        source_state_hash: sdk::util::text_id::encode_base32_crockford(&[0u8; 32]),
+        source_state_number: 0,
+        updated_at: 0,
+    })
+    .expect("seed ERA projection");
+}
+
 /// Build a symmetric pair of handlers for two devices A and B,
 /// with contacts and relationships established on both sides.
 async fn make_handler_pair(
@@ -107,12 +124,13 @@ async fn make_handler_pair(
 
     mgr_a.add_verified_contact(contact_b).expect("add B to A");
     mgr_b.add_verified_contact(contact_a).expect("add A to B");
+    let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
     mgr_a
-        .establish_relationship(&b_dev)
+        .establish_relationship(&b_dev, &mut smt)
         .await
         .expect("A->B rel");
     mgr_b
-        .establish_relationship(&a_dev)
+        .establish_relationship(&a_dev, &mut smt)
         .await
         .expect("B->A rel");
 
@@ -295,9 +313,9 @@ async fn test_disconnect_then_retry_succeeds() {
     );
     sdk::sdk::app_state::AppState::set_has_identity(true);
 
-    // Seed sender wallet
+    // Seed sender ERA projection.
     let a_txt = sdk::util::text_id::encode_base32_crockford(&a_dev);
-    client_db::update_wallet_balance(&a_txt, 10_000).expect("seed wallet");
+    seed_era_projection(&a_txt, 10_000);
 
     // --- Attempt 1: prepare then simulate disconnect before receiver responds ---
     let op1 = make_transfer_op(b_dev, 1);
@@ -348,7 +366,7 @@ async fn test_disconnect_then_retry_succeeds() {
 
     // Receiver handles the second attempt
     handler_b
-        .handle_prepare_request(&prepare2)
+        .handle_prepare_request(&prepare2, None)
         .await
         .expect("receiver handles 2nd prepare");
 
@@ -396,70 +414,76 @@ async fn test_disconnect_then_retry_succeeds() {
 // =============================================================================
 // Test 4: Multiple sequential back-and-forth transfers (A→B repeated 3×)
 // =============================================================================
-#[allow(clippy::too_many_arguments)]
+struct TransferParticipant<'a> {
+    handler: &'a BilateralBleHandler,
+    dev: [u8; 32],
+    gen: [u8; 32],
+    pubkey: Vec<u8>,
+}
+
 async fn run_one_transfer(
-    sender: &BilateralBleHandler,
-    receiver: &BilateralBleHandler,
-    sender_dev: [u8; 32],
-    sender_gen: [u8; 32],
-    sender_pub: Vec<u8>,
-    receiver_dev: [u8; 32],
-    receiver_gen: [u8; 32],
-    receiver_pub: Vec<u8>,
+    sender: &TransferParticipant<'_>,
+    receiver: &TransferParticipant<'_>,
     nonce: u8,
 ) {
     sdk::sdk::app_state::AppState::set_identity_info(
-        sender_dev.to_vec(),
-        sender_pub.clone(),
-        sender_gen.to_vec(),
+        sender.dev.to_vec(),
+        sender.pubkey.clone(),
+        sender.gen.to_vec(),
         vec![0u8; 32],
     );
     sdk::sdk::app_state::AppState::set_has_identity(true);
 
-    let op = make_transfer_op(receiver_dev, nonce);
+    let op = make_transfer_op(receiver.dev, nonce);
     let (prep, commit) = sender
-        .prepare_bilateral_transaction(receiver_dev, op, 300)
+        .handler
+        .prepare_bilateral_transaction(receiver.dev, op, 300)
         .await
         .unwrap_or_else(|e| panic!("prepare nonce={nonce}: {e}"));
 
     receiver
-        .handle_prepare_request(&prep)
+        .handler
+        .handle_prepare_request(&prep, None)
         .await
         .unwrap_or_else(|e| panic!("recv prepare nonce={nonce}: {e}"));
 
     let accept = receiver
+        .handler
         .create_prepare_accept_envelope(commit)
         .await
         .unwrap_or_else(|e| panic!("accept nonce={nonce}: {e}"));
 
     sdk::sdk::app_state::AppState::set_identity_info(
-        sender_dev.to_vec(),
-        sender_pub,
-        sender_gen.to_vec(),
+        sender.dev.to_vec(),
+        sender.pubkey.clone(),
+        sender.gen.to_vec(),
         vec![0u8; 32],
     );
     let (confirm, _) = sender
+        .handler
         .handle_prepare_response(&accept)
         .await
         .unwrap_or_else(|e| panic!("handle_response nonce={nonce}: {e}"));
 
     sdk::sdk::app_state::AppState::set_identity_info(
-        receiver_dev.to_vec(),
-        receiver_pub,
-        receiver_gen.to_vec(),
+        receiver.dev.to_vec(),
+        receiver.pubkey.clone(),
+        receiver.gen.to_vec(),
         vec![0u8; 32],
     );
     receiver
+        .handler
         .handle_confirm_request(&confirm)
         .await
         .unwrap_or_else(|e| panic!("handle_confirm nonce={nonce}: {e}"));
 
     sender
+        .handler
         .mark_confirm_delivered(commit)
         .await
         .unwrap_or_else(|e| panic!("mark_delivered nonce={nonce}: {e}"));
 
-    let phase = sender.get_session_phase(&commit).await;
+    let phase = sender.handler.get_session_phase(&commit).await;
     assert_eq!(
         phase,
         Some(BilateralPhase::Committed),
@@ -481,27 +505,28 @@ async fn test_multiple_sequential_transfers() {
 
     let (handler_a, handler_b) = make_handler_pair(a_dev, a_gen, b_dev, b_gen, &a_kp, &b_kp).await;
 
-    // Seed both wallets
+    // Seed both ERA projections.
     let a_txt = sdk::util::text_id::encode_base32_crockford(&a_dev);
     let b_txt = sdk::util::text_id::encode_base32_crockford(&b_dev);
-    client_db::update_wallet_balance(&a_txt, 50_000).expect("seed A");
-    client_db::update_wallet_balance(&b_txt, 50_000).expect("seed B");
+    seed_era_projection(&a_txt, 50_000);
+    seed_era_projection(&b_txt, 50_000);
 
     // Run 3 sequential A→B transfers with increasing nonces (simulating repeated
     // back-and-forth sessions on the same BLE connection without disconnect).
+    let participant_a = TransferParticipant {
+        handler: &handler_a,
+        dev: a_dev,
+        gen: a_gen,
+        pubkey: a_kp.public_key().to_vec(),
+    };
+    let participant_b = TransferParticipant {
+        handler: &handler_b,
+        dev: b_dev,
+        gen: b_gen,
+        pubkey: b_kp.public_key().to_vec(),
+    };
     for nonce in [10u8, 11, 12] {
-        run_one_transfer(
-            &handler_a,
-            &handler_b,
-            a_dev,
-            a_gen,
-            a_kp.public_key().to_vec(),
-            b_dev,
-            b_gen,
-            b_kp.public_key().to_vec(),
-            nonce,
-        )
-        .await;
+        run_one_transfer(&participant_a, &participant_b, nonce).await;
     }
 }
 
@@ -677,7 +702,7 @@ async fn test_stale_session_superseded_on_prepare() {
     );
     sdk::sdk::app_state::AppState::set_has_identity(true);
     let a_txt = sdk::util::text_id::encode_base32_crockford(&a_dev);
-    client_db::update_wallet_balance(&a_txt, 10_000).expect("seed wallet");
+    seed_era_projection(&a_txt, 10_000);
 
     // A fresh prepare must supersede the stale session immediately
     let op = make_transfer_op(b_dev, 99);

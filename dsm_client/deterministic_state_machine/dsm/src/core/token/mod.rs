@@ -23,7 +23,9 @@ pub use token_factory::{
 };
 
 pub use token_registry::TokenRegistry;
-pub use token_state_manager::{PolicyCommitResolver, TokenStateManager, TokenTransfer};
+pub use token_state_manager::{
+    derive_canonical_balance_key, PolicyCommitResolver, TokenStateManager, TokenTransfer,
+};
 
 // Re-export faucet only when enabled and implemented
 #[cfg(feature = "faucet")]

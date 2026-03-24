@@ -96,7 +96,10 @@ impl AppRouterImpl {
                     let genesis_hash = res.genesis_hash.clone().unwrap_or_else(|| vec![0u8; 32]);
                     let public_key =
                         crate::sdk::app_state::AppState::get_public_key().unwrap_or_default();
-                    let smt_root = vec![0u8; 32];
+                    let smt_root = dsm::merkle::sparse_merkle_tree::empty_root(
+                        dsm::merkle::sparse_merkle_tree::DEFAULT_SMT_HEIGHT,
+                    )
+                    .to_vec();
 
                     crate::sdk::app_state::AppState::set_identity_info(
                         device_id.clone(),
@@ -187,7 +190,10 @@ impl AppRouterImpl {
                     let genesis_hash = req.genesis_hash.clone();
                     let public_key =
                         crate::sdk::app_state::AppState::get_public_key().unwrap_or_default();
-                    let smt_root = vec![0u8; 32];
+                    let smt_root = dsm::merkle::sparse_merkle_tree::empty_root(
+                        dsm::merkle::sparse_merkle_tree::DEFAULT_SMT_HEIGHT,
+                    )
+                    .to_vec();
 
                     crate::sdk::app_state::AppState::set_identity_info(
                         device_id.clone(),

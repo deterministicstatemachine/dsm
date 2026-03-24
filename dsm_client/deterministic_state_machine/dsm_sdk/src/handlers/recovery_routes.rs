@@ -23,9 +23,10 @@ impl AppRouterImpl {
                 let resp = generated::AppStateResponse {
                     key: "recovery.status".to_string(),
                     value: Some(format!(
-                        "enabled={},configured={},capsule_count={},last_capsule_index={}",
+                        "enabled={},configured={},pending={},capsule_count={},last_capsule_index={}",
                         status.enabled,
                         status.configured,
+                        status.pending_capsule,
                         status.capsule_count,
                         status.last_capsule_index,
                     )),
@@ -61,7 +62,7 @@ impl AppRouterImpl {
                             value: Some(format!(
                                 "capsule_index={},smt_root={},created_tick={},counterparty_count={}",
                                 meta.capsule_index,
-                                &smt_root_str[..smt_root_str.len().min(16)],
+                                smt_root_str,
                                 meta.created_tick,
                                 meta.counterparty_count,
                             )),
@@ -198,9 +199,36 @@ impl AppRouterImpl {
                 }
             }
 
+            // -------- recovery.inspectCapsule --------
+            // Decrypts a ring capsule using the cached recovery key so mnemonic
+            // handling stays inside Rust, but does not stage any recovered state.
+            "recovery.inspectCapsule" => {
+                let capsule = match Self::decode_nfc_capsule_payload(&i.args) {
+                    Ok(payload) => payload,
+                    Err(e) => return err(format!("recovery.inspectCapsule: {e}")),
+                };
+
+                let decrypted =
+                    match crate::sdk::recovery_sdk::RecoverySDK::decrypt_capsule_with_cached_key_bytes(
+                        &capsule,
+                    ) {
+                        Ok(v) => v,
+                        Err(e) => return err(format!("recovery.inspectCapsule failed: {e}")),
+                    };
+
+                let (chain_tips, _) =
+                    match Self::map_decrypted_capsule(&decrypted, "recovery.inspectCapsule") {
+                        Ok(mapped) => mapped,
+                        Err(e) => return err(e),
+                    };
+
+                let resp = Self::build_capsule_decrypt_response(&decrypted, chain_tips);
+                pack_envelope_ok(generated::envelope::Payload::RecoveryCapsuleDecryptResponse(resp))
+            }
+
             // -------- recovery.decryptCapsule --------
             // Decrypts a ring capsule using the cached recovery key so mnemonic
-            // handling stays inside Rust.
+            // handling stays inside Rust, then stages the recovered state locally.
             "recovery.decryptCapsule" => {
                 let capsule = match Self::decode_nfc_capsule_payload(&i.args) {
                     Ok(payload) => payload,
@@ -215,54 +243,11 @@ impl AppRouterImpl {
                         Err(e) => return err(format!("recovery.decryptCapsule failed: {e}")),
                     };
 
-                if decrypted.smt_root.len() != 32 {
-                    return err("recovery.decryptCapsule: invalid SMT root length".into());
-                }
-                if decrypted.rollup_hash.len() != 32 {
-                    return err("recovery.decryptCapsule: invalid rollup hash length".into());
-                }
-
-                let mut chain_tips = Vec::new();
-                let mut recovered_tips = Vec::new();
-                for (device_id_str, (height, head_hash)) in decrypted.counterparty_tips {
-                    let device_id_bytes =
-                        match crate::util::text_id::decode_base32_crockford(&device_id_str) {
-                            Some(v) => v,
-                            None => {
-                                return err(
-                                    "recovery.decryptCapsule: invalid counterparty device_id"
-                                        .into(),
-                                )
-                            }
-                        };
-
-                    if device_id_bytes.len() != 32 {
-                        return err(
-                            "recovery.decryptCapsule: invalid counterparty device_id length".into(),
-                        );
-                    }
-                    if head_hash.len() != 32 {
-                        return err(
-                            "recovery.decryptCapsule: invalid counterparty head_hash length".into(),
-                        );
-                    }
-
-                    let mut device_id_arr = [0u8; 32];
-                    device_id_arr.copy_from_slice(&device_id_bytes);
-                    let mut head_hash_arr = [0u8; 32];
-                    head_hash_arr.copy_from_slice(&head_hash);
-                    recovered_tips.push(crate::storage::client_db::recovery::RecoveredChainTip {
-                        device_id: device_id_arr,
-                        height,
-                        head_hash: head_hash_arr,
-                    });
-
-                    chain_tips.push(generated::ChainTip {
-                        counterparty_device_id: device_id_bytes,
-                        height,
-                        head_hash: Some(generated::Hash32 { v: head_hash }),
-                    });
-                }
+                let (chain_tips, recovered_tips) =
+                    match Self::map_decrypted_capsule(&decrypted, "recovery.decryptCapsule") {
+                        Ok(mapped) => mapped,
+                        Err(e) => return err(e),
+                    };
 
                 Self::clear_staged_recovery_state();
 
@@ -297,23 +282,7 @@ impl AppRouterImpl {
                     }
                 }
 
-                let mut metadata = Vec::with_capacity(20);
-                metadata.extend_from_slice(&decrypted.metadata.version.to_le_bytes());
-                metadata.extend_from_slice(&decrypted.metadata.flags.to_le_bytes());
-                metadata.extend_from_slice(&decrypted.metadata.logical_time.to_le_bytes());
-                metadata.extend_from_slice(&decrypted.metadata.counter.to_le_bytes());
-
-                let resp = generated::RecoveryCapsuleDecryptResponse {
-                    success: true,
-                    global_root: Some(generated::Hash32 {
-                        v: decrypted.smt_root,
-                    }),
-                    chain_tips,
-                    receipt_rollup: Some(generated::Hash32 {
-                        v: decrypted.rollup_hash,
-                    }),
-                    meta_data: metadata,
-                };
+                let resp = Self::build_capsule_decrypt_response(&decrypted, chain_tips);
                 pack_envelope_ok(generated::envelope::Payload::RecoveryCapsuleDecryptResponse(resp))
             }
 
@@ -498,6 +467,19 @@ impl AppRouterImpl {
                     }
                     Err(e) => err(format!("recovery.generateMnemonic failed: {e}")),
                 }
+            }
+
+            // -------- nfc.ring.read --------
+            // Authorizes Kotlin to launch NfcRecoveryActivity (enableReaderMode).
+            // No capsule validation — we are reading from the ring, not writing.
+            // Kotlin must call this route first, check for an error response,
+            // and only launch NfcRecoveryActivity on success.
+            "nfc.ring.read" => {
+                let resp = generated::AppStateResponse {
+                    key: "nfc.ring.read".to_string(),
+                    value: Some("authorized=true".to_string()),
+                };
+                pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
             }
 
             // -------- nfc.ring.write --------
@@ -881,6 +863,85 @@ impl AppRouterImpl {
             if let Err(e) = crate::storage::client_db::recovery::set_recovery_pref(key, &[]) {
                 log::warn!("[RECOVERY] Failed to clear recovery pref {}: {}", key, e);
             }
+        }
+    }
+
+    fn map_decrypted_capsule(
+        decrypted: &dsm::recovery::RecoveryCapsule,
+        route_name: &str,
+    ) -> Result<
+        (
+            Vec<generated::ChainTip>,
+            Vec<crate::storage::client_db::recovery::RecoveredChainTip>,
+        ),
+        String,
+    > {
+        if decrypted.smt_root.len() != 32 {
+            return Err(format!("{route_name}: invalid SMT root length"));
+        }
+        if decrypted.rollup_hash.len() != 32 {
+            return Err(format!("{route_name}: invalid rollup hash length"));
+        }
+
+        let mut chain_tips = Vec::new();
+        let mut recovered_tips = Vec::new();
+        for (device_id_str, (height, head_hash)) in &decrypted.counterparty_tips {
+            let device_id_bytes = crate::util::text_id::decode_base32_crockford(device_id_str)
+                .ok_or_else(|| format!("{route_name}: invalid counterparty device_id"))?;
+
+            if device_id_bytes.len() != 32 {
+                return Err(format!(
+                    "{route_name}: invalid counterparty device_id length"
+                ));
+            }
+            if head_hash.len() != 32 {
+                return Err(format!(
+                    "{route_name}: invalid counterparty head_hash length"
+                ));
+            }
+
+            let mut device_id_arr = [0u8; 32];
+            device_id_arr.copy_from_slice(&device_id_bytes);
+            let mut head_hash_arr = [0u8; 32];
+            head_hash_arr.copy_from_slice(head_hash);
+            recovered_tips.push(crate::storage::client_db::recovery::RecoveredChainTip {
+                device_id: device_id_arr,
+                height: *height,
+                head_hash: head_hash_arr,
+            });
+
+            chain_tips.push(generated::ChainTip {
+                counterparty_device_id: device_id_bytes,
+                height: *height,
+                head_hash: Some(generated::Hash32 {
+                    v: head_hash.clone(),
+                }),
+            });
+        }
+
+        Ok((chain_tips, recovered_tips))
+    }
+
+    fn build_capsule_decrypt_response(
+        decrypted: &dsm::recovery::RecoveryCapsule,
+        chain_tips: Vec<generated::ChainTip>,
+    ) -> generated::RecoveryCapsuleDecryptResponse {
+        let mut metadata = Vec::with_capacity(20);
+        metadata.extend_from_slice(&decrypted.metadata.version.to_le_bytes());
+        metadata.extend_from_slice(&decrypted.metadata.flags.to_le_bytes());
+        metadata.extend_from_slice(&decrypted.metadata.logical_time.to_le_bytes());
+        metadata.extend_from_slice(&decrypted.metadata.counter.to_le_bytes());
+
+        generated::RecoveryCapsuleDecryptResponse {
+            success: true,
+            global_root: Some(generated::Hash32 {
+                v: decrypted.smt_root.clone(),
+            }),
+            chain_tips,
+            receipt_rollup: Some(generated::Hash32 {
+                v: decrypted.rollup_hash.clone(),
+            }),
+            meta_data: metadata,
         }
     }
 }

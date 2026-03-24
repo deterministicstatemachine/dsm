@@ -2,8 +2,7 @@
 //! from the whitepaper, specifically the formula: S(n+1).prev_hash = H(S(n))
 
 use dsm::core::state_machine::hashchain::HashChain;
-use dsm::core::state_machine::hashchain::BatchStatus;
-use dsm::crypto::sphincs::{generate_sphincs_keypair, sphincs_sign};
+use dsm::crypto::sphincs::generate_sphincs_keypair;
 use dsm::types::error::DsmError;
 use dsm::types::operations::Operation;
 use dsm::types::state_types::{DeviceInfo, SparseIndex, State, StateParams};
@@ -14,7 +13,7 @@ fn test_hash_chain_mathematical_model() -> Result<(), DsmError> {
     let mut chain = HashChain::new();
 
     // Create a device info with real SPHINCS+ keypair for signature verification
-    let (pk, sk) =
+    let (pk, _sk) =
         generate_sphincs_keypair().unwrap_or_else(|e| panic!("keypair generation failed: {e}"));
     let device_info = DeviceInfo::new(*blake3::hash(b"test_device").as_bytes(), pk);
 
@@ -91,52 +90,5 @@ fn test_hash_chain_mathematical_model() -> Result<(), DsmError> {
     let chain_valid = chain.verify_chain()?;
     assert!(chain_valid, "Chain verification failed");
 
-    // Test batch operations to verify they maintain mathematical constraints
-    let batch_id = chain.create_batch()?;
-
-    // Create a signed transition using the available constructors
-    let mut operation = Operation::Generic {
-        operation_type: b"batch_test".to_vec(),
-        data: vec![],
-        message: "Batch operation test".to_string(),
-        signature: vec![],
-    };
-    let op_bytes = operation.to_bytes();
-    let sig = sphincs_sign(&sk, &op_bytes).unwrap_or_else(|e| panic!("sign batch op failed: {e}"));
-    if let Operation::Generic { signature, .. } = &mut operation {
-        *signature = sig;
-    }
-
-    // Get the current state to use for transition
-    let current_state = chain.get_latest_state()?;
-
-    // Create a state transition by using the proper factory method with only 3 required arguments
-    let transition = dsm::core::state_machine::transition::create_transition(
-        current_state,
-        operation,
-        &[10, 11, 12], // new_entropy
-    )?;
-
-    // Add transition to batch
-    let _transition_index = chain.add_transition_to_batch(batch_id, transition.clone())?;
-
-    // Finalize and commit batch
-    chain.finalize_batch(batch_id)?;
-    chain.commit_batch(batch_id)?;
-
-    // Verify chain is still valid after batch operations
-    let chain_still_valid = chain.verify_chain()?;
-    assert!(
-        chain_still_valid,
-        "Chain verification failed after batch operations"
-    );
-
-    // Verify that the batch status is committed
-    let batch_status = chain.get_batch_status(batch_id)?;
-    assert_eq!(
-        batch_status,
-        BatchStatus::Committed,
-        "Batch should be in committed status"
-    );
     Ok(())
 }

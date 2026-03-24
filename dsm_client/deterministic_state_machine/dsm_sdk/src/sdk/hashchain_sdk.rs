@@ -14,9 +14,8 @@ use dsm::crypto::blake3 as dsm_blake3;
 use dsm::core::state_machine::{hashchain::HashChain, StateMachine};
 use dsm::types::error::DsmError;
 use dsm::types::operations::{Operation, TransactionMode};
-use dsm::types::state_types::{
-    MerkleProof, MerkleProofParams, SparseIndex, SparseMerkleTree, State, StateParams,
-};
+use dsm::merkle::sparse_merkle_tree::SparseMerkleTree;
+use dsm::types::state_types::{MerkleProof, MerkleProofParams, SparseIndex, State, StateParams};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::fmt;
@@ -144,9 +143,9 @@ impl HashChainSDK {
             path: vec![], // If SMT exposes sibling path building, populate here.
             index: state_number,
             leaf_hash: blake3::Hash::from_bytes(state_commitment).into(),
-            root_hash: blake3::Hash::from_bytes(*tree.root.as_bytes()).into(),
-            height: tree.height,
-            leaf_count: tree.leaf_count,
+            root_hash: blake3::Hash::from_bytes(*tree.root()).into(),
+            height: dsm::merkle::sparse_merkle_tree::DEFAULT_SMT_HEIGHT,
+            leaf_count: tree.leaf_count() as u64,
             device_id: String::new(),
             public_key: vec![],
             sparse_index: SparseIndex::new(vec![0]),
@@ -177,7 +176,7 @@ impl HashChainSDK {
             .ok_or_else(|| DsmError::merkle("Merkle tree not initialized"))?;
 
         // Root must match caller's reference root.
-        if tree.root.as_bytes() != root_hash {
+        if tree.root() != root_hash {
             return Ok(false);
         }
 
@@ -204,21 +203,19 @@ impl HashChainSDK {
             n += 1;
         }
 
-        // Convert to leaf map: index -> blake3::Hash (from canonical state commitment).
-        let mut leaf_values: Vec<(u64, Hash)> = Vec::with_capacity(states.len());
+        // Build a Per-Device SMT with state hashes keyed by their state number.
+        let mut smt = SparseMerkleTree::new(states.len().max(256));
         for s in states {
             let commitment = to_arr32(
                 s.compute_hash()
                     .map_err(|_| DsmError::merkle("failed to compute state hash"))?
                     .to_vec(),
             )?;
-            leaf_values.push((s.state_number, Hash::from_bytes(commitment)));
-        }
-
-        // Build a 32-level SMT (sparse).
-        let mut smt = SparseMerkleTree::new(32);
-        for (idx, h) in leaf_values {
-            smt.leaves.insert(idx, h);
+            // Key: BLAKE3 hash of the state number (deterministic 256-bit key)
+            let key = *dsm_blake3::domain_hash("DSM/smt-state-key", &s.state_number.to_le_bytes())
+                .as_bytes();
+            smt.update_leaf(&key, &commitment)
+                .map_err(|e| DsmError::merkle(format!("SMT insert failed: {e}")))?;
         }
 
         let mut mt_guard = self.merkle_tree.write();
@@ -236,7 +233,7 @@ impl HashChainSDK {
     pub fn merkle_root(&self) -> Result<Hash, DsmError> {
         let mt_guard = self.merkle_tree.read();
         match &*mt_guard {
-            Some(tree) => Ok(tree.root),
+            Some(tree) => Ok(Hash::from_bytes(*tree.root())),
             None => Err(DsmError::merkle("Merkle tree not initialized")),
         }
     }

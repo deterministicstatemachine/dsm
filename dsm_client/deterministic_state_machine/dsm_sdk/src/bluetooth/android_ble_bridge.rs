@@ -1,7 +1,7 @@
-//! Android BLE Bridge for Bilateral Transactions
+//! Android BLE Bridge for BLE transport sessions.
 //!
-//! Integrates with Android DsmBluetoothService.kt to coordinate bilateral transactions
-//! over BLE GATT characteristics.
+//! Integrates with Android DsmBluetoothService.kt to coordinate BLE transport
+//! over GATT characteristics while keeping protocol semantics above transport.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
@@ -12,8 +12,10 @@ use log::{info, debug, warn};
 use dsm::types::error::DsmError;
 use crate::generated;
 use prost::Message;
-use crate::bluetooth::bilateral_ble_handler::BilateralBleHandler;
-use crate::bluetooth::ble_frame_coordinator::{BleFrameCoordinator, BleFrameType};
+use crate::bluetooth::bilateral_transport_adapter::{
+    BleTransportDelegate, TransportInboundMessage, TransportOutbound,
+};
+use crate::bluetooth::ble_frame_coordinator::{BleFrameCoordinator, BleFrameType, FrameIngressResult};
 
 /// BLE event types from Android DsmBluetoothService
 #[derive(Debug, Clone)]
@@ -62,11 +64,8 @@ pub enum BleCommand {
 /// Android BLE bridge for bilateral transactions
 pub struct AndroidBleBridge {
     frame_coordinator: Arc<BleFrameCoordinator>,
-    bilateral_handler: Arc<BilateralBleHandler>,
+    transport_delegate: Arc<dyn BleTransportDelegate>,
     connected_devices: Arc<RwLock<HashMap<String, DeviceConnection>>>,
-    device_id: [u8; 32],
-    // When manual-accept is enabled, we stash prepared response commands here keyed by commitment hash
-    pending_prepare_responses: Arc<RwLock<HashMap<[u8; 32], Vec<Vec<u8>>>>>,
 }
 
 // Global registry for a single AndroidBleBridge instance so JNI shims can access it.
@@ -100,15 +99,13 @@ pub fn next_ble_tick() -> u64 {
 impl AndroidBleBridge {
     pub fn new(
         frame_coordinator: Arc<BleFrameCoordinator>,
-        bilateral_handler: Arc<BilateralBleHandler>,
-        device_id: [u8; 32],
+        transport_delegate: Arc<dyn BleTransportDelegate>,
+        _device_id: [u8; 32],
     ) -> Self {
         Self {
             frame_coordinator,
-            bilateral_handler,
+            transport_delegate,
             connected_devices: Arc::new(RwLock::new(HashMap::new())),
-            device_id,
-            pending_prepare_responses: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -205,15 +202,9 @@ impl AndroidBleBridge {
                 // Fail any early-phase bilateral sessions for this address before removing
                 // from the connected set.  Late-phase sessions (Accepted, ConfirmPending)
                 // retain all cryptographic material for automatic recovery on reconnect.
-                let failed = self
-                    .bilateral_handler
-                    .handle_peer_disconnected(&address)
+                self.transport_delegate
+                    .on_peer_disconnected(address.clone())
                     .await;
-                if failed > 0 {
-                    info!(
-                        "BLE disconnect {address}: failed {failed} early-phase session(s); late-phase sessions preserved"
-                    );
-                }
 
                 // Notify the pairing orchestrator so stale pairing sessions for this
                 // address are reset immediately (no need to wait for the 90-second timeout).
@@ -257,12 +248,9 @@ impl AndroidBleBridge {
             Some(Ev::ConnectionFailed(msg)) => {
                 warn!("BLE connection failed (proto): {msg}");
                 // Fail any early-phase bilateral sessions associated with this address.
-                let failed = self.bilateral_handler.handle_peer_disconnected(&msg).await;
-                if failed > 0 {
-                    warn!(
-                        "BLE connection failure for {msg}: failed {failed} early-phase session(s)"
-                    );
-                }
+                self.transport_delegate
+                    .on_peer_disconnected(msg.clone())
+                    .await;
                 // Reset stale pairing sessions for this address immediately.
                 crate::bluetooth::get_pairing_orchestrator()
                     .handle_peer_disconnected(&msg)
@@ -273,6 +261,7 @@ impl AndroidBleBridge {
                     devices.remove(&msg);
                 }
             }
+            Some(Ev::PairingRequest(req)) => {}
             Some(Ev::PairingRequest(req)) => {
                 info!(
                     "BLE pairing request received from {}: alias={}",
@@ -439,127 +428,94 @@ impl AndroidBleBridge {
             return Ok(None);
         }
 
-        let chunk_result = self.frame_coordinator.handle_ble_chunk(data).await?;
+        if let Some(outbounds) = self.handle_inbound_transport_bytes(address, data).await? {
+            let mut first_cmd: Option<Vec<u8>> = None;
+            let mut pending_followups: Vec<Vec<u8>> = Vec::new();
 
-        if let Some(result) = chunk_result {
-            info!(
-                "Received complete bilateral message: frame_type={:?}, response_len={:?}",
-                result.frame_type,
-                result.response.as_ref().map(|r| r.len())
-            );
-
-            // Use the frame type from the BLE frame header
-            let frame_type = result.frame_type;
-
-            if let Some(response_bytes) = result.response {
-                // Determine follow-up frame type. For a prepare response we now automatically
-                // advance to the Confirm phase (3-step protocol) by emitting the confirm envelope.
-                let response_type = match frame_type {
-                    BleFrameType::BilateralPrepare => BleFrameType::BilateralPrepareResponse,
-                    BleFrameType::BilateralPrepareResponse => BleFrameType::BilateralConfirm,
-                    // BilateralConfirm returns None from coordinator — no response needed
-                    _ => return Ok(None),
-                };
-
-                // Determine counterparty device_id; do NOT silently fall back to zero array.
-                // If identity has not yet been observed we defer sending the response chunks.
-                let counterparty_device_id = {
-                    let devices = self.connected_devices.read().await;
-                    match devices.get(address).and_then(|c| c.device_id) {
-                        Some(id) => id,
-                        None => {
-                            warn!(
-                                "Deferring bilateral response {:?} for address {} until identity observed (device_id unknown)",
-                                response_type, address
-                            );
-                            return Ok(None);
-                        }
-                    }
-                };
-
+            for outbound in outbounds {
+                let target_address = outbound.peer_address.as_deref().unwrap_or(address);
                 let chunks = self
-                    .frame_coordinator
-                    .send_bilateral_message(
-                        counterparty_device_id,
-                        response_type,
-                        response_bytes.clone(),
-                    )
+                    .send_transport_payload(target_address, outbound.frame_type, &outbound.payload)
                     .await?;
 
-                // Send chunks back to Android for transmission; collect the first command to reply
-                let mut first_cmd: Option<Vec<u8>> = None;
-                let mut pending_followups: Vec<Vec<u8>> = Vec::new();
                 for (idx, chunk) in chunks.into_iter().enumerate() {
                     let command = BleCommand::WriteCharacteristic {
-                        address: address.to_string(),
-                        data: chunk.clone(),
+                        address: target_address.to_string(),
+                        data: chunk,
                     };
                     let proto_bytes = self.create_ble_command(command).await?;
-                    if idx == 0 {
-                        // keep a copy of the first proto bytes to return to caller
+                    if first_cmd.is_none() && idx == 0 {
                         first_cmd = Some(proto_bytes.clone());
                     } else {
                         pending_followups.push(proto_bytes);
                     }
                 }
+            }
 
-                // Manual-accept gating for prepare: stash instead of sending immediately
-                if response_type as i32 == BleFrameType::BilateralPrepareResponse as i32
-                    && crate::bluetooth::manual_accept_enabled()
-                {
-                    // Decode response to extract commitment hash (origin)
-                    if let Ok(resp_env) = crate::generated::Envelope::decode(
-                        &mut std::io::Cursor::new(&response_bytes[..]),
-                    ) {
-                        if let Some(
-                            crate::generated::envelope::Payload::BilateralPrepareResponse(resp),
-                        ) = resp_env.payload
-                        {
-                            if let Some(h) = resp.commitment_hash.as_ref() {
-                                if h.v.len() == 32 {
-                                    let mut key = [0u8; 32];
-                                    key.copy_from_slice(&h.v);
-                                    let mut all_cmds = Vec::new();
-                                    if let Some(f) = first_cmd.take() {
-                                        all_cmds.push(f);
-                                    }
-                                    all_cmds.append(&mut pending_followups);
-                                    let mut map = self.pending_prepare_responses.write().await;
-                                    map.insert(key, all_cmds);
-                                    debug!("Stashed prepare response commands under commitment for manual accept");
-                                    // Do not send now
-                                    return Ok(None);
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if !pending_followups.is_empty() {
-                    let new_count = pending_followups.len();
-                    let mut devices = self.connected_devices.write().await;
-                    if let Some(connection) = devices.get_mut(address) {
-                        connection.pending_commands.extend(pending_followups);
-                        debug!(
+            if !pending_followups.is_empty() {
+                let new_count = pending_followups.len();
+                let mut devices = self.connected_devices.write().await;
+                if let Some(connection) = devices.get_mut(address) {
+                    connection.pending_commands.extend(pending_followups);
+                    debug!(
                             "Queued {new_count} follow-up BLE commands for {addr} (total pending: {total})",
                             new_count = new_count,
                             addr = address,
                             total = connection.pending_commands.len()
                         );
-                    } else {
-                        warn!(
-                            "Attempted to queue follow-up BLE commands for unknown address {address}"
-                        );
-                    }
+                } else {
+                    warn!(
+                        "Attempted to queue follow-up BLE commands for unknown address {address}"
+                    );
                 }
+            }
 
-                if let Some(cmd_bytes) = first_cmd {
-                    return Ok(Some(cmd_bytes));
-                }
+            if let Some(cmd_bytes) = first_cmd {
+                return Ok(Some(cmd_bytes));
             }
         }
 
         Ok(None)
+    }
+
+    pub async fn send_transport_payload(
+        &self,
+        _address: &str,
+        frame_type: BleFrameType,
+        payload: &[u8],
+    ) -> Result<Vec<Vec<u8>>, DsmError> {
+        self.frame_coordinator.encode_message(frame_type, payload)
+    }
+
+    pub async fn handle_inbound_transport_bytes(
+        &self,
+        address: &str,
+        data: &[u8],
+    ) -> Result<Option<Vec<TransportOutbound>>, DsmError> {
+        match self.frame_coordinator.ingest_chunk(data).await? {
+            FrameIngressResult::NeedMoreChunks => Ok(None),
+            FrameIngressResult::ProtocolControl(_) => Ok(None),
+            FrameIngressResult::MessageComplete { message } => {
+                info!(
+                    "Received complete transport message: frame_type={:?}, payload_len={}",
+                    message.frame_type,
+                    message.payload.len()
+                );
+                let outbound = self
+                    .transport_delegate
+                    .on_transport_message(TransportInboundMessage {
+                        peer_address: address.to_string(),
+                        frame_type: message.frame_type,
+                        payload: message.payload,
+                    })
+                    .await?;
+                if outbound.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(outbound))
+                }
+            }
+        }
     }
 
     /// Test-only: Process a bilateral frame locally without real BLE I/O.
@@ -578,9 +534,14 @@ impl AndroidBleBridge {
 
         let mut final_response = None;
         for chunk in chunks {
-            let chunk_result = self.frame_coordinator.handle_ble_chunk(&chunk).await?;
-            if let Some(result) = chunk_result {
-                final_response = result.response;
+            if let Some(outbounds) = self
+                .handle_inbound_transport_bytes("loopback", &chunk)
+                .await?
+            {
+                final_response = outbounds
+                    .into_iter()
+                    .next()
+                    .map(|outbound| outbound.payload);
             }
         }
 
@@ -754,22 +715,54 @@ impl AndroidBleBridge {
 #[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use tokio::sync::RwLock;
+    use crate::bluetooth::BilateralTransportAdapter;
     use crate::bluetooth::bilateral_ble_handler::BilateralBleHandler;
     use crate::bluetooth::ble_frame_coordinator::BleFrameCoordinator;
     use crate::bluetooth::{get_pairing_orchestrator};
     use crate::storage::client_db;
     use crate::storage::client_db::ContactRecord;
     use std::collections::HashMap;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    fn make_test_bridge(
+        device_id: [u8; 32],
+        genesis_hash: [u8; 32],
+    ) -> (
+        Arc<RwLock<dsm::core::bilateral_transaction_manager::BilateralTransactionManager>>,
+        Arc<BilateralTransportAdapter>,
+        Arc<BleFrameCoordinator>,
+        AndroidBleBridge,
+    ) {
+        let contact_manager = dsm::core::contact_manager::DsmContactManager::new(
+            device_id,
+            vec![dsm::types::identifiers::NodeId::new("n")],
+        );
+        let keypair = dsm::crypto::SignatureKeyPair::generate_from_entropy(
+            &[device_id.as_slice(), genesis_hash.as_slice()].concat(),
+        )
+        .expect("keypair generation failed in test helper");
+        let bilateral_tx_manager = Arc::new(RwLock::new(
+            dsm::core::bilateral_transaction_manager::BilateralTransactionManager::new(
+                contact_manager,
+                keypair,
+                device_id,
+                genesis_hash,
+            ),
+        ));
+        let handler = Arc::new(BilateralBleHandler::new(
+            bilateral_tx_manager.clone(),
+            device_id,
+        ));
+        let transport_adapter = Arc::new(BilateralTransportAdapter::new(handler));
+        let coordinator = Arc::new(BleFrameCoordinator::new(device_id));
+        let bridge =
+            AndroidBleBridge::new(coordinator.clone(), transport_adapter.clone(), device_id);
+        (bilateral_tx_manager, transport_adapter, coordinator, bridge)
+    }
 
     #[test]
     fn test_ble_command_serialization() {
-        // bring in minimal core types for constructing dependencies
-        use dsm::core::bilateral_transaction_manager::BilateralTransactionManager;
-        use dsm::core::contact_manager::DsmContactManager;
-        use dsm::crypto::SignatureKeyPair;
-        use dsm::types::identifiers::NodeId;
         let command = BleCommand::StartScan;
         let rt = match tokio::runtime::Runtime::new() {
             Ok(rt) => rt,
@@ -777,37 +770,8 @@ mod tests {
         };
 
         // Create minimal dependencies for bridge without panicking
-        let contact_manager =
-            DsmContactManager::new([0u8; 32], vec![NodeId::new("storage_node_1")]);
-        // Generate proper cryptographic keypair based on test identity
-        let device_id = [0u8; 32];
-        let genesis_hash = [0u8; 32];
-        let key_entropy = [device_id.as_slice(), genesis_hash.as_slice()].concat();
-        let keypair = match SignatureKeyPair::generate_from_entropy(&key_entropy) {
-            Ok(kp) => kp,
-            Err(e) => panic!("keypair generation failed in test: {}", e),
-        };
-        let bilateral_tx_manager = Arc::new(RwLock::new(BilateralTransactionManager::new(
-            contact_manager,
-            keypair,
-            [0u8; 32],
-            [0u8; 32],
-        )));
-
-        let handler = Arc::new(BilateralBleHandler::new(
-            bilateral_tx_manager.clone(),
-            [0u8; 32],
-        ));
-        let coordinator = Arc::new(BleFrameCoordinator::new(handler.clone(), [0u8; 32]));
-
-        // Mock bridge for testing
-        let bridge = AndroidBleBridge {
-            frame_coordinator: coordinator,
-            bilateral_handler: handler,
-            connected_devices: Arc::new(RwLock::new(HashMap::new())),
-            device_id: [0u8; 32],
-            pending_prepare_responses: Arc::new(RwLock::new(HashMap::new())),
-        };
+        let (_bilateral_tx_manager, _transport_adapter, _coordinator, bridge) =
+            make_test_bridge([0u8; 32], [0u8; 32]);
 
         // Exercise serialization: create proto bytes, decode and inspect
         let bytes = match rt.block_on(bridge.create_ble_command(command)) {
@@ -858,25 +822,9 @@ mod tests {
             Ok(rt) => rt,
             Err(e) => panic!("failed to create tokio runtime: {}", e),
         };
-        let contact_manager = dsm::core::contact_manager::DsmContactManager::new(
-            [0u8; 32],
-            vec![dsm::types::identifiers::NodeId::new("n")],
-        );
-        let keypair = match dsm::crypto::SignatureKeyPair::new() {
-            Ok(kp) => kp,
-            Err(e) => panic!("keygen failed in test: {}", e),
-        };
-        let bilateral_mgr = Arc::new(RwLock::new(
-            dsm::core::bilateral_transaction_manager::BilateralTransactionManager::new(
-                contact_manager,
-                keypair,
-                [0u8; 32],
-                [0u8; 32],
-            ),
-        ));
-        let handler = Arc::new(BilateralBleHandler::new(bilateral_mgr.clone(), [0u8; 32]));
-        let coord = Arc::new(BleFrameCoordinator::new(handler.clone(), [0u8; 32]));
-        let bridge = Box::new(AndroidBleBridge::new(coord, handler, [0u8; 32]));
+        let (_bilateral_mgr, _transport_adapter, _coord, bridge) =
+            make_test_bridge([0u8; 32], [0u8; 32]);
+        let bridge = Box::new(bridge);
         // Start discovery via pure-Rust API
         let bytes = match rt.block_on(bridge.start_device_discovery()) {
             Ok(b) => b,
@@ -935,22 +883,7 @@ mod tests {
         crate::bluetooth::reset_pairing_orchestrator_for_tests();
 
         // Build minimal bridge
-        let contact_manager = dsm::core::contact_manager::DsmContactManager::new(
-            [1u8; 32],
-            vec![dsm::types::identifiers::NodeId::new("n")],
-        );
-        let keypair = dsm::crypto::SignatureKeyPair::new().expect("keygen");
-        let bilateral_mgr = Arc::new(RwLock::new(
-            dsm::core::bilateral_transaction_manager::BilateralTransactionManager::new(
-                contact_manager,
-                keypair,
-                [1u8; 32],
-                [2u8; 32],
-            ),
-        ));
-        let handler = Arc::new(BilateralBleHandler::new(bilateral_mgr.clone(), [1u8; 32]));
-        let coord = Arc::new(BleFrameCoordinator::new(handler.clone(), [1u8; 32]));
-        let bridge = AndroidBleBridge::new(coord.clone(), handler.clone(), [1u8; 32]);
+        let (_mgr, _adapter, _coord, bridge) = make_test_bridge([1u8; 32], [2u8; 32]);
 
         // Prepare contact so status update succeeds
         let device_id = [9u8; 32];
@@ -1083,22 +1016,7 @@ mod tests {
         crate::bluetooth::reset_pairing_orchestrator_for_tests();
 
         // Build bridge
-        let contact_manager = dsm::core::contact_manager::DsmContactManager::new(
-            [2u8; 32],
-            vec![dsm::types::identifiers::NodeId::new("n")],
-        );
-        let keypair = dsm::crypto::SignatureKeyPair::new().expect("keygen");
-        let bilateral_mgr = Arc::new(RwLock::new(
-            dsm::core::bilateral_transaction_manager::BilateralTransactionManager::new(
-                contact_manager,
-                keypair,
-                [2u8; 32],
-                [3u8; 32],
-            ),
-        ));
-        let handler = Arc::new(BilateralBleHandler::new(bilateral_mgr.clone(), [2u8; 32]));
-        let coord = Arc::new(BleFrameCoordinator::new(handler.clone(), [2u8; 32]));
-        let bridge = AndroidBleBridge::new(coord.clone(), handler.clone(), [2u8; 32]);
+        let (_mgr, _adapter, _coord, bridge) = make_test_bridge([2u8; 32], [3u8; 32]);
 
         // Contact
         let device_id = [5u8; 32];
@@ -1189,22 +1107,7 @@ mod tests {
         crate::bluetooth::reset_pairing_orchestrator_for_tests();
 
         // Build bridge
-        let contact_manager = dsm::core::contact_manager::DsmContactManager::new(
-            [10u8; 32],
-            vec![dsm::types::identifiers::NodeId::new("n")],
-        );
-        let keypair = dsm::crypto::SignatureKeyPair::new().expect("keygen");
-        let bilateral_mgr = Arc::new(RwLock::new(
-            dsm::core::bilateral_transaction_manager::BilateralTransactionManager::new(
-                contact_manager,
-                keypair,
-                [10u8; 32],
-                [11u8; 32],
-            ),
-        ));
-        let handler = Arc::new(BilateralBleHandler::new(bilateral_mgr.clone(), [10u8; 32]));
-        let coord = Arc::new(BleFrameCoordinator::new(handler.clone(), [10u8; 32]));
-        let bridge = AndroidBleBridge::new(coord.clone(), handler.clone(), [10u8; 32]);
+        let (_mgr, _adapter, _coord, bridge) = make_test_bridge([10u8; 32], [11u8; 32]);
         // Contact with stored genesis
         let device_id = [12u8; 32];
         let genesis_stored = [8u8; 32];
@@ -1269,22 +1172,7 @@ mod tests {
     #[tokio::test]
     async fn device_connect_disconnect_clears_state() {
         // Build bridge (no DB needed)
-        let contact_manager = dsm::core::contact_manager::DsmContactManager::new(
-            [20u8; 32],
-            vec![dsm::types::identifiers::NodeId::new("n")],
-        );
-        let keypair = dsm::crypto::SignatureKeyPair::new().expect("keygen");
-        let bilateral_mgr = Arc::new(RwLock::new(
-            dsm::core::bilateral_transaction_manager::BilateralTransactionManager::new(
-                contact_manager,
-                keypair,
-                [20u8; 32],
-                [21u8; 32],
-            ),
-        ));
-        let handler = Arc::new(BilateralBleHandler::new(bilateral_mgr.clone(), [20u8; 32]));
-        let coord = Arc::new(BleFrameCoordinator::new(handler.clone(), [20u8; 32]));
-        let bridge = AndroidBleBridge::new(coord.clone(), handler.clone(), [20u8; 32]);
+        let (_mgr, _adapter, _coord, bridge) = make_test_bridge([20u8; 32], [21u8; 32]);
 
         // Send DeviceConnected
         let dev_connected = crate::generated::BleEvent {
@@ -1331,22 +1219,8 @@ mod tests {
     #[tokio::test]
     async fn test_defer_response_until_identity() {
         // Build minimal environment similar to other tests
-        let contact_manager = dsm::core::contact_manager::DsmContactManager::new(
-            [9u8; 32],
-            vec![dsm::types::identifiers::NodeId::new("n")],
-        );
-        let keypair = dsm::crypto::SignatureKeyPair::new().expect("keygen");
-        let bilateral_mgr = Arc::new(RwLock::new(
-            dsm::core::bilateral_transaction_manager::BilateralTransactionManager::new(
-                contact_manager,
-                keypair,
-                [9u8; 32],
-                [5u8; 32],
-            ),
-        ));
-        let handler = Arc::new(BilateralBleHandler::new(bilateral_mgr.clone(), [9u8; 32]));
-        let coord = Arc::new(BleFrameCoordinator::new(handler.clone(), [9u8; 32]));
-        let bridge = AndroidBleBridge::new(coord.clone(), handler.clone(), [9u8; 32]);
+        let (bilateral_mgr, transport_adapter, coord, bridge) =
+            make_test_bridge([9u8; 32], [5u8; 32]);
 
         // Establish verified contact + relationship for counterparty so prepare succeeds
         let counterparty = [7u8; 32];
@@ -1371,15 +1245,19 @@ mod tests {
                 let _ = mgr.add_verified_contact(contact);
             }
             if mgr.get_relationship(&counterparty).is_none() {
-                let _ = mgr.establish_relationship(&counterparty).await;
+                let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
+                let _ = mgr.establish_relationship(&counterparty, &mut smt).await;
             }
         }
 
         // Create a prepare message chunks directly via coordinator (simulate receiving from counterparty)
         let op = dsm::types::operations::Operation::Noop;
-        let chunks = coord
+        let prepare_envelope = transport_adapter
             .create_prepare_message(counterparty, op, 50)
             .await
+            .expect("prepare envelope");
+        let chunks = coord
+            .encode_message(BleFrameType::BilateralPrepare, &prepare_envelope)
             .expect("prepare chunks");
         assert!(!chunks.is_empty());
 
@@ -1421,25 +1299,8 @@ mod tests {
             Ok(rt) => rt,
             Err(e) => panic!("failed to create tokio runtime: {}", e),
         };
-        let contact_manager = dsm::core::contact_manager::DsmContactManager::new(
-            [0u8; 32],
-            vec![dsm::types::identifiers::NodeId::new("n")],
-        );
-        let keypair = match dsm::crypto::SignatureKeyPair::new() {
-            Ok(kp) => kp,
-            Err(e) => panic!("keygen failed in test: {}", e),
-        };
-        let bilateral_mgr = Arc::new(RwLock::new(
-            dsm::core::bilateral_transaction_manager::BilateralTransactionManager::new(
-                contact_manager,
-                keypair,
-                [0u8; 32],
-                [0u8; 32],
-            ),
-        ));
-        let handler = Arc::new(BilateralBleHandler::new(bilateral_mgr.clone(), [0u8; 32]));
-        let coord = Arc::new(BleFrameCoordinator::new(handler.clone(), [0u8; 32]));
-        let _bridge = AndroidBleBridge::new(coord.clone(), handler, [0u8; 32]);
+        let (bilateral_mgr, transport_adapter, coord, _bridge) =
+            make_test_bridge([0u8; 32], [0u8; 32]);
         // Prepare inputs
         let cp = [2u8; 32];
         // Satisfy relationship requirement: add verified contact and establish relationship
@@ -1465,10 +1326,11 @@ mod tests {
             }
         }
         rt.block_on(async {
+            let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
             match bilateral_mgr
                 .write()
                 .await
-                .establish_relationship(&cp)
+                .establish_relationship(&cp, &mut smt)
                 .await
             {
                 Ok(_) => {}
@@ -1478,9 +1340,14 @@ mod tests {
 
         // Test that we can create prepare message chunks directly from coordinator
         let op = dsm::types::operations::Operation::Noop;
-        let chunks = match rt.block_on(coord.create_prepare_message(cp, op, 100)) {
+        let prepare_envelope =
+            match rt.block_on(transport_adapter.create_prepare_message(cp, op, 100)) {
+                Ok(payload) => payload,
+                Err(e) => panic!("create_prepare_message failed in test: {}", e),
+            };
+        let chunks = match coord.encode_message(BleFrameType::BilateralPrepare, &prepare_envelope) {
             Ok(c) => c,
-            Err(e) => panic!("create_prepare_message failed in test: {}", e),
+            Err(e) => panic!("encode_message failed in test: {}", e),
         };
 
         assert!(!chunks.is_empty(), "expected at least one chunk");
@@ -1502,25 +1369,7 @@ mod tests {
             Ok(rt) => rt,
             Err(e) => panic!("failed to create tokio runtime: {}", e),
         };
-        let contact_manager = dsm::core::contact_manager::DsmContactManager::new(
-            [0u8; 32],
-            vec![dsm::types::identifiers::NodeId::new("n")],
-        );
-        let keypair = match dsm::crypto::SignatureKeyPair::new() {
-            Ok(kp) => kp,
-            Err(e) => panic!("keygen failed in test: {}", e),
-        };
-        let bilateral_mgr = Arc::new(RwLock::new(
-            dsm::core::bilateral_transaction_manager::BilateralTransactionManager::new(
-                contact_manager,
-                keypair,
-                [0u8; 32],
-                [0u8; 32],
-            ),
-        ));
-        let handler = Arc::new(BilateralBleHandler::new(bilateral_mgr.clone(), [0u8; 32]));
-        let coord = Arc::new(BleFrameCoordinator::new(handler.clone(), [0u8; 32]));
-        let bridge = AndroidBleBridge::new(coord.clone(), handler, [0u8; 32]);
+        let (_mgr, _adapter, _coord, bridge) = make_test_bridge([0u8; 32], [0u8; 32]);
 
         // Build BleEvent::DeviceFound proto
         let proto_evt = crate::generated::BleEvent {

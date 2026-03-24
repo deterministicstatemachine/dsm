@@ -33,7 +33,6 @@ pub mod genesis_mpc;
 pub mod hierarchical_device_management;
 // JNI bridge moved to dsm_sdk - see dsm_sdk/src/jni/unified_protobuf_bridge.rs
 
-use crate::merkle::sparse_merkle_tree::SparseMerkleTreeImpl;
 use crate::types::state_types::MerkleProof;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
@@ -508,8 +507,6 @@ impl IdentityStore {
                 sparse_indices: HashMap::new(),
             }],
             invalidated: false,
-            // Sparse Merkle Tree height must not exceed 64 due to u64 index representation
-            merkle_tree: SparseMerkleTreeImpl::new(64),
         };
 
         if let Ok(mut store) = self.store.write() {
@@ -698,7 +695,6 @@ pub struct Identity {
     pub master_genesis: GenesisState,
     pub devices: Vec<DeviceIdentity>,
     pub invalidated: bool,
-    merkle_tree: SparseMerkleTreeImpl,
 }
 
 impl Identity {
@@ -714,8 +710,6 @@ impl Identity {
             master_genesis,
             devices: Vec::new(),
             invalidated: false,
-            // Limit SMT height to 64 due to u64 index space
-            merkle_tree: SparseMerkleTreeImpl::new(64),
         }
     }
 
@@ -726,8 +720,6 @@ impl Identity {
             master_genesis: genesis,
             devices: Vec::new(),
             invalidated: false,
-            // Limit SMT height to 64 due to u64 index space
-            merkle_tree: SparseMerkleTreeImpl::new(64),
         })
     }
     /// Apply a state transition to create a new state
@@ -745,14 +737,10 @@ impl Identity {
             &transition.new_entropy.unwrap_or_default(),
         )?;
 
-        // Map the 32-byte BLAKE3 hash deterministically into a u64 SMT index using the
-        // first 8 bytes in little-endian order. This mapping must be consistent across
-        // insertions and proofs.
-        let key_hash = domain_hash("DSM/smt-index", new_state.hash.as_ref());
-        let mut idx_bytes = [0u8; 8];
-        idx_bytes.copy_from_slice(&key_hash.as_bytes()[0..8]);
-        let index = u64::from_le_bytes(idx_bytes);
-        self.merkle_tree.insert(index, &new_state.hash()?)?;
+        // TODO: Update the Per-Device SMT (SparseMerkleTree) with the new state.
+        // The Per-Device SMT uses 256-bit keys (relationship IDs) and lives in
+        // merkle::sparse_merkle_tree::SparseMerkleTree. The SMT update should happen
+        // at the bilateral relationship level, not here in Identity.
 
         if let Some(device) = self.devices.first_mut() {
             device.current_state = Some(new_state.clone());
@@ -791,11 +779,17 @@ impl Identity {
         crate::crypto::sphincs::sphincs_sign(&self.master_genesis.signing_key.secret_key, data)
     }
 
-    pub async fn get_proof(&self, key: [u8; 32]) -> Result<MerkleProof, DsmError> {
-        let mut idx_bytes = [0u8; 8];
-        idx_bytes.copy_from_slice(&key[0..8]);
-        let index = u64::from_le_bytes(idx_bytes);
-        self.merkle_tree.get_proof(index)
+    /// Get a Merkle proof for the given key.
+    ///
+    /// NOTE: This previously used the embedded u64-index tree which has been removed.
+    /// Inclusion proofs should come from the Per-Device SMT (SparseMerkleTree) using
+    /// 256-bit relationship keys. Returns an error until migrated.
+    // TODO: Migrate callers to use the Per-Device SMT for inclusion proofs
+    pub async fn get_proof(&self, _key: [u8; 32]) -> Result<MerkleProof, DsmError> {
+        Err(DsmError::internal(
+            "Identity::get_proof not yet migrated to Per-Device SMT",
+            None::<String>,
+        ))
     }
 
     pub fn genesis_hash(&self) -> blake3::Hash {

@@ -119,6 +119,7 @@ pub fn init_database() -> Result<()> {
     ensure_vault_records_lineage_columns(&conn)?;
     ensure_bitcoin_accounts_active_receive_index(&conn)?;
     ensure_contacts_device_tree_root(&conn)?;
+    ensure_contacts_observed_remote_tip_columns(&conn)?;
     ensure_stitched_receipts_sig_b_nullable(&conn)?;
     migrate_legacy_withdrawal_states(&conn)?;
 
@@ -265,7 +266,9 @@ fn create_schema(conn: &Connection) -> Result<()> {
             last_seen_online_counter    INTEGER NOT NULL,
             last_seen_ble_counter       INTEGER NOT NULL,
             local_bilateral_chain_tip   BLOB,
-            previous_chain_tip          BLOB
+            previous_chain_tip          BLOB,
+            observed_remote_chain_tip   BLOB,
+            observed_remote_tip_updated_at INTEGER
         );
 
         CREATE TABLE IF NOT EXISTS auth_tokens(
@@ -308,14 +311,21 @@ fn create_schema(conn: &Connection) -> Result<()> {
             metadata        BLOB
         );
 
-        CREATE TABLE IF NOT EXISTS token_balances(
-            device_id   TEXT NOT NULL,
-            token_id    TEXT NOT NULL,
-            available   INTEGER NOT NULL DEFAULT 0 CHECK(available >= 0),
-            locked      INTEGER NOT NULL DEFAULT 0 CHECK(locked >= 0),
-            updated_at  INTEGER NOT NULL,
-            PRIMARY KEY (device_id, token_id)
+        CREATE TABLE IF NOT EXISTS balance_projections(
+            balance_key         TEXT NOT NULL PRIMARY KEY,
+            device_id           TEXT NOT NULL,
+            token_id            TEXT NOT NULL,
+            policy_commit       TEXT NOT NULL,
+            available           INTEGER NOT NULL DEFAULT 0 CHECK(available >= 0),
+            locked              INTEGER NOT NULL DEFAULT 0 CHECK(locked >= 0),
+            source_state_hash   TEXT NOT NULL,
+            source_state_number INTEGER NOT NULL,
+            updated_at          INTEGER NOT NULL,
+            UNIQUE (device_id, token_id)
         );
+
+        CREATE INDEX IF NOT EXISTS idx_balance_projections_device_token
+            ON balance_projections(device_id, token_id);
 
         CREATE TABLE IF NOT EXISTS spent_nonces(
             nonce_hash  BLOB PRIMARY KEY,
@@ -365,6 +375,36 @@ fn create_schema(conn: &Connection) -> Result<()> {
             sender_ble_address        TEXT,
             updated_at                INTEGER NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS system_peers(
+            peer_key       TEXT PRIMARY KEY,
+            device_id      BLOB NOT NULL UNIQUE,
+            display_name   TEXT NOT NULL,
+            peer_type      TEXT NOT NULL,
+            chain_tip      BLOB,
+            created_at     INTEGER NOT NULL,
+            updated_at     INTEGER NOT NULL,
+            metadata       BLOB
+        );
+        CREATE INDEX IF NOT EXISTS idx_system_peers_type ON system_peers(peer_type);
+
+        CREATE TABLE IF NOT EXISTS system_peer_events(
+            peer_key             TEXT NOT NULL,
+            peer_type            TEXT NOT NULL,
+            parent_tip           BLOB NOT NULL,
+            child_tip            BLOB NOT NULL,
+            transition_digest    BLOB NOT NULL,
+            source_state_hash    BLOB NOT NULL,
+            source_state_number  INTEGER NOT NULL,
+            payload_bytes        BLOB NOT NULL,
+            created_at           INTEGER NOT NULL,
+            PRIMARY KEY(peer_key, child_tip),
+            FOREIGN KEY(peer_key) REFERENCES system_peers(peer_key)
+        );
+        CREATE INDEX IF NOT EXISTS idx_system_peer_events_created
+            ON system_peer_events(peer_key, created_at ASC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_system_peer_events_source_state
+            ON system_peer_events(peer_key, source_state_number);
 
         CREATE TABLE IF NOT EXISTS transactions(
             tx_id              TEXT PRIMARY KEY,
@@ -771,6 +811,33 @@ fn ensure_contacts_device_tree_root(conn: &Connection) -> Result<()> {
         Err(e) if e.to_string().contains("duplicate column name") => Ok(()),
         Err(e) => Err(e.into()),
     }
+}
+
+fn ensure_contacts_observed_remote_tip_columns(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(contacts)")?;
+    let cols = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    let mut has_observed_tip = false;
+    let mut has_observed_tip_updated_at = false;
+    for col in cols {
+        match col?.as_str() {
+            "observed_remote_chain_tip" => has_observed_tip = true,
+            "observed_remote_tip_updated_at" => has_observed_tip_updated_at = true,
+            _ => {}
+        }
+    }
+    if !has_observed_tip {
+        conn.execute(
+            "ALTER TABLE contacts ADD COLUMN observed_remote_chain_tip BLOB",
+            [],
+        )?;
+    }
+    if !has_observed_tip_updated_at {
+        conn.execute(
+            "ALTER TABLE contacts ADD COLUMN observed_remote_tip_updated_at INTEGER",
+            [],
+        )?;
+    }
+    Ok(())
 }
 
 fn migrate_legacy_withdrawal_states(conn: &Connection) -> Result<()> {
@@ -1260,7 +1327,7 @@ mod tests {
             wallet.merkle_root,
             crate::util::text_id::encode_base32_crockford(&merkle_root)
         );
-        assert_eq!(wallet.balance, 99);
+        assert_eq!(wallet.balance, 0);
     }
 
     fn seed_contact_for_chain_tip_tests(device_id: [u8; 32], genesis_hash: [u8; 32], status: &str) {
@@ -1292,7 +1359,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_update_contact_chain_tip_after_bilateral_preserves_local_restore_tip() {
+    fn test_record_observed_remote_chain_tip_preserves_canonical_bilateral_tips() {
         unsafe {
             std::env::set_var("DSM_SDK_TEST_MODE", "1");
         }
@@ -1307,16 +1374,19 @@ mod tests {
         seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable");
         update_local_bilateral_chain_tip(&device_id, &local_tip).expect("seed local tip");
 
-        update_contact_chain_tip_after_bilateral(&device_id, &observed_tip)
-            .expect("update observed tip");
+        record_observed_remote_chain_tip(&device_id, &observed_tip).expect("record observed tip");
 
-        assert_eq!(get_contact_chain_tip_raw(&device_id), Some(observed_tip));
+        assert_eq!(get_contact_chain_tip_raw(&device_id), None);
         assert_eq!(get_local_bilateral_chain_tip(&device_id), Some(local_tip));
+        assert_eq!(
+            get_observed_remote_chain_tip(&device_id).expect("load observed tip"),
+            Some(observed_tip)
+        );
     }
 
     #[test]
     #[serial]
-    fn test_update_finalized_bilateral_chain_tip_updates_local_restore_tip() {
+    fn test_restore_finalized_bilateral_chain_tip_updates_local_restore_tip() {
         unsafe {
             std::env::set_var("DSM_SDK_TEST_MODE", "1");
         }
@@ -1332,8 +1402,8 @@ mod tests {
         update_local_bilateral_chain_tip(&device_id, &stale_local_tip).expect("seed local tip");
         mark_contact_needs_online_reconcile(&device_id).expect("mark reconcile");
 
-        update_finalized_bilateral_chain_tip(&device_id, &finalized_tip)
-            .expect("update finalized tip");
+        restore_finalized_bilateral_chain_tip(&device_id, &finalized_tip)
+            .expect("restore finalized tip");
 
         assert_eq!(get_contact_chain_tip_raw(&device_id), Some(finalized_tip));
         assert_eq!(
@@ -1364,7 +1434,7 @@ mod tests {
         let new_tip = [0x55u8; 32];
 
         seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable");
-        update_finalized_bilateral_chain_tip(&device_id, &current_tip).expect("seed current tip");
+        restore_finalized_bilateral_chain_tip(&device_id, &current_tip).expect("seed current tip");
 
         let advanced =
             try_advance_finalized_bilateral_chain_tip(&device_id, &stale_parent, &new_tip)
@@ -1390,7 +1460,7 @@ mod tests {
         let next_tip = [0xD1u8; 32];
 
         seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable");
-        update_finalized_bilateral_chain_tip(&device_id, &parent_tip).expect("seed parent tip");
+        restore_finalized_bilateral_chain_tip(&device_id, &parent_tip).expect("seed parent tip");
 
         record_pending_online_transition(&device_id, "0Q4T3ZGMVR8JKPGS", &parent_tip, &next_tip)
             .expect("persist pending transition");
@@ -1404,6 +1474,267 @@ mod tests {
         assert_eq!(pending.message_id, "0Q4T3ZGMVR8JKPGS");
         assert_eq!(pending.parent_tip, parent_tip.to_vec());
         assert_eq!(pending.next_tip, next_tip.to_vec());
+    }
+
+    #[test]
+    #[serial]
+    fn test_record_pending_online_transition_rejects_divergent_existing_gate() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        reset_database_for_tests();
+        init_database().expect("init db");
+
+        let device_id = [0xB1u8; 32];
+        let genesis_hash = [0xC1u8; 32];
+        let parent_tip = [0xD1u8; 32];
+        let next_tip = [0xE1u8; 32];
+        let divergent_next_tip = [0xF1u8; 32];
+
+        seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable");
+        restore_finalized_bilateral_chain_tip(&device_id, &parent_tip).expect("seed parent tip");
+        record_pending_online_transition(&device_id, "MSG-1", &parent_tip, &next_tip)
+            .expect("persist initial gate");
+
+        let err =
+            record_pending_online_transition(&device_id, "MSG-2", &parent_tip, &divergent_next_tip)
+                .expect_err("divergent gate must be rejected");
+        assert!(err.to_string().contains("different gate"));
+
+        let pending = get_pending_online_outbox(&device_id)
+            .expect("load pending row")
+            .expect("pending row exists");
+        assert_eq!(pending.message_id, "MSG-1");
+        assert_eq!(pending.next_tip, next_tip.to_vec());
+        assert_eq!(get_local_bilateral_chain_tip(&device_id), Some(next_tip));
+    }
+
+    #[test]
+    #[serial]
+    fn test_restore_finalized_bilateral_chain_tip_rejects_conflicting_existing_tip() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        reset_database_for_tests();
+        init_database().expect("init db");
+
+        let device_id = [0x21u8; 32];
+        let genesis_hash = [0x31u8; 32];
+        let current_tip = [0x41u8; 32];
+        let conflicting_tip = [0x51u8; 32];
+
+        seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable");
+        restore_finalized_bilateral_chain_tip(&device_id, &current_tip).expect("seed current tip");
+
+        let err = restore_finalized_bilateral_chain_tip(&device_id, &conflicting_tip)
+            .expect_err("conflicting restore must fail");
+        assert!(err.to_string().contains("Refusing to overwrite"));
+        assert_eq!(get_contact_chain_tip_raw(&device_id), Some(current_tip));
+        assert_eq!(get_local_bilateral_chain_tip(&device_id), Some(current_tip));
+    }
+
+    #[test]
+    #[serial]
+    fn test_advance_system_peer_tip_tracks_sovereign_lineage() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        reset_database_for_tests();
+        init_database().expect("init db");
+
+        let peer = SystemPeerRecord {
+            peer_key: "era-source-dlv".to_string(),
+            device_id: [0xABu8; 32].to_vec(),
+            display_name: "ERA Source DLV".to_string(),
+            peer_type: SystemPeerType::Dlv,
+            current_chain_tip: None,
+            created_at: 1,
+            updated_at: 1,
+            metadata: HashMap::new(),
+        };
+        store_system_peer(&peer).expect("store peer");
+
+        let payload_one = b"faucet.claim:first".to_vec();
+        let payload_two = b"faucet.claim:second".to_vec();
+        let source_hash_one = [0x11u8; 32];
+        let source_hash_two = [0x22u8; 32];
+
+        let first = advance_system_peer_tip(
+            "era-source-dlv",
+            SystemPeerType::Dlv,
+            &[0u8; 32],
+            &payload_one,
+            &source_hash_one,
+            5,
+        )
+        .expect("advance first event");
+        let second = advance_system_peer_tip(
+            "era-source-dlv",
+            SystemPeerType::Dlv,
+            &first.child_tip,
+            &payload_two,
+            &source_hash_two,
+            6,
+        )
+        .expect("advance second event");
+
+        assert_eq!(first.parent_tip, vec![0u8; 32]);
+        assert_ne!(first.child_tip, source_hash_one.to_vec());
+        assert_eq!(second.parent_tip, first.child_tip);
+        assert_ne!(second.child_tip, source_hash_two.to_vec());
+
+        let stored = get_system_peer("era-source-dlv")
+            .expect("load peer")
+            .expect("peer exists");
+        assert_eq!(stored.current_chain_tip, Some(second.child_tip.clone()));
+
+        let events = get_system_peer_events("era-source-dlv").expect("load events");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].child_tip, first.child_tip);
+        assert_eq!(events[1].child_tip, second.child_tip);
+    }
+
+    #[test]
+    #[serial]
+    fn test_store_system_peer_is_insert_only_for_existing_identity() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        reset_database_for_tests();
+        init_database().expect("init db");
+
+        let peer = SystemPeerRecord {
+            peer_key: "era-source-dlv".to_string(),
+            device_id: [0xABu8; 32].to_vec(),
+            display_name: "ERA Source DLV".to_string(),
+            peer_type: SystemPeerType::Dlv,
+            current_chain_tip: None,
+            created_at: 1,
+            updated_at: 1,
+            metadata: HashMap::new(),
+        };
+        store_system_peer(&peer).expect("store peer");
+        let advanced = advance_system_peer_tip(
+            "era-source-dlv",
+            SystemPeerType::Dlv,
+            &[0u8; 32],
+            b"faucet.claim:first",
+            &[0x11u8; 32],
+            5,
+        )
+        .expect("advance peer");
+
+        let attempted_overwrite = SystemPeerRecord {
+            peer_key: "era-source-dlv".to_string(),
+            device_id: [0xABu8; 32].to_vec(),
+            display_name: "mutated".to_string(),
+            peer_type: SystemPeerType::Dlv,
+            current_chain_tip: None,
+            created_at: 99,
+            updated_at: 99,
+            metadata: HashMap::from([("note".to_string(), b"overwrite".to_vec())]),
+        };
+        let err =
+            store_system_peer(&attempted_overwrite).expect_err("duplicate system peer must fail");
+        assert!(err.to_string().contains("already exists"));
+
+        let stored = get_system_peer("era-source-dlv")
+            .expect("load peer")
+            .expect("peer exists");
+        assert_eq!(stored.display_name, "ERA Source DLV");
+        assert_eq!(stored.current_chain_tip, Some(advanced.child_tip));
+        assert!(stored.metadata.is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn test_advance_system_peer_tip_rejects_stale_expected_parent() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        reset_database_for_tests();
+        init_database().expect("init db");
+
+        let peer = SystemPeerRecord {
+            peer_key: "era-source-dlv".to_string(),
+            device_id: [0xCBu8; 32].to_vec(),
+            display_name: "ERA Source DLV".to_string(),
+            peer_type: SystemPeerType::Dlv,
+            current_chain_tip: None,
+            created_at: 1,
+            updated_at: 1,
+            metadata: HashMap::new(),
+        };
+        store_system_peer(&peer).expect("store peer");
+
+        let first = advance_system_peer_tip(
+            "era-source-dlv",
+            SystemPeerType::Dlv,
+            &[0u8; 32],
+            b"faucet.claim:first",
+            &[0x61u8; 32],
+            7,
+        )
+        .expect("advance first event");
+
+        let err = advance_system_peer_tip(
+            "era-source-dlv",
+            SystemPeerType::Dlv,
+            &[0xEEu8; 32],
+            b"faucet.claim:second",
+            &[0x62u8; 32],
+            8,
+        )
+        .expect_err("stale expected parent must fail");
+        assert!(err.to_string().contains("expected parent tip"));
+
+        let stored = get_system_peer("era-source-dlv")
+            .expect("load peer")
+            .expect("peer exists");
+        assert_eq!(stored.current_chain_tip, Some(first.child_tip));
+    }
+
+    #[test]
+    #[serial]
+    fn test_advance_system_peer_tip_rejects_duplicate_source_state_number() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        reset_database_for_tests();
+        init_database().expect("init db");
+
+        let peer = SystemPeerRecord {
+            peer_key: "era-source-dlv".to_string(),
+            device_id: [0xDBu8; 32].to_vec(),
+            display_name: "ERA Source DLV".to_string(),
+            peer_type: SystemPeerType::Dlv,
+            current_chain_tip: None,
+            created_at: 1,
+            updated_at: 1,
+            metadata: HashMap::new(),
+        };
+        store_system_peer(&peer).expect("store peer");
+
+        let first = advance_system_peer_tip(
+            "era-source-dlv",
+            SystemPeerType::Dlv,
+            &[0u8; 32],
+            b"faucet.claim:first",
+            &[0x71u8; 32],
+            9,
+        )
+        .expect("advance first event");
+
+        let err = advance_system_peer_tip(
+            "era-source-dlv",
+            SystemPeerType::Dlv,
+            &first.child_tip,
+            b"faucet.claim:duplicate-number",
+            &[0x72u8; 32],
+            9,
+        )
+        .expect_err("duplicate source state number must fail");
+        assert!(err.to_string().contains("must advance monotonically"));
     }
 
     #[test]

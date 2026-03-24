@@ -169,11 +169,11 @@ pub enum FulfillmentProof {
         /// Empty for test networks; required for mainnet.
         /// Confirmation depth is derived from `header_chain.len() + 1` — never caller-attested.
         header_chain: Vec<[u8; 80]>,
-        /// Canonical protobuf bytes for stitched receipt corresponding to this unlock.
-        /// Used to recompute sigma via StitchedReceiptV2::compute_commitment().
+        /// Legacy carrier field for canonical protocol-transition bytes
+        /// corresponding to this unlock. This is not a bilateral stitched receipt
+        /// for sovereign Bitcoin/DLV progression.
         stitched_receipt: Option<Vec<u8>>,
-        /// σ commitment from bilateral stitched receipt (§7.3, §18.4).
-        /// = StitchedReceiptV2::compute_commitment() = BLAKE3("DSM/receipt-commit\0" || proto_bytes).
+        /// Commitment for the protocol-transition payload carried above.
         /// Required for mainnet/testnet/signet DLV unlocks.
         stitched_receipt_sigma: Option<[u8; 32]>,
     },
@@ -1423,22 +1423,21 @@ impl LimboVault {
             )));
         }
 
-        // §18.4: DLV unlocks require canonical stitched receipt + sigma.
+        // §18.4: DLV unlocks require canonical protocol-transition bytes + commitment.
         let sigma = stitched_receipt_sigma.ok_or_else(|| {
             DsmError::invalid_operation("DLV unlock requires stitched_receipt_sigma (§18.4)")
         })?;
         let receipt_bytes = stitched_receipt.ok_or_else(|| {
             DsmError::invalid_operation(
-                "DLV unlock requires canonical stitched_receipt bytes (§18.4)",
+                "DLV unlock requires canonical protocol transition bytes (§18.4)",
             )
         })?;
 
         let computed_sigma =
-            crate::crypto::blake3::domain_hash("DSM/receipt-commit", receipt_bytes);
-        let computed_sigma = *computed_sigma.as_bytes();
+            crate::crypto::blake3::domain_hash_bytes("DSM/protocol-transition", receipt_bytes);
         if !secure_eq(&computed_sigma, &sigma) {
             return Err(DsmError::invalid_operation(
-                "stitched_receipt_sigma does not match canonical stitched receipt commitment",
+                "stitched_receipt_sigma does not match canonical protocol transition commitment",
             ));
         }
 

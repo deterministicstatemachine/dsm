@@ -44,7 +44,43 @@ fn configure_local_identity_for_receipts(
         Some(genesis_hash.to_vec()),
         "AppState must expose the local genesis hash for receipt construction"
     );
-    Ok(())
+}
+
+/// Archive a genesis state with ERA balance to BCR so that the settlement
+/// layer's `latest_archived_state` returns a state with funds.
+fn seed_bcr_genesis_with_era(device_id: [u8; 32], public_key: &[u8], era_balance: u64) {
+    use dsm::types::state_builder::StateBuilder;
+    use dsm::types::state_types::DeviceInfo;
+
+    let policy_commit = *dsm_sdk::policy::builtins::NATIVE_POLICY_COMMIT;
+    let balance_key =
+        dsm::core::token::derive_canonical_balance_key(&policy_commit, public_key, "ERA");
+
+    let mut balances = std::collections::HashMap::new();
+    balances.insert(balance_key, Balance::from_state(era_balance, [0u8; 32], 0));
+
+    let mut state = StateBuilder::new()
+        .with_id("genesis".to_string())
+        .with_state_number(0)
+        .with_entropy(vec![0u8; 32])
+        .with_prev_state_hash([0u8; 32])
+        .with_operation(Operation::Generic {
+            operation_type: b"genesis".to_vec(),
+            data: vec![],
+            message: String::new(),
+            signature: vec![],
+        })
+        .with_device_info(DeviceInfo {
+            device_id,
+            public_key: public_key.to_vec(),
+            metadata: Vec::new(),
+        })
+        .with_token_balances(balances)
+        .build()
+        .expect("genesis state should build");
+
+    state.hash = state.compute_hash().expect("compute hash");
+    client_db::store_bcr_state(&state, true).expect("seed BCR genesis");
 }
 
 #[tokio::test]
@@ -121,16 +157,23 @@ async fn bilateral_offline_prepare_accept_commit_finalize_flow(
     mgr_b.add_verified_contact(contact_a.clone())?;
 
     // Establish relationships on both sides (ensures chain tips + keys set)
-    mgr_a.establish_relationship(&b_dev).await?;
-    mgr_b.establish_relationship(&a_dev).await?;
+    let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
+    mgr_a
+        .establish_relationship(&b_dev, &mut smt)
+        .await
+        .unwrap_or_else(|e| panic!("establish relationship a->b failed: {e}"));
+    mgr_b
+        .establish_relationship(&a_dev, &mut smt)
+        .await
+        .unwrap_or_else(|e| panic!("establish relationship b->a failed: {e}"));
 
     let a = Arc::new(RwLock::new(mgr_a));
     let b = Arc::new(RwLock::new(mgr_b));
 
-    // Seed sender's wallet with sufficient ERA balance for the transfer.
-    // The atomic sender debit enforces B >= 0 at the SQL level.
-    let a_device_txt = text_id::encode_base32_crockford(&a_dev);
-    client_db::update_wallet_balance(&a_device_txt, 10_000)?;
+    // Seed sender's ERA balance in BCR (authoritative for settlement).
+    // The balance projection is synced automatically by the settlement layer
+    // after reconciliation, using the canonical balance key.
+    seed_bcr_genesis_with_era(a_dev, a_kp.public_key(), 10_000);
 
     let delegate = Arc::new(DefaultBilateralSettlementDelegate);
     let mut handler_a = BilateralBleHandler::new(a.clone(), a_dev);
@@ -143,7 +186,7 @@ async fn bilateral_offline_prepare_accept_commit_finalize_flow(
     let transfer_op = Operation::Transfer {
         to_device_id: b"to_b".to_vec(),
         amount: balance,
-        token_id: b"ERA".to_vec(),
+        token_id: b"".to_vec(),
         mode: dsm::types::operations::TransactionMode::Bilateral,
         nonce: vec![0u8; 8],
         verification: dsm::types::operations::VerificationType::Standard,
@@ -166,7 +209,10 @@ async fn bilateral_offline_prepare_accept_commit_finalize_flow(
     }
 
     // Receiver handles prepare request
-    handler_b.handle_prepare_request(&prepare_bytes).await?;
+    handler_b
+        .handle_prepare_request(&prepare_bytes, None)
+        .await
+        .unwrap_or_else(|e| panic!("handle_prepare_request failed: {e}"));
 
     // Receiver accepts and builds response (origin commit hash used here)
     let accept_envelope = handler_b.create_prepare_accept_envelope(commitment).await?;
@@ -185,13 +231,20 @@ async fn bilateral_offline_prepare_accept_commit_finalize_flow(
         assert!(!ma.has_pending_commitment(&commitment));
     }
 
-    // Ensure receiver saw ERA balance update via wallet_state
+    // Receiver settlement is persisted as bilateral chain advancement plus
+    // transaction history. Balance projections are derived lazily from
+    // canonical state/cache reads and are no longer required to exist here.
     let device_txt = text_id::encode_base32_crockford(&b_dev);
-    let wallet = client_db::get_wallet_state(&device_txt)?
-        .ok_or("receiver wallet_state should exist after bilateral ERA transfer")?;
+    let history = client_db::get_transaction_history(Some(&device_txt), Some(20))
+        .expect("receiver transaction history");
     assert!(
-        wallet.balance >= 10,
-        "receiver ERA balance should be updated"
+        history.iter().any(|tx| {
+            tx.amount == 10
+                && tx.from_device == text_id::encode_base32_crockford(&a_dev)
+                && tx.to_device == device_txt
+                && !tx.metadata.contains_key("token_id")
+        }),
+        "receiver transaction history should record the settled ERA transfer"
     );
 
     Ok(())
@@ -269,16 +322,21 @@ async fn bilateral_offline_state_consistency_across_peers() -> Result<(), Box<dy
     mgr_a.add_verified_contact(contact_b.clone())?;
     mgr_b.add_verified_contact(contact_a.clone())?;
 
-    mgr_a.establish_relationship(&b_dev).await?;
-    mgr_b.establish_relationship(&a_dev).await?;
+    let mut smt2 = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
+    mgr_a
+        .establish_relationship(&b_dev, &mut smt2)
+        .await
+        .unwrap_or_else(|e| panic!("establish relationship a->b failed: {e}"));
+    mgr_b
+        .establish_relationship(&a_dev, &mut smt2)
+        .await
+        .unwrap_or_else(|e| panic!("establish relationship b->a failed: {e}"));
 
     let a = Arc::new(RwLock::new(mgr_a));
     let b = Arc::new(RwLock::new(mgr_b));
 
-    // Seed sender's wallet with sufficient token balance for the transfer.
-    // The atomic sender debit enforces B >= 0 at the SQL level.
-    let a_device_txt = text_id::encode_base32_crockford(&a_dev);
-    client_db::upsert_token_balance(&a_device_txt, "TOK", 10_000, 0)?;
+    // Seed sender's ERA balance in BCR (authoritative for settlement).
+    seed_bcr_genesis_with_era(a_dev, a_kp.public_key(), 1_000);
 
     let delegate = Arc::new(DefaultBilateralSettlementDelegate);
     let mut handler_a = BilateralBleHandler::new(a.clone(), a_dev);
@@ -290,7 +348,7 @@ async fn bilateral_offline_state_consistency_across_peers() -> Result<(), Box<dy
     let transfer_op = Operation::Transfer {
         to_device_id: b"to_b".to_vec(),
         amount: balance,
-        token_id: b"TOK".to_vec(),
+        token_id: b"".to_vec(),
         mode: dsm::types::operations::TransactionMode::Bilateral,
         nonce: vec![0u8; 8],
         verification: dsm::types::operations::VerificationType::Standard,
@@ -305,7 +363,10 @@ async fn bilateral_offline_state_consistency_across_peers() -> Result<(), Box<dy
         .prepare_bilateral_transaction(b_dev, transfer_op.clone(), 300)
         .await?;
 
-    handler_b.handle_prepare_request(&prepare_bytes).await?;
+    handler_b
+        .handle_prepare_request(&prepare_bytes, None)
+        .await
+        .unwrap_or_else(|e| panic!("handle_prepare_request failed: {e}"));
 
     let accept_envelope = handler_b.create_prepare_accept_envelope(commitment).await?;
 

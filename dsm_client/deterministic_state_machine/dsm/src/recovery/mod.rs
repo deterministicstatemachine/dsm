@@ -8,7 +8,7 @@ pub mod capsule;
 pub mod rollup;
 pub mod tombstone;
 
-pub use capsule::{EncryptedCapsule, RecoveryCapsule, CapsuleMetadata};
+pub use capsule::{CapsuleMetadata, EncryptedCapsule, RecoveryCapsule};
 pub use rollup::{ReceiptRollup, RollupEntry};
 pub use tombstone::{TombstoneReceipt, SuccessionReceipt, RecoveryReceipt};
 
@@ -40,26 +40,28 @@ pub fn create_recovery_capsule(
     counterparty_tips: HashMap<String, (u64, Vec<u8>)>, // counterparty_id -> (height, head_hash)
     rollup: &ReceiptRollup,
     mnemonic: &str,
-    device_id: &str,
     counter: u64,
 ) -> Result<EncryptedCapsule, DsmError> {
-    capsule::create_encrypted_capsule(
-        smt_root,
-        counterparty_tips,
-        rollup,
-        mnemonic,
-        device_id,
-        counter,
-    )
+    capsule::create_encrypted_capsule(smt_root, counterparty_tips, rollup, mnemonic, counter)
+}
+
+/// Create an encrypted recovery capsule using a pre-derived recovery key.
+pub fn create_recovery_capsule_with_key(
+    smt_root: &[u8],
+    counterparty_tips: HashMap<String, (u64, Vec<u8>)>,
+    rollup: &ReceiptRollup,
+    key: &[u8; 32],
+    counter: u64,
+) -> Result<EncryptedCapsule, DsmError> {
+    capsule::create_encrypted_capsule_with_key(smt_root, counterparty_tips, rollup, key, counter)
 }
 
 /// Decrypt and verify a recovery capsule from NFC ring
 pub fn decrypt_recovery_capsule(
     encrypted_capsule: &EncryptedCapsule,
     mnemonic: &str,
-    device_id: &str,
 ) -> Result<RecoveryCapsule, DsmError> {
-    capsule::decrypt_capsule(encrypted_capsule, mnemonic, device_id)
+    capsule::decrypt_capsule(encrypted_capsule, mnemonic)
 }
 
 /// Create tombstone receipt to invalidate old device binding
@@ -150,7 +152,6 @@ mod tests {
 
         let rollup = ReceiptRollup::new();
         let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
-        let device_id = "test_device";
         let counter = 1u64;
 
         // Create encrypted capsule
@@ -159,12 +160,11 @@ mod tests {
             counterparty_tips.clone(),
             &rollup,
             mnemonic,
-            device_id,
             counter,
         )?;
 
         // Decrypt capsule
-        let decrypted = decrypt_recovery_capsule(&encrypted, mnemonic, device_id)?;
+        let decrypted = decrypt_recovery_capsule(&encrypted, mnemonic)?;
 
         // Verify contents
         assert_eq!(decrypted.smt_root, smt_root);

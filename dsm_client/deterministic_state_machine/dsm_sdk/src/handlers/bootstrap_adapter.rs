@@ -80,7 +80,10 @@ impl CoreBootstrapAdapter {
                     seed.as_bytes()[0..32].to_vec()
                 });
 
-            let smt_root = dsm::merkle::sparse_merkle_tree::empty_leaf().to_vec();
+            let smt_root = dsm::merkle::sparse_merkle_tree::empty_root(
+                dsm::merkle::sparse_merkle_tree::DEFAULT_SMT_HEIGHT,
+            )
+            .to_vec();
 
             crate::sdk::app_state::AppState::set_identity_info(
                 device_id_bytes.to_vec(),
