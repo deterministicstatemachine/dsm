@@ -187,7 +187,11 @@ impl BilateralTransactionExample {
         let mut bob_smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
         let (_created, response) = self
             .bob_manager
-            .accept_contact_request_with_response(&req_hash, Some("Welcome, Alice".to_string()), &mut bob_smt)
+            .accept_contact_request_with_response(
+                &req_hash,
+                Some("Welcome, Alice".to_string()),
+                &mut bob_smt,
+            )
             .await?;
 
         // Alice finalizes her side from Bob’s response

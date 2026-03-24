@@ -15,9 +15,7 @@ use dsm::core::state_machine::{hashchain::HashChain, StateMachine};
 use dsm::types::error::DsmError;
 use dsm::types::operations::{Operation, TransactionMode};
 use dsm::merkle::sparse_merkle_tree::SparseMerkleTree;
-use dsm::types::state_types::{
-    MerkleProof, MerkleProofParams, SparseIndex, State, StateParams,
-};
+use dsm::types::state_types::{MerkleProof, MerkleProofParams, SparseIndex, State, StateParams};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::fmt;
@@ -214,10 +212,8 @@ impl HashChainSDK {
                     .to_vec(),
             )?;
             // Key: BLAKE3 hash of the state number (deterministic 256-bit key)
-            let key = *dsm_blake3::domain_hash(
-                "DSM/smt-state-key",
-                &s.state_number.to_le_bytes(),
-            ).as_bytes();
+            let key = *dsm_blake3::domain_hash("DSM/smt-state-key", &s.state_number.to_le_bytes())
+                .as_bytes();
             smt.update_leaf(&key, &commitment)
                 .map_err(|e| DsmError::merkle(format!("SMT insert failed: {e}")))?;
         }

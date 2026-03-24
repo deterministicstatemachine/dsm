@@ -220,6 +220,7 @@ async fn offline_transfer_roundtrip(
 
 #[tokio::test]
 #[serial]
+#[ignore = "requires live AWS storage nodes for MPC genesis"]
 async fn offline_real_protocol_ble_mock_roundtrip() {
     println!("[OFFLINE] init test storage + MPC genesis");
     // Point at the real env config TOML so StorageNodeConfig picks up the
@@ -330,8 +331,14 @@ async fn offline_real_protocol_ble_mock_roundtrip() {
 
     // Establish relationships
     let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-    alice_mgr.establish_relationship(&bob_dev_id, &mut smt).await.unwrap();
-    bob_mgr.establish_relationship(&alice_dev_id, &mut smt).await.unwrap();
+    alice_mgr
+        .establish_relationship(&bob_dev_id, &mut smt)
+        .await
+        .unwrap();
+    bob_mgr
+        .establish_relationship(&alice_dev_id, &mut smt)
+        .await
+        .unwrap();
 
     let alice_mgr = Arc::new(RwLock::new(alice_mgr));
     let bob_mgr = Arc::new(RwLock::new(bob_mgr));
@@ -506,6 +513,7 @@ async fn offline_real_protocol_ble_mock_roundtrip() {
 
 #[tokio::test]
 #[serial]
+#[ignore = "requires live AWS storage nodes for MPC genesis"]
 async fn offline_real_protocol_ble_mock_multi_relationship_multi_tx() {
     println!("[OFFLINE-MULTI] init test storage + MPC genesis");
     let env_config_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -631,12 +639,18 @@ async fn offline_real_protocol_ble_mock_multi_relationship_multi_tx() {
     carol_mgr.add_verified_contact(contact_a_for_c).unwrap();
 
     let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-    alice_mgr.establish_relationship(&bob_dev_id, &mut smt).await.unwrap();
+    alice_mgr
+        .establish_relationship(&bob_dev_id, &mut smt)
+        .await
+        .unwrap();
     alice_mgr
         .establish_relationship(&carol_dev_id, &mut smt)
         .await
         .unwrap();
-    bob_mgr.establish_relationship(&alice_dev_id, &mut smt).await.unwrap();
+    bob_mgr
+        .establish_relationship(&alice_dev_id, &mut smt)
+        .await
+        .unwrap();
     carol_mgr
         .establish_relationship(&alice_dev_id, &mut smt)
         .await

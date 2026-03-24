@@ -79,6 +79,7 @@ fn seed_era_projection(device_txt: &str, available: u64) {
 }
 
 #[tokio::test]
+#[ignore = "requires live AWS storage nodes for MPC genesis"]
 #[allow(clippy::await_holding_lock)]
 async fn verify_frontend_event_guarantees() {
     println!("[EVENT-TEST] Init storage + MPC genesis");
