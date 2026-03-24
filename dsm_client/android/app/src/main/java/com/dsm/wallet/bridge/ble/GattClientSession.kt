@@ -34,9 +34,13 @@ class GattClientSession(
     private val permissionsGate: BlePermissionsGate = BlePermissionsGate(context)
 ) {
 
-    // Shared flow for state changes - BleCoordinator collects from this
+    // Shared flow for state changes - BleCoordinator collects from this.
+    // extraBufferCapacity must be large enough to absorb a full chunked
+    // notification burst (168+ chunks at 10ms pacing) without dropping
+    // events before the collector can call processIncomingBleData.
     private val _events = MutableSharedFlow<BleSessionEvent>(
-        replay = 1,
+        replay = 0,
+        extraBufferCapacity = 256,
         onBufferOverflow = BufferOverflow.DROP_OLDEST
     )
     val events: SharedFlow<BleSessionEvent> = _events.asSharedFlow()
@@ -44,10 +48,20 @@ class GattClientSession(
     companion object {
         /** Disconnect if GATT connection isn't established within 15 seconds. */
         private const val CONNECTION_TIMEOUT_MS = 15_000L
+        /** Number of notification chunks to receive before sending ACK write-back. */
+        private const val NOTIFICATION_ACK_WINDOW = 10
     }
 
     private var bluetoothGatt: BluetoothGatt? = null
     private val timeoutHandler = Handler(Looper.getMainLooper())
+
+    /**
+     * Counts TX_RESPONSE notifications received in the current notification stream.
+     * After every [NOTIFICATION_ACK_WINDOW] notifications, writes a transport-level ACK
+     * back to the server's TX_REQUEST characteristic so the server knows chunks arrived.
+     * Reset to 0 when a non-notification write occurs or connection resets.
+     */
+    private var notificationChunkCount = 0
     private val connectionTimeoutRunnable = Runnable {
         Log.w("GattClientSession", "GATT connection timeout (${CONNECTION_TIMEOUT_MS}ms) for $deviceAddress - disconnecting")
         _events.tryEmit(BleSessionEvent.ErrorOccurred(deviceAddress, BleErrorCategory.CONNECTION_FAILED, "connection_timeout"))
@@ -90,6 +104,9 @@ class GattClientSession(
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
                     timeoutHandler.removeCallbacks(connectionTimeoutRunnable)
+                    // reset ack windows at new connection start so we don’t carry stale notification counters from previous transfers.
+                    notificationChunkCount = 0
+
                     // Guard against platforms that deliver STATE_CONNECTED with a non-SUCCESS status
                     // (e.g. status 133 / GATT_ERROR on some OEMs). Proceeding to discoverServices()
                     // in this state causes silent failures — close and signal error instead.
@@ -339,6 +356,14 @@ class GattClientSession(
                     // processBleChunk or processEnvelopeV3 as appropriate).
                     Log.d("GattClientSession", "TX_RESPONSE notification from $deviceAddress (${data.size} bytes)")
                     _events.tryEmit(BleSessionEvent.ResponseReceived(deviceAddress, data))
+
+                    // Windowed ACK: after every NOTIFICATION_ACK_WINDOW notifications,
+                    // write a transport-level ACK back to the server so it knows chunks arrived.
+                    // ACK frame: [0xFF][chunk_count_hi][chunk_count_lo]
+                    notificationChunkCount++
+                    if (notificationChunkCount % NOTIFICATION_ACK_WINDOW == 0) {
+                        writeChunkAck(notificationChunkCount)
+                    }
                 }
                 else -> {
                     // Unknown characteristic notification — emit as response
@@ -605,6 +630,45 @@ class GattClientSession(
     }
 
     /**
+     * Write a transport-level chunk ACK back to the server's TX_REQUEST characteristic.
+     * Frame format: [0xFF][chunk_count_hi][chunk_count_lo]
+     * This tells the server how many notification chunks the client has received,
+     * allowing it to pace delivery and detect drops.
+     */
+    private fun writeChunkAck(chunkCount: Int) {
+        val char = requestCharacteristic
+        if (char == null) {
+            Log.w("GattClientSession", "writeChunkAck: TX_REQUEST not available for $deviceAddress")
+            return
+        }
+        val ack = byteArrayOf(
+            0xFF.toByte(),
+            ((chunkCount shr 8) and 0xFF).toByte(),
+            (chunkCount and 0xFF).toByte()
+        )
+        @Suppress("DEPRECATION")
+        char.setValue(ack)
+        try {
+            val sent = bluetoothGatt?.writeCharacteristic(char) == true
+            if (sent) {
+                Log.d("GattClientSession", "Chunk ACK written: $chunkCount chunks confirmed to $deviceAddress")
+            } else {
+                Log.w("GattClientSession", "writeChunkAck: write failed for $deviceAddress (count=$chunkCount)")
+            }
+        } catch (e: SecurityException) {
+            Log.w("GattClientSession", "writeChunkAck: security exception for $deviceAddress", e)
+        }
+    }
+
+    /**
+     * Reset the notification chunk counter. Called when starting a new notification stream
+     * or when the connection resets.
+     */
+    fun resetNotificationCounter() {
+        notificationChunkCount = 0
+    }
+
+    /**
      * Ensure TX_RESPONSE notifications are subscribed before sending transaction data.
      * If already subscribed, returns an immediately completed deferred.
      * If not subscribed, initiates the CCCD write and returns a deferred that completes
@@ -750,6 +814,7 @@ class GattClientSession(
         txResponseSubscribed = false
         awaitingConfirmWriteAck = false
         pairingAckCccdSubscribed = false
+        notificationChunkCount = 0
         pendingTxResponseResubscribe?.cancel()
         pendingTxResponseResubscribe = null
     }

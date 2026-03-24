@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use log::{debug, info, warn, error};
 use prost::Message;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 
 #[cfg(all(target_os = "android", feature = "jni"))]
 use crate::jni::state::DEVICE_ID_TO_ADDR;
@@ -21,8 +21,8 @@ use crate::jni::state::DEVICE_ID_TO_ADDR;
 // Re-export types from bilateral_session so existing import paths still work.
 pub use super::bilateral_session::{
     BilateralBleSession, BilateralEventCallback, BilateralPhase, BilateralSettlementContext,
-    BilateralSettlementDelegate, SessionStore, is_inflight_phase, phase_to_str, phase_from_str,
-    MAX_TERMINAL_SESSIONS_PER_COUNTERPARTY,
+    BilateralSettlementDelegate, BilateralSettlementOutcome, SessionStore, is_inflight_phase,
+    phase_to_str, phase_from_str, MAX_TERMINAL_SESSIONS_PER_COUNTERPARTY,
 };
 
 /// Base32 Crockford encoding helper for logging
@@ -58,11 +58,9 @@ pub struct BilateralBleHandler {
     sessions: SessionStore,
     device_id: [u8; 32],
     event_callback: Option<BilateralEventCallback>,
-    /// Current sender's BLE address (set by coordinator before handle_prepare_request)
-    current_sender_ble_address: Arc<Mutex<Option<String>>>,
     /// Per-Device SMT for relationship chain tips (§2.2, §4.3).
     /// Shared singleton — same instance is used by both BLE and online transfer paths.
-    per_device_smt: Arc<RwLock<crate::security::bounded_smt::BoundedSmt>>,
+    per_device_smt: Arc<RwLock<dsm::merkle::sparse_merkle_tree::SparseMerkleTree>>,
     /// Application-layer settlement delegate.  Handles all token- and
     /// balance-specific logic so the transport layer stays coin-agnostic.
     settlement_delegate: Option<Arc<dyn BilateralSettlementDelegate>>,
@@ -81,7 +79,6 @@ impl BilateralBleHandler {
             sessions: SessionStore::new(),
             device_id,
             event_callback: None,
-            current_sender_ble_address: Arc::new(Mutex::new(None)),
             per_device_smt,
             settlement_delegate: None,
         }
@@ -95,18 +92,6 @@ impl BilateralBleHandler {
     /// synchronisation).
     pub fn set_settlement_delegate(&mut self, delegate: Arc<dyn BilateralSettlementDelegate>) {
         self.settlement_delegate = Some(delegate);
-    }
-
-    /// Set the current sender's BLE address (called by coordinator before processing)
-    pub async fn set_current_sender_ble_address(&self, address: Option<String>) {
-        let mut guard = self.current_sender_ble_address.lock().await;
-        *guard = address;
-    }
-
-    /// Get the current sender's BLE address
-    pub async fn get_current_sender_ble_address(&self) -> Option<String> {
-        let guard = self.current_sender_ble_address.lock().await;
-        guard.clone()
     }
 
     /// Set the event callback for bilateral transaction notifications
@@ -731,7 +716,8 @@ impl BilateralBleHandler {
                     let _ = mgr.add_verified_contact(contact);
                 }
                 if mgr.get_relationship(&counterparty_device_id).is_none() {
-                    let _ = mgr.establish_relationship(&counterparty_device_id).await;
+                    let mut smt = self.per_device_smt.write().await;
+                    let _ = mgr.establish_relationship(&counterparty_device_id, &mut smt).await;
                 }
                 drop(mgr);
             } else {
@@ -1162,6 +1148,7 @@ impl BilateralBleHandler {
     pub async fn handle_prepare_request(
         &self,
         envelope_bytes: &[u8],
+        sender_ble_address: Option<String>,
     ) -> Result<(Vec<u8>, crate::sdk::transfer_hooks::TransferMeta), DsmError> {
         debug!("Handling bilateral prepare request");
 
@@ -1448,20 +1435,21 @@ impl BilateralBleHandler {
                     );
                     // Update in-memory view of sender's chain tip
                     mgr.advance_chain_tip(&counterparty_device_id, sender_chain_tip_bytes);
-                    // Persist to SQLite for durability across restarts
-                    if let Err(e) =
-                        crate::storage::client_db::update_contact_chain_tip_after_bilateral(
-                            &counterparty_device_id,
-                            &sender_chain_tip_bytes,
-                        )
-                    {
+                    // Persist to SQLite in the observed-tip namespace for
+                    // durability across restarts without mutating canonical state.
+                    if let Err(e) = crate::storage::client_db::record_observed_remote_chain_tip(
+                        &counterparty_device_id,
+                        &sender_chain_tip_bytes,
+                    ) {
                         log::warn!(
-                            "[BilateralBleHandler] ⚠️ Failed to persist remote chain tip to SQLite: {}",
+                            "[BilateralBleHandler] ⚠️ Failed to persist observed remote chain tip to SQLite: {}",
                             e
                         );
                         // Non-fatal - in-memory update still happened
                     } else {
-                        log::info!("[BilateralBleHandler] ✅ Persisted remote chain tip to SQLite");
+                        log::info!(
+                            "[BilateralBleHandler] ✅ Persisted observed remote chain tip to SQLite"
+                        );
                     }
                 } else {
                     log::warn!(
@@ -1475,7 +1463,8 @@ impl BilateralBleHandler {
             }
 
             if mgr.get_relationship(&counterparty_device_id).is_none() {
-                mgr.establish_relationship(&counterparty_device_id)
+                let mut smt = self.per_device_smt.write().await;
+                mgr.establish_relationship(&counterparty_device_id, &mut smt)
                     .await
                     .map_err(|e| {
                         DsmError::relationship(format!("Failed to establish relationship: {e}"))
@@ -1623,9 +1612,6 @@ impl BilateralBleHandler {
                 )
                 .await?
         };
-
-        // Get sender's BLE address for session and event emission
-        let sender_ble_address = self.get_current_sender_ble_address().await;
 
         let counterparty_genesis_hash = if let Some(hash) = prepare_request
             .expected_genesis_hash
@@ -2309,33 +2295,20 @@ impl BilateralBleHandler {
             &receipt_digest,
         );
 
-        // 5. SMT-Replace: update per_device_smt with new chain tip
-        let smt_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
-            &self.device_id,
-            &session.counterparty_device_id,
-        );
-        let (sender_smt_root, rel_proof_parent_bytes, rel_proof_child_bytes, pre_root) = {
+        // 5. SMT-Replace: atomic update via core (§4.2)
+        let result = {
+            let mut manager = self.bilateral_tx_manager.write().await;
             let mut smt = self.per_device_smt.write().await;
-            let pre_root = *smt.root();
-            // Get proof for h_n BEFORE update (parent proof — §4.3#2: π_rel)
-            let parent_proof = smt.get_inclusion_proof(&smt_key, 256).ok();
-            let parent_bytes = parent_proof
-                .as_ref()
-                .map(crate::sdk::receipts::serialize_inclusion_proof)
-                .unwrap_or_default();
-            // Perform SMT-Replace: h_n → h_{n+1}
-            if let Err(e) = smt.update_leaf(&smt_key, &h_n_plus_1) {
-                warn!("[BILATERAL] SMT update_leaf failed: {e}");
-            }
-            let new_root = *smt.root();
-            // Get proof for h_{n+1} AFTER update (child proof — §4.3#2: π'_rel)
-            let child_proof = smt.get_inclusion_proof(&smt_key, 256).ok();
-            let child_bytes = child_proof
-                .as_ref()
-                .map(crate::sdk::receipts::serialize_inclusion_proof)
-                .unwrap_or_default();
-            (new_root, parent_bytes, child_bytes, pre_root)
+            manager.commit_bilateral_smt_update(
+                &mut smt,
+                &session.counterparty_device_id,
+                &h_n_plus_1,
+            )?
         };
+        let pre_root = result.pre_root;
+        let sender_smt_root = result.post_root;
+        let rel_proof_parent_bytes = result.parent_proof.to_bytes();
+        let rel_proof_child_bytes = result.child_proof.to_bytes();
 
         // 6. Build stitched receipt with real SMT roots + proofs (§4.2)
         let local_r_g = crate::sdk::app_state::AppState::get_device_tree_root();
@@ -2356,8 +2329,12 @@ impl BilateralBleHandler {
             )
         })?;
 
-        // 7. Finalize sender: execute state transition
-        {
+        // 7. Finalize sender: execute state transition.
+        // Capture the finalized local_state so it can be threaded into settlement
+        // and BCR archive — the same canonical commit path used by recovery
+        // (mark_sender_committed_with_post_state_hash).
+        let finalized_local_state = {
+            let mut smt = self.per_device_smt.write().await;
             let mut manager = self.bilateral_tx_manager.write().await;
             match manager
                 .finalize_offline_transfer_with_entropy(
@@ -2365,6 +2342,7 @@ impl BilateralBleHandler {
                     &commitment_hash,
                     counterparty_sig,
                     Some(pre_entropy),
+                    &mut smt,
                 )
                 .await
             {
@@ -2376,6 +2354,7 @@ impl BilateralBleHandler {
                     // Chain tip already advanced and persisted to SQLite inside
                     // finalize_offline_transfer_with_entropy → update_anchor →
                     // chain_tip_store.set_contact_chain_tip(). No redundant CAS needed.
+                    result.local_state
                 }
                 Err(e) => {
                     return Err(DsmError::invalid_operation(format!(
@@ -2383,32 +2362,54 @@ impl BilateralBleHandler {
                     )));
                 }
             }
-        }
+        };
 
         // 9+10. Delegate sender settlement (balance debit + transaction history) to the
         // application layer.  If settlement fails the confirm envelope is never built —
         // the receiver will not get a confirm for a transfer the sender could not debit.
         // Session stays Accepted so the caller can retry.
+        //
+        // The finalized local_state is passed as canonical_state so that
+        // build_canonical_settled_state can reconcile the ERA debit and produce a
+        // canonical settled state.  After settlement, archive to BCR and sync the
+        // balance cache — converging on the same canonical commit path that recovery
+        // (mark_sender_committed_with_post_state_hash) already depends on.
         let confirm_meta = if let Some(ref delegate) = self.settlement_delegate {
             let ctx = BilateralSettlementContext {
                 local_device_id: self.device_id,
                 counterparty_device_id: session.counterparty_device_id,
                 commitment_hash,
                 transaction_hash: h_n_plus_1,
-                chain_height: 0,
+                chain_height: finalized_local_state.state_number,
                 operation_bytes: session.operation.to_bytes(),
                 proof_data: Some(receipt_bytes.clone()),
                 is_sender: true,
                 tx_type: "bilateral_offline",
                 new_chain_tip: [0u8; 32],
+                canonical_state: Some(finalized_local_state.clone()),
             };
-            delegate.settle(ctx).map_err(|e| {
+            let outcome = delegate.settle(ctx).map_err(|e| {
                 DsmError::invalid_operation(format!(
                     "send_bilateral_confirm: sender settlement failed: {e}"
                 ))
-            })?
+            })?;
+
+            // Canonical post-settlement persistence: archive to BCR and sync
+            // balance cache.  Matches mark_sender_committed_with_post_state_hash
+            // so there is exactly one sender-side canonical commit path.
+            let state_to_record = outcome
+                .canonical_state
+                .as_ref()
+                .unwrap_or(&finalized_local_state);
+            self.record_bcr_state_and_scan(state_to_record, true).await;
+
+            if let Some(router) = crate::bridge::app_router() {
+                router.sync_balance_cache();
+            }
+
+            outcome
         } else {
-            crate::sdk::transfer_hooks::TransferMeta::default()
+            BilateralSettlementOutcome::default()
         };
 
         // 11. Build BilateralConfirmRequest
@@ -2491,7 +2492,7 @@ impl BilateralBleHandler {
         }
 
         info!("[BILATERAL] send_bilateral_confirm: confirm envelope built ({} bytes), session ConfirmPending until delivery", buffer.len());
-        Ok((buffer, confirm_meta))
+        Ok((buffer, confirm_meta.transfer_meta))
     }
 
     /// Mark a ConfirmPending sender session as Committed after the BilateralConfirm
@@ -2735,7 +2736,7 @@ impl BilateralBleHandler {
                 &confirm_request.rel_proof_child,
             )?;
 
-            if !crate::security::bounded_smt::BoundedSmt::verify_proof_against_root(
+            if !dsm::merkle::sparse_merkle_tree::SparseMerkleTree::verify_proof_against_root(
                 &child_proof,
                 &sender_root,
             ) {
@@ -2762,7 +2763,7 @@ impl BilateralBleHandler {
                 let parent_proof = crate::sdk::receipts::deserialize_inclusion_proof(
                     &confirm_request.rel_proof_parent,
                 )?;
-                if !crate::security::bounded_smt::BoundedSmt::verify_proof_against_root(
+                if !dsm::merkle::sparse_merkle_tree::SparseMerkleTree::verify_proof_against_root(
                     &parent_proof,
                     &old_root,
                 ) {
@@ -2793,7 +2794,7 @@ impl BilateralBleHandler {
             .map_err(|_| DsmError::invalid_operation("shared_chain_tip_new must be 32 bytes"))?;
 
         // RECEIVER-SIDE FINALIZE: Execute state transition, advance to sender's h_{n+1}
-        let (tx_result, h_n) = {
+        let (tx_result, h_n, replace_result) = {
             let mut manager = self.bilateral_tx_manager.write().await;
 
             let mut anchor = manager
@@ -2851,13 +2852,22 @@ impl BilateralBleHandler {
                 entropy,
             )?;
 
-            // Advance shared chain tip in-memory only — SQLite persistence is deferred
-            // to apply_receiver_confirm_full_atomic() so that chain tip, balance credit,
-            // and transaction history commit as a single atomic unit (§4.2).
-            manager.update_anchor_in_memory_public(
+            // §4.2: SMT-Replace FIRST, then anchor update from the replace result.
+            // No speculative proofs — the anchor only gets a chain tip backed by a real replace.
+            let mut smt = self.per_device_smt.write().await;
+            let replace_result = manager.commit_bilateral_smt_update(
+                &mut smt,
+                &session.counterparty_device_id,
+                &new_chain_tip,
+            )?;
+
+            // Now update anchor from the real replace result (in-memory only —
+            // SQLite persistence deferred to atomic commit with balance writes).
+            manager.update_anchor_in_memory_from_replace_public(
                 &session.counterparty_device_id,
                 &mut anchor,
                 new_chain_tip,
+                &replace_result,
             )?;
 
             let tx_hash =
@@ -2871,71 +2881,31 @@ impl BilateralBleHandler {
                 completed_offline: true,
             };
 
-            (result, h_n)
+            (result, h_n, replace_result)
         };
 
-        // Receiver: SMT-Replace FIRST, then build receipt with real proofs (§4.2)
+        // Build receipt with real proofs from the replace result (§4.2).
+        // No fake roots, no empty proofs — the real SmtReplaceResult carries
+        // pre_root (r_A), post_root (r'_A), parent_proof (π h_n ∈ r_A),
+        // and child_proof (π' h_{n+1} ∈ r'_A).
         let receipt_bytes = {
-            let smt_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
-                &self.device_id,
-                &session.counterparty_device_id,
-            );
-            let (pre_root, post_root, parent_bytes, child_bytes) = {
-                let mut smt = self.per_device_smt.write().await;
-                let pre_root = *smt.root();
-                let parent_bytes = smt
-                    .get_inclusion_proof(&smt_key, 256)
-                    .ok()
-                    .as_ref()
-                    .map(crate::sdk::receipts::serialize_inclusion_proof)
-                    .unwrap_or_default();
-                if let Err(e) = smt.update_leaf(&smt_key, &new_chain_tip) {
-                    warn!("[BILATERAL] Receiver SMT update failed: {}", e);
-                }
-                let post_root = *smt.root();
-                let child_bytes = smt
-                    .get_inclusion_proof(&smt_key, 256)
-                    .ok()
-                    .as_ref()
-                    .map(crate::sdk::receipts::serialize_inclusion_proof)
-                    .unwrap_or_default();
-                (pre_root, post_root, parent_bytes, child_bytes)
-            };
-            // §B3: Store the real Per-Device SMT proof in the relationship anchor.
-            {
-                let mut manager = self.bilateral_tx_manager.write().await;
-                let real_proof = dsm::types::contact_types::ChainTipSmtProof {
-                    smt_root: post_root,
-                    state_hash: new_chain_tip,
-                    proof_path: Vec::new(), // serialized bytes stored in receipt separately
-                    state_index: dsm::core::bilateral_transaction_manager::mono_commit_height_pub(),
-                    proof_commit_height:
-                        dsm::core::bilateral_transaction_manager::mono_commit_height_pub(),
-                };
-                manager.store_anchor_smt_proof(&session.counterparty_device_id, real_proof);
-            }
-            // §2.3: π_dev proves DevID_A ∈ R_G. devid_a = self.device_id (local), so
-            // we must supply the LOCAL device's R_G, not the counterparty's R_G.
-            // get_contact_device_tree_root returns the sender's R_G which is only
-            // needed to verify the sender's proof — not our own local π_dev.
             let local_r_g = crate::sdk::app_state::AppState::get_device_tree_root();
-            // §B2: Use relationship chain tips (h_n, h_{n+1}) NOT entity hashes.
             crate::sdk::receipts::build_bilateral_receipt_with_smt(
                 self.device_id,
                 session.counterparty_device_id,
-                h_n,           // §B2: relationship chain tip h_n (captured before transition)
-                new_chain_tip, // §B2: relationship chain tip h_{n+1} from sender's confirm
-                pre_root,
-                post_root,
-                parent_bytes,
-                child_bytes,
+                h_n,
+                new_chain_tip,
+                replace_result.pre_root,
+                replace_result.post_root,
+                replace_result.parent_proof.to_bytes(),
+                replace_result.child_proof.to_bytes(),
                 local_r_g,
             )
         };
 
-        // Chain tip h_{n+1} is NOT yet persisted to SQLite — update_anchor_in_memory_public
-        // only updated in-memory state. The SQLite persistence happens atomically with the
-        // balance credit inside the settlement delegate below.
+        // Chain tip h_{n+1} is NOT yet persisted to SQLite — update_anchor_in_memory_from_replace_public
+        // only updated in-memory state. The SQLite persistence happens atomically with
+        // settlement metadata inside the delegate below.
 
         let pending_key = session.local_commitment_hash.unwrap_or(commitment_hash);
 
@@ -2950,35 +2920,36 @@ impl BilateralBleHandler {
 
         // §4.2 Full-persistence atomic boundary: delegate applies chain tip + balance +
         // history in one SQLite transaction.
-        let (confirm_meta, persistence_error) = if let Some(ref delegate) = self.settlement_delegate
-        {
-            let ctx = BilateralSettlementContext {
-                local_device_id: self.device_id,
-                counterparty_device_id: session.counterparty_device_id,
-                commitment_hash,
-                transaction_hash: tx_result.transaction_hash,
-                chain_height: tx_result.local_state.state_number,
-                operation_bytes: op_bytes.clone(),
-                proof_data: receipt_bytes,
-                is_sender: false,
-                tx_type: "bilateral_offline",
-                new_chain_tip,
-            };
-            match delegate.settle(ctx) {
-                Ok(meta) => (meta, None),
-                Err(e) => {
-                    warn!(
-                        "[BILATERAL] Receiver settlement failed (device={}, amount={:?}): {}",
-                        bytes_to_base32(&self.device_id[..8]),
-                        amount_opt,
-                        e
-                    );
-                    (crate::sdk::transfer_hooks::TransferMeta::default(), Some(e))
+        let (confirm_outcome, persistence_error) =
+            if let Some(ref delegate) = self.settlement_delegate {
+                let ctx = BilateralSettlementContext {
+                    local_device_id: self.device_id,
+                    counterparty_device_id: session.counterparty_device_id,
+                    commitment_hash,
+                    transaction_hash: tx_result.transaction_hash,
+                    chain_height: tx_result.local_state.state_number,
+                    operation_bytes: op_bytes.clone(),
+                    proof_data: receipt_bytes,
+                    is_sender: false,
+                    tx_type: "bilateral_offline",
+                    new_chain_tip,
+                    canonical_state: Some(tx_result.local_state.clone()),
+                };
+                match delegate.settle(ctx) {
+                    Ok(outcome) => (outcome, None),
+                    Err(e) => {
+                        warn!(
+                            "[BILATERAL] Receiver settlement failed (device={}, amount={:?}): {}",
+                            bytes_to_base32(&self.device_id[..8]),
+                            amount_opt,
+                            e
+                        );
+                        (BilateralSettlementOutcome::default(), Some(e))
+                    }
                 }
-            }
-        } else {
-            (crate::sdk::transfer_hooks::TransferMeta::default(), None)
-        };
+            } else {
+                (BilateralSettlementOutcome::default(), None)
+            };
 
         if let Some(persist_error) = persistence_error {
             {
@@ -3037,8 +3008,15 @@ impl BilateralBleHandler {
             )));
         }
 
-        self.record_bcr_state_and_scan(&tx_result.local_state, true)
-            .await;
+        let state_to_record = confirm_outcome
+            .canonical_state
+            .as_ref()
+            .unwrap_or(&tx_result.local_state);
+        self.record_bcr_state_and_scan(state_to_record, true).await;
+
+        if let Some(router) = crate::bridge::app_router() {
+            router.sync_balance_cache();
+        }
 
         {
             let mut mgr = self.bilateral_tx_manager.write().await;
@@ -3111,7 +3089,7 @@ impl BilateralBleHandler {
 
         info!("[BILATERAL] handle_confirm_request: receiver finalized successfully");
 
-        Ok(confirm_meta)
+        Ok(confirm_outcome.transfer_meta)
     }
 
     /// Clean up expired sessions
@@ -3242,6 +3220,7 @@ impl BilateralBleHandler {
 
         // Finalize the sender's transaction using pre-generated entropy (if available)
         // so that the actual post-finalize tip matches what was sent in the CommitRequest.
+        let mut smt = self.per_device_smt.write().await;
         let mut manager = self.bilateral_tx_manager.write().await;
         match manager
             .finalize_offline_transfer_with_entropy(
@@ -3249,6 +3228,7 @@ impl BilateralBleHandler {
                 commitment_hash,
                 &counterparty_sig,
                 pre_entropy,
+                &mut smt,
             )
             .await
         {
@@ -3270,14 +3250,12 @@ impl BilateralBleHandler {
                         "[BILATERAL] Sender using receiver-reported post_state_hash as counterparty chain tip: {}",
                         bytes_to_base32(&post_tip[..8])
                     );
-                    if let Err(e) =
-                        crate::storage::client_db::update_contact_chain_tip_after_bilateral(
-                            &counterparty_device_id,
-                            &post_tip,
-                        )
-                    {
+                    if let Err(e) = crate::storage::client_db::record_observed_remote_chain_tip(
+                        &counterparty_device_id,
+                        &post_tip,
+                    ) {
                         warn!(
-                            "[BILATERAL] Failed to persist post_state_hash as counterparty chain tip: {}",
+                            "[BILATERAL] Failed to persist post_state_hash as observed counterparty chain tip: {}",
                             e
                         );
                     }
@@ -3289,14 +3267,12 @@ impl BilateralBleHandler {
                         "[BILATERAL] No post_state_hash from commit-response; using shared chain_tip: {}",
                         bytes_to_base32(&shared_tip[..8])
                     );
-                    if let Err(e) =
-                        crate::storage::client_db::update_contact_chain_tip_after_bilateral(
-                            &counterparty_device_id,
-                            &shared_tip,
-                        )
-                    {
+                    if let Err(e) = crate::storage::client_db::record_observed_remote_chain_tip(
+                        &counterparty_device_id,
+                        &shared_tip,
+                    ) {
                         warn!(
-                            "[BILATERAL] Failed to persist counterparty chain tip: {}",
+                            "[BILATERAL] Failed to persist observed counterparty chain tip: {}",
                             e
                         );
                     }
@@ -3348,7 +3324,7 @@ impl BilateralBleHandler {
                     )
                 };
 
-                let _settlement_meta = if let Some(ref delegate) = self.settlement_delegate {
+                let settlement_outcome = if let Some(ref delegate) = self.settlement_delegate {
                     let ctx = BilateralSettlementContext {
                         local_device_id: self.device_id,
                         counterparty_device_id,
@@ -3360,20 +3336,29 @@ impl BilateralBleHandler {
                         is_sender: true,
                         tx_type: "bilateral_offline",
                         new_chain_tip: [0u8; 32],
+                        canonical_state: Some(result.local_state.clone()),
                     };
-                    match delegate.settle(ctx) {
-                        Ok(meta) => meta,
-                        Err(e) => {
-                            warn!("[BILATERAL] Sender settlement failed (post-delivery): {e}");
-                            crate::sdk::transfer_hooks::TransferMeta::default()
-                        }
-                    }
+                    delegate
+                        .settle(ctx)
+                        .map_err(|e| {
+                            DsmError::invalid_operation(format!(
+                            "mark_confirm_delivered: sender settlement failed (post-delivery): {e}"
+                        ))
+                        })
+                        .ok()?
                 } else {
-                    crate::sdk::transfer_hooks::TransferMeta::default()
+                    BilateralSettlementOutcome::default()
                 };
 
-                self.record_bcr_state_and_scan(&result.local_state, true)
-                    .await;
+                let state_to_record = settlement_outcome
+                    .canonical_state
+                    .as_ref()
+                    .unwrap_or(&result.local_state);
+                self.record_bcr_state_and_scan(state_to_record, true).await;
+
+                if let Some(router) = crate::bridge::app_router() {
+                    router.sync_balance_cache();
+                }
 
                 // Update session phase and cleanup storage
                 drop(manager);
@@ -3439,14 +3424,12 @@ impl BilateralBleHandler {
                         "[BILATERAL RECOVERY] Applying commit-response post_state_hash to counterparty tip: {}",
                         bytes_to_base32(&post_tip[..8])
                     );
-                    if let Err(e) =
-                        crate::storage::client_db::update_contact_chain_tip_after_bilateral(
-                            &counterparty_device_id,
-                            &post_tip,
-                        )
-                    {
+                    if let Err(e) = crate::storage::client_db::record_observed_remote_chain_tip(
+                        &counterparty_device_id,
+                        &post_tip,
+                    ) {
                         warn!(
-                            "[BILATERAL RECOVERY] Failed to persist post_state_hash as counterparty chain tip: {}",
+                            "[BILATERAL RECOVERY] Failed to persist post_state_hash as observed counterparty chain tip: {}",
                             e
                         );
                     }
@@ -3475,6 +3458,7 @@ impl BilateralBleHandler {
                         is_sender: true,
                         tx_type: "bilateral_offline_recovered",
                         new_chain_tip: [0u8; 32],
+                        canonical_state: None,
                     };
                     if let Err(e) = delegate.settle(ctx) {
                         warn!("[BILATERAL RECOVERY] Sender settlement failed (recovery path): {e}");
@@ -3557,7 +3541,7 @@ impl BilateralBleHandler {
     }
 
     /// Per-Device SMT for relationship chain tips (§18.1)
-    pub fn per_device_smt(&self) -> &Arc<RwLock<crate::security::bounded_smt::BoundedSmt>> {
+    pub fn per_device_smt(&self) -> &Arc<RwLock<dsm::merkle::sparse_merkle_tree::SparseMerkleTree>> {
         &self.per_device_smt
     }
 
@@ -4052,7 +4036,8 @@ mod tests {
         {
             let mut mgr = bilateral_manager.write().await;
             mgr.add_verified_contact(contact).expect("add contact");
-            mgr.establish_relationship(&counterparty_device_id)
+            let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
+            mgr.establish_relationship(&counterparty_device_id, &mut smt)
                 .await
                 .expect("establish relationship");
         }

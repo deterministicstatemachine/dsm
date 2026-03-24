@@ -94,7 +94,7 @@ pub fn collect_adversarial_results() -> AdversarialSuiteResult {
 
     eprintln!("  Generating SPHINCS+ keypairs...");
     let seed = [77u8; 32];
-    let kp = generate_keypair_from_seed(SphincsVariant::SPX256s, &seed).expect("keygen");
+    let kp = generate_keypair_from_seed(SphincsVariant::SPX256f, &seed).expect("keygen");
     let pk = kp.public_key.clone();
     let sk = kp.secret_key.clone();
 

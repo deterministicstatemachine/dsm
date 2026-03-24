@@ -107,7 +107,10 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_addSecondaryDevice<'a>(
                     // Persist identity to AppState (mirrors create_genesis flow)
                     let public_key =
                         crate::sdk::app_state::AppState::get_public_key().unwrap_or_default();
-                    let smt_root = vec![0u8; 32];
+                    let smt_root = dsm::merkle::sparse_merkle_tree::empty_root(
+                        dsm::merkle::sparse_merkle_tree::DEFAULT_SMT_HEIGHT,
+                    )
+                    .to_vec();
                     crate::sdk::app_state::AppState::set_identity_info(
                         device_id.clone(),
                         public_key,

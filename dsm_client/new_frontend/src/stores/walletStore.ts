@@ -3,7 +3,6 @@
 
 import { useSyncExternalStore } from 'react';
 import { dsmClient } from '../services/dsmClient';
-import { getDbtcBalance } from '../services/bitcoinTap';
 import type { Transaction } from '@/hooks/useTransactions';
 import { toBase32Crockford } from '../dsm/decoding';
 import type { WalletBalance, WalletState } from '../contexts/WalletContext';
@@ -104,12 +103,12 @@ class WalletStore {
     this.loadingCount++;
     this.setState({ isLoading: true });
     try {
-      const [eraResult, dbtcResult] = await Promise.allSettled([
+      const [eraResult] = await Promise.allSettled([
         dsmClient.getAllBalances(),
-        getDbtcBalance(),
       ]);
 
-      // Use ERA balances if that fetch succeeded; keep previous balances on failure
+      // Wallet balances are canonical from the local SMT/hash-chain state.
+      // Do not overwrite dBTC with the separate Bitcoin chain-wallet endpoint.
       let balances: WalletBalance[];
       if (eraResult.status === 'fulfilled') {
         balances = (eraResult.value as any[])
@@ -117,41 +116,12 @@ class WalletStore {
           .slice();
       } else {
         console.error('WalletStore: ERA balance fetch failed:', eraResult.reason);
-        balances = this.snapshot.balances.filter((b) => b.tokenId.toUpperCase() !== 'DBTC');
-      }
-
-      // Merge dBTC if that fetch succeeded
-      if (dbtcResult.status === 'fulfilled' && dbtcResult.value !== null) {
-        const dbtcBalance = dbtcResult.value;
-        const available = typeof dbtcBalance.available === 'bigint'
-          ? dbtcBalance.available
-          : BigInt(0);
-        const index = balances.findIndex((entry) => entry.tokenId.toUpperCase() === 'DBTC');
-        const nextEntry: WalletBalance = {
-          tokenId: 'dBTC',
-          tokenName: 'dBTC',
-          balance: available,
-          decimals: 8,
-          symbol: 'dBTC',
-        };
-        if (index >= 0) {
-          balances[index] = nextEntry;
-        } else {
-          balances.unshift(nextEntry);
-        }
-      } else if (dbtcResult.status === 'rejected') {
-        console.error('WalletStore: dBTC balance fetch failed:', dbtcResult.reason);
-        // Preserve existing dBTC entry from previous snapshot if any
-        const prevDbtc = this.snapshot.balances.find((b) => b.tokenId.toUpperCase() === 'DBTC');
-        if (prevDbtc && !balances.some((b) => b.tokenId.toUpperCase() === 'DBTC')) {
-          balances.unshift(prevDbtc);
-        }
+        balances = this.snapshot.balances.slice();
       }
 
       // Report partial failures as a non-blocking error
       const failedParts: string[] = [];
       if (eraResult.status === 'rejected') failedParts.push('ERA');
-      if (dbtcResult.status === 'rejected') failedParts.push('dBTC');
       const error = failedParts.length > 0
         ? `Failed to refresh ${failedParts.join(' & ')} balances`
         : null;

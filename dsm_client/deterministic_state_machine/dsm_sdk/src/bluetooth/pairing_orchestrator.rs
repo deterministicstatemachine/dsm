@@ -3,6 +3,9 @@
 //! Deterministic state machine for bilateral identity exchange over BLE.
 //! Takes a contact's device_id as input, coordinates the Kotlin BLE radio
 //! (scan/advertise), and drives the bilateral handshake when peer connects.
+//! Transport policy: wall-clock time is allowed here for BLE handshake freshness,
+//! disconnect recovery, retry windows, and wake-up timeouts. Those timers never
+//! participate in chain ordering, receipt commits, or acceptance predicates.
 // 4. Validates identity + chain tip
 // 5. Updates contact status to BleCapable when complete
 // 6. Holds GATT session stable until handshake done
@@ -54,8 +57,11 @@ pub struct PairingSession {
     pub ble_address: Option<String>,
     pub peer_genesis_hash: Option<[u8; 32]>,
     pub peer_chain_tip: Option<Vec<u8>>,
-    /// Wall-clock timestamp of the last state transition. Used exclusively for
-    /// BLE session staleness detection (transport layer). Permitted by invariant #4.
+    /// Wall-clock timestamp of the last state transition.
+    ///
+    /// This is transport-runtime state only: used for BLE session staleness,
+    /// handshake timeout windows, and retry scheduling. It never enters protocol
+    /// commitments or acceptance logic.
     pub last_activity: Instant,
 }
 
@@ -682,10 +688,10 @@ impl PairingOrchestrator {
 
     /// Reset any in-progress pairing session for a peer that just disconnected.
     ///
-    /// When the BLE link drops during a pairing handshake the pairing loop normally
-    /// waits up to 90 s (STALE_SECS) before retrying.  Calling this method resets
-    /// the session to `Failed` immediately so the next loop iteration re-initiates
-    /// pairing without delay.
+    /// When the BLE link drops during a pairing handshake the transport retry window
+    /// would otherwise wait up to 90 s (`STALE_SECS`) before retrying. Calling this
+    /// method resets the session to `Failed` immediately so the next loop iteration
+    /// re-initiates pairing without delay.
     ///
     /// Completed (`Complete`) sessions are never reset — an already-paired contact
     /// does not need to be re-paired just because the transport layer disconnected.
@@ -703,8 +709,7 @@ impl PairingOrchestrator {
                     }
                     _ => {
                         let old_state = format!("{:?}", session.state);
-                        session.state =
-                            PairingState::Failed("BLE link dropped".to_string());
+                        session.state = PairingState::Failed("BLE link dropped".to_string());
                         session.last_activity = Instant::now();
                         log::info!(
                             "[PairingOrchestrator] Peer {} disconnected — reset pairing session {:02x}{:02x}... ({} → Failed)",
@@ -740,7 +745,7 @@ impl PairingOrchestrator {
     /// 2. Filters to unpaired (no ble_address)
     /// 3. For each, calls initiate_pairing() which determines role and starts BLE
     /// 4. Emits PairingStatusUpdate envelopes for each state change
-    /// 5. Waits for actual pairing state changes or a periodic retry timeout
+    /// 5. Waits for actual pairing state changes or a transport retry timeout
     /// 6. Loops until all contacts are paired or stop_pairing_loop() is called
     ///
     /// Designed to be spawned on the tokio runtime (fire-and-forget from JNI).
@@ -757,12 +762,11 @@ impl PairingOrchestrator {
 
         log::info!("[PairingOrchestrator] start_pairing_all_unpaired: loop started");
 
-        /// Maximum time the pairing loop waits for a state-change notification
-        /// before re-evaluating sessions regardless.  This ensures stale or
-        /// silently-dropped BLE sessions are recovered even when no explicit
-        /// disconnect event fires.
-        const PAIRING_LOOP_WAKE_TIMEOUT: std::time::Duration =
-            std::time::Duration::from_secs(30);
+        /// Maximum wall-clock interval the pairing loop waits for a state-change
+        /// notification before re-evaluating sessions regardless. This is transport
+        /// runtime control only and ensures stale or silently-dropped BLE sessions
+        /// are recovered even when no explicit disconnect event fires.
+        const PAIRING_LOOP_WAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
         loop {
             let state_changed = self.state_change.notified();
@@ -842,7 +846,8 @@ impl PairingOrchestrator {
                 let mut device_id = [0u8; 32];
                 device_id.copy_from_slice(&contact.device_id);
 
-                // BLE sessions stale after 90s (transport-layer staleness per invariant #4).
+                // BLE sessions stale after 90s. This transport timer bounds
+                // handshake freshness and reconnect retry windows only.
                 const STALE_SECS: u64 = 90;
 
                 // Determine whether to skip or clear this contact's pairing session.
@@ -919,10 +924,10 @@ impl PairingOrchestrator {
                 }
             }
 
-            // Wait for the next state-change event or a periodic timeout, whichever
-            // arrives first.  The timeout ensures that stale sessions that were
-            // not detected via a disconnect notification are still re-evaluated within
-            // a reasonable window rather than waiting indefinitely.
+            // Wait for the next state-change event or a periodic transport timeout,
+            // whichever arrives first. The timeout ensures that stale sessions that
+            // were not detected via a disconnect notification are still re-evaluated
+            // within a reasonable window rather than waiting indefinitely.
             let _ = tokio::time::timeout(PAIRING_LOOP_WAKE_TIMEOUT, state_changed).await;
         }
 

@@ -82,6 +82,23 @@ impl ProofRunner {
                 module_file: "DSM_InitProof.tla".into(),
                 theorem_names: vec!["ConcreteInitRefinesCore".into()],
             },
+            // --- Offline Finality (Paper Theorems 4.1, 4.2) ---
+            ProofSpec {
+                label: "DSM_OfflineFinality".into(),
+                module_file: "DSM_OfflineFinality.tla".into(),
+                theorem_names: vec![
+                    "OfflineFinalityInit".into(),
+                    "OfflineFinalityStep".into(),
+                    "IrreversibilityInductive".into(),
+                    "NoHalfCommitInductive".into(),
+                ],
+            },
+            // --- Non-Interference (Paper Lemma 3.1, Theorem 3.1) ---
+            ProofSpec {
+                label: "DSM_NonInterference".into(),
+                module_file: "DSM_NonInterference.tla".into(),
+                theorem_names: vec!["NonInterferenceStep".into()],
+            },
         ]
     }
 

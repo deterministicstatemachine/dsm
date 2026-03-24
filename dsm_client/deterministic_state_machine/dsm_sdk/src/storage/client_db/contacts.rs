@@ -405,19 +405,26 @@ pub fn update_contact_ble_status(
     });
 
     let updated_ble_address = ble_address.or(contact.ble_address.as_deref());
+    let observed_tip_bytes = observed_chain_tip.filter(|tip| tip.len() == 32);
 
     conn.execute(
         "UPDATE contacts SET
             status = ?1,
             needs_online_reconcile = ?2,
             last_seen_ble_counter = ?3,
-            ble_address = ?4
-         WHERE device_id = ?5",
+            ble_address = ?4,
+            observed_remote_chain_tip = COALESCE(?5, observed_remote_chain_tip),
+            observed_remote_tip_updated_at = CASE
+                WHEN ?5 IS NULL THEN observed_remote_tip_updated_at
+                ELSE ?3
+            END
+         WHERE device_id = ?6",
         params![
             new_status,
             if needs_reconcile { 1i32 } else { 0i32 },
             now as i64,
             updated_ble_address,
+            observed_tip_bytes,
             device_id,
         ],
     )?;
@@ -430,16 +437,16 @@ pub fn update_contact_ble_status(
     Ok(())
 }
 
-fn update_contact_chain_tip_columns(
-    device_id: &[u8],
-    new_chain_tip: &[u8],
-    update_local_bilateral_tip: bool,
-) -> Result<()> {
+/// Persist an unverified remote chain-tip claim in an observed-only namespace.
+///
+/// This is advisory durability for BLE/session recovery. It MUST NOT be used as
+/// the canonical bilateral relationship tip.
+pub fn record_observed_remote_chain_tip(device_id: &[u8], observed_chain_tip: &[u8]) -> Result<()> {
     if device_id.len() != 32 {
         return Err(anyhow!("Invalid device_id length"));
     }
-    if new_chain_tip.len() != 32 {
-        return Err(anyhow!("Invalid chain_tip length"));
+    if observed_chain_tip.len() != 32 {
+        return Err(anyhow!("Invalid observed_chain_tip length"));
     }
 
     let binding = get_connection()?;
@@ -449,75 +456,157 @@ fn update_contact_chain_tip_columns(
     });
 
     let now = tick();
-
-    if update_local_bilateral_tip {
-        conn.execute(
-            "UPDATE contacts SET
-                previous_chain_tip = chain_tip,
-                chain_tip = ?1,
-                local_bilateral_chain_tip = ?1,
-                needs_online_reconcile = 0,
-                last_seen_online_counter = ?2,
-                status = CASE
-                    WHEN status = 'BleCapable' THEN 'BleCapable'
-                    ELSE 'OnlineCapable'
-                END
-             WHERE device_id = ?3",
-            params![new_chain_tip, now as i64, device_id,],
-        )?;
-    } else {
-        conn.execute(
-            "UPDATE contacts SET
-                previous_chain_tip = chain_tip,
-                chain_tip = ?1,
-                needs_online_reconcile = 0,
-                last_seen_online_counter = ?2,
-                status = CASE
-                    WHEN status = 'BleCapable' THEN 'BleCapable'
-                    ELSE 'OnlineCapable'
-                END
-             WHERE device_id = ?3",
-            params![new_chain_tip, now as i64, device_id,],
-        )?;
+    let updated = conn.execute(
+        "UPDATE contacts SET
+            observed_remote_chain_tip = ?1,
+            observed_remote_tip_updated_at = ?2
+         WHERE device_id = ?3",
+        params![observed_chain_tip, now as i64, device_id],
+    )?;
+    if updated == 0 {
+        return Err(anyhow!(
+            "Cannot persist observed remote chain tip for unknown contact"
+        ));
     }
 
+    info!(
+        "Recorded observed remote chain tip without mutating canonical state: tip={:?}",
+        &observed_chain_tip[..8]
+    );
     Ok(())
 }
 
-/// Update the observed/shared relationship chain tip for a contact.
-///
-/// This intentionally does NOT update `local_bilateral_chain_tip`. Some call
-/// sites use this during pre-verification sync (for example, to record the
-/// sender's claimed tip from an incoming BLE prepare), and overwriting the
-/// caller's own persisted local tip there would mask real mismatches.
-pub fn update_contact_chain_tip_after_bilateral(
-    device_id: &[u8],
-    new_chain_tip: &[u8],
-) -> Result<()> {
-    update_contact_chain_tip_columns(device_id, new_chain_tip, false)?;
+/// Load the last observed unverified remote chain tip, if any.
+pub fn get_observed_remote_chain_tip(device_id: &[u8]) -> Result<Option<[u8; 32]>> {
+    if device_id.len() != 32 {
+        return Err(anyhow!("Invalid device_id length"));
+    }
 
-    info!(
-        "Updated contact chain tip after bilateral transaction: tip={:?}",
-        &new_chain_tip[..8]
-    );
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|poisoned| {
+        log::warn!("DB lock poisoned, recovering");
+        poisoned.into_inner()
+    });
 
+    let value: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT observed_remote_chain_tip FROM contacts WHERE device_id = ?1",
+            params![device_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+
+    match value {
+        Some(tip) if tip.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&tip);
+            Ok(Some(arr))
+        }
+        Some(tip) => Err(anyhow!(
+            "Observed remote chain tip has invalid length {}",
+            tip.len()
+        )),
+        None => Ok(None),
+    }
+}
+
+/// Clear any observed-only remote chain-tip claim for a contact.
+pub fn clear_observed_remote_chain_tip(device_id: &[u8]) -> Result<()> {
+    if device_id.len() != 32 {
+        return Err(anyhow!("Invalid device_id length"));
+    }
+
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|poisoned| {
+        log::warn!("DB lock poisoned, recovering");
+        poisoned.into_inner()
+    });
+
+    conn.execute(
+        "UPDATE contacts
+            SET observed_remote_chain_tip = NULL,
+                observed_remote_tip_updated_at = NULL
+          WHERE device_id = ?1",
+        params![device_id],
+    )?;
     Ok(())
 }
 
-/// Persist a fully finalized relationship tip for the local device.
+/// Restore a finalized bilateral chain tip only when storage is empty, zero, or already equal.
 ///
-/// Use this only after the bilateral/online state advance is complete. This
-/// updates both the shared contact tip and the caller's own persisted
-/// `local_bilateral_chain_tip`, which is what the offline BLE path restores
-/// after app restarts or relationship re-establish.
-pub fn update_finalized_bilateral_chain_tip(device_id: &[u8], new_chain_tip: &[u8]) -> Result<()> {
-    update_contact_chain_tip_columns(device_id, new_chain_tip, true)?;
+/// This is the only valid non-CAS restore path. It never overwrites a different
+/// canonical tip.
+pub fn restore_finalized_bilateral_chain_tip(device_id: &[u8], restored_tip: &[u8]) -> Result<()> {
+    if device_id.len() != 32 {
+        return Err(anyhow!("Invalid device_id length"));
+    }
+    if restored_tip.len() != 32 {
+        return Err(anyhow!("Invalid restored_tip length"));
+    }
+
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|poisoned| {
+        log::warn!("DB lock poisoned, recovering");
+        poisoned.into_inner()
+    });
+
+    let current_tip: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT chain_tip FROM contacts WHERE device_id = ?1",
+            params![device_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+
+    match current_tip.as_deref() {
+        Some(tip) if tip.len() != 32 => {
+            return Err(anyhow!(
+                "Stored finalized chain tip has invalid length {}",
+                tip.len()
+            ));
+        }
+        Some(tip) if tip != restored_tip && !tip.iter().all(|byte| *byte == 0) => {
+            return Err(anyhow!(
+                "Refusing to overwrite finalized bilateral chain tip with a different restored tip"
+            ));
+        }
+        _ => {}
+    }
+
+    let now = tick();
+    let zero_tip = [0u8; 32];
+    let updated = conn.execute(
+        "UPDATE contacts SET
+            previous_chain_tip = CASE
+                WHEN chain_tip IS NULL OR chain_tip = ?1 OR chain_tip = ?2 THEN previous_chain_tip
+                ELSE chain_tip
+            END,
+            chain_tip = ?2,
+            local_bilateral_chain_tip = ?2,
+            observed_remote_chain_tip = NULL,
+            observed_remote_tip_updated_at = NULL,
+            needs_online_reconcile = 0,
+            last_seen_online_counter = ?3,
+            status = CASE
+                WHEN status = 'BleCapable' THEN 'BleCapable'
+                ELSE 'OnlineCapable'
+            END
+         WHERE device_id = ?4
+           AND (chain_tip IS NULL OR chain_tip = ?1 OR chain_tip = ?2)",
+        params![&zero_tip, restored_tip, now as i64, device_id],
+    )?;
+    if updated == 0 {
+        return Err(anyhow!(
+            "Cannot restore finalized bilateral chain tip for unknown contact"
+        ));
+    }
 
     info!(
-        "Updated finalized bilateral chain tip (shared + local): tip={:?}",
-        &new_chain_tip[..8]
+        "Restored finalized bilateral chain tip without overwrite: tip={:?}",
+        &restored_tip[..8]
     );
-
     Ok(())
 }
 
@@ -562,6 +651,11 @@ pub fn try_advance_finalized_bilateral_chain_tip(
     if new_chain_tip.len() != 32 {
         return Err(anyhow!("Invalid chain_tip length"));
     }
+    if expected_parent_tip == new_chain_tip {
+        return Err(anyhow!(
+            "Finalized bilateral chain tip advance requires child tip different from parent tip"
+        ));
+    }
 
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|poisoned| {
@@ -578,6 +672,8 @@ pub fn try_advance_finalized_bilateral_chain_tip(
                 previous_chain_tip = chain_tip,
                 chain_tip = ?1,
                 local_bilateral_chain_tip = ?1,
+                observed_remote_chain_tip = NULL,
+                observed_remote_tip_updated_at = NULL,
                 needs_online_reconcile = 0,
                 last_seen_online_counter = ?2,
                 status = CASE
@@ -594,6 +690,8 @@ pub fn try_advance_finalized_bilateral_chain_tip(
                 previous_chain_tip = chain_tip,
                 chain_tip = ?1,
                 local_bilateral_chain_tip = ?1,
+                observed_remote_chain_tip = NULL,
+                observed_remote_tip_updated_at = NULL,
                 needs_online_reconcile = 0,
                 last_seen_online_counter = ?2,
                 status = CASE
@@ -625,8 +723,8 @@ pub fn try_advance_finalized_bilateral_chain_tip(
 
 /// Clear the `needs_online_reconcile` flag for a contact WITHOUT touching the
 /// chain tip. This is the only correct way to mark a reconcile as done —
-/// `update_contact_chain_tip_after_bilateral` must NOT be called with a zero
-/// tip just to clear this flag, as doing so destroys the real chain tip and
+/// the observed-tip namespace must NOT be written into canonical chain-tip
+/// columns just to clear this flag, as doing so destroys the real chain tip and
 /// causes every subsequent Prepare to be rejected with TipMismatch.
 pub fn clear_contact_reconcile_flag(device_id: &[u8]) -> Result<()> {
     if device_id.len() != 32 {

@@ -420,17 +420,11 @@ impl AppRouterImpl {
 
                 let token_id = crate::sdk::bitcoin_tap_sdk::DBTC_TOKEN_ID;
 
-                // Prefer SQLite (authoritative after bilateral debit), fall back to in-memory wallet.
-                let device_id_txt =
-                    crate::util::text_id::encode_base32_crockford(&self.device_id_bytes);
-                let (available, raw_locked) =
-                    match crate::storage::client_db::get_token_balance(&device_id_txt, token_id) {
-                        Ok(Some((a, l))) => (a, l),
-                        _ => match self.wallet.get_balance(Some(token_id)) {
-                            Ok(bal) => (bal.available(), bal.locked()),
-                            Err(_) => (0, 0),
-                        },
-                    };
+                // Prefer canonical projection/state-backed wallet balance.
+                let (available, raw_locked) = match self.wallet.get_balance(Some(token_id)) {
+                    Ok(bal) => (bal.available(), bal.locked()),
+                    Err(_) => (0, 0),
+                };
                 // Defensive: if locked > available, the value is corrupted (e.g. negative i64
                 // cast to u64). Clamp to 0 to prevent garbage display.
                 let locked = if raw_locked > available {
