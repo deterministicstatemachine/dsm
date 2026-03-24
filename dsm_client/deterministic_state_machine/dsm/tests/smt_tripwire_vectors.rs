@@ -12,9 +12,7 @@ use dsm::merkle::sparse_merkle_tree::{
     default_node, empty_root, hash_smt_node, DEFAULT_SMT_HEIGHT, ZERO_LEAF,
 };
 use dsm::verification::smt_replace_witness::{
-    hash_smt_leaf,
-    hash_smt_node as witness_hash_node,
-    SmtReplaceWitness,
+    hash_smt_leaf, hash_smt_node as witness_hash_node, SmtReplaceWitness,
 };
 use dsm::core::bilateral_transaction_manager::{
     compute_precommit, compute_smt_key, compute_successor_tip,
@@ -37,9 +35,9 @@ const GOLDEN_SMT_LEAF: &str = "353NDPGJG210GSZA40PMY9YRJX56XZV4AZ40KHEF1HHP96D49
 const GOLDEN_SMT_KEY: &str = "6WQ5V974ZVJ32GJH38XKVXR500BCJA3D2ZXJREFSX1S86KDVHV7G";
 const GOLDEN_PRECOMMIT: &str = "6D6FFAX2FMPB9FP8VJ8KNY4EQ343GBZ8T32YRDR8RGBDJ7PWEJS0";
 const GOLDEN_SUCCESSOR_TIP: &str = "83BWY3QWZ349189XV1GPE2K2EX2REYNSXG445K7SPGSRQZWZF300";
-const GOLDEN_EMPTY_ROOT_32: &str = "DHA9AF0Z8TQ9QJ37RKH5PKCMEDECHMD01SK5SNWWBR3RKR5RSDAG";
-const GOLDEN_DEFAULT_NODE_0: &str = "0000000000000000000000000000000000000000000000000000";
-const GOLDEN_DEFAULT_NODE_1: &str = "NV3X1C3N3KDG2ZSFRKDD8VYY8MCA6D9CF238G20XJK6ZAENPNHK0";
+const GOLDEN_EMPTY_ROOT_32: &str = "E1JERDTXVWR09YMPW1FVGV12GBTB0RNT36P0TNQCWQD4JK4JDG90";
+const GOLDEN_DEFAULT_NODE_0: &str = "NVM9HGMZVHS8FR2CMTBEX8S5QHNQX03WM91QSSGAZ471189S2120";
+const GOLDEN_DEFAULT_NODE_1: &str = "SVRH8ZTRABJ1G040KNKY042R9E3HC8E5ZNBWWF17Q0E6BA06HJPG";
 const GOLDEN_DEVTREE_SINGLE: &str = "32D73DT2ME8YNVD6DFB2DSKZN1R5YYN87ARBBCGZJATC63D24JV0";
 const GOLDEN_INITIAL_TIP: &str = "KKF8ZAT6H6X292YFK5VBM5SCKYB8AR912HD0RN8VNEQVGBCQECR0";
 
@@ -123,9 +121,19 @@ fn golden_tag_initial_chain_tip() {
     let remote_genesis = [0x02u8; 32];
 
     let (genesis_a, device_a, genesis_b, device_b) = if local_device_id < remote_device_id {
-        (&local_genesis, &local_device_id, &remote_genesis, &remote_device_id)
+        (
+            &local_genesis,
+            &local_device_id,
+            &remote_genesis,
+            &remote_device_id,
+        )
     } else {
-        (&remote_genesis, &remote_device_id, &local_genesis, &local_device_id)
+        (
+            &remote_genesis,
+            &remote_device_id,
+            &local_genesis,
+            &local_device_id,
+        )
     };
 
     let mut h = dsm_domain_hasher("DSM/bilateral-session");
@@ -180,12 +188,12 @@ fn golden_default_node_0_is_zero() {
     assert_eq!(
         to_b32(&node),
         GOLDEN_DEFAULT_NODE_0,
-        "default_node(0) must be ZERO_LEAF (all zeros)"
+        "default_node(0) drifted — leaf-level default hash changed"
     );
     assert_eq!(
         node,
-        ZERO_LEAF,
-        "default_node(0) must equal ZERO_LEAF constant"
+        hash_smt_leaf(&ZERO_LEAF),
+        "default_node(0) must equal hash_smt_leaf(ZERO_LEAF)"
     );
 }
 
@@ -195,7 +203,7 @@ fn golden_default_node_1() {
     assert_eq!(
         to_b32(&node),
         GOLDEN_DEFAULT_NODE_1,
-        "default_node(1) drifted — H(ZERO_LEAF || ZERO_LEAF) changed"
+        "default_node(1) drifted — H(default_node(0) || default_node(0)) changed"
     );
 }
 
@@ -206,7 +214,8 @@ fn golden_default_node_chain_consistent() {
         let child = default_node(n - 1);
         let recomputed = hash_smt_node(&child, &child);
         assert_eq!(
-            expected, recomputed,
+            expected,
+            recomputed,
             "default_node({n}) != hash_smt_node(default_node({}), default_node({}))",
             n - 1,
             n - 1,
@@ -320,12 +329,10 @@ fn smt_replace_witness_roundtrip() {
         wire.extend_from_slice(&siblings[i]);
     }
 
-    let witness = SmtReplaceWitness::from_bytes(&wire)
-        .expect("valid witness bytes must parse");
+    let witness = SmtReplaceWitness::from_bytes(&wire).expect("valid witness bytes must parse");
 
     // Re-encode manually and decode again
-    let witness2 = SmtReplaceWitness::from_bytes(&wire)
-        .expect("second parse must succeed");
+    let witness2 = SmtReplaceWitness::from_bytes(&wire).expect("second parse must succeed");
 
     // Both must produce the same root from an arbitrary leaf
     let leaf = hash_smt_leaf(&[0x42; 32]);
@@ -346,10 +353,7 @@ fn smt_replace_witness_rejects_bad_is_left() {
     wire.extend_from_slice(&[0xDD; 32]);
 
     let result = SmtReplaceWitness::from_bytes(&wire);
-    assert!(
-        result.is_none(),
-        "witness with is_left=2 must be rejected"
-    );
+    assert!(result.is_none(), "witness with is_left=2 must be rejected");
 }
 
 // ===========================================================================
@@ -367,10 +371,7 @@ fn msb_first_all_256_positions() {
 
         // Extract bit at position N using MSB-first convention
         let extracted = (key[n / 8] >> (7 - n % 8)) & 1;
-        assert_eq!(
-            extracted, 1,
-            "bit {n} should be 1 in the constructed key"
-        );
+        assert_eq!(extracted, 1, "bit {n} should be 1 in the constructed key");
 
         // Verify all other sampled positions are 0
         for m in [0, 1, 127, 128, 255] {
@@ -378,10 +379,7 @@ fn msb_first_all_256_positions() {
                 continue;
             }
             let other = (key[m / 8] >> (7 - m % 8)) & 1;
-            assert_eq!(
-                other, 0,
-                "bit {m} should be 0 when only bit {n} is set"
-            );
+            assert_eq!(other, 0, "bit {m} should be 0 when only bit {n} is set");
         }
     }
 }

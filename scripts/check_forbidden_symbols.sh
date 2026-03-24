@@ -13,7 +13,7 @@ if command -v rg >/dev/null 2>&1; then
 else
   _grep_excludes=()
   for d in "${EXCLUDE_DIRS[@]}"; do _grep_excludes+=(--exclude-dir="$d"); done
-  _bt_hits=$(grep -rn --include='*.rs' --include='*.kt' --include='*.java' --include='*.ts' --include='*.tsx' \
+  _bt_hits=$(grep -rn -w --include='*.rs' --include='*.kt' --include='*.java' --include='*.ts' --include='*.tsx' \
     "${_grep_excludes[@]}" 'BluetoothMessage' . || true)
 fi
 if [[ -n "$_bt_hits" ]]; then

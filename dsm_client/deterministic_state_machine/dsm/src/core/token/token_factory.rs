@@ -132,7 +132,7 @@ pub fn create_token_genesis(
             ));
         }
 
-        contributions.sort_by(|a, b| a.participant.cmp(&b.participant));
+        contributions.sort_by_key(|c| c.participant);
     }
 
     // Only the first `threshold` contributions count (deterministic after sorting).

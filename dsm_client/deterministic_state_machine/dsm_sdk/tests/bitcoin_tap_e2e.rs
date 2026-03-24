@@ -2749,8 +2749,8 @@ async fn concurrent_pour_partial_only_one_succeeds() {
         successes, 1,
         "exactly one pour_partial must win the race (got {successes})"
     );
-    let losing = if result1.is_err() {
-        result1.unwrap_err()
+    let losing = if let Err(e) = result1 {
+        e
     } else {
         result2.unwrap_err()
     };

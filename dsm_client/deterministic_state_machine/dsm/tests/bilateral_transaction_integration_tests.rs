@@ -120,7 +120,11 @@ async fn test_complete_bilateral_transaction_flow() {
 
     let mut smt_bob = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
     let (_ok, contact_response) = bob_manager
-        .accept_contact_request_with_response(&request_hash, Some("Welcome Alice!".to_string()), &mut smt_bob)
+        .accept_contact_request_with_response(
+            &request_hash,
+            Some("Welcome Alice!".to_string()),
+            &mut smt_bob,
+        )
         .await
         .expect("accept contact");
 

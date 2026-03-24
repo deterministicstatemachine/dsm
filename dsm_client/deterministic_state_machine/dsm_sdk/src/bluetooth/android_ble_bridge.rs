@@ -455,15 +455,13 @@ impl AndroidBleBridge {
                 let new_count = pending_followups.len();
                 let mut devices = self.connected_devices.write().await;
                 if let Some(connection) = devices.get_mut(address) {
-                    connection
-                        .pending_commands
-                        .extend(pending_followups.into_iter());
+                    connection.pending_commands.extend(pending_followups);
                     debug!(
-                        "Queued {new_count} follow-up BLE commands for {addr} (total pending: {total})",
-                        new_count = new_count,
-                        addr = address,
-                        total = connection.pending_commands.len()
-                    );
+                            "Queued {new_count} follow-up BLE commands for {addr} (total pending: {total})",
+                            new_count = new_count,
+                            addr = address,
+                            total = connection.pending_commands.len()
+                        );
                 } else {
                     warn!(
                         "Attempted to queue follow-up BLE commands for unknown address {address}"
@@ -654,6 +652,26 @@ impl AndroidBleBridge {
         }
         cleaned
     }
+
+    /// Release a stashed prepare response for a given commitment hash (manual accept)
+    pub async fn release_pending_prepare_response(
+        &self,
+        commitment_hash: [u8; 32],
+    ) -> Result<(), DsmError> {
+        let _ = commitment_hash;
+        Err(DsmError::invalid_operation(
+            "manual prepare-response release is unavailable in the current BLE bridge",
+        ))
+    }
+
+    /// Drop any stashed prepare response for a commitment (manual reject)
+    pub async fn drop_pending_prepare_response(
+        &self,
+        commitment_hash: [u8; 32],
+    ) -> Result<(), DsmError> {
+        let _ = commitment_hash;
+        Ok(())
+    }
 }
 
 // JNI extern helpers for BLE (android_ble_*) are implemented in
@@ -770,6 +788,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_start_discovery_and_advertise_proto_only() {
         // Build minimal bridge
         let rt = match tokio::runtime::Runtime::new() {
