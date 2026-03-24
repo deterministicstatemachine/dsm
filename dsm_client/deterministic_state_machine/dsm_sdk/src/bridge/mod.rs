@@ -82,6 +82,11 @@ pub trait AppRouter: Send + Sync {
     async fn invoke(&self, i: AppInvoke) -> AppResult;
     /// Reload in-memory balance cache from SQLite after external balance changes (e.g. BLE debit).
     fn sync_balance_cache(&self) {}
+    /// Return the device's canonical tip state (authoritative token balances).
+    ///
+    /// Used by bilateral settlement to source B_n before applying the transfer
+    /// delta.  Returns `None` if no canonical state is available yet.
+    fn get_device_current_state(&self) -> Option<dsm::types::state_types::State> { None }
 }
 
 /// App router storage. Uses RwLock to allow replacement (MinimalBootstrapRouter → AppRouterImpl).
