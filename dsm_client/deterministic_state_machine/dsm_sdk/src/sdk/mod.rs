@@ -59,11 +59,11 @@ pub mod session_manager; // Native-first session state projection
 pub mod b0x_sdk;
 pub mod chain_tip_store;
 pub mod inbox_poller;
-pub mod nfc_transport_sdk;
 pub mod policy_cache;
 pub mod tls_transport_sdk;
 pub mod token_mpc_sdk;
 pub mod token_sdk;
+pub mod token_state;
 pub mod unilateral_ops_sdk;
 // Storage-node client wrapper and discovery (dev-only)
 #[cfg(feature = "dev-discovery")]

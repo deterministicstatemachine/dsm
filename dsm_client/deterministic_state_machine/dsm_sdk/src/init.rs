@@ -501,18 +501,24 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
         // within a runtime" when init_dsm_sdk is called from an async context (e.g.
         // createGenesis's block_on future).
         let coordinator = manager_arc.frame_coordinator().clone();
+        let transport_adapter = manager_arc.transport_adapter().clone();
         let ble_inject_result = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .map_err(|e| format!("ble coordinator runtime: {e}"))?;
-            rt.block_on(crate::bridge::inject_ble_coordinator(coordinator))
+            rt.block_on(async move {
+                crate::bridge::inject_ble_coordinator(coordinator).await?;
+                crate::bridge::inject_ble_transport_adapter(transport_adapter).await
+            })
         })
         .join();
         match ble_inject_result {
-            Ok(Ok(_)) => log::info!("[SDK Init] BLE coordinator injected into bilateral handler"),
-            Ok(Err(e)) => log::warn!("[SDK Init] BLE coordinator injection failed: {e}"),
-            Err(_) => log::warn!("[SDK Init] BLE coordinator injection thread panicked"),
+            Ok(Ok(_)) => log::info!(
+                "[SDK Init] BLE coordinator and transport adapter injected into bilateral handler"
+            ),
+            Ok(Err(e)) => log::warn!("[SDK Init] BLE injection failed: {e}"),
+            Err(_) => log::warn!("[SDK Init] BLE injection thread panicked"),
         }
 
         // Load existing contacts from SQLite and sync to BluetoothManager SYNCHRONOUSLY

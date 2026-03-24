@@ -4,7 +4,7 @@ use dsm_sdk::storage::client_db;
 use dsm_sdk::storage::client_db::GenesisRecord;
 
 #[test]
-fn genesis_persists_and_initializes_wallet() {
+fn genesis_persists_and_initializes_wallet_metadata() {
     // Enable test mode to avoid writing AppState files
     std::env::set_var("DSM_SDK_TEST_MODE", "1");
 
@@ -41,9 +41,7 @@ fn genesis_persists_and_initializes_wallet() {
     client_db::store_genesis_record_with_verification(&gen).expect("store genesis");
     client_db::ensure_wallet_state_for_device(&gen.device_id).expect("ensure wallet");
 
-    // Verify wallet exists and has zero balance
+    // Verify wallet metadata exists; balances now live in projections/canonical state.
     let ws = client_db::get_wallet_state(&gen.device_id).expect("get_wallet_state");
     assert!(ws.is_some(), "wallet state should be present");
-    let ws = ws.unwrap();
-    assert_eq!(ws.balance, 0, "balance should be initialized to 0");
 }

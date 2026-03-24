@@ -6,7 +6,7 @@ This directory contains the ONLY permitted Bluetooth Low Energy (BLE) integratio
 
 ## Scope
 
-Minimal responsibility: move serialized Envelope v3 byte frames between two Android devices so the bilateral transaction state machine can progress offline. No discovery logic, no generalized messaging layer, no background maintenance loops, no multi-hop routing, no JSON framing.
+Minimal responsibility: move serialized Envelope v3 byte frames between two Android devices so the bilateral transaction state machine can progress offline. No JSON framing, no generalized message bus, no multi-hop routing, and no wall-clock influence on protocol semantics. Operational BLE timers are allowed only for transport behavior such as retries, ACK timeouts, reconnect backoff, pacing, and idle expiry.
 
 ## Components
 
@@ -30,7 +30,8 @@ core bilateral manager       // Forward-only state updates
 
 - Envelope version: v3 only
 - Forward-only chain progression; no rollback / fork semantics
-- No wall‑clock driven maintenance (no `tokio::time::sleep/interval/timeout` in this stack)
+- Protocol semantics are clockless: wall-clock must never affect envelope contents, commitment bytes, chain ordering, or acceptance.
+- BLE transport/runtime may use wall-clock timers for handshake freshness, ACK timeout, reconnect backoff, pacing, reassembly expiry, and idle session cleanup.
 - No JSON / Base64 / hex application framing – raw protobuf bytes only
 - No deprecated modules or symbols (`BluetoothConnectionManager`, `BluetoothMessaging`, `BluetoothDiscovery`, etc.)
 - Commitment hash produced directly at preparation step (BLAKE3 precommitment) – no heuristic session scans
@@ -41,7 +42,7 @@ core bilateral manager       // Forward-only state updates
 
 1. Any deleted deprecated file (`connection.rs`, `messaging.rs`, `bluetooth_impl.rs`, `discovery.rs`) reappears.
 2. Any banned deprecated symbol is referenced anywhere in Rust sources.
-3. Runtime `tokio::time::{sleep,interval,timeout}` is introduced into this directory.
+3. A transport-runtime timer leaks into protocol semantics or acceptance logic.
 
 These gates run early for fail‑fast feedback. To extend enforcement add new patterns to the BLE section at the top of `ci_gates.sh`.
 
@@ -52,7 +53,7 @@ Android (Kotlin) pushes a prepared transaction by invoking JNI → bytes enter `
 ## Non-Goals (Deliberate Exclusions)
 
 - General device discovery / scanning orchestration
-- Connection retry backoff schedulers
+- Protocol-semantic schedulers or background loops that advance DSM state by elapsed time
 - Multi-hop / mesh routing
 - Arbitrary message bus or chat semantics
 - Cross-platform desktop BLE (Android only for now)
@@ -72,4 +73,4 @@ If this path changes, update: `ci_gates.sh`, this README, and any frontend bridg
 
 ## Summary
 
-This is a lean, deterministic transport conduit. Its correctness is enforced by design and by CI. Any expansion must retain determinism and avoid resurrecting deprecated abstractions.
+This is a lean, deterministic transport conduit. Its correctness is enforced by design and by CI. BLE runtime timers are allowed for transport control only; any expansion must keep protocol semantics clockless and avoid resurrecting deprecated abstractions.

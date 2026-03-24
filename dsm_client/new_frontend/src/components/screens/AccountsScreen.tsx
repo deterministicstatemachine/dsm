@@ -6,7 +6,7 @@ import React, { useEffect, useMemo, useState, useCallback } from 'react';
 import LoadingSpinner from '../common/LoadingSpinner';
 import { dsmClient } from '../../services/dsmClient';
 import { useWallet } from '../../contexts/WalletContext';
-import { formatBtc, getDbtcBalance } from '../../services/bitcoinTap';
+import { formatBtc } from '../../services/bitcoinTap';
 import { useDpadNav } from '../../hooks/useDpadNav';
 
 type TokenSymbol = 'ERA' | string;
@@ -94,10 +94,7 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
     setError(null);
     setSuccessMsg(null);
     try {
-      const [data, dbtcBal] = await Promise.all([
-        dsmClient.getAllBalances(),
-        getDbtcBalance(),
-      ]);
+      const data = await dsmClient.getAllBalances();
       const raw = Array.isArray(data) ? data : Array.isArray((data as any)?.balances) ? (data as any).balances : [];
       const list: TokenBalance[] = (raw as any[]).map((b: any) => ({
         tokenId: String(b.tokenId || ''),
@@ -106,15 +103,6 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
           ? formatCompactDbtc(typeof b.balance === 'bigint' ? b.balance : BigInt(b.balance || 0))
           : String(b.balance ?? '0'),
       }));
-      // Merge authoritative dBTC balance from the bitcoin.balance endpoint.
-      const available = typeof dbtcBal.available === 'bigint' ? dbtcBal.available : BigInt(0);
-      const dbtcIdx = list.findIndex((b) => b.tokenId.toUpperCase() === 'DBTC');
-      const dbtcEntry: TokenBalance = { tokenId: 'dBTC', symbol: 'dBTC', balance: formatCompactDbtc(available) };
-      if (dbtcIdx >= 0) {
-        list[dbtcIdx] = dbtcEntry;
-      } else {
-        list.unshift(dbtcEntry);
-      }
       setBalances(list);
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Failed to load balances';
@@ -209,11 +197,13 @@ const AccountsScreen: React.FC<{ eraTokenSrc?: string; btcLogoSrc?: string }> = 
   return (
     <div className="dsm-content" style={{
       alignSelf: 'stretch',
-      width: '100%',
-      minHeight: '100%',
+      width: 'calc(100% + 40px)',
+      minHeight: 'calc(100% + 20px)',
+      height: 'calc(100% + 20px)',
       boxSizing: 'border-box',
-      padding: '0 6px',
-      margin: 0,
+      padding: '0 8px',
+      margin: '-20px -20px 0',
+      overflow: 'hidden',
       background: 'linear-gradient(0deg, rgba(var(--text-rgb),0.08), rgba(var(--text-rgb),0.02)), repeating-linear-gradient(45deg, rgba(var(--text-rgb),0.1) 0px, rgba(var(--text-rgb),0.1) 2px, transparent 2px, transparent 4px)',
     }}>
       {/* Header */}

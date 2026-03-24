@@ -461,12 +461,11 @@ fn try_handle_vector_envelope(envelope: &gp::Envelope) -> Option<Vec<u8>> {
         }
     }
 
-    let relationship_key =
-        crate::verification::smt_replace_witness::compute_relationship_key(&devid_a, &devid_b);
+    let smt_key = crate::core::bilateral_transaction_manager::compute_smt_key(&devid_a, &devid_b);
 
     let parent_ok = match crate::verification::proof_primitives::verify_smt_inclusion_proof_bytes(
         &parent_root,
-        &relationship_key,
+        &smt_key,
         &parent_tip,
         &receipt.rel_proof_parent,
     ) {
@@ -487,7 +486,7 @@ fn try_handle_vector_envelope(envelope: &gp::Envelope) -> Option<Vec<u8>> {
 
     let child_ok = match crate::verification::proof_primitives::verify_smt_inclusion_proof_bytes(
         &child_root,
-        &relationship_key,
+        &smt_key,
         &child_tip,
         &receipt.rel_proof_child,
     ) {

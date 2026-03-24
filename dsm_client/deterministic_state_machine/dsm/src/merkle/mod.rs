@@ -1,69 +1,41 @@
-//! # DSM Merkle Module: Protocol Math, Security, and Usage
+//! # DSM Merkle Module
 //!
-//! ## Protocol Math & Security (DSM v2.1)
-//! - **Forward-Only Hash Chain:**
-//!   - State evolution: `S_n = H(S_{n-1} || R_n)` (irreversible, quantum-resistant, BLAKE3)
-//!   - Bilateral isolation: `S_A' = H(S_A || tx)`, `S_B' = H(S_B || tx)` (lockstep, no global consensus)
-//! - **Sparse Merkle Tree (SMT):**
-//!   - Efficient, sub-linear inclusion proofs for state/token updates
-//!   - Root: `SMT_root = H({ H(S_0), H(S_1), ..., H(S_n) })`
-//!   - Proof: `VerifyInclusion(SMT_root, H(S_i), π)`
-//! - **Security Guarantees:**
-//!   - Tamper-proof, forward-only, no rollbacks/forks
-//!   - Double-spend impossible (one valid forward path)
-//!   - All validation is local, cryptographic, and post-quantum
-//!   - No miners, no gas, no global consensus
-//! - **Offline Capability:**
-//!   - All state transitions and proofs can be performed offline; sync is optional
-//!
-//! ## DSM Merkle API Overview
+//! ## Trees in This Module
 //!
 //! ### Classic Merkle Tree (device/master/bilateral)
 //! - Use `tree::{MerkleTree, MerkleProof}` for per-device, master, and bilateral relationship trees.
-//! - API: `MerkleTree::new`, `MerkleTree::add_leaf`, `MerkleTree::root_hash`, `MerkleTree::generate_proof`, `MerkleTree::verify_proof`.
-//! - Use for local state, recovery, and bilateral sync (see DSM protocol).
+//! - API: `MerkleTree::new`, `MerkleTree::add_leaf`, `MerkleTree::root_hash`,
+//!   `MerkleTree::generate_proof`, `MerkleTree::verify_proof`.
 //!
-//! ### Sparse Merkle Tree (SMT)
-//! - Use `sparse_merkle_tree::{SparseMerkleTreeImpl, ...}` for efficient state/token proofs.
-//! - API: `SparseMerkleTreeImpl::new`, `insert`, `get_proof`, `verify_proof`, `root`.
-//! - Use for scalable, sub-linear proofs of state or token balances.
+//! ### Per-Device Sparse Merkle Tree (§2.2)
+//! - Use `sparse_merkle_tree::{SparseMerkleTree, SmtInclusionProof}` for 256-bit key SMT.
+//! - Each leaf represents one bilateral relationship's chain tip `h_n^{A↔B}`.
+//! - Domain separation (normative):
+//!   - Leaf: `BLAKE3("DSM/smt-leaf\0" || value)`
+//!   - Internal: `BLAKE3("DSM/smt-node\0" || left || right)`
+//!   - Zero leaf: `[0u8; 32]` (32 zero bytes)
+//! - API: `SparseMerkleTree::new`, `update_leaf`, `get_inclusion_proof`,
+//!   `verify_inclusion_proof`, `verify_proof_against_root`.
 //!
-//! ### API Separation
-//! - Each tree type has its own API and logic. Do not mix types between classic and sparse trees.
-//! - See DSM Protocol Implementation Guide for full details and usage patterns.
+//! ### Emissions Trees
+//! - Emission-specific trees (ShardCountSMT, SpentProofSMT, SAA) live in the
+//!   `emissions` module, not here. See `crate::emissions` for details.
 //!
-//! ## Example: Forward-Only State Transition (Pseudocode)
-//! ```text
-//! S_{n+1} = H(S_n || tx || randomness)
-//! SMT_{root} = updateSMT(SMT_{root}, tx)
-//! ```
-//!
-//! ## Example: Merkle Proof Verification (Pseudocode)
-//! ```text
-//! is_valid = MerkleTree::verify_proof(root, leaf, proof.path, proof.leaf_index)
-//! ```
-//!
-//! ## See Also
-//! - DSM Protocol Implementation Guide (DSM-SHORT-paper-math.txt)
-//! - dsm_contacts.rs, dsm_storage.rs for contact and state management flows
-//!
-//! ---
+//! ## API Separation
+//! - Each tree type has its own API. Do not mix classic and sparse tree types.
 
 // --- Classic Merkle Tree API (device/master/bilateral) ---
 pub mod tree;
 pub use tree::{MerkleTree, MerkleProof};
 
-// --- Sparse Merkle Tree API (state/token proofs) ---
+// --- Per-Device Sparse Merkle Tree (§2.2) ---
 pub mod sparse_merkle_tree;
-pub use sparse_merkle_tree::SparseMerkleTreeImpl;
+
+// --- Tests ---
+#[cfg(test)]
+mod empty_leaf_tests;
 
 // --- Classic Merkle Tree API helpers (optional, for convenience) ---
-/// Initialize Merkle tree subsystem (DSM context).
-/// Call once per device or test harness.
-pub fn init_merkle_trees() {
-    println!("DSM Merkle tree module initialized");
-}
-
 /// Create a new Merkle tree for a device or relationship.
 /// Returns the 32-byte root hash. All leaves must be 32 bytes (BLAKE3 output).
 pub fn create_merkle_tree(leaves: &[Vec<u8>]) -> [u8; 32] {

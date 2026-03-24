@@ -28,99 +28,10 @@ use crate::generated as pb;
 use dsm::types::error::DsmError;
 
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
+use crate::bluetooth::bilateral_transport_adapter::BilateralTransportAdapter;
+
+#[cfg(all(target_os = "android", feature = "bluetooth"))]
 use crate::bluetooth::ble_frame_coordinator::BleFrameCoordinator;
-
-/// Helper to send BLE chunks via Android BLE service through JNI
-#[cfg(all(target_os = "android", feature = "jni"))]
-fn send_ble_chunks_jni(device_address: &str, chunks: &[Vec<u8>]) -> Result<(), DsmError> {
-    use jni::objects::{JString, JValue, JObject};
-
-    // Get JavaVM
-    let jvm = crate::jni::jni_common::get_java_vm()
-        .ok_or_else(|| DsmError::internal("JavaVM not initialized", None::<std::io::Error>))?;
-
-    let mut env = jvm.attach_current_thread().map_err(|e| {
-        DsmError::internal(format!("JNI attach failed: {e}"), None::<std::io::Error>)
-    })?;
-
-    // Convert device address to JString
-    let device_addr_j = env.new_string(device_address).map_err(|e| {
-        DsmError::internal(
-            format!("JNI new_string failed: {e}"),
-            None::<std::io::Error>,
-        )
-    })?;
-
-    // Create Java byte[][] array for chunks
-    let byte_array_class = env.find_class("[B").map_err(|e| {
-        DsmError::internal(
-            format!("Failed to find byte array class: {e}"),
-            None::<std::io::Error>,
-        )
-    })?;
-
-    let chunks_array = env
-        .new_object_array(chunks.len() as i32, &byte_array_class, JObject::null())
-        .map_err(|e| {
-            DsmError::internal(
-                format!("Failed to create chunks array: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
-
-    // Populate chunks array
-    for (i, chunk) in chunks.iter().enumerate() {
-        let chunk_bytes = env.byte_array_from_slice(chunk).map_err(|e| {
-            DsmError::internal(
-                format!("Failed to create byte array for chunk {}: {}", i, e),
-                None::<std::io::Error>,
-            )
-        })?;
-        env.set_object_array_element(&chunks_array, i as i32, chunk_bytes)
-            .map_err(|e| {
-                DsmError::internal(
-                    format!("Failed to set chunk {} in array: {}", i, e),
-                    None::<std::io::Error>,
-                )
-            })?;
-    }
-
-    // Call Unified.requestGattWriteChunks(String, byte[][]) - the actual Kotlin method
-    let class_name = "com/dsm/wallet/bridge/Unified";
-    let jstr_addr = JString::from(device_addr_j);
-    let jobj_addr = JObject::from(jstr_addr);
-    let jobj_chunks = JObject::from(chunks_array);
-
-    let args = [JValue::Object(&jobj_addr), JValue::Object(&jobj_chunks)];
-    let result = env
-        .call_static_method(
-            class_name,
-            "requestGattWriteChunks",
-            "(Ljava/lang/String;[[B)Z",
-            &args,
-        )
-        .map_err(|e| {
-            DsmError::internal(
-                format!("JNI call requestGattWriteChunks failed: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
-
-    let ok = result.z().unwrap_or(false);
-    if ok {
-        log::info!(
-            "[BiImpl] Successfully sent {} BLE chunks to {}",
-            chunks.len(),
-            device_address
-        );
-        Ok(())
-    } else {
-        Err(DsmError::network(
-            "requestGattWriteChunks returned false",
-            None::<std::io::Error>,
-        ))
-    }
-}
 
 /// Bilateral (offline) protocol handler.
 ///
@@ -130,6 +41,8 @@ pub struct BiImpl {
     _config: SdkConfig,
     #[cfg(all(target_os = "android", feature = "bluetooth"))]
     ble_coordinator: Arc<tokio::sync::RwLock<Option<Arc<BleFrameCoordinator>>>>,
+    #[cfg(all(target_os = "android", feature = "bluetooth"))]
+    ble_transport_adapter: Arc<tokio::sync::RwLock<Option<Arc<BilateralTransportAdapter>>>>,
     storage: Option<Arc<BilateralStorageSDK>>,
 }
 
@@ -151,6 +64,8 @@ impl BiImpl {
             _config: config,
             #[cfg(all(target_os = "android", feature = "bluetooth"))]
             ble_coordinator: Arc::new(tokio::sync::RwLock::new(None)),
+            #[cfg(all(target_os = "android", feature = "bluetooth"))]
+            ble_transport_adapter: Arc::new(tokio::sync::RwLock::new(None)),
             storage,
         }
     }
@@ -167,6 +82,19 @@ impl BiImpl {
     #[cfg(all(target_os = "android", feature = "bluetooth"))]
     pub async fn get_ble_coordinator(&self) -> Option<Arc<BleFrameCoordinator>> {
         let guard = self.ble_coordinator.read().await;
+        guard.clone()
+    }
+
+    #[cfg(all(target_os = "android", feature = "bluetooth"))]
+    pub async fn set_ble_transport_adapter(&self, adapter: Arc<BilateralTransportAdapter>) {
+        let mut guard = self.ble_transport_adapter.write().await;
+        *guard = Some(adapter);
+        log::info!("[BiImpl] BLE transport adapter injected successfully");
+    }
+
+    #[cfg(all(target_os = "android", feature = "bluetooth"))]
+    pub async fn get_ble_transport_adapter(&self) -> Option<Arc<BilateralTransportAdapter>> {
+        let guard = self.ble_transport_adapter.read().await;
         guard.clone()
     }
 }
@@ -244,6 +172,18 @@ impl BilateralHandler for BiImpl {
                         };
                     }
 
+                    let adapter_guard = self.ble_transport_adapter.read().await;
+                    let transport_adapter = match adapter_guard.as_ref() {
+                        Some(adapter) => adapter,
+                        None => {
+                            return BiResult {
+                                success: false,
+                                result_data: vec![],
+                                error_message: Some("BLE transport adapter not initialized".into()),
+                            };
+                        }
+                    };
+
                     let coord_guard = self.ble_coordinator.read().await;
                     let coordinator = match coord_guard.as_ref() {
                         Some(c) => c,
@@ -256,8 +196,7 @@ impl BilateralHandler for BiImpl {
                         }
                     };
 
-                    // Create prepare message via BilateralBleHandler
-                    match coordinator
+                    match transport_adapter
                         .create_prepare_message_with_commitment(
                             counterparty_id,
                             operation,
@@ -265,16 +204,65 @@ impl BilateralHandler for BiImpl {
                         )
                         .await
                     {
-                        Ok((chunks, commitment_hash_bytes)) => {
+                        Ok((prepare_envelope, commitment_hash_bytes)) => {
+                            let chunks = match coordinator.encode_message(
+                                pb::BleFrameType::BilateralPrepare,
+                                &prepare_envelope,
+                            ) {
+                                Ok(chunks) => chunks,
+                                Err(e) => {
+                                    return BiResult {
+                                        success: false,
+                                        result_data: vec![],
+                                        error_message: Some(format!(
+                                            "Failed to frame BLE prepare payload: {}",
+                                            e
+                                        )),
+                                    };
+                                }
+                            };
                             let commitment_txt = crate::util::text_id::encode_base32_crockford(
                                 &commitment_hash_bytes,
                             );
                             log::info!("[BiImpl] Bilateral prepare created {} BLE chunks for device {} (commitment={})", chunks.len(), ble_address, commitment_txt);
 
-                            // Send chunks via Android BLE service
+                            // Send chunks via the shared JNI BLE dispatch helper.
                             #[cfg(all(target_os = "android", feature = "jni"))]
                             {
-                                if let Err(e) = send_ble_chunks_jni(&ble_address, &chunks) {
+                                let jvm = crate::jni::jni_common::get_java_vm().ok_or_else(|| {
+                                    DsmError::internal(
+                                        "JavaVM not initialized",
+                                        None::<std::io::Error>,
+                                    )
+                                });
+                                let send_result = jvm.and_then(|jvm| {
+                                    let mut env = jvm.attach_current_thread().map_err(|e| {
+                                        DsmError::internal(
+                                            format!("JNI attach failed: {e}"),
+                                            None::<std::io::Error>,
+                                        )
+                                    })?;
+                                    crate::jni::unified_protobuf_bridge::send_ble_chunks_via_unified(
+                                        &mut env,
+                                        &ble_address,
+                                        &chunks,
+                                    )
+                                    .map_err(|e| {
+                                        DsmError::internal(e, None::<std::io::Error>)
+                                    })
+                                    .and_then(|sent| {
+                                        if sent {
+                                            Ok(())
+                                        } else {
+                                            Err(DsmError::network(
+                                                "requestGattWriteChunks returned false",
+                                                None::<std::io::Error>,
+                                            ))
+                                        }
+                                    })
+                                });
+
+                                if let Err(e) = send_result {
                                     return BiResult {
                                         success: false,
                                         result_data: vec![],
@@ -591,8 +579,8 @@ impl BilateralHandler for BiImpl {
 
     async fn reconcile_before_send(&self, counterparty_device_id: &[u8]) -> Result<(), String> {
         // Clear the `needs_online_reconcile` flag before each send.
-        // IMPORTANT: Only clear the flag — do NOT pass a zero tip to
-        // update_contact_chain_tip_after_bilateral here. Doing so would destroy
+        // IMPORTANT: Only clear the flag — do NOT write any observed/placeholder
+        // tip into the canonical chain-tip columns here. Doing so would destroy
         // the real SQLite chain tip, causing the Prepare to go out with
         // sender_chain_tip=0000… and be rejected by the receiver every time.
         if let Err(e) =

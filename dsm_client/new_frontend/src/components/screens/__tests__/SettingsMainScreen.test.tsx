@@ -4,6 +4,7 @@ import SettingsMainScreen from '../SettingsMainScreen';
 
 const mockGetPreference = jest.fn();
 const mockSetPreference = jest.fn();
+const mockGetNfcBackupStatus = jest.fn();
 
 jest.mock('../../../services/dsmClient', () => ({
   dsmClient: {
@@ -23,18 +24,21 @@ jest.mock('../../../services/settings/backupService', () => ({
 }));
 
 jest.mock('../../../services/recovery/nfcRecoveryService', () => ({
-  getNfcBackupStatus: jest.fn(async () => ({
-    enabled: false,
-    configured: false,
-    capsuleCount: 0,
-    lastCapsuleIndex: 0,
-  })),
+  getNfcBackupStatus: (...args: unknown[]) => mockGetNfcBackupStatus(...args),
 }));
 
 describe('SettingsMainScreen developer unlock', () => {
   beforeEach(() => {
     mockGetPreference.mockReset();
     mockSetPreference.mockReset();
+    mockGetNfcBackupStatus.mockReset();
+    mockGetNfcBackupStatus.mockResolvedValue({
+      enabled: false,
+      configured: false,
+      pendingCapsule: false,
+      capsuleCount: 0,
+      lastCapsuleIndex: 0,
+    });
   });
 
   it('keeps developer options unlocked across remounts while prefs reload', async () => {
@@ -77,5 +81,28 @@ describe('SettingsMainScreen developer unlock', () => {
 
     resolveDevPref?.('true');
     await waitFor(() => expect(mockGetPreference).toHaveBeenCalled());
+  });
+
+  it('shows the compact NFC summary with pending-aware state', async () => {
+    mockGetPreference.mockResolvedValueOnce('false');
+    mockGetNfcBackupStatus.mockResolvedValueOnce({
+      enabled: true,
+      configured: true,
+      pendingCapsule: false,
+      capsuleCount: 4,
+      lastCapsuleIndex: 9,
+    });
+
+    render(<SettingsMainScreen />);
+
+    await waitFor(() =>
+      expect(screen.getByText('ON / WAITING')).toBeInTheDocument(),
+    );
+    expect(
+      screen.getByText(/Enabled, but nothing is armed right now\./i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: /INSPECT OR RECOVER/i }),
+    ).toBeInTheDocument();
   });
 });

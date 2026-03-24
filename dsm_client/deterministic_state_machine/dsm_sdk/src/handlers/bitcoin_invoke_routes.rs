@@ -20,7 +20,7 @@ use std::sync::Arc;
 use crate::bridge::{AppInvoke, AppResult};
 use super::app_router_impl::AppRouterImpl;
 use super::response_helpers::{pack_envelope_ok, err};
-use super::transfer_helpers::{build_online_receipt, build_online_receipt_and_sigma};
+use super::transfer_helpers::build_protocol_transition_commitment;
 
 #[derive(Clone)]
 struct DepositCompletionPrep {
@@ -28,8 +28,8 @@ struct DepositCompletionPrep {
     requester_key: Vec<u8>,
     signing_public_key: Vec<u8>,
     recipient: [u8; 32],
-    receipt_bytes: Vec<u8>,
-    stitched_receipt_sigma: [u8; 32],
+    protocol_transition_bytes: Vec<u8>,
+    protocol_transition_commitment: [u8; 32],
     pre_applied_token_op: Option<dsm::types::token_types::TokenOperation>,
     pre_applied_token_state: Option<dsm::types::state_types::State>,
 }
@@ -73,6 +73,86 @@ fn decode_internal_envelope(result: AppResult, route: &str) -> Result<generated:
         .ok_or_else(|| format!("{route}: missing envelope v3 framing"))?;
     generated::Envelope::decode(payload)
         .map_err(|e| format!("{route}: failed to decode envelope: {e}"))
+}
+
+fn state_balance_for_token(
+    state: &dsm::types::state_types::State,
+    token_id: &str,
+) -> dsm::types::token_types::Balance {
+    state
+        .token_balances
+        .iter()
+        .find_map(|(key, balance)| {
+            if key == token_id
+                || key
+                    .split_once('|')
+                    .map(|(_, canonical_token_id)| canonical_token_id == token_id)
+                    .unwrap_or(false)
+            {
+                Some(balance.clone())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(dsm::types::token_types::Balance::zero)
+}
+
+fn canonical_balance_key_for_token(
+    state: &dsm::types::state_types::State,
+    token_id: &str,
+    policy_commit: &[u8; 32],
+) -> String {
+    dsm::core::token::derive_canonical_balance_key(
+        policy_commit,
+        &state.device_info.public_key,
+        token_id,
+    )
+}
+
+fn sync_dbtc_projection_from_state(
+    route: &str,
+    device_id_bytes: &[u8; 32],
+    state: &dsm::types::state_types::State,
+    locked_sats: u64,
+) -> Result<(), String> {
+    let device_id = crate::util::text_id::encode_base32_crockford(device_id_bytes);
+    let dbtc_id = crate::sdk::bitcoin_tap_sdk::DBTC_TOKEN_ID;
+    let projected = state_balance_for_token(state, dbtc_id);
+    let spendable = projected.available().saturating_sub(locked_sats);
+    let canonical_balance_key = canonical_balance_key_for_token(
+        state,
+        dbtc_id,
+        crate::policy::builtins::DBTC_POLICY_COMMIT,
+    );
+    let state_hash = state
+        .hash()
+        .map_err(|e| format!("{route}: failed to derive state hash: {e}"))?;
+
+    crate::storage::client_db::upsert_balance_projection(
+        &crate::storage::client_db::BalanceProjectionRecord {
+            balance_key: canonical_balance_key,
+            device_id: device_id.clone(),
+            token_id: dbtc_id.to_string(),
+            policy_commit: crate::util::text_id::encode_base32_crockford(
+                crate::policy::builtins::DBTC_POLICY_COMMIT,
+            ),
+            available: spendable,
+            locked: locked_sats,
+            source_state_hash: crate::util::text_id::encode_base32_crockford(&state_hash),
+            source_state_number: state.state_number,
+            updated_at: crate::util::deterministic_time::tick(),
+        },
+    )
+    .map_err(|e| format!("{route}: failed to persist dBTC canonical projection row: {e}"))?;
+
+    log::info!(
+        "[{route}] dBTC projection synced from state: spendable={} locked={} total={} state_number={}",
+        spendable,
+        locked_sats,
+        projected.available(),
+        state.state_number,
+    );
+    Ok(())
 }
 
 fn ensure_dbtc_exit_balance(
@@ -153,33 +233,36 @@ fn ensure_exec_data_matches_withdrawal_policy(
     )
 }
 
-fn persist_withdrawal_leg(
-    withdrawal_id: &str,
+struct WithdrawalLegParams<'a> {
+    withdrawal_id: &'a str,
     leg_index: u32,
-    vault_id: &str,
-    leg_kind: &str,
+    vault_id: &'a str,
+    leg_kind: &'a str,
     amount_sats: u64,
     estimated_fee_sats: u64,
     estimated_net_sats: u64,
-    sweep_txid: Option<&str>,
-    successor_vault_id: Option<&str>,
-    successor_vault_op_id: Option<&str>,
-    exit_vault_op_id: Option<&str>,
-) -> Result<(), String> {
+    sweep_txid: Option<&'a str>,
+    successor_vault_id: Option<&'a str>,
+    successor_vault_op_id: Option<&'a str>,
+    exit_vault_op_id: Option<&'a str>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn persist_withdrawal_leg(params: &WithdrawalLegParams<'_>) -> Result<(), String> {
     let now = crate::util::deterministic_time::tick();
     crate::storage::client_db::upsert_withdrawal_leg(
         &crate::storage::client_db::InFlightWithdrawalLeg {
-            withdrawal_id: withdrawal_id.to_string(),
-            leg_index,
-            vault_id: vault_id.to_string(),
-            leg_kind: leg_kind.to_string(),
-            amount_sats,
-            estimated_fee_sats,
-            estimated_net_sats,
-            sweep_txid: sweep_txid.map(str::to_string),
-            successor_vault_id: successor_vault_id.map(str::to_string),
-            successor_vault_op_id: successor_vault_op_id.map(str::to_string),
-            exit_vault_op_id: exit_vault_op_id.map(str::to_string),
+            withdrawal_id: params.withdrawal_id.to_string(),
+            leg_index: params.leg_index,
+            vault_id: params.vault_id.to_string(),
+            leg_kind: params.leg_kind.to_string(),
+            amount_sats: params.amount_sats,
+            estimated_fee_sats: params.estimated_fee_sats,
+            estimated_net_sats: params.estimated_net_sats,
+            sweep_txid: params.sweep_txid.map(str::to_string),
+            successor_vault_id: params.successor_vault_id.map(str::to_string),
+            successor_vault_op_id: params.successor_vault_op_id.map(str::to_string),
+            exit_vault_op_id: params.exit_vault_op_id.map(str::to_string),
             state: "broadcast".to_string(),
             proof_digest: None,
             created_at: now,
@@ -198,27 +281,34 @@ fn persist_committed_withdrawal_metadata(
     burn_token_id: &str,
     burn_amount_sats: u64,
 ) -> Result<(), String> {
-    if withdrawal_id.is_empty() {
-        return crate::storage::client_db::create_withdrawal(
-            crate::storage::client_db::CreateWithdrawalParams {
-                withdrawal_id,
-                device_id,
-                amount_sats,
-                dest_address,
-                policy_commit,
-                state: "committed",
-                burn_token_id: Some(burn_token_id),
-                burn_amount_sats,
-            },
-        )
-        .map_err(|e| format!("withdrawal metadata creation failed: {e}"));
-    }
+    persist_withdrawal_metadata_state(
+        withdrawal_id,
+        device_id,
+        amount_sats,
+        dest_address,
+        policy_commit,
+        burn_token_id,
+        burn_amount_sats,
+        "committed",
+    )
+}
 
+#[allow(clippy::too_many_arguments)]
+fn persist_withdrawal_metadata_state(
+    withdrawal_id: &str,
+    device_id: &str,
+    amount_sats: u64,
+    dest_address: &str,
+    policy_commit: &[u8],
+    burn_token_id: &str,
+    burn_amount_sats: u64,
+    state: &str,
+) -> Result<(), String> {
     match crate::storage::client_db::get_withdrawal(withdrawal_id)
         .map_err(|e| format!("withdrawal metadata lookup failed: {e}"))?
     {
-        Some(_) => crate::storage::client_db::set_withdrawal_state(withdrawal_id, "committed")
-            .map_err(|e| format!("withdrawal metadata commit transition failed: {e}")),
+        Some(_) => crate::storage::client_db::set_withdrawal_state(withdrawal_id, state)
+            .map_err(|e| format!("withdrawal metadata {state} transition failed: {e}")),
         None => crate::storage::client_db::create_withdrawal(
             crate::storage::client_db::CreateWithdrawalParams {
                 withdrawal_id,
@@ -226,12 +316,67 @@ fn persist_committed_withdrawal_metadata(
                 amount_sats,
                 dest_address,
                 policy_commit,
-                state: "committed",
+                state,
                 burn_token_id: Some(burn_token_id),
                 burn_amount_sats,
             },
         )
         .map_err(|e| format!("withdrawal metadata creation failed: {e}")),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reserve_withdrawal_and_sync_projection(
+    route: &str,
+    withdrawal_id: &str,
+    device_id_bytes: &[u8; 32],
+    state: &dsm::types::state_types::State,
+    amount_sats: u64,
+    dest_address: &str,
+    policy_commit: &[u8],
+    burn_token_id: &str,
+    burn_amount_sats: u64,
+) -> Result<(), String> {
+    let device_id = crate::util::text_id::encode_base32_crockford(device_id_bytes);
+    persist_withdrawal_metadata_state(
+        withdrawal_id,
+        &device_id,
+        amount_sats,
+        dest_address,
+        policy_commit,
+        burn_token_id,
+        burn_amount_sats,
+        "executing",
+    )?;
+    let locked = crate::storage::client_db::get_locked_balance(&device_id, burn_token_id)
+        .map_err(|e| format!("{route}: failed to compute dBTC in-flight amount: {e}"))?;
+    sync_dbtc_projection_from_state(route, device_id_bytes, state, locked)
+}
+
+fn fail_withdrawal_and_sync_projection(
+    route: &str,
+    withdrawal_id: &str,
+    device_id_bytes: &[u8; 32],
+    state: &dsm::types::state_types::State,
+) {
+    if let Err(e) = crate::storage::client_db::set_withdrawal_state(withdrawal_id, "failed") {
+        log::error!("[{route}] failed to mark withdrawal {withdrawal_id} failed: {e}");
+    }
+    let device_id = crate::util::text_id::encode_base32_crockford(device_id_bytes);
+    match crate::storage::client_db::get_locked_balance(
+        &device_id,
+        crate::sdk::bitcoin_tap_sdk::DBTC_TOKEN_ID,
+    ) {
+        Ok(locked) => {
+            if let Err(e) = sync_dbtc_projection_from_state(route, device_id_bytes, state, locked) {
+                log::error!(
+                    "[{route}] failed to resync dBTC projection after withdrawal failure: {e}"
+                );
+            }
+        }
+        Err(e) => {
+            log::error!("[{route}] failed to recompute dBTC lock after withdrawal failure: {e}");
+        }
     }
 }
 
@@ -401,27 +546,20 @@ impl AppRouterImpl {
 
         let sigma_state: dsm::types::state_types::State = if is_dbtc_exit {
             let dbtc_id = crate::sdk::bitcoin_tap_sdk::DBTC_TOKEN_ID;
-            let device_id_b32 =
-                crate::util::text_id::encode_base32_crockford(&self.device_id_bytes);
-            let current_sqlite =
-                match crate::storage::client_db::get_token_balance(&device_id_b32, dbtc_id) {
-                    Ok(Some((a, _))) => a,
-                    Ok(None) => 0,
-                    Err(e) => {
-                        log::error!("[{route}] failed to read dBTC balance: {e}");
-                        0
-                    }
-                };
-            if current_sqlite < deposit_record.btc_amount_sats {
+            let current_dbtc = self
+                .wallet
+                .get_balance(Some(dbtc_id))
+                .map(|bal| bal.available())
+                .unwrap_or_else(|e| {
+                    log::error!("[{route}] failed to read canonical dBTC balance: {e}");
+                    0
+                });
+            if current_dbtc < deposit_record.btc_amount_sats {
                 return Err(format!(
                     "{route}: insufficient dBTC balance for burn: have {} need {}",
-                    current_sqlite, deposit_record.btc_amount_sats
+                    current_dbtc, deposit_record.btc_amount_sats
                 ));
             }
-
-            self.wallet
-                .seed_token_balance_for_self(dbtc_id, current_sqlite)
-                .map_err(|e| format!("{route}: failed to seed dBTC balance before burn: {e}"))?;
 
             let burn_op = dsm::types::token_types::TokenOperation::Burn {
                 token_id: dbtc_id.to_string(),
@@ -451,24 +589,25 @@ impl AppRouterImpl {
             current_state.clone()
         };
 
-        let (receipt_bytes, stitched_receipt_sigma): (Vec<u8>, [u8; 32]) =
-            build_online_receipt_and_sigma(
-                &sigma_state,
-                &self.device_id_bytes,
-                &recipient,
-                crate::sdk::app_state::AppState::get_device_tree_root(),
-            )
-            .ok_or_else(|| {
-                format!("{route}: failed to build canonical stitched receipt commitment")
-            })?;
+        let state_number_bytes = sigma_state.state_number.to_le_bytes();
+        let (protocol_transition_bytes, protocol_transition_commitment) =
+            build_protocol_transition_commitment(
+                route.as_bytes(),
+                &[
+                    vault_op_id.as_bytes(),
+                    &recipient,
+                    &sigma_state.hash,
+                    &state_number_bytes,
+                ],
+            );
 
         Ok(DepositCompletionPrep {
             current_state,
             requester_key,
             signing_public_key,
             recipient,
-            receipt_bytes,
-            stitched_receipt_sigma,
+            protocol_transition_bytes,
+            protocol_transition_commitment,
             pre_applied_token_op,
             pre_applied_token_state,
         })
@@ -672,23 +811,23 @@ impl AppRouterImpl {
                     };
 
                     let leg_index = executed_legs.len() as u32;
-                    persist_withdrawal_leg(
-                        &withdrawal_id,
+                    persist_withdrawal_leg(&WithdrawalLegParams {
+                        withdrawal_id: &withdrawal_id,
                         leg_index,
-                        &execution_leg.vault_id,
-                        &execution_leg.kind,
-                        execution_leg.gross_exit_sats,
-                        execution_leg.estimated_fee_sats,
-                        execution_leg.estimated_net_sats,
-                        (!execution_leg.sweep_txid.is_empty())
+                        vault_id: &execution_leg.vault_id,
+                        leg_kind: &execution_leg.kind,
+                        amount_sats: execution_leg.gross_exit_sats,
+                        estimated_fee_sats: execution_leg.estimated_fee_sats,
+                        estimated_net_sats: execution_leg.estimated_net_sats,
+                        sweep_txid: (!execution_leg.sweep_txid.is_empty())
                             .then_some(execution_leg.sweep_txid.as_str()),
-                        (!execution_leg.successor_vault_id.is_empty())
+                        successor_vault_id: (!execution_leg.successor_vault_id.is_empty())
                             .then_some(execution_leg.successor_vault_id.as_str()),
-                        (!execution_leg.successor_vault_op_id.is_empty())
+                        successor_vault_op_id: (!execution_leg.successor_vault_op_id.is_empty())
                             .then_some(execution_leg.successor_vault_op_id.as_str()),
-                        (!execution_leg.exit_vault_op_id.is_empty())
+                        exit_vault_op_id: (!execution_leg.exit_vault_op_id.is_empty())
                             .then_some(execution_leg.exit_vault_op_id.as_str()),
-                    )?;
+                    })?;
 
                     // Mark vault as AwaitingSettlement to block grid routing
                     if let Err(e) = crate::storage::client_db::update_vault_record_state(
@@ -985,26 +1124,9 @@ impl AppRouterImpl {
 
                 // Deferred burn: execute the token burn now that d_min is reached.
                 // dBTC §13.1 Property 8: finality only at settlement depth.
+                let mut applied_burn_state: Option<dsm::types::state_types::State> = None;
                 if wd.burn_amount_sats > 0 {
                     let dbtc_id = wd.burn_token_id.as_deref().unwrap_or("dBTC");
-                    let dev_str = &wd.device_id;
-
-                    // Seed in-memory balance from SQLite
-                    let current = crate::storage::client_db::get_token_balance(dev_str, dbtc_id)
-                        .ok()
-                        .flatten()
-                        .map(|(a, l)| a + l)
-                        .unwrap_or(0);
-                    if let Err(e) = self.wallet.seed_token_balance_for_self(dbtc_id, current) {
-                        log::error!(
-                            "[{}] deferred burn seed failed for ρ={}: {} — keeping pending",
-                            log_prefix,
-                            wd.withdrawal_id,
-                            e
-                        );
-                        summary.pending += 1;
-                        continue;
-                    }
 
                     let burn_op = dsm::types::token_types::TokenOperation::Burn {
                         token_id: dbtc_id.to_string(),
@@ -1016,11 +1138,7 @@ impl AppRouterImpl {
                                 let _ = crate::get_sdk_context()
                                     .update_chain_tip(applied.hash.to_vec());
                             }
-                            let _ = crate::storage::client_db::finalize_exit_burn(
-                                dev_str,
-                                dbtc_id,
-                                wd.burn_amount_sats,
-                            );
+                            applied_burn_state = Some(applied);
                             log::info!(
                                 "[{}] deferred burn OK for ρ={}: {} sats of {}",
                                 log_prefix,
@@ -1051,6 +1169,39 @@ impl AppRouterImpl {
                     );
                     summary.pending += 1;
                     continue;
+                }
+                if let Some(applied_state) = applied_burn_state.as_ref() {
+                    let dbtc_id = wd.burn_token_id.as_deref().unwrap_or("dBTC");
+                    let remaining_locked =
+                        match crate::storage::client_db::get_locked_balance(&wd.device_id, dbtc_id)
+                        {
+                            Ok(value) => value,
+                            Err(e) => {
+                                log::error!(
+                                    "[{}] failed to recompute dBTC lock for ρ={}: {}",
+                                    log_prefix,
+                                    wd.withdrawal_id,
+                                    e
+                                );
+                                summary.pending += 1;
+                                continue;
+                            }
+                        };
+                    if let Err(e) = sync_dbtc_projection_from_state(
+                        log_prefix,
+                        &self.device_id_bytes,
+                        applied_state,
+                        remaining_locked,
+                    ) {
+                        log::error!(
+                            "[{}] failed to sync dBTC projection after final burn for ρ={}: {}",
+                            log_prefix,
+                            wd.withdrawal_id,
+                            e
+                        );
+                        summary.pending += 1;
+                        continue;
+                    }
                 }
                 log::info!(
                     "[{}] finalized ρ={} (all recorded txids at d_min)",
@@ -1666,8 +1817,8 @@ impl AppRouterImpl {
                         &prep.signing_public_key,
                         prep.recipient,
                         &prep.current_state,
-                        Some(prep.receipt_bytes),
-                        Some(prep.stitched_receipt_sigma),
+                        Some(prep.protocol_transition_bytes.clone()),
+                        Some(prep.protocol_transition_commitment),
                     )
                     .await
                 {
@@ -1739,55 +1890,31 @@ impl AppRouterImpl {
                             (completion_op, applied_state)
                         };
 
-                        // Sync dBTC balance to SQLite using SQLite-authoritative arithmetic.
-                        // The in-memory wallet value is stale when dBTC was received via bilateral
-                        // transfer (bilateral recv updates SQLite only, not the in-memory wallet).
-                        // Reading wallet.get_balance() here would overwrite the correct SQLite
-                        // balance with 0 and zero out a bilaterally-received dBTC balance.
+                        // Materialize the SQLite projection from the applied SMT state.
+                        // Keep the projection's locked column intact; this route only advances
+                        // the spendable dBTC state, not the in-flight exit lock bookkeeping.
                         {
                             let dev = crate::util::text_id::encode_base32_crockford(
                                 &self.device_id_bytes,
                             );
                             let dbtc_id = crate::sdk::bitcoin_tap_sdk::DBTC_TOKEN_ID;
-                            let (current_sqlite, existing_locked) =
-                                match crate::storage::client_db::get_token_balance(&dev, dbtc_id) {
-                                    Ok(Some((a, l))) => (a, l),
-                                    Ok(None) => (0, 0),
+                            let existing_locked =
+                                match crate::storage::client_db::get_locked_balance(&dev, dbtc_id) {
+                                    Ok(locked) => locked,
                                     Err(e) => {
                                         return err(format!(
-                                            "bitcoin.deposit.complete: failed to read dBTC balance: {e}"
-                                        ));
+                                        "bitcoin.deposit.complete: failed to read dBTC locked balance: {e}"
+                                    ));
                                     }
                                 };
-                            let new_sqlite = match &effective_token_op {
-                                dsm::types::token_types::TokenOperation::Burn {
-                                    amount, ..
-                                } => {
-                                    if current_sqlite < *amount {
-                                        return err(format!(
-                                            "bitcoin.deposit.complete: sqlite underflow guard hit: current={} burn={}",
-                                            current_sqlite,
-                                            amount
-                                        ));
-                                    }
-                                    current_sqlite - *amount
-                                }
-                                dsm::types::token_types::TokenOperation::Mint {
-                                    amount, ..
-                                } => current_sqlite.saturating_add(*amount),
-                                _ => current_sqlite,
-                            };
-                            if let Err(e) = crate::storage::client_db::upsert_token_balance(
-                                &dev,
-                                dbtc_id,
-                                new_sqlite,
+                            if let Err(e) = sync_dbtc_projection_from_state(
+                                "bitcoin.deposit.complete",
+                                &self.device_id_bytes,
+                                &applied_state,
                                 existing_locked,
                             ) {
-                                return err(format!(
-                                    "bitcoin.deposit.complete: failed to persist dBTC balance: {e}"
-                                ));
+                                return err(e);
                             }
-                            log::info!("[bitcoin.deposit.complete] dBTC SQLite balance: {current_sqlite} → {new_sqlite}");
                         }
 
                         // Record the dBTC mint/burn in SQLite transaction history
@@ -1828,6 +1955,22 @@ impl AppRouterImpl {
                                 completion.vault_op_id.as_bytes().to_vec(),
                             );
                             metadata.insert("token_id".to_string(), token_id.as_bytes().to_vec());
+                            metadata.insert(
+                                "protocol_transition_payload".to_string(),
+                                prep.protocol_transition_bytes.clone(),
+                            );
+                            metadata.insert(
+                                "protocol_transition_digest".to_string(),
+                                prep.protocol_transition_commitment.to_vec(),
+                            );
+                            metadata.insert(
+                                "source_state_hash".to_string(),
+                                applied_state.hash.to_vec(),
+                            );
+                            metadata.insert(
+                                "source_state_number".to_string(),
+                                applied_state.state_number.to_le_bytes().to_vec(),
+                            );
                             let rec = crate::storage::client_db::TransactionRecord {
                                 tx_id: format!("deposit_{}", completion.vault_op_id),
                                 tx_hash: tx_hash_txt,
@@ -1838,13 +1981,8 @@ impl AppRouterImpl {
                                 status: "completed".to_string(),
                                 chain_height: applied_state.state_number,
                                 step_index: 0,
-                                commitment_hash: Some(applied_state.hash.to_vec()),
-                                proof_data: build_online_receipt(
-                                    &applied_state,
-                                    &self.device_id_bytes,
-                                    &self.device_id_bytes,
-                                    crate::sdk::app_state::AppState::get_device_tree_root(),
-                                ),
+                                commitment_hash: Some(prep.protocol_transition_commitment.to_vec()),
+                                proof_data: None,
                                 metadata,
                                 created_at: crate::util::deterministic_time::tick(),
                             };
@@ -1996,22 +2134,25 @@ impl AppRouterImpl {
                                             log::warn!("[bitcoin.deposit.refund] update_chain_tip failed: {e}");
                                         }
                                     }
-                                    // Sync dBTC balance to SQLite (authoritative for bilateral debit path)
+                                    // Materialize the dBTC projection from the post-unlock cache.
                                     {
                                         let dev = crate::util::text_id::encode_base32_crockford(
                                             &self.device_id_bytes,
                                         );
                                         let dbtc_id = crate::sdk::bitcoin_tap_sdk::DBTC_TOKEN_ID;
-                                        if let Ok(bal) = self.wallet.get_balance(Some(dbtc_id)) {
-                                            if let Err(e) =
-                                                crate::storage::client_db::upsert_token_balance(
-                                                    &dev,
-                                                    dbtc_id,
-                                                    bal.available(),
-                                                    bal.locked(),
+                                        if let Ok(state) = self.core_sdk.get_current_state() {
+                                            let existing_locked =
+                                                crate::storage::client_db::get_locked_balance(
+                                                    &dev, dbtc_id,
                                                 )
-                                            {
-                                                log::error!("[bitcoin.deposit.refund] CRITICAL: failed to persist dBTC balance: {e}");
+                                                .unwrap_or(0);
+                                            if let Err(e) = sync_dbtc_projection_from_state(
+                                                "bitcoin.deposit.refund",
+                                                &self.device_id_bytes,
+                                                &state,
+                                                existing_locked,
+                                            ) {
+                                                log::error!("[bitcoin.deposit.refund] CRITICAL: failed to sync dBTC projection: {e}");
                                             }
                                         }
                                     }
@@ -2429,15 +2570,11 @@ impl AppRouterImpl {
                 let dbtc_id = crate::sdk::bitcoin_tap_sdk::DBTC_TOKEN_ID;
 
                 // Read dBTC balance early — gate check runs after burn_amount is known.
-                let current_dbtc = match crate::storage::client_db::get_token_balance(&dev, dbtc_id)
-                {
-                    Ok(Some((a, _))) => a,
-                    _ => self
-                        .wallet
-                        .get_balance(Some(dbtc_id))
-                        .map(|b| b.available())
-                        .unwrap_or(0),
-                };
+                let current_dbtc = self
+                    .wallet
+                    .get_balance(Some(dbtc_id))
+                    .map(|b| b.available())
+                    .unwrap_or(0);
 
                 // Successor vault creation needs keys + state (this device creates the successor)
                 let state = match self.core_sdk.get_current_state() {
@@ -2505,29 +2642,39 @@ impl AppRouterImpl {
                 let orchestrated = !req.plan_id.is_empty();
 
                 // For standalone invocations, generate a deterministic withdrawal ID.
-                // None when orchestrated (outer executor already created the record).
-                let standalone_wd_id: Option<String> = if orchestrated {
-                    None
+                // Orchestrated legs reuse the pre-created outer withdrawal row.
+                let withdrawal_id = if orchestrated {
+                    req.plan_id.clone()
                 } else {
-                    Some(Self::generate_standalone_withdrawal_id(
+                    Self::generate_standalone_withdrawal_id(
                         &dev,
                         burn_amount,
                         &req.destination_address,
-                    ))
+                    )
                 };
 
                 // ═══════════════════════════════════════════════════════
-                // Phase 2: Pre-commitment (SQLite balance hold)
-                // Lock dBTC so it cannot be double-spent during sweep.
-                // Each handler always owns its own lock lifecycle.
+                // Phase 2: pre-commitment reservation.
+                // Withdrawal metadata owns dBTC in-flight authority; projection rows
+                // are derived from canonical state plus unresolved reservation sum.
                 // ═══════════════════════════════════════════════════════
-                if let Err(e) =
-                    crate::storage::client_db::lock_dbtc_for_exit(&dev, dbtc_id, burn_amount)
-                {
-                    return err(format!("bitcoin.fractional.exit: balance lock failed: {e}"));
+                if let Err(e) = reserve_withdrawal_and_sync_projection(
+                    "bitcoin.fractional.exit",
+                    &withdrawal_id,
+                    &self.device_id_bytes,
+                    &state,
+                    burn_amount,
+                    &req.destination_address,
+                    &exec_data.policy_commit,
+                    dbtc_id,
+                    burn_amount,
+                ) {
+                    return err(format!(
+                        "bitcoin.fractional.exit: withdrawal reserve failed: {e}"
+                    ));
                 }
                 log::info!(
-                    "[bitcoin.fractional.exit] Phase 2: locked {} sats for exit",
+                    "[bitcoin.fractional.exit] Phase 2: reserved {} sats for exit",
                     burn_amount
                 );
 
@@ -2546,13 +2693,12 @@ impl AppRouterImpl {
                     log::error!(
                         "[bitcoin.fractional.exit] CRITICAL: failed to mark SweepPending: {e}"
                     );
-                    if let Err(e2) = crate::storage::client_db::release_locked_to_available(
-                        &dev,
-                        dbtc_id,
-                        burn_amount,
-                    ) {
-                        log::error!("[bitcoin.fractional.exit] also failed to release lock: {e2}");
-                    }
+                    fail_withdrawal_and_sync_projection(
+                        "bitcoin.fractional.exit",
+                        &withdrawal_id,
+                        &self.device_id_bytes,
+                        &state,
+                    );
                     return err(format!(
                         "bitcoin.fractional.exit: failed to mark SweepPending: {e}"
                     ));
@@ -2612,17 +2758,16 @@ impl AppRouterImpl {
                         txid
                     }
                     Err(e) => {
-                        // Sweep failed: release the locked balance and abort.
+                        // Sweep failed: clear the unresolved reservation and abort.
                         log::error!(
-                            "[bitcoin.fractional.exit] Phase 3: sweep FAILED: {e} — releasing lock"
+                            "[bitcoin.fractional.exit] Phase 3: sweep FAILED: {e} — clearing reservation"
                         );
-                        if let Err(e2) = crate::storage::client_db::release_locked_to_available(
-                            &dev,
-                            dbtc_id,
-                            burn_amount,
-                        ) {
-                            log::error!("[bitcoin.fractional.exit] CRITICAL: failed to release lock after sweep failure: {e2}");
-                        }
+                        fail_withdrawal_and_sync_projection(
+                            "bitcoin.fractional.exit",
+                            &withdrawal_id,
+                            &self.device_id_bytes,
+                            &state,
+                        );
                         if let Err(e2) = crate::storage::client_db::update_vault_record_state(
                             &result.successor_vault_op_id,
                             "SweepFailed",
@@ -2652,26 +2797,21 @@ impl AppRouterImpl {
                 // Creating or overwriting the record here would corrupt the txid CSV
                 // for multi-leg plans (§13, Property 4: Amount-Exact Commitment).
                 // ═══════════════════════════════════════════════════════
-                if let Some(wd_id) = &standalone_wd_id {
-                    if let Err(e) = crate::storage::client_db::create_withdrawal(
-                        crate::storage::client_db::CreateWithdrawalParams {
-                            withdrawal_id: wd_id,
-                            device_id: &dev,
-                            amount_sats: burn_amount,
-                            dest_address: &req.destination_address,
-                            policy_commit: &exec_data.policy_commit,
-                            state: "committed",
-                            burn_token_id: Some(dbtc_id),
-                            burn_amount_sats: burn_amount,
-                        },
-                    ) {
-                        log::error!(
-                            "[bitcoin.fractional.exit] withdrawal metadata creation failed: {e}"
-                        );
-                    }
+                if let Err(e) = persist_committed_withdrawal_metadata(
+                    &withdrawal_id,
+                    &dev,
+                    burn_amount,
+                    &req.destination_address,
+                    &exec_data.policy_commit,
+                    dbtc_id,
+                    burn_amount,
+                ) {
+                    log::error!("[bitcoin.fractional.exit] withdrawal metadata commit failed: {e}");
+                }
 
+                if !orchestrated {
                     if let Err(e) = crate::storage::client_db::set_withdrawal_redemption_txids(
-                        wd_id,
+                        &withdrawal_id,
                         &sweep_txid,
                         Some(exec_data.vault_content_hash.as_slice()),
                     ) {
@@ -2718,22 +2858,24 @@ impl AppRouterImpl {
                         String::new()
                     }
                 };
-                if let Some(wd_id) = &standalone_wd_id {
-                    if let Err(e) = persist_withdrawal_leg(
-                        wd_id,
-                        0,
-                        &req.source_vault_id,
-                        "partial",
-                        burn_amount,
-                        crate::sdk::bitcoin_tap_sdk::estimated_partial_withdrawal_fee_sats(),
-                        burn_amount.saturating_sub(
+                if !orchestrated {
+                    if let Err(e) = persist_withdrawal_leg(&WithdrawalLegParams {
+                        withdrawal_id: &withdrawal_id,
+                        leg_index: 0,
+                        vault_id: &req.source_vault_id,
+                        leg_kind: "partial",
+                        amount_sats: burn_amount,
+                        estimated_fee_sats:
+                            crate::sdk::bitcoin_tap_sdk::estimated_partial_withdrawal_fee_sats(),
+                        estimated_net_sats: burn_amount.saturating_sub(
                             crate::sdk::bitcoin_tap_sdk::estimated_partial_withdrawal_fee_sats(),
                         ),
-                        Some(&sweep_txid),
-                        Some(&result.successor_vault_id),
-                        Some(&result.successor_vault_op_id),
-                        (!exit_vault_op_id.is_empty()).then_some(exit_vault_op_id.as_str()),
-                    ) {
+                        sweep_txid: Some(&sweep_txid),
+                        successor_vault_id: Some(&result.successor_vault_id),
+                        successor_vault_op_id: Some(&result.successor_vault_op_id),
+                        exit_vault_op_id: (!exit_vault_op_id.is_empty())
+                            .then_some(exit_vault_op_id.as_str()),
+                    }) {
                         log::error!(
                             "[bitcoin.fractional.exit] withdrawal leg persistence failed: {e}"
                         );
@@ -2828,45 +2970,59 @@ impl AppRouterImpl {
                 let orchestrated = !req.plan_id.is_empty();
 
                 // For standalone invocations, generate a deterministic withdrawal ID.
-                // None when orchestrated (outer executor already created the record).
-                let standalone_wd_id: Option<String> = if orchestrated {
-                    None
+                // Orchestrated legs reuse the pre-created outer withdrawal row.
+                let withdrawal_id = if orchestrated {
+                    req.plan_id.clone()
                 } else {
-                    Some(Self::generate_standalone_withdrawal_id(
+                    Self::generate_standalone_withdrawal_id(
                         &dev,
                         burn_amount,
                         &req.destination_address,
-                    ))
+                    )
                 };
 
                 // Gate 1: verify dBTC balance covers the vault amount
-                let current_dbtc = match crate::storage::client_db::get_token_balance(&dev, dbtc_id)
-                {
-                    Ok(Some((a, _))) => a,
-                    _ => self
-                        .wallet
-                        .get_balance(Some(dbtc_id))
-                        .map(|b| b.available())
-                        .unwrap_or(0),
-                };
+                let current_dbtc = self
+                    .wallet
+                    .get_balance(Some(dbtc_id))
+                    .map(|b| b.available())
+                    .unwrap_or(0);
                 if let Err(message) =
                     ensure_dbtc_exit_balance("bitcoin.full.sweep", current_dbtc, burn_amount)
                 {
                     return err(message);
                 }
 
+                let current_state = match self.core_sdk.get_current_state() {
+                    Ok(state) => state,
+                    Err(e) => {
+                        return err(format!(
+                            "bitcoin.full.sweep: failed to read canonical state: {e}"
+                        ))
+                    }
+                };
+
                 // ═══════════════════════════════════════════════════════
-                // Phase 2: Lock dBTC (§13 state machine)
-                // Moves available → locked. If broadcast fails we release.
-                // Each handler always owns its own lock lifecycle.
+                // Phase 2: reserve dBTC via withdrawal metadata (§13 state machine).
+                // Executing/committed rows define in-flight supply; projections are derived.
                 // ═══════════════════════════════════════════════════════
-                if let Err(e) =
-                    crate::storage::client_db::lock_dbtc_for_exit(&dev, dbtc_id, burn_amount)
-                {
-                    return err(format!("bitcoin.full.sweep: balance lock failed: {e}"));
+                if let Err(e) = reserve_withdrawal_and_sync_projection(
+                    "bitcoin.full.sweep",
+                    &withdrawal_id,
+                    &self.device_id_bytes,
+                    &current_state,
+                    burn_amount,
+                    &req.destination_address,
+                    &exec_data.policy_commit,
+                    dbtc_id,
+                    burn_amount,
+                ) {
+                    return err(format!(
+                        "bitcoin.full.sweep: withdrawal reserve failed: {e}"
+                    ));
                 }
                 log::info!(
-                    "[bitcoin.full.sweep] Phase 2: locked {} sats for exit",
+                    "[bitcoin.full.sweep] Phase 2: reserved {} sats for exit",
                     burn_amount
                 );
 
@@ -2882,13 +3038,12 @@ impl AppRouterImpl {
                         Ok(p) => p,
                         Err(e) => {
                             log::error!("[bitcoin.full.sweep] cannot derive preimage: {e}");
-                            if let Err(e2) = crate::storage::client_db::release_locked_to_available(
-                                &dev, dbtc_id, burn_amount,
-                            ) {
-                                log::error!(
-                                    "[bitcoin.full.sweep] CRITICAL: failed to release dBTC lock: {e2}"
-                                );
-                            }
+                            fail_withdrawal_and_sync_projection(
+                                "bitcoin.full.sweep",
+                                &withdrawal_id,
+                                &self.device_id_bytes,
+                                &current_state,
+                            );
                             return err(format!("bitcoin.full.sweep: cannot derive preimage: {e}"));
                         }
                     };
@@ -2920,15 +3075,12 @@ impl AppRouterImpl {
 
                 if claim_dest.is_empty() {
                     log::error!("[bitcoin.full.sweep] no destination address available");
-                    if let Err(e2) = crate::storage::client_db::release_locked_to_available(
-                        &dev,
-                        dbtc_id,
-                        burn_amount,
-                    ) {
-                        log::error!(
-                            "[bitcoin.full.sweep] CRITICAL: failed to release dBTC lock: {e2}"
-                        );
-                    }
+                    fail_withdrawal_and_sync_projection(
+                        "bitcoin.full.sweep",
+                        &withdrawal_id,
+                        &self.device_id_bytes,
+                        &current_state,
+                    );
                     return err("bitcoin.full.sweep: no destination address available".to_string());
                 }
 
@@ -2937,15 +3089,12 @@ impl AppRouterImpl {
                         Ok(c) => c,
                         Err(e) => {
                             log::error!("[bitcoin.full.sweep] mempool client init failed: {e}");
-                            if let Err(e2) = crate::storage::client_db::release_locked_to_available(
-                                &dev,
-                                dbtc_id,
-                                burn_amount,
-                            ) {
-                                log::error!(
-                                "[bitcoin.full.sweep] CRITICAL: failed to release dBTC lock: {e2}"
+                            fail_withdrawal_and_sync_projection(
+                                "bitcoin.full.sweep",
+                                &withdrawal_id,
+                                &self.device_id_bytes,
+                                &current_state,
                             );
-                            }
                             return err(format!(
                                 "bitcoin.full.sweep: mempool client init failed: {e}"
                             ));
@@ -2956,30 +3105,24 @@ impl AppRouterImpl {
                     Ok(u) if !u.is_empty() => u,
                     Ok(_) => {
                         log::error!("[bitcoin.full.sweep] no UTXO at HTLC address {addr}");
-                        if let Err(e2) = crate::storage::client_db::release_locked_to_available(
-                            &dev,
-                            dbtc_id,
-                            burn_amount,
-                        ) {
-                            log::error!(
-                                "[bitcoin.full.sweep] CRITICAL: failed to release dBTC lock: {e2}"
-                            );
-                        }
+                        fail_withdrawal_and_sync_projection(
+                            "bitcoin.full.sweep",
+                            &withdrawal_id,
+                            &self.device_id_bytes,
+                            &current_state,
+                        );
                         return err(format!(
                             "bitcoin.full.sweep: no UTXO at HTLC address {addr}"
                         ));
                     }
                     Err(e) => {
                         log::error!("[bitcoin.full.sweep] UTXO lookup failed: {e}");
-                        if let Err(e2) = crate::storage::client_db::release_locked_to_available(
-                            &dev,
-                            dbtc_id,
-                            burn_amount,
-                        ) {
-                            log::error!(
-                                "[bitcoin.full.sweep] CRITICAL: failed to release dBTC lock: {e2}"
-                            );
-                        }
+                        fail_withdrawal_and_sync_projection(
+                            "bitcoin.full.sweep",
+                            &withdrawal_id,
+                            &self.device_id_bytes,
+                            &current_state,
+                        );
                         return err(format!("bitcoin.full.sweep: UTXO lookup failed: {e}"));
                     }
                 };
@@ -2990,15 +3133,12 @@ impl AppRouterImpl {
                     Ok(b) if b.len() == 32 => b,
                     _ => {
                         log::error!("[bitcoin.full.sweep] invalid utxo txid");
-                        if let Err(e2) = crate::storage::client_db::release_locked_to_available(
-                            &dev,
-                            dbtc_id,
-                            burn_amount,
-                        ) {
-                            log::error!(
-                                "[bitcoin.full.sweep] CRITICAL: failed to release dBTC lock: {e2}"
-                            );
-                        }
+                        fail_withdrawal_and_sync_projection(
+                            "bitcoin.full.sweep",
+                            &withdrawal_id,
+                            &self.device_id_bytes,
+                            &current_state,
+                        );
                         return err(
                             "bitcoin.full.sweep: invalid utxo txid from mempool".to_string()
                         );
@@ -3031,15 +3171,12 @@ impl AppRouterImpl {
                     Ok(tx) => tx,
                     Err(e) => {
                         log::error!("[bitcoin.full.sweep] build_htlc_claim_tx failed: {e}");
-                        if let Err(e2) = crate::storage::client_db::release_locked_to_available(
-                            &dev,
-                            dbtc_id,
-                            burn_amount,
-                        ) {
-                            log::error!(
-                                "[bitcoin.full.sweep] CRITICAL: failed to release dBTC lock: {e2}"
-                            );
-                        }
+                        fail_withdrawal_and_sync_projection(
+                            "bitcoin.full.sweep",
+                            &withdrawal_id,
+                            &self.device_id_bytes,
+                            &current_state,
+                        );
                         return err(format!("bitcoin.full.sweep: build claim tx failed: {e}"));
                     }
                 };
@@ -3051,19 +3188,16 @@ impl AppRouterImpl {
                         txid
                     }
                     Err(e) => {
-                        // Broadcast failed → release lock, no value stranded (§13, Property 9)
+                        // Broadcast failed → clear reservation, no value stranded (§13, Property 9)
                         log::error!(
-                            "[bitcoin.full.sweep] Phase 3: broadcast FAILED: {e} — releasing lock"
+                            "[bitcoin.full.sweep] Phase 3: broadcast FAILED: {e} — clearing reservation"
                         );
-                        if let Err(e2) = crate::storage::client_db::release_locked_to_available(
-                            &dev,
-                            dbtc_id,
-                            burn_amount,
-                        ) {
-                            log::error!(
-                                "[bitcoin.full.sweep] CRITICAL: failed to release dBTC lock: {e2}"
-                            );
-                        }
+                        fail_withdrawal_and_sync_projection(
+                            "bitcoin.full.sweep",
+                            &withdrawal_id,
+                            &self.device_id_bytes,
+                            &current_state,
+                        );
                         return err(format!("bitcoin.full.sweep: broadcast failed: {e}"));
                     }
                 };
@@ -3090,26 +3224,21 @@ impl AppRouterImpl {
                 // Creating or overwriting the record here would corrupt the txid CSV
                 // for multi-leg plans (§13, Property 4: Amount-Exact Commitment).
                 // ═══════════════════════════════════════════════════════
-                if let Some(wd_id) = &standalone_wd_id {
-                    if let Err(e) = crate::storage::client_db::create_withdrawal(
-                        crate::storage::client_db::CreateWithdrawalParams {
-                            withdrawal_id: wd_id,
-                            device_id: &dev,
-                            amount_sats: burn_amount,
-                            dest_address: &req.destination_address,
-                            policy_commit: &exec_data.policy_commit,
-                            state: "committed",
-                            burn_token_id: Some(dbtc_id),
-                            burn_amount_sats: burn_amount,
-                        },
-                    ) {
-                        log::error!(
-                            "[bitcoin.full.sweep] withdrawal metadata creation failed: {e}"
-                        );
-                    }
+                if let Err(e) = persist_committed_withdrawal_metadata(
+                    &withdrawal_id,
+                    &dev,
+                    burn_amount,
+                    &req.destination_address,
+                    &exec_data.policy_commit,
+                    dbtc_id,
+                    burn_amount,
+                ) {
+                    log::error!("[bitcoin.full.sweep] withdrawal metadata commit failed: {e}");
+                }
 
+                if !orchestrated {
                     if let Err(e) = crate::storage::client_db::set_withdrawal_redemption_txids(
-                        wd_id,
+                        &withdrawal_id,
                         &sweep_txid,
                         Some(exec_data.vault_content_hash.as_slice()),
                     ) {
@@ -3146,22 +3275,24 @@ impl AppRouterImpl {
                         String::new()
                     }
                 };
-                if let Some(wd_id) = &standalone_wd_id {
-                    if let Err(e) = persist_withdrawal_leg(
-                        wd_id,
-                        0,
-                        &req.source_vault_id,
-                        "full",
-                        burn_amount,
-                        crate::sdk::bitcoin_tap_sdk::estimated_full_withdrawal_fee_sats(),
-                        burn_amount.saturating_sub(
+                if !orchestrated {
+                    if let Err(e) = persist_withdrawal_leg(&WithdrawalLegParams {
+                        withdrawal_id: &withdrawal_id,
+                        leg_index: 0,
+                        vault_id: &req.source_vault_id,
+                        leg_kind: "full",
+                        amount_sats: burn_amount,
+                        estimated_fee_sats:
+                            crate::sdk::bitcoin_tap_sdk::estimated_full_withdrawal_fee_sats(),
+                        estimated_net_sats: burn_amount.saturating_sub(
                             crate::sdk::bitcoin_tap_sdk::estimated_full_withdrawal_fee_sats(),
                         ),
-                        Some(&sweep_txid),
-                        None,
-                        None,
-                        (!exit_vault_op_id.is_empty()).then_some(exit_vault_op_id.as_str()),
-                    ) {
+                        sweep_txid: Some(&sweep_txid),
+                        successor_vault_id: None,
+                        successor_vault_op_id: None,
+                        exit_vault_op_id: (!exit_vault_op_id.is_empty())
+                            .then_some(exit_vault_op_id.as_str()),
+                    }) {
                         log::error!("[bitcoin.full.sweep] withdrawal leg persistence failed: {e}");
                     }
                 }
@@ -3849,8 +3980,8 @@ impl AppRouterImpl {
                         &prep.signing_public_key,
                         prep.recipient,
                         &prep.current_state,
-                        Some(prep.receipt_bytes),
-                        Some(prep.stitched_receipt_sigma),
+                        Some(prep.protocol_transition_bytes.clone()),
+                        Some(prep.protocol_transition_commitment),
                     )
                     .await
                 {
@@ -3922,58 +4053,32 @@ impl AppRouterImpl {
                                 }
                             }
 
-                            // Sync dBTC balance to SQLite
+                            // Materialize the SQLite projection from the applied SMT state.
+                            // Keep the projection's locked column intact; this route only advances
+                            // the spendable dBTC state, not the in-flight exit lock bookkeeping.
                             {
                                 let dev =
                                     crate::util::text_id::encode_base32_crockford(&device_id_bytes);
                                 let dbtc_id = crate::sdk::bitcoin_tap_sdk::DBTC_TOKEN_ID;
-                                let (current_sqlite, existing_locked) =
-                                    match crate::storage::client_db::get_token_balance(
+                                let existing_locked =
+                                    match crate::storage::client_db::get_locked_balance(
                                         &dev, dbtc_id,
                                     ) {
-                                        Ok(Some((a, l))) => (a, l),
-                                        Ok(None) => (0, 0),
+                                        Ok(locked) => locked,
                                         Err(e) => {
                                             return err(format!(
-                                                "bitcoin.deposit.await_and_complete: failed to read dBTC balance: {e}"
-                                            ));
+                                            "bitcoin.deposit.await_and_complete: failed to read dBTC locked balance: {e}"
+                                        ));
                                         }
                                     };
-                                let new_sqlite = match &effective_token_op {
-                                    dsm::types::token_types::TokenOperation::Burn {
-                                        amount,
-                                        ..
-                                    } => {
-                                        if current_sqlite < *amount {
-                                            return err(format!(
-                                                    "bitcoin.deposit.await_and_complete: dBTC sqlite underflow: current={} burn={}",
-                                                    current_sqlite, amount
-                                                ));
-                                        }
-                                        current_sqlite - *amount
-                                    }
-                                    dsm::types::token_types::TokenOperation::Mint {
-                                        amount,
-                                        ..
-                                    } => current_sqlite.saturating_add(*amount),
-                                    _ => current_sqlite,
-                                };
-                                if let Err(e) = crate::storage::client_db::upsert_token_balance(
-                                    &dev,
-                                    dbtc_id,
-                                    new_sqlite,
+                                if let Err(e) = sync_dbtc_projection_from_state(
+                                    "bitcoin.deposit.await_and_complete",
+                                    &device_id_bytes,
+                                    &applied_state,
                                     existing_locked,
                                 ) {
-                                    return err(format!(
-                                        "bitcoin.deposit.await_and_complete: failed to persist dBTC balance: {e}"
-                                    ));
+                                    return err(e);
                                 }
-                                log::info!(
-                                    "[AWAIT_AND_COMPLETE] dBTC SQLite balance: {} → {} (deposit={})",
-                                    current_sqlite,
-                                    new_sqlite,
-                                    completion.vault_op_id
-                                );
                             }
 
                             // Record transaction in history
@@ -4018,6 +4123,22 @@ impl AppRouterImpl {
                                     "funding_txid".to_string(),
                                     funding_txid_hex.as_bytes().to_vec(),
                                 );
+                                metadata.insert(
+                                    "protocol_transition_payload".to_string(),
+                                    prep.protocol_transition_bytes.clone(),
+                                );
+                                metadata.insert(
+                                    "protocol_transition_digest".to_string(),
+                                    prep.protocol_transition_commitment.to_vec(),
+                                );
+                                metadata.insert(
+                                    "source_state_hash".to_string(),
+                                    applied_state.hash.to_vec(),
+                                );
+                                metadata.insert(
+                                    "source_state_number".to_string(),
+                                    applied_state.state_number.to_le_bytes().to_vec(),
+                                );
                                 let rec = crate::storage::client_db::TransactionRecord {
                                     tx_id: format!("deposit_{}", completion.vault_op_id),
                                     tx_hash: tx_hash_txt,
@@ -4028,13 +4149,10 @@ impl AppRouterImpl {
                                     status: "completed".to_string(),
                                     chain_height: applied_state.state_number,
                                     step_index: 0,
-                                    commitment_hash: Some(applied_state.hash.to_vec()),
-                                    proof_data: build_online_receipt(
-                                        &applied_state,
-                                        &device_id_bytes,
-                                        &device_id_bytes,
-                                        crate::sdk::app_state::AppState::get_device_tree_root(),
+                                    commitment_hash: Some(
+                                        prep.protocol_transition_commitment.to_vec(),
                                     ),
+                                    proof_data: None,
                                     metadata,
                                     created_at: crate::util::deterministic_time::tick(),
                                 };
@@ -4908,11 +5026,35 @@ mod tests {
         );
     }
 
-    /// Seed dBTC available balance for the test device ([0xA1; 32]).
-    fn seed_dbtc_balance(amount_sats: u64) {
+    /// Seed canonical dBTC projection for the test device ([0xA1; 32]).
+    fn seed_dbtc_balance(router: &AppRouterImpl, amount_sats: u64) {
+        let state = router
+            .core_sdk
+            .get_current_state()
+            .expect("load current state for dBTC projection seed");
         let device_id = crate::util::text_id::encode_base32_crockford(&[0xA1; 32]);
-        client_db::upsert_token_balance(&device_id, "dBTC", amount_sats, 0)
-            .expect("seed dBTC balance");
+        let state_hash = state
+            .hash()
+            .expect("hash current state for dBTC projection seed");
+        let balance_key = dsm::core::token::derive_canonical_balance_key(
+            crate::policy::builtins::DBTC_POLICY_COMMIT,
+            &state.device_info.public_key,
+            crate::sdk::bitcoin_tap_sdk::DBTC_TOKEN_ID,
+        );
+        client_db::upsert_balance_projection(&client_db::BalanceProjectionRecord {
+            balance_key,
+            device_id,
+            token_id: crate::sdk::bitcoin_tap_sdk::DBTC_TOKEN_ID.to_string(),
+            policy_commit: crate::util::text_id::encode_base32_crockford(
+                crate::policy::builtins::DBTC_POLICY_COMMIT,
+            ),
+            available: amount_sats,
+            locked: 0,
+            source_state_hash: crate::util::text_id::encode_base32_crockford(&state_hash),
+            source_state_number: state.state_number,
+            updated_at: crate::util::deterministic_time::tick(),
+        })
+        .expect("seed dBTC projection");
     }
 
     #[test]
@@ -4972,7 +5114,7 @@ mod tests {
         let full_fee = crate::sdk::bitcoin_tap_sdk::estimated_full_withdrawal_fee_sats();
         let source_amount = request_net_sats + full_fee;
 
-        seed_dbtc_balance(request_net_sats * 3); // enough for multiple withdrawals
+        seed_dbtc_balance(&router, request_net_sats * 3); // enough for multiple withdrawals
         put_active_vault("000-vault-consumed", source_amount);
         put_active_vault_record("000-vault-consumed", source_amount);
 
@@ -5121,7 +5263,7 @@ mod tests {
         let full_fee = crate::sdk::bitcoin_tap_sdk::estimated_full_withdrawal_fee_sats();
         let source_amount = request_net_sats + full_fee;
 
-        seed_dbtc_balance(request_net_sats * 3);
+        seed_dbtc_balance(&router, request_net_sats * 3);
         put_active_vault("vault-execute-success", source_amount);
         put_active_vault_record("vault-execute-success", source_amount);
 
@@ -5301,7 +5443,7 @@ mod tests {
         let full_fee = crate::sdk::bitcoin_tap_sdk::estimated_full_withdrawal_fee_sats();
         let source_amount = request_net_sats + full_fee;
 
-        seed_dbtc_balance(request_net_sats * 3);
+        seed_dbtc_balance(&router, request_net_sats * 3);
         put_active_vault("vault-policy", source_amount);
         put_active_vault_record("vault-policy", source_amount);
 
@@ -5401,7 +5543,7 @@ mod tests {
         let actual_policy_commit = *crate::policy::builtins::DBTC_POLICY_COMMIT;
         let mismatched_policy_commit = [0xAB; 32];
 
-        seed_dbtc_balance(amount_sats);
+        seed_dbtc_balance(&router, amount_sats);
         seed_vault_execution_advertisement(
             "vault-policy-mismatch",
             amount_sats,

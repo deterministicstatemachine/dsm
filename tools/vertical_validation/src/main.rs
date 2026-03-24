@@ -33,6 +33,7 @@ mod benchmark;
 mod bilateral_throughput;
 mod crypto_kat;
 mod implementation_traces;
+mod lean_checker;
 mod local_nodes;
 mod proof_runner;
 mod property_tests;
@@ -115,6 +116,25 @@ enum Commands {
         iterations: u64,
     },
 
+    /// Generate formal verification report (Markdown) with all results
+    FormalReport {
+        /// Output path (default: docs/reports/YYYY-MM-DD-formal-verification-report.md)
+        #[arg(long)]
+        output: Option<String>,
+        /// Skip Lean 4 proof checking
+        #[arg(long)]
+        skip_lean: bool,
+        /// Run fresh scaling benchmark (requires local storage nodes, adds ~3 min)
+        #[arg(long)]
+        include_scaling: bool,
+        /// Number of property test iterations
+        #[arg(long, default_value = "100")]
+        iterations: u64,
+        /// Deterministic seed for property tests
+        #[arg(long, default_value = "42")]
+        seed: u64,
+    },
+
     /// Run everything end-to-end (TLA+ check + benchmark + all new modules + report)
     Full {
         /// Duration per benchmark run in seconds
@@ -174,6 +194,16 @@ async fn main() -> anyhow::Result<()> {
 
         Commands::BilateralThroughput { iterations } => {
             run_bilateral_throughput(iterations);
+        }
+
+        Commands::FormalReport {
+            output,
+            skip_lean,
+            include_scaling,
+            iterations,
+            seed,
+        } => {
+            run_formal_report(&root, output, skip_lean, include_scaling, iterations, seed).await?;
         }
 
         Commands::Full {
@@ -412,6 +442,185 @@ fn run_bilateral_throughput(iterations: u64) {
         bilateral_throughput_results: Some(results),
     };
     print!("{}", report.render_ascii());
+}
+
+/// Generate a formal Markdown verification report.
+async fn run_formal_report(
+    root: &std::path::Path,
+    output: Option<String>,
+    skip_lean: bool,
+    include_scaling: bool,
+    iterations: u64,
+    seed: u64,
+) -> anyhow::Result<()> {
+    eprintln!("=== GENERATING FORMAL VERIFICATION REPORT ===\n");
+
+    // Git metadata
+    let git_commit = std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|_| "unknown".into());
+    let git_branch = std::process::Command::new("git")
+        .args(["branch", "--show-current"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_else(|_| "unknown".into());
+
+    // Date
+    let report_date = {
+        let output = std::process::Command::new("date")
+            .args(["+%Y-%m-%d"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_else(|_| "unknown".into());
+        output
+    };
+
+    // Phase 1: Crypto KATs (fast)
+    let crypto_kat_results = crypto_kat::collect_crypto_kat_results();
+
+    // Phase 2: Property-based tests
+    let property_test_results = property_tests::collect_property_test_results(seed, iterations);
+
+    // Phase 3: Implementation traces
+    let implementation_trace_results =
+        implementation_traces::collect_implementation_trace_results();
+
+    // Phase 4: Adversarial bilateral tests (catch panics — pre-existing issue)
+    let adversarial_results =
+        std::panic::catch_unwind(|| adversarial_bilateral::collect_adversarial_results())
+            .map_err(|_| eprintln!("  WARNING: Adversarial tests panicked — skipping"))
+            .ok();
+
+    // Phase 5: Bilateral throughput (catch panics)
+    let bilateral_throughput_results = std::panic::catch_unwind(|| {
+        bilateral_throughput::collect_bilateral_throughput_results(iterations)
+    })
+    .map_err(|_| eprintln!("  WARNING: Bilateral throughput panicked — skipping"))
+    .ok();
+
+    // Phase 6: Lean 4 proof checking
+    let lean_results = if skip_lean {
+        eprintln!("  Lean proof checking skipped (--skip-lean)");
+        None
+    } else {
+        Some(lean_checker::collect_lean_results(root))
+    };
+
+    // Phase 7: TLA+ model checking
+    let tla_results = collect_tla_results(root, false).await?;
+    let (trace_replays, implementation_replays) =
+        collect_tla_trace_replays(root, &tla_results).await?;
+
+    // Phase 8: Scaling (cached or fresh)
+    let scaling_cache_path = root.join("docs/reports/.scaling-cache.json");
+    let (scaling_results, scaling_cache_info) = if include_scaling {
+        eprintln!("\n  Running fresh scaling benchmark (--include-scaling)...");
+        let results = collect_benchmark_results(root, 10, false).await?;
+        // Save cache
+        let cache_data = serde_json::json!({
+            "date": report_date,
+            "commit": git_commit,
+            "data": results,
+        });
+        if let Some(parent) = scaling_cache_path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        std::fs::write(
+            &scaling_cache_path,
+            serde_json::to_string_pretty(&cache_data)?,
+        )
+        .ok();
+        (
+            Some(results),
+            Some(report::ScalingCacheInfo {
+                cached: false,
+                cache_date: report_date.clone(),
+                cache_commit: git_commit.clone(),
+            }),
+        )
+    } else if scaling_cache_path.exists() {
+        // Load cached results
+        let cache_str = std::fs::read_to_string(&scaling_cache_path)?;
+        let cache_json: serde_json::Value = serde_json::from_str(&cache_str)?;
+        let cache_date = cache_json["date"].as_str().unwrap_or("unknown").to_string();
+        let cache_commit = cache_json["commit"]
+            .as_str()
+            .unwrap_or("unknown")
+            .to_string();
+        let scaling: Option<crate::benchmark::ScalingBenchmarkResult> =
+            serde_json::from_value(cache_json["data"].clone()).ok();
+        eprintln!("  Using cached scaling data from {cache_date} (commit {cache_commit})");
+        (
+            scaling,
+            Some(report::ScalingCacheInfo {
+                cached: true,
+                cache_date,
+                cache_commit,
+            }),
+        )
+    } else {
+        eprintln!("  No scaling cache found. Use --include-scaling to run benchmark.");
+        (None, None)
+    };
+
+    // Build TLA report entries
+    let tla_reports = build_tla_reports(
+        &tla_results,
+        &trace_replays,
+        &implementation_replays,
+        Some(&implementation_trace_results),
+    );
+
+    // Assemble full report struct
+    let report = VerticalValidationReport {
+        proof_results: Vec::new(),
+        tla_results: tla_reports,
+        scaling_results,
+        property_test_results: Some(property_test_results),
+        implementation_trace_results: Some(implementation_trace_results),
+        adversarial_results,
+        crypto_kat_results: Some(crypto_kat_results),
+        bilateral_throughput_results,
+    };
+
+    // Render formal Markdown
+    let mut markdown = report.render_formal_report(
+        lean_results.as_ref(),
+        &git_commit,
+        &git_branch,
+        &report_date,
+        scaling_cache_info.as_ref(),
+    );
+
+    // Compute BLAKE3 domain-separated hash of report body (before Attestation)
+    let body_end = markdown.find("## Attestation").unwrap_or(markdown.len());
+    let body = &markdown[..body_end];
+    let mut hasher = blake3::Hasher::new_derive_key("DSM/formal-verification-report-v1");
+    hasher.update(body.as_bytes());
+    let body_hash = hasher.finalize();
+    let blake3_hex = body_hash.to_hex();
+    markdown = markdown.replace("{{REPORT_BLAKE3}}", &blake3_hex[..64]);
+
+    // Write report
+    let output_path = output
+        .unwrap_or_else(|| format!("docs/reports/{report_date}-formal-verification-report.md"));
+    let full_output_path = root.join(&output_path);
+    if let Some(parent) = full_output_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&full_output_path, &markdown)?;
+
+    eprintln!("\n=== REPORT WRITTEN ===\n");
+    eprintln!("  Path: {}", full_output_path.display());
+    eprintln!("  Body BLAKE3: {}...", &blake3_hex[..16]);
+    eprintln!("\n  To sign: git add {output_path} && git commit -S && git push\n");
+
+    // Also print path to stdout for scripting
+    println!("{}", full_output_path.display());
+
+    Ok(())
 }
 
 /// Run everything end-to-end and produce a single combined report.

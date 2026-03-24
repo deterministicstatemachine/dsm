@@ -34,7 +34,7 @@ import com.dsm.wallet.security.AccessLevel
 //   BLE:        "bleCommand", "getBleStats", "retryBle", ...
 //   Contacts:   "contactAdd", "contactRemove", "handleContactQrV3"
 //   System:     "getTransportHeaders", "setSystemBarColor", "setPreference"
-//   NFC:        "nfcIsBackupEnabled", "nfcHasPendingCapsule", "nfcStartWrite"
+//   Recovery:   appRouter routes "recovery.*", "nfc.ring.write"
 //
 // ERROR CODES (returned in response envelope):
 //   0 = success
@@ -571,50 +571,6 @@ class SinglePathWebViewBridge(private val context: Context) {
                         Log.w(TAG, "processEnvelopeV3 failed", t)
                         ByteArray(0)
                     }
-                }
-
-                // --- NFC Ring Backup domain ---
-                // Kotlin is transport-only: launches hardware activity, relays results.
-                // Rust owns capsule creation, NDEF formatting, all crypto.
-                // TypeScript triggers flow and listens for completion events.
-
-                "nfcIsBackupEnabled" -> {
-                    try {
-                        byteArrayOf(if (UnifiedNativeApi.isNfcBackupEnabled()) 1 else 0)
-                    } catch (t: Throwable) {
-                        Log.w(TAG, "nfcIsBackupEnabled failed", t)
-                        byteArrayOf(0)
-                    }
-                }
-
-                "nfcHasPendingCapsule" -> {
-                    try {
-                        val pending = UnifiedNativeApi.getPendingRecoveryCapsule()
-                        byteArrayOf(if (pending.isNotEmpty()) 1 else 0)
-                    } catch (t: Throwable) {
-                        Log.w(TAG, "nfcHasPendingCapsule failed", t)
-                        byteArrayOf(0)
-                    }
-                }
-
-                "nfcStartWrite" -> {
-                    try {
-                        val act = com.dsm.wallet.ui.MainActivity.getActiveInstance()
-                        act?.runOnUiThread {
-                            try {
-                                val intent = android.content.Intent(
-                                    act,
-                                    com.dsm.wallet.recovery.NfcWriteActivity::class.java
-                                )
-                                act.startActivity(intent)
-                            } catch (e: Throwable) {
-                                Log.w(TAG, "nfcStartWrite: failed to launch NfcWriteActivity", e)
-                            }
-                        }
-                    } catch (e: Throwable) {
-                        Log.w(TAG, "nfcStartWrite: failed", e)
-                    }
-                    ByteArray(0)
                 }
 
                 else -> throw IllegalArgumentException("Unknown binary RPC method: $method")

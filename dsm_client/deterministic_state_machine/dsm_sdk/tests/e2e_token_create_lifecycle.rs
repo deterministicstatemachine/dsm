@@ -9,7 +9,7 @@ use dsm_sdk::sdk::b0x_sdk::B0xSDK;
 use prost::Message;
 use dsm_sdk::storage_utils;
 use dsm_sdk::sdk::storage_node_sdk::{StorageNodeConfig, StorageNodeSDK};
-use getrandom::getrandom;
+use rand::{rngs::OsRng, RngCore};
 use tokio::time::{timeout, Duration};
 
 /// E2E test: Token Create Lifecycle
@@ -63,8 +63,9 @@ async fn e2e_token_create_lifecycle() {
         .await
         .expect("Failed to create StorageNodeSDK");
 
+    let mut os_rng = OsRng;
     let mut entropy = vec![0u8; 32];
-    getrandom(&mut entropy).expect("Failed to generate entropy");
+    os_rng.fill_bytes(&mut entropy);
 
     println!("Creating genesis via MPC...");
     let genesis = timeout(

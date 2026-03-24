@@ -3,11 +3,13 @@
 
 use async_trait::async_trait;
 use dsm::types::error::DsmError;
+use rustls::crypto::{ring, CryptoProvider};
 use rustls::ClientConfig;
 use rustls::RootCertStore;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::Once;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -120,6 +122,14 @@ fn normalize_pins(pins: Vec<Vec<u8>>) -> Result<Vec<[u8; 32]>, DsmError> {
         .collect::<Result<Vec<_>, _>>()
 }
 
+static INSTALL_RUSTLS_PROVIDER: Once = Once::new();
+
+pub fn ensure_rustls_crypto_provider() {
+    INSTALL_RUSTLS_PROVIDER.call_once(|| {
+        let _ = CryptoProvider::install_default(ring::default_provider());
+    });
+}
+
 #[derive(Debug)]
 pub struct TlsTransport {
     cfg: Arc<ClientConfig>,
@@ -129,6 +139,8 @@ pub struct TlsTransport {
 
 impl TlsTransport {
     pub fn from_config(config: TlsConfig) -> Result<Self, DsmError> {
+        ensure_rustls_crypto_provider();
+
         let server_name = ServerName::try_from(config.server_name.clone())
             .map_err(|_| DsmError::invalid_parameter("invalid tls server_name"))?;
 

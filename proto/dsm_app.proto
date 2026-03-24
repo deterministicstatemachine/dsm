@@ -417,7 +417,7 @@ message BitcoinFractionalExitRequest {
   uint32 successor_locktime = 3;
   uint64 refund_iterations = 4;
   string destination_address = 5; // Native BTC destination for sweep (§6.3)
-  string plan_id = 6;             // Deterministic withdrawal ID (ρ) from planning phase
+  string plan_id = 6; // Deterministic withdrawal ID (ρ) from planning phase
 }
 
 message BitcoinFractionalExitResponse {
@@ -1342,6 +1342,7 @@ message BleIncomingDataResponse {
   repeated bytes response_chunks = 1 [(dsm_max_len)=1024]; // BLE chunks to write back (may be empty)
   bool pairing_complete          = 2; // true = bilateral confirm delivered, Kotlin may clean up
   bool use_reliable_write        = 3; // true = send via requestGattWriteChunks (bilateral follow-ups)
+  bytes confirm_commitment_hash  = 4 [(dsm_max_len)=32]; // exact ConfirmPending session to finalize after BilateralConfirm delivery
 }
 
 // Status update emitted by PairingOrchestrator during the pairing loop.
@@ -1567,6 +1568,31 @@ message BleFrameHeader {
 message BleChunk {
   BleFrameHeader header = 1;
   bytes          data   = 2 [(dsm_max_len)=1024];
+}
+
+// Phase-1 BLE transport framing: session/message scoped chunk delivery below Envelope v3.
+// These messages are transport-only. They MUST NOT alter protocol semantics.
+message BleTransportHeader {
+  uint32 version     = 1; // transport framing version (currently 1)
+  uint32 flags       = 2; // bitmask: DATA/SYN/ACK/NACK/FIN/KEEPALIVE
+  fixed64 session_id = 3; // random per transport session
+  fixed64 message_id = 4; // monotonic within session
+  uint32 chunk_index = 5; // zero-based
+  uint32 chunk_count = 6; // total chunks for the message
+  uint32 payload_len = 7; // bytes carried in this chunk's payload field
+  uint32 checksum    = 8; // CRC32 of the payload bytes
+}
+
+message BleTransportChunk {
+  BleTransportHeader header  = 1;
+  bytes              payload = 2 [(dsm_max_len)=1024];
+}
+
+message BleTransportAck {
+  fixed64 session_id     = 1;
+  fixed64 message_id     = 2;
+  uint32  ack_base_chunk = 3; // highest contiguous received chunk index + 1 base for bitmap
+  bytes   ack_bitmap     = 4 [(dsm_max_len)=256];
 }
 
 // Resumable BLE chunk transfer — receiver reports persisted chunk progress
@@ -1974,7 +2000,7 @@ message TransactionInfo {
   string status        = 11; // "completed", "confirmed", "pending", etc.
   string recipient     = 12; // alias or device ID text for UI display
   bytes  stitched_receipt = 13 [(dsm_max_len)=131072]; // canonical stitched receipt bytes (if available)
-  uint64 created_at = 14; // DISPLAY-ONLY: unix timestamp (seconds) for UI history ordering. MUST NOT be used in hash preimages, ReceiptCommit fields, acceptance predicates, or protocol ordering.
+  uint64 created_at = 14; // DISPLAY-ONLY: unix wall-clock seconds for UI history ordering. MUST NOT be used in hash preimages, ReceiptCommit fields, acceptance predicates, or protocol ordering.
   string memo = 15; // optional memo/note
   bool   receipt_verified = 16; // true iff stitched_receipt passes cryptographic verification (SMT roots, tripwire, proofs)
 }

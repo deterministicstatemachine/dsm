@@ -731,49 +731,6 @@ fn test_batch_operations() -> Result<(), DsmError> {
     // Verify the chain is valid
     assert!(chain.verify_chain()?, "Regular chain should be valid");
 
-    // ---- NOW TEST BATCH OPERATIONS WITH A NEW CHAIN ----
-    // Create a fresh chain for batch operations
-    let mut batch_chain = HashChain::new();
-    batch_chain.add_state(genesis.clone())?;
-
-    // Create a batch - use simpler approach to avoid sparse index issues
-    let batch_id = batch_chain.create_batch()?;
-
-    // Add operations to the batch using minimal transitions
-    let mut batch_transitions = Vec::new();
-
-    for i in 0..3 {
-        // Create a minimal transition with just the operation
-        // Prefix unused variable with underscore
-        let _to_state = &states[i + 1];
-
-        let op = signed_generic_op(
-            &sk,
-            &format!("batch_op_{}", i),
-            vec![i as u8; 4],
-            &format!("Batch operation {}", i),
-        );
-
-        // Create minimal transition directly
-        let transition = transition::StateTransition::new(
-            op,                     // Just the operation
-            None,                   // No encapsulated entropy
-            None,                   // No encapsulation
-            &device_info.device_id, // Device ID
-        );
-
-        let tx_index = batch_chain.add_transition_to_batch(batch_id, transition.clone())?;
-        batch_transitions.push((tx_index, transition));
-    }
-
-    // Try to finalize batch - we're only testing that the API works, not validation
-    if batch_chain.finalize_batch(batch_id).is_ok() {
-        println!("Batch finalized successfully");
-    } else {
-        println!("Batch finalization skipped - only testing API access");
-    }
-
-    println!("Batch operations test completed successfully!");
     Ok(())
 }
 

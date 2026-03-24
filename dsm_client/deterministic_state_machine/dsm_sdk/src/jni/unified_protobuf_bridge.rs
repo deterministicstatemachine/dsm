@@ -42,6 +42,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 use crate::generated as pb;
+use crate::bluetooth::bilateral_transport_adapter::BleTransportDelegate;
 use crate::jni::helpers;
 use jni::objects::{JByteArray, JString, JObject, JValue};
 use jni::JNIEnv;
@@ -1127,17 +1128,23 @@ fn process_envelope_v3_impl(req: &[u8], device_address: Option<&str>) -> Result<
                     "process_envelope_v3: intercepting bilateral {:?} via BLE coordinator",
                     frame_type
                 );
-                let coord = crate::runtime::get_runtime()
-                    .block_on(crate::bridge::get_ble_coordinator())
-                    .map_err(|e| format!("BLE coordinator not ready: {e}"))?;
-                if let Some(addr) = device_address {
-                    crate::runtime::get_runtime()
-                        .block_on(coord.set_current_sender_ble_address(Some(addr.to_string())));
-                }
+                let adapter = crate::runtime::get_runtime()
+                    .block_on(crate::bridge::get_ble_transport_adapter())
+                    .map_err(|e| format!("BLE transport adapter not ready: {e}"))?;
                 let result = crate::runtime::get_runtime()
-                    .block_on(coord.process_bilateral_message(&frame_type, raw))
+                    .block_on(adapter.on_transport_message(
+                        crate::bluetooth::TransportInboundMessage {
+                            peer_address: device_address.unwrap_or_default().to_string(),
+                            frame_type,
+                            payload: raw.to_vec(),
+                        },
+                    ))
                     .map_err(|e| format!("bilateral via envelope: {e}"))?;
-                return Ok(result.unwrap_or_default());
+                return Ok(result
+                    .into_iter()
+                    .next()
+                    .map(|outbound| outbound.payload)
+                    .unwrap_or_default());
             }
         }
     }
@@ -2514,11 +2521,37 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bilateralOffl
                                 }
                             };
 
-                            // Call coordinator directly — uses BiImpl's shared BLE coordinator
-                            match coordinator.create_prepare_message_with_commitment(
+                            let transport_adapter = match crate::bridge::get_ble_transport_adapter().await {
+                                Ok(adapter) => adapter,
+                                Err(e) => {
+                                    results.push(gp::OpResult {
+                                        op_id, accepted: false,
+                                        error: Some(gp::Error { code: 503, message: format!("BLE transport adapter not ready: {e}"), ..Default::default() }),
+                                        ..Default::default()
+                                    });
+                                    continue;
+                                }
+                            };
+
+                            match transport_adapter.create_prepare_message_with_commitment(
                                 counterparty_id, operation, req.validity_iterations,
                             ).await {
-                                Ok((chunks, commitment_hash)) => {
+                                Ok((prepare_envelope, commitment_hash)) => {
+                                    let chunks = match coordinator.encode_message(
+                                        crate::bluetooth::BleFrameType::BilateralPrepare,
+                                        &prepare_envelope,
+                                    ) {
+                                        Ok(chunks) => chunks,
+                                        Err(e) => {
+                                            transport_adapter.cancel_prepared_session_for_counterparty(counterparty_id).await;
+                                            results.push(gp::OpResult {
+                                                op_id, accepted: false,
+                                                error: Some(gp::Error { code: 500, message: format!("Failed to frame BLE prepare payload: {e}"), ..Default::default() }),
+                                                ..Default::default()
+                                            });
+                                            continue;
+                                        }
+                                    };
                                     log::info!("[bilateralOfflineSend] prepare OK: {} chunks, commitment={:02x}{:02x}{:02x}{:02x}",
                                         chunks.len(), commitment_hash[0], commitment_hash[1], commitment_hash[2], commitment_hash[3]);
 
@@ -2532,14 +2565,6 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bilateralOffl
                                         use crate::jni::jni_common::get_java_vm_borrowed;
                                         ble_send_ok = if let Some(vm) = get_java_vm_borrowed() {
                                             if let Ok(mut jni_env) = vm.attach_current_thread() {
-                                                // Prime BLE transport before sending
-                                                match crate::jni::unified_protobuf_bridge::ensure_ble_transport_ready(
-                                                    &mut jni_env, &ble_address,
-                                                ) {
-                                                    Ok(true) => log::info!("[bilateralOfflineSend] BLE transport ready for {}", &ble_address),
-                                                    Ok(false) => log::warn!("[bilateralOfflineSend] BLE transport not ready for {} — trying send anyway", &ble_address),
-                                                    Err(e) => log::warn!("[bilateralOfflineSend] BLE prime error: {e}"),
-                                                }
                                                 match crate::jni::unified_protobuf_bridge::send_ble_chunks_via_unified(
                                                     &mut jni_env, &ble_address, &chunks,
                                                 ) {
@@ -2560,7 +2585,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bilateralOffl
                                             "[bilateralOfflineSend] BLE send failed for commitment={:02x}{:02x}{:02x}{:02x} — cancelling prepared session",
                                             commitment_hash[0], commitment_hash[1], commitment_hash[2], commitment_hash[3]
                                         );
-                                        coordinator.cancel_prepared_session_for_counterparty(counterparty_id).await;
+                                        transport_adapter.cancel_prepared_session_for_counterparty(counterparty_id).await;
                                         results.push(gp::OpResult {
                                             op_id, accepted: false,
                                             error: Some(gp::Error {
@@ -2780,18 +2805,17 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_markBilateral
         let mut ch = [0u8; 32];
         ch.copy_from_slice(&bytes);
 
-        let coord =
-            match crate::runtime::get_runtime().block_on(crate::bridge::get_ble_coordinator()) {
-                Ok(c) => c,
-                Err(e) => {
-                    log::warn!("markBilateralConfirmDelivered: BLE coordinator not ready: {e}");
-                    return jni::sys::JNI_FALSE;
-                }
-            };
-
-        match crate::runtime::get_runtime()
-            .block_on(coord.bilateral_handler().mark_confirm_delivered(ch))
+        let adapter = match crate::runtime::get_runtime()
+            .block_on(crate::bridge::get_ble_transport_adapter())
         {
+            Ok(adapter) => adapter,
+            Err(e) => {
+                log::warn!("markBilateralConfirmDelivered: BLE transport adapter not ready: {e}");
+                return jni::sys::JNI_FALSE;
+            }
+        };
+
+        match crate::runtime::get_runtime().block_on(adapter.mark_confirm_delivered(ch)) {
             Ok(()) => jni::sys::JNI_TRUE,
             Err(e) => {
                 log::warn!("markBilateralConfirmDelivered: failed: {e}");
@@ -2826,19 +2850,18 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_markAnyBilate
             Some(e) => e,
             None => return 0i32,
         };
-        let coord =
-            match crate::runtime::get_runtime().block_on(crate::bridge::get_ble_coordinator()) {
-                Ok(c) => c,
-                Err(e) => {
-                    log::warn!("markAnyBilateralConfirmDelivered: BLE coordinator not ready: {e}");
-                    return 0i32;
-                }
-            };
-        match crate::runtime::get_runtime().block_on(
-            coord
-                .bilateral_handler()
-                .mark_any_confirm_pending_delivered(),
-        ) {
+        let adapter = match crate::runtime::get_runtime()
+            .block_on(crate::bridge::get_ble_transport_adapter())
+        {
+            Ok(adapter) => adapter,
+            Err(e) => {
+                log::warn!(
+                    "markAnyBilateralConfirmDelivered: BLE transport adapter not ready: {e}"
+                );
+                return 0i32;
+            }
+        };
+        match crate::runtime::get_runtime().block_on(adapter.mark_any_confirm_pending_delivered()) {
             Ok(n) => n as i32,
             Err(e) => {
                 log::warn!("markAnyBilateralConfirmDelivered: failed: {e}");
@@ -2933,28 +2956,6 @@ fn empty_byte_array_2d<'a>(env: &mut JNIEnv<'a>) -> jni::objects::JObjectArray<'
             }),
         None => unsafe { jni::objects::JObjectArray::from_raw(std::ptr::null_mut()) },
     }
-}
-
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
-pub(crate) fn ensure_ble_transport_ready<'a>(
-    env: &mut JNIEnv<'a>,
-    device_address: &str,
-) -> Result<bool, String> {
-    let addr_j = env
-        .new_string(device_address)
-        .map_err(|e| format!("new_string failed: {e}"))?;
-    let class_name = "com/dsm/wallet/bridge/Unified";
-    let addr_obj = JObject::from(addr_j);
-    let args = [JValue::Object(&addr_obj)];
-    let result = env
-        .call_static_method(
-            class_name,
-            "ensureBleTransportReady",
-            "(Ljava/lang/String;)Z",
-            &args,
-        )
-        .map_err(|e| format!("call_static_method ensureBleTransportReady failed: {e}"))?;
-    Ok(result.z().unwrap_or(false))
 }
 
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
@@ -3132,23 +3133,43 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_processBleChu
                     .into_raw();
                 }
             };
+        let adapter = match crate::runtime::get_runtime()
+            .block_on(crate::bridge::get_ble_transport_adapter())
+        {
+            Ok(adapter) => adapter,
+            Err(e) => {
+                return error_byte_array(
+                    &mut env,
+                    helpers::JniErrorCode::NotReady as u32,
+                    &format!("BLE transport adapter not ready: {e}"),
+                )
+                .into_raw();
+            }
+        };
 
-        let result = crate::runtime::get_runtime().block_on(async {
-            coord
-                .handle_ble_chunk_with_address(&bytes, Some(addr.as_str()))
-                .await
-        });
+        let result: Result<Option<Vec<u8>>, dsm::types::error::DsmError> =
+            crate::runtime::get_runtime().block_on(async {
+                match coord.ingest_chunk(&bytes).await? {
+                    crate::bluetooth::FrameIngressResult::NeedMoreChunks => Ok(None),
+                    crate::bluetooth::FrameIngressResult::ProtocolControl(_) => Ok(None),
+                    crate::bluetooth::FrameIngressResult::MessageComplete { message } => {
+                        let outbound = adapter
+                            .on_transport_message(crate::bluetooth::TransportInboundMessage {
+                                peer_address: addr.clone(),
+                                frame_type: message.frame_type,
+                                payload: message.payload,
+                            })
+                            .await?;
+                        Ok(outbound.into_iter().next().map(|item| item.payload))
+                    }
+                }
+            });
 
         match result {
-            Ok(Some(res)) => {
-                if let Some(payload) = res.response {
-                    env.byte_array_from_slice(&payload)
-                        .map(|a| a.into_raw())
-                        .unwrap_or_else(|_| empty_byte_array_or_empty(&mut env).into_raw())
-                } else {
-                    empty_byte_array_or_empty(&mut env).into_raw()
-                }
-            }
+            Ok(Some(payload)) => env
+                .byte_array_from_slice(&payload)
+                .map(|a| a.into_raw())
+                .unwrap_or_else(|_| empty_byte_array_or_empty(&mut env).into_raw()),
             Ok(None) => empty_byte_array_or_empty(&mut env).into_raw(),
             Err(e) => error_byte_array(
                 &mut env,
@@ -3267,7 +3288,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_processIncomi
 
         // Data routing: 0x03 prefix = complete Envelope v3; anything else = BLE chunk.
         let is_chunk = bytes.first() != Some(&0x03);
-        let maybe_response: Option<Vec<u8>> = if is_chunk {
+        let maybe_response: Option<Vec<crate::bluetooth::TransportOutbound>> = if is_chunk {
             let coord = match crate::runtime::get_runtime()
                 .block_on(crate::bridge::get_ble_coordinator())
             {
@@ -3281,28 +3302,76 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_processIncomi
                     .into_raw();
                 }
             };
-            crate::runtime::get_runtime()
-                .block_on(async {
-                    coord
-                        .handle_ble_chunk_with_address(&bytes, Some(addr.as_str()))
-                        .await
-                })
-                .ok()
-                .flatten()
-                .and_then(|res| res.response)
+            let adapter = match crate::runtime::get_runtime()
+                .block_on(crate::bridge::get_ble_transport_adapter())
+            {
+                Ok(adapter) => adapter,
+                Err(e) => {
+                    return error_byte_array(
+                        &mut env,
+                        helpers::JniErrorCode::NotReady as u32,
+                        &format!("processIncomingBleData: BLE transport adapter not ready: {e}"),
+                    )
+                    .into_raw();
+                }
+            };
+            let inbound_result: Result<
+                Option<Vec<crate::bluetooth::TransportOutbound>>,
+                dsm::types::error::DsmError,
+            > = crate::runtime::get_runtime().block_on(async {
+                match coord.ingest_chunk(&bytes).await? {
+                    crate::bluetooth::FrameIngressResult::NeedMoreChunks => {
+                        Ok::<
+                            Option<Vec<crate::bluetooth::TransportOutbound>>,
+                            dsm::types::error::DsmError,
+                        >(None)
+                    }
+                    crate::bluetooth::FrameIngressResult::ProtocolControl(_) => {
+                        Ok::<
+                            Option<Vec<crate::bluetooth::TransportOutbound>>,
+                            dsm::types::error::DsmError,
+                        >(None)
+                    }
+                    crate::bluetooth::FrameIngressResult::MessageComplete { message } => {
+                        let outbound = adapter
+                            .on_transport_message(crate::bluetooth::TransportInboundMessage {
+                                peer_address: addr.clone(),
+                                frame_type: message.frame_type,
+                                payload: message.payload,
+                            })
+                            .await?;
+                        if outbound.is_empty() {
+                            Ok(None)
+                        } else {
+                            Ok(Some(outbound))
+                        }
+                    }
+                }
+            });
+            inbound_result.ok().flatten()
         } else {
             process_envelope_v3_impl(&bytes, Some(&addr))
                 .ok()
                 .filter(|b| !b.is_empty())
+                .map(|payload| {
+                    vec![crate::bluetooth::TransportOutbound::new(
+                        ble_frame_type_from_i32(detect_ble_frame_type_from_bytes(&payload)),
+                        payload,
+                    )]
+                })
         };
 
         let mut response_chunks: Vec<Vec<u8>> = Vec::new();
         let mut pairing_complete = false;
         let mut use_reliable_write = false;
+        let mut confirm_commitment_hash: Vec<u8> = Vec::new();
 
-        if let Some(resp) = maybe_response {
-            if !resp.is_empty() {
-                let frame_type = detect_ble_frame_type_from_bytes(&resp);
+        if let Some(outbounds) = maybe_response {
+            for outbound in outbounds {
+                if outbound.payload.is_empty() {
+                    continue;
+                }
+                let frame_type = outbound.frame_type as i32;
                 let needs_chunking = frame_type
                     == crate::generated::BleFrameType::BilateralCommit as i32
                     || frame_type == crate::generated::BleFrameType::BilateralCommitResponse as i32
@@ -3312,30 +3381,32 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_processIncomi
                     use_reliable_write = true;
                     if frame_type == crate::generated::BleFrameType::BilateralConfirm as i32 {
                         pairing_complete = true;
+                        confirm_commitment_hash =
+                            extract_confirm_commitment_hash(&outbound.payload)
+                                .map(|hash| hash.to_vec())
+                                .unwrap_or_default();
                     }
                     match crate::runtime::get_runtime()
                         .block_on(crate::bridge::get_ble_coordinator())
                     {
                         Ok(coord) => {
-                            let raw_env = strip_envelope_v3_framing(&resp);
-                            let ft = ble_frame_type_from_i32(frame_type);
-                            match coord.chunk_message(ft, raw_env) {
-                                Ok(chunks) => response_chunks = chunks,
+                            match coord.encode_message(outbound.frame_type, &outbound.payload) {
+                                Ok(chunks) => response_chunks.extend(chunks),
                                 Err(e) => {
                                     log::error!(
-                                        "processIncomingBleData: chunk_message failed: {e}"
+                                        "processIncomingBleData: encode_message failed: {e}"
                                     );
-                                    response_chunks.push(resp);
+                                    response_chunks.push(outbound.payload);
                                 }
                             }
                         }
                         Err(_) => {
                             // Coordinator unavailable — pass through unframed
-                            response_chunks.push(resp);
+                            response_chunks.push(outbound.payload);
                         }
                     }
                 } else {
-                    response_chunks.push(resp);
+                    response_chunks.push(outbound.payload);
                 }
             }
         }
@@ -3344,6 +3415,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_processIncomi
             response_chunks,
             pairing_complete,
             use_reliable_write,
+            confirm_commitment_hash,
         };
         let encoded = prost::Message::encode_to_vec(&out);
         env.byte_array_from_slice(&encoded)
@@ -3368,6 +3440,41 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_processIncomi
             .into_raw()
         }
     }
+}
+
+fn extract_confirm_commitment_hash(payload: &[u8]) -> Option<[u8; 32]> {
+    let envelope = crate::generated::Envelope::decode(&mut std::io::Cursor::new(payload)).ok()?;
+    let tx = match envelope.payload? {
+        crate::generated::envelope::Payload::UniversalTx(tx) => tx,
+        _ => return None,
+    };
+    let op = tx.ops.first()?;
+    let invoke = match &op.kind {
+        Some(crate::generated::universal_op::Kind::Invoke(invoke))
+            if invoke.method == "bilateral.confirm" =>
+        {
+            invoke
+        }
+        _ => return None,
+    };
+
+    if let Some(op_id) = &op.op_id {
+        if op_id.v.len() == 32 {
+            let mut hash = [0u8; 32];
+            hash.copy_from_slice(&op_id.v);
+            return Some(hash);
+        }
+    }
+
+    let args = invoke.args.as_ref()?;
+    let confirm = crate::generated::BilateralConfirmRequest::decode(args.body.as_slice()).ok()?;
+    let hash32 = confirm.commitment_hash?;
+    if hash32.v.len() != 32 {
+        return None;
+    }
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&hash32.v);
+    Some(hash)
 }
 
 /// Extract `response_chunks` from a `BleIncomingDataResponse` proto.
@@ -3458,6 +3565,38 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bleDataRespon
                 flags |= 2;
             }
             flags
+        }),
+    )
+}
+
+/// Extract exact BilateralConfirm commitment hash from a `BleIncomingDataResponse` proto.
+#[no_mangle]
+#[cfg(all(target_os = "android", feature = "bluetooth"))]
+pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bleDataResponseExtractConfirmCommitmentHash(
+    env: jni::sys::JNIEnv,
+    _clazz: jni::sys::jclass,
+    response_proto: jni::sys::jbyteArray,
+) -> jni::sys::jbyteArray {
+    crate::jni::bridge_utils::jni_catch_unwind_jbytearray(
+        "bleDataResponseExtractConfirmCommitmentHash",
+        std::panic::AssertUnwindSafe(|| {
+            let mut env = match unsafe { env_from(env) } {
+                Some(e) => e,
+                None => return std::ptr::null_mut(),
+            };
+            let jba = unsafe { jba_from(response_proto) };
+            let bytes = match env.convert_byte_array(&jba) {
+                Ok(v) => v,
+                Err(_) => return empty_byte_array_or_empty(&mut env).into_raw(),
+            };
+            let resp: crate::generated::BleIncomingDataResponse =
+                match prost::Message::decode(bytes.as_slice()) {
+                    Ok(r) => r,
+                    Err(_) => return empty_byte_array_or_empty(&mut env).into_raw(),
+                };
+            env.byte_array_from_slice(&resp.confirm_commitment_hash)
+                .map(|a| a.into_raw())
+                .unwrap_or_else(|_| empty_byte_array_or_empty(&mut env).into_raw())
         }),
     )
 }
@@ -3770,8 +3909,22 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_acceptBilater
                 }
             };
 
+        let transport_adapter = match crate::runtime::get_runtime()
+            .block_on(crate::bridge::get_ble_transport_adapter())
+        {
+            Ok(adapter) => adapter,
+            Err(e) => {
+                return error_byte_array(
+                    &mut env,
+                    helpers::JniErrorCode::NotReady as u32,
+                    &format!("BLE transport adapter not ready: {e}"),
+                )
+                .into_raw();
+            }
+        };
+
         let (envelope_bytes, counterparty_device_id) = match crate::runtime::get_runtime()
-            .block_on(coord.create_prepare_accept_envelope_with_counterparty(ch))
+            .block_on(transport_adapter.create_prepare_accept_envelope_with_counterparty(ch))
         {
             Ok(v) => v,
             Err(e) => {
@@ -3784,14 +3937,8 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_acceptBilater
             }
         };
 
-        let sender_ble_address = crate::runtime::get_runtime().block_on(async {
-            coord
-                .bilateral_handler()
-                .get_session_for_commitment(&ch)
-                .await
-                .and_then(|s| s.sender_ble_address)
-                .filter(|s| !s.is_empty())
-        });
+        let sender_ble_address = crate::runtime::get_runtime()
+            .block_on(transport_adapter.sender_ble_address_for_commitment(ch));
 
         let mut addr = sender_ble_address;
         if addr.is_none() {
@@ -3813,7 +3960,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_acceptBilater
         };
 
         let chunks = match coord
-            .chunk_message(pb::BleFrameType::BilateralPrepareResponse, &envelope_bytes)
+            .encode_message(pb::BleFrameType::BilateralPrepareResponse, &envelope_bytes)
         {
             Ok(c) => c,
             Err(e) => {
@@ -3932,9 +4079,22 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_rejectBilater
                 }
             };
 
+            let transport_adapter = match crate::runtime::get_runtime()
+                .block_on(crate::bridge::get_ble_transport_adapter())
+            {
+                Ok(adapter) => adapter,
+                Err(e) => {
+                    return error_byte_array(
+                        &mut env,
+                        helpers::JniErrorCode::NotReady as u32,
+                        &format!("BLE transport adapter not ready: {e}"),
+                    )
+                    .into_raw();
+                }
+            };
+
             let envelope_bytes = match crate::runtime::get_runtime().block_on(
-                coord
-                    .bilateral_handler()
+                transport_adapter
                     .create_prepare_reject_envelope_with_cleanup(ch, reason_str.clone()),
             ) {
                 Ok(v) => v,
@@ -3948,23 +4108,13 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_rejectBilater
                 }
             };
 
-            let sender_ble_address = crate::runtime::get_runtime().block_on(async {
-                coord
-                    .bilateral_handler()
-                    .get_session_for_commitment(&ch)
-                    .await
-                    .and_then(|s| s.sender_ble_address)
-                    .filter(|s| !s.is_empty())
-            });
+            let sender_ble_address = crate::runtime::get_runtime()
+                .block_on(transport_adapter.sender_ble_address_for_commitment(ch));
 
             let mut addr = sender_ble_address;
             if addr.is_none() {
-                let counterparty = crate::runtime::get_runtime().block_on(async {
-                    coord
-                        .bilateral_handler()
-                        .get_counterparty_for_commitment(&ch)
-                        .await
-                });
+                let counterparty = crate::runtime::get_runtime()
+                    .block_on(async { transport_adapter.counterparty_for_commitment(ch).await });
                 if let Some(dev_id) = counterparty {
                     if let Ok(Some(contact)) = get_contact_by_device_id(&dev_id) {
                         addr = contact.ble_address;
@@ -4546,8 +4696,11 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_initializeSdk
                     let seed = hasher.finalize();
                     let public_key = seed.as_bytes()[0..32].to_vec();
 
-                    // Use empty SMT root (same as bootstrap adapter)
-                    let smt_root = dsm::merkle::sparse_merkle_tree::empty_leaf().to_vec();
+                    // Use the canonical empty SMT root (same as bootstrap adapter)
+                    let smt_root = dsm::merkle::sparse_merkle_tree::empty_root(
+                        dsm::merkle::sparse_merkle_tree::DEFAULT_SMT_HEIGHT,
+                    )
+                    .to_vec();
 
                     // Set identity info in AppState (idempotent)
                     crate::sdk::app_state::AppState::set_identity_info_if_empty(
@@ -5738,25 +5891,6 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_prepareNfcWri
     )
 }
 
-/// Check if NFC backup is currently enabled.
-/// Returns 1 (true) or 0 (false) as a single-byte array.
-#[no_mangle]
-pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_isNfcBackupEnabled(
-    _env: jni::sys::JNIEnv,
-    _clazz: jni::sys::jclass,
-) -> jni::sys::jboolean {
-    crate::jni::bridge_utils::jni_catch_unwind_jboolean(
-        "isNfcBackupEnabled",
-        std::panic::AssertUnwindSafe(|| {
-            if crate::sdk::recovery_sdk::RecoverySDK::is_nfc_backup_enabled() {
-                jni::sys::JNI_TRUE
-            } else {
-                jni::sys::JNI_FALSE
-            }
-        }),
-    )
-}
-
 /// Clear the pending recovery capsule after a successful NFC write.
 /// Called by Kotlin after `Ndef.writeNdefMessage()` succeeds.
 #[no_mangle]
@@ -5764,10 +5898,11 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_clearPendingR
     _env: jni::sys::JNIEnv,
     _clazz: jni::sys::jclass,
 ) {
-    // Prune all but the latest capsule (effectively clearing the "pending" state
-    // since the latest has been written). We keep the latest for reference/re-write.
-    let _ = crate::storage::client_db::recovery::prune_old_capsules(1);
-    log::info!("[NFC_BACKUP] Pending capsule cleared after successful NFC write");
+    if let Err(e) = crate::storage::client_db::recovery::clear_pending_recovery_capsule() {
+        log::warn!("[NFC_BACKUP] Failed to clear pending capsule marker: {e}");
+    } else {
+        log::info!("[NFC_BACKUP] Pending capsule cleared after successful NFC write");
+    }
 }
 
 /// Derive a 4-byte NFC hardware password from device identity.

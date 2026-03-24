@@ -109,6 +109,41 @@ internal object BridgeRouterHandler {
                 }}
                 return result
             }
+            "nfc.ring.read" -> {
+                // NFC ring read flow (Invariant: Rust first, Kotlin operates hardware).
+                //
+                // 1. Forward to Rust for authorization.
+                // 2. If authorized, enable reader mode on MainActivity (inline — no Activity switch).
+                // 3. Return the Rust FramedEnvelopeV3 to the caller.
+
+                val nativeFramedPayload2 = BridgeEnvelopeCodec.encodeAppRouterPayload(name, args)
+                val rustResponse = Unified.appRouterInvokeFramedSafe(nativeFramedPayload2)
+
+                val isError = Unified.isErrorEnvelope(rustResponse) != 0
+                if (!isError) {
+                    com.dsm.wallet.ui.MainActivity.getActiveInstance()?.startNfcReader()
+                    Log.i(logTag, "nfc.ring.read: Enabled inline NFC reader on MainActivity")
+                } else {
+                    Log.w(logTag, "nfc.ring.read: Rust rejected read request")
+                }
+
+                val result = ByteArray(reqId.size + rustResponse.size)
+                System.arraycopy(reqId, 0, result, 0, reqId.size)
+                System.arraycopy(rustResponse, 0, result, reqId.size, rustResponse.size)
+                return result
+            }
+            "nfc.ring.stopRead" -> {
+                // Stop NFC reader mode on MainActivity.
+                com.dsm.wallet.ui.MainActivity.getActiveInstance()?.stopNfcReader()
+                Log.i(logTag, "nfc.ring.stopRead: Disabled NFC reader")
+
+                // No Rust round-trip needed — this is a pure hardware teardown.
+                val ack = BridgeEnvelopeCodec.encodeAppRouterPayload("nfc.ring.stopRead", ByteArray(0))
+                val result = ByteArray(reqId.size + ack.size)
+                System.arraycopy(reqId, 0, result, 0, reqId.size)
+                System.arraycopy(ack, 0, result, reqId.size, ack.size)
+                return result
+            }
             "nfc.ring.write" -> {
                 // NFC ring write flow (Invariant: Rust first, Kotlin operates hardware).
                 //
