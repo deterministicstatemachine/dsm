@@ -93,3 +93,4 @@ path = "src/main.rs"
 [dev-dependencies]
 hyper = { version = "0.14", features = ["full"] }
 prost = "0.13"
+serial_test = "3"

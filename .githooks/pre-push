@@ -35,7 +35,7 @@ pass "cargo clippy"
 # 2. Tests
 # ---------------------------------------------------------------------------
 info "Running test suite..."
-if ! cargo test --locked --workspace 2>&1; then
+if ! cargo test --locked --workspace --features local-dev 2>&1; then
   fail "cargo test failed — fix failing tests before pushing"
 fi
 pass "cargo test"
