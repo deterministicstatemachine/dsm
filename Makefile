@@ -245,7 +245,8 @@ install-only: ## Install existing APK without rebuilding (fast iteration)
 .PHONY: test
 test: ## Run Rust workspace tests + frontend jest tests
 	@echo "==> Running Rust tests..."
-	cargo test --workspace -- --nocapture
+	cargo test --workspace --exclude dsm_storage_node -- --nocapture
+	cargo test -p dsm_storage_node --no-default-features --features local-dev,strict -- --nocapture
 	@echo "==> Running frontend tests..."
 	cd $(FRONTEND_DIR) && \
 		[ -s $$HOME/.nvm/nvm.sh ] && . $$HOME/.nvm/nvm.sh; \
@@ -254,7 +255,11 @@ test: ## Run Rust workspace tests + frontend jest tests
 
 .PHONY: test-rust
 test-rust: ## Run Rust tests only
-	cargo test --workspace -- --nocapture
+	# Most of the workspace uses the default (postgres-feature) build.
+	# dsm_storage_node integration tests use the local-dev (SQLite) build so
+	# they run without a live PostgreSQL instance.
+	cargo test --workspace --exclude dsm_storage_node -- --nocapture
+	cargo test -p dsm_storage_node --no-default-features --features local-dev,strict -- --nocapture
 
 .PHONY: test-frontend
 test-frontend: ## Run frontend jest tests only
