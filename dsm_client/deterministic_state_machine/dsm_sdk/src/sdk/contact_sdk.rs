@@ -750,8 +750,18 @@ impl ContactManager {
         expected_parent_tip: [u8; 32],
         new_chain_tip: [u8; 32],
     ) -> Result<(), ContactError> {
+        // §4.2: SMT-Replace is mandatory for every state transition.
+        let smt_arc = crate::security::shared_smt::get_shared_smt()
+            .ok_or(ContactError::InvalidContactData(
+                "Per-Device SMT not initialized — cannot produce valid proof (§4.2)".into(),
+            ))?;
+        let smt = smt_arc.read().await;
+        let smt_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
+            &self.device_id,
+            &contact_device_id,
+        );
         let mut mgr = self.dsm_manager.write().await;
-        mgr.update_contact_chain_tip_unilateral(&contact_device_id, new_chain_tip)?;
+        mgr.update_contact_chain_tip_unilateral(&contact_device_id, new_chain_tip, &smt, &smt_key)?;
 
         match crate::storage::client_db::try_advance_finalized_bilateral_chain_tip(
             &contact_device_id,

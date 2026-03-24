@@ -372,6 +372,67 @@ impl SparseMerkleTree {
         self.eviction_order.clear();
         self.root = self.defaults[0];
     }
+
+    /// Atomic SMT-Replace: update leaf from old value to `new_value`,
+    /// returning pre/post roots and inclusion proofs for both.
+    ///
+    /// This is the canonical §4.2 operation. Hard-fails if update_leaf fails
+    /// (receipt MUST contain valid r'_A).
+    ///
+    /// For first-ever transactions where the key has no prior leaf, the parent
+    /// proof will have `value: None` (ZERO_LEAF / non-inclusion).
+    pub fn smt_replace(
+        &mut self,
+        key: &[u8; 32],
+        new_value: &[u8; 32],
+    ) -> Result<SmtReplaceResult, &'static str> {
+        let pre_root = self.root;
+
+        // Parent proof: inclusion of h_n (or ZERO_LEAF for first tx).
+        // If key doesn't exist yet, construct a default non-inclusion proof.
+        let parent_proof = self.get_inclusion_proof(key, 256).unwrap_or(
+            SmtInclusionProof {
+                key: *key,
+                value: None,
+                siblings: Vec::new(),
+            },
+        );
+
+        self.update_leaf(key, new_value)?;
+
+        let post_root = self.root;
+
+        // Child proof: inclusion of h_{n+1} — must succeed since we just inserted.
+        let child_proof = self.get_inclusion_proof(key, 256)?;
+
+        Ok(SmtReplaceResult {
+            pre_root,
+            post_root,
+            parent_proof,
+            child_proof,
+        })
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────
+// SMT-Replace result (§4.2)
+// ───────────────────────────────────────────────────────────────────
+
+/// Result of an atomic SMT-Replace operation (§4.2).
+///
+/// Contains the pre/post roots and inclusion proofs needed to construct
+/// a ReceiptCommit with valid `parent_root`, `child_root`, `rel_proof_parent`,
+/// and `rel_proof_child` fields.
+#[derive(Debug, Clone)]
+pub struct SmtReplaceResult {
+    /// SMT root before the update (r_A).
+    pub pre_root: [u8; 32],
+    /// SMT root after the update (r'_A).
+    pub post_root: [u8; 32],
+    /// Inclusion proof for h_n ∈ r_A (value=None for first-ever tx).
+    pub parent_proof: SmtInclusionProof,
+    /// Inclusion proof for h_{n+1} ∈ r'_A.
+    pub child_proof: SmtInclusionProof,
 }
 
 // ───────────────────────────────────────────────────────────────────
@@ -397,6 +458,59 @@ impl SmtInclusionProof {
         1 + // value present flag
         if self.value.is_some() { 32 } else { 0 } + // value
         4 + self.siblings.len() * 32 // siblings
+    }
+
+    /// Serialize to bytes: [32-byte key][1-byte has_value][optional 32-byte value][4-byte LE count][32-byte siblings...]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(self.size_bytes());
+        buf.extend_from_slice(&self.key);
+        buf.push(self.value.is_some() as u8);
+        if let Some(v) = &self.value {
+            buf.extend_from_slice(v);
+        }
+        buf.extend_from_slice(&(self.siblings.len() as u32).to_le_bytes());
+        for s in &self.siblings {
+            buf.extend_from_slice(s);
+        }
+        buf
+    }
+
+    /// Deserialize from bytes. Returns `None` on malformed input.
+    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+        if data.len() < 33 {
+            return None;
+        }
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&data[..32]);
+        let has_value = data[32] != 0;
+        let mut offset = 33;
+        let value = if has_value {
+            if data.len() < offset + 32 {
+                return None;
+            }
+            let mut v = [0u8; 32];
+            v.copy_from_slice(&data[offset..offset + 32]);
+            offset += 32;
+            Some(v)
+        } else {
+            None
+        };
+        if data.len() < offset + 4 {
+            return None;
+        }
+        let count =
+            u32::from_le_bytes(data[offset..offset + 4].try_into().ok()?) as usize;
+        offset += 4;
+        if data.len() < offset + count * 32 {
+            return None;
+        }
+        let mut siblings = Vec::with_capacity(count);
+        for i in 0..count {
+            let mut s = [0u8; 32];
+            s.copy_from_slice(&data[offset + i * 32..offset + (i + 1) * 32]);
+            siblings.push(s);
+        }
+        Some(SmtInclusionProof { key, value, siblings })
     }
 }
 

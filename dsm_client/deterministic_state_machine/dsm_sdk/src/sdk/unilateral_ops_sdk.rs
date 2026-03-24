@@ -31,6 +31,8 @@ pub struct UnilateralOpsSDK {
     device_id: String,
     /// Canonical device id bytes (32). All-zeros indicates "pre-genesis".
     pub(crate) device_id_bytes: [u8; 32],
+    /// Per-Device SMT (§2.2). Every state transition requires SMT-Replace (§4.2).
+    per_device_smt: Arc<RwLock<dsm::merkle::sparse_merkle_tree::SparseMerkleTree>>,
 }
 
 impl UnilateralOpsSDK {
@@ -98,6 +100,9 @@ impl UnilateralOpsSDK {
             device_id_b32,
             device_id_bytes,
         ))
+        // Note: disabled() is pre-genesis. The shared SMT singleton
+        // is initialized by init_shared_smt(256) in the constructors above.
+        // No transactions should be attempted until post-genesis.
     }
     /// Create a new UnilateralOpsSDK.
     pub fn new(
@@ -105,11 +110,13 @@ impl UnilateralOpsSDK {
         contact_manager: Arc<RwLock<DsmContactManager>>,
         device_id: String,
     ) -> Self {
+        let per_device_smt = crate::security::shared_smt::init_shared_smt(256);
         Self {
             b0x_sdk: Arc::new(RwLock::new(b0x_sdk)),
             contact_manager,
             device_id,
             device_id_bytes: [0u8; 32],
+            per_device_smt,
         }
     }
 
@@ -120,11 +127,13 @@ impl UnilateralOpsSDK {
         device_id: String,
         device_id_bytes: [u8; 32],
     ) -> Self {
+        let per_device_smt = crate::security::shared_smt::init_shared_smt(256);
         Self {
             b0x_sdk: Arc::new(RwLock::new(b0x_sdk)),
             contact_manager,
             device_id,
             device_id_bytes,
+            per_device_smt,
         }
     }
 
@@ -266,8 +275,14 @@ impl UnilateralOpsSDK {
                 let mut next_tip = [0u8; 32];
                 next_tip.copy_from_slice(&next_tip_bytes);
 
+                // §4.2: SMT-Replace is mandatory for every state transition.
+                let smt = self.per_device_smt.read().await;
+                let smt_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
+                    &self.device_id_bytes,
+                    &recipient,
+                );
                 let mut cm = self.contact_manager.write().await;
-                if let Err(e) = cm.update_contact_chain_tip_unilateral(&recipient, next_tip) {
+                if let Err(e) = cm.update_contact_chain_tip_unilateral(&recipient, next_tip, &smt, &smt_key) {
                     return Err(DsmError::InvalidState(format!(
                         "UnilateralOpsSDK: failed to update in-memory contact chain tip after submission: {e}"
                     )));
@@ -489,6 +504,7 @@ impl UnilateralOpsSDK {
         let smt_proof = ChainTipSmtProof {
             smt_root: [0u8; 32],
             state_hash: id32("next_chain_tip", &entry.next_chain_tip)?,
+            smt_key: [0u8; 32],
             proof_path: vec![],
             state_index: tick,
             proof_commit_height: tick,

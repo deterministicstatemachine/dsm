@@ -11,7 +11,10 @@ pub struct ChainTipSmtProof {
     pub smt_root: [u8; 32],
     /// State hash being proven
     pub state_hash: [u8; 32],
-    /// Merkle proof path
+    /// 256-bit SMT key for this relationship (k_{A↔B})
+    /// Required for Merkle path verification (determines bit-path through tree).
+    pub smt_key: [u8; 32],
+    /// Merkle proof path (sibling hashes, leaf-to-root order)
     pub proof_path: Vec<[u8; 32]>,
     /// State index in the SMT
     pub state_index: u64,

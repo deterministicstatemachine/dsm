@@ -17,7 +17,7 @@ use crate::core::state_machine::bilateral::BilateralStateManager;
 use crate::core::state_machine::relationship::RelationshipStatePair as StatePair;
 use crate::crypto::canonical_lp;
 use crate::crypto::signatures::SignatureKeyPair;
-use crate::merkle::sparse_merkle_tree::empty_leaf;
+use crate::merkle::sparse_merkle_tree::{empty_leaf, SmtReplaceResult, SparseMerkleTree};
 use crate::types::contact_types::{ChainTipSmtProof, DsmVerifiedContact};
 use crate::types::error::{DeterministicSafetyClass, DsmError};
 use crate::types::operations::Operation;
@@ -430,14 +430,16 @@ impl BilateralTransactionManager {
         )
     }
 
-    /// Update relationship anchor after state transition (public wrapper for receiver-side finalize)
+    /// Update relationship anchor after state transition (public wrapper for receiver-side finalize).
+    /// §4.2: Requires the Per-Device SMT for proof generation.
     pub fn update_anchor_public(
         &mut self,
         remote_device_id: &[u8; 32],
         anchor: &mut BilateralRelationshipAnchor,
         new_chain_tip: [u8; 32],
+        smt: &crate::merkle::sparse_merkle_tree::SparseMerkleTree,
     ) -> Result<(), DsmError> {
-        self.update_anchor(remote_device_id, anchor, new_chain_tip)
+        self.update_anchor(remote_device_id, anchor, new_chain_tip, smt)
     }
 
     /// Update anchor in-memory only — public wrapper for BLE receiver confirm (§4.2).
@@ -445,13 +447,15 @@ impl BilateralTransactionManager {
     /// Caller MUST persist the chain tip to SQLite atomically with the balance write
     /// via `apply_receiver_confirm_full_atomic()`. If the caller does not persist, the
     /// in-memory state will be ahead of SQLite until the next app restart.
+    /// §4.2: Requires the Per-Device SMT for proof generation.
     pub fn update_anchor_in_memory_public(
         &mut self,
         remote_device_id: &[u8; 32],
         anchor: &mut BilateralRelationshipAnchor,
         new_chain_tip: [u8; 32],
+        smt: &crate::merkle::sparse_merkle_tree::SparseMerkleTree,
     ) -> Result<(), DsmError> {
-        self.update_anchor_in_memory(remote_device_id, anchor, new_chain_tip)
+        self.update_anchor_in_memory(remote_device_id, anchor, new_chain_tip, smt)
     }
 
     /// Store real Per-Device SMT proof in the relationship anchor after BLE SMT-Replace.
@@ -473,6 +477,41 @@ impl BilateralTransactionManager {
                 smt_proof,
             );
         }
+    }
+
+    /// Perform atomic SMT-Replace for a bilateral relationship (§4.2).
+    ///
+    /// Updates the Per-Device SMT leaf from h_n to `new_chain_tip`, captures
+    /// pre/post roots and inclusion proofs, and stores the proof in the
+    /// relationship anchor. Returns the `SmtReplaceResult` for receipt construction.
+    ///
+    /// Hard-fails if the SMT update fails — §4.2 requires receipt to contain
+    /// valid r'_A.
+    pub fn commit_bilateral_smt_update(
+        &mut self,
+        smt: &mut SparseMerkleTree,
+        local_device_id: &[u8; 32],
+        remote_device_id: &[u8; 32],
+        new_chain_tip: &[u8; 32],
+    ) -> Result<SmtReplaceResult, DsmError> {
+        let smt_key = compute_smt_key(local_device_id, remote_device_id);
+
+        let result = smt.smt_replace(&smt_key, new_chain_tip).map_err(|e| {
+            DsmError::merkle(format!("SMT-Replace failed (§4.2): {e}"))
+        })?;
+
+        // Store proof in the relationship anchor
+        let proof = ChainTipSmtProof {
+            smt_root: result.post_root,
+            state_hash: *new_chain_tip,
+            smt_key,
+            proof_path: result.child_proof.siblings.clone(),
+            state_index: mono_commit_height_pub(),
+            proof_commit_height: mono_commit_height_pub(),
+        };
+        self.store_anchor_smt_proof(remote_device_id, proof);
+
+        Ok(result)
     }
 
     /// Compute transaction hash from state pair (public wrapper for receiver-side finalize)
@@ -877,15 +916,14 @@ impl BilateralTransactionManager {
         remote_device_id: &[u8; 32],
         anchor: &mut BilateralRelationshipAnchor,
         new_chain_tip: [u8; 32],
+        smt: &crate::merkle::sparse_merkle_tree::SparseMerkleTree,
     ) -> Result<(), DsmError> {
         let expected_parent_tip = anchor.chain_tip;
-        // Use the unilateral path: contact manager generates and verifies its own
-        // internal per-device SMT proof for the new chain tip (§4.2 Per-Device SMT Replace).
-        // The BLE handler may later call store_anchor_smt_proof() to override this with the
-        // full stitched-receipt proof (§B3).
+        let smt_key = compute_smt_key(&self.local_device_id, remote_device_id);
+        // §4.2: Every state transition requires real SMT proof.
         let payload = self
             .contact_manager
-            .update_contact_chain_tip_unilateral(remote_device_id, new_chain_tip)
+            .update_contact_chain_tip_unilateral(remote_device_id, new_chain_tip, smt, &smt_key)
             .map_err(|e| DsmError::InvalidContact(format!("{e:?}")))?;
         anchor.chain_tip = new_chain_tip;
         anchor.last_sync_at = mono_commit_height();
@@ -924,10 +962,12 @@ impl BilateralTransactionManager {
         remote_device_id: &[u8; 32],
         anchor: &mut BilateralRelationshipAnchor,
         new_chain_tip: [u8; 32],
+        smt: &crate::merkle::sparse_merkle_tree::SparseMerkleTree,
     ) -> Result<(), DsmError> {
+        let smt_key = compute_smt_key(&self.local_device_id, remote_device_id);
         let payload = self
             .contact_manager
-            .update_contact_chain_tip_unilateral(remote_device_id, new_chain_tip)
+            .update_contact_chain_tip_unilateral(remote_device_id, new_chain_tip, smt, &smt_key)
             .map_err(|e| DsmError::InvalidContact(format!("{e:?}")))?;
         anchor.chain_tip = new_chain_tip;
         anchor.last_sync_at = mono_commit_height();
@@ -1418,6 +1458,7 @@ mod tests {
         let dummy_proof = ChainTipSmtProof {
             smt_root: [1u8; 32],
             state_hash: updated.chain_tip,
+            smt_key: [0u8; 32],
             proof_path: Vec::new(),
             state_index: 0,
             proof_commit_height: 0,

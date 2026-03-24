@@ -1313,38 +1313,29 @@ impl AppRouterImpl {
         };
 
         let (receipt_commit_bytes, receipt_canonical_bytes) = {
-            let mut smt_guard = smt.write().await;
-            let pre_root = *smt_guard.root();
-
-            // Get pre-update inclusion proof (may fail if leaf doesn't exist yet — that's OK for first tx)
-            let pre_proof_bytes = smt_guard
-                .get_inclusion_proof(&smt_key, 131072)
-                .ok()
-                .map(|p| crate::sdk::receipts::serialize_inclusion_proof(&p))
-                .unwrap_or_default();
-
-            // SMT-Replace
-            if let Err(e) = smt_guard.update_leaf(&smt_key, &new_chain_tip) {
-                drop(smt_guard);
-                crate::security::shared_smt::clear_pending_online(&smt_key).await;
-                Self::clear_balance_projection_after_rollback(
-                    &sender_device_id_str,
-                    &token_id,
-                    pre_send_balance,
-                );
-                self.wallet
-                    .force_set_balance_for_self(&token_id, pre_send_balance);
-                return err(format!(
-                    "wallet.send: SMT update_leaf failed (terminal): {e}"
-                ));
-            }
-
-            let post_root = *smt_guard.root();
-            let post_proof_bytes = smt_guard
-                .get_inclusion_proof(&smt_key, 131072)
-                .map(|p| crate::sdk::receipts::serialize_inclusion_proof(&p))
-                .unwrap_or_default();
-            drop(smt_guard);
+            // Atomic SMT-Replace via core (§4.2)
+            let result = {
+                let mut smt_guard = smt.write().await;
+                match smt_guard.smt_replace(&smt_key, &new_chain_tip) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        drop(smt_guard);
+                        crate::security::shared_smt::clear_pending_online(&smt_key).await;
+                        Self::clear_balance_projection_after_rollback(
+                            &sender_device_id_str,
+                            &token_id,
+                            pre_send_balance,
+                        );
+                        self.wallet
+                            .force_set_balance_for_self(&token_id, pre_send_balance);
+                        return err(format!(
+                            "wallet.send: SMT-Replace failed (terminal, §4.2): {e}"
+                        ));
+                    }
+                }
+            };
+            let pre_proof_bytes = result.parent_proof.to_bytes();
+            let post_proof_bytes = result.child_proof.to_bytes();
 
             // Build ReceiptCommit with real SMT roots and proofs
             // Use local Device Tree root (R_G) for receipt construction
@@ -1354,8 +1345,8 @@ impl AppRouterImpl {
                 to_device_id,
                 chain_tip_arr,
                 new_chain_tip,
-                pre_root,
-                post_root,
+                result.pre_root,
+                result.post_root,
                 pre_proof_bytes,
                 post_proof_bytes,
                 local_r_g,
@@ -1466,8 +1457,8 @@ impl AppRouterImpl {
             log::info!(
                 "[wallet.send] §4.2 SMT updated + receipt self-verified + sig_a embedded: smt_key={:?}.. pre_root={:?}.. post_root={:?}.. receipt_len={}",
                 &smt_key[..4],
-                &pre_root[..4],
-                &post_root[..4],
+                &result.pre_root[..4],
+                &result.post_root[..4],
                 rc.len(),
             );
             (rc, rc_canonical)

@@ -76,10 +76,8 @@ pub mod crypto;
 pub mod crypto_verification;
 pub mod emissions;
 pub mod envelope;
-pub mod limits;
 pub mod merkle;
 pub mod pbi;
-pub mod spend_gate;
 // #[cfg(feature = "perf")]
 pub mod bitcoin;
 pub mod performance;
