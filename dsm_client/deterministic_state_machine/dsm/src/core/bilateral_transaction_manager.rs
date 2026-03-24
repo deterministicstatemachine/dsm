@@ -572,6 +572,7 @@ impl BilateralTransactionManager {
     pub async fn establish_relationship(
         &mut self,
         remote_device_id: &[u8; 32],
+        smt: &mut crate::merkle::sparse_merkle_tree::SparseMerkleTree,
     ) -> Result<BilateralRelationshipAnchor, DsmError> {
         info!(
             "[BTM] establish_relationship: device={}",
@@ -625,6 +626,12 @@ impl BilateralTransactionManager {
             labeling::hash_to_short_id(&tip),
             contact_chain_tip.is_some()
         );
+        // §4.2: Seed the Per-Device SMT leaf to h0 so the first replace is
+        // h0 → h1, not empty → h1. The parent proof must show h_n ∈ r_A.
+        let smt_key = compute_smt_key(&self.local_device_id, remote_device_id);
+        smt.update_leaf(&smt_key, &tip)
+            .map_err(|e| DsmError::merkle(format!("Failed to seed SMT leaf for h0: {e}")))?;
+
         anchor.chain_tip = tip;
         self.relationships.insert(*remote_device_id, anchor.clone());
 
@@ -1379,7 +1386,8 @@ mod tests {
     async fn establish_relationship_missing_contact() {
         let (mut manager, _kp) = make_manager();
         let remote = make_remote_ids().0;
-        let res = manager.establish_relationship(&remote).await;
+        let mut smt = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
+        let res = manager.establish_relationship(&remote, &mut smt).await;
         assert!(res.is_err());
     }
 
@@ -1389,7 +1397,8 @@ mod tests {
         let contact = make_verified_contact("Alice", true, false);
         // Add contact (pre-verified API allows any, but BTM enforces on use)
         manager.add_verified_contact(contact.clone()).expect("add");
-        let res = manager.establish_relationship(&contact.device_id).await;
+        let mut smt = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
+        let res = manager.establish_relationship(&contact.device_id, &mut smt).await;
         assert!(matches!(res, Err(DsmError::InvalidContact(_))));
     }
 
@@ -1401,8 +1410,9 @@ mod tests {
         let remote_genesis = contact.genesis_hash;
         manager.add_verified_contact(contact).expect("add");
 
+        let mut smt = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
         let anchor = manager
-            .establish_relationship(&remote_id)
+            .establish_relationship(&remote_id, &mut smt)
             .await
             .expect("establish");
         assert_eq!(anchor.local_device_id, make_manager_ids().0);
@@ -1445,8 +1455,9 @@ mod tests {
         let contact = make_verified_contact("Carol", true, true);
         let remote_id = contact.device_id;
         manager.add_verified_contact(contact).expect("add");
+        let mut smt = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
         manager
-            .establish_relationship(&remote_id)
+            .establish_relationship(&remote_id, &mut smt)
             .await
             .expect("establish");
 
@@ -1469,8 +1480,9 @@ mod tests {
         let remote_id = contact.device_id;
         let remote_genesis = contact.genesis_hash;
         manager.add_verified_contact(contact).expect("add");
+        let mut smt = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
         let anchor = manager
-            .establish_relationship(&remote_id)
+            .establish_relationship(&remote_id, &mut smt)
             .await
             .expect("establish");
         // Establish relationship now uses deterministic initial relationship tip (h_0)
@@ -1522,8 +1534,9 @@ mod tests {
         let contact = make_verified_contact("RemoteTip", true, true);
         let remote_id = contact.device_id;
         manager.add_verified_contact(contact).expect("add");
+        let mut smt = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
         manager
-            .establish_relationship(&remote_id)
+            .establish_relationship(&remote_id, &mut smt)
             .await
             .expect("establish");
 
@@ -1549,8 +1562,9 @@ mod tests {
         let contact = make_verified_contact("Eve", true, true);
         let remote_id = contact.device_id;
         manager.add_verified_contact(contact).expect("add");
+        let mut smt = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
         manager
-            .establish_relationship(&remote_id)
+            .establish_relationship(&remote_id, &mut smt)
             .await
             .expect("establish");
         let op = signed_transfer_op(&manager.signature_keypair, "m", 4);
@@ -1575,7 +1589,8 @@ mod tests {
         let contact = make_verified_contact("Frank", false, true); // no public key
         let remote_id = contact.device_id;
         manager.add_verified_contact(contact).expect("add");
-        let res = manager.establish_relationship(&remote_id).await;
+        let mut smt = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
+        let res = manager.establish_relationship(&remote_id, &mut smt).await;
         assert!(matches!(res, Err(DsmError::InvalidContact(_))));
     }
 

@@ -163,12 +163,13 @@ async fn bilateral_offline_prepare_accept_commit_finalize_flow() {
         .unwrap_or_else(|e| panic!("add contact a failed: {e}"));
 
     // Establish relationships on both sides (ensures chain tips + keys set)
+    let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
     mgr_a
-        .establish_relationship(&b_dev)
+        .establish_relationship(&b_dev, &mut smt)
         .await
         .unwrap_or_else(|e| panic!("establish relationship a->b failed: {e}"));
     mgr_b
-        .establish_relationship(&a_dev)
+        .establish_relationship(&a_dev, &mut smt)
         .await
         .unwrap_or_else(|e| panic!("establish relationship b->a failed: {e}"));
 
@@ -337,12 +338,13 @@ async fn bilateral_offline_state_consistency_across_peers() {
         .add_verified_contact(contact_a.clone())
         .unwrap_or_else(|e| panic!("add contact a failed: {e}"));
 
+    let mut smt2 = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
     mgr_a
-        .establish_relationship(&b_dev)
+        .establish_relationship(&b_dev, &mut smt2)
         .await
         .unwrap_or_else(|e| panic!("establish relationship a->b failed: {e}"));
     mgr_b
-        .establish_relationship(&a_dev)
+        .establish_relationship(&a_dev, &mut smt2)
         .await
         .unwrap_or_else(|e| panic!("establish relationship b->a failed: {e}"));
 
