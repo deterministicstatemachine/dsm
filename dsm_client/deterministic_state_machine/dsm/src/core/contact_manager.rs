@@ -629,10 +629,11 @@ mod tests {
     #[test]
     fn test_chain_tip_proof_generation() {
         let verifier = LocalSmtVerifier::new();
-        let device_id = create_test_device_id(1);
         let chain_tip = [5u8; 32];
+        let smt = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
+        let smt_key = [0u8; 32];
 
-        let proof = verifier.create_chain_tip_proof(&device_id, &chain_tip);
+        let proof = verifier.create_chain_tip_proof_from_smt(&chain_tip, &smt, &smt_key);
         assert_eq!(proof.state_hash, chain_tip);
         assert_ne!(proof.smt_root, [0u8; 32], "SMT root should be non-zero");
     }
@@ -642,8 +643,10 @@ mod tests {
         let verifier = LocalSmtVerifier::new();
         let device_id = create_test_device_id(1);
         let chain_tip = [5u8; 32];
+        let smt = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
+        let smt_key = [0u8; 32];
 
-        let proof = verifier.create_chain_tip_proof(&device_id, &chain_tip);
+        let proof = verifier.create_chain_tip_proof_from_smt(&chain_tip, &smt, &smt_key);
         assert!(verifier.verify_chain_tip_with_proof(&device_id, &chain_tip, &proof));
     }
 
@@ -678,9 +681,11 @@ mod tests {
         let mut contact = create_test_contact(device_id, genesis_hash);
 
         let chain_tip = [5u8; 32];
+        let smt = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
+        let smt_key = [0u8; 32];
         let proof = manager
             .local_smt_verifier
-            .create_chain_tip_proof(&device_id, &chain_tip);
+            .create_chain_tip_proof_from_smt(&chain_tip, &smt, &smt_key);
 
         contact.chain_tip = Some(chain_tip);
         contact.chain_tip_smt_proof = Some(proof);
