@@ -71,6 +71,14 @@ pub use wallet_state::*;
 static DB_CONNECTION: RwLock<Option<Arc<Mutex<Connection>>>> = RwLock::new(None);
 const DB_FILE_NAME: &str = "dsm_client.db";
 
+/// Per-reset generation counter (test builds only). Incremented by
+/// `reset_database_for_tests()` so every reset+reinit cycle opens a
+/// brand-new named in-memory SQLite database, preventing
+/// SQLITE_LOCKED_SHAREDCACHE races caused by concurrent or lingering
+/// test connections that still hold the previous shared-cache handle.
+#[cfg(test)]
+static TEST_DB_GENERATION: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 pub fn init_database() -> Result<()> {
     {
         let guard = DB_CONNECTION
@@ -148,12 +156,18 @@ pub fn is_database_initialized() -> bool {
 
 /// Reset the database connection singleton for testing.
 ///
-/// Safe replacement for the former `unsafe` version that used `std::ptr::write`.
-/// Acquires a write lock and clears the connection. Use `#[serial_test]` to
-/// ensure tests run sequentially and no other thread holds the connection.
+/// Acquires a write lock, drops the current connection, then bumps
+/// `TEST_DB_GENERATION` so the next `init_database()` call opens a
+/// completely fresh named in-memory SQLite database. This prevents
+/// SQLITE_LOCKED_SHAREDCACHE errors that occur when a concurrent test
+/// still holds an Arc clone to the previous shared-cache connection.
 pub fn reset_database_for_tests() {
     if let Ok(mut guard) = DB_CONNECTION.write() {
         *guard = None;
+    }
+    #[cfg(test)]
+    {
+        TEST_DB_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -169,9 +183,14 @@ pub fn get_db_size() -> Result<u64> {
 fn get_database_path() -> Result<PathBuf> {
     if std::env::var("DSM_SDK_TEST_MODE").is_ok() {
         let pid = std::process::id();
-        return Ok(PathBuf::from(format!(
-            "file:dsm_sdk_test_{pid}?mode=memory&cache=shared"
-        )));
+        #[cfg(test)]
+        let uri = {
+            let gen = TEST_DB_GENERATION.load(std::sync::atomic::Ordering::Relaxed);
+            format!("file:dsm_sdk_test_{pid}_{gen}?mode=memory&cache=shared")
+        };
+        #[cfg(not(test))]
+        let uri = format!("file:dsm_sdk_test_{pid}?mode=memory&cache=shared");
+        return Ok(PathBuf::from(uri));
     }
 
     #[cfg(all(target_os = "android", not(test)))]
@@ -192,10 +211,13 @@ fn get_database_path() -> Result<PathBuf> {
 
     #[cfg(test)]
     {
-        // Use a per-test-process, shared in-memory DB.
+        // Each reset_database_for_tests() increments TEST_DB_GENERATION so
+        // every reset+reinit cycle uses a fresh named in-memory SQLite URI,
+        // preventing SQLITE_LOCKED_SHAREDCACHE races with other test connections.
         let pid = std::process::id();
+        let gen = TEST_DB_GENERATION.load(std::sync::atomic::Ordering::Relaxed);
         Ok(PathBuf::from(format!(
-            "file:dsm_sdk_test_{pid}?mode=memory&cache=shared"
+            "file:dsm_sdk_test_{pid}_{gen}?mode=memory&cache=shared"
         )))
     }
 }
