@@ -113,27 +113,29 @@ pub extern "system" fn JNI_OnLoad(
     vm: *mut jni::sys::JavaVM,
     _reserved: *mut core::ffi::c_void,
 ) -> jni::sys::jint {
-    // Prevent linker from dead-code eliminating JNI entry points by taking their addresses
-    // This ensures all #[no_mangle] JNI functions are included in the final library
-    let _ = bootstrap::Java_com_dsm_native_DsmNative_sdkBootstrap as usize;
+    // Prevent linker from dead-code eliminating JNI entry points by taking their addresses.
+    // Cast to `*const ()` (not `usize`) — direct fn-item-to-integer casts are rejected by
+    // recent Rust toolchains (E0606 / "direct cast of function item into an integer").
+    let _ = bootstrap::Java_com_dsm_native_DsmNative_sdkBootstrap as *const ();
     let _ = unified_protobuf_bridge::Java_com_dsm_wallet_bridge_UnifiedNativeApi_getSessionSnapshot
-        as usize;
-    let _ = unified_protobuf_bridge::Java_com_dsm_wallet_bridge_UnifiedNativeApi_updateSessionHardwareFacts as usize;
+        as *const ();
+    let _ = unified_protobuf_bridge::Java_com_dsm_wallet_bridge_UnifiedNativeApi_updateSessionHardwareFacts as *const ();
     let _ =
         unified_protobuf_bridge::Java_com_dsm_wallet_bridge_UnifiedNativeApi_setSessionFatalError
-            as usize;
+            as *const ();
     let _ =
         unified_protobuf_bridge::Java_com_dsm_wallet_bridge_UnifiedNativeApi_clearSessionFatalError
-            as usize;
-    let _ = cdbrw::Java_com_dsm_wallet_bridge_UnifiedNativeApi_cdbrwDomainHash as usize;
-    let _ = cdbrw::Java_com_dsm_wallet_bridge_UnifiedNativeApi_cdbrwEncapsDeterministic as usize;
+            as *const ();
+    let _ = cdbrw::Java_com_dsm_wallet_bridge_UnifiedNativeApi_cdbrwDomainHash as *const ();
     let _ =
-        cdbrw::Java_com_dsm_wallet_bridge_UnifiedNativeApi_cdbrwEnsureVerifierPublicKey as usize;
-    let _ = cdbrw::Java_com_dsm_wallet_bridge_UnifiedNativeApi_cdbrwSignResponse as usize;
-    let _ =
-        cdbrw::Java_com_dsm_wallet_bridge_UnifiedNativeApi_cdbrwVerifyChallengeResponse as usize;
-    let _ =
-        cdbrw::Java_com_dsm_wallet_bridge_UnifiedNativeApi_cdbrwVerifyResponseSignature as usize;
+        cdbrw::Java_com_dsm_wallet_bridge_UnifiedNativeApi_cdbrwEncapsDeterministic as *const ();
+    let _ = cdbrw::Java_com_dsm_wallet_bridge_UnifiedNativeApi_cdbrwEnsureVerifierPublicKey
+        as *const ();
+    let _ = cdbrw::Java_com_dsm_wallet_bridge_UnifiedNativeApi_cdbrwSignResponse as *const ();
+    let _ = cdbrw::Java_com_dsm_wallet_bridge_UnifiedNativeApi_cdbrwVerifyChallengeResponse
+        as *const ();
+    let _ = cdbrw::Java_com_dsm_wallet_bridge_UnifiedNativeApi_cdbrwVerifyResponseSignature
+        as *const ();
 
     // Initialize Rust logging early so all JNI functions produce logcat output.
     crate::logging::init_android_device_logging();
