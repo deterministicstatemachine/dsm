@@ -91,6 +91,11 @@ fn configure_local_identity_for_receipts(
         expected_root.as_slice(),
         "AppState must contain the canonical single-device R_G"
     );
+    assert_eq!(
+        sdk::sdk::app_state::AppState::get_genesis_hash(),
+        Some(genesis_hash.to_vec()),
+        "AppState must expose the local genesis hash for receipt construction"
+    );
 }
 
 /// Build a genesis state with ERA balance, archive to BCR, and install as the
