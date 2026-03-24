@@ -145,7 +145,7 @@ mockall = "0.12.1"
 tempfile = "3.10.0"
 test-log = { version = "0.2.14", features = ["trace"] }
 quickcheck = "1.0.3"
-proptest = "1.4.0"
+proptest = "1.11.0"
 rstest = "0.18.2"
 serial_test = "3.0.0"
 
