@@ -124,12 +124,13 @@ async fn make_handler_pair(
 
     mgr_a.add_verified_contact(contact_b).expect("add B to A");
     mgr_b.add_verified_contact(contact_a).expect("add A to B");
+    let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
     mgr_a
-        .establish_relationship(&b_dev)
+        .establish_relationship(&b_dev, &mut smt)
         .await
         .expect("A->B rel");
     mgr_b
-        .establish_relationship(&a_dev)
+        .establish_relationship(&a_dev, &mut smt)
         .await
         .expect("B->A rel");
 

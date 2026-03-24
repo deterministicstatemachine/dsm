@@ -716,7 +716,8 @@ impl BilateralBleHandler {
                     let _ = mgr.add_verified_contact(contact);
                 }
                 if mgr.get_relationship(&counterparty_device_id).is_none() {
-                    let _ = mgr.establish_relationship(&counterparty_device_id).await;
+                    let mut smt = self.per_device_smt.write().await;
+                    let _ = mgr.establish_relationship(&counterparty_device_id, &mut smt).await;
                 }
                 drop(mgr);
             } else {
@@ -1462,7 +1463,8 @@ impl BilateralBleHandler {
             }
 
             if mgr.get_relationship(&counterparty_device_id).is_none() {
-                mgr.establish_relationship(&counterparty_device_id)
+                let mut smt = self.per_device_smt.write().await;
+                mgr.establish_relationship(&counterparty_device_id, &mut smt)
                     .await
                     .map_err(|e| {
                         DsmError::relationship(format!("Failed to establish relationship: {e}"))
@@ -2792,7 +2794,7 @@ impl BilateralBleHandler {
             .map_err(|_| DsmError::invalid_operation("shared_chain_tip_new must be 32 bytes"))?;
 
         // RECEIVER-SIDE FINALIZE: Execute state transition, advance to sender's h_{n+1}
-        let (tx_result, h_n) = {
+        let (tx_result, h_n, replace_result) = {
             let mut manager = self.bilateral_tx_manager.write().await;
 
             let mut anchor = manager
@@ -2879,39 +2881,24 @@ impl BilateralBleHandler {
                 completed_offline: true,
             };
 
-            (result, h_n)
+            (result, h_n, replace_result)
         };
 
-        // Build receipt with real proofs from the replace result (§4.2)
+        // Build receipt with real proofs from the replace result (§4.2).
+        // No fake roots, no empty proofs — the real SmtReplaceResult carries
+        // pre_root (r_A), post_root (r'_A), parent_proof (π h_n ∈ r_A),
+        // and child_proof (π' h_{n+1} ∈ r'_A).
         let receipt_bytes = {
-            let result = {
-                // Re-read the SMT to get current root for receipt construction
-                let smt = self.per_device_smt.read().await;
-                let smt_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
-                    &self.device_id,
-                    &session.counterparty_device_id,
-                );
-                let proof = smt.get_inclusion_proof(&smt_key, 256)
-                    .map_err(|e| DsmError::merkle(format!("Post-replace proof failed: {e}")))?;
-                dsm::merkle::sparse_merkle_tree::SmtReplaceResult {
-                    pre_root: [0u8; 32], // Not needed for receipt — only post_root matters
-                    post_root: *smt.root(),
-                    parent_proof: dsm::merkle::sparse_merkle_tree::SmtInclusionProof {
-                        key: smt_key, value: None, siblings: Vec::new(),
-                    },
-                    child_proof: proof,
-                }
-            };
             let local_r_g = crate::sdk::app_state::AppState::get_device_tree_root();
             crate::sdk::receipts::build_bilateral_receipt_with_smt(
                 self.device_id,
                 session.counterparty_device_id,
                 h_n,
                 new_chain_tip,
-                result.pre_root,
-                result.post_root,
-                result.parent_proof.to_bytes(),
-                result.child_proof.to_bytes(),
+                replace_result.pre_root,
+                replace_result.post_root,
+                replace_result.parent_proof.to_bytes(),
+                replace_result.child_proof.to_bytes(),
                 local_r_g,
             )
         };
@@ -4049,7 +4036,8 @@ mod tests {
         {
             let mut mgr = bilateral_manager.write().await;
             mgr.add_verified_contact(contact).expect("add contact");
-            mgr.establish_relationship(&counterparty_device_id)
+            let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
+            mgr.establish_relationship(&counterparty_device_id, &mut smt)
                 .await
                 .expect("establish relationship");
         }

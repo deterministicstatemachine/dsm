@@ -329,8 +329,9 @@ async fn offline_real_protocol_ble_mock_roundtrip() {
     bob_mgr.add_verified_contact(contact_a).unwrap();
 
     // Establish relationships
-    alice_mgr.establish_relationship(&bob_dev_id).await.unwrap();
-    bob_mgr.establish_relationship(&alice_dev_id).await.unwrap();
+    let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
+    alice_mgr.establish_relationship(&bob_dev_id, &mut smt).await.unwrap();
+    bob_mgr.establish_relationship(&alice_dev_id, &mut smt).await.unwrap();
 
     let alice_mgr = Arc::new(RwLock::new(alice_mgr));
     let bob_mgr = Arc::new(RwLock::new(bob_mgr));
@@ -629,14 +630,15 @@ async fn offline_real_protocol_ble_mock_multi_relationship_multi_tx() {
     bob_mgr.add_verified_contact(contact_a_for_b).unwrap();
     carol_mgr.add_verified_contact(contact_a_for_c).unwrap();
 
-    alice_mgr.establish_relationship(&bob_dev_id).await.unwrap();
+    let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
+    alice_mgr.establish_relationship(&bob_dev_id, &mut smt).await.unwrap();
     alice_mgr
-        .establish_relationship(&carol_dev_id)
+        .establish_relationship(&carol_dev_id, &mut smt)
         .await
         .unwrap();
-    bob_mgr.establish_relationship(&alice_dev_id).await.unwrap();
+    bob_mgr.establish_relationship(&alice_dev_id, &mut smt).await.unwrap();
     carol_mgr
-        .establish_relationship(&alice_dev_id)
+        .establish_relationship(&alice_dev_id, &mut smt)
         .await
         .unwrap();
 

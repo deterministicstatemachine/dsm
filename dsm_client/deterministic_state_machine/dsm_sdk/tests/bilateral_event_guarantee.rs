@@ -186,12 +186,13 @@ async fn verify_frontend_event_guarantees() {
         .unwrap();
 
     // Establish relationships (required for Offline flow)
+    let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
     alice_mgr
-        .establish_relationship(&bob_dev_id)
+        .establish_relationship(&bob_dev_id, &mut smt)
         .await
         .expect("alice establish");
     bob_mgr
-        .establish_relationship(&alice_dev_id)
+        .establish_relationship(&alice_dev_id, &mut smt)
         .await
         .expect("bob establish");
 

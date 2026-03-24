@@ -1199,7 +1199,8 @@ mod tests {
                 let _ = mgr.add_verified_contact(contact);
             }
             if mgr.get_relationship(&counterparty).is_none() {
-                let _ = mgr.establish_relationship(&counterparty).await;
+                let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
+                let _ = mgr.establish_relationship(&counterparty, &mut smt).await;
             }
         }
 
@@ -1279,10 +1280,11 @@ mod tests {
             }
         }
         rt.block_on(async {
+            let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
             match bilateral_mgr
                 .write()
                 .await
-                .establish_relationship(&cp)
+                .establish_relationship(&cp, &mut smt)
                 .await
             {
                 Ok(_) => {}

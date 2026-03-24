@@ -92,8 +92,9 @@ async fn ble_smoke_prepare_roundtrip() {
         BilateralTransactionManager::new(contact_manager, keypair, device_id, genesis_hash);
 
     // Establish bilateral relationship before attempting prepare
+    let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
     manager
-        .establish_relationship(&recipient_id)
+        .establish_relationship(&recipient_id, &mut smt)
         .await
         .unwrap_or_else(|e| panic!("establish relationship failed: {e}"));
 
