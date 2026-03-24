@@ -12,9 +12,7 @@ use dsm::merkle::sparse_merkle_tree::{
     default_node, empty_root, hash_smt_node, DEFAULT_SMT_HEIGHT, ZERO_LEAF,
 };
 use dsm::verification::smt_replace_witness::{
-    hash_smt_leaf,
-    hash_smt_node as witness_hash_node,
-    SmtReplaceWitness,
+    hash_smt_leaf, hash_smt_node as witness_hash_node, SmtReplaceWitness,
 };
 use dsm::core::bilateral_transaction_manager::{
     compute_precommit, compute_smt_key, compute_successor_tip,
@@ -123,9 +121,19 @@ fn golden_tag_initial_chain_tip() {
     let remote_genesis = [0x02u8; 32];
 
     let (genesis_a, device_a, genesis_b, device_b) = if local_device_id < remote_device_id {
-        (&local_genesis, &local_device_id, &remote_genesis, &remote_device_id)
+        (
+            &local_genesis,
+            &local_device_id,
+            &remote_genesis,
+            &remote_device_id,
+        )
     } else {
-        (&remote_genesis, &remote_device_id, &local_genesis, &local_device_id)
+        (
+            &remote_genesis,
+            &remote_device_id,
+            &local_genesis,
+            &local_device_id,
+        )
     };
 
     let mut h = dsm_domain_hasher("DSM/bilateral-session");
@@ -183,8 +191,7 @@ fn golden_default_node_0_is_zero() {
         "default_node(0) must be ZERO_LEAF (all zeros)"
     );
     assert_eq!(
-        node,
-        ZERO_LEAF,
+        node, ZERO_LEAF,
         "default_node(0) must equal ZERO_LEAF constant"
     );
 }
@@ -206,7 +213,8 @@ fn golden_default_node_chain_consistent() {
         let child = default_node(n - 1);
         let recomputed = hash_smt_node(&child, &child);
         assert_eq!(
-            expected, recomputed,
+            expected,
+            recomputed,
             "default_node({n}) != hash_smt_node(default_node({}), default_node({}))",
             n - 1,
             n - 1,
@@ -320,12 +328,10 @@ fn smt_replace_witness_roundtrip() {
         wire.extend_from_slice(&siblings[i]);
     }
 
-    let witness = SmtReplaceWitness::from_bytes(&wire)
-        .expect("valid witness bytes must parse");
+    let witness = SmtReplaceWitness::from_bytes(&wire).expect("valid witness bytes must parse");
 
     // Re-encode manually and decode again
-    let witness2 = SmtReplaceWitness::from_bytes(&wire)
-        .expect("second parse must succeed");
+    let witness2 = SmtReplaceWitness::from_bytes(&wire).expect("second parse must succeed");
 
     // Both must produce the same root from an arbitrary leaf
     let leaf = hash_smt_leaf(&[0x42; 32]);
@@ -346,10 +352,7 @@ fn smt_replace_witness_rejects_bad_is_left() {
     wire.extend_from_slice(&[0xDD; 32]);
 
     let result = SmtReplaceWitness::from_bytes(&wire);
-    assert!(
-        result.is_none(),
-        "witness with is_left=2 must be rejected"
-    );
+    assert!(result.is_none(), "witness with is_left=2 must be rejected");
 }
 
 // ===========================================================================
@@ -367,10 +370,7 @@ fn msb_first_all_256_positions() {
 
         // Extract bit at position N using MSB-first convention
         let extracted = (key[n / 8] >> (7 - n % 8)) & 1;
-        assert_eq!(
-            extracted, 1,
-            "bit {n} should be 1 in the constructed key"
-        );
+        assert_eq!(extracted, 1, "bit {n} should be 1 in the constructed key");
 
         // Verify all other sampled positions are 0
         for m in [0, 1, 127, 128, 255] {
@@ -378,10 +378,7 @@ fn msb_first_all_256_positions() {
                 continue;
             }
             let other = (key[m / 8] >> (7 - m % 8)) & 1;
-            assert_eq!(
-                other, 0,
-                "bit {m} should be 0 when only bit {n} is set"
-            );
+            assert_eq!(other, 0, "bit {m} should be 0 when only bit {n} is set");
         }
     }
 }

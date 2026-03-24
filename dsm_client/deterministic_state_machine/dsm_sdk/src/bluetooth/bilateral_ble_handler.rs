@@ -739,7 +739,9 @@ impl BilateralBleHandler {
                 }
                 if mgr.get_relationship(&counterparty_device_id).is_none() {
                     let mut smt = self.per_device_smt.write().await;
-                    let _ = mgr.establish_relationship(&counterparty_device_id, &mut smt).await;
+                    let _ = mgr
+                        .establish_relationship(&counterparty_device_id, &mut smt)
+                        .await;
                 }
                 drop(mgr);
             } else {
@@ -3571,7 +3573,9 @@ impl BilateralBleHandler {
     }
 
     /// Per-Device SMT for relationship chain tips (§18.1)
-    pub fn per_device_smt(&self) -> &Arc<RwLock<dsm::merkle::sparse_merkle_tree::SparseMerkleTree>> {
+    pub fn per_device_smt(
+        &self,
+    ) -> &Arc<RwLock<dsm::merkle::sparse_merkle_tree::SparseMerkleTree>> {
         &self.per_device_smt
     }
 

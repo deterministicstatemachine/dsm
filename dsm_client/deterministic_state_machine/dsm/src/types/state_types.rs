@@ -1292,7 +1292,9 @@ impl MerkleProof {
             .map(|s| SerializableHash::new(blake3::Hash::from_bytes(*s)))
             .collect();
 
-        let value_bytes = proof.value.unwrap_or(crate::merkle::sparse_merkle_tree::ZERO_LEAF);
+        let value_bytes = proof
+            .value
+            .unwrap_or(crate::merkle::sparse_merkle_tree::ZERO_LEAF);
 
         let params = MerkleProofParams {
             path: siblings,
