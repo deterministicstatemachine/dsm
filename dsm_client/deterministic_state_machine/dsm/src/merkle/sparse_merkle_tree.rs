@@ -70,7 +70,7 @@ fn precompute_defaults() -> Vec<[u8; 32]> {
     // Level 0 (leaf level): hash of the zero leaf
     table.push(hash_smt_leaf(&ZERO_LEAF));
     for _ in 1..max {
-        let child = *table.last().unwrap();
+        let child = table[table.len() - 1];
         table.push(hash_smt_node(&child, &child));
     }
     table
