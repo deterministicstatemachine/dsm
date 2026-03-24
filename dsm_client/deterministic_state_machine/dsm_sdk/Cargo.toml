@@ -170,7 +170,7 @@ criterion = { version = "0.5.1", features = ["async_tokio", "html_reports"] }
 mockall = "0.12.1"
 tempfile = "3.10.0"
 test-log = { version = "0.2.14", features = ["trace"] }
-proptest = "1.4.0"
+proptest = "1.11.0"
 quickcheck = "1.0.3"
 rstest = "0.26.1"
 serial_test = "3.0.0"
