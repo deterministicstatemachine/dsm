@@ -220,6 +220,7 @@ async fn offline_transfer_roundtrip(
 
 #[tokio::test]
 #[serial]
+#[ignore = "requires live AWS storage nodes for MPC genesis"]
 async fn offline_real_protocol_ble_mock_roundtrip() {
     println!("[OFFLINE] init test storage + MPC genesis");
     // Point at the real env config TOML so StorageNodeConfig picks up the
@@ -512,6 +513,7 @@ async fn offline_real_protocol_ble_mock_roundtrip() {
 
 #[tokio::test]
 #[serial]
+#[ignore = "requires live AWS storage nodes for MPC genesis"]
 async fn offline_real_protocol_ble_mock_multi_relationship_multi_tx() {
     println!("[OFFLINE-MULTI] init test storage + MPC genesis");
     let env_config_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
