@@ -1,4 +1,4 @@
-//! Shared Per-Device SMT singleton (§2.2, §4.3).
+//! Per-Device SMT singleton — shared between online and offline paths on the same device (§2.2, §4.3).
 //!
 //! Both online (`app_router_impl`) and offline (`bilateral_ble_handler`) transfer
 //! paths update the **same** Per-Device SMT. This module provides a process-wide

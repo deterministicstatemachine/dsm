@@ -658,15 +658,8 @@ mod state_machine_tests {
             state.hash = hash;
         }
 
-        let mut era_policy =
-            crate::types::policy_types::PolicyFile::new("ERA Token Policy", "1.0.0", "system");
-        era_policy.with_description("Default policy for the ERA token in DSM ecosystem");
-        era_policy.add_metadata("token_type", "native");
-        era_policy.add_metadata("governance", "meritocratic");
-        era_policy.add_metadata("supply_model", "fixed");
-        let era_policy_commit = crate::types::policy_types::PolicyAnchor::from_policy(&era_policy)
-            .expect("derive ERA policy anchor for test state")
-            .0;
+        let era_policy_commit = crate::core::token::builtin_policy_commit_for_token("ERA")
+            .expect("ERA builtin policy commit");
 
         let era_key = crate::core::token::derive_canonical_balance_key(
             &era_policy_commit,
