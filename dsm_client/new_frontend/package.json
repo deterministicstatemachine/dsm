@@ -55,7 +55,7 @@
     "@bufbuild/protobuf": "^2.11.0",
     "@bufbuild/protoc-gen-es": "^1.7.0",
     "@testing-library/jest-dom": "^6.1.4",
-    "@testing-library/react": "^14.1.2",
+    "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.5.1",
     "@types/jest": "^29.5.14",
     "@types/mocha": "^10.0.10",
