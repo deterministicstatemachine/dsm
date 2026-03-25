@@ -1,8 +1,8 @@
 //! Token balance state enforcement — whitepaper Section 8.
 //!
 //! Balances are embedded in the state hash. `compute_hash` sorts and hashes
-//! all `token_balances` entries deterministically. `State::new_with_operation`
-//! clones previous balances forward. This module provides the atomic balance
+//! all `token_balances` entries deterministically. `create_next_state` calls
+//! `apply_token_balance_delta` before hash computation. This module provides the atomic balance
 //! arithmetic that every transport mode (bilateral, online) calls for the
 //! Section 8 invariant: Bn+1 = Bn + Δn+1, Bn+1 ≥ 0.
 //!
