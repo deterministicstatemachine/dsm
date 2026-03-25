@@ -2423,14 +2423,11 @@ impl BilateralBleHandler {
             // Canonical post-settlement persistence: archive to BCR and sync
             // balance cache.  Matches mark_sender_committed_with_post_state_hash
             // so there is exactly one sender-side canonical commit path.
-            let state_to_record = outcome
-                .canonical_state
-                .as_ref()
-                .ok_or_else(|| {
-                    DsmError::invalid_operation(
-                        "send_bilateral_confirm: settlement returned missing canonical state",
-                    )
-                })?;
+            let state_to_record = outcome.canonical_state.as_ref().ok_or_else(|| {
+                DsmError::invalid_operation(
+                    "send_bilateral_confirm: settlement returned missing canonical state",
+                )
+            })?;
             self.record_bcr_state_and_scan(state_to_record, true).await;
 
             if let Some(router) = crate::bridge::app_router() {
@@ -3385,7 +3382,9 @@ impl BilateralBleHandler {
                 let state_to_record = match settlement_outcome.canonical_state.as_ref() {
                     Some(state) => state,
                     None => {
-                        warn!("mark_confirm_delivered: settlement returned missing canonical state");
+                        warn!(
+                            "mark_confirm_delivered: settlement returned missing canonical state"
+                        );
                         return None;
                     }
                 };
