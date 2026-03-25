@@ -53,7 +53,7 @@
     "react-dom": "^19.2.4"
   },
   "devDependencies": {
-    "@babel/core": "7.27.1",
+    "@babel/core": "7.29.0",
     "@bufbuild/protobuf": "^1.7.2",
     "@bufbuild/protoc-gen-es": "^1.7.0",
     "@testing-library/jest-dom": "^6.1.4",
