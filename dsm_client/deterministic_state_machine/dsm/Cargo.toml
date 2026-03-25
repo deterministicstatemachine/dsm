@@ -151,7 +151,7 @@ rstest = "0.18.2"
 serial_test = "3.0.0"
 
 [build-dependencies]
-prost-build = "0.12"
+prost-build = "0.13"
 metrics-exporter-prometheus = "0.12.1"
 protoc-bin-vendored = "3"
 
