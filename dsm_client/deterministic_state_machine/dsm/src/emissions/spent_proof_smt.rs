@@ -12,7 +12,7 @@
 //! Uses a flat `HashMap<[u8; 32], bool>` with sorted-concatenation root.
 //! This is a placeholder — it does not produce real SMT inclusion/non-inclusion proofs.
 //!
-//! # TODO
+//! # Planned Upgrade
 //!
 //! Convert to a proper 256-bit SMT using `merkle::sparse_merkle_tree::SparseMerkleTree`
 //! with DJTE-specific domain separation (`DJTE/spent-leaf`, `DJTE/spent-node`).
@@ -61,7 +61,7 @@ impl SpentProofSmt {
     /// Compute a deterministic root commitment over sorted spent keys.
     ///
     /// NOTE: This is NOT a proper SMT root — it's a sorted-concatenation hash.
-    /// See module-level TODO for the planned upgrade path.
+    /// See module-level "Planned Upgrade" for the upgrade path.
     pub fn root(&self) -> [u8; 32] {
         let mut keys: Vec<[u8; 32]> = self.spent.keys().cloned().collect();
         keys.sort();
