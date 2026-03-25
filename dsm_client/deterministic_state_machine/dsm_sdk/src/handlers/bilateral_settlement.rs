@@ -377,5 +377,4 @@ mod tests {
         assert_eq!(amount, 5);
         assert_eq!(token_id.as_deref(), Some("dBTC"));
     }
-
 }
