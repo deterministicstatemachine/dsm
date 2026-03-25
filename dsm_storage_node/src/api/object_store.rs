@@ -247,6 +247,20 @@ pub async fn put_object(
     info!("object.put: addr={addr} path={path} bytes={new_size}");
     metrics::counter!("dsm_storage_objects_put_total", 1);
     metrics::counter!("dsm_storage_bytes_written_total", new_size as u64);
+
+    // Replicate to peer nodes in background (spec §6: redundant mirrors).
+    {
+        let rm = state.replication_manager.clone();
+        let state_clone = state.clone();
+        let obj_key = addr.clone();
+        let obj_data = body.to_vec();
+        tokio::spawn(async move {
+            if let Err(e) = rm.replicate_object(state_clone, &obj_key, &obj_data, 0).await {
+                warn!("background replication failed for {obj_key}: {e}");
+            }
+        });
+    }
+
     Ok((StatusCode::OK, out))
 }
 

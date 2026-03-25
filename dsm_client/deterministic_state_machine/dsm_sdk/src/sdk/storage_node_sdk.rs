@@ -866,6 +866,71 @@ impl StorageNodeSDK {
         })
     }
 
+    /// Write to ALL configured storage nodes (spec §6: redundant mirrors).
+    ///
+    /// Fans out the PUT to every endpoint in the live registry. Returns
+    /// successfully if at least one write succeeds. Failed nodes are
+    /// quarantined via `report_storage_failure`.
+    pub async fn put_to_all_replicas(
+        &self,
+        key: &str,
+        data: &[u8],
+        ttl_seconds: Option<u64>,
+    ) -> Result<String, DsmError> {
+        let endpoints = crate::network::list_storage_endpoints()?;
+        if endpoints.is_empty() {
+            return self.put(key, data, ttl_seconds).await;
+        }
+
+        let mut primary_addr = String::new();
+        let mut success_count = 0u32;
+        let total = endpoints.len();
+
+        for endpoint in &endpoints {
+            let temp_config = StorageNodeConfig::new(vec![endpoint.clone()]);
+            let temp_client = match StorageNodeClient::new(temp_config).await {
+                Ok(mut c) => {
+                    // Propagate auth from primary client.
+                    c.auth.clone_from(&self.inner.auth);
+                    c
+                }
+                Err(e) => {
+                    log::warn!("replica fanout: failed to create client for {endpoint}: {e}");
+                    let _ = crate::network::report_storage_failure(endpoint);
+                    continue;
+                }
+            };
+            match temp_client.put(key, data, ttl_seconds).await {
+                Ok(addr) => {
+                    if primary_addr.is_empty() {
+                        primary_addr = addr;
+                    }
+                    success_count += 1;
+                    let _ = crate::network::report_storage_success(endpoint);
+                }
+                Err(e) => {
+                    log::warn!("replica fanout: PUT to {endpoint} failed: {e}");
+                    let _ = crate::network::report_storage_failure(endpoint);
+                }
+            }
+        }
+
+        log::info!(
+            "put_to_all_replicas: key={} success={}/{} nodes",
+            &key[..key.len().min(24)],
+            success_count,
+            total
+        );
+
+        if success_count == 0 {
+            return Err(DsmError::storage(
+                "all replica writes failed",
+                None::<std::io::Error>,
+            ));
+        }
+        Ok(primary_addr)
+    }
+
     /// Retrieve data from storage node with automatic decoding and failover
     pub async fn get(&self, key: &str) -> Result<Vec<u8>, DsmError> {
         #[cfg(feature = "perf-metrics")]
