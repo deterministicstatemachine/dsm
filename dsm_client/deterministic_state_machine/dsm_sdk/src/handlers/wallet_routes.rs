@@ -145,7 +145,7 @@ fn ensure_default_visible_balances(items: &mut Vec<generated::BalanceGetResponse
     }
 }
 
-fn canonicalize_token_id(token_id: &str) -> String {
+pub(crate) fn canonicalize_token_id(token_id: &str) -> String {
     let trimmed = token_id.trim();
     if trimmed.is_empty() {
         return String::new();
@@ -156,6 +156,91 @@ fn canonicalize_token_id(token_id: &str) -> String {
         "DBTC" => "dBTC".to_string(),
         _ => trimmed.to_string(),
     }
+}
+
+pub(crate) fn resolve_token_decimals(token_id: &str) -> u32 {
+    match canonicalize_token_id(token_id).as_str() {
+        "ERA" => 0,
+        "dBTC" => 8,
+        other => {
+            let anchor_b32 = crate::sdk::app_state::AppState::handle_app_state_request(
+                &format!("dsm.token.{other}"),
+                "get",
+                "",
+            );
+            if anchor_b32.is_empty() {
+                return 0;
+            }
+
+            let policy_b32 = crate::sdk::app_state::AppState::handle_app_state_request(
+                &format!("dsm.policy.{anchor_b32}"),
+                "get",
+                "",
+            );
+            if policy_b32.is_empty() {
+                return 0;
+            }
+
+            let Some(policy_bytes) = crate::util::text_id::decode_base32_crockford(&policy_b32)
+            else {
+                return 0;
+            };
+            parse_cached_policy_metadata(&policy_bytes)
+                .map(|meta| meta.decimals)
+                .unwrap_or(0)
+        }
+    }
+}
+
+pub(crate) fn parse_display_amount_to_base_units(
+    amount_str: &str,
+    decimals: u32,
+) -> Result<u64, String> {
+    let trimmed = amount_str.trim();
+    if trimmed.is_empty() {
+        return Err("amount is required".to_string());
+    }
+    if trimmed.starts_with('-') {
+        return Err("amount must be non-negative".to_string());
+    }
+
+    let mut parts = trimmed.split('.');
+    let whole = parts.next().unwrap_or_default();
+    let frac = parts.next().unwrap_or_default();
+    if parts.next().is_some() {
+        return Err("amount has too many decimal separators".to_string());
+    }
+    if whole.is_empty() || !whole.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("amount must be a decimal string".to_string());
+    }
+    if !frac.is_empty() && !frac.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("amount must be a decimal string".to_string());
+    }
+    if frac.len() > decimals as usize {
+        return Err(format!("amount exceeds {} fractional digits", decimals));
+    }
+
+    let whole_norm = whole.trim_start_matches('0');
+    let whole_digits = if whole_norm.is_empty() { "0" } else { whole_norm };
+    let frac_padded = if decimals == 0 {
+        if !frac.is_empty() {
+            return Err("token does not support fractional amounts".to_string());
+        }
+        String::new()
+    } else {
+        let mut frac_buf = frac.to_string();
+        while frac_buf.len() < decimals as usize {
+            frac_buf.push('0');
+        }
+        frac_buf
+    };
+
+    let joined = format!("{}{}", whole_digits, frac_padded);
+    let normalized = joined.trim_start_matches('0');
+    let canonical = if normalized.is_empty() { "0" } else { normalized };
+    canonical
+        .parse::<u64>()
+        .map_err(|e| format!("amount out of range: {e}"))
 }
 
 fn encode_offline_transfer_operation_canonical(
@@ -644,9 +729,25 @@ impl AppRouterImpl {
                     } else {
                         canonicalize_token_id(&req.token_id_hint)
                     };
+                    let transfer_amount = if req.transfer_amount_display.trim().is_empty() {
+                        req.transfer_amount
+                    } else {
+                        let decimals = resolve_token_decimals(&token_id);
+                        match parse_display_amount_to_base_units(
+                            &req.transfer_amount_display,
+                            decimals,
+                        ) {
+                            Ok(amount) => amount,
+                            Err(e) => {
+                                return err(format!(
+                                    "wallet.sendOffline: invalid display amount: {e}"
+                                ))
+                            }
+                        }
+                    };
                     encode_offline_transfer_operation_canonical(
                         &counterparty_device_id,
-                        req.transfer_amount,
+                        transfer_amount,
                         &token_id,
                         req.memo_hint.trim(),
                     )
@@ -889,8 +990,13 @@ impl AppRouterImpl {
                         }
                     };
 
-                // 3. Parse Amount
-                let amount: u64 = match smart_req.amount.parse() {
+                // 3. Parse display amount into canonical base units in the backend.
+                let canonical_token_id = canonicalize_token_id(&smart_req.token_id);
+                let token_decimals = resolve_token_decimals(&canonical_token_id);
+                let amount: u64 = match parse_display_amount_to_base_units(
+                    &smart_req.amount,
+                    token_decimals,
+                ) {
                     Ok(v) => v,
                     Err(e) => return err(format!("Invalid amount: {}", e)),
                 };
@@ -903,7 +1009,7 @@ impl AppRouterImpl {
 
                 // 5. Construct OnlineTransferRequest with deterministic nonce
                 let mut inner_req = generated::OnlineTransferRequest {
-                    token_id: canonicalize_token_id(&smart_req.token_id),
+                    token_id: canonical_token_id,
                     to_device_id: to_device_id_vec.clone(),
                     amount,
                     memo: smart_req.memo,
@@ -959,7 +1065,7 @@ impl AppRouterImpl {
 mod tests {
     use super::{
         canonicalize_token_id, encode_offline_transfer_operation_canonical,
-        ensure_default_visible_balances,
+        ensure_default_visible_balances, parse_display_amount_to_base_units,
     };
     use dsm::types::proto as generated;
     use dsm::types::operations::Operation;
@@ -970,6 +1076,24 @@ mod tests {
         assert_eq!(canonicalize_token_id("dbtc"), "dBTC");
         assert_eq!(canonicalize_token_id(" dBTC "), "dBTC");
         assert_eq!(canonicalize_token_id("ERA"), "ERA");
+    }
+
+    #[test]
+    fn parse_display_amount_to_base_units_handles_fractional_tokens() {
+        assert_eq!(parse_display_amount_to_base_units("1.25", 2).unwrap(), 125);
+        assert_eq!(parse_display_amount_to_base_units("1", 8).unwrap(), 100000000);
+        assert_eq!(parse_display_amount_to_base_units("0.00000001", 8).unwrap(), 1);
+    }
+
+    #[test]
+    fn parse_display_amount_to_base_units_rejects_overprecision() {
+        assert!(parse_display_amount_to_base_units("1.001", 2).is_err());
+        assert!(parse_display_amount_to_base_units("abc", 0).is_err());
+    }
+
+    #[test]
+    fn parse_display_amount_to_base_units_rejects_fractional_whole_tokens() {
+        assert!(parse_display_amount_to_base_units("1.5", 0).is_err());
     }
 
     #[test]

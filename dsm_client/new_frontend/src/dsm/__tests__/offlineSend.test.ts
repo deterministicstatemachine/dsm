@@ -61,7 +61,7 @@ describe('offlineSend', () => {
       const argPack = pb.ArgPack.fromBinary(args);
       const request = pb.BilateralPrepareRequest.fromBinary(argPack.body);
       expect(request.counterpartyDeviceId).toEqual(to);
-      expect(request.transferAmount).toBe(1n);
+      expect(request.transferAmountDisplay).toBe('1');
       expect(request.tokenIdHint).toBe('ERA');
       expect(request.memoHint).toBe('');
       expect(request.bleAddress).toBe('');

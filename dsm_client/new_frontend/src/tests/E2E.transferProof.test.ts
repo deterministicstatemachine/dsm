@@ -92,26 +92,15 @@ function makeContactsFramedEnvelope(bleAddress?: string): Uint8Array {
   return frameEnvelope(env);
 }
 
-/** Build a BilateralPrepareResponse inside UniversalRx inside framed Envelope */
+/** Build a BilateralPrepareResponse inside a framed Envelope. */
 function makeBilateralPrepareResponseEnvelope(commitHash: Uint8Array): Uint8Array {
   const resp = new pb.BilateralPrepareResponse({
     commitmentHash: new pb.Hash32({ v: commitHash } as any),
     localSignature: new Uint8Array(64),
   } as any);
-  const rx = new pb.UniversalRx({
-    results: [
-      new pb.OpResult({
-        accepted: true,
-        result: new pb.ResultPack({
-          codec: pb.Codec.PROTO,
-          body: resp.toBinary(),
-        } as any),
-      } as any),
-    ],
-  } as any);
   const env = new pb.Envelope({
     version: 3,
-    payload: { case: 'universalRx', value: rx },
+    payload: { case: 'bilateralPrepareResponse', value: resp },
   } as any);
   return frameEnvelope(env);
 }
@@ -587,7 +576,7 @@ describe('Offline Transfer — Full Cycle', () => {
     expect(capturedPrepReq!.counterpartyDeviceId[0]).toBe(0xBB); // matches DEVICE_B
     expect(capturedPrepReq!.bleAddress).toBe('AA:BB:CC:DD:EE:FF');
     expect(capturedPrepReq!.validityIterations).toBe(100n);
-    expect(capturedPrepReq!.transferAmount).toBe(BigInt(11000 + testIndex));
+    expect(capturedPrepReq!.transferAmountDisplay).toBe(String(11000 + testIndex));
   });
 
   test('BILATERAL_EVENT_REJECTED event → accepted=false', async () => {

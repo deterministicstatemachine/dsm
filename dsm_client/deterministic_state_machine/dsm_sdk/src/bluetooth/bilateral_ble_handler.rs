@@ -1058,6 +1058,7 @@ impl BilateralBleHandler {
             transfer_amount: 0,
             token_id_hint: String::new(),
             memo_hint: String::new(),
+            transfer_amount_display: String::new(),
         };
 
         let tip_override = {
@@ -2647,6 +2648,10 @@ impl BilateralBleHandler {
         &self,
         envelope_bytes: &[u8],
     ) -> Result<crate::sdk::transfer_hooks::TransferMeta, DsmError> {
+        info!(
+            "[BILATERAL] handle_confirm_request ENTERED on device={}",
+            bytes_to_base32(&self.device_id[..8])
+        );
         info!("[BILATERAL] handle_confirm_request: processing confirm (3-step step 3, receiver)");
 
         // Decode envelope
@@ -2949,9 +2954,20 @@ impl BilateralBleHandler {
         // history in one SQLite transaction.
         let (confirm_outcome, persistence_error) =
             if let Some(ref delegate) = self.settlement_delegate {
-                // Receiver uses its local relationship state as canonical_state.
-                // The bilateral state carries the receiver's device_info (public_key)
-                // which is needed for correct balance key derivation in settlement.
+                // Ensure CoreSDK has the latest archived BCR state loaded before
+                // settlement reads canonical state. Without this, a fresh app start
+                // or race condition can leave get_device_current_state() returning
+                // None, silently failing the receiver's settlement.
+                if let Some(router) = crate::bridge::app_router() {
+                    router.sync_balance_cache();
+                }
+                let canonical_state = crate::bridge::app_router()
+                    .and_then(|r| r.get_device_current_state())
+                    .ok_or_else(|| {
+                        DsmError::invalid_operation(
+                            "handle_confirm_request: missing canonical device state",
+                        )
+                    })?;
                 let ctx = BilateralSettlementContext {
                     local_device_id: self.device_id,
                     counterparty_device_id: session.counterparty_device_id,
@@ -2963,7 +2979,7 @@ impl BilateralBleHandler {
                     is_sender: false,
                     tx_type: "bilateral_offline",
                     new_chain_tip,
-                    canonical_state: Some(tx_result.local_state.clone()),
+                    canonical_state: Some(canonical_state),
                 };
                 match delegate.settle(ctx) {
                     Ok(outcome) => (outcome, None),
@@ -3122,14 +3138,38 @@ impl BilateralBleHandler {
         Ok(confirm_outcome.transfer_meta)
     }
 
-    /// Clean up expired sessions
+    /// Clean up stale early-phase sessions.
+    ///
+    /// Transport-only timing (rules.instructions.md §36: "stale-session recovery").
+    /// Sessions already have `created_at_wall: Instant` for exactly this purpose.
+    /// We only prune sessions in early (non-terminal, non-committed) phases that
+    /// have been idle for > 60 seconds — these represent abandoned BLE connections.
     pub async fn cleanup_expired_sessions(&self) -> usize {
-        let sessions = self.sessions.sessions.lock().await;
+        let mut sessions = self.sessions.sessions.lock().await;
+        let now = std::time::Instant::now();
+        let stale_threshold = std::time::Duration::from_secs(60);
         let initial_count = sessions.len();
-        // Clockless: expiry-based cleanup is disabled.
-        // (Storages don't track expiration; callers may prune by phase elsewhere.)
-        let _ = initial_count;
-        0
+
+        sessions.retain(|_k, session| {
+            let is_early_phase = matches!(
+                session.phase,
+                BilateralPhase::Preparing | BilateralPhase::Prepared | BilateralPhase::PendingUserAction
+            );
+            let is_stale = now.duration_since(session.created_at_wall) > stale_threshold;
+
+            if is_early_phase && is_stale {
+                warn!(
+                    "[BILATERAL] Pruning stale {:?} session (age {:?})",
+                    session.phase,
+                    now.duration_since(session.created_at_wall)
+                );
+                false
+            } else {
+                true
+            }
+        });
+
+        initial_count - sessions.len()
     }
 
     /// Get session status with core manager reconciliation

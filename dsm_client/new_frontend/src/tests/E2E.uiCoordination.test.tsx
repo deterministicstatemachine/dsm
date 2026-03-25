@@ -32,7 +32,7 @@
  * 4. DOM event → nativeBridgeAdapter → bridgeEvents (REAL adapter)
  * 5. DOM event → EventBridge → bilateral.event (REAL EventBridge)
  * 6. INTEGRATED: Dialog + WalletContext — PREPARE → Accept → COMPLETE → refreshAll → REAL getAllBalances → __callBin → proto decode → balance in DOM
- * 7. INTEGRATED: wallet.sendCommitted → WalletContext immediate balance + tx append
+ * 7. INTEGRATED: wallet.sendCommitted → WalletContext refresh trigger only
  * 8. INTEGRATED: Full bilateral sequence through REAL components — EXACT device sequence
  */
 
@@ -983,12 +983,13 @@ describe('INTEGRATED: Full chain with __callBin-only mock', () => {
     await settleWalletEffects();
   });
 
-  test('wallet.sendCommitted → immediate balance + tx append in WalletProvider', async () => {
+  test('wallet.sendCommitted triggers refresh without frontend-owned balance mutation', async () => {
     render(<ProductionLayout />);
     await settleWalletInit();
     await waitFor(() => expect(screen.getByTestId('i-balance-era').textContent).toBe('10000'));
 
     const initialTxCount = parseInt(screen.getByTestId('i-tx-count').textContent || '0');
+    capturedMethods = [];
 
     // Emit sendCommitted — simulates what happens after online send completes
     act(() => {
@@ -1002,20 +1003,13 @@ describe('INTEGRATED: Full chain with __callBin-only mock', () => {
       });
     });
 
-    // IMMEDIATE balance reflect (IMMEDIATE_BALANCE_SET dispatched without bridge call)
-    await waitFor(() => {
-      expect(screen.getByTestId('i-balance-era').textContent).toBe('9500');
-    });
-
-    // Transaction appended (APPEND_TX action dispatched)
-    await waitFor(() => {
-      const txCount = parseInt(screen.getByTestId('i-tx-count').textContent || '0');
-      expect(txCount).toBeGreaterThan(initialTxCount);
-    });
-
     await waitFor(() => {
       expect(capturedMethods).toContain('getAllBalancesStrict');
+      expect(capturedMethods).toContain('appRouterQuery');
     });
+
+    expect(screen.getByTestId('i-balance-era').textContent).toBe('10000');
+    expect(parseInt(screen.getByTestId('i-tx-count').textContent || '0')).toBe(initialTxCount);
 
     await settleWalletEffects();
   });

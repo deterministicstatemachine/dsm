@@ -175,7 +175,7 @@ describe('useTransactions', () => {
     });
 
     expect(sendResult).toBe(true);
-    expect(sendArgs).toEqual(['alice', '1000', undefined]);
+    expect(sendArgs).toEqual(['alice', '10.0', undefined, undefined]);
     expect(invalidated).toBeGreaterThan(0);
     expect(result.current.error).toBeNull();
   });

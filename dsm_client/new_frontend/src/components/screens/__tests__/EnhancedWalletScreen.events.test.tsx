@@ -94,7 +94,7 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
         expect.objectContaining({
           tokenId: 'ROOT',
           to: contact.deviceId,
-          amount: '100',
+          amount: '1',
           bleAddress: contact.bleAddress,
         })
       );

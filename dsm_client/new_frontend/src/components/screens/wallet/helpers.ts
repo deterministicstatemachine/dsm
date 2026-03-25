@@ -68,47 +68,6 @@ export function resolveAlias(deviceIdB32: string, aliasMap: Map<string, string>)
   return aliasMap.get(deviceIdB32) || shortStr(deviceIdB32, 8, 6);
 }
 
-export function isValidDecimalString(value: string): boolean {
-  let sawDot = false;
-  let digitsBefore = 0;
-  let digitsAfter = 0;
-  for (let i = 0; i < value.length; i += 1) {
-    const code = value.charCodeAt(i);
-    if (code >= 48 && code <= 57) {
-      if (sawDot) {
-        digitsAfter += 1;
-      } else {
-        digitsBefore += 1;
-      }
-      continue;
-    }
-    if (code === 46) {
-      if (sawDot) return false;
-      sawDot = true;
-      continue;
-    }
-    return false;
-  }
-  return digitsBefore > 0 && (!sawDot || digitsAfter > 0);
-}
-
-export function toBaseUnits(amountStr: string, decimals: number): bigint {
-  if (!Number.isInteger(decimals) || decimals < 0 || decimals > 36) {
-    throw new Error('Decimals must be an integer 0..36');
-  }
-  const s = amountStr.trim();
-  if (!isValidDecimalString(s)) throw new Error('Amount must be a positive decimal string');
-  const [rawInts, fracs = ''] = s.split('.');
-  const ints = rawInts.replace(/^0+(?=\d)/, '') || '0';
-  if (fracs.length > decimals) {
-    throw new Error(`Amount has more than ${decimals} fractional digits`);
-  }
-  const fracPadded = fracs.padEnd(decimals, '0');
-  const joined = decimals > 0 ? `${ints}${fracPadded}` : ints;
-  const normalized = joined.replace(/^0+(?=\d)/, '') || '0';
-  return BigInt(normalized);
-}
-
 export function buildAliasLookup(contacts: DomainContact[]): Map<string, string> {
   const map = new Map<string, string>();
   for (const c of contacts) {

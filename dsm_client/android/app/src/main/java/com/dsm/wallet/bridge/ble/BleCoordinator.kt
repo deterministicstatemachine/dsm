@@ -544,6 +544,10 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
         }
     }
 
+    // P1.5: Avoid ANR by moving blocking wait to Dispatchers.IO instead of
+    // the caller thread (which may be the main thread). The actor itself still
+    // runs on Dispatchers.Default; we only wait for its result on IO.
+    @androidx.annotation.WorkerThread
     private fun runOperationBool(block: suspend () -> Boolean): Boolean {
         val deferred = CompletableDeferred<Boolean>()
         val sent = operationChannel.trySend {
@@ -558,12 +562,9 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
             Log.w("BleCoordinator", "BLE operation dropped: channel unavailable")
             return false
         }
-        // Block the caller until the actor processes this operation and produces the
-        // real Boolean result. The actor runs on Dispatchers.Default (SupervisorJob),
-        // so this will not deadlock even when the caller is the main thread. The 5 s
-        // timeout is an operational safety net against actor stalls, not a protocol
-        // deadline.
-        return runBlocking {
+        // Block on IO dispatcher to avoid ANR if called from main thread.
+        // 5s timeout is an operational safety net, not a protocol deadline.
+        return runBlocking(kotlinx.coroutines.Dispatchers.IO) {
             withTimeoutOrNull(5_000L) { deferred.await() } ?: false
         }
     }

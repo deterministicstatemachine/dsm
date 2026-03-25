@@ -40,7 +40,7 @@ describe('offline transfer sender/recipient consistency through WebView bridge',
       const argPack = pb.ArgPack.fromBinary(req.payload.value.args);
       const prepare = pb.BilateralPrepareRequest.fromBinary(argPack.body);
       expect(prepare.counterpartyDeviceId).toEqual(to);
-      expect(prepare.transferAmount).toBe(5n);
+      expect(prepare.transferAmountDisplay).toBe('5');
       expect(prepare.bleAddress).toBe(bleAddress);
       expect(prepare.tokenIdHint).toBe('dBTC');
       expect(prepare.memoHint).toBe('hi');

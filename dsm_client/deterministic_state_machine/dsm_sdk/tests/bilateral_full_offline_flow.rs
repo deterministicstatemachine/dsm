@@ -34,18 +34,22 @@ fn dev(id: u8) -> [u8; 32] {
 /// Minimal AppRouter for tests — returns a pre-seeded device canonical state
 /// so that `build_canonical_settled_state` can read B_n from the device tip.
 struct TestAppRouter {
-    device_state: std::sync::RwLock<Option<dsm::types::state_types::State>>,
+    device_states:
+        std::sync::RwLock<std::collections::HashMap<[u8; 32], dsm::types::state_types::State>>,
 }
 
 impl TestAppRouter {
     fn new() -> Self {
         Self {
-            device_state: std::sync::RwLock::new(None),
+            device_states: std::sync::RwLock::new(std::collections::HashMap::new()),
         }
     }
 
     fn set_device_state(&self, state: dsm::types::state_types::State) {
-        *self.device_state.write().unwrap() = Some(state);
+        self.device_states
+            .write()
+            .unwrap()
+            .insert(state.device_info.device_id, state);
     }
 }
 
@@ -66,7 +70,9 @@ impl sdk::bridge::AppRouter for TestAppRouter {
         }
     }
     fn get_device_current_state(&self) -> Option<dsm::types::state_types::State> {
-        self.device_state.read().ok()?.clone()
+        let device_id = sdk::sdk::app_state::AppState::get_device_id()?;
+        let device_id: [u8; 32] = device_id.try_into().ok()?;
+        self.device_states.read().ok()?.get(&device_id).cloned()
     }
 }
 
@@ -99,8 +105,8 @@ fn configure_local_identity_for_receipts(
     Ok(())
 }
 
-/// Build a genesis state with ERA balance, archive to BCR, and install as the
-/// device canonical state via the TestAppRouter.
+/// Build a genesis state with ERA balance, mirror it into BCR for projection
+/// queries, and install it as the device canonical state via the TestAppRouter.
 fn seed_device_state_with_era(
     router: &TestAppRouter,
     device_id: [u8; 32],
@@ -139,7 +145,8 @@ fn seed_device_state_with_era(
 
     state.hash = state.compute_hash().expect("compute hash");
 
-    // Archive to BCR (for restore_latest_archived_state_for_device).
+    // Mirror the canonical seed into BCR so projection/history queries see the
+    // same authoritative device state the settlement delegate starts from.
     client_db::store_bcr_state(&state, true).expect("seed BCR genesis");
 
     // Set as the device canonical state (authoritative for settlement).
@@ -254,10 +261,11 @@ async fn setup_two_devices(a_id: u8, b_id: u8, sender_era: u64) -> TwoDeviceSetu
     let a = Arc::new(RwLock::new(mgr_a));
     let b = Arc::new(RwLock::new(mgr_b));
 
-    // Install test router and seed sender's ERA balance.
+    // Install test router and seed canonical device states for both peers.
     let router = Arc::new(TestAppRouter::new());
     sdk::bridge::install_app_router(router.clone()).expect("install test router");
     seed_device_state_with_era(&router, a_dev, a_kp.public_key(), sender_era);
+    seed_device_state_with_era(&router, b_dev, b_kp.public_key(), 0);
 
     let delegate = Arc::new(DefaultBilateralSettlementDelegate);
     let mut handler_a = BilateralBleHandler::new_with_smt(a.clone(), a_dev, smt_a);
@@ -305,15 +313,15 @@ async fn bilateral_offline_prepare_accept_commit_finalize_flow() {
 
     let balance = Balance::from_state(10, [1u8; 32], 0);
     let transfer_op = Operation::Transfer {
-        to_device_id: b"to_b".to_vec(),
+        to_device_id: s.b_dev.to_vec(),
         amount: balance,
         token_id: b"".to_vec(),
         mode: dsm::types::operations::TransactionMode::Bilateral,
         nonce: vec![0u8; 8],
         verification: dsm::types::operations::VerificationType::Standard,
         pre_commit: None,
-        recipient: b"recipient".to_vec(),
-        to: b"to".to_vec(),
+        recipient: s.b_kp.public_key().to_vec(),
+        to: s.b_dev.to_vec(),
         message: "pay".to_string(),
         signature: Vec::new(),
     };
@@ -379,6 +387,20 @@ async fn bilateral_offline_prepare_accept_commit_finalize_flow() {
         "sender ERA balance should be 10,000 - 10 = 9,990"
     );
 
+    // ── Verification: receiver balance (0 + 10 = 10) ───────────────────
+    let b_device_txt = text_id::encode_base32_crockford(&s.b_dev);
+    let receiver_projection =
+        client_db::get_balance_projection(&b_device_txt, "ERA").expect("receiver projection query");
+    assert!(
+        receiver_projection.is_some(),
+        "receiver ERA balance projection must exist after settlement"
+    );
+    let receiver_proj = receiver_projection.unwrap();
+    assert_eq!(
+        receiver_proj.available, 10,
+        "receiver ERA balance should be credited by the bilateral settlement"
+    );
+
     // ── Verification: BCR state has correct device_id and sn ─────────────
     let sender_bcr = client_db::get_bcr_states(&s.a_dev, false).expect("sender BCR states");
     let sender_latest = sender_bcr.last().expect("sender must have BCR state");
@@ -392,7 +414,6 @@ async fn bilateral_offline_prepare_accept_commit_finalize_flow() {
     );
 
     // ── Verification: receiver transaction history ───────────────────────
-    let b_device_txt = text_id::encode_base32_crockford(&s.b_dev);
     let history = client_db::get_transaction_history(Some(&b_device_txt), Some(20))
         .expect("receiver transaction history");
     assert!(
@@ -421,15 +442,15 @@ async fn bilateral_offline_state_consistency_across_peers() {
 
     let balance = Balance::from_state(5, [2u8; 32], 0);
     let transfer_op = Operation::Transfer {
-        to_device_id: b"to_b".to_vec(),
+        to_device_id: s.b_dev.to_vec(),
         amount: balance,
         token_id: b"".to_vec(),
         mode: dsm::types::operations::TransactionMode::Bilateral,
         nonce: vec![0u8; 8],
         verification: dsm::types::operations::VerificationType::Standard,
         pre_commit: None,
-        recipient: b"recipient".to_vec(),
-        to: b"to".to_vec(),
+        recipient: s.b_kp.public_key().to_vec(),
+        to: s.b_dev.to_vec(),
         message: "pay".to_string(),
         signature: Vec::new(),
     };

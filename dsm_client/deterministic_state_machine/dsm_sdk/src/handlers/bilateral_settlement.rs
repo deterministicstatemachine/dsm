@@ -11,6 +11,7 @@ use crate::bluetooth::bilateral_ble_handler::{
 };
 use crate::sdk::token_state::{self, canonicalize_token_id, TransferFields};
 use crate::sdk::transfer_hooks::TransferMeta;
+use crate::storage::client_db::BalanceProjectionRecord;
 use crate::util::text_id::encode_base32_crockford;
 use dsm::types::operations::Operation;
 use dsm::types::state_types::State;
@@ -82,7 +83,7 @@ fn resolve_policy_commit(token_id: &str) -> Result<[u8; 32], String> {
 /// emitted by the state machine. Settlement must not re-apply token deltas.
 fn build_canonical_settled_state(
     ctx: &BilateralSettlementContext,
-) -> Result<Option<State>, String> {
+) -> Result<(Option<State>, Option<BalanceProjectionRecord>), String> {
     let canonical_state = match ctx.canonical_state.as_ref() {
         Some(s) => s,
         None => {
@@ -94,7 +95,7 @@ fn build_canonical_settled_state(
 
     let transfer = match parse_transfer(&ctx.operation_bytes) {
         Some(t) if t.amount > 0 => t,
-        _ => return Ok(Some(canonical_state.clone())),
+        _ => return Ok((Some(canonical_state.clone()), None)),
     };
 
     let token_for_policy = if transfer.token_id.is_empty() {
@@ -160,16 +161,16 @@ fn build_canonical_settled_state(
     let local_txt = encode_base32_crockford(&ctx.local_device_id);
     let locked = crate::storage::client_db::get_locked_balance(&local_txt, token_for_policy)
         .map_err(|e| format!("read locked balance failed: {e}"))?;
-    crate::storage::client_db::sync_token_projection_from_state(
+    let projection = crate::storage::client_db::build_balance_projection_from_state(
         &local_txt,
         token_for_policy,
         &policy_commit,
         &settled_state,
         locked,
     )
-    .map_err(|e| format!("sync balance projection failed: {e}"))?;
+    .map_err(|e| format!("build balance projection failed: {e}"))?;
 
-    Ok(Some(settled_state))
+    Ok((Some(settled_state), Some(projection)))
 }
 
 /// Application-layer implementation of [`BilateralSettlementDelegate`].
@@ -212,7 +213,7 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
                 );
             }
         }
-        let canonical_state = build_canonical_settled_state(&ctx)?;
+        let (canonical_state, projection) = build_canonical_settled_state(&ctx)?;
 
         // Log the canonical state for debugging
         match &canonical_state {
@@ -232,17 +233,6 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
             None => {
                 log::warn!("[BILATERAL][settle] canonical_state=None");
             }
-        }
-
-        // Archive the settled state to BCR so balance.list reflects the updated balances
-        if let Some(ref settled_state) = canonical_state {
-            crate::storage::client_db::store_bcr_state(settled_state, true)
-                .map_err(|e| format!("archive settled state failed: {e}"))?;
-            log::info!(
-                "[BILATERAL][settle] archived settled state hash={} state_number={}",
-                encode_base32_crockford(&settled_state.hash),
-                settled_state.state_number
-            );
         }
 
         let local_txt = encode_base32_crockford(&ctx.local_device_id);
@@ -286,11 +276,13 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
         if ctx.is_sender {
             if transfer_amount > 0 {
                 let debit_result =
-                    crate::storage::client_db::apply_sender_settlement_and_store_transaction_atomic(
+                    crate::storage::client_db::apply_sender_settlement_bundle_atomic(
                         &local_txt,
                         token_for_atomic,
                         transfer_amount,
                         &tx_record,
+                        canonical_state.as_ref(),
+                        projection.as_ref(),
                     );
 
                 if let Err(e) = &debit_result {
@@ -308,13 +300,15 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
         } else {
             // Receiver: persist chain tip + transaction history atomically.
             let confirm_result =
-                crate::storage::client_db::apply_receiver_confirm_and_store_transaction_atomic(
+                crate::storage::client_db::apply_receiver_confirm_bundle_atomic(
                     &ctx.counterparty_device_id,
                     &ctx.new_chain_tip,
                     &local_txt,
                     token_for_atomic,
                     transfer_amount,
                     &tx_record,
+                    canonical_state.as_ref(),
+                    projection.as_ref(),
                 );
 
             if let Err(e) = &confirm_result {

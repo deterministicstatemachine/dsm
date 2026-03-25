@@ -10,19 +10,11 @@ export type WalletSyncHandlers = {
   onRefreshAll: () => void | Promise<void>;
   onRefreshBalances?: () => void | Promise<void>;
   onRefreshTransactions?: () => void | Promise<void>;
-  onImmediateSenderUpdate?: (detail: {
-    success?: boolean;
-    tokenId?: string;
-    newBalance?: bigint | string | number;
-    transactionHash?: Uint8Array;
-    toDeviceId?: Uint8Array;
-    amount?: bigint | string | number;
-  }) => void;
   onIdentityReady?: () => void | Promise<void>;
 };
 
 export function useWalletSync(handlers: WalletSyncHandlers) {
-  const { onRefreshAll: _onRefreshAll, onRefreshBalances, onRefreshTransactions, onImmediateSenderUpdate, onIdentityReady } = handlers;
+  const { onRefreshAll, onRefreshBalances, onRefreshTransactions, onIdentityReady } = handlers;
 
   // NOTE: wallet.refresh is handled by useWalletRefreshListener (RAF-coalesced
   // + 120-frame cooldown) inside useWalletScreenData.  We intentionally do NOT
@@ -44,13 +36,12 @@ export function useWalletSync(handlers: WalletSyncHandlers) {
     });
   }, [onRefreshBalances]));
 
-  // Immediate sender-side reflect after online send commit
-  useBridgeEvent('wallet.sendCommitted', useCallback((detail) => {
-    if (!onImmediateSenderUpdate) return;
-    try { onImmediateSenderUpdate(detail as any); } catch (e) {
-      console.error('[useWalletSync] wallet.sendCommitted handler failed:', e);
-    }
-  }, [onImmediateSenderUpdate]));
+  // Sender-side commit is a projection refresh trigger only.
+  useBridgeEvent('wallet.sendCommitted', useCallback(() => {
+    Promise.resolve(onRefreshAll()).catch((e) => {
+      console.error('[useWalletSync] wallet.sendCommitted refresh failed:', e);
+    });
+  }, [onRefreshAll]));
 
   // Identity lifecycle
   useBridgeEvent('identity.ready', useCallback(() => {
