@@ -853,9 +853,11 @@ pub fn create_next_state(
     verification_type: &VerificationType,
     require_bilateral: bool,
 ) -> Result<State, DsmError> {
-    // Unused parameters are kept for future implementation
+    // verification_type is checked per-operation in the signature match below.
     let _ = verification_type;
-    let _ = require_bilateral;
+    // require_bilateral gates apply_token_balance_delta — bilateral BLE
+    // transitions skip the in-core delta (settlement handler applies it).
+
     // ── Fail-closed signature verification ────────────────────────────
     match &operation {
         // ── Transfer ──────────────────────────────────────────────
@@ -1035,7 +1037,7 @@ pub fn create_next_state(
     // transitions only. Bilateral relationship-chain transitions skip this — the bilateral
     // settlement handler applies the delta to the device canonical state separately.
     if !require_bilateral {
-        apply_token_balance_delta(&mut next_state, &current_state, &operation_for_balance)?;
+        apply_token_balance_delta(&mut next_state, current_state, &operation_for_balance)?;
     }
 
     // Compute the hash for the new state after balance mutations
