@@ -93,6 +93,7 @@ impl ReplicationManager {
         local_node_id: String,
         local_address: String,
         cert_path: &Path,
+        seed_peers: Vec<String>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let mut node_states = HashMap::new();
 
@@ -106,6 +107,21 @@ impl ReplicationManager {
                 status: pb::StorageNodeStatus::Alive as i32,
             },
         );
+
+        // Seed peers from config so gossip has nodes to talk to on startup.
+        for (i, peer_addr) in seed_peers.iter().enumerate() {
+            let peer_id = format!("seed-peer-{i}");
+            log::info!("replication: seeding peer {peer_id} at {peer_addr}");
+            node_states.insert(
+                peer_id.clone(),
+                pb::StorageNodeInfoV1 {
+                    node_id: peer_id,
+                    address: peer_addr.clone(),
+                    last_seen_tick: 0,
+                    status: pb::StorageNodeStatus::Alive as i32,
+                },
+            );
+        }
 
         Ok(Self {
             config,

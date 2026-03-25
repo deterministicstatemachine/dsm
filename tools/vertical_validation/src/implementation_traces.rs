@@ -1975,7 +1975,7 @@ fn create_test_state(seed_bytes: &[u8; 32], pk: &[u8]) -> State {
 }
 fn builtin_balance_key(owner_pk: &[u8], token_id: &str) -> String {
     let policy_commit = dsm::core::token::builtin_policy_commit_for_token(token_id)
-        .unwrap_or_else(|| panic!("builtin policy commit missing for {token_id}"));
+        .expect("builtin policy commit missing for implementation trace token");
     dsm::core::token::derive_canonical_balance_key(&policy_commit, owner_pk, token_id)
 }
 

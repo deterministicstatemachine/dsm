@@ -97,7 +97,7 @@ EXTEOF
         -e "s|__LISTEN_ADDR__|0.0.0.0|g" \
         -e "s|__PORT__|8080|g" \
         -e "s|__DATABASE_URL__|${DB_URL}|g" \
-        -e "s|# peers = .*|peers = [${PEERS}]|g" \
+        -e "s|peers = .*|peers = [${PEERS}]|g" \
         "${TEMPLATE}" > "${NODE_DIR}/config/node.toml"
 
     # --- .env for docker-compose ---
