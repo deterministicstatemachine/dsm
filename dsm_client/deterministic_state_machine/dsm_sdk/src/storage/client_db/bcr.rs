@@ -7,7 +7,7 @@ use anyhow::{anyhow, Result};
 use dsm::types::state_types::State;
 use dsm::types::token_types::Balance;
 use log::warn;
-use rusqlite::params;
+use rusqlite::{params, Connection};
 
 use super::get_connection;
 use crate::storage::codecs::{read_len_u32, read_string, read_u64, read_u8, read_vec};
@@ -38,6 +38,16 @@ pub fn store_bcr_state(state: &State, published: bool) -> Result<()> {
         poisoned.into_inner()
     });
     let now = tick();
+
+    store_bcr_state_with_conn(&conn, state, published, now)
+}
+
+pub(crate) fn store_bcr_state_with_conn(
+    conn: &Connection,
+    state: &State,
+    published: bool,
+    now: u64,
+) -> Result<()> {
 
     let state_bytes = state
         .to_bytes()

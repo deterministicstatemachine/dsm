@@ -2,7 +2,7 @@
 //! Non-ERA token balance persistence.
 
 use anyhow::Result;
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use super::get_connection;
 use crate::util::deterministic_time::tick;
@@ -48,6 +48,14 @@ fn validate_projection_identity(
 pub fn upsert_balance_projection(record: &BalanceProjectionRecord) -> Result<()> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+
+    upsert_balance_projection_with_conn(&conn, record)
+}
+
+pub(crate) fn upsert_balance_projection_with_conn(
+    conn: &Connection,
+    record: &BalanceProjectionRecord,
+) -> Result<()> {
 
     let existing = conn
         .query_row(
@@ -100,6 +108,39 @@ pub fn upsert_balance_projection(record: &BalanceProjectionRecord) -> Result<()>
         ],
     )?;
     Ok(())
+}
+
+pub fn build_balance_projection_from_state(
+    device_id: &str,
+    token_id: &str,
+    policy_commit: &[u8; 32],
+    state: &dsm::types::state_types::State,
+    locked: u64,
+) -> Result<BalanceProjectionRecord> {
+    let balance_key = dsm::core::token::derive_canonical_balance_key(
+        policy_commit,
+        &state.device_info.public_key,
+        token_id,
+    );
+    let state_hash = state.hash()?;
+    let balance = state
+        .token_balances
+        .get(&balance_key)
+        .cloned()
+        .unwrap_or_else(dsm::types::token_types::Balance::zero);
+    let spendable = balance.available().saturating_sub(locked);
+
+    Ok(BalanceProjectionRecord {
+        balance_key,
+        device_id: device_id.to_string(),
+        token_id: token_id.to_string(),
+        policy_commit: crate::util::text_id::encode_base32_crockford(policy_commit),
+        available: spendable,
+        locked,
+        source_state_hash: crate::util::text_id::encode_base32_crockford(&state_hash),
+        source_state_number: state.state_number,
+        updated_at: tick(),
+    })
 }
 
 pub fn get_balance_projection(
@@ -220,30 +261,7 @@ pub fn sync_token_projection_from_state(
     state: &dsm::types::state_types::State,
     locked: u64,
 ) -> Result<BalanceProjectionRecord> {
-    let balance_key = dsm::core::token::derive_canonical_balance_key(
-        policy_commit,
-        &state.device_info.public_key,
-        token_id,
-    );
-    let balance = state
-        .token_balances
-        .get(&balance_key)
-        .cloned()
-        .unwrap_or_else(dsm::types::token_types::Balance::zero);
-    let state_hash = state.hash()?;
-    let spendable = balance.available().saturating_sub(locked);
-
-    let record = BalanceProjectionRecord {
-        balance_key,
-        device_id: device_id.to_string(),
-        token_id: token_id.to_string(),
-        policy_commit: crate::util::text_id::encode_base32_crockford(policy_commit),
-        available: spendable,
-        locked,
-        source_state_hash: crate::util::text_id::encode_base32_crockford(&state_hash),
-        source_state_number: state.state_number,
-        updated_at: tick(),
-    };
+    let record = build_balance_projection_from_state(device_id, token_id, policy_commit, state, locked)?;
 
     upsert_balance_projection(&record)?;
     Ok(record)

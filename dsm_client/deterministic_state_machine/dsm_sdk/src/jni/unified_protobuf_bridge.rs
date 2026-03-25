@@ -2432,11 +2432,14 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bilateralOffl
                         Ok(req) => {
                             // Build operation bytes: use supplied operation_data if present;
                             // otherwise synthesise an Operation::Transfer from intent hint fields
-                            // (transfer_amount + token_id_hint + memo_hint).  This removes the
+                            // (display amount or base-unit amount + token_id_hint + memo_hint). This removes the
                             // requirement for the frontend to perform canonical serialisation.
                             let operation_data_bytes: Vec<u8> = if !req.operation_data.is_empty() {
                                 req.operation_data.clone()
-                            } else if req.transfer_amount > 0 && !req.token_id_hint.is_empty() {
+                            } else if (!req.transfer_amount_display.trim().is_empty()
+                                || req.transfer_amount > 0)
+                                && !req.token_id_hint.is_empty()
+                            {
                                 // Validate counterparty_device_id early so we can use it here
                                 if req.counterparty_device_id.len() != 32 {
                                     results.push(gp::OpResult {
@@ -2448,6 +2451,35 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bilateralOffl
                                 }
                                 let cid_arr: [u8; 32] = req.counterparty_device_id.as_slice().try_into()
                                     .expect("length checked above");
+                                let token_id = crate::handlers::wallet_routes::canonicalize_token_id(
+                                    &req.token_id_hint,
+                                );
+                                let transfer_amount = if req.transfer_amount_display.trim().is_empty() {
+                                    req.transfer_amount
+                                } else {
+                                    let decimals = crate::handlers::wallet_routes::resolve_token_decimals(&token_id);
+                                    match crate::handlers::wallet_routes::parse_display_amount_to_base_units(
+                                        &req.transfer_amount_display,
+                                        decimals,
+                                    ) {
+                                        Ok(amount) => amount,
+                                        Err(e) => {
+                                            results.push(gp::OpResult {
+                                                op_id,
+                                                accepted: false,
+                                                error: Some(gp::Error {
+                                                    code: 469,
+                                                    message: format!(
+                                                        "invalid bilateral.prepare display amount: {e}"
+                                                    ),
+                                                    ..Default::default()
+                                                }),
+                                                ..Default::default()
+                                            });
+                                            continue;
+                                        }
+                                    }
+                                };
                                 // Deterministic balance anchor — same derivation as wallet.send path
                                 let balance_anchor = dsm::crypto::blake3::domain_hash(
                                     "DSM/balance-anchor", &[],
@@ -2455,11 +2487,11 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bilateralOffl
                                 let hint_op = dsm::types::operations::Operation::Transfer {
                                     to_device_id: cid_arr.to_vec(),
                                     amount: dsm::types::token_types::Balance::from_state(
-                                        req.transfer_amount,
+                                        transfer_amount,
                                         *balance_anchor.as_bytes(),
                                         0,
                                     ),
-                                    token_id: req.token_id_hint.as_bytes().to_vec(),
+                                    token_id: token_id.as_bytes().to_vec(),
                                     mode: dsm::types::operations::TransactionMode::Bilateral,
                                     nonce: vec![],
                                     verification: dsm::types::operations::VerificationType::Bilateral,
@@ -2475,7 +2507,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bilateralOffl
                             } else {
                                 results.push(gp::OpResult {
                                     op_id, accepted: false,
-                                    error: Some(gp::Error { code: 465, message: "operation_data empty and no intent hint fields provided".into(), ..Default::default() }),
+                                            error: Some(gp::Error { code: 465, message: "operation_data empty and no intent hint fields provided".into(), ..Default::default() }),
                                     ..Default::default()
                                 });
                                 continue;

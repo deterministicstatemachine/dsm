@@ -26,7 +26,7 @@ async fn build_policy_app() -> Option<axum::Router> {
         gossip_fanout: 3,
         max_concurrent_jobs: 10,
     };
-    let replication_manager = Arc::new(ReplicationManager::new(
+    let replication_manager = Arc::new(ReplicationManager::new_for_tests(
         replication_config,
         "test-node".to_string(),
         "http://localhost:8080".to_string(),

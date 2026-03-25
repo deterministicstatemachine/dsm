@@ -94,9 +94,10 @@ type SendOffline = (
 
 type SendOnlineSmart = (
   recipientAlias: string,
-  scaledAmountStr: string,
-  memo?: string
-) => Promise<{ success: boolean; error?: { message?: string }; newBalance?: number }>;
+  amountStr: string,
+  memo?: string,
+  tokenId?: string,
+) => Promise<{ success: boolean; error?: { message?: string }; newBalance?: number | bigint }>;
 
 /* -------------------------- Strict helpers ------------------------------- */
 function requireFn<T extends Function>(obj: any, name: string): T {
@@ -105,24 +106,6 @@ function requireFn<T extends Function>(obj: any, name: string): T {
     throw new Error(`STRICT: dsmClient.${name} is required but not implemented`);
   }
   return fn as unknown as T;
-}
-
-function toBaseUnits(amountStr: string, decimals: number): bigint {
-  if (!Number.isInteger(decimals) || decimals < 0 || decimals > 36) {
-    throw new Error('STRICT: decimals must be an integer 0..36');
-  }
-  const s = amountStr.trim();
-  // eslint-disable-next-line security/detect-unsafe-regex
-  if (!/^\d+(\.\d+)?$/.test(s)) throw new Error('STRICT: amount must be a positive decimal string');
-  const [rawInts, fracs = ''] = s.split('.');
-  const ints = rawInts.replace(/^0+(?=\d)/, '') || '0';
-  if (fracs.length > decimals) {
-    throw new Error(`STRICT: amount has more than ${decimals} fractional digits`);
-  }
-  const fracPadded = fracs.padEnd(decimals, '0');
-  const joined = decimals > 0 ? `${ints}${fracPadded}` : ints;
-  const normalized = joined.replace(/^0+(?=\d)/, '') || '0';
-  return BigInt(normalized);
 }
 
 function toBigIntSignedStrict(v: string | number | bigint, field = 'amount'): bigint {
@@ -416,9 +399,6 @@ export function useTransactions() {
     setError(null);
     try {
       // Validate inputs early
-      const decimals = Number.isFinite(input.decimals ?? NaN) ? Number(input.decimals) : 0;
-      const amountBU = toBaseUnits(input.amount, decimals);
-
       // Note: recipientAlias is passed to backend; backend must resolve to device_id
       let ok = false;
 
@@ -448,30 +428,26 @@ export function useTransactions() {
         const res = await dsmClient.sendOfflineTransfer({
           tokenId,
           to: toDeviceIdB32,
-          amount: amountBU.toString(10),
+          amount: input.amount.trim(),
           memo: input.memo,
           bleAddress,
         });
         ok = Boolean((res as any)?.success ?? (res as any)?.accepted);
         if (!ok) throw new Error(String((res as any)?.result || (res as any)?.message || 'Offline transfer failed'));
       } else {
-        // Online: pass alias and scaled amount; backend resolves contact
+        // Online: pass the user-entered display amount through; backend owns amount scaling.
         const sendOnlineTransferSmart = requireFn<SendOnlineSmart>(dsmClient, 'sendOnlineTransferSmart');
-        const scaledAmountStr = amountBU.toString(10);
-        const res = await sendOnlineTransferSmart(input.recipientAlias, scaledAmountStr, input.memo);
+        const res = await sendOnlineTransferSmart(
+          input.recipientAlias,
+          input.amount.trim(),
+          input.memo,
+          input.tokenId,
+        );
         ok = !!res?.success;
         if (!ok) throw new Error(res?.error?.message || 'Online transfer failed');
-        // Immediate sender balance reflect: fire wallet.sendCommitted so WalletContext
-        // dispatches IMMEDIATE_BALANCE_SET without waiting for the async SQLite refresh.
-        if (ok && res?.newBalance !== undefined && res.newBalance !== null) {
-          try {
-            bridgeEvents.emit('wallet.sendCommitted', {
-              success: true,
-              tokenId: input.tokenId ?? 'ERA',
-              newBalance: res.newBalance,
-            } as any);
-          } catch {}
-        }
+        try {
+          bridgeEvents.emit('wallet.sendCommitted', { success: true } as any);
+        } catch {}
       }
 
       if (ok) {

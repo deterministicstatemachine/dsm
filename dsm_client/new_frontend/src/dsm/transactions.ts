@@ -198,7 +198,7 @@ export async function sendOnlineTransferSmart(
       const smartReq = new pb.OnlineTransferSmartRequest({
         recipient,
         amount: String(amount),
-        tokenId: canonicalizeTransferTokenId(tokenId),
+        tokenId: String(tokenId ?? '').trim(),
         memo: memo || '',
       });
 
@@ -250,17 +250,16 @@ export async function offlineSend(transfer: GenericTransaction): Promise<Generic
       return true;
     };
 
-    const AMOUNT_MAX = 0xffff_ffff_ffff_ffffn;
-    const amountBig = BigInt(transfer.amount);
-    if (amountBig < 0n || amountBig > AMOUNT_MAX) {
-      throw new Error('offlineSend: amount must fit in u64');
+    const transferAmountDisplay = String(transfer.amount ?? '').trim();
+    if (!transferAmountDisplay) {
+      throw new Error('offlineSend: amount is required');
     }
 
     const prepReq = new pb.BilateralPrepareRequest({
       counterpartyDeviceId: toBytes as any,
       validityIterations: BigInt(100),
       bleAddress: normalizeBleAddress(String(transfer.bleAddress || '')) || '',
-      transferAmount: amountBig as any,
+      transferAmountDisplay,
       tokenIdHint: canonicalizeTransferTokenId(transfer.tokenId),
       memoHint: transfer.memo || '',
     } as any);
@@ -371,25 +370,6 @@ export async function offlineSend(transfer: GenericTransaction): Promise<Generic
         const resp = p.value as pb.BilateralPrepareResponse;
         const h = resp.commitmentHash?.v;
         if (h instanceof Uint8Array && h.length === 32) commitmentHash = h;
-      } else if (p.case === 'universalRx') {
-        // Backward compatibility for older native builds still returning UniversalRx.
-        const rx = p.value as pb.UniversalRx;
-        if (!rx.results || rx.results.length === 0) {
-          finish({ accepted: false, result: 'offlineSend: empty UniversalRx results' });
-          return { accepted: false, result: 'offlineSend: empty UniversalRx results' };
-        }
-        const opResult = rx.results[0];
-        if (!opResult.accepted) {
-          const errMsg = opResult.error?.message || 'Operation rejected';
-          finish({ accepted: false, result: `offlineSend: ${errMsg}` });
-          return { accepted: false, result: `offlineSend: ${errMsg}` };
-        }
-        const body = opResult?.result?.body;
-        if (body && body.length > 0) {
-          const resp = pb.BilateralPrepareResponse.fromBinary(body);
-          const h = resp.commitmentHash?.v;
-          if (h instanceof Uint8Array && h.length === 32) commitmentHash = h;
-        }
       } else if (p.case === 'bilateralPrepareReject') {
         const rej = p.value as pb.BilateralPrepareReject;
         finish({ accepted: false, result: rej?.reason || 'offlineSend: rejected' });

@@ -1,0 +1,56 @@
+# DSM Storage Node — Per-Node Docker Compose
+#
+# Deployed to each EC2 instance. Runs PostgreSQL + storage-node together.
+# Requires: .env, config/node.toml, certs/node.crt, certs/node.key, certs/ca.crt
+#
+# Usage:
+#   docker compose -f docker-compose.node.yml up -d
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-dsm_storage}
+      POSTGRES_USER: ${POSTGRES_USER:-dsm}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dsm} -d ${POSTGRES_DB:-dsm_storage}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - dsm-internal
+
+  storage-node:
+    image: dsm-storage-node:latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${DSM_PORT:-8080}:8080"
+      - "${DSM_METRICS_PORT:-9090}:9090"
+    volumes:
+      - ./config:/config:ro
+      - ./certs:/certs:ro
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+      RUST_BACKTRACE: "1"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "--insecure", "https://localhost:8080/api/v2/health"]
+      interval: 15s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    networks:
+      - dsm-internal
+
+volumes:
+  pgdata:
+
+networks:
+  dsm-internal:
+    driver: bridge

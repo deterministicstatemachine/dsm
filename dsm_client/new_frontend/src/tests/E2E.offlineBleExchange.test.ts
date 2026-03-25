@@ -136,23 +136,12 @@ describe('E2E: Offline BLE exchange -> wallet refresh', () => {
           // Return a BilateralPrepareResponse envelope with a commitment hash
           // so offlineSend can proceed.
           const resp = new pb.BilateralPrepareResponse({
-            commitmentHash: new pb.Hash32({ v: new Uint8Array(32) } as any), // Fixed: should be Hash32 object
+            commitmentHash: new pb.Hash32({ v: new Uint8Array(32) } as any),
             localSignature: new Uint8Array(64),
           });
-          const rx = new pb.UniversalRx({
-            results: [
-              new pb.OpResult({
-                accepted: true,
-                result: new pb.ResultPack({
-                  codec: pb.Codec.PROTO,
-                  body: resp.toBinary(),
-                } as any),
-              } as any),
-            ],
-          } as any);
           const env = new pb.Envelope({
             version: 3,
-            payload: { case: 'universalRx', value: rx },
+            payload: { case: 'bilateralPrepareResponse', value: resp },
           } as any);
           return wrapSuccessEnvelope(withRouterPrefix(frameEnvelope(env)));
         }

@@ -9669,6 +9669,13 @@ export class BilateralPrepareRequest extends Message<BilateralPrepareRequest> {
    */
   memoHint = "";
 
+  /**
+   * decimal display amount; backend scales via token decimals
+   *
+   * @generated from field: string transfer_amount_display = 14;
+   */
+  transferAmountDisplay = "";
+
   constructor(data?: PartialMessage<BilateralPrepareRequest>) {
     super();
     proto3.util.initPartial(data, this);
@@ -9690,6 +9697,7 @@ export class BilateralPrepareRequest extends Message<BilateralPrepareRequest> {
     { no: 11, name: "transfer_amount", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 12, name: "token_id_hint", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 13, name: "memo_hint", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 14, name: "transfer_amount_display", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BilateralPrepareRequest {
@@ -11465,6 +11473,13 @@ export class BleIncomingDataResponse extends Message<BleIncomingDataResponse> {
    */
   useReliableWrite = false;
 
+  /**
+   * exact ConfirmPending session to finalize after BilateralConfirm delivery
+   *
+   * @generated from field: bytes confirm_commitment_hash = 4;
+   */
+  confirmCommitmentHash = new Uint8Array(0);
+
   constructor(data?: PartialMessage<BleIncomingDataResponse>) {
     super();
     proto3.util.initPartial(data, this);
@@ -11476,6 +11491,7 @@ export class BleIncomingDataResponse extends Message<BleIncomingDataResponse> {
     { no: 1, name: "response_chunks", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
     { no: 2, name: "pairing_complete", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
     { no: 3, name: "use_reliable_write", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 4, name: "confirm_commitment_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BleIncomingDataResponse {

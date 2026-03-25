@@ -1767,6 +1767,34 @@ impl<I: Send + Sync> TokenSDK<I> {
         );
     }
 
+    pub fn discard_transfer_history_entry(
+        &self,
+        token_id: &str,
+        recipient_device_id: &[u8; 32],
+        amount: u64,
+        memo: Option<&str>,
+    ) -> bool {
+        let mut history = self.transaction_history.write();
+        if let Some(idx) = history.iter().rposition(|(op, _)| {
+            matches!(
+                op,
+                TokenOperation::Transfer {
+                    token_id: tid,
+                    recipient,
+                    amount: amt,
+                    memo: op_memo,
+                } if tid == token_id
+                    && recipient == recipient_device_id
+                    && *amt == amount
+                    && op_memo.as_deref() == memo
+            )
+        }) {
+            history.remove(idx);
+            return true;
+        }
+        false
+    }
+
     /// Reload the local in-memory balance cache from canonical state reads,
     /// re-materializing any missing derived projection rows along the way.
     pub fn reload_balance_cache_for_self(&self, device_id: DevId) -> Result<(), DsmError> {

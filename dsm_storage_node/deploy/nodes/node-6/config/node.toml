@@ -1,0 +1,44 @@
+# DSM Storage Node — Production Configuration Template
+#
+# Placeholders are filled by deploy/generate_node_configs.sh:
+#   dsm-node-6         — e.g. "dsm-node-1"
+#   0.0.0.0     — e.g. "0.0.0.0"
+#   8080            — e.g. 8080
+#   postgresql://postgres:5432/dsm_storage?user=dsm__DATABASE_URL__password=p2mfu8Z544GWXmCBNOXv7SDqtI6CNN    — injected at deploy time from operator-provided settings
+
+[node]
+id = "dsm-node-6"
+
+[network]
+listen_addr = "0.0.0.0"
+port = 8080
+max_connections = 256
+
+[tls]
+enabled = true
+cert_path = "/certs/node.crt"
+key_path  = "/certs/node.key"
+
+[database]
+url = "postgresql://postgres:5432/dsm_storage?user=dsm__DATABASE_URL__password=p2mfu8Z544GWXmCBNOXv7SDqtI6CNN"
+
+[http]
+body_limit_bytes = 1048576    # 1 MiB
+
+[security_headers]
+hsts_max_age = 31536000       # 1 year
+
+[replication]
+# Peers are listed here; generate_node_configs.sh fills them in at deploy time.
+peers = ["https://13.218.83.69:8080", "https://44.223.31.184:8080", "https://54.74.145.172:8080", "https://3.249.79.215:8080", "https://18.141.56.252:8080"]
+
+[paidk]
+flat_rate = 1000     # Minimum payment amount per operator
+k = 3                # Distinct operators required for spend-gate satisfaction
+
+[registry]
+grace_cycles = 8     # New nodes protected from Down signals for this many cycles
+discovery_window = 4 # Signal aggregation window (cycles)
+n = 6                # Target node count
+u_up = 0.85          # Utilization threshold for Up signal validity
+u_down = 0.35        # Utilization threshold for Down signal validity

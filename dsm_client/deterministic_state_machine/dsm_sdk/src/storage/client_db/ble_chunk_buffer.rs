@@ -115,6 +115,21 @@ pub fn delete_frame_chunks(frame_commitment: &[u8; 32]) -> Result<()> {
     Ok(())
 }
 
+/// Delete a single chunk by frame_commitment + chunk_index.
+/// Used to remove corrupt chunks detected during hydration revalidation.
+pub fn delete_single_chunk(frame_commitment: &[u8; 32], chunk_index: u16) -> Result<()> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|_| anyhow!("Database lock poisoned"))?;
+
+    conn.execute(
+        "DELETE FROM ble_reassembly_state WHERE frame_commitment = ?1 AND chunk_index = ?2",
+        params![&frame_commitment[..], chunk_index],
+    )?;
+    Ok(())
+}
+
 /// Delete all chunks associated with a counterparty device_id.
 /// Used when a bilateral session reaches a terminal state (Committed/Rejected/Failed).
 pub fn delete_chunks_by_counterparty(counterparty_id: &[u8; 32]) -> Result<()> {

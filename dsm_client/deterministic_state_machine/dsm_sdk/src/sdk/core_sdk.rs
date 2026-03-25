@@ -334,6 +334,18 @@ impl CoreSDK {
         Self::restore_latest_archived_state(&self.state_machine, &self.device_info.device_id)
     }
 
+    /// Replace the in-memory canonical tip with a caller-supplied archived state snapshot.
+    /// Used by failed-online-send rollback after the bad archived successor has been removed.
+    pub fn restore_state_snapshot(&self, state: &State) -> Result<(), DsmError> {
+        if state.device_info.device_id != self.device_info.device_id {
+            return Err(DsmError::state_machine(
+                "restore_state_snapshot: device mismatch",
+            ));
+        }
+        self.state_machine.lock().set_state(state.clone());
+        Ok(())
+    }
+
     /// Normalize stale balance key formats in the current state.
     ///
     /// Migrates:
@@ -1940,6 +1952,44 @@ mod tests {
             restored_state.hash, executed.hash,
             "restored canonical state hash must match archived state"
         );
+    }
+
+    #[test]
+    #[serial]
+    fn restore_state_snapshot_rewinds_in_memory_tip() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+
+        let device = DeviceInfo::from_hashed_label("rollback_state_device", vec![7u8; 32]);
+        let sdk = CoreSDK::new_with_device(device.clone()).expect("init sdk");
+        sdk.initialize_with_genesis_state()
+            .expect("initialize genesis state");
+        let prior = sdk.get_current_state().expect("prior state");
+
+        let (pk, sk) =
+            dsm::crypto::sphincs::generate_sphincs_keypair().expect("generate test keypair");
+        sdk.set_signing_key(sk);
+        sdk.update_signing_public_key(pk);
+
+        let op = sdk
+            .sign_operation_sphincs(DsmOperation::Generic {
+                operation_type: b"rollback.test".to_vec(),
+                data: vec![0x01],
+                message: "advance".to_string(),
+                signature: vec![],
+            })
+            .expect("sign operation");
+        let advanced = sdk.execute_dsm_operation(op).expect("execute operation");
+        assert!(advanced.state_number > prior.state_number, "state must advance");
+
+        sdk.restore_state_snapshot(&prior)
+            .expect("restore prior snapshot");
+        let current = sdk.get_current_state().expect("current state");
+        assert_eq!(current.state_number, prior.state_number);
+        assert_eq!(current.hash, prior.hash);
     }
 }
 
