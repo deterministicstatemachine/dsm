@@ -819,63 +819,6 @@ impl State {
         Ok(indices)
     }
 
-    /// Derive a new state from a predecessor by applying an operation.
-    ///
-    /// Evolves entropy deterministically, computes the new state hash via
-    /// domain-separated BLAKE3, and calculates the sparse index for the
-    /// successor state number.
-    pub fn new_with_operation(prev_state: &Self, operation: Operation) -> Result<Self, DsmError> {
-        // Use canonical operation bytes for deterministic entropy evolution (no Serde)
-        let op_bytes = operation.to_bytes();
-
-        // Derive new entropy: e_{n+1} = H("DSM/state-entropy" || e_n || op || (n+1))
-        let next_state_number = prev_state.state_number.saturating_add(1);
-        let mut hasher = crate::crypto::blake3::dsm_domain_hasher("DSM/state-entropy");
-        hasher.update(&prev_state.entropy);
-        hasher.update(&op_bytes);
-        hasher.update(&next_state_number.to_le_bytes());
-        let new_entropy = hasher.finalize().as_bytes().to_vec();
-
-        // Derive the new hash by combining the new entropy with the previous state hash
-        let mut hash_input = new_entropy.clone();
-        hash_input.extend_from_slice(&prev_state.hash);
-        let new_hash = *domain_hash("DSM/state-hash", &hash_input).as_bytes();
-
-        // Calculate the sparse index for the new state
-        let sparse_index_vec =
-            SparseIndex::calculate_sparse_indices(prev_state.state_number.saturating_add(1))?;
-        let sparse_index = SparseIndex::new(sparse_index_vec);
-
-        let new_hash_cloned = new_hash;
-        Ok(State {
-            id: format!("state_{}", prev_state.state_number.saturating_add(1)),
-            state_number: prev_state.state_number.saturating_add(1),
-            entropy: new_entropy,
-            hash: new_hash,
-            prev_state_hash: prev_state.hash,
-            sparse_index,
-            operation,
-            encapsulated_entropy: None,
-            device_info: prev_state.device_info.clone(),
-            flags: HashSet::new(),
-            token_balances: prev_state.token_balances.clone(),
-            matches_parameters: false,
-            relationship_context: None,
-            dbrw_summary_hash: prev_state.dbrw_summary_hash,
-            forward_commitment: None,
-            position_sequence: None,
-            positions: Vec::new(),
-            public_key: prev_state.device_info.public_key.clone(),
-            hashchain_head: Some(new_hash_cloned.to_vec()),
-            external_data: HashMap::new(),
-            entity_sig: None,
-            counterparty_sig: None,
-            value: Vec::new(),
-            commitment: Vec::new(),
-            state_type: String::from("benchmark"),
-        })
-    }
-
     /// Set the forward commitment for this state
     pub fn set_forward_commitment(&mut self, commitment: Option<PreCommitment>) {
         self.forward_commitment = commitment;
@@ -1441,8 +1384,8 @@ impl NonInclusionProof {
                 // Key absent — construct non-inclusion proof from the root
                 // For now, return a proof with the root hash. Full sibling path
                 // collection for absent keys requires walking the SMT structure.
-                // TODO: Implement proper non-inclusion proof path collection
-                // by walking the SMT for the absent key's bit path.
+                // Non-inclusion proof currently returns root hash only. Full sibling
+                // path collection requires walking the SMT for the absent key's bit path.
                 Ok(NonInclusionProof {
                     path: Vec::new(),
                     index: 0,

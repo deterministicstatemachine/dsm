@@ -493,6 +493,13 @@ impl CoreSDK {
     /// Execute a full DSM Operation (preserving signatures and proofs)
     /// This bypasses the simplified CoreSDK::Operation wrapper to ensure
     /// authorization material reaches the state machine intact.
+    /// Execute a DSM operation through the state machine and archive the result.
+    ///
+    /// Returns the post-transition state with correct balances and hash.
+    /// Callers are responsible for calling `sync_token_projection_from_state`
+    /// (or `sync_token_projection_best_effort`) after this returns, since the
+    /// projection sync requires token_id and policy_commit which are
+    /// caller-specific context.
     pub fn execute_dsm_operation(
         &self,
         dsm_operation: dsm::types::operations::Operation,

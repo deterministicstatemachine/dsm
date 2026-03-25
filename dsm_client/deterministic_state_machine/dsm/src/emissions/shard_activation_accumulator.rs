@@ -18,7 +18,7 @@
 //!
 //! - Leaf values use `DJTE.ACTIVE` domain (per emissions spec §3.4)
 //! - Internal nodes currently use `DSM/djte-shard-merkle` domain
-//! - TODO: Consider using `DJTE/saa-node` when parameterized domains are implemented
+//! - Future: use `DJTE/saa-node` when parameterized domains are implemented
 
 use crate::crypto::blake3::{domain_hash_bytes, dsm_domain_hasher};
 

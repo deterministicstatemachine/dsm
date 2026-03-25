@@ -737,10 +737,9 @@ impl Identity {
             &transition.new_entropy.unwrap_or_default(),
         )?;
 
-        // TODO: Update the Per-Device SMT (SparseMerkleTree) with the new state.
-        // The Per-Device SMT uses 256-bit keys (relationship IDs) and lives in
-        // merkle::sparse_merkle_tree::SparseMerkleTree. The SMT update should happen
-        // at the bilateral relationship level, not here in Identity.
+        // Per-Device SMT update belongs at the bilateral relationship level, not here.
+        // The Per-Device SMT uses 256-bit relationship keys and lives in
+        // merkle::sparse_merkle_tree::SparseMerkleTree.
 
         if let Some(device) = self.devices.first_mut() {
             device.current_state = Some(new_state.clone());
@@ -784,7 +783,7 @@ impl Identity {
     /// NOTE: This previously used the embedded u64-index tree which has been removed.
     /// Inclusion proofs should come from the Per-Device SMT (SparseMerkleTree) using
     /// 256-bit relationship keys. Returns an error until migrated.
-    // TODO: Migrate callers to use the Per-Device SMT for inclusion proofs
+    // Callers should migrate to Per-Device SMT for inclusion proofs
     pub async fn get_proof(&self, _key: [u8; 32]) -> Result<MerkleProof, DsmError> {
         Err(DsmError::internal(
             "Identity::get_proof not yet migrated to Per-Device SMT",

@@ -2797,12 +2797,15 @@ impl<I: Send + Sync> TokenSDK<I> {
         };
 
         let current_state = self.core_sdk.get_current_state()?;
-        let state_hash = current_state.hash;
         let sender = current_state.device_info.device_id;
 
         log::debug!("[TOKEN] execute_transfer_op: calling core_sdk.execute_dsm_operation...");
         let new_state = self.core_sdk.execute_dsm_operation(op)?;
         log::debug!("[TOKEN] execute_transfer_op: execute_dsm_operation OK");
+
+        // Anchor balance cache entries to the POST-transition state (not pre-transition).
+        let state_hash = new_state.hash;
+        let state_number = new_state.state_number;
 
         // Update balances cache (same logic as execute_signed_transfer)
         log::debug!("[TOKEN] execute_transfer_op: updating balances cache...");
@@ -2821,7 +2824,7 @@ impl<I: Send + Sync> TokenSDK<I> {
                     ));
                 }
                 *bal =
-                    Balance::from_state(cur - amount_val, state_hash, current_state.state_number);
+                    Balance::from_state(cur - amount_val, state_hash, state_number);
             } else {
                 let cur = current_balance.value();
                 if cur < amount_val {
@@ -2831,7 +2834,7 @@ impl<I: Send + Sync> TokenSDK<I> {
                 }
                 sender_balances.insert(
                     token_id.clone(),
-                    Balance::from_state(cur - amount_val, state_hash, current_state.state_number),
+                    Balance::from_state(cur - amount_val, state_hash, state_number),
                 );
             }
 
@@ -2844,10 +2847,10 @@ impl<I: Send + Sync> TokenSDK<I> {
                     .entry(token_id.clone())
                     .and_modify(|bal| {
                         let nv = bal.value() + amount_val;
-                        *bal = Balance::from_state(nv, state_hash, current_state.state_number);
+                        *bal = Balance::from_state(nv, state_hash, state_number);
                     })
                     .or_insert_with(|| {
-                        Balance::from_state(amount_val, state_hash, current_state.state_number)
+                        Balance::from_state(amount_val, state_hash, state_number)
                     });
             }
         }

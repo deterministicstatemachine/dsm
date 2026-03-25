@@ -1347,7 +1347,7 @@ mod tests {
         nonce: Vec<u8>,
         message: &str,
     ) -> Operation {
-        signed_transfer_op_amount(sk, state_hash, nonce, message, "token1", 10)
+        signed_transfer_op_amount(sk, state_hash, nonce, message, "ERA", 10)
     }
 
     fn signed_mint_op_amount(sk: &[u8], token_id: &str, amount: u64) -> Operation {
@@ -1600,12 +1600,12 @@ mod tests {
         let (_state, _pk, sk) = create_test_state_with_keypair(0);
         let transfer_op = signed_transfer_op(&sk, [0u8; 32], vec![28, 29, 30], "test transfer");
 
-        assert!(transfer_op.affects_balance(b"token1"));
+        assert!(transfer_op.affects_balance(b"ERA"));
         assert!(!transfer_op.affects_balance(b"token2"));
         let mint_op = signed_mint_op(&sk);
 
         assert!(mint_op.affects_balance(b"token2"));
-        assert!(!mint_op.affects_balance(b"token1"));
+        assert!(!mint_op.affects_balance(b"ERA"));
     }
 
     #[test]
@@ -1796,7 +1796,19 @@ mod tests {
 
     #[test]
     fn test_create_next_state() {
-        let (current_state, _pk, sk) = create_test_state_with_keypair(5);
+        let (mut current_state, _pk, sk) = create_test_state_with_keypair(5);
+
+        // Seed sender balance so the transfer has sufficient funds
+        let era_pc = crate::core::token::builtin_policy_commit_for_token("ERA").unwrap();
+        let sender_key = crate::core::token::derive_canonical_balance_key(
+            &era_pc,
+            &current_state.device_info.public_key,
+            "ERA",
+        );
+        current_state
+            .token_balances
+            .insert(sender_key, Balance::from_state(1000, current_state.hash, 5));
+
         let operation =
             signed_transfer_op(&sk, current_state.hash, vec![49, 50, 51], "signed transfer");
         let entropy = vec![1, 2, 3, 4];
@@ -2242,7 +2254,7 @@ mod tests {
                 balance.update_add(25);
                 balance
             },
-            token_id: b"token1".to_vec(),
+            token_id: b"ERA".to_vec(),
             to_device_id: b"recipient".to_vec(),
             nonce: vec![0, 1, 2, 3],
             pre_commit: None,
@@ -2280,6 +2292,15 @@ mod tests {
 
         let mut current_state = create_test_state(3);
         current_state.device_info.public_key = pk.clone();
+
+        // Seed sender balance so the unilateral transfer has sufficient funds
+        let era_pc = crate::core::token::builtin_policy_commit_for_token("ERA").unwrap();
+        let sender_key =
+            crate::core::token::derive_canonical_balance_key(&era_pc, &pk, "ERA");
+        current_state
+            .token_balances
+            .insert(sender_key, Balance::from_state(1000, current_state.hash, 3));
+
         let entropy = vec![4, 5, 6, 7];
 
         let mut transfer_op = Operation::Transfer {
@@ -2288,7 +2309,7 @@ mod tests {
                 balance.update_add(10);
                 balance
             },
-            token_id: b"token1".to_vec(),
+            token_id: b"ERA".to_vec(),
             to_device_id: b"recipient".to_vec(),
             nonce: vec![0, 1, 2, 3],
             pre_commit: None,

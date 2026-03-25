@@ -18,7 +18,7 @@
 //! # Domain Separation
 //!
 //! Currently uses the generic `DSM/smt-leaf` and `DSM/smt-node` domains.
-//! TODO: Add DJTE-specific domain separation (`DJTE/count-leaf`, `DJTE/count-node`)
+//! Future: add DJTE-specific domain separation (`DJTE/count-leaf`, `DJTE/count-node`)
 //! when parameterized domain support is implemented. This was discussed with Brandon
 //! and will be part of the broader domain parameterization effort.
 
@@ -48,7 +48,7 @@ impl ShardCountSmt {
     /// Compute the Merkle root from heap-indexed counts using bottom-up hashing.
     ///
     /// Leaf nodes hash their count value; internal nodes hash their children.
-    // TODO: Use DJTE/count-leaf and DJTE/count-node domains when parameterized domains land
+    // Uses generic DSM/smt-leaf and DSM/smt-node pending parameterized domain support
     pub fn root(&self) -> [u8; 32] {
         self.compute_node_hash(1)
     }
