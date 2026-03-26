@@ -859,6 +859,140 @@ async fn smoke_appstate_device_tree_root_canonical() {
     );
 }
 
+/// Validate that adding a contact stores the sender's Device Tree root (R_G)
+/// in the contacts table, so that receipt verification during `storage.sync`
+/// can succeed (§2.3 / §4.3#3).
+///
+/// Both `store_contact` (client_db) and the explicit `store_contact_device_tree_root`
+/// call (added in contact_sdk.rs) ensure R_G is persisted.  This test validates
+/// the end-to-end invariant: after a contact is stored, `verify_receipt_bytes`
+/// succeeds for any receipt built with that contact's device_id as the sender.
+#[tokio::test]
+#[serial]
+async fn contact_add_stores_device_tree_root() {
+    setup_test_env();
+
+    // Contact (Bob) details — Bob is the sender whose R_G the receiver (Alice) needs.
+    let mut bob_id = [0u8; 32];
+    bob_id[0] = 0xB1;
+    let mut bob_genesis = [0u8; 32];
+    bob_genesis[0] = 0xB2;
+
+    use dsm_sdk::storage::client_db::{
+        store_contact, get_contact_device_tree_commitment, ContactRecord,
+    };
+    let record = ContactRecord {
+        contact_id: "c_bob".to_string(),
+        device_id: bob_id.to_vec(),
+        alias: "Bob".to_string(),
+        genesis_hash: bob_genesis.to_vec(),
+        current_chain_tip: None,
+        added_at: 0,
+        verified: true,
+        verification_proof: None,
+        metadata: std::collections::HashMap::new(),
+        ble_address: None,
+        status: "Created".to_string(),
+        needs_online_reconcile: false,
+        last_seen_online_counter: 0,
+        last_seen_ble_counter: 0,
+        public_key: vec![],
+        previous_chain_tip: None,
+    };
+    store_contact(&record).expect("store_contact must succeed");
+
+    // After store_contact, R_G must be available for the contact.
+    // Both the internal UPDATE in store_contact and the explicit call in
+    // contact_sdk.rs ensure this invariant is satisfied.
+    let expected_root = DeviceTree::single(bob_id).root();
+    let commitment = get_contact_device_tree_commitment(&bob_id)
+        .expect("device tree commitment must be Some after store_contact");
+    assert_eq!(
+        commitment.root(),
+        expected_root,
+        "stored R_G must equal DeviceTree::single(bob_id).root()"
+    );
+
+    // End-to-end smoke-check: build a receipt as Bob (sender) and verify as Alice (receiver).
+    // This exercises the full verify_receipt_bytes code path used in storage.sync.
+    let mut alice_id = [0u8; 32];
+    alice_id[0] = 0xA1;
+    let mut alice_genesis = [0u8; 32];
+    alice_genesis[0] = 0xA2;
+
+    // Set AppState to Bob (sender) for receipt construction.
+    AppState::set_identity_info(
+        bob_id.to_vec(),
+        vec![0u8; 64],
+        bob_genesis.to_vec(),
+        vec![0u8; 32],
+    );
+    AppState::set_has_identity(true);
+
+    let smt_a_arc = shared_smt::init_shared_smt(256);
+    let smt_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&bob_id, &alice_id);
+    let h0 = compute_h0(
+        &TestDevice {
+            device_id: bob_id,
+            genesis_hash: bob_genesis,
+            keypair: SignatureKeyPair::generate_from_entropy(&[0xB1u8; 32]).unwrap(),
+            smt: SparseMerkleTree::new(256),
+            device_tree_root: expected_root,
+        },
+        &TestDevice {
+            device_id: alice_id,
+            genesis_hash: alice_genesis,
+            keypair: SignatureKeyPair::generate_from_entropy(&[0xA1u8; 32]).unwrap(),
+            smt: SparseMerkleTree::new(256),
+            device_tree_root: DeviceTree::single(alice_id).root(),
+        },
+    );
+
+    let h1 = {
+        let nonce = [0u8; 32];
+        let op_bytes = b"test-op".to_vec();
+        let sigma = dsm::core::bilateral_transaction_manager::compute_precommit(&h0, &op_bytes, &nonce);
+        dsm::core::bilateral_transaction_manager::compute_successor_tip(&h0, &op_bytes, &nonce, &sigma)
+    };
+
+    let (pre_root, post_root, parent_proof_bytes, child_proof_bytes) = {
+        let mut smt = smt_a_arc.write().await;
+        // Establish h0 as the initial relationship tip (mirrors establish_relationship).
+        smt.update_leaf(&smt_key, &h0).expect("initial h0 insert must succeed");
+        // Now advance h0 → h1 (the actual transfer); parent_proof proves h0 ∈ pre_root.
+        let result = smt.smt_replace(&smt_key, &h1).expect("smt_replace must succeed");
+        (
+            result.pre_root,
+            result.post_root,
+            result.parent_proof.to_bytes(),
+            result.child_proof.to_bytes(),
+        )
+    };
+
+    let bob_device_tree_commitment = AppState::get_device_tree_commitment()
+        .expect("Bob's device tree commitment must be set after set_identity_info");
+
+    let receipt_bytes = build_bilateral_receipt_with_smt(
+        bob_id,
+        alice_id,
+        h0,
+        h1,
+        pre_root,
+        post_root,
+        parent_proof_bytes,
+        child_proof_bytes,
+        Some(bob_device_tree_commitment),
+    )
+    .expect("build_bilateral_receipt_with_smt must return Some");
+
+    // Alice verifying: looks up Bob's stored R_G from contacts table → must succeed.
+    let ok = verify_receipt_bytes(&receipt_bytes, Some(commitment));
+    assert!(
+        ok,
+        "verify_receipt_bytes must succeed when contact device tree root is stored"
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn smoke_proof_serialize_deserialize_roundtrip() {
