@@ -199,8 +199,8 @@ pub async fn replication_outbox_record_failure(
         )
         .await?;
 
-    metrics::counter!("dsm_replication_outbox_failures_total", 1);
-    metrics::gauge!("dsm_replication_outbox_last_failure_iter", now_iter as f64);
+    metrics::counter!("dsm_replication_outbox_failures_total").increment(1);
+    metrics::gauge!("dsm_replication_outbox_last_failure_iter").set(now_iter as f64);
     Ok(())
 }
 
@@ -944,12 +944,10 @@ pub async fn cleanup_expired_objects_and_spool(
         .await?;
 
     // Record cleanup metrics
-    metrics::counter!("dsm_storage_cleanup_runs_total", 1);
-    metrics::counter!("dsm_storage_cleanup_objects_deleted_total", objects_deleted);
-    metrics::counter!(
-        "dsm_storage_cleanup_spool_deleted_total",
-        spool_deleted + acked_deleted
-    );
+    metrics::counter!("dsm_storage_cleanup_runs_total").increment(1);
+    metrics::counter!("dsm_storage_cleanup_objects_deleted_total").increment(objects_deleted);
+    metrics::counter!("dsm_storage_cleanup_spool_deleted_total")
+        .increment(spool_deleted + acked_deleted);
 
     Ok((objects_deleted, spool_deleted + acked_deleted))
 }
