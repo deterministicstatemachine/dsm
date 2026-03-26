@@ -372,6 +372,22 @@ impl ContactManager {
                     }
                     log::info!("[DSM_SDK] ✅ Contact stored successfully in SQLite");
 
+                    // §2.3: Store the contact's Device Tree root R_G so that receipt
+                    // verification during inbox sync can validate π_dev proofs.
+                    // For a single-device tree, R_G = hash_leaf(device_id) and is
+                    // deterministic from the contact's device ID alone.
+                    let contact_device_tree_root =
+                        dsm::common::device_tree::DeviceTree::single(contact_device_id).root();
+                    if let Err(e) = crate::storage::client_db::store_contact_device_tree_root(
+                        &contact_device_id,
+                        &contact_device_tree_root,
+                    ) {
+                        log::warn!(
+                            "[DSM_SDK] ⚠️ Failed to store contact device tree root: {}",
+                            e
+                        );
+                    }
+
                     // Mark device as paired to persist BLE connection in Android layer
                     #[allow(unused_variables)]
                     if let Some(ref addr) = ble_address {
@@ -667,6 +683,22 @@ impl ContactManager {
                         return Err(ContactError::InvalidChainTip(format!(
                             "Failed to persist initial local bilateral chain tip: {e}"
                         )));
+                    }
+
+                    // §2.3: Store the contact's Device Tree root R_G so that receipt
+                    // verification during inbox sync can validate π_dev proofs.
+                    // For a single-device tree, R_G = hash_leaf(device_id) and is
+                    // deterministic from the contact's device ID alone.
+                    let contact_device_tree_root =
+                        dsm::common::device_tree::DeviceTree::single(contact_device_id).root();
+                    if let Err(e) = crate::storage::client_db::store_contact_device_tree_root(
+                        &contact_device_id,
+                        &contact_device_tree_root,
+                    ) {
+                        log::warn!(
+                            "[DSM_SDK] ⚠️ Failed to store contact device tree root: {}",
+                            e
+                        );
                     }
 
                     // Mark device as paired to persist BLE connection in Android layer
