@@ -511,8 +511,15 @@ impl AppRouterImpl {
 
             // -------- balance.list --------
             "balance.list" => {
-                if let Err(e) = self.core_sdk.restore_latest_archived_state_for_device() {
-                    log::warn!("[balance.list] archive refresh failed: {}", e);
+                // Canonical in-memory state is the authoritative balance source.
+                // Only restore from BCR archive on cold start when no in-memory
+                // state exists. Unconditional restore can race with bilateral
+                // settlement and read stale deltas instead of post-settlement
+                // balances.
+                if self.core_sdk.get_current_state().is_err() {
+                    if let Err(e) = self.core_sdk.restore_latest_archived_state_for_device() {
+                        log::warn!("[balance.list] cold-start archive refresh failed: {}", e);
+                    }
                 }
                 log::debug!("[balance.list] query handler entered");
 

@@ -1,0 +1,61 @@
+            self.exec_offline(remote_device_id, operation, &mut anchor, smt)
+                .await
+        } else {
+            self.exec_online(remote_device_id, operation, &mut anchor, smt)
+                .await
+        }
+    }
+
+    async fn exec_offline(
+        &mut self,
+        remote_device_id: &[u8; 32],
+        operation: Operation,
+        anchor: &mut BilateralRelationshipAnchor,
+        smt: &mut SparseMerkleTree,
+    ) -> Result<BilateralTransactionResult, DsmError> {
+        // Tripwire: shared chain_tip must match persisted contact tip
+        if let Some(contact) = self.contact_manager.get_contact(remote_device_id) {
+            if let Some(contact_tip) = contact.chain_tip {
+                if anchor.chain_tip != contact_tip {
+                    return Err(DsmError::deterministic_safety(
+                        DeterministicSafetyClass::ParentConsumed,
+                        "Tripwire: relationship chain tip diverged from persisted value",
+                    ));
+                }
+            }
+        } else {
+            return Err(DsmError::RelationshipNotFound(
+                "remote contact missing for exec_offline".into(),
+            ));
+        }
+
+        let _ = self
+            .create_bilateral_precommitment(remote_device_id, operation.clone(), 300)
+            .await?;
+        let entropy = self.bilateral_state_manager.generate_entropy()?;
+        let sp: StatePair = self.bilateral_state_manager.execute_transition_bytes(
+            &self.local_device_id,
+            remote_device_id,
+            operation.clone(),
+            entropy,
+        )?;
+        let current_tip = anchor.chain_tip;
+        let receipt_sigma = compute_precommit(&current_tip, &operation.to_bytes(), &entropy);
+        let new_tip = compute_successor_tip(
+            &current_tip,
+            &operation.to_bytes(),
+            &entropy,
+            &receipt_sigma,
+        );
+        let tx_hash = self.tx_hash(&sp.entity_state, &sp.counterparty_state)?;
+
+        // §4.2: SMT-Replace FIRST, then anchor update from the result.
+        let replace_result = self.commit_bilateral_smt_update(smt, remote_device_id, &new_tip)?;
+        self.update_anchor_from_replace(remote_device_id, anchor, new_tip, &replace_result)?;
+
+        Ok(BilateralTransactionResult {
+            local_state: sp.entity_state,
+            remote_state: sp.counterparty_state,
+            relationship_anchor: anchor.clone(),
+            transaction_hash: tx_hash,
+            completed_offline: true,

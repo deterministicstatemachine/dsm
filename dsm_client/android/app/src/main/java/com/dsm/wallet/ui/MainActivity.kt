@@ -404,6 +404,10 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         publishSessionState(reason)
     }
 
+    fun setBleAdvertisingDesired(desired: Boolean) {
+        bleBackgroundService?.setAdvertisingDesired(desired)
+    }
+
     private fun setSessionFatalError(message: String?) {
         if (message.isNullOrBlank()) {
             try { Unified.clearSessionFatalError() } catch (_: Throwable) {}

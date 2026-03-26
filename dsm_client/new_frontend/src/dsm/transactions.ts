@@ -9,8 +9,11 @@ import {
     getSigningPublicKeyBinBridgeAsync,
     acceptBilateralByCommitmentBridge,
     rejectBilateralByCommitmentBridge,
-    getPendingBilateralListStrictBridge
-} from './WebViewBridge'; 
+    getPendingBilateralListStrictBridge,
+    setBleIdentityForAdvertising,
+    startBleAdvertisingViaRouter,
+    startBleScanViaRouter,
+} from './WebViewBridge';
 import { on as eventBridgeOn } from './EventBridge';
 import { bridgeEvents } from '../bridge/bridgeEvents';
 import { getHeaders } from './identity';
@@ -299,6 +302,8 @@ export async function offlineSend(transfer: GenericTransaction): Promise<Generic
       }
       offEvent();
       offBle();
+      // Re-start advertising so device stays discoverable for next transfer
+      void startBleAdvertisingViaRouter().catch(() => {});
       if (resolvePromise) resolvePromise(res);
     };
 
@@ -349,6 +354,20 @@ export async function offlineSend(transfer: GenericTransaction): Promise<Generic
         finish({ accepted: false, result: msg });
       } catch { /* ignore */ }
     });
+
+    // --- Ensure BLE advertising + scanning so the receiver can connect back ---
+    try {
+      const devId = await getDeviceIdBinBridgeAsync();
+      if (devId && devId.length === 32) {
+        await setBleIdentityForAdvertising(new Uint8Array(32), devId);
+        await startBleAdvertisingViaRouter();
+      }
+      await startBleScanViaRouter();
+      // Brief pause for BLE stack to settle and peer to discover us
+      await new Promise(r => setTimeout(r, 1500));
+    } catch {
+      // Best-effort — proceed with send even if BLE priming fails
+    }
 
     // --- Delegate native authoring + BLE dispatch to wallet.sendOffline ---
     const respBytes = await appRouterInvokeBin('wallet.sendOffline', new Uint8Array(argPack.toBinary()));

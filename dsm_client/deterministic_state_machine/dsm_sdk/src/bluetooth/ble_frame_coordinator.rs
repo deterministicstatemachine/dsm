@@ -608,11 +608,19 @@ impl BleFrameCoordinator {
 
         // P0.1: Sweep expired reassembly buffers before processing new chunk.
         // Transport-only timing (rules.instructions.md §36: "idle expiry, stale-session recovery").
-        let reassembly_timeout = Duration::from_secs(10);
+        // Timeout scales with frame size: large bilateral confirm envelopes
+        // (262 chunks / 47KB) need more time over BLE than small frames.
         let now = Instant::now();
         let expired: Vec<[u8; 32]> = buffers
             .iter()
-            .filter(|(_, buf)| now.duration_since(buf.created_at) > reassembly_timeout)
+            .filter(|(_, buf)| {
+                let timeout = match buf.total_chunks {
+                    0..=10 => Duration::from_secs(10),
+                    11..=100 => Duration::from_secs(30),
+                    _ => Duration::from_secs(60),
+                };
+                now.duration_since(buf.created_at) > timeout
+            })
             .map(|(k, buf)| {
                 warn!(
                     "BLE reassembly timeout: frame {} expired ({}/{} chunks received)",
@@ -624,8 +632,12 @@ impl BleFrameCoordinator {
             })
             .collect();
         for key in &expired {
+            // Evict in-memory buffer to free RAM, but preserve persisted
+            // chunks in SQLite. When the next chunk arrives for this frame,
+            // auto-hydration (line 635) will reload them and resume
+            // reassembly. Persisted chunks are cleaned up after successful
+            // reassembly (line 734) or by the periodic stale-frame sweep.
             buffers.remove(key);
-            let _ = crate::storage::client_db::delete_frame_chunks(key);
         }
 
         if !buffers.contains_key(&frame_commitment) {
