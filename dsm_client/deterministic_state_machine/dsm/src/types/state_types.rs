@@ -620,10 +620,10 @@ impl State {
             hasher.update(enc);
         }
 
-        // Optional DBRW summary commitment (non-secret). If present, it must be exactly 32 bytes.
-        if let Some(h) = &self.dbrw_summary_hash {
-            hasher.update(h);
-        }
+        // DBRW health summaries are intentionally excluded from the canonical
+        // state hash. They are device-local, advisory telemetry and must not
+        // perturb deterministic state identity or balance projection matching
+        // across restore/replay paths.
 
         // Deterministic serialization of operation (canonical bytes)
         let op_bytes = self.operation.to_bytes();
@@ -946,6 +946,34 @@ impl CanonicalEncode for State {
 
     fn domain_tag(&self) -> &'static str {
         "DSM/state"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DeviceInfo, State, StateParams};
+    use crate::types::operations::Operation;
+
+    #[test]
+    fn dbrw_summary_hash_does_not_change_state_hash() {
+        let device_info = DeviceInfo::new([0x11; 32], vec![0x22; 64]);
+
+        let base = State::new(StateParams::new(
+            7,
+            vec![1, 2, 3, 4],
+            Operation::Noop,
+            device_info.clone(),
+        ));
+
+        let with_dbrw = State::new(
+            StateParams::new(7, vec![1, 2, 3, 4], Operation::Noop, device_info)
+                .with_dbrw_summary_hash([0xAB; 32]),
+        );
+
+        let base_hash = base.compute_hash().expect("base hash");
+        let dbrw_hash = with_dbrw.compute_hash().expect("dbrw hash");
+
+        assert_eq!(base_hash, dbrw_hash);
     }
 }
 
