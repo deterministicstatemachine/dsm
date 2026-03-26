@@ -31,7 +31,7 @@ pub(crate) fn build_online_receipt_with_smt(
     child_root: [u8; 32],
     rel_proof_parent: Vec<u8>,
     rel_proof_child: Vec<u8>,
-    device_tree_root: Option<[u8; 32]>,
+    device_tree_commitment: Option<crate::sdk::receipts::DeviceTreeAcceptanceCommitment>,
 ) -> Option<Vec<u8>> {
     let mut dev_a = [0u8; 32];
     if from_device.len() >= 32 {
@@ -50,6 +50,6 @@ pub(crate) fn build_online_receipt_with_smt(
         child_root,
         rel_proof_parent,
         rel_proof_child,
-        device_tree_root,
+        device_tree_commitment,
     )
 }

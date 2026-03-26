@@ -195,16 +195,18 @@ pub fn apply_receiver_confirm_and_store_transaction_atomic(
     Ok(())
 }
 
-pub fn apply_receiver_confirm_bundle_atomic(
-    counterparty_device_id: &[u8],
-    new_chain_tip: &[u8],
-    receiver_device_id: &str,
-    token_id: Option<&str>,
-    amount: u64,
-    tx: &TransactionRecord,
-    settled_state: Option<&State>,
-    projection: Option<&BalanceProjectionRecord>,
-) -> Result<()> {
+pub struct ReceiverConfirmBundle<'a> {
+    pub counterparty_device_id: &'a [u8],
+    pub new_chain_tip: &'a [u8],
+    pub receiver_device_id: &'a str,
+    pub token_id: Option<&'a str>,
+    pub amount: u64,
+    pub tx: &'a TransactionRecord,
+    pub settled_state: Option<&'a State>,
+    pub projection: Option<&'a BalanceProjectionRecord>,
+}
+
+pub fn apply_receiver_confirm_bundle_atomic(bundle: ReceiverConfirmBundle<'_>) -> Result<()> {
     let binding = get_connection()?;
     let mut conn = binding.lock().unwrap_or_else(|poisoned| {
         log::warn!(
@@ -228,23 +230,23 @@ pub fn apply_receiver_confirm_bundle_atomic(
                 ELSE 'OnlineCapable'
             END
          WHERE device_id = ?3",
-        params![new_chain_tip, now as i64, counterparty_device_id],
+        params![bundle.new_chain_tip, now as i64, bundle.counterparty_device_id],
     )?;
 
-    if let Some(state) = settled_state {
+    if let Some(state) = bundle.settled_state {
         store_bcr_state_with_conn(&txdb, state, true, now)?;
     }
-    if let Some(record) = projection {
+    if let Some(record) = bundle.projection {
         upsert_balance_projection_with_conn(&txdb, record)?;
     }
 
-    let affected = upsert_transaction_row(&txdb, tx, now)?;
+    let affected = upsert_transaction_row(&txdb, bundle.tx, now)?;
     txdb.commit()?;
 
     if affected > 0 {
         info!(
             "Atomic receiver settlement bundle stored (tip+history+state): device={} token={:?} amount={} tx_id={}",
-            receiver_device_id, token_id, amount, tx.tx_id
+            bundle.receiver_device_id, bundle.token_id, bundle.amount, bundle.tx.tx_id
         );
     }
 
@@ -350,101 +352,6 @@ pub fn rollback_failed_online_send_atomic(
     );
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::storage::client_db::tokens::{upsert_balance_projection, BalanceProjectionRecord};
-    use crate::storage::client_db::types::TransactionRecord;
-    use crate::storage::client_db::{
-        get_balance_projection, get_bcr_states, get_transaction_history, init_database,
-        reset_database_for_tests, store_bcr_state,
-    };
-    use dsm::types::operations::Operation;
-    use dsm::types::state_types::{DeviceInfo, State, StateParams};
-    use serial_test::serial;
-    use std::collections::HashMap;
-
-    #[test]
-    #[serial]
-    fn rollback_failed_online_send_atomic_removes_failed_artifacts() {
-        unsafe {
-            std::env::set_var("DSM_SDK_TEST_MODE", "1");
-        }
-        reset_database_for_tests();
-        init_database().expect("init db");
-
-        let device = [0x41u8; 32];
-        let device_b32 = crate::util::text_id::encode_base32_crockford(&device);
-        let failed_state = State::new(StateParams::new(
-            1,
-            vec![0xAA],
-            Operation::Noop,
-            DeviceInfo::new(device, vec![0x22; 64]),
-        ));
-        store_bcr_state(&failed_state, false).expect("store failed state");
-
-        upsert_balance_projection(&BalanceProjectionRecord {
-            balance_key: format!("{}|{}", device_b32, "ERA"),
-            device_id: device_b32.clone(),
-            token_id: "ERA".to_string(),
-            policy_commit: crate::util::text_id::encode_base32_crockford(&[0x33u8; 32]),
-            available: 9,
-            locked: 0,
-            source_state_hash: crate::util::text_id::encode_base32_crockford(&failed_state.hash),
-            source_state_number: failed_state.state_number,
-            updated_at: 0,
-        })
-        .expect("store projection");
-
-        store_transaction(&TransactionRecord {
-            tx_id: "tx-rollback".to_string(),
-            tx_hash: crate::util::text_id::encode_base32_crockford(&failed_state.hash),
-            from_device: device_b32.clone(),
-            to_device: "peer".to_string(),
-            amount: 9,
-            tx_type: "online".to_string(),
-            status: "confirmed".to_string(),
-            chain_height: failed_state.state_number,
-            step_index: 1,
-            commitment_hash: None,
-            proof_data: None,
-            metadata: HashMap::new(),
-            created_at: 0,
-        })
-        .expect("store transaction");
-
-        rollback_failed_online_send_atomic(
-            &device,
-            &failed_state.hash,
-            "tx-rollback",
-            &device_b32,
-            "ERA",
-        )
-        .expect("rollback artifacts");
-
-        assert!(
-            get_bcr_states(&device, false)
-                .expect("load bcr states")
-                .into_iter()
-                .all(|state| state.hash != failed_state.hash),
-            "failed archived state must be removed"
-        );
-        assert!(
-            get_balance_projection(&device_b32, "ERA")
-                .expect("load projection")
-                .is_none(),
-            "failed balance projection must be removed"
-        );
-        assert!(
-            get_transaction_history(Some(&device_b32), Some(20))
-                .expect("load tx history")
-                .into_iter()
-                .all(|tx| tx.tx_id != "tx-rollback"),
-            "failed transaction record must be removed"
-        );
-    }
 }
 
 pub fn get_transaction_history(
@@ -560,5 +467,100 @@ pub fn get_transaction_history(
             out.push(r?);
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::client_db::tokens::{upsert_balance_projection, BalanceProjectionRecord};
+    use crate::storage::client_db::types::TransactionRecord;
+    use crate::storage::client_db::{
+        get_balance_projection, get_bcr_states, get_transaction_history, init_database,
+        reset_database_for_tests, store_bcr_state,
+    };
+    use dsm::types::operations::Operation;
+    use dsm::types::state_types::{DeviceInfo, State, StateParams};
+    use serial_test::serial;
+    use std::collections::HashMap;
+
+    #[test]
+    #[serial]
+    fn rollback_failed_online_send_atomic_removes_failed_artifacts() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        reset_database_for_tests();
+        init_database().expect("init db");
+
+        let device = [0x41u8; 32];
+        let device_b32 = crate::util::text_id::encode_base32_crockford(&device);
+        let failed_state = State::new(StateParams::new(
+            1,
+            vec![0xAA],
+            Operation::Noop,
+            DeviceInfo::new(device, vec![0x22; 64]),
+        ));
+        store_bcr_state(&failed_state, false).expect("store failed state");
+
+        upsert_balance_projection(&BalanceProjectionRecord {
+            balance_key: format!("{}|{}", device_b32, "ERA"),
+            device_id: device_b32.clone(),
+            token_id: "ERA".to_string(),
+            policy_commit: crate::util::text_id::encode_base32_crockford(&[0x33u8; 32]),
+            available: 9,
+            locked: 0,
+            source_state_hash: crate::util::text_id::encode_base32_crockford(&failed_state.hash),
+            source_state_number: failed_state.state_number,
+            updated_at: 0,
+        })
+        .expect("store projection");
+
+        store_transaction(&TransactionRecord {
+            tx_id: "tx-rollback".to_string(),
+            tx_hash: crate::util::text_id::encode_base32_crockford(&failed_state.hash),
+            from_device: device_b32.clone(),
+            to_device: "peer".to_string(),
+            amount: 9,
+            tx_type: "online".to_string(),
+            status: "confirmed".to_string(),
+            chain_height: failed_state.state_number,
+            step_index: 1,
+            commitment_hash: None,
+            proof_data: None,
+            metadata: HashMap::new(),
+            created_at: 0,
+        })
+        .expect("store transaction");
+
+        rollback_failed_online_send_atomic(
+            &device,
+            &failed_state.hash,
+            "tx-rollback",
+            &device_b32,
+            "ERA",
+        )
+        .expect("rollback artifacts");
+
+        assert!(
+            get_bcr_states(&device, false)
+                .expect("load bcr states")
+                .into_iter()
+                .all(|state| state.hash != failed_state.hash),
+            "failed archived state must be removed"
+        );
+        assert!(
+            get_balance_projection(&device_b32, "ERA")
+                .expect("load projection")
+                .is_none(),
+            "failed balance projection must be removed"
+        );
+        assert!(
+            get_transaction_history(Some(&device_b32), Some(20))
+                .expect("load tx history")
+                .into_iter()
+                .all(|tx| tx.tx_id != "tx-rollback"),
+            "failed transaction record must be removed"
+        );
     }
 }

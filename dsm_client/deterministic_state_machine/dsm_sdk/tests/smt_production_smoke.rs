@@ -14,7 +14,8 @@ use dsm::merkle::sparse_merkle_tree::{SparseMerkleTree, SmtInclusionProof};
 use dsm_sdk::security::shared_smt;
 use dsm_sdk::sdk::app_state::AppState;
 use dsm_sdk::sdk::receipts::{
-    build_bilateral_receipt_with_smt, serialize_inclusion_proof, deserialize_inclusion_proof,
+    build_bilateral_receipt_with_smt, deserialize_inclusion_proof,
+    serialize_inclusion_proof, verify_receipt_bytes, DeviceTreeAcceptanceCommitment,
 };
 
 use serial_test::serial;
@@ -151,7 +152,9 @@ fn execute_transfer(
         post_root,
         serialize_inclusion_proof(&parent_proof),
         serialize_inclusion_proof(&child_proof),
-        Some(sender.device_tree_root),
+        Some(DeviceTreeAcceptanceCommitment::from_root(
+            sender.device_tree_root,
+        )),
     )
     .expect("receipt must build");
 
@@ -235,6 +238,114 @@ async fn smoke_receiver_verifies_sender_proofs() {
     assert!(
         !SparseMerkleTree::verify_proof_against_root(&result.child_proof, &tampered_root),
         "tampered root must fail verification"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn smoke_verify_receipt_bytes_accepts_authenticated_commitment() {
+    setup_test_env();
+
+    let mut a = TestDevice::from_seed(0x10);
+    let mut b = TestDevice::from_seed(0x20);
+
+    let smt_key = compute_smt_key(&a.device_id, &b.device_id);
+    let h_0 = compute_h0(&a, &b);
+
+    a.smt.update_leaf(&smt_key, &h_0).unwrap();
+    b.smt.update_leaf(&smt_key, &h_0).unwrap();
+
+    let result = execute_transfer(&mut a, &mut b, &smt_key, &h_0, 0, 25);
+
+    assert!(
+        verify_receipt_bytes(
+            &result.receipt_bytes,
+            Some(DeviceTreeAcceptanceCommitment::from_root(a.device_tree_root)),
+        ),
+        "receipt verification must accept the correct authenticated device-tree commitment"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn smoke_verify_receipt_bytes_rejects_missing_authenticated_commitment() {
+    setup_test_env();
+
+    let mut a = TestDevice::from_seed(0x30);
+    let mut b = TestDevice::from_seed(0x40);
+
+    let smt_key = compute_smt_key(&a.device_id, &b.device_id);
+    let h_0 = compute_h0(&a, &b);
+
+    a.smt.update_leaf(&smt_key, &h_0).unwrap();
+    b.smt.update_leaf(&smt_key, &h_0).unwrap();
+
+    let result = execute_transfer(&mut a, &mut b, &smt_key, &h_0, 0, 25);
+
+    assert!(
+        !verify_receipt_bytes(&result.receipt_bytes, None),
+        "receipt verification must reject when the authenticated device-tree commitment is absent"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn smoke_verify_receipt_bytes_rejects_wrong_authenticated_commitment() {
+    setup_test_env();
+
+    let mut a = TestDevice::from_seed(0x50);
+    let mut b = TestDevice::from_seed(0x60);
+
+    let smt_key = compute_smt_key(&a.device_id, &b.device_id);
+    let h_0 = compute_h0(&a, &b);
+
+    a.smt.update_leaf(&smt_key, &h_0).unwrap();
+    b.smt.update_leaf(&smt_key, &h_0).unwrap();
+
+    let result = execute_transfer(&mut a, &mut b, &smt_key, &h_0, 0, 25);
+
+    assert!(
+        !verify_receipt_bytes(
+            &result.receipt_bytes,
+            Some(DeviceTreeAcceptanceCommitment::from_root(b.device_tree_root)),
+        ),
+        "receipt verification must reject when the authenticated device-tree commitment does not match π_dev"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn smoke_receipt_failure_scope_is_relationship_local() {
+    setup_test_env();
+
+    let mut a = TestDevice::from_seed(0x11);
+    let mut b = TestDevice::from_seed(0x22);
+    let mut c = TestDevice::from_seed(0x33);
+    let mut d = TestDevice::from_seed(0x44);
+
+    let smt_key_ab = compute_smt_key(&a.device_id, &b.device_id);
+    let smt_key_cd = compute_smt_key(&c.device_id, &d.device_id);
+    let h_0_ab = compute_h0(&a, &b);
+    let h_0_cd = compute_h0(&c, &d);
+
+    a.smt.update_leaf(&smt_key_ab, &h_0_ab).unwrap();
+    b.smt.update_leaf(&smt_key_ab, &h_0_ab).unwrap();
+    c.smt.update_leaf(&smt_key_cd, &h_0_cd).unwrap();
+    d.smt.update_leaf(&smt_key_cd, &h_0_cd).unwrap();
+
+    let result_ab = execute_transfer(&mut a, &mut b, &smt_key_ab, &h_0_ab, 0, 10);
+    let result_cd = execute_transfer(&mut c, &mut d, &smt_key_cd, &h_0_cd, 0, 20);
+
+    assert!(
+        !verify_receipt_bytes(&result_ab.receipt_bytes, None),
+        "missing authenticated commitment must reject the affected relationship path"
+    );
+    assert!(
+        verify_receipt_bytes(
+            &result_cd.receipt_bytes,
+            Some(DeviceTreeAcceptanceCommitment::from_root(c.device_tree_root)),
+        ),
+        "an unrelated relationship with a valid authenticated commitment must continue to verify"
     );
 }
 
@@ -646,7 +757,9 @@ async fn smoke_receipt_canonical_determinism() {
             post_root,
             serialize_inclusion_proof(&parent_proof),
             serialize_inclusion_proof(&child_proof),
-            Some(dev_a.device_tree_root),
+            Some(DeviceTreeAcceptanceCommitment::from_root(
+                dev_a.device_tree_root,
+            )),
         )
         .expect("receipt must build")
     };
@@ -735,6 +848,14 @@ async fn smoke_appstate_device_tree_root_canonical() {
     assert_eq!(
         stored_root, expected,
         "AppState device_tree_root must equal DeviceTree::single(device_id).root()"
+    );
+
+    let stored_commitment = AppState::get_device_tree_commitment()
+        .expect("device tree commitment must be Some after configure_appstate");
+    assert_eq!(
+        stored_commitment.root(),
+        expected,
+        "AppState device_tree_commitment must wrap the canonical persisted R_G"
     );
 }
 

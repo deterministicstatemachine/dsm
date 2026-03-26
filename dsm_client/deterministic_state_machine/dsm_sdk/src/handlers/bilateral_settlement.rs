@@ -201,7 +201,12 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
     ) -> Result<BilateralSettlementOutcome, String> {
         let (transfer_amount, token_id_opt) = parse_transfer_fields(&ctx.operation_bytes);
         let token_id_str = token_id_opt.clone().unwrap_or_default();
-        if transfer_amount > 0 {
+        
+        // (§2.3.1) Recovery-path settlements are allowed to have None proof_data
+        // (BLE GATT failure scenario where receipt delivery failed).
+        // Only enforce proof_data presence for normal bilateral path.
+        let is_recovery = ctx.tx_type == "bilateral_offline_recovered";
+        if transfer_amount > 0 && !is_recovery {
             let has_proof = ctx
                 .proof_data
                 .as_ref()
@@ -299,17 +304,18 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
             }
         } else {
             // Receiver: persist chain tip + transaction history atomically.
-            let confirm_result =
-                crate::storage::client_db::apply_receiver_confirm_bundle_atomic(
-                    &ctx.counterparty_device_id,
-                    &ctx.new_chain_tip,
-                    &local_txt,
-                    token_for_atomic,
-                    transfer_amount,
-                    &tx_record,
-                    canonical_state.as_ref(),
-                    projection.as_ref(),
-                );
+            let confirm_result = crate::storage::client_db::apply_receiver_confirm_bundle_atomic(
+                crate::storage::client_db::ReceiverConfirmBundle {
+                    counterparty_device_id: &ctx.counterparty_device_id,
+                    new_chain_tip: &ctx.new_chain_tip,
+                    receiver_device_id: &local_txt,
+                    token_id: token_for_atomic,
+                    amount: transfer_amount,
+                    tx: &tx_record,
+                    settled_state: canonical_state.as_ref(),
+                    projection: projection.as_ref(),
+                },
+            );
 
             if let Err(e) = &confirm_result {
                 error!(

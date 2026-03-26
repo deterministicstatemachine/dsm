@@ -237,6 +237,19 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_createGenesis<'a>(
                         smt_root,
                     );
                     crate::sdk::app_state::AppState::set_has_identity(true);
+                    // Compute and persist Device Tree root (§2.3) so that
+                    // build_bilateral_receipt_with_smt can verify DevID ∈ R_G.
+                    // Without this, get_device_tree_root() always returns None,
+                    // causing every bilateral receipt build to fail → proof_data None →
+                    // settle() rejects the transfer → balance never updates.
+                    if gc.device_id.len() == 32 {
+                        let mut dev_arr = [0u8; 32];
+                        dev_arr.copy_from_slice(&gc.device_id);
+                        let root =
+                            dsm::common::device_tree::DeviceTree::single(dev_arr).root();
+                        crate::sdk::app_state::AppState::set_device_tree_root(root);
+                        log::info!("[Genesis] Device tree root computed and persisted for bilateral receipt verification");
+                    }
                     // Initialize SDK context so header fetch works immediately
                     let _ = crate::initialize_sdk_context(
                         gc.device_id.clone(),

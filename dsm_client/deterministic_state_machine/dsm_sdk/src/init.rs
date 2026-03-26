@@ -425,6 +425,30 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
         dev_fixed.copy_from_slice(&dev);
         gen_fixed.copy_from_slice(&gen);
 
+        // Backfill Device Tree root (§2.3) for existing identities created before this was
+        // persisted at genesis time.  The root of a single-device tree is deterministic from
+        // dev_fixed, so it is always safe to recompute and overwrite.
+        // Without the root, build_bilateral_receipt_with_smt returns None → proof_data None →
+        // settle() rejects every bilateral transfer → balance never updates.
+        {
+            let root = dsm::common::device_tree::DeviceTree::single(dev_fixed).root();
+            crate::sdk::app_state::AppState::set_device_tree_root(root);
+            log::info!(
+                "[SDK Init] Device tree root computed and persisted (dev={})",
+                crate::util::text_id::encode_base32_crockford(&dev_fixed)
+            );
+        }
+
+        // Bootstrap-time validation gate (§2.3.1): Ensure device_tree_root is always present.
+        // If any earlier initialization step is skipped or fails, recover here.
+        // This prevents silent bilateral transfer failures post-initialization.
+        if crate::sdk::app_state::AppState::get_device_tree_root().is_none() {
+            log::warn!("[SDK Init Validation] device_tree_root is None — emergency backfill from device_id");
+            let root = dsm::common::device_tree::DeviceTree::single(dev_fixed).root();
+            crate::sdk::app_state::AppState::set_device_tree_root(root);
+            log::info!("[SDK Init Validation] Emergency backfill successful — R_G now available");
+        }
+
         let contact_manager =
             DsmContactManager::new(dev_fixed, vec![dsm::types::identifiers::NodeId::new("n")]);
 
