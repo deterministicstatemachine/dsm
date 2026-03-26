@@ -859,45 +859,27 @@ async fn smoke_appstate_device_tree_root_canonical() {
     );
 }
 
-/// Validate that adding a contact via the SDK stores the contact's Device Tree
-/// root (R_G) in the contacts table, so that receipt verification during
-/// `storage.sync` can succeed (§2.3 / §4.3#3).
+/// Validate that adding a contact stores the sender's Device Tree root (R_G)
+/// in the contacts table, so that receipt verification during `storage.sync`
+/// can succeed (§2.3 / §4.3#3).
 ///
-/// Before this fix, `get_contact_device_tree_commitment` always returned `None`
-/// because `store_contact_device_tree_root` was never called during contact
-/// addition. This caused `verify_receipt_bytes` to return `false`, which
-/// silently skipped both the balance update and history recording for ALL
-/// incoming online transfers.
+/// Both `store_contact` (client_db) and the explicit `store_contact_device_tree_root`
+/// call (added in contact_sdk.rs) ensure R_G is persisted.  This test validates
+/// the end-to-end invariant: after a contact is stored, `verify_receipt_bytes`
+/// succeeds for any receipt built with that contact's device_id as the sender.
 #[tokio::test]
 #[serial]
 async fn contact_add_stores_device_tree_root() {
     setup_test_env();
 
-    // Set up a local identity for the SDK under test (Alice).
-    let mut alice_id = [0u8; 32];
-    alice_id[0] = 0xA1;
-    let mut alice_genesis = [0u8; 32];
-    alice_genesis[0] = 0xA2;
-    AppState::set_identity_info(
-        alice_id.to_vec(),
-        vec![0u8; 64],
-        alice_genesis.to_vec(),
-        vec![0u8; 32],
-    );
-    AppState::set_has_identity(true);
-
-    // Contact (Bob) details.
+    // Contact (Bob) details — Bob is the sender whose R_G the receiver (Alice) needs.
     let mut bob_id = [0u8; 32];
     bob_id[0] = 0xB1;
     let mut bob_genesis = [0u8; 32];
     bob_genesis[0] = 0xB2;
 
-    // Simulate adding Bob as a contact using the SDK path that mirrors production.
-    // We call store_contact directly here to replicate the pre-fix behaviour and
-    // then call store_contact_device_tree_root ourselves, mirroring the fix.
     use dsm_sdk::storage::client_db::{
-        store_contact, store_contact_device_tree_root, get_contact_device_tree_commitment,
-        ContactRecord,
+        store_contact, get_contact_device_tree_commitment, ContactRecord,
     };
     let record = ContactRecord {
         contact_id: "c_bob".to_string(),
@@ -919,30 +901,34 @@ async fn contact_add_stores_device_tree_root() {
     };
     store_contact(&record).expect("store_contact must succeed");
 
-    // Before the fix: no device_tree_root stored → commitment returns None.
-    let commitment_before = get_contact_device_tree_commitment(&bob_id);
-    assert!(
-        commitment_before.is_none(),
-        "pre-fix: device tree commitment must be None before explicit store"
-    );
-
-    // Apply the fix: compute and persist Bob's Device Tree root.
+    // After store_contact, R_G must be available for the contact.
+    // Both the internal UPDATE in store_contact and the explicit call in
+    // contact_sdk.rs ensure this invariant is satisfied.
     let expected_root = DeviceTree::single(bob_id).root();
-    store_contact_device_tree_root(&bob_id, &expected_root)
-        .expect("store_contact_device_tree_root must succeed");
-
-    // After the fix: commitment is available and matches the expected root.
-    let commitment_after = get_contact_device_tree_commitment(&bob_id)
-        .expect("device tree commitment must be Some after explicit store");
+    let commitment = get_contact_device_tree_commitment(&bob_id)
+        .expect("device tree commitment must be Some after store_contact");
     assert_eq!(
-        commitment_after.root(),
+        commitment.root(),
         expected_root,
         "stored R_G must equal DeviceTree::single(bob_id).root()"
     );
 
-    // Verify that the root also allows verify_receipt_bytes to accept a receipt
-    // built from the same R_G (end-to-end smoke-check of the fix).
-    // We configure the shared SMT for Alice (sender) and build a minimal receipt.
+    // End-to-end smoke-check: build a receipt as Bob (sender) and verify as Alice (receiver).
+    // This exercises the full verify_receipt_bytes code path used in storage.sync.
+    let mut alice_id = [0u8; 32];
+    alice_id[0] = 0xA1;
+    let mut alice_genesis = [0u8; 32];
+    alice_genesis[0] = 0xA2;
+
+    // Set AppState to Bob (sender) for receipt construction.
+    AppState::set_identity_info(
+        bob_id.to_vec(),
+        vec![0u8; 64],
+        bob_genesis.to_vec(),
+        vec![0u8; 32],
+    );
+    AppState::set_has_identity(true);
+
     let smt_a_arc = shared_smt::init_shared_smt(256);
     let smt_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&bob_id, &alice_id);
     let h0 = compute_h0(
@@ -962,15 +948,6 @@ async fn contact_add_stores_device_tree_root() {
         },
     );
 
-    // Configure Bob as the sender so AppState reflects his R_G for receipt building.
-    AppState::set_identity_info(
-        bob_id.to_vec(),
-        vec![0u8; 64],
-        bob_genesis.to_vec(),
-        vec![0u8; 32],
-    );
-    AppState::set_has_identity(true);
-
     let h1 = {
         let nonce = [0u8; 32];
         let op_bytes = b"test-op".to_vec();
@@ -980,6 +957,9 @@ async fn contact_add_stores_device_tree_root() {
 
     let (pre_root, post_root, parent_proof_bytes, child_proof_bytes) = {
         let mut smt = smt_a_arc.write().await;
+        // Establish h0 as the initial relationship tip (mirrors establish_relationship).
+        smt.update_leaf(&smt_key, &h0).expect("initial h0 insert must succeed");
+        // Now advance h0 → h1 (the actual transfer); parent_proof proves h0 ∈ pre_root.
         let result = smt.smt_replace(&smt_key, &h1).expect("smt_replace must succeed");
         (
             result.pre_root,
@@ -1005,8 +985,8 @@ async fn contact_add_stores_device_tree_root() {
     )
     .expect("build_bilateral_receipt_with_smt must return Some");
 
-    // Alice verifying with the stored commitment for Bob (the sender).
-    let ok = verify_receipt_bytes(&receipt_bytes, Some(commitment_after));
+    // Alice verifying: looks up Bob's stored R_G from contacts table → must succeed.
+    let ok = verify_receipt_bytes(&receipt_bytes, Some(commitment));
     assert!(
         ok,
         "verify_receipt_bytes must succeed when contact device tree root is stored"
