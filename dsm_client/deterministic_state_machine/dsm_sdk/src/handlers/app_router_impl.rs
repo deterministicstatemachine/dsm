@@ -256,24 +256,28 @@ pub(crate) fn build_testnet_faucet_policy() -> PolicyFile {
     policy
 }
 
+struct OnlineTransferRollback<'a> {
+    smt_key: &'a [u8; 32],
+    parent_chain_tip: &'a [u8; 32],
+    token_id: &'a str,
+    failed_state: &'a dsm::types::state_types::State,
+    previous_state: &'a dsm::types::state_types::State,
+    tx_id: &'a str,
+    recipient_device_id: &'a [u8; 32],
+    amount: u64,
+    memo: Option<&'a str>,
+}
+
 impl AppRouterImpl {
     async fn rollback_failed_online_transfer(
         &self,
-        smt_key: &[u8; 32],
-        parent_chain_tip: &[u8; 32],
-        token_id: &str,
-        failed_state: &dsm::types::state_types::State,
-        previous_state: &dsm::types::state_types::State,
-        tx_id: &str,
-        recipient_device_id: &[u8; 32],
-        amount: u64,
-        memo: Option<&str>,
+        rollback: &OnlineTransferRollback<'_>,
     ) -> Result<(), String> {
         let mut rollback_errors = Vec::new();
 
         if let Some(smt) = crate::security::shared_smt::get_shared_smt() {
             let mut smt_guard = smt.write().await;
-            if let Err(e) = smt_guard.smt_replace(smt_key, parent_chain_tip) {
+            if let Err(e) = smt_guard.smt_replace(rollback.smt_key, rollback.parent_chain_tip) {
                 rollback_errors.push(format!("shared SMT rollback failed: {e}"));
             }
         } else {
@@ -283,18 +287,20 @@ impl AppRouterImpl {
         }
 
         if let Err(e) = self.wallet.rollback_failed_online_send(
-            tx_id,
-            token_id,
-            failed_state,
-            previous_state,
-            recipient_device_id,
-            amount,
-            memo,
+            &crate::sdk::wallet_sdk::FailedOnlineSendRollback {
+                tx_id: rollback.tx_id,
+                token_id: rollback.token_id,
+                failed_state: rollback.failed_state,
+                previous_state: rollback.previous_state,
+                recipient_device_id: rollback.recipient_device_id,
+                amount: rollback.amount,
+                memo: rollback.memo,
+            },
         ) {
             rollback_errors.push(format!("wallet rollback failed: {e}"));
         }
 
-        crate::security::shared_smt::clear_pending_online(smt_key).await;
+        crate::security::shared_smt::clear_pending_online(rollback.smt_key).await;
 
         if rollback_errors.is_empty() {
             Ok(())
@@ -1286,6 +1292,17 @@ impl AppRouterImpl {
                 return err(format!("wallet.send: local state update failed: {e}"));
             }
         };
+        let rollback_request = OnlineTransferRollback {
+            smt_key: &smt_key,
+            parent_chain_tip: &chain_tip_arr,
+            token_id: &token_id,
+            failed_state: &new_state,
+            previous_state: &pre_send_state,
+            tx_id: &signed_tx.id,
+            recipient_device_id: &to_device_id,
+            amount: transfer_req.amount,
+            memo: Some(&transfer_req.memo),
+        };
 
         // §16.6: σ = Cpre = BLAKE3("DSM/pre\0" || h_n || op || nonce) — symmetric, shared inputs only.
         // Both sender and receiver derive identical h_{n+1} from the same envelope fields.
@@ -1308,17 +1325,7 @@ impl AppRouterImpl {
             // §4.3#8: SMT not initialized is a terminal error, not silent degradation.
             // Without Per-Device SMT, we cannot produce verifiable ReceiptCommit.
             let rollback_error = self
-                .rollback_failed_online_transfer(
-                    &smt_key,
-                    &chain_tip_arr,
-                    &token_id,
-                    &new_state,
-                    &pre_send_state,
-                    &signed_tx.id,
-                    &to_device_id,
-                    transfer_req.amount,
-                    Some(&transfer_req.memo),
-                )
+                .rollback_failed_online_transfer(&rollback_request)
                 .await
                 .err()
                 .map(|e| format!("; rollback failed: {e}"))
@@ -1337,17 +1344,7 @@ impl AppRouterImpl {
                     Err(e) => {
                         drop(smt_guard);
                         let rollback_error = self
-                            .rollback_failed_online_transfer(
-                                &smt_key,
-                                &chain_tip_arr,
-                                &token_id,
-                                &new_state,
-                                &pre_send_state,
-                                &signed_tx.id,
-                                &to_device_id,
-                                transfer_req.amount,
-                                Some(&transfer_req.memo),
-                            )
+                            .rollback_failed_online_transfer(&rollback_request)
                             .await
                             .err()
                             .map(|rb| format!("; rollback failed: {rb}"))
@@ -1363,7 +1360,8 @@ impl AppRouterImpl {
 
             // Build ReceiptCommit with real SMT roots and proofs
             // Use local Device Tree root (R_G) for receipt construction
-            let local_r_g = crate::sdk::app_state::AppState::get_device_tree_root();
+            let local_device_tree_commitment =
+                crate::sdk::app_state::AppState::get_device_tree_commitment();
             let rc_canonical = match crate::sdk::receipts::build_bilateral_receipt_with_smt(
                 from_device_id,
                 to_device_id,
@@ -1373,22 +1371,12 @@ impl AppRouterImpl {
                 result.post_root,
                 pre_proof_bytes,
                 post_proof_bytes,
-                local_r_g,
+                local_device_tree_commitment,
             ) {
                 Some(bytes) => bytes,
                 None => {
                     let rollback_error = self
-                        .rollback_failed_online_transfer(
-                            &smt_key,
-                            &chain_tip_arr,
-                            &token_id,
-                            &new_state,
-                            &pre_send_state,
-                            &signed_tx.id,
-                            &to_device_id,
-                            transfer_req.amount,
-                            Some(&transfer_req.memo),
-                        )
+                        .rollback_failed_online_transfer(&rollback_request)
                         .await
                         .err()
                         .map(|e| format!("; rollback failed: {e}"))
@@ -1401,19 +1389,12 @@ impl AppRouterImpl {
 
             // §4.3#6 Defensive: Sender self-verifies the ReceiptCommit before sending.
             // Catches corrupted SMT state before propagating invalid proofs to receiver.
-            if !crate::sdk::receipts::verify_receipt_bytes(&rc_canonical, local_r_g) {
+            if !crate::sdk::receipts::verify_receipt_bytes(
+                &rc_canonical,
+                local_device_tree_commitment,
+            ) {
                 let rollback_error = self
-                    .rollback_failed_online_transfer(
-                        &smt_key,
-                        &chain_tip_arr,
-                        &token_id,
-                        &new_state,
-                        &pre_send_state,
-                        &signed_tx.id,
-                        &to_device_id,
-                        transfer_req.amount,
-                        Some(&transfer_req.memo),
-                    )
+                    .rollback_failed_online_transfer(&rollback_request)
                     .await
                     .err()
                     .map(|e| format!("; rollback failed: {e}"))
@@ -1442,17 +1423,7 @@ impl AppRouterImpl {
                                 Ok(full_bytes) => full_bytes,
                                 Err(e) => {
                                     let rollback_error = self
-                                        .rollback_failed_online_transfer(
-                                            &smt_key,
-                                            &chain_tip_arr,
-                                            &token_id,
-                                            &new_state,
-                                            &pre_send_state,
-                                            &signed_tx.id,
-                                            &to_device_id,
-                                            transfer_req.amount,
-                                            Some(&transfer_req.memo),
-                                        )
+                                        .rollback_failed_online_transfer(&rollback_request)
                                         .await
                                         .err()
                                         .map(|rb| format!("; rollback failed: {rb}"))
@@ -1465,17 +1436,7 @@ impl AppRouterImpl {
                         }
                         Err(e) => {
                             let rollback_error = self
-                                .rollback_failed_online_transfer(
-                                    &smt_key,
-                                    &chain_tip_arr,
-                                    &token_id,
-                                    &new_state,
-                                    &pre_send_state,
-                                    &signed_tx.id,
-                                    &to_device_id,
-                                    transfer_req.amount,
-                                    Some(&transfer_req.memo),
-                                )
+                                .rollback_failed_online_transfer(&rollback_request)
                                 .await
                                 .err()
                                 .map(|rb| format!("; rollback failed: {rb}"))
@@ -1487,17 +1448,7 @@ impl AppRouterImpl {
                     },
                     Err(e) => {
                         let rollback_error = self
-                            .rollback_failed_online_transfer(
-                                &smt_key,
-                                &chain_tip_arr,
-                                &token_id,
-                                &new_state,
-                                &pre_send_state,
-                                &signed_tx.id,
-                                &to_device_id,
-                                transfer_req.amount,
-                                Some(&transfer_req.memo),
-                            )
+                            .rollback_failed_online_transfer(&rollback_request)
                             .await
                             .err()
                             .map(|rb| format!("; rollback failed: {rb}"))
@@ -1509,17 +1460,7 @@ impl AppRouterImpl {
                 },
                 Err(e) => {
                     let rollback_error = self
-                        .rollback_failed_online_transfer(
-                            &smt_key,
-                            &chain_tip_arr,
-                            &token_id,
-                            &new_state,
-                            &pre_send_state,
-                            &signed_tx.id,
-                            &to_device_id,
-                            transfer_req.amount,
-                            Some(&transfer_req.memo),
-                        )
+                        .rollback_failed_online_transfer(&rollback_request)
                         .await
                         .err()
                         .map(|rb| format!("; rollback failed: {rb}"))
@@ -1600,17 +1541,7 @@ impl AppRouterImpl {
                 Ok(genesis) => genesis,
                 Err(_) => {
                     let rollback_error = self
-                        .rollback_failed_online_transfer(
-                            &smt_key,
-                            &chain_tip_arr,
-                            &token_id,
-                            &new_state,
-                            &pre_send_state,
-                            &signed_tx.id,
-                            &to_device_id,
-                            transfer_req.amount,
-                            Some(&transfer_req.memo),
-                        )
+                        .rollback_failed_online_transfer(&rollback_request)
                         .await
                         .err()
                         .map(|e| format!("; rollback failed: {e}"))
@@ -1633,17 +1564,7 @@ impl AppRouterImpl {
             // routing key during storage.sync polling.
             if recipient_genesis_raw == [0u8; 32] {
                 let rollback_error = self
-                    .rollback_failed_online_transfer(
-                        &smt_key,
-                        &chain_tip_arr,
-                        &token_id,
-                        &new_state,
-                        &pre_send_state,
-                        &signed_tx.id,
-                        &to_device_id,
-                        transfer_req.amount,
-                        Some(&transfer_req.memo),
-                    )
+                    .rollback_failed_online_transfer(&rollback_request)
                     .await
                     .err()
                     .map(|e| format!("; rollback failed: {e}"))
@@ -1677,17 +1598,7 @@ impl AppRouterImpl {
                 }
                 Err(e) => {
                     let rollback_error = self
-                        .rollback_failed_online_transfer(
-                            &smt_key,
-                            &chain_tip_arr,
-                            &token_id,
-                            &new_state,
-                            &pre_send_state,
-                            &signed_tx.id,
-                            &to_device_id,
-                            transfer_req.amount,
-                            Some(&transfer_req.memo),
-                        )
+                        .rollback_failed_online_transfer(&rollback_request)
                         .await
                         .err()
                         .map(|rb| format!("; rollback failed: {rb}"))
@@ -1780,17 +1691,7 @@ impl AppRouterImpl {
         // =====================================================================
         if !b0x_succeeded {
             let rollback_error = self
-                .rollback_failed_online_transfer(
-                    &smt_key,
-                    &chain_tip_arr,
-                    &token_id,
-                    &new_state,
-                    &pre_send_state,
-                    &signed_tx.id,
-                    &to_device_id,
-                    transfer_req.amount,
-                    Some(&transfer_req.memo),
-                )
+                .rollback_failed_online_transfer(&rollback_request)
                 .await
                 .err()
                 .map(|e| format!("; rollback failed: {e}"))
@@ -1808,17 +1709,7 @@ impl AppRouterImpl {
                 Some(ref msg_id) => msg_id,
                 None => {
                     let rollback_error = self
-                        .rollback_failed_online_transfer(
-                            &smt_key,
-                            &chain_tip_arr,
-                            &token_id,
-                            &new_state,
-                            &pre_send_state,
-                            &signed_tx.id,
-                            &to_device_id,
-                            transfer_req.amount,
-                            Some(&transfer_req.memo),
-                        )
+                        .rollback_failed_online_transfer(&rollback_request)
                         .await
                         .err()
                         .map(|e| format!("; rollback failed: {e}"))
@@ -1838,17 +1729,7 @@ impl AppRouterImpl {
                 let _ =
                     crate::storage::client_db::mark_contact_needs_online_reconcile(&to_device_id);
                 let rollback_error = self
-                    .rollback_failed_online_transfer(
-                        &smt_key,
-                        &chain_tip_arr,
-                        &token_id,
-                        &new_state,
-                        &pre_send_state,
-                        &signed_tx.id,
-                        &to_device_id,
-                        transfer_req.amount,
-                        Some(&transfer_req.memo),
-                    )
+                    .rollback_failed_online_transfer(&rollback_request)
                     .await
                     .err()
                     .map(|rb| format!("; rollback failed: {rb}"))

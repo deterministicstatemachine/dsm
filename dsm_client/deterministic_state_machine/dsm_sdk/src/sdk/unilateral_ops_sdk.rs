@@ -62,7 +62,7 @@ impl UnilateralOpsSDK {
             devid_b,
             parent_tip,
             child_tip,
-            crate::sdk::app_state::AppState::get_device_tree_root(),
+            crate::sdk::app_state::AppState::get_device_tree_commitment(),
         )
     }
 

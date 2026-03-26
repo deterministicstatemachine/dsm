@@ -1128,7 +1128,7 @@ fn trace_receipt_verifier_tripwire(
     );
 
     let ctx = ReceiptVerificationContext::new(
-        device_tree_root,
+        dsm::types::receipt_types::DeviceTreeAcceptanceCommitment::from_root(device_tree_root),
         receipt_a.parent_root,
         keypair_a.public_key.clone(),
         Vec::new(),

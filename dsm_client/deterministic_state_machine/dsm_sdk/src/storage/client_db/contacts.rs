@@ -3,6 +3,7 @@
 
 use anyhow::{anyhow, Result};
 use log::{info, warn};
+use dsm::types::receipt_types::DeviceTreeAcceptanceCommitment;
 use rusqlite::{params, OptionalExtension};
 
 use super::get_connection;
@@ -880,6 +881,16 @@ pub fn get_contact_device_tree_root(device_id: &[u8]) -> Option<[u8; 32]> {
         }
         _ => None,
     }
+}
+
+/// Get the authenticated persisted device-tree commitment for a contact.
+///
+/// Today this is the raw stored `R_G` wrapped for receipt acceptance paths
+/// that verify `π_dev` relationship-locally.
+pub fn get_contact_device_tree_commitment(
+    device_id: &[u8],
+) -> Option<DeviceTreeAcceptanceCommitment> {
+    get_contact_device_tree_root(device_id).map(DeviceTreeAcceptanceCommitment::from_root)
 }
 
 /// Persist the Device Tree root R_G for a contact (§2.3).

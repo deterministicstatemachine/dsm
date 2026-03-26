@@ -315,6 +315,16 @@ pub struct WalletSDK {
     device_book: RwLock<HashMap<String, Counterparty>>,
 }
 
+pub struct FailedOnlineSendRollback<'a> {
+    pub tx_id: &'a str,
+    pub token_id: &'a str,
+    pub failed_state: &'a State,
+    pub previous_state: &'a State,
+    pub recipient_device_id: &'a [u8; 32],
+    pub amount: u64,
+    pub memo: Option<&'a str>,
+}
+
 impl fmt::Debug for WalletSDK {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let did = self.device_id.read().clone();
@@ -1531,21 +1541,19 @@ impl WalletSDK {
         self.token_sdk.reload_balance_cache_for_self(device_id)
     }
 
-    pub fn rollback_failed_online_send(
+    pub(crate) fn rollback_failed_online_send(
         &self,
-        tx_id: &str,
-        token_id: &str,
-        failed_state: &State,
-        previous_state: &State,
-        recipient_device_id: &[u8; 32],
-        amount: u64,
-        memo: Option<&str>,
+        rollback: &FailedOnlineSendRollback<'_>,
     ) -> Result<(), DsmError> {
-        let canonical_token_id = if token_id.is_empty() { "ERA" } else { token_id };
+        let canonical_token_id = if rollback.token_id.is_empty() {
+            "ERA"
+        } else {
+            rollback.token_id
+        };
         crate::storage::client_db::rollback_failed_online_send_atomic(
             &self.device_id_array(),
-            &failed_state.hash,
-            tx_id,
+            &rollback.failed_state.hash,
+            rollback.tx_id,
             &self.device_id_base32(),
             canonical_token_id,
         )
@@ -1556,13 +1564,16 @@ impl WalletSDK {
             )
         })?;
 
-        self.core_sdk.restore_state_snapshot(previous_state)?;
-        self.transactions.write().retain(|tx| tx.id != tx_id);
+        self.core_sdk
+            .restore_state_snapshot(rollback.previous_state)?;
+        self.transactions
+            .write()
+            .retain(|tx| tx.id != rollback.tx_id);
         let _ = self.token_sdk.discard_transfer_history_entry(
             canonical_token_id,
-            recipient_device_id,
-            amount,
-            memo,
+            rollback.recipient_device_id,
+            rollback.amount,
+            rollback.memo,
         );
         self.reload_balance_cache_for_self()?;
         Ok(())
