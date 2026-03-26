@@ -36,7 +36,7 @@
     "format:check": "prettier --check 'src/**/*.{ts,tsx}'",
     "test": "cross-env NODE_OPTIONS='--max-old-space-size=4096' jest",
     "test:ci": "cross-env CI=1 NODE_OPTIONS='--max-old-space-size=4096' jest --ci",
-    "test:coverage": "cross-env NODE_OPTIONS='--max-old-space-size=4096' jest --coverage",
+    "test:coverage": "cross-env CI=1 NODE_OPTIONS='--max-old-space-size=4096' jest --coverage --runInBand",
     "test:ssr": "ts-node -O '{\"module\":\"CommonJS\",\"jsx\":\"react-jsx\"}' scripts/ssr-smoke.ts",
     "analyze": "webpack-bundle-analyzer dist/js/main.*.js",
     "ci": "npm run clean && npm run type-check && npm run lint && npm run test:ci && npm run build:android-webpack && npm run copy:android && npm run validate:android-assets"
@@ -52,7 +52,7 @@
   },
   "devDependencies": {
     "@babel/core": "7.27.1",
-    "@bufbuild/protobuf": "^1.10.1",
+    "@bufbuild/protobuf": "^2.11.0",
     "@bufbuild/protoc-gen-es": "^1.7.0",
     "@testing-library/jest-dom": "^6.1.4",
     "@testing-library/react": "^16.3.2",
@@ -72,7 +72,7 @@
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-react": "^7.33.0",
     "eslint-plugin-react-hooks": "^4.6.0",
-    "eslint-plugin-security": "^3.0.1",
+    "eslint-plugin-security": "^4.0.0",
     "html-webpack-plugin": "^5.5.3",
     "jest": "^29.7.0",
     "jest-environment-jsdom": "^29.7.0",
