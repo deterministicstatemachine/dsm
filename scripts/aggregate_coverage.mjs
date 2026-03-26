@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Aggregates coverage across layers: Rust (cargo-llvm-cov JSON), Android (JaCoCo HTML), Frontend (Jest lcov)
-// Outputs: COVERAGE_SUMMARY.md at repo root and coverage/aggregate.json with raw metrics
+// Outputs: coverage/aggregate.json with raw metrics
 
 import fs from 'fs/promises';
 import path from 'path';
@@ -126,8 +126,6 @@ async function parseAndroidJaCoCo() {
   };
 }
 
-function fmtPercent(v) { return (v == null || Number.isNaN(v)) ? 'n/a' : `${(+v).toFixed(2)}%`; }
-
 async function main() {
   const rust = await parseRustCoverage();
   const fe = await parseFrontendLcov();
@@ -150,53 +148,7 @@ async function main() {
   try { await fs.mkdir(outDir, { recursive: true }); } catch {}
   await fs.writeFile(path.join(outDir, 'aggregate.json'), JSON.stringify(out, null, 2));
 
-  // Write human-readable summary
-  let md = '';
-  md += '# Cross-layer Coverage Summary\n\n';
-  md += `Generated: ${out.generatedAt}\n\n`;
-  md += 'Artifacts:\n';
-  md += `- Rust: ${out.paths.rust}\n`;
-  md += `- Android (HTML): ${out.paths.android}\n`;
-  md += `- Frontend (lcov): ${out.paths.frontend}\n\n`;
-
-  md += '## Rust (cargo-llvm-cov)\n\n';
-  if (rust) {
-    md += `- Lines: ${rust.lines?.covered ?? 0}/${rust.lines?.count ?? 0} (${fmtPercent(rust.lines?.percent)})\n`;
-    if (rust.functions) md += `- Functions: ${rust.functions.covered}/${rust.functions.count} (${fmtPercent(rust.functions.percent)})\n`;
-    if (rust.regions) md += `- Regions: ${rust.regions.covered}/${rust.regions.count} (${fmtPercent(rust.regions.percent)})\n`;
-  } else {
-    md += '- Not found (expected coverage.json at repo root)\n';
-  }
-
-  md += '\n## Android (JaCoCo unit tests)\n\n';
-  if (android) {
-    md += `- Lines: ${android.lines.covered}/${android.lines.count} (${fmtPercent(android.lines.percent)})\n`;
-    md += `- Instructions: ${android.instructions.covered}/${android.instructions.count} (${fmtPercent(android.instructions.percent)})\n`;
-    md += `- Branches: ${android.branches.covered}/${android.branches.count} (${fmtPercent(android.branches.percent)})\n`;
-    md += `- Methods: ${android.methods.covered}/${android.methods.count} (${fmtPercent(android.methods.percent)})\n`;
-    md += `- Classes: ${android.classes.covered}/${android.classes.count} (${fmtPercent(android.classes.percent)})\n`;
-  } else {
-    md += '- Not found (expected jacoco HTML at dsm_client/android/app/build/reports/jacoco/jacocoTestReport/html/index.html)\n';
-  }
-
-  md += '\n## Frontend (Jest)\n\n';
-  if (fe) {
-    md += `- Lines: ${fe.lines.covered}/${fe.lines.count} (${fmtPercent(fe.lines.percent)})\n`;
-    if (fe.functions) md += `- Functions: ${fe.functions.covered}/${fe.functions.count} (${fmtPercent(fe.functions.percent)})\n`;
-    if (fe.branches) md += `- Branches: ${fe.branches.covered}/${fe.branches.count} (${fmtPercent(fe.branches.percent)})\n`;
-  } else {
-    md += '- Not found (expected lcov at dsm_client/new_frontend/coverage/lcov.info)\n';
-  }
-
-  // Recommendations skeleton
-  md += '\n---\n\n';
-  md += '### Next-step coverage targets\n\n';
-  md += '- Rust: Focus on SDK bridge edge-cases and storage error branches; prefer unit tests near trait impls.\n';
-  md += '- Android: Target com.dsm.wallet.bridge and com.dsm.wallet.ui presenters with Robolectric; mock JNI/HTTP.\n';
-  md += '- Frontend: Add tests for service facades and proto utils; keep time and randomness deterministic.\n';
-
-  await fs.writeFile(path.join(root, 'COVERAGE_SUMMARY.md'), md);
-  console.log('Wrote COVERAGE_SUMMARY.md and coverage/aggregate.json');
+  console.log('Wrote coverage/aggregate.json');
 }
 
 main().catch((e) => {
