@@ -52,6 +52,28 @@ fn option_string_or_default(opt: Option<String>, default: &str) -> String {
     }
 }
 
+/// Derive the local device-tree commitment for receipt construction (§2.3).
+///
+/// Primary source: `AppState::get_device_tree_commitment()` which is set during
+/// SDK initialisation via `set_identity_info`.  Fall-back: compute directly from
+/// `device_id` using a single-device Merkle tree.  For the single-device case
+/// these are identical, so the fall-back is always correct.
+///
+/// Using the fall-back instead of returning `None` ensures BLE bilateral receipts
+/// can always be built even when AppState has not yet been fully populated (e.g.,
+/// on a fresh app start before the first storage.sync completes).  Without this,
+/// `build_bilateral_receipt_with_smt` returns `None` → `proof_data` in the
+/// settlement context is `None` → settlement fails → receiver balance and history
+/// are never updated.
+fn local_device_tree_commitment(
+    device_id: &[u8; 32],
+) -> dsm::types::receipt_types::DeviceTreeAcceptanceCommitment {
+    crate::sdk::app_state::AppState::get_device_tree_commitment().unwrap_or_else(|| {
+        let root = dsm::common::device_tree::DeviceTree::single(*device_id).root();
+        dsm::types::receipt_types::DeviceTreeAcceptanceCommitment::from_root(root)
+    })
+}
+
 /// Bilateral BLE transaction coordinator
 pub struct BilateralBleHandler {
     bilateral_tx_manager: Arc<RwLock<BilateralTransactionManager>>,
@@ -2336,8 +2358,7 @@ impl BilateralBleHandler {
         let rel_proof_child_bytes = result.child_proof.to_bytes();
 
         // 6. Build stitched receipt with real SMT roots + proofs (§4.2)
-        let local_device_tree_commitment =
-            crate::sdk::app_state::AppState::get_device_tree_commitment();
+        let local_device_tree_commitment = local_device_tree_commitment(&self.device_id);
         let receipt_bytes = crate::sdk::receipts::build_bilateral_receipt_with_smt(
             self.device_id,
             session.counterparty_device_id,
@@ -2347,7 +2368,7 @@ impl BilateralBleHandler {
             sender_smt_root,
             rel_proof_parent_bytes.clone(),
             rel_proof_child_bytes.clone(),
-            local_device_tree_commitment,
+            Some(local_device_tree_commitment),
         )
         .ok_or_else(|| {
             DsmError::invalid_operation(
@@ -2922,8 +2943,7 @@ impl BilateralBleHandler {
         // pre_root (r_A), post_root (r'_A), parent_proof (π h_n ∈ r_A),
         // and child_proof (π' h_{n+1} ∈ r'_A).
         let receipt_bytes = {
-            let local_device_tree_commitment =
-                crate::sdk::app_state::AppState::get_device_tree_commitment();
+            let local_commitment = local_device_tree_commitment(&self.device_id);
             crate::sdk::receipts::build_bilateral_receipt_with_smt(
                 self.device_id,
                 session.counterparty_device_id,
@@ -2933,10 +2953,9 @@ impl BilateralBleHandler {
                 replace_result.post_root,
                 replace_result.parent_proof.to_bytes(),
                 replace_result.child_proof.to_bytes(),
-                local_device_tree_commitment,
+                Some(local_commitment),
             )
         };
-
         // Chain tip h_{n+1} is NOT yet persisted to SQLite — update_anchor_in_memory_from_replace_public
         // only updated in-memory state. The SQLite persistence happens atomically with
         // settlement metadata inside the delegate below.
@@ -3382,7 +3401,7 @@ impl BilateralBleHandler {
                         current_root,
                         Vec::new(), // Recovery: parent proof unavailable
                         child_bytes,
-                        crate::sdk::app_state::AppState::get_device_tree_commitment(),
+                        Some(local_device_tree_commitment(&self.device_id)),
                     )
                 };
 
