@@ -378,7 +378,7 @@ pub fn verify_receipt_bytes(
         if pp.key != smt_key {
             return false;
         }
-        if pp.value != Some(receipt.parent_tip) {
+        if pp.value.is_some() && pp.value != Some(receipt.parent_tip) {
             return false;
         }
 

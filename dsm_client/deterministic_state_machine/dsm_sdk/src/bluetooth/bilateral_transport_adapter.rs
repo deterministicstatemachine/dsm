@@ -297,16 +297,32 @@ impl BleTransportDelegate for BilateralTransportAdapter {
                         )]);
                     }
 
-                    match bilateral_handler
-                        .handle_confirm_request(&message.payload)
-                        .await
+                    // Spawn the confirm handler on the tokio runtime instead of
+                    // awaiting inline. The GATT callback thread enters Rust via
+                    // block_on(), and handle_confirm_request acquires
+                    // bilateral_tx_manager read+write locks. If any other tokio
+                    // task holds a write lock, block_on deadlocks because it
+                    // cannot yield the thread. Spawning detaches the heavy
+                    // state-machine work from the GATT thread. The confirm
+                    // handler returns no response data (Ok(Vec::new())), so the
+                    // caller does not need the result.
                     {
-                        Ok(_meta) => Ok(Vec::new()),
-                        Err(e) if e.to_string().contains("silent_drop_duplicate_packet") => {
-                            warn!("Silently dropping duplicate Confirm Request.");
-                            Ok(Vec::new())
-                        }
-                        Err(e) => Err(e),
+                        let handler = bilateral_handler;
+                        let payload = message.payload;
+                        tokio::spawn(async move {
+                            match handler.handle_confirm_request(&payload).await {
+                                Ok(_meta) => {
+                                    info!("[BILATERAL] Confirm handler completed successfully");
+                                }
+                                Err(e) if e.to_string().contains("silent_drop_duplicate_packet") => {
+                                    warn!("[BILATERAL] Silently dropping duplicate Confirm Request.");
+                                }
+                                Err(e) => {
+                                    log::error!("[BILATERAL] Confirm handler failed: {e}");
+                                }
+                            }
+                        });
+                        Ok(Vec::new())
                     }
                 }
                 BleFrameType::Unspecified => Ok(vec![TransportOutbound::new(

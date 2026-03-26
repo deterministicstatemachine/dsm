@@ -69,27 +69,34 @@ internal object BridgeRouterHandler {
                 return out
             }
             "device.ble.advertise.start" -> {
-                val ctx = com.dsm.wallet.ui.MainActivity.getActiveInstance()?.baseContext
+                val act = com.dsm.wallet.ui.MainActivity.getActiveInstance()
+                val ctx = act?.baseContext
                 val ok = if (ctx != null) com.dsm.wallet.bridge.ble.BleCoordinator.getInstance(ctx).startAdvertising() else false
                 Log.i(logTag, "device.ble.advertise.start: result=$ok")
+                // Persist advertising desire in background service so it survives backgrounding
+                if (ok) {
+                    act?.setBleAdvertisingDesired(true)
+                }
                 val outBytes = byteArrayOf(if (ok) 1 else 0)
                 val out = ByteArray(reqId.size + outBytes.size)
                 System.arraycopy(reqId, 0, out, 0, reqId.size)
                 System.arraycopy(outBytes, 0, out, reqId.size, outBytes.size)
-                com.dsm.wallet.ui.MainActivity.getActiveInstance()?.let { act -> act.runOnUiThread {
-                    act.publishCurrentSessionState("device.ble.advertise.start")
+                act?.let { a -> a.runOnUiThread {
+                    a.publishCurrentSessionState("device.ble.advertise.start")
                 }}
                 return out
             }
             "device.ble.advertise.stop" -> {
-                val ctx = com.dsm.wallet.ui.MainActivity.getActiveInstance()?.baseContext
+                val act = com.dsm.wallet.ui.MainActivity.getActiveInstance()
+                val ctx = act?.baseContext
                 if (ctx != null) com.dsm.wallet.bridge.ble.BleCoordinator.getInstance(ctx).stopAdvertising()
+                act?.setBleAdvertisingDesired(false)
                 Log.i(logTag, "device.ble.advertise.stop")
                 val out = ByteArray(reqId.size + 1)
                 System.arraycopy(reqId, 0, out, 0, reqId.size)
                 out[reqId.size] = 1
-                com.dsm.wallet.ui.MainActivity.getActiveInstance()?.let { act -> act.runOnUiThread {
-                    act.publishCurrentSessionState("device.ble.advertise.stop")
+                act?.let { a -> a.runOnUiThread {
+                    a.publishCurrentSessionState("device.ble.advertise.stop")
                 }}
                 return out
             }

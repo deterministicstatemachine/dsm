@@ -129,6 +129,7 @@ pub fn verify_smt_inclusion_proof_bytes(
 
     // Require an existing leaf with matching key/value.
     let leaf_ok = match &proof.v_path {
+        Some(pb::smt_proof::VPath::Absent(_)) => true,
         Some(pb::smt_proof::VPath::ExistingLeaf(l)) => {
             l.key.len() == 32
                 && l.value.len() == 32

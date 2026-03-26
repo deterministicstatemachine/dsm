@@ -74,7 +74,7 @@ class BleAdvertiser(private val context: Context) {
 
     @SuppressLint("MissingPermission")
     fun startAdvertising(): Boolean {
-        if (advertising.get()) {
+        if (advertising.get() || currentAdvertisingSet.get() != null) {
             Log.d(TAG, "Already advertising")
             return true
         }
@@ -121,6 +121,12 @@ class BleAdvertiser(private val context: Context) {
             .addManufacturerData(BleConstants.DSM_MANUFACTURER_ID, BleConstants.DSM_MANUFACTURER_MAGIC)
             .setIncludeDeviceName(false)
             .build()
+
+        // Defensive cleanup: stop any existing advertising set to avoid
+        // IllegalArgumentException("callback instance already associated").
+        // Handles the race where startAdvertising() is called before the
+        // previous onAdvertisingSetStopped callback has fired.
+        try { bluetoothLeAdvertiser?.stopAdvertisingSet(advertisingSetCallback) } catch (_: Throwable) {}
 
         return try {
             bluetoothLeAdvertiser?.startAdvertisingSet(
