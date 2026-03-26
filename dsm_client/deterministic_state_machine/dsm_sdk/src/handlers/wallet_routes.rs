@@ -494,7 +494,9 @@ impl AppRouterImpl {
                                 .map(|b| {
                                     let r_g = dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(b)
                                         .ok()
-                                        .map(|r| dsm::common::device_tree::DeviceTree::single(r.devid_a).root());
+                                        .map(|r| crate::sdk::receipts::DeviceTreeAcceptanceCommitment::from_root(
+                                            dsm::common::device_tree::DeviceTree::single(r.devid_a).root(),
+                                        ));
                                     crate::sdk::receipts::verify_receipt_bytes(b, r_g)
                                 })
                                 .unwrap_or(false),

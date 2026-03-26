@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use prost::Message;
+use dsm::types::receipt_types::DeviceTreeAcceptanceCommitment;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -49,6 +50,8 @@ struct AppStateStorage {
     device_tree_root: Option<Vec<u8>>,
     recovery_sessions: HashMap<String, String>,
     key_value_store: HashMap<String, String>,
+    // (§2.3.1) Contact's Device Tree roots — indexed by contact device_id
+    contact_device_tree_roots: HashMap<String, Vec<u8>>,
 }
 
 // Global storage slot
@@ -108,6 +111,7 @@ impl AppState {
                         device_tree_root: proto.device_tree_root,
                         recovery_sessions: proto.recovery_sessions,
                         key_value_store: proto.key_value_store,
+                        contact_device_tree_roots: proto.contact_device_tree_roots,
                     },
                     Err(e) => {
                         log::warn!("AppState: decode failed ({e}); using defaults");
@@ -171,6 +175,7 @@ impl AppState {
             device_tree_root: storage.device_tree_root,
             recovery_sessions: storage.recovery_sessions,
             key_value_store: storage.key_value_store,
+            contact_device_tree_roots: storage.contact_device_tree_roots,
         };
         let buf = proto.encode_to_vec();
 
@@ -321,6 +326,14 @@ impl AppState {
                 None
             }
         })
+    }
+    /// Get the authenticated local device-tree commitment used for `π_dev`
+    /// verification on receipt paths that require device membership under `R_G`.
+    ///
+    /// Today this returns the raw persisted `R_G` wrapped in an explicit
+    /// acceptance-commitment type.
+    pub fn get_device_tree_commitment() -> Option<DeviceTreeAcceptanceCommitment> {
+        Self::get_device_tree_root().map(DeviceTreeAcceptanceCommitment::from_root)
     }
     /// Set the Device Tree root R_G and persist.
     pub fn set_device_tree_root(root: [u8; 32]) {

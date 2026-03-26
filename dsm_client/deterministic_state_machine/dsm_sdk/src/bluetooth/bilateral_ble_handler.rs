@@ -2336,7 +2336,8 @@ impl BilateralBleHandler {
         let rel_proof_child_bytes = result.child_proof.to_bytes();
 
         // 6. Build stitched receipt with real SMT roots + proofs (§4.2)
-        let local_r_g = crate::sdk::app_state::AppState::get_device_tree_root();
+        let local_device_tree_commitment =
+            crate::sdk::app_state::AppState::get_device_tree_commitment();
         let receipt_bytes = crate::sdk::receipts::build_bilateral_receipt_with_smt(
             self.device_id,
             session.counterparty_device_id,
@@ -2346,7 +2347,7 @@ impl BilateralBleHandler {
             sender_smt_root,
             rel_proof_parent_bytes.clone(),
             rel_proof_child_bytes.clone(),
-            local_r_g,
+            local_device_tree_commitment,
         )
         .ok_or_else(|| {
             DsmError::invalid_operation(
@@ -2921,7 +2922,8 @@ impl BilateralBleHandler {
         // pre_root (r_A), post_root (r'_A), parent_proof (π h_n ∈ r_A),
         // and child_proof (π' h_{n+1} ∈ r'_A).
         let receipt_bytes = {
-            let local_r_g = crate::sdk::app_state::AppState::get_device_tree_root();
+            let local_device_tree_commitment =
+                crate::sdk::app_state::AppState::get_device_tree_commitment();
             crate::sdk::receipts::build_bilateral_receipt_with_smt(
                 self.device_id,
                 session.counterparty_device_id,
@@ -2931,7 +2933,7 @@ impl BilateralBleHandler {
                 replace_result.post_root,
                 replace_result.parent_proof.to_bytes(),
                 replace_result.child_proof.to_bytes(),
-                local_r_g,
+                local_device_tree_commitment,
             )
         };
 
@@ -3380,7 +3382,7 @@ impl BilateralBleHandler {
                         current_root,
                         Vec::new(), // Recovery: parent proof unavailable
                         child_bytes,
-                        crate::sdk::app_state::AppState::get_device_tree_root(),
+                        crate::sdk::app_state::AppState::get_device_tree_commitment(),
                     )
                 };
 

@@ -8,8 +8,8 @@ use dsm::types::error::DsmError;
 
 // Re-export canonical types from dsm core
 pub use dsm::types::receipt_types::{
-    ParentConsumptionTracker as ReceiptGuard, ReceiptAcceptance, ReceiptVerificationContext,
-    StitchedReceiptV2,
+    DeviceTreeAcceptanceCommitment, ParentConsumptionTracker as ReceiptGuard,
+    ReceiptAcceptance, ReceiptVerificationContext, StitchedReceiptV2,
 };
 
 /// Derive relationship key from counterparty public key.
@@ -30,12 +30,13 @@ pub fn verify_stitched_receipt(
     sig_b: &[u8],
     pk_a: &[u8],
     pk_b: &[u8],
+    device_tree_commitment: DeviceTreeAcceptanceCommitment,
     guard: Option<&mut ReceiptGuard>,
 ) -> Result<(), DsmError> {
     // Create verification context
     let ctx = ReceiptVerificationContext::new(
-        receipt.genesis,
-        [0; 32], // device_tree_root - would be provided by state
+        device_tree_commitment,
+        receipt.parent_root,
         pk_a.to_vec(),
         pk_b.to_vec(),
     );
@@ -87,7 +88,7 @@ pub fn build_receipt_struct(
     devid_b: [u8; 32],
     parent_tip: [u8; 32],
     child_tip: [u8; 32],
-    device_tree_root: Option<[u8; 32]>,
+    device_tree_commitment: Option<DeviceTreeAcceptanceCommitment>,
 ) -> Option<StitchedReceiptV2> {
     use dsm::common::device_tree;
     use dsm::verification::smt_replace_witness::{
@@ -136,16 +137,18 @@ pub fn build_receipt_struct(
         });
 
     // 4. Build device tree proof via DeviceTree builder (§2.3).
-    //    R_G MUST be supplied explicitly by the caller.
-    let r_g = match device_tree_root {
-        Some(root) => root,
+    //    The authenticated commitment used for `π_dev` MUST be supplied explicitly
+    //    by the caller. Today that commitment is the concrete root `R_G`.
+    let device_tree_commitment = match device_tree_commitment {
+        Some(commitment) => commitment,
         None => {
             log::error!(
-                "[receipts] build_receipt_struct: device_tree_root is required; refusing to derive a synthetic R_G"
+                "[receipts] build_receipt_struct: authenticated device-tree commitment is required; refusing to derive a synthetic R_G"
             );
             return None;
         }
     };
+    let r_g = device_tree_commitment.root();
     let dev_tree = device_tree::DeviceTree::single(devid_a);
     let dev_proof_obj = dev_tree
         .proof(&devid_a)
@@ -205,9 +208,15 @@ pub fn build_bilateral_receipt(
     devid_b: [u8; 32],
     parent_tip: [u8; 32],
     child_tip: [u8; 32],
-    device_tree_root: Option<[u8; 32]>,
+    device_tree_commitment: Option<DeviceTreeAcceptanceCommitment>,
 ) -> Option<Vec<u8>> {
-    build_receipt_struct(devid_a, devid_b, parent_tip, child_tip, device_tree_root)?
+    build_receipt_struct(
+        devid_a,
+        devid_b,
+        parent_tip,
+        child_tip,
+        device_tree_commitment,
+    )?
         .to_canonical_protobuf()
         .ok()
 }
@@ -228,7 +237,7 @@ pub fn build_bilateral_receipt_with_smt(
     child_root: [u8; 32],
     rel_proof_parent: Vec<u8>,
     rel_proof_child: Vec<u8>,
-    device_tree_root: Option<[u8; 32]>,
+    device_tree_commitment: Option<DeviceTreeAcceptanceCommitment>,
 ) -> Option<Vec<u8>> {
     use dsm::common::device_tree;
 
@@ -250,16 +259,18 @@ pub fn build_bilateral_receipt_with_smt(
     };
 
     // 2. Build device tree proof via DeviceTree builder (§2.3).
-    //    R_G MUST be supplied explicitly by the caller.
-    let r_g = match device_tree_root {
-        Some(root) => root,
+    //    The authenticated commitment used for `π_dev` MUST be supplied explicitly
+    //    by the caller. Today that commitment is the concrete root `R_G`.
+    let device_tree_commitment = match device_tree_commitment {
+        Some(commitment) => commitment,
         None => {
             log::error!(
-                "[receipts] build_bilateral_receipt_with_smt: device_tree_root is required; refusing to derive a synthetic R_G"
+                "[receipts] build_bilateral_receipt_with_smt: authenticated device-tree commitment is required; refusing to derive a synthetic R_G"
             );
             return None;
         }
     };
+    let r_g = device_tree_commitment.root();
     let dev_tree = device_tree::DeviceTree::single(devid_a);
     let dev_proof_obj = dev_tree
         .proof(&devid_a)
@@ -310,9 +321,13 @@ pub fn build_bilateral_receipt_with_smt(
 ///    the same sibling path must yield r'_A byte-exactly
 /// 5. §4.3#3: π_dev proves DevID_A ∈ R_G (Device Tree inclusion)
 ///
-/// `device_tree_root`: explicit R_G for sender. `None` is rejected.
+/// `device_tree_commitment`: explicit authenticated commitment for the sender's
+/// Device Tree path. `None` is rejected.
 /// Returns `true` only if all checks pass.
-pub fn verify_receipt_bytes(receipt_bytes: &[u8], device_tree_root: Option<[u8; 32]>) -> bool {
+pub fn verify_receipt_bytes(
+    receipt_bytes: &[u8],
+    device_tree_commitment: Option<DeviceTreeAcceptanceCommitment>,
+) -> bool {
     use dsm::merkle::sparse_merkle_tree::{SmtInclusionProof, SparseMerkleTree};
     use dsm::common::device_tree;
     use dsm::verification::smt_replace_witness::compute_smt_key;
@@ -387,15 +402,17 @@ pub fn verify_receipt_bytes(receipt_bytes: &[u8], device_tree_root: Option<[u8; 
     // If parent proof absent: first tx for this relationship (leaf was ZERO_LEAF).
     // Child proof already verified above.
 
-    // 5. §4.3#3: Device proof must parse and verify against R_G.
-    //    R_G MUST be supplied by the caller from a trusted external source (§2.3 commit path).
-    //    If None, reject: acceptance predicates must never derive R_G from the receipt itself.
-    let r_g = match device_tree_root {
-        Some(root) => root,
+    // 5. §4.3#3: Device proof must parse and verify against the authenticated
+    //    local commitment used for `π_dev`.
+    //    Today this is the raw root `R_G`, supplied by the caller from a trusted
+    //    external source (§2.3 commit path). If None, reject: acceptance predicates
+    //    must never derive `R_G` from the receipt itself.
+    let r_g = match device_tree_commitment {
+        Some(commitment) => commitment.root(),
         None => {
             log::error!(
-                "[receipts] §4.3#3 FATAL: device_tree_root not provided — \
-                 R_G must be externally supplied, never derived from the receipt itself."
+                "[receipts] §4.3#3 FATAL: authenticated device-tree commitment not provided — \
+                 R_G or an equivalent authenticated persisted commitment must be externally supplied, never derived from the receipt itself."
             );
             return false;
         }

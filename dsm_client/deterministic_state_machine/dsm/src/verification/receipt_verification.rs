@@ -105,8 +105,12 @@ pub fn verify_stitched_receipt(
         ));
     }
 
-    // 3c: DevID in Device Tree root (dev_proof)
-    if !verify_device_tree_inclusion(&ctx.device_tree_root, &receipt.devid_a, &receipt.dev_proof)? {
+    // 3c: DevID in the authenticated Device Tree commitment used for `π_dev`
+    if !verify_device_tree_inclusion(
+        &ctx.device_tree_commitment.root(),
+        &receipt.devid_a,
+        &receipt.dev_proof,
+    )? {
         return Ok(ReceiptAcceptance::reject(
             "Device Tree inclusion proof failed".to_string(),
         ));
@@ -264,7 +268,7 @@ mod tests {
             vec![],
         );
 
-        let ctx = ReceiptVerificationContext::new([0; 32], [0; 32], vec![], vec![]);
+        let ctx = ReceiptVerificationContext::new([0u8; 32], [0u8; 32], vec![], vec![]);
         let mut tracker = ParentConsumptionTracker::new();
 
         let result = verify_stitched_receipt(&receipt, &ctx, &mut tracker).unwrap();
@@ -308,8 +312,8 @@ mod tests {
 
         // Create context with the public keys
         let ctx = ReceiptVerificationContext::new(
-            [0; 32],
-            [0; 32],
+            [0u8; 32],
+            [0u8; 32],
             keypair_a.public_key().to_vec(),
             keypair_b.public_key().to_vec(),
         );

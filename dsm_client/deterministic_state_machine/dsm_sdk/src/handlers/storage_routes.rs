@@ -868,9 +868,11 @@ impl AppRouterImpl {
                                                         // Full receipt verification: protobuf decode, non-zero fields,
                                                         // relation proofs parse, SMT roots match recomputed values,
                                                         // tripwire replace witness, device proof verification.
-                                                        // Look up sender's Device Tree root (R_G) for §2.3 verification
-                                                        let sender_r_g = crate::storage::client_db::get_contact_device_tree_root(&from_device_id);
-                                                        if !crate::sdk::receipts::verify_receipt_bytes(&entry.receipt_commit, sender_r_g) {
+                                                        // Look up sender's authenticated device-tree commitment for §2.3 verification.
+                                                        // If it is unavailable, this receipt path rejects relationship-locally;
+                                                        // unrelated bilateral relationships continue unaffected.
+                                                        let sender_device_tree_commitment = crate::storage::client_db::get_contact_device_tree_commitment(&from_device_id);
+                                                        if !crate::sdk::receipts::verify_receipt_bytes(&entry.receipt_commit, sender_device_tree_commitment) {
                                                                     log::error!(
                                                                         "[storage.sync] §4.3#2+4 ReceiptCommit full verification FAILED for tx {} — REJECTING",
                                                                         entry.transaction_id
@@ -1088,7 +1090,7 @@ impl AppRouterImpl {
                                                         // Use SENDER's R_G: the receipt proves devid_a (sender) membership.
                                                         // The sender is a contact of the receiver, so their R_G is in the contacts table.
                                                         // Using the receiver's own device_id here would return None (self is not in contacts).
-                                                        let recv_r_g = crate::storage::client_db::get_contact_device_tree_root(&from_device_id);
+                                                        let recv_device_tree_commitment = crate::storage::client_db::get_contact_device_tree_commitment(&from_device_id);
                                                         let rebuilt_history_receipt =
                                                             build_online_receipt_with_smt(
                                                                 &from_device_id,
@@ -1099,7 +1101,7 @@ impl AppRouterImpl {
                                                                 recv_smt_post,
                                                                 recv_parent_bytes,
                                                                 recv_child_bytes,
-                                                                recv_r_g,
+                                                                recv_device_tree_commitment,
                                                             );
                                                         let used_verified_receipt_fallback =
                                                             rebuilt_history_receipt.is_none()

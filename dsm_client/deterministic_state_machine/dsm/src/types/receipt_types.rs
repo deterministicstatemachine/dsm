@@ -295,9 +295,37 @@ impl StitchedReceiptV2 {
 /// Receipt verification context
 ///
 /// Holds all data needed to verify a stitched receipt against acceptance predicates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeviceTreeAcceptanceCommitment {
+    /// Concrete authenticated commitment used to validate `π_dev: DevID ∈ R_G`.
+    ///
+    /// Today this is the canonical 32-byte Device Tree root `R_G` itself. The
+    /// wrapper keeps the acceptance path explicit about requiring an authenticated
+    /// locally persisted commitment, while allowing equivalent authenticated
+    /// persisted artifacts to be represented in the future without changing the
+    /// strict-fail receipt predicate.
+    root: [u8; 32],
+}
+
+impl DeviceTreeAcceptanceCommitment {
+    pub fn from_root(root: [u8; 32]) -> Self {
+        Self { root }
+    }
+
+    pub fn root(&self) -> [u8; 32] {
+        self.root
+    }
+}
+
+impl From<[u8; 32]> for DeviceTreeAcceptanceCommitment {
+    fn from(root: [u8; 32]) -> Self {
+        Self::from_root(root)
+    }
+}
+
 pub struct ReceiptVerificationContext {
-    /// Device Tree root R_G
-    pub device_tree_root: [u8; 32],
+    /// Authenticated local commitment used to validate `π_dev: DevID ∈ R_G`.
+    pub device_tree_commitment: DeviceTreeAcceptanceCommitment,
 
     /// Expected parent Per-Device SMT root
     pub expected_parent_root: [u8; 32],
@@ -313,14 +341,14 @@ pub struct ReceiptVerificationContext {
 }
 
 impl ReceiptVerificationContext {
-    pub fn new(
-        device_tree_root: [u8; 32],
+    pub fn new<T: Into<DeviceTreeAcceptanceCommitment>>(
+        device_tree_commitment: T,
         expected_parent_root: [u8; 32],
         pubkey_a: Vec<u8>,
         pubkey_b: Vec<u8>,
     ) -> Self {
         Self {
-            device_tree_root,
+            device_tree_commitment: device_tree_commitment.into(),
             expected_parent_root,
             pubkey_a,
             pubkey_b,
