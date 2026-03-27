@@ -189,7 +189,9 @@ pub fn apply_transfer_credit(
 
 #[cfg(test)]
 mod tests {
-    use super::canonical_transfer_recipient_owner;
+    use super::{apply_transfer_debit, canonical_transfer_recipient_owner};
+    use dsm::types::token_types::Balance;
+    use std::collections::HashMap;
 
     #[test]
     fn canonical_transfer_recipient_owner_rejects_legacy_device_id() {
@@ -208,5 +210,60 @@ mod tests {
             canonical_transfer_recipient_owner(&owner, &device_id),
             Some(owner.as_slice())
         );
+    }
+
+    #[test]
+    fn canonical_transfer_recipient_owner_rejects_empty_recipient() {
+        let device_id = [0x11; 32];
+        assert_eq!(canonical_transfer_recipient_owner(&[], &device_id), None);
+    }
+
+    #[test]
+    fn apply_transfer_debit_updates_sender_balance() {
+        let policy_commit = [0x33; 32];
+        let sender_pk = [0x44; 64];
+        let sender_key =
+            dsm::core::token::derive_canonical_balance_key(&policy_commit, &sender_pk, "ERA");
+        let mut balances = HashMap::new();
+        balances.insert(sender_key.clone(), Balance::from_state(50, [0u8; 32], 0));
+
+        apply_transfer_debit(
+            &mut balances,
+            &policy_commit,
+            &sender_pk,
+            "ERA",
+            20,
+            [0x55; 32],
+            7,
+        )
+        .expect("debit should succeed");
+
+        let balance = balances
+            .get(&sender_key)
+            .expect("sender balance should remain present");
+        assert_eq!(balance.value(), 30);
+    }
+
+    #[test]
+    fn apply_transfer_debit_rejects_insufficient_balance() {
+        let policy_commit = [0x33; 32];
+        let sender_pk = [0x44; 64];
+        let sender_key =
+            dsm::core::token::derive_canonical_balance_key(&policy_commit, &sender_pk, "ERA");
+        let mut balances = HashMap::new();
+        balances.insert(sender_key, Balance::from_state(5, [0u8; 32], 0));
+
+        let err = apply_transfer_debit(
+            &mut balances,
+            &policy_commit,
+            &sender_pk,
+            "ERA",
+            20,
+            [0x55; 32],
+            7,
+        )
+        .expect_err("insufficient balance must fail");
+
+        assert!(err.contains("insufficient ERA balance"));
     }
 }

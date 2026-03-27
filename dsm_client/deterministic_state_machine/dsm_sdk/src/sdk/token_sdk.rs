@@ -2025,11 +2025,11 @@ impl<I: Send + Sync> TokenSDK<I> {
             ..Default::default()
         };
 
-        let recipient_owner = if recipient_public_key.is_empty() {
-            recipient.to_vec()
-        } else {
-            recipient_public_key
-        };
+        if recipient_public_key.is_empty() {
+            return Err(DsmError::invalid_parameter(
+                "recipient_public_key must be present for bilateral transfers",
+            ));
+        }
 
         let mut bilateral_transfer_op = Operation::Transfer {
             token_id: token_id.as_bytes().to_vec(),
@@ -2039,7 +2039,7 @@ impl<I: Send + Sync> TokenSDK<I> {
                 state_hash.clone().try_into().unwrap_or([0u8; 32]),
                 current_state.state_number,
             ),
-            recipient: recipient_owner,
+            recipient: recipient_public_key,
             message: memo.clone().unwrap_or_else(|| {
                 format!(
                     "Bilateral transfer of {amount} tokens to {}",
