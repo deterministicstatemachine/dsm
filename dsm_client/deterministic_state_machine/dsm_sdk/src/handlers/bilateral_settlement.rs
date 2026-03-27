@@ -116,22 +116,31 @@ fn build_canonical_settled_state(
         } else {
             transfer.token_id.as_str()
         };
-        let recipient_owner = if transfer.recipient.is_empty() {
-            transfer.to_device_id.as_slice()
+        if let Some(recipient_owner) = token_state::canonical_transfer_recipient_owner(
+            transfer.recipient.as_slice(),
+            transfer.to_device_id.as_slice(),
+        ) {
+            token_state::apply_transfer_debit_credit(
+                &mut settled_state.token_balances,
+                &policy_commit,
+                &canonical_state.device_info.public_key,
+                recipient_owner,
+                token_id,
+                transfer.amount,
+                canonical_state.hash,
+                canonical_state.state_number,
+            )?;
         } else {
-            transfer.recipient.as_slice()
-        };
-
-        token_state::apply_transfer_debit_credit(
-            &mut settled_state.token_balances,
-            &policy_commit,
-            &canonical_state.device_info.public_key,
-            recipient_owner,
-            token_id,
-            transfer.amount,
-            canonical_state.hash,
-            canonical_state.state_number,
-        )?;
+            token_state::apply_transfer_debit(
+                &mut settled_state.token_balances,
+                &policy_commit,
+                &canonical_state.device_info.public_key,
+                token_id,
+                transfer.amount,
+                canonical_state.hash,
+                canonical_state.state_number,
+            )?;
+        }
     } else {
         let token_id = if transfer.token_id.is_empty() {
             "ERA"
@@ -404,5 +413,26 @@ mod tests {
         let (amount, token_id) = parse_transfer_fields(&op.to_bytes());
         assert_eq!(amount, 5);
         assert_eq!(token_id.as_deref(), Some("dBTC"));
+    }
+
+    #[test]
+    fn parse_transfer_preserves_public_key_recipient_bytes() {
+        let recipient_owner = vec![0x42; 64];
+        let op = Operation::Transfer {
+            to_device_id: vec![0x11; 32],
+            amount: Balance::from_state(7, [0u8; 32], 0),
+            token_id: b"ERA".to_vec(),
+            mode: TransactionMode::Bilateral,
+            nonce: vec![],
+            verification: VerificationType::Bilateral,
+            pre_commit: None,
+            recipient: recipient_owner.clone(),
+            to: b"recipient".to_vec(),
+            message: "memo".to_string(),
+            signature: vec![],
+        };
+
+        let parsed = super::parse_transfer(&op.to_bytes()).expect("transfer should parse");
+        assert_eq!(parsed.recipient, recipient_owner);
     }
 }
