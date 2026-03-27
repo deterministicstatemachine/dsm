@@ -373,6 +373,7 @@ pub fn is_settlement_completed(tx_id: &str) -> bool {
     .unwrap_or(false)
 }
 
+
 pub fn get_transaction_history(
     device_id: Option<&str>,
     limit: Option<usize>,

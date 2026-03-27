@@ -2380,7 +2380,7 @@ impl BilateralBleHandler {
         // Capture the finalized local_state so it can be threaded into settlement
         // and BCR archive — the same canonical commit path used by recovery
         // (mark_sender_committed_with_post_state_hash).
-        let finalized_local_state = {
+        let _finalized_local_state = {
             let mut smt = self.per_device_smt.write().await;
             let mut manager = self.bilateral_tx_manager.write().await;
             match manager
@@ -2429,7 +2429,7 @@ impl BilateralBleHandler {
                 counterparty_device_id: session.counterparty_device_id,
                 commitment_hash,
                 transaction_hash: h_n_plus_1,
-                device_state_index: finalized_local_state.state_number,
+
                 operation_bytes: session.operation.to_bytes(),
                 proof_data: Some(receipt_bytes.clone()),
                 is_sender: true,
@@ -2977,12 +2977,15 @@ impl BilateralBleHandler {
 
         // §4.2 Full-persistence atomic boundary: delegate applies chain tip + balance +
         // history in one SQLite transaction.
+
         let (confirm_outcome, persistence_error) =
             if let Some(ref delegate) = self.settlement_delegate {
                 // Ensure CoreSDK has the latest archived BCR state loaded before
-                // settlement reads canonical state. Without this, a fresh app start
-                // or race condition can leave get_device_current_state() returning
-                // None, silently failing the receiver's settlement.
+                // settlement reads canonical state.  Without this, a fresh app
+                // start or race condition can leave get_device_current_state()
+                // returning None, causing the `?` below to bail out of the
+                // entire function — skipping settlement, BCR archive, push, and
+                // sync, which silently drops the receiver's balance and history.
                 if let Some(router) = crate::bridge::app_router() {
                     router.sync_balance_cache();
                 }
@@ -2998,7 +3001,7 @@ impl BilateralBleHandler {
                     counterparty_device_id: session.counterparty_device_id,
                     commitment_hash,
                     transaction_hash: tx_result.transaction_hash,
-                    device_state_index: tx_result.local_state.state_number,
+
                     operation_bytes: op_bytes.clone(),
                     proof_data: receipt_bytes,
                     is_sender: false,
@@ -3022,11 +3025,16 @@ impl BilateralBleHandler {
                 (BilateralSettlementOutcome::default(), None)
             };
 
-        if let Some(persist_error) = persistence_error {
-            {
-                let mut mgr = self.bilateral_tx_manager.write().await;
-                let _ = mgr.remove_pending_commitment(&pending_key);
-            }
+        if let Some(ref persist_error) = persistence_error {
+            // Receiver settlement delegate failed (e.g. missing proof_data,
+            // projection write error).  The cryptographic commitment is already
+            // finalized — do NOT bail here.  Log the error, mark for reconcile,
+            // but still fall through to archive state / push / sync so the
+            // receiver's balance and history can still update.
+            warn!(
+                "[BILATERAL] Receiver settlement delegate error (non-fatal, will still archive+sync): {}",
+                persist_error
+            );
 
             if let Err(e) = crate::storage::client_db::mark_contact_needs_online_reconcile(
                 &session.counterparty_device_id,
@@ -3036,47 +3044,6 @@ impl BilateralBleHandler {
                     e
                 );
             }
-
-            let failed_session = {
-                let mut sessions = self.sessions.sessions.lock().await;
-                if let Some(active) = sessions.get_mut(&commitment_hash) {
-                    active.phase = BilateralPhase::Failed;
-                    Some(active.clone())
-                } else {
-                    None
-                }
-            };
-            if let Some(failed_session) = failed_session.as_ref() {
-                if let Err(e) = self.persist_session(failed_session, None).await {
-                    warn!(
-                        "[BILATERAL] Failed to persist failed receiver session after local persistence error: {}",
-                        e
-                    );
-                }
-            }
-
-            self.emit_event(&generated::BilateralEventNotification {
-                event_type: generated::BilateralEventType::BilateralEventFailed.into(),
-                counterparty_device_id: session.counterparty_device_id.to_vec(),
-                commitment_hash: commitment_hash.to_vec(),
-                transaction_hash: Some(tx_result.transaction_hash.to_vec()),
-                amount: amount_opt,
-                token_id: token_id_opt,
-                status: "failed".to_string(),
-                message: format!(
-                    "Receiver finalized but failed to persist local wallet state: {}",
-                    persist_error
-                ),
-                sender_ble_address: session.sender_ble_address.clone(),
-                failure_reason: Some(
-                    generated::BilateralFailureReason::FailureReasonUnspecified.into(),
-                ),
-            });
-
-            return Err(DsmError::invalid_operation(format!(
-                "receiver finalized but failed to persist local wallet state: {}",
-                persist_error
-            )));
         }
 
         let state_to_record = confirm_outcome
@@ -3425,7 +3392,7 @@ impl BilateralBleHandler {
                         counterparty_device_id,
                         commitment_hash: *commitment_hash,
                         transaction_hash: result.transaction_hash,
-                        device_state_index: result.local_state.state_number,
+
                         operation_bytes: op_bytes.clone(),
                         proof_data: receipt_bytes,
                         is_sender: true,
@@ -3545,14 +3512,6 @@ impl BilateralBleHandler {
                 manager.advance_chain_tip(&counterparty_device_id, post_tip);
 
                 // --- DELEGATE SETTLEMENT (recovery path) ---
-                let recovered_state_index = crate::storage::client_db::get_wallet_state(
-                    &crate::util::text_id::encode_base32_crockford(&self.device_id),
-                )
-                .ok()
-                .flatten()
-                .map(|ws| ws.chain_height)
-                .unwrap_or(0);
-
                 if let Some(ref delegate) = self.settlement_delegate {
                     let canonical_state = match crate::bridge::app_router()
                         .and_then(|r| r.get_device_current_state())
@@ -3569,7 +3528,7 @@ impl BilateralBleHandler {
                         commitment_hash: *commitment_hash,
                         // Recovery path: reuse commitment_hash as tx_hash (no finalized tx hash).
                         transaction_hash: *commitment_hash,
-                        device_state_index: recovered_state_index,
+
                         operation_bytes: op_bytes.clone(),
                         proof_data: None,
                         is_sender: true,

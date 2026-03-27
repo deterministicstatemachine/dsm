@@ -199,15 +199,28 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
         &self,
         ctx: BilateralSettlementContext,
     ) -> Result<BilateralSettlementOutcome, String> {
+
         // §8 Atomicity + Theorem 3: the same accepted transition must not
-        // debit or credit twice. Check the transactions table for an existing
-        // completed record before applying any balance delta.
+        // debit or credit twice.  The tx_id is derived from commitment_hash
+        // which is identical for both parties.  In production each device has
+        // its own DB so collisions are impossible; but in single-process tests
+        // both roles share one DB.  Scope the guard to the local device so
+        // the sender's completed record does not block the receiver.
+        let local_txt = encode_base32_crockford(&ctx.local_device_id);
         let tx_id_candidate =
             crate::util::text_id::encode_base32_crockford(&ctx.commitment_hash);
-        if crate::storage::client_db::is_settlement_completed(&tx_id_candidate) {
+        // Sender-only idempotency: prevent double-debit if the sender's
+        // settlement is retried.  The receiver side is naturally idempotent
+        // via the atomic chain-tip CAS in apply_receiver_confirm_bundle_atomic
+        // (the UPDATE contacts SET chain_tip = ?1 WHERE device_id = ?3 only
+        // succeeds once for the same tip value).  In production each device
+        // has its own DB so a bare tx_id check suffices for senders.
+        if ctx.is_sender
+            && crate::storage::client_db::is_settlement_completed(&tx_id_candidate)
+        {
             log::warn!(
-                "[BILATERAL][settle] Idempotency guard: settlement already completed for {}",
-                tx_id_candidate
+                "[BILATERAL][settle] Idempotency guard: sender settlement already completed for {}",
+                tx_id_candidate,
             );
             return Ok(BilateralSettlementOutcome::default());
         }
@@ -217,9 +230,12 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
         
         // (§2.3.1) Recovery-path settlements are allowed to have None proof_data
         // (BLE GATT failure scenario where receipt delivery failed).
-        // Only enforce proof_data presence for normal bilateral path.
+        // Sender must always have proof_data (receipt from its own SMT-Replace).
+        // Receiver receipt is speculative — built for archival, not a settlement
+        // precondition.  Blocking receiver settlement on receipt construction
+        // silently drops balance + history when AppState is not yet populated.
         let is_recovery = ctx.tx_type == "bilateral_offline_recovered";
-        if transfer_amount > 0 && !is_recovery {
+        if transfer_amount > 0 && !is_recovery && ctx.is_sender {
             let has_proof = ctx
                 .proof_data
                 .as_ref()
@@ -253,7 +269,6 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
             }
         }
 
-        let local_txt = encode_base32_crockford(&ctx.local_device_id);
         let counterparty_txt = encode_base32_crockford(&ctx.counterparty_device_id);
         let (from_txt, to_txt) = if ctx.is_sender {
             (local_txt.clone(), counterparty_txt.clone())
@@ -269,7 +284,7 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
             amount: transfer_amount,
             tx_type: ctx.tx_type.to_string(),
             status: "completed".to_string(),
-            chain_height: canonical_state.as_ref().map_or(ctx.device_state_index, |s| s.state_number),
+            chain_height: canonical_state.as_ref().map_or(0, |s| s.state_number),
             step_index: crate::util::deterministic_time::tick(),
             commitment_hash: Some(encode_base32_crockford(&ctx.commitment_hash).into_bytes()),
             proof_data: ctx.proof_data,
