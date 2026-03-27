@@ -2357,6 +2357,58 @@ impl BilateralBleHandler {
         let rel_proof_parent_bytes = result.parent_proof.to_bytes();
         let rel_proof_child_bytes = result.child_proof.to_bytes();
 
+        // DIAGNOSTIC: sender self-verifies proofs before envelope assembly.
+        // If this fails, the bug is upstream in proof construction / smt_replace.
+        // If this passes but receiver rejects, the gremlin is in transport or deser.
+        {
+            let parent_ok = if !rel_proof_parent_bytes.is_empty() {
+                match crate::sdk::receipts::deserialize_inclusion_proof(&rel_proof_parent_bytes) {
+                    Ok(proof) => {
+                        let ok = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::verify_proof_against_root(&proof, &pre_root);
+                        info!(
+                            "[BILATERAL][SENDER-SELFCHECK] parent_proof vs pre_root: {} (siblings={}, value={:?}, key={})",
+                            if ok { "PASS" } else { "FAIL" },
+                            proof.siblings.len(),
+                            proof.value.map(|v| bytes_to_base32(&v[..8])),
+                            bytes_to_base32(&proof.key[..8]),
+                        );
+                        ok
+                    }
+                    Err(e) => {
+                        error!("[BILATERAL][SENDER-SELFCHECK] parent_proof deser failed: {}", e);
+                        false
+                    }
+                }
+            } else {
+                info!("[BILATERAL][SENDER-SELFCHECK] parent_proof empty (first tx for relationship)");
+                true
+            };
+            let child_ok = match crate::sdk::receipts::deserialize_inclusion_proof(&rel_proof_child_bytes) {
+                Ok(proof) => {
+                    let ok = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::verify_proof_against_root(&proof, &sender_smt_root);
+                    info!(
+                        "[BILATERAL][SENDER-SELFCHECK] child_proof vs post_root: {} (siblings={}, value={:?}, key={})",
+                        if ok { "PASS" } else { "FAIL" },
+                        proof.siblings.len(),
+                        proof.value.map(|v| bytes_to_base32(&v[..8])),
+                        bytes_to_base32(&proof.key[..8]),
+                    );
+                    ok
+                }
+                Err(e) => {
+                    error!("[BILATERAL][SENDER-SELFCHECK] child_proof deser failed: {}", e);
+                    false
+                }
+            };
+            info!(
+                "[BILATERAL][SENDER-SELFCHECK] pre_root={} post_root={} parent_ok={} child_ok={}",
+                bytes_to_base32(&pre_root[..8]),
+                bytes_to_base32(&sender_smt_root[..8]),
+                parent_ok,
+                child_ok,
+            );
+        }
+
         // 6. Build stitched receipt with real SMT roots + proofs (§4.2)
         let local_device_tree_commitment = local_device_tree_commitment(&self.device_id);
         let receipt_bytes = crate::sdk::receipts::build_bilateral_receipt_with_smt(
