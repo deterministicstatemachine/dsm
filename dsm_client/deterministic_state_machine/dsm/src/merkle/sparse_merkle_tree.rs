@@ -233,15 +233,19 @@ impl SparseMerkleTree {
     ///
     /// Collects 256 sibling hashes ordered leaf-to-root.
     /// Sibling at index `i` corresponds to level `(255 - i)` in MSB-first order.
+    ///
+    /// For absent keys the proof value is `ZERO_LEAF` — the canonical default
+    /// leaf.  The sibling path is still valid and `verify_proof_against_root`
+    /// will recompute `hash_smt_leaf(ZERO_LEAF)` at the leaf position, walk the
+    /// siblings up, and match the root.  This is the "non-inclusion proof" that
+    /// `smt_replace` needs for first-ever transactions in a relationship (§4.2).
     pub fn get_inclusion_proof(
         &self,
         key: &[u8; 32],
         max_proof_size: usize,
     ) -> Result<SmtInclusionProof, &'static str> {
-        let value = self.leaves.get(key).copied();
-        if value.is_none() {
-            return Err("Key not found in SMT");
-        }
+        // Absent keys get ZERO_LEAF — a valid non-inclusion proof.
+        let value = Some(self.leaves.get(key).copied().unwrap_or(ZERO_LEAF));
 
         let all_keys: Vec<[u8; 32]> = self.leaves.keys().copied().collect();
         let mut siblings = Vec::with_capacity(256);
@@ -386,14 +390,10 @@ impl SparseMerkleTree {
         let pre_root = self.root;
 
         // Parent proof: inclusion of h_n (or ZERO_LEAF for first tx).
-        // If key doesn't exist yet, construct a default non-inclusion proof.
-        let parent_proof = self
-            .get_inclusion_proof(key, 256)
-            .unwrap_or(SmtInclusionProof {
-                key: *key,
-                value: None,
-                siblings: Vec::new(),
-            });
+        // get_inclusion_proof now returns a valid non-inclusion proof for
+        // absent keys (value = ZERO_LEAF with real sibling path), so the
+        // receiver can verify π(h_n ∈ r_A) even on the first transaction.
+        let parent_proof = self.get_inclusion_proof(key, 256)?;
 
         self.update_leaf(key, new_value)?;
 
@@ -679,12 +679,17 @@ mod tests {
             assert!(smt.verify_inclusion_proof(&proof.unwrap()));
         }
 
-        // Oldest 2 (keys 0, 1) should be gone
+        // Oldest 2 (keys 0, 1) should be evicted — proof returns ZERO_LEAF
         for i in 0..2u8 {
             let mut key = [0u8; 32];
             key[0] = i;
-            let result = smt.get_inclusion_proof(&key, 256);
-            assert!(result.is_err(), "Key {} should have been evicted", i);
+            let proof = smt.get_inclusion_proof(&key, 256).unwrap();
+            assert_eq!(
+                proof.value,
+                Some(ZERO_LEAF),
+                "Evicted key {} should produce ZERO_LEAF proof",
+                i
+            );
         }
     }
 
