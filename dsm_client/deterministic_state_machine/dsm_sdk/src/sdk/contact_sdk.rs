@@ -187,14 +187,14 @@ impl ContactManager {
                         self.with_manager_write_sync("load_contacts_from_database", move |mgr| {
                             mgr.add_verified_contact(verified_contact.clone())?;
                             if let Some(chain_tip) = verified_contact.chain_tip {
-                                let smt = smt_arc.blocking_read();
+                                let mut smt = smt_arc.blocking_write();
                                 let smt_key =
                                     dsm::core::bilateral_transaction_manager::compute_smt_key(
                                         &own_device_id,
                                         &device_id,
                                     );
                                 mgr.initialize_contact_chain_tip(
-                                    &device_id, chain_tip, &smt, &smt_key,
+                                    &device_id, chain_tip, &mut smt, &smt_key,
                                 )
                                 .map_err(|e| {
                                     DsmError::internal(
@@ -306,7 +306,7 @@ impl ContactManager {
         };
         {
             let smt_arc = crate::security::shared_smt::init_shared_smt(256);
-            let smt = smt_arc.read().await;
+            let mut smt = smt_arc.write().await;
             let smt_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
                 &self.device_id,
                 &contact_device_id,
@@ -318,7 +318,7 @@ impl ContactManager {
             if let Err(e) = mgr.initialize_contact_chain_tip(
                 &contact_device_id,
                 initial_chain_tip,
-                &smt,
+                &mut smt,
                 &smt_key,
             ) {
                 return Err(ContactError::InvalidChainTip(format!(
@@ -599,7 +599,7 @@ impl ContactManager {
         };
         {
             let smt_arc = crate::security::shared_smt::init_shared_smt(256);
-            let smt = smt_arc.read().await;
+            let mut smt = smt_arc.write().await;
             let smt_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
                 &self.device_id,
                 &contact_device_id,
@@ -615,7 +615,7 @@ impl ContactManager {
             if let Err(e) = mgr.initialize_contact_chain_tip(
                 &contact_device_id,
                 initial_chain_tip,
-                &smt,
+                &mut smt,
                 &smt_key,
             ) {
                 return Err(ContactError::InvalidChainTip(format!(

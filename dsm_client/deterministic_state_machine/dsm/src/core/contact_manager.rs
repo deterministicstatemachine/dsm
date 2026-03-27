@@ -112,30 +112,28 @@ impl LocalSmtVerifier {
         if now.saturating_sub(smt_proof.proof_commit_height) > PROOF_MAX_AGE_COMMIT_HEIGHTS {
             return false;
         }
-        // §4.3: Verify actual Merkle inclusion proof if proof_path is available.
-        // Zero root is always invalid; empty proof_path is only valid for the
-        // very first relationship entry (ZERO_LEAF case) where the caller has
-        // not yet constructed real proofs.
+        // §4.3: Verify actual Merkle inclusion proof.
+        // Zero root is always invalid.
         if smt_proof.smt_root.iter().all(|&b| b == 0) {
             return false;
         }
-        if !smt_proof.proof_path.is_empty() {
-            // proof_path contains sibling hashes directly — construct the proof
-            // and verify against the claimed SMT root.
-            let proof = crate::merkle::sparse_merkle_tree::SmtInclusionProof {
-                key: smt_proof.smt_key,
-                value: Some(smt_proof.state_hash),
-                siblings: smt_proof.proof_path.clone(),
-            };
-            crate::merkle::sparse_merkle_tree::SparseMerkleTree::verify_proof_against_root(
-                &proof,
-                &smt_proof.smt_root,
-            )
-        } else {
-            // No proof path — accept only as a legacy/bootstrap placeholder.
-            // Callers SHOULD provide real proofs from the SDK's Per-Device SMT.
-            true
+        if smt_proof.proof_path.is_empty() {
+            // No proof path — reject. Every chain tip must have a real
+            // SMT inclusion proof (initialize_contact_chain_tip inserts
+            // the leaf before proving, so empty paths are never valid).
+            return false;
         }
+        // proof_path contains sibling hashes directly — construct the proof
+        // and verify against the claimed SMT root.
+        let proof = crate::merkle::sparse_merkle_tree::SmtInclusionProof {
+            key: smt_proof.smt_key,
+            value: Some(smt_proof.state_hash),
+            siblings: smt_proof.proof_path.clone(),
+        };
+        crate::merkle::sparse_merkle_tree::SparseMerkleTree::verify_proof_against_root(
+            &proof,
+            &smt_proof.smt_root,
+        )
     }
 
     /// Generate a chain tip proof from the real Per-Device SMT (§2.2).
@@ -365,13 +363,22 @@ impl DsmContactManager {
     /// Initialize a contact's chain tip with a real Per-Device SMT proof.
     ///
     /// §4.2: Every state transition requires an SMT-Replace. No exceptions.
+    /// The chain tip is inserted into the SMT first, then a genuine inclusion
+    /// proof is generated and verified. No empty-path fallbacks.
     pub fn initialize_contact_chain_tip(
         &mut self,
         device_id: &[u8; 32],
         new_chain_tip: [u8; 32],
-        smt: &crate::merkle::sparse_merkle_tree::SparseMerkleTree,
+        smt: &mut crate::merkle::sparse_merkle_tree::SparseMerkleTree,
         smt_key: &[u8; 32],
     ) -> Result<ChainTipSmtProof, ContactError> {
+        // Insert the chain tip into the SMT BEFORE generating the proof.
+        // This ensures get_inclusion_proof returns a real proof for the
+        // actual chain tip value, not a ZERO_LEAF non-inclusion proof.
+        smt.update_leaf(smt_key, &new_chain_tip).map_err(|e| {
+            ContactError::InvalidChainTip(format!("SMT update_leaf failed: {e}"))
+        })?;
+
         let smt_proof =
             self.local_smt_verifier
                 .create_chain_tip_proof_from_smt(&new_chain_tip, smt, smt_key);
@@ -630,12 +637,16 @@ mod tests {
     fn test_chain_tip_proof_generation() {
         let verifier = LocalSmtVerifier::new();
         let chain_tip = [5u8; 32];
-        let smt = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
+        let mut smt = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
         let smt_key = [0u8; 32];
+
+        // Insert chain tip into SMT first — proofs are only valid for inserted keys.
+        smt.update_leaf(&smt_key, &chain_tip).unwrap();
 
         let proof = verifier.create_chain_tip_proof_from_smt(&chain_tip, &smt, &smt_key);
         assert_eq!(proof.state_hash, chain_tip);
         assert_ne!(proof.smt_root, [0u8; 32], "SMT root should be non-zero");
+        assert!(!proof.proof_path.is_empty(), "Proof must have real siblings");
     }
 
     #[test]
@@ -643,8 +654,12 @@ mod tests {
         let verifier = LocalSmtVerifier::new();
         let device_id = create_test_device_id(1);
         let chain_tip = [5u8; 32];
-        let smt = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
+        let mut smt = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
         let smt_key = [0u8; 32];
+
+        // Insert chain tip into SMT first — matches production flow where
+        // initialize_contact_chain_tip does update_leaf before proving.
+        smt.update_leaf(&smt_key, &chain_tip).unwrap();
 
         let proof = verifier.create_chain_tip_proof_from_smt(&chain_tip, &smt, &smt_key);
         assert!(verifier.verify_chain_tip_with_proof(&device_id, &chain_tip, &proof));
@@ -681,8 +696,10 @@ mod tests {
         let mut contact = create_test_contact(device_id, genesis_hash);
 
         let chain_tip = [5u8; 32];
-        let smt = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
+        let mut smt = crate::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
         let smt_key = [0u8; 32];
+        // Insert chain tip into SMT before generating proof.
+        smt.update_leaf(&smt_key, &chain_tip).unwrap();
         let proof = manager
             .local_smt_verifier
             .create_chain_tip_proof_from_smt(&chain_tip, &smt, &smt_key);

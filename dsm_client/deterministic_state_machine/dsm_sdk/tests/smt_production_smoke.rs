@@ -508,11 +508,12 @@ async fn smoke_eviction_boundary() {
         &proof_257, &root_257
     ));
 
-    // Evicted key's proof returns error
-    let evicted_result = smt.get_inclusion_proof(&keys[0], 256);
-    assert!(
-        evicted_result.is_err(),
-        "evicted key must return Err from get_inclusion_proof"
+    // Evicted key returns a ZERO_LEAF non-inclusion proof (key no longer in tree)
+    let evicted_proof = smt.get_inclusion_proof(&keys[0], 256).unwrap();
+    assert_eq!(
+        evicted_proof.value,
+        Some(dsm::merkle::sparse_merkle_tree::ZERO_LEAF),
+        "evicted key must produce ZERO_LEAF proof"
     );
 }
 
@@ -786,10 +787,17 @@ async fn smoke_first_transaction_zero_leaf_edge() {
 
     let mut smt = SparseMerkleTree::new(256);
 
-    // Brand new SMT: get_inclusion_proof for a non-existent key returns Err
+    // Brand new SMT: get_inclusion_proof for absent key returns a valid
+    // ZERO_LEAF non-inclusion proof that verifies against the empty-tree root.
+    let absent_proof = smt.get_inclusion_proof(&smt_key, 256).unwrap();
+    assert_eq!(
+        absent_proof.value,
+        Some(dsm::merkle::sparse_merkle_tree::ZERO_LEAF),
+        "absent key must produce ZERO_LEAF proof"
+    );
     assert!(
-        smt.get_inclusion_proof(&smt_key, 256).is_err(),
-        "proof for absent key must be Err"
+        SparseMerkleTree::verify_proof_against_root(&absent_proof, smt.root()),
+        "ZERO_LEAF proof must verify against empty-tree root"
     );
 
     // Insert h_0
