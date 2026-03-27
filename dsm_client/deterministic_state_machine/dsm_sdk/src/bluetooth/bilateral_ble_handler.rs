@@ -2856,10 +2856,10 @@ impl BilateralBleHandler {
                 ));
             }
 
-            // §4.3 acceptance predicate #2: verify π_rel_parent (h_n ∈ r_A) if available.
-            // For the FIRST transaction in a relationship, the sender's SMT has no entry
-            // for this key — parent proof is legitimately empty (leaf = ZERO_LEAF).
-            // verify_receipt_bytes() handles this case; the confirm handler must too.
+            // §4.3 acceptance predicate #2: verify π_rel_parent (h_n ∈ r_A).
+            // For first-ever transactions the proof value is ZERO_LEAF with a
+            // real sibling path — verify_proof_against_root handles this by
+            // hashing ZERO_LEAF and walking the Merkle path to recompute r_A.
             if !confirm_request.rel_proof_parent.is_empty()
                 && confirm_request.sender_smt_root_before.len() == 32
             {
@@ -2882,13 +2882,15 @@ impl BilateralBleHandler {
                          π(h_n ∈ r_A) does not recompute to sender_smt_root_before (§4.3)",
                     ));
                 }
+                let is_zero_leaf = parent_proof.value == Some(dsm::merkle::sparse_merkle_tree::ZERO_LEAF);
                 info!(
-                    "[BILATERAL] §4.3 parent proof verified: π(h_n ∈ r_A) ✓ ({} siblings)",
-                    parent_proof.siblings.len()
+                    "[BILATERAL] §4.3 parent proof verified: π(h_n ∈ r_A) ✓ (siblings={}, first_tx={})",
+                    parent_proof.siblings.len(),
+                    is_zero_leaf,
                 );
             } else {
                 info!(
-                    "[BILATERAL] §4.3 parent proof absent — first transaction for this relationship (ZERO_LEAF)"
+                    "[BILATERAL] §4.3 parent proof absent — skipping (empty bytes or no pre-root)"
                 );
             }
         }
