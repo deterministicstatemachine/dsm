@@ -1984,7 +1984,7 @@ impl<I: Send + Sync> TokenSDK<I> {
         token_id: String,
         recipient: [u8; 32],
         amount: u64,
-        _recipient_public_key: Vec<u8>,
+        recipient_public_key: Vec<u8>,
         memo: Option<String>,
         state_hash: Vec<u8>,
     ) -> Result<State, DsmError> {
@@ -2025,6 +2025,12 @@ impl<I: Send + Sync> TokenSDK<I> {
             ..Default::default()
         };
 
+        if recipient_public_key.is_empty() {
+            return Err(DsmError::invalid_parameter(
+                "recipient_public_key must be present for bilateral transfers",
+            ));
+        }
+
         let mut bilateral_transfer_op = Operation::Transfer {
             token_id: token_id.as_bytes().to_vec(),
             to_device_id: recipient.to_vec(),
@@ -2033,7 +2039,7 @@ impl<I: Send + Sync> TokenSDK<I> {
                 state_hash.clone().try_into().unwrap_or([0u8; 32]),
                 current_state.state_number,
             ),
-            recipient: recipient.to_vec(),
+            recipient: recipient_public_key,
             message: memo.clone().unwrap_or_else(|| {
                 format!(
                     "Bilateral transfer of {amount} tokens to {}",

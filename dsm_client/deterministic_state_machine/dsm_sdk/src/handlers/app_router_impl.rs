@@ -1003,6 +1003,12 @@ impl AppRouterImpl {
                 _ => raw.to_string(),
             }
         };
+        if contact_record.public_key.is_empty() {
+            return err(
+                "wallet.send: recipient contact is missing a canonical public key".to_string(),
+            );
+        }
+        let recipient_owner = contact_record.public_key.clone();
         let seq = transfer_req.seq;
 
         // §4.1: Nonce = "fresh entropy e" — generated deterministically by the SDK.
@@ -1052,7 +1058,7 @@ impl AppRouterImpl {
             nonce: nonce.clone(),
             verification: dsm::types::operations::VerificationType::Standard,
             pre_commit: None,
-            recipient: to_device_id.to_vec(),
+            recipient: recipient_owner.clone(),
             to: to_device_id_str.as_bytes().to_vec(),
             message: transfer_req.memo.clone(),
             signature: Vec::new(),
@@ -1227,7 +1233,7 @@ impl AppRouterImpl {
             nonce: nonce.clone(),
             verification: dsm::types::operations::VerificationType::Standard,
             pre_commit: None,
-            recipient: to_device_id.to_vec(),
+            recipient: recipient_owner.clone(),
             to: to_device_id_str.as_bytes().to_vec(),
             message: transfer_req.memo.clone(),
             signature: canonical_signature.clone(),
@@ -1504,7 +1510,7 @@ impl AppRouterImpl {
                 nonce: nonce.to_vec(),
                 verification: dsm::types::operations::VerificationType::Standard,
                 pre_commit: None,
-                recipient: to_device_id.to_vec(),
+                recipient: recipient_owner,
                 to: to_device_id_str.as_bytes().to_vec(),
                 message: transfer_req.memo.clone(),
                 signature: canonical_signature.clone(),

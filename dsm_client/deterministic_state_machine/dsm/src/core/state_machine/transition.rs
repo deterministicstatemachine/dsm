@@ -1081,12 +1081,6 @@ fn apply_token_balance_delta(
                 &current_state.device_info.public_key,
                 &token_id_str,
             );
-            let recipient_key = crate::core::token::derive_canonical_balance_key(
-                &policy_commit,
-                recipient.as_slice(),
-                &token_id_str,
-            );
-
             let sender_balance = next_state
                 .token_balances
                 .get(&sender_key)
@@ -1141,31 +1135,38 @@ fn apply_token_balance_delta(
                     current_state.state_number,
                 );
 
-                let recipient_balance = next_state
-                    .token_balances
-                    .get(&recipient_key)
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        Balance::from_state(0, current_state.hash, current_state.state_number)
-                    });
-                let new_recipient_value = recipient_balance
-                    .value()
-                    .checked_add(amount.value())
-                    .ok_or_else(|| {
-                        DsmError::invalid_operation("Balance overflow on transfer credit")
-                    })?;
-                let new_recipient_balance = Balance::from_state(
-                    new_recipient_value,
-                    current_state.hash,
-                    current_state.state_number,
-                );
-
                 next_state
                     .token_balances
                     .insert(sender_key, new_sender_balance);
-                next_state
-                    .token_balances
-                    .insert(recipient_key, new_recipient_balance);
+                if !recipient.is_empty() && recipient.as_slice() != to_device_id.as_slice() {
+                    let recipient_owner = recipient.as_slice();
+                    let recipient_key = crate::core::token::derive_canonical_balance_key(
+                        &policy_commit,
+                        recipient_owner,
+                        &token_id_str,
+                    );
+                    let recipient_balance = next_state
+                        .token_balances
+                        .get(&recipient_key)
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            Balance::from_state(0, current_state.hash, current_state.state_number)
+                        });
+                    let new_recipient_value = recipient_balance
+                        .value()
+                        .checked_add(amount.value())
+                        .ok_or_else(|| {
+                            DsmError::invalid_operation("Balance overflow on transfer credit")
+                        })?;
+                    let new_recipient_balance = Balance::from_state(
+                        new_recipient_value,
+                        current_state.hash,
+                        current_state.state_number,
+                    );
+                    next_state
+                        .token_balances
+                        .insert(recipient_key, new_recipient_balance);
+                }
             }
         }
         Operation::Mint {
@@ -1876,6 +1877,79 @@ mod tests {
             .get(&recipient_key)
             .unwrap_or_else(|| panic!("recipient balance key should exist after credit"));
         assert_eq!(bal.value(), 10, "receiver should be credited 10 ERA");
+    }
+
+    #[test]
+    fn test_create_next_state_outgoing_transfer_with_device_id_recipient_only_debits_sender() {
+        let (mut current_state, _pk, sk) = create_test_state_with_keypair(1);
+        let policy_commit =
+            crate::core::token::builtin_policy_commit_for_token("ERA").expect("ERA policy commit");
+        let sender_key = crate::core::token::derive_canonical_balance_key(
+            &policy_commit,
+            &current_state.device_info.public_key,
+            "ERA",
+        );
+        let recipient_device_id = [0x55u8; 32];
+        let phantom_key = crate::core::token::derive_canonical_balance_key(
+            &policy_commit,
+            &recipient_device_id,
+            "ERA",
+        );
+        current_state
+            .token_balances
+            .insert(sender_key.clone(), Balance::from_state(100, current_state.hash, 1));
+
+        let operation = Operation::Transfer {
+            amount: Balance::from_state(10, current_state.hash, 1),
+            token_id: b"ERA".to_vec(),
+            to_device_id: recipient_device_id.to_vec(),
+            nonce: vec![1, 2, 3],
+            pre_commit: None,
+            recipient: recipient_device_id.to_vec(),
+            message: "outgoing".to_string(),
+            mode: TransactionMode::Unilateral,
+            verification: OpVerificationType::Standard,
+            to: b"recipient".to_vec(),
+            signature: {
+                let unsigned = Operation::Transfer {
+                    amount: Balance::from_state(10, current_state.hash, 1),
+                    token_id: b"ERA".to_vec(),
+                    to_device_id: recipient_device_id.to_vec(),
+                    nonce: vec![1, 2, 3],
+                    pre_commit: None,
+                    recipient: recipient_device_id.to_vec(),
+                    message: "outgoing".to_string(),
+                    mode: TransactionMode::Unilateral,
+                    verification: OpVerificationType::Standard,
+                    to: b"recipient".to_vec(),
+                    signature: Vec::new(),
+                };
+                crate::crypto::sphincs::sphincs_sign(&sk, &unsigned.to_bytes())
+                    .expect("sign outgoing transfer")
+            },
+        };
+
+        let next_state = create_next_state(
+            &current_state,
+            operation,
+            &[7, 8, 9, 10],
+            &super::VerificationType::Standard,
+            false,
+        )
+        .expect("outgoing transfer should succeed");
+
+        assert_eq!(
+            next_state
+                .token_balances
+                .get(&sender_key)
+                .expect("sender balance should exist")
+                .value(),
+            90
+        );
+        assert!(
+            !next_state.token_balances.contains_key(&phantom_key),
+            "device-id recipient must not create a phantom recipient balance entry"
+        );
     }
 
     #[test]
