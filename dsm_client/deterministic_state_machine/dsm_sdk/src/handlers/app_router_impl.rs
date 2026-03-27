@@ -2427,12 +2427,11 @@ async fn fetch_quorum_device_identity(
 #[async_trait]
 impl AppRouter for AppRouterImpl {
     fn sync_balance_cache(&self) {
-        if let Err(e) = self.core_sdk.restore_latest_archived_state_for_device() {
-            log::warn!(
-                "[AppRouter] restore_latest_archived_state_for_device failed: {}",
-                e
-            );
-        }
+        // Reload token balance projection from SQLite only.
+        // Do NOT re-load canonical state from BCR archive here — the caller
+        // has already pushed the settled canonical state via push_device_state().
+        // Re-loading from BCR would overwrite the just-pushed settled state
+        // with a potentially stale archive entry.
         if let Err(e) = self.wallet.reload_balance_cache_for_self() {
             log::warn!("[AppRouter] sync_balance_cache failed: {}", e);
         }
