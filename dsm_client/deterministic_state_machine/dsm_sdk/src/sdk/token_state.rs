@@ -23,6 +23,23 @@ pub struct TransferFields {
     pub to_device_id: Vec<u8>,
 }
 
+/// Canonical recipient owner bytes for transfer balance keys.
+///
+/// Transfer operations historically overloaded `recipient` with either the
+/// recipient's balance-owner bytes (public key) or the recipient's device ID.
+/// A raw device ID cannot be used to derive the canonical balance key, so those
+/// legacy forms must not mint a phantom credit entry.
+pub fn canonical_transfer_recipient_owner<'a>(
+    recipient: &'a [u8],
+    to_device_id: &[u8],
+) -> Option<&'a [u8]> {
+    if recipient.is_empty() || recipient == to_device_id {
+        None
+    } else {
+        Some(recipient)
+    }
+}
+
 /// Normalize token ticker to canonical form.
 pub fn canonicalize_token_id(token_id: &str) -> String {
     let trimmed = token_id.trim();
@@ -99,6 +116,44 @@ pub fn apply_transfer_debit_credit(
     Ok(())
 }
 
+/// Debit-only for sender-side transitions that do not carry a canonical
+/// recipient balance owner.
+pub fn apply_transfer_debit(
+    balances: &mut HashMap<String, Balance>,
+    policy_commit: &[u8; 32],
+    sender_pk: &[u8],
+    token_id: &str,
+    amount: u64,
+    anchor_hash: [u8; 32],
+    anchor_state_number: u64,
+) -> Result<(), String> {
+    let sender_key =
+        dsm::core::token::derive_canonical_balance_key(policy_commit, sender_pk, token_id);
+    let sender_balance = balances
+        .get(&sender_key)
+        .cloned()
+        .unwrap_or_else(Balance::zero);
+    if sender_balance.value() < amount {
+        return Err(format!(
+            "insufficient {} balance: have {}, need {}",
+            token_id,
+            sender_balance.value(),
+            amount
+        ));
+    }
+
+    balances.insert(
+        sender_key,
+        Balance::from_state(
+            sender_balance.value() - amount,
+            anchor_hash,
+            anchor_state_number,
+        ),
+    );
+
+    Ok(())
+}
+
 /// Credit-only for the local party's balance.
 ///
 /// Used by: bilateral receiver (`reconcile_receiver_state`).
@@ -130,4 +185,28 @@ pub fn apply_transfer_credit(
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::canonical_transfer_recipient_owner;
+
+    #[test]
+    fn canonical_transfer_recipient_owner_rejects_legacy_device_id() {
+        let device_id = [0x11; 32];
+        assert_eq!(
+            canonical_transfer_recipient_owner(&device_id, &device_id),
+            None
+        );
+    }
+
+    #[test]
+    fn canonical_transfer_recipient_owner_accepts_balance_owner_bytes() {
+        let device_id = [0x11; 32];
+        let owner = [0x22; 64];
+        assert_eq!(
+            canonical_transfer_recipient_owner(&owner, &device_id),
+            Some(owner.as_slice())
+        );
+    }
 }
