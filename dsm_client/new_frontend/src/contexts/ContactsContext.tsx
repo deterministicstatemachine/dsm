@@ -6,10 +6,10 @@ import { useBridgeEvent } from '@/hooks/useBridgeEvents';
 import { hasIdentity } from '../utils/identity';
 import { contactsStore, useContactsStore } from '../stores/contactsStore';
 import {
-  getDeviceIdBinBridgeAsync,
   setBleIdentityForAdvertising,
   startBleAdvertisingViaRouter,
 } from '../dsm/WebViewBridge';
+import { getHeaders } from '../dsm/identity';
 
 export interface Contact {
   id: string;
@@ -71,10 +71,15 @@ async function ensureBleAdvertisingIfContacts(): Promise<void> {
     const hasBleContacts = contacts.some((c: any) => c.bleAddress);
     if (!hasBleContacts) return;
 
-    const devId = await getDeviceIdBinBridgeAsync();
+    // §2.3-2.4: Device is bound to genesis via DevID ∈ R_G.
+    // Fetch the real genesis hash — never advertise all-zeros.
+    const headers = await getHeaders();
+    const devId = headers.deviceId;
+    const genesisHash = headers.genesisHash;
     if (!devId || devId.length !== 32) return;
+    if (!genesisHash || genesisHash.length !== 32) return;
 
-    await setBleIdentityForAdvertising(new Uint8Array(32), devId);
+    await setBleIdentityForAdvertising(new Uint8Array(genesisHash), new Uint8Array(devId));
     await startBleAdvertisingViaRouter();
   } catch {
     // Best-effort — don't block contacts flow if BLE advertising fails

@@ -89,6 +89,11 @@ pub trait AppRouter: Send + Sync {
     fn get_device_current_state(&self) -> Option<dsm::types::state_types::State> {
         None
     }
+
+    /// Push a settled canonical state into CoreSDK's in-memory state machine.
+    /// Must be called BEFORE sync_balance_cache() after bilateral settlement
+    /// so the in-memory tip is ahead of any stale BCR archive entry.
+    fn push_device_state(&self, _state: &dsm::types::state_types::State) {}
 }
 
 /// App router storage. Uses RwLock to allow replacement (MinimalBootstrapRouter → AppRouterImpl).

@@ -1068,11 +1068,11 @@ fn apply_token_balance_delta(
             ..
         } => {
             let token_id_str = String::from_utf8_lossy(token_id).to_string();
+            // §8 Atomicity: all token ops MUST apply balance deltas in the
+            // same state transition. resolve_policy_commit handles both
+            // builtins (ERA/dBTC) and CPTA-anchored custom tokens.
             let policy_commit =
-                match crate::core::token::builtin_policy_commit_for_token(&token_id_str) {
-                    Some(pc) => pc,
-                    None => return Ok(()), // Non-builtin token — policy resolution handled by SDK layer
-                };
+                crate::core::token::resolve_policy_commit(&token_id_str);
             let is_recipient = to_device_id.len() == 32
                 && to_device_id.as_slice() == current_state.device_info.device_id.as_slice();
 
@@ -1173,10 +1173,7 @@ fn apply_token_balance_delta(
         } => {
             let token_id_str = String::from_utf8_lossy(token_id).to_string();
             let policy_commit =
-                match crate::core::token::builtin_policy_commit_for_token(&token_id_str) {
-                    Some(pc) => pc,
-                    None => return Ok(()),
-                };
+                crate::core::token::resolve_policy_commit(&token_id_str);
             let owner_key = crate::core::token::derive_canonical_balance_key(
                 &policy_commit,
                 &current_state.device_info.public_key,
@@ -1209,10 +1206,7 @@ fn apply_token_balance_delta(
         } => {
             let token_id_str = String::from_utf8_lossy(token_id).to_string();
             let policy_commit =
-                match crate::core::token::builtin_policy_commit_for_token(&token_id_str) {
-                    Some(pc) => pc,
-                    None => return Ok(()),
-                };
+                crate::core::token::resolve_policy_commit(&token_id_str);
             let owner_key = crate::core::token::derive_canonical_balance_key(
                 &policy_commit,
                 &current_state.device_info.public_key,

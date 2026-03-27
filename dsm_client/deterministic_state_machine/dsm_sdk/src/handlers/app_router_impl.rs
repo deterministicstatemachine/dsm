@@ -2442,6 +2442,12 @@ impl AppRouter for AppRouterImpl {
         self.core_sdk.get_current_state().ok()
     }
 
+    fn push_device_state(&self, state: &dsm::types::state_types::State) {
+        if let Err(e) = self.core_sdk.restore_state_snapshot(state) {
+            log::warn!("[AppRouter] push_device_state failed: {}", e);
+        }
+    }
+
     // ====================== QUERY ======================
     async fn query(&self, q: AppQuery) -> AppResult {
         self.ensure_bitcoin_tap_restored().await;

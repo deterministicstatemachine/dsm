@@ -354,6 +354,25 @@ pub fn rollback_failed_online_send_atomic(
     Ok(())
 }
 
+/// Check whether a completed transaction record already exists for the given tx_id.
+/// Used as an idempotency guard before applying bilateral settlement deltas.
+pub fn is_settlement_completed(tx_id: &str) -> bool {
+    let binding = match get_connection() {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+    let conn = binding.lock().unwrap_or_else(|poisoned| {
+        log::warn!("DB lock poisoned, recovering");
+        poisoned.into_inner()
+    });
+    conn.query_row(
+        "SELECT 1 FROM transactions WHERE tx_id = ?1 AND status = 'completed' LIMIT 1",
+        params![tx_id],
+        |_| Ok(true),
+    )
+    .unwrap_or(false)
+}
+
 pub fn get_transaction_history(
     device_id: Option<&str>,
     limit: Option<usize>,

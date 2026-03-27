@@ -2429,7 +2429,7 @@ impl BilateralBleHandler {
                 counterparty_device_id: session.counterparty_device_id,
                 commitment_hash,
                 transaction_hash: h_n_plus_1,
-                chain_height: finalized_local_state.state_number,
+                device_state_index: finalized_local_state.state_number,
                 operation_bytes: session.operation.to_bytes(),
                 proof_data: Some(receipt_bytes.clone()),
                 is_sender: true,
@@ -2453,7 +2453,11 @@ impl BilateralBleHandler {
             })?;
             self.record_bcr_state_and_scan(state_to_record, true).await;
 
+            // Push settled state into CoreSDK in-memory BEFORE sync_balance_cache
+            // reads from BCR. This ensures the in-memory tip is the post-settlement
+            // state, not a stale BCR archive entry.
             if let Some(router) = crate::bridge::app_router() {
+                router.push_device_state(state_to_record);
                 router.sync_balance_cache();
             }
 
@@ -2994,7 +2998,7 @@ impl BilateralBleHandler {
                     counterparty_device_id: session.counterparty_device_id,
                     commitment_hash,
                     transaction_hash: tx_result.transaction_hash,
-                    chain_height: tx_result.local_state.state_number,
+                    device_state_index: tx_result.local_state.state_number,
                     operation_bytes: op_bytes.clone(),
                     proof_data: receipt_bytes,
                     is_sender: false,
@@ -3082,6 +3086,7 @@ impl BilateralBleHandler {
         self.record_bcr_state_and_scan(state_to_record, true).await;
 
         if let Some(router) = crate::bridge::app_router() {
+            router.push_device_state(state_to_record);
             router.sync_balance_cache();
         }
 
@@ -3420,7 +3425,7 @@ impl BilateralBleHandler {
                         counterparty_device_id,
                         commitment_hash: *commitment_hash,
                         transaction_hash: result.transaction_hash,
-                        chain_height: result.local_state.state_number,
+                        device_state_index: result.local_state.state_number,
                         operation_bytes: op_bytes.clone(),
                         proof_data: receipt_bytes,
                         is_sender: true,
@@ -3452,6 +3457,7 @@ impl BilateralBleHandler {
                 self.record_bcr_state_and_scan(state_to_record, true).await;
 
                 if let Some(router) = crate::bridge::app_router() {
+                    router.push_device_state(state_to_record);
                     router.sync_balance_cache();
                 }
 
@@ -3539,7 +3545,7 @@ impl BilateralBleHandler {
                 manager.advance_chain_tip(&counterparty_device_id, post_tip);
 
                 // --- DELEGATE SETTLEMENT (recovery path) ---
-                let recovered_chain_height = crate::storage::client_db::get_wallet_state(
+                let recovered_state_index = crate::storage::client_db::get_wallet_state(
                     &crate::util::text_id::encode_base32_crockford(&self.device_id),
                 )
                 .ok()
@@ -3563,7 +3569,7 @@ impl BilateralBleHandler {
                         commitment_hash: *commitment_hash,
                         // Recovery path: reuse commitment_hash as tx_hash (no finalized tx hash).
                         transaction_hash: *commitment_hash,
-                        chain_height: recovered_chain_height,
+                        device_state_index: recovered_state_index,
                         operation_bytes: op_bytes.clone(),
                         proof_data: None,
                         is_sender: true,
@@ -3571,11 +3577,21 @@ impl BilateralBleHandler {
                         new_chain_tip: [0u8; 32],
                         canonical_state: Some(canonical_state),
                     };
-                    if let Err(e) = delegate.settle(ctx) {
-                        warn!("[BILATERAL RECOVERY] Sender settlement failed (recovery path): {e}");
-                        return None;
+                    match delegate.settle(ctx) {
+                        Ok(outcome) => {
+                            if let Some(state) = outcome.canonical_state.as_ref() {
+                                if let Some(router) = crate::bridge::app_router() {
+                                    router.push_device_state(state);
+                                    router.sync_balance_cache();
+                                }
+                            }
+                            info!("[BILATERAL RECOVERY] Transaction stored to history");
+                        }
+                        Err(e) => {
+                            warn!("[BILATERAL RECOVERY] Sender settlement failed (recovery path): {e}");
+                            return None;
+                        }
                     }
-                    info!("[BILATERAL RECOVERY] Transaction stored to history");
                 }
 
                 // Update session phase and cleanup storage

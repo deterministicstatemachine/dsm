@@ -378,8 +378,12 @@ pub fn verify_receipt_bytes(
         if pp.key != smt_key {
             return false;
         }
-        if pp.value.is_some() && pp.value != Some(receipt.parent_tip) {
-            return false;
+        // §4.3#2: π_rel MUST prove inclusion of h_n in r_A.
+        // Fail closed: the proof value must be present and must equal parent_tip.
+        // A non-inclusion proof (value=None) or value mismatch both reject.
+        match pp.value {
+            Some(v) if v == receipt.parent_tip => { /* inclusion of correct tip */ }
+            _ => return false,
         }
 
         // §4.3#2: π_rel proves h_n ∈ r_A
