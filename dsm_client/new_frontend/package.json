@@ -36,7 +36,7 @@
     "format:check": "prettier --check 'src/**/*.{ts,tsx}'",
     "test": "cross-env NODE_OPTIONS='--max-old-space-size=4096' jest",
     "test:ci": "cross-env CI=1 NODE_OPTIONS='--max-old-space-size=4096' jest --ci",
-    "test:coverage": "cross-env NODE_OPTIONS='--max-old-space-size=4096' jest --coverage",
+    "test:coverage": "cross-env CI=1 NODE_OPTIONS='--max-old-space-size=4096' jest --coverage --runInBand",
     "test:ssr": "ts-node -O '{\"module\":\"CommonJS\",\"jsx\":\"react-jsx\"}' scripts/ssr-smoke.ts",
     "analyze": "webpack-bundle-analyzer dist/js/main.*.js",
     "ci": "npm run clean && npm run type-check && npm run lint && npm run test:ci && npm run build:android-webpack && npm run copy:android && npm run validate:android-assets"
@@ -51,7 +51,7 @@
     "react-dom": "^19.2.4"
   },
   "devDependencies": {
-    "@babel/core": "7.27.1",
+    "@babel/core": "7.29.0",
     "@bufbuild/protobuf": "^1.10.1",
     "@bufbuild/protoc-gen-es": "^1.7.0",
     "@testing-library/jest-dom": "^6.1.4",
@@ -83,7 +83,7 @@
     "ts-jest": "^29.1.1",
     "ts-loader": "^9.5.0",
     "ts-node": "^10.9.2",
-    "typescript": "^5.4.0",
+    "typescript": "^5.9.3",
     "webpack": "^5.105.4",
     "webpack-bundle-analyzer": "^4.9.1",
     "webpack-cli": "^5.1.4",
@@ -91,6 +91,9 @@
   },
   "overrides": {
     "minimatch": ">=10.0.0",
+    "test-exclude": {
+      "minimatch": "^8.0.4"
+    },
     "undici": ">=7.10.0",
     "serialize-javascript": ">=7.0.4",
     "lodash": ">=4.17.22",
