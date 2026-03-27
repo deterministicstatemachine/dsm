@@ -91,6 +91,9 @@
   },
   "overrides": {
     "minimatch": ">=10.0.0",
+    "test-exclude": {
+      "minimatch": "^8.0.4"
+    },
     "undici": ">=7.10.0",
     "serialize-javascript": ">=7.0.4",
     "lodash": ">=4.17.22",
