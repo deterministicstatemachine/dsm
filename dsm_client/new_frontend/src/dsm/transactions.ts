@@ -356,10 +356,13 @@ export async function offlineSend(transfer: GenericTransaction): Promise<Generic
     });
 
     // --- Ensure BLE advertising + scanning so the receiver can connect back ---
+    // §2.3-2.4: advertise real genesis hash, not zeros.
     try {
-      const devId = await getDeviceIdBinBridgeAsync();
-      if (devId && devId.length === 32) {
-        await setBleIdentityForAdvertising(new Uint8Array(32), devId);
+      const headers = await getHeaders();
+      const devId = headers.deviceId;
+      const genesisHash = headers.genesisHash;
+      if (devId && devId.length === 32 && genesisHash && genesisHash.length === 32) {
+        await setBleIdentityForAdvertising(new Uint8Array(genesisHash), new Uint8Array(devId));
         await startBleAdvertisingViaRouter();
       }
       await startBleScanViaRouter();

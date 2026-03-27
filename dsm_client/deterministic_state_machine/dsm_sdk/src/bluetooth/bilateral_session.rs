@@ -44,8 +44,9 @@ pub struct BilateralSettlementContext {
     pub commitment_hash: [u8; 32],
     /// Transaction hash produced by the state-machine finalization step.
     pub transaction_hash: [u8; 32],
-    /// Local chain height (state number) after the transition; 0 if unavailable.
-    pub chain_height: u64,
+    /// Device-local state index after the transition (wallet history metadata,
+    /// not consensus-critical); 0 if unavailable.
+    pub device_state_index: u64,
     /// Serialised [`dsm::types::operations::Operation`] bytes.
     /// The delegate MUST parse this to determine token type, amount, and direction.
     pub operation_bytes: Vec<u8>,

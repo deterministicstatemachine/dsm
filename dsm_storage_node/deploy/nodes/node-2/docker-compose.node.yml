@@ -34,7 +34,7 @@ services:
       - "${DSM_PORT:-8080}:8080"
       - "${DSM_METRICS_PORT:-9090}:9090"
     volumes:
-      - ./config:/config:ro
+      - ./config:/var/lib/dsm-storage/config:ro
       - ./certs:/certs:ro
     environment:
       RUST_LOG: ${RUST_LOG:-info}

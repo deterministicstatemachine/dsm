@@ -109,8 +109,12 @@ impl ReplicationManager {
         );
 
         // Seed peers from config so gossip has nodes to talk to on startup.
-        for (i, peer_addr) in seed_peers.iter().enumerate() {
-            let peer_id = format!("seed-peer-{i}");
+        // §10.3: Replica placement uses a Fisher-Yates permutation over {nodeID}.
+        // Derive a stable, deterministic peer ID from the address so seed entries
+        // don't create duplicate replica slots when reconciled with real gossip IDs.
+        for peer_addr in seed_peers.iter() {
+            let addr_hash = blake3::hash(peer_addr.as_bytes());
+            let peer_id = format!("node-{}", &addr_hash.to_hex()[..12]);
             log::info!("replication: seeding peer {peer_id} at {peer_addr}");
             node_states.insert(
                 peer_id.clone(),

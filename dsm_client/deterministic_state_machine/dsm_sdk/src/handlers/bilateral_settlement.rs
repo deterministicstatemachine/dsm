@@ -199,6 +199,19 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
         &self,
         ctx: BilateralSettlementContext,
     ) -> Result<BilateralSettlementOutcome, String> {
+        // §8 Atomicity + Theorem 3: the same accepted transition must not
+        // debit or credit twice. Check the transactions table for an existing
+        // completed record before applying any balance delta.
+        let tx_id_candidate =
+            crate::util::text_id::encode_base32_crockford(&ctx.commitment_hash);
+        if crate::storage::client_db::is_settlement_completed(&tx_id_candidate) {
+            log::warn!(
+                "[BILATERAL][settle] Idempotency guard: settlement already completed for {}",
+                tx_id_candidate
+            );
+            return Ok(BilateralSettlementOutcome::default());
+        }
+
         let (transfer_amount, token_id_opt) = parse_transfer_fields(&ctx.operation_bytes);
         let token_id_str = token_id_opt.clone().unwrap_or_default();
         
@@ -256,7 +269,7 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
             amount: transfer_amount,
             tx_type: ctx.tx_type.to_string(),
             status: "completed".to_string(),
-            chain_height: ctx.chain_height,
+            chain_height: canonical_state.as_ref().map_or(ctx.device_state_index, |s| s.state_number),
             step_index: crate::util::deterministic_time::tick(),
             commitment_hash: Some(encode_base32_crockford(&ctx.commitment_hash).into_bytes()),
             proof_data: ctx.proof_data,

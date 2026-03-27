@@ -73,6 +73,26 @@ pub fn builtin_policy_commit_for_token(token_id: &str) -> Option<[u8; 32]> {
     }
 }
 
+/// Resolve policy_commit for any token, including non-builtins.
+///
+/// §9.1: All TokenOps MUST include `policy_commit`. For builtins (ERA, dBTC),
+/// the precomputed constants are returned. For CPTA-anchored custom tokens,
+/// the policy_commit is derived deterministically from the token_id using
+/// BLAKE3 domain separation. The full CPTA bytes should ideally be cached
+/// locally and verified by digest, but this derivation ensures balance
+/// mutations are never skipped for valid token operations.
+pub fn resolve_policy_commit(token_id: &str) -> [u8; 32] {
+    builtin_policy_commit_for_token(token_id).unwrap_or_else(|| {
+        // §9.3: policy_commit := BLAKE3-256("DSM/cpta\0" || canonical_cpta_bytes)
+        // For non-builtin tokens without cached CPTA bytes, derive a
+        // deterministic placeholder from the token_id. This ensures the
+        // state machine applies balance deltas for all tokens, not just
+        // builtins. The real policy_commit is verified at the receipt
+        // acceptance layer (§9.5 binding to policy).
+        crate::crypto::blake3::domain_hash_bytes("DSM/token-policy\0", token_id.as_bytes())
+    })
+}
+
 #[derive(Debug, Default)]
 pub struct TokenStateManager {
     token_store: Arc<RwLock<HashMap<String, Token>>>,
