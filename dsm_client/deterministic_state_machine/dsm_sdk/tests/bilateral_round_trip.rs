@@ -140,6 +140,7 @@ fn seed_device_state(
     router.set_device_state(state);
 }
 
+#[allow(dead_code)]
 struct TwoDeviceSetup {
     handler_a: BilateralBleHandler,
     handler_b: BilateralBleHandler,
@@ -407,6 +408,7 @@ fn init_test_db() {
 // Helper: execute a full 3-phase bilateral transfer (sender → receiver)
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_bilateral_transfer(
     handler_sender: &BilateralBleHandler,
     handler_receiver: &BilateralBleHandler,
