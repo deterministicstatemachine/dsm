@@ -9,7 +9,7 @@ Get from zero to a running DSM development environment in under 30 minutes. Ever
 - (Optional) The DSM Wallet app installed on an Android phone
 - (Optional) A Bitcoin signet setup for dBTC testing
 
----
+----
 
 ## Prerequisites
 
