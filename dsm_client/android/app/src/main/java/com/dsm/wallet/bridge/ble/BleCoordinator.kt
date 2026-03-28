@@ -225,6 +225,11 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                 return@runOperationBool true
             }
 
+            // Clear paired-address guard so bilateral transfers can connect
+            // to already-paired contacts.  The guard only needs to prevent
+            // re-pairing within a single scan cycle, not block transfers.
+            pairedBleAddresses.clear()
+
             // Rate limit check: enforce minimum gap since last stop
             val now = System.currentTimeMillis()
             val timeSinceLastStop = now - lastScanStopTimestamp
@@ -961,7 +966,15 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                             sessionStates.remove(event.deviceAddress)
                             resumePairingScan(event.deviceAddress, event.details)
                         } else {
-                            Log.w("BleCoordinator", "ErrorOccurred for ${event.deviceAddress} (${event.category}), but device is already paired. Not closing session aggressively.")
+                            // Already-paired device hit a write failure — the GATT session
+                            // is stale (likely BLE MAC rotated since last transfer).  Close
+                            // the dead session so the next bilateral transfer gets a fresh
+                            // GATT connection to whatever address the peer is now advertising.
+                            Log.w("BleCoordinator", "ErrorOccurred for ${event.deviceAddress} (${event.category}), paired device — closing stale session for fresh reconnect")
+                            activeSessions.remove(event.deviceAddress)?.closeQuietly()
+                            sessionStates.remove(event.deviceAddress)
+                            // Allow re-discovery of this peer under its new BLE MAC.
+                            pairedBleAddresses.remove(event.deviceAddress)
                         }
                     }
                 }
