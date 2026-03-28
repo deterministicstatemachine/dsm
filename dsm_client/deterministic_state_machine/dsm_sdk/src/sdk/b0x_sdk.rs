@@ -2433,6 +2433,13 @@ impl B0xSDK {
                                     vec![]
                                 };
 
+                                // The sender signs the Operation with recipient = receiver's
+                                // PUBLIC KEY (not device_id).  The receiver must reconstruct
+                                // the same Operation for signature verification.  Use local
+                                // public key since we ARE the recipient.
+                                let recipient_owner = crate::sdk::app_state::AppState::get_public_key()
+                                    .unwrap_or_else(|| transfer_req.to_device_id.clone());
+
                                 let transfer_op = Operation::Transfer {
                                     to_device_id: transfer_req.to_device_id.clone(),
                                     amount: dsm::types::token_types::Balance::from_state(
@@ -2450,7 +2457,7 @@ impl B0xSDK {
                                     verification:
                                         dsm::types::operations::VerificationType::Standard,
                                     pre_commit: None,
-                                    recipient: transfer_req.to_device_id.clone(),
+                                    recipient: recipient_owner,
                                     to: recipient_id.clone().into_bytes(),
                                     message: transfer_req.memo.clone(),
                                     signature: sig.clone(),
