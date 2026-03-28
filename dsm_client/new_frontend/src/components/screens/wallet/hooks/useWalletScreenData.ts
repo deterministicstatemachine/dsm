@@ -2,6 +2,7 @@
 // Data loading hook for the wallet screen — identity, balances, contacts, transactions.
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { dsmClient } from '../../../../services/dsmClient';
+import { syncWithStorage } from '../../../../dsm/storage';
 import { formatBtc } from '../../../../services/bitcoinTap';
 import { encodeBase32Crockford } from '../../../../utils/textId';
 import { useWalletRefreshListener } from '../../../../hooks/useWalletRefreshListener';
@@ -67,6 +68,18 @@ export function useWalletScreenData(activeTab: string): WalletScreenData {
       setIdentity(id);
       setGenesisB32(id.genesisHash);
       setDeviceB32(id.deviceId);
+
+      // Auto-sync inbox from storage nodes before reading balances.
+      // Transfers are applied server-side by the Rust storage.sync handler;
+      // balances read after this reflect any pending deposits.
+      try {
+        const syncResult = await syncWithStorage({ pullInbox: true });
+        if (syncResult.processed && syncResult.processed > 0) {
+          logger.info(`[useWalletScreenData] Auto-sync applied ${syncResult.processed} transfers`);
+        }
+      } catch (e) {
+        logger.warn('[useWalletScreenData] Auto-sync failed (non-fatal):', e);
+      }
 
       try {
         const list = await dsmClient.getContacts();

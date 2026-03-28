@@ -52,7 +52,6 @@ function InboxOverlayInner({ headerHeight, loadWalletData }: Props): JSX.Element
   const [records, setRecords] = useState<NotificationRecord[]>([]);
   const [pending, setPending] = useState<PendingItem[]>([]);
   const [loadingPending, setLoadingPending] = useState(false);
-  const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // Badge = total transfer count across all active transient notices.
@@ -96,19 +95,6 @@ function InboxOverlayInner({ headerHeight, loadWalletData }: Props): JSX.Element
     setOpen(true);
     void loadPending();
   }, [open, loadPending]);
-
-  const handleSyncNow = useCallback(async () => {
-    if (syncing) return;
-    setSyncing(true);
-    setError(null);
-    try {
-      await dsmClient.syncWithStorage({ pullInbox: true });
-      await loadWalletData();
-      await loadPending();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Sync failed');
-    } finally { setSyncing(false); }
-  }, [syncing, loadWalletData, loadPending]);
 
   const handleClose = useCallback(() => { setOpen(false); setError(null); }, []);
 
@@ -186,17 +172,7 @@ function InboxOverlayInner({ headerHeight, loadWalletData }: Props): JSX.Element
                 <div style={{ ...mono, fontSize: 12, opacity: 0.6 }}>No new notifications.</div>
               )}
 
-              {/* ---- Footer ---- */}
-              <div style={{ display: 'flex', gap: 8 }}>
-                <button
-                  onClick={() => void handleSyncNow()}
-                  disabled={syncing || loadingPending}
-                  className="button-brick"
-                  style={{ flex: 1, ...mono, fontSize: 11, padding: '6px 10px', borderRadius: 8, border: '1px solid var(--border)', background: 'transparent', color: 'inherit', cursor: 'pointer' }}
-                >
-                  {syncing ? 'Syncing…' : 'Sync now'}
-                </button>
-              </div>
+              {/* ---- Footer (notification-only, no manual sync) ---- */}
             </div>
           </div>
         </>
