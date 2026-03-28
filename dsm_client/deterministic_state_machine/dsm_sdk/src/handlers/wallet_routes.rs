@@ -1030,6 +1030,7 @@ impl AppRouterImpl {
                     chain_tip: chain_tip_vec.clone(),
                     seq,
                     receipt_commit: Vec::new(), // ReceiptCommit built in process_online_transfer_logic
+                    canonical_operation_bytes: Vec::new(),
                 };
 
                 // Compute deterministic nonce: Hash(domain || sender_id || receiver_id || prev_tip || seq || payload_digest)

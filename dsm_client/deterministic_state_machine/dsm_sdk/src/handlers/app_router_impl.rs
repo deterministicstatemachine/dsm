@@ -1628,6 +1628,7 @@ impl AppRouterImpl {
                 next_chain_tip: Some(b0x_next_chain_tip),
                 receipt_commit: receipt_commit_bytes,
                 routing_address,
+                canonical_operation_bytes: signing_bytes.clone(),
             };
 
             // Create B0xSDK and submit (arg order: device_id, core_sdk, endpoints)
@@ -1933,6 +1934,7 @@ impl AppRouterImpl {
             next_chain_tip: None,
             receipt_commit: Vec::new(),
             routing_address,
+            canonical_operation_bytes: Vec::new(),
         };
 
         let sender_device_id_b32 = crate::util::text_id::encode_base32_crockford(&from_device_id);

@@ -121,7 +121,7 @@ function InboxOverlayInner({ headerHeight, loadWalletData }: Props): JSX.Element
 
             {/* Header row */}
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '8px 10px', borderBottom: '2px solid var(--border)' }}>
-              <strong style={{ ...mono, fontSize: 12 }}>Inbox — B0x</strong>
+              <strong style={{ ...mono, fontSize: 12 }}>Inbox — b0x</strong>
               <button onClick={handleClose} aria-label="Close inbox" style={{ minWidth: 28, minHeight: 28, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 16, background: 'transparent', border: '1px solid var(--border)', borderRadius: 8, color: 'inherit', cursor: 'pointer' }}>
                 {'\u00D7'}
               </button>

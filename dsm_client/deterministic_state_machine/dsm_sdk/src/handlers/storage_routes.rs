@@ -533,24 +533,22 @@ impl AppRouterImpl {
                                             continue;
                                         }
 
-                                        // Compute canonical signing bytes from the Operation payload
-                                        // (signature field cleared) to match state machine verification.
-                                        let mut op_for_sig = entry.transaction.clone();
-                                        if let dsm::types::operations::Operation::Transfer {
-                                            signature,
-                                            ..
-                                        } = &mut op_for_sig
-                                        {
-                                            signature.clear();
+                                        // §4.2.1: Use the sender's canonical unsigned Operation bytes
+                                        // directly.  No field-by-field reconstruction — the sender
+                                        // embedded the exact signing preimage in the envelope.
+                                        if entry.canonical_operation_bytes.is_empty() {
+                                            log::error!(
+                                                "[storage.sync] ❌ REJECTING tx {}: missing canonical_operation_bytes (§4.2.1 strict-fail)",
+                                                entry.transaction_id
+                                            );
+                                            let mut state_guard = batch_state.lock().await;
+                                            state_guard.errors.push(format!(
+                                                "missing canonical_operation_bytes for tx {}",
+                                                entry.transaction_id
+                                            ));
+                                            continue;
                                         }
-                                        let signing_bytes = op_for_sig.to_bytes();
-
-                                        // Diagnostic: log BLAKE3 of signing preimage so we can compare sender vs receiver
-                                        let signing_hash = dsm::crypto::blake3::domain_hash(
-                                            "DSM/signing-hash",
-                                            &signing_bytes,
-                                        );
-                                        log::info!("🔍 storage.sync signing preimage hash (first8) = {:?} for tx {} from {}", &signing_hash.as_bytes()[..8], entry.transaction_id, entry.sender_device_id);
+                                        let signing_bytes = entry.canonical_operation_bytes.clone();
 
                                         // Verify SPHINCS+ signature (fail-closed)
                                         // Prefer embedded sender signing key; fall back to contact book.
