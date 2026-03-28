@@ -219,6 +219,7 @@ impl UnilateralOpsSDK {
                 &recipient_device_arr,
                 &sender_chain_tip_arr,
             )?,
+            canonical_operation_bytes: Vec::new(),
         };
 
         // 1. Pre-flight balance check: prevent submitting if insufficient funds logic is needed.
@@ -551,6 +552,7 @@ mod tests {
             ttl_seconds: 0,
             seq: 0,
             receipt_commit: Vec::new(),
+            canonical_operation_bytes: Vec::new(),
         }
     }
 

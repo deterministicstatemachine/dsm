@@ -69,17 +69,20 @@ export function useWalletScreenData(activeTab: string): WalletScreenData {
       setGenesisB32(id.genesisHash);
       setDeviceB32(id.deviceId);
 
-      // Auto-sync inbox from storage nodes before reading balances.
-      // Transfers are applied server-side by the Rust storage.sync handler;
-      // balances read after this reflect any pending deposits.
-      try {
-        const syncResult = await syncWithStorage({ pullInbox: true });
-        if (syncResult.processed && syncResult.processed > 0) {
-          logger.info(`[useWalletScreenData] Auto-sync applied ${syncResult.processed} transfers`);
-        }
-      } catch (e) {
-        logger.warn('[useWalletScreenData] Auto-sync failed (non-fatal):', e);
-      }
+      // Auto-sync inbox from storage nodes in the background.
+      // Don't await — show current balances immediately while sync runs.
+      // If sync finds new transfers, it triggers a wallet.refresh event
+      // which will reload the data via useWalletRefreshListener above.
+      syncWithStorage({ pullInbox: true })
+        .then((syncResult) => {
+          if (syncResult.processed && syncResult.processed > 0) {
+            logger.info(`[useWalletScreenData] Auto-sync applied ${syncResult.processed} transfers — reloading`);
+            void loadWalletData();
+          }
+        })
+        .catch((e) => {
+          logger.warn('[useWalletScreenData] Auto-sync failed (non-fatal):', e);
+        });
 
       try {
         const list = await dsmClient.getContacts();

@@ -1942,6 +1942,11 @@ message OnlineTransferRequest {
   uint64 seq = 9; // REQUIRED: deterministic sequence counter
   // §4.2 ReceiptCommit canonical protobuf bytes — SMT proofs for this transition
   bytes receipt_commit = 10 [(dsm_max_len)=131072];
+  // §4.2.1 Canonical unsigned Operation bytes (signing preimage).
+  // Sender populates with signing_op.to_bytes() (signature field empty).
+  // Receiver MUST use these bytes directly for SPHINCS+ verification and
+  // h_{n+1} tip computation — no reconstruction from individual fields.
+  bytes canonical_operation_bytes = 11 [(dsm_max_len)=65535];
 }
 
 message OnlineTransferSmartRequest {
