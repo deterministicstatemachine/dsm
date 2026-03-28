@@ -3219,6 +3219,17 @@ impl BilateralBleHandler {
         initial_count - sessions.len()
     }
 
+    /// Remove all terminal sessions (Committed, ConfirmPending, or later)
+    /// from the in-memory map.  Allows the next transfer to the same
+    /// counterparty without hitting the "existing session" guard.
+    pub async fn clear_terminal_sessions(&self) {
+        let mut sessions = self.sessions.sessions.lock().await;
+        sessions.retain(|_, s| matches!(
+            s.phase,
+            BilateralPhase::Preparing | BilateralPhase::Prepared | BilateralPhase::PendingUserAction
+        ));
+    }
+
     /// Get session status with core manager reconciliation
     pub async fn get_session_status(&self, commitment_hash: &[u8; 32]) -> Option<BilateralPhase> {
         // Try direct lookup only - single hash space
