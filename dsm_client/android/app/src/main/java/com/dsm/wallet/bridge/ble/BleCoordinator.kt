@@ -1023,6 +1023,23 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
     }
 
     /**
+     * Find any active client session or subscribed server-client address.
+     * Used by UnifiedBleBridge when the original BLE address has rotated —
+     * a scan may have discovered the same DSM peer under a new address.
+     */
+    fun findAnyReadySessionAddress(): String? {
+        // Prefer an active GATT client session (we can write to them)
+        for ((addr, session) in activeSessions) {
+            val state = sessionStates[addr]
+            if (state != null && state.isConnected && state.negotiatedMtu > 23) {
+                return addr
+            }
+        }
+        // Fall back to a GATT server client that's subscribed to TX_RESPONSE
+        return gattServer.findSubscribedServerClient()
+    }
+
+    /**
      * Establish an on-demand GATT client connection to a device.
      * Used when bilateral send needs to subscribe to TX_RESPONSE on the
      * peer's server but no client session exists (torn down after pairing).
