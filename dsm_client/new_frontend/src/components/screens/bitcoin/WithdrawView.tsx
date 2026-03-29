@@ -121,9 +121,9 @@ export default function WithdrawView({
   }, [reviewResult, executeLoading, reviewLoading, withdrawDest, onRefresh]);
 
   const confirmMessage = reviewResult
-    ? `Execute ${planClassLabel(reviewResult.planClass).toLowerCase()} to ${
+    ? `Withdraw ${formatBtc(reviewResult.totalGrossExitSats)} BTC to ${
       withdrawDest.slice(0, 12)
-    }…?\nEst. Bitcoin network fee: ${formatBtc(reviewResult.totalFeeSats)} BTC\nEstimated delivered: ${
+    }…?\nBitcoin network fee: ${formatBtc(reviewResult.totalFeeSats)} BTC (deducted from amount)\nYou receive: ${
       formatBtc(reviewResult.plannedNetSats)
     } BTC`
     : 'Execute withdrawal?';
@@ -243,10 +243,9 @@ export default function WithdrawView({
           </div>
 
           <div style={{ fontSize: 11, color: 'var(--text-dark)', display: 'grid', gap: 4 }}>
-            <div>Requested delivery: <strong>{formatBtc(reviewResult.requestedNetSats)} BTC</strong></div>
+            <div>Withdrawal amount: <strong>{formatBtc(reviewResult.totalGrossExitSats)} BTC</strong></div>
+            <div>Est. Bitcoin network fee: <strong>{formatBtc(reviewResult.totalFeeSats)} BTC</strong></div>
             <div>Estimated delivery: <strong>{formatBtc(reviewResult.plannedNetSats)} BTC</strong></div>
-            <div>Est. Bitcoin network fee (not a DSM charge): <strong>{formatBtc(reviewResult.totalFeeSats)} BTC</strong></div>
-            <div>Gross vault exit: <strong>{formatBtc(reviewResult.totalGrossExitSats)} BTC</strong></div>
             {reviewResult.shortfallSats > 0n && (
               <div style={{ color: 'var(--text-disabled)' }}>
                 Shortfall from request: <strong>{formatBtc(reviewResult.shortfallSats)} BTC</strong>
