@@ -158,6 +158,7 @@ export function useWalletScreenData(activeTab: string): WalletScreenData {
         setLoading(false);
       }
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const loadWalletData = useCallback(async () => {

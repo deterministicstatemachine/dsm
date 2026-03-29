@@ -123,6 +123,7 @@ async fn test_b0x_integration_full_flow() {
         next_chain_tip: Some(sender_tip.clone()),
         receipt_commit: vec![],
         routing_address: routing_address.clone(),
+        canonical_operation_bytes: vec![],
     };
 
     // 5. Submit
@@ -312,6 +313,7 @@ async fn test_b0x_live_recipient_roundtrip() {
         next_chain_tip: Some(next_tip.to_vec()),
         receipt_commit: vec![],
         routing_address: routing_address.clone(),
+        canonical_operation_bytes: vec![],
     };
 
     let tx_id = sender_b0x

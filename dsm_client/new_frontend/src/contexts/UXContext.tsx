@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import React, { createContext, useContext, useMemo, useState } from 'react';
 import { useBridgeEvent } from '@/hooks/useBridgeEvents';
+import { playCoinSound } from '@/utils/coinSound';
 
 export interface UXContextValue {
   hideComplexity: boolean;
@@ -85,10 +86,16 @@ export const UXProvider: React.FC<{ defaultHideComplexity?: boolean; children?: 
     notifyToast('exit_completed');
   }, [notifyToast]);
 
+  // Global coin sound when a BLE bilateral transfer completes (receiver side).
+  useBridgeEvent('bilateral.transferComplete', () => {
+    playCoinSound();
+  }, []);
+
   // Global notification when new inbox items arrive from storage sync.
   useBridgeEvent('inbox.updated', (detail?: { unreadCount?: number; newItems?: number }) => {
     const newItems = typeof detail?.newItems === 'number' ? detail.newItems : 0;
     if (newItems <= 0) return;
+    playCoinSound();
     const label = newItems === 1 ? 'New inbox item received' : `${newItems} new inbox items received`;
     notifyToast('inbox_received', label);
   }, [notifyToast]);
