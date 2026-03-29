@@ -261,7 +261,7 @@ async fn smoke_verify_receipt_bytes_accepts_authenticated_commitment() {
         verify_receipt_bytes(
             &result.receipt_bytes,
             Some(DeviceTreeAcceptanceCommitment::from_root(
-                a.device_tree_root
+                a.device_tree_root,
             )),
         ),
         "receipt verification must accept the correct authenticated device-tree commitment"
