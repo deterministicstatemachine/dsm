@@ -14,8 +14,8 @@ use dsm::merkle::sparse_merkle_tree::{SparseMerkleTree, SmtInclusionProof};
 use dsm_sdk::security::shared_smt;
 use dsm_sdk::sdk::app_state::AppState;
 use dsm_sdk::sdk::receipts::{
-    build_bilateral_receipt_with_smt, deserialize_inclusion_proof,
-    serialize_inclusion_proof, verify_receipt_bytes, DeviceTreeAcceptanceCommitment,
+    build_bilateral_receipt_with_smt, deserialize_inclusion_proof, serialize_inclusion_proof,
+    verify_receipt_bytes, DeviceTreeAcceptanceCommitment,
 };
 
 use serial_test::serial;
@@ -260,7 +260,9 @@ async fn smoke_verify_receipt_bytes_accepts_authenticated_commitment() {
     assert!(
         verify_receipt_bytes(
             &result.receipt_bytes,
-            Some(DeviceTreeAcceptanceCommitment::from_root(a.device_tree_root)),
+            Some(DeviceTreeAcceptanceCommitment::from_root(
+                a.device_tree_root
+            )),
         ),
         "receipt verification must accept the correct authenticated device-tree commitment"
     );
@@ -343,7 +345,9 @@ async fn smoke_receipt_failure_scope_is_relationship_local() {
     assert!(
         verify_receipt_bytes(
             &result_cd.receipt_bytes,
-            Some(DeviceTreeAcceptanceCommitment::from_root(c.device_tree_root)),
+            Some(DeviceTreeAcceptanceCommitment::from_root(
+                c.device_tree_root
+            )),
         ),
         "an unrelated relationship with a valid authenticated commitment must continue to verify"
     );
@@ -959,16 +963,22 @@ async fn contact_add_stores_device_tree_root() {
     let h1 = {
         let nonce = [0u8; 32];
         let op_bytes = b"test-op".to_vec();
-        let sigma = dsm::core::bilateral_transaction_manager::compute_precommit(&h0, &op_bytes, &nonce);
-        dsm::core::bilateral_transaction_manager::compute_successor_tip(&h0, &op_bytes, &nonce, &sigma)
+        let sigma =
+            dsm::core::bilateral_transaction_manager::compute_precommit(&h0, &op_bytes, &nonce);
+        dsm::core::bilateral_transaction_manager::compute_successor_tip(
+            &h0, &op_bytes, &nonce, &sigma,
+        )
     };
 
     let (pre_root, post_root, parent_proof_bytes, child_proof_bytes) = {
         let mut smt = smt_a_arc.write().await;
         // Establish h0 as the initial relationship tip (mirrors establish_relationship).
-        smt.update_leaf(&smt_key, &h0).expect("initial h0 insert must succeed");
+        smt.update_leaf(&smt_key, &h0)
+            .expect("initial h0 insert must succeed");
         // Now advance h0 → h1 (the actual transfer); parent_proof proves h0 ∈ pre_root.
-        let result = smt.smt_replace(&smt_key, &h1).expect("smt_replace must succeed");
+        let result = smt
+            .smt_replace(&smt_key, &h1)
+            .expect("smt_replace must succeed");
         (
             result.pre_root,
             result.post_root,

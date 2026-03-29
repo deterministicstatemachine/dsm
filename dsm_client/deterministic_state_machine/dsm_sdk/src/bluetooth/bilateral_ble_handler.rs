@@ -2378,15 +2378,22 @@ impl BilateralBleHandler {
                         ok
                     }
                     Err(e) => {
-                        error!("[BILATERAL][SENDER-SELFCHECK] parent_proof deser failed: {}", e);
+                        error!(
+                            "[BILATERAL][SENDER-SELFCHECK] parent_proof deser failed: {}",
+                            e
+                        );
                         false
                     }
                 }
             } else {
-                info!("[BILATERAL][SENDER-SELFCHECK] parent_proof empty (first tx for relationship)");
+                info!(
+                    "[BILATERAL][SENDER-SELFCHECK] parent_proof empty (first tx for relationship)"
+                );
                 true
             };
-            let child_ok = match crate::sdk::receipts::deserialize_inclusion_proof(&rel_proof_child_bytes) {
+            let child_ok = match crate::sdk::receipts::deserialize_inclusion_proof(
+                &rel_proof_child_bytes,
+            ) {
                 Ok(proof) => {
                     let ok = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::verify_proof_against_root(&proof, &sender_smt_root);
                     info!(
@@ -2399,7 +2406,10 @@ impl BilateralBleHandler {
                     ok
                 }
                 Err(e) => {
-                    error!("[BILATERAL][SENDER-SELFCHECK] child_proof deser failed: {}", e);
+                    error!(
+                        "[BILATERAL][SENDER-SELFCHECK] child_proof deser failed: {}",
+                        e
+                    );
                     false
                 }
             };
@@ -2885,7 +2895,8 @@ impl BilateralBleHandler {
                          π(h_n ∈ r_A) does not recompute to sender_smt_root_before (§4.3)",
                     ));
                 }
-                let is_zero_leaf = parent_proof.value == Some(dsm::merkle::sparse_merkle_tree::ZERO_LEAF);
+                let is_zero_leaf =
+                    parent_proof.value == Some(dsm::merkle::sparse_merkle_tree::ZERO_LEAF);
                 info!(
                     "[BILATERAL] §4.3 parent proof verified: π(h_n ∈ r_A) ✓ (siblings={}, first_tx={})",
                     parent_proof.siblings.len(),
@@ -3203,7 +3214,9 @@ impl BilateralBleHandler {
         sessions.retain(|_k, session| {
             let is_early_phase = matches!(
                 session.phase,
-                BilateralPhase::Preparing | BilateralPhase::Prepared | BilateralPhase::PendingUserAction
+                BilateralPhase::Preparing
+                    | BilateralPhase::Prepared
+                    | BilateralPhase::PendingUserAction
             );
             let is_stale = now.duration_since(session.created_at_wall) > stale_threshold;
 
@@ -3227,10 +3240,14 @@ impl BilateralBleHandler {
     /// counterparty without hitting the "existing session" guard.
     pub async fn clear_terminal_sessions(&self) {
         let mut sessions = self.sessions.sessions.lock().await;
-        sessions.retain(|_, s| matches!(
-            s.phase,
-            BilateralPhase::Preparing | BilateralPhase::Prepared | BilateralPhase::PendingUserAction
-        ));
+        sessions.retain(|_, s| {
+            matches!(
+                s.phase,
+                BilateralPhase::Preparing
+                    | BilateralPhase::Prepared
+                    | BilateralPhase::PendingUserAction
+            )
+        });
     }
 
     /// Get session status with core manager reconciliation

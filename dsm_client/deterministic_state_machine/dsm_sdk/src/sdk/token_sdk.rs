@@ -2857,8 +2857,7 @@ impl<I: Send + Sync> TokenSDK<I> {
                         "Insufficient balance for transfer",
                     ));
                 }
-                *bal =
-                    Balance::from_state(cur - amount_val, state_hash, state_number);
+                *bal = Balance::from_state(cur - amount_val, state_hash, state_number);
             } else {
                 let cur = current_balance.value();
                 if cur < amount_val {
@@ -2883,9 +2882,7 @@ impl<I: Send + Sync> TokenSDK<I> {
                         let nv = bal.value() + amount_val;
                         *bal = Balance::from_state(nv, state_hash, state_number);
                     })
-                    .or_insert_with(|| {
-                        Balance::from_state(amount_val, state_hash, state_number)
-                    });
+                    .or_insert_with(|| Balance::from_state(amount_val, state_hash, state_number));
             }
         }
         log::debug!("[TOKEN] execute_transfer_op: balances cache updated");
