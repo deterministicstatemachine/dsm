@@ -154,14 +154,34 @@ internal object UnifiedBleBridge {
     fun requestGattWriteChunks(deviceAddress: String, chunks: Array<ByteArray>): Boolean {
         val svc = bleCoordinator ?: return false
         return try {
+            // --- RPA resolution ---
+            // Rust may pass a stale BLE address from pairing time. Android rotates
+            // Random Private Addresses, so the peer may now be reachable under a
+            // different address.  Check if Kotlin already has a live route and prefer
+            // it over the (potentially stale) address from Rust.
+            val effectiveAddr = if (svc.hasActiveClientSession(deviceAddress)
+                || (svc.isGattServerClient(deviceAddress) && svc.isServerClientSubscribedToTxResponse(deviceAddress))
+            ) {
+                deviceAddress // requested address is already live — use it
+            } else {
+                // Look for any live session (client or server) under a different RPA
+                val freshClient = svc.findAnyReadySessionAddress()
+                if (freshClient != null && freshClient != deviceAddress) {
+                    Log.i("UnifiedBleBridge", "requestGattWriteChunks: RPA stale $deviceAddress → active session $freshClient")
+                    freshClient
+                } else {
+                    deviceAddress // no better option — proceed with requested address
+                }
+            }
+
             // Routing priority:
             // 1. If we have an active GATT client session (we connected to them), use regular writes.
             //    Both devices may have bidirectional GATT connections, so prefer the client path
             //    since the client subscribed to TX_RESPONSE on the remote server.
             // 2. Only fall back to server notifications if we DON'T have a client session but
             //    the target is connected as a client to our GATT server (reverse path).
-            if (svc.hasActiveClientSession(deviceAddress)) {
-                Log.i("UnifiedBleBridge", "requestGattWriteChunks: routing ${chunks.size} chunks via GATT client writes to $deviceAddress")
+            if (svc.hasActiveClientSession(effectiveAddr)) {
+                Log.i("UnifiedBleBridge", "requestGattWriteChunks: routing ${chunks.size} chunks via GATT client writes to $effectiveAddr")
                 // Ensure TX_RESPONSE is subscribed so we can receive the response
                 // back from the peer via GATT server notifications.
                 runBlocking {
@@ -169,18 +189,18 @@ internal object UnifiedBleBridge {
                         var subscribed = false
                         for (attempt in 1..TX_RESPONSE_SUBSCRIBE_MAX_ATTEMPTS) {
                             subscribed = withTimeoutOrNull(TX_RESPONSE_SUBSCRIBE_TIMEOUT_MS) {
-                                svc.ensureClientTxResponseSubscribed(deviceAddress).await()
+                                svc.ensureClientTxResponseSubscribed(effectiveAddr).await()
                             } ?: false
                             if (subscribed) {
                                 Log.i(
                                     "UnifiedBleBridge",
-                                    "requestGattWriteChunks: TX_RESPONSE subscribed for $deviceAddress (attempt $attempt/${TX_RESPONSE_SUBSCRIBE_MAX_ATTEMPTS})"
+                                    "requestGattWriteChunks: TX_RESPONSE subscribed for $effectiveAddr (attempt $attempt/${TX_RESPONSE_SUBSCRIBE_MAX_ATTEMPTS})"
                                 )
                                 break
                             }
                             Log.w(
                                 "UnifiedBleBridge",
-                                "requestGattWriteChunks: TX_RESPONSE subscription attempt $attempt/${TX_RESPONSE_SUBSCRIBE_MAX_ATTEMPTS} failed for $deviceAddress"
+                                "requestGattWriteChunks: TX_RESPONSE subscription attempt $attempt/${TX_RESPONSE_SUBSCRIBE_MAX_ATTEMPTS} failed for $effectiveAddr"
                             )
                             if (attempt < TX_RESPONSE_SUBSCRIBE_MAX_ATTEMPTS) {
                                 delay(200L * attempt)
@@ -190,43 +210,43 @@ internal object UnifiedBleBridge {
                         if (!subscribed) {
                             Log.e(
                                 "UnifiedBleBridge",
-                                "requestGattWriteChunks: TX_RESPONSE subscription failed after ${TX_RESPONSE_SUBSCRIBE_MAX_ATTEMPTS} attempts for $deviceAddress; aborting send"
+                                "requestGattWriteChunks: TX_RESPONSE subscription failed after ${TX_RESPONSE_SUBSCRIBE_MAX_ATTEMPTS} attempts for $effectiveAddr; aborting send"
                             )
-                            UnifiedBleEvents.onConnectionFailed(deviceAddress, "tx_response_subscription_failed")
+                            UnifiedBleEvents.onConnectionFailed(effectiveAddr, "tx_response_subscription_failed")
                             return@runBlocking false
                         }
 
                         sendViaActiveClientSession(
                             svc,
-                            deviceAddress,
+                            effectiveAddr,
                             chunks,
                             "tx_chunk_send_partial",
                         )
                     } catch (t: Throwable) {
-                        Log.w("UnifiedBleBridge", "requestGattWriteChunks: TX_RESPONSE subscription/send error for $deviceAddress", t)
-                        UnifiedBleEvents.onConnectionFailed(deviceAddress, "tx_response_subscription_exception")
+                        Log.w("UnifiedBleBridge", "requestGattWriteChunks: TX_RESPONSE subscription/send error for $effectiveAddr", t)
+                        UnifiedBleEvents.onConnectionFailed(effectiveAddr, "tx_response_subscription_exception")
                         false
                     }
                 }
-            } else if (svc.isGattServerClient(deviceAddress) && svc.isServerClientSubscribedToTxResponse(deviceAddress)) {
-                Log.i("UnifiedBleBridge", "requestGattWriteChunks: target is GATT server client AND subscribed — using server notifications immediately for $deviceAddress")
+            } else if (svc.isGattServerClient(effectiveAddr) && svc.isServerClientSubscribedToTxResponse(effectiveAddr)) {
+                Log.i("UnifiedBleBridge", "requestGattWriteChunks: target is GATT server client AND subscribed — using server notifications immediately for $effectiveAddr")
                 runBlocking {
-                    val ok = svc.sendViaServerNotifications(deviceAddress, chunks)
+                    val ok = svc.sendViaServerNotifications(effectiveAddr, chunks)
                     if (!ok) {
-                        UnifiedBleEvents.onConnectionFailed(deviceAddress, "server_notify_failed")
+                        UnifiedBleEvents.onConnectionFailed(effectiveAddr, "server_notify_failed")
                     }
                     ok
                 }
             } else {
                 // No active session — ensure BLE infrastructure is up, then attempt on-demand connection.
                 // Start GATT server + advertising so the peer can discover us while we also try to connect to them.
-                Log.i("UnifiedBleBridge", "requestGattWriteChunks: no route for $deviceAddress — priming BLE and attempting on-demand connection")
+                Log.i("UnifiedBleBridge", "requestGattWriteChunks: no route for $effectiveAddr — priming BLE and attempting on-demand connection")
                 svc.ensureGattServerStarted()
                 publishLocalIdentityIfAvailable(svc)
                 svc.startAdvertising()
                 runBlocking {
                     // Track effective BLE address — may change if Android rotated the peer's RPA
-                    var effectiveAddress = deviceAddress
+                    var effectiveAddress = effectiveAddr
                     try {
                         // Attempt 1: direct on-demand GATT client connect (works if peer is connectable).
                         // connectToDevice now includes a 1.5s scan for RPA resolution + 12s poll,
