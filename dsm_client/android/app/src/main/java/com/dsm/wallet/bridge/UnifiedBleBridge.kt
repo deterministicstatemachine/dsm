@@ -225,6 +225,8 @@ internal object UnifiedBleBridge {
                 publishLocalIdentityIfAvailable(svc)
                 svc.startAdvertising()
                 runBlocking {
+                    // Track effective BLE address — may change if Android rotated the peer's RPA
+                    var effectiveAddress = deviceAddress
                     try {
                         // Attempt 1: direct on-demand GATT client connect (works if peer is connectable)
                         var connected = withTimeoutOrNull(8000L) {
@@ -241,36 +243,51 @@ internal object UnifiedBleBridge {
                                 }
                                 return@runBlocking ok
                             }
-                            // Attempt 2: start scanning to discover the peer, then retry connect
+                            // Attempt 2: start scanning to discover the peer under potentially new BLE address
+                            // (Android rotates BLE addresses — the pairing-time address may be stale)
                             Log.i("UnifiedBleBridge", "requestGattWriteChunks: starting scan + retry connect for $deviceAddress")
                             svc.startScanning()
                             delay(3000L) // Allow 3s for scan results + peer discovery
                             svc.stopScanning()
-                            // Re-check: peer may have connected to us during scan
-                            if (svc.hasActiveClientSession(deviceAddress)) {
+
+                            // BLE address may have rotated since pairing. Check if a
+                            // freshly-discovered peer created a session under a different
+                            // address.  If so, use the new address for this send.
+                            if (!svc.hasActiveClientSession(deviceAddress)
+                                && !(svc.isGattServerClient(deviceAddress) && svc.isServerClientSubscribedToTxResponse(deviceAddress))
+                            ) {
+                                val freshAddr = svc.findAnyReadySessionAddress()
+                                if (freshAddr != null && freshAddr != deviceAddress) {
+                                    Log.i("UnifiedBleBridge", "requestGattWriteChunks: BLE address rotated $deviceAddress → $freshAddr")
+                                    effectiveAddress = freshAddr
+                                }
+                            }
+
+                            // Re-check with potentially updated address
+                            if (svc.hasActiveClientSession(effectiveAddress)) {
                                 connected = true
-                            } else if (svc.isGattServerClient(deviceAddress) && svc.isServerClientSubscribedToTxResponse(deviceAddress)) {
-                                val ok = svc.sendViaServerNotifications(deviceAddress, chunks)
+                            } else if (svc.isGattServerClient(effectiveAddress) && svc.isServerClientSubscribedToTxResponse(effectiveAddress)) {
+                                val ok = svc.sendViaServerNotifications(effectiveAddress, chunks)
                                 if (!ok) {
-                                    UnifiedBleEvents.onConnectionFailed(deviceAddress, "on_demand_scan_server_notify_failed")
+                                    UnifiedBleEvents.onConnectionFailed(effectiveAddress, "on_demand_scan_server_notify_failed")
                                 }
                                 return@runBlocking ok
                             } else {
                                 connected = withTimeoutOrNull(8000L) {
-                                    svc.connectToDevice(deviceAddress).await()
+                                    svc.connectToDevice(effectiveAddress).await()
                                 } ?: false
                             }
                         }
                         if (!connected) {
-                            Log.e("UnifiedBleBridge", "requestGattWriteChunks: on-demand GATT connection failed for $deviceAddress")
-                            UnifiedBleEvents.onConnectionFailed(deviceAddress, "on_demand_connect_failed")
+                            Log.e("UnifiedBleBridge", "requestGattWriteChunks: on-demand GATT connection failed for $effectiveAddress")
+                            UnifiedBleEvents.onConnectionFailed(effectiveAddress, "on_demand_connect_failed")
                             return@runBlocking false
                         }
                         // Subscribe to TX_RESPONSE
                         var subscribed = false
                         for (attempt in 1..TX_RESPONSE_SUBSCRIBE_MAX_ATTEMPTS) {
                             subscribed = withTimeoutOrNull(TX_RESPONSE_SUBSCRIBE_TIMEOUT_MS) {
-                                svc.ensureClientTxResponseSubscribed(deviceAddress).await()
+                                svc.ensureClientTxResponseSubscribed(effectiveAddress).await()
                             } ?: false
                             if (subscribed) break
                             if (attempt < TX_RESPONSE_SUBSCRIBE_MAX_ATTEMPTS) delay(200L * attempt)
@@ -278,32 +295,32 @@ internal object UnifiedBleBridge {
                         if (!subscribed) {
                             Log.e(
                                 "UnifiedBleBridge",
-                                "requestGattWriteChunks: on-demand TX_RESPONSE subscription failed for $deviceAddress; aborting send"
+                                "requestGattWriteChunks: on-demand TX_RESPONSE subscription failed for $effectiveAddress; aborting send"
                             )
-                            if (svc.isGattServerClient(deviceAddress) && svc.isServerClientSubscribedToTxResponse(deviceAddress)) {
+                            if (svc.isGattServerClient(effectiveAddress) && svc.isServerClientSubscribedToTxResponse(effectiveAddress)) {
                                 Log.i(
                                     "UnifiedBleBridge",
-                                    "requestGattWriteChunks: falling back to server notifications after on-demand subscribe failure for $deviceAddress"
+                                    "requestGattWriteChunks: falling back to server notifications after on-demand subscribe failure for $effectiveAddress"
                                 )
-                                val ok = svc.sendViaServerNotifications(deviceAddress, chunks)
+                                val ok = svc.sendViaServerNotifications(effectiveAddress, chunks)
                                 if (!ok) {
-                                    UnifiedBleEvents.onConnectionFailed(deviceAddress, "on_demand_server_notify_after_subscribe_failed")
+                                    UnifiedBleEvents.onConnectionFailed(effectiveAddress, "on_demand_server_notify_after_subscribe_failed")
                                 }
                                 return@runBlocking ok
                             }
-                            UnifiedBleEvents.onConnectionFailed(deviceAddress, "tx_response_subscription_failed")
+                            UnifiedBleEvents.onConnectionFailed(effectiveAddress, "tx_response_subscription_failed")
                             return@runBlocking false
                         }
                         // Send via client writes
                         sendViaActiveClientSession(
                             svc,
-                            deviceAddress,
+                            effectiveAddress,
                             chunks,
                             "tx_chunk_send_partial",
                         )
                     } catch (t: Throwable) {
-                        Log.e("UnifiedBleBridge", "requestGattWriteChunks: on-demand error for $deviceAddress", t)
-                        UnifiedBleEvents.onConnectionFailed(deviceAddress, "on_demand_connect_exception")
+                        Log.e("UnifiedBleBridge", "requestGattWriteChunks: on-demand error for $effectiveAddress", t)
+                        UnifiedBleEvents.onConnectionFailed(effectiveAddress, "on_demand_connect_exception")
                         false
                     }
                 }

@@ -380,6 +380,13 @@ class GattServerHost(private val context: Context) {
         return isCccdEnabled(address, BleConstants.TX_RESPONSE_UUID)
     }
 
+    /** Find any connected server client that is subscribed to TX_RESPONSE. */
+    fun findSubscribedServerClient(): String? {
+        return connectedServerClients.keys.firstOrNull { addr ->
+            isCccdEnabled(addr, BleConstants.TX_RESPONSE_UUID)
+        }
+    }
+
     /**
      * Send chunked data as GATT server notifications on the TX_RESPONSE characteristic.
      * Each chunk is sent as a separate notification, waiting for onNotificationSent
