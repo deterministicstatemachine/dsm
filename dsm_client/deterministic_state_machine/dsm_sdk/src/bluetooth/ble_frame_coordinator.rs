@@ -655,11 +655,11 @@ impl BleFrameCoordinator {
                         .min_by_key(|(_, buf)| buf.created_at)
                         .map(|(k, buf)| {
                             warn!(
-                            "BLE reassembly buffer full; evicting oldest frame {} ({}/{} chunks)",
-                            short_id(&k[..8]),
-                            buf.received_chunks.len(),
-                            buf.total_chunks
-                        );
+                                "BLE reassembly buffer full; evicting oldest frame {} ({}/{} chunks)",
+                                short_id(&k[..8]),
+                                buf.received_chunks.len(),
+                                buf.total_chunks
+                            );
                             *k
                         })
                 {
