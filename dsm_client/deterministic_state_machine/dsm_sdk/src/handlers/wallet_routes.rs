@@ -221,7 +221,11 @@ pub(crate) fn parse_display_amount_to_base_units(
     }
 
     let whole_norm = whole.trim_start_matches('0');
-    let whole_digits = if whole_norm.is_empty() { "0" } else { whole_norm };
+    let whole_digits = if whole_norm.is_empty() {
+        "0"
+    } else {
+        whole_norm
+    };
     let frac_padded = if decimals == 0 {
         if !frac.is_empty() {
             return Err("token does not support fractional amounts".to_string());
@@ -237,7 +241,11 @@ pub(crate) fn parse_display_amount_to_base_units(
 
     let joined = format!("{}{}", whole_digits, frac_padded);
     let normalized = joined.trim_start_matches('0');
-    let canonical = if normalized.is_empty() { "0" } else { normalized };
+    let canonical = if normalized.is_empty() {
+        "0"
+    } else {
+        normalized
+    };
     canonical
         .parse::<u64>()
         .map_err(|e| format!("amount out of range: {e}"))
@@ -1004,13 +1012,11 @@ impl AppRouterImpl {
                 // 3. Parse display amount into canonical base units in the backend.
                 let canonical_token_id = canonicalize_token_id(&smart_req.token_id);
                 let token_decimals = resolve_token_decimals(&canonical_token_id);
-                let amount: u64 = match parse_display_amount_to_base_units(
-                    &smart_req.amount,
-                    token_decimals,
-                ) {
-                    Ok(v) => v,
-                    Err(e) => return err(format!("Invalid amount: {}", e)),
-                };
+                let amount: u64 =
+                    match parse_display_amount_to_base_units(&smart_req.amount, token_decimals) {
+                        Ok(v) => v,
+                        Err(e) => return err(format!("Invalid amount: {}", e)),
+                    };
 
                 // 4. Fetch Sequence (from current state)
                 let seq = match self.core_sdk.get_current_state() {
@@ -1093,8 +1099,14 @@ mod tests {
     #[test]
     fn parse_display_amount_to_base_units_handles_fractional_tokens() {
         assert_eq!(parse_display_amount_to_base_units("1.25", 2).unwrap(), 125);
-        assert_eq!(parse_display_amount_to_base_units("1", 8).unwrap(), 100000000);
-        assert_eq!(parse_display_amount_to_base_units("0.00000001", 8).unwrap(), 1);
+        assert_eq!(
+            parse_display_amount_to_base_units("1", 8).unwrap(),
+            100000000
+        );
+        assert_eq!(
+            parse_display_amount_to_base_units("0.00000001", 8).unwrap(),
+            1
+        );
     }
 
     #[test]

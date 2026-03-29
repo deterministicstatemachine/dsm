@@ -1071,8 +1071,7 @@ fn apply_token_balance_delta(
             // §8 Atomicity: all token ops MUST apply balance deltas in the
             // same state transition. resolve_policy_commit handles both
             // builtins (ERA/dBTC) and CPTA-anchored custom tokens.
-            let policy_commit =
-                crate::core::token::resolve_policy_commit(&token_id_str);
+            let policy_commit = crate::core::token::resolve_policy_commit(&token_id_str);
             let is_recipient = to_device_id.len() == 32
                 && to_device_id.as_slice() == current_state.device_info.device_id.as_slice();
 
@@ -1173,8 +1172,7 @@ fn apply_token_balance_delta(
             token_id, amount, ..
         } => {
             let token_id_str = String::from_utf8_lossy(token_id).to_string();
-            let policy_commit =
-                crate::core::token::resolve_policy_commit(&token_id_str);
+            let policy_commit = crate::core::token::resolve_policy_commit(&token_id_str);
             let owner_key = crate::core::token::derive_canonical_balance_key(
                 &policy_commit,
                 &current_state.device_info.public_key,
@@ -1206,8 +1204,7 @@ fn apply_token_balance_delta(
             token_id, amount, ..
         } => {
             let token_id_str = String::from_utf8_lossy(token_id).to_string();
-            let policy_commit =
-                crate::core::token::resolve_policy_commit(&token_id_str);
+            let policy_commit = crate::core::token::resolve_policy_commit(&token_id_str);
             let owner_key = crate::core::token::derive_canonical_balance_key(
                 &policy_commit,
                 &current_state.device_info.public_key,
@@ -1895,9 +1892,10 @@ mod tests {
             &recipient_device_id,
             "ERA",
         );
-        current_state
-            .token_balances
-            .insert(sender_key.clone(), Balance::from_state(100, current_state.hash, 1));
+        current_state.token_balances.insert(
+            sender_key.clone(),
+            Balance::from_state(100, current_state.hash, 1),
+        );
 
         let operation = Operation::Transfer {
             amount: Balance::from_state(10, current_state.hash, 1),
@@ -2373,8 +2371,7 @@ mod tests {
 
         // Seed sender balance so the unilateral transfer has sufficient funds
         let era_pc = crate::core::token::builtin_policy_commit_for_token("ERA").unwrap();
-        let sender_key =
-            crate::core::token::derive_canonical_balance_key(&era_pc, &pk, "ERA");
+        let sender_key = crate::core::token::derive_canonical_balance_key(&era_pc, &pk, "ERA");
         current_state
             .token_balances
             .insert(sender_key, Balance::from_state(1000, current_state.hash, 3));

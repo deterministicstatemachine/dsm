@@ -248,8 +248,22 @@ async fn setup_two_devices_era(a_id: u8, b_id: u8, a_era: u64, b_era: u64) -> Tw
     sdk::bridge::install_app_router(router.clone()).expect("install test router");
 
     let policy_commit = *dsm_sdk::policy::builtins::NATIVE_POLICY_COMMIT;
-    seed_device_state(&router, a_dev, a_kp.public_key(), "ERA", &policy_commit, a_era);
-    seed_device_state(&router, b_dev, b_kp.public_key(), "ERA", &policy_commit, b_era);
+    seed_device_state(
+        &router,
+        a_dev,
+        a_kp.public_key(),
+        "ERA",
+        &policy_commit,
+        a_era,
+    );
+    seed_device_state(
+        &router,
+        b_dev,
+        b_kp.public_key(),
+        "ERA",
+        &policy_commit,
+        b_era,
+    );
 
     let delegate = Arc::new(DefaultBilateralSettlementDelegate);
     let mut handler_a = BilateralBleHandler::new_with_smt(a.clone(), a_dev, smt_a);
@@ -369,8 +383,22 @@ async fn setup_two_devices_dbtc(
     sdk::bridge::install_app_router(router.clone()).expect("install test router");
 
     let dbtc_policy = *dsm_sdk::policy::builtins::DBTC_POLICY_COMMIT;
-    seed_device_state(&router, a_dev, a_kp.public_key(), "dBTC", &dbtc_policy, a_dbtc);
-    seed_device_state(&router, b_dev, b_kp.public_key(), "dBTC", &dbtc_policy, b_dbtc);
+    seed_device_state(
+        &router,
+        a_dev,
+        a_kp.public_key(),
+        "dBTC",
+        &dbtc_policy,
+        a_dbtc,
+    );
+    seed_device_state(
+        &router,
+        b_dev,
+        b_kp.public_key(),
+        "dBTC",
+        &dbtc_policy,
+        b_dbtc,
+    );
 
     let delegate = Arc::new(DefaultBilateralSettlementDelegate);
     let mut handler_a = BilateralBleHandler::new_with_smt(a.clone(), a_dev, smt_a);
@@ -747,7 +775,8 @@ async fn round_trip_consecutive_same_direction() {
             .expect("A projection query")
             .expect("A ERA projection must exist");
         assert_eq!(
-            a_proj.available, expected_a,
+            a_proj.available,
+            expected_a,
             "after transfer {}: A should have {}, got {}",
             i + 1,
             expected_a,
@@ -758,7 +787,8 @@ async fn round_trip_consecutive_same_direction() {
             .expect("B projection query")
             .expect("B ERA projection must exist");
         assert_eq!(
-            b_proj.available, expected_b,
+            b_proj.available,
+            expected_b,
             "after transfer {}: B should have {}, got {}",
             i + 1,
             expected_b,

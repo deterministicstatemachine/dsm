@@ -437,7 +437,9 @@ fn golden_inclusion_proof_absent_key() {
     let smt = SparseMerkleTree::new(256);
     let key = [0x07u8; 32];
 
-    let proof = smt.get_inclusion_proof(&key, 256).expect("absent key proof");
+    let proof = smt
+        .get_inclusion_proof(&key, 256)
+        .expect("absent key proof");
     assert_eq!(
         proof.value,
         Some(ZERO_LEAF),
@@ -467,13 +469,19 @@ fn golden_inclusion_proof_present_key() {
     let value = [0x42u8; 32];
     smt.update_leaf(&key, &value).expect("insert leaf");
 
-    let proof = smt.get_inclusion_proof(&key, 256).expect("present key proof");
+    let proof = smt
+        .get_inclusion_proof(&key, 256)
+        .expect("present key proof");
     assert_eq!(
         proof.value,
         Some(value),
         "present key proof must contain the inserted value"
     );
-    assert_eq!(proof.siblings.len(), 256, "proof must have full-depth siblings");
+    assert_eq!(
+        proof.siblings.len(),
+        256,
+        "proof must have full-depth siblings"
+    );
     assert!(
         SparseMerkleTree::verify_proof_against_root(&proof, smt.root()),
         "present key proof must verify against post-insert root"

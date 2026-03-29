@@ -314,8 +314,12 @@ impl BleTransportDelegate for BilateralTransportAdapter {
                                 Ok(_meta) => {
                                     info!("[BILATERAL] Confirm handler completed successfully");
                                 }
-                                Err(e) if e.to_string().contains("silent_drop_duplicate_packet") => {
-                                    warn!("[BILATERAL] Silently dropping duplicate Confirm Request.");
+                                Err(e)
+                                    if e.to_string().contains("silent_drop_duplicate_packet") =>
+                                {
+                                    warn!(
+                                        "[BILATERAL] Silently dropping duplicate Confirm Request."
+                                    );
                                 }
                                 Err(e) => {
                                     log::error!("[BILATERAL] Confirm handler failed: {e}");

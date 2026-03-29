@@ -2446,8 +2446,9 @@ impl B0xSDK {
                                 // PUBLIC KEY (not device_id).  The receiver must reconstruct
                                 // the same Operation for signature verification.  Use local
                                 // public key since we ARE the recipient.
-                                let recipient_owner = crate::sdk::app_state::AppState::get_public_key()
-                                    .unwrap_or_else(|| transfer_req.to_device_id.clone());
+                                let recipient_owner =
+                                    crate::sdk::app_state::AppState::get_public_key()
+                                        .unwrap_or_else(|| transfer_req.to_device_id.clone());
 
                                 let transfer_op = Operation::Transfer {
                                     to_device_id: transfer_req.to_device_id.clone(),
@@ -2517,7 +2518,9 @@ impl B0xSDK {
                                     ttl_seconds: 0,
                                     seq: transfer_req.seq,
                                     receipt_commit: transfer_req.receipt_commit.clone(),
-                                    canonical_operation_bytes: transfer_req.canonical_operation_bytes.clone(),
+                                    canonical_operation_bytes: transfer_req
+                                        .canonical_operation_bytes
+                                        .clone(),
                                 });
                             }
                         }
