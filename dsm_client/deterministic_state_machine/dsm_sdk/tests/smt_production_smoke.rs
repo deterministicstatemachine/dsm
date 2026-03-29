@@ -966,7 +966,10 @@ async fn contact_add_stores_device_tree_root() {
         let sigma =
             dsm::core::bilateral_transaction_manager::compute_precommit(&h0, &op_bytes, &nonce);
         dsm::core::bilateral_transaction_manager::compute_successor_tip(
-            &h0, &op_bytes, &nonce, &sigma,
+            &h0,
+            &op_bytes,
+            &nonce,
+            &sigma,
         )
     };
 
