@@ -649,22 +649,21 @@ impl BleFrameCoordinator {
 
             // P1.4: LRU eviction — evict the oldest buffer by created_at, not arbitrary insertion order.
             if buffers.len() >= MAX_PENDING_REASSEMBLY {
-                if let Some(oldest_key) =
-                    buffers
-                        .iter()
-                        .min_by_key(|(_, buf)| buf.created_at)
-                        .map(|(k, buf)| {
-                            warn!(
-                                "BLE reassembly buffer full; evicting oldest frame {} ({}/{} chunks)",
-                                short_id(&k[..8]),
-                                buf.received_chunks.len(),
-                                buf.total_chunks
-                            );
-                            *k
-                        })
-                {
-                    buffers.remove(&oldest_key);
-                    let _ = crate::storage::client_db::delete_frame_chunks(&oldest_key);
+                let oldest_key = buffers
+                    .iter()
+                    .min_by_key(|(_, buf)| buf.created_at)
+                    .map(|(k, _)| *k);
+                if let Some(key) = oldest_key {
+                    if let Some(evicted) = buffers.get(&key) {
+                        warn!(
+                            "BLE reassembly buffer full; evicting oldest frame {} ({}/{} chunks)",
+                            short_id(&key[..8]),
+                            evicted.received_chunks.len(),
+                            evicted.total_chunks
+                        );
+                    }
+                    buffers.remove(&key);
+                    let _ = crate::storage::client_db::delete_frame_chunks(&key);
                 }
             }
 
