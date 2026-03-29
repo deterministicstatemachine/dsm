@@ -2,7 +2,6 @@
 // Data loading hook for the wallet screen — identity, balances, contacts, transactions.
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { dsmClient } from '../../../../services/dsmClient';
-import { syncWithStorage } from '../../../../dsm/storage';
 import { formatBtc } from '../../../../services/bitcoinTap';
 import { encodeBase32Crockford } from '../../../../utils/textId';
 import { useWalletRefreshListener } from '../../../../hooks/useWalletRefreshListener';
@@ -69,20 +68,12 @@ export function useWalletScreenData(activeTab: string): WalletScreenData {
       setGenesisB32(id.genesisHash);
       setDeviceB32(id.deviceId);
 
-      // Auto-sync inbox from storage nodes in the background.
-      // Don't await — show current balances immediately while sync runs.
-      // If sync finds new transfers, it triggers a wallet.refresh event
-      // which will reload the data via useWalletRefreshListener above.
-      syncWithStorage({ pullInbox: true })
-        .then((syncResult) => {
-          if (syncResult.processed && syncResult.processed > 0) {
-            logger.info(`[useWalletScreenData] Auto-sync applied ${syncResult.processed} transfers — reloading`);
-            void loadWalletData();
-          }
-        })
-        .catch((e) => {
-          logger.warn('[useWalletScreenData] Auto-sync failed (non-fatal):', e);
-        });
+      // Inbox sync is handled by the background poller (inbox_poller.rs).
+      // Do NOT call syncWithStorage here — it blocks the Kotlin bridge thread
+      // for 2-3 minutes while polling 6 storage nodes, which prevents ALL
+      // other bridge calls (balance.list, wallet.history) from completing.
+      // When the poller finds new transfers, it emits inbox.updated which
+      // triggers a wallet.refresh via useWalletRefreshListener.
 
       try {
         const list = await dsmClient.getContacts();
@@ -195,6 +186,19 @@ export function useWalletScreenData(activeTab: string): WalletScreenData {
     const unsub = bridgeEvents.on('bilateral.transferComplete', () => {
       logger.debug('[useWalletScreenData] bilateral.transferComplete -> reloading wallet data');
       void loadWalletData();
+    });
+    return unsub;
+  }, [loadWalletData]);
+
+  // Reload when inbox sync applies new transfers (online receive path).
+  // storage.sync → apply_operation → inbox.updated event → reload balances.
+  useEffect(() => {
+    const unsub = bridgeEvents.on('inbox.updated', (detail) => {
+      const newItems = typeof detail?.newItems === 'number' ? detail.newItems : 0;
+      if (newItems > 0) {
+        logger.debug(`[useWalletScreenData] inbox.updated (${newItems} new) -> reloading wallet data`);
+        void loadWalletData();
+      }
     });
     return unsub;
   }, [loadWalletData]);

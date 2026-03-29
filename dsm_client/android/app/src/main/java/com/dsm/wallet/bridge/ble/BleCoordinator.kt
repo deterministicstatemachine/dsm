@@ -220,15 +220,17 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                 return@runOperationBool false
             }
 
+            // Clear paired-address guard so bilateral transfers can connect
+            // to already-paired contacts.  The guard only needs to prevent
+            // re-pairing within a single scan cycle, not block transfers.
+            // Must happen BEFORE the isScanning() early return — otherwise
+            // stale addresses persist when a background scan is already active.
+            pairedBleAddresses.clear()
+
             // If already scanning, leave it alone
             if (scanner.isScanning()) {
                 return@runOperationBool true
             }
-
-            // Clear paired-address guard so bilateral transfers can connect
-            // to already-paired contacts.  The guard only needs to prevent
-            // re-pairing within a single scan cycle, not block transfers.
-            pairedBleAddresses.clear()
 
             // Rate limit check: enforce minimum gap since last stop
             val now = System.currentTimeMillis()
@@ -489,12 +491,10 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
 
     override fun onDeviceDiscovered(device: BluetoothDevice, rssi: Int) {
         val address = device.address
-        // Skip devices that already completed pairing — prevents the
-        // rediscovery → reconnect → re-pair → disconnect → stuck-scanning loop.
-        if (pairedBleAddresses.contains(address)) {
-            Log.d("BleCoordinator", "Skipping already-paired device $address")
-            return
-        }
+        // pairedBleAddresses guard removed — the Rust pairing orchestrator
+        // already prevents duplicate pairing at the protocol level.  The
+        // Kotlin guard blocked on-demand GATT reconnection for bilateral
+        // transfers after the original pairing session dropped.
         if (pendingConnectionAddresses.contains(address)) {
             Log.d("BleCoordinator", "Skipping $address — GATT connection already in flight")
             return
@@ -575,10 +575,6 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
     }
 
     private fun resumePairingScan(deviceAddress: String, reason: String) {
-        if (pairedBleAddresses.contains(deviceAddress)) {
-            return
-        }
-
         // Already scanning - no action needed
         if (scanner.isScanning()) {
             return
