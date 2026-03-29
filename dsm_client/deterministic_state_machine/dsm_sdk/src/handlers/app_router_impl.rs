@@ -1764,6 +1764,35 @@ impl AppRouterImpl {
                     e
                 );
             }
+            // §2.1: Advance the sender's SQLite chain tip to h_{n+1}.
+            // Both devices must agree on the current tip. The sender computed
+            // and signed h_{n+1} — it's authoritative. Without this, a
+            // subsequent BLE bilateral from the receiver uses h_{n+1} as
+            // parent, but the sender's SQLite still has h_n → tripwire.
+            match crate::storage::client_db::try_advance_finalized_bilateral_chain_tip(
+                &to_device_id,
+                &chain_tip_arr,
+                &new_chain_tip,
+            ) {
+                Ok(true) => {
+                    log::info!(
+                        "[wallet.send] §2.1 Sender SQLite chain tip advanced: {} → {}",
+                        &crate::util::text_id::encode_base32_crockford(&chain_tip_arr)[..8],
+                        &new_tip_b32[..8],
+                    );
+                }
+                Ok(false) => {
+                    log::warn!(
+                        "[wallet.send] §2.1 Sender SQLite chain tip CAS rejected (tip already advanced?)"
+                    );
+                }
+                Err(e) => {
+                    log::warn!(
+                        "[wallet.send] §2.1 Sender SQLite chain tip advance failed: {}",
+                        e
+                    );
+                }
+            }
         }
         crate::security::shared_smt::clear_pending_online(&smt_key).await;
 

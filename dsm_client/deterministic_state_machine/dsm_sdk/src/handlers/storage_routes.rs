@@ -1297,9 +1297,15 @@ impl AppRouterImpl {
                                                 &pending.counterparty_device_id,
                                             );
 
-                                        // Fast path: chain tip already advanced past the gate
-                                        let already_advanced = match (current_tip, pending_next) {
-                                            (Some(ct), Some(pn)) => ct == pn,
+                                        // Fast path: chain tip has moved since the gate was set.
+                                        // The gate's parent_tip was the tip BEFORE the gated send.
+                                        // If the current tip != parent_tip, the relationship
+                                        // advanced (possibly multiple times), so the gate is stale.
+                                        let pending_parent: Option<[u8; 32]> =
+                                            pending.parent_tip.as_slice().try_into().ok();
+                                        let already_advanced = match (current_tip, pending_parent) {
+                                            (Some(ct), Some(pp)) => ct != pp,
+                                            (Some(_ct), None) => true, // no parent means gate is bogus
                                             _ => false,
                                         };
 

@@ -1362,8 +1362,8 @@ impl BilateralBleHandler {
                         //   2. Persisted contacts.chain_tip in SQLite (may be stale)
                         //   3. The storage.sync outbox sweep handles the network ACK path
                         //      (checking is_message_acknowledged) proactively every cycle.
-                        let pending_next: Option<[u8; 32]> =
-                            pending.next_tip.as_slice().try_into().ok();
+                        let pending_parent: Option<[u8; 32]> =
+                            pending.parent_tip.as_slice().try_into().ok();
 
                         // Source 1: sender's self-reported chain tip from the prepare request.
                         // This is authoritative — the sender knows its own chain state.
@@ -1377,12 +1377,15 @@ impl BilateralBleHandler {
                             &counterparty_device_id,
                         );
 
-                        let already_advanced = match pending_next {
-                            Some(pn) => {
-                                // Prefer sender-reported tip (prepare request) over stale SQLite
-                                (sender_reported_tip == Some(pn)) || (persisted_tip == Some(pn))
+                        // The gate's parent_tip was the tip BEFORE the gated send.
+                        // If the current tip != parent_tip, the chain moved forward
+                        // (possibly multiple times) and the gate is stale.
+                        let already_advanced = match pending_parent {
+                            Some(pp) => {
+                                (sender_reported_tip.is_some() && sender_reported_tip != Some(pp))
+                                    || (persisted_tip.is_some() && persisted_tip != Some(pp))
                             }
-                            None => false,
+                            None => true, // no parent means gate is bogus
                         };
 
                         if already_advanced {
@@ -1396,11 +1399,11 @@ impl BilateralBleHandler {
                             );
                         } else {
                             log::error!(
-                                "[BilateralBleHandler] ❌ persisted online gate: recipient has not caught up for ({}, {}). sender_tip={} pending_next={} persisted_tip={}. Rejecting offline.",
+                                "[BilateralBleHandler] ❌ persisted online gate: chain tip unchanged from parent for ({}, {}). sender_tip={} parent_tip={} persisted_tip={}. Rejecting offline.",
                                 bytes_to_base32(&self.device_id[..8]),
                                 bytes_to_base32(&counterparty_device_id[..8]),
                                 sender_reported_tip.map_or("none".to_string(), |t| bytes_to_base32(&t[..8])),
-                                pending_next.map_or("none".to_string(), |t| bytes_to_base32(&t[..8])),
+                                pending_parent.map_or("none".to_string(), |t| bytes_to_base32(&t[..8])),
                                 persisted_tip.map_or("none".to_string(), |t| bytes_to_base32(&t[..8])),
                             );
                             return Err(DsmError::invalid_operation(
