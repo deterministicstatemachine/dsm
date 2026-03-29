@@ -228,8 +228,10 @@ internal object UnifiedBleBridge {
                     // Track effective BLE address — may change if Android rotated the peer's RPA
                     var effectiveAddress = deviceAddress
                     try {
-                        // Attempt 1: direct on-demand GATT client connect (works if peer is connectable)
-                        var connected = withTimeoutOrNull(8000L) {
+                        // Attempt 1: direct on-demand GATT client connect (works if peer is connectable).
+                        // connectToDevice now includes a 1.5s scan for RPA resolution + 12s poll,
+                        // so allow 15s total.
+                        var connected = withTimeoutOrNull(15000L) {
                             svc.connectToDevice(deviceAddress).await()
                         } ?: false
                         if (!connected) {
@@ -273,7 +275,7 @@ internal object UnifiedBleBridge {
                                 }
                                 return@runBlocking ok
                             } else {
-                                connected = withTimeoutOrNull(8000L) {
+                                connected = withTimeoutOrNull(15000L) {
                                     svc.connectToDevice(effectiveAddress).await()
                                 } ?: false
                             }
