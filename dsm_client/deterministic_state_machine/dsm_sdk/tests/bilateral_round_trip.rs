@@ -286,12 +286,7 @@ async fn setup_two_devices_era(a_id: u8, b_id: u8, a_era: u64, b_era: u64) -> Tw
     }
 }
 
-async fn setup_two_devices_dbtc(
-    a_id: u8,
-    b_id: u8,
-    a_dbtc: u64,
-    b_dbtc: u64,
-) -> TwoDeviceSetup {
+async fn setup_two_devices_dbtc(a_id: u8, b_id: u8, a_dbtc: u64, b_dbtc: u64) -> TwoDeviceSetup {
     assert_ne!(a_id, b_id, "Device IDs for A and B must be distinct");
     let a_dev = dev(a_id);
     let b_dev = dev(b_id);

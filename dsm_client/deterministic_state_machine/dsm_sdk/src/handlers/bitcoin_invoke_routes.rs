@@ -5440,11 +5440,11 @@ mod tests {
     #[serial]
     async fn bitcoin_withdraw_execute_persists_policy_commit_from_plan() {
         let router = init_withdrawal_invoke_test_router("withdraw_policy_commit");
-        let request_net_sats = 100_000;
+        let request_gross_sats = 150_000;
         let full_fee = crate::sdk::bitcoin_tap_sdk::estimated_full_withdrawal_fee_sats();
-        let source_amount = request_net_sats + full_fee;
+        let source_amount = request_gross_sats + full_fee;
 
-        seed_dbtc_balance(&router, request_net_sats * 3);
+        seed_dbtc_balance(&router, request_gross_sats * 3);
         put_active_vault("vault-policy", source_amount);
         put_active_vault_record("vault-policy", source_amount);
 
@@ -5457,7 +5457,7 @@ mod tests {
             .query(AppQuery {
                 path: "bitcoin.withdraw.plan".to_string(),
                 params: pack_proto(&generated::BitcoinWithdrawalPlanRequest {
-                    requested_net_sats: request_net_sats,
+                    requested_net_sats: request_gross_sats,
                     destination_address: "tb1qpolicy".to_string(),
                 }),
             })

@@ -123,6 +123,9 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
     }
 
     companion object {
+        /** Max time to wait for GATT connection readiness (connect + discover + MTU). */
+        private const val CONNECT_READY_TIMEOUT_MS = 12_000L
+
         private var instance: BleCoordinator? = null
 
         fun getInstance(context: Context): BleCoordinator {
@@ -460,13 +463,15 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
      */
     fun notifyAdvertiserPairingComplete(bleAddress: String) {
         runOperation {
-            // Clear session state after pairing so the bilateral send uses a fresh
-            // on-demand connection instead of the pairing session. The active session
-            // (activeSessions) is kept alive; connectToDevice() will clean it up if
-            // needed when the send is initiated.
-            sessionStates.remove(bleAddress)
+            // Mark the session as disconnected but keep the entry so on-demand
+            // reconnect does not lose track of the device entirely. connectToDevice()
+            // will clean up and re-establish the GATT connection as needed.
+            sessionStates[bleAddress]?.let { state ->
+                state.isConnected = false
+                state.serviceDiscoveryCompleted = false
+            }
             pendingConnectionAddresses.remove(bleAddress)
-            Log.i("BleCoordinator", "Advertiser pairing complete for $bleAddress — keeping advertising active for reconnects")
+            Log.i("BleCoordinator", "Advertiser pairing complete for $bleAddress — marked disconnected, keeping advertising active for reconnects")
         }
     }
 
@@ -1051,21 +1056,44 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                 deferred.complete(true)
                 return@runOperation
             }
-            // Clean up stale session
+            // Clean up stale session (gatt.close() is called by dropClientSession → disconnect → cleanup)
             if (activeSessions.containsKey(address)) {
                 dropClientSession(address, "pre_connect_stale_session")
+            }
+            // Brief scan to resolve current RPA before connecting — the pairing-time
+            // address may have rotated. Scanner calls are safe here because they operate
+            // directly on the scanner object, not through the operation channel.
+            Log.i("BleCoordinator", "connectToDevice($address): scanning briefly to resolve current RPA")
+            scanner.startScanning()
+            kotlinx.coroutines.delay(1500)
+            scanner.stopScanning()
+            // If a scan result yielded a ready session under a different address, use it
+            val resolvedAddress = if (hasActiveClientSession(address)) {
+                address
+            } else {
+                val freshAddr = findAnyReadySessionAddress()
+                if (freshAddr != null && freshAddr != address) {
+                    Log.i("BleCoordinator", "connectToDevice: RPA rotated $address → $freshAddr")
+                }
+                freshAddr ?: address
+            }
+            // If the scan resolved a ready session, we can skip the connect entirely
+            if (hasActiveClientSession(resolvedAddress)) {
+                pendingConnectionAddresses.remove(resolvedAddress)
+                deferred.complete(true)
+                return@runOperation
             }
             // Ensure GATT server is running
             if (!gattStartInFlight) {
                 gattStartInFlight = true
                 try { gattServer.ensureStarted() } finally { gattStartInFlight = false }
             }
-            val session = getOrCreateSession(address)
-            pendingConnectionAddresses.add(address)
+            val session = getOrCreateSession(resolvedAddress)
+            pendingConnectionAddresses.add(resolvedAddress)
             // Bilateral reconnect — identity read skip is determined by Rust pairing status
             val connected = session.connect()
             if (!connected) {
-                dropClientSession(address, "connect_init_failed")
+                dropClientSession(resolvedAddress, "connect_init_failed")
                 deferred.complete(false)
                 return@runOperation
             }
@@ -1074,16 +1102,24 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
             // semantics.
             bleScope.launch {
                 val startTime = android.os.SystemClock.elapsedRealtime()
-                while (android.os.SystemClock.elapsedRealtime() - startTime < 6000L) {
-                    val state = sessionStates[address]
+                while (android.os.SystemClock.elapsedRealtime() - startTime < CONNECT_READY_TIMEOUT_MS) {
+                    val state = sessionStates[resolvedAddress]
                     if (state != null && state.isConnected && state.negotiatedMtu > 23 && state.serviceDiscoveryCompleted) {
-                        pendingConnectionAddresses.remove(address)
+                        pendingConnectionAddresses.remove(resolvedAddress)
                         deferred.complete(true)
                         return@launch
                     }
-                    if (state == null || (!state.isConnected && !activeSessions.containsKey(address))) {
+                    // If peer connected to our GATT server while we polled, succeed —
+                    // the caller will detect the server notification path.
+                    if (isGattServerClient(resolvedAddress) && isServerClientSubscribedToTxResponse(resolvedAddress)) {
+                        pendingConnectionAddresses.remove(resolvedAddress)
+                        Log.i("BleCoordinator", "connectToDevice: peer $resolvedAddress connected to our GATT server during poll — succeeding")
+                        deferred.complete(true)
+                        return@launch
+                    }
+                    if (state == null || (!state.isConnected && !activeSessions.containsKey(resolvedAddress))) {
                         runOperation {
-                            dropClientSession(address, "connect_aborted_before_ready")
+                            dropClientSession(resolvedAddress, "connect_aborted_before_ready")
                         }
                         deferred.complete(false)
                         return@launch
@@ -1091,7 +1127,7 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                     kotlinx.coroutines.delay(100)
                 }
                 runOperation {
-                    dropClientSession(address, "connect_ready_timeout")
+                    dropClientSession(resolvedAddress, "connect_ready_timeout")
                 }
                 deferred.complete(false)
             }

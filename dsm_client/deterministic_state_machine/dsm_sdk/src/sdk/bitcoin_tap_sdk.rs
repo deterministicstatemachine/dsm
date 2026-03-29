@@ -3975,15 +3975,12 @@ impl BitcoinTapSdk {
 
     pub async fn plan_withdrawal(
         &self,
-        requested_net_sats: u64,
+        requested_gross_sats: u64,
         destination_address: &str,
         planner_device_id: &[u8; 32],
     ) -> Result<WithdrawalPlan, DsmError> {
-        let plan = self
-            .prepare_withdrawal_plan(requested_net_sats, destination_address, planner_device_id)
-            .await?;
-
-        Ok(plan)
+        self.prepare_withdrawal_plan(requested_gross_sats, destination_address, planner_device_id)
+            .await
     }
 
     /// Fetch vault execution data from storage nodes by vault_id.
@@ -5152,19 +5149,20 @@ mod tests {
         init_withdrawal_test_db();
 
         let bridge = BitcoinTapSdk::new(Arc::new(DLVManager::new()));
-        let requested_net_sats = 150_000;
+        let desired_net_sats = 150_000;
         let full_fee = estimated_full_withdrawal_fee_sats();
-        put_active_vault("vault-route", requested_net_sats + full_fee);
-        put_active_vault_record("vault-route", requested_net_sats + full_fee, "btc_to_dbtc");
+        let gross = desired_net_sats + full_fee;
+        put_active_vault("vault-route", gross);
+        put_active_vault_record("vault-route", gross, "btc_to_dbtc");
 
         let plan = bridge
-            .plan_withdrawal(requested_net_sats, "tb1qexactroute", &[0x11; 32])
+            .plan_withdrawal(gross, "tb1qexactroute", &[0x11; 32])
             .await
             .unwrap_or_else(|e| panic!("plan withdrawal failed: {e}"));
 
         assert_eq!(plan.legs.len(), 1);
         assert!(!plan.plan_id.is_empty());
-        assert_eq!(plan.requested_net_sats, requested_net_sats);
+        assert_eq!(plan.requested_net_sats, desired_net_sats);
         assert_eq!(plan.legs[0].vault_id, "vault-route");
     }
 
@@ -5177,7 +5175,8 @@ mod tests {
         let bridge = BitcoinTapSdk::new(dlv.clone());
 
         let full_fee = estimated_full_withdrawal_fee_sats();
-        let requested_net_sats = 1_501_337;
+        let desired_net_sats = 1_501_337;
+        let gross = desired_net_sats + full_fee;
         let preferred_vault_id = "000-vault-a";
         let secondary_vault_id = "001-vault-b";
 
@@ -5188,7 +5187,7 @@ mod tests {
                 refund_hash_lock: [0x20; 32],
                 refund_iterations: 42,
                 bitcoin_pubkey: vec![0x03; 33],
-                expected_btc_amount_sats: requested_net_sats + full_fee,
+                expected_btc_amount_sats: gross,
                 network: 0,
                 min_confirmations: 1,
             },
@@ -5201,21 +5200,13 @@ mod tests {
             .await
             .unwrap_or_else(|e| panic!("add stale vault failed: {e}"));
 
-        put_active_vault(secondary_vault_id, requested_net_sats + full_fee);
-        put_active_vault_record(
-            secondary_vault_id,
-            requested_net_sats + full_fee,
-            "btc_to_dbtc",
-        );
-        put_active_vault(preferred_vault_id, requested_net_sats + full_fee);
-        put_active_vault_record(
-            preferred_vault_id,
-            requested_net_sats + full_fee,
-            "btc_to_dbtc",
-        );
+        put_active_vault(secondary_vault_id, gross);
+        put_active_vault_record(secondary_vault_id, gross, "btc_to_dbtc");
+        put_active_vault(preferred_vault_id, gross);
+        put_active_vault_record(preferred_vault_id, gross, "btc_to_dbtc");
 
         let plan = bridge
-            .plan_withdrawal(requested_net_sats, "tb1qexampledestination", &[0x11; 32])
+            .plan_withdrawal(gross, "tb1qexampledestination", &[0x11; 32])
             .await
             .unwrap_or_else(|e| panic!("plan withdrawal failed: {e}"));
 
