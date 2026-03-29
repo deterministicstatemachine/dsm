@@ -1983,7 +1983,10 @@ mod tests {
             })
             .expect("sign operation");
         let advanced = sdk.execute_dsm_operation(op).expect("execute operation");
-        assert!(advanced.state_number > prior.state_number, "state must advance");
+        assert!(
+            advanced.state_number > prior.state_number,
+            "state must advance"
+        );
 
         sdk.restore_state_snapshot(&prior)
             .expect("restore prior snapshot");

@@ -265,7 +265,10 @@ async fn submit_b0x_envelope(
                 .replicate_object(app_clone, &repl_key, &repl_data, 0)
                 .await
             {
-                log::warn!("b0x replication failed for {}: {e}", &repl_key[..repl_key.len().min(32)]);
+                log::warn!(
+                    "b0x replication failed for {}: {e}",
+                    &repl_key[..repl_key.len().min(32)]
+                );
             }
         });
     }

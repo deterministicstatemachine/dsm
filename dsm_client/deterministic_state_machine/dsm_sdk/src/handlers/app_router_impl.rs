@@ -1241,7 +1241,11 @@ impl AppRouterImpl {
 
         let pre_send_state = match self.core_sdk.get_current_state() {
             Ok(state) => state,
-            Err(e) => return err(format!("wallet.send: failed to snapshot pre-send state: {e}")),
+            Err(e) => {
+                return err(format!(
+                    "wallet.send: failed to snapshot pre-send state: {e}"
+                ))
+            }
         };
         let smt_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
             &from_device_id,

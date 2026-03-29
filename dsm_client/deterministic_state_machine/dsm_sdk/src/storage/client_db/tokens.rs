@@ -56,7 +56,6 @@ pub(crate) fn upsert_balance_projection_with_conn(
     conn: &Connection,
     record: &BalanceProjectionRecord,
 ) -> Result<()> {
-
     let existing = conn
         .query_row(
             "SELECT balance_key, device_id, token_id, policy_commit,
@@ -261,7 +260,8 @@ pub fn sync_token_projection_from_state(
     state: &dsm::types::state_types::State,
     locked: u64,
 ) -> Result<BalanceProjectionRecord> {
-    let record = build_balance_projection_from_state(device_id, token_id, policy_commit, state, locked)?;
+    let record =
+        build_balance_projection_from_state(device_id, token_id, policy_commit, state, locked)?;
 
     upsert_balance_projection(&record)?;
     Ok(record)

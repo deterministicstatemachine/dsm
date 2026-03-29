@@ -375,9 +375,8 @@ impl DsmContactManager {
         // Insert the chain tip into the SMT BEFORE generating the proof.
         // This ensures get_inclusion_proof returns a real proof for the
         // actual chain tip value, not a ZERO_LEAF non-inclusion proof.
-        smt.update_leaf(smt_key, &new_chain_tip).map_err(|e| {
-            ContactError::InvalidChainTip(format!("SMT update_leaf failed: {e}"))
-        })?;
+        smt.update_leaf(smt_key, &new_chain_tip)
+            .map_err(|e| ContactError::InvalidChainTip(format!("SMT update_leaf failed: {e}")))?;
 
         let smt_proof =
             self.local_smt_verifier
@@ -646,7 +645,10 @@ mod tests {
         let proof = verifier.create_chain_tip_proof_from_smt(&chain_tip, &smt, &smt_key);
         assert_eq!(proof.state_hash, chain_tip);
         assert_ne!(proof.smt_root, [0u8; 32], "SMT root should be non-zero");
-        assert!(!proof.proof_path.is_empty(), "Proof must have real siblings");
+        assert!(
+            !proof.proof_path.is_empty(),
+            "Proof must have real siblings"
+        );
     }
 
     #[test]

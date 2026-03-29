@@ -107,9 +107,7 @@ pub fn apply_sender_settlement_bundle_atomic(
 ) -> Result<()> {
     let binding = get_connection()?;
     let mut conn = binding.lock().unwrap_or_else(|poisoned| {
-        log::warn!(
-            "DB lock poisoned in apply_sender_settlement_bundle_atomic, recovering"
-        );
+        log::warn!("DB lock poisoned in apply_sender_settlement_bundle_atomic, recovering");
         poisoned.into_inner()
     });
 
@@ -209,9 +207,7 @@ pub struct ReceiverConfirmBundle<'a> {
 pub fn apply_receiver_confirm_bundle_atomic(bundle: ReceiverConfirmBundle<'_>) -> Result<()> {
     let binding = get_connection()?;
     let mut conn = binding.lock().unwrap_or_else(|poisoned| {
-        log::warn!(
-            "DB lock poisoned in apply_receiver_confirm_bundle_atomic, recovering"
-        );
+        log::warn!("DB lock poisoned in apply_receiver_confirm_bundle_atomic, recovering");
         poisoned.into_inner()
     });
 
@@ -230,7 +226,11 @@ pub fn apply_receiver_confirm_bundle_atomic(bundle: ReceiverConfirmBundle<'_>) -
                 ELSE 'OnlineCapable'
             END
          WHERE device_id = ?3",
-        params![bundle.new_chain_tip, now as i64, bundle.counterparty_device_id],
+        params![
+            bundle.new_chain_tip,
+            now as i64,
+            bundle.counterparty_device_id
+        ],
     )?;
 
     if let Some(state) = bundle.settled_state {
@@ -324,9 +324,7 @@ pub fn rollback_failed_online_send_atomic(
 ) -> Result<()> {
     let binding = get_connection()?;
     let mut conn = binding.lock().unwrap_or_else(|poisoned| {
-        log::warn!(
-            "DB lock poisoned in rollback_failed_online_send_atomic, recovering"
-        );
+        log::warn!("DB lock poisoned in rollback_failed_online_send_atomic, recovering");
         poisoned.into_inner()
     });
 
@@ -372,7 +370,6 @@ pub fn is_settlement_completed(tx_id: &str) -> bool {
     )
     .unwrap_or(false)
 }
-
 
 pub fn get_transaction_history(
     device_id: Option<&str>,

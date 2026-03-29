@@ -8,8 +8,8 @@ use dsm::types::error::DsmError;
 
 // Re-export canonical types from dsm core
 pub use dsm::types::receipt_types::{
-    DeviceTreeAcceptanceCommitment, ParentConsumptionTracker as ReceiptGuard,
-    ReceiptAcceptance, ReceiptVerificationContext, StitchedReceiptV2,
+    DeviceTreeAcceptanceCommitment, ParentConsumptionTracker as ReceiptGuard, ReceiptAcceptance,
+    ReceiptVerificationContext, StitchedReceiptV2,
 };
 
 /// Derive relationship key from counterparty public key.
@@ -217,8 +217,8 @@ pub fn build_bilateral_receipt(
         child_tip,
         device_tree_commitment,
     )?
-        .to_canonical_protobuf()
-        .ok()
+    .to_canonical_protobuf()
+    .ok()
 }
 
 /// Build receipt with **real** Per-Device SMT roots and inclusion proofs (§4.2).

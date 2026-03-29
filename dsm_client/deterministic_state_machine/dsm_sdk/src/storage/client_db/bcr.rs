@@ -48,7 +48,6 @@ pub(crate) fn store_bcr_state_with_conn(
     published: bool,
     now: u64,
 ) -> Result<()> {
-
     let state_bytes = state
         .to_bytes()
         .map_err(|e| anyhow!("bcr state serialize failed: {e}"))?;

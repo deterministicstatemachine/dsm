@@ -255,7 +255,10 @@ pub async fn put_object(
         let obj_key = addr.clone();
         let obj_data = body.to_vec();
         tokio::spawn(async move {
-            if let Err(e) = rm.replicate_object(state_clone, &obj_key, &obj_data, 0).await {
+            if let Err(e) = rm
+                .replicate_object(state_clone, &obj_key, &obj_data, 0)
+                .await
+            {
                 warn!("background replication failed for {obj_key}: {e}");
             }
         });

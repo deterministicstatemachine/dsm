@@ -646,11 +646,9 @@ impl BilateralTransactionManager {
         // stores tip, not zeros). Skip the redundant write to avoid the
         // rejected-CAS warning.
         if contact_chain_tip.is_none() {
-            let _ = self.chain_tip_store.set_contact_chain_tip(
-                remote_device_id,
-                [0u8; 32],
-                tip,
-            );
+            let _ = self
+                .chain_tip_store
+                .set_contact_chain_tip(remote_device_id, [0u8; 32], tip);
         }
 
         Ok(anchor)

@@ -122,8 +122,7 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_addSecondaryDevice<'a>(
                     if device_id.len() == 32 {
                         let mut dev_arr = [0u8; 32];
                         dev_arr.copy_from_slice(&device_id);
-                        let root =
-                            dsm::common::device_tree::DeviceTree::single(dev_arr).root();
+                        let root = dsm::common::device_tree::DeviceTree::single(dev_arr).root();
                         crate::sdk::app_state::AppState::set_device_tree_root(root);
                         log::info!("[SecondaryDevice] Device tree root persisted for bilateral receipt verification");
                     }
