@@ -76,6 +76,7 @@ async fn main() {
         next_chain_tip: Some(chain_state.hash.to_vec()),
         receipt_commit: vec![],
         routing_address: routing_address.clone(),
+        canonical_operation_bytes: vec![],
     };
 
     println!("Submitting to b0x (self)");

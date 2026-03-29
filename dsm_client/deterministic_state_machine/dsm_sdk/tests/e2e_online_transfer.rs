@@ -295,6 +295,7 @@ async fn e2e_online_transfer_era_and_custom_token() {
         chain_tip: chain_tip.clone(),
         seq: 1,
         receipt_commit: vec![],
+        canonical_operation_bytes: vec![],
     };
 
     let res = router
@@ -346,6 +347,7 @@ async fn e2e_online_transfer_era_and_custom_token() {
         chain_tip: chain_tip.clone(),
         seq: 1,
         receipt_commit: vec![],
+        canonical_operation_bytes: vec![],
     };
 
     let res = router
@@ -651,6 +653,7 @@ async fn live_aws_online_transfer_recipient_storage_sync() {
             chain_tip: relationship_tip.clone(),
             seq: 1,
             receipt_commit: vec![],
+            canonical_operation_bytes: vec![],
         };
         let send_res = sender_router
             .invoke(AppInvoke {
