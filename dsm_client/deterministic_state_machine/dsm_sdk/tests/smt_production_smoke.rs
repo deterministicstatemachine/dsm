@@ -261,7 +261,7 @@ async fn smoke_verify_receipt_bytes_accepts_authenticated_commitment() {
         verify_receipt_bytes(
             &result.receipt_bytes,
             Some(DeviceTreeAcceptanceCommitment::from_root(
-                a.device_tree_root
+                a.device_tree_root,
             )),
         ),
         "receipt verification must accept the correct authenticated device-tree commitment"
@@ -346,7 +346,7 @@ async fn smoke_receipt_failure_scope_is_relationship_local() {
         verify_receipt_bytes(
             &result_cd.receipt_bytes,
             Some(DeviceTreeAcceptanceCommitment::from_root(
-                c.device_tree_root
+                c.device_tree_root,
             )),
         ),
         "an unrelated relationship with a valid authenticated commitment must continue to verify"
@@ -966,7 +966,10 @@ async fn contact_add_stores_device_tree_root() {
         let sigma =
             dsm::core::bilateral_transaction_manager::compute_precommit(&h0, &op_bytes, &nonce);
         dsm::core::bilateral_transaction_manager::compute_successor_tip(
-            &h0, &op_bytes, &nonce, &sigma,
+            &h0,
+            &op_bytes,
+            &nonce,
+            &sigma,
         )
     };
 
