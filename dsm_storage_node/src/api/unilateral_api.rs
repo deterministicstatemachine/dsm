@@ -254,6 +254,22 @@ async fn submit_b0x_envelope(
         expires_at_iter
     );
 
+    // Replicate b0x envelope to peer nodes so the receiver can poll any node.
+    {
+        let rm = app.replication_manager.clone();
+        let app_clone = app.clone();
+        let repl_key = format!("b0x/{recipient_spool_key}/{msg_id_b32}");
+        let repl_data = body.to_vec();
+        tokio::spawn(async move {
+            if let Err(e) = rm
+                .replicate_object(app_clone, &repl_key, &repl_data, 0)
+                .await
+            {
+                log::warn!("b0x replication failed for {}: {e}", &repl_key[..repl_key.len().min(32)]);
+            }
+        });
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -620,11 +636,10 @@ mod tests {
             max_concurrent_jobs: 10,
         };
         let replication_manager = Arc::new(
-            ReplicationManager::new(
+            ReplicationManager::new_for_tests(
                 replication_config,
                 "test-node".to_string(),
                 "http://localhost:8080".to_string(),
-                std::path::Path::new("certs/node.crt"),
             )
             .unwrap_or_else(|e| panic!("Failed to create replication manager: {e}")),
         );

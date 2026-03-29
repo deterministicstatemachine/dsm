@@ -92,31 +92,6 @@ npm test -- --passWithNoTests     # pass if no test files found
 
 For initial environment validation, start with `npm run type-check`; `npm test` is the broader Jest suite.
 
-## Coverage Tracking
-
-The active GitHub Actions pipeline publishes coverage to Codecov for the Rust workspace and the frontend Jest suite on every push and pull request targeting `main`.
-
-Local coverage commands:
-
-```bash
-# Rust coverage (requires cargo-llvm-cov)
-cargo llvm-cov clean --workspace
-cargo llvm-cov --workspace --exclude dsm_storage_node --no-report
-cargo llvm-cov -p dsm_storage_node --no-default-features --features local-dev,strict --no-report
-cargo llvm-cov report --json --output-path coverage.json
-cargo llvm-cov report --lcov --output-path coverage/rust.lcov
-
-# Frontend coverage
-cd dsm_client/new_frontend
-npm run test:coverage -- --passWithNoTests --ci
-
-# Aggregate repo summary
-cd ../..
-node scripts/aggregate_coverage.mjs
-```
-
-Repo-level Codecov policy lives in `codecov.yml`. The current policy uses auto-baselined project and patch statuses with a 1% tolerance so coverage regressions surface in PRs without forcing an arbitrary hard floor while the baseline stabilizes.
-
 ### TypeScript Type-Check
 
 ```bash

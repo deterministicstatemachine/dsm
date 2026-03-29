@@ -127,14 +127,6 @@ class SinglePathWebViewBridge(private val context: Context) {
         }
 
         /**
-         * Formal schema validation for bridge payloads.
-         * Validates payload structure against expected format for each method.
-         */
-        private fun validateBridgePayload(method: String, payload: ByteArray): Boolean {
-            return BridgePayloadValidator.validate(method, payload)
-        }
-
-        /**
          * Debug interceptor for bridge calls.
          * Provides readable logging without external decoders as recommended in critique.
          */
@@ -159,16 +151,6 @@ class SinglePathWebViewBridge(private val context: Context) {
             ) { bytes -> BridgeEncoding.base32CrockfordEncode(bytes) }
 
             return try {
-                // Validate payload structure before processing
-                if (!validateBridgePayload(method, payload)) {
-                    val error = BridgeEnvelopeCodec.createErrorResponse(
-                        ERROR_INVALID_PAYLOAD,
-                        "Invalid payload structure for method '$method'"
-                    ) { bytes -> BridgeEncoding.base32CrockfordEncode(bytes) }
-                    logBridgeCall(method, payload, error, null)
-                    return error
-                }
-
                 val result = handleBinaryRpcInternal(inst, method, payload)
                 logBridgeCall(method, payload, result, null)
                 BridgeEnvelopeCodec.createSuccessResponse(result)

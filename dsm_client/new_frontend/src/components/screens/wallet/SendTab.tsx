@@ -5,7 +5,6 @@ import { dsmClient } from '../../../services/dsmClient';
 import { failureReasonMessage } from '../../../domain/bilateral';
 import { getTokenDecimals } from '../../../utils/tokenMeta';
 import ConfirmModal from '../../ConfirmModal';
-import { toBaseUnits } from './helpers';
 import type { Balance } from './helpers';
 import type { DomainContact } from '../../../domain/types';
 
@@ -65,8 +64,6 @@ function SendTabInner({ contacts, balances, eraGif, btcGif, onCancel, onSendComp
       }
 
       const tokenId = sendForm.token || 'ERA';
-      const decimals = Number((balances.find(b => b.tokenId === tokenId)?.decimals) ?? 0);
-      const amountBU = toBaseUnits(sendForm.amount, Number.isFinite(decimals) ? decimals : 0);
 
       if (txMode === 'offline') {
         const bleAddr = await dsmClient.resolveBleAddressForContact(contact);
@@ -77,7 +74,7 @@ function SendTabInner({ contacts, balances, eraGif, btcGif, onCancel, onSendComp
         const res = await dsmClient.sendOfflineTransfer({
           tokenId,
           to: sendForm.selectedContactKey,
-          amount: amountBU.toString(10),
+          amount: sendForm.amount.trim(),
           memo: sendForm.note || undefined,
           bleAddress: bleAddr,
         });
@@ -102,7 +99,7 @@ function SendTabInner({ contacts, balances, eraGif, btcGif, onCancel, onSendComp
       } else {
         const res = await dsmClient.sendOnlineTransferSmart(
           contact.alias,
-          amountBU.toString(10),
+          sendForm.amount.trim(),
           sendForm.note || undefined,
           tokenId,
         );
@@ -118,7 +115,7 @@ function SendTabInner({ contacts, balances, eraGif, btcGif, onCancel, onSendComp
     } finally {
       setSendingTx(false);
     }
-  }, [sendForm, contacts, balances, txMode, loadWalletData, setError, onSendComplete]);
+  }, [sendForm, contacts, txMode, loadWalletData, setError, onSendComplete]);
 
   return (
     <div className="send-tab">

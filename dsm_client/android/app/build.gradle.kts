@@ -224,9 +224,9 @@ tasks.withType<KotlinCompile>().configureEach {
     }
 }
 
-// ---- Native libs refresh (Rust cargo target -> Android jniLibs) ----
-// Copies libdsm_sdk.so directly from cargo's target/<triple>/release/ output.
-// This is the ONLY source of truth — avoids stale intermediaries.
+// ---- Native libs refresh (Rust cargo output -> Android jniLibs) ----
+// Prefer cargo's target/<triple> output, but also accept direct cargo-ndk `-o`
+// output written into jniLibs. Both are produced by the same Rust build.
 val refreshDsmJniLibs = tasks.register("refreshDsmJniLibs") {
     val cargoTarget = project.file("../../deterministic_state_machine/target")
     val appJniLibs = project.file("src/main/jniLibs")
@@ -239,18 +239,23 @@ val refreshDsmJniLibs = tasks.register("refreshDsmJniLibs") {
         "x86_64"      to "x86_64-linux-android",
     )
 
-    // Resolve .so path: prefer release, fall back to debug
-    fun resolveSo(triple: String): File? {
+    // Resolve .so path: prefer cargo target release/debug, then accept direct
+    // cargo-ndk `-o` output already written into jniLibs.
+    fun resolveSo(abi: String, triple: String): File? {
         val release = File(cargoTarget, "$triple/release/libdsm_sdk.so")
         if (release.exists()) return release
         val debug = File(cargoTarget, "$triple/debug/libdsm_sdk.so")
         if (debug.exists()) return debug
+        val appOutput = File(File(appJniLibs, abi), "libdsm_sdk.so")
+        if (appOutput.exists()) return appOutput
+        val repoOutput = File(File(repoJniLibs, abi), "libdsm_sdk.so")
+        if (repoOutput.exists()) return repoOutput
         return null
     }
 
     // Declare cargo target .so files as inputs so Gradle detects rebuilds
-    abiToTriple.values.forEach { triple ->
-        val so = resolveSo(triple)
+    abiToTriple.forEach { (abi, triple) ->
+        val so = resolveSo(abi, triple)
         if (so != null) inputs.file(so)
     }
     outputs.dir(appJniLibs)
@@ -270,10 +275,10 @@ val refreshDsmJniLibs = tasks.register("refreshDsmJniLibs") {
         }
 
         abiToTriple.forEach { (abi, triple) ->
-            val src = resolveSo(triple)
+            val src = resolveSo(abi, triple)
             if (src == null) {
                 throw GradleException(
-                    "Missing Rust build output for $triple (checked release/ and debug/)\n" +
+                    "Missing Rust build output for $triple (checked release/, debug/, and jniLibs/)\n" +
                     "(hint: run cargo ndk build first)"
                 )
             }
@@ -281,17 +286,21 @@ val refreshDsmJniLibs = tasks.register("refreshDsmJniLibs") {
             // Copy to app-level jniLibs (what gets packaged)
             val appDst = File(File(appJniLibs, abi), "libdsm_sdk.so")
             appDst.parentFile.mkdirs()
-            src.copyTo(appDst, overwrite = true)
+            if (src.canonicalFile != appDst.canonicalFile) {
+                src.copyTo(appDst, overwrite = true)
+            }
 
             // Also sync repo-level jniLibs to keep it current
             val repoDst = File(File(repoJniLibs, abi), "libdsm_sdk.so")
             if (repoJniLibs.exists()) {
                 repoDst.parentFile.mkdirs()
-                src.copyTo(repoDst, overwrite = true)
+                if (src.canonicalFile != repoDst.canonicalFile) {
+                    src.copyTo(repoDst, overwrite = true)
+                }
             }
 
             val digest = sha256Hex(appDst)
-            logger.lifecycle("[DSM JNI] Refreshed $abi/libdsm_sdk.so from cargo target sha256=$digest")
+            logger.lifecycle("[DSM JNI] Refreshed $abi/libdsm_sdk.so from ${src.parentFile} sha256=$digest")
         }
     }
 }

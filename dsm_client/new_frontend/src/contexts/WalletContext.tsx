@@ -98,9 +98,6 @@ export const WalletProvider: React.FC<{ children: ReactNode }> = ({ children }) 
         console.warn('[WalletProvider] refreshTransactions failed:', error);
       }
     },
-    onImmediateSenderUpdate: (detail) => {
-      walletStore.applyImmediateSenderUpdate(detail);
-    },
     onIdentityReady: async () => {
       try {
         await walletStore.initialize();

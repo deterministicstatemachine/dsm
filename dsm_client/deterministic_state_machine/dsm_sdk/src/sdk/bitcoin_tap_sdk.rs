@@ -3784,23 +3784,34 @@ impl BitcoinTapSdk {
 
     pub(crate) async fn prepare_withdrawal_plan(
         &self,
-        requested_net_sats: u64,
+        requested_gross_sats: u64,
         destination_address: &str,
         planner_device_id: &[u8; 32],
     ) -> Result<WithdrawalPlan, DsmError> {
-        if requested_net_sats == 0 {
+        if requested_gross_sats == 0 {
             return Err(DsmError::invalid_operation(
                 "Withdrawal amount must be greater than 0",
             ));
         }
-        // Reject below min_exit_sats at plan time so the user sees a clear error
-        // before reviewing a route, rather than a cryptic failure at execute time.
+        // The user's input is the GROSS amount — the total dBTC to burn.
+        // Bitcoin network fee comes out of this amount: net = gross - fee.
+        // This matches user expectation: "I have X dBTC, withdraw it all."
         let params = DbtcParams::resolve();
+        let estimated_fee = estimated_full_withdrawal_fee_sats();
+        if requested_gross_sats <= estimated_fee {
+            return Err(DsmError::invalid_operation(format!(
+                "Withdrawal amount ({} sats) must exceed estimated Bitcoin network fee ({} sats)",
+                requested_gross_sats, estimated_fee,
+            )));
+        }
+        let requested_net_sats = requested_gross_sats.saturating_sub(estimated_fee);
         if requested_net_sats < params.min_exit_sats {
             return Err(DsmError::invalid_operation(format!(
-                "Withdrawal below minimum: {} sats requested, minimum is {} sats \
+                "Withdrawal below minimum after fee: {} sats net ({} gross - {} fee), minimum is {} sats \
                  (dust floor {} + estimated sweep fee {})",
                 requested_net_sats,
+                requested_gross_sats,
+                estimated_fee,
                 params.min_exit_sats,
                 params.dust_floor_sats,
                 params.estimated_sweep_fee_sats,

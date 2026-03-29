@@ -1767,6 +1767,34 @@ impl<I: Send + Sync> TokenSDK<I> {
         );
     }
 
+    pub fn discard_transfer_history_entry(
+        &self,
+        token_id: &str,
+        recipient_device_id: &[u8; 32],
+        amount: u64,
+        memo: Option<&str>,
+    ) -> bool {
+        let mut history = self.transaction_history.write();
+        if let Some(idx) = history.iter().rposition(|(op, _)| {
+            matches!(
+                op,
+                TokenOperation::Transfer {
+                    token_id: tid,
+                    recipient,
+                    amount: amt,
+                    memo: op_memo,
+                } if tid == token_id
+                    && recipient == recipient_device_id
+                    && *amt == amount
+                    && op_memo.as_deref() == memo
+            )
+        }) {
+            history.remove(idx);
+            return true;
+        }
+        false
+    }
+
     /// Reload the local in-memory balance cache from canonical state reads,
     /// re-materializing any missing derived projection rows along the way.
     pub fn reload_balance_cache_for_self(&self, device_id: DevId) -> Result<(), DsmError> {
@@ -1956,7 +1984,7 @@ impl<I: Send + Sync> TokenSDK<I> {
         token_id: String,
         recipient: [u8; 32],
         amount: u64,
-        _recipient_public_key: Vec<u8>,
+        recipient_public_key: Vec<u8>,
         memo: Option<String>,
         state_hash: Vec<u8>,
     ) -> Result<State, DsmError> {
@@ -1997,6 +2025,12 @@ impl<I: Send + Sync> TokenSDK<I> {
             ..Default::default()
         };
 
+        if recipient_public_key.is_empty() {
+            return Err(DsmError::invalid_parameter(
+                "recipient_public_key must be present for bilateral transfers",
+            ));
+        }
+
         let mut bilateral_transfer_op = Operation::Transfer {
             token_id: token_id.as_bytes().to_vec(),
             to_device_id: recipient.to_vec(),
@@ -2005,7 +2039,7 @@ impl<I: Send + Sync> TokenSDK<I> {
                 state_hash.clone().try_into().unwrap_or([0u8; 32]),
                 current_state.state_number,
             ),
-            recipient: recipient.to_vec(),
+            recipient: recipient_public_key,
             message: memo.clone().unwrap_or_else(|| {
                 format!(
                     "Bilateral transfer of {amount} tokens to {}",
@@ -2797,12 +2831,15 @@ impl<I: Send + Sync> TokenSDK<I> {
         };
 
         let current_state = self.core_sdk.get_current_state()?;
-        let state_hash = current_state.hash;
         let sender = current_state.device_info.device_id;
 
         log::debug!("[TOKEN] execute_transfer_op: calling core_sdk.execute_dsm_operation...");
         let new_state = self.core_sdk.execute_dsm_operation(op)?;
         log::debug!("[TOKEN] execute_transfer_op: execute_dsm_operation OK");
+
+        // Anchor balance cache entries to the POST-transition state (not pre-transition).
+        let state_hash = new_state.hash;
+        let state_number = new_state.state_number;
 
         // Update balances cache (same logic as execute_signed_transfer)
         log::debug!("[TOKEN] execute_transfer_op: updating balances cache...");
@@ -2821,7 +2858,7 @@ impl<I: Send + Sync> TokenSDK<I> {
                     ));
                 }
                 *bal =
-                    Balance::from_state(cur - amount_val, state_hash, current_state.state_number);
+                    Balance::from_state(cur - amount_val, state_hash, state_number);
             } else {
                 let cur = current_balance.value();
                 if cur < amount_val {
@@ -2831,7 +2868,7 @@ impl<I: Send + Sync> TokenSDK<I> {
                 }
                 sender_balances.insert(
                     token_id.clone(),
-                    Balance::from_state(cur - amount_val, state_hash, current_state.state_number),
+                    Balance::from_state(cur - amount_val, state_hash, state_number),
                 );
             }
 
@@ -2844,10 +2881,10 @@ impl<I: Send + Sync> TokenSDK<I> {
                     .entry(token_id.clone())
                     .and_modify(|bal| {
                         let nv = bal.value() + amount_val;
-                        *bal = Balance::from_state(nv, state_hash, current_state.state_number);
+                        *bal = Balance::from_state(nv, state_hash, state_number);
                     })
                     .or_insert_with(|| {
-                        Balance::from_state(amount_val, state_hash, current_state.state_number)
+                        Balance::from_state(amount_val, state_hash, state_number)
                     });
             }
         }

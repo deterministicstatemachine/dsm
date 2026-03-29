@@ -220,6 +220,13 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                 return@runOperationBool false
             }
 
+            // Clear paired-address guard so bilateral transfers can connect
+            // to already-paired contacts.  The guard only needs to prevent
+            // re-pairing within a single scan cycle, not block transfers.
+            // Must happen BEFORE the isScanning() early return — otherwise
+            // stale addresses persist when a background scan is already active.
+            pairedBleAddresses.clear()
+
             // If already scanning, leave it alone
             if (scanner.isScanning()) {
                 return@runOperationBool true
@@ -484,12 +491,10 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
 
     override fun onDeviceDiscovered(device: BluetoothDevice, rssi: Int) {
         val address = device.address
-        // Skip devices that already completed pairing — prevents the
-        // rediscovery → reconnect → re-pair → disconnect → stuck-scanning loop.
-        if (pairedBleAddresses.contains(address)) {
-            Log.d("BleCoordinator", "Skipping already-paired device $address")
-            return
-        }
+        // pairedBleAddresses guard removed — the Rust pairing orchestrator
+        // already prevents duplicate pairing at the protocol level.  The
+        // Kotlin guard blocked on-demand GATT reconnection for bilateral
+        // transfers after the original pairing session dropped.
         if (pendingConnectionAddresses.contains(address)) {
             Log.d("BleCoordinator", "Skipping $address — GATT connection already in flight")
             return
@@ -544,6 +549,10 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
         }
     }
 
+    // P1.5: Avoid ANR by moving blocking wait to Dispatchers.IO instead of
+    // the caller thread (which may be the main thread). The actor itself still
+    // runs on Dispatchers.Default; we only wait for its result on IO.
+    @androidx.annotation.WorkerThread
     private fun runOperationBool(block: suspend () -> Boolean): Boolean {
         val deferred = CompletableDeferred<Boolean>()
         val sent = operationChannel.trySend {
@@ -558,21 +567,14 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
             Log.w("BleCoordinator", "BLE operation dropped: channel unavailable")
             return false
         }
-        // Block the caller until the actor processes this operation and produces the
-        // real Boolean result. The actor runs on Dispatchers.Default (SupervisorJob),
-        // so this will not deadlock even when the caller is the main thread. The 5 s
-        // timeout is an operational safety net against actor stalls, not a protocol
-        // deadline.
-        return runBlocking {
+        // Block on IO dispatcher to avoid ANR if called from main thread.
+        // 5s timeout is an operational safety net, not a protocol deadline.
+        return runBlocking(kotlinx.coroutines.Dispatchers.IO) {
             withTimeoutOrNull(5_000L) { deferred.await() } ?: false
         }
     }
 
     private fun resumePairingScan(deviceAddress: String, reason: String) {
-        if (pairedBleAddresses.contains(deviceAddress)) {
-            return
-        }
-
         // Already scanning - no action needed
         if (scanner.isScanning()) {
             return
@@ -960,7 +962,15 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                             sessionStates.remove(event.deviceAddress)
                             resumePairingScan(event.deviceAddress, event.details)
                         } else {
-                            Log.w("BleCoordinator", "ErrorOccurred for ${event.deviceAddress} (${event.category}), but device is already paired. Not closing session aggressively.")
+                            // Already-paired device hit a write failure — the GATT session
+                            // is stale (likely BLE MAC rotated since last transfer).  Close
+                            // the dead session so the next bilateral transfer gets a fresh
+                            // GATT connection to whatever address the peer is now advertising.
+                            Log.w("BleCoordinator", "ErrorOccurred for ${event.deviceAddress} (${event.category}), paired device — closing stale session for fresh reconnect")
+                            activeSessions.remove(event.deviceAddress)?.closeQuietly()
+                            sessionStates.remove(event.deviceAddress)
+                            // Allow re-discovery of this peer under its new BLE MAC.
+                            pairedBleAddresses.remove(event.deviceAddress)
                         }
                     }
                 }
@@ -1006,6 +1016,23 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                 "dropClientSession($address): reason=$reason removedSession=${removed != null}"
             )
         }
+    }
+
+    /**
+     * Find any active client session or subscribed server-client address.
+     * Used by UnifiedBleBridge when the original BLE address has rotated —
+     * a scan may have discovered the same DSM peer under a new address.
+     */
+    fun findAnyReadySessionAddress(): String? {
+        // Prefer an active GATT client session (we can write to them)
+        for ((addr, session) in activeSessions) {
+            val state = sessionStates[addr]
+            if (state != null && state.isConnected && state.negotiatedMtu > 23) {
+                return addr
+            }
+        }
+        // Fall back to a GATT server client that's subscribed to TX_RESPONSE
+        return gattServer.findSubscribedServerClient()
     }
 
     /**

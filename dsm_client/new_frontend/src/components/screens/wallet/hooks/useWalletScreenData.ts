@@ -68,6 +68,13 @@ export function useWalletScreenData(activeTab: string): WalletScreenData {
       setGenesisB32(id.genesisHash);
       setDeviceB32(id.deviceId);
 
+      // Inbox sync is handled by the background poller (inbox_poller.rs).
+      // Do NOT call syncWithStorage here — it blocks the Kotlin bridge thread
+      // for 2-3 minutes while polling 6 storage nodes, which prevents ALL
+      // other bridge calls (balance.list, wallet.history) from completing.
+      // When the poller finds new transfers, it emits inbox.updated which
+      // triggers a wallet.refresh via useWalletRefreshListener.
+
       try {
         const list = await dsmClient.getContacts();
         const normalized: DomainContact[] = list.contacts.map((c) => {
@@ -142,6 +149,7 @@ export function useWalletScreenData(activeTab: string): WalletScreenData {
         setLoading(false);
       }
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const loadWalletData = useCallback(async () => {
@@ -178,6 +186,19 @@ export function useWalletScreenData(activeTab: string): WalletScreenData {
     const unsub = bridgeEvents.on('bilateral.transferComplete', () => {
       logger.debug('[useWalletScreenData] bilateral.transferComplete -> reloading wallet data');
       void loadWalletData();
+    });
+    return unsub;
+  }, [loadWalletData]);
+
+  // Reload when inbox sync applies new transfers (online receive path).
+  // storage.sync → apply_operation → inbox.updated event → reload balances.
+  useEffect(() => {
+    const unsub = bridgeEvents.on('inbox.updated', (detail) => {
+      const newItems = typeof detail?.newItems === 'number' ? detail.newItems : 0;
+      if (newItems > 0) {
+        logger.debug(`[useWalletScreenData] inbox.updated (${newItems} new) -> reloading wallet data`);
+        void loadWalletData();
+      }
     });
     return unsub;
   }, [loadWalletData]);

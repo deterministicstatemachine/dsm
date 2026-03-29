@@ -11,6 +11,7 @@ use crate::bluetooth::bilateral_ble_handler::{
 };
 use crate::sdk::token_state::{self, canonicalize_token_id, TransferFields};
 use crate::sdk::transfer_hooks::TransferMeta;
+use crate::storage::client_db::BalanceProjectionRecord;
 use crate::util::text_id::encode_base32_crockford;
 use dsm::types::operations::Operation;
 use dsm::types::state_types::State;
@@ -76,126 +77,26 @@ fn resolve_policy_commit(token_id: &str) -> Result<[u8; 32], String> {
     .map_err(|e| format!("resolve policy commit failed for {token_id}: {e}"))
 }
 
-/// Check whether a transaction with the given commitment hash has already been
-/// settled (status = "completed").  Used as a replay guard for bilateral
-/// balance application — the DB-level `ON CONFLICT(tx_id)` upsert handles
-/// storage-layer idempotency, but we need to avoid double-applying balance
-/// deltas in `build_canonical_settled_state`.
-fn is_already_settled(commitment_hash: &[u8; 32]) -> bool {
-    let tx_id = encode_base32_crockford(commitment_hash);
-    crate::storage::client_db::get_transaction_history(None, Some(500))
-        .ok()
-        .map(|txs| {
-            txs.iter()
-                .any(|tx| tx.tx_id == tx_id && tx.status == "completed")
-        })
-        .unwrap_or(false)
-}
-
-fn reconcile_sender_state(
-    prior_state: &State,
-    _base_state: &State,
-    transfer: &TransferFields,
-    policy_commit: &[u8; 32],
-) -> Result<State, String> {
-    let token_id = if transfer.token_id.is_empty() {
-        "ERA"
-    } else {
-        transfer.token_id.as_str()
-    };
-    let recipient_owner = if transfer.recipient.is_empty() {
-        transfer.to_device_id.as_slice()
-    } else {
-        transfer.recipient.as_slice()
-    };
-
-    // Clone the device canonical state and apply the bilateral delta.
-    // prior_state IS the device canonical state (correct device_id, public_key, balances).
-    let mut settled_state = prior_state.clone();
-
-    token_state::apply_transfer_debit_credit(
-        &mut settled_state.token_balances,
-        policy_commit,
-        &prior_state.device_info.public_key,
-        recipient_owner,
-        token_id,
-        transfer.amount,
-        prior_state.hash,
-        prior_state.state_number,
-    )?;
-
-    // Caller (build_canonical_settled_state) handles state_number bump and hash recompute.
-    Ok(settled_state)
-}
-
-fn reconcile_receiver_state(
-    prior_state: &State,
-    _base_state: &State,
-    transfer: &TransferFields,
-    policy_commit: &[u8; 32],
-) -> Result<State, String> {
-    let token_id = if transfer.token_id.is_empty() {
-        "ERA"
-    } else {
-        transfer.token_id.as_str()
-    };
-
-    // Clone the device canonical state and apply the bilateral credit.
-    let mut settled_state = prior_state.clone();
-
-    token_state::apply_transfer_credit(
-        &mut settled_state.token_balances,
-        policy_commit,
-        &prior_state.device_info.public_key,
-        token_id,
-        transfer.amount,
-        prior_state.hash,
-        prior_state.state_number,
-    )?;
-
-    // Caller handles state_number bump and hash recompute.
-    Ok(settled_state)
-}
-
-/// Build the canonical settled state by applying the bilateral transfer delta
-/// to the device's canonical state.
+/// Build the canonical settled state from the caller-provided canonical state.
 ///
-/// The device's canonical state (`ctx.device_canonical_state`) is the single
-/// source of truth for token balances (B_n).  This function applies Δ_{n+1}
-/// from the bilateral operation, increments the device state_number, and
-/// recomputes the hash.  The result is the next canonical device state.
-///
-/// This replaces the old `latest_archived_state()` approach which mined a BCR
-/// archive mixing faucet/mint/bilateral states under one state_number space —
-/// violating the spec's per-relationship chain model (§2.1, §4.3).
+/// `ctx.canonical_state` is treated as the authoritative post-transition state
+/// emitted by the state machine. Settlement must not re-apply token deltas.
 fn build_canonical_settled_state(
     ctx: &BilateralSettlementContext,
-) -> Result<Option<State>, String> {
-    // The device's canonical state is the authoritative balance source.
-    let device_state = match ctx.device_canonical_state.as_ref() {
+) -> Result<(Option<State>, Option<BalanceProjectionRecord>), String> {
+    let canonical_state = match ctx.canonical_state.as_ref() {
         Some(s) => s,
         None => {
-            // No device state available (e.g. tests, early bootstrap).
-            // Fall through to canonical_state if present.
-            return Ok(ctx.canonical_state.clone());
+            return Err(
+                "missing canonical_state for settlement (strict fail-closed path)".to_string(),
+            )
         }
     };
 
     let transfer = match parse_transfer(&ctx.operation_bytes) {
         Some(t) if t.amount > 0 => t,
-        _ => return Ok(Some(device_state.clone())),
+        _ => return Ok((Some(canonical_state.clone()), None)),
     };
-
-    // Replay guard: if this commitment_hash was already settled, return the
-    // current device state without re-applying the delta.  This replaces the
-    // old (broken) state_number comparison guard.
-    if is_already_settled(&ctx.commitment_hash) {
-        log::info!(
-            "[BILATERAL][settle] duplicate settlement skipped for commitment={}",
-            encode_base32_crockford(&ctx.commitment_hash),
-        );
-        return Ok(Some(device_state.clone()));
-    }
 
     let token_for_policy = if transfer.token_id.is_empty() {
         "ERA"
@@ -204,36 +105,81 @@ fn build_canonical_settled_state(
     };
     let policy_commit = resolve_policy_commit(token_for_policy)?;
 
-    // Apply Δ_{n+1} to B_n from the device's canonical state.
-    // Both prior_state and base_state are the device state:
-    //   prior_state → token_balances source (B_n), public_key for key derivation
-    //   base_state  → skeleton (correct device_id, state_number)
-    let mut settled_state = if ctx.is_sender {
-        reconcile_sender_state(device_state, device_state, &transfer, &policy_commit)?
-    } else {
-        reconcile_receiver_state(device_state, device_state, &transfer, &policy_commit)?
-    };
+    // Bilateral settlement uses a SEPARATE state machine (BTM) for the relationship
+    // chain. The device's canonical_state (from app_router) does NOT have the transfer
+    // delta applied — only the BTM relationship state does. We must apply the delta here.
+    let mut settled_state = canonical_state.clone();
 
-    // Advance the device's state_number and recompute hash.
-    settled_state.state_number = device_state.state_number + 1;
+    if ctx.is_sender {
+        let token_id = if transfer.token_id.is_empty() {
+            "ERA"
+        } else {
+            transfer.token_id.as_str()
+        };
+        if let Some(recipient_owner) = token_state::canonical_transfer_recipient_owner(
+            transfer.recipient.as_slice(),
+            transfer.to_device_id.as_slice(),
+        ) {
+            token_state::apply_transfer_debit_credit(
+                &mut settled_state.token_balances,
+                &policy_commit,
+                &canonical_state.device_info.public_key,
+                recipient_owner,
+                token_id,
+                transfer.amount,
+                canonical_state.hash,
+                canonical_state.state_number,
+            )?;
+        } else {
+            token_state::apply_transfer_debit(
+                &mut settled_state.token_balances,
+                &policy_commit,
+                &canonical_state.device_info.public_key,
+                token_id,
+                transfer.amount,
+                canonical_state.hash,
+                canonical_state.state_number,
+            )?;
+        }
+    } else {
+        let token_id = if transfer.token_id.is_empty() {
+            "ERA"
+        } else {
+            transfer.token_id.as_str()
+        };
+
+        token_state::apply_transfer_credit(
+            &mut settled_state.token_balances,
+            &policy_commit,
+            &canonical_state.device_info.public_key,
+            token_id,
+            transfer.amount,
+            canonical_state.hash,
+            canonical_state.state_number,
+        )?;
+    }
+
+    // Advance device state_number for the settled state.
+    settled_state.state_number = canonical_state.state_number + 1;
+
     settled_state.hash = settled_state
         .compute_hash()
-        .map_err(|e| format!("settled-state hash recompute failed: {e}"))?;
+        .map_err(|e| format!("settlement hash recompute failed: {e}"))?;
 
     // Sync balance projection so balance.list reflects the updated balance.
     let local_txt = encode_base32_crockford(&ctx.local_device_id);
     let locked = crate::storage::client_db::get_locked_balance(&local_txt, token_for_policy)
         .map_err(|e| format!("read locked balance failed: {e}"))?;
-    crate::storage::client_db::sync_token_projection_from_state(
+    let projection = crate::storage::client_db::build_balance_projection_from_state(
         &local_txt,
         token_for_policy,
         &policy_commit,
         &settled_state,
         locked,
     )
-    .map_err(|e| format!("sync balance projection failed: {e}"))?;
+    .map_err(|e| format!("build balance projection failed: {e}"))?;
 
-    Ok(Some(settled_state))
+    Ok((Some(settled_state), Some(projection)))
 }
 
 /// Application-layer implementation of [`BilateralSettlementDelegate`].
@@ -262,9 +208,55 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
         &self,
         ctx: BilateralSettlementContext,
     ) -> Result<BilateralSettlementOutcome, String> {
+
+        // §8 Atomicity + Theorem 3: the same accepted transition must not
+        // debit or credit twice.  The tx_id is derived from commitment_hash
+        // which is identical for both parties.  In production each device has
+        // its own DB so collisions are impossible; but in single-process tests
+        // both roles share one DB.  Scope the guard to the local device so
+        // the sender's completed record does not block the receiver.
+        let local_txt = encode_base32_crockford(&ctx.local_device_id);
+        let tx_id_candidate =
+            crate::util::text_id::encode_base32_crockford(&ctx.commitment_hash);
+        // Sender-only idempotency: prevent double-debit if the sender's
+        // settlement is retried.  The receiver side is naturally idempotent
+        // via the atomic chain-tip CAS in apply_receiver_confirm_bundle_atomic
+        // (the UPDATE contacts SET chain_tip = ?1 WHERE device_id = ?3 only
+        // succeeds once for the same tip value).  In production each device
+        // has its own DB so a bare tx_id check suffices for senders.
+        if ctx.is_sender
+            && crate::storage::client_db::is_settlement_completed(&tx_id_candidate)
+        {
+            log::warn!(
+                "[BILATERAL][settle] Idempotency guard: sender settlement already completed for {}",
+                tx_id_candidate,
+            );
+            return Ok(BilateralSettlementOutcome::default());
+        }
+
         let (transfer_amount, token_id_opt) = parse_transfer_fields(&ctx.operation_bytes);
         let token_id_str = token_id_opt.clone().unwrap_or_default();
-        let canonical_state = build_canonical_settled_state(&ctx)?;
+        
+        // (§2.3.1) Recovery-path settlements are allowed to have None proof_data
+        // (BLE GATT failure scenario where receipt delivery failed).
+        // Sender must always have proof_data (receipt from its own SMT-Replace).
+        // Receiver receipt is speculative — built for archival, not a settlement
+        // precondition.  Blocking receiver settlement on receipt construction
+        // silently drops balance + history when AppState is not yet populated.
+        let is_recovery = ctx.tx_type == "bilateral_offline_recovered";
+        if transfer_amount > 0 && !is_recovery && ctx.is_sender {
+            let has_proof = ctx
+                .proof_data
+                .as_ref()
+                .is_some_and(|proof| !proof.is_empty());
+            if !has_proof {
+                return Err(
+                    "missing proof_data for bilateral transfer settlement (strict fail-closed path)"
+                        .to_string(),
+                );
+            }
+        }
+        let (canonical_state, projection) = build_canonical_settled_state(&ctx)?;
 
         // Log the canonical state for debugging
         match &canonical_state {
@@ -286,18 +278,6 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
             }
         }
 
-        // Archive the settled state to BCR so balance.list reflects the updated balances
-        if let Some(ref settled_state) = canonical_state {
-            crate::storage::client_db::store_bcr_state(settled_state, true)
-                .map_err(|e| format!("archive settled state failed: {e}"))?;
-            log::info!(
-                "[BILATERAL][settle] archived settled state hash={} state_number={}",
-                encode_base32_crockford(&settled_state.hash),
-                settled_state.state_number
-            );
-        }
-
-        let local_txt = encode_base32_crockford(&ctx.local_device_id);
         let counterparty_txt = encode_base32_crockford(&ctx.counterparty_device_id);
         let (from_txt, to_txt) = if ctx.is_sender {
             (local_txt.clone(), counterparty_txt.clone())
@@ -313,7 +293,7 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
             amount: transfer_amount,
             tx_type: ctx.tx_type.to_string(),
             status: "completed".to_string(),
-            chain_height: ctx.chain_height,
+            chain_height: canonical_state.as_ref().map_or(0, |s| s.state_number),
             step_index: crate::util::deterministic_time::tick(),
             commitment_hash: Some(encode_base32_crockford(&ctx.commitment_hash).into_bytes()),
             proof_data: ctx.proof_data,
@@ -338,11 +318,13 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
         if ctx.is_sender {
             if transfer_amount > 0 {
                 let debit_result =
-                    crate::storage::client_db::apply_sender_settlement_and_store_transaction_atomic(
+                    crate::storage::client_db::apply_sender_settlement_bundle_atomic(
                         &local_txt,
                         token_for_atomic,
                         transfer_amount,
                         &tx_record,
+                        canonical_state.as_ref(),
+                        projection.as_ref(),
                     );
 
                 if let Err(e) = &debit_result {
@@ -359,15 +341,18 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
             }
         } else {
             // Receiver: persist chain tip + transaction history atomically.
-            let confirm_result =
-                crate::storage::client_db::apply_receiver_confirm_and_store_transaction_atomic(
-                    &ctx.counterparty_device_id,
-                    &ctx.new_chain_tip,
-                    &local_txt,
-                    token_for_atomic,
-                    transfer_amount,
-                    &tx_record,
-                );
+            let confirm_result = crate::storage::client_db::apply_receiver_confirm_bundle_atomic(
+                crate::storage::client_db::ReceiverConfirmBundle {
+                    counterparty_device_id: &ctx.counterparty_device_id,
+                    new_chain_tip: &ctx.new_chain_tip,
+                    receiver_device_id: &local_txt,
+                    token_id: token_for_atomic,
+                    amount: transfer_amount,
+                    tx: &tx_record,
+                    settled_state: canonical_state.as_ref(),
+                    projection: projection.as_ref(),
+                },
+            );
 
             if let Err(e) = &confirm_result {
                 error!(
@@ -397,35 +382,10 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_transfer_fields, reconcile_receiver_state, reconcile_sender_state};
-    use crate::sdk::token_state::{canonicalize_token_id, TransferFields};
+    use super::parse_transfer_fields;
+    use crate::sdk::token_state::canonicalize_token_id;
     use dsm::types::operations::{Operation, TransactionMode, VerificationType};
-    use dsm::types::state_builder::StateBuilder;
-    use dsm::types::state_types::{DeviceInfo, State};
     use dsm::types::token_types::Balance;
-    use std::collections::HashMap;
-
-    fn make_state(device_id: [u8; 32], public_key: Vec<u8>, state_number: u64) -> State {
-        StateBuilder::new()
-            .with_id(format!("state_{state_number}"))
-            .with_state_number(state_number)
-            .with_entropy(vec![state_number as u8; 32])
-            .with_prev_state_hash([state_number.saturating_sub(1) as u8; 32])
-            .with_operation(Operation::Generic {
-                operation_type: b"test".to_vec(),
-                data: vec![],
-                message: String::new(),
-                signature: vec![],
-            })
-            .with_device_info(DeviceInfo {
-                device_id,
-                public_key,
-                metadata: Vec::new(),
-            })
-            .with_token_balances(HashMap::new())
-            .build()
-            .expect("state should build")
-    }
 
     #[test]
     fn canonicalize_token_id_normalizes_dbtc() {
@@ -456,81 +416,23 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_sender_state_debits_local_and_credits_recipient() {
-        let policy_commit = *crate::policy::builtins::NATIVE_POLICY_COMMIT;
-        let sender_pk = vec![0x21; 32];
-        let recipient = vec![0x42; 32];
-        // In the new model, prior_state IS the device canonical state.
-        // base_state is unused (reconcile clones from prior_state).
-        let mut device_state = make_state([0x11; 32], sender_pk.clone(), 7);
-        let base = make_state([0x11; 32], sender_pk.clone(), 8);
+    fn parse_transfer_preserves_public_key_recipient_bytes() {
+        let recipient_owner = vec![0x42; 64];
+        let op = Operation::Transfer {
+            to_device_id: vec![0x11; 32],
+            amount: Balance::from_state(7, [0u8; 32], 0),
+            token_id: b"ERA".to_vec(),
+            mode: TransactionMode::Bilateral,
+            nonce: vec![],
+            verification: VerificationType::Bilateral,
+            pre_commit: None,
+            recipient: recipient_owner.clone(),
+            to: b"recipient".to_vec(),
+            message: "memo".to_string(),
+            signature: vec![],
+        };
 
-        let sender_key =
-            dsm::core::token::derive_canonical_balance_key(&policy_commit, &sender_pk, "ERA");
-        let recipient_key =
-            dsm::core::token::derive_canonical_balance_key(&policy_commit, &recipient, "ERA");
-        device_state.token_balances.insert(
-            sender_key.clone(),
-            Balance::from_state(10, device_state.hash, device_state.state_number),
-        );
-
-        let settled = reconcile_sender_state(
-            &device_state,
-            &base,
-            &TransferFields {
-                amount: 4,
-                token_id: "ERA".to_string(),
-                recipient: recipient.clone(),
-                to_device_id: recipient.clone(),
-            },
-            &policy_commit,
-        )
-        .expect("sender settlement should succeed");
-
-        // Reconcile clones from prior_state (device_state at sn=7).
-        // Caller (build_canonical_settled_state) bumps to sn=8.
-        assert_eq!(settled.state_number, 7);
-        assert_eq!(
-            settled.token_balances.get(&sender_key).map(Balance::value),
-            Some(6)
-        );
-        assert_eq!(
-            settled
-                .token_balances
-                .get(&recipient_key)
-                .map(Balance::value),
-            Some(4)
-        );
-    }
-
-    #[test]
-    fn reconcile_receiver_state_credits_local_owner() {
-        let policy_commit = *crate::policy::builtins::NATIVE_POLICY_COMMIT;
-        let receiver_pk = vec![0x33; 32];
-        let device_state = make_state([0x22; 32], receiver_pk.clone(), 3);
-        let base = make_state([0x22; 32], receiver_pk.clone(), 4);
-        let local_key =
-            dsm::core::token::derive_canonical_balance_key(&policy_commit, &receiver_pk, "ERA");
-
-        let settled = reconcile_receiver_state(
-            &device_state,
-            &base,
-            &TransferFields {
-                amount: 7,
-                token_id: "ERA".to_string(),
-                recipient: vec![0x44; 32],
-                to_device_id: vec![0x22; 32],
-            },
-            &policy_commit,
-        )
-        .expect("receiver settlement should succeed");
-
-        // Reconcile clones from prior_state (device_state at sn=3).
-        // Caller bumps to sn=4.
-        assert_eq!(settled.state_number, 3);
-        assert_eq!(
-            settled.token_balances.get(&local_key).map(Balance::value),
-            Some(7)
-        );
+        let parsed = super::parse_transfer(&op.to_bytes()).expect("transfer should parse");
+        assert_eq!(parsed.recipient, recipient_owner);
     }
 }

@@ -226,6 +226,9 @@ pub enum FrameIngressResult {
 }
 
 /// Reassembly buffer for multi-chunk frames.
+///
+/// Transport-only timing: `created_at` is used for idle expiry and stale-session
+/// recovery (rules.instructions.md §36). It never enters protocol semantics.
 #[derive(Debug)]
 pub struct ReassemblyBuffer {
     pub frame_commitment: [u8; 32],
@@ -233,6 +236,9 @@ pub struct ReassemblyBuffer {
     pub total_chunks: u16,
     pub received_chunks: HashMap<u16, BleChunkMeta>,
     pub expected_size: u32,
+    /// Transport-only: wall-clock instant when this buffer was created.
+    /// Used for reassembly timeout enforcement and LRU eviction.
+    pub created_at: Instant,
 }
 
 impl ReassemblyBuffer {
@@ -244,6 +250,7 @@ impl ReassemblyBuffer {
             total_chunks: header.total_chunks as u16,
             received_chunks: HashMap::new(),
             expected_size: header.payload_len,
+            created_at: Instant::now(),
         }
     }
 
@@ -255,6 +262,8 @@ impl ReassemblyBuffer {
         self.received_chunks.len() == self.total_chunks as usize
     }
 
+    /// Reassemble all chunks into the original payload, then verify frame-level
+    /// BLAKE3 integrity against `frame_commitment`.
     pub fn reassemble(self) -> Result<Vec<u8>, DsmError> {
         let mut result = Vec::with_capacity(self.expected_size as usize);
         for i in 0..self.total_chunks {
@@ -267,6 +276,23 @@ impl ReassemblyBuffer {
         if result.len() != self.expected_size as usize {
             return Err(DsmError::invalid_operation("reassembled size mismatch"));
         }
+
+        // P0.2: Frame-level BLAKE3 integrity check.
+        // Recompute content_addressed_frame_commitment over the full reassembled
+        // payload and compare against the commitment carried in chunk headers.
+        // Catches: SQLite corruption, mis-ordered cross-frame chunks, partial overwrites.
+        let recomputed = BleFrameCoordinator::content_addressed_frame_commitment(
+            self.frame_type as i32,
+            &result,
+        );
+        if recomputed != self.frame_commitment {
+            return Err(DsmError::invalid_operation(format!(
+                "frame integrity check failed: expected {}, got {}",
+                short_id(&self.frame_commitment[..8]),
+                short_id(&recomputed[..8])
+            )));
+        }
+
         Ok(result)
     }
 }
@@ -580,6 +606,40 @@ impl BleFrameCoordinator {
 
         let mut buffers = self.pending_reassembly.lock().await;
 
+        // P0.1: Sweep expired reassembly buffers before processing new chunk.
+        // Transport-only timing (rules.instructions.md §36: "idle expiry, stale-session recovery").
+        // Timeout scales with frame size: large bilateral confirm envelopes
+        // (262 chunks / 47KB) need more time over BLE than small frames.
+        let now = Instant::now();
+        let expired: Vec<[u8; 32]> = buffers
+            .iter()
+            .filter(|(_, buf)| {
+                let timeout = match buf.total_chunks {
+                    0..=10 => Duration::from_secs(10),
+                    11..=100 => Duration::from_secs(30),
+                    _ => Duration::from_secs(60),
+                };
+                now.duration_since(buf.created_at) > timeout
+            })
+            .map(|(k, buf)| {
+                warn!(
+                    "BLE reassembly timeout: frame {} expired ({}/{} chunks received)",
+                    short_id(&k[..8]),
+                    buf.received_chunks.len(),
+                    buf.total_chunks
+                );
+                *k
+            })
+            .collect();
+        for key in &expired {
+            // Evict in-memory buffer to free RAM, but preserve persisted
+            // chunks in SQLite. When the next chunk arrives for this frame,
+            // auto-hydration (line 635) will reload them and resume
+            // reassembly. Persisted chunks are cleaned up after successful
+            // reassembly (line 734) or by the periodic stale-frame sweep.
+            buffers.remove(key);
+        }
+
         if !buffers.contains_key(&frame_commitment) {
             // Try hydrating from SQLite before creating a fresh buffer.
             // This is the auto-resume path: if we have persisted chunks from
@@ -587,10 +647,23 @@ impl BleFrameCoordinator {
             let persisted = crate::storage::client_db::load_persisted_chunks(&frame_commitment)
                 .unwrap_or_default();
 
+            // P1.4: LRU eviction — evict the oldest buffer by created_at, not arbitrary insertion order.
             if buffers.len() >= MAX_PENDING_REASSEMBLY {
-                warn!("BLE reassembly buffer full; dropping oldest entry");
-                if let Some(key_to_remove) = buffers.keys().next().cloned() {
-                    buffers.remove(&key_to_remove);
+                if let Some(oldest_key) = buffers
+                    .iter()
+                    .min_by_key(|(_, buf)| buf.created_at)
+                    .map(|(k, buf)| {
+                        warn!(
+                            "BLE reassembly buffer full; evicting oldest frame {} ({}/{} chunks)",
+                            short_id(&k[..8]),
+                            buf.received_chunks.len(),
+                            buf.total_chunks
+                        );
+                        *k
+                    })
+                {
+                    buffers.remove(&oldest_key);
+                    let _ = crate::storage::client_db::delete_frame_chunks(&oldest_key);
                 }
             }
 
@@ -602,6 +675,24 @@ impl BleFrameCoordinator {
                     short_id(&frame_commitment[..8])
                 );
                 for pc in persisted {
+                    // P0.3: Revalidate checksum on hydration — catch SQLite corruption.
+                    let recomputed = Self::checksum32(&pc.chunk_data);
+                    if recomputed != pc.checksum {
+                        warn!(
+                            "Hydration checksum mismatch for frame {} chunk {} (expected {}, got {}) — skipping corrupt chunk",
+                            short_id(&frame_commitment[..8]),
+                            pc.chunk_index,
+                            pc.checksum,
+                            recomputed
+                        );
+                        // Delete corrupt chunk from SQLite so it gets retransmitted
+                        let _ = crate::storage::client_db::delete_single_chunk(
+                            &frame_commitment,
+                            pc.chunk_index,
+                        );
+                        continue;
+                    }
+
                     // Reconstruct minimal header from persisted fields
                     let restored_header = BleFrameHeader {
                         frame_type: pc.frame_type,
@@ -713,6 +804,8 @@ mod tests {
         rt.block_on(async {
             // Create a chunk with a modern frame type
             let modern_payload = vec![5, 6, 7, 8]; // Some dummy payload
+            let normalized_frame_type =
+                BleFrameType::try_from(200).unwrap_or(BleFrameType::Unspecified);
 
             // Create BleChunk with header
             let header = crate::generated::BleFrameHeader {
@@ -722,7 +815,7 @@ mod tests {
                 payload_len: modern_payload.len() as u32,
                 checksum: BleFrameCoordinator::checksum32(&modern_payload),
                 frame_commitment: BleFrameCoordinator::content_addressed_frame_commitment(
-                    200,
+                    normalized_frame_type as i32,
                     &modern_payload,
                 )
                 .to_vec(),

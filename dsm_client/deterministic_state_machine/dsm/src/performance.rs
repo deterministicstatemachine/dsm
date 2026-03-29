@@ -442,7 +442,6 @@ pub mod io_ops {
 pub mod cache {
     use lru::LruCache;
     use std::hash::Hash;
-    use std::num::NonZeroUsize;
     use std::sync::Mutex;
 
     /// Thread-safe LRU cache
@@ -457,10 +456,8 @@ pub mod cache {
     {
         /// Create a new cache with the given capacity
         pub fn new(capacity: usize) -> Self {
-            // capacity.max(1) guarantees non-zero; use unwrap_or with 1 to satisfy lint
-            let nz_cap = NonZeroUsize::new(capacity.max(1)).unwrap_or(NonZeroUsize::MIN);
             Self {
-                cache: Mutex::new(LruCache::new(nz_cap)),
+                cache: Mutex::new(LruCache::new(capacity)),
             }
         }
 
@@ -489,7 +486,7 @@ pub mod cache {
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            (cache.len(), cache.cap().into())
+            (cache.len(), cache.cap())
         }
     }
 }

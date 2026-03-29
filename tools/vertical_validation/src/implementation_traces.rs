@@ -208,8 +208,9 @@ fn trace_state_machine_transfer_chain(
     let mut failures = Vec::new();
 
     let mut state = create_test_state(seed_bytes, pk);
+    let sender_key = builtin_balance_key(pk, "ERA");
     state.token_balances.insert(
-        "ERA".into(),
+        sender_key,
         Balance::from_state(100, state.hash, state.state_number),
     );
 
@@ -262,8 +263,9 @@ fn trace_state_machine_signature_rejection(
     let mut failures = Vec::new();
 
     let mut state = create_test_state(seed_bytes, pk);
+    let sender_key = builtin_balance_key(pk, "ERA");
     state.token_balances.insert(
-        "ERA".into(),
+        sender_key,
         Balance::from_state(100, state.hash, state.state_number),
     );
 
@@ -310,8 +312,9 @@ fn trace_state_machine_fork_divergence(
     let mut failures = Vec::new();
 
     let mut state = create_test_state(seed_bytes, pk);
+    let sender_key = builtin_balance_key(pk, "ERA");
     state.token_balances.insert(
-        "ERA".into(),
+        sender_key,
         Balance::from_state(100, state.hash, state.state_number),
     );
     let prev_hash = state.hash().expect("fork parent hash");
@@ -1125,7 +1128,7 @@ fn trace_receipt_verifier_tripwire(
     );
 
     let ctx = ReceiptVerificationContext::new(
-        device_tree_root,
+        dsm::types::receipt_types::DeviceTreeAcceptanceCommitment::from_root(device_tree_root),
         receipt_a.parent_root,
         keypair_a.public_key.clone(),
         Vec::new(),
@@ -1969,6 +1972,11 @@ fn create_test_state(seed_bytes: &[u8; 32], pk: &[u8]) -> State {
         state.hash = hash;
     }
     state
+}
+fn builtin_balance_key(owner_pk: &[u8], token_id: &str) -> String {
+    let policy_commit = dsm::core::token::builtin_policy_commit_for_token(token_id)
+        .expect("builtin policy commit missing for implementation trace token");
+    dsm::core::token::derive_canonical_balance_key(&policy_commit, owner_pk, token_id)
 }
 
 fn build_signed_receipt(

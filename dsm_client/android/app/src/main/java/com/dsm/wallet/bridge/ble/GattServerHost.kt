@@ -380,6 +380,13 @@ class GattServerHost(private val context: Context) {
         return isCccdEnabled(address, BleConstants.TX_RESPONSE_UUID)
     }
 
+    /** Find any connected server client that is subscribed to TX_RESPONSE. */
+    fun findSubscribedServerClient(): String? {
+        return connectedServerClients.keys.firstOrNull { addr ->
+            isCccdEnabled(addr, BleConstants.TX_RESPONSE_UUID)
+        }
+    }
+
     /**
      * Send chunked data as GATT server notifications on the TX_RESPONSE characteristic.
      * Each chunk is sent as a separate notification, waiting for onNotificationSent
@@ -454,13 +461,37 @@ class GattServerHost(private val context: Context) {
                             return@withLock false
                         }
 
-                        // Wait for onNotificationSent callback (5s timeout per chunk). If the platform fails to deliver this callback,
-                        // continue instead of aborting; final stream progress is protected by the window ACK fallback.
-                        val success = withTimeoutOrNull(5000) { deferred.await() }
+                        // P1.2: Wait for onNotificationSent with retry on timeout.
+                        // Android BLE can silently drop notifications if link layer is congested.
+                        // Retry up to 2 times with exponential backoff before continuing.
+                        var notifSuccess: Boolean? = withTimeoutOrNull(5000) { deferred.await() }
                         notificationCompletions.remove(deviceAddress)
-                        if (success == null) {
-                            Log.w("GattServerHost", "sendChunkedNotifications: onNotificationSent timeout for chunk $index/${chunks.size}; continuing")
-                        } else if (!success) {
+                        if (notifSuccess == null) {
+                            // Retry loop: 50ms, then 200ms backoff
+                            val retryDelays = longArrayOf(50, 200)
+                            for ((retryIdx, retryDelay) in retryDelays.withIndex()) {
+                                Log.w("GattServerHost", "sendChunkedNotifications: onNotificationSent timeout for chunk $index/${chunks.size}; retry ${retryIdx + 1}")
+                                kotlinx.coroutines.delay(retryDelay)
+                                val retryDeferred = CompletableDeferred<Boolean>()
+                                notificationCompletions[deviceAddress] = retryDeferred
+                                val retrySent: Boolean = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                    server.notifyCharacteristicChanged(device, txResponseChar, false, chunk) == BluetoothStatusCodes.SUCCESS
+                                } else {
+                                    @Suppress("DEPRECATION") txResponseChar.setValue(chunk)
+                                    @Suppress("DEPRECATION") server.notifyCharacteristicChanged(device, txResponseChar, false)
+                                }
+                                if (!retrySent) {
+                                    notificationCompletions.remove(deviceAddress)
+                                    continue
+                                }
+                                notifSuccess = withTimeoutOrNull(5000) { retryDeferred.await() }
+                                notificationCompletions.remove(deviceAddress)
+                                if (notifSuccess != null) break
+                            }
+                            if (notifSuccess == null) {
+                                Log.w("GattServerHost", "sendChunkedNotifications: onNotificationSent exhausted retries for chunk $index/${chunks.size}; continuing")
+                            }
+                        } else if (notifSuccess == false) {
                             Log.w("GattServerHost", "sendChunkedNotifications: onNotificationSent reported failure for chunk $index/${chunks.size}; continuing")
                         }
 
@@ -497,7 +528,10 @@ class GattServerHost(private val context: Context) {
                                 // ACK timeout — client may not support windowed ACK (older version).
                                 // Fall back to pacing-only mode for remaining chunks.
                                 Log.w("GattServerHost", "sendChunkedNotifications: ACK timeout at chunk $chunkNum/${chunks.size}; falling back to pacing-only")
-                                // Continue sending remaining chunks with aggressive pacing
+                                // P1.3: Adaptive congestion backoff in fallback-to-pacing mode.
+                                // Track consecutive timeouts and increase delay dynamically.
+                                var consecutiveTimeouts = 0
+                                var pacingDelayMs = 15L // Start conservative
                                 for (remaining in (index + 1) until chunks.size) {
                                     val fallbackDeferred = CompletableDeferred<Boolean>()
                                     notificationCompletions[deviceAddress] = fallbackDeferred
@@ -515,7 +549,23 @@ class GattServerHost(private val context: Context) {
                                     val fbOk = withTimeoutOrNull(5000) { fallbackDeferred.await() }
                                     notificationCompletions.remove(deviceAddress)
                                     if (fbOk == false) return@withLock false
-                                    kotlinx.coroutines.delay(15) // Conservative pacing in fallback
+
+                                    if (fbOk == null) {
+                                        consecutiveTimeouts++
+                                        pacingDelayMs = when {
+                                            consecutiveTimeouts >= 5 -> 100L
+                                            consecutiveTimeouts >= 3 -> 50L
+                                            else -> 15L
+                                        }
+                                        if (consecutiveTimeouts >= 20) {
+                                            Log.e("GattServerHost", "sendChunkedNotifications: 20 consecutive timeouts in fallback; aborting at chunk $remaining/${chunks.size}")
+                                            return@withLock false
+                                        }
+                                    } else {
+                                        consecutiveTimeouts = 0
+                                        pacingDelayMs = 15L
+                                    }
+                                    kotlinx.coroutines.delay(pacingDelayMs)
                                 }
                                 Log.i("GattServerHost", "sendChunkedNotifications: all ${chunks.size} chunks sent (pacing-only fallback)")
                                 return@withLock true
@@ -807,9 +857,20 @@ class GattServerHost(private val context: Context) {
                 }
             }
 
-            // Check for transport-level chunk ACK: [0xFF][hi][lo]
-            if (data.size == 3 && data[0] == CHUNK_ACK_MARKER) {
-                val ackCount = ((data[1].toInt() and 0xFF) shl 8) or (data[2].toInt() and 0xFF)
+            // Check for transport-level chunk ACK:
+            //   3-byte legacy: [0xFF][hi][lo] — 16-bit count
+            //   5-byte modern:  [0xFF][b3][b2][b1][b0] — 32-bit count
+            if ((data.size == 3 || data.size == 5) && data[0] == CHUNK_ACK_MARKER) {
+                val ackCount = if (data.size == 5) {
+                    // 32-bit ACK (modern format)
+                    ((data[1].toInt() and 0xFF) shl 24) or
+                    ((data[2].toInt() and 0xFF) shl 16) or
+                    ((data[3].toInt() and 0xFF) shl 8) or
+                    (data[4].toInt() and 0xFF)
+                } else {
+                    // 16-bit ACK (legacy format)
+                    ((data[1].toInt() and 0xFF) shl 8) or (data[2].toInt() and 0xFF)
+                }
                 Log.i("GattServerHost", "Chunk ACK received from $deviceAddress: $ackCount chunks confirmed")
                 chunkAckCompletions[deviceAddress]?.trySend(ackCount)
             } else {

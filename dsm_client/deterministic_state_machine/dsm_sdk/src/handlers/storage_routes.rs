@@ -533,24 +533,22 @@ impl AppRouterImpl {
                                             continue;
                                         }
 
-                                        // Compute canonical signing bytes from the Operation payload
-                                        // (signature field cleared) to match state machine verification.
-                                        let mut op_for_sig = entry.transaction.clone();
-                                        if let dsm::types::operations::Operation::Transfer {
-                                            signature,
-                                            ..
-                                        } = &mut op_for_sig
-                                        {
-                                            signature.clear();
+                                        // §4.2.1: Use the sender's canonical unsigned Operation bytes
+                                        // directly.  No field-by-field reconstruction — the sender
+                                        // embedded the exact signing preimage in the envelope.
+                                        if entry.canonical_operation_bytes.is_empty() {
+                                            log::error!(
+                                                "[storage.sync] ❌ REJECTING tx {}: missing canonical_operation_bytes (§4.2.1 strict-fail)",
+                                                entry.transaction_id
+                                            );
+                                            let mut state_guard = batch_state.lock().await;
+                                            state_guard.errors.push(format!(
+                                                "missing canonical_operation_bytes for tx {}",
+                                                entry.transaction_id
+                                            ));
+                                            continue;
                                         }
-                                        let signing_bytes = op_for_sig.to_bytes();
-
-                                        // Diagnostic: log BLAKE3 of signing preimage so we can compare sender vs receiver
-                                        let signing_hash = dsm::crypto::blake3::domain_hash(
-                                            "DSM/signing-hash",
-                                            &signing_bytes,
-                                        );
-                                        log::info!("🔍 storage.sync signing preimage hash (first8) = {:?} for tx {} from {}", &signing_hash.as_bytes()[..8], entry.transaction_id, entry.sender_device_id);
+                                        let signing_bytes = entry.canonical_operation_bytes.clone();
 
                                         // Verify SPHINCS+ signature (fail-closed)
                                         // Prefer embedded sender signing key; fall back to contact book.
@@ -868,9 +866,11 @@ impl AppRouterImpl {
                                                         // Full receipt verification: protobuf decode, non-zero fields,
                                                         // relation proofs parse, SMT roots match recomputed values,
                                                         // tripwire replace witness, device proof verification.
-                                                        // Look up sender's Device Tree root (R_G) for §2.3 verification
-                                                        let sender_r_g = crate::storage::client_db::get_contact_device_tree_root(&from_device_id);
-                                                        if !crate::sdk::receipts::verify_receipt_bytes(&entry.receipt_commit, sender_r_g) {
+                                                        // Look up sender's authenticated device-tree commitment for §2.3 verification.
+                                                        // If it is unavailable, this receipt path rejects relationship-locally;
+                                                        // unrelated bilateral relationships continue unaffected.
+                                                        let sender_device_tree_commitment = crate::storage::client_db::get_contact_device_tree_commitment(&from_device_id);
+                                                        if !crate::sdk::receipts::verify_receipt_bytes(&entry.receipt_commit, sender_device_tree_commitment) {
                                                                     log::error!(
                                                                         "[storage.sync] §4.3#2+4 ReceiptCommit full verification FAILED for tx {} — REJECTING",
                                                                         entry.transaction_id
@@ -1088,7 +1088,7 @@ impl AppRouterImpl {
                                                         // Use SENDER's R_G: the receipt proves devid_a (sender) membership.
                                                         // The sender is a contact of the receiver, so their R_G is in the contacts table.
                                                         // Using the receiver's own device_id here would return None (self is not in contacts).
-                                                        let recv_r_g = crate::storage::client_db::get_contact_device_tree_root(&from_device_id);
+                                                        let recv_device_tree_commitment = crate::storage::client_db::get_contact_device_tree_commitment(&from_device_id);
                                                         let rebuilt_history_receipt =
                                                             build_online_receipt_with_smt(
                                                                 &from_device_id,
@@ -1099,7 +1099,7 @@ impl AppRouterImpl {
                                                                 recv_smt_post,
                                                                 recv_parent_bytes,
                                                                 recv_child_bytes,
-                                                                recv_r_g,
+                                                                recv_device_tree_commitment,
                                                             );
                                                         let used_verified_receipt_fallback =
                                                             rebuilt_history_receipt.is_none()
@@ -1297,9 +1297,15 @@ impl AppRouterImpl {
                                                 &pending.counterparty_device_id,
                                             );
 
-                                        // Fast path: chain tip already advanced past the gate
-                                        let already_advanced = match (current_tip, pending_next) {
-                                            (Some(ct), Some(pn)) => ct == pn,
+                                        // Fast path: chain tip has moved since the gate was set.
+                                        // The gate's parent_tip was the tip BEFORE the gated send.
+                                        // If the current tip != parent_tip, the relationship
+                                        // advanced (possibly multiple times), so the gate is stale.
+                                        let pending_parent: Option<[u8; 32]> =
+                                            pending.parent_tip.as_slice().try_into().ok();
+                                        let already_advanced = match (current_tip, pending_parent) {
+                                            (Some(ct), Some(pp)) => ct != pp,
+                                            (Some(_ct), None) => true, // no parent means gate is bogus
                                             _ => false,
                                         };
 

@@ -61,7 +61,7 @@ describe('Offline/bilateral flows', () => {
       expect(route).toBe('wallet.sendOffline');
       const request = pb.BilateralPrepareRequest.fromBinary(pb.ArgPack.fromBinary(args).body);
       expect(request.counterpartyDeviceId).toEqual(to);
-      expect(request.transferAmount).toBe(1n);
+      expect(request.transferAmountDisplay).toBe('1');
       expect(request.tokenIdHint).toBe('ERA');
       expect(request.memoHint).toBe('');
       expect(request.bleAddress).toBe('');

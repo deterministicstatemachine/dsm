@@ -52,7 +52,6 @@ function InboxOverlayInner({ headerHeight, loadWalletData }: Props): JSX.Element
   const [records, setRecords] = useState<NotificationRecord[]>([]);
   const [pending, setPending] = useState<PendingItem[]>([]);
   const [loadingPending, setLoadingPending] = useState(false);
-  const [syncing, setSyncing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // Badge = total transfer count across all active transient notices.
@@ -97,19 +96,6 @@ function InboxOverlayInner({ headerHeight, loadWalletData }: Props): JSX.Element
     void loadPending();
   }, [open, loadPending]);
 
-  const handleSyncNow = useCallback(async () => {
-    if (syncing) return;
-    setSyncing(true);
-    setError(null);
-    try {
-      await dsmClient.syncWithStorage({ pullInbox: true });
-      await loadWalletData();
-      await loadPending();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Sync failed');
-    } finally { setSyncing(false); }
-  }, [syncing, loadWalletData, loadPending]);
-
   const handleClose = useCallback(() => { setOpen(false); setError(null); }, []);
 
   const mono: React.CSSProperties = { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' };
@@ -135,7 +121,7 @@ function InboxOverlayInner({ headerHeight, loadWalletData }: Props): JSX.Element
 
             {/* Header row */}
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '8px 10px', borderBottom: '2px solid var(--border)' }}>
-              <strong style={{ ...mono, fontSize: 12 }}>Inbox — B0x</strong>
+              <strong style={{ ...mono, fontSize: 12 }}>Inbox — b0x</strong>
               <button onClick={handleClose} aria-label="Close inbox" style={{ minWidth: 28, minHeight: 28, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 16, background: 'transparent', border: '1px solid var(--border)', borderRadius: 8, color: 'inherit', cursor: 'pointer' }}>
                 {'\u00D7'}
               </button>
@@ -186,17 +172,7 @@ function InboxOverlayInner({ headerHeight, loadWalletData }: Props): JSX.Element
                 <div style={{ ...mono, fontSize: 12, opacity: 0.6 }}>No new notifications.</div>
               )}
 
-              {/* ---- Footer ---- */}
-              <div style={{ display: 'flex', gap: 8 }}>
-                <button
-                  onClick={() => void handleSyncNow()}
-                  disabled={syncing || loadingPending}
-                  className="button-brick"
-                  style={{ flex: 1, ...mono, fontSize: 11, padding: '6px 10px', borderRadius: 8, border: '1px solid var(--border)', background: 'transparent', color: 'inherit', cursor: 'pointer' }}
-                >
-                  {syncing ? 'Syncing…' : 'Sync now'}
-                </button>
-              </div>
+              {/* ---- Footer (notification-only, no manual sync) ---- */}
             </div>
           </div>
         </>

@@ -1,21 +1,79 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-// Full offline bilateral flow unit test (prepare -> accept -> commit -> finalize)
+//! Full offline bilateral flow integration tests.
+//!
+//! Each "device" gets its own Per-Device SMT (§2.2) — the SMT is a compact
+//! commitment to current relationship heads.  Device A's SMT has leaf k_{A↔B},
+//! Device B's SMT has leaf k_{B↔A}.  Same relationship key, same chain tip
+//! value, two independent trees on two independent devices.  Using a shared
+//! singleton would corrupt proofs when one device's SMT-Replace changes the
+//! root that the other device's receipt verification expects (Tripwire §6.1).
+
+#![allow(clippy::disallowed_methods)]
 
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use dsm_sdk as sdk;
-use sdk::bluetooth::bilateral_ble_handler::BilateralBleHandler;
-use sdk::handlers::bilateral_settlement::DefaultBilateralSettlementDelegate;
 use dsm::core::bilateral_transaction_manager::BilateralTransactionManager;
 use dsm::types::operations::Operation;
 use dsm::types::token_types::Balance;
+use dsm_sdk as sdk;
 use dsm_sdk::storage::client_db;
 use dsm_sdk::util::text_id;
+use sdk::bluetooth::bilateral_ble_handler::BilateralBleHandler;
+use sdk::handlers::bilateral_settlement::DefaultBilateralSettlementDelegate;
 use serial_test::serial;
+
+// ---------------------------------------------------------------------------
+// Test infrastructure
+// ---------------------------------------------------------------------------
 
 fn dev(id: u8) -> [u8; 32] {
     [id; 32]
+}
+
+/// Minimal AppRouter for tests — returns a pre-seeded device canonical state
+/// so that `build_canonical_settled_state` can read B_n from the device tip.
+struct TestAppRouter {
+    device_states:
+        std::sync::RwLock<std::collections::HashMap<[u8; 32], dsm::types::state_types::State>>,
+}
+
+impl TestAppRouter {
+    fn new() -> Self {
+        Self {
+            device_states: std::sync::RwLock::new(std::collections::HashMap::new()),
+        }
+    }
+
+    fn set_device_state(&self, state: dsm::types::state_types::State) {
+        self.device_states
+            .write()
+            .unwrap()
+            .insert(state.device_info.device_id, state);
+    }
+}
+
+#[async_trait::async_trait]
+impl sdk::bridge::AppRouter for TestAppRouter {
+    async fn query(&self, _q: sdk::bridge::AppQuery) -> sdk::bridge::AppResult {
+        sdk::bridge::AppResult {
+            success: false,
+            data: vec![],
+            error_message: Some("not implemented in test".into()),
+        }
+    }
+    async fn invoke(&self, _i: sdk::bridge::AppInvoke) -> sdk::bridge::AppResult {
+        sdk::bridge::AppResult {
+            success: false,
+            data: vec![],
+            error_message: Some("not implemented in test".into()),
+        }
+    }
+    fn get_device_current_state(&self) -> Option<dsm::types::state_types::State> {
+        let device_id = sdk::sdk::app_state::AppState::get_device_id()?;
+        let device_id: [u8; 32] = device_id.try_into().ok()?;
+        self.device_states.read().ok()?.get(&device_id).cloned()
+    }
 }
 
 fn configure_local_identity_for_receipts(
@@ -47,9 +105,14 @@ fn configure_local_identity_for_receipts(
     Ok(())
 }
 
-/// Archive a genesis state with ERA balance to BCR so that the settlement
-/// layer's `latest_archived_state` returns a state with funds.
-fn seed_bcr_genesis_with_era(device_id: [u8; 32], public_key: &[u8], era_balance: u64) {
+/// Build a genesis state with ERA balance, mirror it into BCR for projection
+/// queries, and install it as the device canonical state via the TestAppRouter.
+fn seed_device_state_with_era(
+    router: &TestAppRouter,
+    device_id: [u8; 32],
+    public_key: &[u8],
+    era_balance: u64,
+) {
     use dsm::types::state_builder::StateBuilder;
     use dsm::types::state_types::DeviceInfo;
 
@@ -81,34 +144,44 @@ fn seed_bcr_genesis_with_era(device_id: [u8; 32], public_key: &[u8], era_balance
         .expect("genesis state should build");
 
     state.hash = state.compute_hash().expect("compute hash");
+
+    // Mirror the canonical seed into BCR so projection/history queries see the
+    // same authoritative device state the settlement delegate starts from.
     client_db::store_bcr_state(&state, true).expect("seed BCR genesis");
+
+    // Set as the device canonical state (authoritative for settlement).
+    router.set_device_state(state);
 }
 
-#[tokio::test]
-#[serial]
-#[ignore = "requires a two-device test harness; current single-process shared SMT singleton breaks parent-proof verification"]
-// clippy incorrectly reports `Ok(())` in `-> Result<(),...>` tests as
-// `Result::expect`; allow the false positive on this function only.
-#[allow(clippy::disallowed_methods)]
-async fn bilateral_offline_prepare_accept_commit_finalize_flow(
-) -> Result<(), Box<dyn std::error::Error>> {
-    // Use in-memory DB for tests (avoids stale on-disk DB issues).
-    std::env::set_var("DSM_SDK_TEST_MODE", "1");
-    let _ =
-        dsm_sdk::storage_utils::set_storage_base_dir(std::path::PathBuf::from("./.dsm_testdata"));
-    client_db::reset_database_for_tests();
-    if let Err(e) = client_db::init_database() {
-        eprintln!("[bilateral_full_offline_flow] init_database skipped (already init): {e}");
-    }
+/// Common setup: two devices with keypairs, contact managers, bilateral
+/// transaction managers, relationships established on separate SMTs,
+/// and BLE handlers with per-device SMTs + settlement delegates.
+struct TwoDeviceSetup {
+    handler_a: BilateralBleHandler,
+    handler_b: BilateralBleHandler,
+    a: Arc<RwLock<BilateralTransactionManager>>,
+    b: Arc<RwLock<BilateralTransactionManager>>,
+    a_dev: [u8; 32],
+    b_dev: [u8; 32],
+    a_gen: [u8; 32],
+    b_gen: [u8; 32],
+    a_kp: dsm::crypto::signatures::SignatureKeyPair,
+    b_kp: dsm::crypto::signatures::SignatureKeyPair,
+    #[allow(dead_code)]
+    router: Arc<TestAppRouter>,
+}
 
-    // Setup devices and managers
-    let a_dev = dev(0xA1);
-    let b_dev = dev(0xB2);
-    let a_gen = dev(0xA2);
-    let b_gen = dev(0xB3);
+async fn setup_two_devices(a_id: u8, b_id: u8, sender_era: u64) -> TwoDeviceSetup {
+    assert_ne!(a_id, b_id, "Device IDs for A and B must be distinct");
+    let a_dev = dev(a_id);
+    let b_dev = dev(b_id);
+    let a_gen = dev(a_id.wrapping_add(0x10));
+    let b_gen = dev(b_id.wrapping_add(0x10));
 
-    let a_kp = dsm::crypto::signatures::SignatureKeyPair::generate_from_entropy(b"a-kp")?;
-    let b_kp = dsm::crypto::signatures::SignatureKeyPair::generate_from_entropy(b"b-kp")?;
+    let a_kp = dsm::crypto::signatures::SignatureKeyPair::generate_from_entropy(b"a-kp")
+        .unwrap_or_else(|e| panic!("a keypair failed: {e}"));
+    let b_kp = dsm::crypto::signatures::SignatureKeyPair::generate_from_entropy(b"b-kp")
+        .unwrap_or_else(|e| panic!("b keypair failed: {e}"));
 
     let a_cm = dsm::core::contact_manager::DsmContactManager::new(
         a_dev,
@@ -122,7 +195,6 @@ async fn bilateral_offline_prepare_accept_commit_finalize_flow(
     let mut mgr_a = BilateralTransactionManager::new(a_cm, a_kp.clone(), a_dev, a_gen);
     let mut mgr_b = BilateralTransactionManager::new(b_cm, b_kp.clone(), b_dev, b_gen);
 
-    // Add verified contacts to each manager for the other device (with signing keys)
     let contact_b = dsm::types::contact_types::DsmVerifiedContact {
         alias: "B".to_string(),
         device_id: b_dev,
@@ -155,288 +227,323 @@ async fn bilateral_offline_prepare_accept_commit_finalize_flow(
         ble_address: None,
     };
 
-    mgr_a.add_verified_contact(contact_b.clone())?;
-    mgr_b.add_verified_contact(contact_a.clone())?;
-
-    // Establish relationships on both sides (ensures chain tips + keys set)
-    let mut smt_a = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-    let mut smt_b = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
     mgr_a
-        .establish_relationship(&b_dev, &mut smt_a)
-        .await
-        .unwrap_or_else(|e| panic!("establish relationship a->b failed: {e}"));
+        .add_verified_contact(contact_b)
+        .unwrap_or_else(|e| panic!("add contact b failed: {e}"));
     mgr_b
-        .establish_relationship(&a_dev, &mut smt_b)
-        .await
-        .unwrap_or_else(|e| panic!("establish relationship b->a failed: {e}"));
+        .add_verified_contact(contact_a)
+        .unwrap_or_else(|e| panic!("add contact a failed: {e}"));
+
+    // Each device has its own Per-Device SMT (§2.2).
+    let smt_a = Arc::new(RwLock::new(
+        dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256),
+    ));
+    let smt_b = Arc::new(RwLock::new(
+        dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256),
+    ));
+
+    // Establish relationships — each manager uses its own device's SMT.
+    {
+        let mut guard = smt_a.write().await;
+        mgr_a
+            .establish_relationship(&b_dev, &mut guard)
+            .await
+            .unwrap_or_else(|e| panic!("establish relationship a->b failed: {e}"));
+    }
+    {
+        let mut guard = smt_b.write().await;
+        mgr_b
+            .establish_relationship(&a_dev, &mut guard)
+            .await
+            .unwrap_or_else(|e| panic!("establish relationship b->a failed: {e}"));
+    }
 
     let a = Arc::new(RwLock::new(mgr_a));
     let b = Arc::new(RwLock::new(mgr_b));
 
-    // Seed sender's ERA balance in BCR (authoritative for settlement).
-    // The balance projection is synced automatically by the settlement layer
-    // after reconciliation, using the canonical balance key.
-    seed_bcr_genesis_with_era(a_dev, a_kp.public_key(), 10_000);
+    // Install test router and seed canonical device states for both peers.
+    let router = Arc::new(TestAppRouter::new());
+    sdk::bridge::install_app_router(router.clone()).expect("install test router");
+    seed_device_state_with_era(&router, a_dev, a_kp.public_key(), sender_era);
+    seed_device_state_with_era(&router, b_dev, b_kp.public_key(), 0);
 
     let delegate = Arc::new(DefaultBilateralSettlementDelegate);
-    let mut handler_a = BilateralBleHandler::new(a.clone(), a_dev);
+    let mut handler_a = BilateralBleHandler::new_with_smt(a.clone(), a_dev, smt_a);
     handler_a.set_settlement_delegate(delegate.clone());
-    let mut handler_b = BilateralBleHandler::new(b.clone(), b_dev);
+    let mut handler_b = BilateralBleHandler::new_with_smt(b.clone(), b_dev, smt_b);
     handler_b.set_settlement_delegate(delegate.clone());
 
-    // Use a Transfer operation to exercise balance update on receiver
+    TwoDeviceSetup {
+        handler_a,
+        handler_b,
+        a,
+        b,
+        a_dev,
+        b_dev,
+        a_gen,
+        b_gen,
+        a_kp,
+        b_kp,
+        router,
+    }
+}
+
+fn init_test_db() {
+    std::env::set_var("DSM_SDK_TEST_MODE", "1");
+    let _ =
+        dsm_sdk::storage_utils::set_storage_base_dir(std::path::PathBuf::from("./.dsm_testdata"));
+    client_db::reset_database_for_tests();
+    if let Err(e) = client_db::init_database() {
+        eprintln!("[bilateral_full_offline_flow] init_database skipped (already init): {e}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test 1: Full 3-phase flow + balance verification
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[serial]
+async fn bilateral_offline_prepare_accept_commit_finalize_flow() {
+    init_test_db();
+
+    let s = setup_two_devices(0xA1, 0xB2, 10_000).await;
+    let handler_a = s.handler_a;
+    let handler_b = s.handler_b;
+
     let balance = Balance::from_state(10, [1u8; 32], 0);
     let transfer_op = Operation::Transfer {
-        to_device_id: b"to_b".to_vec(),
+        to_device_id: s.b_dev.to_vec(),
         amount: balance,
         token_id: b"".to_vec(),
         mode: dsm::types::operations::TransactionMode::Bilateral,
         nonce: vec![0u8; 8],
         verification: dsm::types::operations::VerificationType::Standard,
         pre_commit: None,
-        recipient: b"recipient".to_vec(),
-        to: b"to".to_vec(),
+        recipient: s.b_kp.public_key().to_vec(),
+        to: s.b_dev.to_vec(),
         message: "pay".to_string(),
         signature: Vec::new(),
     };
 
-    // Sender prepares
+    // Phase 1: Prepare
     let (prepare_bytes, commitment) = handler_a
-        .prepare_bilateral_transaction(b_dev, transfer_op.clone(), 300)
-        .await?;
+        .prepare_bilateral_transaction(s.b_dev, transfer_op.clone(), 300)
+        .await
+        .unwrap_or_else(|e| panic!("prepare failed: {e}"));
 
-    // Ensure manager A has pending commitment
     {
-        let ma = a.read().await;
+        let ma = s.a.read().await;
         assert!(ma.has_pending_commitment(&commitment));
     }
 
-    // Receiver handles prepare request
+    // Phase 2: Accept
     handler_b
         .handle_prepare_request(&prepare_bytes, None)
         .await
         .unwrap_or_else(|e| panic!("handle_prepare_request failed: {e}"));
 
-    // Receiver accepts and builds response (origin commit hash used here)
-    let accept_envelope = handler_b.create_prepare_accept_envelope(commitment).await?;
+    let accept_envelope = handler_b
+        .create_prepare_accept_envelope(commitment)
+        .await
+        .unwrap_or_else(|e| panic!("create_accept failed: {e}"));
 
-    // Sender handles prepare response -> builds confirm envelope (3-step protocol step 3)
-    configure_local_identity_for_receipts(a_dev, a_gen, a_kp.public_key().to_vec())?;
-    let (confirm_envelope, _meta) = handler_a.handle_prepare_response(&accept_envelope).await?;
+    // Phase 3: Confirm (sender finalizes + settlement)
+    configure_local_identity_for_receipts(s.a_dev, s.a_gen, s.a_kp.public_key().to_vec())
+        .unwrap_or_else(|e| panic!("configure identity for a failed: {e}"));
+    let (confirm_envelope, _meta) = handler_a
+        .handle_prepare_response(&accept_envelope)
+        .await
+        .unwrap_or_else(|e| panic!("handle_prepare_response failed: {e}"));
 
-    // Receiver handles confirm request and both sides finalize
-    configure_local_identity_for_receipts(b_dev, b_gen, b_kp.public_key().to_vec())?;
-    let _meta = handler_b.handle_confirm_request(&confirm_envelope).await?;
+    // Phase 3: Confirm (receiver finalizes + settlement)
+    configure_local_identity_for_receipts(s.b_dev, s.b_gen, s.b_kp.public_key().to_vec())
+        .unwrap_or_else(|e| panic!("configure identity for b failed: {e}"));
+    let _meta = handler_b
+        .handle_confirm_request(&confirm_envelope)
+        .await
+        .unwrap_or_else(|e| panic!("handle_confirm_request failed: {e}"));
 
-    // Sender already finalized in send_bilateral_confirm(); ensure commitment cleared
+    // ── Verification: commitment cleared ─────────────────────────────────
     {
-        let ma = a.read().await;
-        assert!(!ma.has_pending_commitment(&commitment));
+        let ma = s.a.read().await;
+        assert!(
+            !ma.has_pending_commitment(&commitment),
+            "sender pending commitment should be cleared"
+        );
     }
 
-    // Receiver settlement is persisted as bilateral chain advancement plus
-    // transaction history. Balance projections are derived lazily from
-    // canonical state/cache reads and are no longer required to exist here.
-    let device_txt = text_id::encode_base32_crockford(&b_dev);
-    let history = client_db::get_transaction_history(Some(&device_txt), Some(20))
+    // ── Verification: sender balance (10,000 - 10 = 9,990) ──────────────
+    let a_device_txt = text_id::encode_base32_crockford(&s.a_dev);
+    let sender_projection =
+        client_db::get_balance_projection(&a_device_txt, "ERA").expect("sender projection query");
+    assert!(
+        sender_projection.is_some(),
+        "sender ERA balance projection must exist after settlement"
+    );
+    let sender_proj = sender_projection.unwrap();
+    assert_eq!(
+        sender_proj.available, 9_990,
+        "sender ERA balance should be 10,000 - 10 = 9,990"
+    );
+
+    // ── Verification: receiver balance (0 + 10 = 10) ───────────────────
+    let b_device_txt = text_id::encode_base32_crockford(&s.b_dev);
+    let receiver_projection =
+        client_db::get_balance_projection(&b_device_txt, "ERA").expect("receiver projection query");
+    assert!(
+        receiver_projection.is_some(),
+        "receiver ERA balance projection must exist after settlement"
+    );
+    let receiver_proj = receiver_projection.unwrap();
+    assert_eq!(
+        receiver_proj.available, 10,
+        "receiver ERA balance should be credited by the bilateral settlement"
+    );
+
+    // ── Verification: BCR state has correct device_id and sn ─────────────
+    let sender_bcr = client_db::get_bcr_states(&s.a_dev, false).expect("sender BCR states");
+    let sender_latest = sender_bcr.last().expect("sender must have BCR state");
+    assert_eq!(
+        sender_latest.state_number, 1,
+        "sender BCR state_number should be genesis(0) + 1"
+    );
+    assert_eq!(
+        sender_latest.device_info.device_id, s.a_dev,
+        "sender BCR state must have raw device_id, not domain-hashed"
+    );
+
+    // ── Verification: receiver transaction history ───────────────────────
+    let history = client_db::get_transaction_history(Some(&b_device_txt), Some(20))
         .expect("receiver transaction history");
     assert!(
         history.iter().any(|tx| {
             tx.amount == 10
-                && tx.from_device == text_id::encode_base32_crockford(&a_dev)
-                && tx.to_device == device_txt
+                && tx.from_device == a_device_txt
+                && tx.to_device == b_device_txt
                 && !tx.metadata.contains_key("token_id")
         }),
         "receiver transaction history should record the settled ERA transfer"
     );
-
-    Ok(())
 }
 
-// Ensure sender/receiver see identical chain tips and transaction hash across layers
+// ---------------------------------------------------------------------------
+// Test 2: State consistency across peers (chain tips, tx hashes, integrity)
+// ---------------------------------------------------------------------------
+
 #[tokio::test]
 #[serial]
-#[ignore = "requires a two-device test harness; current single-process shared SMT singleton breaks parent-proof verification"]
-// clippy incorrectly reports `Ok(())` in `-> Result<(),...>` tests as
-// `Result::expect`; allow the false positive on this function only.
-#[allow(clippy::disallowed_methods)]
-async fn bilateral_offline_state_consistency_across_peers() -> Result<(), Box<dyn std::error::Error>>
-{
-    // Use in-memory DB for tests.
-    std::env::set_var("DSM_SDK_TEST_MODE", "1");
-    let _ =
-        dsm_sdk::storage_utils::set_storage_base_dir(std::path::PathBuf::from("./.dsm_testdata"));
-    client_db::reset_database_for_tests();
-    if let Err(e) = client_db::init_database() {
-        eprintln!("[bilateral_full_offline_flow] init_database skipped (already init): {e}");
-    }
+async fn bilateral_offline_state_consistency_across_peers() {
+    init_test_db();
 
-    let a_dev = dev(0xC1);
-    let b_dev = dev(0xD2);
-    let a_gen = dev(0xC2);
-    let b_gen = dev(0xD3);
-
-    let a_kp = dsm::crypto::signatures::SignatureKeyPair::generate_from_entropy(b"a-kp")?;
-    let b_kp = dsm::crypto::signatures::SignatureKeyPair::generate_from_entropy(b"b-kp")?;
-
-    let a_cm = dsm::core::contact_manager::DsmContactManager::new(
-        a_dev,
-        vec![dsm::types::identifiers::NodeId::new("n")],
-    );
-    let b_cm = dsm::core::contact_manager::DsmContactManager::new(
-        b_dev,
-        vec![dsm::types::identifiers::NodeId::new("n")],
-    );
-
-    let mut mgr_a = BilateralTransactionManager::new(a_cm, a_kp.clone(), a_dev, a_gen);
-    let mut mgr_b = BilateralTransactionManager::new(b_cm, b_kp.clone(), b_dev, b_gen);
-
-    let contact_b = dsm::types::contact_types::DsmVerifiedContact {
-        alias: "B".to_string(),
-        device_id: b_dev,
-        genesis_hash: b_gen,
-        public_key: b_kp.public_key().to_vec(),
-        genesis_material: vec![0u8; 32],
-        chain_tip: None,
-        chain_tip_smt_proof: None,
-        genesis_verified_online: true,
-        verified_at_commit_height: 1,
-        added_at_commit_height: 1,
-        last_updated_commit_height: 1,
-        verifying_storage_nodes: vec![],
-        ble_address: None,
-    };
-
-    let contact_a = dsm::types::contact_types::DsmVerifiedContact {
-        alias: "A".to_string(),
-        device_id: a_dev,
-        genesis_hash: a_gen,
-        public_key: a_kp.public_key().to_vec(),
-        genesis_material: vec![0u8; 32],
-        chain_tip: None,
-        chain_tip_smt_proof: None,
-        genesis_verified_online: true,
-        verified_at_commit_height: 1,
-        added_at_commit_height: 1,
-        last_updated_commit_height: 1,
-        verifying_storage_nodes: vec![],
-        ble_address: None,
-    };
-
-    mgr_a.add_verified_contact(contact_b.clone())?;
-    mgr_b.add_verified_contact(contact_a.clone())?;
-
-    let mut smt_a = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-    let mut smt_b = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
-    mgr_a
-        .establish_relationship(&b_dev, &mut smt_a)
-        .await
-        .unwrap_or_else(|e| panic!("establish relationship a->b failed: {e}"));
-    mgr_b
-        .establish_relationship(&a_dev, &mut smt_b)
-        .await
-        .unwrap_or_else(|e| panic!("establish relationship b->a failed: {e}"));
-
-    let a = Arc::new(RwLock::new(mgr_a));
-    let b = Arc::new(RwLock::new(mgr_b));
-
-    // Seed sender's ERA balance in BCR (authoritative for settlement).
-    seed_bcr_genesis_with_era(a_dev, a_kp.public_key(), 1_000);
-
-    let delegate = Arc::new(DefaultBilateralSettlementDelegate);
-    let mut handler_a = BilateralBleHandler::new(a.clone(), a_dev);
-    handler_a.set_settlement_delegate(delegate.clone());
-    let mut handler_b = BilateralBleHandler::new(b.clone(), b_dev);
-    handler_b.set_settlement_delegate(delegate.clone());
+    let s = setup_two_devices(0xC1, 0xD2, 1_000).await;
+    let handler_a = s.handler_a;
+    let handler_b = s.handler_b;
 
     let balance = Balance::from_state(5, [2u8; 32], 0);
     let transfer_op = Operation::Transfer {
-        to_device_id: b"to_b".to_vec(),
+        to_device_id: s.b_dev.to_vec(),
         amount: balance,
         token_id: b"".to_vec(),
         mode: dsm::types::operations::TransactionMode::Bilateral,
         nonce: vec![0u8; 8],
         verification: dsm::types::operations::VerificationType::Standard,
         pre_commit: None,
-        recipient: b"recipient".to_vec(),
-        to: b"to".to_vec(),
+        recipient: s.b_kp.public_key().to_vec(),
+        to: s.b_dev.to_vec(),
         message: "pay".to_string(),
         signature: Vec::new(),
     };
 
     let (prepare_bytes, commitment) = handler_a
-        .prepare_bilateral_transaction(b_dev, transfer_op.clone(), 300)
-        .await?;
+        .prepare_bilateral_transaction(s.b_dev, transfer_op.clone(), 300)
+        .await
+        .unwrap_or_else(|e| panic!("prepare failed: {e}"));
 
     handler_b
         .handle_prepare_request(&prepare_bytes, None)
         .await
         .unwrap_or_else(|e| panic!("handle_prepare_request failed: {e}"));
 
-    let accept_envelope = handler_b.create_prepare_accept_envelope(commitment).await?;
-
-    // Sender handles prepare response -> builds confirm envelope (3-step protocol step 3)
-    configure_local_identity_for_receipts(a_dev, a_gen, a_kp.public_key().to_vec())?;
-    let (confirm_envelope, _meta) = handler_a.handle_prepare_response(&accept_envelope).await?;
-
-    // Receiver handles confirm request — both sides finalize
-    configure_local_identity_for_receipts(b_dev, b_gen, b_kp.public_key().to_vec())?;
-    let _meta = handler_b.handle_confirm_request(&confirm_envelope).await?;
-
-    let a_anchor = a
-        .read()
+    let accept_envelope = handler_b
+        .create_prepare_accept_envelope(commitment)
         .await
-        .get_relationship(&b_dev)
-        .ok_or("a relationship missing")?;
-    let b_anchor = b
-        .read()
+        .unwrap_or_else(|e| panic!("create_accept failed: {e}"));
+
+    configure_local_identity_for_receipts(s.a_dev, s.a_gen, s.a_kp.public_key().to_vec())
+        .unwrap_or_else(|e| panic!("configure identity for a failed: {e}"));
+    let (confirm_envelope, _meta) = handler_a
+        .handle_prepare_response(&accept_envelope)
         .await
-        .get_relationship(&a_dev)
-        .ok_or("b relationship missing")?;
+        .unwrap_or_else(|e| panic!("handle_prepare_response failed: {e}"));
 
-    let a_tip = a_anchor.chain_tip;
-    let b_tip = b_anchor.chain_tip;
+    configure_local_identity_for_receipts(s.b_dev, s.b_gen, s.b_kp.public_key().to_vec())
+        .unwrap_or_else(|e| panic!("configure identity for b failed: {e}"));
+    let _meta = handler_b
+        .handle_confirm_request(&confirm_envelope)
+        .await
+        .unwrap_or_else(|e| panic!("handle_confirm_request failed: {e}"));
 
-    // Both peers must agree on the shared chain tip after 3-step confirm
+    // ── Chain tip consistency ────────────────────────────────────────────
+    let a_anchor =
+        s.a.read()
+            .await
+            .get_relationship(&s.b_dev)
+            .unwrap_or_else(|| panic!("a relationship missing"));
+    let b_anchor =
+        s.b.read()
+            .await
+            .get_relationship(&s.a_dev)
+            .unwrap_or_else(|| panic!("b relationship missing"));
+
     assert_eq!(
-        a_tip, b_tip,
+        a_anchor.chain_tip, b_anchor.chain_tip,
         "shared chain tips must match after bilateral confirm"
     );
-
-    // Both peers must also clear their pending commitments after confirm.
-    assert!(
-        a.read().await.list_pending_commitments().is_empty(),
-        "sender pending commitments should be cleared after confirm"
-    );
-    assert!(
-        b.read().await.list_pending_commitments().is_empty(),
-        "receiver pending commitments should be cleared after confirm"
+    assert_eq!(
+        a_anchor.mutual_anchor_hash, b_anchor.mutual_anchor_hash,
+        "mutual anchor hash must match"
     );
 
-    // Mutual anchor hash identical on both sides
-    assert_eq!(a_anchor.mutual_anchor_hash, b_anchor.mutual_anchor_hash);
+    // ── Pending commitments cleared ─────────────────────────────────────
+    assert!(s.a.read().await.list_pending_commitments().is_empty());
+    assert!(s.b.read().await.list_pending_commitments().is_empty());
 
-    let a_device_txt = text_id::encode_base32_crockford(&a_dev);
-    let b_device_txt = text_id::encode_base32_crockford(&b_dev);
+    // ── Transaction history consistency ──────────────────────────────────
+    let a_device_txt = text_id::encode_base32_crockford(&s.a_dev);
+    let b_device_txt = text_id::encode_base32_crockford(&s.b_dev);
     let commitment_txt = text_id::encode_base32_crockford(&commitment);
-    let a_history = client_db::get_transaction_history(Some(&a_device_txt), Some(20))?;
-    let b_history = client_db::get_transaction_history(Some(&b_device_txt), Some(20))?;
+
+    let a_history =
+        client_db::get_transaction_history(Some(&a_device_txt), Some(20)).expect("sender history");
+    let b_history = client_db::get_transaction_history(Some(&b_device_txt), Some(20))
+        .expect("receiver history");
+
     let a_tx = a_history
         .iter()
         .find(|tx| tx.tx_id == commitment_txt)
-        .ok_or("sender history missing bilateral tx")?;
+        .unwrap_or_else(|| panic!("sender history missing bilateral tx"));
     let b_tx = b_history
         .iter()
         .find(|tx| tx.tx_id == commitment_txt)
-        .ok_or("receiver history missing bilateral tx")?;
+        .unwrap_or_else(|| panic!("receiver history missing bilateral tx"));
+
     assert_eq!(
         a_tx.tx_hash, b_tx.tx_hash,
         "sender and receiver must record the same bilateral tx hash"
     );
 
-    // Relationship integrity verifier should pass on both peers
-    assert!(a.read().await.verify_relationship_integrity(&b_dev)?);
-    assert!(b.read().await.verify_relationship_integrity(&a_dev)?);
-
-    Ok(())
+    // ── Relationship integrity ──────────────────────────────────────────
+    assert!(s
+        .a
+        .read()
+        .await
+        .verify_relationship_integrity(&s.b_dev)
+        .unwrap_or_else(|e| panic!("verify relationship integrity on a failed: {e}")));
+    assert!(s
+        .b
+        .read()
+        .await
+        .verify_relationship_integrity(&s.a_dev)
+        .unwrap_or_else(|e| panic!("verify relationship integrity on b failed: {:?}", e)));
 }

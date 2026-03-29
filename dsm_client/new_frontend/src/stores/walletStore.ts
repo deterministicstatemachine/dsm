@@ -4,17 +4,7 @@
 import { useSyncExternalStore } from 'react';
 import { dsmClient } from '../services/dsmClient';
 import type { Transaction } from '@/hooks/useTransactions';
-import { toBase32Crockford } from '../dsm/decoding';
 import type { WalletBalance, WalletState } from '../contexts/WalletContext';
-
-type ImmediateSenderUpdate = {
-  success?: boolean;
-  tokenId?: string;
-  newBalance?: bigint | string | number;
-  transactionHash?: Uint8Array;
-  toDeviceId?: Uint8Array;
-  amount?: bigint | string | number;
-};
 
 const initialState: WalletState = {
   genesisHash: null,
@@ -58,20 +48,6 @@ class WalletStore {
       ...patch,
     };
     this.emit();
-  }
-
-  private setImmediateBalance(tokenId: string, balance: bigint): void {
-    this.setState({
-      balances: this.snapshot.balances.map((entry) =>
-        entry.tokenId === tokenId ? { ...entry, balance } : entry,
-      ),
-    });
-  }
-
-  private appendTransaction(tx: Transaction): void {
-    this.setState({
-      transactions: [tx, ...this.snapshot.transactions],
-    });
   }
 
   initialize = async (): Promise<void> => {
@@ -158,48 +134,6 @@ class WalletStore {
 
   refreshAll = async (): Promise<void> => {
     await Promise.all([this.refreshBalances(), this.refreshTransactions()]);
-  };
-
-  applyImmediateSenderUpdate = (detail: ImmediateSenderUpdate): void => {
-    const hasNewBalance = detail?.newBalance !== undefined && detail?.newBalance !== null;
-    const tokenId = String(detail?.tokenId ?? 'ERA');
-    if (!detail?.success || !hasNewBalance) return;
-
-    try {
-      const immediateBalance = BigInt(String(detail.newBalance));
-      this.setImmediateBalance(tokenId, immediateBalance);
-    } catch (error) {
-      console.warn('WalletStore: immediate balance reflect failed, will refresh from SDK', error);
-    }
-
-    try {
-      const txHash = detail?.transactionHash;
-      const txId = txHash instanceof Uint8Array && txHash.length === 32
-        ? toBase32Crockford(txHash)
-        : 'LOCAL_TX';
-      const toDeviceId = detail?.toDeviceId;
-      const recipient = toDeviceId instanceof Uint8Array ? toBase32Crockford(toDeviceId) : '';
-      const amount = BigInt(String(detail?.amount ?? 0));
-      this.appendTransaction({
-        txId,
-        type: 'online',
-        amount,
-        recipient,
-        createdAt: Math.floor(Date.now() / 1000),
-        status: 'confirmed',
-        syncStatus: 'synced',
-      } as any);
-    } catch (error) {
-      console.warn('WalletStore: immediate history append failed (non-fatal)', error);
-    }
-
-    queueMicrotask(() => {
-      try {
-        void this.refreshBalances();
-      } catch (error) {
-        console.warn('WalletStore: refreshBalances failed:', error);
-      }
-    });
   };
 
   private emit(): void {

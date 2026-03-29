@@ -222,11 +222,11 @@ pub async fn put_object(
         .map_err(|e| {
             if e.to_string().contains("capacity_exceeded") {
                 warn!("DLV capacity exceeded: {}", e);
-                metrics::counter!("dsm_storage_objects_put_capacity_exceeded_total").increment(1);
+                metrics::counter!("dsm_storage_objects_put_capacity_exceeded_total", 1);
                 StatusCode::INSUFFICIENT_STORAGE
             } else {
                 warn!("put_object: upsert_object_with_capacity_check DB error: {e}");
-                metrics::counter!("dsm_storage_objects_put_error_total").increment(1);
+                metrics::counter!("dsm_storage_objects_put_error_total", 1);
                 StatusCode::INTERNAL_SERVER_ERROR
             }
         })?;
@@ -245,8 +245,22 @@ pub async fn put_object(
         HeaderValue::from_str(&addr).unwrap_or_else(|_| HeaderValue::from_static("")),
     );
     info!("object.put: addr={addr} path={path} bytes={new_size}");
-    metrics::counter!("dsm_storage_objects_put_total").increment(1);
-    metrics::counter!("dsm_storage_bytes_written_total").increment(new_size as u64);
+    metrics::counter!("dsm_storage_objects_put_total", 1);
+    metrics::counter!("dsm_storage_bytes_written_total", new_size as u64);
+
+    // Replicate to peer nodes in background (spec §6: redundant mirrors).
+    {
+        let rm = state.replication_manager.clone();
+        let state_clone = state.clone();
+        let obj_key = addr.clone();
+        let obj_data = body.to_vec();
+        tokio::spawn(async move {
+            if let Err(e) = rm.replicate_object(state_clone, &obj_key, &obj_data, 0).await {
+                warn!("background replication failed for {obj_key}: {e}");
+            }
+        });
+    }
+
     Ok((StatusCode::OK, out))
 }
 
@@ -314,12 +328,12 @@ pub async fn get_object_handler(
                 axum::http::header::CONTENT_TYPE,
                 HeaderValue::from_static("application/octet-stream"),
             );
-            metrics::counter!("dsm_storage_objects_get_total").increment(1);
-            metrics::counter!("dsm_storage_bytes_read_total").increment(bytes.len() as u64);
+            metrics::counter!("dsm_storage_objects_get_total", 1);
+            metrics::counter!("dsm_storage_bytes_read_total", bytes.len() as u64);
             Ok((StatusCode::OK, headers, bytes))
         }
         None => {
-            metrics::counter!("dsm_storage_objects_get_not_found_total").increment(1);
+            metrics::counter!("dsm_storage_objects_get_not_found_total", 1);
             Err(StatusCode::NOT_FOUND)
         }
     }

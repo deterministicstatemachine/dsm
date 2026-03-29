@@ -334,6 +334,18 @@ impl CoreSDK {
         Self::restore_latest_archived_state(&self.state_machine, &self.device_info.device_id)
     }
 
+    /// Replace the in-memory canonical tip with a caller-supplied archived state snapshot.
+    /// Used by failed-online-send rollback after the bad archived successor has been removed.
+    pub fn restore_state_snapshot(&self, state: &State) -> Result<(), DsmError> {
+        if state.device_info.device_id != self.device_info.device_id {
+            return Err(DsmError::state_machine(
+                "restore_state_snapshot: device mismatch",
+            ));
+        }
+        self.state_machine.lock().set_state(state.clone());
+        Ok(())
+    }
+
     /// Normalize stale balance key formats in the current state.
     ///
     /// Migrates:
@@ -493,134 +505,21 @@ impl CoreSDK {
     /// Execute a full DSM Operation (preserving signatures and proofs)
     /// This bypasses the simplified CoreSDK::Operation wrapper to ensure
     /// authorization material reaches the state machine intact.
+    /// Execute a DSM operation through the state machine and archive the result.
+    ///
+    /// Returns the post-transition state with correct balances and hash.
+    /// Callers are responsible for calling `sync_token_projection_from_state`
+    /// (or `sync_token_projection_best_effort`) after this returns, since the
+    /// projection sync requires token_id and policy_commit which are
+    /// caller-specific context.
     pub fn execute_dsm_operation(
         &self,
         dsm_operation: dsm::types::operations::Operation,
     ) -> Result<State, DsmError> {
         let mut sm = self.state_machine.lock();
-        let current_state = sm
-            .current_state()
-            .cloned()
-            .ok_or_else(|| DsmError::state_machine("No current state available"))?;
-
         let next_state = sm.execute_transition(dsm_operation.clone())?;
-
-        match &dsm_operation {
-            dsm::types::operations::Operation::Transfer {
-                amount,
-                token_id,
-                recipient,
-                to_device_id,
-                ..
-            } => {
-                let mut reconciled_state = next_state;
-                let policy_commit = self.resolve_policy_commit_strict(token_id)?;
-                let token_id_str = std::str::from_utf8(token_id)
-                    .map_err(|_| DsmError::invalid_operation("token_id must be valid UTF-8"))?;
-                let recipient_owner = if recipient.is_empty() {
-                    to_device_id.as_slice()
-                } else {
-                    recipient.as_slice()
-                };
-
-                crate::sdk::token_state::apply_transfer_debit_credit(
-                    &mut reconciled_state.token_balances,
-                    &policy_commit,
-                    &current_state.device_info.public_key,
-                    recipient_owner,
-                    token_id_str,
-                    amount.value(),
-                    current_state.hash,
-                    current_state.state_number,
-                )
-                .map_err(DsmError::invalid_operation)?;
-
-                reconciled_state.hash = reconciled_state.compute_hash()?;
-                sm.set_state(reconciled_state.clone());
-                Self::archive_state_snapshot(&reconciled_state)?;
-                Ok(reconciled_state)
-            }
-            dsm::types::operations::Operation::Mint { .. }
-            | dsm::types::operations::Operation::Burn { .. } => {
-                let mut reconciled_state = next_state;
-                match &dsm_operation {
-                    dsm::types::operations::Operation::Mint {
-                        amount, token_id, ..
-                    } => {
-                        let policy_commit = self.resolve_policy_commit_strict(token_id)?;
-                        let token_id = std::str::from_utf8(token_id).map_err(|_| {
-                            DsmError::invalid_operation("token_id must be valid UTF-8")
-                        })?;
-                        let balance_key = dsm::core::token::derive_canonical_balance_key(
-                            &policy_commit,
-                            &current_state.device_info.public_key,
-                            token_id,
-                        );
-                        let current_balance = current_state
-                            .token_balances
-                            .get(&balance_key)
-                            .cloned()
-                            .unwrap_or_else(dsm::types::token_types::Balance::zero);
-                        let new_value = current_balance
-                            .value()
-                            .checked_add(amount.value())
-                            .ok_or_else(|| {
-                                DsmError::invalid_operation("Balance overflow on mint")
-                            })?;
-                        reconciled_state.token_balances.insert(
-                            balance_key,
-                            dsm::types::token_types::Balance::from_state(
-                                new_value,
-                                current_state.hash,
-                                current_state.state_number,
-                            ),
-                        );
-                    }
-                    dsm::types::operations::Operation::Burn {
-                        amount, token_id, ..
-                    } => {
-                        let policy_commit = self.resolve_policy_commit_strict(token_id)?;
-                        let token_id = std::str::from_utf8(token_id).map_err(|_| {
-                            DsmError::invalid_operation("token_id must be valid UTF-8")
-                        })?;
-                        let balance_key = dsm::core::token::derive_canonical_balance_key(
-                            &policy_commit,
-                            &current_state.device_info.public_key,
-                            token_id,
-                        );
-                        let current_balance = current_state
-                            .token_balances
-                            .get(&balance_key)
-                            .cloned()
-                            .unwrap_or_else(dsm::types::token_types::Balance::zero);
-                        if current_balance.value() < amount.value() {
-                            return Err(DsmError::insufficient_balance(
-                                token_id.to_string(),
-                                current_balance.value(),
-                                amount.value(),
-                            ));
-                        }
-                        reconciled_state.token_balances.insert(
-                            balance_key,
-                            dsm::types::token_types::Balance::from_state(
-                                current_balance.value() - amount.value(),
-                                current_state.hash,
-                                current_state.state_number,
-                            ),
-                        );
-                    }
-                    _ => {}
-                }
-                reconciled_state.hash = reconciled_state.compute_hash()?;
-                sm.set_state(reconciled_state.clone());
-                Self::archive_state_snapshot(&reconciled_state)?;
-                Ok(reconciled_state)
-            }
-            _ => {
-                Self::archive_state_snapshot(&next_state)?;
-                Ok(next_state)
-            }
-        }
+        Self::archive_state_snapshot(&next_state)?;
+        Ok(next_state)
     }
 
     pub fn register_token_manager(
@@ -1223,6 +1122,58 @@ impl CoreSDK {
         self.hash_state(&state_bytes)
     }
 
+    fn sync_token_projection_best_effort(
+        &self,
+        local_b32: &str,
+        token_id: &[u8],
+        new_state: &State,
+        context: &str,
+    ) {
+        let token_id_str = String::from_utf8_lossy(token_id);
+        let canonical_token_id = if token_id_str.trim().is_empty() {
+            "ERA"
+        } else {
+            token_id_str.as_ref()
+        };
+
+        let existing_locked = match client_db::get_locked_balance(local_b32, canonical_token_id) {
+            Ok(value) => value,
+            Err(error) => {
+                log::error!(
+                    "[{context}] CRITICAL: failed to read {canonical_token_id} locked balance: {error}"
+                );
+                0
+            }
+        };
+
+        let policy_commit = match self.resolve_policy_commit_strict(token_id) {
+            Ok(commit) => commit,
+            Err(error) => {
+                log::error!(
+                    "[{context}] CRITICAL: failed to resolve policy commit for {canonical_token_id}: {error}"
+                );
+                return;
+            }
+        };
+
+        if let Err(error) = client_db::sync_token_projection_from_state(
+            local_b32,
+            canonical_token_id,
+            &policy_commit,
+            new_state,
+            existing_locked,
+        ) {
+            log::error!(
+                "[{context}] CRITICAL: failed to sync {canonical_token_id} projection: {error}"
+            );
+        } else {
+            log::info!(
+                "[{context}] token projection synced: {canonical_token_id} state_number={}",
+                new_state.state_number
+            );
+        }
+    }
+
     /// Apply a decoded Operation with replay protection and state machine integration.
     /// This executes the operation through the state machine for validation and state transition,
     /// then persists the results to the database with idempotency checks.
@@ -1348,42 +1299,17 @@ impl CoreSDK {
                     )
                 })?;
 
-                let token_id_str = String::from_utf8_lossy(&token_id);
-                let canonical_token_id = if token_id_str.trim().is_empty() {
-                    "ERA"
-                } else {
-                    token_id_str.as_ref()
-                };
-                let existing_locked = match client_db::get_locked_balance(
+                self.sync_token_projection_best_effort(
                     &local_b32,
-                    canonical_token_id,
-                ) {
-                    Ok(l) => l,
-                    Err(e) => {
-                        log::error!("[apply_operation] CRITICAL: failed to read {canonical_token_id} locked balance: {e}");
-                        0
-                    }
-                };
-                if let Err(e) = client_db::sync_token_projection_from_state(
-                    &local_b32,
-                    canonical_token_id,
-                    &pc,
+                    &token_id,
                     &new_state,
-                    existing_locked,
-                ) {
-                    log::error!("[apply_operation] CRITICAL: failed to sync {canonical_token_id} projection: {e}");
-                } else {
-                    log::info!(
-                        "[apply_operation] token projection synced: {} state_number={}",
-                        canonical_token_id,
-                        new_state.state_number
-                    );
-                }
+                    "apply_operation",
+                );
 
                 log::info!(
                     "[apply_operation] ✅ applied transfer tx={} token={} amount={} from={}",
                     String::from_utf8_lossy(tx_id.as_bytes()),
-                    token_id_str,
+                    String::from_utf8_lossy(&token_id),
                     amount_val,
                     sender_device_id
                 );
@@ -1488,42 +1414,17 @@ impl CoreSDK {
                     )
                 })?;
 
-                let token_id_str = String::from_utf8_lossy(&token_id);
-                let canonical_token_id = if token_id_str.trim().is_empty() {
-                    "ERA"
-                } else {
-                    token_id_str.as_ref()
-                };
-                let existing_locked = match client_db::get_locked_balance(
+                self.sync_token_projection_best_effort(
                     &local_b32,
-                    canonical_token_id,
-                ) {
-                    Ok(l) => l,
-                    Err(e) => {
-                        log::error!("[apply_operation] CRITICAL: failed to read {canonical_token_id} locked balance: {e}");
-                        0
-                    }
-                };
-                if let Err(e) = client_db::sync_token_projection_from_state(
-                    &local_b32,
-                    canonical_token_id,
-                    &pc,
+                    &token_id,
                     &new_state,
-                    existing_locked,
-                ) {
-                    log::error!("[apply_operation] CRITICAL: failed to sync {canonical_token_id} projection: {e}");
-                } else {
-                    log::info!(
-                        "[apply_operation] token projection synced: {} state_number={}",
-                        canonical_token_id,
-                        new_state.state_number
-                    );
-                }
+                    "apply_operation",
+                );
 
                 log::info!(
                     "[apply_operation] ✅ applied receive tx={} token={} amount={} from={}",
                     String::from_utf8_lossy(tx_id.as_bytes()),
-                    token_id_str,
+                    String::from_utf8_lossy(&token_id),
                     amount_val,
                     sender_device_id
                 );
@@ -2051,6 +1952,44 @@ mod tests {
             restored_state.hash, executed.hash,
             "restored canonical state hash must match archived state"
         );
+    }
+
+    #[test]
+    #[serial]
+    fn restore_state_snapshot_rewinds_in_memory_tip() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+
+        let device = DeviceInfo::from_hashed_label("rollback_state_device", vec![7u8; 32]);
+        let sdk = CoreSDK::new_with_device(device.clone()).expect("init sdk");
+        sdk.initialize_with_genesis_state()
+            .expect("initialize genesis state");
+        let prior = sdk.get_current_state().expect("prior state");
+
+        let (pk, sk) =
+            dsm::crypto::sphincs::generate_sphincs_keypair().expect("generate test keypair");
+        sdk.set_signing_key(sk);
+        sdk.update_signing_public_key(pk);
+
+        let op = sdk
+            .sign_operation_sphincs(DsmOperation::Generic {
+                operation_type: b"rollback.test".to_vec(),
+                data: vec![0x01],
+                message: "advance".to_string(),
+                signature: vec![],
+            })
+            .expect("sign operation");
+        let advanced = sdk.execute_dsm_operation(op).expect("execute operation");
+        assert!(advanced.state_number > prior.state_number, "state must advance");
+
+        sdk.restore_state_snapshot(&prior)
+            .expect("restore prior snapshot");
+        let current = sdk.get_current_state().expect("current state");
+        assert_eq!(current.state_number, prior.state_number);
+        assert_eq!(current.hash, prior.hash);
     }
 }
 

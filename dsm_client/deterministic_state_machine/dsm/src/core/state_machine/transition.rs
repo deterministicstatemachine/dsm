@@ -853,25 +853,12 @@ pub fn create_next_state(
     verification_type: &VerificationType,
     require_bilateral: bool,
 ) -> Result<State, DsmError> {
-    // Unused parameters are kept for future implementation
+    // verification_type is checked per-operation in the signature match below.
     let _ = verification_type;
-    let _ = require_bilateral;
+    // require_bilateral gates apply_token_balance_delta — bilateral BLE
+    // transitions skip the in-core delta (settlement handler applies it).
 
     // ── Fail-closed signature verification ────────────────────────────
-    //
-    // Every state-changing operation that carries a signature field must
-    // pass SPHINCS+ verification before the next state is produced.
-    //
-    // Device-key operations (the current device is the signer):
-    //   Transfer, CreateToken, Lock, Unlock, LockToken, UnlockToken, Generic
-    //
-    // Embedded-key operations (the signer's key is in the operation itself):
-    //   DlvCreate, DlvUnlock, DlvClaim, DlvInvalidate
-    //
-    // Special case: incoming unilateral Transfers (where this device is the
-    // recipient) were already verified upstream by the sender's device; we
-    // skip the local-key check for those.
-
     match &operation {
         // ── Transfer ──────────────────────────────────────────────
         Operation::Transfer {
@@ -1027,6 +1014,8 @@ pub fn create_next_state(
         _ => {}
     }
 
+    let operation_for_balance = operation.clone();
+
     let mut next_state = current_state.clone();
     next_state.state_number += 1;
     next_state.operation = operation;
@@ -1044,17 +1033,215 @@ pub fn create_next_state(
     let sparse_indices = calculate_sparse_indices(next_state.state_number)?;
     next_state.sparse_index = crate::types::state_types::SparseIndex::new(sparse_indices);
 
-    // Token balance mutations for Mint/Burn/Transfer are handled exclusively by
-    // TokenStateManager::apply_token_operation (single source of truth). The
-    // token_balances map on next_state is already populated by that layer before
-    // create_next_state is called. Duplicating the mutation here caused every
-    // token amount to be applied twice (double-spend / double-receive).
+    // Apply token balance delta for Transfer/Mint/Burn operations on device-canonical
+    // transitions only. Bilateral relationship-chain transitions skip this — the bilateral
+    // settlement handler applies the delta to the device canonical state separately.
+    if !require_bilateral {
+        apply_token_balance_delta(&mut next_state, current_state, &operation_for_balance)?;
+    }
 
-    // Recompute the hash for the new state after mutations
+    // Compute the hash for the new state after balance mutations
     let computed_hash = next_state.compute_hash()?;
     next_state.hash = computed_hash;
 
     Ok(next_state)
+}
+
+/// Apply token balance delta directly within state transition.
+///
+/// This function is the SINGLE AUTHORITATIVE place where token balances are mutated.
+/// It is called from create_next_state BEFORE hash computation, ensuring:
+/// - Balance delta is atomic with state change
+/// - Hash commits to updated balances
+/// - No post-transition patching required
+fn apply_token_balance_delta(
+    next_state: &mut State,
+    current_state: &State,
+    operation: &Operation,
+) -> Result<(), DsmError> {
+    match operation {
+        Operation::Transfer {
+            token_id,
+            to_device_id,
+            recipient,
+            amount,
+            ..
+        } => {
+            let token_id_str = String::from_utf8_lossy(token_id).to_string();
+            // §8 Atomicity: all token ops MUST apply balance deltas in the
+            // same state transition. resolve_policy_commit handles both
+            // builtins (ERA/dBTC) and CPTA-anchored custom tokens.
+            let policy_commit =
+                crate::core::token::resolve_policy_commit(&token_id_str);
+            let is_recipient = to_device_id.len() == 32
+                && to_device_id.as_slice() == current_state.device_info.device_id.as_slice();
+
+            let sender_key = crate::core::token::derive_canonical_balance_key(
+                &policy_commit,
+                &current_state.device_info.public_key,
+                &token_id_str,
+            );
+            let sender_balance = next_state
+                .token_balances
+                .get(&sender_key)
+                .cloned()
+                .unwrap_or_else(|| {
+                    Balance::from_state(0, current_state.hash, current_state.state_number)
+                });
+
+            if is_recipient {
+                // Credit the LOCAL device's balance key (derived from public_key).
+                // The `recipient` field in the op contains the device_id, but balance
+                // keys are always derived from public_key. Using recipient directly
+                // would credit a phantom key that no balance query ever reads.
+                let local_credit_key = crate::core::token::derive_canonical_balance_key(
+                    &policy_commit,
+                    &current_state.device_info.public_key,
+                    &token_id_str,
+                );
+                let local_balance = next_state
+                    .token_balances
+                    .get(&local_credit_key)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        Balance::from_state(0, current_state.hash, current_state.state_number)
+                    });
+                let new_recipient_value = local_balance
+                    .value()
+                    .checked_add(amount.value())
+                    .ok_or_else(|| {
+                        DsmError::invalid_operation("Balance overflow on transfer credit")
+                    })?;
+                next_state.token_balances.insert(
+                    local_credit_key,
+                    Balance::from_state(
+                        new_recipient_value,
+                        current_state.hash,
+                        current_state.state_number,
+                    ),
+                );
+            } else {
+                if sender_balance.value() < amount.value() {
+                    return Err(DsmError::insufficient_balance(
+                        token_id_str,
+                        sender_balance.value(),
+                        amount.value(),
+                    ));
+                }
+
+                let new_sender_balance = Balance::from_state(
+                    sender_balance.value() - amount.value(),
+                    current_state.hash,
+                    current_state.state_number,
+                );
+
+                next_state
+                    .token_balances
+                    .insert(sender_key, new_sender_balance);
+                if !recipient.is_empty() && recipient.as_slice() != to_device_id.as_slice() {
+                    let recipient_owner = recipient.as_slice();
+                    let recipient_key = crate::core::token::derive_canonical_balance_key(
+                        &policy_commit,
+                        recipient_owner,
+                        &token_id_str,
+                    );
+                    let recipient_balance = next_state
+                        .token_balances
+                        .get(&recipient_key)
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            Balance::from_state(0, current_state.hash, current_state.state_number)
+                        });
+                    let new_recipient_value = recipient_balance
+                        .value()
+                        .checked_add(amount.value())
+                        .ok_or_else(|| {
+                            DsmError::invalid_operation("Balance overflow on transfer credit")
+                        })?;
+                    let new_recipient_balance = Balance::from_state(
+                        new_recipient_value,
+                        current_state.hash,
+                        current_state.state_number,
+                    );
+                    next_state
+                        .token_balances
+                        .insert(recipient_key, new_recipient_balance);
+                }
+            }
+        }
+        Operation::Mint {
+            token_id, amount, ..
+        } => {
+            let token_id_str = String::from_utf8_lossy(token_id).to_string();
+            let policy_commit =
+                crate::core::token::resolve_policy_commit(&token_id_str);
+            let owner_key = crate::core::token::derive_canonical_balance_key(
+                &policy_commit,
+                &current_state.device_info.public_key,
+                &token_id_str,
+            );
+
+            let current_balance = next_state
+                .token_balances
+                .get(&owner_key)
+                .cloned()
+                .unwrap_or_else(|| {
+                    Balance::from_state(0, current_state.hash, current_state.state_number)
+                });
+            let new_mint_value = current_balance
+                .value()
+                .checked_add(amount.value())
+                .ok_or_else(|| DsmError::invalid_operation("Balance overflow on mint"))?;
+
+            next_state.token_balances.insert(
+                owner_key,
+                Balance::from_state(
+                    new_mint_value,
+                    current_state.hash,
+                    current_state.state_number,
+                ),
+            );
+        }
+        Operation::Burn {
+            token_id, amount, ..
+        } => {
+            let token_id_str = String::from_utf8_lossy(token_id).to_string();
+            let policy_commit =
+                crate::core::token::resolve_policy_commit(&token_id_str);
+            let owner_key = crate::core::token::derive_canonical_balance_key(
+                &policy_commit,
+                &current_state.device_info.public_key,
+                &token_id_str,
+            );
+
+            let owner_balance = next_state
+                .token_balances
+                .get(&owner_key)
+                .cloned()
+                .unwrap_or_else(|| {
+                    Balance::from_state(0, current_state.hash, current_state.state_number)
+                });
+            if owner_balance.value() < amount.value() {
+                return Err(DsmError::insufficient_balance(
+                    token_id_str,
+                    owner_balance.value(),
+                    amount.value(),
+                ));
+            }
+
+            next_state.token_balances.insert(
+                owner_key,
+                Balance::from_state(
+                    owner_balance.value() - amount.value(),
+                    current_state.hash,
+                    current_state.state_number,
+                ),
+            );
+        }
+        _ => {}
+    }
+
+    Ok(())
 }
 
 /// Convert operations verification type to local verification type
@@ -1164,7 +1351,7 @@ mod tests {
         nonce: Vec<u8>,
         message: &str,
     ) -> Operation {
-        signed_transfer_op_amount(sk, state_hash, nonce, message, "token1", 10)
+        signed_transfer_op_amount(sk, state_hash, nonce, message, "ERA", 10)
     }
 
     fn signed_mint_op_amount(sk: &[u8], token_id: &str, amount: u64) -> Operation {
@@ -1417,12 +1604,12 @@ mod tests {
         let (_state, _pk, sk) = create_test_state_with_keypair(0);
         let transfer_op = signed_transfer_op(&sk, [0u8; 32], vec![28, 29, 30], "test transfer");
 
-        assert!(transfer_op.affects_balance(b"token1"));
+        assert!(transfer_op.affects_balance(b"ERA"));
         assert!(!transfer_op.affects_balance(b"token2"));
         let mint_op = signed_mint_op(&sk);
 
         assert!(mint_op.affects_balance(b"token2"));
-        assert!(!mint_op.affects_balance(b"token1"));
+        assert!(!mint_op.affects_balance(b"ERA"));
     }
 
     #[test]
@@ -1613,7 +1800,19 @@ mod tests {
 
     #[test]
     fn test_create_next_state() {
-        let (current_state, _pk, sk) = create_test_state_with_keypair(5);
+        let (mut current_state, _pk, sk) = create_test_state_with_keypair(5);
+
+        // Seed sender balance so the transfer has sufficient funds
+        let era_pc = crate::core::token::builtin_policy_commit_for_token("ERA").unwrap();
+        let sender_key = crate::core::token::derive_canonical_balance_key(
+            &era_pc,
+            &current_state.device_info.public_key,
+            "ERA",
+        );
+        current_state
+            .token_balances
+            .insert(sender_key, Balance::from_state(1000, current_state.hash, 5));
+
         let operation =
             signed_transfer_op(&sk, current_state.hash, vec![49, 50, 51], "signed transfer");
         let entropy = vec![1, 2, 3, 4];
@@ -1636,13 +1835,17 @@ mod tests {
 
     #[test]
     fn test_create_next_state_incoming_transfer_adds_balance() {
-        // Token balance mutations are handled exclusively by TokenStateManager,
-        // not by create_next_state. Verify that create_next_state preserves the
-        // existing balance from the input state without applying transfer deltas.
-        let mut current_state = create_test_state(1);
-        current_state.token_balances.insert(
-            "ERA".to_string(),
-            Balance::from_state(0, current_state.hash, 0),
+        // Whitepaper §8: balance delta is applied atomically inside create_next_state.
+        // When this device is the recipient (to_device_id == local device_id),
+        // apply_token_balance_delta credits using the device's public_key (not device_id),
+        // because all balance reads derive keys from public_key.
+        let current_state = create_test_state(1);
+        let policy_commit =
+            crate::core::token::builtin_policy_commit_for_token("ERA").expect("ERA policy commit");
+        let recipient_key = crate::core::token::derive_canonical_balance_key(
+            &policy_commit,
+            &current_state.device_info.public_key,
+            "ERA",
         );
 
         let operation = Operation::Transfer {
@@ -1671,11 +1874,82 @@ mod tests {
 
         let bal = next_state
             .token_balances
-            .get("ERA")
-            .unwrap_or_else(|| panic!("balance present"));
-        // create_next_state no longer modifies balances; that is handled by
-        // TokenStateManager::apply_token_operation to avoid double-application.
-        assert_eq!(bal.value(), 0);
+            .get(&recipient_key)
+            .unwrap_or_else(|| panic!("recipient balance key should exist after credit"));
+        assert_eq!(bal.value(), 10, "receiver should be credited 10 ERA");
+    }
+
+    #[test]
+    fn test_create_next_state_outgoing_transfer_with_device_id_recipient_only_debits_sender() {
+        let (mut current_state, _pk, sk) = create_test_state_with_keypair(1);
+        let policy_commit =
+            crate::core::token::builtin_policy_commit_for_token("ERA").expect("ERA policy commit");
+        let sender_key = crate::core::token::derive_canonical_balance_key(
+            &policy_commit,
+            &current_state.device_info.public_key,
+            "ERA",
+        );
+        let recipient_device_id = [0x55u8; 32];
+        let phantom_key = crate::core::token::derive_canonical_balance_key(
+            &policy_commit,
+            &recipient_device_id,
+            "ERA",
+        );
+        current_state
+            .token_balances
+            .insert(sender_key.clone(), Balance::from_state(100, current_state.hash, 1));
+
+        let operation = Operation::Transfer {
+            amount: Balance::from_state(10, current_state.hash, 1),
+            token_id: b"ERA".to_vec(),
+            to_device_id: recipient_device_id.to_vec(),
+            nonce: vec![1, 2, 3],
+            pre_commit: None,
+            recipient: recipient_device_id.to_vec(),
+            message: "outgoing".to_string(),
+            mode: TransactionMode::Unilateral,
+            verification: OpVerificationType::Standard,
+            to: b"recipient".to_vec(),
+            signature: {
+                let unsigned = Operation::Transfer {
+                    amount: Balance::from_state(10, current_state.hash, 1),
+                    token_id: b"ERA".to_vec(),
+                    to_device_id: recipient_device_id.to_vec(),
+                    nonce: vec![1, 2, 3],
+                    pre_commit: None,
+                    recipient: recipient_device_id.to_vec(),
+                    message: "outgoing".to_string(),
+                    mode: TransactionMode::Unilateral,
+                    verification: OpVerificationType::Standard,
+                    to: b"recipient".to_vec(),
+                    signature: Vec::new(),
+                };
+                crate::crypto::sphincs::sphincs_sign(&sk, &unsigned.to_bytes())
+                    .expect("sign outgoing transfer")
+            },
+        };
+
+        let next_state = create_next_state(
+            &current_state,
+            operation,
+            &[7, 8, 9, 10],
+            &super::VerificationType::Standard,
+            false,
+        )
+        .expect("outgoing transfer should succeed");
+
+        assert_eq!(
+            next_state
+                .token_balances
+                .get(&sender_key)
+                .expect("sender balance should exist")
+                .value(),
+            90
+        );
+        assert!(
+            !next_state.token_balances.contains_key(&phantom_key),
+            "device-id recipient must not create a phantom recipient balance entry"
+        );
     }
 
     #[test]
@@ -2058,7 +2332,7 @@ mod tests {
                 balance.update_add(25);
                 balance
             },
-            token_id: b"token1".to_vec(),
+            token_id: b"ERA".to_vec(),
             to_device_id: b"recipient".to_vec(),
             nonce: vec![0, 1, 2, 3],
             pre_commit: None,
@@ -2096,6 +2370,15 @@ mod tests {
 
         let mut current_state = create_test_state(3);
         current_state.device_info.public_key = pk.clone();
+
+        // Seed sender balance so the unilateral transfer has sufficient funds
+        let era_pc = crate::core::token::builtin_policy_commit_for_token("ERA").unwrap();
+        let sender_key =
+            crate::core::token::derive_canonical_balance_key(&era_pc, &pk, "ERA");
+        current_state
+            .token_balances
+            .insert(sender_key, Balance::from_state(1000, current_state.hash, 3));
+
         let entropy = vec![4, 5, 6, 7];
 
         let mut transfer_op = Operation::Transfer {
@@ -2104,7 +2387,7 @@ mod tests {
                 balance.update_add(10);
                 balance
             },
-            token_id: b"token1".to_vec(),
+            token_id: b"ERA".to_vec(),
             to_device_id: b"recipient".to_vec(),
             nonce: vec![0, 1, 2, 3],
             pre_commit: None,
@@ -2146,10 +2429,12 @@ mod tests {
         };
 
         let mut current_state = State::new_genesis([0u8; 32], device_info);
-        current_state.token_balances.insert(
-            "ERA".to_string(),
-            Balance::from_state(100, current_state.hash, 0),
-        );
+        let era_pc =
+            crate::core::token::builtin_policy_commit_for_token("ERA").expect("ERA policy commit");
+        let sender_key = crate::core::token::derive_canonical_balance_key(&era_pc, &pk, "ERA");
+        current_state
+            .token_balances
+            .insert(sender_key, Balance::from_state(100, current_state.hash, 0));
 
         let mut op_unsigned = Operation::Transfer {
             token_id: b"ERA".to_vec(),
@@ -2183,15 +2468,17 @@ mod tests {
 
         let device_info = crate::types::state_types::DeviceInfo {
             device_id: *blake3::hash(b"devA").as_bytes(),
-            public_key: pk,
+            public_key: pk.clone(),
             metadata: Default::default(),
         };
 
         let mut current_state = State::new_genesis([0u8; 32], device_info);
-        current_state.token_balances.insert(
-            "ERA".to_string(),
-            Balance::from_state(100, current_state.hash, 0),
-        );
+        let era_pc =
+            crate::core::token::builtin_policy_commit_for_token("ERA").expect("ERA policy commit");
+        let sender_key = crate::core::token::derive_canonical_balance_key(&era_pc, &pk, "ERA");
+        current_state
+            .token_balances
+            .insert(sender_key, Balance::from_state(100, current_state.hash, 0));
 
         let op = Operation::Transfer {
             token_id: b"ERA".to_vec(),

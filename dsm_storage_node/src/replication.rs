@@ -93,6 +93,7 @@ impl ReplicationManager {
         local_node_id: String,
         local_address: String,
         cert_path: &Path,
+        seed_peers: Vec<String>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let mut node_states = HashMap::new();
 
@@ -106,6 +107,25 @@ impl ReplicationManager {
                 status: pb::StorageNodeStatus::Alive as i32,
             },
         );
+
+        // Seed peers from config so gossip has nodes to talk to on startup.
+        // §10.3: Replica placement uses a Fisher-Yates permutation over {nodeID}.
+        // Derive a stable, deterministic peer ID from the address so seed entries
+        // don't create duplicate replica slots when reconciled with real gossip IDs.
+        for peer_addr in seed_peers.iter() {
+            let addr_hash = blake3::hash(peer_addr.as_bytes());
+            let peer_id = format!("node-{}", &addr_hash.to_hex()[..12]);
+            log::info!("replication: seeding peer {peer_id} at {peer_addr}");
+            node_states.insert(
+                peer_id.clone(),
+                pb::StorageNodeInfoV1 {
+                    node_id: peer_id,
+                    address: peer_addr.clone(),
+                    last_seen_tick: 0,
+                    status: pb::StorageNodeStatus::Alive as i32,
+                },
+            );
+        }
 
         Ok(Self {
             config,

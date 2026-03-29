@@ -256,30 +256,57 @@ pub(crate) fn build_testnet_faucet_policy() -> PolicyFile {
     policy
 }
 
+struct OnlineTransferRollback<'a> {
+    smt_key: &'a [u8; 32],
+    parent_chain_tip: &'a [u8; 32],
+    token_id: &'a str,
+    failed_state: &'a dsm::types::state_types::State,
+    previous_state: &'a dsm::types::state_types::State,
+    tx_id: &'a str,
+    recipient_device_id: &'a [u8; 32],
+    amount: u64,
+    memo: Option<&'a str>,
+}
+
 impl AppRouterImpl {
-    /// Clear any stale derived balance projection after a failed b0x submission.
-    /// Canonical state and the in-memory cache remain the only live balance sources.
-    fn clear_balance_projection_after_rollback(
-        sender_device_id_str: &str,
-        token_id: &str,
-        pre_send_balance: u64,
-    ) {
-        let canonical_token_id = if token_id.is_empty() { "ERA" } else { token_id };
-        if let Err(e) = crate::storage::client_db::delete_balance_projection(
-            sender_device_id_str,
-            canonical_token_id,
-        ) {
-            log::warn!(
-                "[wallet.send] failed to clear stale {} projection during rollback to pre-send {}: {}",
-                canonical_token_id,
-                pre_send_balance,
-                e
+    async fn rollback_failed_online_transfer(
+        &self,
+        rollback: &OnlineTransferRollback<'_>,
+    ) -> Result<(), String> {
+        let mut rollback_errors = Vec::new();
+
+        if let Some(smt) = crate::security::shared_smt::get_shared_smt() {
+            let mut smt_guard = smt.write().await;
+            if let Err(e) = smt_guard.smt_replace(rollback.smt_key, rollback.parent_chain_tip) {
+                rollback_errors.push(format!("shared SMT rollback failed: {e}"));
+            }
+        } else {
+            rollback_errors.push(
+                "shared SMT unavailable during rollback of failed online transfer".to_string(),
             );
         }
-        log::info!(
-            "[wallet.send] cleared stale {} projection during rollback; canonical state and in-memory cache remain authoritative",
-            canonical_token_id
-        );
+
+        if let Err(e) = self.wallet.rollback_failed_online_send(
+            &crate::sdk::wallet_sdk::FailedOnlineSendRollback {
+                tx_id: rollback.tx_id,
+                token_id: rollback.token_id,
+                failed_state: rollback.failed_state,
+                previous_state: rollback.previous_state,
+                recipient_device_id: rollback.recipient_device_id,
+                amount: rollback.amount,
+                memo: rollback.memo,
+            },
+        ) {
+            rollback_errors.push(format!("wallet rollback failed: {e}"));
+        }
+
+        crate::security::shared_smt::clear_pending_online(rollback.smt_key).await;
+
+        if rollback_errors.is_empty() {
+            Ok(())
+        } else {
+            Err(rollback_errors.join("; "))
+        }
     }
 
     async fn repair_contact_identity_from_quorum(
@@ -976,6 +1003,12 @@ impl AppRouterImpl {
                 _ => raw.to_string(),
             }
         };
+        if contact_record.public_key.is_empty() {
+            return err(
+                "wallet.send: recipient contact is missing a canonical public key".to_string(),
+            );
+        }
+        let recipient_owner = contact_record.public_key.clone();
         let seq = transfer_req.seq;
 
         // §4.1: Nonce = "fresh entropy e" — generated deterministically by the SDK.
@@ -1025,7 +1058,7 @@ impl AppRouterImpl {
             nonce: nonce.clone(),
             verification: dsm::types::operations::VerificationType::Standard,
             pre_commit: None,
-            recipient: to_device_id.to_vec(),
+            recipient: recipient_owner.clone(),
             to: to_device_id_str.as_bytes().to_vec(),
             message: transfer_req.memo.clone(),
             signature: Vec::new(),
@@ -1200,27 +1233,15 @@ impl AppRouterImpl {
             nonce: nonce.clone(),
             verification: dsm::types::operations::VerificationType::Standard,
             pre_commit: None,
-            recipient: to_device_id.to_vec(),
+            recipient: recipient_owner.clone(),
             to: to_device_id_str.as_bytes().to_vec(),
             message: transfer_req.memo.clone(),
             signature: canonical_signature.clone(),
         };
 
-        // =====================================================================
-        // ATOMIC B0X DELIVERY: Capture pre-deduction balance so we can
-        // rollback if storage node delivery fails.
-        // =====================================================================
-        // Ensure the in-memory cache is refreshed before capturing the rollback value.
-        if let Err(e) = self.wallet.reload_balance_cache_for_self() {
-            log::warn!("[wallet.send] Failed to reload balance cache: {}", e);
-        }
-        let pre_send_balance: u64 = match self.wallet.get_balance(if token_id.is_empty() {
-            None
-        } else {
-            Some(&token_id)
-        }) {
-            Ok(bal) => bal.value(),
-            Err(_) => 0,
+        let pre_send_state = match self.core_sdk.get_current_state() {
+            Ok(state) => state,
+            Err(e) => return err(format!("wallet.send: failed to snapshot pre-send state: {e}")),
         };
         let smt_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
             &from_device_id,
@@ -1277,6 +1298,17 @@ impl AppRouterImpl {
                 return err(format!("wallet.send: local state update failed: {e}"));
             }
         };
+        let rollback_request = OnlineTransferRollback {
+            smt_key: &smt_key,
+            parent_chain_tip: &chain_tip_arr,
+            token_id: &token_id,
+            failed_state: &new_state,
+            previous_state: &pre_send_state,
+            tx_id: &signed_tx.id,
+            recipient_device_id: &to_device_id,
+            amount: transfer_req.amount,
+            memo: Some(&transfer_req.memo),
+        };
 
         // §16.6: σ = Cpre = BLAKE3("DSM/pre\0" || h_n || op || nonce) — symmetric, shared inputs only.
         // Both sender and receiver derive identical h_{n+1} from the same envelope fields.
@@ -1298,18 +1330,15 @@ impl AppRouterImpl {
         let Some(smt) = crate::security::shared_smt::get_shared_smt() else {
             // §4.3#8: SMT not initialized is a terminal error, not silent degradation.
             // Without Per-Device SMT, we cannot produce verifiable ReceiptCommit.
-            crate::security::shared_smt::clear_pending_online(&smt_key).await;
-            Self::clear_balance_projection_after_rollback(
-                &sender_device_id_str,
-                &token_id,
-                pre_send_balance,
-            );
-            self.wallet
-                .force_set_balance_for_self(&token_id, pre_send_balance);
-            return err(
-                "wallet.send: Per-Device SMT not initialized — cannot produce verifiable receipt"
-                    .to_string(),
-            );
+            let rollback_error = self
+                .rollback_failed_online_transfer(&rollback_request)
+                .await
+                .err()
+                .map(|e| format!("; rollback failed: {e}"))
+                .unwrap_or_default();
+            return err(format!(
+                "wallet.send: Per-Device SMT not initialized — cannot produce verifiable receipt{rollback_error}"
+            ));
         };
 
         let (receipt_commit_bytes, receipt_canonical_bytes) = {
@@ -1320,16 +1349,14 @@ impl AppRouterImpl {
                     Ok(r) => r,
                     Err(e) => {
                         drop(smt_guard);
-                        crate::security::shared_smt::clear_pending_online(&smt_key).await;
-                        Self::clear_balance_projection_after_rollback(
-                            &sender_device_id_str,
-                            &token_id,
-                            pre_send_balance,
-                        );
-                        self.wallet
-                            .force_set_balance_for_self(&token_id, pre_send_balance);
+                        let rollback_error = self
+                            .rollback_failed_online_transfer(&rollback_request)
+                            .await
+                            .err()
+                            .map(|rb| format!("; rollback failed: {rb}"))
+                            .unwrap_or_default();
                         return err(format!(
-                            "wallet.send: SMT-Replace failed (terminal, §4.2): {e}"
+                            "wallet.send: SMT-Replace failed (terminal, §4.2): {e}{rollback_error}"
                         ));
                     }
                 }
@@ -1339,7 +1366,8 @@ impl AppRouterImpl {
 
             // Build ReceiptCommit with real SMT roots and proofs
             // Use local Device Tree root (R_G) for receipt construction
-            let local_r_g = crate::sdk::app_state::AppState::get_device_tree_root();
+            let local_device_tree_commitment =
+                crate::sdk::app_state::AppState::get_device_tree_commitment();
             let rc_canonical = match crate::sdk::receipts::build_bilateral_receipt_with_smt(
                 from_device_id,
                 to_device_id,
@@ -1349,37 +1377,37 @@ impl AppRouterImpl {
                 result.post_root,
                 pre_proof_bytes,
                 post_proof_bytes,
-                local_r_g,
+                local_device_tree_commitment,
             ) {
                 Some(bytes) => bytes,
                 None => {
-                    crate::security::shared_smt::clear_pending_online(&smt_key).await;
-                    Self::clear_balance_projection_after_rollback(
-                        &sender_device_id_str,
-                        &token_id,
-                        pre_send_balance,
-                    );
-                    self.wallet
-                        .force_set_balance_for_self(&token_id, pre_send_balance);
-                    return err("wallet.send: Failed to build ReceiptCommit (terminal)".to_string());
+                    let rollback_error = self
+                        .rollback_failed_online_transfer(&rollback_request)
+                        .await
+                        .err()
+                        .map(|e| format!("; rollback failed: {e}"))
+                        .unwrap_or_default();
+                    return err(format!(
+                        "wallet.send: Failed to build ReceiptCommit (terminal){rollback_error}"
+                    ));
                 }
             };
 
             // §4.3#6 Defensive: Sender self-verifies the ReceiptCommit before sending.
             // Catches corrupted SMT state before propagating invalid proofs to receiver.
-            if !crate::sdk::receipts::verify_receipt_bytes(&rc_canonical, local_r_g) {
-                crate::security::shared_smt::clear_pending_online(&smt_key).await;
-                Self::clear_balance_projection_after_rollback(
-                    &sender_device_id_str,
-                    &token_id,
-                    pre_send_balance,
-                );
-                self.wallet
-                    .force_set_balance_for_self(&token_id, pre_send_balance);
-                return err(
-                    "wallet.send: ReceiptCommit self-verification FAILED — SMT proofs are invalid, aborting"
-                        .to_string(),
-                );
+            if !crate::sdk::receipts::verify_receipt_bytes(
+                &rc_canonical,
+                local_device_tree_commitment,
+            ) {
+                let rollback_error = self
+                    .rollback_failed_online_transfer(&rollback_request)
+                    .await
+                    .err()
+                    .map(|e| format!("; rollback failed: {e}"))
+                    .unwrap_or_default();
+                return err(format!(
+                    "wallet.send: ReceiptCommit self-verification FAILED — SMT proofs are invalid, aborting{rollback_error}"
+                ));
             }
 
             // §4.2 Non-repudiation: Sender signs receipt commitment → sig_a.
@@ -1400,56 +1428,51 @@ impl AppRouterImpl {
                             match receipt.to_full_protobuf() {
                                 Ok(full_bytes) => full_bytes,
                                 Err(e) => {
-                                    crate::security::shared_smt::clear_pending_online(&smt_key)
-                                        .await;
-                                    Self::clear_balance_projection_after_rollback(
-                                        &sender_device_id_str,
-                                        &token_id,
-                                        pre_send_balance,
-                                    );
-                                    self.wallet
-                                        .force_set_balance_for_self(&token_id, pre_send_balance);
+                                    let rollback_error = self
+                                        .rollback_failed_online_transfer(&rollback_request)
+                                        .await
+                                        .err()
+                                        .map(|rb| format!("; rollback failed: {rb}"))
+                                        .unwrap_or_default();
                                     return err(format!(
-                                        "wallet.send: receipt full serialization failed: {e}"
+                                        "wallet.send: receipt full serialization failed: {e}{rollback_error}"
                                     ));
                                 }
                             }
                         }
                         Err(e) => {
-                            crate::security::shared_smt::clear_pending_online(&smt_key).await;
-                            Self::clear_balance_projection_after_rollback(
-                                &sender_device_id_str,
-                                &token_id,
-                                pre_send_balance,
-                            );
-                            self.wallet
-                                .force_set_balance_for_self(&token_id, pre_send_balance);
-                            return err(format!("wallet.send: receipt signing failed: {e}"));
+                            let rollback_error = self
+                                .rollback_failed_online_transfer(&rollback_request)
+                                .await
+                                .err()
+                                .map(|rb| format!("; rollback failed: {rb}"))
+                                .unwrap_or_default();
+                            return err(format!(
+                                "wallet.send: receipt signing failed: {e}{rollback_error}"
+                            ));
                         }
                     },
                     Err(e) => {
-                        crate::security::shared_smt::clear_pending_online(&smt_key).await;
-                        Self::clear_balance_projection_after_rollback(
-                            &sender_device_id_str,
-                            &token_id,
-                            pre_send_balance,
-                        );
-                        self.wallet
-                            .force_set_balance_for_self(&token_id, pre_send_balance);
-                        return err(format!("wallet.send: receipt commitment hash failed: {e}"));
+                        let rollback_error = self
+                            .rollback_failed_online_transfer(&rollback_request)
+                            .await
+                            .err()
+                            .map(|rb| format!("; rollback failed: {rb}"))
+                            .unwrap_or_default();
+                        return err(format!(
+                            "wallet.send: receipt commitment hash failed: {e}{rollback_error}"
+                        ));
                     }
                 },
                 Err(e) => {
-                    crate::security::shared_smt::clear_pending_online(&smt_key).await;
-                    Self::clear_balance_projection_after_rollback(
-                        &sender_device_id_str,
-                        &token_id,
-                        pre_send_balance,
-                    );
-                    self.wallet
-                        .force_set_balance_for_self(&token_id, pre_send_balance);
+                    let rollback_error = self
+                        .rollback_failed_online_transfer(&rollback_request)
+                        .await
+                        .err()
+                        .map(|rb| format!("; rollback failed: {rb}"))
+                        .unwrap_or_default();
                     return err(format!(
-                        "wallet.send: receipt deserialization for signing failed: {e}"
+                        "wallet.send: receipt deserialization for signing failed: {e}{rollback_error}"
                     ));
                 }
             };
@@ -1487,7 +1510,7 @@ impl AppRouterImpl {
                 nonce: nonce.to_vec(),
                 verification: dsm::types::operations::VerificationType::Standard,
                 pre_commit: None,
-                recipient: to_device_id.to_vec(),
+                recipient: recipient_owner,
                 to: to_device_id_str.as_bytes().to_vec(),
                 message: transfer_req.memo.clone(),
                 signature: canonical_signature.clone(),
@@ -1523,17 +1546,15 @@ impl AppRouterImpl {
             {
                 Ok(genesis) => genesis,
                 Err(_) => {
-                    Self::clear_balance_projection_after_rollback(
-                        &sender_device_id_str,
-                        &token_id,
-                        pre_send_balance,
-                    );
-                    self.wallet
-                        .force_set_balance_for_self(&token_id, pre_send_balance);
-                    return err(
-                            "wallet.send: recipient contact has invalid genesis hash for rotated b0x routing"
-                                .into(),
-                        );
+                    let rollback_error = self
+                        .rollback_failed_online_transfer(&rollback_request)
+                        .await
+                        .err()
+                        .map(|e| format!("; rollback failed: {e}"))
+                        .unwrap_or_default();
+                    return err(format!(
+                        "wallet.send: recipient contact has invalid genesis hash for rotated b0x routing{rollback_error}"
+                    ));
                 }
             };
             let recipient_genesis_b32 =
@@ -1548,16 +1569,15 @@ impl AppRouterImpl {
             // genesis/device/tip components, and the recipient derives the same
             // routing key during storage.sync polling.
             if recipient_genesis_raw == [0u8; 32] {
-                Self::clear_balance_projection_after_rollback(
-                    &sender_device_id_str,
-                    &token_id,
-                    pre_send_balance,
-                );
-                self.wallet
-                    .force_set_balance_for_self(&token_id, pre_send_balance);
-                return err(
-                    "wallet.send: recipient genesis is required for rotated b0x routing".into(),
-                );
+                let rollback_error = self
+                    .rollback_failed_online_transfer(&rollback_request)
+                    .await
+                    .err()
+                    .map(|e| format!("; rollback failed: {e}"))
+                    .unwrap_or_default();
+                return err(format!(
+                    "wallet.send: recipient genesis is required for rotated b0x routing{rollback_error}"
+                ));
             }
 
             // DIAGNOSTIC: Log the exact inputs used for b0x address computation so
@@ -1583,14 +1603,15 @@ impl AppRouterImpl {
                     addr
                 }
                 Err(e) => {
-                    Self::clear_balance_projection_after_rollback(
-                        &sender_device_id_str,
-                        &token_id,
-                        pre_send_balance,
-                    );
-                    self.wallet
-                        .force_set_balance_for_self(&token_id, pre_send_balance);
-                    return err(format!("wallet.send: b0x address rotation failed: {e}"));
+                    let rollback_error = self
+                        .rollback_failed_online_transfer(&rollback_request)
+                        .await
+                        .err()
+                        .map(|rb| format!("; rollback failed: {rb}"))
+                        .unwrap_or_default();
+                    return err(format!(
+                        "wallet.send: b0x address rotation failed: {e}{rollback_error}"
+                    ));
                 }
             };
 
@@ -1607,6 +1628,7 @@ impl AppRouterImpl {
                 next_chain_tip: Some(b0x_next_chain_tip),
                 receipt_commit: receipt_commit_bytes,
                 routing_address,
+                canonical_operation_bytes: signing_bytes.clone(),
             };
 
             // Create B0xSDK and submit (arg order: device_id, core_sdk, endpoints)
@@ -1671,36 +1693,19 @@ impl AppRouterImpl {
         }
 
         // =====================================================================
-        // ATOMIC ROLLBACK: If b0x delivery failed, restore the pre-send cache value
-        // and clear any stale derived projection.
+        // ATOMIC ROLLBACK: If b0x delivery failed, restore canonical state,
+        // shared SMT, persisted transaction/projection rows, and in-memory caches.
         // =====================================================================
         if !b0x_succeeded {
-            log::warn!(
-                "[wallet.send] ⚠️ Rolling back balance to {} because b0x delivery failed",
-                pre_send_balance
-            );
-            Self::clear_balance_projection_after_rollback(
-                &sender_device_id_str,
-                &token_id,
-                pre_send_balance,
-            );
-            // Restore in-memory balance cache so subsequent sends don't see
-            //    stale deducted value and hit "Insufficient balance for transfer"
-            let rollback_token = if token_id.is_empty() {
-                "ERA"
-            } else {
-                &token_id
-            };
-            self.wallet
-                .force_set_balance_for_self(rollback_token, pre_send_balance);
-            log::info!(
-                "[wallet.send] 🔄 In-memory balance cache restored for {}",
-                rollback_token
-            );
-            crate::security::shared_smt::clear_pending_online(&smt_key).await;
-            return err(
-                "wallet.send: transfer rolled back — could not deliver to recipient inbox. Check storage node connectivity.".into()
-            );
+            let rollback_error = self
+                .rollback_failed_online_transfer(&rollback_request)
+                .await
+                .err()
+                .map(|e| format!("; rollback failed: {e}"))
+                .unwrap_or_default();
+            return err(format!(
+                "wallet.send: transfer rolled back — could not deliver to recipient inbox. Check storage node connectivity.{rollback_error}"
+            ));
         }
 
         // Record a single outstanding online transition for this relationship.
@@ -1710,11 +1715,15 @@ impl AppRouterImpl {
             let msg_id = match b0x_message_id {
                 Some(ref msg_id) => msg_id,
                 None => {
-                    crate::security::shared_smt::clear_pending_online(&smt_key).await;
-                    return err(
-                        "wallet.send: delivery succeeded but no b0x message id was returned"
-                            .to_string(),
-                    );
+                    let rollback_error = self
+                        .rollback_failed_online_transfer(&rollback_request)
+                        .await
+                        .err()
+                        .map(|e| format!("; rollback failed: {e}"))
+                        .unwrap_or_default();
+                    return err(format!(
+                        "wallet.send: delivery succeeded but no b0x message id was returned{rollback_error}"
+                    ));
                 }
             };
             let new_tip_b32 = crate::util::text_id::encode_base32_crockford(&new_chain_tip);
@@ -1726,9 +1735,14 @@ impl AppRouterImpl {
             ) {
                 let _ =
                     crate::storage::client_db::mark_contact_needs_online_reconcile(&to_device_id);
-                crate::security::shared_smt::clear_pending_online(&smt_key).await;
+                let rollback_error = self
+                    .rollback_failed_online_transfer(&rollback_request)
+                    .await
+                    .err()
+                    .map(|rb| format!("; rollback failed: {rb}"))
+                    .unwrap_or_default();
                 return err(format!(
-                    "wallet.send: delivered transfer but failed to persist sender-side online gate: {e}"
+                    "wallet.send: delivered transfer but failed to persist sender-side online gate: {e}{rollback_error}"
                 ));
             }
             log::info!(
@@ -1749,6 +1763,35 @@ impl AppRouterImpl {
                     "[wallet.send] §16.6 In-memory bilateral_chains cache sync failed: {}",
                     e
                 );
+            }
+            // §2.1: Advance the sender's SQLite chain tip to h_{n+1}.
+            // Both devices must agree on the current tip. The sender computed
+            // and signed h_{n+1} — it's authoritative. Without this, a
+            // subsequent BLE bilateral from the receiver uses h_{n+1} as
+            // parent, but the sender's SQLite still has h_n → tripwire.
+            match crate::storage::client_db::try_advance_finalized_bilateral_chain_tip(
+                &to_device_id,
+                &chain_tip_arr,
+                &new_chain_tip,
+            ) {
+                Ok(true) => {
+                    log::info!(
+                        "[wallet.send] §2.1 Sender SQLite chain tip advanced: {} → {}",
+                        &crate::util::text_id::encode_base32_crockford(&chain_tip_arr)[..8],
+                        &new_tip_b32[..8],
+                    );
+                }
+                Ok(false) => {
+                    log::warn!(
+                        "[wallet.send] §2.1 Sender SQLite chain tip CAS rejected (tip already advanced?)"
+                    );
+                }
+                Err(e) => {
+                    log::warn!(
+                        "[wallet.send] §2.1 Sender SQLite chain tip advance failed: {}",
+                        e
+                    );
+                }
             }
         }
         crate::security::shared_smt::clear_pending_online(&smt_key).await;
@@ -1920,6 +1963,7 @@ impl AppRouterImpl {
             next_chain_tip: None,
             receipt_commit: Vec::new(),
             routing_address,
+            canonical_operation_bytes: Vec::new(),
         };
 
         let sender_device_id_b32 = crate::util::text_id::encode_base32_crockford(&from_device_id);
@@ -2420,12 +2464,11 @@ async fn fetch_quorum_device_identity(
 #[async_trait]
 impl AppRouter for AppRouterImpl {
     fn sync_balance_cache(&self) {
-        if let Err(e) = self.core_sdk.restore_latest_archived_state_for_device() {
-            log::warn!(
-                "[AppRouter] restore_latest_archived_state_for_device failed: {}",
-                e
-            );
-        }
+        // Reload token balance projection from SQLite only.
+        // Do NOT re-load canonical state from BCR archive here — the caller
+        // has already pushed the settled canonical state via push_device_state().
+        // Re-loading from BCR would overwrite the just-pushed settled state
+        // with a potentially stale archive entry.
         if let Err(e) = self.wallet.reload_balance_cache_for_self() {
             log::warn!("[AppRouter] sync_balance_cache failed: {}", e);
         }
@@ -2433,6 +2476,12 @@ impl AppRouter for AppRouterImpl {
 
     fn get_device_current_state(&self) -> Option<dsm::types::state_types::State> {
         self.core_sdk.get_current_state().ok()
+    }
+
+    fn push_device_state(&self, state: &dsm::types::state_types::State) {
+        if let Err(e) = self.core_sdk.restore_state_snapshot(state) {
+            log::warn!("[AppRouter] push_device_state failed: {}", e);
+        }
     }
 
     // ====================== QUERY ======================

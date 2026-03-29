@@ -325,15 +325,15 @@ mod tests {
         tree.add_leaf(hash_data(b"data4"));
 
         let root_hash = tree.root_hash().expect("Expected root hash");
-        tracing::debug!("Root hash (bytes): {:?}", root_hash);
-        tracing::debug!("Leaf2 hash (bytes): {:?}", leaf2);
+        println!("Root hash (bytes): {:?}", root_hash);
+        println!("Leaf2 hash (bytes): {:?}", leaf2);
 
         let leaf3 = hash_data(b"data3");
 
         let proof = tree.generate_proof(1);
-        tracing::debug!("Proof path length: {}", proof.path.len());
+        println!("Proof path length: {}", proof.path.len());
         for (i, hash) in proof.path.iter().enumerate() {
-            tracing::debug!("Proof element {} (bytes): {:?}", i, hash);
+            println!("Proof element {} (bytes): {:?}", i, hash);
         }
 
         assert!(MerkleTree::verify_proof(
@@ -369,21 +369,21 @@ mod tests {
         assert_eq!(tree.leaves.len(), 3);
 
         let root_hash = tree.root_hash().expect("Expected root hash");
-        tracing::debug!("Root hash (bytes): {:?}", root_hash);
-        tracing::debug!("Leaf3 hash (bytes): {:?}", leaf3);
+        println!("Root hash (bytes): {:?}", root_hash);
+        println!("Leaf3 hash (bytes): {:?}", leaf3);
 
         let proof = tree.generate_proof(2);
-        tracing::debug!("Proof path length: {}", proof.path.len());
+        println!("Proof path length: {}", proof.path.len());
         for (i, hash) in proof.path.iter().enumerate() {
-            tracing::debug!("Proof element {} (bytes): {:?}", i, hash);
+            println!("Proof element {} (bytes): {:?}", i, hash);
         }
 
         // With odd-leaf duplication, proof must verify
         let combined_0_1 = MerkleNode::combine_hashes(&tree.leaves[0], &tree.leaves[1]);
         let combined_2_2 = MerkleNode::combine_hashes(&tree.leaves[2], &tree.leaves[2]);
         let expected_root = MerkleNode::combine_hashes(&combined_0_1, &combined_2_2);
-        tracing::debug!("Expected root (bytes): {:?}", expected_root);
-        tracing::debug!("Actual root   (bytes): {:?}", root_hash);
+        println!("Expected root (bytes): {:?}", expected_root);
+        println!("Actual root   (bytes): {:?}", root_hash);
 
         assert!(MerkleTree::verify_proof(
             &root_hash,

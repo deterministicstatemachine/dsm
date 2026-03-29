@@ -639,14 +639,19 @@ impl BilateralTransactionManager {
         anchor.chain_tip = tip;
         self.relationships.insert(*remote_device_id, anchor.clone());
 
-        // Seed the chain tip store so the first set_contact_chain_tip succeeds.
-        // The store expects expected_parent == stored; if no entry exists yet,
-        // stored defaults to [0u8;32], so we must write the initial tip first.
-        let _ = self.chain_tip_store.set_contact_chain_tip(
-            remote_device_id,
-            [0u8; 32], // no previous tip in store
-            tip,
-        );
+        // Seed the chain tip store only when no chain tip exists yet.
+        // contact_sdk may have already persisted the initial tip during
+        // add_contact, in which case contact_chain_tip is Some(...) and the
+        // CAS with expected_parent=[0u8;32] would fail (SQLite already
+        // stores tip, not zeros). Skip the redundant write to avoid the
+        // rejected-CAS warning.
+        if contact_chain_tip.is_none() {
+            let _ = self.chain_tip_store.set_contact_chain_tip(
+                remote_device_id,
+                [0u8; 32],
+                tip,
+            );
+        }
 
         Ok(anchor)
     }

@@ -187,14 +187,14 @@ impl ContactManager {
                         self.with_manager_write_sync("load_contacts_from_database", move |mgr| {
                             mgr.add_verified_contact(verified_contact.clone())?;
                             if let Some(chain_tip) = verified_contact.chain_tip {
-                                let smt = smt_arc.blocking_read();
+                                let mut smt = smt_arc.blocking_write();
                                 let smt_key =
                                     dsm::core::bilateral_transaction_manager::compute_smt_key(
                                         &own_device_id,
                                         &device_id,
                                     );
                                 mgr.initialize_contact_chain_tip(
-                                    &device_id, chain_tip, &smt, &smt_key,
+                                    &device_id, chain_tip, &mut smt, &smt_key,
                                 )
                                 .map_err(|e| {
                                     DsmError::internal(
@@ -306,7 +306,7 @@ impl ContactManager {
         };
         {
             let smt_arc = crate::security::shared_smt::init_shared_smt(256);
-            let smt = smt_arc.read().await;
+            let mut smt = smt_arc.write().await;
             let smt_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
                 &self.device_id,
                 &contact_device_id,
@@ -318,7 +318,7 @@ impl ContactManager {
             if let Err(e) = mgr.initialize_contact_chain_tip(
                 &contact_device_id,
                 initial_chain_tip,
-                &smt,
+                &mut smt,
                 &smt_key,
             ) {
                 return Err(ContactError::InvalidChainTip(format!(
@@ -371,6 +371,22 @@ impl ContactManager {
                         );
                     }
                     log::info!("[DSM_SDK] ✅ Contact stored successfully in SQLite");
+
+                    // §2.3: Store the contact's Device Tree root R_G so that receipt
+                    // verification during inbox sync can validate π_dev proofs.
+                    // For a single-device tree, R_G = hash_leaf(device_id) and is
+                    // deterministic from the contact's device ID alone.
+                    let contact_device_tree_root =
+                        dsm::common::device_tree::DeviceTree::single(contact_device_id).root();
+                    if let Err(e) = crate::storage::client_db::store_contact_device_tree_root(
+                        &contact_device_id,
+                        &contact_device_tree_root,
+                    ) {
+                        log::warn!(
+                            "[DSM_SDK] ⚠️ Failed to store contact device tree root: {}",
+                            e
+                        );
+                    }
 
                     // Mark device as paired to persist BLE connection in Android layer
                     #[allow(unused_variables)]
@@ -583,7 +599,7 @@ impl ContactManager {
         };
         {
             let smt_arc = crate::security::shared_smt::init_shared_smt(256);
-            let smt = smt_arc.read().await;
+            let mut smt = smt_arc.write().await;
             let smt_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
                 &self.device_id,
                 &contact_device_id,
@@ -599,7 +615,7 @@ impl ContactManager {
             if let Err(e) = mgr.initialize_contact_chain_tip(
                 &contact_device_id,
                 initial_chain_tip,
-                &smt,
+                &mut smt,
                 &smt_key,
             ) {
                 return Err(ContactError::InvalidChainTip(format!(
@@ -667,6 +683,22 @@ impl ContactManager {
                         return Err(ContactError::InvalidChainTip(format!(
                             "Failed to persist initial local bilateral chain tip: {e}"
                         )));
+                    }
+
+                    // §2.3: Store the contact's Device Tree root R_G so that receipt
+                    // verification during inbox sync can validate π_dev proofs.
+                    // For a single-device tree, R_G = hash_leaf(device_id) and is
+                    // deterministic from the contact's device ID alone.
+                    let contact_device_tree_root =
+                        dsm::common::device_tree::DeviceTree::single(contact_device_id).root();
+                    if let Err(e) = crate::storage::client_db::store_contact_device_tree_root(
+                        &contact_device_id,
+                        &contact_device_tree_root,
+                    ) {
+                        log::warn!(
+                            "[DSM_SDK] ⚠️ Failed to store contact device tree root: {}",
+                            e
+                        );
                     }
 
                     // Mark device as paired to persist BLE connection in Android layer
