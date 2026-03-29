@@ -9,7 +9,8 @@
 
 use dsm::crypto::blake3::dsm_domain_hasher;
 use dsm::merkle::sparse_merkle_tree::{
-    default_node, empty_root, hash_smt_node, DEFAULT_SMT_HEIGHT, ZERO_LEAF,
+    default_node, empty_root, hash_smt_node, SmtInclusionProof, SparseMerkleTree,
+    DEFAULT_SMT_HEIGHT, ZERO_LEAF,
 };
 use dsm::verification::smt_replace_witness::{
     hash_smt_leaf, hash_smt_node as witness_hash_node, SmtReplaceWitness,
@@ -40,6 +41,13 @@ const GOLDEN_DEFAULT_NODE_0: &str = "NVM9HGMZVHS8FR2CMTBEX8S5QHNQX03WM91QSSGAZ47
 const GOLDEN_DEFAULT_NODE_1: &str = "SVRH8ZTRABJ1G040KNKY042R9E3HC8E5ZNBWWF17Q0E6BA06HJPG";
 const GOLDEN_DEVTREE_SINGLE: &str = "32D73DT2ME8YNVD6DFB2DSKZN1R5YYN87ARBBCGZJATC63D24JV0";
 const GOLDEN_INITIAL_TIP: &str = "KKF8ZAT6H6X292YFK5VBM5SCKYB8AR912HD0RN8VNEQVGBCQECR0";
+
+// Beta release (2026-03-29): inclusion proof + smt_replace golden vectors.
+// These freeze the ZERO_LEAF non-inclusion proof behavior for absent keys
+// and the full smt_replace proof pipeline for first-ever transactions.
+// Placeholder — will be populated on first run with --nocapture.
+const GOLDEN_SINGLE_LEAF_ROOT: &str = "Q6E1YEENJDT4ZQ9CN0Y52H144ZTHEB2EW94YTR8Y7BKCJPKKR7W0";
+const GOLDEN_FIRST_TX_POST_ROOT: &str = "Q6E1YEENJDT4ZQ9CN0Y52H144ZTHEB2EW94YTR8Y7BKCJPKKR7W0";
 
 // ===========================================================================
 // Domain Tag Golden Vectors
@@ -418,4 +426,127 @@ fn smt_key_determinism_reversed_args() {
             "compute_smt_key(A,B) != compute_smt_key(B,A) for pair {i}"
         );
     }
+}
+
+// ===========================================================================
+// Beta Release: Inclusion Proof + SMT-Replace Golden Vectors
+// ===========================================================================
+
+#[test]
+fn golden_inclusion_proof_absent_key() {
+    let smt = SparseMerkleTree::new(256);
+    let key = [0x07u8; 32];
+
+    let proof = smt.get_inclusion_proof(&key, 256).expect("absent key proof");
+    assert_eq!(
+        proof.value,
+        Some(ZERO_LEAF),
+        "absent key must produce ZERO_LEAF proof"
+    );
+    assert_eq!(
+        proof.siblings.len(),
+        256,
+        "absent key proof must have full-depth siblings"
+    );
+    assert!(
+        SparseMerkleTree::verify_proof_against_root(&proof, smt.root()),
+        "absent key ZERO_LEAF proof must verify against empty tree root"
+    );
+    // The empty tree root is deterministic — verify it matches the existing golden.
+    assert_eq!(
+        to_b32(smt.root()),
+        GOLDEN_EMPTY_ROOT_32,
+        "empty tree root must match existing golden"
+    );
+}
+
+#[test]
+fn golden_inclusion_proof_present_key() {
+    let mut smt = SparseMerkleTree::new(256);
+    let key = [0x07u8; 32];
+    let value = [0x42u8; 32];
+    smt.update_leaf(&key, &value).expect("insert leaf");
+
+    let proof = smt.get_inclusion_proof(&key, 256).expect("present key proof");
+    assert_eq!(
+        proof.value,
+        Some(value),
+        "present key proof must contain the inserted value"
+    );
+    assert_eq!(proof.siblings.len(), 256, "proof must have full-depth siblings");
+    assert!(
+        SparseMerkleTree::verify_proof_against_root(&proof, smt.root()),
+        "present key proof must verify against post-insert root"
+    );
+    let root_b32 = to_b32(smt.root());
+    assert_eq!(
+        root_b32, GOLDEN_SINGLE_LEAF_ROOT,
+        "single-leaf SMT root drifted — tree structure or leaf hashing changed"
+    );
+}
+
+#[test]
+fn golden_smt_replace_first_tx() {
+    let mut smt = SparseMerkleTree::new(256);
+    let key = [0x07u8; 32];
+    let new_tip = [0x42u8; 32];
+
+    let result = smt.smt_replace(&key, &new_tip).expect("smt_replace");
+
+    // Pre-root is the empty tree root.
+    assert_eq!(
+        to_b32(&result.pre_root),
+        GOLDEN_EMPTY_ROOT_32,
+        "first-tx pre_root must be the empty tree root"
+    );
+
+    // Parent proof: ZERO_LEAF (key absent before insert).
+    assert_eq!(
+        result.parent_proof.value,
+        Some(ZERO_LEAF),
+        "first-tx parent proof must be ZERO_LEAF"
+    );
+    assert!(
+        SparseMerkleTree::verify_proof_against_root(&result.parent_proof, &result.pre_root),
+        "first-tx parent proof must verify against pre_root"
+    );
+
+    // Child proof: the inserted value.
+    assert_eq!(
+        result.child_proof.value,
+        Some(new_tip),
+        "first-tx child proof must contain the new tip"
+    );
+    assert!(
+        SparseMerkleTree::verify_proof_against_root(&result.child_proof, &result.post_root),
+        "first-tx child proof must verify against post_root"
+    );
+
+    let post_root_b32 = to_b32(&result.post_root);
+    assert_eq!(
+        post_root_b32, GOLDEN_FIRST_TX_POST_ROOT,
+        "first-tx post_root drifted — smt_replace proof pipeline changed"
+    );
+}
+
+#[test]
+fn golden_proof_serialization_round_trip() {
+    let mut smt = SparseMerkleTree::new(256);
+    let key = [0x07u8; 32];
+    let value = [0x42u8; 32];
+    smt.update_leaf(&key, &value).expect("insert leaf");
+
+    let proof = smt.get_inclusion_proof(&key, 256).expect("proof");
+    let bytes = proof.to_bytes();
+    let proof2 = SmtInclusionProof::from_bytes(&bytes).expect("deserialize proof");
+
+    assert_eq!(proof.key, proof2.key, "key must round-trip");
+    assert_eq!(proof.value, proof2.value, "value must round-trip");
+    assert_eq!(proof.siblings, proof2.siblings, "siblings must round-trip");
+
+    let root = *smt.root();
+    assert!(
+        SparseMerkleTree::verify_proof_against_root(&proof2, &root),
+        "deserialized proof must verify against the same root"
+    );
 }
