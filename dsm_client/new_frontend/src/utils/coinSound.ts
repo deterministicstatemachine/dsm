@@ -24,12 +24,16 @@ function getAudio(): HTMLAudioElement {
 /** Play the coin sound. Respects global mute. Safe to call rapidly. */
 export function playCoinSound(): void {
   try {
-    if (!appRuntimeStore.getSnapshot().soundEnabled) return;
+    const snapshot = appRuntimeStore.getSnapshot();
+    if (!snapshot.soundEnabled) {
+      console.log('[coinSound] muted — skipping');
+      return;
+    }
+    console.log('[coinSound] playing coin.mp3');
     const a = getAudio();
     a.currentTime = 0;
-    a.play().catch(() => {
-      // Autoplay blocked by browser policy — silent fail.
-      // On Android WebView this is generally allowed after first user gesture.
+    a.play().catch((e) => {
+      console.warn('[coinSound] play() rejected:', e);
     });
   } catch {
     // Audio not available (e.g. SSR, test env) — ignore.

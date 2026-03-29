@@ -23,12 +23,22 @@ internal object BridgeBleHandler {
     }
 
     fun setBleIdentityForAdvertising(payload: ByteArray, logTag: String): ByteArray {
-        if (payload.size != 64) {
-            Log.e(logTag, "setBleIdentityForAdvertising: expected 64 bytes, got ${payload.size}")
+        // Payload is protobuf-encoded BleIdentityCharValue from Rust's
+        // encodeIdentityCharValue. Decode the proto fields.
+        val genesisHash: ByteArray
+        val deviceId: ByteArray
+        try {
+            val parsed = dsm.types.proto.BleIdentityCharValue.parseFrom(payload)
+            genesisHash = parsed.genesisHash.toByteArray()
+            deviceId = parsed.deviceId.toByteArray()
+            if (genesisHash.size != 32 || deviceId.size != 32) {
+                Log.e(logTag, "setBleIdentityForAdvertising: proto field sizes wrong genesis=${genesisHash.size} device=${deviceId.size}")
+                return ByteArray(0)
+            }
+        } catch (e: Exception) {
+            Log.e(logTag, "setBleIdentityForAdvertising: failed to decode ${payload.size} bytes: ${e.message}")
             return ByteArray(0)
         }
-        val genesisHash = payload.copyOfRange(0, 32)
-        val deviceId = payload.copyOfRange(32, 64)
 
         try {
             val ctx = com.dsm.wallet.ui.MainActivity.getActiveInstance()?.baseContext
