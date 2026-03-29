@@ -208,7 +208,6 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
         &self,
         ctx: BilateralSettlementContext,
     ) -> Result<BilateralSettlementOutcome, String> {
-
         // §8 Atomicity + Theorem 3: the same accepted transition must not
         // debit or credit twice.  The tx_id is derived from commitment_hash
         // which is identical for both parties.  In production each device has
@@ -216,17 +215,14 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
         // both roles share one DB.  Scope the guard to the local device so
         // the sender's completed record does not block the receiver.
         let local_txt = encode_base32_crockford(&ctx.local_device_id);
-        let tx_id_candidate =
-            crate::util::text_id::encode_base32_crockford(&ctx.commitment_hash);
+        let tx_id_candidate = crate::util::text_id::encode_base32_crockford(&ctx.commitment_hash);
         // Sender-only idempotency: prevent double-debit if the sender's
         // settlement is retried.  The receiver side is naturally idempotent
         // via the atomic chain-tip CAS in apply_receiver_confirm_bundle_atomic
         // (the UPDATE contacts SET chain_tip = ?1 WHERE device_id = ?3 only
         // succeeds once for the same tip value).  In production each device
         // has its own DB so a bare tx_id check suffices for senders.
-        if ctx.is_sender
-            && crate::storage::client_db::is_settlement_completed(&tx_id_candidate)
-        {
+        if ctx.is_sender && crate::storage::client_db::is_settlement_completed(&tx_id_candidate) {
             log::warn!(
                 "[BILATERAL][settle] Idempotency guard: sender settlement already completed for {}",
                 tx_id_candidate,
@@ -236,7 +232,7 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
 
         let (transfer_amount, token_id_opt) = parse_transfer_fields(&ctx.operation_bytes);
         let token_id_str = token_id_opt.clone().unwrap_or_default();
-        
+
         // (§2.3.1) Recovery-path settlements are allowed to have None proof_data
         // (BLE GATT failure scenario where receipt delivery failed).
         // Sender must always have proof_data (receipt from its own SMT-Replace).
@@ -317,15 +313,14 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
 
         if ctx.is_sender {
             if transfer_amount > 0 {
-                let debit_result =
-                    crate::storage::client_db::apply_sender_settlement_bundle_atomic(
-                        &local_txt,
-                        token_for_atomic,
-                        transfer_amount,
-                        &tx_record,
-                        canonical_state.as_ref(),
-                        projection.as_ref(),
-                    );
+                let debit_result = crate::storage::client_db::apply_sender_settlement_bundle_atomic(
+                    &local_txt,
+                    token_for_atomic,
+                    transfer_amount,
+                    &tx_record,
+                    canonical_state.as_ref(),
+                    projection.as_ref(),
+                );
 
                 if let Err(e) = &debit_result {
                     error!(
