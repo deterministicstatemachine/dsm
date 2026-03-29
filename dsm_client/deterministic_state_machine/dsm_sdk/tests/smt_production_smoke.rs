@@ -346,7 +346,7 @@ async fn smoke_receipt_failure_scope_is_relationship_local() {
         verify_receipt_bytes(
             &result_cd.receipt_bytes,
             Some(DeviceTreeAcceptanceCommitment::from_root(
-                c.device_tree_root
+                c.device_tree_root,
             )),
         ),
         "an unrelated relationship with a valid authenticated commitment must continue to verify"
