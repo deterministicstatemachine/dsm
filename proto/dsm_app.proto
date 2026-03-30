@@ -1348,6 +1348,8 @@ message BleGattIdentityReadResult {
   bool   success             = 1;
   bytes  write_back_envelope = 2 [(dsm_max_len)=4096]; // Framed Envelope to write to PAIRING char
   string error_message       = 3;
+  bytes  peer_device_id      = 4 [(dsm_fixed_len)=32]; // Peer's deviceId (for Kotlin identity anchoring)
+  bytes  peer_genesis_hash   = 5 [(dsm_fixed_len)=32]; // Peer's genesisHash
 }
 
 // Response from processIncomingBleData JNI call.
