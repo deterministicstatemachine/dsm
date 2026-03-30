@@ -1274,6 +1274,25 @@ fn emit_identity_read_result(
     write_back_envelope: &[u8],
     error_message: &str,
 ) -> jni::sys::jbyteArray {
+    emit_identity_read_result_with_identity(
+        env,
+        success,
+        write_back_envelope,
+        error_message,
+        &[],
+        &[],
+    )
+}
+
+/// Full version that includes the peer's identity for Kotlin-side anchoring.
+fn emit_identity_read_result_with_identity(
+    env: &mut JNIEnv<'_>,
+    success: bool,
+    write_back_envelope: &[u8],
+    error_message: &str,
+    peer_device_id: &[u8],
+    peer_genesis_hash: &[u8],
+) -> jni::sys::jbyteArray {
     let result = pb::BleGattIdentityReadResult {
         success,
         write_back_envelope: write_back_envelope.to_vec(),
