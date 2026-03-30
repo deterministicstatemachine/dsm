@@ -442,22 +442,25 @@ class GattClientSession(
                 }
                 BleConstants.TX_RESPONSE_UUID -> {
                     // TX_RESPONSE notification — response data from the GATT server.
-                    // Transfer nonce: the server prepends 1 byte to the first
-                    // chunk of each sendChunkedNotifications call. If the nonce
-                    // differs from the last one we saw, this is a new transfer —
-                    // reset the ACK counter and strip the nonce byte.
-                    var payload = data
-                    if (data.isNotEmpty()) {
-                        val nonce = data[0]
-                        if (nonce != currentTransferNonce) {
-                            if (notificationChunkCount > 0) {
-                                Log.d("GattClientSession", "Transfer nonce changed for $deviceAddress (${(currentTransferNonce.toInt() and 0xFF)} -> ${(nonce.toInt() and 0xFF)}); resetting chunk counter from $notificationChunkCount")
-                            }
-                            currentTransferNonce = nonce
-                            notificationChunkCount = 0
-                            // Strip the nonce byte from the first chunk
-                            payload = data.copyOfRange(1, data.size)
+                    // Transfer nonce: the server prepends [0xFF, nonce] to the
+                    // FIRST chunk of each sendChunkedNotifications call.
+                    // 0xFF is an invalid protobuf tag so it can't appear as
+                    // the first byte of a real BleChunk payload.
+                    // When detected: strip the 2-byte header, reset the ACK
+                    // counter so per-transfer flow control stays synchronized.
+                    val payload: ByteArray
+                    if (data.size > 2 && data[0] == 0xFF.toByte()) {
+                        // First chunk of a new transfer — extract nonce, strip header
+                        val nonce = data[1]
+                        if (nonce != currentTransferNonce || notificationChunkCount > 0) {
+                            Log.d("GattClientSession", "Transfer nonce for $deviceAddress: ${(nonce.toInt() and 0xFF)} (prev=${(currentTransferNonce.toInt() and 0xFF)}, reset counter from $notificationChunkCount)")
                         }
+                        currentTransferNonce = nonce
+                        notificationChunkCount = 0
+                        payload = data.copyOfRange(2, data.size)
+                    } else {
+                        // Continuation chunk — raw payload
+                        payload = data
                     }
 
                     Log.d("GattClientSession", "TX_RESPONSE notification from $deviceAddress (${payload.size} bytes, nonce=${currentTransferNonce.toInt() and 0xFF})")
