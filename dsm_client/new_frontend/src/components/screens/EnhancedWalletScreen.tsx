@@ -7,6 +7,9 @@ import SendTab from './wallet/SendTab';
 import HistoryTab from './wallet/HistoryTab';
 import InboxOverlay from './wallet/InboxOverlay';
 import BitcoinTapTab from './BitcoinTapTab';
+import { ensureBleAdvertisingIfContacts } from '../../contexts/ContactsContext';
+import { stopBleAdvertisingViaRouter } from '../../dsm/WebViewBridge';
+import { bridgeEvents } from '../../bridge/bridgeEvents';
 import '../../styles/EnhancedWallet.css';
 
 interface EnhancedWalletScreenProps {
@@ -31,6 +34,29 @@ const EnhancedWalletScreen: React.FC<EnhancedWalletScreenProps> = ({ eraTokenSrc
     measure();
     window.addEventListener('resize', measure);
     return () => window.removeEventListener('resize', measure);
+  }, []);
+
+  // ── BLE lifecycle: wallet screen visible = BLE advertising active ──
+  // Both parties must be on the wallet screen for bilateral transfers.
+  // On mount: start GATT server + advertising via protobuf bridge.
+  // On unmount or app backgrounded: stop advertising.
+  // On app foregrounded: re-ensure advertising.
+  useEffect(() => {
+    void ensureBleAdvertisingIfContacts();
+
+    const handleVisibility = (ev: { state: string }) => {
+      if (ev.state === 'visible') {
+        void ensureBleAdvertisingIfContacts();
+      } else {
+        void stopBleAdvertisingViaRouter();
+      }
+    };
+    const off = bridgeEvents.on('visibility.change', handleVisibility);
+
+    return () => {
+      off();
+      void stopBleAdvertisingViaRouter();
+    };
   }, []);
 
   const [activeTab, setActiveTab] = useState<'overview' | 'send' | 'history' | 'bitcoin'>(initialTab || 'overview');

@@ -67,6 +67,16 @@ impl BilateralTransportAdapter {
             .await;
     }
 
+    pub async fn fail_session_by_commitment(
+        &self,
+        commitment_hash: [u8; 32],
+        reason: &str,
+    ) -> bool {
+        self.bilateral_handler
+            .fail_session_by_commitment(commitment_hash, reason)
+            .await
+    }
+
     pub async fn create_prepare_message(
         &self,
         counterparty_device_id: [u8; 32],
