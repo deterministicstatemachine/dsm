@@ -4034,6 +4034,14 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_acceptBilater
         {
             Ok(v) => v,
             Err(e) => {
+                crate::runtime::get_runtime().block_on(async {
+                    let _ = transport_adapter
+                        .fail_session_by_commitment(
+                            ch,
+                            "Receiver accept failed before transport send completed",
+                        )
+                        .await;
+                });
                 return error_byte_array(
                     &mut env,
                     helpers::JniErrorCode::ProcessingFailed as u32,
@@ -4070,6 +4078,14 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_acceptBilater
         {
             Ok(c) => c,
             Err(e) => {
+                crate::runtime::get_runtime().block_on(async {
+                    let _ = transport_adapter
+                        .fail_session_by_commitment(
+                            ch,
+                            "Receiver accept framing failed before BLE delivery",
+                        )
+                        .await;
+                });
                 return error_byte_array(
                     &mut env,
                     helpers::JniErrorCode::ProcessingFailed as u32,
@@ -4082,6 +4098,14 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_acceptBilater
         match send_ble_chunks_via_unified(&mut env, &addr, &chunks) {
             Ok(true) => {}
             Ok(false) => {
+                crate::runtime::get_runtime().block_on(async {
+                    let _ = transport_adapter
+                        .fail_session_by_commitment(
+                            ch,
+                            "Receiver accept BLE send failed before completion; retry from sender is safe",
+                        )
+                        .await;
+                });
                 return error_byte_array(
                     &mut env,
                     helpers::JniErrorCode::ProcessingFailed as u32,
@@ -4090,6 +4114,14 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_acceptBilater
                 .into_raw();
             }
             Err(e) => {
+                crate::runtime::get_runtime().block_on(async {
+                    let _ = transport_adapter
+                        .fail_session_by_commitment(
+                            ch,
+                            "Receiver accept BLE transport error before completion; retry from sender is safe",
+                        )
+                        .await;
+                });
                 return error_byte_array(
                     &mut env,
                     helpers::JniErrorCode::ProcessingFailed as u32,

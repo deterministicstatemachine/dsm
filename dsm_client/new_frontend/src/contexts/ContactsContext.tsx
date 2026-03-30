@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // path: src/contexts/ContactsContext.tsx
 // SPDX-License-Identifier: Apache-2.0
-import React, { createContext, useContext, useEffect, useMemo, useRef } from 'react';
+import React, { createContext, useContext, useEffect, useMemo } from 'react';
 import { useBridgeEvent } from '@/hooks/useBridgeEvents';
 import { hasIdentity } from '../utils/identity';
 import { contactsStore, useContactsStore } from '../stores/contactsStore';
@@ -63,9 +63,10 @@ export const ContactsContext = createContext<ContactsContextValue>(defaultValue)
 
 /**
  * Ensure BLE advertising is active so peers can initiate bilateral transfers.
- * Called after identity.ready and whenever a new BLE contact is mapped.
+ * Called by EnhancedWalletScreen on mount/visibility change, and by
+ * ContactsProvider on identity.ready and contact.bleMapped events.
  */
-async function ensureBleAdvertisingIfContacts(): Promise<void> {
+export async function ensureBleAdvertisingIfContacts(): Promise<void> {
   try {
     const contacts = contactsStore.getSnapshot().contacts;
     const hasBleContacts = contacts.some((c: any) => c.bleAddress);
@@ -88,15 +89,10 @@ async function ensureBleAdvertisingIfContacts(): Promise<void> {
 
 export function ContactsProvider({ children }: { children: React.ReactNode }) {
   const state = useContactsStore();
-  const bleAdvertisingStarted = useRef(false);
 
   useBridgeEvent('contact.bleMapped', (detail) => {
     contactsStore.handleBleMapped(detail);
-    // New BLE contact — ensure we're advertising
-    if (!bleAdvertisingStarted.current) {
-      bleAdvertisingStarted.current = true;
-      void ensureBleAdvertisingIfContacts();
-    }
+    void ensureBleAdvertisingIfContacts();
   }, []);
   useBridgeEvent('contact.bleUpdated', contactsStore.handleBleUpdated, []);
   useBridgeEvent('contact.added', () => {
