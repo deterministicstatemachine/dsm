@@ -4034,9 +4034,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_acceptBilater
         {
             Ok(v) => v,
             Err(e) => {
-                eprintln!(
-                    "create_prepare_accept_envelope_with_counterparty failed: {e}"
-                );
+                eprintln!("create_prepare_accept_envelope_with_counterparty failed: {e}");
                 crate::runtime::get_runtime().block_on(async {
                     let _ = transport_adapter
                         .fail_session_by_commitment(
