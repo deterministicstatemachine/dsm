@@ -321,6 +321,27 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
     }
 
     /**
+     * Ensure BLE is ready to receive bilateral transfers: GATT server running
+     * and advertising active. Called by the frontend wallet screen lifecycle
+     * via the protobuf bridge (device.ble.advertise.start). Also called
+     * internally by connectToDevice as a safety net.
+     */
+    fun ensureBleReady(): Boolean {
+        return runOperationBool(BleOpLane.LIFECYCLE) {
+            if (!gattServer.isReady()) {
+                if (!gattStartInFlight) {
+                    gattStartInFlight = true
+                    try { gattServer.ensureStarted() } finally { gattStartInFlight = false }
+                }
+            }
+            if (!advertiser.isAdvertising()) {
+                try { advertiser.startAdvertising() } catch (_: Throwable) { /* best-effort */ }
+            }
+            gattServer.isReady()
+        }
+    }
+
+    /**
      * Ensure GATT server is started.
      */
     fun ensureGattServerStarted(): Boolean {
