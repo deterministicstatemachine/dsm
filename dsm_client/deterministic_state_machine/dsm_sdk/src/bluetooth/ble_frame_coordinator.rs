@@ -297,9 +297,58 @@ impl ReassemblyBuffer {
     }
 }
 
+/// Fixed-size LRU dedup table for fully reassembled frames.
+///
+/// After a frame is reassembled, its commitment is inserted here.  If the same
+/// commitment appears again within `TTL_SECS` (e.g. peer retransmitted the
+/// entire chunk set), the duplicate is dropped before it reaches the bilateral
+/// handler.  This prevents the "Duplicate prepare request" log from firing.
+///
+/// Capacity is bounded at `DEDUP_TABLE_SIZE` entries — oldest entry is evicted
+/// when full, so memory usage is O(1).
+struct DeduplicationTable {
+    entries: Vec<([u8; 32], Instant)>,
+    capacity: usize,
+}
+
+impl DeduplicationTable {
+    const TTL_SECS: u64 = 60;
+
+    fn new(capacity: usize) -> Self {
+        Self {
+            entries: Vec::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    /// Returns `true` if the commitment was already seen within the TTL window.
+    /// Otherwise inserts it and returns `false`.
+    fn is_duplicate(&mut self, commitment: &[u8; 32]) -> bool {
+        let now = Instant::now();
+
+        // Evict expired entries
+        self.entries
+            .retain(|(_, ts)| now.duration_since(*ts).as_secs() < Self::TTL_SECS);
+
+        // Check for existing entry
+        if self.entries.iter().any(|(c, _)| c == commitment) {
+            return true;
+        }
+
+        // Evict oldest if at capacity
+        if self.entries.len() >= self.capacity {
+            self.entries.remove(0);
+        }
+
+        self.entries.push((*commitment, now));
+        false
+    }
+}
+
 /// BLE frame coordinator: handles chunking, reassembly, and bilateral flow dispatch.
 pub struct BleFrameCoordinator {
     pending_reassembly: Arc<Mutex<HashMap<[u8; 32], ReassemblyBuffer>>>,
+    dedup_table: Arc<Mutex<DeduplicationTable>>,
     device_id: [u8; 32],
 }
 
@@ -470,6 +519,7 @@ impl BleFrameCoordinator {
     pub fn new(device_id: [u8; 32]) -> Self {
         Self {
             pending_reassembly: Arc::new(Mutex::new(HashMap::new())),
+            dedup_table: Arc::new(Mutex::new(DeduplicationTable::new(32))),
             device_id,
         }
     }
@@ -744,6 +794,20 @@ impl BleFrameCoordinator {
 
         // Cleanup persisted chunks after successful reassembly
         let _ = crate::storage::client_db::delete_frame_chunks(&frame_commitment);
+
+        // Transport-level dedup: if the same frame_commitment was already
+        // dispatched (e.g. peer retransmitted the entire chunk set), drop it
+        // before it reaches the bilateral handler.
+        {
+            let mut dedup = self.dedup_table.lock().await;
+            if dedup.is_duplicate(&frame_commitment) {
+                warn!(
+                    "Transport dedup: dropping reassembled duplicate frame {}",
+                    short_id(&frame_commitment[..8])
+                );
+                return Ok(FrameIngressResult::NeedMoreChunks); // silently drop
+            }
+        }
 
         Ok(FrameIngressResult::MessageComplete {
             message: BleTransportMessage {

@@ -60,9 +60,11 @@ class BleCoordinatorSingleFlightTest {
         }
 
         // Stub GATT ensure: count invocations
-        whenever(mockGatt.ensureStarted()).thenAnswer {
-            gattEnsureCount.incrementAndGet()
-            true
+        runBlocking {
+            whenever(mockGatt.ensureStarted()).thenAnswer {
+                gattEnsureCount.incrementAndGet()
+                true
+            }
         }
     }
 
