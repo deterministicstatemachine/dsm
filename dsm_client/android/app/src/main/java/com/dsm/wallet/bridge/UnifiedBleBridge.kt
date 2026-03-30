@@ -155,24 +155,11 @@ internal object UnifiedBleBridge {
         val svc = bleCoordinator ?: return false
         return try {
             // --- RPA resolution ---
-            // Rust may pass a stale BLE address from pairing time. Android rotates
-            // Random Private Addresses, so the peer may now be reachable under a
-            // different address.  Check if Kotlin already has a live route and prefer
-            // it over the (potentially stale) address from Rust.
-            val effectiveAddr = if (svc.hasActiveClientSession(deviceAddress)
-                || (svc.isGattServerClient(deviceAddress) && svc.isServerClientSubscribedToTxResponse(deviceAddress))
-            ) {
-                deviceAddress // requested address is already live — use it
-            } else {
-                // Look for any live session (client or server) under a different RPA
-                val freshClient = svc.findAnyReadySessionAddress()
-                if (freshClient != null && freshClient != deviceAddress) {
-                    Log.i("UnifiedBleBridge", "requestGattWriteChunks: RPA stale $deviceAddress → active session $freshClient")
-                    freshClient
-                } else {
-                    deviceAddress // no better option — proceed with requested address
-                }
-            }
+            // Rust may pass a stale BLE address. Resolve via identity-anchored
+            // registry (addressIndex → PeerIdentity → current address) or fall
+            // back to any ready session in single-peer scenarios.
+            val resolved = svc.resolveSession(deviceAddress)
+            val effectiveAddr = resolved?.second ?: deviceAddress
 
             // Routing priority:
             // 1. If we have an active GATT client session (we connected to them), use regular writes.
@@ -238,113 +225,60 @@ internal object UnifiedBleBridge {
                     ok
                 }
             } else {
-                // No active session — ensure BLE infrastructure is up, then attempt on-demand connection.
-                // Start GATT server + advertising so the peer can discover us while we also try to connect to them.
-                Log.i("UnifiedBleBridge", "requestGattWriteChunks: no route for $effectiveAddr — priming BLE and attempting on-demand connection")
+                // No active session — on-demand connect.
+                // connectToDevice handles: scan for RPA, connect, MTU negotiation.
+                // resolveSession re-resolves after connect so we target the actual address.
+                Log.i("UnifiedBleBridge", "requestGattWriteChunks: no route for $effectiveAddr — on-demand connect")
                 svc.ensureGattServerStarted()
                 publishLocalIdentityIfAvailable(svc)
                 svc.startAdvertising()
                 runBlocking {
-                    // Track effective BLE address — may change if Android rotated the peer's RPA
-                    var effectiveAddress = effectiveAddr
                     try {
-                        // Attempt 1: direct on-demand GATT client connect (works if peer is connectable).
-                        // connectToDevice now includes a 1.5s scan for RPA resolution + 12s poll,
-                        // so allow 15s total.
-                        var connected = withTimeoutOrNull(15000L) {
-                            svc.connectToDevice(deviceAddress).await()
+                        val connected = withTimeoutOrNull(15000L) {
+                            svc.connectToDevice(effectiveAddr).await()
                         } ?: false
+
+                        // Re-resolve: connectToDevice may have found the peer under a new RPA.
+                        val currentAddr = svc.resolveSession(deviceAddress)?.second ?: effectiveAddr
+
                         if (!connected) {
-                            Log.w("UnifiedBleBridge", "requestGattWriteChunks: first connect attempt failed for $effectiveAddress — checking reverse path")
-                            // While we were trying to connect, the peer may have connected to our GATT server and subscribed.
-                            // Use effectiveAddr (not the original deviceAddress) so we find the peer
-                            // even if it connected under a rotated RPA.
-                            if (svc.isGattServerClient(effectiveAddress) && svc.isServerClientSubscribedToTxResponse(effectiveAddress)) {
-                                Log.i("UnifiedBleBridge", "requestGattWriteChunks: peer connected to our GATT server and subscribed during wait — using server notifications for $effectiveAddress")
-                                val ok = svc.sendViaServerNotifications(effectiveAddress, chunks)
-                                if (!ok) {
-                                    UnifiedBleEvents.onConnectionFailed(effectiveAddress, "on_demand_server_notify_fallback_failed")
-                                }
+                            // Check if peer connected to our server while we tried
+                            if (svc.isGattServerClient(currentAddr) && svc.isServerClientSubscribedToTxResponse(currentAddr)) {
+                                Log.i("UnifiedBleBridge", "requestGattWriteChunks: peer connected to our GATT server during wait — using server notifications for $currentAddr")
+                                val ok = svc.sendViaServerNotifications(currentAddr, chunks)
+                                if (!ok) UnifiedBleEvents.onConnectionFailed(currentAddr, "on_demand_server_notify_fallback_failed")
                                 return@runBlocking ok
                             }
-                            // Attempt 2: start scanning to discover the peer under potentially new BLE address
-                            // (Android rotates BLE addresses — the pairing-time address may be stale)
-                            Log.i("UnifiedBleBridge", "requestGattWriteChunks: starting scan + retry connect for $deviceAddress")
-                            svc.startScanning()
-                            delay(3000L) // Allow 3s for scan results + peer discovery
-                            svc.stopScanning()
-
-                            // BLE address may have rotated since pairing. Check if a
-                            // freshly-discovered peer created a session under a different
-                            // address.  If so, use the new address for this send.
-                            if (!svc.hasActiveClientSession(deviceAddress)
-                                && !(svc.isGattServerClient(deviceAddress) && svc.isServerClientSubscribedToTxResponse(deviceAddress))
-                            ) {
-                                val freshAddr = svc.findAnyReadySessionAddress()
-                                if (freshAddr != null && freshAddr != deviceAddress) {
-                                    Log.i("UnifiedBleBridge", "requestGattWriteChunks: BLE address rotated $deviceAddress → $freshAddr")
-                                    effectiveAddress = freshAddr
-                                }
-                            }
-
-                            // Re-check with potentially updated address
-                            if (svc.hasActiveClientSession(effectiveAddress)) {
-                                connected = true
-                            } else if (svc.isGattServerClient(effectiveAddress) && svc.isServerClientSubscribedToTxResponse(effectiveAddress)) {
-                                val ok = svc.sendViaServerNotifications(effectiveAddress, chunks)
-                                if (!ok) {
-                                    UnifiedBleEvents.onConnectionFailed(effectiveAddress, "on_demand_scan_server_notify_failed")
-                                }
-                                return@runBlocking ok
-                            } else {
-                                connected = withTimeoutOrNull(15000L) {
-                                    svc.connectToDevice(effectiveAddress).await()
-                                } ?: false
-                            }
-                        }
-                        if (!connected) {
-                            Log.e("UnifiedBleBridge", "requestGattWriteChunks: on-demand GATT connection failed for $effectiveAddress")
-                            UnifiedBleEvents.onConnectionFailed(effectiveAddress, "on_demand_connect_failed")
+                            Log.e("UnifiedBleBridge", "requestGattWriteChunks: on-demand GATT connection failed for $currentAddr")
+                            UnifiedBleEvents.onConnectionFailed(currentAddr, "on_demand_connect_failed")
                             return@runBlocking false
                         }
+
                         // Subscribe to TX_RESPONSE
                         var subscribed = false
                         for (attempt in 1..TX_RESPONSE_SUBSCRIBE_MAX_ATTEMPTS) {
                             subscribed = withTimeoutOrNull(TX_RESPONSE_SUBSCRIBE_TIMEOUT_MS) {
-                                svc.ensureClientTxResponseSubscribed(effectiveAddress).await()
+                                svc.ensureClientTxResponseSubscribed(currentAddr).await()
                             } ?: false
                             if (subscribed) break
                             if (attempt < TX_RESPONSE_SUBSCRIBE_MAX_ATTEMPTS) delay(200L * attempt)
                         }
                         if (!subscribed) {
-                            Log.e(
-                                "UnifiedBleBridge",
-                                "requestGattWriteChunks: on-demand TX_RESPONSE subscription failed for $effectiveAddress; aborting send"
-                            )
-                            if (svc.isGattServerClient(effectiveAddress) && svc.isServerClientSubscribedToTxResponse(effectiveAddress)) {
-                                Log.i(
-                                    "UnifiedBleBridge",
-                                    "requestGattWriteChunks: falling back to server notifications after on-demand subscribe failure for $effectiveAddress"
-                                )
-                                val ok = svc.sendViaServerNotifications(effectiveAddress, chunks)
-                                if (!ok) {
-                                    UnifiedBleEvents.onConnectionFailed(effectiveAddress, "on_demand_server_notify_after_subscribe_failed")
-                                }
+                            Log.e("UnifiedBleBridge", "requestGattWriteChunks: TX_RESPONSE subscription failed for $currentAddr")
+                            // Last resort: server notification path
+                            if (svc.isGattServerClient(currentAddr) && svc.isServerClientSubscribedToTxResponse(currentAddr)) {
+                                val ok = svc.sendViaServerNotifications(currentAddr, chunks)
+                                if (!ok) UnifiedBleEvents.onConnectionFailed(currentAddr, "on_demand_server_notify_after_subscribe_failed")
                                 return@runBlocking ok
                             }
-                            UnifiedBleEvents.onConnectionFailed(effectiveAddress, "tx_response_subscription_failed")
+                            UnifiedBleEvents.onConnectionFailed(currentAddr, "tx_response_subscription_failed")
                             return@runBlocking false
                         }
-                        // Send via client writes
-                        sendViaActiveClientSession(
-                            svc,
-                            effectiveAddress,
-                            chunks,
-                            "tx_chunk_send_partial",
-                        )
+
+                        sendViaActiveClientSession(svc, currentAddr, chunks, "tx_chunk_send_partial")
                     } catch (t: Throwable) {
-                        Log.e("UnifiedBleBridge", "requestGattWriteChunks: on-demand error for $effectiveAddress", t)
-                        UnifiedBleEvents.onConnectionFailed(effectiveAddress, "on_demand_connect_exception")
+                        Log.e("UnifiedBleBridge", "requestGattWriteChunks: on-demand error", t)
+                        UnifiedBleEvents.onConnectionFailed(effectiveAddr, "on_demand_connect_exception")
                         false
                     }
                 }

@@ -3707,6 +3707,80 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_identityReadR
     )
 }
 
+/// Extract `peer_device_id` from a `BleGattIdentityReadResult` proto.
+/// Returns the 32-byte device ID, or empty array on decode error.
+#[no_mangle]
+#[cfg(all(target_os = "android", feature = "bluetooth"))]
+pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_identityReadResultExtractPeerDeviceId(
+    env: jni::sys::JNIEnv,
+    _clazz: jni::sys::jclass,
+    response_proto: jni::sys::jbyteArray,
+) -> jni::sys::jbyteArray {
+    crate::jni::bridge_utils::jni_catch_unwind_jbytearray(
+        "identityReadResultExtractPeerDeviceId",
+        std::panic::AssertUnwindSafe(|| {
+            let env = match unsafe { env_from(env) } {
+                Some(e) => e,
+                None => return std::ptr::null_mut(),
+            };
+            let jba = unsafe { jba_from(response_proto) };
+            let bytes = match env.convert_byte_array(&jba) {
+                Ok(v) => v,
+                Err(_) => return std::ptr::null_mut(),
+            };
+            let resp: crate::generated::BleGattIdentityReadResult =
+                match prost::Message::decode(bytes.as_slice()) {
+                    Ok(r) => r,
+                    Err(_) => return std::ptr::null_mut(),
+                };
+            if resp.peer_device_id.is_empty() {
+                return std::ptr::null_mut();
+            }
+            match env.byte_array_from_slice(&resp.peer_device_id) {
+                Ok(out) => out.into_raw(),
+                Err(_) => std::ptr::null_mut(),
+            }
+        }),
+    )
+}
+
+/// Extract `peer_genesis_hash` from a `BleGattIdentityReadResult` proto.
+/// Returns the 32-byte genesis hash, or empty array on decode error.
+#[no_mangle]
+#[cfg(all(target_os = "android", feature = "bluetooth"))]
+pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_identityReadResultExtractPeerGenesisHash(
+    env: jni::sys::JNIEnv,
+    _clazz: jni::sys::jclass,
+    response_proto: jni::sys::jbyteArray,
+) -> jni::sys::jbyteArray {
+    crate::jni::bridge_utils::jni_catch_unwind_jbytearray(
+        "identityReadResultExtractPeerGenesisHash",
+        std::panic::AssertUnwindSafe(|| {
+            let env = match unsafe { env_from(env) } {
+                Some(e) => e,
+                None => return std::ptr::null_mut(),
+            };
+            let jba = unsafe { jba_from(response_proto) };
+            let bytes = match env.convert_byte_array(&jba) {
+                Ok(v) => v,
+                Err(_) => return std::ptr::null_mut(),
+            };
+            let resp: crate::generated::BleGattIdentityReadResult =
+                match prost::Message::decode(bytes.as_slice()) {
+                    Ok(r) => r,
+                    Err(_) => return std::ptr::null_mut(),
+                };
+            if resp.peer_genesis_hash.is_empty() {
+                return std::ptr::null_mut();
+            }
+            match env.byte_array_from_slice(&resp.peer_genesis_hash) {
+                Ok(out) => out.into_raw(),
+                Err(_) => std::ptr::null_mut(),
+            }
+        }),
+    )
+}
+
 #[no_mangle]
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
 pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_chunkEnvelopeForBle(

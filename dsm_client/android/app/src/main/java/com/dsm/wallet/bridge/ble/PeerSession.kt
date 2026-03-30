@@ -8,6 +8,23 @@ import kotlinx.coroutines.sync.Mutex
 import java.util.UUID
 
 /**
+ * Identity anchor for a DSM peer. Keyed by deviceId (32 bytes) which is
+ * stable across BLE address rotations. The genesisHash is carried for
+ * display/verification but identity equality is based on deviceId alone.
+ */
+data class PeerIdentity(
+    val deviceId: ByteArray,
+    val genesisHash: ByteArray,
+) {
+    /** Hex key for map lookups. */
+    val key: String get() = deviceId.joinToString("") { "%02x".format(it) }
+
+    override fun equals(other: Any?): Boolean =
+        other is PeerIdentity && deviceId.contentEquals(other.deviceId)
+    override fun hashCode(): Int = deviceId.contentHashCode()
+}
+
+/**
  * Unified per-peer state object. Replaces the 10 address-keyed maps that were
  * previously spread across BleCoordinator (sessionStates, activeSessions,
  * pendingConnectionAddresses, pendingPairingConfirms) and GattServerHost
@@ -49,7 +66,10 @@ data class PeerSession(
     var notificationSendLock: Mutex = Mutex(),
     var writeBudget: BleWriteBudget = BleWriteBudget(),
 
-    // ── Transfer nonce (Phase 4 addition slot) ───────────────────────────
+    // ── Identity anchor (stable across RPA rotations) ──────────────────
+    @Transient var identity: PeerIdentity? = null,
+
+    // ── Transfer nonce ───────────────────────────────────────────────────
     var serverTransferNonce: Byte = 0,
 ) {
     /** True if a GATT connect is in flight for this peer. */

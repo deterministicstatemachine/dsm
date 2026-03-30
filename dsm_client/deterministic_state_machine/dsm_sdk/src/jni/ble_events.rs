@@ -1277,7 +1277,14 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_processGattId
                 }
             };
 
-            emit_identity_read_result(&mut env, true, &write_back, "")
+            emit_identity_read_result_with_identity(
+                &mut env,
+                true,
+                &write_back,
+                "",
+                &char_value.device_id,
+                &char_value.genesis_hash,
+            )
         }),
     )
 }
@@ -1289,10 +1296,24 @@ fn emit_identity_read_result(
     write_back_envelope: &[u8],
     error_message: &str,
 ) -> jni::sys::jbyteArray {
+    emit_identity_read_result_with_identity(env, success, write_back_envelope, error_message, &[], &[])
+}
+
+/// Full version that includes the peer's identity for Kotlin-side anchoring.
+fn emit_identity_read_result_with_identity(
+    env: &mut JNIEnv<'_>,
+    success: bool,
+    write_back_envelope: &[u8],
+    error_message: &str,
+    peer_device_id: &[u8],
+    peer_genesis_hash: &[u8],
+) -> jni::sys::jbyteArray {
     let result = pb::BleGattIdentityReadResult {
         success,
         write_back_envelope: write_back_envelope.to_vec(),
         error_message: error_message.to_string(),
+        peer_device_id: peer_device_id.to_vec(),
+        peer_genesis_hash: peer_genesis_hash.to_vec(),
     };
     let encoded = result.encode_to_vec();
     match env.byte_array_from_slice(&encoded) {

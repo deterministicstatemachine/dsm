@@ -44,6 +44,11 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
     // pendingConnectionAddresses, and pendingPairingConfirms.
     internal val peers = java.util.concurrent.ConcurrentHashMap<String, PeerSession>()
 
+    // Reverse index: BLE MAC address → PeerIdentity. Updated on every
+    // identity observation (pairing + reconnect). Enables O(1) resolution
+    // of stale addresses to the peer's current address.
+    internal val addressIndex = java.util.concurrent.ConcurrentHashMap<String, PeerIdentity>()
+
     // Internal components
     internal var permissionsGate = BlePermissionsGate(context)
     private var scanner = BleScanner(context)
@@ -695,6 +700,15 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                                 if (success) {
                                     Log.i("BleCoordinator", "processGattIdentityRead succeeded for ${event.deviceAddress}")
 
+                                    // Anchor the peer's identity for RPA-proof addressing.
+                                    // Extract deviceId + genesisHash from the Rust-decoded result
+                                    // proto. Kotlin does not parse protobuf — all decoding is Rust-side.
+                                    val peerDeviceId = com.dsm.wallet.bridge.Unified.identityReadResultExtractPeerDeviceId(resultBytes)
+                                    val peerGenesisHash = com.dsm.wallet.bridge.Unified.identityReadResultExtractPeerGenesisHash(resultBytes)
+                                    if (peerDeviceId.size == 32 && peerGenesisHash.size == 32) {
+                                        anchorIdentity(event.deviceAddress, PeerIdentity(peerDeviceId, peerGenesisHash))
+                                    }
+
                                     val writeBackEnvelope = com.dsm.wallet.bridge.Unified.identityReadResultExtractWriteBack(resultBytes)
                                         .takeIf { it.isNotEmpty() }
                                     if (writeBackEnvelope != null) {
@@ -990,7 +1004,7 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
      * Used by UnifiedBleBridge when the original BLE address has rotated —
      * a scan may have discovered the same DSM peer under a new address.
      */
-    fun findAnyReadySessionAddress(): String? {
+    private fun findAnyReadySessionAddress(): String? {
         // Prefer an active GATT client session (we can write to them)
         for ((addr, peer) in peers) {
             if (peer.isConnected && peer.negotiatedMtu > 23) {
@@ -998,7 +1012,80 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
             }
         }
         // Fall back to a GATT server client that's subscribed to TX_RESPONSE
-        return gattServer.findSubscribedServerClient()
+        return peers.entries.firstOrNull {
+            it.value.isServerClient && it.value.isSubscribedTo(BleConstants.TX_RESPONSE_UUID)
+        }?.key
+    }
+
+    /**
+     * Resolve a BLE address (potentially stale) to the current PeerSession.
+     *
+     * Resolution order:
+     * 1. Direct peers[address] lookup (address is current)
+     * 2. addressIndex[address] → PeerIdentity → find peer with matching identity
+     * 3. findAnyReadySessionAddress() fallback (single-peer scenario)
+     *
+     * Returns the PeerSession and its current address, or null if unknown.
+     */
+    fun resolveSession(address: String): Pair<PeerSession, String>? {
+        // 1. Direct hit — but only if the peer is actually reachable
+        peers[address]?.let { peer ->
+            if (peer.hasActiveClientSession || peer.isServerClient) {
+                return peer to address
+            }
+            // Entry exists but is a dead shell — fall through to identity lookup
+        }
+
+        // 2. Identity-indexed lookup — address is stale but identity is known
+        addressIndex[address]?.let { identity ->
+            for ((addr, peer) in peers) {
+                if (peer.identity == identity && (peer.hasActiveClientSession || peer.isServerClient)) {
+                    Log.i("BleCoordinator", "resolveSession: stale $address → identity → current $addr")
+                    return peer to addr
+                }
+            }
+        }
+
+        // 3. Fallback — any ready session (single-peer scenario)
+        findAnyReadySessionAddress()?.let { freshAddr ->
+            if (freshAddr != address) {
+                Log.i("BleCoordinator", "resolveSession: fallback $address → $freshAddr")
+            }
+            peers[freshAddr]?.let { return it to freshAddr }
+        }
+
+        return null
+    }
+
+    /**
+     * Anchor a peer's identity after successful GATT identity read.
+     * Updates the addressIndex so future RPA rotations can be resolved.
+     */
+    fun anchorIdentity(address: String, identity: PeerIdentity) {
+        val peer = peers[address] ?: return
+        peer.identity = identity
+        addressIndex[address] = identity
+        Log.i("BleCoordinator", "anchorIdentity: $address → ${identity.key.take(16)}...")
+    }
+
+    /**
+     * Update a peer's BLE address after RPA rotation detected during scan.
+     * Migrates the PeerSession from the old address key to the new one.
+     */
+    fun updatePeerAddress(identity: PeerIdentity, newAddress: String) {
+        // Find the old entry
+        val oldEntry = peers.entries.firstOrNull { it.value.identity == identity }
+        if (oldEntry == null || oldEntry.key == newAddress) return
+
+        val oldAddr = oldEntry.key
+        val session = oldEntry.value
+
+        // Migrate: remove old key, insert under new key
+        peers.remove(oldAddr)
+        peers[newAddress] = session
+        addressIndex.remove(oldAddr)
+        addressIndex[newAddress] = identity
+        Log.i("BleCoordinator", "updatePeerAddress: ${identity.key.take(16)}... migrated $oldAddr → $newAddress")
     }
 
     /**
@@ -1022,34 +1109,27 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                 deferred.complete(true)
                 return@runOperation
             }
-            // Clean up stale session
+            // Clean up stale client session if one exists under this address
             if (peers[address]?.gattClientSession != null) {
                 dropClientSession(address, "pre_connect_stale_session")
             }
-            // Brief scan to resolve current RPA before connecting — the pairing-time
-            // address may have rotated.
-            Log.i("BleCoordinator", "connectToDevice($address): scanning briefly to resolve current RPA")
-            scanner.startScanning()
-            kotlinx.coroutines.delay(1500)
-            scanner.stopScanning()
-            // If a scan result yielded a ready session under a different address, use it
-            val resolvedAddress = if (hasActiveClientSession(address)) {
-                address
-            } else {
-                val freshAddr = findAnyReadySessionAddress()
-                if (freshAddr != null && freshAddr != address) {
-                    Log.i("BleCoordinator", "connectToDevice: RPA rotated $address -> $freshAddr")
-                }
-                freshAddr ?: address
+            // Resolve via identity registry — may find the peer under a current RPA.
+            // If no identity match, brief scan to discover.
+            var resolvedAddress = resolveSession(address)?.second ?: address
+            if (!hasActiveClientSession(resolvedAddress) && !isGattServerClient(resolvedAddress)) {
+                Log.i("BleCoordinator", "connectToDevice($address): scanning briefly to resolve current RPA")
+                scanner.startScanning()
+                kotlinx.coroutines.delay(1500)
+                scanner.stopScanning()
+                resolvedAddress = resolveSession(address)?.second ?: address
             }
-            // If the scan resolved a ready session, skip the connect
+            // If resolution found a ready session, skip the connect
             if (hasActiveClientSession(resolvedAddress)) {
                 deferred.complete(true)
                 return@runOperation
             }
-            // Check if peer connected to our GATT server during scan
             if (isGattServerClient(resolvedAddress) && isServerClientSubscribedToTxResponse(resolvedAddress)) {
-                Log.i("BleCoordinator", "connectToDevice: peer $resolvedAddress connected to our GATT server during scan — succeeding")
+                Log.i("BleCoordinator", "connectToDevice: peer $resolvedAddress connected to our GATT server — succeeding")
                 deferred.complete(true)
                 return@runOperation
             }
