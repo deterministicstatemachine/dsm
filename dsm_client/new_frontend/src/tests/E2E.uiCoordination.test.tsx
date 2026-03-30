@@ -50,6 +50,16 @@ import {
 } from '../services/bilateral/bilateralEventService';
 import { setBridgeInstance } from '../bridge/BridgeRegistry';
 
+let consoleWarnSpy: jest.SpyInstance;
+
+beforeEach(() => {
+  consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+});
+
+afterEach(() => {
+  consoleWarnSpy.mockRestore();
+});
+
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const DEVICE_ID = new Uint8Array(32).fill(0x11);

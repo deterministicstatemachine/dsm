@@ -86,8 +86,8 @@ export const UXProvider: React.FC<{ defaultHideComplexity?: boolean; children?: 
     notifyToast('exit_completed');
   }, [notifyToast]);
 
-  // Global coin sound when a BLE bilateral transfer completes (receiver side).
-  useBridgeEvent('bilateral.transferComplete', () => {
+  // Global coin sound when the local wallet receives a positive settled credit.
+  useBridgeEvent('wallet.creditReceived', () => {
     playCoinSound();
   }, []);
 
@@ -95,7 +95,6 @@ export const UXProvider: React.FC<{ defaultHideComplexity?: boolean; children?: 
   useBridgeEvent('inbox.updated', (detail?: { unreadCount?: number; newItems?: number }) => {
     const newItems = typeof detail?.newItems === 'number' ? detail.newItems : 0;
     if (newItems <= 0) return;
-    playCoinSound();
     const label = newItems === 1 ? 'New inbox item received' : `${newItems} new inbox items received`;
     notifyToast('inbox_received', label);
   }, [notifyToast]);

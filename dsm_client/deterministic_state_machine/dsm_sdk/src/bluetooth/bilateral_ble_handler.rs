@@ -3832,10 +3832,9 @@ impl BilateralBleHandler {
                             | BilateralPhase::Prepared
                             | BilateralPhase::PendingUserAction
                     );
-                    let nonrecoverable_accepted =
-                        addr_match
-                            && s.phase == BilateralPhase::Accepted
-                            && s.counterparty_signature.is_none();
+                    let nonrecoverable_accepted = addr_match
+                        && s.phase == BilateralPhase::Accepted
+                        && s.counterparty_signature.is_none();
                     (addr_match && early_phase) || nonrecoverable_accepted
                 })
                 .map(|(k, s)| (*k, s.counterparty_device_id))
@@ -4380,8 +4379,8 @@ mod tests {
         let genesis_hash = [42u8; 32];
         let counterparty_device_id = [43u8; 32];
         let counterparty_genesis = [44u8; 32];
-        let keypair = SignatureKeyPair::generate_from_entropy(b"fail-accepted-session")
-            .expect("keypair");
+        let keypair =
+            SignatureKeyPair::generate_from_entropy(b"fail-accepted-session").expect("keypair");
 
         let contact_manager = DsmContactManager::new(device_id, vec![NodeId::new("test")]);
         let bilateral_manager = Arc::new(RwLock::new(BilateralTransactionManager::new(

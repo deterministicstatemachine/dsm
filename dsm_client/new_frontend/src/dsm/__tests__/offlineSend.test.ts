@@ -45,10 +45,17 @@ function prepareResponseBytes(commitmentHash: Uint8Array): Uint8Array {
 }
 
 describe('offlineSend', () => {
+  let warnSpy: jest.SpyInstance;
+
   beforeEach(() => {
     jest.restoreAllMocks();
+    warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
     (global as any).window = (global as any).window || {};
     (global as any).window.DsmBridge = (global as any).window.DsmBridge || {};
+  });
+
+  afterEach(() => {
+    warnSpy.mockRestore();
   });
 
   test('delegates missing BLE address resolution to wallet.sendOffline', async () => {

@@ -178,9 +178,10 @@ jest.mock('../components/screens/QRCodeScannerScreen', () => ({
 }));
 
 describe('App UI error boundary placement', () => {
-  const consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+  let consoleErrorSpy: jest.SpyInstance;
 
   beforeEach(() => {
+    consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
     setBridgeInstance(undefined);
     (globalThis as any).window = globalThis.window ?? globalThis;
     (window as any).DsmBridge = { jsReady: jest.fn() };
@@ -188,10 +189,6 @@ describe('App UI error boundary placement', () => {
 
   afterEach(() => {
     setBridgeInstance(undefined);
-    consoleErrorSpy.mockClear();
-  });
-
-  afterAll(() => {
     consoleErrorSpy.mockRestore();
   });
 
