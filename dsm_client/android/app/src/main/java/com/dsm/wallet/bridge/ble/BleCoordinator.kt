@@ -327,18 +327,22 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
      * internally by connectToDevice as a safety net.
      */
     fun ensureBleReady(): Boolean {
-        return runOperationBool(BleOpLane.LIFECYCLE) {
+        val gattReady = runOperationBool(BleOpLane.LIFECYCLE) {
             if (!gattServer.isReady()) {
                 if (!gattStartInFlight) {
                     gattStartInFlight = true
                     try { gattServer.ensureStarted() } finally { gattStartInFlight = false }
                 }
             }
-            if (!advertiser.isAdvertising()) {
-                try { advertiser.startAdvertising() } catch (_: Throwable) { /* best-effort */ }
-            }
             gattServer.isReady()
         }
+        // Delegate to the public advertising entry point so that
+        // permissions and error handling are consistent.
+        val advertisingReady = startAdvertising()
+        if (!advertisingReady) {
+            Log.w("BleCoordinator", "ensureBleReady: startAdvertising returned false")
+        }
+        return gattReady && advertisingReady
     }
 
     /**
