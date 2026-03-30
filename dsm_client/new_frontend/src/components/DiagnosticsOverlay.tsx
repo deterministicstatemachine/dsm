@@ -22,6 +22,7 @@ export default function DiagnosticsOverlay() {
     downloadDiagnostics,
     sendDiagnosticsTelemetry,
     openGitHubIssue,
+    openGitHubFeedback,
   } = useDiagnostics(notifyToast);
 
   const hasBridgeError = !!(window as any).__lastBridgeError;
@@ -93,7 +94,7 @@ export default function DiagnosticsOverlay() {
             <ul style={{ marginTop: 0, marginBottom: 6, paddingLeft: 16, fontSize: '9px' }}>
               <li>Copy or download the diagnostics and attach them to an issue.</li>
               <li>Collect device logs (adb logcat) for a full trace.</li>
-              <li>If you consent, send diagnostics to DSM maintainers for analysis.</li>
+              <li>If you consent, save diagnostics into the local native log before filing a report.</li>
             </ul>
 
             <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '9px' }}>
@@ -111,14 +112,15 @@ export default function DiagnosticsOverlay() {
                   cursor: 'pointer'
                 }}
               />
-              <span>I consent to send diagnostics to DSM maintainers for debugging (no personal data intentionally collected)</span>
+              <span>Include diagnostics when preparing reports and save this preference on this device</span>
             </label>
 
             <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-              <button data-testid="send-diagnostics" disabled={!telemetryConsent || !diagnostics} onClick={() => void sendDiagnosticsTelemetry()} style={{ padding: '4px 6px', fontSize: '9px', background: 'var(--bg)', color: 'var(--text-dark)', border: '1px solid var(--border)', borderRadius: 8, cursor: 'pointer', opacity: (!telemetryConsent || !diagnostics) ? 0.5 : 1 }}>Send diagnostics</button>
+              <button data-testid="send-diagnostics" disabled={!telemetryConsent || !diagnostics} onClick={() => void sendDiagnosticsTelemetry()} style={{ padding: '4px 6px', fontSize: '9px', background: 'var(--bg)', color: 'var(--text-dark)', border: '1px solid var(--border)', borderRadius: 8, cursor: 'pointer', opacity: (!telemetryConsent || !diagnostics) ? 0.5 : 1 }}>Save to local log</button>
               <button data-testid="copy-diagnostics" onClick={() => void copyDiagnostics()} style={{ padding: '4px 6px', fontSize: '9px', background: 'var(--bg)', color: 'var(--text-dark)', border: '1px solid var(--border)', borderRadius: 8, cursor: 'pointer' }}>Copy</button>
               <button data-testid="download-diagnostics" onClick={() => downloadDiagnostics()} style={{ padding: '4px 6px', fontSize: '9px', background: 'var(--bg)', color: 'var(--text-dark)', border: '1px solid var(--border)', borderRadius: 8, cursor: 'pointer' }}>Download</button>
-              <button data-testid="open-issue" onClick={() => openGitHubIssue()} style={{ padding: '4px 6px', fontSize: '9px', background: 'var(--bg)', color: 'var(--text-dark)', border: '1px solid var(--border)', borderRadius: 8, cursor: 'pointer' }}>Open GitHub issue</button>
+              <button data-testid="open-issue" onClick={() => openGitHubIssue()} style={{ padding: '4px 6px', fontSize: '9px', background: 'var(--bg)', color: 'var(--text-dark)', border: '1px solid var(--border)', borderRadius: 8, cursor: 'pointer' }}>Open beta bug report</button>
+              <button data-testid="open-feedback" onClick={() => openGitHubFeedback()} style={{ padding: '4px 6px', fontSize: '9px', background: 'var(--bg)', color: 'var(--text-dark)', border: '1px solid var(--border)', borderRadius: 8, cursor: 'pointer' }}>Send feedback</button>
             </div>
           </div>
 
@@ -203,7 +205,7 @@ export default function DiagnosticsOverlay() {
 
           <div style={{ marginTop: 10, borderTop: '1px solid var(--border)', paddingTop: 10 }}>
             <button onClick={() => void openGitHubIssue()} style={{ padding: '6px 10px', fontSize: '10px', background: 'var(--stateboy-dark)', color: 'var(--text)', borderRadius: 10, border: '2px solid var(--border)', cursor: 'pointer', fontWeight: 600 }}>
-              Open GitHub issue
+              Open beta bug report
             </button>
           </div>
         </div>
