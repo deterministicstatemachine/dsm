@@ -198,12 +198,10 @@ export function useDiagnostics(notifyToast: NotifyToast) {
         const excerpt = telemetryConsent
           ? (await buildDiagnosticsBundle()).substring(0, 2200)
           : '';
-        const body =
-          `**Describe the problem**\n\nPlease describe the beta issue.\n\n` +
-          (telemetryConsent
-            ? `**Diagnostics excerpt**\n\n----BEGIN EXCERPT----\n${excerpt}\n----END EXCERPT----\n\n`
-            : `**Diagnostics**\n\nAttach the downloaded \`dsm-diagnostics.txt\` file if you are comfortable sharing it.\n\n`) +
-          `**Steps to reproduce**\n1. Launch the app\n2. Reproduce the issue\n3. Note the exact screen, flow, and expected result\n\n**Additional info**\n- Attach adb logcat output if available\n`;
+        const diagnosticsSection = telemetryConsent
+          ? `**Diagnostics excerpt**\n\n----BEGIN EXCERPT----\n${excerpt}\n----END EXCERPT----\n\n`
+          : `**Diagnostics**\n\nAttach the downloaded \`dsm-diagnostics.txt\` file if you are comfortable sharing it.\n\n`;
+        const body = `**Describe the problem**\n\nPlease describe the beta issue.\n\n${diagnosticsSection}**Steps to reproduce**\n1. Launch the app\n2. Reproduce the issue\n3. Note the exact screen, flow, and expected result\n\n**Additional info**\n- Attach adb logcat output if available\n`;
         const url = buildGitHubIssueUrl({ title, body, template: BETA_BUG_TEMPLATE });
         const popup = window.open(url, '_blank', 'noopener');
         if (!popup && navigator.clipboard?.writeText) {
