@@ -434,10 +434,11 @@ class GattServerHost(private val context: Context) {
             peer.chunkAckChannel = ackChannel
 
             try {
-                // Prepend 1-byte transfer nonce to the first chunk so the client
-                // can detect transfer boundaries deterministically (no wall-clock).
+                // Prepend [0xFF, nonce] to the first chunk so the client can
+                // detect transfer boundaries. 0xFF is an invalid protobuf tag
+                // so it won't be confused with real BleChunk payload bytes.
                 val framedChunks = chunks.mapIndexed { i, c ->
-                    if (i == 0) byteArrayOf(nonce) + c else c
+                    if (i == 0) byteArrayOf(0xFF.toByte(), nonce) + c else c
                 }.toTypedArray()
 
                 for ((index, chunk) in framedChunks.withIndex()) {

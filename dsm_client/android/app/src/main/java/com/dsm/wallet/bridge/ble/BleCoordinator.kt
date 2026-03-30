@@ -1113,58 +1113,83 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
             if (peers[address]?.gattClientSession != null) {
                 dropClientSession(address, "pre_connect_stale_session")
             }
-            // Resolve via identity registry — may find the peer under a current RPA.
-            // If no identity match, brief scan to discover.
-            var resolvedAddress = resolveSession(address)?.second ?: address
-            if (!hasActiveClientSession(resolvedAddress) && !isGattServerClient(resolvedAddress)) {
-                Log.i("BleCoordinator", "connectToDevice($address): scanning briefly to resolve current RPA")
-                scanner.startScanning()
-                kotlinx.coroutines.delay(1500)
-                scanner.stopScanning()
-                resolvedAddress = resolveSession(address)?.second ?: address
-            }
-            // If resolution found a ready session, skip the connect
-            if (hasActiveClientSession(resolvedAddress)) {
-                deferred.complete(true)
-                return@runOperation
-            }
-            if (isGattServerClient(resolvedAddress) && isServerClientSubscribedToTxResponse(resolvedAddress)) {
-                Log.i("BleCoordinator", "connectToDevice: peer $resolvedAddress connected to our GATT server — succeeding")
-                deferred.complete(true)
-                return@runOperation
-            }
-            // Ensure GATT server is running
+
+            // ── Step 1: Start advertising so the receiver can find US ──
+            // The reverse path (receiver connects to our GATT server) is the
+            // most reliable route. Prime it before scanning.
             if (!gattStartInFlight) {
                 gattStartInFlight = true
                 try { gattServer.ensureStarted() } finally { gattStartInFlight = false }
             }
-            val session = getOrCreateSession(resolvedAddress)
-            val peer = peers[resolvedAddress]!!
-            // Store the deferred on PeerSession. handleSessionEvent will complete it
-            // on MtuNegotiated (true) or Disconnected/Error (false).
-            // No polling loop — the GATT callback chain drives completion.
-            peer.connectResult = deferred
-            val connected = session.connect()
-            if (!connected) {
-                peer.connectResult = null
-                dropClientSession(resolvedAddress, "connect_init_failed")
-                deferred.complete(false)
-                return@runOperation
+            if (!advertiser.isAdvertising()) {
+                try {
+                    advertiser.startAdvertising()
+                    Log.i("BleCoordinator", "connectToDevice($address): started advertising for reverse path")
+                } catch (_: Throwable) { /* best-effort */ }
             }
-            // Set a timeout — if GATT callbacks never fire, we don't hang forever.
-            bleScope.launch {
-                kotlinx.coroutines.delay(CONNECT_READY_TIMEOUT_MS)
-                if (!deferred.isCompleted) {
-                    Log.w("BleCoordinator", "connectToDevice: timeout for $resolvedAddress after ${CONNECT_READY_TIMEOUT_MS}ms")
-                    runOperation(BleOpLane.LIFECYCLE) {
-                        if (!deferred.isCompleted) {
-                            peers[resolvedAddress]?.connectResult = null
-                            dropClientSession(resolvedAddress, "connect_ready_timeout")
-                            deferred.complete(false)
-                        }
+
+            // ── Step 2: Scan the full budget, checking for reverse connection ──
+            // Scan up to 10s. Every second, check if:
+            //   a) We discovered the peer under a fresh address → connect to it
+            //   b) The peer connected to our GATT server → use server notifications
+            Log.i("BleCoordinator", "connectToDevice($address): scanning up to ${CONNECT_READY_TIMEOUT_MS}ms for peer discovery or reverse connection")
+            scanner.startScanning()
+            val scanStartTime = android.os.SystemClock.elapsedRealtime()
+            var resolvedAddress: String? = null
+
+            while (android.os.SystemClock.elapsedRealtime() - scanStartTime < CONNECT_READY_TIMEOUT_MS) {
+                kotlinx.coroutines.delay(1000)
+
+                // Check identity-based resolution first
+                val resolved = resolveSession(address)
+                if (resolved != null) {
+                    val (peer, addr) = resolved
+                    if (peer.hasActiveClientSession) {
+                        Log.i("BleCoordinator", "connectToDevice: peer found with active client session at $addr")
+                        resolvedAddress = addr
+                        break
+                    }
+                    if (peer.isServerClient && peer.isSubscribedTo(BleConstants.TX_RESPONSE_UUID)) {
+                        Log.i("BleCoordinator", "connectToDevice: peer connected to our GATT server at $addr — using server path")
+                        resolvedAddress = addr
+                        break
                     }
                 }
+
+                // Check for any server client that appeared during scan
+                for ((addr, peer) in peers) {
+                    if (peer.isServerClient && peer.isSubscribedTo(BleConstants.TX_RESPONSE_UUID)) {
+                        Log.i("BleCoordinator", "connectToDevice: reverse connection detected from $addr during scan")
+                        resolvedAddress = addr
+                        break
+                    }
+                }
+                if (resolvedAddress != null) break
+
+                // Check if scan discovered any new DSM peer (onDeviceDiscovered may
+                // have created a session and initiated connectGatt already)
+                for ((addr, peer) in peers) {
+                    if (addr != address && peer.gattClientSession != null && peer.isConnected) {
+                        Log.i("BleCoordinator", "connectToDevice: scan discovered connected peer at $addr")
+                        resolvedAddress = addr
+                        break
+                    }
+                }
+                if (resolvedAddress != null) break
             }
+
+            scanner.stopScanning()
+
+            if (resolvedAddress != null) {
+                deferred.complete(true)
+                return@runOperation
+            }
+
+            // ── Step 3: No peer found during full scan window ──
+            // Do NOT try connectGatt to the stale address — it's a guaranteed
+            // 10-second timeout to a dead address. Fail fast.
+            Log.w("BleCoordinator", "connectToDevice($address): no peer discovered after ${CONNECT_READY_TIMEOUT_MS}ms scan — failing (stale address, not attempting dead connectGatt)")
+            deferred.complete(false)
         }
         return deferred
     }
