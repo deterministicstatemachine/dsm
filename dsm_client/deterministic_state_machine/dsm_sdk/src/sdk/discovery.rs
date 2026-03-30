@@ -224,7 +224,11 @@ async fn discover_via_mdns() -> Result<Vec<String>, StorageNodeError> {
                 Ok(ServiceEvent::ServiceResolved(info)) => {
                     let name = info.get_fullname();
                     let port = info.get_port();
-                    let addresses: Vec<IpAddr> = info.get_addresses().iter().cloned().collect();
+                    let addresses: Vec<IpAddr> = info
+                        .get_addresses()
+                        .iter()
+                        .map(|s| s.to_ip_addr())
+                        .collect();
 
                     info!("✅ Resolved DSM node: {name} at port {port}");
 
