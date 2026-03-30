@@ -249,9 +249,16 @@ internal object UnifiedBleBridge {
                                 if (!ok) UnifiedBleEvents.onConnectionFailed(currentAddr, "on_demand_server_notify_fallback_failed")
                                 return@runBlocking ok
                             }
-                            Log.e("UnifiedBleBridge", "requestGattWriteChunks: on-demand GATT connection failed for $currentAddr")
-                            UnifiedBleEvents.onConnectionFailed(currentAddr, "on_demand_connect_failed")
-                            return@runBlocking false
+                            // connectToDevice may have failed on the stale address while a
+                            // scan-triggered auto-connect (onDeviceDiscovered) simultaneously
+                            // established a GATT client session at the re-resolved address.
+                            // Fall through to TX_RESPONSE subscription if that happened.
+                            if (!svc.hasActiveClientSession(currentAddr)) {
+                                Log.e("UnifiedBleBridge", "requestGattWriteChunks: on-demand GATT connection failed for $currentAddr")
+                                UnifiedBleEvents.onConnectionFailed(currentAddr, "on_demand_connect_failed")
+                                return@runBlocking false
+                            }
+                            Log.i("UnifiedBleBridge", "requestGattWriteChunks: scan-resolved client session at $currentAddr — continuing with TX_RESPONSE")
                         }
 
                         // Subscribe to TX_RESPONSE
