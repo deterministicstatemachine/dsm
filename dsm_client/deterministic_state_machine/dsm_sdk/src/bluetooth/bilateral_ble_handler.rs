@@ -1186,6 +1186,86 @@ impl BilateralBleHandler {
         }
     }
 
+    /// Fail and remove a single in-flight session by commitment hash.
+    ///
+    /// Used when BLE transport definitively fails after the session has already
+    /// transitioned out of `PendingUserAction` (for example, receiver-side accept
+    /// send failure). This prevents stale `Accepted` / `ConfirmPending` sessions
+    /// from blocking the next transfer attempt.
+    pub async fn fail_session_by_commitment(
+        &self,
+        commitment_hash: [u8; 32],
+        reason: &str,
+    ) -> bool {
+        let session = {
+            let mut sessions = self.sessions.sessions.lock().await;
+            let Some(mut session) = sessions.remove(&commitment_hash) else {
+                info!(
+                    "[BLE_HANDLER] fail_session_by_commitment: session {} already absent",
+                    bytes_to_base32(&commitment_hash[..8])
+                );
+                return false;
+            };
+
+            if !is_inflight_phase(&session.phase) {
+                info!(
+                    "[BLE_HANDLER] fail_session_by_commitment: session {} already terminal ({:?})",
+                    bytes_to_base32(&commitment_hash[..8]),
+                    session.phase
+                );
+                sessions.insert(commitment_hash, session);
+                return false;
+            }
+
+            session.phase = BilateralPhase::Failed;
+            session
+        };
+
+        warn!(
+            "[BLE_HANDLER] Failing session {} for counterparty {}: {}",
+            bytes_to_base32(&commitment_hash[..8]),
+            bytes_to_base32(&session.counterparty_device_id[..8]),
+            reason
+        );
+
+        let pending_key = session.local_commitment_hash.unwrap_or(commitment_hash);
+        {
+            let mut mgr = self.bilateral_tx_manager.write().await;
+            let _ = mgr.remove_pending_commitment(&pending_key);
+            if pending_key != commitment_hash {
+                let _ = mgr.remove_pending_commitment(&commitment_hash);
+            }
+        }
+
+        if let Err(e) = delete_bilateral_session(&commitment_hash) {
+            warn!(
+                "[BLE_HANDLER] fail_session_by_commitment: failed deleting persisted session {}: {}",
+                bytes_to_base32(&commitment_hash[..8]),
+                e
+            );
+        }
+
+        self.emit_event(&generated::BilateralEventNotification {
+            event_type: generated::BilateralEventType::BilateralEventFailed.into(),
+            counterparty_device_id: session.counterparty_device_id.to_vec(),
+            commitment_hash: commitment_hash.to_vec(),
+            transaction_hash: None,
+            amount: None,
+            token_id: None,
+            status: "failed".to_string(),
+            message: reason.to_string(),
+            sender_ble_address: session.sender_ble_address.clone(),
+            failure_reason: Some(
+                generated::BilateralFailureReason::FailureReasonUnspecified.into(),
+            ),
+        });
+
+        self.prune_terminal_sessions_for_counterparty(&session.counterparty_device_id)
+            .await;
+
+        true
+    }
+
     /// Phase 2: Handle incoming prepare request (receiver processes)
     ///
     /// This validates the proposal and stores it for user decision. Does NOT auto-accept.
@@ -3752,7 +3832,10 @@ impl BilateralBleHandler {
                             | BilateralPhase::Prepared
                             | BilateralPhase::PendingUserAction
                     );
-                    addr_match && early_phase
+                    let nonrecoverable_accepted = addr_match
+                        && s.phase == BilateralPhase::Accepted
+                        && s.counterparty_signature.is_none();
+                    (addr_match && early_phase) || nonrecoverable_accepted
                 })
                 .map(|(k, s)| (*k, s.counterparty_device_id))
                 .collect()
@@ -3760,7 +3843,7 @@ impl BilateralBleHandler {
 
         for (commitment_hash, counterparty_device_id) in to_fail {
             warn!(
-                "[BLE_HANDLER] Peer {} disconnected — failing early-phase session {}",
+                "[BLE_HANDLER] Peer {} disconnected — failing non-recoverable session {}",
                 ble_address,
                 bytes_to_base32(&commitment_hash[..8])
             );
@@ -3810,12 +3893,12 @@ impl BilateralBleHandler {
 
         if failed_count > 0 {
             info!(
-                "[BLE_HANDLER] Marked {} early-phase session(s) Failed on disconnect from {}",
+                "[BLE_HANDLER] Marked {} non-recoverable session(s) Failed on disconnect from {}",
                 failed_count, ble_address
             );
         } else {
             debug!(
-                "[BLE_HANDLER] Peer {} disconnected — no early-phase sessions to fail (late-phase sessions preserved for recovery)",
+                "[BLE_HANDLER] Peer {} disconnected — no non-recoverable sessions to fail (recoverable late-phase sessions preserved)",
                 ble_address
             );
         }
@@ -4287,6 +4370,117 @@ mod tests {
                 .await
                 .has_pending_commitment(&local_pending_hash),
             "stale cleanup must remove the receiver-local pending commitment key"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fail_session_by_commitment_cleans_receiver_accepted_session() {
+        let device_id = [41u8; 32];
+        let genesis_hash = [42u8; 32];
+        let counterparty_device_id = [43u8; 32];
+        let counterparty_genesis = [44u8; 32];
+        let keypair =
+            SignatureKeyPair::generate_from_entropy(b"fail-accepted-session").expect("keypair");
+
+        let contact_manager = DsmContactManager::new(device_id, vec![NodeId::new("test")]);
+        let bilateral_manager = Arc::new(RwLock::new(BilateralTransactionManager::new(
+            contact_manager,
+            keypair,
+            device_id,
+            genesis_hash,
+        )));
+        let handler = BilateralBleHandler::new(bilateral_manager.clone(), device_id);
+
+        let contact = dsm::types::contact_types::DsmVerifiedContact {
+            alias: "accepted_contact".to_string(),
+            device_id: counterparty_device_id,
+            genesis_hash: counterparty_genesis,
+            public_key: vec![9u8; 32],
+            genesis_material: vec![8u8; 32],
+            chain_tip: Some([7u8; 32]),
+            chain_tip_smt_proof: None,
+            genesis_verified_online: true,
+            verified_at_commit_height: 1,
+            added_at_commit_height: 1,
+            last_updated_commit_height: 1,
+            verifying_storage_nodes: vec![],
+            ble_address: Some("AA:BB:CC:DD:EE:FF".to_string()),
+        };
+
+        {
+            let mut mgr = bilateral_manager.write().await;
+            mgr.add_verified_contact(contact).expect("add contact");
+            let mut smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
+            mgr.establish_relationship(&counterparty_device_id, &mut smt)
+                .await
+                .expect("establish relationship");
+        }
+
+        let accepted_op = Operation::Transfer {
+            to_device_id: counterparty_device_id.to_vec(),
+            amount: Balance::from_state(1, [1u8; 32], 0),
+            token_id: b"ERA".to_vec(),
+            mode: TransactionMode::Bilateral,
+            nonce: vec![1],
+            verification: VerificationType::Standard,
+            pre_commit: None,
+            recipient: counterparty_device_id.to_vec(),
+            to: counterparty_device_id.to_vec(),
+            message: "accepted".to_string(),
+            signature: Vec::new(),
+        };
+
+        let local_pending_hash = {
+            let mut mgr = bilateral_manager.write().await;
+            let pre = mgr
+                .prepare_offline_transfer(&counterparty_device_id, accepted_op.clone(), 120)
+                .await
+                .expect("prepare local pending");
+            pre.bilateral_commitment_hash
+        };
+        let receiver_commitment_hash = [92u8; 32];
+
+        handler
+            .test_insert_session(BilateralBleSession {
+                commitment_hash: receiver_commitment_hash,
+                local_commitment_hash: Some(local_pending_hash),
+                counterparty_device_id,
+                counterparty_genesis_hash: Some(counterparty_genesis),
+                operation: accepted_op,
+                phase: BilateralPhase::Accepted,
+                local_signature: Some(vec![1u8; 32]),
+                counterparty_signature: None,
+                created_at_ticks: 1,
+                expires_at_ticks: 2,
+                sender_ble_address: Some("AA:BB:CC:DD:EE:FF".to_string()),
+                created_at_wall: Instant::now(),
+                pre_finalize_entropy: None,
+            })
+            .await;
+
+        assert!(
+            handler
+                .fail_session_by_commitment(
+                    receiver_commitment_hash,
+                    "receiver accept send failed before completion"
+                )
+                .await,
+            "accepted receiver session should be failed"
+        );
+
+        assert!(
+            handler
+                .get_session_status(&receiver_commitment_hash)
+                .await
+                .is_none(),
+            "failed session should be removed from active map"
+        );
+        assert!(
+            !bilateral_manager
+                .read()
+                .await
+                .has_pending_commitment(&local_pending_hash),
+            "failed accepted session must remove the receiver-local pending commitment key"
         );
     }
 

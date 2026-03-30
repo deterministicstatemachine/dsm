@@ -5,6 +5,7 @@ import React, { createContext, useContext, useEffect, useMemo, type ReactNode } 
 import { useUX } from './UXContext';
 import { dsmClient } from '../services/dsmClient';
 import { useEventSignal } from '../bridge/useEventSignal';
+import { useBridgeEvent } from '@/hooks/useBridgeEvents';
 import type { Transaction } from '@/hooks/useTransactions';
 import { useWalletSync } from '@/hooks/useWalletSync';
 import { walletStore, useWalletStore } from '../stores/walletStore';
@@ -72,6 +73,14 @@ export const WalletProvider: React.FC<{ children: ReactNode }> = ({ children }) 
   const state = useWalletStore();
   const bilateralSignal = useEventSignal('wallet.bilateralCommitted');
 
+  const refreshWalletProjection = React.useCallback(async () => {
+    try {
+      await walletStore.refreshAll();
+    } catch (error) {
+      console.warn('[WalletProvider] projection refresh failed:', error);
+    }
+  }, []);
+
   useEffect(() => {
     void walletStore.initialize();
   }, []);
@@ -106,6 +115,24 @@ export const WalletProvider: React.FC<{ children: ReactNode }> = ({ children }) 
       }
     },
   });
+
+  useBridgeEvent('bilateral.transferComplete', () => {
+    void refreshWalletProjection();
+  }, [refreshWalletProjection]);
+
+  useBridgeEvent('deposit.completed', () => {
+    void refreshWalletProjection();
+  }, [refreshWalletProjection]);
+
+  useBridgeEvent('wallet.exitCompleted', () => {
+    void refreshWalletProjection();
+  }, [refreshWalletProjection]);
+
+  useBridgeEvent('inbox.updated', (detail?: { unreadCount?: number; newItems?: number }) => {
+    const newItems = typeof detail?.newItems === 'number' ? detail.newItems : 0;
+    if (newItems <= 0) return;
+    void refreshWalletProjection();
+  }, [refreshWalletProjection]);
 
   useEffect(() => {
     if (bilateralSignal > 0) {

@@ -6,6 +6,63 @@ import { useDiagnostics } from '../hooks/useDiagnostics';
 import { useUX } from '../contexts/UXContext';
 import { decodeBase32Crockford } from '../utils/textId';
 
+const overlayBackdropStyle: React.CSSProperties = {
+  position: 'absolute',
+  inset: 0,
+  background:
+    'linear-gradient(180deg, rgba(var(--text-rgb),0.18), rgba(var(--text-rgb),0.1)), var(--bg)',
+  display: 'flex',
+  alignItems: 'stretch',
+  justifyContent: 'stretch',
+  zIndex: 220,
+  padding: 4,
+};
+
+const overlayCardStyle: React.CSSProperties = {
+  width: '100%',
+  height: '100%',
+  display: 'flex',
+  flexDirection: 'column',
+  overflow: 'hidden',
+  background: 'var(--stateboy-screen)',
+  borderRadius: 10,
+  border: '2px solid var(--border)',
+  color: 'var(--text-dark)',
+  boxShadow: '0 8px 20px rgba(var(--text-dark-rgb),0.35)',
+};
+
+const sectionCardStyle: React.CSSProperties = {
+  background: 'rgba(var(--bg-rgb),0.55)',
+  border: '1px solid var(--border)',
+  borderRadius: 8,
+  padding: 10,
+};
+
+const actionButtonStyle: React.CSSProperties = {
+  padding: '9px 10px',
+  fontSize: '10px',
+  lineHeight: 1.2,
+  background:
+    'linear-gradient(180deg, rgba(var(--bg-rgb),0.12), rgba(var(--bg-rgb),0.03)), var(--stateboy-dark)',
+  color: 'var(--bg)',
+  border: '2px solid var(--border)',
+  borderRadius: 8,
+  cursor: 'pointer',
+  fontWeight: 700,
+  letterSpacing: '0.3px',
+  minHeight: 34,
+  fontFamily: 'Martian Mono, monospace',
+  textAlign: 'center',
+  boxShadow: 'inset 0 -2px 0 rgba(var(--text-dark-rgb),0.2), inset 0 1px 0 rgba(var(--bg-rgb),0.14)',
+};
+
+const secondaryButtonStyle: React.CSSProperties = {
+  ...actionButtonStyle,
+  background:
+    'linear-gradient(180deg, rgba(var(--text-rgb),0.08), rgba(var(--text-rgb),0.02)), rgba(var(--bg-rgb),0.82)',
+  color: 'var(--text-dark)',
+};
+
 export default function DiagnosticsOverlay() {
   const { notifyToast } = useUX();
   const {
@@ -22,6 +79,7 @@ export default function DiagnosticsOverlay() {
     downloadDiagnostics,
     sendDiagnosticsTelemetry,
     openGitHubIssue,
+    openGitHubFeedback,
   } = useDiagnostics(notifyToast);
 
   const hasBridgeError = !!(window as any).__lastBridgeError;
@@ -81,51 +139,60 @@ export default function DiagnosticsOverlay() {
   const DiagnosticsModal = () => {
     if (!showDiagnostics) return null;
     return (
-      <div style={{ position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, background: 'rgba(var(--text-dark-rgb),0.65)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 200 }}>
-        <div style={{ width: 'min(95%, calc(100% - 16px))', maxHeight: '85%', overflow: 'auto', background: 'var(--stateboy-screen)', borderRadius: 12, padding: '10px', border: '2px solid var(--border)', color: 'var(--text-dark)', fontSize: '10px', boxShadow: '0 4px 12px rgba(var(--text-dark-rgb),0.4)' }} role="dialog" aria-modal>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, fontSize: '11px' }}>
-            <strong style={{ fontSize: '11px' }}>DSM Diagnostics</strong>
-            <button onClick={() => { setShowDiagnostics(false); }} style={{ padding: '4px 8px', fontSize: '16px', background: 'var(--stateboy-dark)', color: 'var(--bg)', border: '2px solid var(--border)', borderRadius: 8, cursor: 'pointer', fontWeight: 'bold', lineHeight: '1' }}>×</button>
+      <div style={overlayBackdropStyle} data-testid="diagnostics-overlay">
+        <div style={overlayCardStyle} role="dialog" aria-modal>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, padding: '12px 12px 10px', borderBottom: '1px solid rgba(var(--text-rgb),0.16)', background: 'rgba(var(--bg-rgb),0.18)' }}>
+            <div style={{ minWidth: 0 }}>
+              <strong style={{ display: 'block', fontSize: '12px', letterSpacing: '0.4px' }}>DSM Diagnostics</strong>
+              <span style={{ display: 'block', fontSize: '9px', opacity: 0.76, marginTop: 2, lineHeight: 1.3 }}>Prepare a report without leaving the in-app screen.</span>
+            </div>
+            <button onClick={() => { setShowDiagnostics(false); }} style={secondaryButtonStyle}>Close</button>
           </div>
 
-          <div style={{ marginBottom: 8, color: 'var(--text-dark)', fontSize: '10px' }}>
-            <div style={{ marginBottom: 6 }}>These diagnostics contain runtime state useful for debugging initialization failures. Suggested actions:</div>
-            <ul style={{ marginTop: 0, marginBottom: 6, paddingLeft: 16, fontSize: '9px' }}>
+          <div style={{ padding: '12px', overflowY: 'auto', flex: 1, minHeight: 0 }}>
+            <div style={{ ...sectionCardStyle, marginBottom: 10, color: 'var(--text-dark)', fontSize: '11px' }}>
+              <div style={{ marginBottom: 8, fontWeight: 700 }}>Suggested actions</div>
+              <ul style={{ marginTop: 0, marginBottom: 8, paddingLeft: 18, fontSize: '10px', lineHeight: 1.35 }}>
               <li>Copy or download the diagnostics and attach them to an issue.</li>
               <li>Collect device logs (adb logcat) for a full trace.</li>
-              <li>If you consent, send diagnostics to DSM maintainers for analysis.</li>
-            </ul>
+              <li>If you consent, save diagnostics into the local native log before filing a report.</li>
+              </ul>
 
-            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '9px' }}>
-              <input
-                data-testid="telemetry-checkbox"
-                type="checkbox"
-                checked={telemetryConsent}
-                onChange={(e) => setTelemetryConsent(e.target.checked)}
-                style={{
-                  width: 14,
-                  height: 14,
-                  accentColor: 'var(--border)',
-                  border: '2px solid var(--border)',
-                  borderRadius: 3,
-                  cursor: 'pointer'
-                }}
-              />
-              <span>I consent to send diagnostics to DSM maintainers for debugging (no personal data intentionally collected)</span>
-            </label>
-
-            <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-              <button data-testid="send-diagnostics" disabled={!telemetryConsent || !diagnostics} onClick={() => void sendDiagnosticsTelemetry()} style={{ padding: '4px 6px', fontSize: '9px', background: 'var(--bg)', color: 'var(--text-dark)', border: '1px solid var(--border)', borderRadius: 8, cursor: 'pointer', opacity: (!telemetryConsent || !diagnostics) ? 0.5 : 1 }}>Send diagnostics</button>
-              <button data-testid="copy-diagnostics" onClick={() => void copyDiagnostics()} style={{ padding: '4px 6px', fontSize: '9px', background: 'var(--bg)', color: 'var(--text-dark)', border: '1px solid var(--border)', borderRadius: 8, cursor: 'pointer' }}>Copy</button>
-              <button data-testid="download-diagnostics" onClick={() => downloadDiagnostics()} style={{ padding: '4px 6px', fontSize: '9px', background: 'var(--bg)', color: 'var(--text-dark)', border: '1px solid var(--border)', borderRadius: 8, cursor: 'pointer' }}>Download</button>
-              <button data-testid="open-issue" onClick={() => openGitHubIssue()} style={{ padding: '4px 6px', fontSize: '9px', background: 'var(--bg)', color: 'var(--text-dark)', border: '1px solid var(--border)', borderRadius: 8, cursor: 'pointer' }}>Open GitHub issue</button>
+              <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: '10px', lineHeight: 1.4 }}>
+                <input
+                  data-testid="telemetry-checkbox"
+                  type="checkbox"
+                  checked={telemetryConsent}
+                  onChange={(e) => setTelemetryConsent(e.target.checked)}
+                  style={{
+                    width: 14,
+                    height: 14,
+                    accentColor: 'var(--border)',
+                    border: '2px solid var(--border)',
+                    borderRadius: 3,
+                    cursor: 'pointer',
+                    marginTop: 1,
+                    flexShrink: 0,
+                  }}
+                />
+                <span>Include diagnostics when preparing reports and save this preference on this device</span>
+              </label>
             </div>
-          </div>
 
-          <pre style={{ fontSize: '9px', lineHeight: 1.3, whiteSpace: 'pre-wrap', wordBreak: 'break-all', background: 'var(--bg)', padding: '8px', borderRadius: 8, border: '1px solid var(--border)', color: 'var(--text-dark)' }}>{diagnostics ?? 'No diagnostics collected yet.'}</pre>
+            <div style={{ ...sectionCardStyle, marginBottom: 10 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 8 }}>
+                <button data-testid="send-diagnostics" disabled={!telemetryConsent || !diagnostics} onClick={() => void sendDiagnosticsTelemetry()} style={{ ...actionButtonStyle, opacity: (!telemetryConsent || !diagnostics) ? 0.5 : 1, cursor: (!telemetryConsent || !diagnostics) ? 'not-allowed' : 'pointer' }}>Save to local log</button>
+                <button data-testid="copy-diagnostics" onClick={() => void copyDiagnostics()} style={actionButtonStyle}>Copy</button>
+                <button data-testid="download-diagnostics" onClick={() => downloadDiagnostics()} style={actionButtonStyle}>Download</button>
+                <button data-testid="open-issue" onClick={() => openGitHubIssue()} style={actionButtonStyle}>Open beta bug report</button>
+                <button data-testid="open-feedback" onClick={() => openGitHubFeedback()} style={actionButtonStyle}>Send feedback</button>
+              </div>
+            </div>
 
-          {/* Bridge error debug UI */}
-          { (window as any).__lastBridgeError || null ? (() => {
+            <pre style={{ fontSize: '10px', lineHeight: 1.4, whiteSpace: 'pre-wrap', wordBreak: 'break-all', background: 'rgba(var(--bg-rgb),0.78)', padding: '10px', borderRadius: 8, border: '1px solid var(--border)', color: 'var(--text-dark)', margin: 0 }}>{diagnostics ?? 'No diagnostics collected yet.'}</pre>
+
+            {/* Bridge error debug UI */}
+            { (window as any).__lastBridgeError || null ? (() => {
             const errorObj = (window as any).__lastBridgeError;
             let decodedMessage = '';
             let hexDisplay = '';
@@ -155,15 +222,15 @@ export default function DiagnosticsOverlay() {
               decodedMessage = errorObj?.debugB32 || '';
             }
 
-            return (
-              <div style={{ marginTop: 10, padding: 8, border: '1px solid var(--border)', borderRadius: 8, background: 'var(--bg)', fontSize: '9px', maxWidth: '100%', overflow: 'hidden' }}>
-                <strong style={{ fontSize: '10px' }}>Last Bridge Error</strong>
+              return (
+              <div style={{ ...sectionCardStyle, marginTop: 10, fontSize: '10px', maxWidth: '100%', overflow: 'hidden' }}>
+                <strong style={{ fontSize: '11px' }}>Last Bridge Error</strong>
                 <div style={{ marginTop: 6 }}>
                   <div style={{ wordBreak: 'break-word', overflowWrap: 'anywhere' }}><strong>Code:</strong> {errorObj?.code ?? ''}</div>
                   <div style={{ wordBreak: 'break-word', overflowWrap: 'anywhere' }}><strong>Message:</strong> {errorObj?.message ?? ''}</div>
 
                   <div style={{ marginTop: 8 }}><strong>{decodeError ? 'Raw Debug (decode failed):' : 'Debug Info:'}</strong></div>
-                  <div style={{ wordBreak: 'break-word', overflowWrap: 'anywhere', fontSize: '9px', marginBottom: 6, background: 'var(--stateboy-screen)', padding: 6, borderRadius: 6, maxWidth: '100%', overflow: 'auto', whiteSpace: 'pre-wrap', fontFamily: 'monospace', lineHeight: 1.4 }}>{decodedMessage || 'No debug info'}</div>
+                  <div style={{ wordBreak: 'break-word', overflowWrap: 'anywhere', fontSize: '10px', marginBottom: 6, background: 'rgba(var(--bg-rgb),0.74)', padding: 8, borderRadius: 6, maxWidth: '100%', overflow: 'auto', whiteSpace: 'pre-wrap', fontFamily: 'monospace', lineHeight: 1.4 }}>{decodedMessage || 'No debug info'}</div>
 
                   {decodeError && (
                     <div style={{ marginTop: 4, fontSize: '8px', color: 'var(--text-dark)', opacity: 0.7 }}>Decode error: {decodeError}</div>
@@ -177,7 +244,7 @@ export default function DiagnosticsOverlay() {
                       } catch {
                         alert('Copy failed');
                       }
-                    }} style={{ padding: '4px 6px', fontSize: '9px', background: 'var(--stateboy-screen)', color: 'var(--text-dark)', border: '1px solid var(--border)', borderRadius: 8, cursor: 'pointer' }}>Copy</button>
+                    }} style={actionButtonStyle}>Copy</button>
                     <button onClick={() => {
                       try {
                         const bytes = decodeBase32Crockford(errorObj?.debugB32 || '');
@@ -194,17 +261,12 @@ export default function DiagnosticsOverlay() {
                         a.remove();
                         URL.revokeObjectURL(url);
                       } catch { alert('decode/download failed'); }
-                    }} style={{ padding: '4px 6px', fontSize: '9px', background: 'var(--stateboy-screen)', color: 'var(--text-dark)', border: '1px solid var(--border)', borderRadius: 8, cursor: 'pointer' }}>Download Binary</button>
+                    }} style={actionButtonStyle}>Download Binary</button>
                   </div>
                 </div>
               </div>
             );
-          })() : null }
-
-          <div style={{ marginTop: 10, borderTop: '1px solid var(--border)', paddingTop: 10 }}>
-            <button onClick={() => void openGitHubIssue()} style={{ padding: '6px 10px', fontSize: '10px', background: 'var(--stateboy-dark)', color: 'var(--text)', borderRadius: 10, border: '2px solid var(--border)', cursor: 'pointer', fontWeight: 600 }}>
-              Open GitHub issue
-            </button>
+            })() : null }
           </div>
         </div>
       </div>

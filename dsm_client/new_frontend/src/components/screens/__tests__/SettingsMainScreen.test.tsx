@@ -1,6 +1,7 @@
 import React from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import SettingsMainScreen from '../SettingsMainScreen';
+import { BETA_FEEDBACK_TEMPLATE } from '../../../utils/githubIssue';
 
 const mockGetPreference = jest.fn();
 const mockSetPreference = jest.fn();
@@ -28,10 +29,13 @@ jest.mock('../../../services/recovery/nfcRecoveryService', () => ({
 }));
 
 describe('SettingsMainScreen developer unlock', () => {
+  let openSpy: jest.SpyInstance;
+
   beforeEach(() => {
     mockGetPreference.mockReset();
     mockSetPreference.mockReset();
     mockGetNfcBackupStatus.mockReset();
+    openSpy = jest.spyOn(window, 'open').mockImplementation(() => null as any);
     mockGetNfcBackupStatus.mockResolvedValue({
       enabled: false,
       configured: false,
@@ -39,6 +43,10 @@ describe('SettingsMainScreen developer unlock', () => {
       capsuleCount: 0,
       lastCapsuleIndex: 0,
     });
+  });
+
+  afterEach(() => {
+    openSpy.mockRestore();
   });
 
   it('keeps developer options unlocked across remounts while prefs reload', async () => {
@@ -104,5 +112,20 @@ describe('SettingsMainScreen developer unlock', () => {
     expect(
       screen.getByRole('button', { name: /INSPECT OR RECOVER/i }),
     ).toBeInTheDocument();
+  });
+
+  it('exposes beta support actions', async () => {
+    mockGetPreference.mockResolvedValueOnce('false');
+
+    render(<SettingsMainScreen />);
+
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /REPORT ISSUE/i })).toBeInTheDocument(),
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /SEND FEEDBACK/i }));
+
+    await waitFor(() => expect(openSpy).toHaveBeenCalled());
+    expect(String(openSpy.mock.calls[0][0])).toContain(`template=${encodeURIComponent(BETA_FEEDBACK_TEMPLATE)}`);
   });
 });
