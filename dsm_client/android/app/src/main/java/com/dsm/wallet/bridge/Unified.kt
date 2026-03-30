@@ -409,6 +409,14 @@ object Unified {
     @Keep @JvmStatic fun identityReadResultExtractWriteBack(responseProto: ByteArray): ByteArray =
         UnifiedNativeApi.identityReadResultExtractWriteBack(responseProto)
 
+    /** Extract peer_device_id (32 bytes) from a BleGattIdentityReadResult proto. */
+    @Keep @JvmStatic fun identityReadResultExtractPeerDeviceId(responseProto: ByteArray): ByteArray =
+        UnifiedNativeApi.identityReadResultExtractPeerDeviceId(responseProto)
+
+    /** Extract peer_genesis_hash (32 bytes) from a BleGattIdentityReadResult proto. */
+    @Keep @JvmStatic fun identityReadResultExtractPeerGenesisHash(responseProto: ByteArray): ByteArray =
+        UnifiedNativeApi.identityReadResultExtractPeerGenesisHash(responseProto)
+
     /**
      * Called after bilateral prepare succeeds.
      * deviceAddress: BLE MAC address of recipient
