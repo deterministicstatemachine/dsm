@@ -3,6 +3,7 @@
 
 import { useSyncExternalStore } from 'react';
 import { dsmClient } from '../services/dsmClient';
+import { bridgeEvents } from '../bridge/bridgeEvents';
 import type { Transaction } from '@/hooks/useTransactions';
 import type { WalletBalance, WalletState } from '../contexts/WalletContext';
 
@@ -20,6 +21,8 @@ class WalletStore {
   private snapshot: WalletState = initialState;
 
   private listeners = new Set<() => void>();
+
+  private hasObservedBalances = false;
 
   // Track concurrent in-flight refresh calls so isLoading stays true
   // until ALL concurrent operations complete (prevents race where
@@ -48,6 +51,42 @@ class WalletStore {
       ...patch,
     };
     this.emit();
+  }
+
+  private balanceKey(entry: WalletBalance): string {
+    return String(entry.tokenId || entry.symbol || entry.tokenName || 'UNKNOWN');
+  }
+
+  private coerceBalance(value: unknown): bigint {
+    if (typeof value === 'bigint') return value;
+    if (typeof value === 'number') return BigInt(Number.isFinite(value) ? Math.trunc(value) : 0);
+    if (typeof value === 'string') {
+      try {
+        return BigInt(value);
+      } catch {
+        return 0n;
+      }
+    }
+    return 0n;
+  }
+
+  private detectPositiveCredits(previous: WalletBalance[], next: WalletBalance[]): Array<{
+    tokenId: string;
+    delta: bigint;
+    nextBalance: bigint;
+  }> {
+    const previousByToken = new Map<string, bigint>();
+    previous.forEach((entry) => {
+      previousByToken.set(this.balanceKey(entry), this.coerceBalance(entry.balance));
+    });
+
+    return next.flatMap((entry) => {
+      const tokenId = this.balanceKey(entry);
+      const nextBalance = this.coerceBalance(entry.balance);
+      const previousBalance = previousByToken.get(tokenId) ?? 0n;
+      const delta = nextBalance - previousBalance;
+      return delta > 0n ? [{ tokenId, delta, nextBalance }] : [];
+    });
   }
 
   initialize = async (): Promise<void> => {
@@ -79,6 +118,7 @@ class WalletStore {
     this.loadingCount++;
     this.setState({ isLoading: true });
     try {
+      const previousBalances = this.snapshot.balances.slice();
       const [eraResult] = await Promise.allSettled([
         dsmClient.getAllBalances(),
       ]);
@@ -103,6 +143,22 @@ class WalletStore {
         : null;
 
       this.setState({ balances, error });
+
+      const positiveCredits = this.hasObservedBalances
+        ? this.detectPositiveCredits(previousBalances, balances)
+        : [];
+      this.hasObservedBalances = true;
+
+      if (positiveCredits.length > 0) {
+        const firstCredit = positiveCredits[0];
+        bridgeEvents.emit('wallet.creditReceived', {
+          source: 'wallet.refreshBalances',
+          tokenId: firstCredit.tokenId,
+          amount: firstCredit.delta.toString(),
+          nextBalance: firstCredit.nextBalance.toString(),
+          creditCount: positiveCredits.length,
+        });
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to refresh balances';
       console.error('WalletStore: refreshBalances failed:', message);

@@ -35,13 +35,19 @@ const mockBinaryBridge = { __binary: true as const, sendMessageBin: jest.fn() };
 
 describe("DsmClient identity gating and bridge passthrough", () => {
   let client: DsmClient;
+  let errorSpy: jest.SpyInstance;
 
   beforeEach(() => {
     jest.clearAllMocks();
+    errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
     // Simulate a binary-capable bridge being registered so isBinaryBridgeReady()
     // returns true and isReady() can delegate to hasIdentity() as expected.
     (BridgeRegistry.getBridgeInstance as jest.Mock).mockReturnValue(mockBinaryBridge);
     client = new DsmClient();
+  });
+
+  afterEach(() => {
+    errorSpy.mockRestore();
   });
 
   test("getContacts throws when identity missing", async () => {

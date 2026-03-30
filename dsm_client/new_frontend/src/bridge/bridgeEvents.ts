@@ -11,6 +11,7 @@ export type BridgeEventMap = {
   'wallet.bilateralCommitted': { commitmentHash?: Uint8Array; counterpartyDeviceId?: Uint8Array; accepted?: boolean; committed?: boolean; rejected?: boolean };
   'wallet.historyUpdated': void;
   'wallet.balancesUpdated': void;
+  'wallet.creditReceived': { source: string; tokenId?: string; amount?: bigint | string | number; nextBalance?: bigint | string | number; creditCount?: number };
   'wallet.sendCommitted': { success?: boolean; tokenId?: string; newBalance?: bigint | string | number; transactionHash?: Uint8Array; toDeviceId?: Uint8Array; amount?: bigint | string | number };
   'dsm.deterministicSafety': { classification: string; message?: string };
   'contact.added': { contact?: unknown };

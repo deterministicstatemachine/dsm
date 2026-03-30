@@ -70,6 +70,12 @@ export default function DepositCard({ deposit, onRefresh, network }: Props): JSX
             completedOnceRef.current = true;
             setStatusMessage(isExitDeposit ? `Exit completed: ${result}` : `Deposit completed: ${result}`);
             bridgeEvents.emit('deposit.completed', { depositId: deposit.vaultOpId, amount: formatBtc(deposit.btcAmountSats) });
+            bridgeEvents.emit('wallet.creditReceived', {
+              source: isExitDeposit ? 'bitcoin.exit_completed' : 'bitcoin.deposit_completed',
+              tokenId: isExitDeposit ? 'BTC_CHAIN' : 'dBTC',
+              amount: deposit.btcAmountSats.toString(),
+              creditCount: 1,
+            });
             await onRefresh();
           } catch (e) {
             if (cancelled) return;

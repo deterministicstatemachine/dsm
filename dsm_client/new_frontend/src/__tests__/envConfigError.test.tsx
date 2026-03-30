@@ -86,12 +86,12 @@ describe('Env config error banner & diagnostics', () => {
   let warnSpy: jest.SpyInstance;
   let logSpy: jest.SpyInstance;
 
-  beforeAll(() => {
+  beforeEach(() => {
     warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
     logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
   });
 
-  afterAll(() => {
+  afterEach(() => {
     warnSpy.mockRestore();
     logSpy.mockRestore();
   });

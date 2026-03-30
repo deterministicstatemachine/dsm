@@ -21,10 +21,17 @@ function frameEnvelope(envelope: pb.Envelope): Uint8Array {
 }
 
 describe('offline transfer sender/recipient consistency through WebView bridge', () => {
+  let warnSpy: jest.SpyInstance;
+
   beforeEach(() => {
     jest.restoreAllMocks();
+    warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
     (global as any).window = (global as any).window || {};
     (global as any).window.DsmBridge = (global as any).window.DsmBridge || {};
+  });
+
+  afterEach(() => {
+    warnSpy.mockRestore();
   });
 
   test('dBTC offline send is encoded as wallet.sendOffline with token and memo hints', async () => {

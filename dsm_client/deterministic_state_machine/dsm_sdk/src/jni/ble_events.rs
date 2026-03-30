@@ -1296,7 +1296,14 @@ fn emit_identity_read_result(
     write_back_envelope: &[u8],
     error_message: &str,
 ) -> jni::sys::jbyteArray {
-    emit_identity_read_result_with_identity(env, success, write_back_envelope, error_message, &[], &[])
+    emit_identity_read_result_with_identity(
+        env,
+        success,
+        write_back_envelope,
+        error_message,
+        &[],
+        &[],
+    )
 }
 
 /// Full version that includes the peer's identity for Kotlin-side anchoring.
