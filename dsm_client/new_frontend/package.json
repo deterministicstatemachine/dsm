@@ -92,7 +92,7 @@
   "overrides": {
     "minimatch": ">=10.0.0",
     "undici": ">=7.10.0",
-    "serialize-javascript": ">=7.0.4",
+    "serialize-javascript": ">=7.0.5",
     "lodash": ">=4.17.22",
     "schema-utils": {
       "ajv": ">=8.17.0"
