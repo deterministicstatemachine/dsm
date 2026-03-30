@@ -44,7 +44,7 @@ const EnhancedWalletScreen: React.FC<EnhancedWalletScreenProps> = ({ eraTokenSrc
   useEffect(() => {
     void ensureBleAdvertisingIfContacts();
 
-    const handleVisibility = (ev: { state: string }) => {
+    const handleVisibility = (ev: { state: DocumentVisibilityState }) => {
       if (ev.state === 'visible') {
         void ensureBleAdvertisingIfContacts();
       } else {
