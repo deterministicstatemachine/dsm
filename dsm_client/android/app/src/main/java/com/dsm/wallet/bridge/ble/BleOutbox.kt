@@ -2,6 +2,7 @@ package com.dsm.wallet.bridge.ble
 
 import android.content.Context
 import com.dsm.wallet.bridge.BleOutboxItem
+import com.dsm.wallet.bridge.BleOutboxPriority
 import com.dsm.wallet.bridge.BleOutboxRepository
 
 /**
@@ -18,8 +19,12 @@ class BleOutbox(
     private val repository: BleOutboxRepository = BleOutboxRepository(context)
 ) {
 
-    fun enqueueTransaction(deviceAddress: String, data: ByteArray): Long {
-        return repository.enqueue(deviceAddress, data)
+    fun enqueueTransaction(
+        deviceAddress: String,
+        data: ByteArray,
+        priority: Int = BleOutboxPriority.BILATERAL_PREPARE,
+    ): Long {
+        return repository.enqueue(deviceAddress, data, priority)
     }
 
     fun getPendingForDevice(deviceAddress: String): List<BleOutboxItem> {

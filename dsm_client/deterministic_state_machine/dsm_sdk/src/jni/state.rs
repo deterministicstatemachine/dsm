@@ -33,20 +33,39 @@ pub fn parse_hex_32(hex: &str) -> Option<[u8; 32]> {
 }
 
 /// Register a BLE address mapping for a device_id in the in-memory resolution map.
-/// Called from BLE pairing flow (ble_events.rs) to ensure resolveBleAddressForDeviceId works.
+/// Called from BLE pairing flow (ble_events.rs) and on every reconnect identity
+/// observation so the map tracks the peer's current RPA.
+///
+/// Uses `lock()` (blocking) instead of `try_lock()` — a silently dropped
+/// registration causes the bilateral send to use a stale address, which is
+/// worse than a brief wait on lock contention.
 pub fn register_ble_address_mapping(device_id: &[u8; 32], address: &str) {
     if address.is_empty() {
         return;
     }
-    if let Ok(mut map) = DEVICE_ID_TO_ADDR.try_lock() {
-        map.insert(*device_id, address.to_string());
-        log::info!(
-            "register_ble_address_mapping: {:02x}{:02x}... -> {}",
-            device_id[0],
-            device_id[1],
-            address
-        );
-    } else {
-        log::warn!("DEVICE_ID_TO_ADDR lock contention, skipping");
+    match DEVICE_ID_TO_ADDR.lock() {
+        Ok(mut map) => {
+            let prev = map.insert(*device_id, address.to_string());
+            if prev.as_deref() != Some(address) {
+                log::info!(
+                    "register_ble_address_mapping: {:02x}{:02x}... -> {} (prev={:?})",
+                    device_id[0],
+                    device_id[1],
+                    address,
+                    prev,
+                );
+            }
+        }
+        Err(poisoned) => {
+            // Mutex poisoned by a prior panic — recover and update anyway.
+            let mut map = poisoned.into_inner();
+            map.insert(*device_id, address.to_string());
+            log::warn!(
+                "register_ble_address_mapping: recovered poisoned lock, {:02x}{:02x}... -> {}",
+                device_id[0],
+                device_id[1],
+                address,
+            );
+        }
     }
 }

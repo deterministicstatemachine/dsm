@@ -11,8 +11,7 @@ import java.util.concurrent.atomic.AtomicReference
 /**
  * Handles Bluetooth LE advertising using the extended advertising API (API 26+).
  *
- * Uses [AdvertisingSetParameters] and [AdvertisingSetCallback] — the modern API
- * that replaces the deprecated AdvertiseSettings/AdvertiseCallback path.
+ * Uses [AdvertisingSetParameters] and [AdvertisingSetCallback].
  *
  * This component manages:
  * - Starting/stopping BLE advertising sets
@@ -101,7 +100,7 @@ class BleAdvertiser(private val context: Context) {
         }
 
         val parameters = AdvertisingSetParameters.Builder()
-            .setLegacyMode(true)  // Legacy PDU for broadest device compatibility
+            .setLegacyMode(true)  // Connectable/scannable PDU required by current target devices
             .setConnectable(true)
             .setScannable(true)
             .setInterval(AdvertisingSetParameters.INTERVAL_LOW)

@@ -255,13 +255,15 @@ internal object UnifiedBleBridge {
                             svc.connectToDevice(deviceAddress).await()
                         } ?: false
                         if (!connected) {
-                            Log.w("UnifiedBleBridge", "requestGattWriteChunks: first connect attempt failed for $deviceAddress — checking reverse path")
+                            Log.w("UnifiedBleBridge", "requestGattWriteChunks: first connect attempt failed for $effectiveAddress — checking reverse path")
                             // While we were trying to connect, the peer may have connected to our GATT server and subscribed.
-                            if (svc.isGattServerClient(deviceAddress) && svc.isServerClientSubscribedToTxResponse(deviceAddress)) {
-                                Log.i("UnifiedBleBridge", "requestGattWriteChunks: peer connected to our GATT server and subscribed during wait — using server notifications for $deviceAddress")
-                                val ok = svc.sendViaServerNotifications(deviceAddress, chunks)
+                            // Use effectiveAddr (not the original deviceAddress) so we find the peer
+                            // even if it connected under a rotated RPA.
+                            if (svc.isGattServerClient(effectiveAddress) && svc.isServerClientSubscribedToTxResponse(effectiveAddress)) {
+                                Log.i("UnifiedBleBridge", "requestGattWriteChunks: peer connected to our GATT server and subscribed during wait — using server notifications for $effectiveAddress")
+                                val ok = svc.sendViaServerNotifications(effectiveAddress, chunks)
                                 if (!ok) {
-                                    UnifiedBleEvents.onConnectionFailed(deviceAddress, "on_demand_server_notify_fallback_failed")
+                                    UnifiedBleEvents.onConnectionFailed(effectiveAddress, "on_demand_server_notify_fallback_failed")
                                 }
                                 return@runBlocking ok
                             }

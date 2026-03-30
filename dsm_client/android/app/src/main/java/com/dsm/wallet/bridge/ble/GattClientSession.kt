@@ -7,9 +7,6 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.receiveAsFlow
 
 /**
  * Represents a single GATT client session with a peer device.
@@ -21,29 +18,25 @@ import kotlinx.coroutines.flow.receiveAsFlow
  * - Characteristic read/write operations
  * - Connection timeouts and error handling
  *
- * State changes are communicated via a shared flow instead of direct atomic variable access
- * to eliminate split-brain concurrency issues with BleCoordinator.
+ * State changes are reported directly to the coordinator dispatcher so BLE transport
+ * stays on one bounded scheduling path.
  */
-@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 @Suppress("OVERRIDE_DEPRECATION", "DEPRECATION")
 class GattClientSession(
     private val context: Context,
     private val deviceAddress: String,
     private val diagnostics: BleDiagnostics,
-    private val permissionsGate: BlePermissionsGate = BlePermissionsGate(context)
+    private val permissionsGate: BlePermissionsGate = BlePermissionsGate(context),
+    private val eventSink: (BleSessionEvent) -> Unit,
 ) {
-
-    // BLE transport notifications are loss-intolerant: every response chunk must
-    // reach the single BleCoordinator collector so Rust can reassemble frames.
-    // Use an unbounded channel-backed flow instead of a lossy SharedFlow.
-    private val eventChannel = Channel<BleSessionEvent>(Channel.UNLIMITED)
-    val events: Flow<BleSessionEvent> = eventChannel.receiveAsFlow()
 
     companion object {
         /** Disconnect if GATT connection isn't established within 15 seconds. */
         private const val CONNECTION_TIMEOUT_MS = 15_000L
         /** Number of notification chunks to receive before sending ACK write-back. */
         private const val NOTIFICATION_ACK_WINDOW = 10
+        // TRANSFER_IDLE_THRESHOLD_MS removed — transfer boundaries are now
+        // detected via a 1-byte nonce prepended to the first chunk by the server.
     }
 
     private enum class TxRequestWriteKind {
@@ -56,12 +49,12 @@ class GattClientSession(
     private val timeoutHandler = Handler(Looper.getMainLooper())
 
     /**
-     * Counts TX_RESPONSE notifications received in the current notification stream.
-     * After every [NOTIFICATION_ACK_WINDOW] notifications, writes a transport-level ACK
-     * back to the server's TX_REQUEST characteristic so the server knows chunks arrived.
-     * Reset to 0 when a non-notification write occurs or connection resets.
+     * Per-transfer notification counter.  Resets to 0 when the server's
+     * transfer nonce changes (1 byte prepended to the first chunk of each
+     * `sendChunkedNotifications` call).  No wall-clock idle-gap detection.
      */
     private var notificationChunkCount = 0
+    private var currentTransferNonce: Byte = -1
     private val connectionTimeoutRunnable = Runnable {
         Log.w("GattClientSession", "GATT connection timeout (${CONNECTION_TIMEOUT_MS}ms) for $deviceAddress - disconnecting")
         emitEvent(BleSessionEvent.ErrorOccurred(deviceAddress, BleErrorCategory.CONNECTION_FAILED, "connection_timeout"))
@@ -92,11 +85,9 @@ class GattClientSession(
     private var queuedTransactionWrite: ByteArray? = null
     private var queuedChunkAckWriteCount: Int? = null
     // True while the scanner is waiting for its BlePairingConfirm write to be ACKed by the
-    // BLE stack. Prevents the stale-session eviction from disconnecting before the confirm
-    // reaches the advertiser (the bilateral handshake completion gate).
+    // BLE stack.
     private var awaitingConfirmWriteAck: Boolean = false
-    // Whether the PAIRING_ACK CCCD subscription succeeded. Pairing now relies on that
-    // indication path directly instead of layering delayed read-back retries on top.
+    // Whether the PAIRING_ACK CCCD subscription succeeded.
     private var pairingAckCccdSubscribed: Boolean = false
     // Service discovery retry: Samsung/Qualcomm BT stacks can return status 133 if
     // discoverServices() fires before link-layer negotiation settles. One retry with
@@ -106,9 +97,14 @@ class GattClientSession(
     // Remove callback lambdas - operations are now fully asynchronous via events
 
     private fun emitEvent(event: BleSessionEvent) {
-        val result = eventChannel.trySend(event)
-        if (result.isFailure) {
-            Log.w("GattClientSession", "Dropping BLE session event after channel close for $deviceAddress: ${event::class.java.simpleName}")
+        try {
+            eventSink(event)
+        } catch (t: Throwable) {
+            Log.e(
+                "GattClientSession",
+                "Failed to dispatch BLE session event for $deviceAddress: ${event::class.java.simpleName}",
+                t
+            )
         }
     }
 
@@ -355,14 +351,6 @@ class GattClientSession(
                         emitEvent(BleSessionEvent.ErrorOccurred(deviceAddress, BleErrorCategory.CHARACTERISTIC_READ_FAILED, "identity_read", status))
                     }
                 }
-                BleConstants.PAIRING_UUID -> {
-                    if (status == BluetoothGatt.GATT_SUCCESS && characteristic.value != null && characteristic.value.isNotEmpty()) {
-                        Log.i("GattClientSession", "PAIRING read-back from $deviceAddress: ${characteristic.value.size} bytes (ACK response)")
-                        emitEvent(BleSessionEvent.PairingAckReceived(deviceAddress, characteristic.value))
-                    } else {
-                        Log.w("GattClientSession", "PAIRING read-back empty for $deviceAddress (status=$status)")
-                    }
-                }
             }
         }
 
@@ -386,26 +374,17 @@ class GattClientSession(
                         }
                     } else {
                         if (status == BluetoothGatt.GATT_SUCCESS) {
-                            // Phase 2 identity write delivered to the advertiser.
-                            // Immediately read back PAIRING_UUID — this is the primary, reliable path
-                            // to retrieve the advertiser's BlePairingAccept without depending on
-                            // the INDICATE subscription being fully established.
-                            // If a PAIRING_ACK indication also arrives, Rust handles idempotency.
-                            Log.i("GattClientSession", "Pairing identity write successful for $deviceAddress — reading back PAIRING_UUID for ACK")
-                            val readOk = readPairingAck()
-                            if (!readOk) {
-                                if (pairingAckCccdSubscribed) {
-                                    Log.w("GattClientSession", "PAIRING read-back initiation failed for $deviceAddress — falling back to PAIRING_ACK indication only")
-                                } else {
-                                    Log.w("GattClientSession", "PAIRING read-back failed and PAIRING_ACK indication unavailable for $deviceAddress — pairing may stall")
-                                    emitEvent(
-                                        BleSessionEvent.ErrorOccurred(
-                                            deviceAddress,
-                                            BleErrorCategory.CHARACTERISTIC_READ_FAILED,
-                                            "pairing_ack_readback_and_indication_both_unavailable"
-                                        )
+                            if (!pairingAckCccdSubscribed) {
+                                Log.w("GattClientSession", "Pairing identity write succeeded without PAIRING_ACK subscription for $deviceAddress")
+                                emitEvent(
+                                    BleSessionEvent.ErrorOccurred(
+                                        deviceAddress,
+                                        BleErrorCategory.CHARACTERISTIC_READ_FAILED,
+                                        "pairing_ack_subscription_unavailable"
                                     )
-                                }
+                                )
+                            } else {
+                                Log.i("GattClientSession", "Pairing identity write successful for $deviceAddress — waiting for PAIRING_ACK indication")
                             }
                         } else {
                             Log.w("GattClientSession", "Pairing identity write failed for $deviceAddress: status=$status")
@@ -462,16 +441,28 @@ class GattClientSession(
                     emitEvent(BleSessionEvent.PairingAckReceived(deviceAddress, data))
                 }
                 BleConstants.TX_RESPONSE_UUID -> {
-                    // TX_RESPONSE notification — this is response data from the GATT server.
-                    // Could be a BLE chunk (needs reassembly) or a complete envelope.
-                    // Emit the event for BleCoordinator to handle (it routes through
-                    // processBleChunk or processEnvelopeV3 as appropriate).
-                    Log.d("GattClientSession", "TX_RESPONSE notification from $deviceAddress (${data.size} bytes)")
-                    emitEvent(BleSessionEvent.ResponseReceived(deviceAddress, data))
+                    // TX_RESPONSE notification — response data from the GATT server.
+                    // Transfer nonce: the server prepends 1 byte to the first
+                    // chunk of each sendChunkedNotifications call. If the nonce
+                    // differs from the last one we saw, this is a new transfer —
+                    // reset the ACK counter and strip the nonce byte.
+                    var payload = data
+                    if (data.isNotEmpty()) {
+                        val nonce = data[0]
+                        if (nonce != currentTransferNonce) {
+                            if (notificationChunkCount > 0) {
+                                Log.d("GattClientSession", "Transfer nonce changed for $deviceAddress (${(currentTransferNonce.toInt() and 0xFF)} -> ${(nonce.toInt() and 0xFF)}); resetting chunk counter from $notificationChunkCount")
+                            }
+                            currentTransferNonce = nonce
+                            notificationChunkCount = 0
+                            // Strip the nonce byte from the first chunk
+                            payload = data.copyOfRange(1, data.size)
+                        }
+                    }
 
-                    // Windowed ACK: after every NOTIFICATION_ACK_WINDOW notifications,
-                    // write a transport-level ACK back to the server so it knows chunks arrived.
-                    // ACK frame: [0xFF][chunk_count_hi][chunk_count_lo]
+                    Log.d("GattClientSession", "TX_RESPONSE notification from $deviceAddress (${payload.size} bytes, nonce=${currentTransferNonce.toInt() and 0xFF})")
+                    emitEvent(BleSessionEvent.ResponseReceived(deviceAddress, payload))
+
                     notificationChunkCount++
                     if (notificationChunkCount % 100 == 0) {
                         Log.d("GattClientSession", "BLE RX chunk #$notificationChunkCount for $deviceAddress")
@@ -546,7 +537,6 @@ class GattClientSession(
      */
     fun closeQuietly() {
         timeoutHandler.removeCallbacks(connectionTimeoutRunnable)
-        eventChannel.close()
         try {
             bluetoothGatt?.close()
         } catch (e: SecurityException) {
@@ -768,7 +758,6 @@ class GattClientSession(
         }
 
         // 5-byte ACK frame: [0xFF][b3][b2][b1][b0] — 32-bit chunk count.
-        // Backward-compatible: server parses 3-byte (legacy 16-bit) or 5-byte (32-bit).
         val ack = byteArrayOf(
             0xFF.toByte(),
             ((chunkCount shr 24) and 0xFF).toByte(),
@@ -787,11 +776,13 @@ class GattClientSession(
     }
 
     /**
-     * Reset the notification chunk counter. Called when starting a new notification stream
-     * or when the connection resets.
+     * Reset the notification chunk counter and idle-gap timestamp.
+     * Called on connection reset; per-transfer resets are handled
+     * automatically by idle-gap detection in onCharacteristicChanged.
      */
     fun resetNotificationCounter() {
         notificationChunkCount = 0
+        currentTransferNonce = -1
     }
 
     /**
@@ -819,11 +810,10 @@ class GattClientSession(
     }
 
     /**
-     * Write the Phase-3 BlePairingConfirm envelope to the advertiser's PAIRING characteristic.
-     * Sets [awaitingConfirmWriteAck] so that [onCharacteristicWrite] emits [BleSessionEvent.PairingConfirmWritten]
-     * instead of spuriously treating the confirm as a Phase-1 identity write. The confirm-sent flag in BleCoordinator
-     * lifts the stale-session eviction guard only after this callback fires, ensuring the advertiser
-     * receives the confirm before the GATT connection can be torn down.
+    * Write the Phase-3 BlePairingConfirm envelope to the advertiser's PAIRING characteristic.
+    * Sets [awaitingConfirmWriteAck] so that [onCharacteristicWrite] emits
+    * [BleSessionEvent.PairingConfirmWritten] instead of treating the confirm as a
+    * Phase-1 identity write.
      */
     fun writePairingConfirm(data: ByteArray): Boolean {
         val char = pairingCharacteristic
@@ -846,38 +836,6 @@ class GattClientSession(
                 coordinator.permissionsGate.recordPermissionFailure()
                 coordinator.callback?.onBlePermissionError("Bluetooth connection permission required")
             }
-            false
-        }
-    }
-
-    /**
-     * Read the PAIRING characteristic from the peer to retrieve the advertiser's
-     * BlePairingAccept response (Phase 2 read-back).
-     *
-     * This is the primary ACK retrieval path — more reliable than waiting for a
-     * PAIRING_ACK indication which may be dropped or delayed. Both paths are active
-     * simultaneously (belt-and-suspenders); Rust handles idempotency if both fire.
-     *
-     * Result is communicated via [BleSessionEvent.PairingAckReceived].
-     */
-    fun readPairingAck(): Boolean {
-        val char = pairingCharacteristic
-        if (char == null) {
-            Log.w("GattClientSession", "readPairingAck: PAIRING characteristic not found for $deviceAddress")
-            diagnostics.recordError(BleErrorCategory.CHARACTERISTIC_READ_FAILED, "pairing_ack_read_no_char")
-            return false
-        }
-        return try {
-            val result = bluetoothGatt?.readCharacteristic(char) == true
-            Log.d("GattClientSession", "readPairingAck: initiated read for $deviceAddress, result=$result")
-            result
-        } catch (e: SecurityException) {
-            Log.e("GattClientSession", "Security exception reading PAIRING characteristic for $deviceAddress", e)
-            BleCoordinator.getInstance(context).let { coordinator ->
-                coordinator.permissionsGate.recordPermissionFailure()
-                coordinator.callback?.onBlePermissionError("Bluetooth connection permission required")
-            }
-            diagnostics.recordError(BleErrorCategory.PERMISSION_DENIED, "pairing_ack_read")
             false
         }
     }
@@ -921,7 +879,6 @@ class GattClientSession(
 
     private fun cleanup() {
         timeoutHandler.removeCallbacks(connectionTimeoutRunnable)
-        eventChannel.close()
         // P1.1: Reset connection priority to balanced on cleanup to save battery.
         try {
             bluetoothGatt?.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_BALANCED)
