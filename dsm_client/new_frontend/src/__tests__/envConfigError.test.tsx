@@ -1,6 +1,7 @@
 import React, { act } from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { bridgeEvents } from '../bridge/bridgeEvents';
+import { BETA_BUG_TEMPLATE } from '../utils/githubIssue';
 
 // App is default export
 import App from '../App';
@@ -72,6 +73,7 @@ jest.mock('../services/dsmClient', () => ({
     }),
     getBluetoothStatus: jest.fn().mockResolvedValue({ enabled: false, advertising: false, scanning: false }),
     getContacts: jest.fn().mockResolvedValue({ contacts: [] }),
+    setPreference: jest.fn().mockResolvedValue(undefined),
   },
 }));
 
@@ -141,7 +143,8 @@ describe('Env config error banner & diagnostics', () => {
     fireEvent.click(openBtn);
     await waitFor(() => expect(openSpy).toHaveBeenCalled());
     const calledUrl = String(openSpy.mock.calls[0][0]);
-    expect(calledUrl).toContain('github.com/DSM-Deterministic-State-Machine/deterministic-state-machine/issues/new');
+    expect(calledUrl).toContain('github.com/deterministicstatemachine/dsm/issues/new');
+    expect(calledUrl).toContain(`template=${encodeURIComponent(BETA_BUG_TEMPLATE)}`);
     openSpy.mockRestore();
     batteryEl.remove();
   });

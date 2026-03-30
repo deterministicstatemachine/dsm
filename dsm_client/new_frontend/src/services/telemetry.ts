@@ -1,15 +1,15 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-// Simple telemetry helper for diagnostics. Tests should mock this module.
-export const TELEMETRY_ENDPOINT = '/telemetry/diagnostics';
+// Diagnostics helper for beta support flows. Tests should mock this module.
+export const DIAGNOSTICS_LOG_METHOD = 'diagnosticsLog';
 
 export async function sendDiagnostics(payload: any, hasConsent: boolean = false): Promise<void> {
   if (!hasConsent) {
-    // Consent gate: diagnostics must be opt-in.
+    // Consent gate: diagnostics logging must be opt-in.
     return;
   }
 
-  // Clockless + protobuf-only rule: telemetry must not use wall-clock time or JSON.
-  // Send raw text bytes across the bridge so BridgeLogger captures it in the log file (beta diagnostics).
+  // Clockless + protobuf-only rule: diagnostics logging must not use wall-clock time or JSON.
+  // Send raw text bytes across the bridge so BridgeLogger captures it in the local log file.
   try {
     const encoder = new TextEncoder();
     const payloadBytes = encoder.encode(String(payload ?? ''));
@@ -17,7 +17,7 @@ export async function sendDiagnostics(payload: any, hasConsent: boolean = false)
     try {
       const wb = await import('../dsm/WebViewBridge');
       if (typeof wb.callBin === 'function') {
-        await wb.callBin('diagnosticsLog', payloadBytes);
+        await wb.callBin(DIAGNOSTICS_LOG_METHOD, payloadBytes);
         return;
       }
     } catch {
@@ -28,7 +28,7 @@ export async function sendDiagnostics(payload: any, hasConsent: boolean = false)
     if (bridge && typeof bridge.__callBin === 'function') {
       const pb = await import('../proto/dsm_app_pb');
       const req = new pb.BridgeRpcRequest({
-        method: 'diagnosticsLog',
+        method: DIAGNOSTICS_LOG_METHOD,
         payload: { case: 'bytes', value: new pb.BytesPayload({ data: payloadBytes as Uint8Array<ArrayBuffer> }) },
       });
       await bridge.__callBin(req.toBinary());
@@ -50,9 +50,9 @@ export async function sendDiagnostics(payload: any, hasConsent: boolean = false)
 export async function hasUserConsentFromPrefs(): Promise<boolean> {
   try {
     const wb = await import('../dsm/WebViewBridge');
-    if (typeof wb.callBin !== 'function') return false;
-    const bytes = await wb.callBin('prefs.get', new TextEncoder().encode('diagnostics_consent'));
-    return new TextDecoder().decode(bytes).trim() === '1';
+    if (typeof wb.getPreference !== 'function') return false;
+    const value = await wb.getPreference('diagnostics_consent');
+    return value === '1' || value === 'true';
   } catch {
     return false;
   }

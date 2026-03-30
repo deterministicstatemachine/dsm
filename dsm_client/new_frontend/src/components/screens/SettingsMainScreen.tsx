@@ -3,6 +3,7 @@
 import React, { useCallback, useEffect, useRef, useState, memo } from 'react';
 import { dsmClient } from '../../services/dsmClient';
 import { exportStateBackupFile, importStateBackupFile } from '../../services/settings/backupService';
+import { BETA_FEEDBACK_TEMPLATE, buildGitHubIssueUrl } from '../../utils/githubIssue';
 
 import {
   getNfcBackupStatus,
@@ -29,6 +30,7 @@ interface ExtendedDsmClient {
 
 const client = dsmClient as unknown as ExtendedDsmClient;
 const DEV_MODE_PREF_KEY = 'dev_mode';
+const OPEN_DIAGNOSTICS_EVENT = 'dsm-open-diagnostics';
 let cachedDevMode: boolean | null = null;
 const emptyNfcStatus: NfcBackupStatus = {
   enabled: false,
@@ -203,6 +205,33 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
 
     input.click();
   }, [backupProcessing]);
+
+  const openDiagnosticsWorkspace = useCallback(() => {
+    if (typeof window === 'undefined') return;
+    window.dispatchEvent(new CustomEvent(OPEN_DIAGNOSTICS_EVENT, { detail: { autoGather: true } }));
+    setStatus('Diagnostics workspace opened');
+  }, []);
+
+  const openBetaFeedback = useCallback(async () => {
+    try {
+      const url = buildGitHubIssueUrl({
+        template: BETA_FEEDBACK_TEMPLATE,
+        title: 'Beta feedback',
+      });
+      const popup = window.open(url, '_blank', 'noopener');
+      if (!popup && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(url);
+        setStatus('Feedback link copied to clipboard');
+        return;
+      }
+      if (!popup) {
+        throw new Error('Popup blocked');
+      }
+      setStatus('Beta feedback form opened');
+    } catch {
+      setStatus('Unable to open beta feedback form');
+    }
+  }, []);
 
   return (
     <main className="settings-shell settings-shell--main" role="main" aria-labelledby="settings-title">
@@ -408,6 +437,53 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
             style={{ fontSize: '9px' }}
           >
             INSPECT OR RECOVER
+          </button>
+        </div>
+      </section>
+
+      <section
+        aria-labelledby="beta-support-title"
+        className="settings-shell__panel"
+      >
+        <div
+          id="beta-support-title"
+          style={{
+            fontSize: '10px',
+            fontWeight: 'bold',
+            marginBottom: '8px',
+            color: 'var(--text-dark)',
+            letterSpacing: '1px',
+          }}
+        >
+          BETA SUPPORT
+        </div>
+        <div
+          style={{
+            fontSize: '8px',
+            color: 'var(--text-dark)',
+            marginBottom: '12px',
+            lineHeight: '1.4',
+            opacity: 0.8,
+          }}
+        >
+          OPEN THE DIAGNOSTICS WORKSPACE, EXPORT A REPORT, OR SEND GENERAL BETA FEEDBACK.
+        </div>
+        <div className="settings-shell__button-row">
+          <button
+            type="button"
+            className="settings-shell__button"
+            style={{ fontSize: '9px' }}
+            onClick={openDiagnosticsWorkspace}
+          >
+            REPORT ISSUE
+          </button>
+          <button
+            type="button"
+            className="settings-shell__button"
+            style={{ fontSize: '9px' }}
+            onClick={openBetaFeedback}
+          >
+            SEND FEEDBACK
           </button>
         </div>
       </section>

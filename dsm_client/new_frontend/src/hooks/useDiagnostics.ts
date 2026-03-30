@@ -4,7 +4,11 @@
 import { useCallback, useEffect, useState } from 'react';
 import { dsmClient } from '../services/dsmClient';
 import { bridgeEvents } from '../bridge/bridgeEvents';
-import { buildGitHubIssueUrl } from '../utils/githubIssue';
+import {
+  BETA_BUG_TEMPLATE,
+  BETA_FEEDBACK_TEMPLATE,
+  buildGitHubIssueUrl,
+} from '../utils/githubIssue';
 import { nativeSessionStore } from '../runtime/nativeSessionStore';
 
 type NotifyToast = (type: string, message?: string) => void;
@@ -17,6 +21,13 @@ type DiagnosticsState = {
   telemetryConsent: boolean;
 };
 
+const DIAGNOSTICS_CONSENT_PREF_KEY = 'diagnostics_consent';
+const OPEN_DIAGNOSTICS_EVENT = 'dsm-open-diagnostics';
+
+type DiagnosticsOpenDetail = {
+  autoGather?: boolean;
+};
+
 export function useDiagnostics(notifyToast: NotifyToast) {
   const [envConfigError, setEnvConfigError] = useState<string | null>(null);
   const [lastBridgeError, setLastBridgeError] = useState<{ code: number; message: string; debugB32?: string } | null>(null);
@@ -24,6 +35,25 @@ export function useDiagnostics(notifyToast: NotifyToast) {
   const [diagLoading, setDiagLoading] = useState(false);
   const [diagnostics, setDiagnostics] = useState<string | null>(null);
   const [telemetryConsent, setTelemetryConsent] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const pref = await dsmClient.getPreference(DIAGNOSTICS_CONSENT_PREF_KEY);
+        if (!cancelled) {
+          setTelemetryConsent(pref === '1' || pref === 'true');
+        }
+      } catch {
+        if (!cancelled) {
+          setTelemetryConsent(false);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     const handler = (detail: { message: string; type?: string; help?: string }) => {
@@ -63,6 +93,15 @@ export function useDiagnostics(notifyToast: NotifyToast) {
 
     return () => { unsubscribe(); unsub2(); };
   }, []);
+
+  const updateTelemetryConsent = useCallback(async (next: boolean) => {
+    setTelemetryConsent(next);
+    try {
+      await dsmClient.setPreference(DIAGNOSTICS_CONSENT_PREF_KEY, next ? '1' : '0');
+    } catch {
+      notifyToast('error', 'Failed to save diagnostics consent');
+    }
+  }, [notifyToast]);
 
   const gatherDiagnostics = useCallback(async () => {
     setDiagLoading(true);
@@ -123,79 +162,144 @@ export function useDiagnostics(notifyToast: NotifyToast) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [envConfigError]);
 
+  const buildDiagnosticsBundle = useCallback(async (): Promise<string> => {
+    const summary = diagnostics ?? 'No diagnostics collected yet.';
+    try {
+      const telemetry = await import('../services/telemetry');
+      const logBytes = await telemetry.exportDiagnosticsReport();
+      const bridgeLog = logBytes.length > 0
+        ? new TextDecoder().decode(logBytes)
+        : 'No native bridge log captured.';
+      return [summary, '', '--- Native Bridge Log ---', bridgeLog].join('\n');
+    } catch {
+      return summary;
+    }
+  }, [diagnostics]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleOpenDiagnostics = (event: Event) => {
+      const detail = (event as CustomEvent<DiagnosticsOpenDetail | undefined>).detail;
+      setShowDiagnostics(true);
+      if (detail?.autoGather !== false) {
+        void gatherDiagnostics();
+      }
+    };
+    window.addEventListener(OPEN_DIAGNOSTICS_EVENT, handleOpenDiagnostics as EventListener);
+    return () => {
+      window.removeEventListener(OPEN_DIAGNOSTICS_EVENT, handleOpenDiagnostics as EventListener);
+    };
+  }, [gatherDiagnostics]);
+
   const openGitHubIssue = useCallback(() => {
     void (async () => {
       try {
-      const title = `Env config error: ${envConfigError ? envConfigError.substring(0, 80) : 'configuration failure'}`;
-      const excerpt = diagnostics ? diagnostics.substring(0, 1024) : '';
-      const body =
-        `**Describe the problem**\n\nEnvironment configuration failed during app startup. Please attach the diagnostics file you downloaded ("dsm-diagnostics.txt").\n\nDiagnostics excerpt:\n\n----BEGIN EXCERPT----\n${excerpt}\n----END EXCERPT----\n\n**Steps to reproduce**\n1. Install the app\n2. Launch the app\n3. Observe the configuration error\n\n**Additional info**\n- Attach adb logcat output if available\n`;
-      const url = buildGitHubIssueUrl({ title, body });
-      const popup = window.open(url, '_blank', 'noopener');
-      if (!popup && navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(url);
-        notifyToast('success', 'Issue link copied to clipboard');
-        return;
-      }
-      if (!popup) {
-        throw new Error('Popup blocked and clipboard unavailable.');
-      }
-      notifyToast('success', 'GitHub issue opened');
-      } catch {
-        try {
-        const defaultUrl = buildGitHubIssueUrl();
-        const popup = window.open(defaultUrl, '_blank', 'noopener');
+        const title = `Beta bug: ${envConfigError ? envConfigError.substring(0, 80) : 'diagnostics report'}`;
+        const excerpt = telemetryConsent
+          ? (await buildDiagnosticsBundle()).substring(0, 2200)
+          : '';
+        const body =
+          `**Describe the problem**\n\nPlease describe the beta issue.\n\n` +
+          (telemetryConsent
+            ? `**Diagnostics excerpt**\n\n----BEGIN EXCERPT----\n${excerpt}\n----END EXCERPT----\n\n`
+            : `**Diagnostics**\n\nAttach the downloaded \`dsm-diagnostics.txt\` file if you are comfortable sharing it.\n\n`) +
+          `**Steps to reproduce**\n1. Launch the app\n2. Reproduce the issue\n3. Note the exact screen, flow, and expected result\n\n**Additional info**\n- Attach adb logcat output if available\n`;
+        const url = buildGitHubIssueUrl({ title, body, template: BETA_BUG_TEMPLATE });
+        const popup = window.open(url, '_blank', 'noopener');
         if (!popup && navigator.clipboard?.writeText) {
-          await navigator.clipboard.writeText(defaultUrl);
-          notifyToast('success', 'Issue link copied to clipboard');
+          await navigator.clipboard.writeText(url);
+          notifyToast('success', 'Bug report link copied to clipboard');
           return;
         }
         if (!popup) {
           throw new Error('Popup blocked and clipboard unavailable.');
         }
-        notifyToast('success', 'GitHub issue opened');
+        notifyToast('success', 'Beta bug report opened');
+      } catch {
+        try {
+          const defaultUrl = buildGitHubIssueUrl({ template: BETA_BUG_TEMPLATE });
+          const popup = window.open(defaultUrl, '_blank', 'noopener');
+          if (!popup && navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(defaultUrl);
+            notifyToast('success', 'Bug report link copied to clipboard');
+            return;
+          }
+          if (!popup) {
+            throw new Error('Popup blocked and clipboard unavailable.');
+          }
+          notifyToast('success', 'Beta bug report opened');
         } catch (_e) {
           notifyToast('error', 'Failed to open GitHub');
         }
       }
     })();
-  }, [diagnostics, envConfigError, notifyToast]);
+  }, [buildDiagnosticsBundle, envConfigError, notifyToast, telemetryConsent]);
+
+  const openGitHubFeedback = useCallback(() => {
+    void (async () => {
+      try {
+        const body = telemetryConsent && diagnostics
+          ? `**Feedback**\n\nPlease share your beta feedback.\n\n**Optional diagnostics excerpt**\n\n${(await buildDiagnosticsBundle()).substring(0, 1200)}`
+          : '**Feedback**\n\nPlease share your beta feedback.';
+        const url = buildGitHubIssueUrl({
+          template: BETA_FEEDBACK_TEMPLATE,
+          title: 'Beta feedback',
+          body,
+        });
+        const popup = window.open(url, '_blank', 'noopener');
+        if (!popup && navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(url);
+          notifyToast('success', 'Feedback link copied to clipboard');
+          return;
+        }
+        if (!popup) {
+          throw new Error('Popup blocked and clipboard unavailable.');
+        }
+        notifyToast('success', 'Beta feedback form opened');
+      } catch {
+        notifyToast('error', 'Failed to open feedback form');
+      }
+    })();
+  }, [buildDiagnosticsBundle, diagnostics, notifyToast, telemetryConsent]);
 
   const sendDiagnosticsTelemetry = useCallback(async () => {
     if (!diagnostics) return;
     try {
       const t = await import('../services/telemetry');
       await t.sendDiagnostics(diagnostics, telemetryConsent);
-      notifyToast('success', 'Diagnostics sent');
+      notifyToast('success', 'Diagnostics saved to local log');
     } catch (e) {
-      notifyToast('error', `Failed to send diagnostics: ${String(e)}`);
+      notifyToast('error', `Failed to save diagnostics: ${String(e)}`);
     }
   }, [diagnostics, notifyToast, telemetryConsent]);
 
   const copyDiagnostics = useCallback(async () => {
     if (!diagnostics) return;
     try {
-      await navigator.clipboard.writeText(diagnostics);
+      await navigator.clipboard.writeText(await buildDiagnosticsBundle());
       notifyToast('success', 'Diagnostics copied to clipboard');
     } catch (e) {
       notifyToast('error', 'Copy failed');
       console.warn('Failed to copy diagnostics:', e);
     }
-  }, [diagnostics, notifyToast]);
+  }, [buildDiagnosticsBundle, diagnostics, notifyToast]);
 
   const downloadDiagnostics = useCallback(() => {
     if (!diagnostics) return;
-    const blob = new Blob([diagnostics], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'dsm-diagnostics.txt';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-    notifyToast('success', 'Diagnostics downloaded');
-  }, [diagnostics, notifyToast]);
+    void (async () => {
+      const bundle = await buildDiagnosticsBundle();
+      const blob = new Blob([bundle], { type: 'text/plain' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'dsm-diagnostics.txt';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      notifyToast('success', 'Diagnostics downloaded');
+    })();
+  }, [buildDiagnosticsBundle, diagnostics, notifyToast]);
 
   const state: DiagnosticsState = {
     envConfigError,
@@ -209,9 +313,10 @@ export function useDiagnostics(notifyToast: NotifyToast) {
     ...state,
     setEnvConfigError,
     setShowDiagnostics,
-    setTelemetryConsent,
+    setTelemetryConsent: updateTelemetryConsent,
     gatherDiagnostics,
     openGitHubIssue,
+    openGitHubFeedback,
     sendDiagnosticsTelemetry,
     copyDiagnostics,
     downloadDiagnostics,
