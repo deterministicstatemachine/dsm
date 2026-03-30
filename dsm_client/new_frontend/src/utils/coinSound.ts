@@ -77,7 +77,6 @@ export function playCoinSound(): void {
   try {
     const snapshot = appRuntimeStore.getSnapshot();
     if (!snapshot.soundEnabled) {
-      console.log('[coinSound] muted — skipping');
       return;
     }
     const now = Date.now();
@@ -85,7 +84,6 @@ export function playCoinSound(): void {
       return;
     }
     lastPlayAttemptAt = now;
-    console.log('[coinSound] playing coin.mp3');
     const nextAudio = getAudio();
     playWithRetry(nextAudio, 0);
   } catch {
