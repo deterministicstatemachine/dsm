@@ -14,7 +14,7 @@ interface GenesisQRCodeScreenProps {
 
 export default function GenesisQrPanel({ genesisHashBase32, onClose }: GenesisQRCodeScreenProps) {
   const [qrPngUrl, setQrPngUrl] = useState<string>('');
-  const [qrError, setQrError] = useState<boolean>(false);
+  const [qrGenFailed, setQrGenFailed] = useState<boolean>(false);
 
   const encodedQr = useMemo(() => {
     try {
@@ -33,8 +33,6 @@ export default function GenesisQrPanel({ genesisHashBase32, onClose }: GenesisQR
 
   useEffect(() => {
     if (encodedQr.hasError || !encodedQr.data) {
-      setQrPngUrl('');
-      setQrError(true);
       return;
     }
 
@@ -50,13 +48,12 @@ export default function GenesisQrPanel({ genesisHashBase32, onClose }: GenesisQR
     }).then((url) => {
       if (!cancelled && typeof url === 'string' && url.length > 0) {
         setQrPngUrl(url);
-        setQrError(false);
+        setQrGenFailed(false);
       }
     }).catch((err) => {
       if (!cancelled) {
         console.error('QR PNG generation failed:', err);
-        setQrPngUrl('');
-        setQrError(true);
+        setQrGenFailed(true);
       }
     });
 
@@ -64,6 +61,8 @@ export default function GenesisQrPanel({ genesisHashBase32, onClose }: GenesisQR
       cancelled = true;
     };
   }, [encodedQr]);
+
+  const qrError = encodedQr.hasError || qrGenFailed;
 
   return (
     <div className="genesis-qr-screen">
