@@ -44,7 +44,7 @@ perf-metrics = []
 softvault-kek-strict = []
 [build-dependencies]
 cbindgen = "0.29.2"
-blake3 = "1.5.0"
+blake3 = "1.8.4"
 anyhow = "1.0"
 prost = "0.13"
 prost-build = "0.14"
@@ -94,7 +94,7 @@ toml = "0.8.20"
 # Bitcoin bridge support
 bitcoin = { version = "0.32", default-features = false, features = ["std"] }
 # Cryptography
-blake3 = "1.5.0"
+blake3 = "1.8.4"
 # AEAD
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc", "std"] }
 hmac = "0.12.1"
