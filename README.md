@@ -1,5 +1,7 @@
 # DSM Workspace
 
+[![codecov](https://codecov.io/gh/deterministicstatemachine/dsm/graph/badge.svg?branch=main)](https://app.codecov.io/gh/deterministicstatemachine/dsm)
+
 > **🚧 EARLY BETA RELEASE** 🚧
 >
 > This is an early beta release intended for **developer onboarding and community feedback**. It contains novel cryptographic protocols and is not yet ready for production use or end-user deployment. The codebase is under active development with known gaps remaining before mainnet readiness.
@@ -17,6 +19,8 @@
 - **[Security](SECURITY.md)** — Private vulnerability reporting process
 - **[Support](SUPPORT.md)** — Where to ask for help and where to file issues
 - **[Changelog](CHANGELOG.md)** — Version history
+
+CI also publishes Rust and frontend coverage to Codecov for each push and pull request on `main`.
 
 ---
 

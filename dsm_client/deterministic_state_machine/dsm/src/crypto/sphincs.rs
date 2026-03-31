@@ -63,7 +63,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 #[cfg(feature = "sphincs-trace")]
 macro_rules! sphincs_trace {
     ($($arg:tt)*) => {
-        eprintln!($($arg)*);
+        tracing::debug!($($arg)*);
     };
 }
 
