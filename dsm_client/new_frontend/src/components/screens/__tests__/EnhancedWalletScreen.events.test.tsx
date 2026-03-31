@@ -10,6 +10,17 @@ jest.mock('../../../services/bitcoinTap', () => ({
   getDbtcBalance: jest.fn().mockResolvedValue({ available: 0n, locked: 0n, source: 'CHAIN' }),
 }));
 
+function installStandardWalletMocks(contactList: any[] = []) {
+  (dsmClient.isReady as any) = jest.fn().mockResolvedValue(true);
+  (dsmClient.getIdentity as any) = jest.fn().mockResolvedValue({
+    genesisHash: 'G'.repeat(32),
+    deviceId: 'D'.repeat(32),
+  });
+  (dsmClient.getContacts as any) = jest.fn().mockResolvedValue({ contacts: contactList });
+  (dsmClient.getConnectedBluetoothDevices as any) = jest.fn().mockResolvedValue([]);
+  (dsmClient.getConnectedDeviceIds as any) = jest.fn().mockResolvedValue([]);
+}
+
 describe('EnhancedWalletScreen event-driven refresh', () => {
   beforeEach(() => {
     jest.restoreAllMocks();
@@ -94,10 +105,126 @@ describe('EnhancedWalletScreen event-driven refresh', () => {
         expect.objectContaining({
           tokenId: 'ROOT',
           to: contact.deviceId,
-          amount: '100',
+          amount: '1',
           bleAddress: contact.bleAddress,
         })
       );
+    });
+  });
+
+  test('online sender updates visible balance in the UI after send completes', async () => {
+    const contact = {
+      alias: 'Receiver',
+      deviceId: 'ABCDEFGH12345678ABCDEFGH12345678',
+      genesisHash: 'HGFEDCBA12345678HGFEDCBA12345678',
+    };
+
+    installStandardWalletMocks([contact]);
+
+    let balancesState = [{ tokenId: 'ERA', symbol: 'ERA', balance: '100', decimals: 0 }];
+    let historyState: any[] = [];
+
+    (dsmClient.getAllBalances as any) = jest.fn().mockImplementation(async () => balancesState);
+    (dsmClient.getWalletHistory as any) = jest.fn().mockImplementation(async () => ({ transactions: historyState }));
+    (dsmClient.sendOnlineTransferSmart as any) = jest.fn().mockImplementation(async () => {
+      balancesState = [{ tokenId: 'ERA', symbol: 'ERA', balance: '75', decimals: 0 }];
+      historyState = [{ txId: 'tx-online-sender', type: 'online', amount: '25', recipient: 'Receiver', status: 'confirmed' }];
+      return { success: true, message: 'ok', newBalance: 75n };
+    });
+
+    render(<EnhancedWalletScreen />);
+
+    await waitFor(() => expect(screen.getByText('100')).toBeInTheDocument());
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Send' })[0]);
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Send Transaction' })).toBeInTheDocument());
+    fireEvent.change(screen.getByLabelText(/Amount/i), { target: { value: '25' } });
+    fireEvent.click(screen.getAllByRole('button', { name: 'Send' }).at(-1)!);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Confirm' })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+
+    await waitFor(() => {
+      expect(dsmClient.sendOnlineTransferSmart).toHaveBeenCalledWith('Receiver', '25', undefined, 'ERA');
+      expect(screen.queryByRole('heading', { name: 'Send Transaction' })).not.toBeInTheDocument();
+      expect(screen.getAllByText('75').length).toBeGreaterThanOrEqual(1);
+      expect(screen.getByText(/Recent Activity/)).toBeInTheDocument();
+    });
+  });
+
+  test('offline sender updates visible balance in the UI after send completes', async () => {
+    const contact = {
+      alias: 'Receiver',
+      deviceId: 'ABCDEFGH12345678ABCDEFGH12345678',
+      genesisHash: 'HGFEDCBA12345678HGFEDCBA12345678',
+      bleAddress: 'AA:BB:CC:DD:EE:FF',
+    };
+
+    installStandardWalletMocks([contact]);
+
+    let balancesState = [{ tokenId: 'ROOT', symbol: 'ERA', balance: '80', decimals: 2 }];
+    let historyState: any[] = [];
+
+    (dsmClient.getAllBalances as any) = jest.fn().mockImplementation(async () => balancesState);
+    (dsmClient.getWalletHistory as any) = jest.fn().mockImplementation(async () => ({ transactions: historyState }));
+    (dsmClient.resolveBleAddressForContact as any) = jest.fn().mockResolvedValue(contact.bleAddress);
+    (dsmClient.sendOfflineTransfer as any) = jest.fn().mockImplementation(async () => {
+      balancesState = [{ tokenId: 'ROOT', symbol: 'ERA', balance: '55', decimals: 2 }];
+      historyState = [{ txId: 'tx-offline-sender', type: 'offline', amount: '25', recipient: 'Receiver', status: 'confirmed' }];
+      return { success: true };
+    });
+
+    render(<EnhancedWalletScreen />);
+
+    await waitFor(() => expect(screen.getByText('80')).toBeInTheDocument());
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Send' })[0]);
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Send Transaction' })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: 'Offline' }));
+    fireEvent.change(screen.getByLabelText(/Amount/i), { target: { value: '25' } });
+    fireEvent.change(screen.getAllByRole('combobox')[1], { target: { value: 'ROOT' } });
+    fireEvent.click(screen.getAllByRole('button', { name: 'Send' }).at(-1)!);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Confirm' })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+
+    await waitFor(() => {
+      expect(dsmClient.sendOfflineTransfer).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tokenId: 'ROOT',
+          to: contact.deviceId,
+          amount: '25',
+          bleAddress: contact.bleAddress,
+        })
+      );
+      expect(screen.queryByRole('heading', { name: 'Send Transaction' })).not.toBeInTheDocument();
+      expect(screen.getAllByText('55').length).toBeGreaterThanOrEqual(1);
+      expect(screen.getByText(/Recent Activity/)).toBeInTheDocument();
+    });
+  });
+
+  test('online receiver refresh updates visible balance and history in the UI', async () => {
+    installStandardWalletMocks([]);
+
+    let balancesState = [{ tokenId: 'ERA', symbol: 'ERA', balance: '40', decimals: 0 }];
+    let historyState: any[] = [];
+
+    (dsmClient.getAllBalances as any) = jest.fn().mockImplementation(async () => balancesState);
+    (dsmClient.getWalletHistory as any) = jest.fn().mockImplementation(async () => ({ transactions: historyState }));
+
+    render(<EnhancedWalletScreen />);
+
+    await waitFor(() => expect(screen.getByText('40')).toBeInTheDocument());
+
+    balancesState = [{ tokenId: 'ERA', symbol: 'ERA', balance: '65', decimals: 0 }];
+    historyState = [{ txId: 'tx-online-receiver', type: 'online', amount: '25', recipient: 'Self', status: 'confirmed' }];
+
+    await act(async () => {
+      bridgeEvents.emit('wallet.refresh', { source: 'wallet.send' });
+    });
+
+    await waitFor(() => {
+      expect(screen.getAllByText('65').length).toBeGreaterThanOrEqual(1);
+      expect(screen.getByText(/Recent Activity/)).toBeInTheDocument();
+      expect(screen.getAllByText(/25/).length).toBeGreaterThanOrEqual(1);
     });
   });
 

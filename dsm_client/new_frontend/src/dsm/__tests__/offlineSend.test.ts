@@ -45,10 +45,17 @@ function prepareResponseBytes(commitmentHash: Uint8Array): Uint8Array {
 }
 
 describe('offlineSend', () => {
+  let warnSpy: jest.SpyInstance;
+
   beforeEach(() => {
     jest.restoreAllMocks();
+    warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
     (global as any).window = (global as any).window || {};
     (global as any).window.DsmBridge = (global as any).window.DsmBridge || {};
+  });
+
+  afterEach(() => {
+    warnSpy.mockRestore();
   });
 
   test('delegates missing BLE address resolution to wallet.sendOffline', async () => {
@@ -61,7 +68,7 @@ describe('offlineSend', () => {
       const argPack = pb.ArgPack.fromBinary(args);
       const request = pb.BilateralPrepareRequest.fromBinary(argPack.body);
       expect(request.counterpartyDeviceId).toEqual(to);
-      expect(request.transferAmount).toBe(1n);
+      expect(request.transferAmountDisplay).toBe('1');
       expect(request.tokenIdHint).toBe('ERA');
       expect(request.memoHint).toBe('');
       expect(request.bleAddress).toBe('');

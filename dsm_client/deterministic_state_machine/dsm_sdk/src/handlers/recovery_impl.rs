@@ -360,14 +360,14 @@ impl RecoveryHandler for RecoveryImpl {
             };
 
             // Update contact chain tips to recovered values (both shared + local tip)
-            if let Err(e) = crate::storage::client_db::update_finalized_bilateral_chain_tip(
+            if let Err(e) = crate::storage::client_db::restore_finalized_bilateral_chain_tip(
                 counterparty_device_id,
                 &head_hash_32,
             ) {
-                log::warn!(
-                    "[RECOVERY] Failed to update chain tip for {}: {e}",
+                return Err(format!(
+                    "[RECOVERY] Refusing to overwrite existing chain tip for {}: {e}",
                     &device_id_b32[..device_id_b32.len().min(16)]
-                );
+                ));
             } else {
                 log::info!(
                     "[RECOVERY] Restored bilateral chain tip for {}",

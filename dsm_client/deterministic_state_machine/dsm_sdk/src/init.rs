@@ -425,6 +425,30 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
         dev_fixed.copy_from_slice(&dev);
         gen_fixed.copy_from_slice(&gen);
 
+        // Backfill Device Tree root (§2.3) for existing identities created before this was
+        // persisted at genesis time.  The root of a single-device tree is deterministic from
+        // dev_fixed, so it is always safe to recompute and overwrite.
+        // Without the root, build_bilateral_receipt_with_smt returns None → proof_data None →
+        // settle() rejects every bilateral transfer → balance never updates.
+        {
+            let root = dsm::common::device_tree::DeviceTree::single(dev_fixed).root();
+            crate::sdk::app_state::AppState::set_device_tree_root(root);
+            log::info!(
+                "[SDK Init] Device tree root computed and persisted (dev={})",
+                crate::util::text_id::encode_base32_crockford(&dev_fixed)
+            );
+        }
+
+        // Bootstrap-time validation gate (§2.3.1): Ensure device_tree_root is always present.
+        // If any earlier initialization step is skipped or fails, recover here.
+        // This prevents silent bilateral transfer failures post-initialization.
+        if crate::sdk::app_state::AppState::get_device_tree_root().is_none() {
+            log::warn!("[SDK Init Validation] device_tree_root is None — emergency backfill from device_id");
+            let root = dsm::common::device_tree::DeviceTree::single(dev_fixed).root();
+            crate::sdk::app_state::AppState::set_device_tree_root(root);
+            log::info!("[SDK Init Validation] Emergency backfill successful — R_G now available");
+        }
+
         let contact_manager =
             DsmContactManager::new(dev_fixed, vec![dsm::types::identifiers::NodeId::new("n")]);
 
@@ -501,18 +525,24 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
         // within a runtime" when init_dsm_sdk is called from an async context (e.g.
         // createGenesis's block_on future).
         let coordinator = manager_arc.frame_coordinator().clone();
+        let transport_adapter = manager_arc.transport_adapter().clone();
         let ble_inject_result = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .map_err(|e| format!("ble coordinator runtime: {e}"))?;
-            rt.block_on(crate::bridge::inject_ble_coordinator(coordinator))
+            rt.block_on(async move {
+                crate::bridge::inject_ble_coordinator(coordinator).await?;
+                crate::bridge::inject_ble_transport_adapter(transport_adapter).await
+            })
         })
         .join();
         match ble_inject_result {
-            Ok(Ok(_)) => log::info!("[SDK Init] BLE coordinator injected into bilateral handler"),
-            Ok(Err(e)) => log::warn!("[SDK Init] BLE coordinator injection failed: {e}"),
-            Err(_) => log::warn!("[SDK Init] BLE coordinator injection thread panicked"),
+            Ok(Ok(_)) => log::info!(
+                "[SDK Init] BLE coordinator and transport adapter injected into bilateral handler"
+            ),
+            Ok(Err(e)) => log::warn!("[SDK Init] BLE injection failed: {e}"),
+            Err(_) => log::warn!("[SDK Init] BLE injection thread panicked"),
         }
 
         // Load existing contacts from SQLite and sync to BluetoothManager SYNCHRONOUSLY

@@ -5,7 +5,7 @@ import { useDpadNav } from '../../hooks/useDpadNav';
 import { getDbrwStatus, type DbrwStatus } from '../../dsm/dbrw';
 import { exportDiagnosticsReport } from '../../services/telemetry';
 import { useUX } from '../../contexts/UXContext';
-import { buildGitHubIssueUrl, DSM_RELEASE_REPO_URL } from '../../utils/githubIssue';
+import { BETA_BUG_TEMPLATE, buildGitHubIssueUrl, DSM_RELEASE_REPO_URL } from '../../utils/githubIssue';
 import { bytesToBase32CrockfordPrefix } from '../../utils/textId';
 import './StorageScreen.css';
 import './DevCdbrwScreen.css';
@@ -207,6 +207,7 @@ export default function DevCdbrwScreen(): JSX.Element {
       const report = await ensureReport();
       const excerpt = report.slice(0, 3000);
       const url = buildGitHubIssueUrl({
+        template: BETA_BUG_TEMPLATE,
         title: 'C-DBRW diagnostics report',
         body:
           `## Summary\nPlease describe the C-DBRW problem.\n\n` +

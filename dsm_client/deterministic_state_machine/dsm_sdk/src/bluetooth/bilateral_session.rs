@@ -14,6 +14,7 @@ use std::time::Instant;
 
 use dsm::types::error::DsmError;
 use dsm::types::operations::Operation;
+use dsm::types::state_types::State;
 use log::{info, warn};
 use tokio::sync::Mutex;
 
@@ -43,8 +44,6 @@ pub struct BilateralSettlementContext {
     pub commitment_hash: [u8; 32],
     /// Transaction hash produced by the state-machine finalization step.
     pub transaction_hash: [u8; 32],
-    /// Local chain height (state number) after the transition; 0 if unavailable.
-    pub chain_height: u64,
     /// Serialised [`dsm::types::operations::Operation`] bytes.
     /// The delegate MUST parse this to determine token type, amount, and direction.
     pub operation_bytes: Vec<u8>,
@@ -58,6 +57,20 @@ pub struct BilateralSettlementContext {
     /// New bilateral chain tip required for the receiver-side atomic persistence
     /// boundary.  Set to `[0u8; 32]` on sender paths where it is not needed.
     pub new_chain_tip: [u8; 32],
+    /// Canonical post-protocol state transition, when the caller has one.
+    ///
+    /// The application layer may merge token-balance settlement into this state
+    /// so the archived BCR snapshot reflects the completed wallet settlement.
+    pub canonical_state: Option<State>,
+}
+
+/// Result returned by [`BilateralSettlementDelegate::settle`].
+#[derive(Debug, Default)]
+pub struct BilateralSettlementOutcome {
+    /// Transfer metadata used by frontend hooks and notifications.
+    pub transfer_meta: crate::sdk::transfer_hooks::TransferMeta,
+    /// Canonical state snapshot to archive after settlement, when available.
+    pub canonical_state: Option<State>,
 }
 
 /// Application-layer callback installed on [`BilateralBleHandler`](super::BilateralBleHandler).
@@ -80,10 +93,8 @@ pub trait BilateralSettlementDelegate: Send + Sync {
     /// responsible for updating balances and persisting transaction history.
     /// Returns [`TransferMeta`](crate::sdk::transfer_hooks::TransferMeta) for
     /// upstream hooks, or an error string if persistence fails.
-    fn settle(
-        &self,
-        ctx: BilateralSettlementContext,
-    ) -> Result<crate::sdk::transfer_hooks::TransferMeta, String>;
+    fn settle(&self, ctx: BilateralSettlementContext)
+        -> Result<BilateralSettlementOutcome, String>;
 }
 
 // ---------------------------------------------------------------------------

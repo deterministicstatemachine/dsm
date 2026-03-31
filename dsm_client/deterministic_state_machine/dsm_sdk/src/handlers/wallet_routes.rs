@@ -125,7 +125,27 @@ fn enrich_balance_metadata(reply: &mut generated::BalanceGetResponse) {
     reply.decimals = meta.decimals;
 }
 
-fn canonicalize_token_id(token_id: &str) -> String {
+fn ensure_default_visible_balances(items: &mut Vec<generated::BalanceGetResponse>) {
+    for token_id in ["ERA", "dBTC"] {
+        if items
+            .iter()
+            .any(|item| item.token_id.eq_ignore_ascii_case(token_id))
+        {
+            continue;
+        }
+
+        let mut reply = generated::BalanceGetResponse {
+            token_id: token_id.to_string(),
+            available: 0,
+            locked: 0,
+            ..Default::default()
+        };
+        enrich_balance_metadata(&mut reply);
+        items.push(reply);
+    }
+}
+
+pub(crate) fn canonicalize_token_id(token_id: &str) -> String {
     let trimmed = token_id.trim();
     if trimmed.is_empty() {
         return String::new();
@@ -136,6 +156,99 @@ fn canonicalize_token_id(token_id: &str) -> String {
         "DBTC" => "dBTC".to_string(),
         _ => trimmed.to_string(),
     }
+}
+
+pub(crate) fn resolve_token_decimals(token_id: &str) -> u32 {
+    match canonicalize_token_id(token_id).as_str() {
+        "ERA" => 0,
+        "dBTC" => 8,
+        other => {
+            let anchor_b32 = crate::sdk::app_state::AppState::handle_app_state_request(
+                &format!("dsm.token.{other}"),
+                "get",
+                "",
+            );
+            if anchor_b32.is_empty() {
+                return 0;
+            }
+
+            let policy_b32 = crate::sdk::app_state::AppState::handle_app_state_request(
+                &format!("dsm.policy.{anchor_b32}"),
+                "get",
+                "",
+            );
+            if policy_b32.is_empty() {
+                return 0;
+            }
+
+            let Some(policy_bytes) = crate::util::text_id::decode_base32_crockford(&policy_b32)
+            else {
+                return 0;
+            };
+            parse_cached_policy_metadata(&policy_bytes)
+                .map(|meta| meta.decimals)
+                .unwrap_or(0)
+        }
+    }
+}
+
+pub(crate) fn parse_display_amount_to_base_units(
+    amount_str: &str,
+    decimals: u32,
+) -> Result<u64, String> {
+    let trimmed = amount_str.trim();
+    if trimmed.is_empty() {
+        return Err("amount is required".to_string());
+    }
+    if trimmed.starts_with('-') {
+        return Err("amount must be non-negative".to_string());
+    }
+
+    let mut parts = trimmed.split('.');
+    let whole = parts.next().unwrap_or_default();
+    let frac = parts.next().unwrap_or_default();
+    if parts.next().is_some() {
+        return Err("amount has too many decimal separators".to_string());
+    }
+    if whole.is_empty() || !whole.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("amount must be a decimal string".to_string());
+    }
+    if !frac.is_empty() && !frac.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("amount must be a decimal string".to_string());
+    }
+    if frac.len() > decimals as usize {
+        return Err(format!("amount exceeds {} fractional digits", decimals));
+    }
+
+    let whole_norm = whole.trim_start_matches('0');
+    let whole_digits = if whole_norm.is_empty() {
+        "0"
+    } else {
+        whole_norm
+    };
+    let frac_padded = if decimals == 0 {
+        if !frac.is_empty() {
+            return Err("token does not support fractional amounts".to_string());
+        }
+        String::new()
+    } else {
+        let mut frac_buf = frac.to_string();
+        while frac_buf.len() < decimals as usize {
+            frac_buf.push('0');
+        }
+        frac_buf
+    };
+
+    let joined = format!("{}{}", whole_digits, frac_padded);
+    let normalized = joined.trim_start_matches('0');
+    let canonical = if normalized.is_empty() {
+        "0"
+    } else {
+        normalized
+    };
+    canonical
+        .parse::<u64>()
+        .map_err(|e| format!("amount out of range: {e}"))
 }
 
 fn encode_offline_transfer_operation_canonical(
@@ -184,6 +297,11 @@ impl AppRouterImpl {
     pub(crate) async fn handle_wallet_query(&self, q: AppQuery) -> AppResult {
         match q.path.as_str() {
             "balance.get" => {
+                if self.core_sdk.get_current_state().is_err() {
+                    if let Err(e) = self.core_sdk.restore_latest_archived_state_for_device() {
+                        log::warn!("[balance.get] cold-start archive refresh failed: {}", e);
+                    }
+                }
                 let token_id_opt: Option<String> = match generated::ArgPack::decode(&*q.params) {
                     Ok(pack) if pack.codec == generated::Codec::Proto as i32 => {
                         if pack.body.is_empty() {
@@ -198,7 +316,7 @@ impl AppRouterImpl {
                     _ => return err("balance.get: expected ArgPack(codec=PROTO)".into()),
                 };
 
-                // Default to ERA when no token_id provided; canonicalize for consistent SQLite lookups.
+                // Default to ERA when no token_id is provided; canonicalize for consistent balance lookup.
                 let token_for_query_raw = token_id_opt.as_deref().unwrap_or("ERA");
                 let token_for_query_owned = canonicalize_token_id(token_for_query_raw);
                 let token_for_query = if token_for_query_owned.is_empty() {
@@ -207,31 +325,8 @@ impl AppRouterImpl {
                     &token_for_query_owned
                 };
 
-                // For non-ERA tokens, prefer SQLite (authoritative after bilateral transfers).
-                // Bilateral send/recv update SQLite only, not the in-memory wallet cache.
-                if token_for_query != "ERA" {
-                    let device_id_txt =
-                        crate::util::text_id::encode_base32_crockford(&self.device_id_bytes);
-                    if let Ok(Some((available, locked))) =
-                        crate::storage::client_db::get_token_balance(
-                            &device_id_txt,
-                            token_for_query,
-                        )
-                    {
-                        let mut reply = generated::BalanceGetResponse {
-                            token_id: token_for_query.to_string(),
-                            available,
-                            locked,
-                            ..Default::default()
-                        };
-                        enrich_balance_metadata(&mut reply);
-                        return pack_envelope_ok(generated::envelope::Payload::BalanceGetResponse(
-                            reply,
-                        ));
-                    }
-                }
-
-                // Fall through to in-memory path for ERA or when SQLite has no row.
+                // Use the wallet lane router, which prefers validated canonical projection rows
+                // for non-ERA tokens and falls back to canonical state.
                 match self.wallet.get_balance(Some(token_for_query)) {
                     Ok(bal) => {
                         let mut reply = generated::BalanceGetResponse {
@@ -409,7 +504,9 @@ impl AppRouterImpl {
                                 .map(|b| {
                                     let r_g = dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(b)
                                         .ok()
-                                        .map(|r| dsm::common::device_tree::DeviceTree::single(r.devid_a).root());
+                                        .map(|r| crate::sdk::receipts::DeviceTreeAcceptanceCommitment::from_root(
+                                            dsm::common::device_tree::DeviceTree::single(r.devid_a).root(),
+                                        ));
                                     crate::sdk::receipts::verify_receipt_bytes(b, r_g)
                                 })
                                 .unwrap_or(false),
@@ -424,180 +521,118 @@ impl AppRouterImpl {
 
             // -------- balance.list --------
             "balance.list" => {
+                // Canonical in-memory state is the authoritative balance source.
+                // Only restore from BCR archive on cold start when no in-memory
+                // state exists. Unconditional restore can race with bilateral
+                // settlement and read stale deltas instead of post-settlement
+                // balances.
+                if self.core_sdk.get_current_state().is_err() {
+                    if let Err(e) = self.core_sdk.restore_latest_archived_state_for_device() {
+                        log::warn!("[balance.list] cold-start archive refresh failed: {}", e);
+                    }
+                }
                 log::debug!("[balance.list] query handler entered");
 
-                // Enumerate token balances - check client_db first (authoritative for offline bilateral),
-                // then fall back to core state for other tokens.
+                // Log the restored BCR state for debugging
+                if let Some(cs) = self.core_sdk.get_current_state().ok().as_ref() {
+                    let era_balance = cs
+                        .token_balances
+                        .values()
+                        .find_map(|b| if b.value() > 0 { Some(b.value()) } else { None })
+                        .unwrap_or(0);
+                    log::info!(
+                        "[balance.list] restored BCR state hash={} state_number={} era_balance={}",
+                        crate::util::text_id::encode_base32_crockford(&cs.hash),
+                        cs.state_number,
+                        era_balance
+                    );
+                } else {
+                    log::warn!("[balance.list] no current state after restore");
+                }
+
+                // Enumerate token balances from the canonical token cache/projection path.
                 let mut items: Vec<generated::BalanceGetResponse> = Vec::new();
 
-                // CRITICAL: Check client_db wallet_state first - this is where bilateral transfers update balance.
-                // Must use encode_base32_crockford to match the key used by all balance write paths.
                 let device_id_txt =
                     crate::util::text_id::encode_base32_crockford(&self.device_id_bytes);
+                let current_state = self.core_sdk.get_current_state().ok();
+                let current_state_number = current_state.as_ref().map(|cs| cs.state_number);
+                let current_state_hash = current_state
+                    .as_ref()
+                    .and_then(|cs| cs.hash().ok())
+                    .map(|hash| crate::util::text_id::encode_base32_crockford(&hash));
 
-                // Ensure wallet state exists before querying (creates with balance 0 if missing)
-                if let Err(e) =
-                    crate::storage::client_db::ensure_wallet_state_for_device(&device_id_txt)
-                {
-                    log::warn!(
-                        "balance.list: failed to ensure wallet state for {}: {}",
-                        device_id_txt,
-                        e
-                    );
-                }
-
-                log::debug!(
-                    "[balance.list] Querying SQLite wallet_state for device_id={}",
-                    device_id_txt
-                );
-                let sqlite_balance = crate::storage::client_db::get_wallet_state(&device_id_txt)
-                    .ok()
-                    .flatten()
-                    .map(|ws| {
-                        log::debug!(
-                            "[balance.list] SQLite wallet_state found: balance={} updated_at={}",
-                            ws.balance,
-                            ws.updated_at
-                        );
-                        ws.balance
-                    });
-
-                if sqlite_balance.is_none() {
-                    log::debug!(
-                        "[balance.list] SQLite wallet_state not found for device_id={}",
-                        device_id_txt
-                    );
-                }
-
-                // Prefer SQLite balance as authoritative for ERA (bilateral transfers update here).
-                // In unit tests and early bootstrap, SQLite may not be initialized yet; fall back
-                // to the in-memory wallet/core balance to avoid false zeros.
-                let era_available = match sqlite_balance {
-                    Some(bal) => Some(bal),
-                    None => self.wallet.get_balance(Some("ERA")).ok().map(|b| b.value()),
-                };
-                if let Some(bal) = era_available {
-                    items.push(generated::BalanceGetResponse {
-                        token_id: "ERA".to_string(),
-                        available: bal,
-                        locked: 0,
-                        ..Default::default()
-                    });
-                }
-
-                // Extract unique non-ERA token IDs from state and query each via the lane router.
-                // No dedup needed — each lane does exactly one canonical key lookup.
-                if let Ok(cs) = self.core_sdk.get_current_state() {
-                    let mut seen_tokens: std::collections::HashSet<String> =
-                        std::collections::HashSet::new();
-                    for k in cs.token_balances.keys() {
-                        let token_id =
-                            canonicalize_token_id(&if let Some((_, t)) = k.split_once('|') {
-                                t.to_string()
-                            } else {
-                                k.clone()
-                            });
-                        if token_id == "ERA" {
-                            continue;
-                        }
+                // Seed from canonical state first.
+                if let Some(cs) = current_state.as_ref() {
+                    for (token_key, balance) in &cs.token_balances {
+                        let token_id = canonicalize_token_id(&if let Some((_, t)) =
+                            token_key.split_once('|')
+                        {
+                            t.to_string()
+                        } else {
+                            token_key.clone()
+                        });
                         if token_id.chars().any(|c| c.is_control() || (c as u32) > 126) {
                             continue;
                         }
-                        seen_tokens.insert(token_id);
-                    }
-
-                    for token_id in &seen_tokens {
-                        if !items.iter().any(|i| i.token_id == *token_id) {
-                            if let Ok(bal) = self.wallet.get_balance(Some(token_id)) {
-                                items.push(generated::BalanceGetResponse {
-                                    token_id: token_id.clone(),
-                                    available: bal.available(),
-                                    locked: bal.locked(),
-                                    ..Default::default()
-                                });
-                            }
-                        }
-                    }
-                }
-
-                // Seed-on-read: flush any in-memory-only token balances into SQLite so that the
-                // bilateral debit path (which reads from SQLite) always has a valid baseline.
-                // This runs before the SQLite merge below so that the seeded rows are immediately
-                // visible if merged back in the same pass.
-                // ERA is excluded because it uses the separate wallet_state.balance column.
-                for item in items.iter() {
-                    if item.token_id == "ERA" || item.available == 0 {
-                        continue;
-                    }
-                    match crate::storage::client_db::get_token_balance(
-                        &device_id_txt,
-                        &item.token_id,
-                    ) {
-                        Ok(None) => {
-                            // No SQLite row yet — seed it from the in-memory value.
-                            if let Err(e) = crate::storage::client_db::upsert_token_balance(
-                                &device_id_txt,
-                                &item.token_id,
-                                item.available,
-                                item.locked,
-                            ) {
-                                log::warn!(
-                                    "[balance.list] Failed to seed SQLite row for {}:{}: {}",
-                                    device_id_txt,
-                                    item.token_id,
-                                    e
-                                );
-                            } else {
-                                log::info!(
-                                    "[balance.list] Seeded SQLite row for {}:{} balance={}",
-                                    device_id_txt,
-                                    item.token_id,
-                                    item.available
-                                );
-                            }
-                        }
-                        Ok(Some(_)) => {} // Row already exists — SQLite merge below handles it.
-                        Err(e) => {
-                            log::warn!(
-                                "[balance.list] DB error checking seed for {}:{}: {}",
-                                device_id_txt,
-                                item.token_id,
-                                e
-                            );
-                        }
-                    }
-                }
-
-                // Merge persisted token balances from SQLite (authoritative for bilateral transfers).
-                // The bilateral send path always writes to SQLite and never updates the in-memory
-                // wallet, so SQLite wins unconditionally for any token it has a row for.
-                // ERA is excluded because it uses the separate wallet_state.balance column.
-                if let Ok(persisted) = crate::storage::client_db::get_token_balances(&device_id_txt)
-                {
-                    for (tok_id, available, locked) in persisted {
-                        if tok_id == "ERA" {
-                            continue;
-                        }
-                        // BTC_CHAIN is native on-chain Bitcoin — not a DSM token.
-                        // It is only served via the bitcoin.wallet.balance endpoint
-                        // and must NOT appear in the DSM token balance list.
-                        if tok_id == "BTC_CHAIN" {
-                            continue;
-                        }
-                        if let Some(existing) = items.iter_mut().find(|i| i.token_id == tok_id) {
-                            // SQLite is authoritative — always overwrite the in-memory value.
-                            existing.available = available;
-                            existing.locked = locked;
-                        } else {
+                        if !items.iter().any(|i| i.token_id == token_id) {
                             items.push(generated::BalanceGetResponse {
-                                token_id: tok_id,
-                                available,
-                                locked,
+                                token_id,
+                                available: balance.available(),
+                                locked: balance.locked(),
                                 ..Default::default()
                             });
                         }
                     }
                 }
+
+                // Merge canonical projection rows.
+                if let Ok(projected) =
+                    crate::storage::client_db::list_balance_projections(&device_id_txt)
+                {
+                    for record in projected {
+                        let tok_id = canonicalize_token_id(&record.token_id);
+                        if tok_id == "BTC_CHAIN" {
+                            continue;
+                        }
+                        let projection_matches_current_state =
+                            match (current_state_number, current_state_hash.as_ref()) {
+                                (Some(state_number), Some(state_hash)) => {
+                                    record.source_state_number == state_number
+                                        && record.source_state_hash == *state_hash
+                                }
+                                _ => true,
+                            };
+
+                        if let Some(existing) = items.iter_mut().find(|i| i.token_id == tok_id) {
+                            if projection_matches_current_state {
+                                existing.available = record.available;
+                                existing.locked = record.locked;
+                            }
+                        } else {
+                            items.push(generated::BalanceGetResponse {
+                                token_id: tok_id,
+                                available: record.available,
+                                locked: record.locked,
+                                ..Default::default()
+                            });
+                        }
+                    }
+                }
+
+                // Ensure built-in tokens always appear (even at zero balance).
+                for builtin in &["ERA", "dBTC"] {
+                    if !items.iter().any(|i| i.token_id == *builtin) {
+                        items.push(generated::BalanceGetResponse {
+                            token_id: builtin.to_string(),
+                            available: 0,
+                            locked: 0,
+                            ..Default::default()
+                        });
+                    }
+                }
+
+                ensure_default_visible_balances(&mut items);
 
                 // Deterministic order by token_id
                 for item in &mut items {
@@ -713,9 +748,25 @@ impl AppRouterImpl {
                     } else {
                         canonicalize_token_id(&req.token_id_hint)
                     };
+                    let transfer_amount = if req.transfer_amount_display.trim().is_empty() {
+                        req.transfer_amount
+                    } else {
+                        let decimals = resolve_token_decimals(&token_id);
+                        match parse_display_amount_to_base_units(
+                            &req.transfer_amount_display,
+                            decimals,
+                        ) {
+                            Ok(amount) => amount,
+                            Err(e) => {
+                                return err(format!(
+                                    "wallet.sendOffline: invalid display amount: {e}"
+                                ))
+                            }
+                        }
+                    };
                     encode_offline_transfer_operation_canonical(
                         &counterparty_device_id,
-                        req.transfer_amount,
+                        transfer_amount,
                         &token_id,
                         req.memo_hint.trim(),
                     )
@@ -754,6 +805,14 @@ impl AppRouterImpl {
                     } else {
                         req.validity_iterations
                     };
+                    let transport_adapter = match crate::bridge::get_ble_transport_adapter().await {
+                        Ok(adapter) => adapter,
+                        Err(e) => {
+                            return err(format!(
+                                "wallet.sendOffline: BLE transport adapter not ready: {e}"
+                            ))
+                        }
+                    };
                     let coordinator = match crate::bridge::get_ble_coordinator().await {
                         Ok(c) => c,
                         Err(e) => {
@@ -762,7 +821,7 @@ impl AppRouterImpl {
                             ))
                         }
                     };
-                    let (chunks, commitment_hash) = match coordinator
+                    let (prepare_envelope, commitment_hash) = match transport_adapter
                         .create_prepare_message_with_commitment(
                             counterparty_device_id,
                             operation,
@@ -777,12 +836,26 @@ impl AppRouterImpl {
                             ))
                         }
                     };
+                    let chunks = match coordinator.encode_message(
+                        crate::bluetooth::BleFrameType::BilateralPrepare,
+                        &prepare_envelope,
+                    ) {
+                        Ok(chunks) => chunks,
+                        Err(e) => {
+                            transport_adapter
+                                .cancel_prepared_session_for_counterparty(counterparty_device_id)
+                                .await;
+                            return err(format!(
+                                "wallet.sendOffline: failed to frame BLE prepare payload: {e}"
+                            ));
+                        }
+                    };
 
                     use crate::jni::jni_common::get_java_vm_borrowed;
                     let vm = match get_java_vm_borrowed() {
                         Some(vm) => vm,
                         None => {
-                            coordinator
+                            transport_adapter
                                 .cancel_prepared_session_for_counterparty(counterparty_device_id)
                                 .await;
                             return err(
@@ -793,25 +866,7 @@ impl AppRouterImpl {
                     // JNI AttachGuard is !Send — do all JNI work in a sync block,
                     // drop the guard, THEN handle errors with async.
                     //
-                    // Step 1: Prime BLE transport — start GATT server + advertising
-                    // so the peer can reconnect if the session dropped after pairing.
-                    let _ble_primed: Result<bool, String> = (|| {
-                        let mut jni_env = vm.attach_current_thread().map_err(|e| {
-                            format!("wallet.sendOffline: attach for BLE prime failed: {e}")
-                        })?;
-                        let ready = crate::jni::unified_protobuf_bridge::ensure_ble_transport_ready(
-                            &mut jni_env,
-                            &ble_address,
-                        );
-                        if let Ok(false) = &ready {
-                            log::warn!(
-                                "[wallet.sendOffline] BLE transport not ready for {} — will try send anyway",
-                                &ble_address
-                            );
-                        }
-                        ready
-                    })();
-                    // Step 2: Send the bilateral prepare chunks via BLE.
+                    // Send the bilateral prepare chunks via the single BLE dispatch path.
                     let ble_send_result: Result<bool, String> = (|| {
                         let mut jni_env = vm.attach_current_thread().map_err(|e| {
                             format!("wallet.sendOffline: attach_current_thread failed: {e}")
@@ -827,7 +882,7 @@ impl AppRouterImpl {
                     match ble_send_result {
                         Ok(true) => {}
                         Ok(false) => {
-                            coordinator
+                            transport_adapter
                                 .cancel_prepared_session_for_counterparty(counterparty_device_id)
                                 .await;
                             return err(
@@ -836,7 +891,7 @@ impl AppRouterImpl {
                             );
                         }
                         Err(e) => {
-                            coordinator
+                            transport_adapter
                                 .cancel_prepared_session_for_counterparty(counterparty_device_id)
                                 .await;
                             return err(e);
@@ -954,11 +1009,14 @@ impl AppRouterImpl {
                         }
                     };
 
-                // 3. Parse Amount
-                let amount: u64 = match smart_req.amount.parse() {
-                    Ok(v) => v,
-                    Err(e) => return err(format!("Invalid amount: {}", e)),
-                };
+                // 3. Parse display amount into canonical base units in the backend.
+                let canonical_token_id = canonicalize_token_id(&smart_req.token_id);
+                let token_decimals = resolve_token_decimals(&canonical_token_id);
+                let amount: u64 =
+                    match parse_display_amount_to_base_units(&smart_req.amount, token_decimals) {
+                        Ok(v) => v,
+                        Err(e) => return err(format!("Invalid amount: {}", e)),
+                    };
 
                 // 4. Fetch Sequence (from current state)
                 let seq = match self.core_sdk.get_current_state() {
@@ -968,7 +1026,7 @@ impl AppRouterImpl {
 
                 // 5. Construct OnlineTransferRequest with deterministic nonce
                 let mut inner_req = generated::OnlineTransferRequest {
-                    token_id: canonicalize_token_id(&smart_req.token_id),
+                    token_id: canonical_token_id,
                     to_device_id: to_device_id_vec.clone(),
                     amount,
                     memo: smart_req.memo,
@@ -978,6 +1036,7 @@ impl AppRouterImpl {
                     chain_tip: chain_tip_vec.clone(),
                     seq,
                     receipt_commit: Vec::new(), // ReceiptCommit built in process_online_transfer_logic
+                    canonical_operation_bytes: Vec::new(),
                 };
 
                 // Compute deterministic nonce: Hash(domain || sender_id || receiver_id || prev_tip || seq || payload_digest)
@@ -1022,7 +1081,11 @@ impl AppRouterImpl {
 
 #[cfg(test)]
 mod tests {
-    use super::{canonicalize_token_id, encode_offline_transfer_operation_canonical};
+    use super::{
+        canonicalize_token_id, encode_offline_transfer_operation_canonical,
+        ensure_default_visible_balances, parse_display_amount_to_base_units,
+    };
+    use dsm::types::proto as generated;
     use dsm::types::operations::Operation;
 
     #[test]
@@ -1031,6 +1094,30 @@ mod tests {
         assert_eq!(canonicalize_token_id("dbtc"), "dBTC");
         assert_eq!(canonicalize_token_id(" dBTC "), "dBTC");
         assert_eq!(canonicalize_token_id("ERA"), "ERA");
+    }
+
+    #[test]
+    fn parse_display_amount_to_base_units_handles_fractional_tokens() {
+        assert_eq!(parse_display_amount_to_base_units("1.25", 2).unwrap(), 125);
+        assert_eq!(
+            parse_display_amount_to_base_units("1", 8).unwrap(),
+            100000000
+        );
+        assert_eq!(
+            parse_display_amount_to_base_units("0.00000001", 8).unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn parse_display_amount_to_base_units_rejects_overprecision() {
+        assert!(parse_display_amount_to_base_units("1.001", 2).is_err());
+        assert!(parse_display_amount_to_base_units("abc", 0).is_err());
+    }
+
+    #[test]
+    fn parse_display_amount_to_base_units_rejects_fractional_whole_tokens() {
+        assert!(parse_display_amount_to_base_units("1.5", 0).is_err());
     }
 
     #[test]
@@ -1045,5 +1132,14 @@ mod tests {
             }
             other => panic!("expected transfer op, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn ensure_default_visible_balances_adds_era_and_dbtc() {
+        let mut items = Vec::<generated::BalanceGetResponse>::new();
+        ensure_default_visible_balances(&mut items);
+
+        assert!(items.iter().any(|item| item.token_id == "ERA"));
+        assert!(items.iter().any(|item| item.token_id == "dBTC"));
     }
 }

@@ -176,7 +176,12 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_createGenesis<'a>(
                         v: genesis_hash_bytes.clone(),
                     }),
                     public_key,
-                    smt_root: Some(pb::Hash32 { v: vec![0u8; 32] }),
+                    smt_root: Some(pb::Hash32 {
+                        v: dsm::merkle::sparse_merkle_tree::empty_root(
+                            dsm::merkle::sparse_merkle_tree::DEFAULT_SMT_HEIGHT,
+                        )
+                        .to_vec(),
+                    }),
                     device_entropy: entropy.clone(),
                     session_id: session_id.clone(),
                     threshold: threshold_usize as u32,
@@ -216,7 +221,12 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_createGenesis<'a>(
                         .smt_root
                         .as_ref()
                         .map(|h| h.v.clone())
-                        .unwrap_or_else(|| vec![0u8; 32]);
+                        .unwrap_or_else(|| {
+                            dsm::merkle::sparse_merkle_tree::empty_root(
+                                dsm::merkle::sparse_merkle_tree::DEFAULT_SMT_HEIGHT,
+                            )
+                            .to_vec()
+                        });
                     crate::sdk::app_state::AppState::set_identity_info(
                         gc.device_id.clone(),
                         pubkey,
@@ -227,6 +237,18 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_createGenesis<'a>(
                         smt_root,
                     );
                     crate::sdk::app_state::AppState::set_has_identity(true);
+                    // Compute and persist Device Tree root (§2.3) so that
+                    // build_bilateral_receipt_with_smt can verify DevID ∈ R_G.
+                    // Without this, get_device_tree_root() always returns None,
+                    // causing every bilateral receipt build to fail → proof_data None →
+                    // settle() rejects the transfer → balance never updates.
+                    if gc.device_id.len() == 32 {
+                        let mut dev_arr = [0u8; 32];
+                        dev_arr.copy_from_slice(&gc.device_id);
+                        let root = dsm::common::device_tree::DeviceTree::single(dev_arr).root();
+                        crate::sdk::app_state::AppState::set_device_tree_root(root);
+                        log::info!("[Genesis] Device tree root computed and persisted for bilateral receipt verification");
+                    }
                     // Initialize SDK context so header fetch works immediately
                     let _ = crate::initialize_sdk_context(
                         gc.device_id.clone(),
@@ -328,10 +350,11 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_createGenesis<'a>(
                         ble_handler.set_event_callback(callback);
 
                         let ble_handler = std::sync::Arc::new(ble_handler);
-                        let coordinator = std::sync::Arc::new(BleFrameCoordinator::new(
-                            ble_handler.clone(),
-                            device_id_arr,
-                        ));
+                        let transport_adapter = std::sync::Arc::new(
+                            crate::bluetooth::BilateralTransportAdapter::new(ble_handler.clone()),
+                        );
+                        let coordinator =
+                            std::sync::Arc::new(BleFrameCoordinator::new(device_id_arr));
 
                         // Inject into BiImpl if available
                         match crate::bridge::inject_ble_coordinator(coordinator).await {
@@ -340,6 +363,19 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_createGenesis<'a>(
                             }
                             Err(e) => {
                                 log::warn!("createGenesis: Failed to inject BLE coordinator: {}", e)
+                            }
+                        }
+                        match crate::bridge::inject_ble_transport_adapter(transport_adapter).await {
+                            Ok(_) => {
+                                log::info!(
+                                    "createGenesis: BLE transport adapter injected successfully"
+                                )
+                            }
+                            Err(e) => {
+                                log::warn!(
+                                    "createGenesis: Failed to inject BLE transport adapter: {}",
+                                    e
+                                )
                             }
                         }
                     }
@@ -396,9 +432,8 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_createGenesis<'a>(
                         }
                     }
 
-                    // Ensure wallet_state exists for newly-created identity so calls like
-                    // getAllBalancesStrict return a valid (possibly empty) balances list
-                    // instead of failing with "No wallet state found".
+                    // Ensure wallet metadata exists for the newly-created identity.
+                    // Token balances are derived later from canonical state/projection sync.
                     match crate::storage::client_db::ensure_wallet_state_for_device(
                         &genesis_record.device_id,
                     ) {

@@ -245,7 +245,8 @@ install-only: ## Install existing APK without rebuilding (fast iteration)
 .PHONY: test
 test: ## Run Rust workspace tests + frontend jest tests
 	@echo "==> Running Rust tests..."
-	cargo test --workspace -- --nocapture
+	cargo test --workspace --exclude dsm_storage_node -- --nocapture
+	cargo test -p dsm_storage_node --no-default-features --features local-dev,strict -- --nocapture
 	@echo "==> Running frontend tests..."
 	cd $(FRONTEND_DIR) && \
 		[ -s $$HOME/.nvm/nvm.sh ] && . $$HOME/.nvm/nvm.sh; \
@@ -254,7 +255,11 @@ test: ## Run Rust workspace tests + frontend jest tests
 
 .PHONY: test-rust
 test-rust: ## Run Rust tests only
-	cargo test --workspace -- --nocapture
+	# Most of the workspace uses the default (postgres-feature) build.
+	# dsm_storage_node integration tests use the local-dev (SQLite) build so
+	# they run without a live PostgreSQL instance.
+	cargo test --workspace --exclude dsm_storage_node -- --nocapture
+	cargo test -p dsm_storage_node --no-default-features --features local-dev,strict -- --nocapture
 
 .PHONY: test-frontend
 test-frontend: ## Run frontend jest tests only
@@ -343,6 +348,54 @@ flow-assertions: ## Run flow assertion checks
 .PHONY: flow-mapping-assertions
 flow-mapping-assertions: ## Run flow mapping assertion checks
 	bash scripts/flow_mapping_assertions.sh
+
+# ---------------------------------------------------------------------------
+# RELEASE PREFLIGHT
+# ---------------------------------------------------------------------------
+
+.PHONY: release-preflight
+release-preflight: ## Run the full pre-tag release gate (lint, test, audit, CI scan, formal verification, frontend, SBOM)
+	@echo ""
+	@echo "╔══════════════════════════════════════════════════════════╗"
+	@echo "║              DSM Release Preflight                      ║"
+	@echo "╚══════════════════════════════════════════════════════════╝"
+	@echo ""
+	@echo "── [1/7] Lint ──────────────────────────────────────────────"
+	cargo fmt --all -- --check
+	cargo clippy --all-targets -- -D warnings
+	@echo ""
+	@echo "── [2/7] Rust tests ────────────────────────────────────────"
+	cargo test --workspace --exclude dsm_storage_node -- --nocapture
+	cargo test -p dsm_storage_node --no-default-features --features local-dev,strict -- --nocapture
+	@echo ""
+	@echo "── [3/7] Security audit ────────────────────────────────────"
+	cargo deny check
+	cargo audit
+	@echo ""
+	@echo "── [4/7] Protocol purity (CI scan) ─────────────────────────"
+	bash scripts/ci_scan.sh
+	bash scripts/flow_assertions.sh
+	bash scripts/flow_mapping_assertions.sh
+	bash scripts/check_forbidden_symbols.sh
+	@echo ""
+	@echo "── [5/7] Frontend (typecheck + test + build) ───────────────"
+	cd $(FRONTEND_DIR) && \
+		[ -s $$HOME/.nvm/nvm.sh ] && . $$HOME/.nvm/nvm.sh; \
+		nvm use --silent 2>/dev/null || true; \
+		npm run type-check && npm test -- --passWithNoTests && npm run build
+	@echo ""
+	@echo "── [6/7] Formal verification (TLA+ vertical validation) ────"
+	cargo run -p dsm_vertical_validation -- tla-check
+	@echo ""
+	@echo "── [7/7] SBOM generation ───────────────────────────────────"
+	bash scripts/generate-sbom.sh --run-id preflight-$$(date +%Y%m%d)
+	@echo ""
+	@echo "╔══════════════════════════════════════════════════════════╗"
+	@echo "║  ✓ All gates passed — ready to tag                      ║"
+	@echo "║                                                          ║"
+	@echo "║    git tag v0.1.0-beta.1                                 ║"
+	@echo "║    git push origin v0.1.0-beta.1                         ║"
+	@echo "╚══════════════════════════════════════════════════════════╝"
 
 # ---------------------------------------------------------------------------
 # CLEAN

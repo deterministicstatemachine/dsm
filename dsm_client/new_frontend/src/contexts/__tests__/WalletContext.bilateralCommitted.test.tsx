@@ -12,6 +12,22 @@ describe('WalletContext bilateral committed event', () => {
     jest.useFakeTimers();
   });
 
+  const renderWalletProvider = async (children?: React.ReactNode) => {
+    await act(async () => {
+      render(
+        <UXProvider>
+          <WalletProvider>
+            <GlobalToast />
+            {children}
+          </WalletProvider>
+        </UXProvider>
+      );
+      jest.runOnlyPendingTimers();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  };
+
   afterEach(async () => {
     await act(async () => {
       jest.runOnlyPendingTimers();
@@ -33,19 +49,7 @@ describe('WalletContext bilateral committed event', () => {
     jest.spyOn(dsmClient, 'isReady' as any).mockResolvedValue(true);
 
     // Render provider so initialization happens and initial fetch may occur
-    render(
-      <UXProvider>
-        <WalletProvider>
-          <GlobalToast />
-          <div data-testid="inside-provider" />
-        </WalletProvider>
-      </UXProvider>
-    );
-
-    // Flush initialization timers/effects.
-    act(() => {
-      jest.runOnlyPendingTimers();
-    });
+    await renderWalletProvider(<div data-testid="inside-provider" />);
 
     // Wait for init to attempt identity + first refresh.
     await waitFor(() => expect(mockIdentity).toHaveBeenCalled());
@@ -55,8 +59,9 @@ describe('WalletContext bilateral committed event', () => {
     mockHistory.mockClear();
 
     // Dispatch event that should trigger refreshAll()
-    act(() => {
+    await act(async () => {
       bridgeEvents.emit('wallet.bilateralCommitted', {} as any);
+      await Promise.resolve();
     });
 
     // useSyncExternalStore triggers a synchronous snapshot update; timers not required.
@@ -81,20 +86,11 @@ describe('WalletContext bilateral committed event', () => {
     });
     jest.spyOn(dsmClient, 'isReady' as any).mockResolvedValue(true);
 
-    render(
-      <UXProvider>
-        <WalletProvider>
-          <GlobalToast />
-        </WalletProvider>
-      </UXProvider>
-    );
+    await renderWalletProvider();
 
-    act(() => {
-      jest.runOnlyPendingTimers();
-    });
-
-    act(() => {
+    await act(async () => {
       bridgeEvents.emit('wallet.bilateralCommitted', { accepted: true } as any);
+      await Promise.resolve();
     });
 
     await waitFor(() => {
@@ -107,8 +103,9 @@ describe('WalletContext bilateral committed event', () => {
       expect(screen.queryByText('Transfer accepted')).not.toBeInTheDocument();
     });
 
-    act(() => {
+    await act(async () => {
       jest.runOnlyPendingTimers();
+      await Promise.resolve();
     });
 
     expect(screen.queryByText('Transfer accepted')).not.toBeInTheDocument();

@@ -2,7 +2,7 @@
 // Data loading hook for the wallet screen — identity, balances, contacts, transactions.
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { dsmClient } from '../../../../services/dsmClient';
-import { formatBtc, getDbtcBalance } from '../../../../services/bitcoinTap';
+import { formatBtc } from '../../../../services/bitcoinTap';
 import { encodeBase32Crockford } from '../../../../utils/textId';
 import { useWalletRefreshListener } from '../../../../hooks/useWalletRefreshListener';
 import { bridgeEvents } from '../../../../bridge/bridgeEvents';
@@ -68,6 +68,13 @@ export function useWalletScreenData(activeTab: string): WalletScreenData {
       setGenesisB32(id.genesisHash);
       setDeviceB32(id.deviceId);
 
+      // Inbox sync is handled by the background poller (inbox_poller.rs).
+      // Do NOT call syncWithStorage here — it blocks the Kotlin bridge thread
+      // for 2-3 minutes while polling 6 storage nodes, which prevents ALL
+      // other bridge calls (balance.list, wallet.history) from completing.
+      // When the poller finds new transfers, it emits inbox.updated which
+      // triggers a wallet.refresh via useWalletRefreshListener.
+
       try {
         const list = await dsmClient.getContacts();
         const normalized: DomainContact[] = list.contacts.map((c) => {
@@ -105,10 +112,7 @@ export function useWalletScreenData(activeTab: string): WalletScreenData {
       }
 
       try {
-        const [bal, dbtcBal] = await Promise.all([
-          dsmClient.getAllBalances(),
-          getDbtcBalance(),
-        ]);
+        const bal = await dsmClient.getAllBalances();
         const raw = Array.isArray(bal) ? bal : [];
         const eraTokens: Balance[] = raw
           .filter((b) => b.tokenId.toUpperCase() !== 'BTC_CHAIN')
@@ -120,16 +124,7 @@ export function useWalletScreenData(activeTab: string): WalletScreenData {
               : b.balance,
             decimals: b.decimals,
           }));
-        const mapped: Balance[] = eraTokens;
-        const available = typeof dbtcBal.available === 'bigint' ? dbtcBal.available : BigInt(0);
-        const dbtcIdx = mapped.findIndex((b) => b.tokenId.toUpperCase() === 'DBTC');
-        const dbtcEntry: Balance = { tokenId: 'dBTC', symbol: 'dBTC', balance: formatBtc(available), decimals: 8 };
-        if (dbtcIdx >= 0) {
-          mapped[dbtcIdx] = dbtcEntry;
-        } else {
-          mapped.unshift(dbtcEntry);
-        }
-        setBalances(mapped);
+        setBalances(eraTokens);
       } catch (e) {
         warnings.push(e instanceof Error ? e.message : 'Failed to load balances');
       }
@@ -154,6 +149,7 @@ export function useWalletScreenData(activeTab: string): WalletScreenData {
         setLoading(false);
       }
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const loadWalletData = useCallback(async () => {
@@ -190,6 +186,19 @@ export function useWalletScreenData(activeTab: string): WalletScreenData {
     const unsub = bridgeEvents.on('bilateral.transferComplete', () => {
       logger.debug('[useWalletScreenData] bilateral.transferComplete -> reloading wallet data');
       void loadWalletData();
+    });
+    return unsub;
+  }, [loadWalletData]);
+
+  // Reload when inbox sync applies new transfers (online receive path).
+  // storage.sync → apply_operation → inbox.updated event → reload balances.
+  useEffect(() => {
+    const unsub = bridgeEvents.on('inbox.updated', (detail) => {
+      const newItems = typeof detail?.newItems === 'number' ? detail.newItems : 0;
+      if (newItems > 0) {
+        logger.debug(`[useWalletScreenData] inbox.updated (${newItems} new) -> reloading wallet data`);
+        void loadWalletData();
+      }
     });
     return unsub;
   }, [loadWalletData]);

@@ -46,10 +46,17 @@ function prepareResponseBytes(commitmentHash: Uint8Array): Uint8Array {
 }
 
 describe('Offline/bilateral flows', () => {
+  let warnSpy: jest.SpyInstance;
+
   beforeEach(() => {
     jest.restoreAllMocks();
+    warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
     (global as any).window = (global as any).window || {};
     (global as any).window.DsmBridge = (global as any).window.DsmBridge || {};
+  });
+
+  afterEach(() => {
+    warnSpy.mockRestore();
   });
 
   test('offlineSend sends typed offline transfer fields to wallet.sendOffline', async () => {
@@ -61,7 +68,7 @@ describe('Offline/bilateral flows', () => {
       expect(route).toBe('wallet.sendOffline');
       const request = pb.BilateralPrepareRequest.fromBinary(pb.ArgPack.fromBinary(args).body);
       expect(request.counterpartyDeviceId).toEqual(to);
-      expect(request.transferAmount).toBe(1n);
+      expect(request.transferAmountDisplay).toBe('1');
       expect(request.tokenIdHint).toBe('ERA');
       expect(request.memoHint).toBe('');
       expect(request.bleAddress).toBe('');

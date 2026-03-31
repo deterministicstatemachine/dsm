@@ -93,11 +93,13 @@ EXTEOF
 
     # --- Node config from template ---
     DB_URL="postgresql://postgres:5432/dsm_storage?user=dsm&password=${PG_PASS}"
+    # Escape '&' in DB_URL so sed doesn't interpret it as backreference
+    DB_URL_ESCAPED="${DB_URL//&/\\&}"
     sed -e "s|__NODE_ID__|${NODE_ID}|g" \
         -e "s|__LISTEN_ADDR__|0.0.0.0|g" \
         -e "s|__PORT__|8080|g" \
-        -e "s|__DATABASE_URL__|${DB_URL}|g" \
-        -e "s|# peers = .*|peers = [${PEERS}]|g" \
+        -e "s|__DATABASE_URL__|${DB_URL_ESCAPED}|g" \
+        -e "s|peers = .*|peers = [${PEERS}]|g" \
         "${TEMPLATE}" > "${NODE_DIR}/config/node.toml"
 
     # --- .env for docker-compose ---

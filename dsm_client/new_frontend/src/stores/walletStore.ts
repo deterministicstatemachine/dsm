@@ -3,19 +3,9 @@
 
 import { useSyncExternalStore } from 'react';
 import { dsmClient } from '../services/dsmClient';
-import { getDbtcBalance } from '../services/bitcoinTap';
+import { bridgeEvents } from '../bridge/bridgeEvents';
 import type { Transaction } from '@/hooks/useTransactions';
-import { toBase32Crockford } from '../dsm/decoding';
 import type { WalletBalance, WalletState } from '../contexts/WalletContext';
-
-type ImmediateSenderUpdate = {
-  success?: boolean;
-  tokenId?: string;
-  newBalance?: bigint | string | number;
-  transactionHash?: Uint8Array;
-  toDeviceId?: Uint8Array;
-  amount?: bigint | string | number;
-};
 
 const initialState: WalletState = {
   genesisHash: null,
@@ -31,6 +21,8 @@ class WalletStore {
   private snapshot: WalletState = initialState;
 
   private listeners = new Set<() => void>();
+
+  private hasObservedBalances = false;
 
   // Track concurrent in-flight refresh calls so isLoading stays true
   // until ALL concurrent operations complete (prevents race where
@@ -61,17 +53,39 @@ class WalletStore {
     this.emit();
   }
 
-  private setImmediateBalance(tokenId: string, balance: bigint): void {
-    this.setState({
-      balances: this.snapshot.balances.map((entry) =>
-        entry.tokenId === tokenId ? { ...entry, balance } : entry,
-      ),
-    });
+  private balanceKey(entry: WalletBalance): string {
+    return String(entry.tokenId || entry.symbol || entry.tokenName || 'UNKNOWN');
   }
 
-  private appendTransaction(tx: Transaction): void {
-    this.setState({
-      transactions: [tx, ...this.snapshot.transactions],
+  private coerceBalance(value: unknown): bigint {
+    if (typeof value === 'bigint') return value;
+    if (typeof value === 'number') return BigInt(Number.isFinite(value) ? Math.trunc(value) : 0);
+    if (typeof value === 'string') {
+      try {
+        return BigInt(value);
+      } catch {
+        return 0n;
+      }
+    }
+    return 0n;
+  }
+
+  private detectPositiveCredits(previous: WalletBalance[], next: WalletBalance[]): Array<{
+    tokenId: string;
+    delta: bigint;
+    nextBalance: bigint;
+  }> {
+    const previousByToken = new Map<string, bigint>();
+    previous.forEach((entry) => {
+      previousByToken.set(this.balanceKey(entry), this.coerceBalance(entry.balance));
+    });
+
+    return next.flatMap((entry) => {
+      const tokenId = this.balanceKey(entry);
+      const nextBalance = this.coerceBalance(entry.balance);
+      const previousBalance = previousByToken.get(tokenId) ?? 0n;
+      const delta = nextBalance - previousBalance;
+      return delta > 0n ? [{ tokenId, delta, nextBalance }] : [];
     });
   }
 
@@ -104,12 +118,13 @@ class WalletStore {
     this.loadingCount++;
     this.setState({ isLoading: true });
     try {
-      const [eraResult, dbtcResult] = await Promise.allSettled([
+      const previousBalances = this.snapshot.balances.slice();
+      const [eraResult] = await Promise.allSettled([
         dsmClient.getAllBalances(),
-        getDbtcBalance(),
       ]);
 
-      // Use ERA balances if that fetch succeeded; keep previous balances on failure
+      // Wallet balances are canonical from the local SMT/hash-chain state.
+      // Do not overwrite dBTC with the separate Bitcoin chain-wallet endpoint.
       let balances: WalletBalance[];
       if (eraResult.status === 'fulfilled') {
         balances = (eraResult.value as any[])
@@ -117,46 +132,33 @@ class WalletStore {
           .slice();
       } else {
         console.error('WalletStore: ERA balance fetch failed:', eraResult.reason);
-        balances = this.snapshot.balances.filter((b) => b.tokenId.toUpperCase() !== 'DBTC');
-      }
-
-      // Merge dBTC if that fetch succeeded
-      if (dbtcResult.status === 'fulfilled' && dbtcResult.value !== null) {
-        const dbtcBalance = dbtcResult.value;
-        const available = typeof dbtcBalance.available === 'bigint'
-          ? dbtcBalance.available
-          : BigInt(0);
-        const index = balances.findIndex((entry) => entry.tokenId.toUpperCase() === 'DBTC');
-        const nextEntry: WalletBalance = {
-          tokenId: 'dBTC',
-          tokenName: 'dBTC',
-          balance: available,
-          decimals: 8,
-          symbol: 'dBTC',
-        };
-        if (index >= 0) {
-          balances[index] = nextEntry;
-        } else {
-          balances.unshift(nextEntry);
-        }
-      } else if (dbtcResult.status === 'rejected') {
-        console.error('WalletStore: dBTC balance fetch failed:', dbtcResult.reason);
-        // Preserve existing dBTC entry from previous snapshot if any
-        const prevDbtc = this.snapshot.balances.find((b) => b.tokenId.toUpperCase() === 'DBTC');
-        if (prevDbtc && !balances.some((b) => b.tokenId.toUpperCase() === 'DBTC')) {
-          balances.unshift(prevDbtc);
-        }
+        balances = this.snapshot.balances.slice();
       }
 
       // Report partial failures as a non-blocking error
       const failedParts: string[] = [];
       if (eraResult.status === 'rejected') failedParts.push('ERA');
-      if (dbtcResult.status === 'rejected') failedParts.push('dBTC');
       const error = failedParts.length > 0
         ? `Failed to refresh ${failedParts.join(' & ')} balances`
         : null;
 
       this.setState({ balances, error });
+
+      const positiveCredits = this.hasObservedBalances
+        ? this.detectPositiveCredits(previousBalances, balances)
+        : [];
+      this.hasObservedBalances = true;
+
+      if (positiveCredits.length > 0) {
+        const firstCredit = positiveCredits[0];
+        bridgeEvents.emit('wallet.creditReceived', {
+          source: 'wallet.refreshBalances',
+          tokenId: firstCredit.tokenId,
+          amount: firstCredit.delta.toString(),
+          nextBalance: firstCredit.nextBalance.toString(),
+          creditCount: positiveCredits.length,
+        });
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to refresh balances';
       console.error('WalletStore: refreshBalances failed:', message);
@@ -188,48 +190,6 @@ class WalletStore {
 
   refreshAll = async (): Promise<void> => {
     await Promise.all([this.refreshBalances(), this.refreshTransactions()]);
-  };
-
-  applyImmediateSenderUpdate = (detail: ImmediateSenderUpdate): void => {
-    const hasNewBalance = detail?.newBalance !== undefined && detail?.newBalance !== null;
-    const tokenId = String(detail?.tokenId ?? 'ERA');
-    if (!detail?.success || !hasNewBalance) return;
-
-    try {
-      const immediateBalance = BigInt(String(detail.newBalance));
-      this.setImmediateBalance(tokenId, immediateBalance);
-    } catch (error) {
-      console.warn('WalletStore: immediate balance reflect failed, will refresh from SDK', error);
-    }
-
-    try {
-      const txHash = detail?.transactionHash;
-      const txId = txHash instanceof Uint8Array && txHash.length === 32
-        ? toBase32Crockford(txHash)
-        : 'LOCAL_TX';
-      const toDeviceId = detail?.toDeviceId;
-      const recipient = toDeviceId instanceof Uint8Array ? toBase32Crockford(toDeviceId) : '';
-      const amount = BigInt(String(detail?.amount ?? 0));
-      this.appendTransaction({
-        txId,
-        type: 'online',
-        amount,
-        recipient,
-        createdAt: Math.floor(Date.now() / 1000),
-        status: 'confirmed',
-        syncStatus: 'synced',
-      } as any);
-    } catch (error) {
-      console.warn('WalletStore: immediate history append failed (non-fatal)', error);
-    }
-
-    queueMicrotask(() => {
-      try {
-        void this.refreshBalances();
-      } catch (error) {
-        console.warn('WalletStore: refreshBalances failed:', error);
-      }
-    });
   };
 
   private emit(): void {

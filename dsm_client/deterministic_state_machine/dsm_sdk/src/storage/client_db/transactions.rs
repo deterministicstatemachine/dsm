@@ -3,12 +3,15 @@
 
 use anyhow::Result;
 use log::info;
-use rusqlite::{params, Connection, OptionalExtension, Row};
+use rusqlite::{params, Connection, Row};
 
+use super::bcr::store_bcr_state_with_conn;
 use super::get_connection;
+use super::tokens::{upsert_balance_projection_with_conn, BalanceProjectionRecord};
 use super::types::TransactionRecord;
 use crate::storage::codecs::{meta_from_blob, meta_to_blob};
 use crate::util::deterministic_time::tick;
+use dsm::types::state_types::State;
 
 fn upsert_transaction_row(conn: &Connection, tx: &TransactionRecord, now: u64) -> Result<usize> {
     let affected = conn.execute(
@@ -58,15 +61,11 @@ fn upsert_transaction_row(conn: &Connection, tx: &TransactionRecord, now: u64) -
     Ok(affected)
 }
 
-/// Atomically apply sender-side balance debit and transaction history write.
+/// Atomically persist sender-side settlement metadata.
 ///
-/// Mirrors `apply_receiver_confirm_full_atomic()` but performs
-/// a **debit** (subtraction) instead of credit (addition). Enforces the token
-/// conservation invariant `B >= 0` at the SQL level — the UPDATE only succeeds
-/// if the current balance is sufficient. If the row is missing or balance is
-/// insufficient, the function returns an error and the SQLite transaction is
-/// rolled back (no partial writes).
-pub fn apply_sender_debit_and_store_transaction_atomic(
+/// Canonical DSM state is authoritative for every token, including ERA. This
+/// function stores sender-side transaction history only.
+pub fn apply_sender_settlement_and_store_transaction_atomic(
     sender_device_id: &str,
     token_id: Option<&str>,
     amount: u64,
@@ -75,111 +74,22 @@ pub fn apply_sender_debit_and_store_transaction_atomic(
     let binding = get_connection()?;
     let mut conn = binding.lock().unwrap_or_else(|poisoned| {
         log::warn!(
-            "DB lock poisoned in apply_sender_debit_and_store_transaction_atomic, recovering"
+            "DB lock poisoned in apply_sender_settlement_and_store_transaction_atomic, recovering"
         );
         poisoned.into_inner()
     });
 
-    let amount_i64 = i64::try_from(amount)
-        .map_err(|_| anyhow::anyhow!("amount exceeds i64 range for SQLite integer"))?;
     let now = tick();
     let txdb = conn.transaction()?;
 
     let token = token_id.unwrap_or("ERA");
-    if token == "ERA" {
-        // ERA token: debit wallet_state.balance.
-        // Conditional UPDATE enforces B_{n+1} = B_n - Delta, B >= 0 at the SQL level.
-        let updated = txdb.execute(
-            "UPDATE wallet_state SET balance = balance - ?1, updated_at = ?2
-             WHERE device_id = ?3 AND balance >= ?1",
-            params![amount_i64, now as i64, sender_device_id],
-        )?;
-
-        if updated == 0 {
-            let exists: bool = txdb
-                .query_row(
-                    "SELECT COUNT(*) FROM wallet_state WHERE device_id = ?1",
-                    params![sender_device_id],
-                    |row| row.get::<_, i64>(0),
-                )
-                .map(|c| c > 0)
-                .unwrap_or(false);
-
-            // Explicit rollback before returning error
-            if let Err(rb_err) = txdb.execute_batch("ROLLBACK") {
-                log::warn!("Rollback failed after debit check: {}", rb_err);
-            }
-
-            if exists {
-                return Err(anyhow::anyhow!(
-                    "insufficient ERA balance to debit {} for sender {}",
-                    amount,
-                    sender_device_id
-                ));
-            } else {
-                return Err(anyhow::anyhow!(
-                    "no wallet_state row for sender {}",
-                    sender_device_id
-                ));
-            }
-        }
-    } else {
-        // Non-ERA token: debit token_balances.available.
-        // Conditional UPDATE enforces available >= amount.
-        let updated = txdb.execute(
-            "UPDATE token_balances SET available = available - ?1, updated_at = ?2
-             WHERE device_id = ?3 AND token_id = ?4 AND available >= ?1",
-            params![amount_i64, now as i64, sender_device_id, token],
-        )?;
-
-        if updated == 0 {
-            let exists: bool = txdb
-                .query_row(
-                    "SELECT COUNT(*) FROM token_balances WHERE device_id = ?1 AND token_id = ?2",
-                    params![sender_device_id, token],
-                    |row| row.get::<_, i64>(0),
-                )
-                .map(|c| c > 0)
-                .unwrap_or(false);
-
-            if let Err(rb_err) = txdb.execute_batch("ROLLBACK") {
-                log::warn!("Rollback failed after token debit check: {}", rb_err);
-            }
-
-            if !exists {
-                // Auto-seed missing token row for native assets like dBTC to prevent
-                // missing-row panic conditions in bilateral settlement paths.
-                if let Err(e) = txdb.execute(
-                    "INSERT OR REPLACE INTO token_balances (device_id, token_id, available, locked, updated_at) VALUES (?1, ?2, 0, 0, ?3)",
-                    params![sender_device_id, token, now as i64],
-                ) {
-                    log::warn!("Failed to seed missing token_balances row for {} {}: {}", sender_device_id, token, e);
-                } else {
-                    log::info!("Seeded missing token_balances row for {} {} to 0", sender_device_id, token);
-                }
-                return Err(anyhow::anyhow!(
-                    "insufficient {} balance to debit {} for sender {} (token row was missing; seeded 0)",
-                    token,
-                    amount,
-                    sender_device_id
-                ));
-            }
-
-            return Err(anyhow::anyhow!(
-                "insufficient {} balance to debit {} for sender {}",
-                token,
-                amount,
-                sender_device_id
-            ));
-        }
-    }
 
     let affected = upsert_transaction_row(&txdb, tx, now)?;
     txdb.commit()?;
 
     if affected > 0 {
         info!(
-            "Atomic sender debit+store committed: device={} token={} amount={} tx_id={}",
+            "Atomic sender settlement stored: device={} token={} amount={} tx_id={}",
             sender_device_id, token, amount, tx.tx_id
         );
     }
@@ -187,15 +97,54 @@ pub fn apply_sender_debit_and_store_transaction_atomic(
     Ok(())
 }
 
-/// Atomically persist chain-tip advancement + receiver balance credit + transaction history.
+pub fn apply_sender_settlement_bundle_atomic(
+    sender_device_id: &str,
+    token_id: Option<&str>,
+    amount: u64,
+    tx: &TransactionRecord,
+    settled_state: Option<&State>,
+    projection: Option<&BalanceProjectionRecord>,
+) -> Result<()> {
+    let binding = get_connection()?;
+    let mut conn = binding.lock().unwrap_or_else(|poisoned| {
+        log::warn!("DB lock poisoned in apply_sender_settlement_bundle_atomic, recovering");
+        poisoned.into_inner()
+    });
+
+    let now = tick();
+    let txdb = conn.transaction()?;
+    let token = token_id.unwrap_or("ERA");
+
+    if let Some(state) = settled_state {
+        store_bcr_state_with_conn(&txdb, state, true, now)?;
+    }
+    if let Some(record) = projection {
+        upsert_balance_projection_with_conn(&txdb, record)?;
+    }
+
+    let affected = upsert_transaction_row(&txdb, tx, now)?;
+    txdb.commit()?;
+
+    if affected > 0 {
+        info!(
+            "Atomic sender settlement bundle stored: device={} token={} amount={} tx_id={}",
+            sender_device_id, token, amount, tx.tx_id
+        );
+    }
+
+    Ok(())
+}
+
+/// Atomically persist chain-tip advancement and receiver-side settlement metadata.
 ///
 /// This is the full-persistence atomic boundary for BLE receiver confirm (§4.2).
-/// If any sub-write fails, the entire SQLite transaction rolls back — no partial
-/// state, no chain-tip-without-balance divergence.
+/// Canonical DSM state is authoritative for every token, including ERA. This
+/// function persists bilateral chain-tip advancement plus transaction history.
 ///
-/// Callers should use `update_anchor_in_memory_public()` for the in-memory anchor
-/// update and then call this function for all SQLite writes.
-pub fn apply_receiver_confirm_full_atomic(
+/// Callers must have a `SmtReplaceResult` from `commit_bilateral_smt_update()`
+/// and use `update_anchor_in_memory_from_replace_public()` for the in-memory
+/// anchor update before calling this function for all SQLite writes.
+pub fn apply_receiver_confirm_and_store_transaction_atomic(
     counterparty_device_id: &[u8],
     new_chain_tip: &[u8],
     receiver_device_id: &str,
@@ -205,7 +154,9 @@ pub fn apply_receiver_confirm_full_atomic(
 ) -> Result<()> {
     let binding = get_connection()?;
     let mut conn = binding.lock().unwrap_or_else(|poisoned| {
-        log::warn!("DB lock poisoned in apply_receiver_confirm_full_atomic, recovering");
+        log::warn!(
+            "DB lock poisoned in apply_receiver_confirm_and_store_transaction_atomic, recovering"
+        );
         poisoned.into_inner()
     });
 
@@ -228,72 +179,74 @@ pub fn apply_receiver_confirm_full_atomic(
         params![new_chain_tip, now as i64, counterparty_device_id],
     )?;
 
-    // 2. Credit balance
-    if amount > 0 {
-        let amount_i64 = i64::try_from(amount)
-            .map_err(|_| anyhow::anyhow!("amount exceeds i64 range for SQLite integer"))?;
-        let token = token_id.unwrap_or("ERA");
-        if token == "ERA" {
-            let updated = txdb.execute(
-                "UPDATE wallet_state SET balance = balance + ?1, updated_at = ?2 WHERE device_id = ?3",
-                params![amount_i64, now as i64, receiver_device_id],
-            )?;
-
-            if updated == 0 {
-                let zero_tip = crate::util::text_id::encode_base32_crockford(&[0u8; 32]);
-                let genesis_id = txdb
-                    .query_row(
-                        "SELECT genesis_id, device_id FROM genesis_records ORDER BY created_at DESC LIMIT 1",
-                        [],
-                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-                    )
-                    .optional()?
-                    .and_then(|(genesis_id, gen_device_id)| {
-                        if gen_device_id == receiver_device_id {
-                            Some(genesis_id)
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or_else(|| receiver_device_id.to_string());
-
-                txdb.execute(
-                    "INSERT INTO wallet_state (wallet_id, device_id, genesis_id, chain_tip, chain_height, merkle_root, balance, created_at, updated_at, status, metadata) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
-                    params![
-                        format!("wallet_{}", receiver_device_id),
-                        receiver_device_id,
-                        genesis_id,
-                        zero_tip,
-                        0i64,
-                        "",
-                        amount_i64,
-                        now as i64,
-                        now as i64,
-                        "active",
-                        Vec::<u8>::new(),
-                    ],
-                )?;
-            }
-        } else {
-            txdb.execute(
-                "INSERT INTO token_balances (device_id, token_id, available, locked, updated_at)
-                 VALUES (?1, ?2, ?3, 0, ?4)
-                 ON CONFLICT(device_id, token_id) DO UPDATE SET
-                   available = token_balances.available + excluded.available,
-                   updated_at = excluded.updated_at",
-                params![receiver_device_id, token, amount_i64, now as i64],
-            )?;
-        }
-    }
-
-    // 3. Store transaction history
+    // 2. Store transaction history
     let affected = upsert_transaction_row(&txdb, tx, now)?;
     txdb.commit()?;
 
     if affected > 0 {
         info!(
-            "Atomic receiver confirm committed (tip+balance+history): device={} token={:?} amount={} tx_id={}",
+            "Atomic receiver settlement stored (tip+history): device={} token={:?} amount={} tx_id={}",
             receiver_device_id, token_id, amount, tx.tx_id
+        );
+    }
+
+    Ok(())
+}
+
+pub struct ReceiverConfirmBundle<'a> {
+    pub counterparty_device_id: &'a [u8],
+    pub new_chain_tip: &'a [u8],
+    pub receiver_device_id: &'a str,
+    pub token_id: Option<&'a str>,
+    pub amount: u64,
+    pub tx: &'a TransactionRecord,
+    pub settled_state: Option<&'a State>,
+    pub projection: Option<&'a BalanceProjectionRecord>,
+}
+
+pub fn apply_receiver_confirm_bundle_atomic(bundle: ReceiverConfirmBundle<'_>) -> Result<()> {
+    let binding = get_connection()?;
+    let mut conn = binding.lock().unwrap_or_else(|poisoned| {
+        log::warn!("DB lock poisoned in apply_receiver_confirm_bundle_atomic, recovering");
+        poisoned.into_inner()
+    });
+
+    let now = tick();
+    let txdb = conn.transaction()?;
+
+    txdb.execute(
+        "UPDATE contacts SET
+            previous_chain_tip = chain_tip,
+            chain_tip = ?1,
+            local_bilateral_chain_tip = ?1,
+            needs_online_reconcile = 0,
+            last_seen_online_counter = ?2,
+            status = CASE
+                WHEN status = 'BleCapable' THEN 'BleCapable'
+                ELSE 'OnlineCapable'
+            END
+         WHERE device_id = ?3",
+        params![
+            bundle.new_chain_tip,
+            now as i64,
+            bundle.counterparty_device_id
+        ],
+    )?;
+
+    if let Some(state) = bundle.settled_state {
+        store_bcr_state_with_conn(&txdb, state, true, now)?;
+    }
+    if let Some(record) = bundle.projection {
+        upsert_balance_projection_with_conn(&txdb, record)?;
+    }
+
+    let affected = upsert_transaction_row(&txdb, bundle.tx, now)?;
+    txdb.commit()?;
+
+    if affected > 0 {
+        info!(
+            "Atomic receiver settlement bundle stored (tip+history+state): device={} token={:?} amount={} tx_id={}",
+            bundle.receiver_device_id, bundle.token_id, bundle.amount, bundle.tx.tx_id
         );
     }
 
@@ -360,6 +313,62 @@ pub fn update_transaction_proof_data(tx_id: &str, proof_data: &[u8]) -> Result<(
         );
     }
     Ok(())
+}
+
+pub fn rollback_failed_online_send_atomic(
+    device_id: &[u8; 32],
+    failed_state_hash: &[u8; 32],
+    tx_id: &str,
+    projection_device_id: &str,
+    token_id: &str,
+) -> Result<()> {
+    let binding = get_connection()?;
+    let mut conn = binding.lock().unwrap_or_else(|poisoned| {
+        log::warn!("DB lock poisoned in rollback_failed_online_send_atomic, recovering");
+        poisoned.into_inner()
+    });
+
+    let txdb = conn.transaction()?;
+    let removed_bcr = txdb.execute(
+        "DELETE FROM bcr_states WHERE device_id = ?1 AND state_hash = ?2",
+        params![device_id.as_slice(), failed_state_hash.as_slice()],
+    )?;
+    let removed_tx = txdb.execute("DELETE FROM transactions WHERE tx_id = ?1", params![tx_id])?;
+    let removed_projection = txdb.execute(
+        "DELETE FROM balance_projections WHERE device_id = ?1 AND token_id = ?2",
+        params![projection_device_id, token_id],
+    )?;
+    txdb.commit()?;
+
+    info!(
+        "Rolled back failed online send artifacts: tx_id={} removed_bcr={} removed_tx={} removed_projection={} token={}",
+        tx_id,
+        removed_bcr,
+        removed_tx,
+        removed_projection,
+        token_id,
+    );
+
+    Ok(())
+}
+
+/// Check whether a completed transaction record already exists for the given tx_id.
+/// Used as an idempotency guard before applying bilateral settlement deltas.
+pub fn is_settlement_completed(tx_id: &str) -> bool {
+    let binding = match get_connection() {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+    let conn = binding.lock().unwrap_or_else(|poisoned| {
+        log::warn!("DB lock poisoned, recovering");
+        poisoned.into_inner()
+    });
+    conn.query_row(
+        "SELECT 1 FROM transactions WHERE tx_id = ?1 AND status = 'completed' LIMIT 1",
+        params![tx_id],
+        |_| Ok(true),
+    )
+    .unwrap_or(false)
 }
 
 pub fn get_transaction_history(
@@ -475,5 +484,100 @@ pub fn get_transaction_history(
             out.push(r?);
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::client_db::tokens::{upsert_balance_projection, BalanceProjectionRecord};
+    use crate::storage::client_db::types::TransactionRecord;
+    use crate::storage::client_db::{
+        get_balance_projection, get_bcr_states, get_transaction_history, init_database,
+        reset_database_for_tests, store_bcr_state,
+    };
+    use dsm::types::operations::Operation;
+    use dsm::types::state_types::{DeviceInfo, State, StateParams};
+    use serial_test::serial;
+    use std::collections::HashMap;
+
+    #[test]
+    #[serial]
+    fn rollback_failed_online_send_atomic_removes_failed_artifacts() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        reset_database_for_tests();
+        init_database().expect("init db");
+
+        let device = [0x41u8; 32];
+        let device_b32 = crate::util::text_id::encode_base32_crockford(&device);
+        let failed_state = State::new(StateParams::new(
+            1,
+            vec![0xAA],
+            Operation::Noop,
+            DeviceInfo::new(device, vec![0x22; 64]),
+        ));
+        store_bcr_state(&failed_state, false).expect("store failed state");
+
+        upsert_balance_projection(&BalanceProjectionRecord {
+            balance_key: format!("{}|{}", device_b32, "ERA"),
+            device_id: device_b32.clone(),
+            token_id: "ERA".to_string(),
+            policy_commit: crate::util::text_id::encode_base32_crockford(&[0x33u8; 32]),
+            available: 9,
+            locked: 0,
+            source_state_hash: crate::util::text_id::encode_base32_crockford(&failed_state.hash),
+            source_state_number: failed_state.state_number,
+            updated_at: 0,
+        })
+        .expect("store projection");
+
+        store_transaction(&TransactionRecord {
+            tx_id: "tx-rollback".to_string(),
+            tx_hash: crate::util::text_id::encode_base32_crockford(&failed_state.hash),
+            from_device: device_b32.clone(),
+            to_device: "peer".to_string(),
+            amount: 9,
+            tx_type: "online".to_string(),
+            status: "confirmed".to_string(),
+            chain_height: failed_state.state_number,
+            step_index: 1,
+            commitment_hash: None,
+            proof_data: None,
+            metadata: HashMap::new(),
+            created_at: 0,
+        })
+        .expect("store transaction");
+
+        rollback_failed_online_send_atomic(
+            &device,
+            &failed_state.hash,
+            "tx-rollback",
+            &device_b32,
+            "ERA",
+        )
+        .expect("rollback artifacts");
+
+        assert!(
+            get_bcr_states(&device, false)
+                .expect("load bcr states")
+                .into_iter()
+                .all(|state| state.hash != failed_state.hash),
+            "failed archived state must be removed"
+        );
+        assert!(
+            get_balance_projection(&device_b32, "ERA")
+                .expect("load projection")
+                .is_none(),
+            "failed balance projection must be removed"
+        );
+        assert!(
+            get_transaction_history(Some(&device_b32), Some(20))
+                .expect("load tx history")
+                .into_iter()
+                .all(|tx| tx.tx_id != "tx-rollback"),
+            "failed transaction record must be removed"
+        );
     }
 }

@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import React, { createContext, useContext, useMemo, useState } from 'react';
 import { useBridgeEvent } from '@/hooks/useBridgeEvents';
+import { playCoinSound } from '@/utils/coinSound';
 
 export interface UXContextValue {
   hideComplexity: boolean;
@@ -84,6 +85,11 @@ export const UXProvider: React.FC<{ defaultHideComplexity?: boolean; children?: 
   useBridgeEvent('wallet.exitCompleted', () => {
     notifyToast('exit_completed');
   }, [notifyToast]);
+
+  // Global coin sound when the local wallet receives a positive settled credit.
+  useBridgeEvent('wallet.creditReceived', () => {
+    playCoinSound();
+  }, []);
 
   // Global notification when new inbox items arrive from storage sync.
   useBridgeEvent('inbox.updated', (detail?: { unreadCount?: number; newItems?: number }) => {

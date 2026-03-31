@@ -29,8 +29,8 @@ body_limit_bytes = 1048576    # 1 MiB
 hsts_max_age = 31536000       # 1 year
 
 [replication]
-# Peers are listed here; generate_node_configs.sh fills them in.
-# peers = ["https://NODE2_IP:8080", "https://NODE3_IP:8080", ...]
+# Peers are listed here; generate_node_configs.sh fills them in at deploy time.
+peers = []
 
 [paidk]
 flat_rate = 1000     # Minimum payment amount per operator

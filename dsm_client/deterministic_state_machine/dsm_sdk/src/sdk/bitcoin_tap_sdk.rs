@@ -45,6 +45,7 @@ use std::sync::{Arc, OnceLock};
 use tokio::sync::RwLock;
 
 use prost::Message;
+use rand::{rngs::OsRng, RngCore};
 
 use dsm::{
     bitcoin::{
@@ -600,6 +601,26 @@ pub struct BitcoinTapSdk {
 }
 
 impl BitcoinTapSdk {
+    fn canonical_archived_dbtc_balance(device_id: &[u8; 32]) -> Option<u64> {
+        let latest_state = crate::storage::client_db::get_bcr_states(device_id, false)
+            .ok()?
+            .into_iter()
+            .last()?;
+        let balance_key = dsm::core::token::derive_canonical_balance_key(
+            crate::policy::builtins::DBTC_POLICY_COMMIT,
+            &latest_state.device_info.public_key,
+            DBTC_TOKEN_ID,
+        );
+        Some(
+            latest_state
+                .token_balances
+                .get(&balance_key)
+                .cloned()
+                .unwrap_or_else(dsm::types::token_types::Balance::zero)
+                .available(),
+        )
+    }
+
     pub fn new(dlv_manager: Arc<DLVManager>) -> Self {
         Self {
             dlv_manager,
@@ -1337,8 +1358,8 @@ impl BitcoinTapSdk {
                 DsmError::storage(format!("manifold_seed: {e}"), None::<std::io::Error>)
             })?;
         let mut deposit_nonce = [0u8; 32];
-        getrandom::getrandom(&mut deposit_nonce)
-            .map_err(|e| DsmError::crypto(format!("RNG: {e}"), None::<String>))?;
+        let mut os_rng = OsRng;
+        os_rng.fill_bytes(&mut deposit_nonce);
         let eta = Self::derive_bearer_eta(&manifold_seed, &deposit_nonce);
         let preimage = Self::derive_preimage_from_eta(&eta);
         let hash_lock = sha256_hash_lock(&preimage);
@@ -1578,8 +1599,8 @@ impl BitcoinTapSdk {
             DsmError::storage(format!("manifold_seed: {e}"), None::<std::io::Error>)
         })?;
         let mut successor_deposit_nonce = [0u8; 32];
-        getrandom::getrandom(&mut successor_deposit_nonce)
-            .map_err(|e| DsmError::crypto(format!("RNG: {e}"), None::<String>))?;
+        let mut os_rng = OsRng;
+        os_rng.fill_bytes(&mut successor_deposit_nonce);
         let successor_eta = Self::derive_bearer_eta(&manifold_seed, &successor_deposit_nonce);
         let successor_preimage = Self::derive_preimage_from_eta(&successor_eta);
         let successor_hash_lock = sha256_hash_lock(&successor_preimage);
@@ -1782,24 +1803,24 @@ impl BitcoinTapSdk {
         stitched_receipt: Option<Vec<u8>>,
         stitched_receipt_sigma: Option<[u8; 32]>,
     ) -> Result<DepositCompletion, DsmError> {
-        // Strict fail-closed gate: deposit completion requires canonical stitched receipt bytes
-        // and matching sigma commitment on all supported networks.
+        // Strict fail-closed gate: deposit completion requires canonical
+        // protocol-transition bytes and matching sovereign commitment.
         let stitched_receipt = stitched_receipt.ok_or_else(|| {
-            DsmError::invalid_operation("draw_tap requires canonical stitched_receipt bytes")
+            DsmError::invalid_operation("draw_tap requires canonical protocol transition bytes")
         })?;
         if stitched_receipt.is_empty() {
             return Err(DsmError::invalid_operation(
-                "draw_tap stitched_receipt must be non-empty",
+                "draw_tap protocol transition bytes must be non-empty",
             ));
         }
         let stitched_receipt_sigma = stitched_receipt_sigma.ok_or_else(|| {
-            DsmError::invalid_operation("draw_tap requires stitched_receipt_sigma")
+            DsmError::invalid_operation("draw_tap requires protocol transition commitment")
         })?;
         let computed_sigma =
-            crate::crypto::blake3::domain_hash("DSM/receipt-commit", &stitched_receipt);
-        if computed_sigma.as_bytes() != &stitched_receipt_sigma {
+            crate::sdk::receipts::compute_protocol_transition_commitment(&stitched_receipt);
+        if computed_sigma != stitched_receipt_sigma {
             return Err(DsmError::invalid_operation(
-                "draw_tap stitched_receipt_sigma mismatch",
+                "draw_tap protocol transition commitment mismatch",
             ));
         }
 
@@ -3763,23 +3784,34 @@ impl BitcoinTapSdk {
 
     pub(crate) async fn prepare_withdrawal_plan(
         &self,
-        requested_net_sats: u64,
+        requested_gross_sats: u64,
         destination_address: &str,
         planner_device_id: &[u8; 32],
     ) -> Result<WithdrawalPlan, DsmError> {
-        if requested_net_sats == 0 {
+        if requested_gross_sats == 0 {
             return Err(DsmError::invalid_operation(
                 "Withdrawal amount must be greater than 0",
             ));
         }
-        // Reject below min_exit_sats at plan time so the user sees a clear error
-        // before reviewing a route, rather than a cryptic failure at execute time.
+        // The user's input is the GROSS amount — the total dBTC to burn.
+        // Bitcoin network fee comes out of this amount: net = gross - fee.
+        // This matches user expectation: "I have X dBTC, withdraw it all."
         let params = DbtcParams::resolve();
+        let estimated_fee = estimated_full_withdrawal_fee_sats();
+        if requested_gross_sats <= estimated_fee {
+            return Err(DsmError::invalid_operation(format!(
+                "Withdrawal amount ({} sats) must exceed estimated Bitcoin network fee ({} sats)",
+                requested_gross_sats, estimated_fee,
+            )));
+        }
+        let requested_net_sats = requested_gross_sats.saturating_sub(estimated_fee);
         if requested_net_sats < params.min_exit_sats {
             return Err(DsmError::invalid_operation(format!(
-                "Withdrawal below minimum: {} sats requested, minimum is {} sats \
+                "Withdrawal below minimum after fee: {} sats net ({} gross - {} fee), minimum is {} sats \
                  (dust floor {} + estimated sweep fee {})",
                 requested_net_sats,
+                requested_gross_sats,
+                estimated_fee,
                 params.min_exit_sats,
                 params.dust_floor_sats,
                 params.estimated_sweep_fee_sats,
@@ -3803,17 +3835,25 @@ impl BitcoinTapSdk {
             log::warn!("[withdraw.plan] advertisement refresh failed: {e}");
         }
 
-        // Query bearer's dBTC balance from SQLite for early warning
+        // Query bearer's dBTC balance from canonical archived state for early warning.
+        // Fallback to the validated projection row only if this device has not yet archived
+        // a canonical state snapshot locally.
         let device_id_str = crate::util::text_id::encode_base32_crockford(planner_device_id);
-        let available_dbtc_sats =
-            match crate::storage::client_db::get_token_balance(&device_id_str, DBTC_TOKEN_ID) {
-                Ok(Some((available, _locked))) => available,
-                Ok(None) => 0,
-                Err(e) => {
-                    log::error!("[withdraw.plan] failed to read dBTC balance: {e}");
-                    0
+        let available_dbtc_sats = Self::canonical_archived_dbtc_balance(planner_device_id)
+            .or_else(|| {
+                match crate::storage::client_db::get_balance_projection(
+                    &device_id_str,
+                    DBTC_TOKEN_ID,
+                ) {
+                    Ok(Some(record)) => Some(record.available),
+                    Ok(None) => None,
+                    Err(e) => {
+                        log::error!("[withdraw.plan] failed to read fallback dBTC projection: {e}");
+                        None
+                    }
                 }
-            };
+            })
+            .unwrap_or(0);
 
         // dBTC Definition 7: construct mempool client for UTXO liveness verification.
         // The bearer's device must verify all 3 facts before planning a withdrawal.
@@ -3935,15 +3975,12 @@ impl BitcoinTapSdk {
 
     pub async fn plan_withdrawal(
         &self,
-        requested_net_sats: u64,
+        requested_gross_sats: u64,
         destination_address: &str,
         planner_device_id: &[u8; 32],
     ) -> Result<WithdrawalPlan, DsmError> {
-        let plan = self
-            .prepare_withdrawal_plan(requested_net_sats, destination_address, planner_device_id)
-            .await?;
-
-        Ok(plan)
+        self.prepare_withdrawal_plan(requested_gross_sats, destination_address, planner_device_id)
+            .await
     }
 
     /// Fetch vault execution data from storage nodes by vault_id.
@@ -5112,19 +5149,20 @@ mod tests {
         init_withdrawal_test_db();
 
         let bridge = BitcoinTapSdk::new(Arc::new(DLVManager::new()));
-        let requested_net_sats = 150_000;
+        let desired_net_sats = 150_000;
         let full_fee = estimated_full_withdrawal_fee_sats();
-        put_active_vault("vault-route", requested_net_sats + full_fee);
-        put_active_vault_record("vault-route", requested_net_sats + full_fee, "btc_to_dbtc");
+        let gross = desired_net_sats + full_fee;
+        put_active_vault("vault-route", gross);
+        put_active_vault_record("vault-route", gross, "btc_to_dbtc");
 
         let plan = bridge
-            .plan_withdrawal(requested_net_sats, "tb1qexactroute", &[0x11; 32])
+            .plan_withdrawal(gross, "tb1qexactroute", &[0x11; 32])
             .await
             .unwrap_or_else(|e| panic!("plan withdrawal failed: {e}"));
 
         assert_eq!(plan.legs.len(), 1);
         assert!(!plan.plan_id.is_empty());
-        assert_eq!(plan.requested_net_sats, requested_net_sats);
+        assert_eq!(plan.requested_net_sats, desired_net_sats);
         assert_eq!(plan.legs[0].vault_id, "vault-route");
     }
 
@@ -5137,7 +5175,8 @@ mod tests {
         let bridge = BitcoinTapSdk::new(dlv.clone());
 
         let full_fee = estimated_full_withdrawal_fee_sats();
-        let requested_net_sats = 1_501_337;
+        let desired_net_sats = 1_501_337;
+        let gross = desired_net_sats + full_fee;
         let preferred_vault_id = "000-vault-a";
         let secondary_vault_id = "001-vault-b";
 
@@ -5148,7 +5187,7 @@ mod tests {
                 refund_hash_lock: [0x20; 32],
                 refund_iterations: 42,
                 bitcoin_pubkey: vec![0x03; 33],
-                expected_btc_amount_sats: requested_net_sats + full_fee,
+                expected_btc_amount_sats: gross,
                 network: 0,
                 min_confirmations: 1,
             },
@@ -5161,21 +5200,13 @@ mod tests {
             .await
             .unwrap_or_else(|e| panic!("add stale vault failed: {e}"));
 
-        put_active_vault(secondary_vault_id, requested_net_sats + full_fee);
-        put_active_vault_record(
-            secondary_vault_id,
-            requested_net_sats + full_fee,
-            "btc_to_dbtc",
-        );
-        put_active_vault(preferred_vault_id, requested_net_sats + full_fee);
-        put_active_vault_record(
-            preferred_vault_id,
-            requested_net_sats + full_fee,
-            "btc_to_dbtc",
-        );
+        put_active_vault(secondary_vault_id, gross);
+        put_active_vault_record(secondary_vault_id, gross, "btc_to_dbtc");
+        put_active_vault(preferred_vault_id, gross);
+        put_active_vault_record(preferred_vault_id, gross, "btc_to_dbtc");
 
         let plan = bridge
-            .plan_withdrawal(requested_net_sats, "tb1qexampledestination", &[0x11; 32])
+            .plan_withdrawal(gross, "tb1qexampledestination", &[0x11; 32])
             .await
             .unwrap_or_else(|e| panic!("plan withdrawal failed: {e}"));
 

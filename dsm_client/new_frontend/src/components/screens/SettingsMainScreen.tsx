@@ -3,8 +3,13 @@
 import React, { useCallback, useEffect, useRef, useState, memo } from 'react';
 import { dsmClient } from '../../services/dsmClient';
 import { exportStateBackupFile, importStateBackupFile } from '../../services/settings/backupService';
+import { BETA_FEEDBACK_TEMPLATE, buildGitHubIssueUrl } from '../../utils/githubIssue';
 
-import { getNfcBackupStatus } from '../../services/recovery/nfcRecoveryService';
+import {
+  getNfcBackupStatus,
+  type NfcBackupStatus,
+} from '../../services/recovery/nfcRecoveryService';
+import { getNfcBackupUiModel } from '../../services/recovery/nfcBackupUi';
 import './SettingsScreen.css';
 
 type PrefValue = string | null;
@@ -25,7 +30,15 @@ interface ExtendedDsmClient {
 
 const client = dsmClient as unknown as ExtendedDsmClient;
 const DEV_MODE_PREF_KEY = 'dev_mode';
+const OPEN_DIAGNOSTICS_EVENT = 'dsm-open-diagnostics';
 let cachedDevMode: boolean | null = null;
+const emptyNfcStatus: NfcBackupStatus = {
+  enabled: false,
+  configured: false,
+  pendingCapsule: false,
+  capsuleCount: 0,
+  lastCapsuleIndex: 0,
+};
 
 interface SettingsMainScreenProps {
   onNavigate?: (screen: string) => void;
@@ -42,22 +55,19 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
   const [backupProcessing, setBackupProcessing] = useState<boolean>(false);
 
   // --- Compact NFC status (full management is on NfcRecoveryScreen) ---
-  const [nfcBackupEnabled, setNfcBackupEnabled] = useState(false);
-  const [nfcCapsuleCount, setNfcCapsuleCount] = useState(0);
-  const [nfcLastIndex, setNfcLastIndex] = useState(0);
+  const [nfcStatus, setNfcStatus] = useState<NfcBackupStatus>(emptyNfcStatus);
 
   useEffect(() => {
     void (async () => {
       try {
-        const s = await getNfcBackupStatus();
-        setNfcBackupEnabled(s.enabled);
-        setNfcCapsuleCount(s.capsuleCount);
-        setNfcLastIndex(s.lastCapsuleIndex);
+        setNfcStatus(await getNfcBackupStatus());
       } catch {
         /* tolerate — tables may not exist yet */
       }
     })();
   }, []);
+
+  const nfcUi = getNfcBackupUiModel(nfcStatus);
 
   // Initial preferences load (deterministic, event-driven only)
   useEffect(() => {
@@ -195,6 +205,33 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
 
     input.click();
   }, [backupProcessing]);
+
+  const openDiagnosticsWorkspace = useCallback(() => {
+    if (typeof window === 'undefined') return;
+    window.dispatchEvent(new CustomEvent(OPEN_DIAGNOSTICS_EVENT, { detail: { autoGather: true } }));
+    setStatus('Diagnostics workspace opened');
+  }, []);
+
+  const openBetaFeedback = useCallback(async () => {
+    try {
+      const url = buildGitHubIssueUrl({
+        template: BETA_FEEDBACK_TEMPLATE,
+        title: 'Beta feedback',
+      });
+      const popup = window.open(url, '_blank', 'noopener');
+      if (!popup && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(url);
+        setStatus('Feedback link copied to clipboard');
+        return;
+      }
+      if (!popup) {
+        throw new Error('Popup blocked');
+      }
+      setStatus('Beta feedback form opened');
+    } catch {
+      setStatus('Unable to open beta feedback form');
+    }
+  }, []);
 
   return (
     <main className="settings-shell settings-shell--main" role="main" aria-labelledby="settings-title">
@@ -363,19 +400,92 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
         >
           NFC RING BACKUP
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-          <span style={{ fontSize: '9px', color: 'var(--text-dark)' }}>
-            {nfcBackupEnabled ? 'ACTIVE' : 'OFF'}
-            {nfcBackupEnabled && nfcCapsuleCount > 0 && ` — Capsule #${nfcLastIndex}`}
-          </span>
+        <div style={{ marginBottom: 8 }}>
+          <div
+            style={{
+              fontSize: '9px',
+              fontWeight: 'bold',
+              color: 'var(--text-dark)',
+              marginBottom: 4,
+            }}
+          >
+            {nfcUi.backupLabel}
+            {nfcUi.writeStateLabel !== '--' ? ` / ${nfcUi.writeStateLabel}` : ''}
+          </div>
+          <div
+            style={{
+              fontSize: '8px',
+              color: 'var(--text-dark)',
+              lineHeight: '1.4',
+              opacity: 0.82,
+            }}
+          >
+            {nfcUi.compactSummary}
+          </div>
         </div>
-        <button
-          className="settings-shell__button"
-          onClick={() => onNavigate?.('nfc_recovery')}
-          style={{ fontSize: '9px', width: '100%' }}
+        <div className="settings-shell__button-row">
+          <button
+            className="settings-shell__button"
+            onClick={() => onNavigate?.('nfc_recovery')}
+            style={{ fontSize: '9px' }}
+          >
+            MANAGE BACKUP
+          </button>
+          <button
+            className="settings-shell__button"
+            onClick={() => onNavigate?.('recovery')}
+            style={{ fontSize: '9px' }}
+          >
+            INSPECT OR RECOVER
+          </button>
+        </div>
+      </section>
+
+      <section
+        aria-labelledby="beta-support-title"
+        className="settings-shell__panel"
+      >
+        <div
+          id="beta-support-title"
+          style={{
+            fontSize: '10px',
+            fontWeight: 'bold',
+            marginBottom: '8px',
+            color: 'var(--text-dark)',
+            letterSpacing: '1px',
+          }}
         >
-          MANAGE
-        </button>
+          BETA SUPPORT
+        </div>
+        <div
+          style={{
+            fontSize: '8px',
+            color: 'var(--text-dark)',
+            marginBottom: '12px',
+            lineHeight: '1.4',
+            opacity: 0.8,
+          }}
+        >
+          OPEN THE DIAGNOSTICS WORKSPACE, EXPORT A REPORT, OR SEND GENERAL BETA FEEDBACK.
+        </div>
+        <div className="settings-shell__button-row">
+          <button
+            type="button"
+            className="settings-shell__button"
+            style={{ fontSize: '9px' }}
+            onClick={openDiagnosticsWorkspace}
+          >
+            REPORT ISSUE
+          </button>
+          <button
+            type="button"
+            className="settings-shell__button"
+            style={{ fontSize: '9px' }}
+            onClick={openBetaFeedback}
+          >
+            SEND FEEDBACK
+          </button>
+        </div>
       </section>
 
       {/* Developer Options (only when unlocked) */}

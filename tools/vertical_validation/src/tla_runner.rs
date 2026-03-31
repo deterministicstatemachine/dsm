@@ -339,6 +339,45 @@ impl TlaRunner {
                 ],
                 supports_trace_replay: true,
             },
+            // --- Offline Finality (Paper Theorems 4.1, 4.2) ---
+            // Bilateral settlement irreversibility + BLE partition tolerance.
+            TlaSpec {
+                label: "OfflineFinality".into(),
+                spec_file: "DSM_OfflineFinality.tla".into(),
+                config_file: "DSM_OfflineFinality.cfg".into(),
+                invariants: vec![
+                    "TypeOK".into(),
+                    "BilateralIrreversibility".into(),
+                    "FullSettlement".into(),
+                    "NoHalfCommit".into(),
+                    "TripwireGuaranteesUniqueness".into(),
+                    "TokenConservation".into(),
+                    "BalancesNonNegative".into(),
+                ],
+                properties: vec![],
+                linked_implementation_traces: vec!["bilateral_full_offline_finality".into()],
+                // No literal TLC trace replay (no simulation trace file);
+                // linked implementation traces provide the code-level bridge.
+                supports_trace_replay: false,
+            },
+            // --- Non-Interference (Paper Lemma 3.1, 3.2, Theorem 3.1) ---
+            // Additive scaling: operations on one bilateral pair cannot affect
+            // any other pair. Mathematical core of Θ(N) throughput.
+            TlaSpec {
+                label: "NonInterference".into(),
+                spec_file: "DSM_NonInterference.tla".into(),
+                config_file: "DSM_NonInterference.cfg".into(),
+                invariants: vec![
+                    "TypeOK".into(),
+                    "NonInterference".into(),
+                    "PairIsolation".into(),
+                    "PerPairConservation".into(),
+                    "ZeroRefreshForInactive".into(),
+                ],
+                properties: vec![],
+                linked_implementation_traces: vec!["bilateral_pair_non_interference".into()],
+                supports_trace_replay: false,
+            },
         ]
     }
 

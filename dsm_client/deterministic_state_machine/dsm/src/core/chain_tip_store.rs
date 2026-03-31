@@ -8,6 +8,8 @@
 
 use std::sync::Arc;
 
+use crate::types::error::DsmError;
+
 /// Chain-tip store abstraction (SDKs provide the backing store).
 ///
 /// Core stays storage-agnostic; callers can provide a DB-backed implementation.
@@ -15,8 +17,16 @@ pub trait ChainTipStore: Send + Sync {
     /// Get the latest chain tip for a contact relationship (if available).
     fn get_contact_chain_tip(&self, device_id: &[u8; 32]) -> Option<[u8; 32]>;
 
-    /// Persist the latest chain tip for a contact relationship.
-    fn set_contact_chain_tip(&self, device_id: &[u8; 32], new_tip: [u8; 32]);
+    /// Persist the latest chain tip for a contact relationship if the parent still matches.
+    ///
+    /// Returns `Ok(true)` when the update was applied, `Ok(false)` when the
+    /// expected parent no longer matches, and `Err(_)` for storage failures.
+    fn set_contact_chain_tip(
+        &self,
+        device_id: &[u8; 32],
+        expected_parent_tip: [u8; 32],
+        new_tip: [u8; 32],
+    ) -> Result<bool, DsmError>;
 }
 
 impl std::fmt::Debug for dyn ChainTipStore {
@@ -34,7 +44,14 @@ impl ChainTipStore for NoopChainTipStore {
         None
     }
 
-    fn set_contact_chain_tip(&self, _device_id: &[u8; 32], _new_tip: [u8; 32]) {}
+    fn set_contact_chain_tip(
+        &self,
+        _device_id: &[u8; 32],
+        _expected_parent_tip: [u8; 32],
+        _new_tip: [u8; 32],
+    ) -> Result<bool, DsmError> {
+        Ok(true)
+    }
 }
 
 /// Convenience helper for a default no-op store.

@@ -25,6 +25,26 @@ if (typeof (global as any).atob === 'undefined') {
   (global as any).atob = (b64: string) => Buffer.from(b64, 'base64').toString('binary');
 }
 
+// jsdom does not implement media playback APIs. Stub them globally so audio
+// cues exercised in tests do not spam the console.
+if (typeof window !== 'undefined' && typeof window.HTMLMediaElement !== 'undefined') {
+  Object.defineProperty(window.HTMLMediaElement.prototype, 'load', {
+    configurable: true,
+    writable: true,
+    value: jest.fn(),
+  });
+  Object.defineProperty(window.HTMLMediaElement.prototype, 'pause', {
+    configurable: true,
+    writable: true,
+    value: jest.fn(),
+  });
+  Object.defineProperty(window.HTMLMediaElement.prototype, 'play', {
+    configurable: true,
+    writable: true,
+    value: jest.fn().mockResolvedValue(undefined),
+  });
+}
+
 // Provide a minimal WebView MCP bridge mock for tests
 if (typeof (global as any).window !== 'undefined') {
   const g = (global as any);

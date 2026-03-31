@@ -56,6 +56,7 @@ struct ServerConfig {
     body_limit_bytes: usize,
     hsts_max_age: Option<u64>,
     database_url: String,
+    seed_peers: Vec<String>,
 }
 
 fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
@@ -105,7 +106,13 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
         .get_string("database.url")
         .unwrap_or_else(|_| "postgresql://localhost:5432/dsm_storage".to_string());
 
-    // Interval (seconds) for automatic expired object cleanup. Defaults to 1 hour.
+    // Extract seed peers from [replication] config section.
+    let seed_peers: Vec<String> = settings
+        .get_array("replication.peers")
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|v| v.into_string().ok())
+        .collect();
 
     if opts.auto_detect {
         let node_index = opts.node_index.unwrap_or(0);
@@ -122,6 +129,7 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
             body_limit_bytes,
             hsts_max_age,
             database_url,
+            seed_peers,
         });
     }
 
@@ -160,6 +168,7 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
         body_limit_bytes,
         hsts_max_age,
         database_url,
+        seed_peers,
     })
 }
 
@@ -380,7 +389,10 @@ async fn async_main() -> Result<()> {
             .map_err(|e| anyhow::anyhow!("Failed to create test replication manager: {}", e))?,
         )
     } else {
-        info!("Initializing replication manager (production TLS pinning)...");
+        info!(
+            "Initializing replication manager (production TLS pinning, {} seed peers)...",
+            server_config.seed_peers.len()
+        );
         let cert_path = server_config
             .tls_cert_path
             .as_deref()
@@ -395,6 +407,7 @@ async fn async_main() -> Result<()> {
                     server_config.bind_addr.port()
                 ),
                 std::path::Path::new(cert_path),
+                server_config.seed_peers.clone(),
             )
             .map_err(|e| anyhow::anyhow!("Failed to create replication manager: {}", e))?,
         )

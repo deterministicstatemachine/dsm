@@ -66,7 +66,6 @@
 //! - All secrets use `Zeroize` + `ZeroizeOnDrop` for memory safety
 //! - Feature-gated optional modules (perf, telemetry, bluetooth)
 
-pub mod batching;
 pub mod bilateral;
 pub mod commitments;
 pub mod common;
@@ -77,10 +76,8 @@ pub mod crypto;
 pub mod crypto_verification;
 pub mod emissions;
 pub mod envelope;
-pub mod limits;
 pub mod merkle;
 pub mod pbi;
-pub mod spend_gate;
 // #[cfg(feature = "perf")]
 pub mod bitcoin;
 pub mod performance;

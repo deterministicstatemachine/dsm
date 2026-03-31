@@ -487,7 +487,7 @@ dependencies = [
  "arrayvec",
  "cc",
  "cfg-if",
- "constant_time_eq 0.4.2",
+ "constant_time_eq",
  "cpufeatures",
 ]
 
@@ -756,12 +756,6 @@ checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
 
 [[package]]
 name = "constant_time_eq"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c74b8349d32d297c9134b8c88677813a227df8f779daa29bfc29c183fe3dca6"
-
-[[package]]
-name = "constant_time_eq"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
@@ -1008,8 +1002,9 @@ dependencies = [
  "bitflags 2.10.0",
  "blake3",
  "bytes",
+ "chacha20poly1305",
  "clap",
- "constant_time_eq 0.3.1",
+ "constant_time_eq",
  "crc32fast",
  "criterion",
  "derive_more",
@@ -1044,7 +1039,7 @@ dependencies = [
  "protoc-bin-vendored",
  "quickcheck",
  "rand 0.8.5",
- "rand_chacha 0.9.0",
+ "rand_chacha 0.3.1",
  "rocksdb",
  "rstest 0.18.2",
  "serde",
@@ -1121,7 +1116,7 @@ dependencies = [
  "protoc-bin-vendored",
  "quickcheck",
  "rand 0.8.5",
- "rand_chacha 0.9.0",
+ "rand_chacha 0.3.1",
  "rcgen",
  "reqwest",
  "rstest 0.26.1",
@@ -2998,9 +2993,9 @@ dependencies = [
 
 [[package]]
 name = "proptest"
-version = "1.9.0"
+version = "1.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bee689443a2bd0a16ab0348b52ee43e3b2d1b1f931c8aa5c9f8de4c86fbe8c40"
+checksum = "4b45fcc2344c680f5025fe57779faef368840d0bd1f42f216291f0dc4ace4744"
 dependencies = [
  "bit-set",
  "bit-vec",
@@ -4400,9 +4395,9 @@ checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
 
 [[package]]
 name = "tonic-build"
-version = "0.12.3"
+version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9557ce109ea773b399c9b9e5dca39294110b74f1f342cb347a80d1fce8c26a11"
+checksum = "eac6f67be712d12f0b41328db3137e0d0757645d8904b4cb7d51cd9c2279e847"
 dependencies = [
  "prettyplease",
  "proc-macro2",

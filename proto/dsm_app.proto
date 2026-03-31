@@ -417,7 +417,7 @@ message BitcoinFractionalExitRequest {
   uint32 successor_locktime = 3;
   uint64 refund_iterations = 4;
   string destination_address = 5; // Native BTC destination for sweep (§6.3)
-  string plan_id = 6;             // Deterministic withdrawal ID (ρ) from planning phase
+  string plan_id = 6; // Deterministic withdrawal ID (ρ) from planning phase
 }
 
 message BitcoinFractionalExitResponse {
@@ -947,13 +947,28 @@ message StateInfoResponse {
 message AppStateStorage {
   bool has_identity = 1;
   bool sdk_initialized = 2;
-  optional bytes device_id = 3 [(dsm_fixed_len)=32];   // binary device id (non-canonical)
+  optional bytes device_id = 3 [(dsm_fixed_len)=32];   // Canonical 32-byte device identifier
   optional bytes public_key = 4 [(dsm_max_len)=512];
   optional bytes genesis_hash = 5 [(dsm_fixed_len)=32];
   optional bytes smt_root = 6 [(dsm_fixed_len)=32];
   map<string,string> recovery_sessions = 7;
   map<string,string> key_value_store   = 8;
-  optional bytes device_tree_root = 9 [(dsm_fixed_len)=32]; // R_G — Device Tree root (§2.3)
+  
+  // (§2.3.1) Device Tree root R_G — current concrete authenticated commitment
+  // used for receipt paths that verify π_dev: DevID ∈ R_G.
+  // Computed at genesis via: R_G = DeviceTree::single(device_id).root()
+  // Persisted IMMEDIATELY after genesis, device addition, or recovery.
+  // If None: build_bilateral_receipt_with_smt() → None → proof_data=None → the affected
+  // receipt path rejects during settlement.
+  // INVARIANT: any local acceptance path carrying π_dev must have R_G or an equivalent
+  // authenticated persisted device-tree commitment available.
+  optional bytes device_tree_root = 9 [(dsm_fixed_len)=32];
+  
+  // (§2.3.1) Contact-side authenticated device-tree commitments — indexed by contact
+  // device_id (base32 Crockford). Used during bilateral settlement to verify
+  // counterparty receipt proofs relationship-locally.
+  // Each device maintains its own unique R_G; devices do not share roots.
+  map<string, bytes> contact_device_tree_roots = 10;
 }
 
 // Binary serialization for sensitive app data (replaces manual length-prefixed format).
@@ -1121,6 +1136,7 @@ message BilateralPrepareRequest {
   uint64 transfer_amount         = 11; // amount in token base units
   string token_id_hint           = 12; // token ID (e.g. "ERA")
   string memo_hint               = 13; // optional transfer memo
+  string transfer_amount_display = 14; // decimal display amount; backend scales via token decimals
 }
 message BilateralPrepareResponse {
   Hash32 commitment_hash        = 1;
@@ -1332,6 +1348,8 @@ message BleGattIdentityReadResult {
   bool   success             = 1;
   bytes  write_back_envelope = 2 [(dsm_max_len)=4096]; // Framed Envelope to write to PAIRING char
   string error_message       = 3;
+  bytes  peer_device_id      = 4 [(dsm_fixed_len)=32]; // Peer's deviceId (for Kotlin identity anchoring)
+  bytes  peer_genesis_hash   = 5 [(dsm_fixed_len)=32]; // Peer's genesisHash
 }
 
 // Response from processIncomingBleData JNI call.
@@ -1342,6 +1360,7 @@ message BleIncomingDataResponse {
   repeated bytes response_chunks = 1 [(dsm_max_len)=1024]; // BLE chunks to write back (may be empty)
   bool pairing_complete          = 2; // true = bilateral confirm delivered, Kotlin may clean up
   bool use_reliable_write        = 3; // true = send via requestGattWriteChunks (bilateral follow-ups)
+  bytes confirm_commitment_hash  = 4 [(dsm_max_len)=32]; // exact ConfirmPending session to finalize after BilateralConfirm delivery
 }
 
 // Status update emitted by PairingOrchestrator during the pairing loop.
@@ -1567,6 +1586,31 @@ message BleFrameHeader {
 message BleChunk {
   BleFrameHeader header = 1;
   bytes          data   = 2 [(dsm_max_len)=1024];
+}
+
+// Phase-1 BLE transport framing: session/message scoped chunk delivery below Envelope v3.
+// These messages are transport-only. They MUST NOT alter protocol semantics.
+message BleTransportHeader {
+  uint32 version     = 1; // transport framing version (currently 1)
+  uint32 flags       = 2; // bitmask: DATA/SYN/ACK/NACK/FIN/KEEPALIVE
+  fixed64 session_id = 3; // random per transport session
+  fixed64 message_id = 4; // monotonic within session
+  uint32 chunk_index = 5; // zero-based
+  uint32 chunk_count = 6; // total chunks for the message
+  uint32 payload_len = 7; // bytes carried in this chunk's payload field
+  uint32 checksum    = 8; // CRC32 of the payload bytes
+}
+
+message BleTransportChunk {
+  BleTransportHeader header  = 1;
+  bytes              payload = 2 [(dsm_max_len)=1024];
+}
+
+message BleTransportAck {
+  fixed64 session_id     = 1;
+  fixed64 message_id     = 2;
+  uint32  ack_base_chunk = 3; // highest contiguous received chunk index + 1 base for bitmap
+  bytes   ack_bitmap     = 4 [(dsm_max_len)=256];
 }
 
 // Resumable BLE chunk transfer — receiver reports persisted chunk progress
@@ -1900,6 +1944,11 @@ message OnlineTransferRequest {
   uint64 seq = 9; // REQUIRED: deterministic sequence counter
   // §4.2 ReceiptCommit canonical protobuf bytes — SMT proofs for this transition
   bytes receipt_commit = 10 [(dsm_max_len)=131072];
+  // §4.2.1 Canonical unsigned Operation bytes (signing preimage).
+  // Sender populates with signing_op.to_bytes() (signature field empty).
+  // Receiver MUST use these bytes directly for SPHINCS+ verification and
+  // h_{n+1} tip computation — no reconstruction from individual fields.
+  bytes canonical_operation_bytes = 11 [(dsm_max_len)=65535];
 }
 
 message OnlineTransferSmartRequest {
@@ -1974,7 +2023,7 @@ message TransactionInfo {
   string status        = 11; // "completed", "confirmed", "pending", etc.
   string recipient     = 12; // alias or device ID text for UI display
   bytes  stitched_receipt = 13 [(dsm_max_len)=131072]; // canonical stitched receipt bytes (if available)
-  uint64 created_at = 14; // DISPLAY-ONLY: unix timestamp (seconds) for UI history ordering. MUST NOT be used in hash preimages, ReceiptCommit fields, acceptance predicates, or protocol ordering.
+  uint64 created_at = 14; // DISPLAY-ONLY: unix wall-clock seconds for UI history ordering. MUST NOT be used in hash preimages, ReceiptCommit fields, acceptance predicates, or protocol ordering.
   string memo = 15; // optional memo/note
   bool   receipt_verified = 16; // true iff stitched_receipt passes cryptographic verification (SMT roots, tripwire, proofs)
 }

@@ -12,6 +12,8 @@ use rusqlite::params;
 use super::get_connection;
 use crate::util::deterministic_time::tick;
 
+const PENDING_CAPSULE_INDEX_KEY: &str = "pending_capsule_index";
+
 /// Ensure the recovery tables exist (called from schema migration path).
 pub fn ensure_recovery_tables() -> Result<()> {
     let binding = get_connection()?;
@@ -103,6 +105,78 @@ pub fn get_latest_recovery_capsule() -> Result<Option<(u64, Vec<u8>)>> {
         .optional()?;
 
     Ok(result)
+}
+
+/// Mark a stored capsule as pending for the next NFC write.
+pub fn mark_pending_recovery_capsule(capsule_index: u64) -> Result<()> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|_| anyhow!("Database lock poisoned"))?;
+
+    let exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM recovery_capsules WHERE capsule_index = ?1",
+        params![capsule_index as i64],
+        |row| row.get(0),
+    )?;
+    if exists == 0 {
+        return Err(anyhow!(
+            "cannot mark missing recovery capsule {} as pending",
+            capsule_index
+        ));
+    }
+
+    drop(conn);
+    set_recovery_pref(PENDING_CAPSULE_INDEX_KEY, &capsule_index.to_le_bytes())
+}
+
+/// Clear the pending NFC-write capsule marker.
+pub fn clear_pending_recovery_capsule() -> Result<()> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|_| anyhow!("Database lock poisoned"))?;
+    conn.execute(
+        "DELETE FROM recovery_prefs WHERE key = ?1",
+        params![PENDING_CAPSULE_INDEX_KEY],
+    )?;
+    Ok(())
+}
+
+/// Get the exact capsule currently pending for NFC write.
+pub fn get_pending_recovery_capsule() -> Result<Option<(u64, Vec<u8>)>> {
+    let Some(bytes) = get_recovery_pref(PENDING_CAPSULE_INDEX_KEY)? else {
+        return Ok(None);
+    };
+    if bytes.len() != 8 {
+        return Err(anyhow!(
+            "pending capsule index pref must be 8 bytes, got {}",
+            bytes.len()
+        ));
+    }
+    let mut idx_bytes = [0u8; 8];
+    idx_bytes.copy_from_slice(&bytes);
+    let capsule_index = u64::from_le_bytes(idx_bytes);
+
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|_| anyhow!("Database lock poisoned"))?;
+    let capsule = conn
+        .query_row(
+            "SELECT encrypted_bytes FROM recovery_capsules WHERE capsule_index = ?1",
+            params![capsule_index as i64],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()?;
+
+    if let Some(encrypted_bytes) = capsule {
+        return Ok(Some((capsule_index, encrypted_bytes)));
+    }
+
+    drop(conn);
+    clear_pending_recovery_capsule()?;
+    Ok(None)
 }
 
 /// Metadata about a stored capsule (for dashboard display, no decryption).
@@ -299,6 +373,32 @@ pub fn prune_old_capsules(keep_latest_n: u64) -> Result<u64> {
         )",
         params![keep_latest_n as i64],
     )?;
+
+    let pending_pref: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT value FROM recovery_prefs WHERE key = ?1",
+            params![PENDING_CAPSULE_INDEX_KEY],
+            |row| row.get(0),
+        )
+        .optional()?;
+
+    if let Some(bytes) = pending_pref {
+        if bytes.len() == 8 {
+            let mut idx_bytes = [0u8; 8];
+            idx_bytes.copy_from_slice(&bytes);
+            let pending_index = u64::from_le_bytes(idx_bytes);
+            let exists: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM recovery_capsules WHERE capsule_index = ?1",
+                params![pending_index as i64],
+                |row| row.get(0),
+            )?;
+            if exists == 0 {
+                drop(conn);
+                clear_pending_recovery_capsule()?;
+                return Ok(deleted as u64);
+            }
+        }
+    }
 
     Ok(deleted as u64)
 }
@@ -718,6 +818,28 @@ mod tests {
 
         assert_eq!(get_capsule_count().expect("count"), 2);
         assert_eq!(get_max_capsule_index().expect("max"), 10);
+    }
+
+    #[test]
+    #[serial]
+    fn test_pending_capsule_marker_clears_without_deleting_capsule() {
+        setup_test_db();
+        let smt_root = [7u8; 32];
+
+        store_recovery_capsule(1, b"cap1", &smt_root).expect("store cap1");
+        store_recovery_capsule(2, b"cap2", &smt_root).expect("store cap2");
+        mark_pending_recovery_capsule(2).expect("mark pending");
+
+        let pending = get_pending_recovery_capsule().expect("read pending");
+        assert_eq!(pending, Some((2, b"cap2".to_vec())));
+
+        clear_pending_recovery_capsule().expect("clear pending");
+        assert!(get_pending_recovery_capsule()
+            .expect("pending cleared")
+            .is_none());
+
+        let latest = get_latest_recovery_capsule().expect("latest");
+        assert_eq!(latest, Some((2, b"cap2".to_vec())));
     }
 
     #[test]

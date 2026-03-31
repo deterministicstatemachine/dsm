@@ -7,7 +7,10 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use dsm_sdk::bluetooth::bilateral_ble_handler::BilateralBleHandler;
-use dsm_sdk::bluetooth::ble_frame_coordinator::{BleFrameCoordinator, BleFrameType};
+use dsm_sdk::bluetooth::bilateral_transport_adapter::{
+    BilateralTransportAdapter, BleTransportDelegate, TransportInboundMessage,
+};
+use dsm_sdk::bluetooth::ble_frame_coordinator::{BleFrameCoordinator, BleFrameType, FrameIngressResult};
 use dsm_sdk::bluetooth::android_ble_bridge::AndroidBleBridge;
 
 use dsm::core::bilateral_transaction_manager::BilateralTransactionManager;
@@ -38,23 +41,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let handler_a = Arc::new(BilateralBleHandler::new(mgr_a.clone(), dev_a));
     let handler_b = Arc::new(BilateralBleHandler::new(mgr_b.clone(), dev_b));
+    let adapter_a = Arc::new(BilateralTransportAdapter::new(handler_a.clone()));
+    let adapter_b = Arc::new(BilateralTransportAdapter::new(handler_b.clone()));
 
-    let coord_a = Arc::new(BleFrameCoordinator::new(handler_a.clone(), dev_a));
-    let coord_b = Arc::new(BleFrameCoordinator::new(handler_b.clone(), dev_b));
+    let coord_a = Arc::new(BleFrameCoordinator::new(dev_a));
+    let coord_b = Arc::new(BleFrameCoordinator::new(dev_b));
 
     // Keep bridge instances alive for the duration of the in-process simulation.
     // The variables are intentionally kept (prefixed with "_") so they are not
     // optimized away or trigger unused-variable lints while still making it
     // obvious they are part of the simulated environment.
-    let _bridge_a = AndroidBleBridge::new(coord_a.clone(), handler_a.clone(), dev_a);
-    let _bridge_b = AndroidBleBridge::new(coord_b.clone(), handler_b.clone(), dev_b);
+    let _bridge_a = AndroidBleBridge::new(coord_a.clone(), adapter_a.clone(), dev_a);
+    let _bridge_b = AndroidBleBridge::new(coord_b.clone(), adapter_b.clone(), dev_b);
 
     println!("BLE Loopback: Creating prepare message from A to B...");
     // A prepares a transfer to B (Noop op for simplicity)
     let op = Operation::Noop;
-    let chunks = coord_a
+    let prepare_payload = adapter_a
         .create_prepare_message(dev_b, op, /*validity_iterations*/ 100)
         .await?;
+    let chunks = coord_a.encode_message(BleFrameType::BilateralPrepare, &prepare_payload)?;
     println!(
         "BLE Loopback: Prepare message created, {} chunks",
         chunks.len()
@@ -64,24 +70,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Simulate BLE chunk transfer: feed all chunks to B's coordinator and capture completion
     let mut maybe_response = None;
     for ch in &chunks {
-        let got = coord_b.handle_ble_chunk(ch).await?;
-        if got.is_some() {
-            maybe_response = got;
+        match coord_b.ingest_chunk(ch).await? {
+            FrameIngressResult::MessageComplete { message } => {
+                let outbound = adapter_b
+                    .on_transport_message(TransportInboundMessage {
+                        peer_address: "loopback-b".to_string(),
+                        frame_type: message.frame_type,
+                        payload: message.payload,
+                    })
+                    .await?;
+                maybe_response = outbound.into_iter().next().map(|item| item.payload);
+            }
+            FrameIngressResult::NeedMoreChunks | FrameIngressResult::ProtocolControl(_) => {}
         }
     }
     println!("BLE Loopback: B processed prepare message");
 
-    // The response from handle_ble_chunk is the prepare response to send back to A
-    if let Some(response_result) = maybe_response {
-        if let Some(resp_bytes) = response_result.response {
-            // Send response back to A (simulate BLE chunks)
-            let resp_chunks = coord_b
-                .send_bilateral_message(dev_a, BleFrameType::BilateralPrepareResponse, resp_bytes)
-                .await?;
-            // Feed response chunks back to A and process the prepare response
-            for ch in &resp_chunks {
-                let _ = coord_a.handle_ble_chunk(ch).await?;
-                // The prepare response is processed here
+    // The adapter response is the prepare response to send back to A
+    if let Some(resp_bytes) = maybe_response {
+        // Send response back to A (simulate BLE chunks)
+        let resp_chunks =
+            coord_b.encode_message(BleFrameType::BilateralPrepareResponse, &resp_bytes)?;
+        // Feed response chunks back to A and process the prepare response
+        for ch in &resp_chunks {
+            match coord_a.ingest_chunk(ch).await? {
+                FrameIngressResult::MessageComplete { message } => {
+                    let _ = adapter_a
+                        .on_transport_message(TransportInboundMessage {
+                            peer_address: "loopback-a".to_string(),
+                            frame_type: message.frame_type,
+                            payload: message.payload,
+                        })
+                        .await?;
+                }
+                FrameIngressResult::NeedMoreChunks | FrameIngressResult::ProtocolControl(_) => {}
             }
         }
     }
@@ -99,13 +121,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Produce confirm envelope on A (3-step protocol step 3) and fragment into BLE chunks
     let (confirm_payload, _meta) = handler_a.send_bilateral_confirm(commitment_hash).await?;
-    let confirm_chunks = coord_a
-        .send_bilateral_message(dev_b, BleFrameType::BilateralConfirm, confirm_payload)
-        .await?;
+    let confirm_chunks =
+        coord_a.encode_message(BleFrameType::BilateralConfirm, &confirm_payload)?;
 
     // B reassembles confirm request and processes it — no response needed
     for ch in &confirm_chunks {
-        let _ = coord_b.handle_ble_chunk(ch).await?;
+        match coord_b.ingest_chunk(ch).await? {
+            FrameIngressResult::MessageComplete { message } => {
+                let outbound = adapter_b
+                    .on_transport_message(TransportInboundMessage {
+                        peer_address: "loopback-b".to_string(),
+                        frame_type: message.frame_type,
+                        payload: message.payload,
+                    })
+                    .await?;
+                assert!(outbound.is_empty(), "confirm should not produce a response");
+            }
+            FrameIngressResult::NeedMoreChunks | FrameIngressResult::ProtocolControl(_) => {}
+        }
     }
 
     println!("Loopback bilateral prepare/confirm simulation finished successfully.");

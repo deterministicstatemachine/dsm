@@ -18,6 +18,7 @@ use crate::util::{deterministic_time as dt, text_id};
 
 use log::{info, warn, debug};
 use prost::Message;
+use rand::{rngs::OsRng, RngCore};
 use reqwest;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -155,6 +156,9 @@ pub struct B0xEntry {
     pub seq: u64,
     /// Canonical ReceiptCommit bytes (§4.2) — SMT proofs for this transition.
     pub receipt_commit: Vec<u8>,
+    /// §4.2.1 Canonical unsigned Operation bytes (signing preimage).
+    /// Receiver uses these directly for SPHINCS+ verification and tip computation.
+    pub canonical_operation_bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -179,6 +183,10 @@ pub struct B0xSubmissionParams {
     /// Tip-scoped b0x routing address (§16.4).
     /// Computed via `B0xSDK::compute_b0x_address(recipient_genesis, recipient_device, chain_tip)`.
     pub routing_address: String,
+    /// §4.2.1 Canonical unsigned Operation bytes (signing preimage).
+    /// The exact bytes the sender signed with SPHINCS+.  The receiver MUST
+    /// use these directly for verification — no field-by-field reconstruction.
+    pub canonical_operation_bytes: Vec<u8>,
 }
 
 impl B0xSubmissionParams {
@@ -391,6 +399,7 @@ impl B0xSubmissionParams {
             next_chain_tip,
             receipt_commit,
             routing_address,
+            canonical_operation_bytes: Vec::new(),
         })
     }
 }
@@ -1215,12 +1224,8 @@ impl B0xSDK {
 
         // 2) Build Envelope v3 with proper request payload
         let mut rand_bytes = [0u8; 16];
-        getrandom::getrandom(&mut rand_bytes).map_err(|e| {
-            DsmError::internal(
-                format!("message_id RNG failed: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
+        let mut os_rng = OsRng;
+        os_rng.fill_bytes(&mut rand_bytes);
         let mut msgid_buf = Vec::with_capacity(11 + 16 + 8 + self.device_id.len());
         msgid_buf.extend_from_slice(b"DSM/b0x-msgid\0");
         msgid_buf.extend_from_slice(&rand_bytes);
@@ -1354,6 +1359,7 @@ impl B0xSDK {
                     chain_tip: sender_tip_bytes.clone(),
                     seq: params.seq,
                     receipt_commit: params.receipt_commit.clone(),
+                    canonical_operation_bytes: params.canonical_operation_bytes.clone(),
                 };
                 info!(
                     "submit_to_b0x: transfer req context from_device_id(first4)={:?} seq={}",
@@ -2003,12 +2009,8 @@ impl B0xSDK {
         // Multi-node retrieve: query all healthy endpoints; merge unique entries by id.
         // Generate a unique message ID for this retrieve request (required by auth middleware)
         let mut msg_id_bytes = [0u8; 16];
-        getrandom::getrandom(&mut msg_id_bytes).map_err(|e| {
-            DsmError::internal(
-                format!("message_id RNG failed: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
+        let mut os_rng = OsRng;
+        os_rng.fill_bytes(&mut msg_id_bytes);
         let msg_id_b32 = text_id::encode_base32_crockford(&msg_id_bytes);
 
         if b0x_address.is_empty() {
@@ -2185,12 +2187,8 @@ impl B0xSDK {
         }
 
         let mut request_msg_id = [0u8; 16];
-        getrandom::getrandom(&mut request_msg_id).map_err(|e| {
-            DsmError::internal(
-                format!("message_id RNG failed: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
+        let mut os_rng = OsRng;
+        os_rng.fill_bytes(&mut request_msg_id);
         let request_msg_id_b32 = text_id::encode_base32_crockford(&request_msg_id);
 
         let endpoints: Vec<String> = self
@@ -2287,12 +2285,8 @@ impl B0xSDK {
         // Multi-node ack: broadcast; require quorum_k successes.
         // Generate a unique message ID for this ack request (required by auth middleware)
         let mut msg_id_bytes = [0u8; 16];
-        getrandom::getrandom(&mut msg_id_bytes).map_err(|e| {
-            DsmError::internal(
-                format!("message_id RNG failed: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
+        let mut os_rng = OsRng;
+        os_rng.fill_bytes(&mut msg_id_bytes);
         let msg_id_b32 = text_id::encode_base32_crockford(&msg_id_bytes);
 
         // ACK scoping:
@@ -2448,6 +2442,14 @@ impl B0xSDK {
                                     vec![]
                                 };
 
+                                // The sender signs the Operation with recipient = receiver's
+                                // PUBLIC KEY (not device_id).  The receiver must reconstruct
+                                // the same Operation for signature verification.  Use local
+                                // public key since we ARE the recipient.
+                                let recipient_owner =
+                                    crate::sdk::app_state::AppState::get_public_key()
+                                        .unwrap_or_else(|| transfer_req.to_device_id.clone());
+
                                 let transfer_op = Operation::Transfer {
                                     to_device_id: transfer_req.to_device_id.clone(),
                                     amount: dsm::types::token_types::Balance::from_state(
@@ -2465,7 +2467,7 @@ impl B0xSDK {
                                     verification:
                                         dsm::types::operations::VerificationType::Standard,
                                     pre_commit: None,
-                                    recipient: transfer_req.to_device_id.clone(),
+                                    recipient: recipient_owner,
                                     to: recipient_id.clone().into_bytes(),
                                     message: transfer_req.memo.clone(),
                                     signature: sig.clone(),
@@ -2516,6 +2518,9 @@ impl B0xSDK {
                                     ttl_seconds: 0,
                                     seq: transfer_req.seq,
                                     receipt_commit: transfer_req.receipt_commit.clone(),
+                                    canonical_operation_bytes: transfer_req
+                                        .canonical_operation_bytes
+                                        .clone(),
                                 });
                             }
                         }
@@ -2596,6 +2601,7 @@ impl B0xSDK {
                                     ttl_seconds: 0,
                                     seq: msg_req.seq,
                                     receipt_commit: Vec::new(),
+                                    canonical_operation_bytes: Vec::new(),
                                 });
                             }
                         }
@@ -2789,6 +2795,7 @@ impl B0xSDK {
                 next_chain_tip: None,
                 receipt_commit: Vec::new(),
                 routing_address,
+                canonical_operation_bytes: Vec::new(),
             };
 
             match sdk.submit_to_b0x(params).await {
@@ -3052,6 +3059,7 @@ mod tests {
             chain_tip: vec![0x33; 32],
             seq: 1,
             receipt_commit: vec![],
+            canonical_operation_bytes: vec![],
         };
         let mut transfer_req_bytes = Vec::with_capacity(transfer_req.encoded_len());
         transfer_req.encode(&mut transfer_req_bytes).map_err(|e| {
@@ -3128,6 +3136,7 @@ mod tests {
             chain_tip: vec![0x55; 32],
             seq: 2,
             receipt_commit: vec![],
+            canonical_operation_bytes: vec![],
         };
         let mut transfer_req_bytes = Vec::with_capacity(transfer_req.encoded_len());
         transfer_req.encode(&mut transfer_req_bytes).map_err(|e| {
@@ -3307,6 +3316,7 @@ mod tests {
             chain_tip: vec![0x33; 32],
             seq: 9,
             receipt_commit: vec![],
+            canonical_operation_bytes: vec![],
         };
         let mut transfer_req_bytes = Vec::with_capacity(transfer_req.encoded_len());
         transfer_req.encode(&mut transfer_req_bytes).map_err(|e| {

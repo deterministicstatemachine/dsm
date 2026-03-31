@@ -125,38 +125,6 @@ fn encode_dsm_operation_det(op: &dsm::types::operations::Operation) -> Vec<u8> {
             &u64_le(amount.value()),
         ]
         .concat(),
-        O::Receive {
-            token_id,
-            from_device_id,
-            amount,
-            recipient,
-            ..
-        } => [
-            &b"dsm_op/receive"[..],
-            token_id.as_slice(),
-            from_device_id.as_slice(),
-            recipient.as_slice(),
-            &u64_le(amount.value()),
-        ]
-        .concat(),
-        O::Create {
-            message,
-            identity_data,
-            public_key,
-            metadata,
-            commitment,
-            proof,
-            ..
-        } => [
-            &b"dsm_op/create"[..],
-            message.as_bytes(),
-            identity_data.as_slice(),
-            public_key.as_slice(),
-            metadata.as_slice(),
-            commitment.as_slice(),
-            proof.as_slice(),
-        ]
-        .concat(),
         O::Generic {
             operation_type,
             data,
@@ -180,6 +148,38 @@ fn encode_dsm_operation_det(op: &dsm::types::operations::Operation) -> Vec<u8> {
 /* ------------------------------- Impl ----------------------------------- */
 
 impl CoreSDK {
+    fn restore_latest_archived_state(
+        state_machine: &Mutex<StateMachine>,
+        device_id: &[u8; 32],
+    ) -> Result<(), DsmError> {
+        let archived_states =
+            crate::storage::client_db::get_bcr_states(device_id, false).map_err(|e| {
+                DsmError::state_machine(format!(
+                    "Failed to load archived states during startup restore: {e}"
+                ))
+            })?;
+
+        if let Some(latest_state) = archived_states.last() {
+            state_machine.lock().set_state(latest_state.clone());
+            log::info!(
+                "[CoreSDK] restored archived canonical state_number={} for device {}",
+                latest_state.state_number,
+                crate::util::text_id::encode_base32_crockford(device_id)
+            );
+        }
+
+        Ok(())
+    }
+
+    fn archive_state_snapshot(state: &State) -> Result<(), DsmError> {
+        crate::storage::client_db::store_bcr_state(state, false).map_err(|e| {
+            DsmError::state_machine(format!(
+                "Failed to archive canonical state {} for sparse replay: {e}",
+                state.state_number
+            ))
+        })
+    }
+
     /// Initialize CoreSDK with default device identity
     pub fn new() -> Result<Self, DsmError> {
         Self::new_with_device(DeviceInfo::from_hashed_label("default_device", vec![0; 32]))
@@ -199,11 +199,15 @@ impl CoreSDK {
         // Preload standard token policies (ERA) synchronously
         policy_system.preload_standard_policies_blocking()?;
 
+        let state_machine = Mutex::new(StateMachine::new_with_strategy_and_device_id(
+            KeyDerivationStrategy::Canonical,
+            device_info.device_id,
+        ));
+
+        Self::restore_latest_archived_state(&state_machine, &device_info.device_id)?;
+
         Ok(Self {
-            state_machine: Mutex::new(StateMachine::new_with_strategy_and_device_id(
-                KeyDerivationStrategy::Canonical,
-                device_info.device_id,
-            )),
+            state_machine,
             device_info,
             policy_system,
             audit_ctr: AtomicU64::new(0),
@@ -324,6 +328,24 @@ impl CoreSDK {
             .ok_or_else(|| DsmError::state_machine("No current state available"))
     }
 
+    /// Refresh the in-memory canonical tip from the latest archived sparse-replay
+    /// snapshot for this device.
+    pub fn restore_latest_archived_state_for_device(&self) -> Result<(), DsmError> {
+        Self::restore_latest_archived_state(&self.state_machine, &self.device_info.device_id)
+    }
+
+    /// Replace the in-memory canonical tip with a caller-supplied archived state snapshot.
+    /// Used by failed-online-send rollback after the bad archived successor has been removed.
+    pub fn restore_state_snapshot(&self, state: &State) -> Result<(), DsmError> {
+        if state.device_info.device_id != self.device_info.device_id {
+            return Err(DsmError::state_machine(
+                "restore_state_snapshot: device mismatch",
+            ));
+        }
+        self.state_machine.lock().set_state(state.clone());
+        Ok(())
+    }
+
     /// Normalize stale balance key formats in the current state.
     ///
     /// Migrates:
@@ -339,15 +361,32 @@ impl CoreSDK {
         let mut updated = state;
         let mut changed = false;
 
+        let canonical_era_key = dsm::core::token::derive_canonical_balance_key(
+            crate::policy::builtins::NATIVE_POLICY_COMMIT,
+            &updated.device_info.public_key,
+            "ERA",
+        );
+
         // Collect keys to remove and entries to migrate
         let mut keys_to_remove: Vec<String> = Vec::new();
         let mut era_max: Option<dsm::types::token_types::Balance> = None;
 
         for (key, balance) in &updated.token_balances {
+            if key == "ERA" {
+                keys_to_remove.push(key.clone());
+                era_max = Some(match era_max {
+                    Some(existing) if existing.value() >= balance.value() => existing,
+                    _ => balance.clone(),
+                });
+                continue;
+            }
+
             // Detect pipe-format ERA keys like "{u128}|ERA"
             if let Some((_, token_id)) = key.split_once('|') {
                 if token_id == "ERA" {
-                    keys_to_remove.push(key.clone());
+                    if key != &canonical_era_key {
+                        keys_to_remove.push(key.clone());
+                    }
                     era_max = Some(match era_max {
                         Some(existing) if existing.value() >= balance.value() => existing,
                         _ => balance.clone(),
@@ -366,15 +405,15 @@ impl CoreSDK {
             changed = true;
         }
 
-        // Merge migrated ERA balance with any existing plain "ERA" entry
+        // Merge migrated ERA balance into the canonical balance-key entry
         if let Some(migrated) = era_max {
             let existing = updated
                 .token_balances
-                .get("ERA")
+                .get(&canonical_era_key)
                 .map(|b| b.value())
                 .unwrap_or(0);
             if migrated.value() > existing {
-                updated.token_balances.insert("ERA".to_string(), migrated);
+                updated.token_balances.insert(canonical_era_key, migrated);
                 changed = true;
             }
         }
@@ -466,11 +505,21 @@ impl CoreSDK {
     /// Execute a full DSM Operation (preserving signatures and proofs)
     /// This bypasses the simplified CoreSDK::Operation wrapper to ensure
     /// authorization material reaches the state machine intact.
+    /// Execute a DSM operation through the state machine and archive the result.
+    ///
+    /// Returns the post-transition state with correct balances and hash.
+    /// Callers are responsible for calling `sync_token_projection_from_state`
+    /// (or `sync_token_projection_best_effort`) after this returns, since the
+    /// projection sync requires token_id and policy_commit which are
+    /// caller-specific context.
     pub fn execute_dsm_operation(
         &self,
         dsm_operation: dsm::types::operations::Operation,
     ) -> Result<State, DsmError> {
-        self.state_machine.lock().execute_transition(dsm_operation)
+        let mut sm = self.state_machine.lock();
+        let next_state = sm.execute_transition(dsm_operation.clone())?;
+        Self::archive_state_snapshot(&next_state)?;
+        Ok(next_state)
     }
 
     pub fn register_token_manager(
@@ -568,12 +617,17 @@ impl CoreSDK {
             crate::util::text_id::encode_base32_crockford(&genesis_state.hash)
         );
 
-        // Install the new genesis as current state
+        // Install the new genesis as current state and archive it so that
+        // bilateral settlement always has a prior BCR state to reconcile against
+        // (the contact-add handshake anchors the chain tip; the genesis archive
+        // ensures latest_archived_state() is never None).
         {
             let mut sm = self.state_machine.lock();
             let mut s = State::new_genesis(genesis_state.initial_entropy, self.device_info.clone());
             s.hash = genesis_state.hash;
+            let snapshot = s.clone();
             sm.set_state(s);
+            Self::archive_state_snapshot(&snapshot)?;
         }
 
         // Optional dev-only seeding (idempotent)
@@ -1068,6 +1122,58 @@ impl CoreSDK {
         self.hash_state(&state_bytes)
     }
 
+    fn sync_token_projection_best_effort(
+        &self,
+        local_b32: &str,
+        token_id: &[u8],
+        new_state: &State,
+        context: &str,
+    ) {
+        let token_id_str = String::from_utf8_lossy(token_id);
+        let canonical_token_id = if token_id_str.trim().is_empty() {
+            "ERA"
+        } else {
+            token_id_str.as_ref()
+        };
+
+        let existing_locked = match client_db::get_locked_balance(local_b32, canonical_token_id) {
+            Ok(value) => value,
+            Err(error) => {
+                log::error!(
+                    "[{context}] CRITICAL: failed to read {canonical_token_id} locked balance: {error}"
+                );
+                0
+            }
+        };
+
+        let policy_commit = match self.resolve_policy_commit_strict(token_id) {
+            Ok(commit) => commit,
+            Err(error) => {
+                log::error!(
+                    "[{context}] CRITICAL: failed to resolve policy commit for {canonical_token_id}: {error}"
+                );
+                return;
+            }
+        };
+
+        if let Err(error) = client_db::sync_token_projection_from_state(
+            local_b32,
+            canonical_token_id,
+            &policy_commit,
+            new_state,
+            existing_locked,
+        ) {
+            log::error!(
+                "[{context}] CRITICAL: failed to sync {canonical_token_id} projection: {error}"
+            );
+        } else {
+            log::info!(
+                "[{context}] token projection synced: {canonical_token_id} state_number={}",
+                new_state.state_number
+            );
+        }
+    }
+
     /// Apply a decoded Operation with replay protection and state machine integration.
     /// This executes the operation through the state machine for validation and state transition,
     /// then persists the results to the database with idempotency checks.
@@ -1092,7 +1198,7 @@ impl CoreSDK {
         }
 
         // First, execute the operation through the state machine for validation and state transition
-        let _new_state = self.execute_dsm_operation(op.clone()).map_err(|e| {
+        let new_state = self.execute_dsm_operation(op.clone()).map_err(|e| {
             DsmError::invalid_operation(format!(
                 "apply_operation_with_replay_protection: state machine execution failed: {}",
                 e
@@ -1171,9 +1277,7 @@ impl CoreSDK {
                     ));
                 }
 
-                // Apply atomically in SQLite: marks nonce spent and credits wallet balance.
-                // atomic_receive_transfer always credits wallet_state.balance (ERA).
-                // For non-ERA tokens we correct this below.
+                // Apply atomically in SQLite: marks nonce spent and records receive metadata.
                 let local_b32 =
                     crate::util::text_id::encode_base32_crockford(&local_device_id_bytes);
                 // Resolve policy_commit for hierarchical domain separation in chain tip.
@@ -1195,48 +1299,17 @@ impl CoreSDK {
                     )
                 })?;
 
-                // atomic_receive_transfer only credits wallet_state.balance (ERA).
-                // For non-ERA tokens, credit the token_balances table and reverse
-                // the incorrect ERA credit. Matches pattern in unilateral_ops_sdk.rs:644-655.
-                let token_id_str = String::from_utf8_lossy(&token_id);
-                if !token_id.is_empty() && token_id.as_slice() != b"ERA" {
-                    let (prev, existing_locked) = match client_db::get_token_balance(
-                        &local_b32,
-                        &token_id_str,
-                    ) {
-                        Ok(Some((a, l))) => (a, l),
-                        Ok(None) => (0, 0),
-                        Err(e) => {
-                            log::error!("[apply_operation] CRITICAL: failed to read {token_id_str} balance: {e}");
-                            (0, 0)
-                        }
-                    };
-                    if let Err(e) = client_db::upsert_token_balance(
-                        &local_b32,
-                        &token_id_str,
-                        prev.saturating_add(amount_val),
-                        existing_locked,
-                    ) {
-                        log::error!("[apply_operation] CRITICAL: failed to credit {token_id_str} balance: {e}");
-                    }
-                    // Reverse the ERA credit that atomic_receive_transfer applied
-                    if let Ok(Some(ws)) = client_db::get_wallet_state(&local_b32) {
-                        let corrected = ws.balance.saturating_sub(amount_val);
-                        if let Err(e) = client_db::update_wallet_balance(&local_b32, corrected) {
-                            log::error!("[apply_operation] failed to reverse ERA credit: {e}");
-                        }
-                    }
-                    log::info!(
-                        "[apply_operation] token balance corrected: {} +{} (ERA reversed)",
-                        token_id_str,
-                        amount_val
-                    );
-                }
+                self.sync_token_projection_best_effort(
+                    &local_b32,
+                    &token_id,
+                    &new_state,
+                    "apply_operation",
+                );
 
                 log::info!(
                     "[apply_operation] ✅ applied transfer tx={} token={} amount={} from={}",
                     String::from_utf8_lossy(tx_id.as_bytes()),
-                    token_id_str,
+                    String::from_utf8_lossy(&token_id),
                     amount_val,
                     sender_device_id
                 );
@@ -1319,9 +1392,7 @@ impl CoreSDK {
                     ));
                 }
 
-                // Apply atomically in SQLite: marks nonce spent and credits wallet balance.
-                // atomic_receive_transfer always credits wallet_state.balance (ERA).
-                // For non-ERA tokens we correct this below.
+                // Apply atomically in SQLite: marks nonce spent and records receive metadata.
                 let local_b32 =
                     crate::util::text_id::encode_base32_crockford(&local_device_id_bytes);
                 // Resolve policy_commit for hierarchical domain separation in chain tip.
@@ -1343,46 +1414,17 @@ impl CoreSDK {
                     )
                 })?;
 
-                // For non-ERA tokens, credit the token_balances table and reverse
-                // the incorrect ERA credit. Matches pattern in unilateral_ops_sdk.rs:644-655.
-                let token_id_str = String::from_utf8_lossy(&token_id);
-                if !token_id.is_empty() && token_id.as_slice() != b"ERA" {
-                    let (prev, existing_locked) = match client_db::get_token_balance(
-                        &local_b32,
-                        &token_id_str,
-                    ) {
-                        Ok(Some((a, l))) => (a, l),
-                        Ok(None) => (0, 0),
-                        Err(e) => {
-                            log::error!("[apply_operation] CRITICAL: failed to read {token_id_str} balance: {e}");
-                            (0, 0)
-                        }
-                    };
-                    if let Err(e) = client_db::upsert_token_balance(
-                        &local_b32,
-                        &token_id_str,
-                        prev.saturating_add(amount_val),
-                        existing_locked,
-                    ) {
-                        log::error!("[apply_operation] CRITICAL: failed to credit {token_id_str} balance: {e}");
-                    }
-                    if let Ok(Some(ws)) = client_db::get_wallet_state(&local_b32) {
-                        let corrected = ws.balance.saturating_sub(amount_val);
-                        if let Err(e) = client_db::update_wallet_balance(&local_b32, corrected) {
-                            log::error!("[apply_operation] failed to reverse ERA credit: {e}");
-                        }
-                    }
-                    log::info!(
-                        "[apply_operation] token balance corrected: {} +{} (ERA reversed)",
-                        token_id_str,
-                        amount_val
-                    );
-                }
+                self.sync_token_projection_best_effort(
+                    &local_b32,
+                    &token_id,
+                    &new_state,
+                    "apply_operation",
+                );
 
                 log::info!(
                     "[apply_operation] ✅ applied receive tx={} token={} amount={} from={}",
                     String::from_utf8_lossy(tx_id.as_bytes()),
-                    token_id_str,
+                    String::from_utf8_lossy(&token_id),
                     amount_val,
                     sender_device_id
                 );
@@ -1777,6 +1819,7 @@ impl CoreSDK {
 mod tests {
     use super::*;
     use dsm::types::operations::Operation as DsmOperation;
+    use serial_test::serial;
 
     fn rt() -> tokio::runtime::Runtime {
         match tokio::runtime::Runtime::new() {
@@ -1857,6 +1900,99 @@ mod tests {
             sig1, sig2,
             "signing must be deterministic for identical input"
         );
+    }
+
+    #[test]
+    #[serial]
+    fn execute_operation_archives_and_restores_latest_state() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+
+        let device = DeviceInfo::from_hashed_label("archived_state_device", vec![3u8; 32]);
+        let sdk = CoreSDK::new_with_device(device.clone()).expect("init sdk");
+        sdk.initialize_with_genesis_state()
+            .expect("initialize genesis state");
+
+        let (pk, sk) =
+            dsm::crypto::sphincs::generate_sphincs_keypair().expect("generate test keypair");
+        sdk.set_signing_key(sk);
+        sdk.update_signing_public_key(pk);
+
+        let op = sdk
+            .sign_operation_sphincs(DsmOperation::Generic {
+                operation_type: b"archive.test".to_vec(),
+                data: vec![0xAB, 0xCD],
+                message: "persist state".to_string(),
+                signature: vec![],
+            })
+            .expect("sign operation");
+
+        let executed = sdk.execute_dsm_operation(op).expect("execute operation");
+        assert!(executed.state_number > 0, "state number should advance");
+
+        let archived = crate::storage::client_db::get_bcr_states(&device.device_id, false)
+            .expect("load archived states");
+        assert!(
+            archived
+                .iter()
+                .any(|state| state.state_number == executed.state_number),
+            "executed canonical state must be archived for sparse replay"
+        );
+
+        let restored = CoreSDK::new_with_device(device).expect("restore sdk from archive");
+        let restored_state = restored.get_current_state().expect("current state");
+        assert_eq!(
+            restored_state.state_number, executed.state_number,
+            "CoreSDK startup must restore the latest archived canonical state"
+        );
+        assert_eq!(
+            restored_state.hash, executed.hash,
+            "restored canonical state hash must match archived state"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn restore_state_snapshot_rewinds_in_memory_tip() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+
+        let device = DeviceInfo::from_hashed_label("rollback_state_device", vec![7u8; 32]);
+        let sdk = CoreSDK::new_with_device(device.clone()).expect("init sdk");
+        sdk.initialize_with_genesis_state()
+            .expect("initialize genesis state");
+        let prior = sdk.get_current_state().expect("prior state");
+
+        let (pk, sk) =
+            dsm::crypto::sphincs::generate_sphincs_keypair().expect("generate test keypair");
+        sdk.set_signing_key(sk);
+        sdk.update_signing_public_key(pk);
+
+        let op = sdk
+            .sign_operation_sphincs(DsmOperation::Generic {
+                operation_type: b"rollback.test".to_vec(),
+                data: vec![0x01],
+                message: "advance".to_string(),
+                signature: vec![],
+            })
+            .expect("sign operation");
+        let advanced = sdk.execute_dsm_operation(op).expect("execute operation");
+        assert!(
+            advanced.state_number > prior.state_number,
+            "state must advance"
+        );
+
+        sdk.restore_state_snapshot(&prior)
+            .expect("restore prior snapshot");
+        let current = sdk.get_current_state().expect("current state");
+        assert_eq!(current.state_number, prior.state_number);
+        assert_eq!(current.hash, prior.hash);
     }
 }
 

@@ -189,7 +189,6 @@ fn map_error_code(error: &DsmError) -> ErrorCode {
         | DsmError::DeviceHierarchy(_)
         | DsmError::ExternalCommitment(_)
         | DsmError::Identity(_)
-        | DsmError::Batch(_)
         | DsmError::TokenError { .. } => ErrorCode::Crypto,
 
         DsmError::Security { .. } => ErrorCode::Crypto,
@@ -394,7 +393,7 @@ impl From<pb::Error> for TransportError {
 pub fn state_to_wire(s: &State) -> pb::StateWire {
     // Collect and sort by token_id for determinism
     let mut entries: Vec<(&String, &Balance)> = s.token_balances.iter().collect();
-    entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+    entries.sort_by_key(|(a, _)| *a);
 
     let token_balances = entries
         .into_iter()

@@ -5,6 +5,11 @@ import React, { createContext, useContext, useEffect, useMemo } from 'react';
 import { useBridgeEvent } from '@/hooks/useBridgeEvents';
 import { hasIdentity } from '../utils/identity';
 import { contactsStore, useContactsStore } from '../stores/contactsStore';
+import {
+  setBleIdentityForAdvertising,
+  startBleAdvertisingViaRouter,
+} from '../dsm/WebViewBridge';
+import { getHeaders } from '../dsm/identity';
 
 export interface Contact {
   id: string;
@@ -56,10 +61,39 @@ const defaultValue: ContactsContextValue = {
 
 export const ContactsContext = createContext<ContactsContextValue>(defaultValue);
 
+/**
+ * Ensure BLE advertising is active so peers can initiate bilateral transfers.
+ * Called by EnhancedWalletScreen on mount/visibility change, and by
+ * ContactsProvider on identity.ready and contact.bleMapped events.
+ */
+export async function ensureBleAdvertisingIfContacts(): Promise<void> {
+  try {
+    const contacts = contactsStore.getSnapshot().contacts;
+    const hasBleContacts = contacts.some((c: any) => c.bleAddress);
+    if (!hasBleContacts) return;
+
+    // §2.3-2.4: Device is bound to genesis via DevID ∈ R_G.
+    // Fetch the real genesis hash — never advertise all-zeros.
+    const headers = await getHeaders();
+    const devId = headers.deviceId;
+    const genesisHash = headers.genesisHash;
+    if (!devId || devId.length !== 32) return;
+    if (!genesisHash || genesisHash.length !== 32) return;
+
+    await setBleIdentityForAdvertising(new Uint8Array(genesisHash), new Uint8Array(devId));
+    await startBleAdvertisingViaRouter();
+  } catch {
+    // Best-effort — don't block contacts flow if BLE advertising fails
+  }
+}
+
 export function ContactsProvider({ children }: { children: React.ReactNode }) {
   const state = useContactsStore();
 
-  useBridgeEvent('contact.bleMapped', contactsStore.handleBleMapped, []);
+  useBridgeEvent('contact.bleMapped', (detail) => {
+    contactsStore.handleBleMapped(detail);
+    void ensureBleAdvertisingIfContacts();
+  }, []);
   useBridgeEvent('contact.bleUpdated', contactsStore.handleBleUpdated, []);
   useBridgeEvent('contact.added', () => {
     void contactsStore.refreshContacts();
@@ -68,7 +102,11 @@ export function ContactsProvider({ children }: { children: React.ReactNode }) {
     void contactsStore.refreshContacts();
   }, []);
   useBridgeEvent('identity.ready', () => {
-    void contactsStore.refreshContacts();
+    // After identity is ready, refresh contacts then start advertising
+    // so peers can discover us for bilateral transfers.
+    void contactsStore.refreshContacts().then(() => {
+      void ensureBleAdvertisingIfContacts();
+    });
   }, []);
 
   useEffect(() => {

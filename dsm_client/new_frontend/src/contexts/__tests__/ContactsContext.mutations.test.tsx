@@ -12,9 +12,16 @@ jest.mock('../../hooks/useBridgeEvents', () => ({
 }));
 
 describe('ContactsContext strict mutations', () => {
+  let errorSpy: jest.SpyInstance;
+
   beforeEach(() => {
     jest.clearAllMocks();
+    errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
     (hasIdentity as jest.MockedFunction<typeof hasIdentity>).mockResolvedValue(false);
+  });
+
+  afterEach(() => {
+    errorSpy.mockRestore();
   });
 
   it('fails closed when updateContactStrict is unavailable', async () => {

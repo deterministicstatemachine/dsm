@@ -21,10 +21,17 @@ function frameEnvelope(envelope: pb.Envelope): Uint8Array {
 }
 
 describe('offline transfer sender/recipient consistency through WebView bridge', () => {
+  let warnSpy: jest.SpyInstance;
+
   beforeEach(() => {
     jest.restoreAllMocks();
+    warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
     (global as any).window = (global as any).window || {};
     (global as any).window.DsmBridge = (global as any).window.DsmBridge || {};
+  });
+
+  afterEach(() => {
+    warnSpy.mockRestore();
   });
 
   test('dBTC offline send is encoded as wallet.sendOffline with token and memo hints', async () => {
@@ -40,7 +47,7 @@ describe('offline transfer sender/recipient consistency through WebView bridge',
       const argPack = pb.ArgPack.fromBinary(req.payload.value.args);
       const prepare = pb.BilateralPrepareRequest.fromBinary(argPack.body);
       expect(prepare.counterpartyDeviceId).toEqual(to);
-      expect(prepare.transferAmount).toBe(5n);
+      expect(prepare.transferAmountDisplay).toBe('5');
       expect(prepare.bleAddress).toBe(bleAddress);
       expect(prepare.tokenIdHint).toBe('dBTC');
       expect(prepare.memoHint).toBe('hi');

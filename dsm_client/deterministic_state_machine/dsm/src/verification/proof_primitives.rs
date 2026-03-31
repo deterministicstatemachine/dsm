@@ -106,7 +106,10 @@ pub fn verify_smt_inclusion_proof_bytes(
     proof_bytes: &[u8],
 ) -> Result<bool, DsmError> {
     if proof_bytes.is_empty() {
-        // Empty proof is valid only if tree is empty (root == all-zeros sentinel).
+        // Empty proof is valid only if tree is empty.
+        // Core SMT uses ZERO_LEAF ([0u8; 32]) as empty sentinel.
+        // SparseMerkleTree uses a computed empty root — its proofs
+        // go through SparseMerkleTree::verify_proof_against_root() instead.
         return Ok(root.iter().all(|&b| b == 0));
     }
 
@@ -126,6 +129,7 @@ pub fn verify_smt_inclusion_proof_bytes(
 
     // Require an existing leaf with matching key/value.
     let leaf_ok = match &proof.v_path {
+        Some(pb::smt_proof::VPath::Absent(_)) => true,
         Some(pb::smt_proof::VPath::ExistingLeaf(l)) => {
             l.key.len() == 32
                 && l.value.len() == 32
@@ -138,7 +142,7 @@ pub fn verify_smt_inclusion_proof_bytes(
         return Ok(false);
     }
 
-    let leaf_hash = hash_smt_leaf(relationship_key, value);
+    let leaf_hash = hash_smt_leaf(value);
 
     // siblings are root->leaf (MSB-first), so walk in reverse to rebuild root
     let mut acc = leaf_hash;

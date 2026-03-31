@@ -25,8 +25,9 @@ object BleConstants {
     const val DSM_MANUFACTURER_ID = 0xFFFF
     val DSM_MANUFACTURER_MAGIC = byteArrayOf(0x44, 0x53, 0x4D, 0x01)
 
-    // MTU settings
-    const val MTU_SIZE = 247
+    // MTU settings — request Android max (517) to trigger DLE at the controller level.
+    // Actual negotiated MTU may be lower; chunk size adapts dynamically.
+    const val MTU_SIZE = 517
     const val IDENTITY_MTU_REQUEST = 512
     const val MIN_IDENTITY_MTU = 67
 }

@@ -51,6 +51,21 @@ fn empty(env: &mut JNIEnv<'_>) -> jni::sys::jbyteArray {
     }
 }
 
+fn build_app_state_envelope(resp: pb::AppStateResponse) -> Result<Vec<u8>, String> {
+    let envelope = pb::Envelope {
+        version: 3,
+        headers: None,
+        message_id: vec![0u8; 16],
+        payload: Some(pb::envelope::Payload::AppStateResponse(resp)),
+    };
+    let mut buf = Vec::with_capacity(1 + envelope.encoded_len());
+    buf.push(0x03);
+    envelope
+        .encode(&mut buf)
+        .map_err(|e| format!("app state envelope encode failed: {e}"))?;
+    Ok(buf)
+}
+
 /// Create a BleEvent envelope for device_found (scanner discovered a DSM peer).
 #[no_mangle]
 pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_createBleDeviceFoundEnvelope(
@@ -1262,7 +1277,14 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_processGattId
                 }
             };
 
-            emit_identity_read_result(&mut env, true, &write_back, "")
+            emit_identity_read_result_with_identity(
+                &mut env,
+                true,
+                &write_back,
+                "",
+                &char_value.device_id,
+                &char_value.genesis_hash,
+            )
         }),
     )
 }
@@ -1274,10 +1296,31 @@ fn emit_identity_read_result(
     write_back_envelope: &[u8],
     error_message: &str,
 ) -> jni::sys::jbyteArray {
+    emit_identity_read_result_with_identity(
+        env,
+        success,
+        write_back_envelope,
+        error_message,
+        &[],
+        &[],
+    )
+}
+
+/// Full version that includes the peer's identity for Kotlin-side anchoring.
+fn emit_identity_read_result_with_identity(
+    env: &mut JNIEnv<'_>,
+    success: bool,
+    write_back_envelope: &[u8],
+    error_message: &str,
+    peer_device_id: &[u8],
+    peer_genesis_hash: &[u8],
+) -> jni::sys::jbyteArray {
     let result = pb::BleGattIdentityReadResult {
         success,
         write_back_envelope: write_back_envelope.to_vec(),
         error_message: error_message.to_string(),
+        peer_device_id: peer_device_id.to_vec(),
+        peer_genesis_hash: peer_genesis_hash.to_vec(),
     };
     let encoded = result.encode_to_vec();
     match env.byte_array_from_slice(&encoded) {
@@ -1627,6 +1670,42 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_createNfcReco
                 Ok(a) => a.into_raw(),
                 Err(e) => {
                     log::error!("createNfcRecoveryCapsuleEnvelope: byte_array_from_slice: {e}");
+                    empty(&mut env)
+                }
+            }
+        }),
+    )
+}
+
+/// NFC write committed — Rust-authored envelope for the frontend event bridge.
+#[no_mangle]
+pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_createNfcBackupWrittenEnvelope(
+    env: jni::sys::JNIEnv,
+    _clazz: jni::sys::jclass,
+) -> jni::sys::jbyteArray {
+    crate::jni::bridge_utils::jni_catch_unwind_jbytearray(
+        "createNfcBackupWrittenEnvelope",
+        std::panic::AssertUnwindSafe(|| {
+            let mut env = match unsafe { env_from(env) } {
+                Some(e) => e,
+                None => return std::ptr::null_mut(),
+            };
+            let resp = pb::AppStateResponse {
+                key: "nfc.backup_written".to_string(),
+                value: Some("committed=true".to_string()),
+            };
+            match build_app_state_envelope(resp) {
+                Ok(bytes) => match env.byte_array_from_slice(&bytes) {
+                    Ok(arr) => arr.into_raw(),
+                    Err(e) => {
+                        log::error!(
+                            "createNfcBackupWrittenEnvelope: byte_array_from_slice failed: {e}"
+                        );
+                        empty(&mut env)
+                    }
+                },
+                Err(e) => {
+                    log::error!("createNfcBackupWrittenEnvelope: {e}");
                     empty(&mut env)
                 }
             }

@@ -107,7 +107,10 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_addSecondaryDevice<'a>(
                     // Persist identity to AppState (mirrors create_genesis flow)
                     let public_key =
                         crate::sdk::app_state::AppState::get_public_key().unwrap_or_default();
-                    let smt_root = vec![0u8; 32];
+                    let smt_root = dsm::merkle::sparse_merkle_tree::empty_root(
+                        dsm::merkle::sparse_merkle_tree::DEFAULT_SMT_HEIGHT,
+                    )
+                    .to_vec();
                     crate::sdk::app_state::AppState::set_identity_info(
                         device_id.clone(),
                         public_key,
@@ -115,6 +118,14 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_addSecondaryDevice<'a>(
                         smt_root,
                     );
                     crate::sdk::app_state::AppState::set_has_identity(true);
+                    // Compute and persist Device Tree root (§2.3) — same as primary genesis path.
+                    if device_id.len() == 32 {
+                        let mut dev_arr = [0u8; 32];
+                        dev_arr.copy_from_slice(&device_id);
+                        let root = dsm::common::device_tree::DeviceTree::single(dev_arr).root();
+                        crate::sdk::app_state::AppState::set_device_tree_root(root);
+                        log::info!("[SecondaryDevice] Device tree root persisted for bilateral receipt verification");
+                    }
                     let _ = crate::initialize_sdk_context(
                         device_id.clone(),
                         genesis_hash.clone(),

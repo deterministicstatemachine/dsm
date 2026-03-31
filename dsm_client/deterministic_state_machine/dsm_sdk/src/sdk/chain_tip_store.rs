@@ -6,9 +6,9 @@
 //! and retrieve per-contact chain tips across process restarts.
 
 use dsm::core::chain_tip_store::ChainTipStore;
+use dsm::types::error::DsmError;
 
 use crate::storage::client_db;
-use log::warn;
 
 /// SQLite-backed chain tip store for SDK usage.
 #[derive(Default, Clone)]
@@ -25,9 +25,17 @@ impl ChainTipStore for SqliteChainTipStore {
         client_db::get_contact_chain_tip_raw(device_id)
     }
 
-    fn set_contact_chain_tip(&self, device_id: &[u8; 32], new_tip: [u8; 32]) {
-        if let Err(e) = client_db::update_finalized_bilateral_chain_tip(device_id, &new_tip) {
-            warn!("SqliteChainTipStore: failed to persist finalized chain tip: {e}");
-        }
+    fn set_contact_chain_tip(
+        &self,
+        device_id: &[u8; 32],
+        expected_parent_tip: [u8; 32],
+        new_tip: [u8; 32],
+    ) -> Result<bool, DsmError> {
+        client_db::try_advance_finalized_bilateral_chain_tip(
+            device_id,
+            &expected_parent_tip,
+            &new_tip,
+        )
+        .map_err(|e| DsmError::InvalidState(format!("SqliteChainTipStore persist failed: {e}")))
     }
 }

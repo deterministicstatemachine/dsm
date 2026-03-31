@@ -1180,9 +1180,11 @@ impl DsmImplementationHarness {
             .devices
             .get_mut(owner)
             .ok_or_else(|| anyhow!("missing contact owner in direct replay"))?;
+        let smt = dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256);
+        let smt_key = [0u8; 32];
         owner_device
             .contact_manager
-            .update_contact_chain_tip_unilateral(remote_device_id, new_tip)
+            .update_contact_chain_tip_unilateral(remote_device_id, new_tip, &smt, &smt_key)
             .map_err(|e| {
                 anyhow!("DsmContactManager::update_contact_chain_tip_unilateral failed: {e}")
             })?;

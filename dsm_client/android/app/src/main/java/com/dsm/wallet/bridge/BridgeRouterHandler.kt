@@ -69,27 +69,34 @@ internal object BridgeRouterHandler {
                 return out
             }
             "device.ble.advertise.start" -> {
-                val ctx = com.dsm.wallet.ui.MainActivity.getActiveInstance()?.baseContext
+                val act = com.dsm.wallet.ui.MainActivity.getActiveInstance()
+                val ctx = act?.baseContext
                 val ok = if (ctx != null) com.dsm.wallet.bridge.ble.BleCoordinator.getInstance(ctx).startAdvertising() else false
                 Log.i(logTag, "device.ble.advertise.start: result=$ok")
+                // Persist advertising desire in background service so it survives backgrounding
+                if (ok) {
+                    act?.setBleAdvertisingDesired(true)
+                }
                 val outBytes = byteArrayOf(if (ok) 1 else 0)
                 val out = ByteArray(reqId.size + outBytes.size)
                 System.arraycopy(reqId, 0, out, 0, reqId.size)
                 System.arraycopy(outBytes, 0, out, reqId.size, outBytes.size)
-                com.dsm.wallet.ui.MainActivity.getActiveInstance()?.let { act -> act.runOnUiThread {
-                    act.publishCurrentSessionState("device.ble.advertise.start")
+                act?.let { a -> a.runOnUiThread {
+                    a.publishCurrentSessionState("device.ble.advertise.start")
                 }}
                 return out
             }
             "device.ble.advertise.stop" -> {
-                val ctx = com.dsm.wallet.ui.MainActivity.getActiveInstance()?.baseContext
+                val act = com.dsm.wallet.ui.MainActivity.getActiveInstance()
+                val ctx = act?.baseContext
                 if (ctx != null) com.dsm.wallet.bridge.ble.BleCoordinator.getInstance(ctx).stopAdvertising()
+                act?.setBleAdvertisingDesired(false)
                 Log.i(logTag, "device.ble.advertise.stop")
                 val out = ByteArray(reqId.size + 1)
                 System.arraycopy(reqId, 0, out, 0, reqId.size)
                 out[reqId.size] = 1
-                com.dsm.wallet.ui.MainActivity.getActiveInstance()?.let { act -> act.runOnUiThread {
-                    act.publishCurrentSessionState("device.ble.advertise.stop")
+                act?.let { a -> a.runOnUiThread {
+                    a.publishCurrentSessionState("device.ble.advertise.stop")
                 }}
                 return out
             }
@@ -107,6 +114,41 @@ internal object BridgeRouterHandler {
                 com.dsm.wallet.ui.MainActivity.getActiveInstance()?.let { act -> act.runOnUiThread {
                     act.publishCurrentSessionState(name)
                 }}
+                return result
+            }
+            "nfc.ring.read" -> {
+                // NFC ring read flow (Invariant: Rust first, Kotlin operates hardware).
+                //
+                // 1. Forward to Rust for authorization.
+                // 2. If authorized, enable reader mode on MainActivity (inline — no Activity switch).
+                // 3. Return the Rust FramedEnvelopeV3 to the caller.
+
+                val nativeFramedPayload2 = BridgeEnvelopeCodec.encodeAppRouterPayload(name, args)
+                val rustResponse = Unified.appRouterInvokeFramedSafe(nativeFramedPayload2)
+
+                val isError = Unified.isErrorEnvelope(rustResponse) != 0
+                if (!isError) {
+                    com.dsm.wallet.ui.MainActivity.getActiveInstance()?.startNfcReader()
+                    Log.i(logTag, "nfc.ring.read: Enabled inline NFC reader on MainActivity")
+                } else {
+                    Log.w(logTag, "nfc.ring.read: Rust rejected read request")
+                }
+
+                val result = ByteArray(reqId.size + rustResponse.size)
+                System.arraycopy(reqId, 0, result, 0, reqId.size)
+                System.arraycopy(rustResponse, 0, result, reqId.size, rustResponse.size)
+                return result
+            }
+            "nfc.ring.stopRead" -> {
+                // Stop NFC reader mode on MainActivity.
+                com.dsm.wallet.ui.MainActivity.getActiveInstance()?.stopNfcReader()
+                Log.i(logTag, "nfc.ring.stopRead: Disabled NFC reader")
+
+                // No Rust round-trip needed — this is a pure hardware teardown.
+                val ack = BridgeEnvelopeCodec.encodeAppRouterPayload("nfc.ring.stopRead", ByteArray(0))
+                val result = ByteArray(reqId.size + ack.size)
+                System.arraycopy(reqId, 0, result, 0, reqId.size)
+                System.arraycopy(ack, 0, result, reqId.size, ack.size)
                 return result
             }
             "nfc.ring.write" -> {
