@@ -26,7 +26,13 @@ use dsm::types::error::DsmError;
 
 use crate::storage::client_db::types::ChunkPersistenceParams;
 
-const MAX_BLE_CHUNK_SIZE: usize = 180;
+/// BLE chunk payload budget. Each chunk is wrapped in a BleChunk protobuf
+/// (BleFrameHeader + data) adding ~50-60 bytes of framing. The total
+/// serialized BleChunk must fit within (MTU - 3) for GATT notifications.
+/// With MTU 517 → max notification = 514 bytes → 514 - 60 framing = ~454.
+/// Using 400 gives ~460 total, safely under 514 with headroom.
+/// A 29KB SPHINCS+ signature fits in ~75 chunks (~30s) vs 168 at 180 bytes.
+const MAX_BLE_CHUNK_SIZE: usize = 400;
 const MAX_PENDING_REASSEMBLY: usize = 256;
 
 /// Render a short, human-readable identifier for logs.

@@ -1012,36 +1012,11 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
         val peer = peers[address]
         val removed = peer?.gattClientSession
 
-        // If the peer is connected to our GATT server, do not forcefully close the client
-        // session object right away, as it can cause Android to tear down the entire
-        // underlying ACL link and break the server notifications.
-        if (gattServer.isServerClient(address)) {
-            Log.w(
-                "BleCoordinator",
-                "dropClientSession($address): reason=$reason removedSession=${removed != null} (avoiding closeQuietly because peer is GATT server client)"
-            )
-            // Just clear the client fields without closing the underlying GATT —
-            // the server relies on the shared BLE radio link.
-            peer?.let {
-                it.gattClientSession = null
-                it.isConnected = false
-                it.negotiatedMtu = 23
-                it.serviceDiscoveryCompleted = false
-                it.lastError = null
-                it.currentTransaction = null
-                it.identityExchangeInProgress = false
-                it.pairingInProgress = false
-                it.connectResult?.complete(false)
-                it.connectResult = null
-                it.pendingPairingConfirm = null
-            }
-        } else {
-            peer?.clearClientState()
-            Log.w(
-                "BleCoordinator",
-                "dropClientSession($address): reason=$reason removedSession=${removed != null}"
-            )
-        }
+        peer?.clearClientState()
+        Log.w(
+            "BleCoordinator",
+            "dropClientSession($address): reason=$reason removedSession=${removed != null}"
+        )
         if (peers[address]?.isEmpty == true) peers.remove(address)
     }
 

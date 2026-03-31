@@ -21,7 +21,9 @@ pub use crate::crypto::sphincs::SphincsVariant as ParameterSet;
 use crate::types::error::DsmError;
 use zeroize::Zeroize;
 
-/// Prefer strong, steady performance & headroom for long-term deployments.
+/// SPX256s: 256-bit post-quantum security (29,792 byte signatures).
+/// BLE bilateral transfers compress the envelope before chunking to reduce
+/// the chunk count from 168 to ~50-60 for acceptable transfer times.
 const DEFAULT_PARAMS: ParameterSet = ParameterSet::SPX256s;
 
 /// Signature bytes alias
