@@ -33,7 +33,7 @@ VIOLATIONS=0
 
 # Code directories to scan (sources only). Keep this definition BEFORE any checks that use it.
 CODE_DIRS=(
-    "$REPO_ROOT/dsm_client/new_frontend/src"
+    "$REPO_ROOT/dsm_client/frontend/src"
     "$REPO_ROOT/dsm_client/android/app/src"
     "$REPO_ROOT/dsm_client/deterministic_state_machine"
     "$REPO_ROOT/dsm_storage_node"
@@ -80,8 +80,8 @@ fi
 # Check 2: Forbid direct WebView bridge calls in TypeScript
 echo "2. Checking TypeScript WebView bridge usage..."
 # macOS grep doesn't support PCRE lookaheads; use a simpler include/exclude pipeline.
-if [ -d "$REPO_ROOT/dsm_client/new_frontend/src" ] && \
-   grep -RIn "window\\.DsmBridge\\." --include="*.ts" --include="*.tsx" "$REPO_ROOT/dsm_client/new_frontend/src" 2>/dev/null | \
+if [ -d "$REPO_ROOT/dsm_client/frontend/src" ] && \
+   grep -RIn "window\\.DsmBridge\\." --include="*.ts" --include="*.tsx" "$REPO_ROOT/dsm_client/frontend/src" 2>/dev/null | \
    grep -v -F 'sendMessage("dsm.send")' | \
    grep -v "/setupTests.ts" >/dev/null; then
     report_violation "FORBIDDEN DIRECT BRIDGE CALL" "Found direct WebView bridge calls. Must use MCP browser adapter."
@@ -92,8 +92,8 @@ fi
 # Check 3: Ensure MCP browser adapter is the only bridge interface
 echo "3. Checking MCP browser adapter usage..."
 # Only enforce if DsmClient.ts exists in expected location
-if [ -f "$REPO_ROOT/dsm_client/new_frontend/src/services/DsmClient.ts" ]; then
-    if ! grep -qE "dsm-mcp.*browser|packages/dsm-mcp/src/browser/index" "$REPO_ROOT/dsm_client/new_frontend/src/services/DsmClient.ts"; then
+if [ -f "$REPO_ROOT/dsm_client/frontend/src/services/DsmClient.ts" ]; then
+    if ! grep -qE "dsm-mcp.*browser|packages/dsm-mcp/src/browser/index" "$REPO_ROOT/dsm_client/frontend/src/services/DsmClient.ts"; then
       report_violation "MISSING MCP ADAPTER" "DsmClient must import and use MCP browser adapter"
   else
       report_success "MCP browser adapter properly integrated"
@@ -104,8 +104,8 @@ fi
 
 # Check 4: Forbid JSON-based communication
 echo "4. Checking for JSON communication patterns (frontend services)..."
-if [ -d "$REPO_ROOT/dsm_client/new_frontend/src/services" ] && \
-   grep -RInE '\\.stringify\(|\\.parse\(' --include="*.ts" --include="*.tsx" "$REPO_ROOT/dsm_client/new_frontend/src/services/" 2>/dev/null | grep -v "temporary\|TODO"; then
+if [ -d "$REPO_ROOT/dsm_client/frontend/src/services" ] && \
+   grep -RInE '\\.stringify\(|\\.parse\(' --include="*.ts" --include="*.tsx" "$REPO_ROOT/dsm_client/frontend/src/services/" 2>/dev/null | grep -v "temporary\|TODO"; then
     report_violation "FORBIDDEN JSON COMMUNICATION" "Found JSON serialization. Must use protobuf envelopes only."
 else
     report_success "No JSON communication patterns found"
@@ -147,8 +147,8 @@ fi
 
 # Check 8: Ensure no forbidden bridge imports
 echo "8. Checking for forbidden bridge imports..."
-if [ -d "$REPO_ROOT/dsm_client/new_frontend/src" ] && \
-   grep -RInE "import.*DsmBridge|import.*WebViewBridge" --include="*.ts" --include="*.tsx" "$REPO_ROOT/dsm_client/new_frontend/src/" 2>/dev/null | grep -v "dsm-mcp"; then
+if [ -d "$REPO_ROOT/dsm_client/frontend/src" ] && \
+   grep -RInE "import.*DsmBridge|import.*WebViewBridge" --include="*.ts" --include="*.tsx" "$REPO_ROOT/dsm_client/frontend/src/" 2>/dev/null | grep -v "dsm-mcp"; then
     report_violation "FORBIDDEN BRIDGE IMPORTS" "Found forbidden bridge imports. Must use MCP browser adapter only."
 else
     report_success "No forbidden bridge imports found"
@@ -156,8 +156,8 @@ fi
 
 # 9: Forbid BLE CustomEvent shim usage in frontend (must use subscription)
 echo "9. Checking for BLE CustomEvent shim and JNI fallback names..."
-if [ -d "$REPO_ROOT/dsm_client/new_frontend/src" ] && \
-   grep -RInE "addEventListener\('dsm-ble'|dispatchEvent\(new CustomEvent\('dsm-ble'" "$REPO_ROOT/dsm_client/new_frontend/src/" 2>/dev/null; then
+if [ -d "$REPO_ROOT/dsm_client/frontend/src" ] && \
+   grep -RInE "addEventListener\('dsm-ble'|dispatchEvent\(new CustomEvent\('dsm-ble'" "$REPO_ROOT/dsm_client/frontend/src/" 2>/dev/null; then
     report_violation "BLE CUSTOMEVENT SHIM" "Remove 'dsm-ble' CustomEvent usage; rely on protobuf envelope push."
 else
     report_success "No BLE CustomEvent shim usage detected in frontend."
@@ -197,8 +197,8 @@ fi
 
 # 10: Flag presence of ProtobufBridge file if still in tree
 echo "10. Checking for ProtobufBridge file..."
-if [ -f "$REPO_ROOT/dsm_client/new_frontend/src/bridge/ProtobufBridge.ts" ]; then
-    report_violation "FORBIDDEN FILE PRESENT" "dsm_client/new_frontend/src/bridge/ProtobufBridge.ts should be removed."
+if [ -f "$REPO_ROOT/dsm_client/frontend/src/bridge/ProtobufBridge.ts" ]; then
+    report_violation "FORBIDDEN FILE PRESENT" "dsm_client/frontend/src/bridge/ProtobufBridge.ts should be removed."
 else
     report_success "ProtobufBridge file not present."
 fi

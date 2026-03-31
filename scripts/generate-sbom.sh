@@ -97,7 +97,7 @@ else
     GIT_TREE_STATE="clean"
 fi
 
-FRONTEND_LOCKFILE="${PROJECT_ROOT}/dsm_client/new_frontend/package-lock.json"
+FRONTEND_LOCKFILE="${PROJECT_ROOT}/dsm_client/frontend/package-lock.json"
 MCP_LOCKFILE="${PROJECT_ROOT}/dsm-mcp/packages/server/package-lock.json"
 WORKSPACE_PACKAGE="${PROJECT_ROOT}/package.json"
 ANDROID_ROOT_BUILD="${PROJECT_ROOT}/dsm_client/android/build.gradle.kts"
@@ -648,7 +648,7 @@ main() {
     validation_exit_code=0
 
     generate_rust_sboms
-    generate_node_lockfile_sbom "${FRONTEND_LOCKFILE}" "${FRONTEND_SBOM_PATH}" "dsm-wallet" "$(jq -r '.version // "0.0.0"' "${PROJECT_ROOT}/dsm_client/new_frontend/package.json")"
+    generate_node_lockfile_sbom "${FRONTEND_LOCKFILE}" "${FRONTEND_SBOM_PATH}" "dsm-wallet" "$(jq -r '.version // "0.0.0"' "${PROJECT_ROOT}/dsm_client/frontend/package.json")"
     generate_node_lockfile_sbom "${MCP_LOCKFILE}" "${MCP_SBOM_PATH}" "@dsm/mcp-server" "$(jq -r '.version // "0.0.0"' "${PROJECT_ROOT}/dsm-mcp/packages/server/package.json")"
     generate_workspace_manifest_sbom
     generate_android_manifest_sbom

@@ -43,4 +43,4 @@ comment:
 ignore:
   - "**/target/**"
   - "**/node_modules/**"
-  - "dsm_client/new_frontend/coverage/**"
+  - "dsm_client/frontend/coverage/**"

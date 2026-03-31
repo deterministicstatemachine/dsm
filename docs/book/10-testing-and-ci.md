@@ -6,18 +6,18 @@ Test suites, CI pipeline, E2E tools, and code quality gates.
 
 ## Test Suites Overview
 
-| Suite | Command | Scope |
-|-------|---------|-------|
-| Rust workspace | `cargo test --workspace --all-features` | Core, SDK, storage node, and broader integration coverage |
-| Core crate | `cargo test --package dsm` | Protocol logic, crypto, state machine |
-| SDK crate | `cargo test --package dsm_sdk` | JNI dispatch, bilateral, BLE, storage |
-| Storage node | `cargo test --package dsm_storage_node` | API handlers, replication |
-| Frontend (Jest) | `cd dsm_client/new_frontend && npm test` | React components, bridge, contexts, and broader UI/Jest coverage |
-| Android (JUnit) | `cd dsm_client/android && ./gradlew :app:testDebugUnitTest` | Kotlin unit tests |
-| Android (device) | `cd dsm_client/android && ./gradlew :app:connectedDebugAndroidTest` | Instrumented tests |
-| Bitcoin E2E | `cargo test --package dsm_sdk --test bitcoin_tap_e2e -- --test-threads=1` | Signet-oriented swap coverage |
-| BLE E2E | `python3 tools/ble_pairing_e2e.py` | Physical device BLE pairing |
-| Offline E2E | `python3 tools/offline_send_e2e.py` | Physical device bilateral transfer |
+| Suite            | Command                                                                   | Scope                                                            |
+| ---------------- | ------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| Rust workspace   | `cargo test --workspace --all-features`                                   | Core, SDK, storage node, and broader integration coverage        |
+| Core crate       | `cargo test --package dsm`                                                | Protocol logic, crypto, state machine                            |
+| SDK crate        | `cargo test --package dsm_sdk`                                            | JNI dispatch, bilateral, BLE, storage                            |
+| Storage node     | `cargo test --package dsm_storage_node`                                   | API handlers, replication                                        |
+| Frontend (Jest)  | `cd dsm_client/frontend && npm test`                                      | React components, bridge, contexts, and broader UI/Jest coverage |
+| Android (JUnit)  | `cd dsm_client/android && ./gradlew :app:testDebugUnitTest`               | Kotlin unit tests                                                |
+| Android (device) | `cd dsm_client/android && ./gradlew :app:connectedDebugAndroidTest`       | Instrumented tests                                               |
+| Bitcoin E2E      | `cargo test --package dsm_sdk --test bitcoin_tap_e2e -- --test-threads=1` | Signet-oriented swap coverage                                    |
+| BLE E2E          | `python3 tools/ble_pairing_e2e.py`                                        | Physical device BLE pairing                                      |
+| Offline E2E      | `python3 tools/offline_send_e2e.py`                                       | Physical device bilateral transfer                               |
 
 ## Quick Onboarding Validation
 
@@ -83,7 +83,7 @@ cargo test --package dsm_sdk --test bitcoin_tap_e2e -- --test-threads=1 --nocapt
 ### Jest Suite
 
 ```bash
-cd dsm_client/new_frontend
+cd dsm_client/frontend
 npm test                          # run all tests
 npm test -- --watch               # watch mode
 npm test -- --coverage            # with coverage report
@@ -107,7 +107,7 @@ cargo llvm-cov report --json --output-path coverage.json
 cargo llvm-cov report --lcov --output-path coverage/rust.lcov
 
 # Frontend coverage
-cd dsm_client/new_frontend
+cd dsm_client/frontend
 npm run test:coverage -- --passWithNoTests --ci
 
 # Aggregate repo summary
@@ -120,14 +120,14 @@ Repo-level Codecov policy lives in `codecov.yml`. The current policy uses auto-b
 ### TypeScript Type-Check
 
 ```bash
-cd dsm_client/new_frontend
+cd dsm_client/frontend
 npm run type-check                # tsc --noEmit
 ```
 
 ### Lint
 
 ```bash
-cd dsm_client/new_frontend
+cd dsm_client/frontend
 npm run lint                      # ESLint check
 npm run lint:fix                  # auto-fix
 ```
@@ -192,13 +192,13 @@ python3 tools/verify_persistence.py \
 
 ### Gate Scripts
 
-| Script | What It Checks |
-|--------|---------------|
-| `scripts/ci_scan.sh` | Banned patterns (TODO, FIXME, HACK, XXX), hex in protocol, JSON in protocol |
-| `scripts/flow_assertions.sh` | Data flow invariants (single authoritative path) |
-| `scripts/flow_mapping_assertions.sh` | Flow mapping correctness |
-| `scripts/guard_protos.sh` | Protobuf types in sync between proto file and generated code |
-| `scripts/codegen_enforce.sh` | Codegen rules (no manual proto edits) |
+| Script                               | What It Checks                                                              |
+| ------------------------------------ | --------------------------------------------------------------------------- |
+| `scripts/ci_scan.sh`                 | Banned patterns (TODO, FIXME, HACK, XXX), hex in protocol, JSON in protocol |
+| `scripts/flow_assertions.sh`         | Data flow invariants (single authoritative path)                            |
+| `scripts/flow_mapping_assertions.sh` | Flow mapping correctness                                                    |
+| `scripts/guard_protos.sh`            | Protobuf types in sync between proto file and generated code                |
+| `scripts/codegen_enforce.sh`         | Codegen rules (no manual proto edits)                                       |
 
 ### Run All CI Gates
 
@@ -223,8 +223,9 @@ make proto-guard
 ```
 
 If this fails, regenerate:
+
 ```bash
-cd dsm_client/new_frontend && npm run proto:gen
+cd dsm_client/frontend && npm run proto:gen
 ```
 
 ### Flow Assertions (Stack Order-of-Operations)
@@ -311,15 +312,16 @@ Verifies all dependencies are compatible with MIT OR Apache-2.0.
 
 CI scans enforce these bans. Any match is build-blocking:
 
-| Pattern | Why Banned |
-|---------|-----------|
-| `TODO`, `FIXME`, `HACK`, `XXX` | Production-quality mandate |
-| `JSON.stringify`, `JSON.parse` | No JSON in protocol |
-| `serde_json` (in protocol code) | Protobuf-only transport |
-| `hex::encode`, `hex::decode` | No hex in core (Base32 Crockford at boundaries) |
-| `Date.now()`, `SystemTime::now()` | No wall-clock time in protocol |
+| Pattern                           | Why Banned                                      |
+| --------------------------------- | ----------------------------------------------- |
+| `TODO`, `FIXME`, `HACK`, `XXX`    | Production-quality mandate                      |
+| `JSON.stringify`, `JSON.parse`    | No JSON in protocol                             |
+| `serde_json` (in protocol code)   | Protobuf-only transport                         |
+| `hex::encode`, `hex::decode`      | No hex in core (Base32 Crockford at boundaries) |
+| `Date.now()`, `SystemTime::now()` | No wall-clock time in protocol                  |
 
 Check manually:
+
 ```bash
 git grep -rn "TODO\|FIXME\|HACK\|XXX"
 # Must return 0 results
@@ -329,24 +331,24 @@ git grep -rn "TODO\|FIXME\|HACK\|XXX"
 
 ## Test Device Reference
 
-| Role | Serial | Model | Notes |
-|------|--------|-------|-------|
-| Device A (Sender) | `<DEVICE_A_SERIAL>` | Android sender device | Use `adb devices` to discover the serial on your machine |
-| Device B (Receiver) | `<DEVICE_B_SERIAL>` | Android receiver device | Use a second connected Android device |
+| Role                | Serial              | Model                   | Notes                                                    |
+| ------------------- | ------------------- | ----------------------- | -------------------------------------------------------- |
+| Device A (Sender)   | `<DEVICE_A_SERIAL>` | Android sender device   | Use `adb devices` to discover the serial on your machine |
+| Device B (Receiver) | `<DEVICE_B_SERIAL>` | Android receiver device | Use a second connected Android device                    |
 
 ---
 
 ## Makefile Test Targets
 
-| Target | Description |
-|--------|-------------|
-| `make test` | Rust + frontend tests |
-| `make test-rust` | Rust tests only |
-| `make test-frontend` | Frontend Jest tests only |
-| `make typecheck` | TypeScript type-check |
-| `make lint` | All linters (fmt, clippy, ESLint) |
-| `make audit` | Security audit |
-| `make ci-scan` | CI gate scripts |
+| Target               | Description                       |
+| -------------------- | --------------------------------- |
+| `make test`          | Rust + frontend tests             |
+| `make test-rust`     | Rust tests only                   |
+| `make test-frontend` | Frontend Jest tests only          |
+| `make typecheck`     | TypeScript type-check             |
+| `make lint`          | All linters (fmt, clippy, ESLint) |
+| `make audit`         | Security audit                    |
+| `make ci-scan`       | CI gate scripts                   |
 
 ---
 

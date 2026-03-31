@@ -205,10 +205,10 @@ echo -e "${BLUE}=== LAYER 5: REACT HOOKS VERIFICATION ===${NC}"
 
 # Check TypeScript interface file exists
 run_test "TypeScript interface file exists" \
-    "check_file_exists 'dsm_client/new_frontend/src/types/dsm-bridge.ts' 'TypeScript interface file'"
+    "check_file_exists 'dsm_client/frontend/src/types/dsm-bridge.ts' 'TypeScript interface file'"
 
 # Check for enhanced HashChain methods in TypeScript interfaces
-TS_FILE="dsm_client/new_frontend/src/types/dsm-bridge.ts"
+TS_FILE="dsm_client/frontend/src/types/dsm-bridge.ts"
 if [ -f "$TS_FILE" ]; then
     run_test "TS hashChainCurrentState interface" \
         "check_method_in_file '$TS_FILE' 'hashChainCurrentState' 'Current state TS interface'"
@@ -228,10 +228,10 @@ fi
 
 # Check React hooks file exists
 run_test "React hooks file exists" \
-    "check_file_exists 'dsm_client/new_frontend/src/hooks/useBridge.ts' 'React hooks file'"
+    "check_file_exists 'dsm_client/frontend/src/hooks/useBridge.ts' 'React hooks file'"
 
 # Check for enhanced HashChain hooks
-HOOKS_FILE="dsm_client/new_frontend/src/hooks/useBridge.ts"
+HOOKS_FILE="dsm_client/frontend/src/hooks/useBridge.ts"
 if [ -f "$HOOKS_FILE" ]; then
     run_test "useHashChainCurrentState hook" \
         "check_method_in_file '$HOOKS_FILE' 'useHashChainCurrentState' 'Current state React hook'"
@@ -254,10 +254,10 @@ echo -e "${BLUE}=== LAYER 6: UI COMPONENT VERIFICATION ===${NC}"
 
 # Check HashChain screen component exists
 run_test "HashChain screen exists" \
-    "check_file_exists 'dsm_client/new_frontend/src/components/screens/HashChainScreen.tsx' 'HashChain screen component'"
+    "check_file_exists 'dsm_client/frontend/src/components/screens/HashChainScreen.tsx' 'HashChain screen component'"
 
 # Check for HashChain screen integration
-SCREEN_FILE="dsm_client/new_frontend/src/components/screens/HashChainScreen.tsx"
+SCREEN_FILE="dsm_client/frontend/src/components/screens/HashChainScreen.tsx"
 if [ -f "$SCREEN_FILE" ]; then
     run_test "HashChain screen component export" \
         "check_method_in_file '$SCREEN_FILE' 'HashChainScreen' 'HashChain screen component export'"
@@ -280,9 +280,9 @@ echo -e "${BLUE}=== NAVIGATION INTEGRATION VERIFICATION ===${NC}"
 
 # Check App.tsx routing
 run_test "App.tsx exists" \
-    "check_file_exists 'dsm_client/new_frontend/src/App.tsx' 'Main App component'"
+    "check_file_exists 'dsm_client/frontend/src/App.tsx' 'Main App component'"
 
-APP_FILE="dsm_client/new_frontend/src/App.tsx"
+APP_FILE="dsm_client/frontend/src/App.tsx"
 if [ -f "$APP_FILE" ]; then
     run_test "HashChain screen import" \
         "check_method_in_file '$APP_FILE' 'HashChainScreen' 'HashChain screen import in App'"
@@ -293,9 +293,9 @@ fi
 
 # Check HomeScreen menu integration  
 run_test "HomeScreen exists" \
-    "check_file_exists 'dsm_client/new_frontend/src/components/screens/HomeScreen.tsx' 'Home screen component'"
+    "check_file_exists 'dsm_client/frontend/src/components/screens/HomeScreen.tsx' 'Home screen component'"
 
-HOME_FILE="dsm_client/new_frontend/src/components/screens/HomeScreen.tsx"
+HOME_FILE="dsm_client/frontend/src/components/screens/HomeScreen.tsx"
 if [ -f "$HOME_FILE" ]; then
     run_test "HashChain menu item" \
         "check_method_in_file '$HOME_FILE' \"id: 'hashchain'\" 'HashChain menu item in HomeScreen'"
@@ -324,9 +324,9 @@ if [ -d "dsm_client/android" ] && command -v gradle >/dev/null 2>&1; then
 fi
 
 # Test React frontend compilation (if npm is available)
-if [ -d "dsm_client/new_frontend" ] && command -v npm >/dev/null 2>&1; then
+if [ -d "dsm_client/frontend" ] && command -v npm >/dev/null 2>&1; then
     run_test "React frontend compilation" \
-        "test_compilation 'dsm_client/new_frontend' 'npm run build --silent' 'React frontend with TypeScript'"
+        "test_compilation 'dsm_client/frontend' 'npm run build --silent' 'React frontend with TypeScript'"
 fi
 
 echo ""

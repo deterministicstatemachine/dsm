@@ -48,7 +48,7 @@ export const getDsmBridge = (): DsmBridgeLike | undefined => {
     return undefined;
   }
 };
-// path: dsm_client/new_frontend/src/lib/types.ts
+// path: dsm_client/frontend/src/lib/types.ts
 // SPDX-License-Identifier: Apache-2.0
 
 // Strict discriminated result types for DSM API (protobuf-only boundary)

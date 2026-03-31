@@ -4,11 +4,13 @@
 # Modes:
 #   --local   (default)  Generate localhost config + adb reverse ports (dev nodes)
 #   --aws               Push pre-built AWS config + self-signed CA cert (production nodes)
+#   --gcp               Push pre-built GCP config + self-signed CA cert (production nodes)
 #
 # Usage:
 #   ./push_env_override.sh             # local dev nodes (default)
 #   ./push_env_override.sh --local     # same as above, explicit
 #   ./push_env_override.sh --aws       # AWS storage nodes
+#   ./push_env_override.sh --gcp       # GCP storage nodes
 
 set -e
 
@@ -22,11 +24,13 @@ MODE="local"
 for arg in "$@"; do
   case "$arg" in
     --aws)   MODE="aws" ;;
+    --gcp)   MODE="gcp" ;;
     --local) MODE="local" ;;
     --help|-h)
-      echo "Usage: $0 [--local|--aws]"
+      echo "Usage: $0 [--local|--aws|--gcp]"
       echo "  --local  (default) Local dev nodes via adb reverse"
       echo "  --aws    AWS storage nodes (6 nodes, 3 regions)"
+      echo "  --gcp    GCP storage nodes (6 nodes, 3 regions)"
       exit 0
       ;;
     *) echo "Unknown argument: $arg"; exit 1 ;;
@@ -35,20 +39,35 @@ done
 
 echo "Mode: $MODE"
 
-# --- AWS config paths ---
+# --- Remote config paths ---
 AWS_CONFIG="$REPO_ROOT/scripts/dsm_env_config.aws.toml"
+GCP_CONFIG="$REPO_ROOT/scripts/dsm_env_config.gcp.toml"
 CA_CERT="$REPO_ROOT/dsm_storage_node/deploy/nodes/ca/ca.crt"
+CA_CERT_SCRIPTS="$REPO_ROOT/scripts/ca.crt"
 
+# Resolve REMOTE_CONFIG and CA cert based on mode
+REMOTE_CONFIG=""
 if [[ "$MODE" == "aws" ]]; then
-  if [[ ! -f "$AWS_CONFIG" ]]; then
-    echo "AWS config not found at $AWS_CONFIG"
-    echo "Run the AWS deployment first (deploy/provision_aws.sh)"
+  REMOTE_CONFIG="$AWS_CONFIG"
+elif [[ "$MODE" == "gcp" ]]; then
+  REMOTE_CONFIG="$GCP_CONFIG"
+fi
+
+if [[ -n "$REMOTE_CONFIG" ]]; then
+  if [[ ! -f "$REMOTE_CONFIG" ]]; then
+    echo "Config not found at $REMOTE_CONFIG"
+    echo "Run the deployment first (deploy/provision_${MODE}.sh)"
     exit 1
   fi
+  # Try deploy/nodes CA first, fall back to scripts/ca.crt
   if [[ ! -f "$CA_CERT" ]]; then
-    echo "CA cert not found at $CA_CERT"
-    echo "Run deploy/generate_node_configs.sh first to generate TLS certs"
-    exit 1
+    if [[ -f "$CA_CERT_SCRIPTS" ]]; then
+      CA_CERT="$CA_CERT_SCRIPTS"
+    else
+      echo "CA cert not found at $CA_CERT or $CA_CERT_SCRIPTS"
+      echo "Run deploy/generate_node_configs.sh first to generate TLS certs"
+      exit 1
+    fi
   fi
 fi
 
@@ -102,22 +121,22 @@ for d in $serials; do
   # Ensure app-private files dir exists
   adb -s "$d" shell run-as "$APP_PKG" mkdir -p files || true
 
-  if [[ "$MODE" == "aws" ]]; then
-    # --- AWS mode ---
-    echo "Pushing AWS storage node config to $d..."
-    adb -s "$d" push "$AWS_CONFIG" /data/local/tmp/dsm_env_config.toml
+  if [[ "$MODE" == "aws" || "$MODE" == "gcp" ]]; then
+    # --- Remote mode (AWS or GCP) ---
+    echo "Pushing $MODE storage node config to $d..."
+    adb -s "$d" push "$REMOTE_CONFIG" /data/local/tmp/dsm_env_config.toml
     adb -s "$d" shell run-as "$APP_PKG" cp /data/local/tmp/dsm_env_config.toml files/dsm_env_config.toml
 
     echo "Pushing CA cert to $d..."
     adb -s "$d" push "$CA_CERT" /data/local/tmp/ca.crt
     adb -s "$d" shell run-as "$APP_PKG" cp /data/local/tmp/ca.crt files/ca.crt
 
-    # Remove any stale adb reverse ports (not needed for AWS)
+    # Remove any stale adb reverse ports (not needed for remote)
     for p in $PORTS 18443; do
       adb -s "$d" reverse --remove tcp:$p 2>/dev/null || true
     done
 
-    echo "Config: 6 AWS storage nodes (HTTPS + custom CA)"
+    echo "Config: 6 $MODE storage nodes (HTTPS + custom CA)"
     adb -s "$d" shell run-as "$APP_PKG" ls -l files/dsm_env_config.toml files/ca.crt
 
   else
@@ -162,7 +181,7 @@ for d in $serials; do
 
   echo "Verifying startup logs for $d..."
   sleep 2
-  if [[ "$MODE" == "aws" ]]; then
+  if [[ "$MODE" == "aws" || "$MODE" == "gcp" ]]; then
     adb -s "$d" logcat -d | grep -iE "(storage node|ca cert|6 storage|appState changed to: wallet_ready)" | tail -15 || true
   else
     adb -s "$d" logcat -d | grep -E "(Using 5 storage nodes|appState changed to: wallet_ready|Genesis.*published)" | tail -15 || true
