@@ -1210,7 +1210,7 @@ dependencies = [
  "parking_lot 0.12.5",
  "pbkdf2",
  "proptest",
- "prost 0.13.5",
+ "prost 0.14.3",
  "prost-build 0.14.3",
  "prost-types 0.12.6",
  "protoc-bin-vendored",
@@ -1287,7 +1287,7 @@ dependencies = [
  "once_cell",
  "parking_lot 0.12.5",
  "proptest",
- "prost 0.13.5",
+ "prost 0.14.3",
  "prost-build 0.14.3",
  "prost-types 0.12.6",
  "protoc-bin-vendored",
@@ -1343,7 +1343,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "ml-kem",
  "once_cell",
- "prost 0.13.5",
+ "prost 0.14.3",
  "rand 0.8.5",
  "reqwest",
  "rusqlite",
@@ -1373,7 +1373,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dsm",
- "prost 0.13.5",
+ "prost 0.14.3",
 ]
 
 [[package]]
@@ -1382,7 +1382,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dsm",
- "prost 0.13.5",
+ "prost 0.14.3",
  "walkdir",
 ]
 
@@ -1395,7 +1395,7 @@ dependencies = [
  "clap",
  "dsm",
  "instant",
- "prost 0.13.5",
+ "prost 0.14.3",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "regex",
@@ -2436,15 +2436,6 @@ name = "itertools"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186"
-dependencies = [
- "either",
-]
-
-[[package]]
-name = "itertools"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
 dependencies = [
  "either",
 ]
@@ -3565,7 +3556,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
 dependencies = [
  "heck",
- "itertools 0.14.0",
+ "itertools 0.10.5",
  "log",
  "multimap",
  "once_cell",
@@ -3585,7 +3576,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "343d3bd7056eda839b03204e68deff7d1b13aba7af2b2fd16890697274262ee7"
 dependencies = [
  "heck",
- "itertools 0.14.0",
+ "itertools 0.10.5",
  "log",
  "multimap",
  "petgraph 0.8.3",
@@ -3617,7 +3608,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.10.5",
  "proc-macro2",
  "quote",
  "syn",
@@ -3630,7 +3621,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27c6023962132f4b30eb4c172c91ce92d933da334c59c23cddee82358ddafb0b"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.10.5",
  "proc-macro2",
  "quote",
  "syn",

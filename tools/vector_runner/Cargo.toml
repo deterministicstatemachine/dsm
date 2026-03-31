@@ -12,4 +12,4 @@ noop_api = []
 anyhow = "1"
 walkdir = "2"
 dsm = { version = "0.1.0-beta.1", path = "../../dsm_client/deterministic_state_machine/dsm" }
-prost = "0.13"
+prost = "0.14"
