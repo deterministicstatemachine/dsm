@@ -94,7 +94,7 @@ ls -la dsm_client/deterministic_state_machine/jniLibs/x86_64/libdsm_sdk.so
 The frontend package supports npm and ships a `package-lock.json`, so use:
 
 ```bash
-cd dsm_client/new_frontend && npm ci
+cd dsm_client/frontend && npm ci
 ```
 
 The repository root also includes pnpm workspace helper commands, so pnpm is optional for root-level workflows, not mandatory for the frontend app itself.
@@ -117,19 +117,19 @@ This was a stale Makefile issue. The hardened `make lint` target now runs all th
 ```bash
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
-cd dsm_client/new_frontend && npm run lint
+cd dsm_client/frontend && npm run lint
 ```
 
 **TypeScript errors after proto changes**
 
 Regenerate proto types:
 ```bash
-cd dsm_client/new_frontend && npm run proto:gen
+cd dsm_client/frontend && npm run proto:gen
 ```
 
 **Webpack build fails with missing loader**
 ```bash
-cd dsm_client/new_frontend && pnpm add -D <missing-loader>
+cd dsm_client/frontend && pnpm add -D <missing-loader>
 ```
 
 ---
@@ -290,7 +290,7 @@ echo -n "<hex_preimage>" | xxd -r -p | sha256sum
 **Clean reset of Bitcoin config**
 
 ```bash
-cd dsm_client/new_frontend
+cd dsm_client/frontend
 npm run build:android-webpack
 npm run copy:android
 ```
@@ -375,7 +375,7 @@ git grep -rn "TODO\|FIXME\|HACK\|XXX"
 
 Regenerate proto types:
 ```bash
-cd dsm_client/new_frontend && npm run proto:gen
+cd dsm_client/frontend && npm run proto:gen
 ```
 
 Then commit the regenerated files.

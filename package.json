@@ -11,10 +11,10 @@
     "frontend": "make frontend",
     "android:build": "make android",
     "android:install": "make install",
-    "type-check": "cd dsm_client/new_frontend && npm run type-check",
-    "fe:build": "cd dsm_client/new_frontend && npm run build:full-deploy",
-    "fe:type-check": "cd dsm_client/new_frontend && npm run type-check",
-    "fe:test": "cd dsm_client/new_frontend && npm run test -- --passWithNoTests",
+    "type-check": "cd dsm_client/frontend && npm run type-check",
+    "fe:build": "cd dsm_client/frontend && npm run build:full-deploy",
+    "fe:type-check": "cd dsm_client/frontend && npm run type-check",
+    "fe:test": "cd dsm_client/frontend && npm run test -- --passWithNoTests",
     "nodes:up": "make nodes-up",
     "nodes:down": "make nodes-down",
     "nodes:status": "make nodes-status",
@@ -24,7 +24,7 @@
     "guardrails:strict": "./scripts/enforce-guardrails.sh",
     "proto:guard": "make proto-guard",
     "codegen:enforce": "bash scripts/codegen_enforce.sh",
-    "proto:ts": "cd dsm_client/new_frontend && npm run proto:gen",
+    "proto:ts": "cd dsm_client/frontend && npm run proto:gen",
     "coverage:aggregate": "node scripts/aggregate_coverage.mjs"
   },
   "devDependencies": {

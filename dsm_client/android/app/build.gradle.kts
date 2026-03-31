@@ -53,6 +53,18 @@ android {
     // composeOptions.kotlinCompilerExtensionVersion is managed automatically by
     // org.jetbrains.kotlin.plugin.compose when using Kotlin 2.0.x.
 
+    signingConfigs {
+        create("release") {
+            val pw = System.getenv("DSM_KEYSTORE_PASSWORD")
+            if (pw != null) {
+                storeFile = file(System.getenv("DSM_KEYSTORE_PATH") ?: "${System.getProperty("user.home")}/dsm-release.jks")
+                storePassword = pw
+                keyAlias = System.getenv("DSM_KEY_ALIAS") ?: "dsm-release"
+                keyPassword = pw
+            }
+        }
+    }
+
     buildTypes {
         debug {
             // keep symbols default; avoid AGP version fragility here
@@ -64,6 +76,10 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            val releaseSigning = signingConfigs.findByName("release")
+            if (releaseSigning?.storeFile?.exists() == true) {
+                signingConfig = releaseSigning
+            }
         }
     }
 

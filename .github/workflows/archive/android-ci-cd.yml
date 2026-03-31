@@ -5,13 +5,13 @@ on:
     branches: [ main, develop ]
     paths:
       - 'dsm_client/android/**'
-      - 'dsm_client/new_frontend/**'
+      - 'dsm_client/frontend/**'
       - 'dsm_client/deterministic_state_machine/**'
   pull_request:
     branches: [ main ]
     paths:
       - 'dsm_client/android/**'
-      - 'dsm_client/new_frontend/**'
+      - 'dsm_client/frontend/**'
 
 env:
   JAVA_VERSION: '17'
@@ -142,29 +142,29 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
-          cache-dependency-path: dsm_client/new_frontend/package-lock.json
+          cache-dependency-path: dsm_client/frontend/package-lock.json
           
       - name: 📦 Install frontend dependencies
-        working-directory: dsm_client/new_frontend
+        working-directory: dsm_client/frontend
         run: npm ci
         
       - name: 🔍 Frontend code quality
-        working-directory: dsm_client/new_frontend
+        working-directory: dsm_client/frontend
         run: |
           npm run type-check
           npm run lint
           
       - name: 🧪 Frontend tests
-        working-directory: dsm_client/new_frontend
+        working-directory: dsm_client/frontend
         run: npm run test:ci
         
       - name: 🏗️ Build for Android
-        working-directory: dsm_client/new_frontend
+        working-directory: dsm_client/frontend
         run: |
           npm run build:android
           
       - name: 🔧 Deploy to Android assets
-        working-directory: dsm_client/new_frontend
+        working-directory: dsm_client/frontend
         run: |
           npm run deploy:android-complete
           

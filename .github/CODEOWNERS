@@ -16,7 +16,7 @@ dsm_client/deterministic_state_machine/dsm/src/types/ @deterministicstatemachine
 dsm_client/deterministic_state_machine/dsm_sdk/ @deterministicstatemachine/core
 
 # Frontend
-dsm_client/new_frontend/ @deterministicstatemachine/core
+dsm_client/frontend/ @deterministicstatemachine/core
 
 # Android
 dsm_client/android/ @deterministicstatemachine/core

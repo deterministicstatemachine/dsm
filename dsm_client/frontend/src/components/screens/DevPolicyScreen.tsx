@@ -87,7 +87,7 @@ export default function DevPolicyScreen(): JSX.Element {
             <div>3) Add <code>conditions</code> (choose oneof per entry): identity constraints, vault enforcement, operation restrictions, geographic or logical time constraints, emissions schedule, credit bundle policy, or custom constraints.</div>
             <div>4) Serialize the message via the protobuf schema (<code>proto/dsm_app.proto</code> &rarr; message <code>CanonicalPolicy</code>) and Base32-Crockford encode the resulting bytes.</div>
             <div style={{ marginTop: 2 }}>
-              Termux/CLI helper (from <code>dsm_client/new_frontend</code>):
+              Termux/CLI helper (from <code>dsm_client/frontend</code>):
               <div style={{ fontFamily: 'monospace', wordBreak: 'break-all' }}>
                 <code>{`npx ts-node -O '{"module":"commonjs","esModuleInterop":true}' scripts/examples/gen_canonical_policy.ts`}</code>
               </div>

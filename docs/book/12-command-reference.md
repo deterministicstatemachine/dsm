@@ -128,7 +128,7 @@ Notable examples:
 
 ## npm Scripts (Frontend)
 
-Run from `dsm_client/new_frontend/`.
+Run from `dsm_client/frontend/`.
 
 | Script | Description |
 |--------|-------------|
@@ -375,7 +375,7 @@ done
 ### Bitcoin Signet
 
 ```bash
-rg "bitcoin_network" dsm_client/new_frontend/public/dsm_env_config.toml
+rg "bitcoin_network" dsm_client/frontend/public/dsm_env_config.toml
 # Shows: chain height, wallet balance, recent transactions
 ```
 

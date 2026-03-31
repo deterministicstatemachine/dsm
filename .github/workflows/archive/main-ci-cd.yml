@@ -103,7 +103,7 @@ jobs:
             rust_changed=true
           fi
 
-          if echo "$CHANGED_FILES" | grep -E -q '^dsm_client/new_frontend/|dsm_client/new_frontend/package.*\.json$|dsm_client/new_frontend/webpack\.config\.js$|dsm_client/new_frontend/tsconfig\.json$'; then
+          if echo "$CHANGED_FILES" | grep -E -q '^dsm_client/frontend/|dsm_client/frontend/package.*\.json$|dsm_client/frontend/webpack\.config\.js$|dsm_client/frontend/tsconfig\.json$'; then
             frontend_changed=true
           fi
 
@@ -306,16 +306,16 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
-          cache-dependency-path: dsm_client/new_frontend/package-lock.json
+          cache-dependency-path: dsm_client/frontend/package-lock.json
           
       - name: 📦 Install dependencies
-        working-directory: dsm_client/new_frontend
+        working-directory: dsm_client/frontend
         run: |
           echo "📦 Installing frontend dependencies..."
           npm ci
           
       - name: 🔍 Code Quality
-        working-directory: dsm_client/new_frontend
+        working-directory: dsm_client/frontend
         run: |
           echo "🧹 TypeScript type checking..."
           npm run type-check
@@ -327,14 +327,14 @@ jobs:
           npm audit --audit-level high || echo "⚠️ Security issues found (non-blocking)"
           
       - name: 🧪 Run Tests
-        working-directory: dsm_client/new_frontend
+        working-directory: dsm_client/frontend
         if: inputs.skip_tests != true
         run: |
           echo "🧪 Running frontend tests..."
           npm run test:coverage
           
       - name: 🏗️ Build Production
-        working-directory: dsm_client/new_frontend
+        working-directory: dsm_client/frontend
         run: |
           echo "🔨 Building production frontend..."
           npm run build:production
@@ -344,7 +344,7 @@ jobs:
           find dist -name "*.js" -exec wc -c {} + | sort -n
           
       - name: 🔧 Prepare Android Assets
-        working-directory: dsm_client/new_frontend
+        working-directory: dsm_client/frontend
         run: |
           echo "📱 Deploying to Android assets..."
           npm run deploy:android-complete
@@ -357,7 +357,7 @@ jobs:
         with:
           name: frontend-build-${{ github.sha }}
           path: |
-            dsm_client/new_frontend/dist/
+            dsm_client/frontend/dist/
             dsm_client/android/app/src/main/assets/
           retention-days: 7
           
@@ -365,7 +365,7 @@ jobs:
         uses: codecov/codecov-action@v3
         if: inputs.skip_tests != true
         with:
-          file: dsm_client/new_frontend/coverage/lcov.info
+          file: dsm_client/frontend/coverage/lcov.info
           flags: frontend
           fail_ci_if_error: false
 
@@ -585,7 +585,7 @@ jobs:
           cd ../dsm_client/deterministic_state_machine && cargo audit
           
       - name: 🔒 Frontend Security Audit
-        working-directory: dsm_client/new_frontend
+        working-directory: dsm_client/frontend
         run: |
           echo "🔒 Running frontend security audit..."
           npm ci
@@ -656,9 +656,9 @@ jobs:
         run: |
           echo "🌐 Deploying frontend assets..."
           
-          if [ -d "frontend-build-${{ github.sha }}/dsm_client/new_frontend/dist" ]; then
+          if [ -d "frontend-build-${{ github.sha }}/dsm_client/frontend/dist" ]; then
             echo "✅ Frontend build ready for deployment"
-            ls -la frontend-build-${{ github.sha }}/dsm_client/new_frontend/dist/
+            ls -la frontend-build-${{ github.sha }}/dsm_client/frontend/dist/
           fi
           
           # This would typically deploy to CDN or web hosting

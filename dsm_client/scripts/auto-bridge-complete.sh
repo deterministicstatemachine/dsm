@@ -20,7 +20,7 @@ echo ""
 echo "🧹 Cleaning up old generated bridge files..."
 rm -f android/app/src/main/java/com/dsm/native/DsmNative.generated.kt
 rm -f android/build/generated/rust-jni/jni_manifest.json
-rm -f new_frontend/src/services/DsmBridge.generated.ts
+rm -f frontend/src/services/DsmBridge.generated.ts
 echo "✅ Old generated files removed"
 
 # Step 1: Generate Kotlin from Rust JNI
@@ -64,7 +64,7 @@ if ./gradlew :app:kspDebugKotlin --dry-run 2>/dev/null; then
         echo "✅ KSP manifest generated"
         
         # Try to generate TypeScript
-        cd ../new_frontend
+        cd ../frontend
         if npm run gen-bridge 2>/dev/null; then
             echo "✅ TypeScript bridge generated"
         else
@@ -88,8 +88,8 @@ echo "   📄 Generated files:"
 echo "      - dsm_client/android/app/src/main/java/com/dsm/native/DsmNative.generated.kt"
 echo "      - dsm_client/android/build/generated/rust-jni/jni_manifest.json"
 
-if [[ -f "new_frontend/src/services/DsmBridge.generated.ts" ]]; then
-    echo "      - new_frontend/src/services/DsmBridge.generated.ts"
+if [[ -f "frontend/src/services/DsmBridge.generated.ts" ]]; then
+    echo "      - frontend/src/services/DsmBridge.generated.ts"
 fi
 
 echo ""

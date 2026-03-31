@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-// path: dsm_client/new_frontend/src/dsm/EventBridge.ts
+// path: dsm_client/frontend/src/dsm/EventBridge.ts
 // SPDX-License-Identifier: Apache-2.0
 // Unified event bridge for native -> WebView push notifications.
 // Kotlin dispatches CustomEvent("dsm-event-bin", { detail: { topic, payload: Uint8Array } })

@@ -20,6 +20,22 @@ internal object BridgeIdentityHandler {
 
     private class GenesisInterruptedException(message: String) : IllegalStateException(message)
 
+    private fun getFramedErrorEnvelopeCode(envelopeBytes: ByteArray): Int {
+        if (envelopeBytes.isEmpty()) {
+            return 0
+        }
+        val rawEnvelope = if (envelopeBytes.first() == 0x03.toByte() && envelopeBytes.size > 1) {
+            envelopeBytes.copyOfRange(1, envelopeBytes.size)
+        } else {
+            envelopeBytes
+        }
+        return try {
+            Unified.isErrorEnvelope(rawEnvelope)
+        } catch (_: Throwable) {
+            0
+        }
+    }
+
     private fun clearGenesisArtifacts(
         prefs: SharedPreferences,
         sdkContextInitialized: AtomicBoolean,
@@ -243,6 +259,12 @@ internal object BridgeIdentityHandler {
                 keyGenesisEnvelope = keyGenesisEnvelope,
                 keyDbrwSalt = keyDbrwSalt,
             )
+
+            val errorCode = getFramedErrorEnvelopeCode(envelopeBytes)
+            if (errorCode != 0) {
+                Log.w(logTag, "createGenesis: native returned error envelope code=$errorCode; forwarding without bootstrap")
+                return envelopeBytes
+            }
 
             // envelopeBytes is already a Rust-authored framed Envelope v3 — relay directly.
             BleEventRelay.dispatchEnvelope(envelopeBytes)

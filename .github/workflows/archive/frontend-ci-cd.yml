@@ -4,11 +4,11 @@ on:
   push:
     branches: [ main, develop ]
     paths:
-      - 'dsm_client/new_frontend/**'
+      - 'dsm_client/frontend/**'
   pull_request:
     branches: [ main ]
     paths:
-      - 'dsm_client/new_frontend/**'
+      - 'dsm_client/frontend/**'
 
 env:
   NODE_VERSION: '18'
@@ -31,31 +31,31 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
-          cache-dependency-path: dsm_client/new_frontend/package-lock.json
+          cache-dependency-path: dsm_client/frontend/package-lock.json
           
       - name: 📦 Install dependencies
-        working-directory: dsm_client/new_frontend
+        working-directory: dsm_client/frontend
         run: npm ci
         
       - name: 🔍 TypeScript type checking
-        working-directory: dsm_client/new_frontend
+        working-directory: dsm_client/frontend
         run: npm run type-check
         
       - name: 📋 ESLint analysis
-        working-directory: dsm_client/new_frontend
+        working-directory: dsm_client/frontend
         run: npm run lint
         
       - name: 🎨 Prettier format check
-        working-directory: dsm_client/new_frontend
+        working-directory: dsm_client/frontend
         run: npm run format:check
         
       - name: 🔒 Security audit
-        working-directory: dsm_client/new_frontend
+        working-directory: dsm_client/frontend
         run: npm audit --audit-level high
         continue-on-error: true
         
       - name: 📊 Bundle size check
-        working-directory: dsm_client/new_frontend
+        working-directory: dsm_client/frontend
         run: npm run size-limit
         continue-on-error: true
 
@@ -75,25 +75,25 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
-          cache-dependency-path: dsm_client/new_frontend/package-lock.json
+          cache-dependency-path: dsm_client/frontend/package-lock.json
           
       - name: 📦 Install dependencies
-        working-directory: dsm_client/new_frontend
+        working-directory: dsm_client/frontend
         run: npm ci
         
       - name: 🧪 Run unit tests
-        working-directory: dsm_client/new_frontend
+        working-directory: dsm_client/frontend
         run: npm run test:coverage
         
       - name: 🎭 Run component tests
-        working-directory: dsm_client/new_frontend
+        working-directory: dsm_client/frontend
         run: npm run test:components
         continue-on-error: true
         
       - name: 📊 Upload coverage
         uses: codecov/codecov-action@v3
         with:
-          file: dsm_client/new_frontend/coverage/lcov.info
+          file: dsm_client/frontend/coverage/lcov.info
           flags: frontend
           name: frontend-coverage
           fail_ci_if_error: false
@@ -104,8 +104,8 @@ jobs:
         with:
           name: frontend-test-results
           path: |
-            dsm_client/new_frontend/coverage/
-            dsm_client/new_frontend/test-results.xml
+            dsm_client/frontend/coverage/
+            dsm_client/frontend/test-results.xml
           retention-days: 7
 
   # ============================================================================
@@ -124,20 +124,20 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
-          cache-dependency-path: dsm_client/new_frontend/package-lock.json
+          cache-dependency-path: dsm_client/frontend/package-lock.json
           
       - name: 📦 Install dependencies
-        working-directory: dsm_client/new_frontend
+        working-directory: dsm_client/frontend
         run: npm ci
         
       - name: 🔗 Test DSM bridge interface
-        working-directory: dsm_client/new_frontend
+        working-directory: dsm_client/frontend
         run: |
           echo "🔗 Testing DSM bridge TypeScript interfaces..."
           npm run test:bridge
           
       - name: 🧪 Test protocol binding chains
-        working-directory: dsm_client/new_frontend
+        working-directory: dsm_client/frontend
         run: |
           echo "🧪 Testing protocol binding chains..."
           
@@ -148,7 +148,7 @@ jobs:
           npx tsc --noEmit src/hooks/useBridge.ts
           
       - name: 🔍 Test component integration
-        working-directory: dsm_client/new_frontend
+        working-directory: dsm_client/frontend
         run: |
           echo "🔍 Testing DSM component integration..."
           
@@ -182,14 +182,14 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
-          cache-dependency-path: dsm_client/new_frontend/package-lock.json
+          cache-dependency-path: dsm_client/frontend/package-lock.json
           
       - name: 📦 Install dependencies
-        working-directory: dsm_client/new_frontend
+        working-directory: dsm_client/frontend
         run: npm ci
         
       - name: 🏗️ Build ${{ matrix.build-type.name }}
-        working-directory: dsm_client/new_frontend
+        working-directory: dsm_client/frontend
         env:
           NODE_ENV: ${{ matrix.build-type.env }}
         run: |
@@ -197,7 +197,7 @@ jobs:
           npm run ${{ matrix.build-type.command }}
           
       - name: 📊 Build analysis
-        working-directory: dsm_client/new_frontend
+        working-directory: dsm_client/frontend
         run: |
           echo "📊 Build Analysis for ${{ matrix.build-type.name }}:"
           echo "================================================="
@@ -247,7 +247,7 @@ jobs:
           fi
           
       - name: 🧪 Smoke test build
-        working-directory: dsm_client/new_frontend
+        working-directory: dsm_client/frontend
         run: |
           echo "🧪 Running smoke tests on build..."
           
@@ -273,7 +273,7 @@ jobs:
         uses: actions/upload-artifact@v3
         with:
           name: frontend-${{ matrix.build-type.name }}-${{ github.sha }}
-          path: dsm_client/new_frontend/dist/
+          path: dsm_client/frontend/dist/
           retention-days: 7
 
   # ============================================================================
@@ -293,26 +293,26 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
-          cache-dependency-path: dsm_client/new_frontend/package-lock.json
+          cache-dependency-path: dsm_client/frontend/package-lock.json
           
       - name: 📥 Download Android build
         uses: actions/download-artifact@v4
         with:
           name: frontend-android-${{ github.sha }}
-          path: dsm_client/new_frontend/dist/
+          path: dsm_client/frontend/dist/
           
       - name: 📦 Install deployment dependencies
-        working-directory: dsm_client/new_frontend
+        working-directory: dsm_client/frontend
         run: npm ci
         
       - name: 🧹 Clean Android assets
-        working-directory: dsm_client/new_frontend
+        working-directory: dsm_client/frontend
         run: |
           echo "🧹 Cleaning Android assets directory..."
           rm -rf ../android/app/src/main/assets/*
           
       - name: 🚀 Deploy to Android assets
-        working-directory: dsm_client/new_frontend
+        working-directory: dsm_client/frontend
         run: |
           echo "🚀 Deploying frontend to Android assets..."
           npm run deploy:android-complete
@@ -425,20 +425,20 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
-          cache-dependency-path: dsm_client/new_frontend/package-lock.json
+          cache-dependency-path: dsm_client/frontend/package-lock.json
           
       - name: 📦 Install dependencies
-        working-directory: dsm_client/new_frontend
+        working-directory: dsm_client/frontend
         run: npm ci
         
       - name: 📥 Download production build
         uses: actions/download-artifact@v4
         with:
           name: frontend-production-${{ github.sha }}
-          path: dsm_client/new_frontend/dist/
+          path: dsm_client/frontend/dist/
           
       - name: 🚀 Start test server
-        working-directory: dsm_client/new_frontend
+        working-directory: dsm_client/frontend
         run: |
           npm run serve:dist &
           echo $! > server.pid
@@ -450,12 +450,12 @@ jobs:
           curl -f http://localhost:3000 || exit 1
           
       - name: 🎭 Run E2E tests
-        working-directory: dsm_client/new_frontend
+        working-directory: dsm_client/frontend
         run: |
           npm run test:e2e
           
       - name: 🛑 Stop test server
-        working-directory: dsm_client/new_frontend
+        working-directory: dsm_client/frontend
         if: always()
         run: |
           if [ -f server.pid ]; then
@@ -469,8 +469,8 @@ jobs:
         with:
           name: e2e-test-results
           path: |
-            dsm_client/new_frontend/e2e-results/
-            dsm_client/new_frontend/screenshots/
+            dsm_client/frontend/e2e-results/
+            dsm_client/frontend/screenshots/
           retention-days: 7
 
   # ============================================================================
@@ -519,7 +519,7 @@ jobs:
       - name: ⚡ Lighthouse CI
         uses: treosh/lighthouse-ci-action@v10
         with:
-          configPath: dsm_client/new_frontend/lighthouserc.json
+          configPath: dsm_client/frontend/lighthouserc.json
           uploadArtifacts: true
           temporaryPublicStorage: true
           

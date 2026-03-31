@@ -12,7 +12,7 @@ roots=(
   dsm_client/deterministic_state_machine/dsm_sdk/src
   dsm_client/deterministic_state_machine/dsm/src
   dsm_client/android/app/src/main/java/com/dsm/wallet/bridge
-  dsm_client/new_frontend/src
+  dsm_client/frontend/src
 )
 
 # Allowlist for tests and docs

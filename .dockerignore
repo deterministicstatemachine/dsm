@@ -6,6 +6,6 @@
 .agents/
 dsm_client/android/.cxx/
 dsm_client/android/app/build/
-dsm_client/new_frontend/dist/
-dsm_client/new_frontend/build/
+dsm_client/frontend/dist/
+dsm_client/frontend/build/
 dsm_client/deterministic_state_machine/target/

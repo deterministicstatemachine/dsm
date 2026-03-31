@@ -181,7 +181,7 @@ For any protocol change, consult ALL layer CLAUDE.md files:
 |-------|------|
 | Rust | `dsm_client/deterministic_state_machine/CLAUDE.md` |
 | Android | `dsm_client/android/CLAUDE.md` |
-| Frontend | `dsm_client/new_frontend/CLAUDE.md` |
+| Frontend | `dsm_client/frontend/CLAUDE.md` |
 
 ### Hard Invariants
 

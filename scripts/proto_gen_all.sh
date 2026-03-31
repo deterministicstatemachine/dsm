@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Unified protobuf generation from the single source of truth: proto/dsm_app.proto
 # Generates:
-#  - TypeScript (new_frontend/src/proto)
+#  - TypeScript (frontend/src/proto)
 #  - Rust (build-time outputs via cargo build --features proto)
 #  - Android (Gradle generateProto)
 #
@@ -28,7 +28,7 @@ echo "   schema: $PROTO_SCHEMA"
 # -------------------------
 echo "🧩 Generating TypeScript protobufs (protoc-gen-es)..."
 (
-  cd "$ROOT_DIR/dsm_client/new_frontend"
+  cd "$ROOT_DIR/dsm_client/frontend"
   # uses package.json script: proto:gen -> npx protoc ... -I ../../proto ../../proto/dsm_app.proto
   npm run -s proto:gen
 )

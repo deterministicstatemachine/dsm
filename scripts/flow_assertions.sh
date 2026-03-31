@@ -27,10 +27,10 @@ assert_pattern() {
   fi
 }
 
-FRONT_TX="dsm_client/new_frontend/src/dsm/transactions.ts"
-FRONT_BRIDGE="dsm_client/new_frontend/src/dsm/WebViewBridge.ts"
-FRONT_EVENT="dsm_client/new_frontend/src/dsm/EventBridge.ts"
-FRONT_PORT="dsm_client/new_frontend/public/index.html"
+FRONT_TX="dsm_client/frontend/src/dsm/transactions.ts"
+FRONT_BRIDGE="dsm_client/frontend/src/dsm/WebViewBridge.ts"
+FRONT_EVENT="dsm_client/frontend/src/dsm/EventBridge.ts"
+FRONT_PORT="dsm_client/frontend/public/index.html"
 JNI_BRIDGE="dsm_client/deterministic_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.rs"
 SDK_ROUTER="dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/app_router_impl.rs"
 

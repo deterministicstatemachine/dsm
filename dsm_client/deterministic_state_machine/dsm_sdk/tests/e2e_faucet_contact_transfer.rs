@@ -23,7 +23,7 @@ async fn e2e_flow_faucet_contact_transfer() {
 
     // Point at real AWS storage nodes via env config TOML
     let env_config_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../new_frontend/public/dsm_env_config.toml");
+        .join("../../frontend/public/dsm_env_config.toml");
     unsafe {
         std::env::set_var(
             "DSM_ENV_CONFIG_PATH",

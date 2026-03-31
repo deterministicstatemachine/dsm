@@ -165,7 +165,7 @@ Each layer has its own CLAUDE.md with layer-specific conventions:
 |-------|------|-------|
 | Rust | `dsm_client/deterministic_state_machine/CLAUDE.md` | Core logic, SDK, JNI, BLE, crypto |
 | Android | `dsm_client/android/CLAUDE.md` | Kotlin, JNI, BLE actor, DBRW gate, WebView bridge |
-| Frontend | `dsm_client/new_frontend/CLAUDE.md` | React UI, bridge protocol, contexts, services |
+| Frontend | `dsm_client/frontend/CLAUDE.md` | React UI, bridge protocol, contexts, services |
 
 For cross-layer changes, consult all relevant CLAUDE.md files.
 

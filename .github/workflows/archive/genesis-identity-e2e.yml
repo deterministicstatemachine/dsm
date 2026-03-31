@@ -789,19 +789,19 @@ jobs:
           node-version: '18'
 
       - name: Install frontend dependencies
-        working-directory: dsm_client/new_frontend
+        working-directory: dsm_client/frontend
         run: |
           npm install --force
           npx playwright install
 
       - name: Start frontend (background)
-        working-directory: dsm_client/new_frontend
+        working-directory: dsm_client/frontend
         run: |
           npm run dev &
           sleep 10
 
       - name: Run Playwright E2E test
-        working-directory: dsm_client/new_frontend
+        working-directory: dsm_client/frontend
         run: |
           npx playwright test e2e/genesis-identity.spec.ts --config=e2e/playwright.config.ts
 
@@ -809,5 +809,5 @@ jobs:
         uses: actions/upload-artifact@v3
         with:
           name: playwright-report-${{ github.sha }}
-          path: dsm_client/new_frontend/playwright-report
+          path: dsm_client/frontend/playwright-report
           retention-days: 7

@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-// path: dsm_client/new_frontend/src/hooks/useTransactions.ts
+// path: dsm_client/frontend/src/hooks/useTransactions.ts
 /* SPDX-License-Identifier: Apache-2.0 */
 /* eslint-disable @typescript-eslint/no-unsafe-function-type */
 

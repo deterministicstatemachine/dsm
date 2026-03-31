@@ -27,7 +27,7 @@ internal object BridgeRouterHandler {
                 val act = com.dsm.wallet.ui.MainActivity.getActiveInstance()
                 // Genesis sub-state ("securing_device") is communicated via DBRW progress events,
                 // not session phase. Rust session phase stays at "needs_genesis" until completion.
-                val outBytes = SinglePathWebViewBridge.handleBinaryRpcRaw("createGenesisBin", args)
+                val outBytes = SinglePathWebViewBridge.handleBinaryRpcRawStrict("createGenesisBin", args)
                 val out = ByteArray(reqId.size + outBytes.size)
                 System.arraycopy(reqId, 0, out, 0, reqId.size)
                 System.arraycopy(outBytes, 0, out, reqId.size, outBytes.size)

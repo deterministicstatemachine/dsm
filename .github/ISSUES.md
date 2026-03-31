@@ -143,8 +143,8 @@ There's no `dsm-sdk` npm package, no `DsmClient` interface, no getting-started g
 ## 9. DUPLICATE FILE: `BitcoinTapTab.tsx` exists in two locations
 
 **Files:**
-- `new_frontend/src/components/screens/BitcoinTapTab.tsx`
-- `new_frontend/src/components/screens/bitcoin/BitcoinTapTab.tsx`
+- `frontend/src/components/screens/BitcoinTapTab.tsx`
+- `frontend/src/components/screens/bitcoin/BitcoinTapTab.tsx`
 
 **Problem:** Two files with the same name in different directories. One is likely the original, the other the refactored version. Imports may reference either depending on when they were written.
 

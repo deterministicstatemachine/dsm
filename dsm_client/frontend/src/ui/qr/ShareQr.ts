@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-// path: dsm_client/new_frontend/src/ui/qr/ShareQr.ts
+// path: dsm_client/frontend/src/ui/qr/ShareQr.ts
 // SPDX-License-Identifier: Apache-2.0
 // Minimal, QR-safe contact payload renderer (protobuf-only, binary-safe)
 // Uses bufbuild-style API (new Message({...}); message.toBinary()).

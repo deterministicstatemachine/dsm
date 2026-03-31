@@ -70,13 +70,13 @@ EXCLUDES=(
   -g '!docs/**'
   -g '!.github/**'
   # Frontend generated proto + bundles are transport-only and migrate separately
-  -g '!dsm_client/new_frontend/**/proto/**'
-  -g '!dsm_client/new_frontend/**/dist/**'
-  -g '!dsm_client/new_frontend/**/build/**'
+  -g '!dsm_client/frontend/**/proto/**'
+  -g '!dsm_client/frontend/**/dist/**'
+  -g '!dsm_client/frontend/**/build/**'
   -g '!**/*bundle*.js'
   -g '!**/*.min.js'
   -g '!packages/**/proto/**'
-  -g '!dsm_client/new_frontend/src/proto/**'
+  -g '!dsm_client/frontend/src/proto/**'
   -g '!scripts/codegen_enforce.sh'
   # General generated folders
     -g '!**/generated/**'

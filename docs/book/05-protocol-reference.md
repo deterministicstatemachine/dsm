@@ -89,7 +89,7 @@ React (TypeScript)                    Kotlin Bridge                  Rust SDK
 ### Timeout
 
 The bridge timeout is 30000ms (30 seconds). Configured in both:
-- `dsm_client/new_frontend/public/index.html`
+- `dsm_client/frontend/public/index.html`
 - `dsm_client/android/app/src/main/assets/index.html`
 
 ---
@@ -172,7 +172,7 @@ The canonical schema lives at `proto/dsm_app.proto` (schema v2.4.0, wire v3).
 After editing `proto/dsm_app.proto`:
 
 ```bash
-cd dsm_client/new_frontend
+cd dsm_client/frontend
 npm run proto:gen
 ```
 

@@ -77,10 +77,10 @@ jobs:
         with:
           node-version: '18'
           cache: 'npm'
-          cache-dependency-path: dsm_client/new_frontend/package-lock.json
+          cache-dependency-path: dsm_client/frontend/package-lock.json
 
       - name: 📦 Install Node.js dependencies
-        working-directory: dsm_client/new_frontend
+        working-directory: dsm_client/frontend
         run: npm ci
 
       - name: 🔧 Install system dependencies (Ubuntu)
@@ -108,7 +108,7 @@ jobs:
           cargo build --release
           
           echo "Building frontend..."
-          cd ../new_frontend
+          cd ../frontend
           npm run build
 
       - name: 🌐 Load E2E configuration

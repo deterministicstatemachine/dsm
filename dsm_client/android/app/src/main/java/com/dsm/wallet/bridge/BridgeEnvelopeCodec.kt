@@ -8,6 +8,8 @@ internal object BridgeEnvelopeCodec {
 
     data class DsmErrorInfo(val sourceTag: Int, val message: String)
 
+    data class BridgeRpcError(val errorCode: Int, val message: String, val debugB32: String?)
+
     data class AppRouterRequest(val methodName: String, val args: ByteArray)
 
     data class PreferenceRequest(val key: String, val value: String?)
@@ -61,6 +63,50 @@ internal object BridgeEnvelopeCodec {
 
     fun parseEnvelopeResponse(responseBytes: ByteArray): Pair<Boolean, ByteArray> {
         return parseBridgeRpcResponse(responseBytes)
+    }
+
+    fun decodeBridgeRpcError(errorBytes: ByteArray): BridgeRpcError? {
+        var offset = 0
+        var errorCode = 0
+        var message = ""
+        var debugB32: String? = null
+
+        while (offset < errorBytes.size) {
+            val (key, keyOff) = readVarint(errorBytes, offset)
+            offset = keyOff
+            val fieldNumber = (key ushr 3).toInt()
+            val wireType = (key and 0x07).toInt()
+
+            when (fieldNumber) {
+                1 -> {
+                    if (wireType != 0) return null
+                    val (value, off) = readVarint(errorBytes, offset)
+                    offset = off
+                    errorCode = value.toInt()
+                }
+                2 -> {
+                    if (wireType != 2) return null
+                    val (bytes, off) = readLengthDelimited(errorBytes, offset)
+                    offset = off
+                    message = bytes.toString(Charsets.UTF_8)
+                }
+                3 -> {
+                    if (wireType != 2) return null
+                    val (bytes, off) = readLengthDelimited(errorBytes, offset)
+                    offset = off
+                    debugB32 = bytes.toString(Charsets.UTF_8)
+                }
+                else -> {
+                    offset = skipField(wireType, errorBytes, offset)
+                }
+            }
+        }
+
+        return if (errorCode != 0 || message.isNotEmpty() || !debugB32.isNullOrEmpty()) {
+            BridgeRpcError(errorCode, message, debugB32)
+        } else {
+            null
+        }
     }
 
     fun encodeAppRouterPayload(methodName: String, args: ByteArray): ByteArray {

@@ -233,6 +233,35 @@ class SinglePathWebViewBridge(private val context: Context) {
             }
         }
 
+        /**
+         * Raw bytes RPC dispatcher that preserves native bridge errors.
+         * Returns the raw success payload or throws with the decoded bridge error.
+         */
+        fun handleBinaryRpcRawStrict(method: String, payload: ByteArray): ByteArray {
+            val envelopeResponse = handleBinaryRpc(method, payload)
+            try {
+                val (isSuccess, data) = parseEnvelopeResponse(envelopeResponse)
+                if (isSuccess) {
+                    return data
+                }
+
+                val err = BridgeEnvelopeCodec.decodeBridgeRpcError(data)
+                val baseMessage = err?.message?.takeIf { it.isNotBlank() }
+                    ?: "Bridge call failed for $method"
+                val suffix = if (err != null && err.errorCode != 0) {
+                    " (code ${err.errorCode})"
+                } else {
+                    ""
+                }
+                throw IllegalStateException(baseMessage + suffix)
+            } catch (e: IllegalStateException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "handleBinaryRpcRawStrict: failed to parse envelope", e)
+                throw IllegalStateException("Failed to decode bridge response for $method", e)
+            }
+        }
+
         /** Escape control characters in strings for diagnostic payloads. */
         private fun escapeForString(s: String?): String {
             if (s == null) return ""
@@ -626,7 +655,7 @@ class SinglePathWebViewBridge(private val context: Context) {
     
     /**
      * Create genesis via JNI.
-     * Returns protobuf-encoded Envelope bytes on success, empty on error.
+     * Returns framed Envelope v3 bytes; failures may be returned as error envelopes.
      * Automatically parses envelope, persists identity, initializes SDK context, and populates transport headers.
      */
     fun createGenesis(locale: String, networkId: String, entropyBytes: ByteArray): ByteArray {

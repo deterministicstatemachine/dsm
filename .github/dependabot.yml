@@ -9,7 +9,7 @@ updates:
     open-pull-requests-limit: 10
 
   - package-ecosystem: "npm"
-    directory: "/dsm_client/new_frontend"
+    directory: "/dsm_client/frontend"
     schedule:
       interval: "weekly"
     labels:
