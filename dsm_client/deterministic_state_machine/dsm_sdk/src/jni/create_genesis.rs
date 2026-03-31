@@ -325,6 +325,13 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_createGenesis<'a>(
                         let mut ble_handler =
                             BilateralBleHandler::new(bilateral_mgr, device_id_arr);
 
+                        // CRITICAL: Install settlement delegate so balance updates happen
+                        // after bilateral transfers. Without this, the 3-phase commit
+                        // completes but balances never change.
+                        ble_handler.set_settlement_delegate(std::sync::Arc::new(
+                            crate::handlers::bilateral_settlement::DefaultBilateralSettlementDelegate,
+                        ));
+
                         // CRITICAL: Set event callback to forward bilateral events to WebView
                         // Without this, prepare_received and other events won't reach the UI
                         let callback: std::sync::Arc<dyn Fn(&[u8]) + Send + Sync> =

@@ -474,6 +474,27 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
     }
 
     /**
+     * Close all GATT client sessions so the next transfer creates fresh
+     * connections. Called on app resume to prevent stale RPA addresses
+     * from causing write failures after a background/foreground cycle.
+     */
+    fun closeStaleGattSessions() {
+        runOperation(BleOpLane.LIFECYCLE) {
+            var closed = 0
+            peers.values.forEach { peer ->
+                peer.gattClientSession?.let { session ->
+                    try { session.disconnect() } catch (_: Throwable) {}
+                    peer.gattClientSession = null
+                    closed++
+                }
+            }
+            if (closed > 0) {
+                Log.i("BleCoordinator", "closeStaleGattSessions: closed $closed session(s) for fresh RPA resolution")
+            }
+        }
+    }
+
+    /**
      * Clean up resources.
      */
     fun cleanup() {

@@ -121,6 +121,10 @@ class BleBackgroundService : Service() {
         return bleCoordinator?.ensureGattServerStarted() ?: false
     }
 
+    fun closeStaleGattSessions() {
+        bleCoordinator?.closeStaleGattSessions()
+    }
+
     fun startScanning(): Boolean {
         return bleCoordinator?.startScanning() ?: false
     }

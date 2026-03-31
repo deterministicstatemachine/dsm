@@ -912,6 +912,25 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         if (hasIdentityViaRust()) {
             invokeNativeRouterInvoke("inbox.resume")
         }
+        // Only restart BLE after genesis — during genesis/DBRW the hardware is
+        // busy and BLE scanning/advertising wastes resources and causes errors.
+        if (hasIdentityViaRust()) {
+            try {
+                val svc = bleBackgroundService
+                if (svc != null) {
+                    svc.closeStaleGattSessions()
+                    val gattOk = svc.ensureGattServerStarted()
+                    svc.setAdvertisingDesired(true)
+                    Log.i(tag, "onResume: BLE restart — stale sessions closed, GATT=$gattOk advertising=desired")
+                } else {
+                    Log.w(tag, "onResume: BLE service not bound yet, GATT restart deferred")
+                }
+            } catch (t: Throwable) {
+                Log.w(tag, "onResume: BLE restart failed: ${t.message}")
+            }
+        } else {
+            Log.d(tag, "onResume: skipping BLE restart (no identity yet, pre-genesis)")
+        }
     }
 
     override fun onPause() {
@@ -1048,14 +1067,20 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         }
         
         if (blePermsGranted) {
-            Log.i(tag, "BLE permissions granted, reinitializing BLE service...")
+            Log.i(tag, "BLE permissions granted")
+            // Start the background service so it's bound and ready, but only
+            // initialize GATT/advertising after genesis (hasIdentityViaRust).
             try {
                 val svc = bleBackgroundService
                 if (svc == null) {
                     BleBackgroundService.start(this@MainActivity)
                 }
-                val gattResult = svc?.ensureGattServerStarted() ?: false
-                Log.i(tag, "Bluetooth permissions granted: GATT server ensure-start result=$gattResult")
+                if (hasIdentityViaRust()) {
+                    val gattResult = svc?.ensureGattServerStarted() ?: false
+                    Log.i(tag, "Bluetooth permissions granted: GATT server ensure-start result=$gattResult")
+                } else {
+                    Log.d(tag, "Bluetooth permissions granted: deferring GATT start until after genesis")
+                }
             } catch (t: Throwable) {
                 Log.e(tag, "Failed to reinitialize BLE after permissions granted", t)
             }
