@@ -20,7 +20,7 @@ Run (preferred):
 ./scripts/generate_ts_protos.sh
 ```
 
-This will output to `dsm_client/new_frontend/src/proto/gen`.
+This will output to `dsm_client/frontend/src/proto/gen`.
 
 ## Importing in UI
 

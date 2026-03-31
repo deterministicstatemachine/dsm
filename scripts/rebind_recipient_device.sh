@@ -11,7 +11,7 @@
 #
 # Defaults:
 #   APK_PATH = dsm_client/android/app/build/outputs/apk/debug/app-debug.apk
-#   ENV_PATH = dsm_client/new_frontend/public/dsm_env_config.toml
+#   ENV_PATH = dsm_client/frontend/public/dsm_env_config.toml
 #
 set -euo pipefail
 
@@ -19,13 +19,13 @@ function usage() {
   echo "Usage: $0 -s <SERIAL> [-p <APK_PATH>] [-e <ENV_PATH>] [--no-build]"
   echo "  -s SERIAL    Recipient device adb serial (required)"
   echo "  -p APK_PATH  Path to APK (default: dsm_client/android/app/build/outputs/apk/debug/app-debug.apk)"
-  echo "  -e ENV_PATH  Path to env config TOML to push (default: dsm_client/new_frontend/public/dsm_env_config.toml)"
+  echo "  -e ENV_PATH  Path to env config TOML to push (default: dsm_client/frontend/public/dsm_env_config.toml)"
   echo "  --no-build   Do not build APK if not found"
 }
 
 SERIAL=""
 APK="dsm_client/android/app/build/outputs/apk/debug/app-debug.apk"
-ENV_FILE="dsm_client/new_frontend/public/dsm_env_config.toml"
+ENV_FILE="dsm_client/frontend/public/dsm_env_config.toml"
 NO_BUILD=0
 
 # Parse args

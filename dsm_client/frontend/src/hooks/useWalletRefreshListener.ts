@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-// path: dsm_client/new_frontend/src/hooks/useWalletRefreshListener.ts
+// path: dsm_client/frontend/src/hooks/useWalletRefreshListener.ts
 // SPDX-License-Identifier: Apache-2.0
 // Event-driven wallet refresh listener with natural (RAF) smoothing.
 // Coalesces rapid dsm-wallet-refresh events onto animation frames to

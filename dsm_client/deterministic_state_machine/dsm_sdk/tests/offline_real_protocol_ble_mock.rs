@@ -226,7 +226,7 @@ async fn offline_real_protocol_ble_mock_roundtrip() {
     // Point at the real env config TOML so StorageNodeConfig picks up the
     // production HTTPS endpoints and build_ca_aware_client loads the CA cert.
     let env_config_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../new_frontend/public/dsm_env_config.toml");
+        .join("../../frontend/public/dsm_env_config.toml");
     std::env::set_var(
         "DSM_ENV_CONFIG_PATH",
         env_config_path.to_str().expect("config path"),
@@ -517,7 +517,7 @@ async fn offline_real_protocol_ble_mock_roundtrip() {
 async fn offline_real_protocol_ble_mock_multi_relationship_multi_tx() {
     println!("[OFFLINE-MULTI] init test storage + MPC genesis");
     let env_config_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../new_frontend/public/dsm_env_config.toml");
+        .join("../../frontend/public/dsm_env_config.toml");
     std::env::set_var(
         "DSM_ENV_CONFIG_PATH",
         env_config_path.to_str().expect("config path"),
