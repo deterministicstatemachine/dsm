@@ -134,7 +134,7 @@ chacha20poly1305 = { version = "0.10", default-features = false, features = ["al
 env_logger = "0.10.0"
 
 # Type safety and validation
-derive_more = { version = "1.0.0", features = ["from", "display", "error", "debug", "into"] }
+derive_more = { version = "2.1.1", features = ["from", "display", "error", "debug", "into"] }
 
 # Web framework and middleware (optional; core must be network-agnostic by default; no JSON feature)
 axum = { version = "0.8", features = ["tracing"], optional = true }
