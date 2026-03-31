@@ -34,7 +34,7 @@ subtle = "2"
 # Configuration
 clap = { version = "4.4.3", features = ["derive"] }
 config = "0.15.22"
-toml = "0.8.20"
+toml = "1.1.0"
 
 # Logging
 tracing = "0.1.40"
