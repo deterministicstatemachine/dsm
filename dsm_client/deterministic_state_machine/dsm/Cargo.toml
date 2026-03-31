@@ -74,7 +74,9 @@ blake3 = "1.8.4"
 hmac = "0.12.1"
 sha2 = "0.10.8"
 pbkdf2 = "0.12.2"
-rand_chacha = "0.3.1"
+chacha20 = "0.10"
+rand_core06 = { package = "rand_core", version = "0.6" }
+rand_chacha = "0.3"
 getrandom = "0.4.2"
 merlin = "3.0.0"
 zeroize = { version = "1.7.0", features = ["zeroize_derive"] }

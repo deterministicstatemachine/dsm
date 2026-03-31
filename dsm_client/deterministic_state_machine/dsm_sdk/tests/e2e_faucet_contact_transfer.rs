@@ -9,7 +9,7 @@ use prost::Message;
 use dsm_sdk::storage_utils;
 use dsm_sdk::sdk::storage_node_sdk::{StorageNodeConfig, StorageNodeSDK};
 use dsm_sdk::sdk::b0x_sdk::B0xSDK;
-use rand::{rngs::OsRng, RngCore};
+use rand_core06::{OsRng, RngCore};
 use std::process::Command;
 use tokio::time::{timeout, Duration};
 

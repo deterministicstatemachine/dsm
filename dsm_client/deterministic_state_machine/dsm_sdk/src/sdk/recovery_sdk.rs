@@ -245,9 +245,9 @@ impl RecoverySDK {
     /// Generate a cryptographically secure 24-word BIP-39 mnemonic.
     /// Uses 256 bits of CSPRNG entropy via OsRng. Crypto stays in Rust.
     pub fn generate_mnemonic() -> Result<String, DsmError> {
-        use rand::RngCore;
+        use rand_core06::RngCore;
         let mut entropy = [0u8; 32]; // 256 bits → 24 words
-        rand::rngs::OsRng.fill_bytes(&mut entropy);
+        rand_core06::OsRng.fill_bytes(&mut entropy);
         let mnemonic = bip39::Mnemonic::from_entropy(&entropy).map_err(|e| {
             DsmError::crypto(
                 format!("BIP-39 generation failed: {e}"),

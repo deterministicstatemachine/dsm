@@ -84,8 +84,7 @@ pub async fn register_device(
     let device_id_b32 = text_id::encode_base32_crockford(&req.device_id);
 
     // Generate a secure random auth token (raw 32 bytes)
-    use rand::Rng;
-    let token_bytes: [u8; 32] = rand::thread_rng().gen();
+    let token_bytes: [u8; 32] = rand::random();
 
     // Hash the token using blake3
     let token_hash = blake3::hash(&token_bytes);
@@ -207,8 +206,7 @@ pub async fn reissue_token(
     }
 
     // Generate and store a new token (raw bytes)
-    use rand::Rng;
-    let token_bytes: [u8; 32] = rand::thread_rng().gen();
+    let token_bytes: [u8; 32] = rand::random();
     let token_hash = blake3::hash(&token_bytes);
     let token_hash_bytes = token_hash.as_bytes().to_vec();
 

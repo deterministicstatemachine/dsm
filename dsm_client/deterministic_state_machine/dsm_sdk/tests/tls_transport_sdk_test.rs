@@ -22,8 +22,8 @@ async fn spawn_tls_echo_server() -> (SocketAddr, Vec<u8>, Vec<u8>, Vec<u8>) {
     // Self-signed server cert.
     let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
 
-    let cert_der = cert.serialize_der().unwrap();
-    let key_der = cert.serialize_private_key_der();
+    let cert_der = cert.cert.der().to_vec();
+    let key_der = cert.signing_key.serialize_der();
     let pin = cert_pin(&cert_der);
 
     let cfg = ServerConfig::builder()

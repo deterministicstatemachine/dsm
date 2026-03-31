@@ -50,10 +50,11 @@ pub use deterministic_time::*;
 /// ```
 #[allow(unused)]
 pub fn random_bytes(length: usize) -> Vec<u8> {
-    use rand::{rngs::OsRng, RngCore};
-
     let mut bytes = vec![0u8; length];
-    OsRng.fill_bytes(&mut bytes);
+    use rand::rngs::SysRng;
+    use chacha20::rand_core::TryRng;
+    let mut bytes = vec![0u8; length];
+    SysRng.try_fill_bytes(&mut bytes).expect("OS RNG failed");
     bytes
 }
 

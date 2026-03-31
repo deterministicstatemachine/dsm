@@ -17,7 +17,7 @@ use blake3;
 use dsm::types::error::DsmError;
 use dsm::types::proto::SensitiveAppDataProto;
 use prost::Message;
-use rand::{rngs::OsRng, RngCore};
+use rand_core06::{OsRng, RngCore};
 use std::sync::Mutex;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 

@@ -33,9 +33,8 @@ use ml_kem::{
     kem::{Decapsulate, DecapsulationKey, Encapsulate, EncapsulationKey},
     B32, EncapsulateDeterministic, EncodedSizeUser, KemCore, MlKem768, MlKem768Params,
 };
-use rand::rngs::OsRng;
-use rand::SeedableRng;
-use rand_chacha::ChaCha20Rng;
+use rand_core06::OsRng;
+use rand_chacha::{ChaCha20Rng, rand_core::SeedableRng};
 use tracing::{debug, error, info, trace};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
