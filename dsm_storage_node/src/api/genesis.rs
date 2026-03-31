@@ -126,12 +126,11 @@ async fn forward_genesis_create(
 async fn get_genesis_entropy(
     Extension(_state): Extension<Arc<AppState>>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    use rand::rngs::OsRng;
-    use rand::RngCore;
+    use rand::{rngs::SysRng, TryRng};
 
     // Generate 32 bytes of cryptographically secure random entropy from OS
     let mut entropy = [0u8; 32];
-    match OsRng.try_fill_bytes(&mut entropy) {
+    match SysRng.try_fill_bytes(&mut entropy) {
         Ok(()) => {
             info!("Generated 32 bytes of entropy from OS for genesis creation");
         }

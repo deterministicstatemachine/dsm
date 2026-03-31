@@ -4,7 +4,7 @@
 #![allow(clippy::disallowed_methods)]
 
 use prost::Message;
-use rand::{rngs::OsRng, RngCore};
+use rand_core06::{OsRng, RngCore};
 use reqwest::Client;
 
 fn base32_encode(bytes: &[u8]) -> String {

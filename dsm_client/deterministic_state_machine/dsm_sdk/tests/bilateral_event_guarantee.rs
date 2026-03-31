@@ -18,7 +18,7 @@ use dsm_sdk::bluetooth::ble_frame_coordinator::{BleFrameCoordinator, BleFrameTyp
 use dsm_sdk::storage_utils;
 use dsm_sdk::generated;
 use prost::Message;
-use rand::{rngs::OsRng, RngCore};
+use rand_core06::{OsRng, RngCore};
 
 use dsm::core::bilateral_transaction_manager::BilateralTransactionManager;
 use dsm::core::contact_manager::DsmContactManager;

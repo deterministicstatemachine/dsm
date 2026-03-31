@@ -16,7 +16,7 @@ use dsm_sdk::bluetooth::bilateral_transport_adapter::{
 use dsm_sdk::bluetooth::ble_frame_coordinator::{BleFrameCoordinator, BleFrameType, FrameIngressResult};
 use dsm_sdk::storage_utils;
 use dsm_sdk::util::text_id;
-use rand::{rngs::OsRng, RngCore};
+use rand_core06::{OsRng, RngCore};
 
 use dsm::core::bilateral_transaction_manager::BilateralTransactionManager;
 use dsm::core::contact_manager::DsmContactManager;

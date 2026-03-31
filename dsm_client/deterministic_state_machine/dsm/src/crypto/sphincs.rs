@@ -53,9 +53,11 @@
 //! All fallible operations return `DsmError`.
 
 use crate::types::error::DsmError;
-use rand::rngs::OsRng;
-use rand::{RngCore, SeedableRng};
-use rand_chacha::ChaCha20Rng;
+use chacha20::{
+    ChaCha20Rng,
+    rand_core::{SeedableRng, TryRng},
+};
+use rand::{Rng, rngs::SysRng};
 use subtle::ConstantTimeEq;
 use tracing::{debug, error, info};
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -740,10 +742,10 @@ pub fn generate_keypair(v: SphincsVariant) -> Result<SphincsKeyPair, DsmError> {
     let p = param_set(v);
     let mut sk = vec![0u8; p.sk_bytes];
     let mut pk = vec![0u8; p.pk_bytes];
-    let mut rng = OsRng;
-
     // sk_seed | sk_prf | pub_seed | root
-    rng.fill_bytes(&mut sk[..3 * p.n]);
+    SysRng
+        .try_fill_bytes(&mut sk[..3 * p.n])
+        .expect("OS RNG failed");
     let (sk_seed, _sk_prf, pub_seed) = (&sk[..p.n], &sk[p.n..2 * p.n], &sk[2 * p.n..3 * p.n]);
 
     // Build top layer Merkle root (layer d-1), across 2^(h/d) leaves

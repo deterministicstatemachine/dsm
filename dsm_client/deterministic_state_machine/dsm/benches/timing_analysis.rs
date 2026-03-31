@@ -3,7 +3,7 @@ use dsm::core::state_machine::{self, transition};
 use dsm::crypto::sphincs::{generate_sphincs_keypair, sphincs_sign, sphincs_verify};
 use dsm::types::operations::Operation;
 use dsm::types::state_types::{DeviceInfo, State};
-use rand::{thread_rng, Rng};
+use rand::RngExt;
 use std::time::Duration;
 
 // mod bench; // Commented out - bench.rs doesn't exist
@@ -42,8 +42,8 @@ fn timing_side_channel_benchmark(c: &mut Criterion) {
 
         // Create an invalid signature by bit-flipping the valid one
         let mut invalid_signature = valid_signature.clone();
-        let byte_to_flip = thread_rng().gen_range(0..invalid_signature.len());
-        let bit_to_flip = thread_rng().gen_range(0..8);
+        let byte_to_flip = rand::rng().random_range(0..invalid_signature.len());
+        let bit_to_flip = rand::rng().random_range(0..8);
         invalid_signature[byte_to_flip] ^= 1 << bit_to_flip;
 
         // Create stable references to avoid allocation during benchmark
@@ -55,7 +55,7 @@ fn timing_side_channel_benchmark(c: &mut Criterion) {
         b.iter_batched_ref(
             || {
                 // Randomly select valid or invalid signature
-                if thread_rng().gen_bool(0.5) {
+                if rand::rng().random_bool(0.5) {
                     valid_signature.clone()
                 } else {
                     invalid_signature.clone()
@@ -98,7 +98,7 @@ fn timing_side_channel_benchmark(c: &mut Criterion) {
         let mut invalid_state = valid_state.clone();
         // Corrupt the previous state hash to break chain integrity
         if !invalid_state.prev_state_hash.is_empty() {
-            let byte_to_flip = thread_rng().gen_range(0..invalid_state.prev_state_hash.len());
+            let byte_to_flip = rand::rng().random_range(0..invalid_state.prev_state_hash.len());
             invalid_state.prev_state_hash[byte_to_flip] ^= 0xFF;
         }
 
@@ -109,7 +109,7 @@ fn timing_side_channel_benchmark(c: &mut Criterion) {
         b.iter_batched_ref(
             || {
                 // Randomly select valid or invalid state
-                if thread_rng().gen_bool(0.5) {
+                if rand::rng().random_bool(0.5) {
                     (valid_state.clone(), valid_op.clone())
                 } else {
                     (invalid_state.clone(), valid_op.clone())
@@ -156,7 +156,7 @@ fn timing_side_channel_benchmark(c: &mut Criterion) {
         // Create invalid precommitment by modifying positions
         let mut invalid_positions = valid_positions.clone();
         if !invalid_positions.is_empty() {
-            let pos_to_modify = thread_rng().gen_range(0..invalid_positions.len());
+            let pos_to_modify = rand::rng().random_range(0..invalid_positions.len());
             if pos_to_modify > 0 {
                 // Store the first position value before modifying
                 let first_value = invalid_positions[0].clone();
@@ -175,7 +175,7 @@ fn timing_side_channel_benchmark(c: &mut Criterion) {
         b.iter_batched_ref(
             || {
                 // Randomly select valid or invalid positions
-                if thread_rng().gen_bool(0.5) {
+                if rand::rng().random_bool(0.5) {
                     valid_positions.clone()
                 } else {
                     invalid_positions.clone()
@@ -200,7 +200,7 @@ fn timing_side_channel_benchmark(c: &mut Criterion) {
         b.iter_batched_ref(
             || {
                 // Randomly select between data sets
-                if thread_rng().gen_bool(0.5) {
+                if rand::rng().random_bool(0.5) {
                     data_set_1.clone()
                 } else {
                     data_set_2.clone()
@@ -241,13 +241,13 @@ fn timing_side_channel_benchmark(c: &mut Criterion) {
         b.iter_batched_ref(
             || {
                 // Randomly select between states
-                if thread_rng().gen_bool(0.5) {
+                if rand::rng().random_bool(0.5) {
                     state_1.clone()
                 } else {
                     state_2.clone()
                 }
             },
-            |state| {
+            |state: &mut State| {
                 // Serialize state using canonical bytes and record result
                 black_box(state.to_bytes())
             },
@@ -284,7 +284,7 @@ fn power_analysis_resistance_benchmark(c: &mut Criterion) {
         b.iter_batched_ref(
             || {
                 // Randomly select message type
-                if thread_rng().gen_bool(0.5) {
+                if rand::rng().random_bool(0.5) {
                     low_weight_message.clone()
                 } else {
                     high_weight_message.clone()
