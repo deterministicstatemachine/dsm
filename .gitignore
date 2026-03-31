@@ -84,6 +84,18 @@ dsm_storage_node/terraform/terraform.tfstate
 dsm_storage_node/terraform/terraform.tfstate.backup
 dsm_storage_node/terraform/terraform.tfstate.d/
 dsm_storage_node/terraform/terraform.tfvars
+dsm_storage_node/terraform-gcp/.terraform/
+dsm_storage_node/terraform-gcp/.terraform.lock.hcl
+dsm_storage_node/terraform-gcp/terraform.tfstate
+dsm_storage_node/terraform-gcp/terraform.tfstate.backup
+dsm_storage_node/terraform-gcp/terraform.tfstate.d/
+dsm_storage_node/terraform-gcp/terraform.tfvars
+
+# ---------------------------------------------------------------------------
+# Deploy — generated node bundles contain TLS keys, passwords, Docker images
+# ---------------------------------------------------------------------------
+dsm_storage_node/deploy/nodes/
+dsm_storage_node/deploy/*.tar
 
 # ---------------------------------------------------------------------------
 # Database files
@@ -100,6 +112,8 @@ dsm_storage_node/terraform/terraform.tfvars
 *.key
 *.pem
 *.p12
+*.jks
+*.keystore
 *secret*
 *password*
 
@@ -121,6 +135,23 @@ lcov.info
 sbom/
 *.cdx.json
 *-20????????T??????Z.json
+
+# ---------------------------------------------------------------------------
+# SBOM scatter files (cargo-sbom drops per-crate JSON with local paths)
+# ---------------------------------------------------------------------------
+dsm-*.json
+wip_dump.txt
+
+# ---------------------------------------------------------------------------
+# Temporary scripts and scratch files — never commit
+# ---------------------------------------------------------------------------
+patch_receipts*.py
+*-repo-zapper.py
+src_test_script.rs
+tmp_sed*.txt
+dsm_spec.txt
+*.tmp
+*.bak
 test-results/
 junit.xml
 dsm_client/new_frontend/build-stats.json
