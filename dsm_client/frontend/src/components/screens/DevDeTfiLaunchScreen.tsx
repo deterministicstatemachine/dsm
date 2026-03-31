@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars, security/detect-object-injection, security/detect-unsafe-regex, no-console, react-hooks/exhaustive-deps */
 // SPDX-License-Identifier: Apache-2.0
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useCallback } from 'react';
 import { launchDeTFi, parseDeTFiHeader } from '../../dsm/detfi';
 import { useDpadNav } from '../../hooks/useDpadNav';
 import './SettingsScreen.css';
@@ -74,15 +74,23 @@ export default function DevDeTfiLaunchScreen(): JSX.Element {
     setExampleIdx((exampleIdx + 1) % EXAMPLE_BLOBS.length);
   };
 
-  const navActions = useMemo(() => [
-    () => void handleLaunch(),
-    () => loadExample(),
-    () => void pasteFromClipboard(),
-  ], [blobBase32, exampleIdx]);
+  const onSelect = useCallback((idx: number) => {
+    if (idx === 0) {
+      void handleLaunch();
+      return;
+    }
+    if (idx === 1) {
+      loadExample();
+      return;
+    }
+    if (idx === 2) {
+      void pasteFromClipboard();
+    }
+  }, [handleLaunch, loadExample, pasteFromClipboard]);
 
   const { focusedIndex } = useDpadNav({
-    itemCount: navActions.length,
-    onSelect: (idx) => navActions[idx]?.(),
+    itemCount: 3,
+    onSelect,
   });
 
   const fc = (idx: number) => (idx === focusedIndex ? ' focused' : '');

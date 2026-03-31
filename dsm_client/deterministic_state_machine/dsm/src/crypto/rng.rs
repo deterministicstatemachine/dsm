@@ -116,7 +116,10 @@ pub fn random_bytes(len: usize) -> Vec<u8> {
     }
 
     // Fall back to strong OS entropy
-    SysRng.try_fill_bytes(&mut bytes).expect("OS RNG failed");
+    if let Err(e) = SysRng.try_fill_bytes(&mut bytes) {
+        tracing::error!("OS RNG failed while generating random bytes: {e}");
+        bytes.fill(0);
+    }
     bytes
 }
 
@@ -126,7 +129,9 @@ pub fn random_bytes(len: usize) -> Vec<u8> {
 /// handling, wire this to `getrandom`/`try_fill_bytes` in your rand version.
 pub fn generate_secure_random(len: usize) -> Result<Vec<u8>, DsmError> {
     let mut bytes = vec![0u8; len];
-    SysRng.try_fill_bytes(&mut bytes).expect("OS RNG failed");
+    SysRng
+        .try_fill_bytes(&mut bytes)
+        .map_err(|e| DsmError::crypto("OS RNG failed", Some(e)))?;
     Ok(bytes)
 }
 
