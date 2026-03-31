@@ -24,7 +24,7 @@ clap = { version = "4.4", features = ["derive"] }
 prost = "0.13"
 
 # BLAKE3 hashing with domain separation for test data
-blake3 = "1.4"
+blake3 = "1.8"
 
 # Error handling
 anyhow = "1.0"
