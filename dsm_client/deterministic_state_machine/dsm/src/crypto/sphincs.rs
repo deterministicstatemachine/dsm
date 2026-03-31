@@ -745,7 +745,7 @@ pub fn generate_keypair(v: SphincsVariant) -> Result<SphincsKeyPair, DsmError> {
     // sk_seed | sk_prf | pub_seed | root
     SysRng
         .try_fill_bytes(&mut sk[..3 * p.n])
-        .expect("OS RNG failed");
+        .map_err(|e| DsmError::crypto("OS RNG failed", Some(e)))?;
     let (sk_seed, _sk_prf, pub_seed) = (&sk[..p.n], &sk[p.n..2 * p.n], &sk[2 * p.n..3 * p.n]);
 
     // Build top layer Merkle root (layer d-1), across 2^(h/d) leaves

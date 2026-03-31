@@ -42,7 +42,10 @@ export default function StateboyComboInput({ onComplete, label }: Props) {
   // Ref holds live combo so event handlers always see current value (no stale closure)
   const comboRef = useRef<ComboButton[]>([]);
   const onCompleteRef = useRef(onComplete);
-  onCompleteRef.current = onComplete;
+
+  useEffect(() => {
+    onCompleteRef.current = onComplete;
+  }, [onComplete]);
 
   const press = useCallback((btn: ComboButton) => {
     const next = [...comboRef.current, btn];

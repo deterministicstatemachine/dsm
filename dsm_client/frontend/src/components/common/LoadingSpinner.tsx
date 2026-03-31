@@ -28,17 +28,12 @@ const LoadingSpinner: React.FC<LoadingSpinnerProps> = ({
   tick,
   eraTokenSrc = 'images/logos/era_token_gb.gif',
 }) => {
-  const [dots, setDots] = useState<1 | 2 | 3>(1);
+  const [eventTicks, setEventTicks] = useState(0);
 
   // Advance dots deterministically: 1 -> 2 -> 3 -> 1
   const bump = useCallback(() => {
-    setDots(prev => (prev === 3 ? 1 : ((prev + 1) as 1 | 2 | 3)));
+    setEventTicks(prev => prev + 1);
   }, []);
-
-  // Advance on external tick prop (purely event-driven from caller)
-  useEffect(() => {
-    if (typeof tick === 'number') bump();
-  }, [tick, bump]);
 
   // Advance on DSM activity events (transport, BLE, or explicit UI tick)
     // Advance on DSM activity events (transport or explicit UI tick)
@@ -53,6 +48,11 @@ const LoadingSpinner: React.FC<LoadingSpinnerProps> = ({
       offUi();
     };
   }, [bump]);
+
+  const dots = useMemo<1 | 2 | 3>(() => {
+    const externalTicks = typeof tick === 'number' ? tick : 0;
+    return (((eventTicks + externalTicks) % 3) + 1) as 1 | 2 | 3;
+  }, [eventTicks, tick]);
 
   const sizeMap = useMemo(
     () =>

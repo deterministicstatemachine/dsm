@@ -31,7 +31,10 @@ export function useDpadNav({
 }: UseDpadNavOptions): UseDpadNavResult {
   const [focusedIndex, setFocusedIndex] = useState(initialIndex);
   const onSelectRef = useRef(onSelect);
-  onSelectRef.current = onSelect;
+
+  useEffect(() => {
+    onSelectRef.current = onSelect;
+  }, [onSelect]);
 
   // Clamp focused index when item count changes
   useEffect(() => {
