@@ -249,9 +249,12 @@ impl LoadEngine {
             let start = Instant::now();
 
             // Generate random data size
-            let data_size = rand::random::<usize>()
-                % (config.data_size_range.1 - config.data_size_range.0)
-                + config.data_size_range.0;
+            let span = config
+                .data_size_range
+                .1
+                .saturating_sub(config.data_size_range.0)
+                .max(1);
+            let data_size = (rand::random::<u64>() as usize % span) + config.data_size_range.0;
 
             // Simulate operation
             let success = Self::simulate_operation(data_size).await;
