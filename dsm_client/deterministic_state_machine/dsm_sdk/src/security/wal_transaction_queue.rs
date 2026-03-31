@@ -15,7 +15,7 @@ use dsm::types::error::DsmError;
 use crate::util::deterministic_time::tick;
 use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead};
 use bincode;
-use rand::RngCore;
+use rand_core06::RngCore;
 
 /// WAL operation types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -308,7 +308,7 @@ impl WalTransactionQueue {
             .map_err(|e| DsmError::crypto("Invalid AES key", Some(e)))?;
 
         let mut nonce = [0u8; 12];
-        rand::rngs::OsRng.fill_bytes(&mut nonce);
+        rand_core06::OsRng.fill_bytes(&mut nonce);
 
         let encrypted_data = cipher
             .encrypt(&nonce.into(), transaction)

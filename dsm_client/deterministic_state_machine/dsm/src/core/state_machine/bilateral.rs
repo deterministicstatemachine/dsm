@@ -251,7 +251,7 @@ impl BilateralStateManager {
         let mut entropy = Vec::with_capacity(16 + 32);
 
         // Deterministic seed component from RNG (named `seed` to avoid time semantics)
-        use rand::RngCore;
+        use rand::Rng;
         let mut rng = crate::crypto::rng::SecureRng;
         let seed = rng.next_u64();
         entropy.extend_from_slice(&seed.to_le_bytes());
