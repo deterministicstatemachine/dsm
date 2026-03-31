@@ -93,7 +93,7 @@ ml-kem = { version = "0.2.0", features = ["deterministic"] }  # Pure Rust FIPS 2
 # pqcrypto-mlkem = "0.1.0"  # REMOVED: Hardware optimized, caused SIGILL on Android
 # pqcrypto-sphincsplus has been replaced with a pure Rust implementation
 
-jni = { version = "0.21", optional = true }
+jni = { version = "0.22", optional = true }
 
 # Bluetooth support (optional)
 tokio-stream = { version = "0.1.14", optional = true, features = ["sync"] }
