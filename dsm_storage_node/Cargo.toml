@@ -67,7 +67,7 @@ dsm = { version = "0.1.0-beta.1", path = "../dsm_client/deterministic_state_mach
 dsm_sdk = { version = "0.1.0-beta.1", path = "../dsm_client/deterministic_state_machine/dsm_sdk" }
 
 # Protobuf support
-prost = "0.13"
+prost = "0.14"
 metrics = "0.24"
 metrics-exporter-prometheus = "0.12"
 once_cell = "1.19"
@@ -92,5 +92,5 @@ path = "src/main.rs"
 
 [dev-dependencies]
 hyper = { version = "0.14", features = ["full"] }
-prost = "0.13"
+prost = "0.14"
 serial_test = "3"
