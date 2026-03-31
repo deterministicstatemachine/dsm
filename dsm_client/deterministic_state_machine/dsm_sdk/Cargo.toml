@@ -46,7 +46,7 @@ softvault-kek-strict = []
 cbindgen = "0.29.2"
 blake3 = "1.8.4"
 anyhow = "1.0"
-prost = "0.13"
+prost = "0.14"
 prost-build = "0.14"
 prost-types = "0.12"
 tonic-build = { version = "0.13", default-features = false, features = ["prost"] }
@@ -66,7 +66,7 @@ jni = { version = "0.22", optional = true }
 mdns-sd = { version = "0.18.2", optional = true }
 
 # Protobuf support
-prost = "0.13"
+prost = "0.14"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 base32 = "0.4"
