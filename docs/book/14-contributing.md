@@ -133,7 +133,7 @@ When replacing a system, fully remove the old path. Don't leave deprecated code 
 Always regenerate proto types after changing `proto/dsm_app.proto`:
 
 ```bash
-cd dsm_client/new_frontend && npm run proto:gen
+cd dsm_client/frontend && npm run proto:gen
 ```
 
 Never use inline type casts or duck-typed interfaces.

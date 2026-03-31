@@ -149,22 +149,22 @@ echo ""
 # Layer 5: React Hook Layer
 echo -e "${YELLOW}Layer 5: React Hook Layer${NC}"
 check_file_content \
-    "dsm_client/new_frontend/src/hooks/useBridge.ts" \
+    "dsm_client/frontend/src/hooks/useBridge.ts" \
     "const metricsStartTimer" \
     "React Hook metricsStartTimer exists"
 
 check_file_content \
-    "dsm_client/new_frontend/src/hooks/useBridge.ts" \
+    "dsm_client/frontend/src/hooks/useBridge.ts" \
     "const metricsStopTimer" \
     "React Hook metricsStopTimer exists"
 
 check_file_content \
-    "dsm_client/new_frontend/src/hooks/useBridge.ts" \
+    "dsm_client/frontend/src/hooks/useBridge.ts" \
     "const metricsGetReport" \
     "React Hook metricsGetReport exists"
 
 check_file_content \
-    "dsm_client/new_frontend/src/hooks/useBridge.ts" \
+    "dsm_client/frontend/src/hooks/useBridge.ts" \
     "const metricsReset" \
     "React Hook metricsReset exists"
 
@@ -173,22 +173,22 @@ echo ""
 # Layer 6: UI Component Layer
 echo -e "${YELLOW}Layer 6: UI Component Layer${NC}"
 check_file_content \
-    "dsm_client/new_frontend/src/components/screens/ProtocolMetricsScreen.tsx" \
+    "dsm_client/frontend/src/components/screens/ProtocolMetricsScreen.tsx" \
     "export const ProtocolMetricsScreen" \
     "ProtocolMetricsScreen component exists"
 
 check_file_content \
-    "dsm_client/new_frontend/src/components/screens/ProtocolMetricsScreen.tsx" \
+    "dsm_client/frontend/src/components/screens/ProtocolMetricsScreen.tsx" \
     "metricsStartTimer" \
     "UI component uses metricsStartTimer"
 
 check_file_content \
-    "dsm_client/new_frontend/src/components/screens/ProtocolMetricsScreen.tsx" \
+    "dsm_client/frontend/src/components/screens/ProtocolMetricsScreen.tsx" \
     "TIMER MANAGEMENT" \
     "UI component has timer management section"
 
 check_file_content \
-    "dsm_client/new_frontend/src/components/screens/ProtocolMetricsScreen.tsx" \
+    "dsm_client/frontend/src/components/screens/ProtocolMetricsScreen.tsx" \
     "PERFORMANCE METRICS" \
     "UI component has performance metrics section"
 
@@ -197,22 +197,22 @@ echo ""
 # Integration Tests
 echo -e "${YELLOW}Integration Tests${NC}"
 check_file_content \
-    "dsm_client/new_frontend/src/App.tsx" \
+    "dsm_client/frontend/src/App.tsx" \
     "import ProtocolMetricsScreen" \
     "App.tsx imports ProtocolMetricsScreen"
 
 check_file_content \
-    "dsm_client/new_frontend/src/App.tsx" \
+    "dsm_client/frontend/src/App.tsx" \
     "case 'protocol-metrics'" \
     "App.tsx has protocol-metrics route"
 
 check_file_content \
-    "dsm_client/new_frontend/src/components/screens/HomeScreen.tsx" \
+    "dsm_client/frontend/src/components/screens/HomeScreen.tsx" \
     "protocol-metrics" \
     "HomeScreen has Protocol Metrics menu item"
 
 check_file_content \
-    "dsm_client/new_frontend/src/types/dsm-bridge.ts" \
+    "dsm_client/frontend/src/types/dsm-bridge.ts" \
     "protocol-metrics" \
     "TypeScript Screen type includes protocol-metrics"
 
@@ -220,7 +220,7 @@ echo ""
 
 # TypeScript Compilation Test
 echo -e "${YELLOW}TypeScript Compilation Test${NC}"
-cd dsm_client/new_frontend
+cd dsm_client/frontend
 if npm run type-check > /dev/null 2>&1; then
     test_result 0 "TypeScript compilation passes"
 else

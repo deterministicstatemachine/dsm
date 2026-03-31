@@ -57,7 +57,7 @@ async function parseRustCoverage() {
 }
 
 async function parseFrontendLcov() {
-  const lcovPath = path.join(root, 'dsm_client', 'new_frontend', 'coverage', 'lcov.info');
+  const lcovPath = path.join(root, 'dsm_client', 'frontend', 'coverage', 'lcov.info');
   if (!(await exists(lcovPath))) return null;
   const text = await fs.readFile(lcovPath, 'utf8');
   let linesFound = 0, linesHit = 0;
@@ -135,7 +135,7 @@ async function main() {
     generatedAt: 'deterministic',
     paths: {
       rust: 'coverage.json',
-      frontend: 'dsm_client/new_frontend/coverage/lcov.info',
+      frontend: 'dsm_client/frontend/coverage/lcov.info',
       android: 'dsm_client/android/app/build/reports/jacoco/jacocoTestReport/html/index.html',
     },
     rust,

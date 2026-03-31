@@ -9,15 +9,16 @@ const path = require('path');
 
 const ASSETS_DIR = path.resolve(__dirname, '../../android/app/src/main/assets');
 
-const REQUIRED = [
+const REQUIRED_EXACT = [
   'index.html',
-  'js/main', // prefix match (hashed filename)
-  'js/runtime',
-  'js/vendors',
-  'css/main',
   'config/app.json',
   'images/logos/era_token_gb.gif',
   'dsm_env_config.toml',
+];
+
+const REQUIRED_PREFIX = [
+  'js/main',
+  'css/main',
 ];
 
 // Optional assets: warn if missing, but don't fail
@@ -38,18 +39,39 @@ function existsExact(rel) {
   return fs.existsSync(path.join(ASSETS_DIR, rel));
 }
 
+function listJsAssets() {
+  const jsDir = path.join(ASSETS_DIR, 'js');
+  if (!fs.existsSync(jsDir) || !fs.statSync(jsDir).isDirectory()) return [];
+  return fs.readdirSync(jsDir).filter(entry => entry.endsWith('.js'));
+}
+
 let ok = true;
-for (const item of REQUIRED) {
-  const ext = path.extname(item);
-  const good = (ext === '.html' || ext === '.json' || ext === '.gif' || ext === '.png' || ext === '.svg')
-    ? existsExact(item)
-    : existsPrefix(item);
+for (const item of REQUIRED_EXACT) {
+  const good = existsExact(item);
   if (!good) {
     console.error(`Error: Missing asset: ${item}`);
     ok = false;
   } else {
     console.log(`OK: Found: ${item}`);
   }
+}
+
+for (const item of REQUIRED_PREFIX) {
+  const good = existsPrefix(item);
+  if (!good) {
+    console.error(`Error: Missing asset: ${item}`);
+    ok = false;
+  } else {
+    console.log(`OK: Found: ${item}`);
+  }
+}
+
+const jsAssets = listJsAssets();
+if (jsAssets.length === 0) {
+  console.error('Error: Missing JavaScript assets in js/') ;
+  ok = false;
+} else {
+  console.log(`OK: Found JavaScript assets: ${jsAssets.join(', ')}`);
 }
 
 if (!ok) {

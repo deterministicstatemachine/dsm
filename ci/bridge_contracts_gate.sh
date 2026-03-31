@@ -5,7 +5,7 @@ set -euo pipefail
 # Goal: enforce a "Uniform Byte Pipe" at boundaries.
 
 roots=(
-  dsm_client/new_frontend/src/dsm
+  dsm_client/frontend/src/dsm
   dsm_client/android/app/src/main/java
 )
 
@@ -18,14 +18,14 @@ android_roots=(
 frontend_strict_roots=(
   # NOTE: `index.ts` is a UI/client facade and may format identifiers for display.
   # The strict bytes-only contract applies to the actual bridge plumbing only.
-  dsm_client/new_frontend/src/dsm/WebViewBridge.ts
-  dsm_client/new_frontend/src/dsm/BridgeGate.ts
+  dsm_client/frontend/src/dsm/WebViewBridge.ts
+  dsm_client/frontend/src/dsm/BridgeGate.ts
 )
 
 # Allowlist some files that are explicitly UI/display/recovery and not transport acceptance.
 # IMPORTANT: keep this list small and intentional.
 allow_paths=(
-  dsm_client/new_frontend/src/dsm/EventBridge.ts
+  dsm_client/frontend/src/dsm/EventBridge.ts
   dsm_client/android/app/src/main/java/com/dsm/wallet/ui/MainActivity.kt
   dsm_client/android/app/src/main/java/com/dsm/wallet/bridge/BleEventRelay.kt
   dsm_client/android/app/src/main/java/com/dsm/wallet/bridge/SinglePathWebViewBridge.kt

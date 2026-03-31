@@ -247,7 +247,7 @@ dsm/
 │   │   │   ├── jniLibs/                  — native .so files (3 ABIs)
 │   │   │   └── assets/                   — frontend bundle + config
 │   │   └── build.gradle.kts
-│   ├── new_frontend/                     — React 18 frontend (TypeScript)
+│   ├── frontend/                     — React 18 frontend (TypeScript)
 │   │   ├── src/
 │   │   │   ├── App.tsx                   — custom router, screen rendering
 │   │   │   ├── bridge/                   — MessagePort binary bridge
@@ -316,7 +316,7 @@ make install-only                        # no rebuild, just install
 After editing `proto/dsm_app.proto`:
 
 ```bash
-cd dsm_client/new_frontend && npm run proto:gen
+cd dsm_client/frontend && npm run proto:gen
 ```
 
 This regenerates `src/proto/dsm_app_pb.ts`. Never use inline type casts or duck-typed interfaces — always regenerate.
@@ -357,9 +357,9 @@ Genesis success or failure
 
 | File | Purpose | Authoritative? |
 |------|---------|----------------|
-| `new_frontend/public/dsm_env_config.toml` | Frontend dev server, reference config | YES — keep this one up to date |
+| `frontend/public/dsm_env_config.toml` | Frontend dev server, reference config | YES — keep this one up to date |
 | `android/app/src/main/assets/dsm_env_config.toml` | Bundled into APK, materialized to device | MUST match the public version |
-| `new_frontend/android-assets/dsm_env_config.toml` | Legacy copy location (may not exist) | Deprecated, ignore |
+| `frontend/android-assets/dsm_env_config.toml` | Legacy copy location (may not exist) | Deprecated, ignore |
 
 **Rule: When you change the public TOML, also update the Android assets TOML.**
 
@@ -432,7 +432,7 @@ To hot-fix a running device without rebuilding the APK:
 
 ```bash
 # Push the correct config as an override
-adb push new_frontend/public/dsm_env_config.toml /data/local/tmp/dsm_env_config.override.toml
+adb push frontend/public/dsm_env_config.toml /data/local/tmp/dsm_env_config.override.toml
 adb shell run-as com.dsm.wallet cp /data/local/tmp/dsm_env_config.override.toml files/dsm_env_config.override.toml
 
 # Force-stop and restart
@@ -468,7 +468,7 @@ adb shell run-as com.dsm.wallet cat files/dsm_env_config.toml
 
 ### Checklist After Modifying Config
 
-- Updated `new_frontend/public/dsm_env_config.toml`
+- Updated `frontend/public/dsm_env_config.toml`
 - Updated `android/app/src/main/assets/dsm_env_config.toml` to match
 - Rebuilt APK (`./gradlew clean && ./gradlew :app:assembleDebug`)
 - Or pushed override to device for immediate testing

@@ -20,7 +20,7 @@ NC='\033[0m' # No Color
 
 # Paths
 ANDROID_DIR="./android"
-FRONTEND_DIR="./new_frontend"
+FRONTEND_DIR="./frontend"
 GENERATED_BRIDGE="$FRONTEND_DIR/src/services/DsmBridge.generated.ts"
 MANIFEST_FILE="$ANDROID_DIR/app/build/generated/ksp/debug/bridge_manifest.json"
 
@@ -42,7 +42,7 @@ echo -e "${GREEN}✅ Bridge manifest found${NC}"
 # Step 2: Check if TypeScript bridge exists
 if [ ! -f "$GENERATED_BRIDGE" ]; then
     echo -e "${RED}❌ Generated TypeScript bridge not found: $GENERATED_BRIDGE${NC}"
-    echo -e "${YELLOW}   Run bridge generation: cd new_frontend && npm run gen-bridge${NC}"
+    echo -e "${YELLOW}   Run bridge generation: cd frontend && npm run gen-bridge${NC}"
     exit 1
 fi
 

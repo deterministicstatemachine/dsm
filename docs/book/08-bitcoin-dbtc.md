@@ -82,7 +82,7 @@ cargo test --package dsm_sdk -- bitcoin_tap --nocapture
 After frontend Bitcoin changes, rebuild and copy the Android bundle:
 
 ```bash
-cd dsm_client/new_frontend
+cd dsm_client/frontend
 npm run build:android-webpack
 npm run copy:android
 ```
@@ -90,7 +90,7 @@ npm run copy:android
 Or use the combined command:
 
 ```bash
-cd dsm_client/new_frontend
+cd dsm_client/frontend
 npm run build:full-deploy
 ```
 

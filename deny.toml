@@ -6,7 +6,6 @@ wildcards = "deny"
 highlight = "all"
 skip = [
     # Legacy transitive support crates still pinned by upstream libraries.
-    { crate = "heck@0.4.1", reason = "legacy codegen stack retained by prost/cbindgen toolchain split" },
     { crate = "http@0.2.12", reason = "legacy hyper 0.14 branch retained by external dependencies" },
     { crate = "http-body@0.4.6", reason = "legacy hyper 0.14 branch retained by external dependencies" },
     { crate = "hyper@0.14.32", reason = "legacy hyper stack retained by metrics exporter and test-only paths" },

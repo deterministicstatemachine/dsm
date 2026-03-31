@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-// path: dsm_client/new_frontend/src/dsm/events.ts
+// path: dsm_client/frontend/src/dsm/events.ts
 // SPDX-License-Identifier: Apache-2.0
 // Shared event definitions to avoid circular dependencies between index.ts and EventBridge.ts
 

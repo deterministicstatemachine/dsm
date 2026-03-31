@@ -16,9 +16,9 @@ vendor/
 # Node / Frontend
 # ---------------------------------------------------------------------------
 node_modules/
-dsm_client/new_frontend/dist/
-dsm_client/new_frontend/build/
-dsm_client/new_frontend/.next/
+dsm_client/frontend/dist/
+dsm_client/frontend/build/
+dsm_client/frontend/.next/
 dsm-mcp/dist/
 packages/dsm-mcp/dist/
 *.log
@@ -106,8 +106,8 @@ dsm_storage_node/terraform/terraform.tfvars
 # ---------------------------------------------------------------------------
 # Android environment config (contains local IPs / credentials)
 # ---------------------------------------------------------------------------
-dsm_client/new_frontend/android-assets/dsm_env_config.json
-dsm_client/new_frontend/android-assets/dsm_env_config.toml
+dsm_client/frontend/android-assets/dsm_env_config.json
+dsm_client/frontend/android-assets/dsm_env_config.toml
 dsm_env_config.override.toml
 
 # ---------------------------------------------------------------------------
@@ -123,7 +123,7 @@ sbom/
 *-20????????T??????Z.json
 test-results/
 junit.xml
-dsm_client/new_frontend/build-stats.json
+dsm_client/frontend/build-stats.json
 verification-reports/verification-report.json
 verification-reports/verification-report.txt
 

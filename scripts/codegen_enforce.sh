@@ -85,7 +85,7 @@ search_noncomment_matches() {
 
 # Code directories to scan
 CODE_DIRS=(
-    "$ROOT_DIR/dsm_client/new_frontend/src"
+    "$ROOT_DIR/dsm_client/frontend/src"
     "$ROOT_DIR/dsm_client/android/app/src"
     "$ROOT_DIR/dsm_client/deterministic_state_machine"
     "$ROOT_DIR/dsm_storage_node"

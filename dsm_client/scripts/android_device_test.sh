@@ -18,7 +18,7 @@ NC='\033[0m' # No Color
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR/.."
 ANDROID_DIR="$PROJECT_ROOT/dsm_client/android"
-FRONTEND_DIR="$PROJECT_ROOT/dsm_client/new_frontend"
+FRONTEND_DIR="$PROJECT_ROOT/dsm_client/frontend"
 RUST_DIR="$PROJECT_ROOT/dsm_client/deterministic_state_machine"
 RUN_ID="run_$$"
 

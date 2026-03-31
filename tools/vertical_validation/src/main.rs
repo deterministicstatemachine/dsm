@@ -338,6 +338,11 @@ async fn run_tla_check(
     };
 
     print!("{}", report.render_ascii());
+
+    if !report.overall_verdict() {
+        anyhow::bail!("vertical validation reported failures");
+    }
+
     Ok(results)
 }
 
@@ -686,6 +691,10 @@ async fn run_full(
         _ => {
             print!("{}", report.render_ascii());
         }
+    }
+
+    if !report.overall_verdict() {
+        anyhow::bail!("vertical validation reported failures");
     }
 
     Ok(())
