@@ -1,12 +1,12 @@
 # format: file|exact_fixed_string|description
 
 # Frontend invoke/query mappings
-dsm_client/new_frontend/src/dsm/transactions.ts|appRouterInvokeBin('wallet.sendSmart'|frontend online transfer maps to wallet.sendSmart
-dsm_client/new_frontend/src/dsm/transactions.ts|appRouterInvokeBin('message.send'|frontend online message maps to message.send
-dsm_client/new_frontend/src/dsm/transactions.ts|appRouterInvokeBin('wallet.sendOffline'|frontend bilateral prepare routes via wallet.sendOffline
-dsm_client/new_frontend/src/dsm/WebViewBridge.ts|methodName: 'bilateralOfflineSend'|bridge payload methodName for bilateral offline send
-dsm_client/new_frontend/src/dsm/WebViewBridge.ts|method: 'appRouterInvoke'|bridge rpc invoke method anchor
-dsm_client/new_frontend/src/dsm/WebViewBridge.ts|method: 'appRouterQuery'|bridge rpc query method anchor
+dsm_client/frontend/src/dsm/transactions.ts|appRouterInvokeBin('wallet.sendSmart'|frontend online transfer maps to wallet.sendSmart
+dsm_client/frontend/src/dsm/transactions.ts|appRouterInvokeBin('message.send'|frontend online message maps to message.send
+dsm_client/frontend/src/dsm/transactions.ts|appRouterInvokeBin('wallet.sendOffline'|frontend bilateral prepare routes via wallet.sendOffline
+dsm_client/frontend/src/dsm/WebViewBridge.ts|methodName: 'bilateralOfflineSend'|bridge payload methodName for bilateral offline send
+dsm_client/frontend/src/dsm/WebViewBridge.ts|method: 'appRouterInvoke'|bridge rpc invoke method anchor
+dsm_client/frontend/src/dsm/WebViewBridge.ts|method: 'appRouterQuery'|bridge rpc query method anchor
 
 # JNI framed/native entrypoints
 dsm_client/deterministic_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.rs|Java_com_dsm_wallet_bridge_UnifiedNativeApi_appRouterInvokeFramed|jni invoke framed export exists

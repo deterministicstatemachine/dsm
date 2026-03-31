@@ -156,7 +156,7 @@ function Invoke-BuildRelease {
 
 function Invoke-Frontend {
     Step "Building frontend..."
-    $FrontendDir = Join-Path $RepoRoot "dsm_client\new_frontend"
+    $FrontendDir = Join-Path $RepoRoot "dsm_client\frontend"
     Set-Location $FrontendDir
     Require "node" "Install Node.js 20+ from https://nodejs.org"
     npm ci
@@ -178,7 +178,7 @@ function Invoke-TestRust {
 
 function Invoke-TestFrontend {
     Step "Running frontend tests..."
-    $FrontendDir = Join-Path $RepoRoot "dsm_client\new_frontend"
+    $FrontendDir = Join-Path $RepoRoot "dsm_client\frontend"
     Set-Location $FrontendDir
     Require "node" "Install Node.js 20+ from https://nodejs.org"
     npm test -- --passWithNoTests --ci
@@ -187,7 +187,7 @@ function Invoke-TestFrontend {
 
 function Invoke-Typecheck {
     Step "Frontend type-check..."
-    $FrontendDir = Join-Path $RepoRoot "dsm_client\new_frontend"
+    $FrontendDir = Join-Path $RepoRoot "dsm_client\frontend"
     Set-Location $FrontendDir
     Require "node" "Install Node.js 20+ from https://nodejs.org"
     npm run type-check
@@ -362,8 +362,8 @@ function Invoke-Clean {
     Set-Location $RepoRoot
     cargo clean
     $FrontendDirs = @(
-        "dsm_client\new_frontend\dist",
-        "dsm_client\new_frontend\build"
+        "dsm_client\frontend\dist",
+        "dsm_client\frontend\build"
     )
     foreach ($d in $FrontendDirs) {
         $full = Join-Path $RepoRoot $d

@@ -88,7 +88,7 @@ async fn verify_frontend_event_guarantees() {
     // Point at real AWS storage nodes (6 nodes across 3 regions) instead of
     // falling through to the hardcoded localhost:8080 fallback.
     let config_path = format!(
-        "{}/../../new_frontend/public/dsm_env_config.toml",
+        "{}/../../frontend/public/dsm_env_config.toml",
         env!("CARGO_MANIFEST_DIR")
     );
     std::env::set_var("DSM_ENV_CONFIG_PATH", &config_path);

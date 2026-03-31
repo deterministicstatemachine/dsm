@@ -1,5 +1,7 @@
 # DSM Workspace
 
+[![codecov](https://codecov.io/gh/deterministicstatemachine/dsm/graph/badge.svg?branch=main)](https://app.codecov.io/gh/deterministicstatemachine/dsm)
+
 > **🚧 EARLY BETA RELEASE** 🚧
 >
 > This is an early beta release intended for **developer onboarding and community feedback**. It contains novel cryptographic protocols and is not yet ready for production use or end-user deployment. The codebase is under active development with known gaps remaining before mainnet readiness.
@@ -18,9 +20,11 @@
 - **[Support](SUPPORT.md)** — Where to ask for help and where to file issues
 - **[Changelog](CHANGELOG.md)** — Version history
 
+CI also publishes Rust and frontend coverage to Codecov for each push and pull request on `main`.
+
 ---
 
-This repository contains the Deterministic State Machine (DSM) workspace: the Rust core and SDK, the DSM Wallet Android app (WebView + JNI/NDK), React frontend bundle, and a six-node production storage cluster on AWS (three regions).
+This repository contains the Deterministic State Machine (DSM) workspace: the Rust core and SDK, the DSM Wallet Android app (WebView + JNI/NDK), and the React frontend bundle. A six-node storage cluster across three GCP regions is provided for beta testers — no local storage node setup is required.
 
 Highlights
 - Post-quantum, clockless protocol. Envelope v3 only. Protobuf transport only (no JSON envelopes).
@@ -71,7 +75,7 @@ The maintained shell workflow is intentionally small: prefer `make`, `.\scripts\
 
 ### Storage Nodes
 
-The default configuration connects to 6 production storage nodes on AWS (us-east-1, eu-west-1, ap-southeast-1). With outbound internet access, no local setup is required.
+The default configuration connects to 6 production storage nodes on GCP (us-east1, europe-west1, asia-southeast1). With outbound internet access, no local setup is required.
 
 For optional local development nodes, see [Storage Nodes](docs/book/07-storage-nodes.md#local-multi-node-development).
 
@@ -127,22 +131,13 @@ make android-libs
 
 See the [Developer Handbook](docs/book/README.md) for full NDK build instructions including `.so` copy steps and symbol verification.
 
-## Storage Nodes (6-node AWS cluster)
+## Storage Nodes
 
-DSM storage nodes are dumb persistence services (no signatures, no validation). The production cluster runs 6 nodes across 3 AWS regions:
+DSM storage nodes are dumb persistence services (no signatures, no validation). A 6-node production cluster across 3 GCP regions is provided for beta testers. The app ships pre-configured to use these nodes — no setup required.
 
-| Node | Region | IP |
-|------|--------|----|
-| dsm-node-1 | us-east-1 | 13.218.83.69 |
-| dsm-node-2 | us-east-1 | 44.223.31.184 |
-| dsm-node-3 | eu-west-1 | 54.74.145.172 |
-| dsm-node-4 | eu-west-1 | 3.249.79.215 |
-| dsm-node-5 | ap-southeast-1 | 18.141.56.252 |
-| dsm-node-6 | ap-southeast-1 | 13.215.175.231 |
+For optional local development nodes (offline dev), see [Storage Nodes](docs/book/07-storage-nodes.md#local-multi-node-development).
 
-The app config (`dsm_env_config.toml`) ships with these nodes as the default. With outbound internet access, no local setup is required.
-
-For optional local development nodes (offline dev without AWS), see [Storage Nodes](docs/book/07-storage-nodes.md#local-multi-node-development).
+For operators who want to run their own cluster, see `dsm_storage_node/` for Terraform configs (AWS and GCP) and deployment scripts.
 
 ## BLE command path (PROTO-only)
 
@@ -199,7 +194,7 @@ Assuming the protocol and implementations are fully audited and battle-tested, D
 
 ## Troubleshooting
 - Android build: ensure Java 17 and Android SDK/NDK are installed; if JNI libs mismatch ABIs, rebuild with cargo-ndk (see above).
-- Storage-node connectivity: the default config points to AWS nodes over HTTPS. If you run local dev nodes instead, ensure PostgreSQL is running and use `make nodes-up`.
+- Storage-node connectivity: the default config points to GCP nodes over HTTPS. If you run local dev nodes instead, ensure PostgreSQL is running and use `make nodes-up`.
 - Protobuf drift: regenerate after editing `proto/dsm_app.proto` and rebuild all packages.
 
 ## License

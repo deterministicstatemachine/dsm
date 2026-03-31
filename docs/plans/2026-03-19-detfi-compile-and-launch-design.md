@@ -151,8 +151,8 @@ Frontend:  show success with IDs
 **Key files to modify:**
 - `dsm_sdk/src/handlers/` — new `detfi_routes.rs` handler
 - `dsm_sdk/src/handlers/app_router_impl.rs` — register `detfi.*` route family
-- `new_frontend/src/dsm/` — new `detfi.ts` with `launchDeTFi()` function
-- `new_frontend/src/components/screens/` — new `DeTFiLaunchScreen.tsx` or extend
+- `frontend/src/dsm/` — new `detfi.ts` with `launchDeTFi()` function
+- `frontend/src/components/screens/` — new `DeTFiLaunchScreen.tsx` or extend
   DevDlvScreen with a "Launch DeTFi" tab
 
 #### 1c. Pre-loaded templates
@@ -357,8 +357,8 @@ message ForkBranch {
 | Compile tests (new) | `dsm-gen/tests/detfi_compile.rs` |
 | Bridge route (new) | `dsm_sdk/src/handlers/detfi_routes.rs` |
 | AppRouter registration | `dsm_sdk/src/handlers/app_router_impl.rs` |
-| Frontend helper (new) | `new_frontend/src/dsm/detfi.ts` |
-| Launch screen (new/extend) | `new_frontend/src/components/screens/DeTFiLaunchScreen.tsx` |
+| Frontend helper (new) | `frontend/src/dsm/detfi.ts` |
+| Launch screen (new/extend) | `frontend/src/components/screens/DeTFiLaunchScreen.tsx` |
 | DLV creation (existing) | `dsm/src/vault/dlv_manager.rs` |
 | Pre-commitment (existing) | `dsm/src/commitments/precommit.rs` |
 | External commits (existing) | `dsm/src/commitments/external_commitment.rs` |

@@ -141,7 +141,7 @@ This builds native libraries (3 ABIs), the React frontend, packages the debug AP
 make android-libs
 
 # 2. Build frontend
-cd dsm_client/new_frontend && npm install && npm run build && cd ../..
+cd dsm_client/frontend && npm install && npm run build && cd ../..
 
 # 3. Assemble APK
 cd dsm_client/android && ./gradlew :app:assembleDebug && cd ../..

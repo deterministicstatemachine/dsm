@@ -14,7 +14,7 @@ APK="$ANDROID_DIR/app/build/outputs/apk/debug/app-debug.apk"
 
 SKIP_BUILD=0
 SKIP_UNINSTALL=1
-SKIP_REVERSE=1        # default: AWS nodes are reachable directly; no adb reverse needed
+SKIP_REVERSE=1        # default: GCP nodes are reachable directly; no adb reverse needed
 START_APP=1
 LOCAL_DEV=0           # --local: push localhost override config + set up adb reverse
 
@@ -86,7 +86,7 @@ if [[ $LOCAL_DEV -eq 1 ]]; then
     echo ""
   fi
 else
-  echo "[fast_deploy] AWS mode: using bundled dsm_env_config.toml (6 AWS nodes, no adb reverse)"
+  echo "[fast_deploy] GCP mode: using bundled dsm_env_config.toml (6 GCP nodes, no adb reverse)"
 fi
 
 for d in "${DEVICES[@]}"; do
@@ -147,9 +147,10 @@ EOF
     rm -f "$ENV_TOML"
     echo "[fast_deploy] Env config pushed to $d (host=$ENV_HOST)"
   else
-    # AWS mode: remove any stale local override so the app uses the bundled AWS config.
-    adb -s "$d" shell run-as com.dsm.wallet rm -f files/dsm_env_config.toml 2>/dev/null || true
-    echo "[fast_deploy] Cleared local env override on $d (app will use bundled AWS config)"
+    # GCP mode: remove any stale local overrides so the app uses the bundled GCP config.
+    adb -s "$d" shell run-as com.dsm.wallet rm -f files/dsm_env_config.override.toml 2>/dev/null || true
+    adb -s "$d" shell run-as com.dsm.wallet rm -f files/dsm_env_config.local.toml 2>/dev/null || true
+    echo "[fast_deploy] Cleared stale overrides on $d (app will use bundled GCP config)"
   fi
 
   if [[ $START_APP -eq 1 ]]; then

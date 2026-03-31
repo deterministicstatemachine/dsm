@@ -84,7 +84,7 @@ if (fs.existsSync(compiledTsDir)) {
   console.log('Info: No compiled TypeScript output found (skipping)');
 }
 
-// Overlay any Android-specific assets from new_frontend/android-assets (source of truth)
+// Overlay any Android-specific assets from frontend/android-assets (source of truth)
 if (fs.existsSync(overlayDir)) {
   console.log(`Overlaying Android-specific assets from ${overlayDir}`);
   copyRecursive(overlayDir, targetDir);

@@ -44,7 +44,7 @@ else
 fi
 
 echo -e "${BLUE}🔄 Step 3: Generating TypeScript bridge...${NC}"
-cd new_frontend
+cd frontend
 
 # Check if ts-node is available
 if ! command -v npx &> /dev/null; then
@@ -79,7 +79,7 @@ echo ""
 echo "📊 Summary:"
 echo "   • Kotlin annotations: $BRIDGE_EXPORTS"
 echo "   • Manifest methods: $(jq '.methods | length' "$MANIFEST_FILE" 2>/dev/null || echo "N/A")"
-echo "   • TypeScript methods: $(grep -c "async.*(" "new_frontend/$GENERATED_BRIDGE" 2>/dev/null || echo "N/A")"
+echo "   • TypeScript methods: $(grep -c "async.*(" "frontend/$GENERATED_BRIDGE" 2>/dev/null || echo "N/A")"
 echo ""
 echo -e "${YELLOW}🔄 To add a new bridge method:${NC}"
 echo "   1. Add @BridgeExport annotation to Kotlin method"
