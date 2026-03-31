@@ -3,7 +3,7 @@
 // path: src/components/qr/GenesisQrPanel.tsx
 // Genesis QR Code Display - Show genesis hash as QR for secondary devices to scan
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { encodeGenesisQrDataFromBase32 } from '../../services/qr/genesisQrService';
 import QRCode from 'qrcode';
 
@@ -13,42 +13,57 @@ interface GenesisQRCodeScreenProps {
 }
 
 export default function GenesisQrPanel({ genesisHashBase32, onClose }: GenesisQRCodeScreenProps) {
-  const [qrData, setQrData] = useState<string>('');
   const [qrPngUrl, setQrPngUrl] = useState<string>('');
   const [qrError, setQrError] = useState<boolean>(false);
 
-  useEffect(() => {
+  const encodedQr = useMemo(() => {
     try {
-      const encoded = encodeGenesisQrDataFromBase32(genesisHashBase32);
-      setQrData(encoded);
-      setQrPngUrl('');
-      setQrError(false);
-
-      // PNG-only rendering — SVG path removed to eliminate XSS surface
-      QRCode.toDataURL(
-        encoded,
-        {
-          errorCorrectionLevel: 'M',
-          margin: 2,
-          width: 300,
-          type: 'image/png',
-          color: { dark: '#000000', light: '#FFFFFF' },
-        },
-        (err, url) => {
-          if (!err && typeof url === 'string' && url.length > 0) {
-            setQrPngUrl(url);
-          } else {
-            console.error('QR PNG generation failed:', err);
-            setQrError(true);
-          }
-        },
-      );
+      return {
+        data: encodeGenesisQrDataFromBase32(genesisHashBase32),
+        hasError: false,
+      };
     } catch (e) {
       console.error('Failed to encode genesis hash for QR:', e);
-      setQrPngUrl('');
-      setQrError(true);
+      return {
+        data: '',
+        hasError: true,
+      };
     }
   }, [genesisHashBase32]);
+
+  useEffect(() => {
+    if (encodedQr.hasError || !encodedQr.data) {
+      setQrPngUrl('');
+      setQrError(true);
+      return;
+    }
+
+    let cancelled = false;
+
+    // PNG-only rendering — SVG path removed to eliminate XSS surface
+    void QRCode.toDataURL(encodedQr.data, {
+      errorCorrectionLevel: 'M',
+      margin: 2,
+      width: 300,
+      type: 'image/png',
+      color: { dark: '#000000', light: '#FFFFFF' },
+    }).then((url) => {
+      if (!cancelled && typeof url === 'string' && url.length > 0) {
+        setQrPngUrl(url);
+        setQrError(false);
+      }
+    }).catch((err) => {
+      if (!cancelled) {
+        console.error('QR PNG generation failed:', err);
+        setQrPngUrl('');
+        setQrError(true);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [encodedQr]);
 
   return (
     <div className="genesis-qr-screen">
@@ -71,10 +86,10 @@ export default function GenesisQrPanel({ genesisHashBase32, onClose }: GenesisQR
 
       <div className="info">
         <h3>Genesis Hash:</h3>
-        <code className="genesis-hash">{qrData || 'binary[32]'}</code>
+        <code className="genesis-hash">{encodedQr.data || 'binary[32]'}</code>
         <button
           onClick={() => {
-            const text = qrData;
+            const text = encodedQr.data;
             const navAny = (navigator as any);
             if (navAny?.clipboard?.writeText) {
               navAny.clipboard.writeText(text).catch(() => {});

@@ -2,7 +2,7 @@
 // Developer-only BLE transfer test screen.
 // Accessed via Settings > Dev Mode > BLE TRANSFER TEST.
 
-import React, { useState, useCallback, useRef, useMemo } from 'react';
+import React, { useState, useCallback, useRef } from 'react';
 import {
   BleRole,
   BleStep,
@@ -61,24 +61,32 @@ export default function BleTestScreen({ onNavigate }: BleTestScreenProps): JSX.E
 
   // --- D-pad navigation ---
   // Items: BACK (0), SENDER (1), RECEIVER (2), then step buttons (3..3+steps.length-1)
-  const navActions = useMemo(() => {
-    const actions: Array<() => void> = [
-      () => onNavigate?.('settings'),
-      () => handleRoleSwitch('sender'),
-      () => handleRoleSwitch('receiver'),
-    ];
-    steps.forEach((step, idx) => {
-      actions.push(() => {
-        const enabled = !running && idx <= completedStep + 1;
-        if (enabled) void handleStep(step, idx);
-      });
-    });
-    return actions;
+  const itemCount = 3 + steps.length;
+  const onSelect = useCallback((idx: number) => {
+    if (idx === 0) {
+      onNavigate?.('settings');
+      return;
+    }
+    if (idx === 1) {
+      handleRoleSwitch('sender');
+      return;
+    }
+    if (idx === 2) {
+      handleRoleSwitch('receiver');
+      return;
+    }
+
+    const stepIdx = idx - 3;
+    const step = steps[stepIdx];
+    const enabled = !running && stepIdx <= completedStep + 1;
+    if (step && enabled) {
+      void handleStep(step, stepIdx);
+    }
   }, [onNavigate, handleRoleSwitch, steps, running, completedStep, handleStep]);
 
   const { focusedIndex } = useDpadNav({
-    itemCount: navActions.length,
-    onSelect: (idx) => navActions[idx]?.(),
+    itemCount,
+    onSelect,
   });
 
   const fc = (idx: number) => (idx === focusedIndex ? ' focused' : '');
