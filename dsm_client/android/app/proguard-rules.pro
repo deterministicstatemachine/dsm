@@ -22,6 +22,9 @@
 # Preserve required attributes for Protobuf & JNI
 -keepattributes Signature, *Annotation*, EnclosingMethod, InnerClasses, SourceFile, LineNumberTable
 
-# No other keep rules needed—everything else may be shrunk/obfuscated.
-# ─────────────────────────────────────────────────────────
+# Keep all app classes — JNI, bridge, BLE, and contacts use reflection/native calls
+# that R8 cannot trace. Stripping these causes runtime crashes in release builds.
+-keep class com.dsm.wallet.** { *; }
+-keep class com.dsm.native.** { *; }
+
 # ─────────────────────────────────────────────────────────
