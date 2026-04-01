@@ -1043,7 +1043,7 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
     private fun findAnyReadySessionAddress(): String? {
         // Prefer an active GATT client session (we can write to them)
         for ((addr, peer) in peers) {
-            if (peer.isConnected && peer.negotiatedMtu > 23) {
+            if (peer.hasActiveClientSession) {
                 return addr
             }
         }
