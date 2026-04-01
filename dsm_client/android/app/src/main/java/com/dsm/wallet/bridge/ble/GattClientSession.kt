@@ -94,6 +94,45 @@ class GattClientSession(
     // a GATT cache refresh catches the transient error without masking real failures.
     private var serviceDiscoveryRetried: Boolean = false
 
+    // ── GATT error 133 retry ──
+    // Status 133 is transient on most OEMs: close GATT, wait, retry fresh.
+    private var connectionRetryCount: Int = 0
+
+    // ── MTU fallback for Android 14+ ──
+    // Android 14+ auto-requests MTU 517. If the app's requestMtu() is ignored,
+    // onMtuChanged never fires and the CCCD chain stalls. This flag + delayed
+    // runnable break the deadlock.
+    private var mtuCallbackReceived: Boolean = false
+
+    private val mtuFallbackRunnable = Runnable { handleMtuFallback() }
+
+    private fun handleMtuFallback() {
+        if (!mtuCallbackReceived && pendingMtu == 0) {
+            Log.w("GattClientSession", "MTU fallback: onMtuChanged never fired for $deviceAddress — assuming MTU ${BleConstants.MTU_SIZE}")
+            // Synthetically start the CCCD subscription chain with the expected MTU.
+            // Duplicates the happy-path from onMtuChanged to avoid circular init.
+            diagnostics.recordEvent(BleDiagEvent(phase = "mtu_fallback", device = deviceAddress, bytes = BleConstants.MTU_SIZE))
+            try {
+                bluetoothGatt?.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
+            } catch (_: SecurityException) {}
+            pendingMtu = BleConstants.MTU_SIZE
+            txResponseSubscribed = false
+            if (!subscribeToTxResponse()) {
+                txResponseSubscribed = true
+                if (!subscribeToPairingAck()) {
+                    emitEvent(BleSessionEvent.MtuNegotiated(deviceAddress, BleConstants.MTU_SIZE))
+                }
+            }
+        }
+    }
+
+    // ── GATT operation queue ──
+    // Android allows only ONE GATT op per connection at a time. The CCCD chain
+    // self-serializes via onDescriptorWrite callbacks, but readIdentity() and
+    // other non-chained ops must be queued to avoid silent failures.
+    private var gattOpInFlight: Boolean = false
+    private val pendingGattOps: ArrayDeque<() -> Boolean> = ArrayDeque()
+
     // Remove callback lambdas - operations are now fully asynchronous via events
 
     private fun emitEvent(event: BleSessionEvent) {
@@ -106,6 +145,26 @@ class GattClientSession(
                 t
             )
         }
+    }
+
+    // ── GATT operation queue ──────────────────────────────────────────────
+    // Android allows only one GATT op in-flight per connection. These helpers
+    // serialize non-chained ops (readIdentity, etc.) behind the CCCD chain.
+
+    private fun enqueueGattOp(op: () -> Boolean): Boolean {
+        if (!gattOpInFlight) {
+            gattOpInFlight = true
+            return op()
+        }
+        pendingGattOps.addLast(op)
+        return true // queued — caller should not treat as failure
+    }
+
+    private fun drainNextGattOp() {
+        gattOpInFlight = false
+        val next = pendingGattOps.removeFirstOrNull() ?: return
+        gattOpInFlight = true
+        next()
     }
 
     @Suppress("DEPRECATION")
@@ -146,6 +205,8 @@ class GattClientSession(
             pendingChunkAckWriteCount = queuedAckCount
             val ack = byteArrayOf(
                 0xFF.toByte(),
+                ((queuedAckCount shr 24) and 0xFF).toByte(),
+                ((queuedAckCount shr 16) and 0xFF).toByte(),
                 ((queuedAckCount shr 8) and 0xFF).toByte(),
                 (queuedAckCount and 0xFF).toByte()
             )
@@ -185,10 +246,21 @@ class GattClientSession(
                     // in this state causes silent failures — close and signal error instead.
                     if (status != BluetoothGatt.GATT_SUCCESS) {
                         Log.e("GattClientSession", "Connection error status=$status for $deviceAddress — closing GATT")
+                        // Status 133 is transient on most OEMs. Close GATT, wait, retry fresh
+                        // with exponential backoff before giving up.
+                        if (status == BleConstants.GATT_ERROR_STATUS && connectionRetryCount < BleConstants.GATT_RETRY_MAX_ATTEMPTS) {
+                            connectionRetryCount++
+                            val delay = (BleConstants.GATT_RETRY_DELAY_MS * Math.pow(1.5, (connectionRetryCount - 1).toDouble())).toLong()
+                            Log.w("GattClientSession", "Status 133 retry #$connectionRetryCount for $deviceAddress — retrying in ${delay}ms")
+                            cleanup()
+                            timeoutHandler.postDelayed({ connect() }, delay)
+                            return
+                        }
                         emitEvent(BleSessionEvent.ErrorOccurred(deviceAddress, BleErrorCategory.CONNECTION_FAILED, "connection_status_$status"))
                         cleanup()
                         return
                     }
+                    connectionRetryCount = 0
                     diagnostics.recordEvent(BleDiagEvent(phase = "connected", device = deviceAddress))
                     // Emit connection event - BleCoordinator manages state
                     emitEvent(BleSessionEvent.Connected(deviceAddress))
@@ -216,6 +288,16 @@ class GattClientSession(
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     timeoutHandler.removeCallbacks(connectionTimeoutRunnable)
                     diagnostics.recordEvent(BleDiagEvent(phase = "disconnected", device = deviceAddress, status = status))
+                    // Status 133 on disconnect is also transient on some OEMs — retry
+                    // if we haven't exhausted retries (e.g., Samsung Tab A9).
+                    if (status == BleConstants.GATT_ERROR_STATUS && connectionRetryCount < BleConstants.GATT_RETRY_MAX_ATTEMPTS) {
+                        connectionRetryCount++
+                        val delay = (BleConstants.GATT_RETRY_DELAY_MS * Math.pow(1.5, (connectionRetryCount - 1).toDouble())).toLong()
+                        Log.w("GattClientSession", "Status 133 on disconnect retry #$connectionRetryCount for $deviceAddress — retrying in ${delay}ms")
+                        cleanup()
+                        timeoutHandler.postDelayed({ connect() }, delay)
+                        return
+                    }
                     // Emit disconnection event - BleCoordinator manages state
                     emitEvent(BleSessionEvent.Disconnected(deviceAddress, status))
                     cleanup()
@@ -267,6 +349,8 @@ class GattClientSession(
 
         override fun onMtuChanged(gatt: BluetoothGatt?, mtu: Int, status: Int) {
             Log.d("GattClientSession", "MTU changed: $deviceAddress, mtu: $mtu, status: $status")
+            mtuCallbackReceived = true
+            timeoutHandler.removeCallbacks(mtuFallbackRunnable)
 
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 diagnostics.recordEvent(BleDiagEvent(phase = "mtu_negotiated", device = deviceAddress, bytes = mtu))
@@ -336,6 +420,8 @@ class GattClientSession(
                     Log.i("GattClientSession", "PAIRING_ACK CCCD write done (status=$status) — emitting MtuNegotiated($mtu)")
                     emitEvent(BleSessionEvent.MtuNegotiated(deviceAddress, mtu))
                 }
+                // CCCD chain complete — drain any ops queued during the chain.
+                drainNextGattOp()
             }
         }
 
@@ -352,6 +438,8 @@ class GattClientSession(
                     }
                 }
             }
+            // GATT op completed — drain next queued op.
+            drainNextGattOp()
         }
 
         override fun onCharacteristicWrite(gatt: BluetoothGatt?, characteristic: BluetoothGattCharacteristic?, status: Int) {
@@ -541,6 +629,7 @@ class GattClientSession(
     fun closeQuietly() {
         timeoutHandler.removeCallbacks(connectionTimeoutRunnable)
         try {
+            bluetoothGatt?.disconnect()
             bluetoothGatt?.close()
         } catch (e: SecurityException) {
             Log.e("GattClientSession", "Security exception closing GATT quietly for $deviceAddress", e)
@@ -672,9 +761,32 @@ class GattClientSession(
             return false
         }
 
+        // Close any stale GATT client to prevent leaking Android's ~32-object limit.
+        // A leaked GATT client permanently degrades BLE until the app process is killed.
+        bluetoothGatt?.let { stale ->
+            try { stale.close() } catch (_: Throwable) {}
+        }
+        bluetoothGatt = null
+
         try {
             val device = adapter.getRemoteDevice(deviceAddress)
-            bluetoothGatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+            // Some OEMs (Samsung, Xiaomi) require connectGatt() on the main Looper.
+            // If we're already on main, call directly; otherwise dispatch and wait.
+            if (Looper.myLooper() == Looper.getMainLooper()) {
+                bluetoothGatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+            } else {
+                val latch = java.util.concurrent.CountDownLatch(1)
+                Handler(Looper.getMainLooper()).post {
+                    bluetoothGatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+                    latch.countDown()
+                }
+                if (!latch.await(3, java.util.concurrent.TimeUnit.SECONDS)) {
+                    Log.e("GattClientSession", "connectGatt main-thread dispatch timed out for $deviceAddress")
+                    diagnostics.recordError(BleErrorCategory.CONNECTION_FAILED, "connect_main_thread_timeout")
+                    emitEvent(BleSessionEvent.ErrorOccurred(deviceAddress, BleErrorCategory.CONNECTION_FAILED, "connect_main_thread_timeout"))
+                    return false
+                }
+            }
             timeoutHandler.removeCallbacks(connectionTimeoutRunnable)
             timeoutHandler.postDelayed(connectionTimeoutRunnable, CONNECTION_TIMEOUT_MS)
             diagnostics.recordEvent(BleDiagEvent(phase = "connecting", device = deviceAddress))
@@ -699,17 +811,21 @@ class GattClientSession(
             return false
         }
 
-        try {
-            return bluetoothGatt?.readCharacteristic(char) == true
-        } catch (e: SecurityException) {
-            Log.e("GattClientSession", "Security exception reading characteristic for $deviceAddress", e)
-            BleCoordinator.getInstance(context).let { coordinator ->
-                coordinator.permissionsGate.recordPermissionFailure()
-                coordinator.callback?.onBlePermissionError("Bluetooth connection permission required")
+        // Queue through the GATT op serializer so this never collides with
+        // an in-flight CCCD descriptor write from the MTU chain.
+        return enqueueGattOp {
+            try {
+                bluetoothGatt?.readCharacteristic(char) == true
+            } catch (e: SecurityException) {
+                Log.e("GattClientSession", "Security exception reading characteristic for $deviceAddress", e)
+                BleCoordinator.getInstance(context).let { coordinator ->
+                    coordinator.permissionsGate.recordPermissionFailure()
+                    coordinator.callback?.onBlePermissionError("Bluetooth connection permission required")
+                }
+                diagnostics.recordError(BleErrorCategory.PERMISSION_DENIED, "characteristic_read")
+                emitEvent(BleSessionEvent.ErrorOccurred(deviceAddress, BleErrorCategory.PERMISSION_DENIED, "characteristic_read"))
+                false
             }
-            diagnostics.recordError(BleErrorCategory.PERMISSION_DENIED, "characteristic_read")
-            emitEvent(BleSessionEvent.ErrorOccurred(deviceAddress, BleErrorCategory.PERMISSION_DENIED, "characteristic_read"))
-            return false
         }
     }
 
@@ -873,29 +989,41 @@ class GattClientSession(
 
     @SuppressLint("MissingPermission")
     private fun negotiateMtu() {
+        mtuCallbackReceived = false
         val requestedMtu = BleConstants.IDENTITY_MTU_REQUEST
         if (bluetoothGatt?.requestMtu(requestedMtu) != true) {
-            Log.w("GattClientSession", "MTU request failed, using default")
-            emitEvent(BleSessionEvent.MtuNegotiated(deviceAddress, 23))
+            // Android 14+ auto-requests MTU 517 before the app calls requestMtu().
+            // If the auto-request already completed, requestMtu() returns false and
+            // onMtuChanged never fires from this call. Schedule a fallback that
+            // unblocks the CCCD chain after a short delay.
+            Log.w("GattClientSession", "requestMtu($requestedMtu) returned false for $deviceAddress — scheduling MTU fallback")
+            timeoutHandler.postDelayed(mtuFallbackRunnable, BleConstants.MTU_FALLBACK_DELAY_MS)
         }
     }
 
     private fun cleanup() {
         timeoutHandler.removeCallbacks(connectionTimeoutRunnable)
+        timeoutHandler.removeCallbacks(mtuFallbackRunnable)
         // P1.1: Reset connection priority to balanced on cleanup to save battery.
         try {
             bluetoothGatt?.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_BALANCED)
-        } catch (_: SecurityException) { /* best-effort */ }
+        } catch (_: Throwable) { /* best-effort */ }
+        // Null the field BEFORE calling close() so that re-entrant paths (e.g.,
+        // an onConnectionStateChange firing during close()) do not double-close.
+        // Widened catch to Throwable: Samsung throws DeadObjectException, not SecurityException.
+        val gatt = bluetoothGatt
+        bluetoothGatt = null
         try {
-            bluetoothGatt?.close()
-        } catch (e: SecurityException) {
-            Log.e("GattClientSession", "Security exception closing GATT for $deviceAddress", e)
-            BleCoordinator.getInstance(context).let { coordinator ->
-                coordinator.permissionsGate.recordPermissionFailure()
-                coordinator.callback?.onBlePermissionError("Bluetooth connection permission required")
+            gatt?.close()
+        } catch (t: Throwable) {
+            Log.e("GattClientSession", "Exception closing GATT for $deviceAddress", t)
+            if (t is SecurityException) {
+                BleCoordinator.getInstance(context).let { coordinator ->
+                    coordinator.permissionsGate.recordPermissionFailure()
+                    coordinator.callback?.onBlePermissionError("Bluetooth connection permission required")
+                }
             }
         }
-        bluetoothGatt = null
         requestCharacteristic = null
         responseCharacteristic = null
         identityCharacteristic = null
@@ -910,6 +1038,10 @@ class GattClientSession(
         awaitingConfirmWriteAck = false
         pairingAckCccdSubscribed = false
         notificationChunkCount = 0
+        mtuCallbackReceived = false
+        connectionRetryCount = 0
+        gattOpInFlight = false
+        pendingGattOps.clear()
         pendingTxResponseResubscribe?.cancel()
         pendingTxResponseResubscribe = null
     }

@@ -6,6 +6,7 @@ import android.content.Context
 import android.os.ParcelUuid
 import android.util.Log
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -30,9 +31,20 @@ class BleAdvertiser(private val context: Context) {
         this.callback = callback
     }
 
-    private val advertising = AtomicBoolean(false)
+    // Current state: IDLE=0, REQUESTING_START=1, STARTED=2, REQUESTING_STOP=3
+    private val state = AtomicReference<Int>(0)
+
+    private val advertisingRequestId = AtomicInteger(0)
     private val currentAdvertisingSet = AtomicReference<AdvertisingSet?>(null)
     private var bluetoothLeAdvertiser: BluetoothLeAdvertiser? = null
+
+    private var permissionsGate: BlePermissionsGate? = null
+
+    private fun ensurePermissionsGate(): BlePermissionsGate {
+        return permissionsGate ?: BlePermissionsGate(context).also {
+            permissionsGate = it
+        }
+    }
 
     private val advertisingSetCallback = object : AdvertisingSetCallback() {
         override fun onAdvertisingSetStarted(
@@ -40,22 +52,34 @@ class BleAdvertiser(private val context: Context) {
             txPower: Int,
             status: Int
         ) {
+            val currentId = advertisingRequestId.get()
+            if (state.get() != 1) { // Not REQUESTING_START
+                Log.w(TAG, "Stale start callback (id=$currentId, state=${state.get()}) ignored")
+                return
+            }
+
             if (status == AdvertisingSetCallback.ADVERTISE_SUCCESS) {
                 currentAdvertisingSet.set(advertisingSet)
-                advertising.set(true)
-                Log.i(TAG, "Advertising set started (txPower=$txPower)")
+                state.set(2) // STARTED
+                Log.i(TAG, "Advertising set started (txPower=$txPower, id=$currentId)")
             } else {
                 currentAdvertisingSet.set(null)
-                advertising.set(false)
-                Log.e(TAG, "Advertising set failed to start, status=$status")
+                state.set(0) // IDLE
+                Log.e(TAG, "Advertising set failed to start, status=$status, id=$currentId")
                 callback?.onAdvertisingFailed(status)
             }
         }
 
         override fun onAdvertisingSetStopped(advertisingSet: AdvertisingSet?) {
+            val currentId = advertisingRequestId.get()
+            if (state.get() != 3) { // Not REQUESTING_STOP
+                Log.w(TAG, "Stale stop callback (id=$currentId, state=${state.get()}) ignored")
+                return
+            }
+
             currentAdvertisingSet.set(null)
-            advertising.set(false)
-            Log.i(TAG, "Advertising set stopped")
+            state.set(0) // IDLE
+            Log.i(TAG, "Advertising set stopped (id=$currentId)")
         }
 
         override fun onAdvertisingDataSet(advertisingSet: AdvertisingSet?, status: Int) {
@@ -73,18 +97,13 @@ class BleAdvertiser(private val context: Context) {
 
     @SuppressLint("MissingPermission")
     fun startAdvertising(): Boolean {
-        if (advertising.get() || currentAdvertisingSet.get() != null) {
-            Log.d(TAG, "Already advertising")
-            return true
-        }
-
-        val permissionsGate = BlePermissionsGate(context)
-        if (!permissionsGate.hasAdvertisePermission()) {
+        val gate = ensurePermissionsGate()
+        if (!gate.hasAdvertisePermission()) {
             Log.w(TAG, "Missing BLUETOOTH_ADVERTISE permission")
             return false
         }
 
-        val adapter = permissionsGate.getBluetoothAdapter() ?: run {
+        val adapter = gate.getBluetoothAdapter() ?: run {
             Log.w(TAG, "No Bluetooth adapter available")
             return false
         }
@@ -97,6 +116,37 @@ class BleAdvertiser(private val context: Context) {
         bluetoothLeAdvertiser = adapter.bluetoothLeAdvertiser ?: run {
             Log.w(TAG, "No BLE advertiser available")
             return false
+        }
+
+        val currentState = state.get()
+        if (currentState == 2) { // Already STARTED
+            Log.d(TAG, "Already advertising")
+            return true
+        }
+
+        if (currentState == 1) { // REQUESTING_START - idempotent
+            Log.d(TAG, "Start already in flight")
+            return true
+        }
+
+        if (currentState == 3) { // REQUESTING_STOP - wait for it
+            Log.d(TAG, "Start requested while stopping, will retry after stop")
+            return false
+        }
+
+        // Transition IDLE -> REQUESTING_START
+        if (!state.compareAndSet(0, 1)) {
+            Log.w(TAG, "State transition failed (expected IDLE)")
+            return false
+        }
+
+        val requestId = advertisingRequestId.incrementAndGet()
+
+        // Defensive cleanup for any existing set
+        try {
+            bluetoothLeAdvertiser?.stopAdvertisingSet(advertisingSetCallback)
+        } catch (_: Throwable) {
+            // Ignore - may not exist
         }
 
         val parameters = AdvertisingSetParameters.Builder()
@@ -121,12 +171,6 @@ class BleAdvertiser(private val context: Context) {
             .setIncludeDeviceName(false)
             .build()
 
-        // Defensive cleanup: stop any existing advertising set to avoid
-        // IllegalArgumentException("callback instance already associated").
-        // Handles the race where startAdvertising() is called before the
-        // previous onAdvertisingSetStopped callback has fired.
-        try { bluetoothLeAdvertiser?.stopAdvertisingSet(advertisingSetCallback) } catch (_: Throwable) {}
-
         return try {
             bluetoothLeAdvertiser?.startAdvertisingSet(
                 parameters,
@@ -136,34 +180,56 @@ class BleAdvertiser(private val context: Context) {
                 null,  // no periodic advertising data
                 advertisingSetCallback
             )
-            Log.i(TAG, "BLE advertising set requested (with scan response)")
+            Log.i(TAG, "BLE advertising set requested (id=$requestId, with scan response)")
             true
         } catch (t: Throwable) {
-            Log.e(TAG, "Failed to start advertising set", t)
+            Log.e(TAG, "Failed to start advertising set (id=$requestId)", t)
+            state.set(0) // Back to IDLE on exception
             false
         }
     }
 
     @SuppressLint("MissingPermission")
     fun stopAdvertising(): Boolean {
-        if (!advertising.get()) {
+        val currentState = state.get()
+        if (currentState == 0) { // IDLE
             Log.d(TAG, "Not advertising")
             return true
         }
 
+        if (currentState == 2) { // STARTED -> REQUESTING_STOP
+            if (!state.compareAndSet(2, 3)) {
+                Log.w(TAG, "Failed to transition STARTED -> REQUESTING_STOP")
+                return false
+            }
+        } else if (currentState == 1) { // REQUESTING_START -> IDLE
+            state.set(0)
+            Log.d(TAG, "Stop requested while starting -> IDLE")
+            return true
+        } else { // Already REQUESTING_STOP
+            Log.d(TAG, "Already stopping")
+            return true
+        }
+
+        val bluetoothLeAdvertiserLocal = bluetoothLeAdvertiser
+        if (bluetoothLeAdvertiserLocal == null) {
+            Log.w(TAG, "No advertiser available for stop")
+            state.set(0) // Treat as stopped
+            return false
+        }
+
         return try {
-            bluetoothLeAdvertiser?.stopAdvertisingSet(advertisingSetCallback)
-            currentAdvertisingSet.set(null)
-            advertising.set(false)
-            Log.i(TAG, "BLE advertising stopped")
+            bluetoothLeAdvertiserLocal.stopAdvertisingSet(advertisingSetCallback)
+            Log.i(TAG, "BLE advertising stop requested")
             true
         } catch (t: Throwable) {
             Log.e(TAG, "Failed to stop advertising", t)
+            state.set(0) // Treat as stopped on error
             false
         }
     }
 
-    fun isAdvertising(): Boolean = advertising.get()
+    fun isAdvertising(): Boolean = state.get() == 2
 
     companion object {
         private const val TAG = "BleAdvertiser"

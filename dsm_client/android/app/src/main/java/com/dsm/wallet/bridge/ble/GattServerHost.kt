@@ -453,9 +453,22 @@ class GattServerHost(private val context: Context) {
                             @Suppress("DEPRECATION") server.notifyCharacteristicChanged(device, txResponseChar, false)
                         }
                         if (!sent) {
-                            Log.e("GattServerHost", "sendChunkedNotifications: notifyCharacteristicChanged failed for chunk $index/${chunks.size}")
-                            peer.notificationCompletion = null
-                            return@withLock false
+                            // BLE notification buffer may be momentarily full. Wait 50ms
+                            // and retry once before giving up — matches Android BLE best
+                            // practice for transient buffer-full conditions.
+                            Log.w("GattServerHost", "sendChunkedNotifications: buffer-full for chunk $index/${chunks.size} — retry in 50ms")
+                            kotlinx.coroutines.delay(50)
+                            val retrySent: Boolean = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                server.notifyCharacteristicChanged(device, txResponseChar, false, chunk) == BluetoothStatusCodes.SUCCESS
+                            } else {
+                                @Suppress("DEPRECATION") txResponseChar.setValue(chunk)
+                                @Suppress("DEPRECATION") server.notifyCharacteristicChanged(device, txResponseChar, false)
+                            }
+                            if (!retrySent) {
+                                Log.e("GattServerHost", "sendChunkedNotifications: notifyCharacteristicChanged failed after retry for chunk $index/${chunks.size}")
+                                peer.notificationCompletion = null
+                                return@withLock false
+                            }
                         }
 
                         // P1.2: Wait for onNotificationSent with retry on timeout.
@@ -508,6 +521,8 @@ class GattServerHost(private val context: Context) {
                         // Windowed flow control: after every WINDOW_SIZE chunks, wait for client ACK.
                         // The client only emits an ACK on exact window boundaries, not on a final partial window.
                         val chunkNum = index + 1
+                        Log.i("BleTransferTrace", "Send chunk $chunkNum/${chunks.size} to $deviceAddress")
+                        Log.i("BleTransferTrace", "Send chunk $chunkNum/${chunks.size} to $deviceAddress")
                         val isWindowBoundary = chunkNum % NOTIFICATION_WINDOW_SIZE == 0
                         val isLastChunk = chunkNum == framedChunks.size
                         if (isWindowBoundary) {
@@ -1179,5 +1194,17 @@ class GattServerHost(private val context: Context) {
         } else existing
         System.arraycopy(value, 0, buf, offset, value.size)
         return buf
+    }
+    @android.annotation.SuppressLint("MissingPermission")
+    fun disconnectClient(deviceAddress: String) {
+        val p = peerLookup?.invoke(deviceAddress)
+        p?.serverDevice?.let { device ->
+            try {
+                android.util.Log.i("GattServerHost", "Forcibly disconnecting server client $deviceAddress")
+                gattServer.get()?.cancelConnection(device)
+            } catch (e: SecurityException) {
+                android.util.Log.e("GattServerHost", "Security exception disconnecting", e)
+            }
+        }
     }
 }

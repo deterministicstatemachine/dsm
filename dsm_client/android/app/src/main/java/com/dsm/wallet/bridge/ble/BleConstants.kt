@@ -30,4 +30,31 @@ object BleConstants {
     const val MTU_SIZE = 517
     const val IDENTITY_MTU_REQUEST = 512
     const val MIN_IDENTITY_MTU = 67
+
+    // ── Reconnection backoff ──
+    // Exponential backoff for BLE reconnection after unexpected disconnect.
+    // Prevents battery drain and Android scan-rate-limit violations.
+    const val RECONNECT_INITIAL_DELAY_MS = 1_000L
+    const val RECONNECT_MAX_DELAY_MS = 30_000L
+    const val RECONNECT_MAX_ATTEMPTS = 8
+
+    // ── Scan duration cap ──
+    // LOW_LATENCY (100% duty) transitions to BALANCED after this window.
+    const val SCAN_LOW_LATENCY_DURATION_MS = 12_000L
+
+    // ── GATT error 133 retry ──
+    // Status 133 is transient on most OEMs. Close GATT, wait, retry fresh.
+    const val GATT_ERROR_STATUS = 133
+    const val GATT_RETRY_DELAY_MS = 300L
+    const val GATT_RETRY_MAX_ATTEMPTS = 3
+
+    // ── Connection priority management ──
+    // Reset HIGH → BALANCED after transfer completion to save battery.
+    const val CONNECTION_PRIORITY_RESET_DELAY_MS = 500L
+
+    // ── MTU fallback ──
+    // Android 14+ auto-requests MTU 517. If the app's requestMtu() is
+    // ignored (returns false), this fallback fires after the delay to
+    // unblock the CCCD subscription chain.
+    const val MTU_FALLBACK_DELAY_MS = 2_000L
 }

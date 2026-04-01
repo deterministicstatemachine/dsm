@@ -20,6 +20,7 @@ internal object BridgeEnvelopeCodec {
         var offset = 0
         var method = ""
         var payload = ByteArray(0)
+        var payloadFound = false
 
         while (offset < requestBytes.size) {
             val (key, keyOff) = readVarint(requestBytes, offset)
@@ -43,6 +44,8 @@ internal object BridgeEnvelopeCodec {
                 }
                 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 -> {
                     if (wireType != 2) throw IllegalArgumentException("BridgeRpcRequest.payload wrong wire type")
+                    if (payloadFound) throw IllegalArgumentException("BridgeRpcRequest has multiple payloads")
+                    payloadFound = true
                     val (bytes, off) = readLengthDelimited(requestBytes, offset)
                     offset = off
                     payload = decodePayload(fieldNumber, bytes)
@@ -289,6 +292,7 @@ internal object BridgeEnvelopeCodec {
             when (fieldNumber) {
                 1 -> {
                     if (wireType != 2) throw IllegalArgumentException("BridgeRpcResponse.success wrong wire type")
+                    if (isSuccess != null) throw IllegalArgumentException("BridgeRpcResponse has multiple results")
                     val (msgBytes, off) = readLengthDelimited(bytes, offset)
                     offset = off
                     payload = parseSuccessPayload(msgBytes)
@@ -296,6 +300,7 @@ internal object BridgeEnvelopeCodec {
                 }
                 2 -> {
                     if (wireType != 2) throw IllegalArgumentException("BridgeRpcResponse.error wrong wire type")
+                    if (isSuccess != null) throw IllegalArgumentException("BridgeRpcResponse has multiple results")
                     val (msgBytes, off) = readLengthDelimited(bytes, offset)
                     offset = off
                     payload = msgBytes
@@ -525,6 +530,7 @@ internal object BridgeEnvelopeCodec {
             if (b and 0x80 == 0) break
             shift += 7
             if (shift > 63) throw IllegalArgumentException("varint too long")
+            if (offset >= bytes.size && (b and 0x80) != 0) throw IllegalArgumentException("truncated varint")
         }
         return Pair(result, offset)
     }
@@ -540,9 +546,17 @@ internal object BridgeEnvelopeCodec {
     private fun skipField(wireType: Int, bytes: ByteArray, start: Int): Int {
         return when (wireType) {
             0 -> readVarint(bytes, start).second
-            1 -> start + 8
+            1 -> {
+                val off = start + 8
+                if (off > bytes.size) throw IllegalArgumentException("truncated fixed64")
+                off
+            }
             2 -> readLengthDelimited(bytes, start).second
-            5 -> start + 4
+            5 -> {
+                val off = start + 4
+                if (off > bytes.size) throw IllegalArgumentException("truncated fixed32")
+                off
+            }
             else -> throw IllegalArgumentException("unsupported wire type: $wireType")
         }
     }

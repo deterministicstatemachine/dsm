@@ -127,7 +127,7 @@ class BleOperationDispatcher(private val scope: CoroutineScope) {
         }
 
         return runBlocking {
-            withTimeoutOrNull(5_000L) { deferred.await() } ?: false
+            withTimeoutOrNull(15_000L) { deferred.await() } ?: false
         }
     }
 

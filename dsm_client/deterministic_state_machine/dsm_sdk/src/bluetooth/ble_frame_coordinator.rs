@@ -83,7 +83,10 @@ impl Default for TransportConfig {
     fn default() -> Self {
         Self {
             ack_timeout: Duration::from_millis(500),
-            idle_timeout: Duration::from_secs(15),
+            // 25s: must exceed the Android BLE supervision timeout (5-20s
+            // depending on chipset and negotiated parameters) to prevent
+            // Rust from tearing down a connection the OS still considers alive.
+            idle_timeout: Duration::from_secs(25),
             reassembly_timeout: Duration::from_secs(10),
             connect_timeout: Duration::from_secs(8),
             max_retries: 5,

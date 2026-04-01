@@ -6,6 +6,9 @@ import android.util.Log
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import android.content.Context
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 /**
  * Protobuf-only BLE event relay.
@@ -19,14 +22,12 @@ object BleEventRelay {
     
     // Track if WebView bridge is ready (set by MainActivity.signalBridgeReady)
     @Volatile private var bridgeReady = false
-    // Guard to prevent re-persisting events during flush
-    @Volatile private var flushing = false
-
+    // Lock for persist/flush synchronization (eliminates flushing race)
+    private val eventLock = ReentrantLock()
+    
     private class BleDbHelper(ctx: Context) : SQLiteOpenHelper(ctx, DB_NAME, null, DB_VERSION) {
         override fun onCreate(db: SQLiteDatabase) {
-            // No wall-clock markers: row order determined by rowid (AUTOINCREMENT)
             db.execSQL("CREATE TABLE IF NOT EXISTS $TABLE (id INTEGER PRIMARY KEY AUTOINCREMENT, topic TEXT NOT NULL, payload BLOB NOT NULL)")
-            // Index on id for ORDER BY and pruning queries (rowid is implicitly indexed, but explicit doesn't hurt)
             db.execSQL("CREATE INDEX IF NOT EXISTS idx_pending_ble_id ON $TABLE(id)")
         }
         override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -36,8 +37,9 @@ object BleEventRelay {
             }
         }
     }
-    // Cache the helper to avoid opening a new connection on every call
-    private var dbHelper: BleDbHelper? = null
+    
+    @Volatile private var dbHelper: BleDbHelper? = null
+    
     @Synchronized
     private fun db(ctx: Context): SQLiteDatabase {
         if (dbHelper == null) {
@@ -73,8 +75,6 @@ object BleEventRelay {
         bridgeReady = true
         Log.d(TAG, "Bridge marked as ready")
 
-        // Ensure Rust BLE coordinator is initialized before flushing events.
-        // Events dispatched to an uninitialized coordinator would be silently dropped.
         try {
             if (!com.dsm.wallet.bridge.UnifiedNativeApi.isBleCoordinatorReady()) {
                 Log.i(TAG, "Rust BLE coordinator not ready — forcing init")
@@ -89,147 +89,153 @@ object BleEventRelay {
         }
     }
 
-    /**
-     * Reflective call to avoid a hard dependency on the bridge.
-     * Expected static method:
-     *   SinglePathWebViewBridge.postBinary(topic: String, payload: ByteArray)
-     */
     private fun postToBridgeBinary(topic: String, payload: ByteArray) {
         if (!bridgeReady) {
-            if (!flushing) {
-                Log.d(TAG, "Bridge not ready, persisting event: topic=$topic")
-                persistEvent(topic, payload)
+            Log.d(TAG, "Bridge not ready, persisting event: topic=$topic")
+            eventLock.withLock {
+                persistEventNoContext(topic, payload)
             }
             return
         }
+        
         try {
             val clazz = Class.forName("com.dsm.wallet.bridge.SinglePathWebViewBridge")
             val method = clazz.getDeclaredMethod("postBinary", String::class.java, ByteArray::class.java)
             method.invoke(null, topic, payload)
+            Log.v(TAG, "Event delivered to bridge: topic=$topic")
         } catch (t: Throwable) {
-            // During flush, don't re-persist — events remain in SQLite for next flush
-            if (!flushing) {
-                Log.w(TAG, "WebView bridge unavailable/incompatible: ${t.message} — persisting for later flush")
-                persistEvent(topic, payload)
-            } else {
-                Log.w(TAG, "WebView bridge unavailable during flush: ${t.message} — will retry on next flush")
+            Log.w(TAG, "WebView bridge unavailable: ${t.message} — persisting: topic=$topic")
+            eventLock.withLock {
+                persistEventNoContext(topic, payload)
             }
         }
     }
+
     @Suppress("PrivateApi", "DiscouragedPrivateApi")
     private fun appContextOrNull(): Context? {
-        // Try AppGlobals first (works in Robolectric and some process states)
-        try {
-            val app = Class.forName("android.app.AppGlobals").getMethod("getInitialApplication").invoke(null) as? Context
-            if (app != null) return app
-        } catch (_: Throwable) { /* ignore */ }
-        // Alternate path: ActivityThread
         return try {
-            val atField = Class.forName("android.app.ActivityThread").getDeclaredField("sCurrentActivityThread").apply { isAccessible = true }
-            val at = atField.get(null) ?: return null
-            val method = at.javaClass.getDeclaredMethod("getApplication")
-            method.invoke(at) as? Context
-        } catch (_: Throwable) {
-            null
-        }
+            val app = Class.forName("android.app.AppGlobals").getMethod("getInitialApplication").invoke(null) as? Context
+            if (app != null) app else try {
+                val atField = Class.forName("android.app.ActivityThread").getDeclaredField("sCurrentActivityThread").apply { isAccessible = true }
+                val at = atField.get(null) ?: return null
+                at.javaClass.getDeclaredMethod("getApplication").invoke(at) as? Context
+            } catch (_: Throwable) { null }
+        } catch (_: Throwable) { null }
     }
 
-    private fun persistEvent(topic: String, payload: ByteArray) {
-        val ctx = appContextOrNull() ?: return
+    private fun persistEventNoContext(topic: String, payload: ByteArray) {
+        val ctx = appContextOrNull() ?: run {
+            Log.w(TAG, "No app context for persistEvent: topic=$topic")
+            return
+        }
         persistEvent(ctx, topic, payload)
     }
 
     private fun persistEvent(ctx: Context, topic: String, payload: ByteArray) {
         try {
             val database = db(ctx)
-            // Enforce a cap (e.g., 200 rows) to avoid unbounded growth
+            // Enforce cap (200 rows max)
             val countCursor = database.rawQuery("SELECT COUNT(*) FROM $TABLE", null)
             var count = 0
             if (countCursor.moveToFirst()) count = countCursor.getInt(0)
             countCursor.close()
+            
             if (count >= 200) {
                 database.execSQL("DELETE FROM $TABLE WHERE id IN (SELECT id FROM $TABLE ORDER BY id ASC LIMIT 1)")
+                Log.w(TAG, "Pruned oldest event to enforce DB cap (was $count)")
             }
+            
             val stmt = database.compileStatement("INSERT INTO $TABLE (topic, payload) VALUES (?, ?)")
             stmt.bindString(1, topic)
             stmt.bindBlob(2, payload)
             stmt.executeInsert()
+            Log.v(TAG, "Persisted event to SQLite: topic=$topic, size=${payload.size}")
         } catch (t: Throwable) {
-            Log.w(TAG, "persistEvent failed: ${t.message}")
+            Log.e(TAG, "persistEvent failed: ${t.message}", t)
         }
     }
 
-    /** Test-only hook to persist an event without requiring the WebView bridge to be missing. */
+    @JvmStatic
+    fun flushPersisted(ctx: Context) {
+        eventLock.withLock {
+            try {
+                val database = db(ctx)
+                database.beginTransaction()
+                try {
+                    val cursor = database.rawQuery("SELECT id, topic, payload FROM $TABLE ORDER BY id ASC", null)
+                    val ids = mutableListOf<Long>()
+                    var flushed = 0
+                    
+                    while (cursor.moveToNext()) {
+                        val id = cursor.getLong(0)
+                        val topic = cursor.getString(1)
+                        val payload = cursor.getBlob(2)
+                        
+                        // Bridge should be ready by now, but double-check
+                        if (bridgeReady) {
+                            postToBridgeBinary(topic, payload)
+                            ids.add(id)
+                            flushed++
+                        } else {
+                            Log.w(TAG, "Bridge not ready during flush, leaving event: topic=$topic")
+                            break
+                        }
+                    }
+                    cursor.close()
+                    
+                    if (ids.isNotEmpty()) {
+                        val idList = ids.joinToString(",")
+                        database.execSQL("DELETE FROM $TABLE WHERE id IN ($idList)")
+                    }
+                    
+                    database.setTransactionSuccessful()
+                    if (flushed > 0) {
+                        Log.i(TAG, "Flushed $flushed persisted BLE events from SQLite")
+                    }
+                } finally {
+                    database.endTransaction()
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "flushPersisted failed: ${t.message}", t)
+            }
+        }
+    }
+
     @androidx.annotation.VisibleForTesting
     @JvmStatic
     fun testPersistDirect(ctx: Context, envelopeBytes: ByteArray) {
         persistEvent(ctx, "ble.envelope.bin", envelopeBytes)
     }
 
-    @JvmStatic
-    fun flushPersisted(ctx: Context) {
-        if (flushing) return // Prevent re-entrant flush
-        flushing = true
-        try {
-            val database = db(ctx)
-            database.beginTransaction()
-            try {
-                val cursor = database.rawQuery("SELECT id, topic, payload FROM $TABLE ORDER BY id ASC", null)
-                var flushed = 0
-                val ids = mutableListOf<Long>()
-                while (cursor.moveToNext()) {
-                    val id = cursor.getLong(0)
-                    val topic = cursor.getString(1)
-                    val payload = cursor.getBlob(2)
-                    postToBridgeBinary(topic, payload)
-                    ids.add(id)
-                    flushed++
-                }
-                cursor.close()
-                if (flushed > 0) {
-                    val idList = ids.joinToString(",")
-                    database.execSQL("DELETE FROM $TABLE WHERE id IN ($idList)")
-                }
-                database.setTransactionSuccessful()
-                if (flushed > 0) {
-                    Log.i(TAG, "Flushed $flushed persisted BLE events from SQLite")
-                }
-            } finally {
-                database.endTransaction()
-            }
-        } catch (t: Throwable) {
-            Log.w(TAG, "flushPersisted failed: ${t.message}")
-        } finally {
-            flushing = false
-        }
-    }
-
-    /** For test visibility. Returns count of pending persisted events. */
     @androidx.annotation.VisibleForTesting
     @JvmStatic
     fun getPendingCount(ctx: Context): Int {
-        return try {
-            val database = db(ctx)
-            val cursor = database.rawQuery("SELECT COUNT(*) FROM $TABLE", null)
-            var count = 0
-            if (cursor.moveToFirst()) count = cursor.getInt(0)
-            cursor.close()
-            count
-        } catch (t: Throwable) {
-            Log.w(TAG, "getPendingCount failed: ${t.message}")
-            0
+        return eventLock.withLock {
+            try {
+                val database = db(ctx)
+                val cursor = database.rawQuery("SELECT COUNT(*) FROM $TABLE", null)
+                var count = 0
+                if (cursor.moveToFirst()) count = cursor.getInt(0)
+                cursor.close()
+                count
+            } catch (t: Throwable) {
+                Log.w(TAG, "getPendingCount failed: ${t.message}")
+                0
+            }
         }
     }
 
-    /** For test cleanup. Deletes all persisted events. */
     @androidx.annotation.VisibleForTesting
     @JvmStatic
     fun clearAll(ctx: Context) {
-        try {
-            val database = db(ctx)
-            database.execSQL("DELETE FROM $TABLE")
-        } catch (t: Throwable) {
-            Log.w(TAG, "clearAll failed: ${t.message}")
+        eventLock.withLock {
+            try {
+                val database = db(ctx)
+                database.execSQL("DELETE FROM $TABLE")
+                Log.i(TAG, "Cleared all persisted BLE events")
+            } catch (t: Throwable) {
+                Log.w(TAG, "clearAll failed: ${t.message}")
+            }
         }
     }
 }

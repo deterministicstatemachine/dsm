@@ -34,11 +34,26 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
 
     // Rate limit protection: Android allows max 5 scan start/stop within 30s window.
     // This is transport-runtime pacing only, not protocol state.
-    private val scanStartTimestamps = mutableListOf<Long>()
+    private val scanStartTimestamps = java.util.concurrent.CopyOnWriteArrayList<Long>()
     private val SCAN_RATE_LIMIT_WINDOW_MS = 30_000L  // 30 seconds
     private val MAX_SCANS_PER_WINDOW = 5
-    private var lastScanStopTimestamp = 0L
+    @Volatile private var lastScanStopTimestamp = 0L
     private val MIN_SCAN_GAP_MS = 6_000L  // 6 seconds between scan operations
+
+    // ── Scan downshift ──
+    // LOW_LATENCY (100% duty) drains battery fast. After 12s, auto-downshift
+    // to BALANCED (~33% duty) for sustained discovery without battery damage.
+    private val scanDownshiftHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val scanDownshiftRunnable = Runnable {
+        if (scanner.isScanning()) {
+            Log.i("BleCoordinator", "Scan downshift: LOW_LATENCY → BALANCED after ${BleConstants.SCAN_LOW_LATENCY_DURATION_MS}ms")
+            scanner.stopScanning()
+            scanner.startScanning(lowLatency = false)
+        }
+    }
+
+    // ── Reconnection backoff ──
+    private val reconnectHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
     // Unified per-peer state. Replaces sessionStates, activeSessions,
     // pendingConnectionAddresses, and pendingPairingConfirms.
@@ -59,10 +74,6 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
     // PairingMachine deleted — pairing state is Rust-authoritative via PairingOrchestrator.
     // Use Unified.isBleAddressPaired(address) to query pairing status.
 
-    // Single-flight guards to avoid redundant GATT/advertising work when multiple
-    // components request the same operation at once.
-    private var gattStartInFlight = false
-    private var advertiseInFlight = false
 
     init {
         // Wire scanner callback so discovered devices trigger GATT connections
@@ -153,35 +164,18 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                 return@runOperationBool false
             }
 
-            // If already advertising or a start is in-flight, avoid redundant calls.
-            if (advertiser.isAdvertising() || advertiseInFlight) {
+            if (advertiser.isAdvertising()) {
                 return@runOperationBool true
             }
 
-            advertiseInFlight = true
-            try {
-                // Ensure GATT server is started exactly once across concurrent callers.
-                var gattReady = false
-                if (!gattStartInFlight) {
-                    gattStartInFlight = true
-                    try {
-                        gattReady = gattServer.ensureStarted()
-                    } finally {
-                        gattStartInFlight = false
-                    }
-                } else {
-                    gattReady = gattServer.isReady()
-                }
-                if (!gattReady) {
-                    Log.w("BleCoordinator", "startAdvertising aborted: GATT server not ready")
-                    return@runOperationBool false
-                }
-                advertiser.startAdvertising()
-                com.dsm.wallet.bridge.Unified.onAdvertisingStarted()
-                true
-            } finally {
-                advertiseInFlight = false
+            val gattReady = gattServer.ensureStarted()
+            if (!gattReady) {
+                Log.w("BleCoordinator", "startAdvertising aborted: GATT server not ready")
+                return@runOperationBool false
             }
+            advertiser.startAdvertising()
+            com.dsm.wallet.bridge.Unified.onAdvertisingStarted()
+            true
         }
     }
 
@@ -268,6 +262,9 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
             scanStartTimestamps.add(now)
 
             scanner.startScanning()
+            // Schedule downshift from LOW_LATENCY → BALANCED after 12s
+            scanDownshiftHandler.removeCallbacks(scanDownshiftRunnable)
+            scanDownshiftHandler.postDelayed(scanDownshiftRunnable, BleConstants.SCAN_LOW_LATENCY_DURATION_MS)
             com.dsm.wallet.bridge.Unified.onScanStarted()
             true
         }
@@ -279,6 +276,7 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
     fun stopScanning(): Boolean {
         return runOperationBool(BleOpLane.LIFECYCLE) {
             lastScanStopTimestamp = System.currentTimeMillis()
+            scanDownshiftHandler.removeCallbacks(scanDownshiftRunnable)
             scanner.stopScanning()
             com.dsm.wallet.bridge.Unified.onScanStopped()
             true // Always succeeds
@@ -329,10 +327,7 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
     fun ensureBleReady(): Boolean {
         val gattReady = runOperationBool(BleOpLane.LIFECYCLE) {
             if (!gattServer.isReady()) {
-                if (!gattStartInFlight) {
-                    gattStartInFlight = true
-                    try { gattServer.ensureStarted() } finally { gattStartInFlight = false }
-                }
+                gattServer.ensureStarted()
             }
             gattServer.isReady()
         }
@@ -350,16 +345,7 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
      */
     fun ensureGattServerStarted(): Boolean {
         return runOperationBool(BleOpLane.LIFECYCLE) {
-            // Deduplicate concurrent ensure calls; if one is in flight, consider it handled.
-            if (gattStartInFlight) {
-                return@runOperationBool true
-            }
-            gattStartInFlight = true
-            try {
-                gattServer.ensureStarted()
-            } finally {
-                gattStartInFlight = false
-            }
+            gattServer.ensureStarted()
         }
     }
 
@@ -467,6 +453,10 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
             peers[bleAddress]?.let { peer ->
                 peer.isConnected = false
                 peer.serviceDiscoveryCompleted = false
+                peer.currentTransaction = null
+                peer.pendingPairingConfirm = null
+                peer.identityExchangeInProgress = false
+                peer.pairingInProgress = false
             }
             peers[bleAddress]?.let { p -> p.connectResult?.complete(false); p.connectResult = null }
             Log.i("BleCoordinator", "Advertiser pairing complete for $bleAddress — marked disconnected, keeping advertising active for reconnects")
@@ -483,8 +473,7 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
             var closed = 0
             peers.values.forEach { peer ->
                 peer.gattClientSession?.let { session ->
-                    try { session.disconnect() } catch (_: Throwable) {}
-                    peer.gattClientSession = null
+                    peer.clearClientState()
                     closed++
                 }
             }
@@ -654,10 +643,25 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                         peer.clearClientState()
                         if (peer.isEmpty) peers.remove(event.deviceAddress)
                         com.dsm.wallet.bridge.Unified.onDeviceDisconnected(event.deviceAddress)
-                        resumePairingScan(event.deviceAddress, "disconnected")
+                        // Exponential backoff on reconnection to prevent battery drain
+                        // and Android scan-rate-limit violations from rapid reconnect loops.
+                        if (peer.reconnectAttemptCount < BleConstants.RECONNECT_MAX_ATTEMPTS) {
+                            val delay = minOf(
+                                BleConstants.RECONNECT_INITIAL_DELAY_MS * (1L shl peer.reconnectAttemptCount),
+                                BleConstants.RECONNECT_MAX_DELAY_MS
+                            )
+                            peer.reconnectAttemptCount++
+                            Log.i("BleCoordinator", "Reconnect backoff #${peer.reconnectAttemptCount} for ${event.deviceAddress} — resuming scan in ${delay}ms")
+                            val addr = event.deviceAddress
+                            reconnectHandler.postDelayed({ resumePairingScan(addr, "disconnected_backoff") }, delay)
+                        } else {
+                            Log.w("BleCoordinator", "Reconnect limit reached for ${event.deviceAddress} — waiting for user-initiated scan")
+                        }
                     }
                     is BleSessionEvent.MtuNegotiated -> {
                         peer.negotiatedMtu = event.mtu
+                        // Successful connection — reset backoff counter.
+                        peer.reconnectAttemptCount = 0
                         // Complete the on-demand connect deferred if one is pending.
                         // This replaces the 100ms polling loop that used to check
                         // sessionStates from outside the dispatcher.
@@ -837,6 +841,8 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                             val chunks = com.dsm.wallet.bridge.Unified.bleDataResponseExtractChunks(responseProto)
                             val flags = com.dsm.wallet.bridge.Unified.bleDataResponseGetFlags(responseProto)
                             val confirmCommitmentHash = com.dsm.wallet.bridge.Unified.bleDataResponseExtractConfirmCommitmentHash(responseProto)
+                            Log.i("BleTransferTrace", "Response received from ${event.deviceAddress}|chunks=${chunks.size}|flags=$flags|confirmCommit=${confirmCommitmentHash.joinToString("") { "%02x".format(it) }}")
+                            Log.i("BleTransferTrace", "Response received from ${event.deviceAddress}|chunks=${chunks.size}|flags=$flags|confirmCommit=${confirmCommitmentHash.joinToString("") { "%02x".format(it) }}")
                             val pairingComplete = (flags and 1) != 0
                             val useReliableWrite = (flags and 2) != 0
                             Log.d("BleCoordinator", "Response processed from ${event.deviceAddress}: chunks=${chunks.size}, flags=$flags")
@@ -858,6 +864,8 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                                         try {
                                             if (confirmCommitmentHash.size == 32) {
                                                 val ok = com.dsm.wallet.bridge.Unified.markBilateralConfirmDelivered(confirmCommitmentHash)
+                                                                    Log.i("BleTransferTrace", "markBilateralConfirmDelivered for confirmCommit=${confirmCommitmentHash.joinToString("") { "%02x".format(it) }} ok=$ok")
+                                                                    Log.i("BleTransferTrace", "markBilateralConfirmDelivered for confirmCommit=${confirmCommitmentHash.joinToString("") { "%02x".format(it) }} ok=$ok")
                                                 Log.i("BleCoordinator", "markBilateralConfirmDelivered: ok=$ok after confirm to $addr")
                                             } else {
                                                 Log.w("BleCoordinator", "Missing confirm commitment hash after confirm to $addr; refusing broad ConfirmPending sweep")
@@ -895,6 +903,7 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                         // and sent the PAIRING_ACK indication.
                         peer.pairingInProgress = true
                         Log.i("BleCoordinator", "PAIRING_ACK received from ${event.deviceAddress} (${event.data.size} bytes)")
+                        var successfullyStartedWrite = false
                         try {
                             val response = com.dsm.wallet.bridge.Unified.processBleIdentityEnvelope(event.data, event.deviceAddress)
                             Log.i("BleCoordinator", "PAIRING_ACK processed through Rust for ${event.deviceAddress}: ${response.size} bytes")
@@ -912,24 +921,24 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                                         // successfully reconnect and negotiate MTU again.
                                         storePendingPairingConfirm(event.deviceAddress, response)
                                         diagnostics.recordError(BleErrorCategory.CHARACTERISTIC_WRITE_FAILED, "coordinator_pairing_confirm_writeback_failed")
-                                        peer.pairingInProgress = false
                                         peer.clearClientState()
                                         if (peer.isEmpty) peers.remove(event.deviceAddress)
                                         com.dsm.wallet.bridge.UnifiedBleEvents.onConnectionFailed(event.deviceAddress, "pairing_confirm_writeback_failed")
                                         resumePairingScan(event.deviceAddress, "pairing_confirm_writeback_failed")
+                                    } else {
+                                        successfullyStartedWrite = true
                                     }
                                 } else {
                                     Log.w("BleCoordinator", "PAIRING_CONFIRM: no active session for ${event.deviceAddress}")
-                                    peer.pairingInProgress = false
                                     resumePairingScan(event.deviceAddress, "pairing_confirm_no_session")
                                 }
-                            } else {
-                                // Empty response — Rust had nothing to send (duplicate or error)
-                                peer.pairingInProgress = false
                             }
                         } catch (e: Exception) {
                             Log.e("BleCoordinator", "Failed to process PAIRING_ACK from ${event.deviceAddress}", e)
-                            peer.pairingInProgress = false
+                        } finally {
+                            if (!successfullyStartedWrite) {
+                                peer.pairingInProgress = false
+                            }
                         }
                         diagnostics.recordEvent(BleDiagEvent(phase = "coordinator_pairing_ack", device = event.deviceAddress))
                     }
@@ -948,7 +957,7 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                         }
                         // Pairing complete on scanner side — stop scanning so the next
                         // transport action starts from a clean reconnect path.
-                        scanner.stopScanning()
+                        this@BleCoordinator.stopScanning()
                         // Keep peer consistent so hasActiveClientSession() returns true
                         // while the GATT link is still live.
                         peer.connectResult?.let { r -> peer.connectResult = null; r.complete(true) }
@@ -960,7 +969,12 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                             Log.w("BleCoordinator", "GATT 133 observed. Scheduling delay recovery...")
                             bleScope.launch {
                                 kotlinx.coroutines.delay(1500)
-                                getOrCreateSession(event.deviceAddress).connect()
+                                runOperation(BleOpLane.LIFECYCLE) {
+                                    val currentPeer = peers[event.deviceAddress]
+                                    if (currentPeer != null && currentPeer.gattClientSession == null && !currentPeer.connectionPending) {
+                                        getOrCreateSession(event.deviceAddress).connect()
+                                    }
+                                }
                             }
                         }
 
@@ -1013,6 +1027,7 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
         val removed = peer?.gattClientSession
 
         peer?.clearClientState()
+        gattServer.disconnectClient(address)
         Log.w(
             "BleCoordinator",
             "dropClientSession($address): reason=$reason removedSession=${removed != null}"
@@ -1122,39 +1137,42 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
         }
         // If a connect is already in flight for this peer, piggy-back on it.
         peers[address]?.connectResult?.let { existing ->
-            bleScope.launch { deferred.complete(existing.await()) }
+             bleScope.launch { deferred.complete(existing.await()) }
             return deferred
         }
-        runOperation(BleOpLane.LIFECYCLE) {
-            if (hasActiveClientSession(address)) {
-                deferred.complete(true)
-                return@runOperation
-            }
-            // Clean up stale client session if one exists under this address
-            if (peers[address]?.gattClientSession != null) {
-                dropClientSession(address, "pre_connect_stale_session")
-            }
+        
+        bleScope.launch {
+            val shouldScan = runOperationBool(BleOpLane.LIFECYCLE) {
+                if (hasActiveClientSession(address)) {
+                    deferred.complete(true)
+                    return@runOperationBool false
+                }
+                // Clean up stale client session if one exists under this address
+                if (peers[address]?.gattClientSession != null) {
+                    dropClientSession(address, "pre_connect_stale_session")
+                }
 
-            // ── Step 1: Start advertising so the receiver can find US ──
-            // The reverse path (receiver connects to our GATT server) is the
-            // most reliable route. Prime it before scanning.
-            if (!gattStartInFlight) {
-                gattStartInFlight = true
-                try { gattServer.ensureStarted() } finally { gattStartInFlight = false }
+                // ── Step 1: Start advertising so the receiver can find US ──
+                // The reverse path (receiver connects to our GATT server) is the
+                // most reliable route. Prime it before scanning.
+                gattServer.ensureStarted()
+                if (!advertiser.isAdvertising()) {
+                    try {
+                        advertiser.startAdvertising()
+                        Log.i("BleCoordinator", "connectToDevice($address): started advertising for reverse path")
+                    } catch (_: Throwable) { /* best-effort */ }
+                }
+                true
             }
-            if (!advertiser.isAdvertising()) {
-                try {
-                    advertiser.startAdvertising()
-                    Log.i("BleCoordinator", "connectToDevice($address): started advertising for reverse path")
-                } catch (_: Throwable) { /* best-effort */ }
-            }
+            
+            if (!shouldScan) return@launch
 
             // ── Step 2: Scan the full budget, checking for reverse connection ──
             // Scan up to 10s. Every second, check if:
             //   a) We discovered the peer under a fresh address → connect to it
             //   b) The peer connected to our GATT server → use server notifications
             Log.i("BleCoordinator", "connectToDevice($address): scanning up to ${CONNECT_READY_TIMEOUT_MS}ms for peer discovery or reverse connection")
-            scanner.startScanning()
+            startScanning() // Use public safe method
             val scanStartTime = android.os.SystemClock.elapsedRealtime()
             var resolvedAddress: String? = null
 
@@ -1199,18 +1217,30 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                 if (resolvedAddress != null) break
             }
 
-            scanner.stopScanning()
+            stopScanning() // safe method
 
             if (resolvedAddress != null) {
                 deferred.complete(true)
-                return@runOperation
+                return@launch
             }
 
-            // ── Step 3: No peer found during full scan window ──
-            // Do NOT try connectGatt to the stale address — it's a guaranteed
-            // 10-second timeout to a dead address. Fail fast.
-            Log.w("BleCoordinator", "connectToDevice($address): no peer discovered after ${CONNECT_READY_TIMEOUT_MS}ms scan — failing (stale address, not attempting dead connectGatt)")
-            deferred.complete(false)
+            // ── Step 3: No peer found during full scan window, fallback to direct connectGatt ──
+            Log.i("BleCoordinator", "connectToDevice($address): no peer discovered after scan, attempting direct fallback connectGatt")
+            runOperation(BleOpLane.LIFECYCLE) {
+                if (peers[address]?.connectionPending == true || peers[address]?.gattClientSession != null) {
+                    deferred.complete(false)
+                    return@runOperation
+                }
+                val session = getOrCreateSession(address)
+                peers[address]!!.connectResult = deferred
+                val connected = session.connect()
+                if (!connected) {
+                    val p = peers[address]
+                    p?.clearClientState()
+                    if (p?.isEmpty == true) peers.remove(address)
+                    deferred.complete(false)
+                }
+            }
         }
         return deferred
     }
