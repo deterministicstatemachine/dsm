@@ -103,7 +103,7 @@ impl BilateralBleHandler {
         let mut mgr = self.bilateral_tx_manager.write().await;
         let _ = mgr.remove_pending_commitment(&pending_key);
     }
-    
+
     pub async fn transition_session_to_rejected(&self, commitment_hash: &[u8; 32]) {
         self.transition_session_to_failed(commitment_hash).await;
     }
@@ -701,7 +701,10 @@ impl BilateralBleHandler {
     }
 
     /// Phase 1: Prepare bilateral transaction (sender initiates)
-async fn ensure_counterparty_ready_for_prepare(&self, counterparty_device_id: &[u8; 32]) -> Result<(), DsmError> {
+    async fn ensure_counterparty_ready_for_prepare(
+        &self,
+        counterparty_device_id: &[u8; 32],
+    ) -> Result<(), DsmError> {
         // §6 Tripwire gate: refuse to initiate BLE transfer with bricked contact.
         if crate::storage::client_db::is_contact_bricked(counterparty_device_id) {
             return Err(DsmError::invalid_operation(
@@ -741,7 +744,8 @@ async fn ensure_counterparty_ready_for_prepare(&self, counterparty_device_id: &[
                 age.as_secs_f64(),
                 bytes_to_base32(&counterparty_device_id[..8])
             );
-            self.transition_session_to_failed(&existing_commitment_hash).await;
+            self.transition_session_to_failed(&existing_commitment_hash)
+                .await;
         }
         Ok(())
     }
@@ -754,7 +758,8 @@ async fn ensure_counterparty_ready_for_prepare(&self, counterparty_device_id: &[
     ) -> Result<(Vec<u8>, [u8; 32]), DsmError> {
         info!("Preparing BLE bilateral transaction");
 
-        self.ensure_counterparty_ready_for_prepare(&counterparty_device_id).await?;
+        self.ensure_counterparty_ready_for_prepare(&counterparty_device_id)
+            .await?;
 
         // Ensure we have a verified contact and relationship. Allow a special-case
         // loopback path when the counterparty is the local device (test harnesses).

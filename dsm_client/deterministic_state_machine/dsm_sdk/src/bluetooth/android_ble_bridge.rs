@@ -1393,13 +1393,16 @@ mod tests {
                 crate::generated::BleConnectionFailed {
                     address: "AA:BB".to_string(),
                     error: "custom_error".to_string(),
-                }
+                },
             )),
         };
         let mut buf = Vec::new();
         fail_evt.encode(&mut buf).expect("encode");
-        let _ = bridge.handle_ble_event_bytes(&buf).await.expect("handle fail");
-        
+        let _ = bridge
+            .handle_ble_event_bytes(&buf)
+            .await
+            .expect("handle fail");
+
         let devices = bridge.connected_devices.read().await;
         assert!(!devices.contains_key("AA:BB"));
     }
@@ -1408,7 +1411,7 @@ mod tests {
     async fn test_pending_commands_queue_growth_bounded() {
         let (_mgr, _adapter, _coord, bridge) = make_test_bridge([20u8; 32], [21u8; 32]);
         bridge.update_connection_state("AA:BB", true).await;
-        
+
         let mut devices = bridge.connected_devices.write().await;
         if let Some(conn) = devices.get_mut("AA:BB") {
             for _ in 0..300 {
@@ -1417,7 +1420,7 @@ mod tests {
             assert_eq!(conn.pending_commands.len(), 300); // Because update wasn't called via standard queueing
         }
         drop(devices);
-        
+
         // Wait, the bounding logic is in handle_characteristic_data ...
         // So we can mock a scenario.
     }
