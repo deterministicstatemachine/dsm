@@ -71,6 +71,12 @@ data class PeerSession(
 
     // ── Transfer nonce ───────────────────────────────────────────────────
     var serverTransferNonce: Byte = 0,
+
+    // ── Reconnection backoff ─────────────────────────────────────────────
+    // Tracks exponential backoff across connect/disconnect cycles.
+    // NOT reset in clearClientState() — must persist to prevent rapid reconnect loops.
+    // Reset by BleCoordinator on successful MtuNegotiated.
+    var reconnectAttemptCount: Int = 0,
 ) {
     /** True if a GATT connect is in flight for this peer. */
     val connectionPending: Boolean

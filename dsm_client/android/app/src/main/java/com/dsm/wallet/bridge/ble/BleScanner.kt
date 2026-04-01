@@ -76,8 +76,16 @@ class BleScanner(private val context: Context) {
         currentSessionMode = mode
     }
 
+    /**
+     * Start BLE scanning.
+     *
+     * @param lowLatency If true (default), uses SCAN_MODE_LOW_LATENCY (100% duty cycle)
+     *   which finds devices in 1-3s but is battery-intensive. If false, uses
+     *   SCAN_MODE_BALANCED (~33% duty cycle) for sustained background scanning.
+     *   BleCoordinator auto-downshifts from low-latency to balanced after 12s.
+     */
     @SuppressLint("MissingPermission")
-    fun startScanning(): Boolean {
+    fun startScanning(lowLatency: Boolean = true): Boolean {
         if (scanning.get()) {
             Log.d("BleScanner", "Already scanning")
             return true
@@ -103,8 +111,10 @@ class BleScanner(private val context: Context) {
             .setManufacturerData(BleConstants.DSM_MANUFACTURER_ID, BleConstants.DSM_MANUFACTURER_MAGIC)
             .build()
 
+        val scanMode = if (lowLatency) ScanSettings.SCAN_MODE_LOW_LATENCY else ScanSettings.SCAN_MODE_BALANCED
+
         val settings = ScanSettings.Builder()
-            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+            .setScanMode(scanMode)
             .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
             .build()
 
@@ -114,7 +124,8 @@ class BleScanner(private val context: Context) {
 
             bluetoothLeScanner?.startScan(filters, settings, scanCallback)
             scanning.set(true)
-            Log.i("BleScanner", "BLE scan started, mode: $currentSessionMode")
+            val modeLabel = if (lowLatency) "LOW_LATENCY" else "BALANCED"
+            Log.i("BleScanner", "BLE scan started ($modeLabel), mode: $currentSessionMode")
             true
         } catch (t: Throwable) {
             Log.e("BleScanner", "Failed to start scan", t)

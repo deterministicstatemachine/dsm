@@ -23,7 +23,7 @@ internal object UnifiedBleBridge {
             "sendViaActiveClientSession: sending ${chunks.size} chunk(s) to $deviceAddress via existing GATT client session"
         )
         var sentCount = 0
-        chunks.forEachIndexed { index, chunk ->
+        for ((index, chunk) in chunks.withIndex()) {
             val sent = svc.sendTransactionRequest(deviceAddress, chunk)
             if (sent) {
                 sentCount += 1
@@ -32,6 +32,7 @@ internal object UnifiedBleBridge {
                     "UnifiedBleBridge",
                     "sendViaActiveClientSession: failed chunk ${index + 1}/${chunks.size} to $deviceAddress"
                 )
+                break // Fail fast instead of partial spray
             }
         }
         if (sentCount != chunks.size) {
@@ -168,6 +169,7 @@ internal object UnifiedBleBridge {
             // 2. Only fall back to server notifications if we DON'T have a client session but
             //    the target is connected as a client to our GATT server (reverse path).
             if (svc.hasActiveClientSession(effectiveAddr)) {
+                Log.i("BleTransferTrace", "requestGattWriteChunks routing: client writes -> $effectiveAddr (chunks=${chunks.size})")
                 Log.i("UnifiedBleBridge", "requestGattWriteChunks: routing ${chunks.size} chunks via GATT client writes to $effectiveAddr")
                 // Ensure TX_RESPONSE is subscribed so we can receive the response
                 // back from the peer via GATT server notifications.
@@ -216,6 +218,7 @@ internal object UnifiedBleBridge {
                     }
                 }
             } else if (svc.isGattServerClient(effectiveAddr) && svc.isServerClientSubscribedToTxResponse(effectiveAddr)) {
+                Log.i("BleTransferTrace", "requestGattWriteChunks routing: server notifications -> $effectiveAddr (chunks=${chunks.size})")
                 Log.i("UnifiedBleBridge", "requestGattWriteChunks: target is GATT server client AND subscribed — using server notifications immediately for $effectiveAddr")
                 runBlocking {
                     val ok = svc.sendViaServerNotifications(effectiveAddr, chunks)
@@ -228,6 +231,7 @@ internal object UnifiedBleBridge {
                 // No active session — on-demand connect.
                 // connectToDevice handles: scan for RPA, connect, MTU negotiation.
                 // resolveSession re-resolves after connect so we target the actual address.
+                Log.i("BleTransferTrace", "requestGattWriteChunks routing: no route -> $effectiveAddr (on-demand connect)")
                 Log.i("UnifiedBleBridge", "requestGattWriteChunks: no route for $effectiveAddr — on-demand connect")
                 svc.ensureGattServerStarted()
                 publishLocalIdentityIfAvailable(svc)

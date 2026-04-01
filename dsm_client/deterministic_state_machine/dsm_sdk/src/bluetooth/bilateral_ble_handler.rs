@@ -89,6 +89,40 @@ pub struct BilateralBleHandler {
 }
 
 impl BilateralBleHandler {
+    pub async fn transition_session_to_failed(&self, commitment_hash: &[u8; 32]) {
+        let pending_key = {
+            let mut sessions = self.sessions.sessions.lock().await;
+            if let Some(mut session) = sessions.remove(commitment_hash) {
+                session.phase = BilateralPhase::Failed;
+                session.local_commitment_hash.unwrap_or(*commitment_hash)
+            } else {
+                *commitment_hash
+            }
+        };
+        let _ = crate::storage::client_db::delete_bilateral_session(commitment_hash);
+        let mut mgr = self.bilateral_tx_manager.write().await;
+        let _ = mgr.remove_pending_commitment(&pending_key);
+    }
+    
+    pub async fn transition_session_to_rejected(&self, commitment_hash: &[u8; 32]) {
+        self.transition_session_to_failed(commitment_hash).await;
+    }
+
+    pub async fn transition_session_to_committed(&self, commitment_hash: &[u8; 32]) {
+        let pending_key = {
+            let mut sessions = self.sessions.sessions.lock().await;
+            if let Some(mut session) = sessions.remove(commitment_hash) {
+                session.phase = BilateralPhase::Committed;
+                session.local_commitment_hash.unwrap_or(*commitment_hash)
+            } else {
+                *commitment_hash
+            }
+        };
+        let _ = crate::storage::client_db::delete_bilateral_session(commitment_hash);
+        let mut mgr = self.bilateral_tx_manager.write().await;
+        let _ = mgr.remove_pending_commitment(&pending_key);
+    }
+
     pub fn new(
         bilateral_tx_manager: Arc<RwLock<BilateralTransactionManager>>,
         device_id: [u8; 32],
@@ -667,23 +701,16 @@ impl BilateralBleHandler {
     }
 
     /// Phase 1: Prepare bilateral transaction (sender initiates)
-    pub async fn prepare_bilateral_transaction(
-        &self,
-        counterparty_device_id: [u8; 32],
-        operation: Operation,
-        validity_iterations: u64,
-    ) -> Result<(Vec<u8>, [u8; 32]), DsmError> {
-        info!("Preparing BLE bilateral transaction");
-
+async fn ensure_counterparty_ready_for_prepare(&self, counterparty_device_id: &[u8; 32]) -> Result<(), DsmError> {
         // §6 Tripwire gate: refuse to initiate BLE transfer with bricked contact.
-        if crate::storage::client_db::is_contact_bricked(&counterparty_device_id) {
+        if crate::storage::client_db::is_contact_bricked(counterparty_device_id) {
             return Err(DsmError::invalid_operation(
                 "BLE prepare rejected: contact is permanently bricked (Tripwire fork detected)",
             ));
         }
 
         if let Some((existing_commitment_hash, existing_phase, created_at_wall)) = self
-            .detect_inflight_counterparty_session(&counterparty_device_id)
+            .detect_inflight_counterparty_session(counterparty_device_id)
             .await
         {
             const STALE_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(120);
@@ -714,26 +741,20 @@ impl BilateralBleHandler {
                 age.as_secs_f64(),
                 bytes_to_base32(&counterparty_device_id[..8])
             );
-            let stale_pending_key = {
-                let mut sessions = self.sessions.sessions.lock().await;
-                if let Some(session) = sessions.get_mut(&existing_commitment_hash) {
-                    session.phase = BilateralPhase::Failed;
-                    let pending_key = session
-                        .local_commitment_hash
-                        .unwrap_or(existing_commitment_hash);
-                    sessions.remove(&existing_commitment_hash);
-                    pending_key
-                } else {
-                    existing_commitment_hash
-                }
-            };
-            // Clean up persisted record + core manager pending commitment
-            let _ = delete_bilateral_session(&existing_commitment_hash);
-            {
-                let mut mgr = self.bilateral_tx_manager.write().await;
-                let _ = mgr.remove_pending_commitment(&stale_pending_key);
-            }
+            self.transition_session_to_failed(&existing_commitment_hash).await;
         }
+        Ok(())
+    }
+
+    pub async fn prepare_bilateral_transaction(
+        &self,
+        counterparty_device_id: [u8; 32],
+        operation: Operation,
+        validity_iterations: u64,
+    ) -> Result<(Vec<u8>, [u8; 32]), DsmError> {
+        info!("Preparing BLE bilateral transaction");
+
+        self.ensure_counterparty_ready_for_prepare(&counterparty_device_id).await?;
 
         // Ensure we have a verified contact and relationship. Allow a special-case
         // loopback path when the counterparty is the local device (test harnesses).
@@ -1899,16 +1920,11 @@ impl BilateralBleHandler {
             warn!("[BLE_HANDLER] Failed to persist accepted session: {}", e);
         }
 
-        // Get chain tips for response
-        let (remote_chain_tip, local_chain_tip) = {
+        // Get shared chain tip for the bilateral relationship
+        let shared_chain_tip = {
             let m = self.bilateral_tx_manager.read().await;
-            let remote = m
-                .get_chain_tip_for(&counterparty_device_id)
-                .ok_or_else(|| DsmError::invalid_operation("No remote chain tip"))?;
-            let local = m
-                .get_chain_tip_for(&counterparty_device_id)
-                .ok_or_else(|| DsmError::invalid_operation("No local chain tip"))?;
-            (remote, local)
+            m.get_chain_tip_for(&counterparty_device_id)
+                .ok_or_else(|| DsmError::invalid_operation("No chain tip for relationship"))?
         };
 
         // Get local signing public key for inclusion in response
@@ -1925,10 +1941,10 @@ impl BilateralBleHandler {
             local_signature: session.local_signature.clone().unwrap_or_default(),
             expires_iterations: session.expires_at_ticks,
             counterparty_state_hash: Some(generated::Hash32 {
-                v: remote_chain_tip.to_vec(),
+                v: shared_chain_tip.to_vec(),
             }),
             local_state_hash: Some(generated::Hash32 {
-                v: local_chain_tip.to_vec(),
+                v: shared_chain_tip.to_vec(),
             }),
             responder_signing_public_key: local_signing_key,
         };
@@ -1937,7 +1953,7 @@ impl BilateralBleHandler {
         let response_envelope = self
             .create_envelope_with_tip(
                 generated::envelope::Payload::BilateralPrepareResponse(prepare_response),
-                Some(local_chain_tip),
+                Some(shared_chain_tip),
             )
             .await?;
 
@@ -2263,16 +2279,6 @@ impl BilateralBleHandler {
             );
             if let Some(session) = sessions.get_mut(&commitment_hash) {
                 session.counterparty_signature = Some(prepare_response.local_signature.clone());
-                if session.phase == BilateralPhase::Accepted
-                    || session.phase == BilateralPhase::Committed
-                    || session.phase == BilateralPhase::ConfirmPending
-                {
-                    log::warn!(
-                        "[BLE_HANDLER] ⚠️ Duplicate prepare response for {}. Dropping silently.",
-                        bytes_to_base32(&commitment_hash)
-                    );
-                    return Err(DsmError::invalid_operation("silent_drop_duplicate_packet"));
-                }
                 if session.phase == BilateralPhase::Accepted
                     || session.phase == BilateralPhase::Committed
                     || session.phase == BilateralPhase::ConfirmPending
@@ -3213,13 +3219,6 @@ impl BilateralBleHandler {
         {
             let mut sessions = self.sessions.sessions.lock().await;
             if let Some(session) = sessions.get_mut(&commitment_hash) {
-                if session.phase == BilateralPhase::Committed {
-                    log::warn!(
-                        "[BLE_HANDLER] ⚠️ Duplicate confirm request for {}. Dropping silently.",
-                        bytes_to_base32(&commitment_hash)
-                    );
-                    return Err(DsmError::invalid_operation("silent_drop_duplicate_packet"));
-                }
                 if session.phase == BilateralPhase::Committed {
                     log::warn!(
                         "[BLE_HANDLER] ⚠️ Duplicate confirm request for {}. Dropping silently.",

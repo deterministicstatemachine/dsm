@@ -1411,7 +1411,7 @@ message BleEvent {
     bool   scan_stopped        = 7;
     bool   advertising_started = 8;
     bool   advertising_stopped = 9;
-    string connection_failed   = 10; // human text (transport only)
+    BleConnectionFailed connection_failed = 10; // human text (transport only)
     BlePairingRequest pairing_request = 11;
     BlePairingAccept  pairing_accept  = 12;
     BleIdentityObserved identity_observed = 13;
@@ -2547,4 +2547,9 @@ message DrainVerifyV3 {
   uint64 start_cycle      = 3;
   uint64 end_cycle        = 4;
   uint32 consecutive_empty = 5;
+}
+
+message BleConnectionFailed {
+  string address = 1;
+  string error = 2;
 }
