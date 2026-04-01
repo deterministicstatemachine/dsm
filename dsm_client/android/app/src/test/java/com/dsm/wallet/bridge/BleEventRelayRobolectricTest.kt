@@ -48,6 +48,7 @@ class BleEventRelayRobolectricTest {
             BleEventRelay.testPersistDirect(ctx, env)
         }
         assertEquals(3, BleEventRelay.getPendingCount(ctx))
+        BleEventRelay.markBridgeReady(ctx)
         BleEventRelay.flushPersisted(ctx)
         assertEquals(0, BleEventRelay.getPendingCount(ctx))
     }
