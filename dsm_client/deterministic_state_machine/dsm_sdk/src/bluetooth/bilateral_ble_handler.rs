@@ -1443,21 +1443,20 @@ impl BilateralBleHandler {
             }
 
             // §5.4 Modal Synchronization Lock: reject offline if pending online for (A,B)
+            //
+            // Two gates: in-memory (shared_smt) and persistent (SQLite outbox).
+            // The SQLite fast-path recovery MUST run first because a completed online
+            // transfer clears the in-memory flag on the sender, but the receiver's
+            // in-memory flag may still be set (or was never set — it's per-process).
+            // If the SQLite gate is stale (chain already advanced), clear both flags
+            // before checking the in-memory gate.
             {
                 let smt_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
                     &self.device_id,
                     &counterparty_device_id,
                 );
-                if crate::security::shared_smt::is_pending_online(&smt_key).await {
-                    log::error!(
-                        "[BilateralBleHandler] ❌ §5.4 modal lock: pending online projection for ({}, {}). Rejecting offline.",
-                        bytes_to_base32(&self.device_id[..8]),
-                        bytes_to_base32(&counterparty_device_id[..8]),
-                    );
-                    return Err(DsmError::invalid_operation(
-                        "§5.4: Cannot initiate offline transfer while pending online projection exists for this relationship",
-                    ));
-                }
+
+                // Step 1: SQLite fast-path recovery — check if the persisted gate is stale.
                 match crate::storage::client_db::get_pending_online_outbox(&counterparty_device_id)
                 {
                     Ok(Some(pending)) => {
@@ -1496,13 +1495,19 @@ impl BilateralBleHandler {
 
                         if already_advanced {
                             log::info!(
-                                "[BilateralBleHandler] ✅ Pending online gate stale (sender tip matches next_tip); clearing for ({}, {})",
+                                "[BilateralBleHandler] ✅ Pending online gate stale (chain advanced); clearing both SQLite and in-memory for ({}, {})",
                                 bytes_to_base32(&self.device_id[..8]),
                                 bytes_to_base32(&counterparty_device_id[..8]),
                             );
                             let _ = crate::storage::client_db::clear_pending_online_outbox(
                                 &counterparty_device_id,
                             );
+                            // Clear the in-memory flag too — this is the fix for the
+                            // "online then offline stops working" bug. Previously the
+                            // SQLite gate was cleared but the in-memory flag persisted,
+                            // and the in-memory check above short-circuited before
+                            // reaching this recovery path.
+                            crate::security::shared_smt::clear_pending_online(&smt_key).await;
                         } else {
                             log::error!(
                                 "[BilateralBleHandler] ❌ persisted online gate: chain tip unchanged from parent for ({}, {}). sender_tip={} parent_tip={} persisted_tip={}. Rejecting offline.",
@@ -1529,6 +1534,19 @@ impl BilateralBleHandler {
                             "§5.4: Cannot verify whether a prior online transfer is still pending for this relationship",
                         ));
                     }
+                }
+
+                // Step 2: In-memory gate — only checked AFTER SQLite recovery ran.
+                // If recovery cleared the in-memory flag above, this passes through.
+                if crate::security::shared_smt::is_pending_online(&smt_key).await {
+                    log::error!(
+                        "[BilateralBleHandler] ❌ §5.4 modal lock: pending online projection for ({}, {}). Rejecting offline.",
+                        bytes_to_base32(&self.device_id[..8]),
+                        bytes_to_base32(&counterparty_device_id[..8]),
+                    );
+                    return Err(DsmError::invalid_operation(
+                        "§5.4: Cannot initiate offline transfer while pending online projection exists for this relationship",
+                    ));
                 }
             }
 
