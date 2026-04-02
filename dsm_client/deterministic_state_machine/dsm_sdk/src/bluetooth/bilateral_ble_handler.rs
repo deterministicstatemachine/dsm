@@ -1448,7 +1448,8 @@ impl BilateralBleHandler {
                     &self.device_id,
                     &counterparty_device_id,
                 );
-                let mut modal_locked = crate::security::shared_smt::is_pending_online(&smt_key).await;
+                let mut modal_locked =
+                    crate::security::shared_smt::is_pending_online(&smt_key).await;
                 if modal_locked {
                     log::warn!(
                         "[BilateralBleHandler] ⚠️ §5.4 in-memory modal lock set for ({}, {}). Checking SQLite recovery before rejecting.",
