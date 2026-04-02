@@ -174,4 +174,82 @@ mod tests {
             _ => panic!("Payload not UniversalRx"),
         }
     }
+
+    #[test]
+    fn encode_universal_rx_empty_results() {
+        let headers = sample_headers();
+        let rx = UniversalRx { results: vec![] };
+        let bytes = encode_universal_rx(&headers, rx).expect("encode");
+        let env = from_transport_bytes(&bytes).expect("decode");
+        assert_eq!(env.version, 3);
+        match env.payload {
+            Some(envelope::Payload::UniversalRx(r)) => {
+                assert!(r.results.is_empty());
+            }
+            _ => panic!("Expected UniversalRx payload"),
+        }
+    }
+
+    #[test]
+    fn encode_universal_rx_message_id_is_deterministic() {
+        let headers = sample_headers();
+        let rx = UniversalRx { results: vec![] };
+        let bytes1 = encode_universal_rx(&headers, rx.clone()).unwrap();
+        let bytes2 = encode_universal_rx(&headers, rx).unwrap();
+        let env1 = from_transport_bytes(&bytes1).unwrap();
+        let env2 = from_transport_bytes(&bytes2).unwrap();
+        assert_eq!(env1.message_id, env2.message_id);
+        assert_eq!(env1.message_id.len(), 16);
+    }
+
+    #[test]
+    fn encode_universal_rx_different_headers_different_message_ids() {
+        let h1 = sample_headers();
+        let mut h2 = sample_headers();
+        h2.seq = 999;
+        let rx = UniversalRx { results: vec![] };
+
+        let b1 = encode_universal_rx(&h1, rx.clone()).unwrap();
+        let b2 = encode_universal_rx(&h2, rx).unwrap();
+        let e1 = from_transport_bytes(&b1).unwrap();
+        let e2 = from_transport_bytes(&b2).unwrap();
+        assert_ne!(e1.message_id, e2.message_id);
+    }
+
+    #[test]
+    fn transport_roundtrip_preserves_all_header_fields() {
+        let env = Envelope {
+            version: 3,
+            headers: Some(Headers {
+                device_id: vec![0xAA; 32],
+                chain_tip: vec![0xBB; 32],
+                genesis_hash: vec![0xCC; 32],
+                seq: 12345,
+            }),
+            message_id: vec![0xDD; 16],
+            payload: None,
+        };
+        let bytes = to_transport_bytes(&env).unwrap();
+        let decoded = from_transport_bytes(&bytes).unwrap();
+        let h = decoded.headers.unwrap();
+        assert_eq!(h.device_id, vec![0xAA; 32]);
+        assert_eq!(h.chain_tip, vec![0xBB; 32]);
+        assert_eq!(h.genesis_hash, vec![0xCC; 32]);
+        assert_eq!(h.seq, 12345);
+        assert_eq!(decoded.message_id, vec![0xDD; 16]);
+    }
+
+    #[test]
+    fn minimal_envelope_transport_roundtrip() {
+        let env = Envelope {
+            version: 0,
+            headers: None,
+            message_id: vec![],
+            payload: None,
+        };
+        let bytes = to_transport_bytes(&env).unwrap();
+        let decoded = from_transport_bytes(&bytes).unwrap();
+        assert!(decoded.headers.is_none());
+        assert!(decoded.payload.is_none());
+    }
 }

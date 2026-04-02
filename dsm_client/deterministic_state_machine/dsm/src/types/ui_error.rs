@@ -216,3 +216,162 @@ impl From<DsmCoreError> for DsmUiError {
         DsmUiError::Core(core_error)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_core_error() -> DsmCoreError {
+        DsmCoreError::StateMachine("test failure".into())
+    }
+
+    #[test]
+    fn core_variant_display_delegates() {
+        let err = DsmUiError::Core(sample_core_error());
+        let msg = err.to_string();
+        assert!(msg.contains("State machine error: test failure"), "got: {msg}");
+    }
+
+    #[test]
+    fn from_core_error() {
+        let ui: DsmUiError = sample_core_error().into();
+        assert!(matches!(ui, DsmUiError::Core(_)));
+    }
+
+    #[test]
+    fn browser_constructor_all_some() {
+        let err = DsmUiError::browser(
+            sample_core_error(),
+            Some("Mozilla/5.0".into()),
+            Some("https://example.com".into()),
+            Some("CORS blocked".into()),
+        );
+        let msg = err.to_string();
+        assert!(msg.starts_with("Browser error:"), "got: {msg}");
+        assert!(msg.contains("User-Agent: Mozilla/5.0"));
+        assert!(msg.contains("URL: https://example.com"));
+        assert!(msg.contains("Details: CORS blocked"));
+    }
+
+    #[test]
+    fn browser_constructor_all_none() {
+        let err = DsmUiError::browser(sample_core_error(), None, None, None);
+        let msg = err.to_string();
+        assert!(msg.starts_with("Browser error:"));
+        assert!(!msg.contains("User-Agent"));
+        assert!(!msg.contains("URL"));
+        assert!(!msg.contains("Details"));
+    }
+
+    #[test]
+    fn webview_display_with_fields() {
+        let err = DsmUiError::webview(
+            sample_core_error(),
+            Some("105.0".into()),
+            Some("Android 14".into()),
+        );
+        let msg = err.to_string();
+        assert!(msg.starts_with("WebView error:"));
+        assert!(msg.contains("WebView: 105.0"));
+        assert!(msg.contains("Platform: Android 14"));
+    }
+
+    #[test]
+    fn webview_display_no_fields() {
+        let err = DsmUiError::webview(sample_core_error(), None, None);
+        let msg = err.to_string();
+        assert!(msg.starts_with("WebView error:"));
+        assert!(!msg.contains("WebView:"));
+        assert!(!msg.contains("Platform:"));
+    }
+
+    #[test]
+    fn js_bridge_display_with_fields() {
+        let err = DsmUiError::js_bridge(
+            sample_core_error(),
+            Some("postMessage".into()),
+            Some("TypeError".into()),
+        );
+        let msg = err.to_string();
+        assert!(msg.starts_with("JavaScript bridge error:"));
+        assert!(msg.contains("Function: postMessage"));
+        assert!(msg.contains("JS Error: TypeError"));
+    }
+
+    #[test]
+    fn js_bridge_display_no_fields() {
+        let err = DsmUiError::js_bridge(sample_core_error(), None, None);
+        let msg = err.to_string();
+        assert!(msg.starts_with("JavaScript bridge error:"));
+        assert!(!msg.contains("Function:"));
+        assert!(!msg.contains("JS Error:"));
+    }
+
+    #[test]
+    fn ui_rendering_display_with_fields() {
+        let err = DsmUiError::ui_rendering(
+            sample_core_error(),
+            Some("WalletView".into()),
+            Some("React 18".into()),
+        );
+        let msg = err.to_string();
+        assert!(msg.starts_with("UI rendering error:"));
+        assert!(msg.contains("Component: WalletView"));
+        assert!(msg.contains("Framework: React 18"));
+    }
+
+    #[test]
+    fn ui_rendering_display_no_fields() {
+        let err = DsmUiError::ui_rendering(sample_core_error(), None, None);
+        let msg = err.to_string();
+        assert!(msg.starts_with("UI rendering error:"));
+        assert!(!msg.contains("Component:"));
+        assert!(!msg.contains("Framework:"));
+    }
+
+    #[test]
+    fn core_error_accessor_for_all_variants() {
+        let core = DsmUiError::Core(sample_core_error());
+        assert!(matches!(core.core_error(), DsmCoreError::StateMachine(_)));
+
+        let browser = DsmUiError::browser(sample_core_error(), None, None, None);
+        assert!(matches!(browser.core_error(), DsmCoreError::StateMachine(_)));
+
+        let wv = DsmUiError::webview(sample_core_error(), None, None);
+        assert!(matches!(wv.core_error(), DsmCoreError::StateMachine(_)));
+
+        let js = DsmUiError::js_bridge(sample_core_error(), None, None);
+        assert!(matches!(js.core_error(), DsmCoreError::StateMachine(_)));
+
+        let ui = DsmUiError::ui_rendering(sample_core_error(), None, None);
+        assert!(matches!(ui.core_error(), DsmCoreError::StateMachine(_)));
+    }
+
+    #[test]
+    fn is_recoverable_delegates_to_core() {
+        let recoverable = DsmUiError::Core(DsmCoreError::Network {
+            context: "timeout".into(),
+            source: None,
+            entity: String::new(),
+            details: None,
+        });
+        assert!(recoverable.is_recoverable());
+
+        let not_recoverable = DsmUiError::Core(DsmCoreError::InvalidPublicKey);
+        assert!(!not_recoverable.is_recoverable());
+    }
+
+    #[test]
+    fn error_trait_source_delegates() {
+        use std::error::Error;
+        let err = DsmUiError::Core(DsmCoreError::InvalidPublicKey);
+        assert!(err.source().is_none());
+    }
+
+    #[test]
+    fn debug_impl_exists() {
+        let err = DsmUiError::Core(sample_core_error());
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("Core"));
+    }
+}

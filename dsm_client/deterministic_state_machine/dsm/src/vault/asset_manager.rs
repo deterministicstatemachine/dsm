@@ -229,3 +229,214 @@ impl Default for AssetManager {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_token(id: &str, balance: u64) -> DigitalAsset {
+        DigitalAsset::new(id.to_string(), AssetType::Token, vec![])
+            .with_metadata("balance", &balance.to_string())
+    }
+
+    #[test]
+    fn new_creates_empty_manager() {
+        let mgr = AssetManager::new();
+        let all = mgr.get_all_assets().unwrap();
+        assert!(all.is_empty());
+    }
+
+    #[test]
+    fn add_asset_and_retrieve() {
+        let mgr = AssetManager::new();
+        let asset = DigitalAsset::new("a1".into(), AssetType::BinaryData, vec![1, 2, 3]);
+        mgr.add_asset(asset).unwrap();
+
+        let fetched = mgr.get_asset("a1").unwrap().unwrap();
+        assert_eq!(fetched.id, "a1");
+        assert_eq!(fetched.data, vec![1, 2, 3]);
+        assert_eq!(fetched.asset_type, AssetType::BinaryData);
+    }
+
+    #[test]
+    fn add_asset_duplicate_id_fails() {
+        let mgr = AssetManager::new();
+        let a1 = DigitalAsset::new("dup".into(), AssetType::BinaryData, vec![]);
+        let a2 = DigitalAsset::new("dup".into(), AssetType::JsonData, vec![]);
+        mgr.add_asset(a1).unwrap();
+        let err = mgr.add_asset(a2).unwrap_err();
+        assert!(format!("{err}").contains("dup"));
+    }
+
+    #[test]
+    fn get_asset_returns_none_for_missing() {
+        let mgr = AssetManager::new();
+        assert!(mgr.get_asset("nonexistent").unwrap().is_none());
+    }
+
+    #[test]
+    fn update_asset_returns_true_for_existing() {
+        let mgr = AssetManager::new();
+        mgr.add_asset(DigitalAsset::new("u1".into(), AssetType::BinaryData, vec![0]))
+            .unwrap();
+
+        let updated = mgr
+            .update_asset("u1", |a| a.data = vec![9, 8, 7])
+            .unwrap();
+        assert!(updated);
+
+        let fetched = mgr.get_asset("u1").unwrap().unwrap();
+        assert_eq!(fetched.data, vec![9, 8, 7]);
+    }
+
+    #[test]
+    fn update_asset_returns_false_for_missing() {
+        let mgr = AssetManager::new();
+        let updated = mgr.update_asset("ghost", |_| {}).unwrap();
+        assert!(!updated);
+    }
+
+    #[test]
+    fn remove_asset_returns_some() {
+        let mgr = AssetManager::new();
+        mgr.add_asset(DigitalAsset::new("rm1".into(), AssetType::Credential, vec![]))
+            .unwrap();
+
+        let removed = mgr.remove_asset("rm1").unwrap();
+        assert!(removed.is_some());
+        assert_eq!(removed.unwrap().id, "rm1");
+        assert!(mgr.get_asset("rm1").unwrap().is_none());
+    }
+
+    #[test]
+    fn remove_asset_returns_none_for_missing() {
+        let mgr = AssetManager::new();
+        assert!(mgr.remove_asset("nope").unwrap().is_none());
+    }
+
+    #[test]
+    fn get_all_assets_returns_all() {
+        let mgr = AssetManager::new();
+        mgr.add_asset(DigitalAsset::new("x".into(), AssetType::BinaryData, vec![]))
+            .unwrap();
+        mgr.add_asset(DigitalAsset::new("y".into(), AssetType::JsonData, vec![]))
+            .unwrap();
+        mgr.add_asset(DigitalAsset::new("z".into(), AssetType::Token, vec![]))
+            .unwrap();
+
+        let all = mgr.get_all_assets().unwrap();
+        assert_eq!(all.len(), 3);
+        assert!(all.contains_key("x"));
+        assert!(all.contains_key("y"));
+        assert!(all.contains_key("z"));
+    }
+
+    #[test]
+    fn get_assets_by_type_filters_correctly() {
+        let mgr = AssetManager::new();
+        mgr.add_asset(DigitalAsset::new("t1".into(), AssetType::Token, vec![]))
+            .unwrap();
+        mgr.add_asset(DigitalAsset::new("t2".into(), AssetType::Token, vec![]))
+            .unwrap();
+        mgr.add_asset(DigitalAsset::new("b1".into(), AssetType::BinaryData, vec![]))
+            .unwrap();
+
+        let tokens = mgr.get_assets_by_type(AssetType::Token).unwrap();
+        assert_eq!(tokens.len(), 2);
+        assert!(tokens.iter().all(|a| a.asset_type == AssetType::Token));
+
+        let binary = mgr.get_assets_by_type(AssetType::BinaryData).unwrap();
+        assert_eq!(binary.len(), 1);
+
+        let creds = mgr.get_assets_by_type(AssetType::Credential).unwrap();
+        assert!(creds.is_empty());
+    }
+
+    #[test]
+    fn update_asset_data_updates_existing() {
+        let mgr = AssetManager::new();
+        mgr.add_asset(DigitalAsset::new("d1".into(), AssetType::BinaryData, vec![0]))
+            .unwrap();
+
+        mgr.update_asset_data("d1", vec![5, 6, 7]).unwrap();
+        let fetched = mgr.get_asset("d1").unwrap().unwrap();
+        assert_eq!(fetched.data, vec![5, 6, 7]);
+    }
+
+    #[test]
+    fn update_asset_data_fails_for_missing() {
+        let mgr = AssetManager::new();
+        let err = mgr.update_asset_data("missing", vec![1]).unwrap_err();
+        assert!(format!("{err}").contains("missing"));
+    }
+
+    #[test]
+    fn validate_transfer_sufficient_balance_succeeds() {
+        let mgr = AssetManager::new();
+        mgr.add_asset(make_token("tok1", 1000)).unwrap();
+        mgr.validate_transfer("tok1", 500).unwrap();
+    }
+
+    #[test]
+    fn validate_transfer_insufficient_balance_fails() {
+        let mgr = AssetManager::new();
+        mgr.add_asset(make_token("tok2", 100)).unwrap();
+        let err = mgr.validate_transfer("tok2", 200).unwrap_err();
+        match err {
+            DsmError::InsufficientBalance {
+                token_id,
+                available,
+                requested,
+            } => {
+                assert_eq!(token_id, "tok2");
+                assert_eq!(available, 100);
+                assert_eq!(requested, 200);
+            }
+            other => panic!("Expected InsufficientBalance, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn validate_transfer_non_token_asset_fails() {
+        let mgr = AssetManager::new();
+        mgr.add_asset(DigitalAsset::new("notok".into(), AssetType::BinaryData, vec![]))
+            .unwrap();
+        let err = mgr.validate_transfer("notok", 1).unwrap_err();
+        assert!(format!("{err}").contains("not a token"));
+    }
+
+    #[test]
+    fn validate_transfer_missing_asset_fails() {
+        let mgr = AssetManager::new();
+        let err = mgr.validate_transfer("ghost", 1).unwrap_err();
+        match err {
+            DsmError::NotFound { .. } => {}
+            other => panic!("Expected NotFound, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn digital_asset_new_sets_fields() {
+        let asset = DigitalAsset::new("id1".into(), AssetType::KeyMaterial, vec![10, 20]);
+        assert_eq!(asset.id, "id1");
+        assert_eq!(asset.asset_type, AssetType::KeyMaterial);
+        assert_eq!(asset.data, vec![10, 20]);
+        assert!(asset.metadata.is_empty());
+    }
+
+    #[test]
+    fn digital_asset_with_metadata_adds_metadata() {
+        let asset = DigitalAsset::new("id2".into(), AssetType::JsonData, vec![])
+            .with_metadata("key1", "val1")
+            .with_metadata("key2", "val2");
+        assert_eq!(asset.metadata.len(), 2);
+        assert_eq!(asset.metadata.get("key1").unwrap(), "val1");
+        assert_eq!(asset.metadata.get("key2").unwrap(), "val2");
+    }
+
+    #[test]
+    fn default_asset_manager_is_empty() {
+        let mgr = AssetManager::default();
+        assert!(mgr.get_all_assets().unwrap().is_empty());
+    }
+}

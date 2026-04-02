@@ -303,4 +303,105 @@ mod tests {
             .expect("decoding should succeed even with version mismatch");
         assert_eq!(decoded.version, 99);
     }
+
+    #[test]
+    fn transfer_signing_bytes_v3_is_deterministic() {
+        let from = [1u8; 32];
+        let to = [2u8; 32];
+        let tip = [3u8; 32];
+        let a = compute_transfer_signing_bytes_v3(&from, &to, "tok", 100, &tip, 1, b"nonce", "memo");
+        let b = compute_transfer_signing_bytes_v3(&from, &to, "tok", 100, &tip, 1, b"nonce", "memo");
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 32);
+    }
+
+    #[test]
+    fn transfer_signing_bytes_v3_different_amounts_differ() {
+        let from = [1u8; 32];
+        let to = [2u8; 32];
+        let tip = [3u8; 32];
+        let a = compute_transfer_signing_bytes_v3(&from, &to, "tok", 100, &tip, 1, b"n", "");
+        let b = compute_transfer_signing_bytes_v3(&from, &to, "tok", 200, &tip, 1, b"n", "");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn transfer_signing_bytes_v3_different_token_ids_differ() {
+        let from = [1u8; 32];
+        let to = [2u8; 32];
+        let tip = [3u8; 32];
+        let a = compute_transfer_signing_bytes_v3(&from, &to, "tok_a", 100, &tip, 1, b"n", "");
+        let b = compute_transfer_signing_bytes_v3(&from, &to, "tok_b", 100, &tip, 1, b"n", "");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn online_message_signing_bytes_v3_is_deterministic() {
+        let from = [10u8; 32];
+        let to = [20u8; 32];
+        let tip = [30u8; 32];
+        let a = compute_online_message_signing_bytes_v3(&from, &to, &tip, 5, b"nonce", b"payload", "hi");
+        let b = compute_online_message_signing_bytes_v3(&from, &to, &tip, 5, b"nonce", b"payload", "hi");
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 32);
+    }
+
+    #[test]
+    fn online_message_signing_bytes_v3_different_payloads_differ() {
+        let from = [10u8; 32];
+        let to = [20u8; 32];
+        let tip = [30u8; 32];
+        let a = compute_online_message_signing_bytes_v3(&from, &to, &tip, 5, b"n", b"alpha", "");
+        let b = compute_online_message_signing_bytes_v3(&from, &to, &tip, 5, b"n", b"beta", "");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn online_message_nonce_v3_is_deterministic() {
+        let from = [0xAAu8; 32];
+        let to = [0xBBu8; 32];
+        let tip = [0xCCu8; 32];
+        let a = compute_online_message_nonce_v3(&from, &to, &tip, 7, b"data", "m");
+        let b = compute_online_message_nonce_v3(&from, &to, &tip, 7, b"data", "m");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn online_message_nonce_v3_different_seq_differ() {
+        let from = [0xAAu8; 32];
+        let to = [0xBBu8; 32];
+        let tip = [0xCCu8; 32];
+        let a = compute_online_message_nonce_v3(&from, &to, &tip, 1, b"d", "");
+        let b = compute_online_message_nonce_v3(&from, &to, &tip, 2, b"d", "");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn minimal_envelope_roundtrip() {
+        let env = Envelope {
+            version: 3,
+            headers: None,
+            message_id: vec![],
+            payload: None,
+        };
+        let bytes = to_canonical_bytes(&env);
+        let decoded = from_canonical_bytes(&bytes).unwrap();
+        assert_eq!(decoded.version, 3);
+        assert!(decoded.headers.is_none());
+        assert!(decoded.payload.is_none());
+    }
+
+    #[test]
+    fn transfer_and_online_message_signing_bytes_differ_same_inputs() {
+        let from = [1u8; 32];
+        let to = [2u8; 32];
+        let tip = [3u8; 32];
+        let transfer = compute_transfer_signing_bytes_v3(
+            &from, &to, "", 0, &tip, 0, b"", "",
+        );
+        let online = compute_online_message_signing_bytes_v3(
+            &from, &to, &tip, 0, b"", b"", "",
+        );
+        assert_ne!(transfer, online, "Different domain tags must produce different hashes");
+    }
 }

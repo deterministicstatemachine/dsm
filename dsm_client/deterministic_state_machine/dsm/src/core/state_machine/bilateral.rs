@@ -290,3 +290,310 @@ impl Default for BilateralStateManager {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::state_machine::relationship::KeyDerivationStrategy;
+
+    fn make_manager() -> BilateralStateManager {
+        BilateralStateManager::new()
+    }
+
+    fn dummy_key() -> Vec<u8> {
+        vec![0xAB; 32]
+    }
+
+    // ── BilateralStateManager::new ──────────────────────────────────────
+
+    #[test]
+    fn new_creates_empty_sessions() {
+        let mgr = make_manager();
+        assert!(mgr.active_sessions.is_empty());
+    }
+
+    // ── BilateralStateManager::new_with_strategy ────────────────────────
+
+    #[test]
+    fn new_with_strategy_canonical() {
+        let mgr = BilateralStateManager::new_with_strategy(KeyDerivationStrategy::Canonical);
+        assert!(mgr.active_sessions.is_empty());
+    }
+
+    #[test]
+    fn new_with_strategy_entity_centric() {
+        let mgr = BilateralStateManager::new_with_strategy(KeyDerivationStrategy::EntityCentric);
+        assert!(mgr.active_sessions.is_empty());
+    }
+
+    #[test]
+    fn new_with_strategy_hashed() {
+        let mgr = BilateralStateManager::new_with_strategy(KeyDerivationStrategy::Hashed);
+        assert!(mgr.active_sessions.is_empty());
+    }
+
+    // ── Default ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn default_is_same_as_new() {
+        let from_new = BilateralStateManager::new();
+        let from_default = BilateralStateManager::default();
+        assert_eq!(
+            from_new.active_sessions.len(),
+            from_default.active_sessions.len()
+        );
+    }
+
+    // ── id_from_32 ──────────────────────────────────────────────────────
+
+    #[test]
+    fn id_from_32_zero_bytes() {
+        let id = [0u8; 32];
+        let result = BilateralStateManager::id_from_32(&id);
+        assert_eq!(result, "0-0");
+    }
+
+    #[test]
+    fn id_from_32_known_values() {
+        let mut id = [0u8; 32];
+        id[0] = 1; // lo u64 = 1 (little-endian)
+        let result = BilateralStateManager::id_from_32(&id);
+        assert_eq!(result, "1-0");
+    }
+
+    #[test]
+    fn id_from_32_high_half() {
+        let mut id = [0u8; 32];
+        id[8] = 2; // hi u64 = 2 (little-endian)
+        let result = BilateralStateManager::id_from_32(&id);
+        assert_eq!(result, "0-2");
+    }
+
+    #[test]
+    fn id_from_32_consistency() {
+        let id = [0xFF; 32];
+        let a = BilateralStateManager::id_from_32(&id);
+        let b = BilateralStateManager::id_from_32(&id);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn id_from_32_different_inputs_differ() {
+        let id_a = [0x01; 32];
+        let id_b = [0x02; 32];
+        assert_ne!(
+            BilateralStateManager::id_from_32(&id_a),
+            BilateralStateManager::id_from_32(&id_b),
+        );
+    }
+
+    // ── label_from_bytes ────────────────────────────────────────────────
+
+    #[test]
+    fn label_from_bytes_long_input() {
+        let bytes = vec![1u8; 16];
+        let label = BilateralStateManager::label_from_bytes(&bytes);
+        assert!(label.starts_with("len16:"));
+        let lo = u64::from_le_bytes([1; 8]);
+        assert!(label.contains(&lo.to_string()));
+    }
+
+    #[test]
+    fn label_from_bytes_exactly_8() {
+        let bytes = vec![0u8; 8];
+        let label = BilateralStateManager::label_from_bytes(&bytes);
+        assert_eq!(label, "len8:0");
+    }
+
+    #[test]
+    fn label_from_bytes_short_input() {
+        let bytes = vec![0xAA; 3];
+        let label = BilateralStateManager::label_from_bytes(&bytes);
+        assert_eq!(label, "len3");
+    }
+
+    #[test]
+    fn label_from_bytes_empty() {
+        let label = BilateralStateManager::label_from_bytes(&[]);
+        assert_eq!(label, "len0");
+    }
+
+    // ── create_session / close_session ──────────────────────────────────
+
+    #[test]
+    fn create_session_returns_expected_id() {
+        let mut mgr = make_manager();
+        let sid = mgr.create_session("alice", "bob");
+        assert_eq!(sid, "session_alice_bob");
+    }
+
+    #[test]
+    fn create_session_stores_in_active_sessions() {
+        let mut mgr = make_manager();
+        let sid = mgr.create_session("alice", "bob");
+        assert!(mgr.active_sessions.contains_key(&sid));
+        assert_eq!(
+            mgr.active_sessions.get(&sid).unwrap(),
+            "alice:bob"
+        );
+    }
+
+    #[test]
+    fn close_session_existing_returns_true() {
+        let mut mgr = make_manager();
+        let sid = mgr.create_session("alice", "bob");
+        assert!(mgr.close_session(&sid));
+        assert!(!mgr.active_sessions.contains_key(&sid));
+    }
+
+    #[test]
+    fn close_session_nonexistent_returns_false() {
+        let mut mgr = make_manager();
+        assert!(!mgr.close_session("no_such_session"));
+    }
+
+    #[test]
+    fn close_session_twice_returns_false_second_time() {
+        let mut mgr = make_manager();
+        let sid = mgr.create_session("alice", "bob");
+        assert!(mgr.close_session(&sid));
+        assert!(!mgr.close_session(&sid));
+    }
+
+    // ── generate_entropy ────────────────────────────────────────────────
+
+    #[test]
+    fn generate_entropy_returns_32_bytes() {
+        let mgr = make_manager();
+        let entropy = mgr.generate_entropy().unwrap();
+        assert_eq!(entropy.len(), 32);
+    }
+
+    #[test]
+    fn generate_entropy_two_calls_differ() {
+        let mgr = make_manager();
+        let a = mgr.generate_entropy().unwrap();
+        let b = mgr.generate_entropy().unwrap();
+        assert_ne!(a, b);
+    }
+
+    // ── initialize_relationship ─────────────────────────────────────────
+
+    #[test]
+    fn initialize_relationship_succeeds() {
+        let mut mgr = make_manager();
+        let result = mgr.initialize_relationship(
+            "alice",
+            "bob",
+            dummy_key(),
+            dummy_key(),
+        );
+        assert!(result.is_ok());
+    }
+
+    // ── ensure_relationship_initialized ─────────────────────────────────
+
+    #[test]
+    fn ensure_relationship_initialized_is_idempotent() {
+        let mut mgr = make_manager();
+        let r1 = mgr.ensure_relationship_initialized(
+            "alice",
+            "bob",
+            dummy_key(),
+            dummy_key(),
+        );
+        assert!(r1.is_ok());
+
+        let r2 = mgr.ensure_relationship_initialized(
+            "alice",
+            "bob",
+            dummy_key(),
+            dummy_key(),
+        );
+        assert!(r2.is_ok());
+    }
+
+    // ── ensure_relationship_initialized_bytes ───────────────────────────
+
+    #[test]
+    fn ensure_relationship_initialized_bytes_succeeds() {
+        let mut mgr = make_manager();
+        let entity = [0x01u8; 32];
+        let counterparty = [0x02u8; 32];
+        let result = mgr.ensure_relationship_initialized_bytes(
+            &entity,
+            &counterparty,
+            dummy_key(),
+            dummy_key(),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn ensure_relationship_initialized_bytes_is_idempotent() {
+        let mut mgr = make_manager();
+        let entity = [0x11u8; 32];
+        let counterparty = [0x22u8; 32];
+        mgr.ensure_relationship_initialized_bytes(
+            &entity,
+            &counterparty,
+            dummy_key(),
+            dummy_key(),
+        )
+        .unwrap();
+        let r2 = mgr.ensure_relationship_initialized_bytes(
+            &entity,
+            &counterparty,
+            dummy_key(),
+            dummy_key(),
+        );
+        assert!(r2.is_ok());
+    }
+
+    // ── update_relationship_state ───────────────────────────────────────
+
+    #[test]
+    fn update_relationship_state_accepts_pair() {
+        let mut mgr = make_manager();
+
+        let entity_id = [0x01u8; 32];
+        let counterparty_id = [0x02u8; 32];
+        let entropy_a = mgr.generate_entropy().unwrap();
+        let entropy_b = mgr.generate_entropy().unwrap();
+
+        let entity_state = State::new_genesis(
+            entropy_a,
+            DeviceInfo::new(entity_id, dummy_key()),
+        );
+        let counterparty_state = State::new_genesis(
+            entropy_b,
+            DeviceInfo::new(counterparty_id, dummy_key()),
+        );
+
+        let pair = RelationshipStatePair::new(
+            entity_id,
+            counterparty_id,
+            entity_state,
+            counterparty_state,
+        )
+        .unwrap();
+
+        let result = mgr.update_relationship_state("bob", pair);
+        assert!(result.is_ok());
+    }
+
+    // ── multiple sessions coexist ───────────────────────────────────────
+
+    #[test]
+    fn multiple_sessions_coexist() {
+        let mut mgr = make_manager();
+        let s1 = mgr.create_session("alice", "bob");
+        let s2 = mgr.create_session("alice", "carol");
+        assert_ne!(s1, s2);
+        assert_eq!(mgr.active_sessions.len(), 2);
+
+        mgr.close_session(&s1);
+        assert_eq!(mgr.active_sessions.len(), 1);
+        assert!(mgr.active_sessions.contains_key(&s2));
+    }
+}

@@ -248,3 +248,126 @@ impl QuantumResistantBinding {
         blake3(&genesis_data)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::kyber::generate_kyber_keypair;
+
+    fn make_keypairs() -> (SignatureKeyPair, KyberKeyPair) {
+        let sphincs = SignatureKeyPair::new().unwrap();
+        let kyber = generate_kyber_keypair().unwrap();
+        (sphincs, kyber)
+    }
+
+    #[test]
+    fn test_binding_creation_succeeds() {
+        let (sphincs, kyber) = make_keypairs();
+        let binding = QuantumResistantBinding::new("app-1", b"seed-share", &sphincs, &kyber);
+        assert!(binding.is_ok());
+    }
+
+    #[test]
+    fn test_device_hash_is_deterministic_for_instance() {
+        let (sphincs, kyber) = make_keypairs();
+        let binding = QuantumResistantBinding::new("app-1", b"seed", &sphincs, &kyber).unwrap();
+        let h1 = *binding.device_hash();
+        let h2 = *binding.device_hash();
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn test_verify_with_correct_params() {
+        let (sphincs, kyber) = make_keypairs();
+        let binding =
+            QuantumResistantBinding::new("app-1", b"seed-share", &sphincs, &kyber).unwrap();
+
+        let valid = binding.verify("app-1", b"seed-share").unwrap();
+        assert!(valid);
+    }
+
+    #[test]
+    fn test_verify_with_wrong_app_id_fails() {
+        let (sphincs, kyber) = make_keypairs();
+        let binding =
+            QuantumResistantBinding::new("app-1", b"seed-share", &sphincs, &kyber).unwrap();
+
+        let valid = binding.verify("app-WRONG", b"seed-share").unwrap();
+        assert!(!valid);
+    }
+
+    #[test]
+    fn test_verify_with_wrong_seed_fails() {
+        let (sphincs, kyber) = make_keypairs();
+        let binding =
+            QuantumResistantBinding::new("app-1", b"seed-share", &sphincs, &kyber).unwrap();
+
+        let valid = binding.verify("app-1", b"wrong-seed").unwrap();
+        assert!(!valid);
+    }
+
+    #[test]
+    fn test_genesis_hash_differs_for_different_keys() {
+        let (sphincs1, kyber1) = make_keypairs();
+        let (sphincs2, kyber2) = make_keypairs();
+
+        let b1 =
+            QuantumResistantBinding::new("app", b"seed", &sphincs1, &kyber1).unwrap();
+        let b2 =
+            QuantumResistantBinding::new("app", b"seed", &sphincs2, &kyber2).unwrap();
+
+        assert_ne!(b1.genesis_hash(), b2.genesis_hash());
+    }
+
+    #[test]
+    fn test_create_attestation_succeeds() {
+        let (sphincs, kyber) = make_keypairs();
+        let binding =
+            QuantumResistantBinding::new("app-1", b"seed", &sphincs, &kyber).unwrap();
+
+        let attestation = binding.create_attestation(&sphincs, &kyber, b"entropy");
+        assert!(attestation.is_ok());
+        let att = attestation.unwrap();
+        assert_eq!(att.device_hash, *binding.device_hash());
+        assert!(!att.encapsulated_state.is_empty());
+        assert!(!att.signature.is_empty());
+    }
+
+    #[test]
+    fn test_verify_own_attestation() {
+        let (sphincs, kyber) = make_keypairs();
+        let binding =
+            QuantumResistantBinding::new("app-1", b"seed", &sphincs, &kyber).unwrap();
+
+        let att = binding.create_attestation(&sphincs, &kyber, b"").unwrap();
+        let valid = binding.verify_attestation(&att, &sphincs.public_key).unwrap();
+        assert!(valid);
+    }
+
+    #[test]
+    fn test_verify_attestation_wrong_device_hash() {
+        let (sphincs1, kyber1) = make_keypairs();
+        let (sphincs2, kyber2) = make_keypairs();
+
+        let binding1 =
+            QuantumResistantBinding::new("app", b"s1", &sphincs1, &kyber1).unwrap();
+        let binding2 =
+            QuantumResistantBinding::new("app", b"s2", &sphincs2, &kyber2).unwrap();
+
+        let att = binding1.create_attestation(&sphincs1, &kyber1, b"").unwrap();
+        let valid = binding2.verify_attestation(&att, &sphincs1.public_key).unwrap();
+        assert!(!valid, "attestation from a different binding should fail device hash check");
+    }
+
+    #[test]
+    fn test_different_entropy_produces_different_verification_entropy() {
+        let (sphincs, kyber) = make_keypairs();
+        let binding =
+            QuantumResistantBinding::new("app-1", b"seed", &sphincs, &kyber).unwrap();
+
+        let att1 = binding.create_attestation(&sphincs, &kyber, b"entropy-A").unwrap();
+        let att2 = binding.create_attestation(&sphincs, &kyber, b"entropy-B").unwrap();
+
+        assert_ne!(att1.verification_entropy, att2.verification_entropy);
+    }
+}

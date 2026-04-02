@@ -680,6 +680,199 @@ mod tests {
         // Should exceed 128 KiB cap
         assert!(receipt.validate_size_cap().is_err());
     }
+
+    // --- Additional tests ---
+
+    #[test]
+    fn receipt_is_fully_signed_both_present() {
+        let mut receipt = StitchedReceiptV2::new(
+            [0; 32], [1; 32], [2; 32], [3; 32],
+            [4; 32], [5; 32], [6; 32],
+            vec![], vec![], vec![],
+        );
+        assert!(!receipt.is_fully_signed());
+
+        receipt.add_sig_a(vec![0xAA; 64]);
+        assert!(!receipt.is_fully_signed());
+
+        receipt.add_sig_b(vec![0xBB; 64]);
+        assert!(receipt.is_fully_signed());
+    }
+
+    #[test]
+    fn receipt_not_fully_signed_empty_sigs() {
+        let receipt = StitchedReceiptV2::new(
+            [0; 32], [1; 32], [2; 32], [3; 32],
+            [4; 32], [5; 32], [6; 32],
+            vec![], vec![], vec![],
+        );
+        assert!(!receipt.is_fully_signed());
+    }
+
+    #[test]
+    fn receipt_id_accessors() {
+        let receipt = StitchedReceiptV2::new(
+            [0; 32], [0x11; 32], [0x22; 32], [0; 32],
+            [0; 32], [0; 32], [0; 32],
+            vec![], vec![], vec![],
+        );
+        assert_eq!(receipt.id_a(), &[0x11; 32]);
+        assert_eq!(receipt.id_b(), &[0x22; 32]);
+    }
+
+    #[test]
+    fn receipt_t_extracts_sequence_from_parent_tip() {
+        let mut parent_tip = [0u8; 32];
+        parent_tip[24..32].copy_from_slice(&42u64.to_le_bytes());
+        let receipt = StitchedReceiptV2::new(
+            [0; 32], [0; 32], [0; 32], parent_tip,
+            [0; 32], [0; 32], [0; 32],
+            vec![], vec![], vec![],
+        );
+        assert_eq!(receipt.t(), 42);
+    }
+
+    #[test]
+    fn receipt_serialized_size_grows_with_sigs() {
+        let mut receipt = StitchedReceiptV2::new(
+            [0; 32], [0; 32], [0; 32], [0; 32],
+            [0; 32], [0; 32], [0; 32],
+            vec![], vec![], vec![],
+        );
+        let base_size = receipt.serialized_size();
+
+        receipt.add_sig_a(vec![0xAA; 100]);
+        receipt.add_sig_b(vec![0xBB; 200]);
+        assert_eq!(receipt.serialized_size(), base_size + 300);
+    }
+
+    #[test]
+    fn receipt_canonical_commit_alias() {
+        let receipt = StitchedReceiptV2::new(
+            [0; 32], [1; 32], [2; 32], [3; 32],
+            [4; 32], [5; 32], [6; 32],
+            vec![], vec![], vec![],
+        );
+        let a = receipt.compute_commitment().unwrap();
+        let b = receipt.canonical_commit().unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn receipt_different_fields_produce_different_commitments() {
+        let r1 = StitchedReceiptV2::new(
+            [0; 32], [1; 32], [2; 32], [3; 32],
+            [4; 32], [5; 32], [6; 32],
+            vec![], vec![], vec![],
+        );
+        let r2 = StitchedReceiptV2::new(
+            [0xFF; 32], [1; 32], [2; 32], [3; 32],
+            [4; 32], [5; 32], [6; 32],
+            vec![], vec![], vec![],
+        );
+        assert_ne!(
+            r1.compute_commitment().unwrap(),
+            r2.compute_commitment().unwrap(),
+        );
+    }
+
+    // --- DeviceTreeAcceptanceCommitment ---
+
+    #[test]
+    fn device_tree_acceptance_from_root() {
+        let root = [0xAB; 32];
+        let c = DeviceTreeAcceptanceCommitment::from_root(root);
+        assert_eq!(c.root(), root);
+    }
+
+    #[test]
+    fn device_tree_acceptance_from_array() {
+        let root = [0xCD; 32];
+        let c: DeviceTreeAcceptanceCommitment = root.into();
+        assert_eq!(c.root(), root);
+    }
+
+    #[test]
+    fn device_tree_acceptance_copy_eq() {
+        let a = DeviceTreeAcceptanceCommitment::from_root([0; 32]);
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    // --- ReceiptAcceptance ---
+
+    #[test]
+    fn receipt_acceptance_accept() {
+        let commitment = [0xEE; 32];
+        let acc = ReceiptAcceptance::accept(commitment);
+        assert!(acc.valid);
+        assert!(acc.reason.is_none());
+        assert_eq!(acc.commitment, Some(commitment));
+    }
+
+    #[test]
+    fn receipt_acceptance_reject() {
+        let acc = ReceiptAcceptance::reject("bad signature");
+        assert!(!acc.valid);
+        assert_eq!(acc.reason.as_deref(), Some("bad signature"));
+        assert!(acc.commitment.is_none());
+    }
+
+    // --- ReceiptVerificationContext ---
+
+    #[test]
+    fn verification_context_mark_and_check_consumed() {
+        let mut ctx = ReceiptVerificationContext::new(
+            [0; 32],
+            [1; 32],
+            vec![2; 64],
+            vec![3; 64],
+        );
+        let tip = [0xAA; 32];
+        assert!(!ctx.is_consumed(&tip));
+        ctx.mark_consumed(tip);
+        assert!(ctx.is_consumed(&tip));
+    }
+
+    // --- ParentConsumptionTracker ---
+
+    #[test]
+    fn tracker_fresh_parent_not_consumed() {
+        let tracker = ParentConsumptionTracker::new();
+        assert!(!tracker.is_consumed(&[0; 32]));
+        assert!(tracker.get_child(&[0; 32]).is_none());
+    }
+
+    #[test]
+    fn tracker_with_capacity_behaves_like_new() {
+        let tracker = ParentConsumptionTracker::with_capacity(100);
+        assert!(!tracker.is_consumed(&[0xFF; 32]));
+    }
+
+    #[test]
+    fn tracker_multiple_distinct_parents() {
+        let mut tracker = ParentConsumptionTracker::new();
+        let p1 = [1u8; 32];
+        let p2 = [2u8; 32];
+        let c1 = [0xA0; 32];
+        let c2 = [0xB0; 32];
+
+        tracker.try_consume(p1, c1).unwrap();
+        tracker.try_consume(p2, c2).unwrap();
+
+        assert_eq!(tracker.get_child(&p1), Some(&c1));
+        assert_eq!(tracker.get_child(&p2), Some(&c2));
+    }
+
+    #[test]
+    fn tracker_replay_same_child_is_error() {
+        let mut tracker = ParentConsumptionTracker::new();
+        let parent = [0x10; 32];
+        let child = [0x20; 32];
+        tracker.try_consume(parent, child).unwrap();
+        let err = tracker.try_consume(parent, child).unwrap_err();
+        assert!(format!("{err}").contains("replay"));
+    }
 }
 
 #[cfg(test)]

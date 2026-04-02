@@ -347,3 +347,336 @@ impl TokenRegistry {
         Ok((total, unique_targets.len()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::token_types::{Balance, Token, TokenStatus};
+
+    fn make_registry() -> TokenRegistry {
+        let tsm = Arc::new(TokenStateManager::new());
+        TokenRegistry::new(tsm)
+    }
+
+    fn make_token(owner: &str, data: &[u8]) -> Token {
+        Token::new(
+            owner,
+            data.to_vec(),
+            vec![],
+            Balance::from_state(100, [0; 32], 1),
+            [0xAA; 32],
+        )
+    }
+
+    // ── Construction ────────────────────────────────────────────────
+
+    #[test]
+    fn new_registry_is_empty() {
+        let reg = make_registry();
+        assert_eq!(reg.token_count(), 0);
+        assert!(reg.get_all_token_ids().unwrap().is_empty());
+    }
+
+    // ── register_token ──────────────────────────────────────────────
+
+    #[test]
+    fn register_and_get_token_from_cache() {
+        let reg = make_registry();
+        let t = make_token("alice", b"tok_data_1");
+        let id = t.id().to_string();
+
+        reg.register_token(t.clone(), Some("MyToken".into())).unwrap();
+        assert_eq!(reg.token_count(), 1);
+
+        let fetched = reg.get_token(&id).unwrap();
+        assert_eq!(fetched.owner_id(), "alice");
+    }
+
+    #[test]
+    fn register_without_friendly_name() {
+        let reg = make_registry();
+        let t = make_token("bob", b"tok_data_2");
+        let id = t.id().to_string();
+
+        reg.register_token(t, None).unwrap();
+        assert_eq!(reg.token_count(), 1);
+
+        let names = reg.all_friendly_names().unwrap();
+        assert!(names.is_empty());
+
+        assert!(reg.get_token(&id).is_ok());
+    }
+
+    // ── get_token_by_name ───────────────────────────────────────────
+
+    #[test]
+    fn get_token_by_name_found() {
+        let reg = make_registry();
+        let t = make_token("alice", b"named_tok");
+        reg.register_token(t.clone(), Some("Friendly".into())).unwrap();
+
+        let found = reg.get_token_by_name("Friendly").unwrap();
+        assert_eq!(found.id(), t.id());
+    }
+
+    #[test]
+    fn get_token_by_name_not_found() {
+        let reg = make_registry();
+        assert!(reg.get_token_by_name("NonExistent").is_err());
+    }
+
+    // ── get_token not in cache or state manager ─────────────────────
+
+    #[test]
+    fn get_token_not_found() {
+        let reg = make_registry();
+        assert!(reg.get_token("unknown_id").is_err());
+    }
+
+    // ── find_tokens ─────────────────────────────────────────────────
+
+    #[test]
+    fn find_tokens_no_filter() {
+        let reg = make_registry();
+        let t1 = make_token("alice", b"t1");
+        let t2 = make_token("bob", b"t2");
+        reg.register_token(t1, None).unwrap();
+        reg.register_token(t2, None).unwrap();
+
+        let found = reg.find_tokens(None, None, 100).unwrap();
+        assert_eq!(found.len(), 2);
+    }
+
+    #[test]
+    fn find_tokens_by_owner() {
+        let reg = make_registry();
+        let t1 = make_token("alice", b"ta");
+        let t2 = make_token("bob", b"tb");
+        reg.register_token(t1, None).unwrap();
+        reg.register_token(t2, None).unwrap();
+
+        let found = reg.find_tokens(Some("alice"), None, 100).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].owner_id(), "alice");
+    }
+
+    #[test]
+    fn find_tokens_by_status() {
+        let reg = make_registry();
+        let mut t1 = make_token("alice", b"ts1");
+        t1.set_status(TokenStatus::Revoked);
+        let t2 = make_token("bob", b"ts2");
+
+        reg.register_token(t1, None).unwrap();
+        reg.register_token(t2, None).unwrap();
+
+        let found = reg.find_tokens(None, Some(TokenStatus::Active), 100).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].owner_id(), "bob");
+    }
+
+    #[test]
+    fn find_tokens_respects_limit() {
+        let reg = make_registry();
+        for i in 0..10 {
+            let t = make_token("alice", &[i as u8; 4]);
+            reg.register_token(t, None).unwrap();
+        }
+        let found = reg.find_tokens(None, None, 3).unwrap();
+        assert_eq!(found.len(), 3);
+    }
+
+    #[test]
+    fn find_tokens_sorted_by_id() {
+        let reg = make_registry();
+        for i in 0..5 {
+            let t = make_token("alice", &[i as u8; 8]);
+            reg.register_token(t, None).unwrap();
+        }
+        let found = reg.find_tokens(None, None, 100).unwrap();
+        for w in found.windows(2) {
+            assert!(w[0].id() <= w[1].id(), "results must be sorted by id");
+        }
+    }
+
+    // ── verify_token ────────────────────────────────────────────────
+
+    #[test]
+    fn verify_token_active_returns_true() {
+        let reg = make_registry();
+        let t = make_token("alice", b"vt");
+        let id = t.id().to_string();
+        reg.register_token(t, None).unwrap();
+        assert!(reg.verify_token(&id).unwrap());
+    }
+
+    #[test]
+    fn verify_token_revoked_returns_false() {
+        let reg = make_registry();
+        let mut t = make_token("alice", b"vr");
+        t.set_status(TokenStatus::Revoked);
+        let id = t.id().to_string();
+        reg.register_token(t, None).unwrap();
+        assert!(!reg.verify_token(&id).unwrap());
+    }
+
+    #[test]
+    fn verify_token_not_found_returns_false() {
+        let reg = make_registry();
+        assert!(!reg.verify_token("nonexistent").unwrap());
+    }
+
+    // ── update_token_name ───────────────────────────────────────────
+
+    #[test]
+    fn update_token_name() {
+        let reg = make_registry();
+        let t = make_token("alice", b"un");
+        let id = t.id().to_string();
+        reg.register_token(t, Some("OldName".into())).unwrap();
+
+        reg.update_token_name(&id, "NewName").unwrap();
+        let found = reg.get_token_by_name("NewName").unwrap();
+        assert_eq!(found.id(), id);
+
+        assert!(
+            reg.get_token_by_name("OldName").is_err(),
+            "old name should be removed"
+        );
+    }
+
+    #[test]
+    fn update_token_name_nonexistent_token_fails() {
+        let reg = make_registry();
+        assert!(reg.update_token_name("nope", "Any").is_err());
+    }
+
+    // ── get_all_token_ids ───────────────────────────────────────────
+
+    #[test]
+    fn get_all_token_ids_sorted() {
+        let reg = make_registry();
+        for i in 0..5 {
+            let t = make_token("alice", &[i as u8; 8]);
+            reg.register_token(t, None).unwrap();
+        }
+        let ids = reg.get_all_token_ids().unwrap();
+        assert_eq!(ids.len(), 5);
+        for w in ids.windows(2) {
+            assert!(w[0] <= w[1]);
+        }
+    }
+
+    // ── revoke_token and update_token_metadata ──────────────────────
+
+    #[test]
+    fn revoke_token_returns_error() {
+        let reg = make_registry();
+        assert!(reg.revoke_token("any").is_err());
+    }
+
+    #[test]
+    fn update_token_metadata_returns_error() {
+        let reg = make_registry();
+        assert!(reg.update_token_metadata("any", vec![1, 2]).is_err());
+    }
+
+    #[test]
+    fn refresh_registry_returns_error() {
+        let reg = make_registry();
+        assert!(reg.refresh_registry().is_err());
+    }
+
+    // ── clear_cache and remove_from_cache ───────────────────────────
+
+    #[test]
+    fn clear_cache_empties_tokens() {
+        let reg = make_registry();
+        reg.register_token(make_token("a", b"c1"), None).unwrap();
+        reg.register_token(make_token("b", b"c2"), None).unwrap();
+        assert_eq!(reg.token_count(), 2);
+
+        reg.clear_cache().unwrap();
+        assert_eq!(reg.token_count(), 0);
+    }
+
+    #[test]
+    fn remove_from_cache() {
+        let reg = make_registry();
+        let t = make_token("alice", b"rm");
+        let id = t.id().to_string();
+        reg.register_token(t, None).unwrap();
+        assert_eq!(reg.token_count(), 1);
+
+        reg.remove_from_cache(&id).unwrap();
+        assert_eq!(reg.token_count(), 0);
+    }
+
+    #[test]
+    fn remove_from_cache_nonexistent_is_ok() {
+        let reg = make_registry();
+        reg.remove_from_cache("nope").unwrap();
+    }
+
+    // ── names_for_token ─────────────────────────────────────────────
+
+    #[test]
+    fn names_for_token_found() {
+        let reg = make_registry();
+        let t = make_token("alice", b"nft");
+        let id = t.id().to_string();
+        reg.register_token(t, Some("AToken".into())).unwrap();
+
+        let names = reg.names_for_token(&id).unwrap();
+        assert_eq!(names, vec!["AToken"]);
+    }
+
+    #[test]
+    fn names_for_token_no_names() {
+        let reg = make_registry();
+        let names = reg.names_for_token("nothing").unwrap();
+        assert!(names.is_empty());
+    }
+
+    // ── all_friendly_names ──────────────────────────────────────────
+
+    #[test]
+    fn all_friendly_names_sorted() {
+        let reg = make_registry();
+        let t1 = make_token("a", b"fn1");
+        let t2 = make_token("b", b"fn2");
+        reg.register_token(t1, Some("Zeta".into())).unwrap();
+        reg.register_token(t2, Some("Alpha".into())).unwrap();
+
+        let names = reg.all_friendly_names().unwrap();
+        assert_eq!(names, vec!["Alpha", "Zeta"]);
+    }
+
+    // ── name_registry_stats ─────────────────────────────────────────
+
+    #[test]
+    fn name_registry_stats_empty() {
+        let reg = make_registry();
+        let (total, unique) = reg.name_registry_stats().unwrap();
+        assert_eq!(total, 0);
+        assert_eq!(unique, 0);
+    }
+
+    #[test]
+    fn name_registry_stats_with_entries() {
+        let reg = make_registry();
+        let t = make_token("alice", b"st");
+        let id = t.id().to_string();
+        reg.register_token(t, Some("Name1".into())).unwrap();
+
+        // Add a second name pointing to the same token manually
+        {
+            let mut names = reg.name_registry.write().unwrap();
+            names.insert("Name2".into(), id);
+        }
+
+        let (total, unique) = reg.name_registry_stats().unwrap();
+        assert_eq!(total, 2);
+        assert_eq!(unique, 1);
+    }
+}

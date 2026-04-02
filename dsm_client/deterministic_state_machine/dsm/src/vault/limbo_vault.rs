@@ -1979,9 +1979,790 @@ impl Default for LimboVault {
 
 #[cfg(test)]
 mod tests {
-    // use super::*;
-    // use crate::crypto::{sphincs, kyber};
-    // use crate::types::state_types::{DeviceInfo, State};
+    use super::*;
+    use crate::core::state_machine::random_walk::algorithms::Position;
+    use crate::types::policy_types::VaultCondition;
+
+    // ───────── secure_eq ─────────
+
+    #[test]
+    fn secure_eq_equal_slices() {
+        assert!(secure_eq(b"hello", b"hello"));
+    }
+
+    #[test]
+    fn secure_eq_different_slices() {
+        assert!(!secure_eq(b"hello", b"world"));
+    }
+
+    #[test]
+    fn secure_eq_different_lengths() {
+        assert!(!secure_eq(b"short", b"longer_slice"));
+    }
+
+    #[test]
+    fn secure_eq_empty_slices() {
+        assert!(secure_eq(b"", b""));
+    }
+
+    #[test]
+    fn secure_eq_one_empty() {
+        assert!(!secure_eq(b"", b"x"));
+    }
+
+    #[test]
+    fn secure_eq_single_bit_diff() {
+        let a = [0xFFu8; 32];
+        let mut b = [0xFFu8; 32];
+        b[31] = 0xFE;
+        assert!(!secure_eq(&a, &b));
+    }
+
+    // ───────── concat_bytes ─────────
+
+    #[test]
+    fn concat_bytes_multiple() {
+        let result = concat_bytes(&[b"ab", b"cd", b"ef"]);
+        assert_eq!(result, b"abcdef");
+    }
+
+    #[test]
+    fn concat_bytes_with_empty() {
+        let result = concat_bytes(&[b"a", b"", b"b"]);
+        assert_eq!(result, b"ab");
+    }
+
+    #[test]
+    fn concat_bytes_all_empty() {
+        let result = concat_bytes(&[b"", b"", b""]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn concat_bytes_no_parts() {
+        let result = concat_bytes(&[]);
+        assert!(result.is_empty());
+    }
+
+    // ───────── decimal_label ─────────
+
+    #[test]
+    fn decimal_label_deterministic() {
+        let l1 = decimal_label("pfx-", b"material");
+        let l2 = decimal_label("pfx-", b"material");
+        assert_eq!(l1, l2);
+    }
+
+    #[test]
+    fn decimal_label_different_prefix() {
+        let l1 = decimal_label("a-", b"mat");
+        let l2 = decimal_label("b-", b"mat");
+        assert!(l1.starts_with("a-"));
+        assert!(l2.starts_with("b-"));
+        let num1 = &l1[2..];
+        let num2 = &l2[2..];
+        assert_eq!(num1, num2);
+    }
+
+    #[test]
+    fn decimal_label_different_material() {
+        let l1 = decimal_label("x-", b"aaa");
+        let l2 = decimal_label("x-", b"bbb");
+        assert_ne!(l1, l2);
+    }
+
+    // ───────── encode_position / decode_position roundtrip ─────────
+
+    #[test]
+    fn position_roundtrip_basic() {
+        let pos = Position(vec![1, -2, 3, 0]);
+        let bytes = encode_position(&pos);
+        let decoded = decode_position(&bytes).unwrap();
+        assert_eq!(pos.0, decoded.0);
+    }
+
+    #[test]
+    fn position_roundtrip_empty() {
+        let pos = Position(vec![]);
+        let bytes = encode_position(&pos);
+        assert_eq!(bytes.len(), 4); // only the length prefix
+        let decoded = decode_position(&bytes).unwrap();
+        assert!(decoded.0.is_empty());
+    }
+
+    #[test]
+    fn position_roundtrip_single_coord() {
+        let pos = Position(vec![i32::MAX]);
+        let bytes = encode_position(&pos);
+        let decoded = decode_position(&bytes).unwrap();
+        assert_eq!(decoded.0, vec![i32::MAX]);
+    }
+
+    #[test]
+    fn position_roundtrip_many_coords() {
+        let coords: Vec<i32> = (0..100).collect();
+        let pos = Position(coords.clone());
+        let bytes = encode_position(&pos);
+        let decoded = decode_position(&bytes).unwrap();
+        assert_eq!(decoded.0, coords);
+    }
+
+    #[test]
+    fn decode_position_short_input() {
+        let result = decode_position(&[0, 1]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn decode_position_wrong_length() {
+        // Header says 2 coords (8 extra bytes needed) but only 4 provided
+        let mut bytes = vec![2, 0, 0, 0]; // len=2
+        bytes.extend_from_slice(&1i32.to_le_bytes());
+        let result = decode_position(&bytes);
+        assert!(result.is_err());
+    }
+
+    // ───────── FulfillmentProof::to_bytes ─────────
+
+    #[test]
+    fn payment_proof_to_bytes_no_sigma() {
+        let proof = FulfillmentProof::PaymentProof {
+            state_transition: vec![1, 2, 3],
+            merkle_proof: vec![4, 5],
+            stitched_receipt_sigma: None,
+        };
+        let bytes = proof.to_bytes();
+        assert_eq!(bytes[0], 1); // variant tag
+        assert!(!bytes.is_empty());
+        // last byte should be 0x00 (no sigma)
+        assert_eq!(*bytes.last().unwrap(), 0x00);
+    }
+
+    #[test]
+    fn payment_proof_to_bytes_with_sigma() {
+        let sigma = [0xABu8; 32];
+        let proof = FulfillmentProof::PaymentProof {
+            state_transition: vec![10],
+            merkle_proof: vec![20],
+            stitched_receipt_sigma: Some(sigma),
+        };
+        let bytes = proof.to_bytes();
+        assert_eq!(bytes[0], 1);
+        // sigma present: ..., 0x01, <32 bytes of 0xAB>
+        let tail = &bytes[bytes.len() - 33..];
+        assert_eq!(tail[0], 0x01);
+        assert_eq!(&tail[1..], &sigma);
+    }
+
+    #[test]
+    fn crypto_condition_proof_to_bytes() {
+        let proof = FulfillmentProof::CryptoConditionProof {
+            solution: vec![0xFF; 5],
+            proof: vec![0xEE; 3],
+            stitched_receipt_sigma: None,
+        };
+        let bytes = proof.to_bytes();
+        assert_eq!(bytes[0], 2);
+    }
+
+    #[test]
+    fn multi_signature_proof_to_bytes() {
+        let proof = FulfillmentProof::MultiSignatureProof {
+            signatures: vec![(vec![1], vec![2]), (vec![3], vec![4])],
+            signed_data: vec![5, 6],
+            stitched_receipt_sigma: None,
+        };
+        let bytes = proof.to_bytes();
+        assert_eq!(bytes[0], 3);
+    }
+
+    #[test]
+    fn random_walk_proof_to_bytes() {
+        let proof = FulfillmentProof::RandomWalkProof {
+            positions: vec![Position(vec![1, 2]), Position(vec![3, 4])],
+            hash_chain_proof: vec![0xCC; 8],
+            stitched_receipt_sigma: None,
+        };
+        let bytes = proof.to_bytes();
+        assert_eq!(bytes[0], 4);
+    }
+
+    #[test]
+    fn compound_proof_to_bytes() {
+        let inner = FulfillmentProof::PaymentProof {
+            state_transition: vec![1],
+            merkle_proof: vec![2],
+            stitched_receipt_sigma: None,
+        };
+        let proof = FulfillmentProof::CompoundProof(vec![inner]);
+        let bytes = proof.to_bytes();
+        assert_eq!(bytes[0], 5);
+    }
+
+    #[test]
+    fn bitcoin_htlc_proof_to_bytes() {
+        let proof = FulfillmentProof::BitcoinHTLCProof {
+            preimage: vec![0x01; 32],
+            bitcoin_txid: [0x02; 32],
+            bitcoin_tx_raw: vec![0x03; 10],
+            spv_proof: vec![0x04; 8],
+            expected_script_pubkey: vec![0x05; 4],
+            block_header: Box::new([0x06; 80]),
+            header_chain: vec![],
+            stitched_receipt: None,
+            stitched_receipt_sigma: None,
+        };
+        let bytes = proof.to_bytes();
+        assert_eq!(bytes[0], 6);
+    }
+
+    #[test]
+    fn to_bytes_deterministic() {
+        let proof = FulfillmentProof::PaymentProof {
+            state_transition: vec![9, 8, 7],
+            merkle_proof: vec![6, 5],
+            stitched_receipt_sigma: Some([0x42; 32]),
+        };
+        let b1 = proof.to_bytes();
+        let b2 = proof.to_bytes();
+        assert_eq!(b1, b2);
+    }
+
+    // ───────── extract_sigma_from_proof ─────────
+
+    #[test]
+    fn extract_sigma_payment_some() {
+        let sigma = [0x11u8; 32];
+        let proof = FulfillmentProof::PaymentProof {
+            state_transition: vec![],
+            merkle_proof: vec![],
+            stitched_receipt_sigma: Some(sigma),
+        };
+        assert_eq!(extract_sigma_from_proof(&proof), Some(sigma));
+    }
+
+    #[test]
+    fn extract_sigma_payment_none() {
+        let proof = FulfillmentProof::PaymentProof {
+            state_transition: vec![],
+            merkle_proof: vec![],
+            stitched_receipt_sigma: None,
+        };
+        assert_eq!(extract_sigma_from_proof(&proof), None);
+    }
+
+    #[test]
+    fn extract_sigma_crypto_condition() {
+        let sigma = [0x22u8; 32];
+        let proof = FulfillmentProof::CryptoConditionProof {
+            solution: vec![],
+            proof: vec![],
+            stitched_receipt_sigma: Some(sigma),
+        };
+        assert_eq!(extract_sigma_from_proof(&proof), Some(sigma));
+    }
+
+    #[test]
+    fn extract_sigma_multi_sig() {
+        let sigma = [0x33u8; 32];
+        let proof = FulfillmentProof::MultiSignatureProof {
+            signatures: vec![],
+            signed_data: vec![],
+            stitched_receipt_sigma: Some(sigma),
+        };
+        assert_eq!(extract_sigma_from_proof(&proof), Some(sigma));
+    }
+
+    #[test]
+    fn extract_sigma_random_walk() {
+        let sigma = [0x44u8; 32];
+        let proof = FulfillmentProof::RandomWalkProof {
+            positions: vec![],
+            hash_chain_proof: vec![],
+            stitched_receipt_sigma: Some(sigma),
+        };
+        assert_eq!(extract_sigma_from_proof(&proof), Some(sigma));
+    }
+
+    #[test]
+    fn extract_sigma_bitcoin_htlc() {
+        let sigma = [0x55u8; 32];
+        let proof = FulfillmentProof::BitcoinHTLCProof {
+            preimage: vec![],
+            bitcoin_txid: [0; 32],
+            bitcoin_tx_raw: vec![],
+            spv_proof: vec![],
+            expected_script_pubkey: vec![],
+            block_header: Box::new([0; 80]),
+            header_chain: vec![],
+            stitched_receipt: None,
+            stitched_receipt_sigma: Some(sigma),
+        };
+        assert_eq!(extract_sigma_from_proof(&proof), Some(sigma));
+    }
+
+    #[test]
+    fn extract_sigma_compound_returns_none() {
+        let proof = FulfillmentProof::CompoundProof(vec![]);
+        assert_eq!(extract_sigma_from_proof(&proof), None);
+    }
+
+    // ───────── VaultState ─────────
+
+    #[test]
+    fn vault_state_limbo_equality() {
+        assert_eq!(VaultState::Limbo, VaultState::Limbo);
+    }
+
+    #[test]
+    fn vault_state_active_equality() {
+        let a = VaultState::Active {
+            activated_state_number: 42,
+        };
+        let b = VaultState::Active {
+            activated_state_number: 42,
+        };
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn vault_state_active_inequality() {
+        let a = VaultState::Active {
+            activated_state_number: 1,
+        };
+        let b = VaultState::Active {
+            activated_state_number: 2,
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn vault_state_limbo_ne_active() {
+        assert_ne!(
+            VaultState::Limbo,
+            VaultState::Active {
+                activated_state_number: 0
+            }
+        );
+    }
+
+    // ───────── DeterministicLimboVault ─────────
+
+    #[test]
+    fn dlv_new_and_getters() {
+        let cond = VaultCondition::Hash(b"test".to_vec());
+        let v = DeterministicLimboVault::new("alice", "bob", vec![1, 2, 3], cond);
+
+        assert!(v.id().starts_with("dlv-"));
+        assert_eq!(v.creator_id(), "alice");
+        assert_eq!(v.recipient_id(), "bob");
+        assert_eq!(v.data(), &[1, 2, 3]);
+        assert_eq!(*v.status(), VaultStatus::Active);
+    }
+
+    #[test]
+    fn dlv_set_status() {
+        let cond = VaultCondition::Hash(vec![]);
+        let mut v = DeterministicLimboVault::new("c", "r", vec![], cond);
+
+        v.set_status(VaultStatus::Claimed);
+        assert_eq!(*v.status(), VaultStatus::Claimed);
+
+        v.set_status(VaultStatus::Revoked);
+        assert_eq!(*v.status(), VaultStatus::Revoked);
+
+        v.set_status(VaultStatus::Expired);
+        assert_eq!(*v.status(), VaultStatus::Expired);
+    }
+
+    #[test]
+    fn dlv_id_is_deterministic() {
+        let cond1 = VaultCondition::Hash(b"h".to_vec());
+        let cond2 = VaultCondition::Hash(b"h".to_vec());
+        let v1 = DeterministicLimboVault::new("alice", "bob", vec![42], cond1);
+        let v2 = DeterministicLimboVault::new("alice", "bob", vec![42], cond2);
+        assert_eq!(v1.id(), v2.id());
+    }
+
+    #[test]
+    fn dlv_different_data_different_id() {
+        let cond1 = VaultCondition::Hash(vec![]);
+        let cond2 = VaultCondition::Hash(vec![]);
+        let v1 = DeterministicLimboVault::new("a", "b", vec![1], cond1);
+        let v2 = DeterministicLimboVault::new("a", "b", vec![2], cond2);
+        assert_ne!(v1.id(), v2.id());
+    }
+
+    // ───────── factory functions ─────────
+
+    #[test]
+    fn create_deterministic_limbo_vault_basic() {
+        let v = create_deterministic_limbo_vault(
+            "creator1",
+            vec![10, 20],
+            VaultCondition::MinimumBalance(100),
+        );
+        assert!(v.id().starts_with("dlv-"));
+        assert_eq!(v.creator_id(), "creator1");
+        assert_eq!(v.recipient_id(), "");
+        assert_eq!(v.data(), &[10, 20]);
+    }
+
+    #[test]
+    fn create_deterministic_limbo_vault_with_timeout_basic() {
+        let v = create_deterministic_limbo_vault_with_timeout("creator2", vec![30], 999);
+        assert!(v.id().starts_with("dlv-"));
+        assert_eq!(v.creator_id(), "creator2");
+        assert_eq!(v.recipient_id(), "");
+    }
+
+    #[test]
+    fn create_deterministic_limbo_vault_with_timeout_and_recipient_basic() {
+        let v = create_deterministic_limbo_vault_with_timeout_and_recipient(
+            "creator3",
+            "recip3",
+            vec![40],
+            500,
+        );
+        assert!(v.id().starts_with("dlv-"));
+        assert_eq!(v.creator_id(), "creator3");
+        assert_eq!(v.recipient_id(), "recip3");
+    }
+
+    // ───────── VaultPost from LimboVault (proto conversion) ─────────
+
+    #[test]
+    fn vault_post_proto_metadata_sorted() {
+        let mut metadata = HashMap::new();
+        metadata.insert("zebra".to_string(), "z_val".to_string());
+        metadata.insert("alpha".to_string(), "a_val".to_string());
+        metadata.insert("mid".to_string(), "m_val".to_string());
+
+        let post = VaultPost {
+            vault_id: "v1".to_string(),
+            lock_description: "test".to_string(),
+            creator_id: "c1".to_string(),
+            commitment_hash: vec![],
+            status: "unresolved".to_string(),
+            metadata,
+            vault_data: vec![],
+        };
+
+        let proto: crate::types::proto::VaultPostProto = (&post).into();
+        let keys: Vec<&str> = proto.metadata.iter().map(|kv| kv.key.as_str()).collect();
+        assert_eq!(keys, vec!["alpha", "mid", "zebra"]);
+    }
+
+    #[test]
+    fn vault_post_proto_fields_match() {
+        let post = VaultPost {
+            vault_id: "vid".to_string(),
+            lock_description: "lock".to_string(),
+            creator_id: "cid".to_string(),
+            commitment_hash: vec![99],
+            status: "active".to_string(),
+            metadata: HashMap::new(),
+            vault_data: vec![1, 2, 3],
+        };
+
+        let proto: crate::types::proto::VaultPostProto = (&post).into();
+        assert_eq!(proto.vault_id, "vid");
+        assert_eq!(proto.lock_description, "lock");
+        assert_eq!(proto.creator_id, "cid");
+        assert_eq!(proto.commitment_hash, vec![99]);
+        assert_eq!(proto.status, "active");
+        assert_eq!(proto.vault_data, vec![1, 2, 3]);
+    }
+
+    // ───────── LimboVault::new_minimal ─────────
+
+    #[test]
+    fn new_minimal_fields() {
+        let cond = FulfillmentMechanism::CryptoCondition {
+            condition_hash: vec![1],
+            public_params: vec![2],
+        };
+        let ref_hash = [0xAAu8; 32];
+        let v = LimboVault::new_minimal("test-vault".to_string(), cond, ref_hash);
+
+        assert_eq!(v.id, "test-vault");
+        assert_eq!(v.created_at_state, 0);
+        assert!(v.creator_public_key.is_empty());
+        assert!(v.intended_recipient.is_none());
+        assert_eq!(v.state, VaultState::Limbo);
+        assert_eq!(v.content_type, "application/dsm-dbtc-mint");
+        assert!(v.encrypted_content.encapsulated_key.is_empty());
+        assert!(v.encrypted_content.encrypted_data.is_empty());
+        assert!(v.encrypted_content.nonce.is_empty());
+        assert!(v.encrypted_content.aad.is_empty());
+        assert!(v.parameters_hash.is_empty());
+        assert!(v.creator_signature.is_empty());
+        assert!(v.verification_positions.is_empty());
+        assert_eq!(v.reference_state_hash, ref_hash);
+        assert!(v.entry_header.is_none());
+    }
+
+    // ───────── LimboVault::default ─────────
+
+    #[test]
+    fn limbo_vault_default() {
+        let v = LimboVault::default();
+
+        assert!(v.id.is_empty());
+        assert_eq!(v.created_at_state, 0);
+        assert!(v.creator_public_key.is_empty());
+        assert!(v.intended_recipient.is_none());
+        assert_eq!(v.state, VaultState::Limbo);
+        assert_eq!(v.content_type, "application/octet-stream");
+        assert!(v.parameters_hash.is_empty());
+        assert!(v.creator_signature.is_empty());
+        assert!(v.verification_positions.is_empty());
+        assert_eq!(v.reference_state_hash, [0u8; 32]);
+        assert!(v.entry_header.is_none());
+    }
+
+    #[test]
+    fn limbo_vault_default_fulfillment_is_crypto_condition() {
+        let v = LimboVault::default();
+        assert!(matches!(
+            v.fulfillment_condition,
+            FulfillmentMechanism::CryptoCondition { .. }
+        ));
+    }
+
+    // ───────── VaultStatus Display ─────────
+
+    #[test]
+    fn vault_status_display_active() {
+        assert_eq!(format!("{}", VaultStatus::Active), "active");
+    }
+
+    #[test]
+    fn vault_status_display_claimed() {
+        assert_eq!(format!("{}", VaultStatus::Claimed), "claimed");
+    }
+
+    #[test]
+    fn vault_status_display_revoked() {
+        assert_eq!(format!("{}", VaultStatus::Revoked), "revoked");
+    }
+
+    #[test]
+    fn vault_status_display_expired() {
+        assert_eq!(format!("{}", VaultStatus::Expired), "expired");
+    }
+
+    // ───────── to_vault_post lock descriptions ─────────
+
+    fn make_minimal_vault_with_condition(cond: FulfillmentMechanism) -> LimboVault {
+        LimboVault {
+            fulfillment_condition: cond,
+            ..LimboVault::default()
+        }
+    }
+
+    #[test]
+    fn to_vault_post_payment_description() {
+        let v = make_minimal_vault_with_condition(FulfillmentMechanism::Payment {
+            amount: 100,
+            token_id: "DSM".to_string(),
+            recipient: "alice".to_string(),
+            verification_state: vec![],
+        });
+        let post = v.to_vault_post("test", None).unwrap();
+        assert_eq!(post.lock_description, "Payment of 100 DSM to alice");
+        assert_eq!(post.status, "unresolved");
+    }
+
+    #[test]
+    fn to_vault_post_multi_sig_description() {
+        let v = make_minimal_vault_with_condition(FulfillmentMechanism::MultiSignature {
+            public_keys: vec![vec![1], vec![2], vec![3]],
+            threshold: 2,
+        });
+        let post = v.to_vault_post("governance", None).unwrap();
+        assert_eq!(post.lock_description, "Requires 2 of 3 signatures");
+    }
+
+    #[test]
+    fn to_vault_post_crypto_condition_description() {
+        let v = make_minimal_vault_with_condition(FulfillmentMechanism::CryptoCondition {
+            condition_hash: vec![],
+            public_params: vec![],
+        });
+        let post = v.to_vault_post("cond", None).unwrap();
+        assert_eq!(post.lock_description, "Cryptographic condition");
+    }
+
+    #[test]
+    fn to_vault_post_state_reference_description() {
+        let v = make_minimal_vault_with_condition(FulfillmentMechanism::StateReference {
+            reference_states: vec![],
+            parameters: vec![],
+        });
+        let post = v.to_vault_post("ref", None).unwrap();
+        assert_eq!(post.lock_description, "Reference state verification");
+    }
+
+    #[test]
+    fn to_vault_post_random_walk_description() {
+        let v = make_minimal_vault_with_condition(FulfillmentMechanism::RandomWalkVerification {
+            verification_key: vec![],
+            statement: "prove-it".to_string(),
+        });
+        let post = v.to_vault_post("rw", None).unwrap();
+        assert_eq!(
+            post.lock_description,
+            "Random walk verification: prove-it"
+        );
+    }
+
+    #[test]
+    fn to_vault_post_bitcoin_htlc_description() {
+        let v = make_minimal_vault_with_condition(FulfillmentMechanism::BitcoinHTLC {
+            hash_lock: [0; 32],
+            refund_hash_lock: [0; 32],
+            refund_iterations: 0,
+            bitcoin_pubkey: vec![],
+            expected_btc_amount_sats: 50_000,
+            network: 0,
+            min_confirmations: 6,
+        });
+        let post = v.to_vault_post("btc", None).unwrap();
+        assert_eq!(post.lock_description, "Bitcoin HTLC vault (50000 sats)");
+    }
+
+    #[test]
+    fn to_vault_post_and_description() {
+        let v = make_minimal_vault_with_condition(FulfillmentMechanism::And(vec![
+            FulfillmentMechanism::CryptoCondition {
+                condition_hash: vec![],
+                public_params: vec![],
+            },
+            FulfillmentMechanism::CryptoCondition {
+                condition_hash: vec![],
+                public_params: vec![],
+            },
+        ]));
+        let post = v.to_vault_post("compound", None).unwrap();
+        assert_eq!(post.lock_description, "All of 2 conditions must be met");
+    }
+
+    #[test]
+    fn to_vault_post_or_description() {
+        let v = make_minimal_vault_with_condition(FulfillmentMechanism::Or(vec![
+            FulfillmentMechanism::CryptoCondition {
+                condition_hash: vec![],
+                public_params: vec![],
+            },
+        ]));
+        let post = v.to_vault_post("compound", None).unwrap();
+        assert_eq!(post.lock_description, "Any of 1 conditions must be met");
+    }
+
+    #[test]
+    fn to_vault_post_with_timeout_metadata() {
+        let v = LimboVault::default();
+        let post = v.to_vault_post("op", Some(3600)).unwrap();
+        assert_eq!(post.metadata.get("purpose").unwrap(), "op");
+        assert_eq!(post.metadata.get("timeout").unwrap(), "3600");
+    }
+
+    #[test]
+    fn to_vault_post_no_timeout_metadata() {
+        let v = LimboVault::default();
+        let post = v.to_vault_post("op", None).unwrap();
+        assert_eq!(post.metadata.get("purpose").unwrap(), "op");
+        assert!(post.metadata.get("timeout").is_none());
+    }
+
+    #[test]
+    fn to_vault_post_status_reflects_vault_state() {
+        let mut v = LimboVault::default();
+        assert_eq!(
+            v.to_vault_post("t", None).unwrap().status,
+            "unresolved"
+        );
+
+        v.state = VaultState::Active {
+            activated_state_number: 1,
+        };
+        assert_eq!(v.to_vault_post("t", None).unwrap().status, "active");
+
+        v.state = VaultState::Unlocked {
+            unlocked_state_number: 2,
+            fulfillment_proof: Box::new(FulfillmentProof::CompoundProof(vec![])),
+        };
+        assert_eq!(v.to_vault_post("t", None).unwrap().status, "unlocked");
+
+        v.state = VaultState::Claimed {
+            claimed_state_number: 3,
+            claimant: vec![],
+            claim_proof: vec![],
+        };
+        assert_eq!(v.to_vault_post("t", None).unwrap().status, "claimed");
+
+        v.state = VaultState::Invalidated {
+            invalidated_state_number: 4,
+            reason: "gone".to_string(),
+            creator_signature: vec![],
+        };
+        assert_eq!(
+            v.to_vault_post("t", None).unwrap().status,
+            "invalidated"
+        );
+    }
+
+    // ───────── from_limbo_vault status mapping ─────────
+
+    #[test]
+    fn from_limbo_vault_status_mapping() {
+        let cond = VaultCondition::Hash(vec![]);
+
+        let mut v = LimboVault::default();
+        v.state = VaultState::Limbo;
+        let dlv = DeterministicLimboVault::from_limbo_vault(&v, cond.clone()).unwrap();
+        assert_eq!(*dlv.status(), VaultStatus::Active);
+
+        v.state = VaultState::Active {
+            activated_state_number: 1,
+        };
+        let dlv = DeterministicLimboVault::from_limbo_vault(&v, cond.clone()).unwrap();
+        assert_eq!(*dlv.status(), VaultStatus::Active);
+
+        v.state = VaultState::Claimed {
+            claimed_state_number: 2,
+            claimant: vec![],
+            claim_proof: vec![],
+        };
+        let dlv = DeterministicLimboVault::from_limbo_vault(&v, cond.clone()).unwrap();
+        assert_eq!(*dlv.status(), VaultStatus::Claimed);
+
+        v.state = VaultState::Invalidated {
+            invalidated_state_number: 3,
+            reason: "test".to_string(),
+            creator_signature: vec![],
+        };
+        let dlv = DeterministicLimboVault::from_limbo_vault(&v, cond).unwrap();
+        assert_eq!(*dlv.status(), VaultStatus::Revoked);
+    }
+
+    // ───────── EncryptedContent struct ─────────
+
+    #[test]
+    fn encrypted_content_clone() {
+        let ec = EncryptedContent {
+            encapsulated_key: vec![1, 2],
+            encrypted_data: vec![3, 4],
+            nonce: vec![5],
+            aad: vec![6],
+        };
+        let ec2 = ec.clone();
+        assert_eq!(ec.encapsulated_key, ec2.encapsulated_key);
+        assert_eq!(ec.encrypted_data, ec2.encrypted_data);
+        assert_eq!(ec.nonce, ec2.nonce);
+        assert_eq!(ec.aad, ec2.aad);
+    }
 }
 
 /* ------------------- Optional Deterministic Limbo (lightweight) -------------- */

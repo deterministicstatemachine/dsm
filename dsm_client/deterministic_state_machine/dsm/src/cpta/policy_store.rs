@@ -276,3 +276,177 @@ impl PolicyStore {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::policy_types::{PolicyCondition, PolicyFile, PolicyRole};
+
+    #[derive(Debug)]
+    struct MockPersistence {
+        store: Arc<RwLock<HashMap<PolicyAnchor, Vec<u8>>>>,
+    }
+
+    impl MockPersistence {
+        fn new() -> Self {
+            Self {
+                store: Arc::new(RwLock::new(HashMap::new())),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl PolicyPersistence for MockPersistence {
+        async fn read(&self, anchor: &PolicyAnchor) -> Result<Vec<u8>, DsmError> {
+            self.store
+                .read()
+                .get(anchor)
+                .cloned()
+                .ok_or_else(|| DsmError::invalid_operation("not found"))
+        }
+
+        async fn write(&self, anchor: &PolicyAnchor, data: &[u8]) -> Result<(), DsmError> {
+            self.store.write().insert(anchor.clone(), data.to_vec());
+            Ok(())
+        }
+
+        async fn delete(&self, anchor: &PolicyAnchor) -> Result<(), DsmError> {
+            self.store.write().remove(anchor);
+            Ok(())
+        }
+
+        async fn list_anchors(&self) -> Result<Vec<PolicyAnchor>, DsmError> {
+            Ok(self.store.read().keys().cloned().collect())
+        }
+    }
+
+    fn make_policy_file(author: &str) -> PolicyFile {
+        let mut pf = PolicyFile::new("TestPolicy", "1.0", author);
+        pf.add_condition(PolicyCondition::OperationRestriction {
+            allowed_operations: vec!["Transfer".to_string()],
+        });
+        pf.add_role(PolicyRole {
+            id: "owner".to_string(),
+            name: "Owner".to_string(),
+            permissions: vec!["Transfer".to_string()],
+        });
+        pf
+    }
+
+    fn make_store(persistence: Arc<MockPersistence>) -> PolicyStore {
+        PolicyStore::with_cache_settings(persistence, 4, 100_000)
+    }
+
+    #[tokio::test]
+    async fn test_store_and_retrieve_policy() {
+        let persistence = Arc::new(MockPersistence::new());
+        let store = make_store(persistence);
+
+        let pf = make_policy_file("author-alpha");
+        let anchor = store.store_policy(&pf).await.unwrap();
+        let retrieved = store.get_policy(&anchor).await.unwrap();
+
+        assert_eq!(retrieved.anchor, anchor);
+    }
+
+    #[tokio::test]
+    async fn test_get_from_cache_after_store() {
+        let persistence = Arc::new(MockPersistence::new());
+        let store = make_store(persistence);
+
+        let pf = make_policy_file("author-beta");
+        let anchor = store.store_policy(&pf).await.unwrap();
+
+        let cached = store.get_from_cache(&anchor);
+        assert!(cached.is_some());
+        assert_eq!(cached.unwrap().anchor, anchor);
+    }
+
+    #[tokio::test]
+    async fn test_cache_miss_returns_none() {
+        let persistence = Arc::new(MockPersistence::new());
+        let store = make_store(persistence);
+
+        let fake_anchor = PolicyAnchor::from_bytes([0xAA; 32]);
+        assert!(store.get_from_cache(&fake_anchor).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_clear_cache_empties_it() {
+        let persistence = Arc::new(MockPersistence::new());
+        let store = make_store(persistence);
+
+        let pf = make_policy_file("author-gamma");
+        let anchor = store.store_policy(&pf).await.unwrap();
+        assert!(store.get_from_cache(&anchor).is_some());
+
+        store.clear_cache();
+        assert!(store.get_from_cache(&anchor).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_delete_policy_removes_from_cache_and_persistence() {
+        let persistence = Arc::new(MockPersistence::new());
+        let store = make_store(persistence.clone());
+
+        let pf = make_policy_file("author-delta");
+        let anchor = store.store_policy(&pf).await.unwrap();
+
+        store.delete_policy(&anchor).await.unwrap();
+        assert!(store.get_from_cache(&anchor).is_none());
+        assert!(persistence.read(&anchor).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_list_policy_anchors() {
+        let persistence = Arc::new(MockPersistence::new());
+        let store = make_store(persistence);
+
+        let a1 = store.store_policy(&make_policy_file("author-x")).await.unwrap();
+        let a2 = store.store_policy(&make_policy_file("author-y")).await.unwrap();
+
+        let mut anchors = store.list_policy_anchors().await.unwrap();
+        anchors.sort_by_key(|a| a.0);
+        let mut expected = vec![a1, a2];
+        expected.sort_by_key(|a| a.0);
+        assert_eq!(anchors, expected);
+    }
+
+    #[tokio::test]
+    async fn test_lru_eviction_when_cache_full() {
+        let persistence = Arc::new(MockPersistence::new());
+        let store = PolicyStore::with_cache_settings(persistence, 2, 100_000);
+
+        let a1 = store.store_policy(&make_policy_file("author-1")).await.unwrap();
+        let a2 = store.store_policy(&make_policy_file("author-2")).await.unwrap();
+        let _a3 = store.store_policy(&make_policy_file("author-3")).await.unwrap();
+
+        // a1 was the LRU entry and should have been evicted from cache
+        assert!(store.get_from_cache(&a1).is_none());
+        assert!(store.get_from_cache(&a2).is_some());
+    }
+
+    #[tokio::test]
+    async fn test_verify_and_get_with_inline_data_rejected() {
+        let persistence = Arc::new(MockPersistence::new());
+        let store = make_store(persistence);
+
+        let pf = make_policy_file("author-v");
+        let anchor = store.store_policy(&pf).await.unwrap();
+
+        let result = store.verify_and_get_policy(&anchor, Some(b"inline")).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_verify_and_get_without_data_succeeds() {
+        let persistence = Arc::new(MockPersistence::new());
+        let store = make_store(persistence);
+
+        let pf = make_policy_file("author-v2");
+        let anchor = store.store_policy(&pf).await.unwrap();
+
+        let policy = store.verify_and_get_policy(&anchor, None).await.unwrap();
+        assert_eq!(policy.anchor, anchor);
+    }
+}

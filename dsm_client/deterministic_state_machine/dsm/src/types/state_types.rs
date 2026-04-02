@@ -975,6 +975,822 @@ mod tests {
 
         assert_eq!(base_hash, dbrw_hash);
     }
+
+    // ── helpers ──────────────────────────────────────────────────────
+
+    fn test_device_info() -> DeviceInfo {
+        DeviceInfo::new([0x11; 32], vec![0x22; 64])
+    }
+
+    fn test_state(n: u64) -> State {
+        State::new(StateParams::new(
+            n,
+            vec![0xAA; 16],
+            Operation::Noop,
+            test_device_info(),
+        ))
+    }
+
+    // ── DeviceInfo ──────────────────────────────────────────────────
+
+    #[test]
+    fn device_info_new_sets_fields() {
+        let di = DeviceInfo::new([0xFF; 32], vec![1, 2, 3]);
+        assert_eq!(di.device_id, [0xFF; 32]);
+        assert_eq!(di.public_key, vec![1, 2, 3]);
+        assert!(di.metadata.is_empty());
+    }
+
+    #[test]
+    fn device_info_from_hashed_label_deterministic() {
+        let a = DeviceInfo::from_hashed_label("alice", vec![10]);
+        let b = DeviceInfo::from_hashed_label("alice", vec![10]);
+        assert_eq!(a.device_id, b.device_id);
+    }
+
+    #[test]
+    fn device_info_from_hashed_label_different_labels_differ() {
+        let a = DeviceInfo::from_hashed_label("alice", vec![10]);
+        let b = DeviceInfo::from_hashed_label("bob", vec![10]);
+        assert_ne!(a.device_id, b.device_id);
+    }
+
+    #[test]
+    fn device_info_validate_ok() {
+        let di = DeviceInfo::new([0x01; 32], vec![0x99; 32]);
+        assert!(di.validate().unwrap());
+    }
+
+    #[test]
+    fn device_info_validate_empty_key_fails() {
+        let di = DeviceInfo::new([0x01; 32], vec![]);
+        assert!(di.validate().is_err());
+    }
+
+    #[test]
+    fn device_info_to_bytes_deterministic() {
+        let di = DeviceInfo::new([0xAB; 32], vec![1, 2, 3, 4]);
+        let b1 = di.to_bytes();
+        let b2 = di.to_bytes();
+        assert_eq!(b1, b2);
+        assert!(!b1.is_empty());
+    }
+
+    #[test]
+    fn device_info_to_bytes_contains_device_id_prefix() {
+        let di = DeviceInfo::new([0xCC; 32], vec![0xDD; 8]);
+        let bytes = di.to_bytes();
+        assert_eq!(&bytes[..32], &[0xCC; 32]);
+    }
+
+    // ── SparseIndex ─────────────────────────────────────────────────
+
+    use super::SparseIndex;
+
+    #[test]
+    fn sparse_index_new_stores_indices() {
+        let si = SparseIndex::new(vec![0, 3, 7]);
+        assert_eq!(si.indices, vec![0, 3, 7]);
+    }
+
+    #[test]
+    fn sparse_index_default_is_empty() {
+        let si = SparseIndex::default();
+        assert!(si.indices.is_empty());
+    }
+
+    #[test]
+    fn sparse_index_value_deterministic() {
+        let si = SparseIndex::new(vec![1, 5, 10]);
+        let v1 = si.value();
+        let v2 = si.value();
+        assert_eq!(v1, v2);
+    }
+
+    #[test]
+    fn sparse_index_value_order_independent() {
+        let a = SparseIndex::new(vec![1, 5, 10]);
+        let b = SparseIndex::new(vec![10, 1, 5]);
+        assert_eq!(a.value(), b.value());
+    }
+
+    #[test]
+    fn sparse_index_with_indices_replaces() {
+        let si = SparseIndex::new(vec![1]).with_indices(vec![9, 8, 7]);
+        assert_eq!(si.indices, vec![9, 8, 7]);
+    }
+
+    #[test]
+    fn sparse_index_calculate_sparse_indices_zero() {
+        let indices = SparseIndex::calculate_sparse_indices(0).unwrap();
+        assert!(indices.is_empty());
+    }
+
+    #[test]
+    fn sparse_index_calculate_sparse_indices_one() {
+        let indices = SparseIndex::calculate_sparse_indices(1).unwrap();
+        assert!(indices.contains(&0), "must include genesis");
+    }
+
+    #[test]
+    fn sparse_index_calculate_includes_genesis_and_predecessor() {
+        let indices = SparseIndex::calculate_sparse_indices(10).unwrap();
+        assert!(indices.contains(&0), "must include genesis");
+        assert!(indices.contains(&9), "must include predecessor");
+    }
+
+    #[test]
+    fn sparse_index_calculate_sorted_and_deduped() {
+        let indices = SparseIndex::calculate_sparse_indices(16).unwrap();
+        for w in indices.windows(2) {
+            assert!(w[0] < w[1], "indices must be sorted and unique");
+        }
+    }
+
+    #[test]
+    fn sparse_index_calculate_logarithmic_count() {
+        let indices = SparseIndex::calculate_sparse_indices(64).unwrap();
+        assert!(
+            indices.len() <= 10,
+            "should be logarithmic: got {}",
+            indices.len()
+        );
+    }
+
+    // ── State construction & basic properties ───────────────────────
+
+    #[test]
+    fn state_new_sets_id_and_number() {
+        let s = test_state(42);
+        assert_eq!(s.state_number, 42);
+        assert_eq!(s.id, "state_42");
+    }
+
+    #[test]
+    fn state_new_genesis_properties() {
+        let s = State::new_genesis([0xBB; 32], test_device_info());
+        assert_eq!(s.state_number, 0);
+        assert_eq!(s.id, "genesis");
+        assert!(s.is_genesis());
+        assert_eq!(s.entropy, vec![0xBB; 32]);
+    }
+
+    #[test]
+    fn state_compute_hash_nonzero() {
+        let s = test_state(1);
+        let h = s.compute_hash().unwrap();
+        assert_ne!(h, [0u8; 32]);
+    }
+
+    #[test]
+    fn state_compute_hash_deterministic() {
+        let a = test_state(5);
+        let b = test_state(5);
+        assert_eq!(a.compute_hash().unwrap(), b.compute_hash().unwrap());
+    }
+
+    #[test]
+    fn state_hash_returns_computed_when_zero() {
+        let s = test_state(3);
+        assert_eq!(s.hash, [0u8; 32]);
+        let h = s.hash().unwrap();
+        assert_ne!(h, [0u8; 32]);
+    }
+
+    #[test]
+    fn state_hash_returns_cached_when_set() {
+        let mut s = test_state(3);
+        s.hash = [0xDD; 32];
+        assert_eq!(s.hash().unwrap(), [0xDD; 32]);
+    }
+
+    #[test]
+    fn state_to_bytes_deterministic() {
+        let s = test_state(7);
+        let b1 = s.to_bytes().unwrap();
+        let b2 = s.to_bytes().unwrap();
+        assert_eq!(b1, b2);
+    }
+
+    #[test]
+    fn state_to_bytes_nonempty() {
+        let s = test_state(0);
+        let bytes = s.to_bytes().unwrap();
+        assert!(!bytes.is_empty());
+    }
+
+    // ── State flags ─────────────────────────────────────────────────
+
+    use super::StateFlag;
+
+    #[test]
+    fn state_is_genesis_false_by_default() {
+        let s = test_state(1);
+        assert!(!s.is_genesis());
+    }
+
+    #[test]
+    fn state_add_flag_invalidated() {
+        let mut s = test_state(2);
+        assert!(!s.is_invalidated());
+        s.add_flag(StateFlag::Invalidated);
+        assert!(s.is_invalidated());
+    }
+
+    #[test]
+    fn state_add_flag_custom() {
+        let mut s = test_state(3);
+        s.add_flag(StateFlag::Custom("test_flag".into()));
+        assert!(s.flags.contains(&StateFlag::Custom("test_flag".into())));
+    }
+
+    #[test]
+    fn state_has_pending_commitment_flag() {
+        let mut s = test_state(4);
+        assert!(!s.has_pending_commitment());
+        s.add_flag(StateFlag::Compromised);
+        assert!(s.has_pending_commitment());
+    }
+
+    // ── State metadata & parameters ─────────────────────────────────
+
+    #[test]
+    fn state_add_metadata_and_get_parameter() {
+        let mut s = test_state(5);
+        s.add_metadata("my_key", vec![1, 2, 3]).unwrap();
+        assert_eq!(s.get_parameter("my_key"), Some(&vec![1, 2, 3]));
+    }
+
+    #[test]
+    fn state_get_parameter_missing_returns_none() {
+        let s = test_state(5);
+        assert_eq!(s.get_parameter("nonexistent"), None);
+    }
+
+    // ── State relationship context ──────────────────────────────────
+
+    #[test]
+    fn state_with_relationship_context() {
+        let s = test_state(10).with_relationship_context([0xCC; 32], 5, vec![0xDD; 32]);
+        let ctx = s.relationship_context.as_ref().unwrap();
+        assert_eq!(ctx.counterparty_id, [0xCC; 32]);
+        assert_eq!(ctx.counterparty_state_number, 5);
+        assert!(ctx.active);
+    }
+
+    #[test]
+    fn state_in_relationship_with_uses_hashed_label() {
+        let counterparty_id =
+            *crate::crypto::blake3::domain_hash("DSM/device-id", b"bob").as_bytes();
+        let s = test_state(10).with_relationship_context(counterparty_id, 3, vec![0xFF; 32]);
+        assert!(s.in_relationship_with("bob"));
+        assert!(!s.in_relationship_with("alice"));
+    }
+
+    #[test]
+    fn state_in_relationship_with_no_context() {
+        let s = test_state(10);
+        assert!(!s.in_relationship_with("anyone"));
+    }
+
+    // ── State hashing variants ──────────────────────────────────────
+
+    #[test]
+    fn state_pre_finalization_hash_deterministic() {
+        let s = test_state(8);
+        let h1 = s.pre_finalization_hash().unwrap();
+        let h2 = s.pre_finalization_hash().unwrap();
+        assert_eq!(h1, h2);
+        assert_eq!(h1.len(), 32);
+    }
+
+    #[test]
+    fn state_finalized_verification_hash_deterministic() {
+        let s = test_state(8);
+        let h1 = s.finalized_verification_hash().unwrap();
+        let h2 = s.finalized_verification_hash().unwrap();
+        assert_eq!(h1, h2);
+        assert_eq!(h1.len(), 32);
+    }
+
+    #[test]
+    fn state_finalized_hash_changes_with_token_balance() {
+        let mut s1 = test_state(9);
+        let h_no_tokens = s1.finalized_verification_hash().unwrap();
+
+        s1.token_balances.insert(
+            "owner:token".to_string(),
+            crate::types::token_types::Balance::zero(),
+        );
+        let h_with_tokens = s1.finalized_verification_hash().unwrap();
+
+        assert_ne!(h_no_tokens, h_with_tokens);
+    }
+
+    // ── State forward commitment ────────────────────────────────────
+
+    use super::PreCommitment;
+    use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn state_forward_commitment_roundtrip() {
+        let mut s = test_state(11);
+        assert!(s.get_forward_commitment().is_none());
+
+        let pc = PreCommitment::new(
+            "transfer".into(),
+            HashMap::new(),
+            HashSet::new(),
+            5,
+            [0xAA; 32],
+        );
+        s.set_forward_commitment(Some(pc));
+        assert!(s.get_forward_commitment().is_some());
+        assert_eq!(
+            s.get_forward_commitment().unwrap().operation_type,
+            "transfer"
+        );
+
+        s.set_forward_commitment(None);
+        assert!(s.get_forward_commitment().is_none());
+    }
+
+    // ── State transition_count ───────────────────────────────────────
+
+    #[test]
+    fn state_transition_count() {
+        assert_eq!(test_state(0).transition_count(), 0);
+        assert_eq!(test_state(99).transition_count(), 99);
+    }
+
+    // ── State entity_signature ───────────────────────────────────────
+
+    #[test]
+    fn state_entity_signature_roundtrip() {
+        let mut s = test_state(12);
+        assert!(s.entity_signature().is_none());
+        s.set_entity_signature(Some(vec![0xEE; 64]));
+        assert_eq!(s.entity_signature(), Some(&vec![0xEE; 64]));
+    }
+
+    // ── State PartialEq (hash-based) ────────────────────────────────
+
+    #[test]
+    fn state_partial_eq_same_params() {
+        let a = test_state(20);
+        let b = test_state(20);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn state_partial_eq_different_state_number() {
+        let a = test_state(20);
+        let b = test_state(21);
+        assert_ne!(a, b);
+    }
+
+    // ── State value ─────────────────────────────────────────────────
+
+    #[test]
+    fn state_value_deterministic() {
+        let a = test_state(7);
+        let b = test_state(7);
+        assert_eq!(a.value(), b.value());
+    }
+
+    // ── State calculate_sparse_indices ───────────────────────────────
+
+    #[test]
+    fn state_calculate_sparse_indices_matches_sparse_index() {
+        let s_indices = State::calculate_sparse_indices(10).unwrap();
+        let si_indices = SparseIndex::calculate_sparse_indices(10).unwrap();
+        assert_eq!(s_indices, si_indices);
+    }
+
+    // ── PreCommitment ───────────────────────────────────────────────
+
+    #[test]
+    fn precommitment_new_defaults() {
+        let pc = PreCommitment::new(
+            "transfer".into(),
+            HashMap::new(),
+            HashSet::new(),
+            10,
+            [0x01; 32],
+        );
+        assert_eq!(pc.operation_type, "transfer");
+        assert_eq!(pc.min_state_number, 10);
+        assert_eq!(pc.counterparty_id, [0x01; 32]);
+        assert_eq!(pc.hash, [0u8; 32]);
+        assert!(pc.signatures.is_empty());
+        assert!(pc.entity_signature.is_none());
+        assert!(pc.counterparty_signature.is_none());
+    }
+
+    #[test]
+    fn precommitment_add_signature() {
+        let mut pc = PreCommitment::new(
+            "update".into(),
+            HashMap::new(),
+            HashSet::new(),
+            1,
+            [0x02; 32],
+        );
+        pc.add_signature(vec![0xAA; 32]);
+        pc.add_signature(vec![0xBB; 32]);
+        assert_eq!(pc.signatures.len(), 2);
+        assert_eq!(pc.signatures[0], vec![0xAA; 32]);
+    }
+
+    #[test]
+    fn precommitment_to_bytes_deterministic() {
+        let mut fixed = HashMap::new();
+        fixed.insert("param_a".to_string(), vec![1, 2, 3]);
+        let mut variable = HashSet::new();
+        variable.insert("var_x".to_string());
+
+        let pc = PreCommitment::new("op".into(), fixed, variable, 5, [0x03; 32]);
+        let b1 = pc.to_bytes();
+        let b2 = pc.to_bytes();
+        assert_eq!(b1, b2);
+        assert!(!b1.is_empty());
+    }
+
+    #[test]
+    fn precommitment_to_bytes_varies_with_content() {
+        let pc1 = PreCommitment::new(
+            "op_a".into(),
+            HashMap::new(),
+            HashSet::new(),
+            1,
+            [0x04; 32],
+        );
+        let pc2 = PreCommitment::new(
+            "op_b".into(),
+            HashMap::new(),
+            HashSet::new(),
+            1,
+            [0x04; 32],
+        );
+        assert_ne!(pc1.to_bytes(), pc2.to_bytes());
+    }
+
+    #[test]
+    fn precommitment_generate_hash_deterministic() {
+        let s = test_state(5);
+        let op = Operation::Noop;
+        let entropy = vec![0xFF; 16];
+        let h1 = PreCommitment::generate_hash(&s, &op, &entropy).unwrap();
+        let h2 = PreCommitment::generate_hash(&s, &op, &entropy).unwrap();
+        assert_eq!(h1, h2);
+        assert_ne!(h1, [0u8; 32]);
+    }
+
+    // ── SerializableHash ────────────────────────────────────────────
+
+    use super::SerializableHash;
+
+    #[test]
+    fn serializable_hash_default_is_zeroes() {
+        let sh = SerializableHash::default();
+        assert_eq!(sh.inner().as_bytes(), &[0u8; 32]);
+    }
+
+    #[test]
+    fn serializable_hash_new_and_inner() {
+        let h = blake3::hash(b"test data");
+        let sh = SerializableHash::new(h);
+        assert_eq!(sh.inner(), &h);
+    }
+
+    #[test]
+    fn serializable_hash_into_inner() {
+        let h = blake3::hash(b"more data");
+        let sh = SerializableHash::new(h);
+        let recovered: blake3::Hash = sh.into_inner();
+        assert_eq!(recovered, h);
+    }
+
+    #[test]
+    fn serializable_hash_from_hash() {
+        let h = blake3::hash(b"from impl");
+        let sh: SerializableHash = h.into();
+        assert_eq!(*sh.inner(), h);
+    }
+
+    #[test]
+    fn serializable_hash_into_blake3_hash() {
+        let h = blake3::hash(b"into impl");
+        let sh = SerializableHash::new(h);
+        let back: blake3::Hash = sh.into();
+        assert_eq!(back, h);
+    }
+
+    #[test]
+    fn serializable_hash_eq() {
+        let h = blake3::hash(b"eq test");
+        let a = SerializableHash::new(h);
+        let b = SerializableHash::new(h);
+        assert_eq!(a, b);
+    }
+
+    // ── SerializableMerkleProof ─────────────────────────────────────
+
+    use super::SerializableMerkleProof;
+
+    #[test]
+    fn serializable_merkle_proof_new() {
+        let root = vec![0xAA; 32];
+        let proof = vec![vec![0xBB; 32], vec![0xCC; 32]];
+        let smp = SerializableMerkleProof::new(root.clone(), proof.clone());
+        assert_eq!(smp.root, root);
+        assert_eq!(smp.proof, proof);
+    }
+
+    #[test]
+    fn serializable_merkle_proof_serialize_from_bytes_roundtrip() {
+        let root = vec![1, 2, 3, 4, 5];
+        let proof = vec![vec![10, 20], vec![30, 40, 50]];
+        let smp = SerializableMerkleProof::new(root.clone(), proof.clone());
+
+        let bytes = smp.serialize();
+        let recovered = SerializableMerkleProof::from_bytes(&bytes).expect("roundtrip");
+        assert_eq!(recovered.root, root);
+        assert_eq!(recovered.proof, proof);
+    }
+
+    #[test]
+    fn serializable_merkle_proof_from_bytes_invalid() {
+        assert!(SerializableMerkleProof::from_bytes(&[]).is_none());
+        assert!(SerializableMerkleProof::from_bytes(&[0xFF; 3]).is_none());
+    }
+
+    #[test]
+    fn serializable_merkle_proof_verify_valid_path() {
+        use crate::crypto::blake3::dsm_domain_hasher;
+
+        let leaf = b"leaf_data";
+        let sibling = vec![0x11; 32];
+
+        let mut hasher = dsm_domain_hasher("DSM/merkle-path");
+        hasher.update(leaf);
+        hasher.update(&sibling);
+        let root = hasher.finalize().as_bytes().to_vec();
+
+        let smp = SerializableMerkleProof::new(root, vec![sibling]);
+        assert!(smp.verify(leaf));
+    }
+
+    #[test]
+    fn serializable_merkle_proof_verify_invalid_root() {
+        let smp = SerializableMerkleProof::new(vec![0x00; 32], vec![vec![0x11; 32]]);
+        assert!(!smp.verify(b"wrong"));
+    }
+
+    // ── PositionSequence ────────────────────────────────────────────
+
+    use super::PositionSequence;
+
+    #[test]
+    fn position_sequence_new() {
+        let ps = PositionSequence::new(vec![vec![1, 2], vec![3, 4]], vec![0xAA; 8]);
+        assert_eq!(ps.positions.len(), 2);
+        assert_eq!(ps.seed, vec![0xAA; 8]);
+    }
+
+    #[test]
+    fn position_sequence_verify_correct_seed() {
+        let seed = vec![0xBB; 16];
+        let ps = PositionSequence::new(vec![vec![1]], seed.clone());
+        assert!(ps.verify(&seed));
+    }
+
+    #[test]
+    fn position_sequence_verify_wrong_seed() {
+        let ps = PositionSequence::new(vec![], vec![0xCC; 16]);
+        assert!(!ps.verify(&[0xDD; 16]));
+    }
+
+    // ── IdentityAnchor ─────────────────────────────────────────────
+
+    use super::IdentityAnchor;
+
+    #[test]
+    fn identity_anchor_new() {
+        let ia = IdentityAnchor::new(
+            "alice".into(),
+            vec![0x01; 32],
+            vec![0x02; 64],
+            vec![0x03; 16],
+        );
+        assert_eq!(ia.id, "alice");
+        assert_eq!(ia.genesis_hash, vec![0x01; 32]);
+        assert_eq!(ia.public_key, vec![0x02; 64]);
+        assert_eq!(ia.commitment_proof, vec![0x03; 16]);
+    }
+
+    #[test]
+    fn identity_anchor_as_bytes_deterministic() {
+        let ia = IdentityAnchor::new(
+            "bob".into(),
+            vec![0x10; 32],
+            vec![0x20; 32],
+            vec![0x30; 32],
+        );
+        let b1 = ia.as_bytes();
+        let b2 = ia.as_bytes();
+        assert_eq!(b1, b2);
+    }
+
+    #[test]
+    fn identity_anchor_as_bytes_contains_all_fields() {
+        let ia = IdentityAnchor::new("x".into(), vec![1], vec![2], vec![3]);
+        let bytes = ia.as_bytes();
+        let expected_len = 1 + 1 + 1 + 1; // "x" + [1] + [2] + [3]
+        assert_eq!(bytes.len(), expected_len);
+    }
+
+    // ── RelationshipContext ─────────────────────────────────────────
+
+    use super::RelationshipContext;
+
+    #[test]
+    fn relationship_context_new() {
+        let ctx = RelationshipContext::new([0xAA; 32], [0xBB; 32], vec![0xCC; 64]);
+        assert_eq!(ctx.entity_id, [0xAA; 32]);
+        assert_eq!(ctx.counterparty_id, [0xBB; 32]);
+        assert_eq!(ctx.counterparty_public_key, vec![0xCC; 64]);
+        assert_eq!(ctx.entity_state_number, 0);
+        assert_eq!(ctx.counterparty_state_number, 0);
+        assert!(ctx.active);
+        assert!(ctx.chain_tip_id.is_none());
+        assert!(ctx.last_bilateral_state_hash.is_none());
+    }
+
+    #[test]
+    fn relationship_context_new_with_chain_tip() {
+        let ctx = RelationshipContext::new_with_chain_tip(
+            [0x01; 32],
+            [0x02; 32],
+            vec![0x03; 32],
+            "tip_42".into(),
+        );
+        assert_eq!(ctx.get_chain_tip_id(), Some(&"tip_42".to_string()));
+    }
+
+    #[test]
+    fn relationship_context_update_chain_tip() {
+        let mut ctx = RelationshipContext::new([0x01; 32], [0x02; 32], vec![]);
+        assert!(ctx.get_chain_tip_id().is_none());
+
+        ctx.update_chain_tip("new_tip".into(), vec![0xFF; 32]);
+        assert_eq!(ctx.get_chain_tip_id(), Some(&"new_tip".to_string()));
+        assert_eq!(ctx.last_bilateral_state_hash, Some(vec![0xFF; 32]));
+    }
+
+    #[test]
+    fn relationship_context_get_chain_tip_id_none_initially() {
+        let ctx = RelationshipContext::new([0; 32], [0; 32], vec![]);
+        assert!(ctx.get_chain_tip_id().is_none());
+    }
+
+    // ── StateParams builder methods ─────────────────────────────────
+
+    #[test]
+    fn state_params_new_defaults() {
+        let sp = StateParams::new(0, vec![1], Operation::Noop, test_device_info());
+        assert_eq!(sp.state_number, 0);
+        assert_eq!(sp.entropy, vec![1]);
+        assert!(sp.encapsulated_entropy.is_none());
+        assert_eq!(sp.prev_state_hash, [0u8; 32]);
+        assert!(sp.forward_commitment.is_none());
+        assert!(!sp.matches_parameters);
+        assert_eq!(sp.state_type, "standard");
+    }
+
+    #[test]
+    fn state_params_with_encapsulated_entropy() {
+        let sp = StateParams::new(1, vec![], Operation::Noop, test_device_info())
+            .with_encapsulated_entropy(vec![0xEE; 32]);
+        assert_eq!(sp.encapsulated_entropy, Some(vec![0xEE; 32]));
+    }
+
+    #[test]
+    fn state_params_with_prev_state_hash() {
+        let sp = StateParams::new(2, vec![], Operation::Noop, test_device_info())
+            .with_prev_state_hash([0xAA; 32]);
+        assert_eq!(sp.prev_state_hash, [0xAA; 32]);
+    }
+
+    #[test]
+    fn state_params_with_sparse_index() {
+        let si = SparseIndex::new(vec![1, 2, 3]);
+        let sp = StateParams::new(3, vec![], Operation::Noop, test_device_info())
+            .with_sparse_index(si);
+        assert_eq!(sp.sparse_index.indices, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn state_params_with_forward_commitment() {
+        let pc = PreCommitment::new(
+            "test".into(),
+            HashMap::new(),
+            HashSet::new(),
+            0,
+            [0; 32],
+        );
+        let sp = StateParams::new(4, vec![], Operation::Noop, test_device_info())
+            .with_forward_commitment(pc);
+        assert!(sp.forward_commitment.is_some());
+    }
+
+    #[test]
+    fn state_params_with_dbrw_summary_hash() {
+        let sp = StateParams::new(5, vec![], Operation::Noop, test_device_info())
+            .with_dbrw_summary_hash([0xDD; 32]);
+        assert_eq!(sp.dbrw_summary_hash, Some([0xDD; 32]));
+    }
+
+    // ── State hash varies with different inputs ─────────────────────
+
+    #[test]
+    fn state_hash_varies_with_entropy() {
+        let a = State::new(StateParams::new(
+            1,
+            vec![0x00; 16],
+            Operation::Noop,
+            test_device_info(),
+        ));
+        let b = State::new(StateParams::new(
+            1,
+            vec![0xFF; 16],
+            Operation::Noop,
+            test_device_info(),
+        ));
+        assert_ne!(a.compute_hash().unwrap(), b.compute_hash().unwrap());
+    }
+
+    #[test]
+    fn state_hash_varies_with_prev_state_hash() {
+        let a = State::new(
+            StateParams::new(1, vec![1], Operation::Noop, test_device_info())
+                .with_prev_state_hash([0x00; 32]),
+        );
+        let b = State::new(
+            StateParams::new(1, vec![1], Operation::Noop, test_device_info())
+                .with_prev_state_hash([0xFF; 32]),
+        );
+        assert_ne!(a.compute_hash().unwrap(), b.compute_hash().unwrap());
+    }
+
+    #[test]
+    fn state_hash_includes_forward_commitment() {
+        let without = test_state(5);
+
+        let pc = PreCommitment::new(
+            "commit_op".into(),
+            HashMap::new(),
+            HashSet::new(),
+            1,
+            [0xCC; 32],
+        );
+        let with = State::new(
+            StateParams::new(5, vec![0xAA; 16], Operation::Noop, test_device_info())
+                .with_forward_commitment(pc),
+        );
+
+        assert_ne!(
+            without.compute_hash().unwrap(),
+            with.compute_hash().unwrap()
+        );
+    }
+
+    // ── State with_relationship_context_and_chain_tip ───────────────
+
+    #[test]
+    fn state_with_relationship_context_and_chain_tip() {
+        let s = test_state(15).with_relationship_context_and_chain_tip(
+            [0xDD; 32],
+            8,
+            vec![0xEE; 32],
+            "chain_tip_99".into(),
+        );
+        let ctx = s.relationship_context.as_ref().unwrap();
+        assert_eq!(ctx.counterparty_state_number, 8);
+        assert_eq!(ctx.get_chain_tip_id(), Some(&"chain_tip_99".to_string()));
+    }
+
+    #[test]
+    fn state_get_counterparty_state() {
+        let s = test_state(10).with_relationship_context([0xCC; 32], 7, vec![]);
+        assert_eq!(s.get_counterparty_state(), Some(7));
+    }
+
+    #[test]
+    fn state_get_counterparty_state_none_without_context() {
+        let s = test_state(10);
+        assert_eq!(s.get_counterparty_state(), None);
+    }
 }
 
 /// SparseIndex represents a sparse index for efficient lookups

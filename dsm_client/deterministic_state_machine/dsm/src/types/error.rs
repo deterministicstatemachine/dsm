@@ -1862,3 +1862,383 @@ impl From<crate::core::token::policy::policy_enforcement::EnforcementError> for 
 }
 
 // This conversion must be implemented in the SDK crate, not in the core DSM crate.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- DeterministicSafetyClass ---
+
+    #[test]
+    fn deterministic_safety_class_as_str() {
+        assert_eq!(DeterministicSafetyClass::ParentConsumed.as_str(), "ParentConsumed");
+        assert_eq!(DeterministicSafetyClass::StalePrecommit.as_str(), "StalePrecommit");
+        assert_eq!(DeterministicSafetyClass::TipMismatch.as_str(), "TipMismatch");
+    }
+
+    #[test]
+    fn deterministic_safety_class_equality_and_clone() {
+        let a = DeterministicSafetyClass::ParentConsumed;
+        let b = a;
+        assert_eq!(a, b);
+    }
+
+    // --- Sub-error type as_str coverage ---
+
+    #[test]
+    fn bitcoin_error_type_as_str_all_variants() {
+        let pairs = [
+            (BitcoinErrorType::InvalidAddress, "InvalidAddress"),
+            (BitcoinErrorType::InsufficientBalance, "InsufficientBalance"),
+            (BitcoinErrorType::BroadcastFailure, "BroadcastFailure"),
+            (BitcoinErrorType::ConfirmationTimeout, "ConfirmationTimeout"),
+            (BitcoinErrorType::InvalidTransaction, "InvalidTransaction"),
+            (BitcoinErrorType::NetworkError, "NetworkError"),
+            (BitcoinErrorType::ScriptValidationError, "ScriptValidationError"),
+            (BitcoinErrorType::FeeEstimationError, "FeeEstimationError"),
+            (BitcoinErrorType::UtxoSelectionError, "UtxoSelectionError"),
+            (BitcoinErrorType::TransactionTooLarge, "TransactionTooLarge"),
+            (BitcoinErrorType::InvalidSignature, "InvalidSignature"),
+            (BitcoinErrorType::BlockNotFound, "BlockNotFound"),
+            (BitcoinErrorType::TransactionNotFound, "TransactionNotFound"),
+            (BitcoinErrorType::InsufficientConfirmations, "InsufficientConfirmations"),
+            (BitcoinErrorType::DustAmount, "DustAmount"),
+            (BitcoinErrorType::InvalidNetwork, "InvalidNetwork"),
+        ];
+        for (variant, expected) in pairs {
+            assert_eq!(variant.as_str(), expected);
+        }
+    }
+
+    #[test]
+    fn htlc_error_type_as_str_all_variants() {
+        assert_eq!(HtlcErrorType::HashLockMismatch.as_str(), "HashLockMismatch");
+        assert_eq!(HtlcErrorType::AlreadyClaimed.as_str(), "AlreadyClaimed");
+        assert_eq!(HtlcErrorType::AmountMismatch.as_str(), "AmountMismatch");
+    }
+
+    #[test]
+    fn storage_node_error_type_as_str() {
+        assert_eq!(StorageNodeErrorType::CapacityExceeded.as_str(), "CapacityExceeded");
+        assert_eq!(StorageNodeErrorType::MaintenanceMode.as_str(), "MaintenanceMode");
+    }
+
+    #[test]
+    fn vault_error_type_as_str() {
+        assert_eq!(VaultErrorType::VaultNotFound.as_str(), "VaultNotFound");
+        assert_eq!(VaultErrorType::EncryptionError.as_str(), "EncryptionError");
+    }
+
+    #[test]
+    fn replication_error_type_as_str() {
+        assert_eq!(ReplicationErrorType::PartnerUnavailable.as_str(), "PartnerUnavailable");
+        assert_eq!(ReplicationErrorType::QueueFull.as_str(), "QueueFull");
+    }
+
+    #[test]
+    fn resource_type_as_str() {
+        assert_eq!(ResourceType::StorageSpace.as_str(), "StorageSpace");
+        assert_eq!(ResourceType::Memory.as_str(), "Memory");
+    }
+
+    #[test]
+    fn consensus_error_type_as_str() {
+        assert_eq!(ConsensusErrorType::Timeout.as_str(), "Timeout");
+        assert_eq!(ConsensusErrorType::ProtocolViolation.as_str(), "ProtocolViolation");
+    }
+
+    // --- DsmError constructors ---
+
+    #[test]
+    fn crypto_constructor_without_source() {
+        let err = DsmError::crypto("bad key", None::<String>);
+        let msg = format!("{err}");
+        assert!(msg.contains("bad key"));
+    }
+
+    #[test]
+    fn crypto_op_constructor() {
+        let err = DsmError::crypto_op("sphincs_sign", "signature failed", Some("oops"));
+        let msg = format!("{err}");
+        assert!(msg.contains("signature failed"));
+    }
+
+    #[test]
+    fn state_machine_constructor() {
+        let err = DsmError::state_machine("invalid transition");
+        assert!(matches!(err, DsmError::StateMachine(ref m) if m == "invalid transition"));
+    }
+
+    #[test]
+    fn not_found_constructor() {
+        let err = DsmError::not_found("Token", Some("tok_123"));
+        let msg = format!("{err}");
+        assert!(msg.contains("Token"));
+        assert!(msg.contains("tok_123"));
+    }
+
+    #[test]
+    fn token_not_found_constructor() {
+        let err = DsmError::token_not_found("ERA".to_string());
+        let msg = format!("{err}");
+        assert!(msg.contains("Token"));
+        assert!(msg.contains("ERA"));
+    }
+
+    #[test]
+    fn internal_constructor_with_source() {
+        let err = DsmError::internal("bug", Some("root cause"));
+        let msg = format!("{err}");
+        assert!(msg.contains("bug"));
+        assert!(msg.contains("root cause"));
+    }
+
+    #[test]
+    fn invalid_parameter_constructor() {
+        let err = DsmError::invalid_parameter("negative amount");
+        assert!(matches!(err, DsmError::InvalidParameter(ref m) if m == "negative amount"));
+    }
+
+    #[test]
+    fn insufficient_balance_constructor() {
+        let err = DsmError::insufficient_balance("ERA", 50, 100);
+        let msg = format!("{err}");
+        assert!(msg.contains("ERA"));
+        assert!(msg.contains("50"));
+        assert!(msg.contains("100"));
+    }
+
+    #[test]
+    fn deterministic_safety_constructor() {
+        let err = DsmError::deterministic_safety(
+            DeterministicSafetyClass::TipMismatch,
+            "tips diverged",
+        );
+        let msg = format!("{err}");
+        assert!(msg.contains("TipMismatch"));
+        assert!(msg.contains("tips diverged"));
+    }
+
+    #[test]
+    fn lock_error_constructor() {
+        let err = DsmError::lock_error();
+        assert!(matches!(err, DsmError::LockError));
+        assert_eq!(format!("{err}"), "Failed to acquire lock");
+    }
+
+    #[test]
+    fn timeout_constructor() {
+        let err = DsmError::timeout("5s exceeded");
+        assert!(matches!(err, DsmError::TimeError(ref m) if m == "5s exceeded"));
+    }
+
+    #[test]
+    fn config_simple_constructor() {
+        let err = DsmError::config_simple("missing key");
+        let msg = format!("{err}");
+        assert!(msg.contains("Configuration error"));
+        assert!(msg.contains("missing key"));
+    }
+
+    #[test]
+    fn capacity_limit_constructor() {
+        let err = DsmError::capacity_limit("objects full", ResourceType::ObjectCount, 1000, 1000);
+        let msg = format!("{err}");
+        assert!(msg.contains("ObjectCount"));
+        assert!(msg.contains("1000"));
+    }
+
+    #[test]
+    fn consensus_constructor() {
+        let err = DsmError::consensus(
+            "round failed",
+            ConsensusErrorType::Conflict,
+            Some("two proposals"),
+        );
+        let msg = format!("{err}");
+        assert!(msg.contains("Conflict"));
+        assert!(msg.contains("two proposals"));
+    }
+
+    // --- is_recoverable ---
+
+    #[test]
+    fn is_recoverable_true_for_network() {
+        let err = DsmError::Network {
+            context: "timeout".into(),
+            source: None,
+            entity: String::new(),
+            details: None,
+        };
+        assert!(err.is_recoverable());
+    }
+
+    #[test]
+    fn is_recoverable_true_for_storage() {
+        let err = DsmError::Storage { context: "disk full".into(), source: None };
+        assert!(err.is_recoverable());
+    }
+
+    #[test]
+    fn is_recoverable_true_for_lock_error() {
+        assert!(DsmError::LockError.is_recoverable());
+    }
+
+    #[test]
+    fn is_recoverable_false_for_serialization() {
+        let err = DsmError::Serialization {
+            context: "bad proto".into(),
+            source: None,
+            entity: "State".into(),
+            details: None,
+        };
+        assert!(!err.is_recoverable());
+    }
+
+    #[test]
+    fn is_recoverable_false_for_state() {
+        assert!(!DsmError::State("bad".into()).is_recoverable());
+    }
+
+    #[test]
+    fn is_recoverable_false_for_deterministic_safety() {
+        let err = DsmError::deterministic_safety(
+            DeterministicSafetyClass::ParentConsumed,
+            "consumed",
+        );
+        assert!(!err.is_recoverable());
+    }
+
+    // --- Display coverage ---
+
+    #[test]
+    fn display_serialization_with_details_and_source() {
+        let src: Box<dyn Error + Send + Sync> = Box::new(std::fmt::Error);
+        let err = DsmError::Serialization {
+            context: "encoding".into(),
+            source: Some(src),
+            entity: "Envelope".into(),
+            details: Some("field missing".into()),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("Envelope"));
+        assert!(msg.contains("encoding"));
+        assert!(msg.contains("field missing"));
+        assert!(msg.contains("caused by"));
+    }
+
+    #[test]
+    fn display_clock_drift() {
+        let err = DsmError::ClockDrift {
+            message: "diverged".into(),
+            local_height: 10,
+            remote_height: 20,
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("10"));
+        assert!(msg.contains("20"));
+        assert!(msg.contains("diverged"));
+    }
+
+    #[test]
+    fn display_unit_variants() {
+        assert_eq!(format!("{}", DsmError::InvalidSignature), "Invalid signature");
+        assert_eq!(format!("{}", DsmError::InvalidPublicKey), "Invalid public key");
+        assert_eq!(format!("{}", DsmError::InvalidSecretKey), "Invalid secret key");
+        assert_eq!(format!("{}", DsmError::InvalidKeyLength), "Invalid key length");
+        assert_eq!(format!("{}", DsmError::InvalidCiphertext), "Invalid ciphertext");
+        assert_eq!(format!("{}", DsmError::InvalidIndex), "Invalid or out-of-bounds index");
+        assert_eq!(format!("{}", DsmError::MintNotAllowed), "Minting not allowed on this network");
+        assert_eq!(format!("{}", DsmError::BurnNotAllowed), "Burning not allowed on this network");
+        assert_eq!(format!("{}", DsmError::FaucetDisabled), "Faucet is currently disabled");
+        assert_eq!(format!("{}", DsmError::FaucetNotAvailable), "Faucet is not available on this network");
+    }
+
+    #[test]
+    fn display_bitcoin_tap_safety() {
+        let err = DsmError::BitcoinTapSafety {
+            invariant: "dust_floor".into(),
+            message: "below 546 sats".into(),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("dust_floor"));
+        assert!(msg.contains("below 546 sats"));
+    }
+
+    #[test]
+    fn display_feature_not_available() {
+        let err = DsmError::FeatureNotAvailable {
+            feature: "ble".into(),
+            context: Some("not compiled".into()),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("ble"));
+        assert!(msg.contains("not compiled"));
+    }
+
+    // --- From impls ---
+
+    #[test]
+    fn from_io_error_not_found() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "gone");
+        let dsm: DsmError = io_err.into();
+        assert!(matches!(dsm, DsmError::NotFound { .. }));
+    }
+
+    #[test]
+    fn from_io_error_permission_denied() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "forbidden");
+        let dsm: DsmError = io_err.into();
+        assert!(matches!(dsm, DsmError::Storage { .. }));
+    }
+
+    #[test]
+    fn from_io_error_connection_refused() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "refused");
+        let dsm: DsmError = io_err.into();
+        assert!(matches!(dsm, DsmError::Network { .. }));
+    }
+
+    #[test]
+    fn from_fmt_error() {
+        let dsm: DsmError = std::fmt::Error.into();
+        assert!(matches!(dsm, DsmError::Generic { .. }));
+    }
+
+    #[test]
+    fn from_utf8_error() {
+        let bad = vec![0xFF, 0xFE];
+        let utf8_err = std::str::from_utf8(&bad).unwrap_err();
+        let dsm: DsmError = utf8_err.into();
+        assert!(matches!(dsm, DsmError::SerializationError(_)));
+    }
+
+    #[test]
+    fn from_parse_int_error() {
+        let e = "abc".parse::<i32>().unwrap_err();
+        let dsm: DsmError = e.into();
+        assert!(matches!(dsm, DsmError::Validation { .. }));
+    }
+
+    #[test]
+    fn from_parse_float_error() {
+        let e = "xyz".parse::<f64>().unwrap_err();
+        let dsm: DsmError = e.into();
+        assert!(matches!(dsm, DsmError::Validation { .. }));
+    }
+
+    // --- Error trait source() ---
+
+    #[test]
+    fn error_source_is_none_for_simple_variants() {
+        let err = DsmError::InvalidSignature;
+        assert!(err.source().is_none());
+    }
+
+    #[test]
+    fn error_source_present_for_storage_with_source() {
+        let inner = std::io::Error::new(std::io::ErrorKind::Other, "disk");
+        let err = DsmError::storage("write failed", Some(inner));
+        assert!(err.source().is_some());
+    }
+}

@@ -307,4 +307,139 @@ mod tests {
         );
         assert_eq!(result.verification_path, vec![0, 1, 3, 7]);
     }
+
+    #[test]
+    fn generic_ops_new_and_accessors() {
+        let op = GenericOps::new("transfer", vec![1, 2, 3]);
+        assert_eq!(op.get_operation_type(), "transfer");
+        assert_eq!(op.get_data(), &[1, 2, 3]);
+    }
+
+    #[test]
+    fn generic_ops_default() {
+        let op = GenericOps::default();
+        assert_eq!(op.get_operation_type(), "default");
+        assert!(op.get_data().is_empty());
+    }
+
+    #[test]
+    fn generic_ops_display() {
+        let op = GenericOps::new("mint", vec![0xAB]);
+        let display = format!("{}", op);
+        assert!(display.contains("mint"));
+        assert!(display.contains("171")); // 0xAB = 171
+    }
+
+    #[test]
+    fn generic_ops_equality() {
+        let a = GenericOps::new("op", vec![1]);
+        let b = GenericOps::new("op", vec![1]);
+        let c = GenericOps::new("op", vec![2]);
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn id_token_is_valid_with_all_fields() {
+        let token = IdToken {
+            token_id: "t1".to_string(),
+            issuer: "iss".to_string(),
+            subject: "sub".to_string(),
+            public_key: vec![1, 2, 3],
+            signature: vec![4, 5, 6],
+        };
+        assert!(token.is_valid());
+    }
+
+    #[test]
+    fn id_token_is_invalid_with_empty_token_id() {
+        let token = IdToken {
+            token_id: "".to_string(),
+            issuer: "iss".to_string(),
+            subject: "sub".to_string(),
+            public_key: vec![],
+            signature: vec![],
+        };
+        assert!(!token.is_valid());
+    }
+
+    #[test]
+    fn id_token_is_invalid_with_empty_issuer() {
+        let token = IdToken {
+            token_id: "t1".to_string(),
+            issuer: "".to_string(),
+            subject: "sub".to_string(),
+            public_key: vec![],
+            signature: vec![],
+        };
+        assert!(!token.is_valid());
+    }
+
+    #[test]
+    fn id_token_never_expires() {
+        let token = IdToken {
+            token_id: "t1".to_string(),
+            issuer: "iss".to_string(),
+            subject: "sub".to_string(),
+            public_key: vec![],
+            signature: vec![],
+        };
+        assert!(!token.has_expired());
+    }
+
+    #[test]
+    fn security_level_equality_and_copy() {
+        let a = SecurityLevel::Standard128;
+        let b = a; // Copy
+        assert_eq!(a, b);
+        assert_ne!(SecurityLevel::Standard128, SecurityLevel::Medium192);
+        assert_ne!(SecurityLevel::Medium192, SecurityLevel::High256);
+    }
+
+    #[test]
+    fn verification_result_failure() {
+        let result = VerificationResult {
+            is_valid: false,
+            reason: Some("Hash mismatch".to_string()),
+            details: None,
+            verification_path: vec![],
+        };
+        assert!(!result.is_valid);
+        assert_eq!(result.reason.as_deref(), Some("Hash mismatch"));
+        assert!(result.details.is_none());
+        assert!(result.verification_path.is_empty());
+    }
+
+    #[test]
+    fn directory_entry_with_invalidation_markers() {
+        let entry = DirectoryEntry {
+            id: "dir1".to_string(),
+            genesis_hash: vec![0xFF; 32],
+            invalidation_markers: vec![vec![1, 2], vec![3, 4]],
+        };
+        assert_eq!(entry.invalidation_markers.len(), 2);
+        assert_eq!(entry.invalidation_markers[0], vec![1, 2]);
+    }
+
+    #[test]
+    fn commitment_without_co_signature() {
+        let c = Commitment {
+            hash: vec![1],
+            signature: vec![2],
+            co_signature: None,
+        };
+        assert!(c.co_signature.is_none());
+        assert_eq!(c.hash, vec![1]);
+    }
+
+    #[test]
+    fn keypair_debug_with_short_public_key() {
+        let kp = KeyPair {
+            public_key: vec![1, 2],
+            private_key: vec![99],
+        };
+        let dbg = format!("{:?}", kp);
+        assert!(dbg.contains("[REDACTED]"));
+        assert!(!dbg.contains("99"));
+    }
 }

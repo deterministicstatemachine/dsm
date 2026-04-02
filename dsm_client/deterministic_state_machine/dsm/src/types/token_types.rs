@@ -1014,3 +1014,422 @@ pub enum TokenStatus {
     /// Token is temporarily locked
     Locked,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- TokenAmount ---
+
+    #[test]
+    fn token_amount_new_and_value() {
+        let a = TokenAmount::new(42);
+        assert_eq!(a.value(), 42);
+    }
+
+    #[test]
+    fn token_amount_default_is_zero() {
+        let a = TokenAmount::default();
+        assert_eq!(a.value(), 0);
+    }
+
+    #[test]
+    fn token_amount_checked_add_normal() {
+        let a = TokenAmount::new(10);
+        let b = TokenAmount::new(20);
+        let c = a.checked_add(b).unwrap();
+        assert_eq!(c.value(), 30);
+    }
+
+    #[test]
+    fn token_amount_checked_add_overflow() {
+        let a = TokenAmount::new(u64::MAX);
+        let b = TokenAmount::new(1);
+        assert!(a.checked_add(b).is_none());
+    }
+
+    #[test]
+    fn token_amount_checked_sub_normal() {
+        let a = TokenAmount::new(50);
+        let b = TokenAmount::new(20);
+        let c = a.checked_sub(b).unwrap();
+        assert_eq!(c.value(), 30);
+    }
+
+    #[test]
+    fn token_amount_checked_sub_underflow() {
+        let a = TokenAmount::new(5);
+        let b = TokenAmount::new(10);
+        assert!(a.checked_sub(b).is_none());
+    }
+
+    #[test]
+    fn token_amount_saturating_add() {
+        let a = TokenAmount::new(u64::MAX);
+        let b = TokenAmount::new(100);
+        assert_eq!(a.saturating_add(b).value(), u64::MAX);
+    }
+
+    #[test]
+    fn token_amount_saturating_sub() {
+        let a = TokenAmount::new(5);
+        let b = TokenAmount::new(100);
+        assert_eq!(a.saturating_sub(b).value(), 0);
+    }
+
+    #[test]
+    fn token_amount_ordering() {
+        let a = TokenAmount::new(10);
+        let b = TokenAmount::new(20);
+        assert!(a < b);
+        assert!(b > a);
+    }
+
+    // --- TokenSupply ---
+
+    #[test]
+    fn token_supply_fixed() {
+        let s = TokenSupply::fixed(1000);
+        assert!(s.is_fixed());
+        assert!(!s.is_unlimited());
+        assert_eq!(s.max_supply(), Some(1000));
+    }
+
+    #[test]
+    fn token_supply_unlimited() {
+        let s = TokenSupply::unlimited();
+        assert!(s.is_unlimited());
+        assert!(!s.is_fixed());
+        assert_eq!(s.max_supply(), None);
+    }
+
+    #[test]
+    fn token_supply_new_is_fixed() {
+        let s = TokenSupply::new(500);
+        assert!(s.is_fixed());
+    }
+
+    // --- TokenSupplyInfo ---
+
+    #[test]
+    fn token_supply_info_new() {
+        let info = TokenSupplyInfo::new(1_000_000);
+        assert_eq!(info.total_supply, 1_000_000);
+        assert_eq!(info.circulating_supply, 1_000_000);
+        assert_eq!(info.max_supply, Some(1_000_000));
+        assert_eq!(info.min_supply, Some(0));
+    }
+
+    #[test]
+    fn token_supply_info_with_limits() {
+        let info = TokenSupplyInfo::with_limits(500, Some(1000), Some(100));
+        assert_eq!(info.total_supply, 500);
+        assert_eq!(info.max_supply, Some(1000));
+        assert_eq!(info.min_supply, Some(100));
+    }
+
+    #[test]
+    fn supply_change_addition_within_max() {
+        let info = TokenSupplyInfo::with_limits(500, Some(1000), Some(0));
+        assert!(info.is_valid_supply_change(500, true));
+    }
+
+    #[test]
+    fn supply_change_addition_exceeds_max() {
+        let info = TokenSupplyInfo::with_limits(500, Some(1000), Some(0));
+        assert!(!info.is_valid_supply_change(501, true));
+    }
+
+    #[test]
+    fn supply_change_subtraction_within_min() {
+        let info = TokenSupplyInfo::with_limits(500, Some(1000), Some(100));
+        assert!(info.is_valid_supply_change(400, false));
+    }
+
+    #[test]
+    fn supply_change_subtraction_below_min() {
+        let info = TokenSupplyInfo::with_limits(500, Some(1000), Some(100));
+        assert!(!info.is_valid_supply_change(401, false));
+    }
+
+    #[test]
+    fn supply_change_subtraction_exceeds_circulating() {
+        let info = TokenSupplyInfo::new(100);
+        assert!(!info.is_valid_supply_change(101, false));
+    }
+
+    #[test]
+    fn supply_change_unlimited_max() {
+        let info = TokenSupplyInfo::with_limits(500, None, Some(0));
+        assert!(info.is_valid_supply_change(u64::MAX - 500, true));
+    }
+
+    #[test]
+    fn validate_supply_change_with_token_amount_mint() {
+        let info = TokenSupplyInfo::with_limits(500, Some(600), Some(0));
+        assert!(info.validate_supply_change(TokenAmount::new(100), true));
+        assert!(!info.validate_supply_change(TokenAmount::new(101), true));
+    }
+
+    #[test]
+    fn validate_supply_change_with_token_amount_burn() {
+        let info = TokenSupplyInfo::with_limits(500, Some(1000), Some(100));
+        assert!(info.validate_supply_change(TokenAmount::new(400), false));
+        assert!(!info.validate_supply_change(TokenAmount::new(401), false));
+    }
+
+    // --- Balance ---
+
+    #[test]
+    fn balance_zero() {
+        let b = Balance::zero();
+        assert_eq!(b.value(), 0);
+        assert_eq!(b.locked(), 0);
+    }
+
+    #[test]
+    fn balance_from_state() {
+        let b = Balance::from_state(1000, [0xAA; 32], 42);
+        assert_eq!(b.value(), 1000);
+        assert_eq!(b.available(), 1000);
+        assert_eq!(b.locked(), 0);
+    }
+
+    #[test]
+    fn balance_lock_and_unlock() {
+        let mut b = Balance::from_state(100, [0; 32], 1);
+        b.lock(30).unwrap();
+        assert_eq!(b.locked(), 30);
+
+        b.unlock(10).unwrap();
+        assert_eq!(b.locked(), 20);
+    }
+
+    #[test]
+    fn balance_lock_zero_fails() {
+        let mut b = Balance::from_state(100, [0; 32], 1);
+        assert!(b.lock(0).is_err());
+    }
+
+    #[test]
+    fn balance_lock_exceeds_available() {
+        let mut b = Balance::from_state(50, [0; 32], 1);
+        assert!(b.lock(51).is_err());
+    }
+
+    #[test]
+    fn balance_unlock_zero_fails() {
+        let mut b = Balance::from_state(100, [0; 32], 1);
+        b.lock(50).unwrap();
+        assert!(b.unlock(0).is_err());
+    }
+
+    #[test]
+    fn balance_unlock_exceeds_locked() {
+        let mut b = Balance::from_state(100, [0; 32], 1);
+        b.lock(30).unwrap();
+        assert!(b.unlock(31).is_err());
+    }
+
+    #[test]
+    fn balance_update_addition() {
+        let mut b = Balance::from_state(100, [0; 32], 1);
+        b.update(50, true);
+        assert_eq!(b.value(), 150);
+    }
+
+    #[test]
+    fn balance_update_subtraction() {
+        let mut b = Balance::from_state(100, [0; 32], 1);
+        b.update(30, false);
+        assert_eq!(b.value(), 70);
+    }
+
+    #[test]
+    fn balance_update_sub_saturates() {
+        let mut b = Balance::from_state(10, [0; 32], 1);
+        b.update(100, false);
+        assert_eq!(b.value(), 0);
+    }
+
+    #[test]
+    fn balance_update_with_amount_deduction_insufficient() {
+        let mut b = Balance::from_state(10, [0; 32], 1);
+        let result = b.update_with_amount(TokenAmount::new(20), false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn balance_update_add_and_sub() {
+        let mut b = Balance::from_state(100, [0; 32], 1);
+        b.update_add(50);
+        assert_eq!(b.value(), 150);
+        b.update_sub(30).unwrap();
+        assert_eq!(b.value(), 120);
+    }
+
+    #[test]
+    fn balance_update_sub_insufficient() {
+        let mut b = Balance::from_state(10, [0; 32], 1);
+        assert!(b.update_sub(11).is_err());
+    }
+
+    #[test]
+    fn balance_formatted() {
+        let b = Balance::from_state(1_500_000, [0; 32], 1);
+        let f = b.formatted(6);
+        assert_eq!(f, "1.500000");
+    }
+
+    #[test]
+    fn balance_with_state_hash() {
+        let b = Balance::from_state(100, [0; 32], 1).with_state_hash([0xFF; 32]);
+        let bytes = b.to_le_bytes();
+        assert!(bytes.len() > 24);
+    }
+
+    #[test]
+    fn balance_to_le_bytes_deterministic() {
+        let b = Balance::from_state(42, [0xAB; 32], 7);
+        assert_eq!(b.to_le_bytes(), b.to_le_bytes());
+    }
+
+    #[test]
+    fn balance_display() {
+        let b = Balance::from_state(12345, [0; 32], 1);
+        assert_eq!(format!("{b}"), "12345");
+    }
+
+    // --- StateContext ---
+
+    #[test]
+    fn state_context_thread_local_set_get_clear() {
+        StateContext::clear_current();
+        assert!(StateContext::get_current().is_none());
+
+        StateContext::set_current(StateContext::new([0xAA; 32], 10, [0xBB; 32]));
+        let ctx = StateContext::get_current().unwrap();
+        assert_eq!(ctx.state_hash, [0xAA; 32]);
+        assert_eq!(ctx.state_number, 10);
+
+        StateContext::clear_current();
+        assert!(StateContext::get_current().is_none());
+    }
+
+    // --- TokenMetadata ---
+
+    #[test]
+    fn token_metadata_builder_methods() {
+        let meta = TokenMetadata::new(
+            "TEST", "Test Token", "TST", 8,
+            TokenType::Created, [0; 32], 1, None,
+        )
+        .with_description("A test token")
+        .with_metadata_uri("https://example.com")
+        .with_icon_url("https://example.com/icon.png")
+        .with_field("website", "https://test.com");
+
+        assert_eq!(meta.description.as_deref(), Some("A test token"));
+        assert_eq!(meta.metadata_uri.as_deref(), Some("https://example.com"));
+        assert_eq!(meta.icon_url.as_deref(), Some("https://example.com/icon.png"));
+        assert_eq!(meta.fields.get("website").map(|s| s.as_str()), Some("https://test.com"));
+    }
+
+    #[test]
+    fn token_metadata_canonical_id() {
+        let meta = TokenMetadata::new(
+            "ERA", "ERA", "ERA", 18,
+            TokenType::Native, [0xAA; 32], 0, None,
+        );
+        let cid = meta.canonical_id();
+        assert!(cid.ends_with(".ERA"));
+    }
+
+    // --- TokenRegistry ---
+
+    #[test]
+    fn token_registry_new_has_era() {
+        let reg = TokenRegistry::new();
+        assert!(reg.get_token("ERA").is_some());
+        assert!(reg.get_supply("ERA").is_some());
+        assert!(reg.is_native_token("ERA"));
+        assert!(!reg.is_native_token("BTC"));
+    }
+
+    #[test]
+    fn token_registry_register_duplicate_fails() {
+        let mut reg = TokenRegistry::new();
+        let meta = TokenMetadata::new(
+            "ERA", "ERA", "ERA", 18,
+            TokenType::Native, [0; 32], 0, None,
+        );
+        let supply = TokenSupplyInfo::new(100);
+        assert!(reg.register_token(meta, supply).is_err());
+    }
+
+    #[test]
+    fn token_registry_register_new_token() {
+        let mut reg = TokenRegistry::new();
+        let meta = TokenMetadata::new(
+            "TEST", "Test", "TST", 8,
+            TokenType::Created, [0; 32], 1, None,
+        );
+        let supply = TokenSupplyInfo::new(1000);
+        reg.register_token(meta, supply).unwrap();
+        assert!(reg.get_token("TEST").is_some());
+    }
+
+    // --- Token ---
+
+    #[test]
+    fn token_new_and_accessors() {
+        let balance = Balance::from_state(100, [0; 32], 1);
+        let t = Token::new("alice", vec![1, 2, 3], vec![4, 5], balance, [0xCC; 32]);
+
+        assert!(t.id().contains("alice"));
+        assert_eq!(t.owner_id(), "alice");
+        assert_eq!(t.token_data(), &[1, 2, 3]);
+        assert_eq!(t.metadata(), &[4, 5]);
+        assert!(!t.token_hash().is_empty());
+        assert_eq!(*t.status(), TokenStatus::Active);
+        assert!(t.is_valid());
+        assert_eq!(t.policy_anchor(), Some(&[0xCC; 32]));
+    }
+
+    #[test]
+    fn token_set_status_revoked() {
+        let balance = Balance::from_state(100, [0; 32], 1);
+        let mut t = Token::new("bob", vec![1], vec![], balance, [0; 32]);
+        t.set_status(TokenStatus::Revoked);
+        assert!(!t.is_valid());
+        assert_eq!(*t.status(), TokenStatus::Revoked);
+    }
+
+    #[test]
+    fn token_set_owner() {
+        let balance = Balance::from_state(100, [0; 32], 1);
+        let mut t = Token::new("bob", vec![1], vec![], balance, [0; 32]);
+        t.set_owner("charlie");
+        assert_eq!(t.owner_id(), "charlie");
+    }
+
+    #[test]
+    fn token_update_balance() {
+        let balance = Balance::from_state(100, [0; 32], 1);
+        let mut t = Token::new("bob", vec![1], vec![], balance, [0; 32]);
+        t.update_balance(50, true);
+        assert_eq!(t.balance().value(), 150);
+        t.update_balance(30, false);
+        assert_eq!(t.balance().value(), 120);
+    }
+
+    // --- TokenFactory ---
+
+    #[test]
+    fn token_factory_creation_fee() {
+        let mut f = TokenFactory::new(1000, vec![0; 32]);
+        assert_eq!(f.get_creation_fee(), 1000);
+        f.set_creation_fee(2000);
+        assert_eq!(f.get_creation_fee(), 2000);
+    }
+}

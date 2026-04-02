@@ -589,3 +589,530 @@ impl BilateralControlResistance {
         Ok(false)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::operations::Operation;
+    use crate::types::state_types::{DeviceInfo, State, StateParams};
+    use crate::types::token_types::Balance;
+
+    // ── Mock storage ────────────────────────────────────────────────
+    struct MockStorage {
+        historical: Vec<State>,
+        published: Vec<State>,
+        reports: std::sync::Mutex<Vec<Vec<u8>>>,
+    }
+
+    impl MockStorage {
+        fn empty() -> Self {
+            Self {
+                historical: vec![],
+                published: vec![],
+                reports: std::sync::Mutex::new(vec![]),
+            }
+        }
+
+        #[allow(dead_code)]
+        fn with_published(states: Vec<State>) -> Self {
+            Self {
+                historical: vec![],
+                published: states,
+                reports: std::sync::Mutex::new(vec![]),
+            }
+        }
+    }
+
+    impl DecentralizedStorage for MockStorage {
+        fn store_suspicious_activity_report(&self, report: &[u8]) -> Result<(), DsmError> {
+            self.reports.lock().unwrap().push(report.to_vec());
+            Ok(())
+        }
+
+        fn get_historical_states(&self, _device_id: &[u8; 32]) -> Result<Vec<State>, DsmError> {
+            Ok(self.historical.clone())
+        }
+
+        fn get_published_states(&self, _device_id: &[u8; 32]) -> Result<Vec<State>, DsmError> {
+            Ok(self.published.clone())
+        }
+    }
+
+    // ── Helpers ──────────────────────────────────────────────────────
+
+    fn dev_info() -> DeviceInfo {
+        DeviceInfo::new([0x11; 32], vec![0x22; 64])
+    }
+
+    fn make_state(n: u64) -> State {
+        State::new(StateParams::new(n, vec![0xAA; 16], Operation::Noop, dev_info()))
+    }
+
+    fn make_chained_states(start: u64, count: u64) -> Vec<State> {
+        let mut states = Vec::new();
+        for i in 0..count {
+            let mut s = make_state(start + i);
+            if i > 0 {
+                s.prev_state_hash = states.last().map(|p: &State| p.hash).unwrap_or([0u8; 32]);
+            }
+            let h = s.compute_hash().unwrap_or([0u8; 32]);
+            s.hash = h;
+            states.push(s);
+        }
+        states
+    }
+
+    fn make_identity_anchor(id: &str) -> IdentityAnchor {
+        IdentityAnchor::new(
+            id.to_string(),
+            vec![0x01; 32],
+            vec![0x02; 64],
+            vec![0x03; 16],
+        )
+    }
+
+    // ── AlertSeverity ───────────────────────────────────────────────
+
+    #[test]
+    fn alert_severity_equality() {
+        assert_eq!(AlertSeverity::Low, AlertSeverity::Low);
+        assert_ne!(AlertSeverity::Low, AlertSeverity::High);
+        assert_ne!(AlertSeverity::Medium, AlertSeverity::Critical);
+    }
+
+    #[test]
+    fn alert_severity_clone() {
+        let s = AlertSeverity::Critical;
+        let c = s;
+        assert_eq!(c, AlertSeverity::Critical);
+    }
+
+    // ── Alert ───────────────────────────────────────────────────────
+
+    #[test]
+    fn alert_construction() {
+        let a = Alert {
+            alert_type: "TestAlert".into(),
+            description: "test desc".into(),
+            severity: AlertSeverity::High,
+        };
+        assert_eq!(a.alert_type, "TestAlert");
+        assert_eq!(a.severity, AlertSeverity::High);
+    }
+
+    // ── RelationshipStatePair ───────────────────────────────────────
+
+    #[test]
+    fn relationship_state_pair_contains_state() {
+        let mut s1 = make_state(1);
+        s1.hash = s1.compute_hash().unwrap();
+        let pair = RelationshipStatePair {
+            entity_id: [0x01; 32],
+            counterparty_id: [0x02; 32],
+            states: vec![s1.clone()],
+        };
+        assert!(pair.contains_state(&s1));
+
+        let s2 = make_state(2);
+        assert!(!pair.contains_state(&s2));
+    }
+
+    // ── calculate_attack_probability ────────────────────────────────
+
+    #[test]
+    fn attack_probability_zero_network() {
+        let p = BilateralControlResistance::calculate_attack_probability(256, 5, 0);
+        assert!(p > 0.0, "zero network should yield >= 1.0 for network_term");
+    }
+
+    #[test]
+    fn attack_probability_high_security_param() {
+        let p = BilateralControlResistance::calculate_attack_probability(1024, 1, 1000);
+        assert!(p < 0.001, "high security param should make crypto_term 0");
+    }
+
+    #[test]
+    fn attack_probability_large_network_small_relationships() {
+        let p = BilateralControlResistance::calculate_attack_probability(256, 1, 1_000_000);
+        assert!(p < 1e-6);
+    }
+
+    #[test]
+    fn attack_probability_monotonic_with_relationships() {
+        let p1 = BilateralControlResistance::calculate_attack_probability(256, 1, 1000);
+        let p2 = BilateralControlResistance::calculate_attack_probability(256, 10, 1000);
+        assert!(p2 > p1);
+    }
+
+    #[test]
+    fn attack_probability_monotonic_with_security_param() {
+        let p1 = BilateralControlResistance::calculate_attack_probability(128, 5, 1000);
+        let p2 = BilateralControlResistance::calculate_attack_probability(256, 5, 1000);
+        assert!(p1 >= p2);
+    }
+
+    // ── verify_genesis_threshold ────────────────────────────────────
+
+    #[tokio::test]
+    async fn genesis_threshold_below_minimum_fails() {
+        let identity = make_identity_anchor("alice");
+        let signers = vec![
+            make_identity_anchor("bob"),
+            make_identity_anchor("carol"),
+        ];
+        let storage = MockStorage::empty();
+        let result = BilateralControlResistance::verify_genesis_threshold(
+            &identity, &signers, 2, &storage,
+        )
+        .await
+        .unwrap();
+        assert!(!result, "threshold < 3 should fail");
+    }
+
+    #[tokio::test]
+    async fn genesis_threshold_not_enough_signers() {
+        let identity = make_identity_anchor("alice");
+        let signers = vec![
+            make_identity_anchor("bob"),
+            make_identity_anchor("carol"),
+        ];
+        let storage = MockStorage::empty();
+        let result = BilateralControlResistance::verify_genesis_threshold(
+            &identity, &signers, 3, &storage,
+        )
+        .await
+        .unwrap();
+        assert!(!result, "signers.len() < threshold should fail");
+    }
+
+    #[tokio::test]
+    async fn genesis_threshold_self_signing_fails() {
+        let identity = make_identity_anchor("alice");
+        let signers = vec![
+            make_identity_anchor("alice"),
+            make_identity_anchor("bob"),
+            make_identity_anchor("carol"),
+        ];
+        let storage = MockStorage::empty();
+        let result = BilateralControlResistance::verify_genesis_threshold(
+            &identity, &signers, 3, &storage,
+        )
+        .await
+        .unwrap();
+        assert!(!result, "self-signing should fail");
+    }
+
+    #[tokio::test]
+    async fn genesis_threshold_valid() {
+        let identity = make_identity_anchor("alice");
+        let signers = vec![
+            make_identity_anchor("bob"),
+            make_identity_anchor("carol"),
+            make_identity_anchor("dave"),
+        ];
+        let storage = MockStorage::empty();
+        let result = BilateralControlResistance::verify_genesis_threshold(
+            &identity, &signers, 3, &storage,
+        )
+        .await
+        .unwrap();
+        assert!(result);
+    }
+
+    // ── verify_temporal_consistency ──────────────────────────────────
+
+    #[tokio::test]
+    async fn temporal_consistency_valid_chain() {
+        let states = make_chained_states(0, 5);
+        let storage = MockStorage::empty();
+        let ok = BilateralControlResistance::verify_temporal_consistency(&states, &storage)
+            .await
+            .unwrap();
+        assert!(ok);
+    }
+
+    #[tokio::test]
+    async fn temporal_consistency_empty() {
+        let storage = MockStorage::empty();
+        let ok = BilateralControlResistance::verify_temporal_consistency(&[], &storage)
+            .await
+            .unwrap();
+        assert!(ok, "empty state list is trivially consistent");
+    }
+
+    #[tokio::test]
+    async fn temporal_consistency_single_state() {
+        let states = make_chained_states(0, 1);
+        let storage = MockStorage::empty();
+        let ok = BilateralControlResistance::verify_temporal_consistency(&states, &storage)
+            .await
+            .unwrap();
+        assert!(ok, "single state is trivially consistent");
+    }
+
+    #[tokio::test]
+    async fn temporal_consistency_non_sequential_fails() {
+        let mut states = make_chained_states(0, 3);
+        states[2].state_number = 5; // skip 3,4
+        let storage = MockStorage::empty();
+        let ok = BilateralControlResistance::verify_temporal_consistency(&states, &storage)
+            .await
+            .unwrap();
+        assert!(!ok);
+    }
+
+    #[tokio::test]
+    async fn temporal_consistency_broken_hash_chain_fails() {
+        let mut states = make_chained_states(0, 3);
+        states[2].prev_state_hash = [0xFF; 32]; // corrupt
+        let storage = MockStorage::empty();
+        let ok = BilateralControlResistance::verify_temporal_consistency(&states, &storage)
+            .await
+            .unwrap();
+        assert!(!ok);
+    }
+
+    // ── detect_temporal_manipulation ────────────────────────────────
+
+    #[test]
+    fn temporal_manipulation_single_state() {
+        let states = make_chained_states(0, 1);
+        assert!(!BilateralControlResistance::detect_temporal_manipulation(&states).unwrap());
+    }
+
+    #[test]
+    fn temporal_manipulation_non_monotonic() {
+        let mut s1 = make_state(5);
+        s1.hash = s1.compute_hash().unwrap();
+        let mut s2 = make_state(3);
+        s2.hash = s2.compute_hash().unwrap();
+        assert!(
+            BilateralControlResistance::detect_temporal_manipulation(&[s1, s2]).unwrap()
+        );
+    }
+
+    #[test]
+    fn temporal_manipulation_equal_state_numbers() {
+        let mut s1 = make_state(5);
+        s1.hash = s1.compute_hash().unwrap();
+        let mut s2 = make_state(5);
+        s2.hash = s2.compute_hash().unwrap();
+        assert!(
+            BilateralControlResistance::detect_temporal_manipulation(&[s1, s2]).unwrap()
+        );
+    }
+
+    #[test]
+    fn temporal_manipulation_regular_intervals_long_sequence() {
+        let mut states = Vec::new();
+        for i in 0..10 {
+            let mut s = make_state(i * 3);
+            s.hash = s.compute_hash().unwrap();
+            states.push(s);
+        }
+        assert!(
+            BilateralControlResistance::detect_temporal_manipulation(&states).unwrap(),
+            "8+ states with identical gaps is suspicious"
+        );
+    }
+
+    #[test]
+    fn temporal_manipulation_large_jump() {
+        let mut s1 = make_state(1);
+        s1.hash = s1.compute_hash().unwrap();
+        let mut s2 = make_state(200);
+        s2.hash = s2.compute_hash().unwrap();
+        assert!(
+            BilateralControlResistance::detect_temporal_manipulation(&[s1, s2]).unwrap()
+        );
+    }
+
+    #[test]
+    fn temporal_manipulation_valid_short_sequence() {
+        let mut states = Vec::new();
+        for i in 0..5 {
+            let mut s = make_state(i);
+            s.hash = s.compute_hash().unwrap();
+            states.push(s);
+        }
+        assert!(
+            !BilateralControlResistance::detect_temporal_manipulation(&states).unwrap(),
+            "short consecutive sequence should not flag (below 8-state threshold for regularity)"
+        );
+    }
+
+    // ── detect_anomalous_balance_changes ─────────────────────────────
+
+    #[test]
+    fn anomalous_balance_no_states() {
+        let result = BilateralControlResistance::detect_anomalous_balance_changes(&[]).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn anomalous_balance_no_token_balances() {
+        let states = make_chained_states(0, 3);
+        let result =
+            BilateralControlResistance::detect_anomalous_balance_changes(&states).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn anomalous_balance_generic_op_large_delta() {
+        let mut s1 = make_state(0);
+        s1.token_balances
+            .insert("tok".into(), Balance::from_state(100, [0; 32], 0));
+        s1.hash = s1.compute_hash().unwrap();
+
+        let mut s2 = make_state(1);
+        s2.token_balances
+            .insert("tok".into(), Balance::from_state(300, [0; 32], 1));
+        s2.prev_state_hash = s1.hash;
+        s2.hash = s2.compute_hash().unwrap();
+
+        let result =
+            BilateralControlResistance::detect_anomalous_balance_changes(&[s1, s2]).unwrap();
+        assert!(
+            !result.is_empty(),
+            "delta (200) > prev balance (100) should be anomalous"
+        );
+    }
+
+    // ── build_compact_report ────────────────────────────────────────
+
+    #[test]
+    fn compact_report_starts_with_prefix() {
+        let states = make_chained_states(0, 2);
+        let alerts = vec![Alert {
+            alert_type: "Test".into(),
+            description: "desc".into(),
+            severity: AlertSeverity::Low,
+        }];
+        let report = BilateralControlResistance::build_compact_report(&states, &alerts);
+        assert!(report.starts_with(BilateralControlResistance::report_prefix()));
+    }
+
+    #[test]
+    fn compact_report_empty_alerts() {
+        let states = make_chained_states(0, 1);
+        let report = BilateralControlResistance::build_compact_report(&states, &[]);
+        assert!(report.starts_with(BilateralControlResistance::report_prefix()));
+        let prefix_len = BilateralControlResistance::report_prefix().len();
+        let alert_count = u32::from_le_bytes(
+            report[prefix_len..prefix_len + 4].try_into().unwrap(),
+        );
+        assert_eq!(alert_count, 0);
+    }
+
+    #[test]
+    fn compact_report_deterministic() {
+        let states = make_chained_states(0, 2);
+        let alerts = vec![Alert {
+            alert_type: "A".into(),
+            description: "d".into(),
+            severity: AlertSeverity::Medium,
+        }];
+        let r1 = BilateralControlResistance::build_compact_report(&states, &alerts);
+        let r2 = BilateralControlResistance::build_compact_report(&states, &alerts);
+        assert_eq!(r1, r2);
+    }
+
+    // ── detect_suspicious_patterns (integration) ────────────────────
+
+    #[tokio::test]
+    async fn suspicious_patterns_clean_short_sequence() {
+        let states = make_chained_states(0, 3);
+        let storage = MockStorage::empty();
+        let alerts =
+            BilateralControlResistance::detect_suspicious_patterns(&states, &storage)
+                .await
+                .unwrap();
+        assert!(
+            alerts.is_empty(),
+            "short clean sequence should produce no alerts"
+        );
+    }
+
+    #[tokio::test]
+    async fn suspicious_patterns_rapid_transactions() {
+        let states = make_chained_states(0, 12);
+        let storage = MockStorage::empty();
+        let alerts =
+            BilateralControlResistance::detect_suspicious_patterns(&states, &storage)
+                .await
+                .unwrap();
+        let has_rapid = alerts.iter().any(|a| a.alert_type == "RapidTransactions");
+        assert!(has_rapid, "12 consecutive states should trigger rapid transaction alert");
+    }
+
+    // ── has_cycle_from ──────────────────────────────────────────────
+
+    #[test]
+    fn has_cycle_no_edges() {
+        let graph: HashMap<[u8; 32], Vec<[u8; 32]>> = HashMap::new();
+        assert!(!BilateralControlResistance::has_cycle_from(&graph, [0; 32]));
+    }
+
+    #[test]
+    fn has_cycle_self_loop() {
+        let node = [0x01; 32];
+        let mut graph = HashMap::new();
+        graph.insert(node, vec![node]);
+        assert!(BilateralControlResistance::has_cycle_from(&graph, node));
+    }
+
+    #[test]
+    fn has_cycle_triangle() {
+        let a = [0x01; 32];
+        let b = [0x02; 32];
+        let c = [0x03; 32];
+        let mut graph = HashMap::new();
+        graph.insert(a, vec![b]);
+        graph.insert(b, vec![c]);
+        graph.insert(c, vec![a]);
+        assert!(BilateralControlResistance::has_cycle_from(&graph, a));
+    }
+
+    #[test]
+    fn has_cycle_linear_chain_no_cycle() {
+        let a = [0x01; 32];
+        let b = [0x02; 32];
+        let c = [0x03; 32];
+        let mut graph = HashMap::new();
+        graph.insert(a, vec![b]);
+        graph.insert(b, vec![c]);
+        assert!(!BilateralControlResistance::has_cycle_from(&graph, a));
+    }
+
+    // ── tag_bytes / op_bytes / report_prefix ────────────────────────
+
+    #[test]
+    fn tag_bytes_deterministic() {
+        let t1 = BilateralControlResistance::tag_bytes(b"device_1");
+        let t2 = BilateralControlResistance::tag_bytes(b"device_1");
+        assert_eq!(t1, t2);
+    }
+
+    #[test]
+    fn tag_bytes_different_inputs_differ() {
+        let t1 = BilateralControlResistance::tag_bytes(b"device_1");
+        let t2 = BilateralControlResistance::tag_bytes(b"device_2");
+        assert_ne!(t1, t2);
+    }
+
+    #[test]
+    fn op_bytes_deterministic() {
+        let op = Operation::Noop;
+        let b1 = BilateralControlResistance::op_bytes(&op);
+        let b2 = BilateralControlResistance::op_bytes(&op);
+        assert_eq!(b1, b2);
+    }
+
+    #[test]
+    fn report_prefix_stable() {
+        assert_eq!(
+            BilateralControlResistance::report_prefix(),
+            b"DSM/BCR/REPORT/v2\0"
+        );
+    }
+}

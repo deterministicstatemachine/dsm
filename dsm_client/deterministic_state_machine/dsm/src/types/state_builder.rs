@@ -327,3 +327,240 @@ impl StateBuilder {
         Ok(state)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::operations::Operation;
+    use crate::types::state_types::StateFlag;
+
+    fn valid_builder() -> StateBuilder {
+        StateBuilder::new()
+            .with_entropy(vec![0xAA; 32])
+            .with_device_id([0x11; 32])
+            .with_public_key(vec![0x22; 64])
+    }
+
+    // --- Successful builds ---
+
+    #[test]
+    fn build_minimal_valid_state() {
+        let state = valid_builder().build().unwrap();
+        assert_eq!(state.device_info.device_id, [0x11; 32]);
+        assert_eq!(state.device_info.public_key, vec![0x22; 64]);
+        assert_ne!(state.hash, [0u8; 32]);
+    }
+
+    #[test]
+    fn build_with_state_number() {
+        let state = valid_builder()
+            .with_state_number(42)
+            .build()
+            .unwrap();
+        assert_eq!(state.state_number, 42);
+    }
+
+    #[test]
+    fn build_with_id() {
+        let state = valid_builder()
+            .with_id("my-state".into())
+            .build()
+            .unwrap();
+        assert_eq!(state.id, "my-state");
+    }
+
+    #[test]
+    fn build_with_explicit_hash() {
+        let hash = [0xFF; 32];
+        let state = valid_builder()
+            .with_hash(hash)
+            .build()
+            .unwrap();
+        assert_eq!(state.hash, hash);
+    }
+
+    #[test]
+    fn build_auto_computed_hash_is_deterministic() {
+        let h1 = valid_builder().with_state_number(1).build().unwrap().hash;
+        let h2 = valid_builder().with_state_number(1).build().unwrap().hash;
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn build_different_state_numbers_produce_different_hashes() {
+        let h1 = valid_builder().with_state_number(1).build().unwrap().hash;
+        let h2 = valid_builder().with_state_number(2).build().unwrap().hash;
+        assert_ne!(h1, h2);
+    }
+
+    // --- Validation failures ---
+
+    #[test]
+    fn build_fails_without_entropy() {
+        let result = StateBuilder::new()
+            .with_device_id([0x11; 32])
+            .with_public_key(vec![0x22; 64])
+            .build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn build_fails_without_public_key() {
+        let result = StateBuilder::new()
+            .with_entropy(vec![0xAA; 32])
+            .with_device_id([0x11; 32])
+            .build();
+        assert!(result.is_err());
+    }
+
+    // --- Optional fields ---
+
+    #[test]
+    fn build_with_prev_state_hash() {
+        let prev = [0xBB; 32];
+        let state = valid_builder()
+            .with_prev_state_hash(prev)
+            .build()
+            .unwrap();
+        assert_eq!(state.prev_state_hash, prev);
+    }
+
+    #[test]
+    fn build_with_prev_hash_alias() {
+        let prev = [0xCC; 32];
+        let state = valid_builder()
+            .with_prev_hash(prev)
+            .build()
+            .unwrap();
+        assert_eq!(state.prev_state_hash, prev);
+    }
+
+    #[test]
+    fn build_with_operation() {
+        let state = valid_builder()
+            .with_operation(Operation::Genesis)
+            .build()
+            .unwrap();
+        assert!(matches!(state.operation, Operation::Genesis));
+    }
+
+    #[test]
+    fn build_with_flags() {
+        let mut flags = HashSet::new();
+        flags.insert(StateFlag::Recovered);
+        let state = valid_builder()
+            .with_flags(flags.clone())
+            .build()
+            .unwrap();
+        assert!(state.flags.contains(&StateFlag::Recovered));
+    }
+
+    #[test]
+    fn build_with_single_flag() {
+        let state = valid_builder()
+            .with_flag(StateFlag::Synced)
+            .build()
+            .unwrap();
+        assert!(state.flags.contains(&StateFlag::Synced));
+    }
+
+    #[test]
+    fn build_with_token_balance() {
+        let balance = Balance::from_state(500, [0; 32], 1);
+        let state = valid_builder()
+            .with_token_balance("ERA".into(), balance)
+            .build()
+            .unwrap();
+        assert!(state.token_balances.contains_key("ERA"));
+        assert_eq!(state.token_balances["ERA"].value(), 500);
+    }
+
+    #[test]
+    fn build_with_token_balances_map() {
+        let mut balances = HashMap::new();
+        balances.insert("ERA".into(), Balance::from_state(100, [0; 32], 1));
+        balances.insert("TEST".into(), Balance::from_state(200, [0; 32], 1));
+        let state = valid_builder()
+            .with_token_balances(balances)
+            .build()
+            .unwrap();
+        assert_eq!(state.token_balances.len(), 2);
+    }
+
+    #[test]
+    fn build_with_encapsulated_entropy() {
+        let state = valid_builder()
+            .with_encapsulated_entropy(vec![0xDD; 32])
+            .build()
+            .unwrap();
+        assert_eq!(state.encapsulated_entropy, Some(vec![0xDD; 32]));
+    }
+
+    #[test]
+    fn build_with_relationship_context() {
+        let ctx = RelationshipContext::new([0x11; 32], [0x22; 32], vec![0x33; 64]);
+        let state = valid_builder()
+            .with_relationship_context(ctx)
+            .build()
+            .unwrap();
+        assert!(state.relationship_context.is_some());
+    }
+
+    #[test]
+    fn build_relationship_context_auto() {
+        let state = valid_builder()
+            .build_relationship_context()
+            .build()
+            .unwrap();
+        let ctx = state.relationship_context.unwrap();
+        assert_eq!(ctx.entity_id, [0x11; 32]);
+        assert!(ctx.active);
+    }
+
+    #[test]
+    fn build_relationship_context_with_chain_tip() {
+        let state = valid_builder()
+            .build_relationship_context_with_chain_tip([0x33; 32], "tip-1".into())
+            .build()
+            .unwrap();
+        let ctx = state.relationship_context.unwrap();
+        assert_eq!(ctx.counterparty_id, [0x33; 32]);
+        assert_eq!(ctx.chain_tip_id, Some("tip-1".into()));
+    }
+
+    #[test]
+    fn build_with_parameter() {
+        let state = valid_builder()
+            .with_parameter("key", vec![1, 2, 3])
+            .build()
+            .unwrap();
+        assert_eq!(state.get_parameter("key"), Some(&vec![1u8, 2, 3]));
+    }
+
+    #[test]
+    fn build_with_device_info() {
+        let info = crate::types::state_types::DeviceInfo {
+            device_id: [0xAA; 32],
+            public_key: vec![0xBB; 64],
+            metadata: vec![],
+        };
+        let state = valid_builder()
+            .with_device_info(info)
+            .with_entropy(vec![1; 32])
+            .build()
+            .unwrap();
+        assert_eq!(state.device_info.device_id, [0xAA; 32]);
+        assert_eq!(state.device_info.public_key, vec![0xBB; 64]);
+    }
+
+    // --- Default ---
+
+    #[test]
+    fn default_builder_matches_new() {
+        let a = StateBuilder::default();
+        let b = StateBuilder::new();
+        assert_eq!(a.state_number, b.state_number);
+        assert_eq!(a.entropy, b.entropy);
+        assert_eq!(a.device_id, b.device_id);
+    }
+}

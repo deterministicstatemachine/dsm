@@ -216,3 +216,541 @@ pub fn derive_sub_token_genesis(
         contributions,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pid(n: u8) -> ParticipantId {
+        [n; 32]
+    }
+
+    fn contrib(n: u8) -> TokenContribution {
+        TokenContribution {
+            participant: pid(n),
+            material: [n + 100; 32],
+        }
+    }
+
+    fn three_participants() -> Vec<ParticipantId> {
+        vec![pid(1), pid(2), pid(3)]
+    }
+
+    fn three_contributions() -> Vec<TokenContribution> {
+        vec![contrib(1), contrib(2), contrib(3)]
+    }
+
+    fn descriptor() -> &'static [u8] {
+        b"test-token-descriptor"
+    }
+
+    // ── ensure_min_threshold (via create_token_genesis) ─────────────
+
+    #[test]
+    fn fewer_than_3_participants_is_rejected() {
+        let result = create_token_genesis(
+            3,
+            vec![pid(1), pid(2)],
+            descriptor(),
+            None,
+            vec![contrib(1), contrib(2)],
+        );
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("≥3 participants"), "got: {msg}");
+    }
+
+    #[test]
+    fn threshold_below_3_is_rejected() {
+        let result = create_token_genesis(
+            2,
+            three_participants(),
+            descriptor(),
+            None,
+            three_contributions(),
+        );
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("threshold ≥3"), "got: {msg}");
+    }
+
+    #[test]
+    fn threshold_exceeding_participants_is_rejected() {
+        let result = create_token_genesis(
+            4,
+            three_participants(),
+            descriptor(),
+            None,
+            three_contributions(),
+        );
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("threshold must be ≤ participants"), "got: {msg}");
+    }
+
+    #[test]
+    fn exactly_3_participants_3_threshold_succeeds() {
+        let result = create_token_genesis(
+            3,
+            three_participants(),
+            descriptor(),
+            None,
+            three_contributions(),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn five_participants_threshold_3_succeeds() {
+        let participants = vec![pid(1), pid(2), pid(3), pid(4), pid(5)];
+        let contributions = vec![contrib(1), contrib(2), contrib(3), contrib(4), contrib(5)];
+        let result = create_token_genesis(3, participants, descriptor(), None, contributions);
+        assert!(result.is_ok());
+        let genesis = result.unwrap();
+        assert_eq!(genesis.threshold, 3);
+        assert_eq!(genesis.participants.len(), 5);
+        assert_eq!(genesis.contributions.len(), 3);
+    }
+
+    // ── create_token_genesis success cases ──────────────────────────
+
+    #[test]
+    fn produces_valid_token_genesis() {
+        let genesis = create_token_genesis(
+            3,
+            three_participants(),
+            descriptor(),
+            None,
+            three_contributions(),
+        )
+        .unwrap();
+
+        assert_eq!(genesis.threshold, 3);
+        assert_eq!(genesis.participants.len(), 3);
+        assert_eq!(genesis.contributions.len(), 3);
+        assert_eq!(genesis.token_hash.len(), 32);
+        assert_eq!(genesis.token_entropy.len(), 32);
+        assert!(genesis.policy_anchor.is_none());
+        assert_ne!(genesis.token_hash, [0u8; 32]);
+        assert_ne!(genesis.token_entropy, [0u8; 32]);
+    }
+
+    #[test]
+    fn participants_are_sorted_in_output() {
+        let participants = vec![pid(3), pid(1), pid(2)];
+        let genesis = create_token_genesis(
+            3,
+            participants,
+            descriptor(),
+            None,
+            three_contributions(),
+        )
+        .unwrap();
+
+        assert_eq!(genesis.participants[0], pid(1));
+        assert_eq!(genesis.participants[1], pid(2));
+        assert_eq!(genesis.participants[2], pid(3));
+    }
+
+    #[test]
+    fn contributions_are_sorted_by_participant() {
+        let contributions = vec![contrib(3), contrib(1), contrib(2)];
+        let genesis = create_token_genesis(
+            3,
+            three_participants(),
+            descriptor(),
+            None,
+            contributions,
+        )
+        .unwrap();
+
+        assert_eq!(genesis.contributions[0].participant, pid(1));
+        assert_eq!(genesis.contributions[1].participant, pid(2));
+        assert_eq!(genesis.contributions[2].participant, pid(3));
+    }
+
+    #[test]
+    fn token_hash_and_entropy_are_32_bytes() {
+        let genesis = create_token_genesis(
+            3,
+            three_participants(),
+            descriptor(),
+            None,
+            three_contributions(),
+        )
+        .unwrap();
+
+        assert_eq!(genesis.token_hash.len(), 32);
+        assert_eq!(genesis.token_entropy.len(), 32);
+    }
+
+    #[test]
+    fn different_descriptors_produce_different_hashes() {
+        let g1 = create_token_genesis(
+            3,
+            three_participants(),
+            b"descriptor-A",
+            None,
+            three_contributions(),
+        )
+        .unwrap();
+
+        let g2 = create_token_genesis(
+            3,
+            three_participants(),
+            b"descriptor-B",
+            None,
+            three_contributions(),
+        )
+        .unwrap();
+
+        assert_ne!(g1.token_hash, g2.token_hash);
+        assert_ne!(g1.token_entropy, g2.token_entropy);
+    }
+
+    #[test]
+    fn same_inputs_produce_same_hash_determinism() {
+        let g1 = create_token_genesis(
+            3,
+            three_participants(),
+            descriptor(),
+            None,
+            three_contributions(),
+        )
+        .unwrap();
+
+        let g2 = create_token_genesis(
+            3,
+            three_participants(),
+            descriptor(),
+            None,
+            three_contributions(),
+        )
+        .unwrap();
+
+        assert_eq!(g1.token_hash, g2.token_hash);
+        assert_eq!(g1.token_entropy, g2.token_entropy);
+    }
+
+    // ── create_token_genesis error cases ────────────────────────────
+
+    #[test]
+    fn contribution_from_non_participant_is_rejected() {
+        let outsider = TokenContribution {
+            participant: pid(99),
+            material: [0xAA; 32],
+        };
+        let contributions = vec![contrib(1), contrib(2), outsider];
+        let result = create_token_genesis(
+            3,
+            three_participants(),
+            descriptor(),
+            None,
+            contributions,
+        );
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("not in participants set"), "got: {msg}");
+    }
+
+    #[test]
+    fn duplicate_contribution_for_same_participant_is_rejected() {
+        let dup = TokenContribution {
+            participant: pid(1),
+            material: [0xBB; 32],
+        };
+        let contributions = vec![contrib(1), dup, contrib(2)];
+        let result = create_token_genesis(
+            3,
+            three_participants(),
+            descriptor(),
+            None,
+            contributions,
+        );
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("duplicate contribution"), "got: {msg}");
+    }
+
+    #[test]
+    fn insufficient_contributions_is_rejected() {
+        let contributions = vec![contrib(1), contrib(2)];
+        let result = create_token_genesis(
+            3,
+            three_participants(),
+            descriptor(),
+            None,
+            contributions,
+        );
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("insufficient contributions"), "got: {msg}");
+    }
+
+    // ── create_token_genesis with policy anchor ─────────────────────
+
+    #[test]
+    fn policy_anchor_changes_token_hash() {
+        let anchor = PolicyAnchor([0x42; 32]);
+
+        let without = create_token_genesis(
+            3,
+            three_participants(),
+            descriptor(),
+            None,
+            three_contributions(),
+        )
+        .unwrap();
+
+        let with = create_token_genesis(
+            3,
+            three_participants(),
+            descriptor(),
+            Some(anchor.clone()),
+            three_contributions(),
+        )
+        .unwrap();
+
+        assert_ne!(without.token_hash, with.token_hash);
+        assert_ne!(without.token_entropy, with.token_entropy);
+    }
+
+    #[test]
+    fn policy_anchor_propagates_to_result() {
+        let anchor = PolicyAnchor([0x42; 32]);
+        let genesis = create_token_genesis(
+            3,
+            three_participants(),
+            descriptor(),
+            Some(anchor.clone()),
+            three_contributions(),
+        )
+        .unwrap();
+
+        assert_eq!(genesis.policy_anchor, Some(anchor));
+    }
+
+    // ── derive_sub_token_genesis ────────────────────────────────────
+
+    #[test]
+    fn derive_produces_valid_sub_token_genesis() {
+        let parent = create_token_genesis(
+            3,
+            three_participants(),
+            descriptor(),
+            None,
+            three_contributions(),
+        )
+        .unwrap();
+
+        let sub = derive_sub_token_genesis(
+            &parent,
+            b"sub-1",
+            3,
+            three_participants(),
+            None,
+            three_contributions(),
+        )
+        .unwrap();
+
+        assert_eq!(sub.threshold, 3);
+        assert_eq!(sub.participants.len(), 3);
+        assert_ne!(sub.token_hash, [0u8; 32]);
+        assert_ne!(sub.token_hash, parent.token_hash);
+    }
+
+    #[test]
+    fn different_sub_id_produces_different_result() {
+        let parent = create_token_genesis(
+            3,
+            three_participants(),
+            descriptor(),
+            None,
+            three_contributions(),
+        )
+        .unwrap();
+
+        let sub_a = derive_sub_token_genesis(
+            &parent,
+            b"sub-A",
+            3,
+            three_participants(),
+            None,
+            three_contributions(),
+        )
+        .unwrap();
+
+        let sub_b = derive_sub_token_genesis(
+            &parent,
+            b"sub-B",
+            3,
+            three_participants(),
+            None,
+            three_contributions(),
+        )
+        .unwrap();
+
+        assert_ne!(sub_a.token_hash, sub_b.token_hash);
+        assert_ne!(sub_a.token_entropy, sub_b.token_entropy);
+    }
+
+    #[test]
+    fn derive_inherits_parent_policy_anchor_when_none_provided() {
+        let anchor = PolicyAnchor([0x77; 32]);
+        let parent = create_token_genesis(
+            3,
+            three_participants(),
+            descriptor(),
+            Some(anchor.clone()),
+            three_contributions(),
+        )
+        .unwrap();
+
+        let sub = derive_sub_token_genesis(
+            &parent,
+            b"sub-inherit",
+            3,
+            three_participants(),
+            None,
+            three_contributions(),
+        )
+        .unwrap();
+
+        assert_eq!(sub.policy_anchor, Some(anchor));
+    }
+
+    #[test]
+    fn derive_overrides_policy_anchor_when_provided() {
+        let parent_anchor = PolicyAnchor([0x77; 32]);
+        let child_anchor = PolicyAnchor([0x88; 32]);
+        let parent = create_token_genesis(
+            3,
+            three_participants(),
+            descriptor(),
+            Some(parent_anchor),
+            three_contributions(),
+        )
+        .unwrap();
+
+        let sub = derive_sub_token_genesis(
+            &parent,
+            b"sub-override",
+            3,
+            three_participants(),
+            Some(child_anchor.clone()),
+            three_contributions(),
+        )
+        .unwrap();
+
+        assert_eq!(sub.policy_anchor, Some(child_anchor));
+    }
+
+    // ── Determinism tests ───────────────────────────────────────────
+
+    #[test]
+    fn identical_inputs_produce_identical_results() {
+        let make = || {
+            create_token_genesis(
+                3,
+                three_participants(),
+                descriptor(),
+                None,
+                three_contributions(),
+            )
+            .unwrap()
+        };
+
+        let a = make();
+        let b = make();
+        assert_eq!(a.token_hash, b.token_hash);
+        assert_eq!(a.token_entropy, b.token_entropy);
+        assert_eq!(a.threshold, b.threshold);
+        assert_eq!(a.participants, b.participants);
+        assert_eq!(a.contributions.len(), b.contributions.len());
+        for (ca, cb) in a.contributions.iter().zip(b.contributions.iter()) {
+            assert_eq!(ca.participant, cb.participant);
+            assert_eq!(ca.material, cb.material);
+        }
+    }
+
+    #[test]
+    fn contribution_order_does_not_affect_result() {
+        let g1 = create_token_genesis(
+            3,
+            three_participants(),
+            descriptor(),
+            None,
+            vec![contrib(1), contrib(2), contrib(3)],
+        )
+        .unwrap();
+
+        let g2 = create_token_genesis(
+            3,
+            three_participants(),
+            descriptor(),
+            None,
+            vec![contrib(3), contrib(1), contrib(2)],
+        )
+        .unwrap();
+
+        assert_eq!(g1.token_hash, g2.token_hash);
+        assert_eq!(g1.token_entropy, g2.token_entropy);
+    }
+
+    #[test]
+    fn participant_order_does_not_affect_result() {
+        let g1 = create_token_genesis(
+            3,
+            vec![pid(1), pid(2), pid(3)],
+            descriptor(),
+            None,
+            three_contributions(),
+        )
+        .unwrap();
+
+        let g2 = create_token_genesis(
+            3,
+            vec![pid(3), pid(1), pid(2)],
+            descriptor(),
+            None,
+            three_contributions(),
+        )
+        .unwrap();
+
+        assert_eq!(g1.token_hash, g2.token_hash);
+        assert_eq!(g1.token_entropy, g2.token_entropy);
+    }
+
+    #[test]
+    fn only_threshold_contributions_are_kept() {
+        let participants = vec![pid(1), pid(2), pid(3), pid(4), pid(5)];
+        let contributions = vec![
+            contrib(1),
+            contrib(2),
+            contrib(3),
+            contrib(4),
+            contrib(5),
+        ];
+        let genesis =
+            create_token_genesis(3, participants, descriptor(), None, contributions).unwrap();
+
+        assert_eq!(genesis.contributions.len(), 3);
+        assert_eq!(genesis.contributions[0].participant, pid(1));
+        assert_eq!(genesis.contributions[1].participant, pid(2));
+        assert_eq!(genesis.contributions[2].participant, pid(3));
+    }
+
+    #[test]
+    fn token_hash_differs_from_token_entropy() {
+        let genesis = create_token_genesis(
+            3,
+            three_participants(),
+            descriptor(),
+            None,
+            three_contributions(),
+        )
+        .unwrap();
+
+        assert_ne!(genesis.token_hash, genesis.token_entropy);
+    }
+}

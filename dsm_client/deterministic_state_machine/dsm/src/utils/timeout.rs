@@ -330,3 +330,219 @@ pub fn calculate_retry_delay(attempt: usize) -> Duration {
     let factor: u32 = 2_u32.pow(attempt as u32).min(4);
     (base_delay * factor).min(max_delay)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── OperationType::timeout tick values ──
+
+    #[test]
+    fn genesis_creation_timeout() {
+        assert_eq!(
+            OperationType::GenesisCreation.timeout().as_ticks(),
+            50_000
+        );
+    }
+
+    #[test]
+    fn identity_verification_timeout() {
+        assert_eq!(
+            OperationType::IdentityVerification.timeout().as_ticks(),
+            2_500
+        );
+    }
+
+    #[test]
+    fn storage_node_connectivity_timeout() {
+        assert_eq!(
+            OperationType::StorageNodeConnectivity.timeout().as_ticks(),
+            833
+        );
+    }
+
+    #[test]
+    fn mpc_contribution_timeout() {
+        assert_eq!(
+            OperationType::MpcContribution.timeout().as_ticks(),
+            5_000
+        );
+    }
+
+    #[test]
+    fn transaction_processing_timeout() {
+        assert_eq!(
+            OperationType::TransactionProcessing.timeout().as_ticks(),
+            2_500
+        );
+    }
+
+    #[test]
+    fn bilateral_transaction_timeout_with_default_calibration() {
+        let ticks = OperationType::BilateralTransaction.timeout().as_ticks();
+        // Default calibration: performance_factor = 1.0, base = 10_000
+        // scaled = 10_000 / 1.0 = 10_000, max = 50_000 → min(10_000, 50_000) = 10_000
+        assert_eq!(ticks, 10_000);
+    }
+
+    #[test]
+    fn crypto_operation_timeout() {
+        assert_eq!(
+            OperationType::CryptoOperation.timeout().as_ticks(),
+            833
+        );
+    }
+
+    #[test]
+    fn http_request_timeout() {
+        assert_eq!(OperationType::HttpRequest.timeout().as_ticks(), 416);
+    }
+
+    // ── OperationType::retry_count ──
+
+    #[test]
+    fn retry_counts() {
+        assert_eq!(OperationType::GenesisCreation.retry_count(), 1);
+        assert_eq!(OperationType::IdentityVerification.retry_count(), 3);
+        assert_eq!(OperationType::StorageNodeConnectivity.retry_count(), 3);
+        assert_eq!(OperationType::MpcContribution.retry_count(), 2);
+        assert_eq!(OperationType::TransactionProcessing.retry_count(), 3);
+        assert_eq!(OperationType::BilateralTransaction.retry_count(), 2);
+        assert_eq!(OperationType::CryptoOperation.retry_count(), 2);
+        assert_eq!(OperationType::HttpRequest.retry_count(), 3);
+    }
+
+    // ── OperationType::should_retry ──
+
+    #[test]
+    fn should_retry_true_variants() {
+        assert!(OperationType::IdentityVerification.should_retry());
+        assert!(OperationType::StorageNodeConnectivity.should_retry());
+        assert!(OperationType::TransactionProcessing.should_retry());
+        assert!(OperationType::HttpRequest.should_retry());
+    }
+
+    #[test]
+    fn should_retry_false_variants() {
+        assert!(!OperationType::GenesisCreation.should_retry());
+        assert!(!OperationType::MpcContribution.should_retry());
+        assert!(!OperationType::BilateralTransaction.should_retry());
+        assert!(!OperationType::CryptoOperation.should_retry());
+    }
+
+    // ── TimeoutConfig constants ──
+
+    #[test]
+    fn timeout_config_genesis() {
+        assert_eq!(TimeoutConfig::genesis_creation().as_ticks(), 50_000);
+    }
+
+    #[test]
+    fn timeout_config_identity() {
+        assert_eq!(TimeoutConfig::identity_verification().as_ticks(), 2_500);
+    }
+
+    #[test]
+    fn timeout_config_storage_node() {
+        assert_eq!(TimeoutConfig::storage_node_connectivity().as_ticks(), 833);
+    }
+
+    #[test]
+    fn timeout_config_mpc() {
+        assert_eq!(TimeoutConfig::mpc_contribution().as_ticks(), 5_000);
+    }
+
+    #[test]
+    fn timeout_config_transaction() {
+        assert_eq!(TimeoutConfig::transaction_processing().as_ticks(), 2_500);
+    }
+
+    #[test]
+    fn timeout_config_crypto() {
+        assert_eq!(TimeoutConfig::crypto_operation().as_ticks(), 833);
+    }
+
+    #[test]
+    fn timeout_config_http() {
+        assert_eq!(TimeoutConfig::http_request().as_ticks(), 416);
+    }
+
+    // ── calculate_retry_delay ──
+
+    #[test]
+    fn retry_delay_attempt_0() {
+        // 2^0 = 1, base * 1 = 2000
+        let d = calculate_retry_delay(0);
+        assert_eq!(d.as_ticks(), 2000);
+    }
+
+    #[test]
+    fn retry_delay_attempt_1() {
+        // 2^1 = 2, base * 2 = 4000
+        let d = calculate_retry_delay(1);
+        assert_eq!(d.as_ticks(), 4000);
+    }
+
+    #[test]
+    fn retry_delay_attempt_2() {
+        // 2^2 = 4, base * 4 = 8000, capped at max_delay 8000
+        let d = calculate_retry_delay(2);
+        assert_eq!(d.as_ticks(), 8000);
+    }
+
+    #[test]
+    fn retry_delay_attempt_3_capped() {
+        // 2^3 = 8 → min(8, 4) = 4, base * 4 = 8000, capped at 8000
+        let d = calculate_retry_delay(3);
+        assert_eq!(d.as_ticks(), 8000);
+    }
+
+    #[test]
+    fn retry_delay_attempt_4_still_capped() {
+        // 2^4 = 16 → min(16, 4) = 4, base * 4 = 8000
+        let d = calculate_retry_delay(4);
+        assert_eq!(d.as_ticks(), 8000);
+    }
+
+    #[test]
+    fn retry_delay_attempt_10_capped() {
+        // 2^10 = 1024 → min(1024, 4) = 4, base * 4 = 8000
+        let d = calculate_retry_delay(10);
+        assert_eq!(d.as_ticks(), 8000);
+    }
+
+    #[test]
+    fn retry_delay_monotonically_non_decreasing() {
+        let d0 = calculate_retry_delay(0).as_ticks();
+        let d1 = calculate_retry_delay(1).as_ticks();
+        let d2 = calculate_retry_delay(2).as_ticks();
+        assert!(d0 <= d1);
+        assert!(d1 <= d2);
+    }
+
+    // ── DeviceCalibration ──
+
+    #[test]
+    fn device_calibration_default() {
+        let cal = DeviceCalibration::default();
+        assert!((cal.ticks_per_second - 12.0).abs() < f64::EPSILON);
+        assert!((cal.performance_factor - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn get_device_calibration_returns_default_when_unset() {
+        let cal = get_device_calibration();
+        assert!((cal.performance_factor - 1.0).abs() < f64::EPSILON);
+    }
+
+    // ── OperationType is Clone + Copy + Debug ──
+
+    #[test]
+    fn operation_type_clone_copy_debug() {
+        let op = OperationType::HttpRequest;
+        let op2 = op;
+        let op3 = op.clone();
+        let _ = format!("{:?}", op2);
+        let _ = format!("{:?}", op3);
+    }
+}

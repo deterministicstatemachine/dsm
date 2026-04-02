@@ -704,4 +704,197 @@ mod tests {
 
         assert_eq!(blake3::hash(&b1).as_bytes(), blake3::hash(&b2).as_bytes());
     }
+
+    #[test]
+    fn anchor_from_bytes_as_bytes_roundtrip() {
+        let raw = [0xABu8; 32];
+        let anchor = PolicyAnchor::from_bytes(raw);
+        assert_eq!(*anchor.as_bytes(), raw);
+    }
+
+    #[test]
+    fn anchor_base32_roundtrip() {
+        let raw = [0x42u8; 32];
+        let anchor = PolicyAnchor::from_bytes(raw);
+        let encoded = anchor.to_base32();
+        let decoded = PolicyAnchor::from_base32(&encoded).unwrap();
+        assert_eq!(anchor.0, decoded.0);
+    }
+
+    #[test]
+    fn anchor_from_base32_invalid_string() {
+        let result = PolicyAnchor::from_base32("!!invalid!!");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn anchor_from_base32_wrong_length() {
+        let short = base32::encode(base32::Alphabet::Crockford, &[1, 2, 3]);
+        let result = PolicyAnchor::from_base32(&short);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn anchor_path_component_roundtrip_no_special_bytes() {
+        let raw = [0x42u8; 32];
+        let anchor = PolicyAnchor::from_bytes(raw);
+        let encoded = anchor.to_path_component_bytes();
+        let decoded = PolicyAnchor::from_path_component_bytes(&encoded).unwrap();
+        assert_eq!(anchor.0, decoded.0);
+        assert_eq!(encoded.len(), 32, "No escaping needed for 0x42");
+    }
+
+    #[test]
+    fn anchor_path_component_roundtrip_with_special_bytes() {
+        let mut raw = [0u8; 32];
+        raw[0] = 0x00; // NUL — forbidden
+        raw[1] = 0x2F; // '/' — forbidden
+        raw[2] = 0xFF; // ESC sentinel
+        let anchor = PolicyAnchor::from_bytes(raw);
+        let encoded = anchor.to_path_component_bytes();
+        assert!(encoded.len() > 32, "Special bytes should be escaped");
+        let decoded = PolicyAnchor::from_path_component_bytes(&encoded).unwrap();
+        assert_eq!(anchor.0, decoded.0);
+    }
+
+    #[test]
+    fn from_path_component_bytes_truncated_escape() {
+        let bad = vec![0xFF]; // ESC with no following byte
+        assert!(PolicyAnchor::from_path_component_bytes(&bad).is_none());
+    }
+
+    #[test]
+    fn from_path_component_bytes_too_long() {
+        let too_long = vec![0x42u8; 33];
+        assert!(PolicyAnchor::from_path_component_bytes(&too_long).is_none());
+    }
+
+    #[test]
+    fn policy_file_builder_methods() {
+        let mut pf = PolicyFile::new("test", "v1", "alice");
+        pf.with_description("A test policy");
+        pf.add_metadata("key1", "val1");
+        pf.add_condition(PolicyCondition::LogicalTimeConstraint {
+            min_tick: 0,
+            max_tick: 100,
+        });
+        pf.add_role(PolicyRole {
+            id: "r1".into(),
+            name: "Role1".into(),
+            permissions: vec!["read".into()],
+        });
+
+        assert_eq!(pf.description.as_deref(), Some("A test policy"));
+        assert_eq!(pf.metadata.get("key1").unwrap(), "val1");
+        assert_eq!(pf.conditions.len(), 1);
+        assert_eq!(pf.roles.len(), 1);
+    }
+
+    #[test]
+    fn policy_file_to_bytes_from_bytes_roundtrip() {
+        let mut pf = PolicyFile::new("roundtrip", "v2", "bob");
+        pf.with_description("desc");
+        pf.add_metadata("k", "v");
+        pf.add_condition(PolicyCondition::IdentityConstraint {
+            allowed_identities: vec!["id1".into()],
+            allow_derived: true,
+        });
+        pf.add_role(PolicyRole {
+            id: "admin".into(),
+            name: "Admin".into(),
+            permissions: vec!["write".into(), "read".into()],
+        });
+
+        let bytes = pf.to_bytes().unwrap();
+        let restored = PolicyFile::from_bytes(&bytes).unwrap();
+        assert_eq!(restored.name, "roundtrip");
+        assert_eq!(restored.version, "v2");
+        assert_eq!(restored.author, "bob");
+        assert_eq!(restored.description.as_deref(), Some("desc"));
+        assert_eq!(restored.conditions.len(), 1);
+        assert_eq!(restored.roles.len(), 1);
+        assert_eq!(restored.roles[0].id, "admin");
+    }
+
+    #[test]
+    fn policy_file_canonical_bytes_from_canonical_bytes_roundtrip() {
+        let mut pf = PolicyFile::new("name", "v1", "carol");
+        pf.add_condition(PolicyCondition::EmissionsSchedule {
+            total_supply: 1_000_000,
+            shard_depth: 4,
+            schedule_steps: 10,
+            initial_step_emissions: 500,
+            initial_step_amount: 100,
+        });
+        let canonical = pf.canonical_bytes().unwrap();
+        let restored = PolicyFile::from_canonical_bytes(&canonical).unwrap();
+        assert_eq!(restored.author, "carol");
+        assert_eq!(restored.conditions.len(), 1);
+        assert!(restored.name.is_empty(), "name excluded from canonical");
+    }
+
+    #[test]
+    fn token_policy_new_and_mark_verified() {
+        let pf = PolicyFile::new("tp", "v1", "auth");
+        let mut tp = TokenPolicy::new(pf).unwrap();
+        assert!(!tp.verified);
+        tp.mark_verified();
+        assert!(tp.verified);
+    }
+
+    #[test]
+    fn token_policy_conditions_always_satisfied() {
+        let pf = PolicyFile::new("tp", "v1", "auth");
+        let tp = TokenPolicy::new(pf).unwrap();
+        let cond = PolicyCondition::LogicalTimeConstraint {
+            min_tick: 0,
+            max_tick: 100,
+        };
+        assert!(tp.is_condition_satisfied(&cond));
+        assert!(tp.are_time_conditions_satisfied());
+    }
+
+    #[test]
+    fn policy_verification_success_and_failure() {
+        let pv = PolicyVerification::new(VerificationType::Standard);
+        assert!(!pv.result);
+        assert!(pv.message.is_none());
+
+        let success = PolicyVerification::new(VerificationType::Standard)
+            .with_parameter("pk", vec![1, 2, 3])
+            .success(Some("ok".into()), Some(vec![9]));
+        assert!(success.result);
+        assert_eq!(success.message.as_deref(), Some("ok"));
+        assert_eq!(success.proof, Some(vec![9]));
+        assert_eq!(success.parameters.get("pk").unwrap(), &vec![1, 2, 3]);
+
+        let fail = PolicyVerification::new(VerificationType::Standard)
+            .failure("bad".into());
+        assert!(!fail.result);
+        assert_eq!(fail.message.as_deref(), Some("bad"));
+    }
+
+    #[test]
+    fn vault_condition_proto_roundtrip() {
+        let conditions = vec![
+            VaultCondition::Hash(vec![1, 2, 3]),
+            VaultCondition::MinimumBalance(1000),
+            VaultCondition::VaultType("standard".into()),
+            VaultCondition::SmartPolicy(vec![0xDE, 0xAD]),
+        ];
+        for cond in &conditions {
+            let proto: crate::types::proto::VaultConditionProto = cond.into();
+            let restored = VaultCondition::try_from(&proto).unwrap();
+            assert_eq!(&restored, cond);
+        }
+    }
+
+    #[test]
+    fn different_authors_produce_different_anchors() {
+        let p1 = PolicyFile::new("n", "v", "alice");
+        let p2 = PolicyFile::new("n", "v", "bob");
+        let a1 = p1.generate_anchor().unwrap();
+        let a2 = p2.generate_anchor().unwrap();
+        assert_ne!(a1.0, a2.0);
+    }
 }

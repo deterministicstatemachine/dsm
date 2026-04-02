@@ -93,3 +93,110 @@ impl ShardCountSmt {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_smt_has_zero_total() {
+        let smt = ShardCountSmt::new(2);
+        assert_eq!(smt.total(), 0);
+        assert_eq!(smt.shard_depth, 2);
+    }
+
+    #[test]
+    fn get_count_returns_zero_for_absent_keys() {
+        let smt = ShardCountSmt::new(3);
+        assert_eq!(smt.get_count(1), 0);
+        assert_eq!(smt.get_count(42), 0);
+        assert_eq!(smt.get_count(u64::MAX), 0);
+    }
+
+    #[test]
+    fn increment_updates_leaf_and_ancestors() {
+        let mut smt = ShardCountSmt::new(2);
+        // depth=2 → leaves at heap indices 4,5,6,7 (shard_index 0,1,2,3)
+        smt.increment(0).unwrap();
+
+        // Leaf at heap_index = 2^2 + 0 = 4
+        assert_eq!(smt.get_count(4), 1);
+        // Parent at heap_index = 2^1 + 0 = 2
+        assert_eq!(smt.get_count(2), 1);
+        // Root at heap_index = 2^0 + 0 = 1
+        assert_eq!(smt.get_count(1), 1);
+        assert_eq!(smt.total(), 1);
+    }
+
+    #[test]
+    fn increment_multiple_shards_accumulates_correctly() {
+        let mut smt = ShardCountSmt::new(2);
+        smt.increment(0).unwrap();
+        smt.increment(1).unwrap();
+        smt.increment(0).unwrap();
+
+        // Shard 0 leaf (heap 4): incremented twice
+        assert_eq!(smt.get_count(4), 2);
+        // Shard 1 leaf (heap 5): incremented once
+        assert_eq!(smt.get_count(5), 1);
+        // Left subtree (heap 2): both shard 0 and 1 roll up here
+        assert_eq!(smt.get_count(2), 3);
+        // Root (heap 1): total
+        assert_eq!(smt.total(), 3);
+    }
+
+    #[test]
+    fn root_is_deterministic() {
+        let mut smt1 = ShardCountSmt::new(2);
+        smt1.increment(0).unwrap();
+        smt1.increment(1).unwrap();
+
+        let mut smt2 = ShardCountSmt::new(2);
+        smt2.increment(0).unwrap();
+        smt2.increment(1).unwrap();
+
+        assert_eq!(smt1.root(), smt2.root());
+    }
+
+    #[test]
+    fn root_changes_on_increment() {
+        let mut smt = ShardCountSmt::new(2);
+        let root_before = smt.root();
+
+        smt.increment(0).unwrap();
+        let root_after = smt.root();
+
+        assert_ne!(root_before, root_after);
+    }
+
+    #[test]
+    fn root_differs_for_different_shards() {
+        let mut smt_a = ShardCountSmt::new(2);
+        smt_a.increment(0).unwrap();
+
+        let mut smt_b = ShardCountSmt::new(2);
+        smt_b.increment(1).unwrap();
+
+        assert_ne!(smt_a.root(), smt_b.root());
+    }
+
+    #[test]
+    fn depth_one_has_two_shards() {
+        let mut smt = ShardCountSmt::new(1);
+        // depth=1 → leaves at heap indices 2,3 (shard_index 0,1)
+        smt.increment(0).unwrap();
+        smt.increment(1).unwrap();
+
+        assert_eq!(smt.get_count(2), 1); // left leaf
+        assert_eq!(smt.get_count(3), 1); // right leaf
+        assert_eq!(smt.total(), 2);
+    }
+
+    #[test]
+    fn root_not_all_zeros() {
+        let smt = ShardCountSmt::new(2);
+        let root = smt.root();
+        // Even with zero counts, the Merkle hashing should produce a non-trivial root
+        assert_ne!(root, [0u8; 32]);
+    }
+}

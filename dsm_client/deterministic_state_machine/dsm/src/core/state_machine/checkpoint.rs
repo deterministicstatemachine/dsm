@@ -255,3 +255,370 @@ impl CheckpointManager {
         checkpoint.verify_state(state)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::operations::Operation;
+    use crate::types::state_types::{DeviceInfo, StateParams};
+
+    // ── Helpers ──────────────────────────────────────────────────────
+
+    fn dev_info() -> DeviceInfo {
+        DeviceInfo::new([0x11; 32], vec![0x22; 64])
+    }
+
+    fn make_dsm_state(n: u64) -> DsmState {
+        let mut s = DsmState::new(StateParams::new(
+            n,
+            vec![0xAA; 16],
+            Operation::Noop,
+            dev_info(),
+        ));
+        let hash_vec = s.compute_hash().unwrap();
+        s.hash.copy_from_slice(&hash_vec[..32]);
+        s
+    }
+
+    // ── Checkpoint::get_signing_data ────────────────────────────────
+
+    #[test]
+    fn signing_data_deterministic() {
+        let cp = Checkpoint {
+            id: "cp_1".into(),
+            state_number: 42,
+            state_hash: [0xAA; 32],
+            genesis_hash: [0xBB; 32],
+            tick: 100,
+            device_id: "device_a".into(),
+            signature: vec![],
+            merkle_proof: None,
+            is_invalidation: false,
+            invalidation_reason: None,
+        };
+        let d1 = cp.get_signing_data();
+        let d2 = cp.get_signing_data();
+        assert_eq!(d1, d2);
+        assert!(!d1.is_empty());
+    }
+
+    #[test]
+    fn signing_data_includes_state_number() {
+        let cp = Checkpoint {
+            id: "cp".into(),
+            state_number: 0x0102030405060708,
+            state_hash: [0; 32],
+            genesis_hash: [0; 32],
+            tick: 0,
+            device_id: "".into(),
+            signature: vec![],
+            merkle_proof: None,
+            is_invalidation: false,
+            invalidation_reason: None,
+        };
+        let data = cp.get_signing_data();
+        assert_eq!(&data[0..8], &0x0102030405060708u64.to_be_bytes());
+    }
+
+    #[test]
+    fn signing_data_includes_state_hash() {
+        let cp = Checkpoint {
+            id: "cp".into(),
+            state_number: 0,
+            state_hash: [0xCC; 32],
+            genesis_hash: [0; 32],
+            tick: 0,
+            device_id: "".into(),
+            signature: vec![],
+            merkle_proof: None,
+            is_invalidation: false,
+            invalidation_reason: None,
+        };
+        let data = cp.get_signing_data();
+        assert_eq!(&data[8..40], &[0xCC; 32]);
+    }
+
+    #[test]
+    fn signing_data_includes_genesis_hash() {
+        let cp = Checkpoint {
+            id: "cp".into(),
+            state_number: 0,
+            state_hash: [0; 32],
+            genesis_hash: [0xDD; 32],
+            tick: 0,
+            device_id: "".into(),
+            signature: vec![],
+            merkle_proof: None,
+            is_invalidation: false,
+            invalidation_reason: None,
+        };
+        let data = cp.get_signing_data();
+        assert_eq!(&data[40..72], &[0xDD; 32]);
+    }
+
+    #[test]
+    fn signing_data_includes_invalidation_flag() {
+        let cp_normal = Checkpoint {
+            id: "cp".into(),
+            state_number: 0,
+            state_hash: [0; 32],
+            genesis_hash: [0; 32],
+            tick: 0,
+            device_id: "".into(),
+            signature: vec![],
+            merkle_proof: None,
+            is_invalidation: false,
+            invalidation_reason: None,
+        };
+        let cp_invalid = Checkpoint {
+            id: "cp".into(),
+            state_number: 0,
+            state_hash: [0; 32],
+            genesis_hash: [0; 32],
+            tick: 0,
+            device_id: "".into(),
+            signature: vec![],
+            merkle_proof: None,
+            is_invalidation: true,
+            invalidation_reason: Some("compromised".into()),
+        };
+        let d1 = cp_normal.get_signing_data();
+        let d2 = cp_invalid.get_signing_data();
+        assert_ne!(d1, d2);
+    }
+
+    // ── Checkpoint::add_merkle_proof ────────────────────────────────
+
+    #[test]
+    fn add_merkle_proof() {
+        let mut cp = Checkpoint {
+            id: "cp".into(),
+            state_number: 0,
+            state_hash: [0; 32],
+            genesis_hash: [0; 32],
+            tick: 0,
+            device_id: "".into(),
+            signature: vec![],
+            merkle_proof: None,
+            is_invalidation: false,
+            invalidation_reason: None,
+        };
+        assert!(cp.merkle_proof.is_none());
+        cp.add_merkle_proof(vec![1, 2, 3]);
+        assert_eq!(cp.merkle_proof, Some(vec![1, 2, 3]));
+    }
+
+    // ── Checkpoint::verify_state ────────────────────────────────────
+
+    #[test]
+    fn verify_state_matching() {
+        let state = make_dsm_state(10);
+        let mut state_hash = [0u8; 32];
+        let h = state.hash().unwrap();
+        state_hash.copy_from_slice(&h[0..32]);
+
+        let cp = Checkpoint {
+            id: "cp".into(),
+            state_number: 10,
+            state_hash,
+            genesis_hash: [0; 32],
+            tick: 0,
+            device_id: "".into(),
+            signature: vec![],
+            merkle_proof: None,
+            is_invalidation: false,
+            invalidation_reason: None,
+        };
+        assert!(cp.verify_state(&state).unwrap());
+    }
+
+    #[test]
+    fn verify_state_wrong_number() {
+        let state = make_dsm_state(10);
+        let mut state_hash = [0u8; 32];
+        let h = state.hash().unwrap();
+        state_hash.copy_from_slice(&h[0..32]);
+
+        let cp = Checkpoint {
+            id: "cp".into(),
+            state_number: 99, // wrong
+            state_hash,
+            genesis_hash: [0; 32],
+            tick: 0,
+            device_id: "".into(),
+            signature: vec![],
+            merkle_proof: None,
+            is_invalidation: false,
+            invalidation_reason: None,
+        };
+        assert!(!cp.verify_state(&state).unwrap());
+    }
+
+    #[test]
+    fn verify_state_wrong_hash() {
+        let state = make_dsm_state(10);
+
+        let cp = Checkpoint {
+            id: "cp".into(),
+            state_number: 10,
+            state_hash: [0xFF; 32], // wrong
+            genesis_hash: [0; 32],
+            tick: 0,
+            device_id: "".into(),
+            signature: vec![],
+            merkle_proof: None,
+            is_invalidation: false,
+            invalidation_reason: None,
+        };
+        assert!(!cp.verify_state(&state).unwrap());
+    }
+
+    // ── Checkpoint with Identity (bypasses sign for pure logic tests) ─
+
+    #[test]
+    fn checkpoint_verify_state_with_manual_construction() {
+        let state = make_dsm_state(5);
+        let hash_vec = state.hash().unwrap();
+        let mut state_hash = [0u8; 32];
+        state_hash.copy_from_slice(&hash_vec[..32]);
+
+        let cp = Checkpoint {
+            id: "cp_5".into(),
+            state_number: 5,
+            state_hash,
+            genesis_hash: [0; 32],
+            tick: 1,
+            device_id: "test_device".into(),
+            signature: vec![],
+            merkle_proof: None,
+            is_invalidation: false,
+            invalidation_reason: None,
+        };
+
+        assert_eq!(cp.state_number, 5);
+        assert_eq!(cp.device_id, "test_device");
+        assert!(!cp.is_invalidation);
+        assert!(cp.invalidation_reason.is_none());
+        assert!(cp.verify_state(&state).unwrap());
+    }
+
+    #[test]
+    fn checkpoint_invalidation_fields() {
+        let cp = Checkpoint {
+            id: "cp_inv".into(),
+            state_number: 3,
+            state_hash: [0; 32],
+            genesis_hash: [0; 32],
+            tick: 1,
+            device_id: "dev".into(),
+            signature: vec![],
+            merkle_proof: None,
+            is_invalidation: true,
+            invalidation_reason: Some("key compromised".into()),
+        };
+        assert!(cp.is_invalidation);
+        assert_eq!(cp.invalidation_reason.as_deref(), Some("key compromised"));
+    }
+
+    // ── CheckpointManager ───────────────────────────────────────────
+
+    #[test]
+    fn checkpoint_manager_default() {
+        let mgr = CheckpointManager::default();
+        let dbg = format!("{:?}", mgr);
+        assert!(dbg.contains("CheckpointManager"));
+    }
+
+    #[test]
+    fn checkpoint_manager_new() {
+        let _mgr = CheckpointManager::new();
+    }
+
+    // ── Checkpoint struct fields ────────────────────────────────────
+
+    #[test]
+    fn checkpoint_clone() {
+        let cp = Checkpoint {
+            id: "cp_1".into(),
+            state_number: 1,
+            state_hash: [0x01; 32],
+            genesis_hash: [0x02; 32],
+            tick: 42,
+            device_id: "dev".into(),
+            signature: vec![0x03; 10],
+            merkle_proof: Some(vec![0x04; 5]),
+            is_invalidation: true,
+            invalidation_reason: Some("test".into()),
+        };
+        let cp2 = cp.clone();
+        assert_eq!(cp.id, cp2.id);
+        assert_eq!(cp.state_hash, cp2.state_hash);
+        assert_eq!(cp.merkle_proof, cp2.merkle_proof);
+        assert_eq!(cp.invalidation_reason, cp2.invalidation_reason);
+    }
+
+    #[test]
+    fn checkpoint_debug_trait() {
+        let cp = Checkpoint {
+            id: "cp_dbg".into(),
+            state_number: 7,
+            state_hash: [0xFF; 32],
+            genesis_hash: [0; 32],
+            tick: 0,
+            device_id: "d".into(),
+            signature: vec![],
+            merkle_proof: None,
+            is_invalidation: false,
+            invalidation_reason: None,
+        };
+        let dbg = format!("{:?}", cp);
+        assert!(dbg.contains("cp_dbg"));
+        assert!(dbg.contains("7"));
+    }
+
+    #[test]
+    fn signing_data_varies_with_device_id() {
+        let cp_a = Checkpoint {
+            id: "cp".into(),
+            state_number: 0,
+            state_hash: [0; 32],
+            genesis_hash: [0; 32],
+            tick: 0,
+            device_id: "dev_a".into(),
+            signature: vec![],
+            merkle_proof: None,
+            is_invalidation: false,
+            invalidation_reason: None,
+        };
+        let cp_b = Checkpoint {
+            id: "cp".into(),
+            state_number: 0,
+            state_hash: [0; 32],
+            genesis_hash: [0; 32],
+            tick: 0,
+            device_id: "dev_b".into(),
+            signature: vec![],
+            merkle_proof: None,
+            is_invalidation: false,
+            invalidation_reason: None,
+        };
+        assert_ne!(cp_a.get_signing_data(), cp_b.get_signing_data());
+    }
+
+    #[test]
+    fn signing_data_varies_with_tick() {
+        let make = |tick: u64| Checkpoint {
+            id: "cp".into(),
+            state_number: 0,
+            state_hash: [0; 32],
+            genesis_hash: [0; 32],
+            tick,
+            device_id: "dev".into(),
+            signature: vec![],
+            merkle_proof: None,
+            is_invalidation: false,
+            invalidation_reason: None,
+        };
+        assert_ne!(make(1).get_signing_data(), make(2).get_signing_data());
+    }
+}

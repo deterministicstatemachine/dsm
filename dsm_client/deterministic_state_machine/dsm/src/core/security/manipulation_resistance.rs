@@ -437,3 +437,363 @@ struct TransferDetails {
     amount: u64,
     recipient: Vec<u8>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::operations::TransactionMode;
+    use crate::types::state_types::{DeviceInfo, State, StateParams};
+    use crate::types::token_types::Balance;
+
+    // ── Helpers ──────────────────────────────────────────────────────
+
+    fn dev_info() -> DeviceInfo {
+        DeviceInfo::new([0x11; 32], vec![0x22; 64])
+    }
+
+    fn make_state(n: u64) -> State {
+        State::new(StateParams::new(
+            n,
+            vec![0xAA; 16],
+            Operation::Noop,
+            dev_info(),
+        ))
+    }
+
+    fn make_transfer_op(amount: u64, recipient: &[u8], token_id: &[u8]) -> Operation {
+        Operation::Transfer {
+            to_device_id: recipient.to_vec(),
+            amount: Balance::from_state(amount, [0; 32], 0),
+            token_id: token_id.to_vec(),
+            mode: TransactionMode::Unilateral,
+            nonce: vec![0x01; 16],
+            verification: crate::types::operations::VerificationType::Standard,
+            pre_commit: None,
+            recipient: recipient.to_vec(),
+            to: recipient.to_vec(),
+            message: "test transfer".into(),
+            signature: vec![],
+        }
+    }
+
+    // ── extract_transfer_operation ───────────────────────────────────
+
+    #[test]
+    fn extract_transfer_from_noop_returns_none() {
+        assert!(ManipulationResistance::extract_transfer_operation(&Operation::Noop).is_none());
+    }
+
+    #[test]
+    fn extract_transfer_from_transfer_returns_details() {
+        let op = make_transfer_op(500, b"bob", b"ERA");
+        let details = ManipulationResistance::extract_transfer_operation(&op).unwrap();
+        assert_eq!(details.amount, 500);
+        assert_eq!(details.recipient, b"bob");
+    }
+
+    #[test]
+    fn extract_transfer_from_genesis_returns_none() {
+        assert!(
+            ManipulationResistance::extract_transfer_operation(&Operation::Genesis).is_none()
+        );
+    }
+
+    // ── verify_double_spend_impossible ───────────────────────────────
+
+    #[test]
+    fn double_spend_no_proposed_states_passes() {
+        let current = make_state(5);
+        let result =
+            ManipulationResistance::verify_double_spend_impossible(&current, &[]).unwrap();
+        assert!(result, "no proposed states means no double spend");
+    }
+
+    #[test]
+    fn double_spend_single_proposed_state_passes() {
+        let mut current = make_state(5);
+        current
+            .token_balances
+            .insert("tok".into(), Balance::from_state(100, [0; 32], 5));
+        current.hash = current.compute_hash().unwrap();
+
+        let mut proposed = make_state(6);
+        proposed.prev_state_hash = current.hash;
+        proposed.hash = proposed.compute_hash().unwrap();
+
+        let result = ManipulationResistance::verify_double_spend_impossible(
+            &current,
+            &[proposed],
+        )
+        .unwrap();
+        assert!(result);
+    }
+
+    #[test]
+    fn double_spend_conflicting_recipients_same_full_balance() {
+        let mut current = make_state(5);
+        current
+            .token_balances
+            .insert("tok".into(), Balance::from_state(100, [0; 32], 5));
+        current.hash = current.compute_hash().unwrap();
+
+        let mut proposed_a = make_state(6);
+        proposed_a.operation = make_transfer_op(100, b"alice", b"tok");
+        proposed_a.prev_state_hash = current.hash;
+
+        let mut proposed_b = make_state(6);
+        proposed_b.operation = make_transfer_op(100, b"bob", b"tok");
+        proposed_b.prev_state_hash = current.hash;
+
+        let result = ManipulationResistance::verify_double_spend_impossible(
+            &current,
+            &[proposed_a, proposed_b],
+        )
+        .unwrap();
+        assert!(!result, "transferring full balance to two different recipients is a double spend");
+    }
+
+    #[test]
+    fn double_spend_exceeding_balance() {
+        let mut current = make_state(5);
+        current
+            .token_balances
+            .insert("tok".into(), Balance::from_state(100, [0; 32], 5));
+        current.hash = current.compute_hash().unwrap();
+
+        let mut proposed_a = make_state(6);
+        proposed_a.operation = make_transfer_op(60, b"alice", b"tok");
+        proposed_a.prev_state_hash = current.hash;
+
+        let mut proposed_b = make_state(6);
+        proposed_b.operation = make_transfer_op(60, b"bob", b"tok");
+        proposed_b.prev_state_hash = current.hash;
+
+        let result = ManipulationResistance::verify_double_spend_impossible(
+            &current,
+            &[proposed_a, proposed_b],
+        )
+        .unwrap();
+        assert!(!result, "60+60=120 > 100 available");
+    }
+
+    #[test]
+    fn double_spend_wrong_state_numbers() {
+        let mut current = make_state(5);
+        current.hash = current.compute_hash().unwrap();
+
+        let mut proposed_a = make_state(7); // wrong: should be 6
+        proposed_a.prev_state_hash = current.hash;
+
+        let mut proposed_b = make_state(6);
+        proposed_b.prev_state_hash = current.hash;
+
+        let result = ManipulationResistance::verify_double_spend_impossible(
+            &current,
+            &[proposed_a, proposed_b],
+        )
+        .unwrap();
+        assert!(!result, "state_number must be current + 1");
+    }
+
+    #[test]
+    fn double_spend_wrong_prev_hash() {
+        let mut current = make_state(5);
+        current.hash = current.compute_hash().unwrap();
+
+        let mut proposed_a = make_state(6);
+        proposed_a.prev_state_hash = current.hash;
+
+        let mut proposed_b = make_state(6);
+        proposed_b.prev_state_hash = [0xFF; 32]; // wrong hash
+
+        let result = ManipulationResistance::verify_double_spend_impossible(
+            &current,
+            &[proposed_a, proposed_b],
+        )
+        .unwrap();
+        assert!(!result, "prev_state_hash must match");
+    }
+
+    // ── verify_state_transition_rules ───────────────────────────────
+
+    #[test]
+    fn transition_rules_wrong_increment() {
+        let mut current = make_state(5);
+        current.hash = current.compute_hash().unwrap();
+
+        let mut next = make_state(7); // should be 6
+        next.prev_state_hash = current.hash;
+        next.hash = next.compute_hash().unwrap();
+
+        let result =
+            ManipulationResistance::verify_state_transition_rules(&current, &next).unwrap();
+        assert!(!result);
+    }
+
+    #[test]
+    fn transition_rules_wrong_prev_hash() {
+        let mut current = make_state(5);
+        current.hash = current.compute_hash().unwrap();
+
+        let mut next = make_state(6);
+        next.prev_state_hash = [0xFF; 32]; // wrong
+        next.hash = next.compute_hash().unwrap();
+
+        let result =
+            ManipulationResistance::verify_state_transition_rules(&current, &next).unwrap();
+        assert!(!result);
+    }
+
+    #[test]
+    fn transition_rules_balance_conservation() {
+        let mut current = make_state(5);
+        current
+            .token_balances
+            .insert("tok".into(), Balance::from_state(100, [0; 32], 5));
+        current.hash = current.compute_hash().unwrap();
+
+        let mut next = make_state(6);
+        next.token_balances
+            .insert("tok".into(), Balance::from_state(100, [0; 32], 6));
+        next.prev_state_hash = current.hash;
+
+        let result =
+            ManipulationResistance::verify_state_transition_rules(&current, &next).unwrap();
+        assert!(result, "same total balance should pass conservation check");
+    }
+
+    #[test]
+    fn transition_rules_balance_not_conserved() {
+        let mut current = make_state(5);
+        current
+            .token_balances
+            .insert("tok".into(), Balance::from_state(100, [0; 32], 5));
+        current.hash = current.compute_hash().unwrap();
+
+        let mut next = make_state(6);
+        next.token_balances
+            .insert("tok".into(), Balance::from_state(200, [0; 32], 6));
+        next.prev_state_hash = current.hash;
+
+        let result =
+            ManipulationResistance::verify_state_transition_rules(&current, &next).unwrap();
+        assert!(!result, "different total balance should fail conservation");
+    }
+
+    // ── verify_balance_conservation ─────────────────────────────────
+
+    #[test]
+    fn balance_conservation_add_relationship_unchanged() {
+        let mut current = make_state(5);
+        current
+            .token_balances
+            .insert("tok".into(), Balance::from_state(50, [0; 32], 5));
+
+        let mut next = make_state(6);
+        next.operation = Operation::AddRelationship {
+            from_id: [0x01; 32],
+            to_id: [0x02; 32],
+            relationship_type: b"bilateral".to_vec(),
+            metadata: vec![],
+            proof: vec![],
+            mode: TransactionMode::Bilateral,
+            message: "test".into(),
+        };
+        next.token_balances
+            .insert("tok".into(), Balance::from_state(50, [0; 32], 6));
+
+        let result =
+            ManipulationResistance::verify_balance_conservation(&current, &next).unwrap();
+        assert!(result);
+    }
+
+    #[test]
+    fn balance_conservation_add_relationship_changed_fails() {
+        let mut current = make_state(5);
+        current
+            .token_balances
+            .insert("tok".into(), Balance::from_state(50, [0; 32], 5));
+
+        let mut next = make_state(6);
+        next.operation = Operation::AddRelationship {
+            from_id: [0x01; 32],
+            to_id: [0x02; 32],
+            relationship_type: b"bilateral".to_vec(),
+            metadata: vec![],
+            proof: vec![],
+            mode: TransactionMode::Bilateral,
+            message: "test".into(),
+        };
+        next.token_balances
+            .insert("tok".into(), Balance::from_state(999, [0; 32], 6));
+
+        let result =
+            ManipulationResistance::verify_balance_conservation(&current, &next).unwrap();
+        assert!(!result);
+    }
+
+    // ── verify_signatures (state gap) ───────────────────────────────
+
+    #[test]
+    fn verify_signatures_excessive_gap_fails() {
+        let mut current = make_state(5);
+        current.hash = current.compute_hash().unwrap();
+
+        let mut next = make_state(200);
+        next.prev_state_hash = current.hash;
+        next.hash = next.compute_hash().unwrap();
+
+        let result = ManipulationResistance::verify_signatures(&current, &next).unwrap();
+        assert!(!result, "gap of 195 > MAX_STATE_GAP=100 should fail");
+    }
+
+    #[test]
+    fn verify_signatures_normal_gap_passes_no_sigs() {
+        let mut current = make_state(5);
+        current.hash = current.compute_hash().unwrap();
+
+        let next = make_state(6);
+
+        let result = ManipulationResistance::verify_signatures(&current, &next).unwrap();
+        assert!(result, "gap of 1 with no signatures should pass");
+    }
+
+    // ── verify_commitment_binding ───────────────────────────────────
+
+    #[test]
+    fn commitment_binding_no_commitments_passes() {
+        let s0 = make_state(0);
+        let s1 = make_state(1);
+        let s2 = make_state(2);
+        let result =
+            ManipulationResistance::verify_commitment_binding(&[s0, s1, s2]).unwrap();
+        assert!(result, "no forward commitments means binding is trivially satisfied");
+    }
+
+    #[test]
+    fn commitment_binding_too_few_states() {
+        let s0 = make_state(0);
+        let s1 = make_state(1);
+        let result = ManipulationResistance::verify_commitment_binding(&[s0, s1]).unwrap();
+        assert!(result, "fewer than 3 states means no windows(3), trivially true");
+    }
+
+    #[test]
+    fn commitment_binding_empty() {
+        let result = ManipulationResistance::verify_commitment_binding(&[]).unwrap();
+        assert!(result);
+    }
+
+    // ── TransferDetails ─────────────────────────────────────────────
+
+    #[test]
+    fn transfer_details_debug() {
+        let td = TransferDetails {
+            amount: 42,
+            recipient: vec![1, 2, 3],
+        };
+        let dbg = format!("{:?}", td);
+        assert!(dbg.contains("42"));
+        assert!(dbg.contains("recipient"));
+    }
+}

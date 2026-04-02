@@ -506,3 +506,215 @@ pub fn get_global_metrics_snapshot() -> Vec<u8> {
     )
     .into_bytes()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── TelemetryConfig ─────────────────────────────────────────────
+
+    #[test]
+    fn telemetry_config_default() {
+        let cfg = TelemetryConfig::default();
+        assert_eq!(cfg.service_name, "dsm");
+        assert_eq!(cfg.environment, "development");
+        assert!(cfg.enable_metrics);
+        assert!(cfg.enable_structured_logging);
+        assert_eq!(cfg.log_level, "info");
+    }
+
+    #[test]
+    fn telemetry_config_clone() {
+        let cfg = TelemetryConfig {
+            service_name: "test".into(),
+            environment: "staging".into(),
+            enable_metrics: false,
+            enable_structured_logging: false,
+            log_level: "debug".into(),
+        };
+        let cloned = cfg.clone();
+        assert_eq!(cloned.service_name, "test");
+        assert_eq!(cloned.environment, "staging");
+        assert!(!cloned.enable_metrics);
+        assert!(!cloned.enable_structured_logging);
+        assert_eq!(cloned.log_level, "debug");
+    }
+
+    #[test]
+    fn telemetry_config_debug() {
+        let cfg = TelemetryConfig::default();
+        let dbg = format!("{cfg:?}");
+        assert!(dbg.contains("TelemetryConfig"));
+        assert!(dbg.contains("dsm"));
+    }
+
+    // ── get_global_metrics_snapshot ─────────────────────────────────
+
+    #[test]
+    fn metrics_snapshot_starts_with_header() {
+        let snap = get_global_metrics_snapshot();
+        let text = String::from_utf8(snap).expect("valid utf-8");
+        assert!(text.starts_with("dsm_metrics_v1\n"), "got: {text}");
+    }
+
+    #[test]
+    fn metrics_snapshot_contains_tick_line() {
+        let snap = get_global_metrics_snapshot();
+        let text = String::from_utf8(snap).unwrap();
+        assert!(
+            text.lines().any(|l| l.starts_with("tick=")),
+            "missing tick= line in: {text}"
+        );
+    }
+
+    #[test]
+    fn metrics_snapshot_contains_sdk_version() {
+        let snap = get_global_metrics_snapshot();
+        let text = String::from_utf8(snap).unwrap();
+        let expected_prefix = format!("sdk_version={}", env!("CARGO_PKG_VERSION"));
+        assert!(
+            text.contains(&expected_prefix),
+            "missing sdk_version in: {text}"
+        );
+    }
+
+    #[test]
+    fn metrics_snapshot_trailing_newline() {
+        let snap = get_global_metrics_snapshot();
+        let text = String::from_utf8(snap).unwrap();
+        assert!(text.ends_with('\n'));
+    }
+
+    #[test]
+    fn metrics_snapshot_no_json() {
+        let snap = get_global_metrics_snapshot();
+        let text = String::from_utf8(snap).unwrap();
+        assert!(!text.contains('{'));
+        assert!(!text.contains('}'));
+    }
+
+    #[test]
+    fn metrics_snapshot_deterministic_across_calls() {
+        let a = get_global_metrics_snapshot();
+        let b = get_global_metrics_snapshot();
+        assert_eq!(a, b, "consecutive calls should produce identical output");
+    }
+
+    // ── telemetry_metrics (pure functions, no subscriber needed) ─────
+
+    #[test]
+    fn increment_counter_does_not_panic() {
+        telemetry_metrics::increment_counter("test_counter", &[("k", "v")]);
+    }
+
+    #[test]
+    fn increment_counter_empty_labels() {
+        telemetry_metrics::increment_counter("test_counter", &[]);
+    }
+
+    #[test]
+    fn record_histogram_does_not_panic() {
+        telemetry_metrics::record_histogram("test_hist", 42, &[("op", "read")]);
+    }
+
+    #[test]
+    fn set_gauge_does_not_panic() {
+        telemetry_metrics::set_gauge("test_gauge", 100, &[("comp", "vault")]);
+    }
+
+    #[test]
+    fn record_operation_ticks_success() {
+        telemetry_metrics::record_operation_ticks("op", 10, true);
+    }
+
+    #[test]
+    fn record_operation_ticks_failure() {
+        telemetry_metrics::record_operation_ticks("op", 10, false);
+    }
+
+    #[test]
+    fn record_request_does_not_panic() {
+        telemetry_metrics::record_request("genesis", "success");
+    }
+
+    #[test]
+    fn record_error_does_not_panic() {
+        telemetry_metrics::record_error("transfer", "crypto");
+    }
+
+    // ── health module ───────────────────────────────────────────────
+
+    #[test]
+    fn health_check_healthy() {
+        health::record_health_check("db", true);
+    }
+
+    #[test]
+    fn health_check_unhealthy() {
+        health::record_health_check("db", false);
+    }
+
+    #[test]
+    fn record_startup_does_not_panic() {
+        health::record_startup("vault");
+    }
+
+    #[test]
+    fn record_shutdown_does_not_panic() {
+        health::record_shutdown("vault");
+    }
+
+    // ── security module ─────────────────────────────────────────────
+
+    #[test]
+    fn log_auth_attempt_success() {
+        security::log_auth_attempt("alice", true, "sphincs");
+    }
+
+    #[test]
+    fn log_auth_attempt_failure() {
+        security::log_auth_attempt("alice", false, "sphincs");
+    }
+
+    #[test]
+    fn log_auth_decision_allowed() {
+        security::log_auth_decision("alice", "vault", "read", true);
+    }
+
+    #[test]
+    fn log_auth_decision_denied() {
+        security::log_auth_decision("alice", "vault", "write", false);
+    }
+
+    #[test]
+    fn log_crypto_operation_success() {
+        security::log_crypto_operation("sign", "sphincs+", true);
+    }
+
+    #[test]
+    fn log_crypto_operation_failure() {
+        security::log_crypto_operation("verify", "blake3", false);
+    }
+
+    // ── performance module ──────────────────────────────────────────
+
+    #[test]
+    fn record_db_operation_fast() {
+        performance::record_db_operation("insert", "states", 5, true);
+    }
+
+    #[test]
+    fn record_db_operation_slow_triggers_warning() {
+        performance::record_db_operation("scan", "states", 2000, true);
+    }
+
+    #[test]
+    fn record_network_operation_does_not_panic() {
+        performance::record_network_operation("fetch", "/api/state", 50, true);
+    }
+
+    #[test]
+    fn record_memory_usage_does_not_panic() {
+        performance::record_memory_usage("cache", 1024 * 1024);
+    }
+}

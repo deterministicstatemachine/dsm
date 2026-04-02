@@ -2047,3 +2047,1094 @@ impl From<StateTransition> for Operation {
         transition.operation
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_balance(value: u64) -> Balance {
+        Balance::from_parts(value, 0, 0, Some([0xAB; 32]))
+    }
+
+    fn roundtrip(op: &Operation) -> Operation {
+        let bytes = op.to_bytes();
+        let decoded = Operation::from_bytes(&bytes).expect("from_bytes failed");
+        assert_eq!(
+            op, &decoded,
+            "round-trip mismatch for {:?}",
+            op.get_operation_type()
+        );
+        let rebytes = decoded.to_bytes();
+        assert_eq!(bytes, rebytes, "re-encode mismatch");
+        decoded
+    }
+
+    // ------------------------------------------------------------------ //
+    //  Round-trip tests for every variant
+    // ------------------------------------------------------------------ //
+    mod roundtrip {
+        use super::*;
+
+        #[test]
+        fn genesis() {
+            roundtrip(&Operation::Genesis);
+        }
+
+        #[test]
+        fn noop() {
+            roundtrip(&Operation::Noop);
+        }
+
+        #[test]
+        fn create() {
+            roundtrip(&Operation::Create {
+                message: "create identity".into(),
+                identity_data: vec![1, 2, 3],
+                public_key: vec![4, 5, 6],
+                metadata: vec![7, 8],
+                commitment: vec![9],
+                proof: vec![10, 11],
+                mode: TransactionMode::Bilateral,
+            });
+        }
+
+        #[test]
+        fn update_with_forward_link() {
+            roundtrip(&Operation::Update {
+                message: "update id".into(),
+                identity_id: vec![0xAA; 16],
+                updated_data: vec![0xBB; 8],
+                proof: vec![0xCC; 4],
+                forward_link: Some(vec![0xDD; 32]),
+            });
+        }
+
+        #[test]
+        fn update_without_forward_link() {
+            roundtrip(&Operation::Update {
+                message: "no fwd".into(),
+                identity_id: vec![1],
+                updated_data: vec![2],
+                proof: vec![3],
+                forward_link: None,
+            });
+        }
+
+        #[test]
+        fn transfer_no_precommit() {
+            roundtrip(&Operation::Transfer {
+                to_device_id: vec![0x01; 32],
+                amount: test_balance(500),
+                token_id: b"ERA".to_vec(),
+                mode: TransactionMode::Bilateral,
+                nonce: vec![0xFF; 16],
+                verification: VerificationType::Standard,
+                pre_commit: None,
+                recipient: vec![0x02; 32],
+                to: vec![0x03; 32],
+                message: "send tokens".into(),
+                signature: vec![0xAA; 64],
+            });
+        }
+
+        #[test]
+        fn transfer_with_precommit() {
+            let mut fixed = HashMap::new();
+            fixed.insert("recipient".into(), vec![0x01; 32]);
+            fixed.insert("amount".into(), vec![0, 0, 0, 100]);
+            let pc = PreCommitmentOp {
+                fixed_parameters: fixed,
+                variable_parameters: vec!["nonce".into(), "timestamp".into()],
+                security_params: SecurityParameters::default(),
+            };
+            roundtrip(&Operation::Transfer {
+                to_device_id: vec![0x01; 32],
+                amount: test_balance(1000),
+                token_id: b"TKN".to_vec(),
+                mode: TransactionMode::Unilateral,
+                nonce: vec![0x11; 8],
+                verification: VerificationType::PreCommitted,
+                pre_commit: Some(pc),
+                recipient: vec![0x02; 32],
+                to: vec![0x03; 32],
+                message: "pre-committed transfer".into(),
+                signature: vec![0xBB; 48],
+            });
+        }
+
+        #[test]
+        fn transfer_custom_verification() {
+            roundtrip(&Operation::Transfer {
+                to_device_id: vec![0x01; 32],
+                amount: test_balance(42),
+                token_id: b"ERA".to_vec(),
+                mode: TransactionMode::Bilateral,
+                nonce: vec![0x99],
+                verification: VerificationType::Custom(vec![0xDE, 0xAD]),
+                pre_commit: None,
+                recipient: vec![],
+                to: vec![],
+                message: String::new(),
+                signature: vec![],
+            });
+        }
+
+        #[test]
+        fn mint() {
+            roundtrip(&Operation::Mint {
+                amount: test_balance(10_000),
+                token_id: b"ERA".to_vec(),
+                authorized_by: vec![0xAA; 32],
+                proof_of_authorization: vec![0xBB; 64],
+                message: "mint tokens".into(),
+            });
+        }
+
+        #[test]
+        fn burn() {
+            roundtrip(&Operation::Burn {
+                amount: test_balance(200),
+                token_id: b"TKN".to_vec(),
+                proof_of_ownership: vec![0xCC; 64],
+                message: "burn tokens".into(),
+            });
+        }
+
+        #[test]
+        fn lock_token() {
+            roundtrip(&Operation::LockToken {
+                token_id: b"ERA".to_vec(),
+                amount: 500,
+                purpose: b"escrow".to_vec(),
+                mode: TransactionMode::Unilateral,
+                signature: vec![0xDD; 32],
+            });
+        }
+
+        #[test]
+        fn unlock_token() {
+            roundtrip(&Operation::UnlockToken {
+                token_id: b"ERA".to_vec(),
+                amount: 250,
+                purpose: b"escrow".to_vec(),
+                mode: TransactionMode::Bilateral,
+                signature: vec![0xEE; 32],
+            });
+        }
+
+        #[test]
+        fn lock() {
+            roundtrip(&Operation::Lock {
+                token_id: b"TKN".to_vec(),
+                amount: test_balance(100),
+                purpose: b"collateral".to_vec(),
+                owner: vec![0x11; 32],
+                message: "lock for collateral".into(),
+                signature: vec![0x22; 48],
+            });
+        }
+
+        #[test]
+        fn unlock() {
+            roundtrip(&Operation::Unlock {
+                token_id: b"TKN".to_vec(),
+                amount: test_balance(50),
+                purpose: b"collateral".to_vec(),
+                owner: vec![0x33; 32],
+                message: "release collateral".into(),
+                signature: vec![0x44; 48],
+            });
+        }
+
+        #[test]
+        fn add_relationship() {
+            roundtrip(&Operation::AddRelationship {
+                from_id: [0x01; 32],
+                to_id: [0x02; 32],
+                relationship_type: b"bilateral_transfer".to_vec(),
+                metadata: vec![0xAA; 10],
+                proof: vec![0xBB; 64],
+                mode: TransactionMode::Bilateral,
+                message: "add rel".into(),
+            });
+        }
+
+        #[test]
+        fn create_relationship() {
+            roundtrip(&Operation::CreateRelationship {
+                message: "create rel".into(),
+                counterparty_id: vec![0x01; 32],
+                commitment: vec![0x02; 16],
+                proof: vec![0x03; 64],
+                mode: TransactionMode::Unilateral,
+            });
+        }
+
+        #[test]
+        fn remove_relationship() {
+            roundtrip(&Operation::RemoveRelationship {
+                from_id: [0xAA; 32],
+                to_id: [0xBB; 32],
+                relationship_type: b"expired".to_vec(),
+                proof: vec![0xCC; 64],
+                mode: TransactionMode::Bilateral,
+                message: "remove rel".into(),
+            });
+        }
+
+        #[test]
+        fn recovery() {
+            roundtrip(&Operation::Recovery {
+                message: "recover chain".into(),
+                state_number: 42,
+                state_hash: vec![0x11; 32],
+                state_entropy: vec![0x22; 32],
+                invalidation_data: vec![0x33; 16],
+                new_state_data: vec![0x44; 64],
+                new_state_number: 43,
+                new_state_hash: vec![0x55; 32],
+                new_state_entropy: vec![0x66; 32],
+                compromise_proof: vec![0x77; 128],
+                authority_sigs: vec![vec![0x88; 64], vec![0x99; 64]],
+            });
+        }
+
+        #[test]
+        fn delete() {
+            roundtrip(&Operation::Delete {
+                reason: "resource expired".into(),
+                proof: vec![0xAA; 64],
+                mode: TransactionMode::Unilateral,
+                id: vec![0xBB; 16],
+            });
+        }
+
+        #[test]
+        fn link() {
+            roundtrip(&Operation::Link {
+                target_id: vec![0x01; 32],
+                link_type: b"forward".to_vec(),
+                proof: vec![0x02; 64],
+                mode: TransactionMode::Bilateral,
+            });
+        }
+
+        #[test]
+        fn unlink() {
+            roundtrip(&Operation::Unlink {
+                target_id: vec![0x01; 32],
+                proof: vec![0x02; 64],
+                mode: TransactionMode::Unilateral,
+            });
+        }
+
+        #[test]
+        fn invalidate() {
+            roundtrip(&Operation::Invalidate {
+                reason: "clone detected".into(),
+                proof: vec![0xDE; 64],
+                mode: TransactionMode::Bilateral,
+            });
+        }
+
+        #[test]
+        fn generic() {
+            roundtrip(&Operation::Generic {
+                operation_type: b"custom_op".to_vec(),
+                data: vec![1, 2, 3, 4, 5],
+                message: "generic op".into(),
+                signature: vec![0xFF; 32],
+            });
+        }
+
+        #[test]
+        fn receive_with_sender_state_hash() {
+            roundtrip(&Operation::Receive {
+                token_id: b"ERA".to_vec(),
+                from_device_id: vec![0x01; 32],
+                amount: test_balance(777),
+                recipient: vec![0x02; 32],
+                message: "receive tokens".into(),
+                mode: TransactionMode::Bilateral,
+                nonce: vec![0x03; 16],
+                verification: VerificationType::StandardBilateral,
+                sender_state_hash: Some(vec![0x04; 32]),
+            });
+        }
+
+        #[test]
+        fn receive_without_sender_state_hash() {
+            roundtrip(&Operation::Receive {
+                token_id: b"TKN".to_vec(),
+                from_device_id: vec![0xAA; 32],
+                amount: test_balance(1),
+                recipient: vec![],
+                message: String::new(),
+                mode: TransactionMode::Unilateral,
+                nonce: vec![],
+                verification: VerificationType::Standard,
+                sender_state_hash: None,
+            });
+        }
+
+        #[test]
+        fn create_token_full() {
+            roundtrip(&Operation::CreateToken {
+                token_id: b"dBTC".to_vec(),
+                initial_supply: test_balance(21_000_000),
+                name: "Deterministic Bitcoin".into(),
+                symbol: "dBTC".into(),
+                decimals: 8,
+                metadata_uri: Some("https://example.com/dbtc".into()),
+                policy_anchor: Some(vec![0xAB; 32]),
+                signature: vec![0xCD; 64],
+            });
+        }
+
+        #[test]
+        fn create_token_minimal() {
+            roundtrip(&Operation::CreateToken {
+                token_id: b"T".to_vec(),
+                initial_supply: test_balance(0),
+                name: "Test".into(),
+                symbol: "T".into(),
+                decimals: 0,
+                metadata_uri: None,
+                policy_anchor: None,
+                signature: vec![],
+            });
+        }
+
+        #[test]
+        fn dlv_create() {
+            roundtrip(&Operation::DlvCreate {
+                vault_id: vec![0x01; 32],
+                creator_public_key: vec![0x02; 64],
+                parameters_hash: vec![0x03; 32],
+                fulfillment_condition: vec![0x04; 16],
+                intended_recipient: Some(vec![0x05; 64]),
+                token_id: Some(b"ERA".to_vec()),
+                locked_amount: Some(test_balance(999)),
+                signature: vec![0x06; 48],
+                mode: TransactionMode::Unilateral,
+            });
+        }
+
+        #[test]
+        fn dlv_create_no_optionals() {
+            roundtrip(&Operation::DlvCreate {
+                vault_id: vec![0x01; 32],
+                creator_public_key: vec![0x02; 64],
+                parameters_hash: vec![0x03; 32],
+                fulfillment_condition: vec![],
+                intended_recipient: None,
+                token_id: None,
+                locked_amount: None,
+                signature: vec![0x06; 48],
+                mode: TransactionMode::Bilateral,
+            });
+        }
+
+        #[test]
+        fn dlv_unlock() {
+            roundtrip(&Operation::DlvUnlock {
+                vault_id: vec![0x01; 32],
+                fulfillment_proof: vec![0x02; 128],
+                requester_public_key: vec![0x03; 64],
+                signature: vec![0x04; 48],
+                mode: TransactionMode::Unilateral,
+            });
+        }
+
+        #[test]
+        fn dlv_claim() {
+            roundtrip(&Operation::DlvClaim {
+                vault_id: vec![0x01; 32],
+                claim_proof: vec![0x02; 64],
+                claimant_public_key: vec![0x03; 64],
+                signature: vec![0x04; 48],
+                mode: TransactionMode::Bilateral,
+            });
+        }
+
+        #[test]
+        fn dlv_invalidate() {
+            roundtrip(&Operation::DlvInvalidate {
+                vault_id: vec![0x01; 32],
+                reason: "timeout expired".into(),
+                creator_public_key: vec![0x02; 64],
+                signature: vec![0x03; 48],
+                mode: TransactionMode::Unilateral,
+            });
+        }
+
+        #[test]
+        fn all_verification_types() {
+            let types = vec![
+                VerificationType::Standard,
+                VerificationType::Enhanced,
+                VerificationType::Bilateral,
+                VerificationType::Directory,
+                VerificationType::StandardBilateral,
+                VerificationType::PreCommitted,
+                VerificationType::UnilateralIdentityAnchor,
+                VerificationType::Custom(vec![0xCA, 0xFE]),
+            ];
+            for vt in types {
+                roundtrip(&Operation::Transfer {
+                    to_device_id: vec![0x01; 32],
+                    amount: test_balance(1),
+                    token_id: b"ERA".to_vec(),
+                    mode: TransactionMode::Bilateral,
+                    nonce: vec![],
+                    verification: vt,
+                    pre_commit: None,
+                    recipient: vec![],
+                    to: vec![],
+                    message: String::new(),
+                    signature: vec![],
+                });
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ //
+    //  Ops trait tests
+    // ------------------------------------------------------------------ //
+    mod ops_trait {
+        use super::*;
+
+        #[test]
+        fn validate_transfer_zero_amount() {
+            let op = Operation::Transfer {
+                to_device_id: vec![0x01; 32],
+                amount: test_balance(0),
+                token_id: b"ERA".to_vec(),
+                mode: TransactionMode::Bilateral,
+                nonce: vec![],
+                verification: VerificationType::Standard,
+                pre_commit: None,
+                recipient: vec![],
+                to: vec![],
+                message: String::new(),
+                signature: vec![],
+            };
+            assert_eq!(Ops::validate(&op).unwrap(), false);
+        }
+
+        #[test]
+        fn validate_transfer_positive_amount() {
+            let op = Operation::Transfer {
+                to_device_id: vec![0x01; 32],
+                amount: test_balance(100),
+                token_id: b"ERA".to_vec(),
+                mode: TransactionMode::Bilateral,
+                nonce: vec![],
+                verification: VerificationType::Standard,
+                pre_commit: None,
+                recipient: vec![],
+                to: vec![],
+                message: String::new(),
+                signature: vec![],
+            };
+            assert_eq!(Ops::validate(&op).unwrap(), true);
+        }
+
+        #[test]
+        fn validate_genesis_is_true() {
+            assert_eq!(Ops::validate(&Operation::Genesis).unwrap(), true);
+        }
+
+        #[test]
+        fn validate_noop_is_true() {
+            assert_eq!(Ops::validate(&Operation::Noop).unwrap(), true);
+        }
+
+        #[test]
+        fn get_id_returns_correct_strings() {
+            let cases: Vec<(Operation, &str)> = vec![
+                (Operation::Genesis, "genesis"),
+                (Operation::Noop, "noop"),
+                (
+                    Operation::Create {
+                        message: String::new(),
+                        identity_data: vec![],
+                        public_key: vec![],
+                        metadata: vec![],
+                        commitment: vec![],
+                        proof: vec![],
+                        mode: TransactionMode::Bilateral,
+                    },
+                    "create",
+                ),
+                (
+                    Operation::Update {
+                        message: String::new(),
+                        identity_id: vec![],
+                        updated_data: vec![],
+                        proof: vec![],
+                        forward_link: None,
+                    },
+                    "update",
+                ),
+                (
+                    Operation::Delete {
+                        reason: String::new(),
+                        proof: vec![],
+                        mode: TransactionMode::Bilateral,
+                        id: vec![],
+                    },
+                    "delete",
+                ),
+                (
+                    Operation::Recovery {
+                        message: String::new(),
+                        state_number: 0,
+                        state_hash: vec![],
+                        state_entropy: vec![],
+                        invalidation_data: vec![],
+                        new_state_data: vec![],
+                        new_state_number: 0,
+                        new_state_hash: vec![],
+                        new_state_entropy: vec![],
+                        compromise_proof: vec![],
+                        authority_sigs: vec![],
+                    },
+                    "recovery",
+                ),
+                (
+                    Operation::DlvCreate {
+                        vault_id: vec![],
+                        creator_public_key: vec![],
+                        parameters_hash: vec![],
+                        fulfillment_condition: vec![],
+                        intended_recipient: None,
+                        token_id: None,
+                        locked_amount: None,
+                        signature: vec![],
+                        mode: TransactionMode::Unilateral,
+                    },
+                    "dlv_create",
+                ),
+            ];
+            for (op, expected) in cases {
+                assert_eq!(Ops::get_id(&op), expected);
+            }
+        }
+
+        #[test]
+        fn execute_returns_bytes() {
+            let op = Operation::Genesis;
+            let result = Ops::execute(&op).unwrap();
+            assert!(!result.is_empty());
+            assert_eq!(result, op.to_bytes());
+        }
+    }
+
+    // ------------------------------------------------------------------ //
+    //  get_operation_type tests
+    // ------------------------------------------------------------------ //
+    mod operation_type {
+        use super::*;
+
+        #[test]
+        fn returns_correct_type_strings() {
+            assert_eq!(Operation::Genesis.get_operation_type(), "genesis");
+            assert_eq!(Operation::Noop.get_operation_type(), "noop");
+
+            let transfer = Operation::Transfer {
+                to_device_id: vec![],
+                amount: test_balance(1),
+                token_id: vec![],
+                mode: TransactionMode::Bilateral,
+                nonce: vec![],
+                verification: VerificationType::Standard,
+                pre_commit: None,
+                recipient: vec![],
+                to: vec![],
+                message: String::new(),
+                signature: vec![],
+            };
+            assert_eq!(transfer.get_operation_type(), "transfer");
+
+            let mint = Operation::Mint {
+                amount: test_balance(1),
+                token_id: vec![],
+                authorized_by: vec![],
+                proof_of_authorization: vec![],
+                message: String::new(),
+            };
+            assert_eq!(mint.get_operation_type(), "mint");
+
+            let burn = Operation::Burn {
+                amount: test_balance(1),
+                token_id: vec![],
+                proof_of_ownership: vec![],
+                message: String::new(),
+            };
+            assert_eq!(burn.get_operation_type(), "burn");
+
+            assert_eq!(
+                Operation::LockToken {
+                    token_id: vec![],
+                    amount: 0,
+                    purpose: vec![],
+                    mode: TransactionMode::Bilateral,
+                    signature: vec![],
+                }
+                .get_operation_type(),
+                "lock_token"
+            );
+
+            assert_eq!(
+                Operation::UnlockToken {
+                    token_id: vec![],
+                    amount: 0,
+                    purpose: vec![],
+                    mode: TransactionMode::Bilateral,
+                    signature: vec![],
+                }
+                .get_operation_type(),
+                "unlock_token"
+            );
+
+            assert_eq!(
+                Operation::DlvUnlock {
+                    vault_id: vec![],
+                    fulfillment_proof: vec![],
+                    requester_public_key: vec![],
+                    signature: vec![],
+                    mode: TransactionMode::Bilateral,
+                }
+                .get_operation_type(),
+                "dlv_unlock"
+            );
+
+            assert_eq!(
+                Operation::DlvClaim {
+                    vault_id: vec![],
+                    claim_proof: vec![],
+                    claimant_public_key: vec![],
+                    signature: vec![],
+                    mode: TransactionMode::Bilateral,
+                }
+                .get_operation_type(),
+                "dlv_claim"
+            );
+
+            assert_eq!(
+                Operation::DlvInvalidate {
+                    vault_id: vec![],
+                    reason: String::new(),
+                    creator_public_key: vec![],
+                    signature: vec![],
+                    mode: TransactionMode::Bilateral,
+                }
+                .get_operation_type(),
+                "dlv_invalidate"
+            );
+        }
+    }
+
+    // ------------------------------------------------------------------ //
+    //  with_cleared_signature tests
+    // ------------------------------------------------------------------ //
+    mod cleared_signature {
+        use super::*;
+
+        #[test]
+        fn clears_transfer_signature() {
+            let op = Operation::Transfer {
+                to_device_id: vec![0x01; 32],
+                amount: test_balance(100),
+                token_id: b"ERA".to_vec(),
+                mode: TransactionMode::Bilateral,
+                nonce: vec![0xFF; 16],
+                verification: VerificationType::Standard,
+                pre_commit: None,
+                recipient: vec![],
+                to: vec![],
+                message: String::new(),
+                signature: vec![0xAA; 64],
+            };
+            let cleared = op.with_cleared_signature();
+            assert_eq!(cleared.get_signature(), None);
+        }
+
+        #[test]
+        fn clears_create_token_signature() {
+            let op = Operation::CreateToken {
+                token_id: b"T".to_vec(),
+                initial_supply: test_balance(0),
+                name: "T".into(),
+                symbol: "T".into(),
+                decimals: 0,
+                metadata_uri: None,
+                policy_anchor: None,
+                signature: vec![0xBB; 48],
+            };
+            let cleared = op.with_cleared_signature();
+            assert_eq!(cleared.get_signature(), None);
+        }
+
+        #[test]
+        fn clears_dlv_create_signature() {
+            let op = Operation::DlvCreate {
+                vault_id: vec![0x01; 32],
+                creator_public_key: vec![0x02; 64],
+                parameters_hash: vec![],
+                fulfillment_condition: vec![],
+                intended_recipient: None,
+                token_id: None,
+                locked_amount: None,
+                signature: vec![0xCC; 48],
+                mode: TransactionMode::Unilateral,
+            };
+            let cleared = op.with_cleared_signature();
+            assert_eq!(cleared.get_signature(), None);
+        }
+
+        #[test]
+        fn genesis_unchanged() {
+            let op = Operation::Genesis;
+            let cleared = op.with_cleared_signature();
+            assert_eq!(op, cleared);
+        }
+
+        #[test]
+        fn generic_signature_cleared() {
+            let op = Operation::Generic {
+                operation_type: b"test".to_vec(),
+                data: vec![1, 2, 3],
+                message: "msg".into(),
+                signature: vec![0xDD; 32],
+            };
+            let cleared = op.with_cleared_signature();
+            match &cleared {
+                Operation::Generic { signature, .. } => assert!(signature.is_empty()),
+                _ => panic!("wrong variant"),
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ //
+    //  from_bytes error cases
+    // ------------------------------------------------------------------ //
+    mod decode_errors {
+        use super::*;
+
+        #[test]
+        fn empty_input() {
+            assert!(Operation::from_bytes(&[]).is_err());
+        }
+
+        #[test]
+        fn invalid_tag_byte() {
+            assert!(Operation::from_bytes(&[254]).is_err());
+        }
+
+        #[test]
+        fn truncated_create() {
+            let bytes = Operation::Create {
+                message: "hello".into(),
+                identity_data: vec![1, 2, 3],
+                public_key: vec![4, 5],
+                metadata: vec![],
+                commitment: vec![],
+                proof: vec![],
+                mode: TransactionMode::Bilateral,
+            }
+            .to_bytes();
+            let truncated = &bytes[..bytes.len() / 2];
+            assert!(Operation::from_bytes(truncated).is_err());
+        }
+
+        #[test]
+        fn truncated_single_byte_tag() {
+            assert!(Operation::from_bytes(&[3]).is_err());
+        }
+
+        #[test]
+        fn bad_mode_byte() {
+            let mut bytes = Operation::Invalidate {
+                reason: "test".into(),
+                proof: vec![],
+                mode: TransactionMode::Bilateral,
+            }
+            .to_bytes();
+            *bytes.last_mut().unwrap() = 99;
+            assert!(Operation::from_bytes(&bytes).is_err());
+        }
+    }
+
+    // ------------------------------------------------------------------ //
+    //  TokenOps trait tests
+    // ------------------------------------------------------------------ //
+    mod token_ops {
+        use super::*;
+
+        #[test]
+        fn is_valid_transfer_positive() {
+            let op = Operation::Transfer {
+                to_device_id: vec![0x01; 32],
+                amount: test_balance(100),
+                token_id: b"ERA".to_vec(),
+                mode: TransactionMode::Bilateral,
+                nonce: vec![],
+                verification: VerificationType::Standard,
+                pre_commit: None,
+                recipient: vec![],
+                to: vec![],
+                message: String::new(),
+                signature: vec![],
+            };
+            assert!(TokenOps::is_valid(&op));
+        }
+
+        #[test]
+        fn is_valid_transfer_zero() {
+            let op = Operation::Transfer {
+                to_device_id: vec![0x01; 32],
+                amount: test_balance(0),
+                token_id: b"ERA".to_vec(),
+                mode: TransactionMode::Bilateral,
+                nonce: vec![],
+                verification: VerificationType::Standard,
+                pre_commit: None,
+                recipient: vec![],
+                to: vec![],
+                message: String::new(),
+                signature: vec![],
+            };
+            assert!(!TokenOps::is_valid(&op));
+        }
+
+        #[test]
+        fn is_valid_genesis_returns_false() {
+            assert!(!TokenOps::is_valid(&Operation::Genesis));
+        }
+
+        #[test]
+        fn is_valid_noop_returns_false() {
+            assert!(!TokenOps::is_valid(&Operation::Noop));
+        }
+
+        #[test]
+        fn is_valid_mint_positive() {
+            let op = Operation::Mint {
+                amount: test_balance(50),
+                token_id: b"ERA".to_vec(),
+                authorized_by: vec![],
+                proof_of_authorization: vec![],
+                message: String::new(),
+            };
+            assert!(TokenOps::is_valid(&op));
+        }
+
+        #[test]
+        fn is_valid_lock_positive() {
+            let op = Operation::Lock {
+                token_id: b"ERA".to_vec(),
+                amount: test_balance(10),
+                purpose: vec![],
+                owner: vec![],
+                message: String::new(),
+                signature: vec![],
+            };
+            assert!(TokenOps::is_valid(&op));
+        }
+
+        #[test]
+        fn has_expired_returns_false() {
+            assert!(!TokenOps::has_expired(&Operation::Genesis));
+            let transfer = Operation::Transfer {
+                to_device_id: vec![],
+                amount: test_balance(1),
+                token_id: vec![],
+                mode: TransactionMode::Bilateral,
+                nonce: vec![],
+                verification: VerificationType::Standard,
+                pre_commit: None,
+                recipient: vec![],
+                to: vec![],
+                message: String::new(),
+                signature: vec![],
+            };
+            assert!(!TokenOps::has_expired(&transfer));
+        }
+    }
+
+    // ------------------------------------------------------------------ //
+    //  GenericOps trait tests
+    // ------------------------------------------------------------------ //
+    mod generic_ops {
+        use super::*;
+
+        #[test]
+        fn get_data_returns_data_for_generic() {
+            let op = Operation::Generic {
+                operation_type: b"test".to_vec(),
+                data: vec![10, 20, 30],
+                message: String::new(),
+                signature: vec![],
+            };
+            assert_eq!(GenericOps::get_data(&op), &[10, 20, 30]);
+        }
+
+        #[test]
+        fn get_data_returns_empty_for_non_generic() {
+            assert!(GenericOps::get_data(&Operation::Genesis).is_empty());
+            assert!(GenericOps::get_data(&Operation::Noop).is_empty());
+        }
+
+        #[test]
+        fn set_data_works_for_generic() {
+            let mut op = Operation::Generic {
+                operation_type: b"test".to_vec(),
+                data: vec![1],
+                message: String::new(),
+                signature: vec![],
+            };
+            GenericOps::set_data(&mut op, vec![99, 100]).unwrap();
+            assert_eq!(GenericOps::get_data(&op), &[99, 100]);
+        }
+
+        #[test]
+        fn set_data_errors_for_non_generic() {
+            let mut op = Operation::Genesis;
+            assert!(GenericOps::set_data(&mut op, vec![1]).is_err());
+        }
+
+        #[test]
+        fn merge_concatenates_data() {
+            let a = Operation::Generic {
+                operation_type: b"t".to_vec(),
+                data: vec![1, 2],
+                message: String::new(),
+                signature: vec![],
+            };
+            let b = Operation::Generic {
+                operation_type: b"t".to_vec(),
+                data: vec![3, 4],
+                message: String::new(),
+                signature: vec![],
+            };
+            let merged = GenericOps::merge(&a, &b).unwrap();
+            assert_eq!(merged, vec![1, 2, 3, 4]);
+        }
+    }
+
+    // ------------------------------------------------------------------ //
+    //  Balance round-trip through Operation encoding
+    // ------------------------------------------------------------------ //
+    mod balance_encoding {
+        use super::*;
+
+        #[test]
+        fn balance_with_state_hash_roundtrips() {
+            let bal = Balance::from_parts(12345, 0, 99, Some([0xFE; 32]));
+            let op = Operation::Mint {
+                amount: bal.clone(),
+                token_id: b"T".to_vec(),
+                authorized_by: vec![],
+                proof_of_authorization: vec![],
+                message: String::new(),
+            };
+            let decoded = roundtrip(&op);
+            if let Operation::Mint { amount, .. } = decoded {
+                assert_eq!(amount.value(), bal.value());
+            } else {
+                panic!("wrong variant");
+            }
+        }
+
+        #[test]
+        fn balance_without_state_hash_roundtrips() {
+            let bal = Balance::from_parts(0, 0, 0, None);
+            let op = Operation::Burn {
+                amount: bal,
+                token_id: b"X".to_vec(),
+                proof_of_ownership: vec![],
+                message: String::new(),
+            };
+            roundtrip(&op);
+        }
+
+        #[test]
+        fn balance_with_locked_roundtrips() {
+            let bal = Balance::from_parts(1000, 200, 5, Some([0x01; 32]));
+            let op = Operation::Lock {
+                token_id: b"ERA".to_vec(),
+                amount: bal.clone(),
+                purpose: b"test".to_vec(),
+                owner: vec![0x01; 32],
+                message: "lock test".into(),
+                signature: vec![],
+            };
+            let decoded = roundtrip(&op);
+            if let Operation::Lock { amount, .. } = decoded {
+                assert_eq!(amount.value(), 1000);
+                assert_eq!(amount.locked(), 200);
+            } else {
+                panic!("wrong variant");
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ //
+    //  Determinism / stability
+    // ------------------------------------------------------------------ //
+    mod determinism {
+        use super::*;
+
+        #[test]
+        fn encoding_is_deterministic() {
+            let op = Operation::Transfer {
+                to_device_id: vec![0x01; 32],
+                amount: test_balance(42),
+                token_id: b"ERA".to_vec(),
+                mode: TransactionMode::Bilateral,
+                nonce: vec![0xAA; 16],
+                verification: VerificationType::Standard,
+                pre_commit: None,
+                recipient: vec![0x02; 32],
+                to: vec![0x03; 32],
+                message: "test".into(),
+                signature: vec![0xBB; 64],
+            };
+            let b1 = op.to_bytes();
+            let b2 = op.to_bytes();
+            assert_eq!(b1, b2);
+        }
+
+        #[test]
+        fn precommit_map_order_independent() {
+            let make_op = |insert_order: &[(&str, Vec<u8>)]| {
+                let mut fixed = HashMap::new();
+                for (k, v) in insert_order {
+                    fixed.insert(k.to_string(), v.clone());
+                }
+                Operation::Transfer {
+                    to_device_id: vec![],
+                    amount: test_balance(1),
+                    token_id: vec![],
+                    mode: TransactionMode::Bilateral,
+                    nonce: vec![],
+                    verification: VerificationType::Standard,
+                    pre_commit: Some(PreCommitmentOp {
+                        fixed_parameters: fixed,
+                        variable_parameters: vec![],
+                        security_params: SecurityParameters::default(),
+                    }),
+                    recipient: vec![],
+                    to: vec![],
+                    message: String::new(),
+                    signature: vec![],
+                }
+            };
+            let a = make_op(&[("alpha", vec![1]), ("beta", vec![2])]);
+            let b = make_op(&[("beta", vec![2]), ("alpha", vec![1])]);
+            assert_eq!(a.to_bytes(), b.to_bytes());
+        }
+    }
+}

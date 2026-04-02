@@ -177,3 +177,168 @@ pub fn create_policy(params: PolicyParameters) -> Result<PolicyFile, DsmError> {
 
     Ok(policy)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_generate_default_policy_basic_fields() {
+        let policy = generate_default_policy("tok-1", "MyToken", "creator-abc").unwrap();
+
+        assert_eq!(policy.name, "Default Policy for MyToken");
+        assert_eq!(policy.author, "creator-abc");
+        assert!(policy
+            .description
+            .as_ref()
+            .unwrap()
+            .contains("tok-1"));
+    }
+
+    #[test]
+    fn test_generate_default_policy_conditions() {
+        let policy = generate_default_policy("tok-1", "MyToken", "creator-abc").unwrap();
+
+        let has_identity = policy.conditions.iter().any(|c| matches!(
+            c,
+            PolicyCondition::IdentityConstraint {
+                allowed_identities,
+                allow_derived: true,
+            } if allowed_identities == &["creator-abc".to_string()]
+        ));
+        assert!(has_identity, "default policy must include identity constraint for creator");
+
+        let has_ops = policy.conditions.iter().any(|c| matches!(
+            c,
+            PolicyCondition::OperationRestriction { allowed_operations }
+            if allowed_operations == &["Transfer".to_string()]
+        ));
+        assert!(has_ops, "default policy must restrict operations to Transfer");
+    }
+
+    #[test]
+    fn test_generate_default_policy_roles() {
+        let policy = generate_default_policy("tok-1", "MyToken", "creator-abc").unwrap();
+
+        assert_eq!(policy.roles.len(), 2);
+        assert_eq!(policy.roles[0].id, "owner");
+        assert_eq!(policy.roles[1].id, "user");
+        assert!(policy.roles[1].permissions.contains(&"LockToken".to_string()));
+        assert!(policy.roles[1].permissions.contains(&"UnlockToken".to_string()));
+    }
+
+    #[test]
+    fn test_generate_default_policy_metadata() {
+        let policy = generate_default_policy("tok-42", "TestToken", "alice").unwrap();
+
+        assert_eq!(policy.metadata.get("token_id").unwrap(), "tok-42");
+        assert_eq!(policy.metadata.get("is_default_policy").unwrap(), "true");
+    }
+
+    #[test]
+    fn test_specialized_policy_time_locked_rejected() {
+        let params = HashMap::new();
+        let result = generate_specialized_policy("t1", "T", "c", "TimeLocked", &params);
+
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("Time-based policies are not supported"));
+    }
+
+    #[test]
+    fn test_specialized_policy_unknown_type_rejected() {
+        let params = HashMap::new();
+        let result = generate_specialized_policy("t1", "T", "c", "Bogus", &params);
+
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("Unknown policy type"));
+    }
+
+    #[test]
+    fn test_specialized_policy_identity_bound_custom_ids() {
+        let mut params = HashMap::new();
+        params.insert("allowed_identities".to_string(), "alice, bob".to_string());
+        params.insert("allow_derived".to_string(), "true".to_string());
+
+        let policy =
+            generate_specialized_policy("t1", "TestToken", "creator", "IdentityBound", &params)
+                .unwrap();
+
+        assert!(policy.name.contains("IdentityBound"));
+
+        let id_constraint = policy.conditions.iter().find(|c| matches!(c, PolicyCondition::IdentityConstraint { .. }));
+        match id_constraint {
+            Some(PolicyCondition::IdentityConstraint { allowed_identities, allow_derived }) => {
+                assert_eq!(allowed_identities, &["alice".to_string(), "bob".to_string()]);
+                assert!(*allow_derived);
+            }
+            _ => panic!("expected IdentityConstraint"),
+        }
+    }
+
+    #[test]
+    fn test_specialized_policy_identity_bound_defaults() {
+        let params = HashMap::new();
+        let policy =
+            generate_specialized_policy("t1", "T", "creator", "IdentityBound", &params).unwrap();
+
+        let id_constraint = policy.conditions.iter().find(|c| matches!(c, PolicyCondition::IdentityConstraint { .. }));
+        match id_constraint {
+            Some(PolicyCondition::IdentityConstraint { allowed_identities, allow_derived }) => {
+                assert_eq!(allowed_identities, &["creator".to_string()]);
+                assert!(!*allow_derived);
+            }
+            _ => panic!("expected IdentityConstraint"),
+        }
+    }
+
+    #[test]
+    fn test_specialized_policy_restricted_operations() {
+        let mut params = HashMap::new();
+        params.insert("allowed_operations".to_string(), "Transfer, Burn".to_string());
+
+        let policy =
+            generate_specialized_policy("t1", "T", "c", "RestrictedOperations", &params).unwrap();
+
+        let ops_condition = policy.conditions.iter().find(|c| matches!(c, PolicyCondition::OperationRestriction { .. }));
+        match ops_condition {
+            Some(PolicyCondition::OperationRestriction { allowed_operations }) => {
+                assert_eq!(allowed_operations, &["Transfer".to_string(), "Burn".to_string()]);
+            }
+            _ => panic!("expected OperationRestriction"),
+        }
+    }
+
+    #[test]
+    fn test_specialized_policy_restricted_operations_defaults_to_transfer() {
+        let params = HashMap::new();
+        let policy =
+            generate_specialized_policy("t1", "T", "c", "RestrictedOperations", &params).unwrap();
+
+        let ops_condition = policy.conditions.iter().find(|c| matches!(c, PolicyCondition::OperationRestriction { .. }));
+        match ops_condition {
+            Some(PolicyCondition::OperationRestriction { allowed_operations }) => {
+                assert_eq!(allowed_operations, &["Transfer".to_string()]);
+            }
+            _ => panic!("expected OperationRestriction"),
+        }
+    }
+
+    #[test]
+    fn test_create_policy_basic() {
+        let params = PolicyParameters {
+            mode: TransactionMode::Bilateral,
+            verification: VerificationType::Standard,
+            name: "Custom".to_string(),
+            version: "2.0".to_string(),
+            author: "bob".to_string(),
+        };
+        let policy = create_policy(params).unwrap();
+
+        assert_eq!(policy.name, "Custom");
+        assert_eq!(policy.version, "2.0");
+        assert_eq!(policy.author, "bob");
+        assert!(!policy.conditions.is_empty());
+    }
+}

@@ -162,3 +162,205 @@ pub struct ContactRequest {
     /// Optional human-readable message.
     pub message: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_contact(verified: bool, chain_tip: Option<[u8; 32]>, proof: Option<ChainTipSmtProof>) -> DsmVerifiedContact {
+        DsmVerifiedContact {
+            alias: "Alice".into(),
+            device_id: [1u8; 32],
+            genesis_hash: [2u8; 32],
+            public_key: vec![3u8; 64],
+            genesis_material: vec![4u8; 128],
+            chain_tip,
+            chain_tip_smt_proof: proof,
+            genesis_verified_online: verified,
+            verified_at_commit_height: 100,
+            added_at_commit_height: 50,
+            last_updated_commit_height: 100,
+            verifying_storage_nodes: vec![],
+            ble_address: None,
+        }
+    }
+
+    fn make_matching_proof(state_hash: [u8; 32]) -> ChainTipSmtProof {
+        ChainTipSmtProof {
+            smt_root: [0xAA; 32],
+            state_hash,
+            smt_key: [0xBB; 32],
+            proof_path: vec![[0xCC; 32]],
+            state_index: 42,
+            proof_commit_height: 100,
+        }
+    }
+
+    // --- can_perform_bilateral_transaction ---
+
+    #[test]
+    fn bilateral_allowed_when_genesis_verified() {
+        let contact = make_contact(true, None, None);
+        assert!(contact.can_perform_bilateral_transaction());
+    }
+
+    #[test]
+    fn bilateral_denied_when_genesis_not_verified() {
+        let contact = make_contact(false, None, None);
+        assert!(!contact.can_perform_bilateral_transaction());
+    }
+
+    // --- needs_reverification_commit_height ---
+
+    #[test]
+    fn needs_reverification_when_stale() {
+        let contact = make_contact(true, None, None);
+        assert!(contact.needs_reverification_commit_height(1100, 500));
+    }
+
+    #[test]
+    fn no_reverification_when_fresh() {
+        let contact = make_contact(true, None, None);
+        assert!(!contact.needs_reverification_commit_height(200, 500));
+    }
+
+    #[test]
+    fn reverification_exact_boundary() {
+        let contact = make_contact(true, None, None);
+        // now=600, verified_at=100, max_age=500 → age=500, not > 500
+        assert!(!contact.needs_reverification_commit_height(600, 500));
+        // now=601 → age=501, > 500
+        assert!(contact.needs_reverification_commit_height(601, 500));
+    }
+
+    // --- update_chain_tip_with_proof ---
+
+    #[test]
+    fn update_chain_tip_sets_values() {
+        let mut contact = make_contact(true, None, None);
+        let new_tip = [0xDD; 32];
+        let proof = make_matching_proof(new_tip);
+
+        contact.update_chain_tip_with_proof(new_tip, Some(proof.clone()));
+
+        assert_eq!(contact.chain_tip, Some(new_tip));
+        assert!(contact.chain_tip_smt_proof.is_some());
+        assert_eq!(contact.chain_tip_smt_proof.unwrap().state_index, 42);
+    }
+
+    #[test]
+    fn update_chain_tip_clears_proof_when_none() {
+        let tip = [0xEE; 32];
+        let proof = make_matching_proof(tip);
+        let mut contact = make_contact(true, Some(tip), Some(proof));
+
+        contact.update_chain_tip_with_proof([0xFF; 32], None);
+
+        assert_eq!(contact.chain_tip, Some([0xFF; 32]));
+        assert!(contact.chain_tip_smt_proof.is_none());
+    }
+
+    // --- verify_chain_tip_proof ---
+
+    #[test]
+    fn verify_chain_tip_proof_matching() {
+        let tip = [0xAB; 32];
+        let proof = make_matching_proof(tip);
+        let contact = make_contact(true, Some(tip), Some(proof));
+        assert!(contact.verify_chain_tip_proof());
+    }
+
+    #[test]
+    fn verify_chain_tip_proof_mismatched_hash() {
+        let tip = [0xAB; 32];
+        let mut proof = make_matching_proof(tip);
+        proof.state_hash = [0xFF; 32]; // mismatch
+        let contact = make_contact(true, Some(tip), Some(proof));
+        assert!(!contact.verify_chain_tip_proof());
+    }
+
+    #[test]
+    fn verify_chain_tip_proof_no_tip() {
+        let contact = make_contact(true, None, None);
+        assert!(!contact.verify_chain_tip_proof());
+    }
+
+    #[test]
+    fn verify_chain_tip_proof_no_proof() {
+        let contact = make_contact(true, Some([0xAB; 32]), None);
+        assert!(!contact.verify_chain_tip_proof());
+    }
+
+    // --- has_verified_chain_tip ---
+
+    #[test]
+    fn has_verified_chain_tip_true() {
+        let tip = [0xCD; 32];
+        let proof = make_matching_proof(tip);
+        let contact = make_contact(true, Some(tip), Some(proof));
+        assert!(contact.has_verified_chain_tip());
+    }
+
+    #[test]
+    fn has_verified_chain_tip_false_no_proof() {
+        let contact = make_contact(true, Some([0xCD; 32]), None);
+        assert!(!contact.has_verified_chain_tip());
+    }
+
+    // --- Struct construction ---
+
+    #[test]
+    fn inbox_message_fields() {
+        let msg = InboxMessage {
+            id: "msg-1".into(),
+            msg_type: "bilateral_prepare".into(),
+            payload: "data".into(),
+            hash: "h".into(),
+            prev_hash: Some("prev".into()),
+            tick: 42,
+            from_device: "dev_a".into(),
+            to_device: "dev_b".into(),
+            signature: "sig".into(),
+        };
+        assert_eq!(msg.id, "msg-1");
+        assert_eq!(msg.tick, 42);
+        assert_eq!(msg.prev_hash, Some("prev".into()));
+    }
+
+    #[test]
+    fn transaction_data_fields() {
+        let tx = TransactionData {
+            from: "alice".into(),
+            to: "bob".into(),
+            amount: 1000,
+            memo: "payment".into(),
+            tick: 5,
+            signature: "sig".into(),
+            hash: "h".into(),
+        };
+        assert_eq!(tx.amount, 1000);
+        assert_eq!(tx.memo, "payment");
+    }
+
+    #[test]
+    fn contact_request_optional_message() {
+        let req = ContactRequest {
+            from_device_id: "d1".into(),
+            to_device_id: "d2".into(),
+            genesis_hash: "gh".into(),
+            public_key: vec![1, 2, 3],
+            tick: 10,
+            signature: "sig".into(),
+            message: None,
+        };
+        assert!(req.message.is_none());
+    }
+
+    #[test]
+    fn chain_tip_smt_proof_clone() {
+        let proof = make_matching_proof([0x11; 32]);
+        let cloned = proof.clone();
+        assert_eq!(cloned.smt_root, proof.smt_root);
+        assert_eq!(cloned.proof_path.len(), 1);
+    }
+}

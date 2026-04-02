@@ -335,4 +335,144 @@ mod tests {
 
         assert!(gs.verify_integrity().unwrap());
     }
+
+    fn make_valid_genesis() -> GenesisState {
+        use crate::crypto::blake3::domain_hash as dh;
+        let keys = GenesisPublicKeys::new(b"sign-key".to_vec(), b"kem-key".to_vec());
+        let proof_data = b"random-walk-data".to_vec();
+        let env_hash = *dh("DSM/genesis/dbrw-env", &proof_data).as_bytes();
+        let dbrw = DBRWProof::new(
+            vec![0xDE, 0xAD],
+            env_hash,
+            proof_data,
+            *blake3::hash(b"attestation").as_bytes(),
+        );
+        let mpc = vec![MPCContribution::new(
+            "node1".into(),
+            *blake3::hash(b"contrib1").as_bytes(),
+            vec![1, 2, 3],
+            0,
+        )];
+        let device_id: [u8; 32] = *blake3::hash(b"device").as_bytes();
+        let mut gs = GenesisState::new(device_id, [0u8; 32], mpc, dbrw, keys, 42);
+        gs.genesis_hash = gs.recompute_genesis_hash().unwrap();
+        gs
+    }
+
+    #[test]
+    fn integrity_fails_with_empty_mpc() {
+        let mut gs = make_valid_genesis();
+        gs.mpc_contributions.clear();
+        assert!(!gs.verify_integrity().unwrap());
+    }
+
+    #[test]
+    fn integrity_fails_with_empty_signing_key() {
+        let mut gs = make_valid_genesis();
+        gs.public_keys.signing_key.clear();
+        assert!(!gs.verify_integrity().unwrap());
+    }
+
+    #[test]
+    fn integrity_fails_with_empty_encapsulation_key() {
+        let mut gs = make_valid_genesis();
+        gs.public_keys.encapsulation_key.clear();
+        assert!(!gs.verify_integrity().unwrap());
+    }
+
+    #[test]
+    fn integrity_fails_with_empty_device_fingerprint() {
+        let mut gs = make_valid_genesis();
+        gs.dbrw_proof.device_fingerprint.clear();
+        assert!(!gs.verify_integrity().unwrap());
+    }
+
+    #[test]
+    fn integrity_fails_with_wrong_env_hash() {
+        let mut gs = make_valid_genesis();
+        gs.dbrw_proof.env_state_hash = [0xFFu8; 32];
+        assert!(!gs.verify_integrity().unwrap());
+    }
+
+    #[test]
+    fn integrity_fails_with_wrong_key_hash() {
+        let mut gs = make_valid_genesis();
+        gs.public_keys.key_hash = [0xFFu8; 32];
+        assert!(!gs.verify_integrity().unwrap());
+    }
+
+    #[test]
+    fn integrity_fails_with_wrong_genesis_hash() {
+        let mut gs = make_valid_genesis();
+        gs.genesis_hash = [0xFFu8; 32];
+        assert!(!gs.verify_integrity().unwrap());
+    }
+
+    #[test]
+    fn mpc_order_does_not_affect_genesis_hash() {
+        let h1 = *blake3::hash(b"c1").as_bytes();
+        let h2 = *blake3::hash(b"c2").as_bytes();
+        let keys = GenesisPublicKeys::new(b"S".to_vec(), b"K".to_vec());
+        let pd = b"pdata".to_vec();
+        let env = *domain_hash("DSM/genesis/dbrw-env", &pd).as_bytes();
+        let dbrw = DBRWProof::new(vec![1], env, pd, *blake3::hash(b"v").as_bytes());
+        let did: [u8; 32] = *blake3::hash(b"d").as_bytes();
+
+        let mpc_ab = vec![
+            MPCContribution::new("a".into(), h1, vec![], 0),
+            MPCContribution::new("b".into(), h2, vec![], 0),
+        ];
+        let mpc_ba = vec![
+            MPCContribution::new("b".into(), h2, vec![], 0),
+            MPCContribution::new("a".into(), h1, vec![], 0),
+        ];
+
+        let gs1 = GenesisState::new(did, [0u8; 32], mpc_ab, dbrw.clone(), keys.clone(), 0);
+        let gs2 = GenesisState::new(did, [0u8; 32], mpc_ba, dbrw, keys, 0);
+        assert_eq!(
+            gs1.recompute_genesis_hash().unwrap(),
+            gs2.recompute_genesis_hash().unwrap(),
+            "MPC contribution order must not affect canonical hash"
+        );
+    }
+
+    #[test]
+    fn genesis_state_new_metadata_is_empty() {
+        let gs = make_valid_genesis();
+        assert!(gs.metadata.is_empty());
+    }
+
+    #[test]
+    fn ct_eq_with_different_lengths() {
+        assert!(!ct_eq(&[1, 2], &[1, 2, 3]));
+    }
+
+    #[test]
+    fn ct_eq_with_equal_bytes() {
+        assert!(ct_eq(&[0xAB; 32], &[0xAB; 32]));
+    }
+
+    #[test]
+    fn ct_eq_with_single_bit_difference() {
+        let a = [0u8; 32];
+        let mut b = [0u8; 32];
+        b[31] = 1;
+        assert!(!ct_eq(&a, &b));
+    }
+
+    #[test]
+    fn different_device_ids_produce_different_hashes() {
+        let keys = GenesisPublicKeys::new(b"S".to_vec(), b"K".to_vec());
+        let pd = b"p".to_vec();
+        let env = *domain_hash("DSM/genesis/dbrw-env", &pd).as_bytes();
+        let dbrw = DBRWProof::new(vec![1], env, pd, [0u8; 32]);
+        let mpc = vec![MPCContribution::new("n".into(), [0u8; 32], vec![], 0)];
+
+        let gs1 = GenesisState::new([1u8; 32], [0u8; 32], mpc.clone(), dbrw.clone(), keys.clone(), 0);
+        let gs2 = GenesisState::new([2u8; 32], [0u8; 32], mpc, dbrw, keys, 0);
+        assert_ne!(
+            gs1.recompute_genesis_hash().unwrap(),
+            gs2.recompute_genesis_hash().unwrap()
+        );
+    }
 }
