@@ -1,0 +1,34 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# CycloneDX SBOM for core DSM crate (issue #26)
+
+name: SBOM
+
+on:
+  schedule:
+    - cron: "15 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cyclonedx:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --locked
+
+      - name: Generate CycloneDX SBOM (dsm crate)
+        working-directory: dsm_client/deterministic_state_machine/dsm
+        run: cargo cyclonedx
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsm-sbom-cyclonedx
+          path: dsm_client/deterministic_state_machine/dsm/dsm.cdx.xml
+          if-no-files-found: error

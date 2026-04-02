@@ -143,6 +143,9 @@ export default function WithdrawView({
 
       <div style={{ fontSize: 11, marginBottom: 12, color: 'var(--text-disabled)' }}>
         Enter the BTC amount the recipient should receive. The SDK will plan the route across active vaults and show the fee impact before anything executes.
+        {' '}
+        Estimates labeled &quot;Bitcoin network fee&quot; are <strong>L1 miner fees</strong> for burns and payouts on Bitcoin.
+        DSM does not add a separate withdrawal service fee on top of those estimates.
       </div>
 
       <div className="balance-card btc-tap-summary-card">

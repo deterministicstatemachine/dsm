@@ -31,6 +31,11 @@
 //! - **Privacy**: [`random_walk_privacy`]
 //! - **Device memory**: [`device_memory_manager`]
 //! - **Testing**: [`adb_test_utils`] (ADB-based hardware testing for C-DBRW)
+//!
+//! # Error handling
+//!
+//! Public crypto APIs return [`DsmError`]. `expect`/`unwrap` are limited to
+//! `#[cfg(test)]` modules, property tests, and the `testing` feature (`SignatureKeyPair::generate_for_testing`).
 
 use crate::types::error::DsmError;
 

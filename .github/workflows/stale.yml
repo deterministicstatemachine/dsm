@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# Close stale issues and PRs (issue #27)
+
+name: Stale issues and PRs
+
+on:
+  schedule:
+    - cron: "30 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/stale@v9
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          days-before-stale: 60
+          days-before-close: 14
+          stale-issue-message: >
+            This issue has been marked stale because there has been no activity for 60 days.
+            It will close in 14 days if nothing further happens. Comment or push a linked PR to keep it open.
+          stale-pr-message: >
+            This pull request has been marked stale because there has been no activity for 60 days.
+            It will close in 14 days if nothing further happens.
+          exempt-issue-labels: "security,critical,priority:high"
+          exempt-pr-labels: "security,critical,priority:high"
