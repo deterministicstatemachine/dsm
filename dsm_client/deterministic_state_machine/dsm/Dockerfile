@@ -104,6 +104,6 @@ LABEL org.opencontainers.image.description="Deterministic State Machine implemen
 LABEL org.opencontainers.image.version="0.1.0"
 LABEL org.opencontainers.image.authors="DSM Development Team"
 LABEL org.opencontainers.image.licenses="MIT OR Apache-2.0"
-LABEL org.opencontainers.image.source="https://github.com/DSM-Deterministic-State-Machine/deterministic-state-machine"
+LABEL org.opencontainers.image.source="https://github.com/deterministicstatemachine/dsm"
 LABEL com.dsm.security.quantum-resistant="true"
 LABEL com.dsm.security.hardened="true"
