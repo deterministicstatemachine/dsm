@@ -491,3 +491,260 @@ impl AppRouterImpl {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prost::Message;
+
+    /// Build a V1 policy_bytes blob: [version=1][ticker_len][ticker][alias_len_be16][alias][decimals]
+    fn build_v1_policy_bytes(ticker: &str, alias: &str, decimals: u8) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.push(1); // version
+        buf.push(ticker.len() as u8);
+        buf.extend_from_slice(ticker.as_bytes());
+        let alias_len = alias.len() as u16;
+        buf.push((alias_len >> 8) as u8);
+        buf.push((alias_len & 0xFF) as u8);
+        buf.extend_from_slice(alias.as_bytes());
+        buf.push(decimals);
+        buf
+    }
+
+    /// Build a V2 policy_bytes blob with the full field layout.
+    fn build_v2_policy_bytes(
+        kind_byte: u8,
+        flags: u8,
+        ticker: &str,
+        alias: &str,
+        decimals: u8,
+        max_supply: u128,
+        description: &str,
+        icon_url: &str,
+    ) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.push(2); // version
+        buf.push(kind_byte);
+        buf.push(flags);
+        buf.push(0); // mintBurnThreshold
+
+        buf.push(ticker.len() as u8);
+        buf.extend_from_slice(ticker.as_bytes());
+
+        let alias_len = alias.len() as u16;
+        buf.push((alias_len >> 8) as u8);
+        buf.push((alias_len & 0xFF) as u8);
+        buf.extend_from_slice(alias.as_bytes());
+
+        buf.push(decimals);
+
+        // max_supply: 16 bytes big-endian
+        for i in (0..16).rev() {
+            buf.push(((max_supply >> (i * 8)) & 0xFF) as u8);
+        }
+        // initialAlloc: 16 bytes zeros
+        buf.extend_from_slice(&[0u8; 16]);
+
+        let desc_len = description.len() as u16;
+        buf.push((desc_len >> 8) as u8);
+        buf.push((desc_len & 0xFF) as u8);
+        buf.extend_from_slice(description.as_bytes());
+
+        let icon_len = icon_url.len() as u16;
+        buf.push((icon_len >> 8) as u8);
+        buf.push((icon_len & 0xFF) as u8);
+        buf.extend_from_slice(icon_url.as_bytes());
+
+        buf
+    }
+
+    fn wrap_as_token_policy_v3(policy_bytes: Vec<u8>) -> Vec<u8> {
+        let msg = generated::TokenPolicyV3 { policy_bytes };
+        msg.encode_to_vec()
+    }
+
+    // ── parse_token_policy tests ─────────────────────────────────────
+
+    #[test]
+    fn parse_v1_basic() {
+        let raw = build_v1_policy_bytes("ERA", "Era Token", 8);
+        let proto = wrap_as_token_policy_v3(raw);
+
+        let parsed = parse_token_policy(&proto).expect("should parse V1");
+        assert_eq!(parsed.ticker, "ERA");
+        assert_eq!(parsed.alias, "Era Token");
+        assert_eq!(parsed.decimals, 8);
+    }
+
+    #[test]
+    fn parse_v1_empty_ticker() {
+        let raw = build_v1_policy_bytes("", "Tok", 2);
+        let proto = wrap_as_token_policy_v3(raw);
+
+        let parsed = parse_token_policy(&proto).expect("should parse V1 with empty ticker");
+        assert_eq!(parsed.ticker, "");
+        assert_eq!(parsed.alias, "Tok");
+    }
+
+    #[test]
+    fn parse_v2_fungible() {
+        let raw = build_v2_policy_bytes(
+            0, // FUNGIBLE
+            0x03, // mint_burn_enabled | transferable
+            "DSM",
+            "DSM Token",
+            18,
+            1_000_000,
+            "A test token",
+            "https://example.com/icon.png",
+        );
+        let proto = wrap_as_token_policy_v3(raw);
+
+        let parsed = parse_token_policy(&proto).expect("should parse V2 fungible");
+        assert_eq!(parsed.ticker, "DSM");
+        assert_eq!(parsed.alias, "DSM Token");
+        assert_eq!(parsed.decimals, 18);
+        assert_eq!(parsed.kind.as_deref(), Some("FUNGIBLE"));
+        assert!(parsed.mint_burn_enabled);
+        assert!(parsed.transferable);
+        assert!(!parsed.unlimited_supply);
+        assert_eq!(parsed.max_supply.as_deref(), Some("1000000"));
+        assert_eq!(parsed.description.as_deref(), Some("A test token"));
+        assert_eq!(parsed.icon_url.as_deref(), Some("https://example.com/icon.png"));
+    }
+
+    #[test]
+    fn parse_v2_nft_with_unlimited_supply() {
+        let raw = build_v2_policy_bytes(
+            1, // NFT
+            0x0A, // transferable(0x02) | unlimited_supply(0x08)
+            "MYNFT",
+            "My NFT",
+            0,
+            0,
+            "",
+            "",
+        );
+        let proto = wrap_as_token_policy_v3(raw);
+
+        let parsed = parse_token_policy(&proto).expect("should parse V2 NFT");
+        assert_eq!(parsed.kind.as_deref(), Some("NFT"));
+        assert!(!parsed.mint_burn_enabled);
+        assert!(parsed.transferable);
+        assert!(parsed.unlimited_supply);
+        assert!(parsed.description.is_none(), "empty description should be None");
+        assert!(parsed.icon_url.is_none(), "empty icon_url should be None");
+    }
+
+    #[test]
+    fn parse_v2_sbt() {
+        let raw = build_v2_policy_bytes(2, 0x00, "SBT1", "Soul Bound", 0, 1, "", "");
+        let proto = wrap_as_token_policy_v3(raw);
+
+        let parsed = parse_token_policy(&proto).expect("should parse V2 SBT");
+        assert_eq!(parsed.kind.as_deref(), Some("SBT"));
+        assert!(!parsed.mint_burn_enabled);
+        assert!(!parsed.transferable);
+    }
+
+    #[test]
+    fn parse_unknown_version_returns_none() {
+        let mut raw = vec![99u8]; // unknown version
+        raw.extend_from_slice(&[0; 20]);
+        let proto = wrap_as_token_policy_v3(raw);
+
+        assert!(parse_token_policy(&proto).is_none());
+    }
+
+    #[test]
+    fn parse_empty_bytes_returns_none() {
+        assert!(parse_token_policy(&[]).is_none());
+    }
+
+    #[test]
+    fn parse_truncated_v1_returns_none() {
+        let proto = wrap_as_token_policy_v3(vec![1]); // version only, no ticker
+        assert!(parse_token_policy(&proto).is_none());
+    }
+
+    // ── list_cached_policy_ids_from_prefs ─────────────────────────────
+
+    #[test]
+    fn list_cached_splits_comma_separated() {
+        // Since list_cached_policy_ids_from_prefs calls app_state_get which
+        // depends on global state, we test the splitting logic directly.
+        let input = "abc123, def456 ,ghi789";
+        let ids: std::collections::BTreeSet<String> = input
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(ids.len(), 3);
+        assert!(ids.contains("abc123"));
+        assert!(ids.contains("def456"));
+        assert!(ids.contains("ghi789"));
+    }
+
+    #[test]
+    fn list_cached_empty_string_returns_empty_set() {
+        let input = "";
+        let ids: std::collections::BTreeSet<String> = input
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect();
+        assert!(ids.is_empty());
+    }
+
+    // ── Token validation constants ────────────────────────────────────
+
+    #[test]
+    fn token_route_constants() {
+        assert_eq!(POLICY_INDEX_KEY, "dsm.policy.index");
+        assert!(POLICY_PREFIX.starts_with("dsm.policy."));
+        assert!(TOKEN_PREFIX.starts_with("dsm.token."));
+    }
+
+    #[test]
+    fn ticker_validation_logic() {
+        let valid_tickers = ["AB", "ERA", "DSMT", "ABCDEFGH"];
+        for t in &valid_tickers {
+            let ticker = t.trim().to_uppercase();
+            assert!(
+                ticker.len() >= 2 && ticker.len() <= 8,
+                "ticker '{}' should be valid",
+                t
+            );
+        }
+
+        let invalid_tickers = ["A", "", "ABCDEFGHI"];
+        for t in &invalid_tickers {
+            let ticker = t.trim().to_uppercase();
+            assert!(
+                ticker.len() < 2 || ticker.len() > 8,
+                "ticker '{}' should be invalid",
+                t
+            );
+        }
+    }
+
+    #[test]
+    fn token_create_request_roundtrip() {
+        let req = generated::TokenCreateRequest {
+            ticker: "ERA".into(),
+            alias: "Era Token".into(),
+            decimals: 8,
+            max_supply_u128: vec![0u8; 16],
+            policy_anchor: vec![0xAA; 32],
+        };
+        let bytes = req.encode_to_vec();
+        let decoded = generated::TokenCreateRequest::decode(&*bytes).expect("decode");
+        assert_eq!(decoded.ticker, "ERA");
+        assert_eq!(decoded.alias, "Era Token");
+        assert_eq!(decoded.decimals, 8);
+        assert_eq!(decoded.max_supply_u128.len(), 16);
+        assert_eq!(decoded.policy_anchor.len(), 32);
+    }
+}

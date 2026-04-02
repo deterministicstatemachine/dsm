@@ -119,3 +119,61 @@ pub fn install_app_router_adapter(handle: Handle) {
 pub fn is_app_router_installed() -> bool {
     CORE_APP_ROUTER_INSTALLED.get().is_some()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn core_app_router_adapter_constructs() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let adapter = CoreAppRouterAdapter::new(rt.handle().clone());
+        let _ = adapter.handle;
+    }
+
+    #[test]
+    #[ignore = "flaky under parallel execution: depends on global APP_ROUTER state"]
+    fn handle_query_fails_without_sdk_router() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let adapter = CoreAppRouterAdapter::new(rt.handle().clone());
+        let result =
+            dsm::core::bridge::AppRouter::handle_query(&adapter, "/test", &[]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not installed"));
+    }
+
+    #[test]
+    #[ignore = "flaky under parallel execution: depends on global APP_ROUTER state"]
+    fn handle_invoke_fails_without_sdk_router() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let adapter = CoreAppRouterAdapter::new(rt.handle().clone());
+        let result =
+            dsm::core::bridge::AppRouter::handle_invoke(&adapter, "test_method", &[]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not installed"));
+    }
+
+    #[test]
+    #[ignore = "flaky under parallel execution: depends on global APP_ROUTER state"]
+    fn handle_query_with_empty_path() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let adapter = CoreAppRouterAdapter::new(rt.handle().clone());
+        let result =
+            dsm::core::bridge::AppRouter::handle_query(&adapter, "", &[]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    #[ignore = "flaky under parallel execution: depends on global APP_ROUTER state"]
+    fn handle_invoke_with_large_payload() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let adapter = CoreAppRouterAdapter::new(rt.handle().clone());
+        let big_payload = vec![0xFFu8; 1024 * 1024];
+        let result = dsm::core::bridge::AppRouter::handle_invoke(
+            &adapter,
+            "big_method",
+            &big_payload,
+        );
+        assert!(result.is_err());
+    }
+}

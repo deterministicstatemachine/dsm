@@ -647,3 +647,240 @@ fn fisher_yates_prf_u64(seed: [u8; 32], ctr: u64) -> u64 {
     le8.copy_from_slice(&bytes[..8]);
     u64::from_le_bytes(le8)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_toml() -> String {
+        r#"
+protocol = "http"
+lan_ip = "10.0.0.1"
+ports = [8080, 8081]
+
+[[nodes]]
+name = "node-a"
+endpoint = "http://10.0.0.1:8080"
+
+[[nodes]]
+name = "node-b"
+endpoint = "http://10.0.0.2:8081"
+"#
+        .to_string()
+    }
+
+    #[test]
+    fn parse_env_config_toml_valid() {
+        let cfg = parse_env_config_toml(&sample_toml()).unwrap();
+        assert_eq!(cfg.protocol, "http");
+        assert_eq!(cfg.lan_ip, "10.0.0.1");
+        assert_eq!(cfg.nodes.len(), 2);
+        assert_eq!(cfg.nodes[0].name, "node-a");
+        assert_eq!(cfg.nodes[1].endpoint, "http://10.0.0.2:8081");
+    }
+
+    #[test]
+    fn parse_env_config_toml_defaults_protocol_and_ip() {
+        let toml = r#"
+protocol = ""
+lan_ip = ""
+
+[[nodes]]
+name = "n1"
+endpoint = "http://1.2.3.4:80"
+"#;
+        let cfg = parse_env_config_toml(toml).unwrap();
+        assert_eq!(cfg.protocol, "http");
+        assert_eq!(cfg.lan_ip, "127.0.0.1");
+    }
+
+    #[test]
+    fn parse_env_config_toml_rejects_empty_nodes() {
+        let toml = r#"
+protocol = "http"
+lan_ip = "127.0.0.1"
+nodes = []
+"#;
+        assert!(parse_env_config_toml(toml).is_err());
+    }
+
+    #[test]
+    fn parse_env_config_toml_rejects_invalid_toml() {
+        assert!(parse_env_config_toml("not valid toml {{{").is_err());
+    }
+
+    #[test]
+    fn parse_env_config_toml_optional_fields() {
+        let toml = r#"
+protocol = "https"
+lan_ip = "10.0.0.5"
+mpc_genesis_url = "https://mpc.example.com"
+mpc_api_key = "secret"
+allow_localhost = true
+bitcoin_network = "signet"
+dbtc_dust_floor_sats = 1000
+
+[[nodes]]
+name = "n1"
+endpoint = "http://10.0.0.5:9090"
+"#;
+        let cfg = parse_env_config_toml(toml).unwrap();
+        assert_eq!(cfg.mpc_genesis_url.as_deref(), Some("https://mpc.example.com"));
+        assert_eq!(cfg.mpc_api_key.as_deref(), Some("secret"));
+        assert!(cfg.allow_localhost);
+        assert_eq!(cfg.bitcoin_network.as_deref(), Some("signet"));
+        assert_eq!(cfg.dbtc_dust_floor_sats, Some(1000));
+    }
+
+    #[test]
+    fn node_registry_round_robin() {
+        let nodes = vec![
+            NodeConfig { name: "a".into(), endpoint: "http://a".into() },
+            NodeConfig { name: "b".into(), endpoint: "http://b".into() },
+            NodeConfig { name: "c".into(), endpoint: "http://c".into() },
+        ];
+        let reg = NodeRegistry::new(nodes, None);
+        let mut seen = Vec::new();
+        for _ in 0..6 {
+            seen.push(reg.next_endpoint().unwrap());
+        }
+        // Should cycle through all 3 endpoints twice
+        assert_eq!(seen[0], seen[3]);
+        assert_eq!(seen[1], seen[4]);
+        assert_eq!(seen[2], seen[5]);
+    }
+
+    #[test]
+    fn node_registry_add_and_remove() {
+        let nodes = vec![
+            NodeConfig { name: "a".into(), endpoint: "http://a".into() },
+        ];
+        let reg = NodeRegistry::new(nodes, None);
+
+        assert_eq!(reg.list_endpoints(), vec!["http://a"]);
+
+        reg.add_endpoint("http://b").unwrap();
+        assert_eq!(reg.list_endpoints().len(), 2);
+
+        // Adding duplicate is idempotent
+        reg.add_endpoint("http://b").unwrap();
+        assert_eq!(reg.list_endpoints().len(), 2);
+
+        reg.remove_endpoint("http://a").unwrap();
+        assert_eq!(reg.list_endpoints(), vec!["http://b"]);
+
+        // Removing non-existent returns error
+        assert!(reg.remove_endpoint("http://z").is_err());
+    }
+
+    #[test]
+    fn node_registry_quarantine_skips_node() {
+        let nodes = vec![
+            NodeConfig { name: "a".into(), endpoint: "http://a".into() },
+            NodeConfig { name: "b".into(), endpoint: "http://b".into() },
+        ];
+        let reg = NodeRegistry::new(nodes, None);
+
+        // Quarantine the first node picked by round-robin
+        let first = reg.next_endpoint().unwrap();
+        reg.quarantine_endpoint(&first);
+
+        // Subsequent calls should skip the quarantined node
+        let next = reg.next_endpoint().unwrap();
+        assert_ne!(next, first);
+    }
+
+    #[test]
+    fn node_registry_clear_quarantine() {
+        let nodes = vec![
+            NodeConfig { name: "a".into(), endpoint: "http://a".into() },
+        ];
+        let reg = NodeRegistry::new(nodes, None);
+
+        reg.quarantine_endpoint("http://a");
+        assert!(reg.next_endpoint().is_err()); // all quarantined
+
+        reg.clear_quarantine("http://a");
+        assert_eq!(reg.next_endpoint().unwrap(), "http://a");
+    }
+
+    #[test]
+    fn node_registry_empty_returns_error() {
+        let reg = NodeRegistry::new(vec![], None);
+        assert!(reg.next_endpoint().is_err());
+    }
+
+    #[test]
+    fn fisher_yates_prf_deterministic() {
+        let seed = [42u8; 32];
+        let a = fisher_yates_prf_u64(seed, 0);
+        let b = fisher_yates_prf_u64(seed, 0);
+        assert_eq!(a, b);
+
+        // Different counter yields different value (overwhelmingly likely)
+        let c = fisher_yates_prf_u64(seed, 1);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn fisher_yates_sample_one_in_range() {
+        let seed = [7u8; 32];
+        for range in [1u64, 2, 3, 5, 10, 100, 1000] {
+            let idx = fisher_yates_sample_one(seed, range);
+            assert!(idx < range, "sample {idx} out of range {range}");
+        }
+    }
+
+    #[test]
+    fn fisher_yates_sample_one_deterministic() {
+        let seed = [99u8; 32];
+        let a = fisher_yates_sample_one(seed, 50);
+        let b = fisher_yates_sample_one(seed, 50);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn validate_and_normalize_nodes_non_android_accepts_all() {
+        let nodes = vec![
+            NodeConfig { name: "local".into(), endpoint: "http://127.0.0.1:8080".into() },
+            NodeConfig { name: "remote".into(), endpoint: "http://10.0.0.5:9090".into() },
+        ];
+        let result = validate_and_normalize_nodes(nodes.clone(), false);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn validate_and_normalize_nodes_rejects_empty() {
+        assert!(validate_and_normalize_nodes(vec![], false).is_err());
+    }
+
+    #[test]
+    fn env_config_serialization_roundtrip() {
+        let cfg = EnvConfig {
+            protocol: "http".into(),
+            lan_ip: "10.0.0.1".into(),
+            ports: vec![8080],
+            nodes: vec![NodeConfig {
+                name: "n1".into(),
+                endpoint: "http://10.0.0.1:8080".into(),
+            }],
+            mpc_genesis_url: None,
+            mpc_api_key: None,
+            allow_localhost: false,
+            bitcoin_network: Some("signet".into()),
+            dbtc_dust_floor_sats: None,
+            dbtc_estimated_sweep_fee_sats: None,
+            dbtc_min_confirmations: None,
+            dbtc_max_successor_depth: None,
+            dbtc_min_vault_balance_sats: None,
+            dbtc_fee_rate_sat_vb: None,
+            mempool_api_url: None,
+        };
+        let toml_str = toml::to_string(&cfg).unwrap();
+        let reparsed = parse_env_config_toml(&toml_str).unwrap();
+        assert_eq!(reparsed.protocol, "http");
+        assert_eq!(reparsed.nodes.len(), 1);
+        assert_eq!(reparsed.bitcoin_network.as_deref(), Some("signet"));
+    }
+}

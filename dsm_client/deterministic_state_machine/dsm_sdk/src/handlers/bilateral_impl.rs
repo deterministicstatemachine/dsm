@@ -581,3 +581,494 @@ impl BilateralHandler for BiImpl {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prost::Message;
+
+    fn make_hash32(bytes: &[u8]) -> pb::Hash32 {
+        pb::Hash32 { v: bytes.to_vec() }
+    }
+
+    fn valid_hash32() -> pb::Hash32 {
+        make_hash32(&[0xAA; 32])
+    }
+
+    fn test_config() -> SdkConfig {
+        SdkConfig {
+            node_id: "test-node".into(),
+            storage_endpoints: vec![],
+            enable_offline: false,
+        }
+    }
+
+    // ── prepare ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn prepare_rejects_invalid_protobuf() {
+        let bi = BiImpl {
+            _config: test_config(),
+            storage: None,
+        };
+        let result = bi
+            .prepare(BiPrepare {
+                payload: vec![0xFF, 0xFF, 0xFF],
+            })
+            .await;
+        assert!(!result.success);
+        assert!(result
+            .error_message
+            .as_deref()
+            .unwrap()
+            .contains("decode BilateralPrepareRequest failed"));
+    }
+
+    #[tokio::test]
+    async fn prepare_rejects_empty_operation_data() {
+        let req = pb::BilateralPrepareRequest {
+            operation_data: vec![],
+            ..Default::default()
+        };
+        let bi = BiImpl {
+            _config: test_config(),
+            storage: None,
+        };
+        let result = bi
+            .prepare(BiPrepare {
+                payload: req.encode_to_vec(),
+            })
+            .await;
+        assert!(!result.success);
+        assert!(result
+            .error_message
+            .as_deref()
+            .unwrap()
+            .contains("operation_data is empty"));
+    }
+
+    #[tokio::test]
+    async fn prepare_non_android_computes_commitment() {
+        // Initialize global storage dir required by AppState::get_public_key()
+        let tmp = std::env::temp_dir().join("dsm_test_bilateral_prepare");
+        let _ = std::fs::create_dir_all(&tmp);
+        let _ = crate::storage_utils::set_storage_base_dir(tmp);
+
+        let op_data = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        let req = pb::BilateralPrepareRequest {
+            operation_data: op_data.clone(),
+            validity_iterations: 10,
+            ..Default::default()
+        };
+        let bi = BiImpl {
+            _config: test_config(),
+            storage: None,
+        };
+        let result = bi
+            .prepare(BiPrepare {
+                payload: req.encode_to_vec(),
+            })
+            .await;
+
+        assert!(
+            result.success,
+            "expected success, got: {:?}",
+            result.error_message
+        );
+        let resp = pb::BilateralPrepareResponse::decode(&*result.result_data)
+            .expect("decode response");
+        let commitment = resp.commitment_hash.expect("commitment present");
+        assert_eq!(commitment.v.len(), 32);
+        assert_eq!(resp.expires_iterations, 10);
+
+        let expected =
+            dsm::crypto::blake3::domain_hash("DSM/bilateral-op-commit", &op_data);
+        assert_eq!(commitment.v, expected.as_bytes());
+    }
+
+    // ── accept ───────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn accept_rejects_invalid_protobuf() {
+        let bi = BiImpl {
+            _config: test_config(),
+            storage: None,
+        };
+        let result = bi
+            .accept(BiAccept {
+                payload: vec![0xFF, 0xFE],
+            })
+            .await;
+        assert!(!result.success);
+        assert!(result
+            .error_message
+            .as_deref()
+            .unwrap()
+            .contains("decode BilateralAcceptRequest failed"));
+    }
+
+    #[tokio::test]
+    async fn accept_rejects_missing_commitment_hash() {
+        let req = pb::BilateralAcceptRequest {
+            commitment_hash: None,
+            ..Default::default()
+        };
+        let bi = BiImpl {
+            _config: test_config(),
+            storage: None,
+        };
+        let result = bi
+            .accept(BiAccept {
+                payload: req.encode_to_vec(),
+            })
+            .await;
+        assert!(!result.success);
+        assert!(result
+            .error_message
+            .as_deref()
+            .unwrap()
+            .contains("commitment_hash missing"));
+    }
+
+    #[tokio::test]
+    async fn accept_rejects_wrong_size_commitment_hash() {
+        let req = pb::BilateralAcceptRequest {
+            commitment_hash: Some(make_hash32(&[0xAA; 16])), // 16 bytes, not 32
+            ..Default::default()
+        };
+        let bi = BiImpl {
+            _config: test_config(),
+            storage: None,
+        };
+        let result = bi
+            .accept(BiAccept {
+                payload: req.encode_to_vec(),
+            })
+            .await;
+        assert!(!result.success);
+        assert!(result
+            .error_message
+            .as_deref()
+            .unwrap()
+            .contains("commitment_hash must be 32 bytes"));
+    }
+
+    #[tokio::test]
+    async fn accept_returns_disabled_for_valid_input() {
+        let req = pb::BilateralAcceptRequest {
+            commitment_hash: Some(valid_hash32()),
+            ..Default::default()
+        };
+        let bi = BiImpl {
+            _config: test_config(),
+            storage: None,
+        };
+        let result = bi
+            .accept(BiAccept {
+                payload: req.encode_to_vec(),
+            })
+            .await;
+        assert!(!result.success);
+        assert!(result
+            .error_message
+            .as_deref()
+            .unwrap()
+            .contains("bilateral.accept disabled"));
+    }
+
+    // ── commit ───────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn commit_rejects_invalid_protobuf() {
+        let bi = BiImpl {
+            _config: test_config(),
+            storage: None,
+        };
+        let result = bi
+            .commit(BiCommit {
+                payload: vec![0xDE, 0xAD],
+            })
+            .await;
+        assert!(!result.success);
+        assert!(result
+            .error_message
+            .as_deref()
+            .unwrap()
+            .contains("decode BilateralCommitRequest failed"));
+    }
+
+    #[tokio::test]
+    async fn commit_rejects_bad_counterparty_device_id_length() {
+        let req = pb::BilateralCommitRequest {
+            counterparty_device_id: vec![0u8; 16],
+            commitment_hash: Some(valid_hash32()),
+            local_signature: vec![1],
+            counterparty_sig: vec![2],
+            ..Default::default()
+        };
+        let bi = BiImpl {
+            _config: test_config(),
+            storage: None,
+        };
+        let result = bi
+            .commit(BiCommit {
+                payload: req.encode_to_vec(),
+            })
+            .await;
+        assert!(!result.success);
+        assert!(result
+            .error_message
+            .as_deref()
+            .unwrap()
+            .contains("counterparty_device_id must be 32 bytes"));
+    }
+
+    #[tokio::test]
+    async fn commit_rejects_missing_commitment_hash() {
+        let req = pb::BilateralCommitRequest {
+            counterparty_device_id: vec![1u8; 32],
+            commitment_hash: None,
+            local_signature: vec![1],
+            counterparty_sig: vec![2],
+            ..Default::default()
+        };
+        let bi = BiImpl {
+            _config: test_config(),
+            storage: None,
+        };
+        let result = bi
+            .commit(BiCommit {
+                payload: req.encode_to_vec(),
+            })
+            .await;
+        assert!(!result.success);
+        assert!(result
+            .error_message
+            .as_deref()
+            .unwrap()
+            .contains("commitment_hash missing"));
+    }
+
+    #[tokio::test]
+    async fn commit_rejects_missing_local_signature() {
+        let req = pb::BilateralCommitRequest {
+            counterparty_device_id: vec![1u8; 32],
+            commitment_hash: Some(valid_hash32()),
+            local_signature: vec![],
+            counterparty_sig: vec![2],
+            ..Default::default()
+        };
+        let bi = BiImpl {
+            _config: test_config(),
+            storage: None,
+        };
+        let result = bi
+            .commit(BiCommit {
+                payload: req.encode_to_vec(),
+            })
+            .await;
+        assert!(!result.success);
+        assert!(result
+            .error_message
+            .as_deref()
+            .unwrap()
+            .contains("local_signature missing"));
+    }
+
+    #[tokio::test]
+    async fn commit_rejects_missing_counterparty_sig() {
+        let req = pb::BilateralCommitRequest {
+            counterparty_device_id: vec![1u8; 32],
+            commitment_hash: Some(valid_hash32()),
+            local_signature: vec![1],
+            counterparty_sig: vec![],
+            ..Default::default()
+        };
+        let bi = BiImpl {
+            _config: test_config(),
+            storage: None,
+        };
+        let result = bi
+            .commit(BiCommit {
+                payload: req.encode_to_vec(),
+            })
+            .await;
+        assert!(!result.success);
+        assert!(result
+            .error_message
+            .as_deref()
+            .unwrap()
+            .contains("counterparty_sig missing"));
+    }
+
+    #[tokio::test]
+    async fn commit_returns_disabled_for_valid_input() {
+        let req = pb::BilateralCommitRequest {
+            counterparty_device_id: vec![1u8; 32],
+            commitment_hash: Some(valid_hash32()),
+            local_signature: vec![0x01; 64],
+            counterparty_sig: vec![0x02; 64],
+            ..Default::default()
+        };
+        let bi = BiImpl {
+            _config: test_config(),
+            storage: None,
+        };
+        let result = bi
+            .commit(BiCommit {
+                payload: req.encode_to_vec(),
+            })
+            .await;
+        assert!(!result.success);
+        assert!(result
+            .error_message
+            .as_deref()
+            .unwrap()
+            .contains("bilateral.commit disabled"));
+    }
+
+    // ── transfer ─────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn transfer_rejects_invalid_protobuf() {
+        let bi = BiImpl {
+            _config: test_config(),
+            storage: None,
+        };
+        let result = bi
+            .transfer(BiTransfer {
+                payload: vec![0xBA, 0xAD],
+            })
+            .await;
+        assert!(!result.success);
+        assert!(result
+            .error_message
+            .as_deref()
+            .unwrap()
+            .contains("decode BilateralTransferRequest failed"));
+    }
+
+    #[tokio::test]
+    async fn transfer_rejects_bad_counterparty_device_id() {
+        let req = pb::BilateralTransferRequest {
+            counterparty_device_id: vec![0u8; 10],
+            commitment_hash: Some(valid_hash32()),
+            counterparty_sig: vec![1],
+            operation_data: 42u64.to_le_bytes().to_vec(),
+            expected_genesis_hash: Some(valid_hash32()),
+            expected_counterparty_state_hash: Some(valid_hash32()),
+            expected_local_state_hash: Some(valid_hash32()),
+        };
+        let bi = BiImpl {
+            _config: test_config(),
+            storage: None,
+        };
+        let result = bi
+            .transfer(BiTransfer {
+                payload: req.encode_to_vec(),
+            })
+            .await;
+        assert!(!result.success);
+        assert!(result
+            .error_message
+            .as_deref()
+            .unwrap()
+            .contains("counterparty_device_id must be 32 bytes"));
+    }
+
+    #[tokio::test]
+    async fn transfer_rejects_zero_amount() {
+        let req = pb::BilateralTransferRequest {
+            counterparty_device_id: vec![1u8; 32],
+            commitment_hash: Some(valid_hash32()),
+            counterparty_sig: vec![1],
+            operation_data: 0u64.to_le_bytes().to_vec(),
+            expected_genesis_hash: Some(valid_hash32()),
+            expected_counterparty_state_hash: Some(valid_hash32()),
+            expected_local_state_hash: Some(valid_hash32()),
+        };
+        let bi = BiImpl {
+            _config: test_config(),
+            storage: None,
+        };
+        let result = bi
+            .transfer(BiTransfer {
+                payload: req.encode_to_vec(),
+            })
+            .await;
+        assert!(!result.success);
+        assert!(result
+            .error_message
+            .as_deref()
+            .unwrap()
+            .contains("amount must be non-zero"));
+    }
+
+    #[tokio::test]
+    async fn transfer_rejects_missing_genesis_hash() {
+        let req = pb::BilateralTransferRequest {
+            counterparty_device_id: vec![1u8; 32],
+            commitment_hash: Some(valid_hash32()),
+            counterparty_sig: vec![1],
+            operation_data: 100u64.to_le_bytes().to_vec(),
+            expected_genesis_hash: None,
+            expected_counterparty_state_hash: Some(valid_hash32()),
+            expected_local_state_hash: Some(valid_hash32()),
+        };
+        let bi = BiImpl {
+            _config: test_config(),
+            storage: None,
+        };
+        let result = bi
+            .transfer(BiTransfer {
+                payload: req.encode_to_vec(),
+            })
+            .await;
+        assert!(!result.success);
+        assert!(result
+            .error_message
+            .as_deref()
+            .unwrap()
+            .contains("expected_genesis_hash"));
+    }
+
+    #[tokio::test]
+    async fn transfer_returns_disabled_for_fully_valid_input() {
+        let req = pb::BilateralTransferRequest {
+            counterparty_device_id: vec![1u8; 32],
+            commitment_hash: Some(valid_hash32()),
+            counterparty_sig: vec![0x01; 64],
+            operation_data: 500u64.to_le_bytes().to_vec(),
+            expected_genesis_hash: Some(valid_hash32()),
+            expected_counterparty_state_hash: Some(valid_hash32()),
+            expected_local_state_hash: Some(valid_hash32()),
+        };
+        let bi = BiImpl {
+            _config: test_config(),
+            storage: None,
+        };
+        let result = bi
+            .transfer(BiTransfer {
+                payload: req.encode_to_vec(),
+            })
+            .await;
+        assert!(!result.success);
+        assert!(result
+            .error_message
+            .as_deref()
+            .unwrap()
+            .contains("bilateral.transfer disabled"));
+    }
+
+    // ── get_pending_transactions ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn get_pending_transactions_returns_empty() {
+        let bi = BiImpl {
+            _config: test_config(),
+            storage: None,
+        };
+        let pending = bi.get_pending_transactions().await.unwrap();
+        assert!(pending.is_empty());
+    }
+}

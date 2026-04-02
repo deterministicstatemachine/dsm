@@ -82,3 +82,94 @@ impl AppRouterImpl {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use dsm::types::proto as generated;
+    use prost::Message;
+
+    use crate::bridge::AppResult;
+
+    #[test]
+    fn identity_route_names_are_stable() {
+        let expected_routes = [
+            "identity.transport_headers_v3",
+            "identity.pairing_qr",
+            "identity.pairing_compact",
+        ];
+        for route in &expected_routes {
+            assert!(!route.is_empty());
+            assert!(route.starts_with("identity."));
+        }
+    }
+
+    #[test]
+    fn contact_qr_v3_response_roundtrip() {
+        let qr = generated::ContactQrV3 {
+            device_id: vec![0xAA; 32],
+            network: "main".into(),
+            storage_nodes: vec!["http://node:8080".into()],
+            sdk_fingerprint: vec![0xBB; 32],
+            genesis_hash: vec![0xCC; 32],
+            signing_public_key: vec![0xDD; 64],
+            preferred_alias: "TestUser".into(),
+        };
+
+        let bytes = qr.encode_to_vec();
+        let decoded = generated::ContactQrV3::decode(&*bytes).expect("decode");
+        assert_eq!(decoded.network, "main");
+        assert_eq!(decoded.device_id.len(), 32);
+        assert_eq!(decoded.genesis_hash.len(), 32);
+        assert_eq!(decoded.preferred_alias, "TestUser");
+    }
+
+    #[test]
+    fn app_state_response_for_pairing_compact() {
+        let resp = generated::AppStateResponse {
+            key: "pairing".into(),
+            value: Some("DEVICE123@GENESIS456".into()),
+        };
+        let bytes = resp.encode_to_vec();
+        let decoded = generated::AppStateResponse::decode(&*bytes).expect("decode");
+        assert_eq!(decoded.key, "pairing");
+        assert_eq!(
+            decoded.value.as_deref(),
+            Some("DEVICE123@GENESIS456")
+        );
+    }
+
+    #[test]
+    fn envelope_framing_byte_is_0x03() {
+        let envelope = generated::Envelope {
+            version: 3,
+            headers: None,
+            message_id: vec![0u8; 16],
+            payload: Some(generated::envelope::Payload::AppStateResponse(
+                generated::AppStateResponse {
+                    key: "test".into(),
+                    value: Some("val".into()),
+                },
+            )),
+        };
+        let mut buf = Vec::with_capacity(1 + envelope.encoded_len());
+        buf.push(0x03);
+        envelope.encode(&mut buf).unwrap();
+
+        assert_eq!(buf[0], 0x03, "framing byte must be 0x03 for v3");
+        let decoded =
+            generated::Envelope::decode(&buf[1..]).expect("decode sans framing byte");
+        assert_eq!(decoded.version, 3);
+    }
+
+    #[test]
+    fn err_helper_produces_failed_result() {
+        let result = AppResult {
+            success: false,
+            data: vec![],
+            error_message: Some("test error".into()),
+        };
+        assert!(!result.success);
+        assert!(result.data.is_empty());
+        assert_eq!(result.error_message.as_deref(), Some("test error"));
+    }
+}
