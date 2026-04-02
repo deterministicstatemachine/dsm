@@ -1,6 +1,6 @@
 import React from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import BitcoinTapTab from '../BitcoinTapTab';
+import BitcoinTapTab from '../bitcoin/BitcoinTapTab';
 
 const mockGetDbtcBalance = jest.fn();
 const mockGetNativeBtcBalance = jest.fn();
