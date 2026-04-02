@@ -651,12 +651,27 @@ mod tests {
             .error_type(),
             "configuration"
         );
-        assert_eq!(UnifiedDsmError::new_internal("x".into()).error_type(), "internal");
+        assert_eq!(
+            UnifiedDsmError::new_internal("x".into()).error_type(),
+            "internal"
+        );
         assert_eq!(UnifiedDsmError::validation("x").error_type(), "validation");
-        assert_eq!(UnifiedDsmError::not_found("a", "b").error_type(), "not_found");
-        assert_eq!(UnifiedDsmError::authentication("x").error_type(), "authentication");
-        assert_eq!(UnifiedDsmError::authorization("x").error_type(), "authorization");
-        assert_eq!(UnifiedDsmError::rate_limit("x", None).error_type(), "rate_limit");
+        assert_eq!(
+            UnifiedDsmError::not_found("a", "b").error_type(),
+            "not_found"
+        );
+        assert_eq!(
+            UnifiedDsmError::authentication("x").error_type(),
+            "authentication"
+        );
+        assert_eq!(
+            UnifiedDsmError::authorization("x").error_type(),
+            "authorization"
+        );
+        assert_eq!(
+            UnifiedDsmError::rate_limit("x", None).error_type(),
+            "rate_limit"
+        );
     }
 
     // ── recovery_strategy ───────────────────────────────────────────
@@ -664,23 +679,43 @@ mod tests {
     #[test]
     fn recovery_strategy_mapping() {
         assert!(matches!(
-            UnifiedDsmError::Crypto { context: "".into(), component: None, source: None, recoverable: false }
-                .recovery_strategy(),
+            UnifiedDsmError::Crypto {
+                context: "".into(),
+                component: None,
+                source: None,
+                recoverable: false
+            }
+            .recovery_strategy(),
             RecoveryStrategy::RetryWithBackoff
         ));
         assert!(matches!(
-            UnifiedDsmError::Network { context: "".into(), component: None, source: None, recoverable: false }
-                .recovery_strategy(),
+            UnifiedDsmError::Network {
+                context: "".into(),
+                component: None,
+                source: None,
+                recoverable: false
+            }
+            .recovery_strategy(),
             RecoveryStrategy::Reconnect
         ));
         assert!(matches!(
-            UnifiedDsmError::Storage { context: "".into(), component: None, source: None, recoverable: false }
-                .recovery_strategy(),
+            UnifiedDsmError::Storage {
+                context: "".into(),
+                component: None,
+                source: None,
+                recoverable: false
+            }
+            .recovery_strategy(),
             RecoveryStrategy::Reload
         ));
         assert!(matches!(
-            UnifiedDsmError::Configuration { context: "".into(), component: None, source: None, recoverable: false }
-                .recovery_strategy(),
+            UnifiedDsmError::Configuration {
+                context: "".into(),
+                component: None,
+                source: None,
+                recoverable: false
+            }
+            .recovery_strategy(),
             RecoveryStrategy::Reconfigure
         ));
         assert!(matches!(
@@ -698,18 +733,33 @@ mod tests {
     #[test]
     fn max_retries_values() {
         assert_eq!(
-            UnifiedDsmError::Crypto { context: "".into(), component: None, source: None, recoverable: false }
-                .max_retries(),
+            UnifiedDsmError::Crypto {
+                context: "".into(),
+                component: None,
+                source: None,
+                recoverable: false
+            }
+            .max_retries(),
             0
         );
         assert_eq!(
-            UnifiedDsmError::Network { context: "".into(), component: None, source: None, recoverable: false }
-                .max_retries(),
+            UnifiedDsmError::Network {
+                context: "".into(),
+                component: None,
+                source: None,
+                recoverable: false
+            }
+            .max_retries(),
             3
         );
         assert_eq!(
-            UnifiedDsmError::Storage { context: "".into(), component: None, source: None, recoverable: false }
-                .max_retries(),
+            UnifiedDsmError::Storage {
+                context: "".into(),
+                component: None,
+                source: None,
+                recoverable: false
+            }
+            .max_retries(),
             2
         );
         assert_eq!(UnifiedDsmError::new_internal("x".into()).max_retries(), 1);
@@ -784,7 +834,7 @@ mod tests {
 
     #[test]
     fn source_returns_inner_when_present() {
-        let inner = std::io::Error::new(std::io::ErrorKind::Other, "disk");
+        let inner = std::io::Error::other("disk");
         let e = UnifiedDsmError::Storage {
             context: "write".into(),
             component: None,

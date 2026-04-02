@@ -483,12 +483,8 @@ mod tests {
     }
 
     fn make_manager(node_id: &str, addr: &str) -> ReplicationManager {
-        ReplicationManager::new_for_tests(
-            test_config(),
-            node_id.to_string(),
-            addr.to_string(),
-        )
-        .unwrap()
+        ReplicationManager::new_for_tests(test_config(), node_id.to_string(), addr.to_string())
+            .unwrap()
     }
 
     #[test]

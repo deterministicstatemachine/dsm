@@ -704,10 +704,7 @@ mod tests {
             message: String::new(),
             signature: vec![],
         };
-        assert_ne!(
-            hash_operation(&op1).unwrap(),
-            hash_operation(&op2).unwrap()
-        );
+        assert_ne!(hash_operation(&op1).unwrap(), hash_operation(&op2).unwrap());
     }
 
     // ── Operation builder methods ──
@@ -751,9 +748,7 @@ mod tests {
     #[test]
     fn add_relationship_operation_contains_counterparty() {
         let sdk = HashChainSDK::new();
-        let op = sdk
-            .add_relationship_operation(vec![1], "alice")
-            .unwrap();
+        let op = sdk.add_relationship_operation(vec![1], "alice").unwrap();
         match op {
             Operation::Generic {
                 operation_type,

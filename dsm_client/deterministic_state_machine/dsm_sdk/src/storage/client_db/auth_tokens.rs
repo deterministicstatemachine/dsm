@@ -204,7 +204,10 @@ mod tests {
         ensure_auth_tokens_bound_to_identity("dev-b", "gen-b").unwrap();
 
         let token = get_auth_token("https://ep", "dev-a", "gen-a").unwrap();
-        assert!(token.is_none(), "tokens should be purged after identity change");
+        assert!(
+            token.is_none(),
+            "tokens should be purged after identity change"
+        );
     }
 
     #[test]

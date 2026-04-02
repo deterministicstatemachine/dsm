@@ -353,29 +353,20 @@ mod tests {
 
     #[test]
     fn build_with_state_number() {
-        let state = valid_builder()
-            .with_state_number(42)
-            .build()
-            .unwrap();
+        let state = valid_builder().with_state_number(42).build().unwrap();
         assert_eq!(state.state_number, 42);
     }
 
     #[test]
     fn build_with_id() {
-        let state = valid_builder()
-            .with_id("my-state".into())
-            .build()
-            .unwrap();
+        let state = valid_builder().with_id("my-state".into()).build().unwrap();
         assert_eq!(state.id, "my-state");
     }
 
     #[test]
     fn build_with_explicit_hash() {
         let hash = [0xFF; 32];
-        let state = valid_builder()
-            .with_hash(hash)
-            .build()
-            .unwrap();
+        let state = valid_builder().with_hash(hash).build().unwrap();
         assert_eq!(state.hash, hash);
     }
 
@@ -418,20 +409,14 @@ mod tests {
     #[test]
     fn build_with_prev_state_hash() {
         let prev = [0xBB; 32];
-        let state = valid_builder()
-            .with_prev_state_hash(prev)
-            .build()
-            .unwrap();
+        let state = valid_builder().with_prev_state_hash(prev).build().unwrap();
         assert_eq!(state.prev_state_hash, prev);
     }
 
     #[test]
     fn build_with_prev_hash_alias() {
         let prev = [0xCC; 32];
-        let state = valid_builder()
-            .with_prev_hash(prev)
-            .build()
-            .unwrap();
+        let state = valid_builder().with_prev_hash(prev).build().unwrap();
         assert_eq!(state.prev_state_hash, prev);
     }
 
@@ -448,10 +433,7 @@ mod tests {
     fn build_with_flags() {
         let mut flags = HashSet::new();
         flags.insert(StateFlag::Recovered);
-        let state = valid_builder()
-            .with_flags(flags.clone())
-            .build()
-            .unwrap();
+        let state = valid_builder().with_flags(flags.clone()).build().unwrap();
         assert!(state.flags.contains(&StateFlag::Recovered));
     }
 

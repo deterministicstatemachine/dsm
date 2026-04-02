@@ -1124,10 +1124,7 @@ mod tests {
         let device_id = [0xAA; 32];
         let genesis_hash = [0xBB; 32];
         ContactManager {
-            dsm_manager: Arc::new(RwLock::new(DsmContactManager::new(
-                device_id,
-                vec![],
-            ))),
+            dsm_manager: Arc::new(RwLock::new(DsmContactManager::new(device_id, vec![]))),
             groups: HashMap::new(),
             device_id,
             genesis_hash,
@@ -1230,8 +1227,7 @@ mod tests {
             preferred_alias: "Alice".into(),
         };
         let bytes = qr.encode_to_vec();
-        let parsed =
-            ContactManager::parse_contact_qr_v3_payload(&bytes).expect("parse QR payload");
+        let parsed = ContactManager::parse_contact_qr_v3_payload(&bytes).expect("parse QR payload");
         assert_eq!(parsed.device_id, vec![0xAA; 32]);
         assert_eq!(parsed.network, "test");
         assert_eq!(parsed.storage_nodes.len(), 2);
@@ -1253,9 +1249,7 @@ mod tests {
     fn create_add_contact_operation_with_labels_builds_bilateral() {
         let cm = test_manager();
         let op = cm
-            .create_add_contact_operation_with_labels(
-                "alice", "bob", "friend", vec![1, 2, 3], true,
-            )
+            .create_add_contact_operation_with_labels("alice", "bob", "friend", vec![1, 2, 3], true)
             .expect("build operation");
 
         match op {
@@ -1277,9 +1271,7 @@ mod tests {
     fn create_add_contact_operation_with_labels_builds_unilateral() {
         let cm = test_manager();
         let op = cm
-            .create_add_contact_operation_with_labels(
-                "alice", "bob", "colleague", vec![], false,
-            )
+            .create_add_contact_operation_with_labels("alice", "bob", "colleague", vec![], false)
             .expect("build operation");
 
         match op {
@@ -1329,7 +1321,9 @@ mod tests {
             message: "test".into(),
         });
         let state = State::default();
-        assert!(cm.update_contact_from_transition(&transition, &state).is_ok());
+        assert!(cm
+            .update_contact_from_transition(&transition, &state)
+            .is_ok());
     }
 
     #[test]

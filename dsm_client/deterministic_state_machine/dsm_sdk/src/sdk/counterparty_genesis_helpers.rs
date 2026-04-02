@@ -527,10 +527,7 @@ mod tests {
             .block_on(cache.get_genesis_state("d1"))
             .unwrap()
             .is_some());
-        let updated = rt
-            .block_on(cache.get_genesis_state("d1"))
-            .unwrap()
-            .unwrap();
+        let updated = rt.block_on(cache.get_genesis_state("d1")).unwrap().unwrap();
         assert_eq!(updated.source, "updated");
         assert_eq!(updated.state_hash, vec![9, 9]);
     }
@@ -544,12 +541,8 @@ mod tests {
         let binding = create_genesis_binding(&local, &remote, "bilateral").unwrap();
 
         assert!(binding.starts_with(b"bilateral\0"));
-        assert!(binding
-            .windows(32)
-            .any(|w| w == [0x11; 32]));
-        assert!(binding
-            .windows(32)
-            .any(|w| w == [0x22; 32]));
+        assert!(binding.windows(32).any(|w| w == [0x11; 32]));
+        assert!(binding.windows(32).any(|w| w == [0x22; 32]));
     }
 
     #[test]
@@ -692,10 +685,7 @@ mod tests {
         let list = rt.block_on(cache.list_cached_genesis_states()).unwrap();
         assert_eq!(list.len(), 1);
 
-        let entry = rt
-            .block_on(cache.get_genesis_state("a"))
-            .unwrap()
-            .unwrap();
+        let entry = rt.block_on(cache.get_genesis_state("a")).unwrap().unwrap();
         assert_eq!(entry.state_hash, vec![3]);
         assert_eq!(entry.source, "s3");
     }
@@ -747,7 +737,7 @@ mod tests {
         let remote = dummy_genesis([0x02; 32]);
         let binding = create_genesis_binding(&local, &remote, "").unwrap();
         // "" (0) + null (1) + hash_a (32) + hash_b (32) = 65
-        assert_eq!(binding.len(), 0 + 1 + 32 + 32);
+        assert_eq!(binding.len(), 1 + 32 + 32);
         assert_eq!(binding[0], 0); // null separator right at start
     }
 
@@ -811,11 +801,12 @@ mod tests {
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
-        assert!(rt
-            .block_on(cache.get_genesis_state("dev1"))
-            .unwrap()
-            .unwrap()
-            .verified);
+        assert!(
+            rt.block_on(cache.get_genesis_state("dev1"))
+                .unwrap()
+                .unwrap()
+                .verified
+        );
     }
 
     // ── Eviction order: multiple evictions ──
@@ -843,21 +834,9 @@ mod tests {
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
-        assert!(rt
-            .block_on(cache.get_genesis_state("a"))
-            .unwrap()
-            .is_none());
-        assert!(rt
-            .block_on(cache.get_genesis_state("b"))
-            .unwrap()
-            .is_none());
-        assert!(rt
-            .block_on(cache.get_genesis_state("c"))
-            .unwrap()
-            .is_some());
-        assert!(rt
-            .block_on(cache.get_genesis_state("d"))
-            .unwrap()
-            .is_some());
+        assert!(rt.block_on(cache.get_genesis_state("a")).unwrap().is_none());
+        assert!(rt.block_on(cache.get_genesis_state("b")).unwrap().is_none());
+        assert!(rt.block_on(cache.get_genesis_state("c")).unwrap().is_some());
+        assert!(rt.block_on(cache.get_genesis_state("d")).unwrap().is_some());
     }
 }

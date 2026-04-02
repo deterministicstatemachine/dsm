@@ -151,8 +151,7 @@ mod tests {
         let created_at_tick = 5u64;
 
         let claim_hash = compute_claim_hash(identity_id, tick, expires_at_tick);
-        let anchor_commitment =
-            compute_anchor_commitment(identity_id, created_at_tick, None);
+        let anchor_commitment = compute_anchor_commitment(identity_id, created_at_tick, None);
 
         let claim = IdentityClaim {
             identity_id: identity_id.to_string(),

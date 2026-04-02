@@ -229,7 +229,10 @@ mod tests {
     fn core_variant_display_delegates() {
         let err = DsmUiError::Core(sample_core_error());
         let msg = err.to_string();
-        assert!(msg.contains("State machine error: test failure"), "got: {msg}");
+        assert!(
+            msg.contains("State machine error: test failure"),
+            "got: {msg}"
+        );
     }
 
     #[test]
@@ -335,7 +338,10 @@ mod tests {
         assert!(matches!(core.core_error(), DsmCoreError::StateMachine(_)));
 
         let browser = DsmUiError::browser(sample_core_error(), None, None, None);
-        assert!(matches!(browser.core_error(), DsmCoreError::StateMachine(_)));
+        assert!(matches!(
+            browser.core_error(),
+            DsmCoreError::StateMachine(_)
+        ));
 
         let wv = DsmUiError::webview(sample_core_error(), None, None);
         assert!(matches!(wv.core_error(), DsmCoreError::StateMachine(_)));

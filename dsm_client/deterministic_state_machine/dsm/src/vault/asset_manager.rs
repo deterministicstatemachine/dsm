@@ -277,12 +277,14 @@ mod tests {
     #[test]
     fn update_asset_returns_true_for_existing() {
         let mgr = AssetManager::new();
-        mgr.add_asset(DigitalAsset::new("u1".into(), AssetType::BinaryData, vec![0]))
-            .unwrap();
+        mgr.add_asset(DigitalAsset::new(
+            "u1".into(),
+            AssetType::BinaryData,
+            vec![0],
+        ))
+        .unwrap();
 
-        let updated = mgr
-            .update_asset("u1", |a| a.data = vec![9, 8, 7])
-            .unwrap();
+        let updated = mgr.update_asset("u1", |a| a.data = vec![9, 8, 7]).unwrap();
         assert!(updated);
 
         let fetched = mgr.get_asset("u1").unwrap().unwrap();
@@ -299,8 +301,12 @@ mod tests {
     #[test]
     fn remove_asset_returns_some() {
         let mgr = AssetManager::new();
-        mgr.add_asset(DigitalAsset::new("rm1".into(), AssetType::Credential, vec![]))
-            .unwrap();
+        mgr.add_asset(DigitalAsset::new(
+            "rm1".into(),
+            AssetType::Credential,
+            vec![],
+        ))
+        .unwrap();
 
         let removed = mgr.remove_asset("rm1").unwrap();
         assert!(removed.is_some());
@@ -338,8 +344,12 @@ mod tests {
             .unwrap();
         mgr.add_asset(DigitalAsset::new("t2".into(), AssetType::Token, vec![]))
             .unwrap();
-        mgr.add_asset(DigitalAsset::new("b1".into(), AssetType::BinaryData, vec![]))
-            .unwrap();
+        mgr.add_asset(DigitalAsset::new(
+            "b1".into(),
+            AssetType::BinaryData,
+            vec![],
+        ))
+        .unwrap();
 
         let tokens = mgr.get_assets_by_type(AssetType::Token).unwrap();
         assert_eq!(tokens.len(), 2);
@@ -355,8 +365,12 @@ mod tests {
     #[test]
     fn update_asset_data_updates_existing() {
         let mgr = AssetManager::new();
-        mgr.add_asset(DigitalAsset::new("d1".into(), AssetType::BinaryData, vec![0]))
-            .unwrap();
+        mgr.add_asset(DigitalAsset::new(
+            "d1".into(),
+            AssetType::BinaryData,
+            vec![0],
+        ))
+        .unwrap();
 
         mgr.update_asset_data("d1", vec![5, 6, 7]).unwrap();
         let fetched = mgr.get_asset("d1").unwrap().unwrap();
@@ -399,8 +413,12 @@ mod tests {
     #[test]
     fn validate_transfer_non_token_asset_fails() {
         let mgr = AssetManager::new();
-        mgr.add_asset(DigitalAsset::new("notok".into(), AssetType::BinaryData, vec![]))
-            .unwrap();
+        mgr.add_asset(DigitalAsset::new(
+            "notok".into(),
+            AssetType::BinaryData,
+            vec![],
+        ))
+        .unwrap();
         let err = mgr.validate_transfer("notok", 1).unwrap_err();
         assert!(format!("{err}").contains("not a token"));
     }

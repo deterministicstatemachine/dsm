@@ -510,15 +510,9 @@ mod tests {
 
     #[test]
     fn advance_system_chain_tip_rejects_empty_payload() {
-        let err = advance_system_chain_tip(
-            "dlv",
-            SystemPeerType::Dlv,
-            &[0u8; 32],
-            b"",
-            &[0u8; 32],
-            1,
-        )
-        .unwrap_err();
+        let err =
+            advance_system_chain_tip("dlv", SystemPeerType::Dlv, &[0u8; 32], b"", &[0u8; 32], 1)
+                .unwrap_err();
         assert!(err.to_string().contains("payload must be non-empty"));
     }
 
@@ -533,7 +527,9 @@ mod tests {
             1,
         )
         .unwrap_err();
-        assert!(err.to_string().contains("expected_parent_tip must be 32 bytes"));
+        assert!(err
+            .to_string()
+            .contains("expected_parent_tip must be 32 bytes"));
     }
 
     #[test]
@@ -547,7 +543,9 @@ mod tests {
             1,
         )
         .unwrap_err();
-        assert!(err.to_string().contains("source_state_hash must be 32 bytes"));
+        assert!(err
+            .to_string()
+            .contains("source_state_hash must be 32 bytes"));
     }
 
     #[test]
@@ -602,7 +600,7 @@ mod tests {
         let peer = make_peer("dlv", SystemPeerType::Dlv);
         store_system_peer(&peer).unwrap();
 
-        let loaded = get_system_peer_by_device_id(&vec![0xABu8; 32])
+        let loaded = get_system_peer_by_device_id(&[0xABu8; 32])
             .unwrap()
             .expect("should find peer");
         assert_eq!(loaded.peer_key, "dlv");
@@ -692,15 +690,8 @@ mod tests {
         .unwrap();
 
         let parent: [u8; 32] = e1.child_tip.clone().try_into().unwrap();
-        advance_system_chain_tip(
-            "dlv",
-            SystemPeerType::Dlv,
-            &parent,
-            b"ev-2",
-            &[0x22; 32],
-            2,
-        )
-        .unwrap();
+        advance_system_chain_tip("dlv", SystemPeerType::Dlv, &parent, b"ev-2", &[0x22; 32], 2)
+            .unwrap();
 
         let events = get_system_peer_events("dlv").unwrap();
         assert_eq!(events.len(), 2);
@@ -771,10 +762,8 @@ mod tests {
     fn store_system_peer_with_metadata() {
         init_test_db();
         let mut peer = make_peer("meta-peer", SystemPeerType::Protocol);
-        peer.metadata
-            .insert("key1".to_string(), b"value1".to_vec());
-        peer.metadata
-            .insert("key2".to_string(), b"value2".to_vec());
+        peer.metadata.insert("key1".to_string(), b"value1".to_vec());
+        peer.metadata.insert("key2".to_string(), b"value2".to_vec());
         store_system_peer(&peer).unwrap();
 
         let loaded = get_system_peer("meta-peer").unwrap().unwrap();

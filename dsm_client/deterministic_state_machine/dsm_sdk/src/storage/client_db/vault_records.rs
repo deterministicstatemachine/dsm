@@ -463,7 +463,9 @@ mod tests {
         let rec = make_vault_record("op-2", "btc_to_dbtc", "completed");
         upsert_vault_record(&rec).unwrap();
 
-        let loaded = super::get_vault_record_by_vault_id("vid-op-2").unwrap().unwrap();
+        let loaded = super::get_vault_record_by_vault_id("vid-op-2")
+            .unwrap()
+            .unwrap();
         assert_eq!(loaded.vault_op_id, "op-2");
     }
 

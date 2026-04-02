@@ -186,9 +186,7 @@ mod tests {
 
         let result = state.claim("", 100);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .contains("Identity is required"));
+        assert!(result.unwrap_err().contains("Identity is required"));
     }
 
     #[test]
@@ -249,7 +247,10 @@ mod tests {
         let err = state.claim("user1", 30).unwrap_err();
         assert!(err.contains("rate limit exceeded"));
 
-        assert!(state.claim("user1", 200).is_ok(), "window expired, should succeed");
+        assert!(
+            state.claim("user1", 200).is_ok(),
+            "window expired, should succeed"
+        );
     }
 
     // ── Protobuf structure tests ──────────────────────────────────────
@@ -282,10 +283,10 @@ mod tests {
 
     #[test]
     fn faucet_claim_request_validates_device_id_length() {
-        let short_id = vec![0xBB; 16];
+        let short_id = [0xBB; 16];
         assert_ne!(short_id.len(), 32, "should detect non-32-byte device_id");
 
-        let valid_id = vec![0xCC; 32];
+        let valid_id = [0xCC; 32];
         assert_eq!(valid_id.len(), 32);
     }
 }

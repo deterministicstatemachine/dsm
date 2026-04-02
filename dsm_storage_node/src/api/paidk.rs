@@ -170,7 +170,10 @@ mod tests {
         let body = b"same-body";
         let pay = blake3_tagged("DSM/pay/storage", body);
         let sig = blake3_tagged("DSM/signal/up", body);
-        assert_ne!(pay, sig, "different domain tags must produce distinct digests");
+        assert_ne!(
+            pay, sig,
+            "different domain tags must produce distinct digests"
+        );
     }
 
     #[test]
@@ -237,6 +240,9 @@ mod tests {
         let digest = blake3_tagged("DSM/pay/storage", b"test");
         let addr = text_id::encode_base32_crockford(&digest);
         assert!(!addr.is_empty());
-        assert!(addr.len() > 10, "base32 encoding of 32 bytes should be substantial");
+        assert!(
+            addr.len() > 10,
+            "base32 encoding of 32 bytes should be substantial"
+        );
     }
 }

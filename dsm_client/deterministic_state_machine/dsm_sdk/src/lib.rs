@@ -55,6 +55,8 @@
 
 // DSM SDK Library – strict, fail-closed posture.
 #![deny(warnings)]
+// Unit tests use unwrap/expect for brevity; production paths stay disciplined via workspace lints.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 // Allows clippy::disallowed_methods for JNI boundary and legacy API surface.
 // Unwrap/expect calls are being systematically replaced with proper Result handling.
 #![allow(clippy::disallowed_methods)]

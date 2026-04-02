@@ -234,12 +234,8 @@ mod tests {
         assert_eq!(ctx.genesis_hash, [0xBB; 32]);
 
         // cdbrw_binding should match a direct call to derive_cdbrw_binding_key
-        let expected_binding = cdbrw_binding::derive_cdbrw_binding_key(
-            &vec![0xCC; 32],
-            &vec![0xDD; 32],
-            &vec![0xEE; 32],
-        )
-        .unwrap();
+        let expected_binding =
+            cdbrw_binding::derive_cdbrw_binding_key(&[0xCC; 32], &[0xDD; 32], &[0xEE; 32]).unwrap();
         assert_eq!(ctx.cdbrw_binding, expected_binding);
     }
 

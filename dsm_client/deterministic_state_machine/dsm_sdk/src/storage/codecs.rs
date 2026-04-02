@@ -398,7 +398,10 @@ mod tests {
     #[test]
     fn generate_hash_chain_proof_equals_hash() {
         let data = b"chain-data";
-        assert_eq!(generate_hash_chain_proof_bytes(data), hash_blake3_bytes(data));
+        assert_eq!(
+            generate_hash_chain_proof_bytes(data),
+            hash_blake3_bytes(data)
+        );
     }
 
     #[test]
@@ -508,9 +511,15 @@ mod tests {
                 assert_eq!(to_device_id, vec![0xAAu8; 32]);
                 assert_eq!(amount.value(), 1000);
                 assert_eq!(token_id, b"dBTC".to_vec());
-                assert!(matches!(mode, dsm::types::operations::TransactionMode::Bilateral));
+                assert!(matches!(
+                    mode,
+                    dsm::types::operations::TransactionMode::Bilateral
+                ));
                 assert_eq!(nonce, vec![0xBBu8; 16]);
-                assert!(matches!(verification, dsm::types::operations::VerificationType::Bilateral));
+                assert!(matches!(
+                    verification,
+                    dsm::types::operations::VerificationType::Bilateral
+                ));
                 assert!(pre_commit.is_none());
                 assert_eq!(recipient, vec![0xCCu8; 32]);
                 assert_eq!(to, vec![0xDDu8; 32]);

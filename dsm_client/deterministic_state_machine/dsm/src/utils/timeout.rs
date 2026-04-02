@@ -339,10 +339,7 @@ mod tests {
 
     #[test]
     fn genesis_creation_timeout() {
-        assert_eq!(
-            OperationType::GenesisCreation.timeout().as_ticks(),
-            50_000
-        );
+        assert_eq!(OperationType::GenesisCreation.timeout().as_ticks(), 50_000);
     }
 
     #[test]
@@ -363,10 +360,7 @@ mod tests {
 
     #[test]
     fn mpc_contribution_timeout() {
-        assert_eq!(
-            OperationType::MpcContribution.timeout().as_ticks(),
-            5_000
-        );
+        assert_eq!(OperationType::MpcContribution.timeout().as_ticks(), 5_000);
     }
 
     #[test]
@@ -387,10 +381,7 @@ mod tests {
 
     #[test]
     fn crypto_operation_timeout() {
-        assert_eq!(
-            OperationType::CryptoOperation.timeout().as_ticks(),
-            833
-        );
+        assert_eq!(OperationType::CryptoOperation.timeout().as_ticks(), 833);
     }
 
     #[test]
@@ -541,7 +532,7 @@ mod tests {
     fn operation_type_clone_copy_debug() {
         let op = OperationType::HttpRequest;
         let op2 = op;
-        let op3 = op.clone();
+        let op3 = op;
         let _ = format!("{:?}", op2);
         let _ = format!("{:?}", op3);
     }

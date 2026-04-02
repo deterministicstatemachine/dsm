@@ -1621,7 +1621,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let sdk = make_sdk(&dir);
         assert_eq!(
-            sdk.get_session(&sample_key(), &SessionId::new("x")).unwrap(),
+            sdk.get_session(&sample_key(), &SessionId::new("x"))
+                .unwrap(),
             None
         );
     }
@@ -1829,14 +1830,7 @@ mod tests {
         let sdk = make_sdk(&dir);
 
         sdk.persist_bilateral_transaction(
-            b"tx002",
-            b"remote",
-            b"hash",
-            b"data",
-            "PREPARE",
-            "PENDING",
-            None,
-            None,
+            b"tx002", b"remote", b"hash", b"data", "PREPARE", "PENDING", None, None,
         )
         .unwrap();
 
@@ -1858,14 +1852,7 @@ mod tests {
         let sdk = make_sdk(&dir);
 
         sdk.persist_bilateral_transaction(
-            b"txR",
-            b"remote",
-            b"ch",
-            b"od",
-            "COMMIT",
-            "PENDING",
-            None,
-            None,
+            b"txR", b"remote", b"ch", b"od", "COMMIT", "PENDING", None, None,
         )
         .unwrap();
 
@@ -1895,14 +1882,7 @@ mod tests {
         let sdk = make_sdk(&dir);
 
         sdk.persist_bilateral_transaction(
-            b"txP",
-            b"device",
-            b"ch",
-            b"od",
-            "PREPARE",
-            "PENDING",
-            None,
-            None,
+            b"txP", b"device", b"ch", b"od", "PREPARE", "PENDING", None, None,
         )
         .unwrap();
 
@@ -2238,11 +2218,25 @@ mod tests {
         )
         .unwrap();
         sdk.persist_bilateral_transaction(
-            b"tx_b", b"dev_b", b"ch", b"data", "COMMIT", "COMPLETED", None, None,
+            b"tx_b",
+            b"dev_b",
+            b"ch",
+            b"data",
+            "COMMIT",
+            "COMPLETED",
+            None,
+            None,
         )
         .unwrap();
         sdk.persist_bilateral_transaction(
-            b"tx_c", b"dev_c", b"ch", b"data", "COMMIT", "IN_PROGRESS", None, None,
+            b"tx_c",
+            b"dev_c",
+            b"ch",
+            b"data",
+            "COMMIT",
+            "IN_PROGRESS",
+            None,
+            None,
         )
         .unwrap();
 
@@ -2266,12 +2260,22 @@ mod tests {
         .unwrap();
 
         sdk.persist_receipt(
-            b"r_001", b"tx_r2", b"remote", b"receipt_body", b"sig_a", b"sig_b",
+            b"r_001",
+            b"tx_r2",
+            b"remote",
+            b"receipt_body",
+            b"sig_a",
+            b"sig_b",
         )
         .unwrap();
 
         sdk.persist_receipt(
-            b"r_002", b"tx_r2", b"remote", b"receipt_body_2", b"sig_c", b"sig_d",
+            b"r_002",
+            b"tx_r2",
+            b"remote",
+            b"receipt_body_2",
+            b"sig_c",
+            b"sig_d",
         )
         .unwrap();
     }
@@ -2329,7 +2333,9 @@ mod tests {
     async fn get_smt_proof_for_state_invalid_bytes() {
         let dir = TempDir::new().unwrap();
         let sdk = make_sdk(&dir);
-        let result = sdk.get_smt_proof_for_state(b"remote", b"not-protobuf").await;
+        let result = sdk
+            .get_smt_proof_for_state(b"remote", b"not-protobuf")
+            .await;
         assert!(result.is_err());
     }
 

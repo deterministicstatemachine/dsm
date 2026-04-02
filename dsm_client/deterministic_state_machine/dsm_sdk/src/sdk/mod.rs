@@ -48,19 +48,19 @@ pub use bootstrap::SdkBootstrap;
 // Core SDK modules - fundamental building blocks
 
 pub mod app_state; // Shared application state management
+pub mod b0x_sdk;
+pub mod chain_tip_store;
 pub mod core_sdk;
 pub mod counterparty_genesis_helpers;
 pub mod dlv_sdk;
 pub mod external_commitment_sdk;
 pub mod hashchain_sdk;
 pub mod identity_sdk;
-pub mod session_manager; // Native-first session state projection
-#[cfg(test)]
-mod qr; // QR code creation and parsing for contacts - enabled for tests only
-pub mod b0x_sdk;
-pub mod chain_tip_store;
 pub mod inbox_poller;
 pub mod policy_cache;
+#[cfg(test)]
+mod qr; // QR code creation and parsing for contacts - enabled for tests only
+pub mod session_manager; // Native-first session state projection
 pub mod tls_transport_sdk;
 pub mod token_mpc_sdk;
 pub mod token_sdk;

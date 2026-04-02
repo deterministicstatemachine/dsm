@@ -79,7 +79,7 @@ mod tests {
         let id = [1u8; 32];
         let parent = [2u8; 32];
         let tip = [3u8; 32];
-        assert_eq!(store.set_contact_chain_tip(&id, parent, tip).unwrap(), true);
+        assert!(store.set_contact_chain_tip(&id, parent, tip).unwrap());
     }
 
     #[test]
@@ -137,9 +137,7 @@ mod tests {
         let id = [42u8; 32];
         let tip = [99u8; 32];
         assert!(store.get_contact_chain_tip(&id).is_none());
-        assert!(store
-            .set_contact_chain_tip(&id, [0u8; 32], tip)
-            .unwrap());
+        assert!(store.set_contact_chain_tip(&id, [0u8; 32], tip).unwrap());
         assert_eq!(store.get_contact_chain_tip(&id), Some(tip));
     }
 
@@ -149,9 +147,7 @@ mod tests {
         let id = [1u8; 32];
         let tip1 = [10u8; 32];
         let tip2 = [20u8; 32];
-        store
-            .set_contact_chain_tip(&id, [0u8; 32], tip1)
-            .unwrap();
+        store.set_contact_chain_tip(&id, [0u8; 32], tip1).unwrap();
 
         let wrong_parent = [0xFFu8; 32];
         let applied = store
@@ -167,9 +163,7 @@ mod tests {
         let id = [5u8; 32];
         let tip1 = [10u8; 32];
         let tip2 = [20u8; 32];
-        store
-            .set_contact_chain_tip(&id, [0u8; 32], tip1)
-            .unwrap();
+        store.set_contact_chain_tip(&id, [0u8; 32], tip1).unwrap();
         let applied = store.set_contact_chain_tip(&id, tip1, tip2).unwrap();
         assert!(applied);
         assert_eq!(store.get_contact_chain_tip(&id), Some(tip2));

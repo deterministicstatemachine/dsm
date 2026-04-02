@@ -801,11 +801,17 @@ mod tests {
         let proof2 = sdk.build_fulfillment_proof("fork_x", &params).unwrap();
 
         let sigma1 = match proof1 {
-            FulfillmentProof::PaymentProof { stitched_receipt_sigma, .. } => stitched_receipt_sigma,
+            FulfillmentProof::PaymentProof {
+                stitched_receipt_sigma,
+                ..
+            } => stitched_receipt_sigma,
             _ => panic!("expected PaymentProof"),
         };
         let sigma2 = match proof2 {
-            FulfillmentProof::PaymentProof { stitched_receipt_sigma, .. } => stitched_receipt_sigma,
+            FulfillmentProof::PaymentProof {
+                stitched_receipt_sigma,
+                ..
+            } => stitched_receipt_sigma,
             _ => panic!("expected PaymentProof"),
         };
         assert_eq!(sigma1, sigma2);
@@ -822,11 +828,17 @@ mod tests {
         let proof_b = sdk.build_fulfillment_proof("fork_B", &params).unwrap();
 
         let sigma_a = match proof_a {
-            FulfillmentProof::PaymentProof { stitched_receipt_sigma, .. } => stitched_receipt_sigma.unwrap(),
+            FulfillmentProof::PaymentProof {
+                stitched_receipt_sigma,
+                ..
+            } => stitched_receipt_sigma.unwrap(),
             _ => panic!("expected PaymentProof"),
         };
         let sigma_b = match proof_b {
-            FulfillmentProof::PaymentProof { stitched_receipt_sigma, .. } => stitched_receipt_sigma.unwrap(),
+            FulfillmentProof::PaymentProof {
+                stitched_receipt_sigma,
+                ..
+            } => stitched_receipt_sigma.unwrap(),
             _ => panic!("expected PaymentProof"),
         };
         assert_ne!(sigma_a, sigma_b);
@@ -952,9 +964,18 @@ mod tests {
         map.insert("a".to_string(), vec![1]);
         map.insert("b".to_string(), vec![2]);
         map.insert("c".to_string(), vec![3]);
-        assert_eq!(DlvPreCommitmentSdk::required_param(&map, "a").unwrap(), &[1]);
-        assert_eq!(DlvPreCommitmentSdk::required_param(&map, "b").unwrap(), &[2]);
-        assert_eq!(DlvPreCommitmentSdk::required_param(&map, "c").unwrap(), &[3]);
+        assert_eq!(
+            DlvPreCommitmentSdk::required_param(&map, "a").unwrap(),
+            &[1]
+        );
+        assert_eq!(
+            DlvPreCommitmentSdk::required_param(&map, "b").unwrap(),
+            &[2]
+        );
+        assert_eq!(
+            DlvPreCommitmentSdk::required_param(&map, "c").unwrap(),
+            &[3]
+        );
     }
 
     // ---- build_fulfillment_proof with empty byte params ----

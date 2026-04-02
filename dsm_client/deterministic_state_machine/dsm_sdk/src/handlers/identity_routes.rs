@@ -132,10 +132,7 @@ mod tests {
         let bytes = resp.encode_to_vec();
         let decoded = generated::AppStateResponse::decode(&*bytes).expect("decode");
         assert_eq!(decoded.key, "pairing");
-        assert_eq!(
-            decoded.value.as_deref(),
-            Some("DEVICE123@GENESIS456")
-        );
+        assert_eq!(decoded.value.as_deref(), Some("DEVICE123@GENESIS456"));
     }
 
     #[test]
@@ -156,8 +153,7 @@ mod tests {
         envelope.encode(&mut buf).unwrap();
 
         assert_eq!(buf[0], 0x03, "framing byte must be 0x03 for v3");
-        let decoded =
-            generated::Envelope::decode(&buf[1..]).expect("decode sans framing byte");
+        let decoded = generated::Envelope::decode(&buf[1..]).expect("decode sans framing byte");
         assert_eq!(decoded.version, 3);
     }
 

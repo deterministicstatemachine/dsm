@@ -34,10 +34,7 @@ mod tests {
             TAG_DEV_EMPTY,
         ];
         for tag in &tags {
-            assert!(
-                tag.ends_with('\0'),
-                "Tag {tag:?} must be NUL-terminated"
-            );
+            assert!(tag.ends_with('\0'), "Tag {tag:?} must be NUL-terminated");
             assert!(tag.len() > 1, "Tag must contain more than just NUL");
         }
     }
@@ -69,10 +66,7 @@ mod tests {
             TAG_DEV_EMPTY,
         ];
         for tag in &tags {
-            assert!(
-                tag.starts_with("DSM/"),
-                "Tag {tag:?} must start with DSM/"
-            );
+            assert!(tag.starts_with("DSM/"), "Tag {tag:?} must start with DSM/");
         }
     }
 

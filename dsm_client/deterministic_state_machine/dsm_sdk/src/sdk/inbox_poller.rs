@@ -237,6 +237,7 @@ fn decode_sync_response(data: &[u8]) -> Option<(u32, u32)> {
 }
 
 #[cfg(test)]
+#[allow(clippy::assertions_on_constants)]
 mod tests {
     use super::*;
 

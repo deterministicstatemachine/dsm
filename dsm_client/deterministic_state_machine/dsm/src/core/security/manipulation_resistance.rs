@@ -493,9 +493,7 @@ mod tests {
 
     #[test]
     fn extract_transfer_from_genesis_returns_none() {
-        assert!(
-            ManipulationResistance::extract_transfer_operation(&Operation::Genesis).is_none()
-        );
+        assert!(ManipulationResistance::extract_transfer_operation(&Operation::Genesis).is_none());
     }
 
     // ── verify_double_spend_impossible ───────────────────────────────
@@ -503,8 +501,7 @@ mod tests {
     #[test]
     fn double_spend_no_proposed_states_passes() {
         let current = make_state(5);
-        let result =
-            ManipulationResistance::verify_double_spend_impossible(&current, &[]).unwrap();
+        let result = ManipulationResistance::verify_double_spend_impossible(&current, &[]).unwrap();
         assert!(result, "no proposed states means no double spend");
     }
 
@@ -520,11 +517,8 @@ mod tests {
         proposed.prev_state_hash = current.hash;
         proposed.hash = proposed.compute_hash().unwrap();
 
-        let result = ManipulationResistance::verify_double_spend_impossible(
-            &current,
-            &[proposed],
-        )
-        .unwrap();
+        let result =
+            ManipulationResistance::verify_double_spend_impossible(&current, &[proposed]).unwrap();
         assert!(result);
     }
 
@@ -549,7 +543,10 @@ mod tests {
             &[proposed_a, proposed_b],
         )
         .unwrap();
-        assert!(!result, "transferring full balance to two different recipients is a double spend");
+        assert!(
+            !result,
+            "transferring full balance to two different recipients is a double spend"
+        );
     }
 
     #[test]
@@ -702,8 +699,7 @@ mod tests {
         next.token_balances
             .insert("tok".into(), Balance::from_state(50, [0; 32], 6));
 
-        let result =
-            ManipulationResistance::verify_balance_conservation(&current, &next).unwrap();
+        let result = ManipulationResistance::verify_balance_conservation(&current, &next).unwrap();
         assert!(result);
     }
 
@@ -727,8 +723,7 @@ mod tests {
         next.token_balances
             .insert("tok".into(), Balance::from_state(999, [0; 32], 6));
 
-        let result =
-            ManipulationResistance::verify_balance_conservation(&current, &next).unwrap();
+        let result = ManipulationResistance::verify_balance_conservation(&current, &next).unwrap();
         assert!(!result);
     }
 
@@ -765,9 +760,11 @@ mod tests {
         let s0 = make_state(0);
         let s1 = make_state(1);
         let s2 = make_state(2);
-        let result =
-            ManipulationResistance::verify_commitment_binding(&[s0, s1, s2]).unwrap();
-        assert!(result, "no forward commitments means binding is trivially satisfied");
+        let result = ManipulationResistance::verify_commitment_binding(&[s0, s1, s2]).unwrap();
+        assert!(
+            result,
+            "no forward commitments means binding is trivially satisfied"
+        );
     }
 
     #[test]
@@ -775,7 +772,10 @@ mod tests {
         let s0 = make_state(0);
         let s1 = make_state(1);
         let result = ManipulationResistance::verify_commitment_binding(&[s0, s1]).unwrap();
-        assert!(result, "fewer than 3 states means no windows(3), trivially true");
+        assert!(
+            result,
+            "fewer than 3 states means no windows(3), trivially true"
+        );
     }
 
     #[test]

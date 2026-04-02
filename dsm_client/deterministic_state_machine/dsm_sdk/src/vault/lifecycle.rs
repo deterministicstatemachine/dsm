@@ -108,7 +108,10 @@ mod tests {
         let a = author_dlv_create(&DEVICE, &POLICY, b"same");
         let b = author_dlv_create(&dev2, &POLICY, b"same");
         assert_ne!(a.vault_id, b.vault_id);
-        assert_eq!(a.precommit, b.precommit, "precommit only depends on reveal_material");
+        assert_eq!(
+            a.precommit, b.precommit,
+            "precommit only depends on reveal_material"
+        );
     }
 
     #[test]

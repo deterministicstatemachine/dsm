@@ -2611,10 +2611,7 @@ mod tests {
             statement: "prove-it".to_string(),
         });
         let post = v.to_vault_post("rw", None).unwrap();
-        assert_eq!(
-            post.lock_description,
-            "Random walk verification: prove-it"
-        );
+        assert_eq!(post.lock_description, "Random walk verification: prove-it");
     }
 
     #[test]
@@ -2673,16 +2670,13 @@ mod tests {
         let v = LimboVault::default();
         let post = v.to_vault_post("op", None).unwrap();
         assert_eq!(post.metadata.get("purpose").unwrap(), "op");
-        assert!(post.metadata.get("timeout").is_none());
+        assert!(!post.metadata.contains_key("timeout"));
     }
 
     #[test]
     fn to_vault_post_status_reflects_vault_state() {
         let mut v = LimboVault::default();
-        assert_eq!(
-            v.to_vault_post("t", None).unwrap().status,
-            "unresolved"
-        );
+        assert_eq!(v.to_vault_post("t", None).unwrap().status, "unresolved");
 
         v.state = VaultState::Active {
             activated_state_number: 1,
@@ -2707,10 +2701,7 @@ mod tests {
             reason: "gone".to_string(),
             creator_signature: vec![],
         };
-        assert_eq!(
-            v.to_vault_post("t", None).unwrap().status,
-            "invalidated"
-        );
+        assert_eq!(v.to_vault_post("t", None).unwrap().status, "invalidated");
     }
 
     // ───────── from_limbo_vault status mapping ─────────
@@ -2719,8 +2710,10 @@ mod tests {
     fn from_limbo_vault_status_mapping() {
         let cond = VaultCondition::Hash(vec![]);
 
-        let mut v = LimboVault::default();
-        v.state = VaultState::Limbo;
+        let mut v = LimboVault {
+            state: VaultState::Limbo,
+            ..LimboVault::default()
+        };
         let dlv = DeterministicLimboVault::from_limbo_vault(&v, cond.clone()).unwrap();
         assert_eq!(*dlv.status(), VaultStatus::Active);
 

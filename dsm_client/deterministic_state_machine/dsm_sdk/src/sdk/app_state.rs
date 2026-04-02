@@ -665,11 +665,13 @@ mod tests {
 
     #[test]
     fn storage_identity_fields_can_be_set() {
-        let mut s = AppStateStorage::default();
-        s.device_id = Some(vec![0x11; 32]);
-        s.public_key = Some(vec![0x22; 32]);
-        s.genesis_hash = Some(vec![0x33; 32]);
-        s.smt_root = Some(vec![0x44; 32]);
+        let s = AppStateStorage {
+            device_id: Some(vec![0x11; 32]),
+            public_key: Some(vec![0x22; 32]),
+            genesis_hash: Some(vec![0x33; 32]),
+            smt_root: Some(vec![0x44; 32]),
+            ..Default::default()
+        };
 
         assert_eq!(s.device_id.as_ref().unwrap(), &vec![0x11; 32]);
         assert_eq!(s.public_key.as_ref().unwrap(), &vec![0x22; 32]);
@@ -679,42 +681,53 @@ mod tests {
 
     #[test]
     fn storage_device_tree_root_can_be_set() {
-        let mut s = AppStateStorage::default();
-        s.device_tree_root = Some(vec![0xDD; 32]);
+        let s = AppStateStorage {
+            device_tree_root: Some(vec![0xDD; 32]),
+            ..Default::default()
+        };
         assert_eq!(s.device_tree_root.as_ref().unwrap().len(), 32);
     }
 
     #[test]
     fn storage_recovery_sessions_crud() {
         let mut s = AppStateStorage::default();
-        s.recovery_sessions.insert("r1".to_string(), "pending".to_string());
-        s.recovery_sessions.insert("r2".to_string(), "active".to_string());
+        s.recovery_sessions
+            .insert("r1".to_string(), "pending".to_string());
+        s.recovery_sessions
+            .insert("r2".to_string(), "active".to_string());
         assert_eq!(s.recovery_sessions.get("r1").unwrap(), "pending");
 
-        s.recovery_sessions.insert("r1".to_string(), "done".to_string());
+        s.recovery_sessions
+            .insert("r1".to_string(), "done".to_string());
         assert_eq!(s.recovery_sessions.get("r1").unwrap(), "done");
 
         s.recovery_sessions.remove("r1");
-        assert!(s.recovery_sessions.get("r1").is_none());
+        assert!(!s.recovery_sessions.contains_key("r1"));
         assert_eq!(s.recovery_sessions.get("r2").unwrap(), "active");
     }
 
     #[test]
     fn storage_kv_store_crud() {
         let mut s = AppStateStorage::default();
-        s.key_value_store.insert("lang".to_string(), "en".to_string());
+        s.key_value_store
+            .insert("lang".to_string(), "en".to_string());
         assert_eq!(s.key_value_store.get("lang").unwrap(), "en");
 
-        s.key_value_store.insert("lang".to_string(), "fr".to_string());
+        s.key_value_store
+            .insert("lang".to_string(), "fr".to_string());
         assert_eq!(s.key_value_store.get("lang").unwrap(), "fr");
-        assert!(s.key_value_store.get("missing").is_none());
+        assert!(!s.key_value_store.contains_key("missing"));
     }
 
     #[test]
     fn storage_contact_device_tree_roots() {
         let mut s = AppStateStorage::default();
-        s.contact_device_tree_roots.insert("c1".to_string(), vec![0xAA; 32]);
-        assert_eq!(s.contact_device_tree_roots.get("c1").unwrap(), &vec![0xAA; 32]);
+        s.contact_device_tree_roots
+            .insert("c1".to_string(), vec![0xAA; 32]);
+        assert_eq!(
+            s.contact_device_tree_roots.get("c1").unwrap(),
+            &vec![0xAA; 32]
+        );
     }
 
     // ── DeviceTreeAcceptanceCommitment from root ──
@@ -747,8 +760,18 @@ mod tests {
     #[test]
     fn set_identity_info_overwrites_existing() {
         setup_test_env();
-        AppState::set_identity_info(vec![0x01; 32], vec![0x02; 32], vec![0x03; 32], vec![0x04; 32]);
-        AppState::set_identity_info(vec![0xAA; 32], vec![0xBB; 32], vec![0xCC; 32], vec![0xDD; 32]);
+        AppState::set_identity_info(
+            vec![0x01; 32],
+            vec![0x02; 32],
+            vec![0x03; 32],
+            vec![0x04; 32],
+        );
+        AppState::set_identity_info(
+            vec![0xAA; 32],
+            vec![0xBB; 32],
+            vec![0xCC; 32],
+            vec![0xDD; 32],
+        );
 
         assert_eq!(AppState::get_device_id().unwrap(), vec![0xAA; 32]);
         assert_eq!(AppState::get_public_key().unwrap(), vec![0xBB; 32]);
@@ -796,10 +819,7 @@ mod tests {
         AppState::handle_app_state_request("theme", "set", "dark");
         AppState::handle_app_state_request("font_size", "set", "14");
 
-        assert_eq!(
-            AppState::handle_app_state_request("lang", "get", ""),
-            "en"
-        );
+        assert_eq!(AppState::handle_app_state_request("lang", "get", ""), "en");
         assert_eq!(
             AppState::handle_app_state_request("theme", "get", ""),
             "dark"
@@ -860,10 +880,14 @@ mod tests {
 
     #[test]
     fn app_state_storage_clone() {
-        let mut s = AppStateStorage::default();
-        s.has_identity = true;
-        s.device_id = Some(vec![1, 2, 3]);
-        s.key_value_store.insert("k".to_string(), "v".to_string());
+        let mut key_value_store = std::collections::HashMap::new();
+        key_value_store.insert("k".to_string(), "v".to_string());
+        let s = AppStateStorage {
+            has_identity: true,
+            device_id: Some(vec![1, 2, 3]),
+            key_value_store,
+            ..Default::default()
+        };
 
         let cloned = s.clone();
         assert!(cloned.has_identity);

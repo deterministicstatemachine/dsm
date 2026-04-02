@@ -1418,20 +1418,8 @@ mod tests {
 
     #[test]
     fn precommitment_to_bytes_varies_with_content() {
-        let pc1 = PreCommitment::new(
-            "op_a".into(),
-            HashMap::new(),
-            HashSet::new(),
-            1,
-            [0x04; 32],
-        );
-        let pc2 = PreCommitment::new(
-            "op_b".into(),
-            HashMap::new(),
-            HashSet::new(),
-            1,
-            [0x04; 32],
-        );
+        let pc1 = PreCommitment::new("op_a".into(), HashMap::new(), HashSet::new(), 1, [0x04; 32]);
+        let pc2 = PreCommitment::new("op_b".into(), HashMap::new(), HashSet::new(), 1, [0x04; 32]);
         assert_ne!(pc1.to_bytes(), pc2.to_bytes());
     }
 
@@ -1591,12 +1579,7 @@ mod tests {
 
     #[test]
     fn identity_anchor_as_bytes_deterministic() {
-        let ia = IdentityAnchor::new(
-            "bob".into(),
-            vec![0x10; 32],
-            vec![0x20; 32],
-            vec![0x30; 32],
-        );
+        let ia = IdentityAnchor::new("bob".into(), vec![0x10; 32], vec![0x20; 32], vec![0x30; 32]);
         let b1 = ia.as_bytes();
         let b2 = ia.as_bytes();
         assert_eq!(b1, b2);
@@ -1685,20 +1668,14 @@ mod tests {
     #[test]
     fn state_params_with_sparse_index() {
         let si = SparseIndex::new(vec![1, 2, 3]);
-        let sp = StateParams::new(3, vec![], Operation::Noop, test_device_info())
-            .with_sparse_index(si);
+        let sp =
+            StateParams::new(3, vec![], Operation::Noop, test_device_info()).with_sparse_index(si);
         assert_eq!(sp.sparse_index.indices, vec![1, 2, 3]);
     }
 
     #[test]
     fn state_params_with_forward_commitment() {
-        let pc = PreCommitment::new(
-            "test".into(),
-            HashMap::new(),
-            HashSet::new(),
-            0,
-            [0; 32],
-        );
+        let pc = PreCommitment::new("test".into(), HashMap::new(), HashSet::new(), 0, [0; 32]);
         let sp = StateParams::new(4, vec![], Operation::Noop, test_device_info())
             .with_forward_commitment(pc);
         assert!(sp.forward_commitment.is_some());

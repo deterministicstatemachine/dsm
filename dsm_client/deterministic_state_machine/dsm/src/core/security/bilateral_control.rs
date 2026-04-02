@@ -645,7 +645,12 @@ mod tests {
     }
 
     fn make_state(n: u64) -> State {
-        State::new(StateParams::new(n, vec![0xAA; 16], Operation::Noop, dev_info()))
+        State::new(StateParams::new(
+            n,
+            vec![0xAA; 16],
+            Operation::Noop,
+            dev_info(),
+        ))
     }
 
     fn make_chained_states(start: u64, count: u64) -> Vec<State> {
@@ -756,32 +761,24 @@ mod tests {
     #[tokio::test]
     async fn genesis_threshold_below_minimum_fails() {
         let identity = make_identity_anchor("alice");
-        let signers = vec![
-            make_identity_anchor("bob"),
-            make_identity_anchor("carol"),
-        ];
+        let signers = vec![make_identity_anchor("bob"), make_identity_anchor("carol")];
         let storage = MockStorage::empty();
-        let result = BilateralControlResistance::verify_genesis_threshold(
-            &identity, &signers, 2, &storage,
-        )
-        .await
-        .unwrap();
+        let result =
+            BilateralControlResistance::verify_genesis_threshold(&identity, &signers, 2, &storage)
+                .await
+                .unwrap();
         assert!(!result, "threshold < 3 should fail");
     }
 
     #[tokio::test]
     async fn genesis_threshold_not_enough_signers() {
         let identity = make_identity_anchor("alice");
-        let signers = vec![
-            make_identity_anchor("bob"),
-            make_identity_anchor("carol"),
-        ];
+        let signers = vec![make_identity_anchor("bob"), make_identity_anchor("carol")];
         let storage = MockStorage::empty();
-        let result = BilateralControlResistance::verify_genesis_threshold(
-            &identity, &signers, 3, &storage,
-        )
-        .await
-        .unwrap();
+        let result =
+            BilateralControlResistance::verify_genesis_threshold(&identity, &signers, 3, &storage)
+                .await
+                .unwrap();
         assert!(!result, "signers.len() < threshold should fail");
     }
 
@@ -794,11 +791,10 @@ mod tests {
             make_identity_anchor("carol"),
         ];
         let storage = MockStorage::empty();
-        let result = BilateralControlResistance::verify_genesis_threshold(
-            &identity, &signers, 3, &storage,
-        )
-        .await
-        .unwrap();
+        let result =
+            BilateralControlResistance::verify_genesis_threshold(&identity, &signers, 3, &storage)
+                .await
+                .unwrap();
         assert!(!result, "self-signing should fail");
     }
 
@@ -811,11 +807,10 @@ mod tests {
             make_identity_anchor("dave"),
         ];
         let storage = MockStorage::empty();
-        let result = BilateralControlResistance::verify_genesis_threshold(
-            &identity, &signers, 3, &storage,
-        )
-        .await
-        .unwrap();
+        let result =
+            BilateralControlResistance::verify_genesis_threshold(&identity, &signers, 3, &storage)
+                .await
+                .unwrap();
         assert!(result);
     }
 
@@ -886,9 +881,7 @@ mod tests {
         s1.hash = s1.compute_hash().unwrap();
         let mut s2 = make_state(3);
         s2.hash = s2.compute_hash().unwrap();
-        assert!(
-            BilateralControlResistance::detect_temporal_manipulation(&[s1, s2]).unwrap()
-        );
+        assert!(BilateralControlResistance::detect_temporal_manipulation(&[s1, s2]).unwrap());
     }
 
     #[test]
@@ -897,9 +890,7 @@ mod tests {
         s1.hash = s1.compute_hash().unwrap();
         let mut s2 = make_state(5);
         s2.hash = s2.compute_hash().unwrap();
-        assert!(
-            BilateralControlResistance::detect_temporal_manipulation(&[s1, s2]).unwrap()
-        );
+        assert!(BilateralControlResistance::detect_temporal_manipulation(&[s1, s2]).unwrap());
     }
 
     #[test]
@@ -922,9 +913,7 @@ mod tests {
         s1.hash = s1.compute_hash().unwrap();
         let mut s2 = make_state(200);
         s2.hash = s2.compute_hash().unwrap();
-        assert!(
-            BilateralControlResistance::detect_temporal_manipulation(&[s1, s2]).unwrap()
-        );
+        assert!(BilateralControlResistance::detect_temporal_manipulation(&[s1, s2]).unwrap());
     }
 
     #[test]
@@ -952,8 +941,7 @@ mod tests {
     #[test]
     fn anomalous_balance_no_token_balances() {
         let states = make_chained_states(0, 3);
-        let result =
-            BilateralControlResistance::detect_anomalous_balance_changes(&states).unwrap();
+        let result = BilateralControlResistance::detect_anomalous_balance_changes(&states).unwrap();
         assert!(result.is_empty());
     }
 
@@ -998,9 +986,8 @@ mod tests {
         let report = BilateralControlResistance::build_compact_report(&states, &[]);
         assert!(report.starts_with(BilateralControlResistance::report_prefix()));
         let prefix_len = BilateralControlResistance::report_prefix().len();
-        let alert_count = u32::from_le_bytes(
-            report[prefix_len..prefix_len + 4].try_into().unwrap(),
-        );
+        let alert_count =
+            u32::from_le_bytes(report[prefix_len..prefix_len + 4].try_into().unwrap());
         assert_eq!(alert_count, 0);
     }
 
@@ -1023,10 +1010,9 @@ mod tests {
     async fn suspicious_patterns_clean_short_sequence() {
         let states = make_chained_states(0, 3);
         let storage = MockStorage::empty();
-        let alerts =
-            BilateralControlResistance::detect_suspicious_patterns(&states, &storage)
-                .await
-                .unwrap();
+        let alerts = BilateralControlResistance::detect_suspicious_patterns(&states, &storage)
+            .await
+            .unwrap();
         assert!(
             alerts.is_empty(),
             "short clean sequence should produce no alerts"
@@ -1037,12 +1023,14 @@ mod tests {
     async fn suspicious_patterns_rapid_transactions() {
         let states = make_chained_states(0, 12);
         let storage = MockStorage::empty();
-        let alerts =
-            BilateralControlResistance::detect_suspicious_patterns(&states, &storage)
-                .await
-                .unwrap();
+        let alerts = BilateralControlResistance::detect_suspicious_patterns(&states, &storage)
+            .await
+            .unwrap();
         let has_rapid = alerts.iter().any(|a| a.alert_type == "RapidTransactions");
-        assert!(has_rapid, "12 consecutive states should trigger rapid transaction alert");
+        assert!(
+            has_rapid,
+            "12 consecutive states should trigger rapid transaction alert"
+        );
     }
 
     // ── has_cycle_from ──────────────────────────────────────────────

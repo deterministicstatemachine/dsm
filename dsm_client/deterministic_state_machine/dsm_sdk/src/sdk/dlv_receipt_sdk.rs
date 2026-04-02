@@ -530,11 +530,7 @@ mod tests {
         let core = Arc::new(crate::sdk::core_sdk::CoreSDK::new().unwrap());
         let short_bytes = [0u8; 16];
         let encoded = text_id::encode_base32_crockford(&short_bytes);
-        let result = DlvReceiptSdk::new(
-            encoded,
-            core,
-            vec!["http://localhost:8080".to_string()],
-        );
+        let result = DlvReceiptSdk::new(encoded, core, vec!["http://localhost:8080".to_string()]);
         match result {
             Err(e) => assert!(format!("{e:?}").contains("32")),
             Ok(_) => panic!("Expected error for wrong length"),
@@ -546,11 +542,8 @@ mod tests {
         let core = Arc::new(crate::sdk::core_sdk::CoreSDK::new().unwrap());
         let device_bytes = [0xABu8; 32];
         let encoded = text_id::encode_base32_crockford(&device_bytes);
-        let result = DlvReceiptSdk::new(
-            encoded.clone(),
-            core,
-            vec!["http://node1:8080".to_string()],
-        );
+        let result =
+            DlvReceiptSdk::new(encoded.clone(), core, vec!["http://node1:8080".to_string()]);
         match result {
             Ok(sdk) => {
                 assert_eq!(sdk.device_id, encoded);

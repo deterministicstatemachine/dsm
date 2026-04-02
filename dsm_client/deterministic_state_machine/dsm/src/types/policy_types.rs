@@ -868,8 +868,7 @@ mod tests {
         assert_eq!(success.proof, Some(vec![9]));
         assert_eq!(success.parameters.get("pk").unwrap(), &vec![1, 2, 3]);
 
-        let fail = PolicyVerification::new(VerificationType::Standard)
-            .failure("bad".into());
+        let fail = PolicyVerification::new(VerificationType::Standard).failure("bad".into());
         assert!(!fail.result);
         assert_eq!(fail.message.as_deref(), Some("bad"));
     }

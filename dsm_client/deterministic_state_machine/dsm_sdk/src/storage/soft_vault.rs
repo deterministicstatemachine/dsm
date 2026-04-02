@@ -950,8 +950,12 @@ mod tests {
         let device_id = "dev-kek".to_string();
         let binder = TestBindingKeyProvider::new(device_id.clone());
         let vault = SoftVaultKeyStorage::new(dir.path(), device_id, binder, None).unwrap();
-        let k1 = vault.derive_kek("alias", "purpose", &KeyType::PeerKey).unwrap();
-        let k2 = vault.derive_kek("alias", "purpose", &KeyType::PeerKey).unwrap();
+        let k1 = vault
+            .derive_kek("alias", "purpose", &KeyType::PeerKey)
+            .unwrap();
+        let k2 = vault
+            .derive_kek("alias", "purpose", &KeyType::PeerKey)
+            .unwrap();
         assert_eq!(k1, k2);
     }
 
@@ -961,8 +965,12 @@ mod tests {
         let device_id = "dev-kek2".to_string();
         let binder = TestBindingKeyProvider::new(device_id.clone());
         let vault = SoftVaultKeyStorage::new(dir.path(), device_id, binder, None).unwrap();
-        let k1 = vault.derive_kek("alias_a", "purpose", &KeyType::PeerKey).unwrap();
-        let k2 = vault.derive_kek("alias_b", "purpose", &KeyType::PeerKey).unwrap();
+        let k1 = vault
+            .derive_kek("alias_a", "purpose", &KeyType::PeerKey)
+            .unwrap();
+        let k2 = vault
+            .derive_kek("alias_b", "purpose", &KeyType::PeerKey)
+            .unwrap();
         assert_ne!(k1, k2);
     }
 
@@ -1051,9 +1059,7 @@ mod tests {
         let device_id = "dev-del".to_string();
         let binder = TestBindingKeyProvider::new(device_id.clone());
         let vault = SoftVaultKeyStorage::new(dir.path(), device_id, binder, None).unwrap();
-        vault
-            .delete_key("no_such_alias", KeyType::PeerKey)
-            .unwrap();
+        vault.delete_key("no_such_alias", KeyType::PeerKey).unwrap();
     }
 
     #[test]
@@ -1078,7 +1084,13 @@ mod tests {
             5,
         );
         let mut buf = Vec::new();
-        h.encode(&mut buf, "my_alias", "private_key", &[0xAA; 32], Some("policy1"));
+        h.encode(
+            &mut buf,
+            "my_alias",
+            "private_key",
+            &[0xAA; 32],
+            Some("policy1"),
+        );
 
         let (decoded, off) = VaultHeader::decode_fixed(&buf).unwrap();
         assert_eq!(decoded.version, 3);

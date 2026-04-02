@@ -1871,9 +1871,18 @@ mod tests {
 
     #[test]
     fn deterministic_safety_class_as_str() {
-        assert_eq!(DeterministicSafetyClass::ParentConsumed.as_str(), "ParentConsumed");
-        assert_eq!(DeterministicSafetyClass::StalePrecommit.as_str(), "StalePrecommit");
-        assert_eq!(DeterministicSafetyClass::TipMismatch.as_str(), "TipMismatch");
+        assert_eq!(
+            DeterministicSafetyClass::ParentConsumed.as_str(),
+            "ParentConsumed"
+        );
+        assert_eq!(
+            DeterministicSafetyClass::StalePrecommit.as_str(),
+            "StalePrecommit"
+        );
+        assert_eq!(
+            DeterministicSafetyClass::TipMismatch.as_str(),
+            "TipMismatch"
+        );
     }
 
     #[test]
@@ -1894,14 +1903,20 @@ mod tests {
             (BitcoinErrorType::ConfirmationTimeout, "ConfirmationTimeout"),
             (BitcoinErrorType::InvalidTransaction, "InvalidTransaction"),
             (BitcoinErrorType::NetworkError, "NetworkError"),
-            (BitcoinErrorType::ScriptValidationError, "ScriptValidationError"),
+            (
+                BitcoinErrorType::ScriptValidationError,
+                "ScriptValidationError",
+            ),
             (BitcoinErrorType::FeeEstimationError, "FeeEstimationError"),
             (BitcoinErrorType::UtxoSelectionError, "UtxoSelectionError"),
             (BitcoinErrorType::TransactionTooLarge, "TransactionTooLarge"),
             (BitcoinErrorType::InvalidSignature, "InvalidSignature"),
             (BitcoinErrorType::BlockNotFound, "BlockNotFound"),
             (BitcoinErrorType::TransactionNotFound, "TransactionNotFound"),
-            (BitcoinErrorType::InsufficientConfirmations, "InsufficientConfirmations"),
+            (
+                BitcoinErrorType::InsufficientConfirmations,
+                "InsufficientConfirmations",
+            ),
             (BitcoinErrorType::DustAmount, "DustAmount"),
             (BitcoinErrorType::InvalidNetwork, "InvalidNetwork"),
         ];
@@ -1919,8 +1934,14 @@ mod tests {
 
     #[test]
     fn storage_node_error_type_as_str() {
-        assert_eq!(StorageNodeErrorType::CapacityExceeded.as_str(), "CapacityExceeded");
-        assert_eq!(StorageNodeErrorType::MaintenanceMode.as_str(), "MaintenanceMode");
+        assert_eq!(
+            StorageNodeErrorType::CapacityExceeded.as_str(),
+            "CapacityExceeded"
+        );
+        assert_eq!(
+            StorageNodeErrorType::MaintenanceMode.as_str(),
+            "MaintenanceMode"
+        );
     }
 
     #[test]
@@ -1931,7 +1952,10 @@ mod tests {
 
     #[test]
     fn replication_error_type_as_str() {
-        assert_eq!(ReplicationErrorType::PartnerUnavailable.as_str(), "PartnerUnavailable");
+        assert_eq!(
+            ReplicationErrorType::PartnerUnavailable.as_str(),
+            "PartnerUnavailable"
+        );
         assert_eq!(ReplicationErrorType::QueueFull.as_str(), "QueueFull");
     }
 
@@ -1944,7 +1968,10 @@ mod tests {
     #[test]
     fn consensus_error_type_as_str() {
         assert_eq!(ConsensusErrorType::Timeout.as_str(), "Timeout");
-        assert_eq!(ConsensusErrorType::ProtocolViolation.as_str(), "ProtocolViolation");
+        assert_eq!(
+            ConsensusErrorType::ProtocolViolation.as_str(),
+            "ProtocolViolation"
+        );
     }
 
     // --- DsmError constructors ---
@@ -2010,10 +2037,8 @@ mod tests {
 
     #[test]
     fn deterministic_safety_constructor() {
-        let err = DsmError::deterministic_safety(
-            DeterministicSafetyClass::TipMismatch,
-            "tips diverged",
-        );
+        let err =
+            DsmError::deterministic_safety(DeterministicSafetyClass::TipMismatch, "tips diverged");
         let msg = format!("{err}");
         assert!(msg.contains("TipMismatch"));
         assert!(msg.contains("tips diverged"));
@@ -2075,7 +2100,10 @@ mod tests {
 
     #[test]
     fn is_recoverable_true_for_storage() {
-        let err = DsmError::Storage { context: "disk full".into(), source: None };
+        let err = DsmError::Storage {
+            context: "disk full".into(),
+            source: None,
+        };
         assert!(err.is_recoverable());
     }
 
@@ -2102,10 +2130,8 @@ mod tests {
 
     #[test]
     fn is_recoverable_false_for_deterministic_safety() {
-        let err = DsmError::deterministic_safety(
-            DeterministicSafetyClass::ParentConsumed,
-            "consumed",
-        );
+        let err =
+            DsmError::deterministic_safety(DeterministicSafetyClass::ParentConsumed, "consumed");
         assert!(!err.is_recoverable());
     }
 
@@ -2142,16 +2168,46 @@ mod tests {
 
     #[test]
     fn display_unit_variants() {
-        assert_eq!(format!("{}", DsmError::InvalidSignature), "Invalid signature");
-        assert_eq!(format!("{}", DsmError::InvalidPublicKey), "Invalid public key");
-        assert_eq!(format!("{}", DsmError::InvalidSecretKey), "Invalid secret key");
-        assert_eq!(format!("{}", DsmError::InvalidKeyLength), "Invalid key length");
-        assert_eq!(format!("{}", DsmError::InvalidCiphertext), "Invalid ciphertext");
-        assert_eq!(format!("{}", DsmError::InvalidIndex), "Invalid or out-of-bounds index");
-        assert_eq!(format!("{}", DsmError::MintNotAllowed), "Minting not allowed on this network");
-        assert_eq!(format!("{}", DsmError::BurnNotAllowed), "Burning not allowed on this network");
-        assert_eq!(format!("{}", DsmError::FaucetDisabled), "Faucet is currently disabled");
-        assert_eq!(format!("{}", DsmError::FaucetNotAvailable), "Faucet is not available on this network");
+        assert_eq!(
+            format!("{}", DsmError::InvalidSignature),
+            "Invalid signature"
+        );
+        assert_eq!(
+            format!("{}", DsmError::InvalidPublicKey),
+            "Invalid public key"
+        );
+        assert_eq!(
+            format!("{}", DsmError::InvalidSecretKey),
+            "Invalid secret key"
+        );
+        assert_eq!(
+            format!("{}", DsmError::InvalidKeyLength),
+            "Invalid key length"
+        );
+        assert_eq!(
+            format!("{}", DsmError::InvalidCiphertext),
+            "Invalid ciphertext"
+        );
+        assert_eq!(
+            format!("{}", DsmError::InvalidIndex),
+            "Invalid or out-of-bounds index"
+        );
+        assert_eq!(
+            format!("{}", DsmError::MintNotAllowed),
+            "Minting not allowed on this network"
+        );
+        assert_eq!(
+            format!("{}", DsmError::BurnNotAllowed),
+            "Burning not allowed on this network"
+        );
+        assert_eq!(
+            format!("{}", DsmError::FaucetDisabled),
+            "Faucet is currently disabled"
+        );
+        assert_eq!(
+            format!("{}", DsmError::FaucetNotAvailable),
+            "Faucet is not available on this network"
+        );
     }
 
     #[test]
@@ -2237,7 +2293,7 @@ mod tests {
 
     #[test]
     fn error_source_present_for_storage_with_source() {
-        let inner = std::io::Error::new(std::io::ErrorKind::Other, "disk");
+        let inner = std::io::Error::other("disk");
         let err = DsmError::storage("write failed", Some(inner));
         assert!(err.source().is_some());
     }

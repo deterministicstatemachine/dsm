@@ -62,7 +62,7 @@ mod tests {
 
     #[test]
     fn bcr_storage_default() {
-        let s = BcrStorage::default();
+        let s = BcrStorage;
         let dbg = format!("{s:?}");
         assert!(dbg.contains("BcrStorage"));
     }
@@ -96,7 +96,7 @@ mod tests {
 
     #[test]
     fn bcr_storage_default_eq_new() {
-        let d = BcrStorage::default();
+        let d = BcrStorage;
         let n = BcrStorage::new();
         assert_eq!(format!("{d:?}"), format!("{n:?}"));
     }

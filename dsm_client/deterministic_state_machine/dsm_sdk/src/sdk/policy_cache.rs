@@ -945,7 +945,9 @@ mod tests {
         let p = make_token_policy("Required");
         cache.cache_policy_internal("req_key", p).unwrap();
 
-        cache.mark_policy_as_required("req_key", "transfer").unwrap();
+        cache
+            .mark_policy_as_required("req_key", "transfer")
+            .unwrap();
 
         let entry = cache.cache.read();
         let e = entry.get("req_key").unwrap();

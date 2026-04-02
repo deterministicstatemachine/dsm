@@ -432,10 +432,7 @@ mod tests {
         let mut mgr = make_manager();
         let sid = mgr.create_session("alice", "bob");
         assert!(mgr.active_sessions.contains_key(&sid));
-        assert_eq!(
-            mgr.active_sessions.get(&sid).unwrap(),
-            "alice:bob"
-        );
+        assert_eq!(mgr.active_sessions.get(&sid).unwrap(), "alice:bob");
     }
 
     #[test]
@@ -482,12 +479,7 @@ mod tests {
     #[test]
     fn initialize_relationship_succeeds() {
         let mut mgr = make_manager();
-        let result = mgr.initialize_relationship(
-            "alice",
-            "bob",
-            dummy_key(),
-            dummy_key(),
-        );
+        let result = mgr.initialize_relationship("alice", "bob", dummy_key(), dummy_key());
         assert!(result.is_ok());
     }
 
@@ -496,20 +488,10 @@ mod tests {
     #[test]
     fn ensure_relationship_initialized_is_idempotent() {
         let mut mgr = make_manager();
-        let r1 = mgr.ensure_relationship_initialized(
-            "alice",
-            "bob",
-            dummy_key(),
-            dummy_key(),
-        );
+        let r1 = mgr.ensure_relationship_initialized("alice", "bob", dummy_key(), dummy_key());
         assert!(r1.is_ok());
 
-        let r2 = mgr.ensure_relationship_initialized(
-            "alice",
-            "bob",
-            dummy_key(),
-            dummy_key(),
-        );
+        let r2 = mgr.ensure_relationship_initialized("alice", "bob", dummy_key(), dummy_key());
         assert!(r2.is_ok());
     }
 
@@ -534,13 +516,8 @@ mod tests {
         let mut mgr = make_manager();
         let entity = [0x11u8; 32];
         let counterparty = [0x22u8; 32];
-        mgr.ensure_relationship_initialized_bytes(
-            &entity,
-            &counterparty,
-            dummy_key(),
-            dummy_key(),
-        )
-        .unwrap();
+        mgr.ensure_relationship_initialized_bytes(&entity, &counterparty, dummy_key(), dummy_key())
+            .unwrap();
         let r2 = mgr.ensure_relationship_initialized_bytes(
             &entity,
             &counterparty,
@@ -561,14 +538,9 @@ mod tests {
         let entropy_a = mgr.generate_entropy().unwrap();
         let entropy_b = mgr.generate_entropy().unwrap();
 
-        let entity_state = State::new_genesis(
-            entropy_a,
-            DeviceInfo::new(entity_id, dummy_key()),
-        );
-        let counterparty_state = State::new_genesis(
-            entropy_b,
-            DeviceInfo::new(counterparty_id, dummy_key()),
-        );
+        let entity_state = State::new_genesis(entropy_a, DeviceInfo::new(entity_id, dummy_key()));
+        let counterparty_state =
+            State::new_genesis(entropy_b, DeviceInfo::new(counterparty_id, dummy_key()));
 
         let pair = RelationshipStatePair::new(
             entity_id,

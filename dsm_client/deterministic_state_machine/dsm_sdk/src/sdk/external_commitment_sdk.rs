@@ -326,9 +326,7 @@ impl ExternalCommitmentSdk {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dsm::commitments::{
-        create_external_commitment, external_evidence_hash, external_source_id,
-    };
+    use dsm::commitments::{create_external_commitment, external_evidence_hash, external_source_id};
     use std::collections::HashMap;
 
     fn make_sdk() -> ExternalCommitmentSdk {
@@ -336,7 +334,11 @@ mod tests {
     }
 
     fn sample_commitment() -> ExternalCommitment {
-        ExternalCommitment::new_with_source(b"payload-data".to_vec(), "bitcoin", b"block-hash".to_vec())
+        ExternalCommitment::new_with_source(
+            b"payload-data".to_vec(),
+            "bitcoin",
+            b"block-hash".to_vec(),
+        )
     }
 
     // ---- serialize / deserialize round-trip ----
@@ -407,11 +409,15 @@ mod tests {
         // Need total > 73 bytes to pass minimum length check, then fail at payload boundary
         let mut bytes = vec![2u8]; // version
         bytes.extend_from_slice(&1000u32.to_le_bytes()); // payload_len = 1000
-        // Pad to pass min length check (73 bytes total) but payload is still short
+                                                         // Pad to pass min length check (73 bytes total) but payload is still short
         bytes.extend_from_slice(&[0u8; 80]);
         let err = sdk.deserialize_commitment(&bytes).unwrap_err();
-        assert!(err.to_string().contains("payload") || format!("{err:?}").contains("payload")
-            || err.to_string().contains("length") || format!("{err:?}").contains("length"));
+        assert!(
+            err.to_string().contains("payload")
+                || format!("{err:?}").contains("payload")
+                || err.to_string().contains("length")
+                || format!("{err:?}").contains("length")
+        );
     }
 
     #[test]
@@ -425,8 +431,12 @@ mod tests {
         bytes.extend_from_slice(&500u32.to_le_bytes()); // evidence_len=500
         bytes.extend_from_slice(&[0u8; 40]); // only 40 bytes (need 500)
         let err = sdk.deserialize_commitment(&bytes).unwrap_err();
-        assert!(err.to_string().contains("evidence") || format!("{err:?}").contains("evidence")
-            || err.to_string().contains("length") || format!("{err:?}").contains("length"));
+        assert!(
+            err.to_string().contains("evidence")
+                || format!("{err:?}").contains("evidence")
+                || err.to_string().contains("length")
+                || format!("{err:?}").contains("length")
+        );
     }
 
     #[test]
@@ -663,8 +673,7 @@ mod tests {
         let sdk = make_sdk();
         let c = sample_commitment();
         let bytes = sdk.serialize_commitment(&c);
-        let payload_len =
-            u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
+        let payload_len = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
         assert_eq!(payload_len, c.payload.len());
     }
 

@@ -578,7 +578,9 @@ mod tests {
         SmtInclusionProof {
             key: [0x11u8; 32],
             value: if with_value { Some([0x22u8; 32]) } else { None },
-            siblings: (0..siblings).map(|i| [(i as u8).wrapping_add(0x30); 32]).collect(),
+            siblings: (0..siblings)
+                .map(|i| [(i as u8).wrapping_add(0x30); 32])
+                .collect(),
         }
     }
 
@@ -746,7 +748,7 @@ mod tests {
     fn encode_protocol_transition_empty_label() {
         let encoded = encode_protocol_transition_payload(b"", &[b"data"]);
         // label_len(4) + label(0) + data_len(4) + data(4) = 12
-        assert_eq!(encoded.len(), 4 + 0 + 4 + 4);
+        assert_eq!(encoded.len(), 4 + 4 + 4);
     }
 
     #[test]
@@ -857,7 +859,7 @@ mod tests {
         // 32 key + 1 has_value(0) + 4 count(0) = 37 bytes
         let mut data = vec![0u8; 37];
         data[32] = 0; // has_value = false
-        // count bytes already zero (0 siblings)
+                      // count bytes already zero (0 siblings)
         let proof = deserialize_inclusion_proof(&data).unwrap();
         assert_eq!(proof.key, [0u8; 32]);
         assert_eq!(proof.value, None);
@@ -870,7 +872,7 @@ mod tests {
         let mut data = vec![0u8; 69];
         data[32] = 1; // has_value = true
         data[33..65].copy_from_slice(&[0xCC; 32]); // value
-        // count bytes at 65..69 already zero
+                                                   // count bytes at 65..69 already zero
         let proof = deserialize_inclusion_proof(&data).unwrap();
         assert_eq!(proof.value, Some([0xCC; 32]));
         assert!(proof.siblings.is_empty());

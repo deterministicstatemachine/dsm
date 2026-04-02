@@ -229,7 +229,10 @@ mod tests {
         let e2 = mk(10);
         let e3 = mk(11);
         assert_eq!(e1.message_id, e2.message_id, "same inputs → same id");
-        assert_ne!(e1.message_id, e3.message_id, "different ticks → different id");
+        assert_ne!(
+            e1.message_id, e3.message_id,
+            "different ticks → different id"
+        );
     }
 
     #[test]
@@ -257,7 +260,11 @@ mod tests {
         let env = build_envelope(&did, &gh, 42, None, payload).unwrap();
         let hdrs = env.headers.unwrap();
         assert_eq!(hdrs.chain_tip.len(), 32);
-        assert_ne!(hdrs.chain_tip, vec![0u8; 32], "derived tip should not be zeros");
+        assert_ne!(
+            hdrs.chain_tip,
+            vec![0u8; 32],
+            "derived tip should not be zeros"
+        );
     }
 
     fn make_invoke_envelope(method: &str, body: &[u8]) -> generated::Envelope {
@@ -356,9 +363,7 @@ mod tests {
     #[test]
     fn extract_confirm_request_success() {
         let req = generated::BilateralConfirmRequest {
-            commitment_hash: Some(generated::Hash32 {
-                v: vec![0xCC; 32],
-            }),
+            commitment_hash: Some(generated::Hash32 { v: vec![0xCC; 32] }),
             sender_signature: vec![3; 16],
             sender_smt_root: vec![],
             rel_proof_parent: vec![],
@@ -371,10 +376,7 @@ mod tests {
         let body = req.encode_to_vec();
         let env = make_invoke_envelope("bilateral.confirm", &body);
         let decoded = extract_confirm_request(&env).unwrap();
-        assert_eq!(
-            decoded.commitment_hash.unwrap().v,
-            vec![0xCC; 32]
-        );
+        assert_eq!(decoded.commitment_hash.unwrap().v, vec![0xCC; 32]);
     }
 
     #[test]

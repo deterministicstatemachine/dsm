@@ -402,8 +402,14 @@ mod tests {
         let persistence = Arc::new(MockPersistence::new());
         let store = make_store(persistence);
 
-        let a1 = store.store_policy(&make_policy_file("author-x")).await.unwrap();
-        let a2 = store.store_policy(&make_policy_file("author-y")).await.unwrap();
+        let a1 = store
+            .store_policy(&make_policy_file("author-x"))
+            .await
+            .unwrap();
+        let a2 = store
+            .store_policy(&make_policy_file("author-y"))
+            .await
+            .unwrap();
 
         let mut anchors = store.list_policy_anchors().await.unwrap();
         anchors.sort_by_key(|a| a.0);
@@ -417,9 +423,18 @@ mod tests {
         let persistence = Arc::new(MockPersistence::new());
         let store = PolicyStore::with_cache_settings(persistence, 2, 100_000);
 
-        let a1 = store.store_policy(&make_policy_file("author-1")).await.unwrap();
-        let a2 = store.store_policy(&make_policy_file("author-2")).await.unwrap();
-        let _a3 = store.store_policy(&make_policy_file("author-3")).await.unwrap();
+        let a1 = store
+            .store_policy(&make_policy_file("author-1"))
+            .await
+            .unwrap();
+        let a2 = store
+            .store_policy(&make_policy_file("author-2"))
+            .await
+            .unwrap();
+        let _a3 = store
+            .store_policy(&make_policy_file("author-3"))
+            .await
+            .unwrap();
 
         // a1 was the LRU entry and should have been evicted from cache
         assert!(store.get_from_cache(&a1).is_none());

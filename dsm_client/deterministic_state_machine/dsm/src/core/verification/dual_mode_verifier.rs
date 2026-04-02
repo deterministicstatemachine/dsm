@@ -364,10 +364,9 @@ mod tests {
     fn make_genesis() -> StateTypesState {
         let di = make_device_info();
         let mut state = State::new_genesis([0xAA; 32], di);
-        state.token_balances.insert(
-            "ERA".to_string(),
-            Balance::from_state(1000, [0u8; 32], 0),
-        );
+        state
+            .token_balances
+            .insert("ERA".to_string(), Balance::from_state(1000, [0u8; 32], 0));
         state
     }
 
@@ -378,12 +377,7 @@ mod tests {
     ) -> StateTypesState {
         let di = make_device_info();
         let prev_hash = prev.hash().unwrap();
-        let mut params = StateParams::new(
-            prev.state_number + 1,
-            entropy,
-            operation,
-            di,
-        );
+        let mut params = StateParams::new(prev.state_number + 1, entropy, operation, di);
         params.prev_state_hash = prev_hash;
         let mut s = State::new(params);
         s.token_balances = prev.token_balances.clone();
@@ -405,12 +399,8 @@ mod tests {
         let mut next = State::new(params);
         next.token_balances = current.token_balances.clone();
 
-        let result = DualModeVerifier::verify_transition(
-            &current,
-            &next,
-            &Operation::Noop,
-        )
-        .unwrap();
+        let result =
+            DualModeVerifier::verify_transition(&current, &next, &Operation::Noop).unwrap();
         assert!(!result, "should reject non-sequential state numbers");
     }
 
@@ -418,22 +408,13 @@ mod tests {
     fn verify_transition_rejects_wrong_prev_hash() {
         let current = make_genesis();
         let di = make_device_info();
-        let mut params = StateParams::new(
-            1,
-            vec![0xCC; 32],
-            Operation::Noop,
-            di,
-        );
+        let mut params = StateParams::new(1, vec![0xCC; 32], Operation::Noop, di);
         params.prev_state_hash = [0xFF; 32]; // wrong hash
         let mut next = State::new(params);
         next.token_balances = current.token_balances.clone();
 
-        let result = DualModeVerifier::verify_transition(
-            &current,
-            &next,
-            &Operation::Noop,
-        )
-        .unwrap();
+        let result =
+            DualModeVerifier::verify_transition(&current, &next, &Operation::Noop).unwrap();
         assert!(!result, "should reject wrong prev_state_hash");
     }
 
@@ -452,12 +433,8 @@ mod tests {
         let mut next = State::new(params);
         next.token_balances = current.token_balances.clone();
 
-        let result = DualModeVerifier::verify_transition(
-            &current,
-            &next,
-            &Operation::Noop,
-        )
-        .unwrap();
+        let result =
+            DualModeVerifier::verify_transition(&current, &next, &Operation::Noop).unwrap();
         assert!(!result, "should reject identical entropy");
     }
 
@@ -469,12 +446,8 @@ mod tests {
         let mut altered_next = next;
         altered_next.token_balances.clear();
 
-        let result = DualModeVerifier::verify_transition(
-            &current,
-            &altered_next,
-            &Operation::Noop,
-        )
-        .unwrap();
+        let result =
+            DualModeVerifier::verify_transition(&current, &altered_next, &Operation::Noop).unwrap();
         assert!(!result, "should reject when token disappears");
     }
 
@@ -483,12 +456,8 @@ mod tests {
         let current = make_genesis();
         let next = make_next_state(&current, Operation::Noop, vec![0xEE; 32]);
 
-        let result = DualModeVerifier::verify_transition(
-            &current,
-            &next,
-            &Operation::Noop,
-        )
-        .unwrap();
+        let result =
+            DualModeVerifier::verify_transition(&current, &next, &Operation::Noop).unwrap();
         assert!(result, "valid basic transition should pass");
     }
 
@@ -510,12 +479,7 @@ mod tests {
         };
         let next = make_next_state(&current, transfer.clone(), vec![0xFF; 32]);
 
-        let result = DualModeVerifier::verify_transition(
-            &current,
-            &next,
-            &transfer,
-        )
-        .unwrap();
+        let result = DualModeVerifier::verify_transition(&current, &next, &transfer).unwrap();
         assert!(!result, "bilateral transfer without signatures should fail");
     }
 
@@ -537,12 +501,7 @@ mod tests {
         };
         let next = make_next_state(&current, transfer.clone(), vec![0xAA; 32]);
 
-        let result = DualModeVerifier::verify_transition(
-            &current,
-            &next,
-            &transfer,
-        )
-        .unwrap();
+        let result = DualModeVerifier::verify_transition(&current, &next, &transfer).unwrap();
         assert!(!result, "unilateral without entity_sig should fail");
     }
 
@@ -576,7 +535,7 @@ mod tests {
         state.relationship_context = Some(RelationshipContext::new(
             [0x01; 32],
             [0u8; 32], // empty counterparty_id (all zeros, but non-empty bytes)
-            vec![],     // empty counterparty_public_key
+            vec![],    // empty counterparty_public_key
         ));
         let result = DualModeVerifier::verify_recipient_identity(&state).unwrap();
         assert!(!result, "empty counterparty public key should fail");

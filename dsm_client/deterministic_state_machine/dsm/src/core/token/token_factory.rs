@@ -285,7 +285,10 @@ mod tests {
         );
         assert!(result.is_err());
         let msg = format!("{}", result.unwrap_err());
-        assert!(msg.contains("threshold must be ≤ participants"), "got: {msg}");
+        assert!(
+            msg.contains("threshold must be ≤ participants"),
+            "got: {msg}"
+        );
     }
 
     #[test]
@@ -338,14 +341,9 @@ mod tests {
     #[test]
     fn participants_are_sorted_in_output() {
         let participants = vec![pid(3), pid(1), pid(2)];
-        let genesis = create_token_genesis(
-            3,
-            participants,
-            descriptor(),
-            None,
-            three_contributions(),
-        )
-        .unwrap();
+        let genesis =
+            create_token_genesis(3, participants, descriptor(), None, three_contributions())
+                .unwrap();
 
         assert_eq!(genesis.participants[0], pid(1));
         assert_eq!(genesis.participants[1], pid(2));
@@ -355,14 +353,9 @@ mod tests {
     #[test]
     fn contributions_are_sorted_by_participant() {
         let contributions = vec![contrib(3), contrib(1), contrib(2)];
-        let genesis = create_token_genesis(
-            3,
-            three_participants(),
-            descriptor(),
-            None,
-            contributions,
-        )
-        .unwrap();
+        let genesis =
+            create_token_genesis(3, three_participants(), descriptor(), None, contributions)
+                .unwrap();
 
         assert_eq!(genesis.contributions[0].participant, pid(1));
         assert_eq!(genesis.contributions[1].participant, pid(2));
@@ -441,13 +434,8 @@ mod tests {
             material: [0xAA; 32],
         };
         let contributions = vec![contrib(1), contrib(2), outsider];
-        let result = create_token_genesis(
-            3,
-            three_participants(),
-            descriptor(),
-            None,
-            contributions,
-        );
+        let result =
+            create_token_genesis(3, three_participants(), descriptor(), None, contributions);
         assert!(result.is_err());
         let msg = format!("{}", result.unwrap_err());
         assert!(msg.contains("not in participants set"), "got: {msg}");
@@ -460,13 +448,8 @@ mod tests {
             material: [0xBB; 32],
         };
         let contributions = vec![contrib(1), dup, contrib(2)];
-        let result = create_token_genesis(
-            3,
-            three_participants(),
-            descriptor(),
-            None,
-            contributions,
-        );
+        let result =
+            create_token_genesis(3, three_participants(), descriptor(), None, contributions);
         assert!(result.is_err());
         let msg = format!("{}", result.unwrap_err());
         assert!(msg.contains("duplicate contribution"), "got: {msg}");
@@ -475,13 +458,8 @@ mod tests {
     #[test]
     fn insufficient_contributions_is_rejected() {
         let contributions = vec![contrib(1), contrib(2)];
-        let result = create_token_genesis(
-            3,
-            three_participants(),
-            descriptor(),
-            None,
-            contributions,
-        );
+        let result =
+            create_token_genesis(3, three_participants(), descriptor(), None, contributions);
         assert!(result.is_err());
         let msg = format!("{}", result.unwrap_err());
         assert!(msg.contains("insufficient contributions"), "got: {msg}");
@@ -724,13 +702,7 @@ mod tests {
     #[test]
     fn only_threshold_contributions_are_kept() {
         let participants = vec![pid(1), pid(2), pid(3), pid(4), pid(5)];
-        let contributions = vec![
-            contrib(1),
-            contrib(2),
-            contrib(3),
-            contrib(4),
-            contrib(5),
-        ];
+        let contributions = vec![contrib(1), contrib(2), contrib(3), contrib(4), contrib(5)];
         let genesis =
             create_token_genesis(3, participants, descriptor(), None, contributions).unwrap();
 

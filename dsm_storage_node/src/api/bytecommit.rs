@@ -312,11 +312,7 @@ pub async fn emit_cycle_commitment(
 
 /// Deterministic address computation exposed for testing.
 #[cfg(test)]
-pub(crate) fn _test_bytecommit_addr(
-    node_id: &[u8; 32],
-    cycle_index: u64,
-    dt: &[u8; 32],
-) -> String {
+pub(crate) fn _test_bytecommit_addr(node_id: &[u8; 32], cycle_index: u64, dt: &[u8; 32]) -> String {
     bytecommit_addr(node_id, cycle_index, dt)
 }
 

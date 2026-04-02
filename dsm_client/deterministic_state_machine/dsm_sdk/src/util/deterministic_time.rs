@@ -49,8 +49,7 @@ mod tests {
     #[test]
     fn tick_returns_value() {
         reset();
-        let t = tick();
-        assert!(t <= u64::MAX);
+        let _ = tick();
     }
 
     #[test]
@@ -58,7 +57,10 @@ mod tests {
         reset();
         let a = tick();
         let b = tick_index();
-        assert_eq!(a, b, "tick() and tick_index() should delegate to the same source");
+        assert_eq!(
+            a, b,
+            "tick() and tick_index() should delegate to the same source"
+        );
     }
 
     #[test]
@@ -72,8 +74,7 @@ mod tests {
     #[test]
     fn peek_returns_value() {
         reset();
-        let p = peek();
-        assert!(p <= u64::MAX);
+        let _ = peek();
     }
 
     #[test]

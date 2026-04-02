@@ -136,8 +136,7 @@ mod tests {
     fn handle_query_fails_without_sdk_router() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let adapter = CoreAppRouterAdapter::new(rt.handle().clone());
-        let result =
-            dsm::core::bridge::AppRouter::handle_query(&adapter, "/test", &[]);
+        let result = dsm::core::bridge::AppRouter::handle_query(&adapter, "/test", &[]);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not installed"));
     }
@@ -147,8 +146,7 @@ mod tests {
     fn handle_invoke_fails_without_sdk_router() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let adapter = CoreAppRouterAdapter::new(rt.handle().clone());
-        let result =
-            dsm::core::bridge::AppRouter::handle_invoke(&adapter, "test_method", &[]);
+        let result = dsm::core::bridge::AppRouter::handle_invoke(&adapter, "test_method", &[]);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not installed"));
     }
@@ -158,8 +156,7 @@ mod tests {
     fn handle_query_with_empty_path() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let adapter = CoreAppRouterAdapter::new(rt.handle().clone());
-        let result =
-            dsm::core::bridge::AppRouter::handle_query(&adapter, "", &[]);
+        let result = dsm::core::bridge::AppRouter::handle_query(&adapter, "", &[]);
         assert!(result.is_err());
     }
 
@@ -169,11 +166,8 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let adapter = CoreAppRouterAdapter::new(rt.handle().clone());
         let big_payload = vec![0xFFu8; 1024 * 1024];
-        let result = dsm::core::bridge::AppRouter::handle_invoke(
-            &adapter,
-            "big_method",
-            &big_payload,
-        );
+        let result =
+            dsm::core::bridge::AppRouter::handle_invoke(&adapter, "big_method", &big_payload);
         assert!(result.is_err());
     }
 }

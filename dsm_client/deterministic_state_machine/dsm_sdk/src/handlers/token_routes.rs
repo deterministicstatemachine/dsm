@@ -512,6 +512,7 @@ mod tests {
     }
 
     /// Build a V2 policy_bytes blob with the full field layout.
+    #[allow(clippy::too_many_arguments)]
     fn build_v2_policy_bytes(
         kind_byte: u8,
         flags: u8,
@@ -522,11 +523,7 @@ mod tests {
         description: &str,
         icon_url: &str,
     ) -> Vec<u8> {
-        let mut buf = Vec::new();
-        buf.push(2); // version
-        buf.push(kind_byte);
-        buf.push(flags);
-        buf.push(0); // mintBurnThreshold
+        let mut buf = vec![2, kind_byte, flags, 0]; // version, kind, flags, mintBurnThreshold
 
         buf.push(ticker.len() as u8);
         buf.extend_from_slice(ticker.as_bytes());
@@ -589,7 +586,7 @@ mod tests {
     #[test]
     fn parse_v2_fungible() {
         let raw = build_v2_policy_bytes(
-            0, // FUNGIBLE
+            0,    // FUNGIBLE
             0x03, // mint_burn_enabled | transferable
             "DSM",
             "DSM Token",
@@ -610,20 +607,18 @@ mod tests {
         assert!(!parsed.unlimited_supply);
         assert_eq!(parsed.max_supply.as_deref(), Some("1000000"));
         assert_eq!(parsed.description.as_deref(), Some("A test token"));
-        assert_eq!(parsed.icon_url.as_deref(), Some("https://example.com/icon.png"));
+        assert_eq!(
+            parsed.icon_url.as_deref(),
+            Some("https://example.com/icon.png")
+        );
     }
 
     #[test]
     fn parse_v2_nft_with_unlimited_supply() {
         let raw = build_v2_policy_bytes(
-            1, // NFT
+            1,    // NFT
             0x0A, // transferable(0x02) | unlimited_supply(0x08)
-            "MYNFT",
-            "My NFT",
-            0,
-            0,
-            "",
-            "",
+            "MYNFT", "My NFT", 0, 0, "", "",
         );
         let proto = wrap_as_token_policy_v3(raw);
 
@@ -632,7 +627,10 @@ mod tests {
         assert!(!parsed.mint_burn_enabled);
         assert!(parsed.transferable);
         assert!(parsed.unlimited_supply);
-        assert!(parsed.description.is_none(), "empty description should be None");
+        assert!(
+            parsed.description.is_none(),
+            "empty description should be None"
+        );
         assert!(parsed.icon_url.is_none(), "empty icon_url should be None");
     }
 

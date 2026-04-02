@@ -686,9 +686,16 @@ mod tests {
     #[test]
     fn receipt_is_fully_signed_both_present() {
         let mut receipt = StitchedReceiptV2::new(
-            [0; 32], [1; 32], [2; 32], [3; 32],
-            [4; 32], [5; 32], [6; 32],
-            vec![], vec![], vec![],
+            [0; 32],
+            [1; 32],
+            [2; 32],
+            [3; 32],
+            [4; 32],
+            [5; 32],
+            [6; 32],
+            vec![],
+            vec![],
+            vec![],
         );
         assert!(!receipt.is_fully_signed());
 
@@ -702,9 +709,16 @@ mod tests {
     #[test]
     fn receipt_not_fully_signed_empty_sigs() {
         let receipt = StitchedReceiptV2::new(
-            [0; 32], [1; 32], [2; 32], [3; 32],
-            [4; 32], [5; 32], [6; 32],
-            vec![], vec![], vec![],
+            [0; 32],
+            [1; 32],
+            [2; 32],
+            [3; 32],
+            [4; 32],
+            [5; 32],
+            [6; 32],
+            vec![],
+            vec![],
+            vec![],
         );
         assert!(!receipt.is_fully_signed());
     }
@@ -712,9 +726,16 @@ mod tests {
     #[test]
     fn receipt_id_accessors() {
         let receipt = StitchedReceiptV2::new(
-            [0; 32], [0x11; 32], [0x22; 32], [0; 32],
-            [0; 32], [0; 32], [0; 32],
-            vec![], vec![], vec![],
+            [0; 32],
+            [0x11; 32],
+            [0x22; 32],
+            [0; 32],
+            [0; 32],
+            [0; 32],
+            [0; 32],
+            vec![],
+            vec![],
+            vec![],
         );
         assert_eq!(receipt.id_a(), &[0x11; 32]);
         assert_eq!(receipt.id_b(), &[0x22; 32]);
@@ -725,9 +746,16 @@ mod tests {
         let mut parent_tip = [0u8; 32];
         parent_tip[24..32].copy_from_slice(&42u64.to_le_bytes());
         let receipt = StitchedReceiptV2::new(
-            [0; 32], [0; 32], [0; 32], parent_tip,
-            [0; 32], [0; 32], [0; 32],
-            vec![], vec![], vec![],
+            [0; 32],
+            [0; 32],
+            [0; 32],
+            parent_tip,
+            [0; 32],
+            [0; 32],
+            [0; 32],
+            vec![],
+            vec![],
+            vec![],
         );
         assert_eq!(receipt.t(), 42);
     }
@@ -735,9 +763,16 @@ mod tests {
     #[test]
     fn receipt_serialized_size_grows_with_sigs() {
         let mut receipt = StitchedReceiptV2::new(
-            [0; 32], [0; 32], [0; 32], [0; 32],
-            [0; 32], [0; 32], [0; 32],
-            vec![], vec![], vec![],
+            [0; 32],
+            [0; 32],
+            [0; 32],
+            [0; 32],
+            [0; 32],
+            [0; 32],
+            [0; 32],
+            vec![],
+            vec![],
+            vec![],
         );
         let base_size = receipt.serialized_size();
 
@@ -749,9 +784,16 @@ mod tests {
     #[test]
     fn receipt_canonical_commit_alias() {
         let receipt = StitchedReceiptV2::new(
-            [0; 32], [1; 32], [2; 32], [3; 32],
-            [4; 32], [5; 32], [6; 32],
-            vec![], vec![], vec![],
+            [0; 32],
+            [1; 32],
+            [2; 32],
+            [3; 32],
+            [4; 32],
+            [5; 32],
+            [6; 32],
+            vec![],
+            vec![],
+            vec![],
         );
         let a = receipt.compute_commitment().unwrap();
         let b = receipt.canonical_commit().unwrap();
@@ -761,14 +803,28 @@ mod tests {
     #[test]
     fn receipt_different_fields_produce_different_commitments() {
         let r1 = StitchedReceiptV2::new(
-            [0; 32], [1; 32], [2; 32], [3; 32],
-            [4; 32], [5; 32], [6; 32],
-            vec![], vec![], vec![],
+            [0; 32],
+            [1; 32],
+            [2; 32],
+            [3; 32],
+            [4; 32],
+            [5; 32],
+            [6; 32],
+            vec![],
+            vec![],
+            vec![],
         );
         let r2 = StitchedReceiptV2::new(
-            [0xFF; 32], [1; 32], [2; 32], [3; 32],
-            [4; 32], [5; 32], [6; 32],
-            vec![], vec![], vec![],
+            [0xFF; 32],
+            [1; 32],
+            [2; 32],
+            [3; 32],
+            [4; 32],
+            [5; 32],
+            [6; 32],
+            vec![],
+            vec![],
+            vec![],
         );
         assert_ne!(
             r1.compute_commitment().unwrap(),
@@ -822,12 +878,7 @@ mod tests {
 
     #[test]
     fn verification_context_mark_and_check_consumed() {
-        let mut ctx = ReceiptVerificationContext::new(
-            [0; 32],
-            [1; 32],
-            vec![2; 64],
-            vec![3; 64],
-        );
+        let mut ctx = ReceiptVerificationContext::new([0; 32], [1; 32], vec![2; 64], vec![3; 64]);
         let tip = [0xAA; 32];
         assert!(!ctx.is_consumed(&tip));
         ctx.mark_consumed(tip);

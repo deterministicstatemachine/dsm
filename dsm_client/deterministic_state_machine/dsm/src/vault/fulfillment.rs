@@ -200,10 +200,7 @@ mod tests {
 
     #[test]
     fn display_random_walk() {
-        assert_eq!(
-            sample_random_walk().to_string(),
-            "RandomWalk: test-stmt"
-        );
+        assert_eq!(sample_random_walk().to_string(), "RandomWalk: test-stmt");
     }
 
     #[test]
@@ -305,10 +302,8 @@ mod tests {
 
     #[test]
     fn or_compound_nesting() {
-        let inner_and = FulfillmentMechanism::And(vec![
-            sample_crypto_condition(),
-            sample_state_reference(),
-        ]);
+        let inner_and =
+            FulfillmentMechanism::And(vec![sample_crypto_condition(), sample_state_reference()]);
         let outer = FulfillmentMechanism::Or(vec![inner_and.clone(), sample_payment()]);
         assert_eq!(outer.to_string(), "OR(2 conditions)");
 

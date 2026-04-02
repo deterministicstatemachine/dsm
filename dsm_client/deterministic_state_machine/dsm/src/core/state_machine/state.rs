@@ -228,11 +228,7 @@ mod tests {
     }
 
     fn test_entropy_array() -> [u8; 32] {
-        let mut arr = [0u8; 32];
-        for i in 0..32 {
-            arr[i] = (i + 1) as u8;
-        }
-        arr
+        std::array::from_fn(|i| (i + 1) as u8)
     }
 
     fn finalize_hash(state: &mut State) {
@@ -461,10 +457,7 @@ mod tests {
     fn sparse_indices_always_include_predecessor() {
         for n in [1u64, 2, 5, 10, 100, 1000] {
             let indices = State::calculate_sparse_indices(n).unwrap();
-            assert!(
-                indices.contains(&(n - 1)),
-                "state {n} missing predecessor"
-            );
+            assert!(indices.contains(&(n - 1)), "state {n} missing predecessor");
         }
     }
 

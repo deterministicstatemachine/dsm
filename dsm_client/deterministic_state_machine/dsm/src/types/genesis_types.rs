@@ -468,7 +468,14 @@ mod tests {
         let dbrw = DBRWProof::new(vec![1], env, pd, [0u8; 32]);
         let mpc = vec![MPCContribution::new("n".into(), [0u8; 32], vec![], 0)];
 
-        let gs1 = GenesisState::new([1u8; 32], [0u8; 32], mpc.clone(), dbrw.clone(), keys.clone(), 0);
+        let gs1 = GenesisState::new(
+            [1u8; 32],
+            [0u8; 32],
+            mpc.clone(),
+            dbrw.clone(),
+            keys.clone(),
+            0,
+        );
         let gs2 = GenesisState::new([2u8; 32], [0u8; 32], mpc, dbrw, keys, 0);
         assert_ne!(
             gs1.recompute_genesis_hash().unwrap(),

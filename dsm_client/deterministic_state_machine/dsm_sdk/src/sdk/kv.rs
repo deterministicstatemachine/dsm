@@ -97,7 +97,8 @@ mod tests {
     #[test]
     fn encode_number() {
         assert_eq!(to_string(&Value::Number(42.0)), "42");
-        assert_eq!(to_string(&Value::Number(3.14)), "3.14");
+        let pi_str = format!("{}", std::f64::consts::PI);
+        assert_eq!(to_string(&Value::Number(std::f64::consts::PI)), pi_str);
         assert_eq!(to_string(&Value::Number(-1.0)), "-1");
     }
 
@@ -171,9 +172,6 @@ mod tests {
         assert_eq!(Value::Null, Value::Null);
         assert_ne!(Value::Bool(true), Value::Bool(false));
         assert_ne!(Value::Number(1.0), Value::Number(2.0));
-        assert_eq!(
-            Value::String("a".into()),
-            Value::String("a".into())
-        );
+        assert_eq!(Value::String("a".into()), Value::String("a".into()));
     }
 }

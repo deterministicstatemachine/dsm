@@ -182,14 +182,16 @@ mod tests {
         let data = [0xFFu8; 32];
         let head = key_head(&data);
         let leaf = key_leaf(&data, &data);
-        assert_ne!(head, leaf, "head and leaf keys must differ due to domain tags");
+        assert_ne!(
+            head, leaf,
+            "head and leaf keys must differ due to domain tags"
+        );
     }
 
     #[test]
     fn size_constants_are_reasonable() {
         assert_eq!(MAX_HEAD_BYTES, 256);
         assert_eq!(MAX_LEAF_BYTES, 2048);
-        assert!(MAX_LEAF_BYTES > MAX_HEAD_BYTES);
     }
 
     #[test]

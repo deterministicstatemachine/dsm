@@ -309,8 +309,10 @@ mod tests {
         let from = [1u8; 32];
         let to = [2u8; 32];
         let tip = [3u8; 32];
-        let a = compute_transfer_signing_bytes_v3(&from, &to, "tok", 100, &tip, 1, b"nonce", "memo");
-        let b = compute_transfer_signing_bytes_v3(&from, &to, "tok", 100, &tip, 1, b"nonce", "memo");
+        let a =
+            compute_transfer_signing_bytes_v3(&from, &to, "tok", 100, &tip, 1, b"nonce", "memo");
+        let b =
+            compute_transfer_signing_bytes_v3(&from, &to, "tok", 100, &tip, 1, b"nonce", "memo");
         assert_eq!(a, b);
         assert_eq!(a.len(), 32);
     }
@@ -340,8 +342,12 @@ mod tests {
         let from = [10u8; 32];
         let to = [20u8; 32];
         let tip = [30u8; 32];
-        let a = compute_online_message_signing_bytes_v3(&from, &to, &tip, 5, b"nonce", b"payload", "hi");
-        let b = compute_online_message_signing_bytes_v3(&from, &to, &tip, 5, b"nonce", b"payload", "hi");
+        let a = compute_online_message_signing_bytes_v3(
+            &from, &to, &tip, 5, b"nonce", b"payload", "hi",
+        );
+        let b = compute_online_message_signing_bytes_v3(
+            &from, &to, &tip, 5, b"nonce", b"payload", "hi",
+        );
         assert_eq!(a, b);
         assert_eq!(a.len(), 32);
     }
@@ -396,12 +402,11 @@ mod tests {
         let from = [1u8; 32];
         let to = [2u8; 32];
         let tip = [3u8; 32];
-        let transfer = compute_transfer_signing_bytes_v3(
-            &from, &to, "", 0, &tip, 0, b"", "",
+        let transfer = compute_transfer_signing_bytes_v3(&from, &to, "", 0, &tip, 0, b"", "");
+        let online = compute_online_message_signing_bytes_v3(&from, &to, &tip, 0, b"", b"", "");
+        assert_ne!(
+            transfer, online,
+            "Different domain tags must produce different hashes"
         );
-        let online = compute_online_message_signing_bytes_v3(
-            &from, &to, &tip, 0, b"", b"", "",
-        );
-        assert_ne!(transfer, online, "Different domain tags must produce different hashes");
     }
 }

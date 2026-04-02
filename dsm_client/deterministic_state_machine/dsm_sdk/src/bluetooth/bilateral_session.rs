@@ -525,10 +525,16 @@ mod tests {
     fn phase_to_str_covers_all_variants() {
         assert_eq!(phase_to_str(&BilateralPhase::Preparing), "preparing");
         assert_eq!(phase_to_str(&BilateralPhase::Prepared), "prepared");
-        assert_eq!(phase_to_str(&BilateralPhase::PendingUserAction), "pending_user_action");
+        assert_eq!(
+            phase_to_str(&BilateralPhase::PendingUserAction),
+            "pending_user_action"
+        );
         assert_eq!(phase_to_str(&BilateralPhase::Accepted), "accepted");
         assert_eq!(phase_to_str(&BilateralPhase::Rejected), "rejected");
-        assert_eq!(phase_to_str(&BilateralPhase::ConfirmPending), "confirm_pending");
+        assert_eq!(
+            phase_to_str(&BilateralPhase::ConfirmPending),
+            "confirm_pending"
+        );
         assert_eq!(phase_to_str(&BilateralPhase::Committed), "committed");
         assert_eq!(phase_to_str(&BilateralPhase::Failed), "failed");
     }
@@ -602,10 +608,7 @@ mod tests {
         store
             .insert(make_session(hash, BilateralPhase::Accepted))
             .await;
-        assert_eq!(
-            store.get_phase(&hash).await,
-            Some(BilateralPhase::Accepted)
-        );
+        assert_eq!(store.get_phase(&hash).await, Some(BilateralPhase::Accepted));
         assert_eq!(store.get_phase(&[0xFF; 32]).await, None);
     }
 

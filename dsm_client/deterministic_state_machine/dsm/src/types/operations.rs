@@ -2060,7 +2060,8 @@ mod tests {
         let bytes = op.to_bytes();
         let decoded = Operation::from_bytes(&bytes).expect("from_bytes failed");
         assert_eq!(
-            op, &decoded,
+            op,
+            &decoded,
             "round-trip mismatch for {:?}",
             op.get_operation_type()
         );
@@ -2519,7 +2520,7 @@ mod tests {
                 message: String::new(),
                 signature: vec![],
             };
-            assert_eq!(Ops::validate(&op).unwrap(), false);
+            assert!(!Ops::validate(&op).unwrap());
         }
 
         #[test]
@@ -2537,17 +2538,17 @@ mod tests {
                 message: String::new(),
                 signature: vec![],
             };
-            assert_eq!(Ops::validate(&op).unwrap(), true);
+            assert!(Ops::validate(&op).unwrap());
         }
 
         #[test]
         fn validate_genesis_is_true() {
-            assert_eq!(Ops::validate(&Operation::Genesis).unwrap(), true);
+            assert!(Ops::validate(&Operation::Genesis).unwrap());
         }
 
         #[test]
         fn validate_noop_is_true() {
-            assert_eq!(Ops::validate(&Operation::Noop).unwrap(), true);
+            assert!(Ops::validate(&Operation::Noop).unwrap());
         }
 
         #[test]

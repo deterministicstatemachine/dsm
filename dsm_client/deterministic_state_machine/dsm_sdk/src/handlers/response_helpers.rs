@@ -61,9 +61,7 @@ mod tests {
     use prost::Message;
 
     fn zero_hash32() -> generated::Hash32 {
-        generated::Hash32 {
-            v: vec![0u8; 32],
-        }
+        generated::Hash32 { v: vec![0u8; 32] }
     }
 
     #[test]
@@ -96,11 +94,10 @@ mod tests {
 
     #[test]
     fn pack_envelope_ok_framing_byte() {
-        let payload =
-            generated::envelope::Payload::AppStateResponse(generated::AppStateResponse {
-                key: "test".into(),
-                value: Some("val".into()),
-            });
+        let payload = generated::envelope::Payload::AppStateResponse(generated::AppStateResponse {
+            key: "test".into(),
+            value: Some("val".into()),
+        });
         let result = pack_envelope_ok(payload);
         assert!(result.success);
         assert!(result.error_message.is_none());
@@ -109,11 +106,10 @@ mod tests {
 
     #[test]
     fn pack_envelope_ok_roundtrip() {
-        let payload =
-            generated::envelope::Payload::AppStateResponse(generated::AppStateResponse {
-                key: "hello".into(),
-                value: None,
-            });
+        let payload = generated::envelope::Payload::AppStateResponse(generated::AppStateResponse {
+            key: "hello".into(),
+            value: None,
+        });
         let result = pack_envelope_ok(payload);
         let envelope = generated::Envelope::decode(&result.data[1..]).unwrap();
         assert_eq!(envelope.version, 3);

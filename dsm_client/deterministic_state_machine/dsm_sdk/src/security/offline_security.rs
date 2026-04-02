@@ -567,14 +567,9 @@ mod tests {
         let genesis_hash = vec![30u8; 32];
         let smt_root = vec![40u8; 32];
 
-        let enc = EncryptedAppState::encrypt(
-            &mk,
-            &device_id,
-            &public_key,
-            &genesis_hash,
-            &smt_root,
-        )
-        .unwrap();
+        let enc =
+            EncryptedAppState::encrypt(&mk, &device_id, &public_key, &genesis_hash, &smt_root)
+                .unwrap();
 
         assert_eq!(enc.version, 1);
         assert!(!enc.encrypted_data.is_empty());
@@ -605,8 +600,7 @@ mod tests {
     fn encrypted_app_state_wrong_key_fails() {
         let mk1 = test_master_key();
         let mk2 = test_master_key();
-        let enc =
-            EncryptedAppState::encrypt(&mk1, b"did", b"pk", b"gh", b"sr").unwrap();
+        let enc = EncryptedAppState::encrypt(&mk1, b"did", b"pk", b"gh", b"sr").unwrap();
         assert!(enc.decrypt(&mk2).is_err());
     }
 
@@ -689,12 +683,7 @@ mod tests {
         assert!(state.get_public_key().unwrap().is_none());
 
         state
-            .set_identity_info(
-                vec![1; 32],
-                vec![2; 64],
-                vec![3; 32],
-                vec![4; 32],
-            )
+            .set_identity_info(vec![1; 32], vec![2; 64], vec![3; 32], vec![4; 32])
             .unwrap();
         assert!(state.has_identity);
         assert_eq!(state.get_device_id().unwrap().unwrap(), vec![1; 32]);

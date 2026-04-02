@@ -978,7 +978,7 @@ mod tests {
 
     #[test]
     fn from_io_other_becomes_generic() {
-        let io_err = io::Error::new(io::ErrorKind::Other, "misc");
+        let io_err = io::Error::other("misc");
         let e: DsmCoreError = io_err.into();
         assert!(matches!(e, DsmCoreError::Generic { .. }));
         assert!(e.to_string().contains("DSM core error"));
@@ -1014,9 +1014,7 @@ mod tests {
     #[test]
     fn error_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
-        // DsmCoreError is Debug and has Send+Sync sources, so this should compile.
-        // We can't assert the trait for DsmCoreError directly because dyn Error
-        // is not Sync unless explicitly boxed as such. But the constructors do.
+        assert_send_sync::<DsmCoreError>();
         let e = DsmCoreError::crypto("t", Option::<TestSourceError>::None);
         let _ = format!("{e}");
     }

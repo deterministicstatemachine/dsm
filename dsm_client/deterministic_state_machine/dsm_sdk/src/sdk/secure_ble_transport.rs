@@ -65,17 +65,32 @@ mod tests {
 
     #[async_trait]
     impl BleLink for MockBleLink {
-        async fn start_scan(&self) -> Result<(), DsmError> { Ok(()) }
-        async fn stop_scan(&self) -> Result<(), DsmError> { Ok(()) }
-        async fn start_advertise(&self) -> Result<(), DsmError> { Ok(()) }
-        async fn stop_advertise(&self) -> Result<(), DsmError> { Ok(()) }
-        async fn connect(&self, _device_id: &str) -> Result<(), DsmError> { Ok(()) }
-        async fn disconnect(&self, _device_id: &str) -> Result<(), DsmError> { Ok(()) }
-        async fn send(&self, _device_id: &str, _bytes: &[u8]) -> Result<(), DsmError> { Ok(()) }
+        async fn start_scan(&self) -> Result<(), DsmError> {
+            Ok(())
+        }
+        async fn stop_scan(&self) -> Result<(), DsmError> {
+            Ok(())
+        }
+        async fn start_advertise(&self) -> Result<(), DsmError> {
+            Ok(())
+        }
+        async fn stop_advertise(&self) -> Result<(), DsmError> {
+            Ok(())
+        }
+        async fn connect(&self, _device_id: &str) -> Result<(), DsmError> {
+            Ok(())
+        }
+        async fn disconnect(&self, _device_id: &str) -> Result<(), DsmError> {
+            Ok(())
+        }
+        async fn send(&self, _device_id: &str, _bytes: &[u8]) -> Result<(), DsmError> {
+            Ok(())
+        }
         async fn recv_stream(
             &self,
             _device_id: &str,
-        ) -> Result<Pin<Box<dyn Stream<Item = Result<Vec<u8>, DsmError>> + Send>>, DsmError> {
+        ) -> Result<Pin<Box<dyn Stream<Item = Result<Vec<u8>, DsmError>> + Send>>, DsmError>
+        {
             Ok(Box::pin(futures::stream::empty()))
         }
         async fn discovered(&self) -> Result<Vec<BluetoothDevice>, DsmError> {
@@ -137,8 +152,7 @@ mod tests {
     fn new_with_peripheral_mode() {
         let link = Arc::new(MockBleLink);
         let device = BluetoothDevice::new("periph-001", "Peripheral Device");
-        let transport =
-            SecureBluetoothTransport::new(BluetoothMode::Peripheral, link, device);
+        let transport = SecureBluetoothTransport::new(BluetoothMode::Peripheral, link, device);
         assert_eq!(transport.local_device_id, "periph-001");
     }
 

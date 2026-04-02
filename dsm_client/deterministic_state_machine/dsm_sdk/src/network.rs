@@ -725,7 +725,10 @@ name = "n1"
 endpoint = "http://10.0.0.5:9090"
 "#;
         let cfg = parse_env_config_toml(toml).unwrap();
-        assert_eq!(cfg.mpc_genesis_url.as_deref(), Some("https://mpc.example.com"));
+        assert_eq!(
+            cfg.mpc_genesis_url.as_deref(),
+            Some("https://mpc.example.com")
+        );
         assert_eq!(cfg.mpc_api_key.as_deref(), Some("secret"));
         assert!(cfg.allow_localhost);
         assert_eq!(cfg.bitcoin_network.as_deref(), Some("signet"));
@@ -735,9 +738,18 @@ endpoint = "http://10.0.0.5:9090"
     #[test]
     fn node_registry_round_robin() {
         let nodes = vec![
-            NodeConfig { name: "a".into(), endpoint: "http://a".into() },
-            NodeConfig { name: "b".into(), endpoint: "http://b".into() },
-            NodeConfig { name: "c".into(), endpoint: "http://c".into() },
+            NodeConfig {
+                name: "a".into(),
+                endpoint: "http://a".into(),
+            },
+            NodeConfig {
+                name: "b".into(),
+                endpoint: "http://b".into(),
+            },
+            NodeConfig {
+                name: "c".into(),
+                endpoint: "http://c".into(),
+            },
         ];
         let reg = NodeRegistry::new(nodes, None);
         let mut seen = Vec::new();
@@ -752,9 +764,10 @@ endpoint = "http://10.0.0.5:9090"
 
     #[test]
     fn node_registry_add_and_remove() {
-        let nodes = vec![
-            NodeConfig { name: "a".into(), endpoint: "http://a".into() },
-        ];
+        let nodes = vec![NodeConfig {
+            name: "a".into(),
+            endpoint: "http://a".into(),
+        }];
         let reg = NodeRegistry::new(nodes, None);
 
         assert_eq!(reg.list_endpoints(), vec!["http://a"]);
@@ -776,8 +789,14 @@ endpoint = "http://10.0.0.5:9090"
     #[test]
     fn node_registry_quarantine_skips_node() {
         let nodes = vec![
-            NodeConfig { name: "a".into(), endpoint: "http://a".into() },
-            NodeConfig { name: "b".into(), endpoint: "http://b".into() },
+            NodeConfig {
+                name: "a".into(),
+                endpoint: "http://a".into(),
+            },
+            NodeConfig {
+                name: "b".into(),
+                endpoint: "http://b".into(),
+            },
         ];
         let reg = NodeRegistry::new(nodes, None);
 
@@ -792,9 +811,10 @@ endpoint = "http://10.0.0.5:9090"
 
     #[test]
     fn node_registry_clear_quarantine() {
-        let nodes = vec![
-            NodeConfig { name: "a".into(), endpoint: "http://a".into() },
-        ];
+        let nodes = vec![NodeConfig {
+            name: "a".into(),
+            endpoint: "http://a".into(),
+        }];
         let reg = NodeRegistry::new(nodes, None);
 
         reg.quarantine_endpoint("http://a");
@@ -842,8 +862,14 @@ endpoint = "http://10.0.0.5:9090"
     #[test]
     fn validate_and_normalize_nodes_non_android_accepts_all() {
         let nodes = vec![
-            NodeConfig { name: "local".into(), endpoint: "http://127.0.0.1:8080".into() },
-            NodeConfig { name: "remote".into(), endpoint: "http://10.0.0.5:9090".into() },
+            NodeConfig {
+                name: "local".into(),
+                endpoint: "http://127.0.0.1:8080".into(),
+            },
+            NodeConfig {
+                name: "remote".into(),
+                endpoint: "http://10.0.0.5:9090".into(),
+            },
         ];
         let result = validate_and_normalize_nodes(nodes.clone(), false);
         assert!(result.is_ok());

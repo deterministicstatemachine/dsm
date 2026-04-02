@@ -19,6 +19,11 @@
 
 #![forbid(unsafe_code)]
 #![deny(warnings, clippy::all, clippy::pedantic)]
+// Tests use unwrap/expect and disallowed std helpers for brevity; production paths stay strict.
+#![cfg_attr(
+    test,
+    allow(clippy::disallowed_methods, clippy::unwrap_used, clippy::expect_used)
+)]
 
 use core::pin::Pin;
 // core::task::Context, Poll not needed here
@@ -806,8 +811,7 @@ mod tests {
     #[test]
     fn bluetooth_device_with_metadata() {
         let mut dev = BluetoothDevice::new("id", "name");
-        dev.metadata
-            .insert("rssi".into(), "-42".into());
+        dev.metadata.insert("rssi".into(), "-42".into());
         assert_eq!(dev.metadata.get("rssi").unwrap(), "-42");
     }
 
@@ -1290,7 +1294,10 @@ mod tests {
     fn security_context_decrypt_exactly_12_bytes() {
         let ctx = BleSecurityContext::new("a", "b");
         let result = ctx.decrypt(&[0u8; 12]);
-        assert!(result.is_err(), "12 bytes is nonce only, no ciphertext for non-empty");
+        assert!(
+            result.is_err(),
+            "12 bytes is nonce only, no ciphertext for non-empty"
+        );
     }
 
     #[test]

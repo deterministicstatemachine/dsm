@@ -784,7 +784,9 @@ mod tests {
         };
         let op = sdk.execute_commitment(&commitment).unwrap();
         match op {
-            Operation::Transfer { amount, token_id, .. } => {
+            Operation::Transfer {
+                amount, token_id, ..
+            } => {
                 assert_eq!(amount.value(), 0);
                 assert_eq!(token_id, b"TOKEN");
             }
@@ -888,7 +890,10 @@ mod tests {
     fn op_fingerprint_burn_different_messages_differ() {
         let op1 = make_burn_op();
         let mut op2 = make_burn_op();
-        if let Operation::Burn { ref mut message, .. } = op2 {
+        if let Operation::Burn {
+            ref mut message, ..
+        } = op2
+        {
             *message = "other burn message".to_string();
         }
         let fp1 = SmartCommitmentSDK::op_fingerprint(&op1);

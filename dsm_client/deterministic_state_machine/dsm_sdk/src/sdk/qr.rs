@@ -3,9 +3,12 @@ use prost::Message;
 use crate::types::error::DsmError;
 use dsm::types::proto::ContactQrV3;
 
-pub fn make_contact_qr_v3_bytes(device_id: &[u8; 32], network: &str, storage_nodes: &[&str], sdk_build_bytes: &[u8])
-    -> Result<Vec<u8>, DsmError>
-{
+pub fn make_contact_qr_v3_bytes(
+    device_id: &[u8; 32],
+    network: &str,
+    storage_nodes: &[&str],
+    sdk_build_bytes: &[u8],
+) -> Result<Vec<u8>, DsmError> {
     let mut h = Hasher::new();
     h.update(sdk_build_bytes);
     let fingerprint = h.finalize();
@@ -66,7 +69,10 @@ mod tests {
 
         assert_eq!(parsed.device_id, device_id.to_vec());
         assert_eq!(parsed.network, "testnet");
-        assert_eq!(parsed.storage_nodes, vec!["node1.example.com", "node2.example.com"]);
+        assert_eq!(
+            parsed.storage_nodes,
+            vec!["node1.example.com", "node2.example.com"]
+        );
         assert_eq!(parsed.sdk_fingerprint.len(), 32);
     }
 
@@ -110,10 +116,8 @@ mod tests {
     #[test]
     fn different_sdk_build_gives_different_fingerprint() {
         let device_id = sample_device_id();
-        let bytes_a =
-            make_contact_qr_v3_bytes(&device_id, "net", &["a"], b"build-A").unwrap();
-        let bytes_b =
-            make_contact_qr_v3_bytes(&device_id, "net", &["a"], b"build-B").unwrap();
+        let bytes_a = make_contact_qr_v3_bytes(&device_id, "net", &["a"], b"build-A").unwrap();
+        let bytes_b = make_contact_qr_v3_bytes(&device_id, "net", &["a"], b"build-B").unwrap();
 
         let parsed_a = parse_contact_qr_v3_bytes(&bytes_a).unwrap();
         let parsed_b = parse_contact_qr_v3_bytes(&bytes_b).unwrap();
@@ -129,8 +133,7 @@ mod tests {
         let expected = h.finalize();
 
         let device_id = sample_device_id();
-        let bytes =
-            make_contact_qr_v3_bytes(&device_id, "net", &[], build).unwrap();
+        let bytes = make_contact_qr_v3_bytes(&device_id, "net", &[], build).unwrap();
         let parsed = parse_contact_qr_v3_bytes(&bytes).unwrap();
 
         assert_eq!(parsed.sdk_fingerprint, expected.as_bytes().to_vec());

@@ -64,7 +64,7 @@ mod tests {
 
     #[test]
     fn default_creates_instance() {
-        let store = SqliteChainTipStore::default();
+        let store = SqliteChainTipStore;
         let store2 = store.clone();
         let _ = store2;
     }
@@ -93,7 +93,7 @@ mod tests {
     #[test]
     fn multiple_instances_independent() {
         let _a = SqliteChainTipStore::new();
-        let _b = SqliteChainTipStore::default();
+        let _b = SqliteChainTipStore;
         let _c = SqliteChainTipStore::new();
     }
 

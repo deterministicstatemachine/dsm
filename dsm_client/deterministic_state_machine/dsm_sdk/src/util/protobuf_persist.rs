@@ -56,9 +56,7 @@ mod tests {
     }
 
     fn sample_message() -> dsm::types::proto::Hash32 {
-        dsm::types::proto::Hash32 {
-            v: vec![0xAA; 32],
-        }
+        dsm::types::proto::Hash32 { v: vec![0xAA; 32] }
     }
 
     #[test]

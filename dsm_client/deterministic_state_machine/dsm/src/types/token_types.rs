@@ -1321,8 +1321,14 @@ mod tests {
     #[test]
     fn token_metadata_builder_methods() {
         let meta = TokenMetadata::new(
-            "TEST", "Test Token", "TST", 8,
-            TokenType::Created, [0; 32], 1, None,
+            "TEST",
+            "Test Token",
+            "TST",
+            8,
+            TokenType::Created,
+            [0; 32],
+            1,
+            None,
         )
         .with_description("A test token")
         .with_metadata_uri("https://example.com")
@@ -1331,15 +1337,27 @@ mod tests {
 
         assert_eq!(meta.description.as_deref(), Some("A test token"));
         assert_eq!(meta.metadata_uri.as_deref(), Some("https://example.com"));
-        assert_eq!(meta.icon_url.as_deref(), Some("https://example.com/icon.png"));
-        assert_eq!(meta.fields.get("website").map(|s| s.as_str()), Some("https://test.com"));
+        assert_eq!(
+            meta.icon_url.as_deref(),
+            Some("https://example.com/icon.png")
+        );
+        assert_eq!(
+            meta.fields.get("website").map(|s| s.as_str()),
+            Some("https://test.com")
+        );
     }
 
     #[test]
     fn token_metadata_canonical_id() {
         let meta = TokenMetadata::new(
-            "ERA", "ERA", "ERA", 18,
-            TokenType::Native, [0xAA; 32], 0, None,
+            "ERA",
+            "ERA",
+            "ERA",
+            18,
+            TokenType::Native,
+            [0xAA; 32],
+            0,
+            None,
         );
         let cid = meta.canonical_id();
         assert!(cid.ends_with(".ERA"));
@@ -1359,10 +1377,7 @@ mod tests {
     #[test]
     fn token_registry_register_duplicate_fails() {
         let mut reg = TokenRegistry::new();
-        let meta = TokenMetadata::new(
-            "ERA", "ERA", "ERA", 18,
-            TokenType::Native, [0; 32], 0, None,
-        );
+        let meta = TokenMetadata::new("ERA", "ERA", "ERA", 18, TokenType::Native, [0; 32], 0, None);
         let supply = TokenSupplyInfo::new(100);
         assert!(reg.register_token(meta, supply).is_err());
     }
@@ -1371,8 +1386,14 @@ mod tests {
     fn token_registry_register_new_token() {
         let mut reg = TokenRegistry::new();
         let meta = TokenMetadata::new(
-            "TEST", "Test", "TST", 8,
-            TokenType::Created, [0; 32], 1, None,
+            "TEST",
+            "Test",
+            "TST",
+            8,
+            TokenType::Created,
+            [0; 32],
+            1,
+            None,
         );
         let supply = TokenSupplyInfo::new(1000);
         reg.register_token(meta, supply).unwrap();

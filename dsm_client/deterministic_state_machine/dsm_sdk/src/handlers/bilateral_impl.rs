@@ -675,14 +675,13 @@ mod tests {
             "expected success, got: {:?}",
             result.error_message
         );
-        let resp = pb::BilateralPrepareResponse::decode(&*result.result_data)
-            .expect("decode response");
+        let resp =
+            pb::BilateralPrepareResponse::decode(&*result.result_data).expect("decode response");
         let commitment = resp.commitment_hash.expect("commitment present");
         assert_eq!(commitment.v.len(), 32);
         assert_eq!(resp.expires_iterations, 10);
 
-        let expected =
-            dsm::crypto::blake3::domain_hash("DSM/bilateral-op-commit", &op_data);
+        let expected = dsm::crypto::blake3::domain_hash("DSM/bilateral-op-commit", &op_data);
         assert_eq!(commitment.v, expected.as_bytes());
     }
 

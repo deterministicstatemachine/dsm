@@ -55,17 +55,15 @@ mod tests {
         let payload = vec![0xA2, 10, 20];
         push_event_bytes(payload.clone());
 
-        let find = |rx: &mut Receiver<Vec<u8>>| {
-            loop {
-                match rx.try_recv() {
-                    Ok(msg) if msg.first() == Some(&0xA2) => return msg,
-                    Ok(_) => continue,
-                    Err(broadcast::error::TryRecvError::Empty) => {
-                        std::thread::sleep(std::time::Duration::from_millis(1));
-                    }
-                    Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
-                    Err(e) => panic!("unexpected recv error: {e:?}"),
+        let find = |rx: &mut Receiver<Vec<u8>>| loop {
+            match rx.try_recv() {
+                Ok(msg) if msg.first() == Some(&0xA2) => return msg,
+                Ok(_) => continue,
+                Err(broadcast::error::TryRecvError::Empty) => {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
                 }
+                Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
+                Err(e) => panic!("unexpected recv error: {e:?}"),
             }
         };
         assert_eq!(find(&mut rx1), payload);

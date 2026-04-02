@@ -167,7 +167,11 @@ pub struct ContactRequest {
 mod tests {
     use super::*;
 
-    fn make_contact(verified: bool, chain_tip: Option<[u8; 32]>, proof: Option<ChainTipSmtProof>) -> DsmVerifiedContact {
+    fn make_contact(
+        verified: bool,
+        chain_tip: Option<[u8; 32]>,
+        proof: Option<ChainTipSmtProof>,
+    ) -> DsmVerifiedContact {
         DsmVerifiedContact {
             alias: "Alice".into(),
             device_id: [1u8; 32],

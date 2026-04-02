@@ -385,7 +385,8 @@ mod tests {
         let t = make_token("alice", b"tok_data_1");
         let id = t.id().to_string();
 
-        reg.register_token(t.clone(), Some("MyToken".into())).unwrap();
+        reg.register_token(t.clone(), Some("MyToken".into()))
+            .unwrap();
         assert_eq!(reg.token_count(), 1);
 
         let fetched = reg.get_token(&id).unwrap();
@@ -413,7 +414,8 @@ mod tests {
     fn get_token_by_name_found() {
         let reg = make_registry();
         let t = make_token("alice", b"named_tok");
-        reg.register_token(t.clone(), Some("Friendly".into())).unwrap();
+        reg.register_token(t.clone(), Some("Friendly".into()))
+            .unwrap();
 
         let found = reg.get_token_by_name("Friendly").unwrap();
         assert_eq!(found.id(), t.id());
@@ -470,7 +472,9 @@ mod tests {
         reg.register_token(t1, None).unwrap();
         reg.register_token(t2, None).unwrap();
 
-        let found = reg.find_tokens(None, Some(TokenStatus::Active), 100).unwrap();
+        let found = reg
+            .find_tokens(None, Some(TokenStatus::Active), 100)
+            .unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].owner_id(), "bob");
     }

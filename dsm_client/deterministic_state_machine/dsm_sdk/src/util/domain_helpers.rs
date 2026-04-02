@@ -71,7 +71,10 @@ mod tests {
     #[test]
     fn device_id_hash_empty_label() {
         let h = device_id_hash("");
-        assert_ne!(h, [0u8; 32], "even empty label should produce a non-zero hash");
+        assert_ne!(
+            h, [0u8; 32],
+            "even empty label should produce a non-zero hash"
+        );
     }
 
     #[test]

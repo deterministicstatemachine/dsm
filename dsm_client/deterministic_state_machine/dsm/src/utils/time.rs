@@ -174,7 +174,7 @@ mod tests {
     fn test_duration_clone_and_copy() {
         let a = Duration::from_ticks(99);
         let b = a;
-        let c = a.clone();
+        let c = a;
         assert_eq!(a, b);
         assert_eq!(a, c);
     }
@@ -191,9 +191,8 @@ mod tests {
 
     #[test]
     fn test_now_returns_value() {
-        let tick = now();
-        // Should be some non-negative value; we just confirm it doesn't panic.
-        assert!(tick <= u64::MAX);
+        // Smoke: must not panic (returned tick is always valid for u64).
+        let _ = now();
     }
 
     #[test]

@@ -425,7 +425,10 @@ mod tests {
     #[test]
     fn constants_match_spec() {
         assert_eq!(GRACE_CYCLES, 8, "new-node grace period must be 8 cycles");
-        assert_eq!(DISCOVERY_WINDOW, 4, "signal discovery window must be 4 cycles");
+        assert_eq!(
+            DISCOVERY_WINDOW, 4,
+            "signal discovery window must be 4 cycles"
+        );
     }
 
     #[test]
@@ -436,7 +439,10 @@ mod tests {
         assert_eq!(a1, a2, "same input must produce same address");
 
         let different = blake3_tagged("DSM/signal/up", b"different-body");
-        assert_ne!(a1, different, "different bodies must produce different addresses");
+        assert_ne!(
+            a1, different,
+            "different bodies must produce different addresses"
+        );
     }
 
     #[test]
@@ -547,6 +553,9 @@ mod tests {
         assert!(!addr_str.is_empty());
 
         let other = blake3_tagged("DSM/apply", body);
-        assert_ne!(addr, other, "different domain tags must produce different digests");
+        assert_ne!(
+            addr, other,
+            "different domain tags must produce different digests"
+        );
     }
 }

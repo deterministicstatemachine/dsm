@@ -372,7 +372,13 @@ mod tests {
     #[test]
     fn testnet_policy_metadata() {
         let policy = build_testnet_faucet_policy();
-        assert_eq!(policy.metadata.get("network").map(|s| s.as_str()), Some("testnet"));
-        assert_eq!(policy.metadata.get("mode").map(|s| s.as_str()), Some("faucet-claim"));
+        assert_eq!(
+            policy.metadata.get("network").map(|s| s.as_str()),
+            Some("testnet")
+        );
+        assert_eq!(
+            policy.metadata.get("mode").map(|s| s.as_str()),
+            Some("faucet-claim")
+        );
     }
 }
