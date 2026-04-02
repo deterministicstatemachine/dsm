@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
+name: Stale issues and PRs
+
+on:
+  schedule:
+    - cron: "30 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/stale@v9
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          stale-issue-message: "This issue has been marked stale due to inactivity."
+          stale-pr-message: "This pull request has been marked stale due to inactivity."
+          close-issue-message: "Closing due to inactivity. Reopen if still relevant."
+          close-pr-message: "Closing due to inactivity."
+          days-before-stale: 60
+          days-before-close: 14
+          exempt-issue-labels: "security,critical,priority:high"
+          exempt-pr-labels: "security,critical,priority:high"
