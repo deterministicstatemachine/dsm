@@ -543,3 +543,421 @@ pub fn encode_protocol_transition_payload(label: &[u8], parts: &[&[u8]]) -> Vec<
 pub fn compute_protocol_transition_commitment(payload_bytes: &[u8]) -> [u8; 32] {
     dsm::crypto::blake3::domain_hash_bytes("DSM/protocol-transition", payload_bytes)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dsm::merkle::sparse_merkle_tree::SmtInclusionProof;
+
+    // ── derive_relationship_key ──
+
+    #[test]
+    fn derive_relationship_key_deterministic() {
+        let pk = [0xABu8; 32];
+        let a = derive_relationship_key(&pk);
+        let b = derive_relationship_key(&pk);
+        assert_eq!(a, b, "same input must yield identical key");
+    }
+
+    #[test]
+    fn derive_relationship_key_varies_with_input() {
+        let k1 = derive_relationship_key(&[1u8; 32]);
+        let k2 = derive_relationship_key(&[2u8; 32]);
+        assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn derive_relationship_key_nonzero() {
+        let k = derive_relationship_key(b"any-counterparty-pk");
+        assert_ne!(k, [0u8; 32]);
+    }
+
+    // ── serialize / deserialize inclusion proof round-trip ──
+
+    fn sample_proof(with_value: bool, siblings: usize) -> SmtInclusionProof {
+        SmtInclusionProof {
+            key: [0x11u8; 32],
+            value: if with_value { Some([0x22u8; 32]) } else { None },
+            siblings: (0..siblings).map(|i| [(i as u8).wrapping_add(0x30); 32]).collect(),
+        }
+    }
+
+    #[test]
+    fn roundtrip_proof_with_value_no_siblings() {
+        let proof = sample_proof(true, 0);
+        let bytes = serialize_inclusion_proof(&proof);
+        let decoded = deserialize_inclusion_proof(&bytes).unwrap();
+        assert_eq!(decoded.key, proof.key);
+        assert_eq!(decoded.value, proof.value);
+        assert!(decoded.siblings.is_empty());
+    }
+
+    #[test]
+    fn roundtrip_proof_without_value_no_siblings() {
+        let proof = sample_proof(false, 0);
+        let bytes = serialize_inclusion_proof(&proof);
+        let decoded = deserialize_inclusion_proof(&bytes).unwrap();
+        assert_eq!(decoded.key, proof.key);
+        assert_eq!(decoded.value, None);
+        assert!(decoded.siblings.is_empty());
+    }
+
+    #[test]
+    fn roundtrip_proof_with_value_and_siblings() {
+        let proof = sample_proof(true, 4);
+        let bytes = serialize_inclusion_proof(&proof);
+        let decoded = deserialize_inclusion_proof(&bytes).unwrap();
+        assert_eq!(decoded.key, proof.key);
+        assert_eq!(decoded.value, proof.value);
+        assert_eq!(decoded.siblings.len(), 4);
+        assert_eq!(decoded.siblings, proof.siblings);
+    }
+
+    #[test]
+    fn roundtrip_proof_without_value_with_siblings() {
+        let proof = sample_proof(false, 3);
+        let bytes = serialize_inclusion_proof(&proof);
+        let decoded = deserialize_inclusion_proof(&bytes).unwrap();
+        assert_eq!(decoded.value, None);
+        assert_eq!(decoded.siblings.len(), 3);
+    }
+
+    #[test]
+    fn serialize_proof_expected_length_with_value() {
+        let proof = sample_proof(true, 2);
+        let bytes = serialize_inclusion_proof(&proof);
+        // 32 (key) + 1 (has_value) + 32 (value) + 4 (count) + 2*32 (siblings)
+        assert_eq!(bytes.len(), 32 + 1 + 32 + 4 + 64);
+    }
+
+    #[test]
+    fn serialize_proof_expected_length_without_value() {
+        let proof = sample_proof(false, 2);
+        let bytes = serialize_inclusion_proof(&proof);
+        // 32 (key) + 1 (has_value) + 4 (count) + 2*32 (siblings)
+        assert_eq!(bytes.len(), 32 + 1 + 4 + 64);
+    }
+
+    // ── deserialize error cases ──
+
+    #[test]
+    fn deserialize_too_short() {
+        let short = vec![0u8; 10];
+        assert!(deserialize_inclusion_proof(&short).is_err());
+    }
+
+    #[test]
+    fn deserialize_truncated_at_value() {
+        // 32 key + has_value=1, but no value bytes
+        let mut data = vec![0u8; 33];
+        data[32] = 1; // has_value = true
+        assert!(deserialize_inclusion_proof(&data).is_err());
+    }
+
+    #[test]
+    fn deserialize_truncated_at_sibling_count() {
+        // 32 key + has_value=0, missing sibling count bytes
+        let data = vec![0u8; 33]; // has_value=0, no count
+        assert!(deserialize_inclusion_proof(&data).is_err());
+    }
+
+    #[test]
+    fn deserialize_truncated_siblings() {
+        // valid header + count=2, but only 1 sibling worth of bytes
+        let proof = sample_proof(false, 2);
+        let bytes = serialize_inclusion_proof(&proof);
+        let truncated = &bytes[..bytes.len() - 16]; // remove half of second sibling
+        assert!(deserialize_inclusion_proof(truncated).is_err());
+    }
+
+    #[test]
+    fn deserialize_empty_is_err() {
+        assert!(deserialize_inclusion_proof(&[]).is_err());
+    }
+
+    // ── derive_stitched_receipt_sigma ──
+
+    #[test]
+    fn sigma_deterministic() {
+        let parts: Vec<&[u8]> = vec![b"hello", b"world"];
+        let a = derive_stitched_receipt_sigma(&parts);
+        let b = derive_stitched_receipt_sigma(&parts);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn sigma_varies_with_different_parts() {
+        let s1 = derive_stitched_receipt_sigma(&[b"a", b"b"]);
+        let s2 = derive_stitched_receipt_sigma(&[b"a", b"c"]);
+        assert_ne!(s1, s2);
+    }
+
+    #[test]
+    fn sigma_order_matters() {
+        let s1 = derive_stitched_receipt_sigma(&[b"first", b"second"]);
+        let s2 = derive_stitched_receipt_sigma(&[b"second", b"first"]);
+        assert_ne!(s1, s2);
+    }
+
+    #[test]
+    fn sigma_empty_parts() {
+        let s = derive_stitched_receipt_sigma(&[]);
+        assert_ne!(s, [0u8; 32]);
+    }
+
+    #[test]
+    fn sigma_nonzero() {
+        let s = derive_stitched_receipt_sigma(&[b"test"]);
+        assert_ne!(s, [0u8; 32]);
+    }
+
+    #[test]
+    fn sigma_length_prefixing_prevents_ambiguity() {
+        // "ab" + "cd" vs "abc" + "d" should differ due to length prefixes
+        let s1 = derive_stitched_receipt_sigma(&[b"ab", b"cd"]);
+        let s2 = derive_stitched_receipt_sigma(&[b"abc", b"d"]);
+        assert_ne!(s1, s2);
+    }
+
+    // ── encode_protocol_transition_payload ──
+
+    #[test]
+    fn encode_protocol_transition_basic() {
+        let encoded = encode_protocol_transition_payload(b"FAUCET", &[b"part1", b"part2"]);
+        // label len (4) + label (6) + part1 len (4) + part1 (5) + part2 len (4) + part2 (5) = 28
+        assert_eq!(encoded.len(), 4 + 6 + 4 + 5 + 4 + 5);
+    }
+
+    #[test]
+    fn encode_protocol_transition_deterministic() {
+        let a = encode_protocol_transition_payload(b"LABEL", &[b"data"]);
+        let b = encode_protocol_transition_payload(b"LABEL", &[b"data"]);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn encode_protocol_transition_empty_parts() {
+        let encoded = encode_protocol_transition_payload(b"LABEL", &[]);
+        // just label length-prefix + label = 4 + 5
+        assert_eq!(encoded.len(), 4 + 5);
+    }
+
+    #[test]
+    fn encode_protocol_transition_empty_label() {
+        let encoded = encode_protocol_transition_payload(b"", &[b"data"]);
+        // label_len(4) + label(0) + data_len(4) + data(4) = 12
+        assert_eq!(encoded.len(), 4 + 0 + 4 + 4);
+    }
+
+    #[test]
+    fn encode_protocol_transition_label_at_offset_zero() {
+        let encoded = encode_protocol_transition_payload(b"LBL", &[b"X"]);
+        // First 4 bytes = label length (3)
+        let label_len = u32::from_le_bytes(encoded[0..4].try_into().unwrap());
+        assert_eq!(label_len, 3);
+        assert_eq!(&encoded[4..7], b"LBL");
+    }
+
+    #[test]
+    fn encode_protocol_transition_parts_are_length_prefixed() {
+        let encoded = encode_protocol_transition_payload(b"L", &[b"AB", b"CDE"]);
+        // After label: offset = 4+1=5
+        // Part0: len(4)=2, data(2)="AB" → offset 5..11
+        let p0_len = u32::from_le_bytes(encoded[5..9].try_into().unwrap());
+        assert_eq!(p0_len, 2);
+        assert_eq!(&encoded[9..11], b"AB");
+        // Part1: len(4)=3, data(3)="CDE" → offset 11..18
+        let p1_len = u32::from_le_bytes(encoded[11..15].try_into().unwrap());
+        assert_eq!(p1_len, 3);
+        assert_eq!(&encoded[15..18], b"CDE");
+    }
+
+    // ── compute_protocol_transition_commitment ──
+
+    #[test]
+    fn protocol_commitment_deterministic() {
+        let a = compute_protocol_transition_commitment(b"payload");
+        let b = compute_protocol_transition_commitment(b"payload");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn protocol_commitment_varies() {
+        let a = compute_protocol_transition_commitment(b"payload_a");
+        let b = compute_protocol_transition_commitment(b"payload_b");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn protocol_commitment_nonzero() {
+        let c = compute_protocol_transition_commitment(b"data");
+        assert_ne!(c, [0u8; 32]);
+    }
+
+    #[test]
+    fn protocol_commitment_empty_input() {
+        let c = compute_protocol_transition_commitment(b"");
+        assert_ne!(c, [0u8; 32]);
+    }
+
+    // ── serialize/deserialize: additional edge cases ──
+
+    #[test]
+    fn roundtrip_proof_many_siblings() {
+        let proof = SmtInclusionProof {
+            key: [0xFF; 32],
+            value: Some([0xEE; 32]),
+            siblings: (0..256).map(|i| [(i as u8); 32]).collect(),
+        };
+        let bytes = serialize_inclusion_proof(&proof);
+        let decoded = deserialize_inclusion_proof(&bytes).unwrap();
+        assert_eq!(decoded.siblings.len(), 256);
+        assert_eq!(decoded.key, [0xFF; 32]);
+        assert_eq!(decoded.value, Some([0xEE; 32]));
+        for (i, sib) in decoded.siblings.iter().enumerate() {
+            assert_eq!(*sib, [(i as u8); 32]);
+        }
+    }
+
+    #[test]
+    fn serialize_proof_key_is_first_32_bytes() {
+        let proof = SmtInclusionProof {
+            key: [0xAB; 32],
+            value: None,
+            siblings: vec![],
+        };
+        let bytes = serialize_inclusion_proof(&proof);
+        assert_eq!(&bytes[..32], &[0xAB; 32]);
+    }
+
+    #[test]
+    fn serialize_has_value_byte_zero_when_none() {
+        let proof = SmtInclusionProof {
+            key: [0; 32],
+            value: None,
+            siblings: vec![],
+        };
+        let bytes = serialize_inclusion_proof(&proof);
+        assert_eq!(bytes[32], 0);
+    }
+
+    #[test]
+    fn serialize_has_value_byte_one_when_some() {
+        let proof = SmtInclusionProof {
+            key: [0; 32],
+            value: Some([0; 32]),
+            siblings: vec![],
+        };
+        let bytes = serialize_inclusion_proof(&proof);
+        assert_eq!(bytes[32], 1);
+    }
+
+    #[test]
+    fn deserialize_exact_minimum_no_value() {
+        // 32 key + 1 has_value(0) + 4 count(0) = 37 bytes
+        let mut data = vec![0u8; 37];
+        data[32] = 0; // has_value = false
+        // count bytes already zero (0 siblings)
+        let proof = deserialize_inclusion_proof(&data).unwrap();
+        assert_eq!(proof.key, [0u8; 32]);
+        assert_eq!(proof.value, None);
+        assert!(proof.siblings.is_empty());
+    }
+
+    #[test]
+    fn deserialize_exact_minimum_with_value() {
+        // 32 key + 1 has_value(1) + 32 value + 4 count(0) = 69 bytes
+        let mut data = vec![0u8; 69];
+        data[32] = 1; // has_value = true
+        data[33..65].copy_from_slice(&[0xCC; 32]); // value
+        // count bytes at 65..69 already zero
+        let proof = deserialize_inclusion_proof(&data).unwrap();
+        assert_eq!(proof.value, Some([0xCC; 32]));
+        assert!(proof.siblings.is_empty());
+    }
+
+    #[test]
+    fn deserialize_sibling_count_as_le_u32() {
+        let proof = sample_proof(false, 1);
+        let bytes = serialize_inclusion_proof(&proof);
+        // After key(32) + has_value(1) byte, count is at offset 33..37
+        let count = u32::from_le_bytes(bytes[33..37].try_into().unwrap());
+        assert_eq!(count, 1);
+    }
+
+    // ── sigma: additional edge cases ──
+
+    #[test]
+    fn sigma_single_empty_part_differs_from_no_parts() {
+        let s_empty = derive_stitched_receipt_sigma(&[]);
+        let s_one_empty = derive_stitched_receipt_sigma(&[b""]);
+        assert_ne!(s_empty, s_one_empty);
+    }
+
+    #[test]
+    fn sigma_large_input() {
+        let big = vec![0x42u8; 10_000];
+        let s = derive_stitched_receipt_sigma(&[&big]);
+        assert_ne!(s, [0u8; 32]);
+    }
+
+    // ── encode_protocol_transition_payload: additional ──
+
+    #[test]
+    fn encode_protocol_transition_order_matters() {
+        let a = encode_protocol_transition_payload(b"L", &[b"X", b"Y"]);
+        let b = encode_protocol_transition_payload(b"L", &[b"Y", b"X"]);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn encode_protocol_transition_different_labels_differ() {
+        let a = encode_protocol_transition_payload(b"FAUCET", &[b"data"]);
+        let b = encode_protocol_transition_payload(b"DLV", &[b"data"]);
+        assert_ne!(a, b);
+    }
+
+    // ── derive_relationship_key: additional ──
+
+    #[test]
+    fn derive_relationship_key_empty_input() {
+        let k = derive_relationship_key(&[]);
+        assert_ne!(k, [0u8; 32]);
+    }
+
+    #[test]
+    fn derive_relationship_key_large_input() {
+        let big = vec![0xCC; 1024];
+        let k = derive_relationship_key(&big);
+        assert_ne!(k, [0u8; 32]);
+    }
+
+    // ── compute_protocol_transition_commitment ──
+
+    #[test]
+    fn protocol_commitment_uses_different_domain_from_sigma() {
+        let data = b"same-payload";
+        let sigma = derive_stitched_receipt_sigma(&[data.as_slice()]);
+        let proto = compute_protocol_transition_commitment(data);
+        assert_ne!(sigma, proto);
+    }
+
+    // ── encode + commit roundtrip ──
+
+    #[test]
+    fn encode_then_commit_deterministic() {
+        let payload = encode_protocol_transition_payload(b"TEST", &[b"a", b"b"]);
+        let c1 = compute_protocol_transition_commitment(&payload);
+        let c2 = compute_protocol_transition_commitment(&payload);
+        assert_eq!(c1, c2);
+    }
+
+    #[test]
+    fn encode_different_payloads_produce_different_commitments() {
+        let p1 = encode_protocol_transition_payload(b"A", &[b"x"]);
+        let p2 = encode_protocol_transition_payload(b"B", &[b"x"]);
+        let c1 = compute_protocol_transition_commitment(&p1);
+        let c2 = compute_protocol_transition_commitment(&p2);
+        assert_ne!(c1, c2);
+    }
+}

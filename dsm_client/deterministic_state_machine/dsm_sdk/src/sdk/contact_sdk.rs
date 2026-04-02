@@ -1114,3 +1114,236 @@ impl ContactManager {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prost::Message;
+
+    fn test_manager() -> ContactManager {
+        let device_id = [0xAA; 32];
+        let genesis_hash = [0xBB; 32];
+        ContactManager {
+            dsm_manager: Arc::new(RwLock::new(DsmContactManager::new(
+                device_id,
+                vec![],
+            ))),
+            groups: HashMap::new(),
+            device_id,
+            genesis_hash,
+        }
+    }
+
+    // ── compute_initial_chain_tip ────────────────────────────────────
+
+    #[test]
+    fn chain_tip_is_deterministic() {
+        let cm = test_manager();
+        let contact_id = [0xCC; 32];
+        let contact_genesis = [0xDD; 32];
+
+        let tip1 = cm.compute_initial_chain_tip(contact_id, contact_genesis);
+        let tip2 = cm.compute_initial_chain_tip(contact_id, contact_genesis);
+        assert_eq!(tip1, tip2, "same inputs must produce same tip");
+    }
+
+    #[test]
+    fn chain_tip_is_order_independent() {
+        // Device A -> B should produce the same tip as Device B -> A
+        let device_a = [0x01; 32];
+        let genesis_a = [0x11; 32];
+        let device_b = [0x02; 32];
+        let genesis_b = [0x22; 32];
+
+        let cm_a = ContactManager {
+            dsm_manager: Arc::new(RwLock::new(DsmContactManager::new(device_a, vec![]))),
+            groups: HashMap::new(),
+            device_id: device_a,
+            genesis_hash: genesis_a,
+        };
+
+        let cm_b = ContactManager {
+            dsm_manager: Arc::new(RwLock::new(DsmContactManager::new(device_b, vec![]))),
+            groups: HashMap::new(),
+            device_id: device_b,
+            genesis_hash: genesis_b,
+        };
+
+        let tip_a_to_b = cm_a.compute_initial_chain_tip(device_b, genesis_b);
+        let tip_b_to_a = cm_b.compute_initial_chain_tip(device_a, genesis_a);
+        assert_eq!(
+            tip_a_to_b, tip_b_to_a,
+            "chain tip must be symmetric regardless of initiator"
+        );
+    }
+
+    #[test]
+    fn chain_tip_differs_for_different_contacts() {
+        let cm = test_manager();
+        let tip1 = cm.compute_initial_chain_tip([0x01; 32], [0x11; 32]);
+        let tip2 = cm.compute_initial_chain_tip([0x02; 32], [0x22; 32]);
+        assert_ne!(tip1, tip2, "different contacts should have different tips");
+    }
+
+    #[test]
+    fn chain_tip_is_32_bytes() {
+        let cm = test_manager();
+        let tip = cm.compute_initial_chain_tip([0x99; 32], [0x88; 32]);
+        assert_eq!(tip.len(), 32);
+        assert_ne!(tip, [0u8; 32], "tip should not be all zeros");
+    }
+
+    // ── Group management ─────────────────────────────────────────────
+
+    #[test]
+    fn add_to_group_and_get_group() {
+        let mut cm = test_manager();
+        let id1 = [0x01; 32];
+        let id2 = [0x02; 32];
+
+        cm.add_to_group(id1, "family");
+        cm.add_to_group(id2, "family");
+        cm.add_to_group(id1, "work");
+
+        let family = cm.get_group("family").expect("family group exists");
+        assert_eq!(family.len(), 2);
+        assert_eq!(family[0], id1);
+        assert_eq!(family[1], id2);
+
+        let work = cm.get_group("work").expect("work group exists");
+        assert_eq!(work.len(), 1);
+
+        assert!(cm.get_group("unknown").is_none());
+    }
+
+    // ── QR payload parsing ───────────────────────────────────────────
+
+    #[test]
+    fn parse_contact_qr_v3_payload_roundtrip() {
+        let qr = pb::ContactQrV3 {
+            device_id: vec![0xAA; 32],
+            network: "test".into(),
+            storage_nodes: vec!["http://a:8080".into(), "http://b:8081".into()],
+            sdk_fingerprint: vec![0xBB; 32],
+            genesis_hash: vec![0xCC; 32],
+            signing_public_key: vec![0xDD; 64],
+            preferred_alias: "Alice".into(),
+        };
+        let bytes = qr.encode_to_vec();
+        let parsed =
+            ContactManager::parse_contact_qr_v3_payload(&bytes).expect("parse QR payload");
+        assert_eq!(parsed.device_id, vec![0xAA; 32]);
+        assert_eq!(parsed.network, "test");
+        assert_eq!(parsed.storage_nodes.len(), 2);
+        assert_eq!(parsed.preferred_alias, "Alice");
+    }
+
+    #[test]
+    fn parse_contact_qr_v3_invalid_bytes() {
+        let result = ContactManager::parse_contact_qr_v3_payload(&[0xFF, 0xFF, 0xFF]);
+        // prost will succeed with default fields for random bytes in many cases,
+        // but truly invalid protobuf should either succeed with defaults or error.
+        // The important thing is it doesn't panic.
+        let _ = result;
+    }
+
+    // ── Operation builders (fail-closed) ─────────────────────────────
+
+    #[test]
+    fn create_add_contact_operation_with_labels_builds_bilateral() {
+        let cm = test_manager();
+        let op = cm
+            .create_add_contact_operation_with_labels(
+                "alice", "bob", "friend", vec![1, 2, 3], true,
+            )
+            .expect("build operation");
+
+        match op {
+            Operation::AddRelationship {
+                relationship_type,
+                mode,
+                message,
+                ..
+            } => {
+                assert_eq!(relationship_type, b"friend");
+                assert_eq!(mode, TransactionMode::Bilateral);
+                assert_eq!(message, "Add contact relationship");
+            }
+            _ => panic!("expected AddRelationship"),
+        }
+    }
+
+    #[test]
+    fn create_add_contact_operation_with_labels_builds_unilateral() {
+        let cm = test_manager();
+        let op = cm
+            .create_add_contact_operation_with_labels(
+                "alice", "bob", "colleague", vec![], false,
+            )
+            .expect("build operation");
+
+        match op {
+            Operation::AddRelationship { mode, .. } => {
+                assert_eq!(mode, TransactionMode::Unilateral);
+            }
+            _ => panic!("expected AddRelationship"),
+        }
+    }
+
+    #[test]
+    fn create_add_contact_operation_bytes_only_fails_closed() {
+        let cm = test_manager();
+        let result = cm.create_add_contact_operation([0x01; 32], "friend", vec![], false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn create_add_contact_operation_with_device_fails_closed() {
+        let cm = test_manager();
+        let result = cm.create_add_contact_operation_with_device(
+            [0x01; 32],
+            [0x02; 32],
+            "friend",
+            vec![],
+            true,
+        );
+        assert!(result.is_err());
+    }
+
+    // ── update_contact_from_transition ────────────────────────────────
+
+    fn stub_transition(op: Operation) -> StateTransition {
+        StateTransition::new(op, None, None, &[0u8; 32])
+    }
+
+    #[test]
+    fn update_contact_from_transition_accepts_add_relationship() {
+        let mut cm = test_manager();
+        let transition = stub_transition(Operation::AddRelationship {
+            from_id: [0x01; 32],
+            to_id: [0x02; 32],
+            relationship_type: b"friend".to_vec(),
+            metadata: vec![],
+            proof: vec![],
+            mode: TransactionMode::Unilateral,
+            message: "test".into(),
+        });
+        let state = State::default();
+        assert!(cm.update_contact_from_transition(&transition, &state).is_ok());
+    }
+
+    #[test]
+    fn update_contact_from_transition_rejects_unsupported_ops() {
+        let mut cm = test_manager();
+        let transition = stub_transition(Operation::Generic {
+            operation_type: b"test".to_vec(),
+            data: vec![],
+            message: "test".into(),
+            signature: vec![],
+        });
+        let state = State::default();
+        assert!(cm
+            .update_contact_from_transition(&transition, &state)
+            .is_err());
+    }
+}

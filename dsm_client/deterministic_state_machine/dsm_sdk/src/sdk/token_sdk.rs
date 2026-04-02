@@ -2797,4 +2797,161 @@ mod tests {
         assert_eq!(cached.get("ERA"), Some(&carried_forward));
         assert!(!cached.contains_key("dBTC"));
     }
+
+    #[test]
+    fn classify_token_dbtc() {
+        assert_eq!(classify_token("dBTC"), TokenLane::Dbtc);
+    }
+
+    #[test]
+    fn classify_token_era_is_canonical() {
+        assert_eq!(classify_token("ERA"), TokenLane::Canonical);
+    }
+
+    #[test]
+    fn classify_token_arbitrary_is_canonical() {
+        assert_eq!(classify_token("MyToken"), TokenLane::Canonical);
+        assert_eq!(classify_token(""), TokenLane::Canonical);
+    }
+
+    #[test]
+    fn canonical_token_id_from_balance_key_era() {
+        assert_eq!(canonical_token_id_from_balance_key("ERA"), Some("ERA"));
+    }
+
+    #[test]
+    fn canonical_token_id_from_balance_key_pipe_format() {
+        assert_eq!(
+            canonical_token_id_from_balance_key("prefix|MyToken"),
+            Some("MyToken")
+        );
+    }
+
+    #[test]
+    fn canonical_token_id_from_balance_key_empty_after_pipe() {
+        assert_eq!(canonical_token_id_from_balance_key("prefix|"), None);
+    }
+
+    #[test]
+    fn canonical_token_id_from_balance_key_no_pipe() {
+        assert_eq!(canonical_token_id_from_balance_key("random"), None);
+    }
+
+    #[test]
+    fn encode_embedded_proof_roundtrip() {
+        let pk = vec![1u8; 33];
+        let sig = vec![2u8; 64];
+        let proof = encode_embedded_proof(&pk, &sig).unwrap();
+
+        let pk_len = u16::from_le_bytes([proof[0], proof[1]]) as usize;
+        assert_eq!(pk_len, 33);
+        assert_eq!(&proof[2..2 + pk_len], &pk[..]);
+        let sig_offset = 2 + pk_len;
+        let sig_len = u16::from_le_bytes([proof[sig_offset], proof[sig_offset + 1]]) as usize;
+        assert_eq!(sig_len, 64);
+        assert_eq!(&proof[sig_offset + 2..], &sig[..]);
+    }
+
+    #[test]
+    fn encode_embedded_proof_rejects_oversized_key() {
+        let pk = vec![0u8; u16::MAX as usize + 1];
+        let sig = vec![0u8; 1];
+        assert!(encode_embedded_proof(&pk, &sig).is_err());
+    }
+
+    #[test]
+    fn token_type_roundtrip() {
+        let types = [
+            TokenType::Native,
+            TokenType::Created,
+            TokenType::Restricted,
+            TokenType::Wrapped,
+        ];
+        for tt in &types {
+            let serialized = token_type_to_string(tt);
+            let deserialized = token_type_from_string(&serialized);
+            assert_eq!(&deserialized, tt);
+        }
+    }
+
+    #[test]
+    fn token_type_from_string_unknown_defaults_to_created() {
+        assert_eq!(token_type_from_string("UNKNOWN"), TokenType::Created);
+        assert_eq!(token_type_from_string(""), TokenType::Created);
+    }
+
+    #[test]
+    fn token_type_from_string_case_insensitive() {
+        assert_eq!(token_type_from_string("native"), TokenType::Native);
+        assert_eq!(token_type_from_string("Wrapped"), TokenType::Wrapped);
+    }
+
+    #[test]
+    fn map_to_metadata_fields_deterministic_order() {
+        let mut metadata = HashMap::new();
+        metadata.insert("z_key".into(), "z_val".into());
+        metadata.insert("a_key".into(), "a_val".into());
+        metadata.insert("m_key".into(), "m_val".into());
+
+        let fields = map_to_metadata_fields(&metadata);
+        assert_eq!(fields.len(), 3);
+        assert_eq!(fields[0].key, "a_key");
+        assert_eq!(fields[1].key, "m_key");
+        assert_eq!(fields[2].key, "z_key");
+    }
+
+    #[test]
+    fn metadata_fields_roundtrip() {
+        let mut metadata = HashMap::new();
+        metadata.insert("version".into(), "1.0".into());
+        metadata.insert("author".into(), "test".into());
+
+        let fields = map_to_metadata_fields(&metadata);
+        let back = metadata_fields_to_map(&fields);
+        assert_eq!(metadata, back);
+    }
+
+    #[test]
+    fn era_token_new_has_expected_fields() {
+        let era = EraToken::new(1_000_000);
+        assert_eq!(era.token_id, "ERA");
+        assert_eq!(era.metadata.symbol, "ERA");
+        assert_eq!(era.metadata.decimals, 18);
+        assert_eq!(era.metadata.token_type, TokenType::Native);
+        assert_eq!(era.total_supply.value(), 1_000_000);
+        assert!(era.fee_schedule.contains_key("token_creation"));
+        assert!(era.fee_schedule.contains_key("smart_commitment"));
+    }
+
+    #[test]
+    fn locked_balance_entry_protobuf_roundtrip() {
+        let entry = LockedBalanceEntry {
+            key: "dev1:ERA:lock".into(),
+            amount: 42,
+        };
+        let bytes = entry.encode_to_vec();
+        let decoded = LockedBalanceEntry::decode(bytes.as_slice()).unwrap();
+        assert_eq!(decoded.key, "dev1:ERA:lock");
+        assert_eq!(decoded.amount, 42);
+    }
+
+    #[test]
+    fn transfer_record_protobuf_roundtrip() {
+        let rec = TransferRecord {
+            token_id: "ERA".into(),
+            from_device_id: "alice".into(),
+            to_device_id: "bob".into(),
+            amount: 100,
+            memo: Some("test transfer".into()),
+            state_number: 5,
+            tick: 99,
+        };
+        let bytes = rec.encode_to_vec();
+        let decoded = TransferRecord::decode(bytes.as_slice()).unwrap();
+        assert_eq!(decoded.token_id, "ERA");
+        assert_eq!(decoded.amount, 100);
+        assert_eq!(decoded.memo.as_deref(), Some("test transfer"));
+        assert_eq!(decoded.state_number, 5);
+        assert_eq!(decoded.tick, 99);
+    }
 }

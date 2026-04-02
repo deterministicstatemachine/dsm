@@ -418,3 +418,277 @@ impl DlvReceiptSdk {
         Ok(Some(body.to_vec()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- CircuitBreaker ----
+
+    #[test]
+    fn circuit_breaker_new_defaults() {
+        let cb = CircuitBreaker::new();
+        assert_eq!(cb.failure_threshold, Duration::from_ticks(300));
+    }
+
+    #[tokio::test]
+    async fn circuit_breaker_all_healthy_initially() {
+        let cb = CircuitBreaker::new();
+        assert!(cb.is_node_healthy("http://node1:8080").await);
+        assert!(cb.is_node_healthy("http://node2:8080").await);
+    }
+
+    #[tokio::test]
+    async fn circuit_breaker_mark_failed_then_unhealthy() {
+        let cb = CircuitBreaker::new();
+        cb.mark_node_failed("http://node1:8080").await;
+        // Node should be unhealthy immediately after marking failed
+        assert!(!cb.is_node_healthy("http://node1:8080").await);
+        // Other nodes unaffected
+        assert!(cb.is_node_healthy("http://node2:8080").await);
+    }
+
+    #[tokio::test]
+    async fn circuit_breaker_mark_healthy_after_failed() {
+        let cb = CircuitBreaker::new();
+        cb.mark_node_failed("http://node1:8080").await;
+        assert!(!cb.is_node_healthy("http://node1:8080").await);
+
+        cb.mark_node_healthy("http://node1:8080").await;
+        assert!(cb.is_node_healthy("http://node1:8080").await);
+    }
+
+    #[tokio::test]
+    async fn circuit_breaker_mark_healthy_noop_when_not_failed() {
+        let cb = CircuitBreaker::new();
+        cb.mark_node_healthy("http://never-failed:8080").await;
+        assert!(cb.is_node_healthy("http://never-failed:8080").await);
+    }
+
+    #[tokio::test]
+    async fn circuit_breaker_healthy_endpoints_filters() {
+        let cb = CircuitBreaker::new();
+        let all = vec![
+            "http://a:8080".to_string(),
+            "http://b:8080".to_string(),
+            "http://c:8080".to_string(),
+        ];
+        cb.mark_node_failed("http://b:8080").await;
+
+        let healthy = cb.healthy_endpoints(&all).await;
+        assert!(healthy.contains(&"http://a:8080".to_string()));
+        assert!(!healthy.contains(&"http://b:8080".to_string()));
+        assert!(healthy.contains(&"http://c:8080".to_string()));
+    }
+
+    #[tokio::test]
+    async fn circuit_breaker_healthy_endpoints_all_failed() {
+        let cb = CircuitBreaker::new();
+        let all = vec!["http://x:8080".to_string(), "http://y:8080".to_string()];
+        cb.mark_node_failed("http://x:8080").await;
+        cb.mark_node_failed("http://y:8080").await;
+
+        let healthy = cb.healthy_endpoints(&all).await;
+        assert!(healthy.is_empty());
+    }
+
+    #[tokio::test]
+    async fn circuit_breaker_healthy_endpoints_empty_input() {
+        let cb = CircuitBreaker::new();
+        let healthy = cb.healthy_endpoints(&[]).await;
+        assert!(healthy.is_empty());
+    }
+
+    #[tokio::test]
+    async fn circuit_breaker_multiple_failures_same_node() {
+        let cb = CircuitBreaker::new();
+        cb.mark_node_failed("http://node:8080").await;
+        cb.mark_node_failed("http://node:8080").await;
+        assert!(!cb.is_node_healthy("http://node:8080").await);
+        cb.mark_node_healthy("http://node:8080").await;
+        assert!(cb.is_node_healthy("http://node:8080").await);
+    }
+
+    // ---- DlvReceiptSdk::new validation ----
+
+    #[test]
+    fn new_invalid_base32_device_id() {
+        let core = Arc::new(crate::sdk::core_sdk::CoreSDK::new().unwrap());
+        let result = DlvReceiptSdk::new(
+            "not-valid-base32!!!".to_string(),
+            core,
+            vec!["http://localhost:8080".to_string()],
+        );
+        match result {
+            Err(e) => assert!(format!("{e:?}").contains("base32")),
+            Ok(_) => panic!("Expected error for invalid base32"),
+        }
+    }
+
+    #[test]
+    fn new_wrong_length_device_id() {
+        let core = Arc::new(crate::sdk::core_sdk::CoreSDK::new().unwrap());
+        let short_bytes = [0u8; 16];
+        let encoded = text_id::encode_base32_crockford(&short_bytes);
+        let result = DlvReceiptSdk::new(
+            encoded,
+            core,
+            vec!["http://localhost:8080".to_string()],
+        );
+        match result {
+            Err(e) => assert!(format!("{e:?}").contains("32")),
+            Ok(_) => panic!("Expected error for wrong length"),
+        }
+    }
+
+    #[test]
+    fn new_valid_device_id_succeeds() {
+        let core = Arc::new(crate::sdk::core_sdk::CoreSDK::new().unwrap());
+        let device_bytes = [0xABu8; 32];
+        let encoded = text_id::encode_base32_crockford(&device_bytes);
+        let result = DlvReceiptSdk::new(
+            encoded.clone(),
+            core,
+            vec!["http://node1:8080".to_string()],
+        );
+        match result {
+            Ok(sdk) => {
+                assert_eq!(sdk.device_id, encoded);
+                assert_eq!(sdk.storage_node_endpoints.len(), 1);
+            }
+            Err(e) => panic!("Unexpected error: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn new_empty_endpoints_ok() {
+        let core = Arc::new(crate::sdk::core_sdk::CoreSDK::new().unwrap());
+        let device_bytes = [1u8; 32];
+        let encoded = text_id::encode_base32_crockford(&device_bytes);
+        let result = DlvReceiptSdk::new(encoded, core, Vec::new());
+        match result {
+            Ok(sdk) => assert!(sdk.storage_node_endpoints.is_empty()),
+            Err(e) => panic!("Unexpected error: {e:?}"),
+        }
+    }
+
+    // ---- CircuitBreaker clone ----
+
+    #[tokio::test]
+    async fn circuit_breaker_clone_shares_state() {
+        let cb = CircuitBreaker::new();
+        let cb2 = cb.clone();
+        cb.mark_node_failed("http://shared:8080").await;
+        // Clone shares the same Arc, so both see the failure
+        assert!(!cb2.is_node_healthy("http://shared:8080").await);
+    }
+
+    // ---- CircuitBreaker failure_threshold ----
+
+    #[test]
+    fn circuit_breaker_failure_threshold_value() {
+        let cb = CircuitBreaker::new();
+        assert_eq!(cb.failure_threshold.as_secs(), 300);
+    }
+
+    // ---- healthy_endpoints preserves order of healthy nodes ----
+
+    #[tokio::test]
+    async fn circuit_breaker_healthy_endpoints_preserves_order() {
+        let cb = CircuitBreaker::new();
+        let all = vec![
+            "http://first:8080".to_string(),
+            "http://second:8080".to_string(),
+            "http://third:8080".to_string(),
+        ];
+        let healthy = cb.healthy_endpoints(&all).await;
+        assert_eq!(healthy[0], "http://first:8080");
+        assert_eq!(healthy[1], "http://second:8080");
+        assert_eq!(healthy[2], "http://third:8080");
+    }
+
+    // ---- DlvReceiptSdk field initialization ----
+
+    #[test]
+    fn new_multiple_endpoints_stored() {
+        let core = Arc::new(crate::sdk::core_sdk::CoreSDK::new().unwrap());
+        let device_bytes = [0xCDu8; 32];
+        let encoded = text_id::encode_base32_crockford(&device_bytes);
+        let endpoints = vec![
+            "http://a:8080".to_string(),
+            "http://b:8080".to_string(),
+            "http://c:8080".to_string(),
+        ];
+        let sdk = DlvReceiptSdk::new(encoded, core, endpoints).unwrap();
+        assert_eq!(sdk.storage_node_endpoints.len(), 3);
+    }
+
+    #[test]
+    fn new_empty_device_id_fails() {
+        let core = Arc::new(crate::sdk::core_sdk::CoreSDK::new().unwrap());
+        let result = DlvReceiptSdk::new("".to_string(), core, Vec::new());
+        assert!(result.is_err());
+    }
+
+    // ---- CircuitBreaker mark_node_healthy idempotent ----
+
+    #[tokio::test]
+    async fn circuit_breaker_mark_healthy_twice_ok() {
+        let cb = CircuitBreaker::new();
+        cb.mark_node_failed("http://node:8080").await;
+        cb.mark_node_healthy("http://node:8080").await;
+        cb.mark_node_healthy("http://node:8080").await;
+        assert!(cb.is_node_healthy("http://node:8080").await);
+    }
+
+    // ---- CircuitBreaker independent nodes ----
+
+    #[tokio::test]
+    async fn circuit_breaker_fail_one_doesnt_affect_others() {
+        let cb = CircuitBreaker::new();
+        let nodes = ["http://a:8080", "http://b:8080", "http://c:8080"];
+        cb.mark_node_failed(nodes[1]).await;
+        assert!(cb.is_node_healthy(nodes[0]).await);
+        assert!(!cb.is_node_healthy(nodes[1]).await);
+        assert!(cb.is_node_healthy(nodes[2]).await);
+    }
+
+    // ---- DlvReceiptSdk new with different byte patterns ----
+
+    #[test]
+    fn new_all_zeros_device_id_succeeds() {
+        let core = Arc::new(crate::sdk::core_sdk::CoreSDK::new().unwrap());
+        let device_bytes = [0u8; 32];
+        let encoded = text_id::encode_base32_crockford(&device_bytes);
+        let result = DlvReceiptSdk::new(encoded, core, Vec::new());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn new_all_ff_device_id_succeeds() {
+        let core = Arc::new(crate::sdk::core_sdk::CoreSDK::new().unwrap());
+        let device_bytes = [0xFFu8; 32];
+        let encoded = text_id::encode_base32_crockford(&device_bytes);
+        let result = DlvReceiptSdk::new(encoded, core, Vec::new());
+        assert!(result.is_ok());
+    }
+
+    // ---- CircuitBreaker healthy_endpoints returns only unfailed ----
+
+    #[tokio::test]
+    async fn circuit_breaker_healthy_endpoints_single_node_failed() {
+        let cb = CircuitBreaker::new();
+        let all = vec!["http://only:8080".to_string()];
+        cb.mark_node_failed("http://only:8080").await;
+        let healthy = cb.healthy_endpoints(&all).await;
+        assert!(healthy.is_empty());
+    }
+
+    #[tokio::test]
+    async fn circuit_breaker_healthy_endpoints_single_node_healthy() {
+        let cb = CircuitBreaker::new();
+        let all = vec!["http://only:8080".to_string()];
+        let healthy = cb.healthy_endpoints(&all).await;
+        assert_eq!(healthy.len(), 1);
+    }
+}

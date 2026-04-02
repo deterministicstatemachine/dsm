@@ -489,3 +489,559 @@ impl DlvPreCommitmentSdk {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    // ---- ensure_non_empty ----
+
+    #[test]
+    fn ensure_non_empty_ok() {
+        assert!(DlvPreCommitmentSdk::ensure_non_empty("field", true).is_ok());
+    }
+
+    #[test]
+    fn ensure_non_empty_err() {
+        let err = DlvPreCommitmentSdk::ensure_non_empty("field", false).unwrap_err();
+        assert!(format!("{err:?}").contains("must not be empty"));
+    }
+
+    #[test]
+    fn ensure_non_empty_label_in_error() {
+        let err = DlvPreCommitmentSdk::ensure_non_empty("my_label", false).unwrap_err();
+        assert!(format!("{err:?}").contains("my_label"));
+    }
+
+    // ---- required_param ----
+
+    #[test]
+    fn required_param_present() {
+        let mut map = HashMap::new();
+        map.insert("key1".to_string(), vec![1, 2, 3]);
+        let result = DlvPreCommitmentSdk::required_param(&map, "key1").unwrap();
+        assert_eq!(result, &[1, 2, 3]);
+    }
+
+    #[test]
+    fn required_param_missing() {
+        let map: HashMap<String, Vec<u8>> = HashMap::new();
+        let err = DlvPreCommitmentSdk::required_param(&map, "missing_key").unwrap_err();
+        assert!(format!("{err:?}").contains("missing required param"));
+        assert!(format!("{err:?}").contains("missing_key"));
+    }
+
+    #[test]
+    fn required_param_empty_value_is_ok() {
+        let mut map = HashMap::new();
+        map.insert("key".to_string(), Vec::new());
+        let result = DlvPreCommitmentSdk::required_param(&map, "key").unwrap();
+        assert!(result.is_empty());
+    }
+
+    // ---- btree_from ----
+
+    #[test]
+    fn btree_from_preserves_entries() {
+        let mut map = HashMap::new();
+        map.insert("b".to_string(), vec![2]);
+        map.insert("a".to_string(), vec![1]);
+        map.insert("c".to_string(), vec![3]);
+
+        let btree = DlvPreCommitmentSdk::btree_from(&map);
+        assert_eq!(btree.len(), 3);
+        assert_eq!(btree["a"], vec![1]);
+        assert_eq!(btree["b"], vec![2]);
+        assert_eq!(btree["c"], vec![3]);
+    }
+
+    #[test]
+    fn btree_from_sorted_iteration_order() {
+        let mut map = HashMap::new();
+        map.insert("z".to_string(), vec![26]);
+        map.insert("a".to_string(), vec![1]);
+        map.insert("m".to_string(), vec![13]);
+
+        let btree = DlvPreCommitmentSdk::btree_from(&map);
+        let keys: Vec<&String> = btree.keys().collect();
+        assert_eq!(keys, vec!["a", "m", "z"]);
+    }
+
+    #[test]
+    fn btree_from_empty() {
+        let map: HashMap<String, Vec<u8>> = HashMap::new();
+        let btree = DlvPreCommitmentSdk::btree_from(&map);
+        assert!(btree.is_empty());
+    }
+
+    // ---- sorted_forks ----
+
+    #[test]
+    fn sorted_forks_returns_sorted_by_key() {
+        let mut forks = HashMap::new();
+        forks.insert(
+            "fork_c".to_string(),
+            DlvForkConfig {
+                unlock_condition: FulfillmentMechanism::Payment {
+                    amount: 100,
+                    token_id: "ROOT".to_string(),
+                    recipient: "r".to_string(),
+                    verification_state: vec![],
+                },
+                required_params: HashMap::new(),
+            },
+        );
+        forks.insert(
+            "fork_a".to_string(),
+            DlvForkConfig {
+                unlock_condition: FulfillmentMechanism::Payment {
+                    amount: 200,
+                    token_id: "ROOT".to_string(),
+                    recipient: "r".to_string(),
+                    verification_state: vec![],
+                },
+                required_params: HashMap::new(),
+            },
+        );
+        forks.insert(
+            "fork_b".to_string(),
+            DlvForkConfig {
+                unlock_condition: FulfillmentMechanism::Payment {
+                    amount: 300,
+                    token_id: "ROOT".to_string(),
+                    recipient: "r".to_string(),
+                    verification_state: vec![],
+                },
+                required_params: HashMap::new(),
+            },
+        );
+
+        let sorted = DlvPreCommitmentSdk::sorted_forks(&forks);
+        let keys: Vec<&str> = sorted.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, vec!["fork_a", "fork_b", "fork_c"]);
+    }
+
+    #[test]
+    fn sorted_forks_empty() {
+        let forks: HashMap<String, DlvForkConfig> = HashMap::new();
+        let sorted = DlvPreCommitmentSdk::sorted_forks(&forks);
+        assert!(sorted.is_empty());
+    }
+
+    #[test]
+    fn sorted_forks_single_entry() {
+        let mut forks = HashMap::new();
+        forks.insert(
+            "only".to_string(),
+            DlvForkConfig {
+                unlock_condition: FulfillmentMechanism::CryptoCondition {
+                    condition_hash: vec![0u8; 32],
+                    public_params: vec![],
+                },
+                required_params: HashMap::new(),
+            },
+        );
+        let sorted = DlvPreCommitmentSdk::sorted_forks(&forks);
+        assert_eq!(sorted.len(), 1);
+        assert_eq!(sorted[0].0, "only");
+    }
+
+    // ---- DlvPreCommitmentConfig ----
+
+    #[test]
+    fn dlv_pre_commitment_config_struct() {
+        let cfg = DlvPreCommitmentConfig {
+            base_config: PreCommitmentConfig {
+                fixed_params: {
+                    let mut m = HashMap::new();
+                    m.insert("key".to_string(), vec![1]);
+                    m
+                },
+                variable_params: vec!["var1".to_string()],
+                security_params: SecurityParameters::default(),
+            },
+            dlv_forks: HashMap::new(),
+            external_publications: vec!["bitcoin".to_string()],
+        };
+        assert_eq!(cfg.base_config.fixed_params.len(), 1);
+        assert_eq!(cfg.external_publications, vec!["bitcoin"]);
+    }
+
+    // ---- DlvPreCommitmentResult ----
+
+    #[test]
+    fn dlv_pre_commitment_result_defaults() {
+        let result = DlvPreCommitmentResult {
+            pre_commitment: PreCommitment::default(),
+            dlv_ids: vec!["v1".to_string(), "v2".to_string()],
+            external_hashes: HashMap::new(),
+            selected_fork: None,
+            fork_vault_bindings: BTreeMap::new(),
+        };
+        assert_eq!(result.dlv_ids.len(), 2);
+        assert!(result.selected_fork.is_none());
+        assert!(result.fork_vault_bindings.is_empty());
+    }
+
+    // ---- DlvForkConfig ----
+
+    #[test]
+    fn dlv_fork_config_with_required_params() {
+        let mut params = HashMap::new();
+        params.insert("vault_content".to_string(), b"secret".to_vec());
+        params.insert("mime".to_string(), b"application/octet-stream".to_vec());
+        params.insert("recipient_public_key".to_string(), vec![0xAA; 32]);
+
+        let cfg = DlvForkConfig {
+            unlock_condition: FulfillmentMechanism::Payment {
+                amount: 1000,
+                token_id: "ROOT".to_string(),
+                recipient: "alice".to_string(),
+                verification_state: vec![],
+            },
+            required_params: params,
+        };
+
+        assert_eq!(cfg.required_params.len(), 3);
+        assert!(cfg.required_params.contains_key("vault_content"));
+        assert!(cfg.required_params.contains_key("mime"));
+    }
+
+    // ---- build_fulfillment_proof ----
+
+    fn make_sdk_for_proof_test() -> DlvPreCommitmentSdk {
+        let core = Arc::new(crate::sdk::core_sdk::CoreSDK::new().unwrap());
+        let dlv = Arc::new(DLVManager::new());
+        DlvPreCommitmentSdk::new(core, dlv)
+    }
+
+    #[test]
+    fn build_fulfillment_proof_with_both_required_params() {
+        let sdk = make_sdk_for_proof_test();
+        let mut params = HashMap::new();
+        params.insert("proof_state_transition".to_string(), vec![1, 2, 3]);
+        params.insert("proof_merkle".to_string(), vec![4, 5, 6]);
+
+        let proof = sdk.build_fulfillment_proof("fork_1", &params).unwrap();
+        match proof {
+            FulfillmentProof::PaymentProof {
+                state_transition,
+                merkle_proof,
+                stitched_receipt_sigma,
+            } => {
+                assert_eq!(state_transition, vec![1, 2, 3]);
+                assert_eq!(merkle_proof, vec![4, 5, 6]);
+                assert!(stitched_receipt_sigma.is_some());
+            }
+            _ => panic!("Expected PaymentProof variant"),
+        }
+    }
+
+    #[test]
+    fn build_fulfillment_proof_with_explicit_sigma() {
+        let sdk = make_sdk_for_proof_test();
+        let mut params = HashMap::new();
+        params.insert("proof_state_transition".to_string(), vec![10]);
+        params.insert("proof_merkle".to_string(), vec![20]);
+        params.insert("stitched_receipt_sigma".to_string(), vec![0xAA; 32]);
+
+        let proof = sdk.build_fulfillment_proof("fork_2", &params).unwrap();
+        match proof {
+            FulfillmentProof::PaymentProof {
+                stitched_receipt_sigma,
+                ..
+            } => {
+                assert_eq!(stitched_receipt_sigma.unwrap(), [0xAA; 32]);
+            }
+            _ => panic!("Expected PaymentProof"),
+        }
+    }
+
+    #[test]
+    fn build_fulfillment_proof_sigma_wrong_length() {
+        let sdk = make_sdk_for_proof_test();
+        let mut params = HashMap::new();
+        params.insert("proof_state_transition".to_string(), vec![10]);
+        params.insert("proof_merkle".to_string(), vec![20]);
+        params.insert("stitched_receipt_sigma".to_string(), vec![0xBB; 16]);
+
+        let err = sdk.build_fulfillment_proof("fork_3", &params).unwrap_err();
+        assert!(format!("{err:?}").contains("32 bytes"));
+    }
+
+    #[test]
+    fn build_fulfillment_proof_missing_state_transition() {
+        let sdk = make_sdk_for_proof_test();
+        let mut params = HashMap::new();
+        params.insert("proof_merkle".to_string(), vec![1]);
+
+        let err = sdk.build_fulfillment_proof("fork_4", &params).unwrap_err();
+        assert!(format!("{err:?}").contains("proof_state_transition"));
+    }
+
+    #[test]
+    fn build_fulfillment_proof_missing_merkle() {
+        let sdk = make_sdk_for_proof_test();
+        let mut params = HashMap::new();
+        params.insert("proof_state_transition".to_string(), vec![1]);
+
+        let err = sdk.build_fulfillment_proof("fork_5", &params).unwrap_err();
+        assert!(format!("{err:?}").contains("proof_merkle"));
+    }
+
+    #[test]
+    fn build_fulfillment_proof_auto_sigma_is_deterministic() {
+        let sdk = make_sdk_for_proof_test();
+        let mut params = HashMap::new();
+        params.insert("proof_state_transition".to_string(), vec![1, 2]);
+        params.insert("proof_merkle".to_string(), vec![3, 4]);
+
+        let proof1 = sdk.build_fulfillment_proof("fork_x", &params).unwrap();
+        let proof2 = sdk.build_fulfillment_proof("fork_x", &params).unwrap();
+
+        let sigma1 = match proof1 {
+            FulfillmentProof::PaymentProof { stitched_receipt_sigma, .. } => stitched_receipt_sigma,
+            _ => panic!("expected PaymentProof"),
+        };
+        let sigma2 = match proof2 {
+            FulfillmentProof::PaymentProof { stitched_receipt_sigma, .. } => stitched_receipt_sigma,
+            _ => panic!("expected PaymentProof"),
+        };
+        assert_eq!(sigma1, sigma2);
+    }
+
+    #[test]
+    fn build_fulfillment_proof_different_fork_ids_yield_different_sigma() {
+        let sdk = make_sdk_for_proof_test();
+        let mut params = HashMap::new();
+        params.insert("proof_state_transition".to_string(), vec![1]);
+        params.insert("proof_merkle".to_string(), vec![2]);
+
+        let proof_a = sdk.build_fulfillment_proof("fork_A", &params).unwrap();
+        let proof_b = sdk.build_fulfillment_proof("fork_B", &params).unwrap();
+
+        let sigma_a = match proof_a {
+            FulfillmentProof::PaymentProof { stitched_receipt_sigma, .. } => stitched_receipt_sigma.unwrap(),
+            _ => panic!("expected PaymentProof"),
+        };
+        let sigma_b = match proof_b {
+            FulfillmentProof::PaymentProof { stitched_receipt_sigma, .. } => stitched_receipt_sigma.unwrap(),
+            _ => panic!("expected PaymentProof"),
+        };
+        assert_ne!(sigma_a, sigma_b);
+    }
+
+    // ---- ensure_variable_params_valid (via instance) ----
+
+    #[test]
+    fn ensure_variable_params_valid_no_duplicates() {
+        let sdk = make_sdk_for_proof_test();
+        let cfg = PreCommitmentConfig {
+            fixed_params: HashMap::new(),
+            variable_params: vec!["a".to_string(), "b".to_string(), "c".to_string()],
+            security_params: SecurityParameters::default(),
+        };
+        assert!(sdk.ensure_variable_params_valid(&cfg).is_ok());
+    }
+
+    #[test]
+    fn ensure_variable_params_valid_empty_list() {
+        let sdk = make_sdk_for_proof_test();
+        let cfg = PreCommitmentConfig {
+            fixed_params: HashMap::new(),
+            variable_params: Vec::new(),
+            security_params: SecurityParameters::default(),
+        };
+        assert!(sdk.ensure_variable_params_valid(&cfg).is_ok());
+    }
+
+    #[test]
+    fn ensure_variable_params_valid_detects_duplicates() {
+        let sdk = make_sdk_for_proof_test();
+        let cfg = PreCommitmentConfig {
+            fixed_params: HashMap::new(),
+            variable_params: vec!["x".to_string(), "y".to_string(), "x".to_string()],
+            security_params: SecurityParameters::default(),
+        };
+        let err = sdk.ensure_variable_params_valid(&cfg).unwrap_err();
+        assert!(format!("{err:?}").contains("duplicate"));
+    }
+
+    // ---- btree_from edge cases ----
+
+    #[test]
+    fn btree_from_single_element() {
+        let mut map = HashMap::new();
+        map.insert("only".to_string(), vec![42]);
+        let btree = DlvPreCommitmentSdk::btree_from(&map);
+        assert_eq!(btree.len(), 1);
+        assert_eq!(btree["only"], vec![42]);
+    }
+
+    #[test]
+    fn btree_from_large_values() {
+        let mut map = HashMap::new();
+        map.insert("big".to_string(), vec![0xFFu8; 1024]);
+        let btree = DlvPreCommitmentSdk::btree_from(&map);
+        assert_eq!(btree["big"].len(), 1024);
+    }
+
+    // ---- sorted_forks preserves values ----
+
+    #[test]
+    fn sorted_forks_preserves_unlock_conditions() {
+        let mut forks = HashMap::new();
+        forks.insert(
+            "fork_b".to_string(),
+            DlvForkConfig {
+                unlock_condition: FulfillmentMechanism::Payment {
+                    amount: 777,
+                    token_id: "ROOT".to_string(),
+                    recipient: "bob".to_string(),
+                    verification_state: vec![],
+                },
+                required_params: {
+                    let mut m = HashMap::new();
+                    m.insert("vault_content".to_string(), b"data".to_vec());
+                    m
+                },
+            },
+        );
+        forks.insert(
+            "fork_a".to_string(),
+            DlvForkConfig {
+                unlock_condition: FulfillmentMechanism::CryptoCondition {
+                    condition_hash: [0xAA; 32].to_vec(),
+                    public_params: vec![1, 2, 3],
+                },
+                required_params: HashMap::new(),
+            },
+        );
+
+        let sorted = DlvPreCommitmentSdk::sorted_forks(&forks);
+        assert_eq!(sorted[0].0, "fork_a");
+        assert_eq!(sorted[1].0, "fork_b");
+        assert_eq!(sorted[1].1.required_params.len(), 1);
+        match &sorted[0].1.unlock_condition {
+            FulfillmentMechanism::CryptoCondition { condition_hash, .. } => {
+                assert_eq!(*condition_hash, [0xAA; 32]);
+            }
+            _ => panic!("Expected CryptoCondition"),
+        }
+    }
+
+    // ---- ensure_non_empty with various labels ----
+
+    #[test]
+    fn ensure_non_empty_different_labels() {
+        let e1 = DlvPreCommitmentSdk::ensure_non_empty("alpha", false).unwrap_err();
+        let e2 = DlvPreCommitmentSdk::ensure_non_empty("beta", false).unwrap_err();
+        let msg1 = format!("{e1:?}");
+        let msg2 = format!("{e2:?}");
+        assert!(msg1.contains("alpha"));
+        assert!(msg2.contains("beta"));
+        assert!(!msg1.contains("beta"));
+    }
+
+    // ---- required_param with multiple keys ----
+
+    #[test]
+    fn required_param_picks_correct_key() {
+        let mut map = HashMap::new();
+        map.insert("a".to_string(), vec![1]);
+        map.insert("b".to_string(), vec![2]);
+        map.insert("c".to_string(), vec![3]);
+        assert_eq!(DlvPreCommitmentSdk::required_param(&map, "a").unwrap(), &[1]);
+        assert_eq!(DlvPreCommitmentSdk::required_param(&map, "b").unwrap(), &[2]);
+        assert_eq!(DlvPreCommitmentSdk::required_param(&map, "c").unwrap(), &[3]);
+    }
+
+    // ---- build_fulfillment_proof with empty byte params ----
+
+    #[test]
+    fn build_fulfillment_proof_empty_byte_params() {
+        let sdk = make_sdk_for_proof_test();
+        let mut params = HashMap::new();
+        params.insert("proof_state_transition".to_string(), Vec::new());
+        params.insert("proof_merkle".to_string(), Vec::new());
+        let proof = sdk.build_fulfillment_proof("f", &params).unwrap();
+        match proof {
+            FulfillmentProof::PaymentProof {
+                state_transition,
+                merkle_proof,
+                ..
+            } => {
+                assert!(state_transition.is_empty());
+                assert!(merkle_proof.is_empty());
+            }
+            _ => panic!("Expected PaymentProof"),
+        }
+    }
+
+    // ---- DlvPreCommitmentResult clone ----
+
+    #[test]
+    fn dlv_pre_commitment_result_clone() {
+        let mut bindings = BTreeMap::new();
+        bindings.insert("fork_a".to_string(), "vault_1".to_string());
+        let result = DlvPreCommitmentResult {
+            pre_commitment: PreCommitment::default(),
+            dlv_ids: vec!["v1".to_string()],
+            external_hashes: {
+                let mut h = HashMap::new();
+                h.insert("btc".to_string(), [0xAB; 32]);
+                h
+            },
+            selected_fork: Some("fork_a".to_string()),
+            fork_vault_bindings: bindings,
+        };
+        let cloned = result.clone();
+        assert_eq!(cloned.dlv_ids, vec!["v1"]);
+        assert_eq!(cloned.selected_fork, Some("fork_a".to_string()));
+        assert_eq!(cloned.fork_vault_bindings.len(), 1);
+        assert_eq!(cloned.external_hashes["btc"], [0xAB; 32]);
+    }
+
+    // ---- ensure_variable_params_valid single duplicate ----
+
+    #[test]
+    fn ensure_variable_params_valid_adjacent_duplicates() {
+        let sdk = make_sdk_for_proof_test();
+        let cfg = PreCommitmentConfig {
+            fixed_params: HashMap::new(),
+            variable_params: vec!["a".to_string(), "a".to_string()],
+            security_params: SecurityParameters::default(),
+        };
+        assert!(sdk.ensure_variable_params_valid(&cfg).is_err());
+    }
+
+    #[test]
+    fn ensure_variable_params_valid_single_element() {
+        let sdk = make_sdk_for_proof_test();
+        let cfg = PreCommitmentConfig {
+            fixed_params: HashMap::new(),
+            variable_params: vec!["sole".to_string()],
+            security_params: SecurityParameters::default(),
+        };
+        assert!(sdk.ensure_variable_params_valid(&cfg).is_ok());
+    }
+
+    // ---- PreCommitmentConfig ----
+
+    #[test]
+    fn pre_commitment_config_clone() {
+        let cfg = PreCommitmentConfig {
+            fixed_params: {
+                let mut m = HashMap::new();
+                m.insert("k".to_string(), vec![1, 2]);
+                m
+            },
+            variable_params: vec!["v1".to_string(), "v2".to_string()],
+            security_params: SecurityParameters::default(),
+        };
+        let cloned = cfg.clone();
+        assert_eq!(cloned.fixed_params.len(), 1);
+        assert_eq!(cloned.variable_params.len(), 2);
+    }
+}

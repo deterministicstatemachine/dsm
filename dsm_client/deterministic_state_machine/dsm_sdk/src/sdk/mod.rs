@@ -55,7 +55,8 @@ pub mod external_commitment_sdk;
 pub mod hashchain_sdk;
 pub mod identity_sdk;
 pub mod session_manager; // Native-first session state projection
-                         // pub mod qr; // QR code creation and parsing for contacts - MOVED TO contact_sdk
+#[cfg(test)]
+mod qr; // QR code creation and parsing for contacts - enabled for tests only
 pub mod b0x_sdk;
 pub mod chain_tip_store;
 pub mod inbox_poller;

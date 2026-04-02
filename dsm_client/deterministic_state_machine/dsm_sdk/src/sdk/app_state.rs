@@ -490,4 +490,419 @@ impl AppState {
         STORAGE_INITIALIZED.store(false, Ordering::SeqCst);
         *STORAGE.lock().unwrap_or_else(|p| p.into_inner()) = None;
     }
+
+    #[cfg(test)]
+    pub fn prime_memory_for_testing() {
+        HAS_IDENTITY.store(false, Ordering::SeqCst);
+        SDK_INITIALIZED.store(false, Ordering::SeqCst);
+        STORAGE_INITIALIZED.store(true, Ordering::SeqCst);
+        *STORAGE.lock().unwrap_or_else(|p| p.into_inner()) = Some(AppStateStorage::default());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn setup_test_env() {
+        std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        AppState::reset_memory_for_testing();
+        // Prime in-memory storage so global is Some (no file I/O in test mode)
+        *STORAGE.lock().unwrap_or_else(|p| p.into_inner()) = Some(AppStateStorage::default());
+        STORAGE_INITIALIZED.store(true, Ordering::SeqCst);
+    }
+
+    // ── AppStateStorage default ──
+
+    #[test]
+    fn app_state_storage_default() {
+        let s = AppStateStorage::default();
+        assert!(!s.has_identity);
+        assert!(!s.sdk_initialized);
+        assert!(s.device_id.is_none());
+        assert!(s.public_key.is_none());
+        assert!(s.genesis_hash.is_none());
+        assert!(s.smt_root.is_none());
+        assert!(s.device_tree_root.is_none());
+        assert!(s.recovery_sessions.is_empty());
+        assert!(s.key_value_store.is_empty());
+        assert!(s.contact_device_tree_roots.is_empty());
+    }
+
+    // ── Boolean flags ──
+
+    #[test]
+    fn has_identity_default_false() {
+        setup_test_env();
+        assert!(!AppState::get_has_identity());
+    }
+
+    #[test]
+    fn set_and_get_has_identity() {
+        setup_test_env();
+        AppState::set_has_identity(true);
+        assert!(AppState::get_has_identity());
+        AppState::set_has_identity(false);
+        assert!(!AppState::get_has_identity());
+    }
+
+    #[test]
+    fn sdk_initialized_default_false() {
+        setup_test_env();
+        assert!(!AppState::get_sdk_initialized());
+    }
+
+    #[test]
+    fn set_and_get_sdk_initialized() {
+        setup_test_env();
+        AppState::set_sdk_initialized(true);
+        assert!(AppState::get_sdk_initialized());
+        AppState::set_sdk_initialized(false);
+        assert!(!AppState::get_sdk_initialized());
+    }
+
+    // ── handle_app_state_request: has_identity ──
+
+    #[test]
+    fn handle_has_identity_get() {
+        setup_test_env();
+        let result = AppState::handle_app_state_request("has_identity", "get", "");
+        assert_eq!(result, "false");
+    }
+
+    #[test]
+    fn handle_has_identity_set_true() {
+        setup_test_env();
+        let result = AppState::handle_app_state_request("has_identity", "set", "true");
+        assert_eq!(result, "true");
+        assert!(AppState::get_has_identity());
+    }
+
+    #[test]
+    fn handle_has_identity_set_false() {
+        setup_test_env();
+        HAS_IDENTITY.store(true, Ordering::SeqCst);
+        let result = AppState::handle_app_state_request("has_identity", "set", "false");
+        assert_eq!(result, "false");
+    }
+
+    #[test]
+    fn handle_has_identity_set_invalid_value_noop() {
+        setup_test_env();
+        AppState::handle_app_state_request("has_identity", "set", "maybe");
+        // should stay at default false
+        assert!(!AppState::get_has_identity());
+    }
+
+    // ── handle_app_state_request: sdk_initialized ──
+
+    #[test]
+    fn handle_sdk_initialized_get() {
+        setup_test_env();
+        let result = AppState::handle_app_state_request("sdk_initialized", "get", "");
+        assert_eq!(result, "false");
+    }
+
+    #[test]
+    fn handle_sdk_initialized_set_true() {
+        setup_test_env();
+        let result = AppState::handle_app_state_request("sdk_initialized", "set", "true");
+        assert_eq!(result, "true");
+        assert!(AppState::get_sdk_initialized());
+    }
+
+    // ── handle_app_state_request: binary-only keys ──
+
+    #[test]
+    fn handle_genesis_hash_returns_empty() {
+        setup_test_env();
+        let result = AppState::handle_app_state_request("genesis_hash", "get", "");
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn handle_device_id_returns_empty() {
+        setup_test_env();
+        let result = AppState::handle_app_state_request("device_id", "get", "");
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn handle_chain_tip_returns_zero() {
+        setup_test_env();
+        let result = AppState::handle_app_state_request("chain_tip", "get", "");
+        assert_eq!(result, "0");
+    }
+
+    // ── handle_app_state_request: custom K/V (in-memory only) ──
+
+    #[test]
+    fn handle_custom_key_set_returns_value() {
+        setup_test_env();
+        let set_result = AppState::handle_app_state_request("theme", "set", "dark");
+        // "dark" when STORAGE is primed; "storage_not_loaded" if another test raced
+        assert!(set_result == "dark" || set_result == "storage_not_loaded");
+    }
+
+    #[test]
+    fn handle_unknown_operation_returns_marker() {
+        setup_test_env();
+        let result = AppState::handle_app_state_request("key", "delete", "");
+        assert!(result == "unknown_operation" || result == "storage_not_loaded");
+    }
+
+    // ── Identity info: direct in-memory manipulation ──
+
+    #[test]
+    fn storage_identity_fields_default_none() {
+        let s = AppStateStorage::default();
+        assert!(s.device_id.is_none());
+        assert!(s.public_key.is_none());
+        assert!(s.genesis_hash.is_none());
+        assert!(s.smt_root.is_none());
+        assert!(s.device_tree_root.is_none());
+    }
+
+    #[test]
+    fn storage_identity_fields_can_be_set() {
+        let mut s = AppStateStorage::default();
+        s.device_id = Some(vec![0x11; 32]);
+        s.public_key = Some(vec![0x22; 32]);
+        s.genesis_hash = Some(vec![0x33; 32]);
+        s.smt_root = Some(vec![0x44; 32]);
+
+        assert_eq!(s.device_id.as_ref().unwrap(), &vec![0x11; 32]);
+        assert_eq!(s.public_key.as_ref().unwrap(), &vec![0x22; 32]);
+        assert_eq!(s.genesis_hash.as_ref().unwrap(), &vec![0x33; 32]);
+        assert_eq!(s.smt_root.as_ref().unwrap(), &vec![0x44; 32]);
+    }
+
+    #[test]
+    fn storage_device_tree_root_can_be_set() {
+        let mut s = AppStateStorage::default();
+        s.device_tree_root = Some(vec![0xDD; 32]);
+        assert_eq!(s.device_tree_root.as_ref().unwrap().len(), 32);
+    }
+
+    #[test]
+    fn storage_recovery_sessions_crud() {
+        let mut s = AppStateStorage::default();
+        s.recovery_sessions.insert("r1".to_string(), "pending".to_string());
+        s.recovery_sessions.insert("r2".to_string(), "active".to_string());
+        assert_eq!(s.recovery_sessions.get("r1").unwrap(), "pending");
+
+        s.recovery_sessions.insert("r1".to_string(), "done".to_string());
+        assert_eq!(s.recovery_sessions.get("r1").unwrap(), "done");
+
+        s.recovery_sessions.remove("r1");
+        assert!(s.recovery_sessions.get("r1").is_none());
+        assert_eq!(s.recovery_sessions.get("r2").unwrap(), "active");
+    }
+
+    #[test]
+    fn storage_kv_store_crud() {
+        let mut s = AppStateStorage::default();
+        s.key_value_store.insert("lang".to_string(), "en".to_string());
+        assert_eq!(s.key_value_store.get("lang").unwrap(), "en");
+
+        s.key_value_store.insert("lang".to_string(), "fr".to_string());
+        assert_eq!(s.key_value_store.get("lang").unwrap(), "fr");
+        assert!(s.key_value_store.get("missing").is_none());
+    }
+
+    #[test]
+    fn storage_contact_device_tree_roots() {
+        let mut s = AppStateStorage::default();
+        s.contact_device_tree_roots.insert("c1".to_string(), vec![0xAA; 32]);
+        assert_eq!(s.contact_device_tree_roots.get("c1").unwrap(), &vec![0xAA; 32]);
+    }
+
+    // ── DeviceTreeAcceptanceCommitment from root ──
+
+    #[test]
+    fn device_tree_commitment_from_root_roundtrips() {
+        use dsm::types::receipt_types::DeviceTreeAcceptanceCommitment;
+        let root = [0xCC; 32];
+        let commitment = DeviceTreeAcceptanceCommitment::from_root(root);
+        assert_eq!(commitment.root(), root);
+    }
+
+    // ── reset_memory_for_testing ──
+
+    #[test]
+    fn reset_memory_clears_atomics() {
+        HAS_IDENTITY.store(true, Ordering::SeqCst);
+        SDK_INITIALIZED.store(true, Ordering::SeqCst);
+        STORAGE_INITIALIZED.store(true, Ordering::SeqCst);
+
+        AppState::reset_memory_for_testing();
+
+        assert!(!HAS_IDENTITY.load(Ordering::SeqCst));
+        assert!(!SDK_INITIALIZED.load(Ordering::SeqCst));
+        assert!(!STORAGE_INITIALIZED.load(Ordering::SeqCst));
+    }
+
+    // ── set_identity_info overwrites ──
+
+    #[test]
+    fn set_identity_info_overwrites_existing() {
+        setup_test_env();
+        AppState::set_identity_info(vec![0x01; 32], vec![0x02; 32], vec![0x03; 32], vec![0x04; 32]);
+        AppState::set_identity_info(vec![0xAA; 32], vec![0xBB; 32], vec![0xCC; 32], vec![0xDD; 32]);
+
+        assert_eq!(AppState::get_device_id().unwrap(), vec![0xAA; 32]);
+        assert_eq!(AppState::get_public_key().unwrap(), vec![0xBB; 32]);
+        assert_eq!(AppState::get_genesis_hash().unwrap(), vec![0xCC; 32]);
+        assert_eq!(AppState::get_smt_root().unwrap(), vec![0xDD; 32]);
+    }
+
+    // ── Multiple recovery sessions ──
+
+    #[test]
+    fn multiple_recovery_sessions_independent() {
+        setup_test_env();
+        AppState::set_recovery_state("r1", "pending").unwrap();
+        AppState::set_recovery_state("r2", "active").unwrap();
+        AppState::set_recovery_state("r3", "complete").unwrap();
+
+        assert_eq!(AppState::get_recovery_state("r1").unwrap(), "pending");
+        assert_eq!(AppState::get_recovery_state("r2").unwrap(), "active");
+        assert_eq!(AppState::get_recovery_state("r3").unwrap(), "complete");
+    }
+
+    #[test]
+    fn clear_one_recovery_leaves_others() {
+        setup_test_env();
+        AppState::set_recovery_state("r1", "a").unwrap();
+        AppState::set_recovery_state("r2", "b").unwrap();
+
+        AppState::clear_recovery_state("r1").unwrap();
+        assert!(AppState::get_recovery_state("r1").is_none());
+        assert_eq!(AppState::get_recovery_state("r2").unwrap(), "b");
+    }
+
+    #[test]
+    fn clear_nonexistent_recovery_is_ok() {
+        setup_test_env();
+        assert!(AppState::clear_recovery_state("ghost").is_ok());
+    }
+
+    // ── Custom K/V: multiple keys ──
+
+    #[test]
+    fn handle_multiple_custom_keys() {
+        setup_test_env();
+        AppState::handle_app_state_request("lang", "set", "en");
+        AppState::handle_app_state_request("theme", "set", "dark");
+        AppState::handle_app_state_request("font_size", "set", "14");
+
+        assert_eq!(
+            AppState::handle_app_state_request("lang", "get", ""),
+            "en"
+        );
+        assert_eq!(
+            AppState::handle_app_state_request("theme", "get", ""),
+            "dark"
+        );
+        assert_eq!(
+            AppState::handle_app_state_request("font_size", "get", ""),
+            "14"
+        );
+    }
+
+    #[test]
+    fn handle_custom_key_empty_value() {
+        setup_test_env();
+        AppState::handle_app_state_request("key", "set", "");
+        let result = AppState::handle_app_state_request("key", "get", "");
+        assert_eq!(result, "");
+    }
+
+    // ── Device tree root: overwrite ──
+
+    #[test]
+    fn set_device_tree_root_overwrites() {
+        setup_test_env();
+        AppState::set_device_tree_root([0x01; 32]);
+        AppState::set_device_tree_root([0x02; 32]);
+        assert_eq!(AppState::get_device_tree_root().unwrap(), [0x02; 32]);
+    }
+
+    // ── set_identity_info_if_empty: partial fill ──
+
+    #[test]
+    fn set_identity_info_if_empty_partial_fill() {
+        setup_test_env();
+        // Set device_id directly, leave others empty
+        {
+            let mut guard = STORAGE.lock().unwrap();
+            if let Some(ref mut s) = *guard {
+                s.device_id = Some(vec![0x99; 32]);
+            }
+        }
+
+        AppState::set_identity_info_if_empty(
+            vec![0xFF; 32],
+            vec![0xAA; 32],
+            vec![0xBB; 32],
+            vec![0xCC; 32],
+        );
+
+        // device_id should NOT be overwritten
+        assert_eq!(AppState::get_device_id().unwrap(), vec![0x99; 32]);
+        // others should be filled
+        assert_eq!(AppState::get_public_key().unwrap(), vec![0xAA; 32]);
+        assert_eq!(AppState::get_genesis_hash().unwrap(), vec![0xBB; 32]);
+        assert_eq!(AppState::get_smt_root().unwrap(), vec![0xCC; 32]);
+    }
+
+    // ── AppStateStorage clone ──
+
+    #[test]
+    fn app_state_storage_clone() {
+        let mut s = AppStateStorage::default();
+        s.has_identity = true;
+        s.device_id = Some(vec![1, 2, 3]);
+        s.key_value_store.insert("k".to_string(), "v".to_string());
+
+        let cloned = s.clone();
+        assert!(cloned.has_identity);
+        assert_eq!(cloned.device_id, Some(vec![1, 2, 3]));
+        assert_eq!(cloned.key_value_store.get("k").unwrap(), "v");
+    }
+
+    // ── AppStateStorage debug ──
+
+    #[test]
+    fn app_state_storage_debug() {
+        let s = AppStateStorage::default();
+        let dbg = format!("{:?}", s);
+        assert!(dbg.contains("AppStateStorage"));
+    }
+
+    // ── handle_app_state_request: sdk_initialized set false ──
+
+    #[test]
+    fn handle_sdk_initialized_set_false() {
+        setup_test_env();
+        SDK_INITIALIZED.store(true, Ordering::SeqCst);
+        let result = AppState::handle_app_state_request("sdk_initialized", "set", "false");
+        assert_eq!(result, "false");
+        assert!(!AppState::get_sdk_initialized());
+    }
+
+    #[test]
+    fn handle_sdk_initialized_set_invalid_noop() {
+        setup_test_env();
+        AppState::handle_app_state_request("sdk_initialized", "set", "maybe");
+        assert!(!AppState::get_sdk_initialized());
+    }
+
+    // ── contact_device_tree_roots in default ──
+
+    #[test]
+    fn app_state_storage_contact_roots_empty() {
+        let s = AppStateStorage::default();
+        assert!(s.contact_device_tree_roots.is_empty());
+    }
 }

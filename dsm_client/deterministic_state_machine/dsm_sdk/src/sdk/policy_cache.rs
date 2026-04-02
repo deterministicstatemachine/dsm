@@ -691,5 +691,666 @@ impl Clone for TokenPolicyCache {
 
 #[cfg(test)]
 mod tests {
-    // Tests for TokenPolicyCache would go here
+    use super::*;
+    use dsm::types::policy_types::{PolicyFile, TokenPolicy};
+    use std::sync::Arc;
+
+    fn make_core_sdk() -> Arc<CoreSDK> {
+        Arc::new(CoreSDK::new().unwrap())
+    }
+
+    fn make_cache(config: Option<PolicyCacheConfig>) -> TokenPolicyCache {
+        TokenPolicyCache::new(make_core_sdk(), config, None, Vec::new())
+    }
+
+    fn make_token_policy(name: &str) -> TokenPolicy {
+        let pf = PolicyFile::new(name, "1.0", "test");
+        TokenPolicy::new(pf).unwrap()
+    }
+
+    // ---- PolicyCacheConfig ----
+
+    #[test]
+    fn default_config_values() {
+        let cfg = PolicyCacheConfig::default();
+        assert_eq!(cfg.default_ttl, 86400);
+        assert_eq!(cfg.max_cache_size, 100);
+        assert!(cfg.auto_refresh);
+        assert!((cfg.refresh_threshold - 0.2).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn config_clone() {
+        let cfg = PolicyCacheConfig {
+            default_ttl: 3600,
+            max_cache_size: 50,
+            auto_refresh: false,
+            refresh_threshold: 0.5,
+        };
+        let cloned = cfg.clone();
+        assert_eq!(cloned.default_ttl, 3600);
+        assert_eq!(cloned.max_cache_size, 50);
+        assert!(!cloned.auto_refresh);
+    }
+
+    // ---- CacheStats ----
+
+    #[test]
+    fn cache_stats_default() {
+        let stats = CacheStats::default();
+        assert_eq!(stats.hits, 0);
+        assert_eq!(stats.misses, 0);
+        assert_eq!(stats.refreshes, 0);
+        assert_eq!(stats.evictions, 0);
+    }
+
+    #[test]
+    fn cache_stats_clone() {
+        let stats = CacheStats {
+            hits: 10,
+            misses: 5,
+            refreshes: 2,
+            evictions: 1,
+        };
+        let cloned = stats.clone();
+        assert_eq!(cloned.hits, 10);
+        assert_eq!(cloned.misses, 5);
+    }
+
+    // ---- cache_policy_internal ----
+
+    #[test]
+    fn cache_policy_internal_inserts() {
+        let cache = make_cache(None);
+        let policy = make_token_policy("TestPolicy");
+        cache.cache_policy_internal("p1", policy).unwrap();
+        assert!(cache.is_cached("p1"));
+    }
+
+    #[test]
+    fn cache_policy_internal_overwrite() {
+        let cache = make_cache(None);
+        let p1 = make_token_policy("First");
+        let p2 = make_token_policy("Second");
+        cache.cache_policy_internal("key", p1).unwrap();
+        cache.cache_policy_internal("key", p2).unwrap();
+        assert!(cache.is_cached("key"));
+        assert_eq!(cache.cache.read().len(), 1);
+    }
+
+    // ---- is_cached ----
+
+    #[test]
+    fn is_cached_false_for_missing() {
+        let cache = make_cache(None);
+        assert!(!cache.is_cached("nonexistent"));
+    }
+
+    #[test]
+    fn is_cached_true_for_present() {
+        let cache = make_cache(None);
+        let policy = make_token_policy("P");
+        cache.cache_policy_internal("present", policy).unwrap();
+        assert!(cache.is_cached("present"));
+    }
+
+    // ---- clear_cache ----
+
+    #[test]
+    fn clear_cache_empties_all() {
+        let cache = make_cache(None);
+        for i in 0..5 {
+            let p = make_token_policy(&format!("P{i}"));
+            cache.cache_policy_internal(&format!("k{i}"), p).unwrap();
+        }
+        assert_eq!(cache.cache.read().len(), 5);
+        cache.clear_cache();
+        assert_eq!(cache.cache.read().len(), 0);
+    }
+
+    // ---- remove_from_cache ----
+
+    #[test]
+    fn remove_from_cache_present() {
+        let cache = make_cache(None);
+        let p = make_token_policy("P");
+        cache.cache_policy_internal("rm_key", p).unwrap();
+        assert!(cache.remove_from_cache("rm_key"));
+        assert!(!cache.is_cached("rm_key"));
+    }
+
+    #[test]
+    fn remove_from_cache_absent() {
+        let cache = make_cache(None);
+        assert!(!cache.remove_from_cache("nope"));
+    }
+
+    // ---- evict_entry (LRU eviction) ----
+
+    #[test]
+    fn evict_entry_removes_least_recently_used() {
+        let cfg = PolicyCacheConfig {
+            max_cache_size: 3,
+            ..Default::default()
+        };
+        let cache = make_cache(Some(cfg));
+
+        // Insert 3 entries with different last_accessed ticks
+        {
+            let mut c = cache.cache.write();
+            for (i, name) in ["oldest", "middle", "newest"].iter().enumerate() {
+                c.insert(
+                    name.to_string(),
+                    CacheEntry {
+                        policy: make_token_policy(name),
+                        cached_at: 0,
+                        expires_at: 999999,
+                        last_accessed: i as u64, // 0, 1, 2
+                        access_count: 1,
+                    },
+                );
+            }
+        }
+
+        // Trigger eviction by inserting a 4th entry
+        let p4 = make_token_policy("new_entry");
+        cache.cache_policy_internal("new_entry", p4).unwrap();
+
+        // "oldest" should have been evicted (last_accessed = 0)
+        assert!(!cache.is_cached("oldest"));
+        assert!(cache.is_cached("middle"));
+        assert!(cache.is_cached("newest"));
+        assert!(cache.is_cached("new_entry"));
+    }
+
+    #[test]
+    fn evict_entry_increments_eviction_stat() {
+        let cfg = PolicyCacheConfig {
+            max_cache_size: 1,
+            ..Default::default()
+        };
+        let cache = make_cache(Some(cfg));
+
+        let p1 = make_token_policy("P1");
+        cache.cache_policy_internal("k1", p1).unwrap();
+
+        let p2 = make_token_policy("P2");
+        cache.cache_policy_internal("k2", p2).unwrap();
+
+        let stats = cache.stats.read();
+        assert!(stats.evictions >= 1);
+    }
+
+    // ---- update_cached_policy ----
+
+    #[test]
+    fn update_cached_policy_updates_entry() {
+        let cache = make_cache(None);
+        let p1 = make_token_policy("Original");
+        cache.cache_policy_internal("up_key", p1).unwrap();
+
+        let p2 = make_token_policy("Updated");
+        cache.update_cached_policy("up_key", p2.clone()).unwrap();
+
+        let c = cache.cache.read();
+        let entry = c.get("up_key").unwrap();
+        assert_eq!(entry.policy.file.name, "Updated");
+    }
+
+    #[test]
+    fn update_cached_policy_nonexistent_does_nothing() {
+        let cache = make_cache(None);
+        let p = make_token_policy("P");
+        assert!(cache.update_cached_policy("missing", p).is_ok());
+        assert!(!cache.is_cached("missing"));
+    }
+
+    // ---- pin_policy ----
+
+    #[test]
+    fn pin_policy_extends_ttl() {
+        let cache = make_cache(None);
+        let p = make_token_policy("Pinned");
+        cache.cache_policy_internal("pin_key", p).unwrap();
+
+        let original_expires = cache.cache.read().get("pin_key").unwrap().expires_at;
+        let result = cache.pin_policy("pin_key", Some(999_999)).unwrap();
+        assert!(result);
+        let new_expires = cache.cache.read().get("pin_key").unwrap().expires_at;
+        assert!(new_expires >= original_expires);
+    }
+
+    #[test]
+    fn pin_policy_uses_default_ttl_when_none() {
+        let cache = make_cache(None);
+        let p = make_token_policy("Pin");
+        cache.cache_policy_internal("pin2", p).unwrap();
+
+        let result = cache.pin_policy("pin2", None).unwrap();
+        assert!(result);
+    }
+
+    #[test]
+    fn pin_policy_missing_returns_false() {
+        let cache = make_cache(None);
+        let result = cache.pin_policy("missing", Some(100)).unwrap();
+        assert!(!result);
+    }
+
+    // ---- mark_policy_as_required ----
+
+    #[test]
+    fn mark_policy_as_required_extends_ttl() {
+        let cache = make_cache(None);
+        let p = make_token_policy("Required");
+        cache.cache_policy_internal("req_key", p).unwrap();
+
+        cache.mark_policy_as_required("req_key", "transfer").unwrap();
+
+        let entry = cache.cache.read();
+        let e = entry.get("req_key").unwrap();
+        // TTL should be doubled → expires_at well beyond default
+        assert!(e.expires_at > e.cached_at + cache.config.default_ttl);
+    }
+
+    #[test]
+    fn mark_policy_as_required_missing_errors() {
+        let cache = make_cache(None);
+        let err = cache.mark_policy_as_required("nope", "op").unwrap_err();
+        assert!(format!("{err:?}").contains("not available in cache"));
+    }
+
+    // ---- is_policy_required ----
+
+    #[test]
+    fn is_policy_required_after_marking() {
+        let cache = make_cache(None);
+        let p = make_token_policy("P");
+        cache.cache_policy_internal("rq", p).unwrap();
+        cache.mark_policy_as_required("rq", "send").unwrap();
+        assert!(cache.is_policy_required("rq"));
+    }
+
+    #[test]
+    fn is_policy_required_false_for_normal() {
+        let cache = make_cache(None);
+        let p = make_token_policy("P");
+        cache.cache_policy_internal("normal", p).unwrap();
+        assert!(!cache.is_policy_required("normal"));
+    }
+
+    #[test]
+    fn is_policy_required_false_for_missing() {
+        let cache = make_cache(None);
+        assert!(!cache.is_policy_required("ghost"));
+    }
+
+    // ---- cleanup_expired ----
+
+    #[test]
+    fn cleanup_expired_removes_expired_entries() {
+        let cache = make_cache(None);
+
+        {
+            let mut c = cache.cache.write();
+            c.insert(
+                "expired1".to_string(),
+                CacheEntry {
+                    policy: make_token_policy("E1"),
+                    cached_at: 0,
+                    expires_at: 0,
+                    last_accessed: 0,
+                    access_count: 1,
+                },
+            );
+            c.insert(
+                "expired2".to_string(),
+                CacheEntry {
+                    policy: make_token_policy("E2"),
+                    cached_at: 0,
+                    expires_at: 0,
+                    last_accessed: 0,
+                    access_count: 1,
+                },
+            );
+            c.insert(
+                "valid".to_string(),
+                CacheEntry {
+                    policy: make_token_policy("V"),
+                    cached_at: 0,
+                    expires_at: u64::MAX,
+                    last_accessed: 0,
+                    access_count: 1,
+                },
+            );
+        }
+
+        let removed = cache.cleanup_expired().unwrap();
+        assert!(removed >= 2);
+        assert!(!cache.is_cached("expired1"));
+        assert!(!cache.is_cached("expired2"));
+        assert!(cache.is_cached("valid"));
+    }
+
+    #[test]
+    fn cleanup_expired_updates_eviction_stats() {
+        let cache = make_cache(None);
+        {
+            let mut c = cache.cache.write();
+            c.insert(
+                "exp".to_string(),
+                CacheEntry {
+                    policy: make_token_policy("E"),
+                    cached_at: 0,
+                    expires_at: 0,
+                    last_accessed: 0,
+                    access_count: 1,
+                },
+            );
+        }
+        cache.cleanup_expired().unwrap();
+        let stats = cache.stats.read();
+        assert!(stats.evictions >= 1);
+    }
+
+    #[test]
+    fn cleanup_expired_returns_zero_when_none_expired() {
+        let cache = make_cache(None);
+        let p = make_token_policy("P");
+        cache.cache_policy_internal("fresh", p).unwrap();
+        let removed = cache.cleanup_expired().unwrap();
+        assert_eq!(removed, 0);
+    }
+
+    // ---- PolicyResponse ----
+
+    #[test]
+    fn policy_response_struct() {
+        let resp = PolicyResponse {
+            policy_id: "abc".to_string(),
+            found: true,
+            policy: Some(PolicyFile::new("P", "1.0", "author")),
+            from_cache: true,
+            tick: 42,
+        };
+        assert_eq!(resp.policy_id, "abc");
+        assert!(resp.found);
+        assert!(resp.from_cache);
+        assert_eq!(resp.tick, 42);
+    }
+
+    #[test]
+    fn policy_response_not_found() {
+        let resp = PolicyResponse {
+            policy_id: "missing".to_string(),
+            found: false,
+            policy: None,
+            from_cache: false,
+            tick: 0,
+        };
+        assert!(!resp.found);
+        assert!(resp.policy.is_none());
+    }
+
+    // ---- cache_size ----
+
+    #[tokio::test]
+    async fn cache_size_empty() {
+        let cache = make_cache(None);
+        assert_eq!(cache.cache_size().await, 0);
+    }
+
+    #[tokio::test]
+    async fn cache_size_after_inserts() {
+        let cache = make_cache(None);
+        for i in 0..3 {
+            let p = make_token_policy(&format!("P{i}"));
+            cache.cache_policy_internal(&format!("k{i}"), p).unwrap();
+        }
+        assert_eq!(cache.cache_size().await, 3);
+    }
+
+    // ---- get_stats ----
+
+    #[tokio::test]
+    async fn get_stats_initial() {
+        let cache = make_cache(None);
+        let stats = cache.get_stats().await;
+        assert_eq!(stats.hits, 0);
+        assert_eq!(stats.misses, 0);
+    }
+
+    // ---- clone ----
+
+    #[test]
+    fn cache_clone_has_fresh_cache() {
+        let cache = make_cache(None);
+        let p = make_token_policy("P");
+        cache.cache_policy_internal("k", p).unwrap();
+
+        let cloned = cache.clone();
+        assert!(!cloned.is_cached("k"));
+        assert_eq!(cloned.config.default_ttl, cache.config.default_ttl);
+    }
+
+    #[test]
+    fn cache_clone_preserves_storage_anchor_map() {
+        let cache = make_cache(None);
+        {
+            let mut m = cache.storage_anchor_map.write();
+            m.insert("test_key".to_string(), vec![1, 2, 3]);
+        }
+        let cloned = cache.clone();
+        let m = cloned.storage_anchor_map.read();
+        assert_eq!(m.get("test_key"), Some(&vec![1, 2, 3]));
+    }
+
+    // ---- list_cached_policies ----
+
+    #[tokio::test]
+    async fn list_cached_policies_empty() {
+        let cache = make_cache(None);
+        let policies = cache.list_cached_policies().await.unwrap();
+        assert!(policies.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_cached_policies_after_inserts() {
+        let cache = make_cache(None);
+        for i in 0..3 {
+            let p = make_token_policy(&format!("Policy{i}"));
+            cache.cache_policy_internal(&format!("k{i}"), p).unwrap();
+        }
+        let policies = cache.list_cached_policies().await.unwrap();
+        assert_eq!(policies.len(), 3);
+    }
+
+    // ---- max_cache_size enforcement ----
+
+    #[test]
+    fn max_cache_size_enforced() {
+        let cfg = PolicyCacheConfig {
+            max_cache_size: 2,
+            ..Default::default()
+        };
+        let cache = make_cache(Some(cfg));
+
+        for i in 0..5 {
+            let p = make_token_policy(&format!("P{i}"));
+            cache.cache_policy_internal(&format!("k{i}"), p).unwrap();
+        }
+        assert!(cache.cache.read().len() <= 3); // at most max + 1 due to insertion before check
+    }
+
+    // ---- evict_entry edge cases ----
+
+    #[test]
+    fn evict_entry_on_empty_cache_is_noop() {
+        let cache = make_cache(None);
+        let mut c = cache.cache.write();
+        assert!(cache.evict_entry(&mut c).is_ok());
+        assert_eq!(c.len(), 0);
+    }
+
+    #[test]
+    fn evict_entry_single_element_removes_it() {
+        let cache = make_cache(None);
+        {
+            let mut c = cache.cache.write();
+            c.insert(
+                "only".to_string(),
+                CacheEntry {
+                    policy: make_token_policy("Only"),
+                    cached_at: 0,
+                    expires_at: 999,
+                    last_accessed: 5,
+                    access_count: 1,
+                },
+            );
+            cache.evict_entry(&mut c).unwrap();
+            assert!(c.is_empty());
+        }
+    }
+
+    // ---- cache_policy_internal entry structure ----
+
+    #[test]
+    fn cache_policy_internal_sets_correct_entry_fields() {
+        let cfg = PolicyCacheConfig {
+            default_ttl: 500,
+            ..Default::default()
+        };
+        let cache = make_cache(Some(cfg));
+        let policy = make_token_policy("FieldCheck");
+        cache.cache_policy_internal("fc", policy).unwrap();
+
+        let c = cache.cache.read();
+        let entry = c.get("fc").unwrap();
+        assert_eq!(entry.access_count, 1);
+        assert_eq!(entry.expires_at, entry.cached_at + 500);
+        assert_eq!(entry.last_accessed, entry.cached_at);
+    }
+
+    #[test]
+    fn update_cached_policy_preserves_access_count() {
+        let cache = make_cache(None);
+        let p1 = make_token_policy("P1");
+        cache.cache_policy_internal("ac", p1).unwrap();
+        {
+            let mut c = cache.cache.write();
+            c.get_mut("ac").unwrap().access_count = 42;
+        }
+        let p2 = make_token_policy("P2");
+        cache.update_cached_policy("ac", p2).unwrap();
+        let c = cache.cache.read();
+        assert_eq!(c.get("ac").unwrap().access_count, 42);
+    }
+
+    // ---- storage_anchor_map operations ----
+
+    #[test]
+    fn storage_anchor_map_insert_and_read() {
+        let cache = make_cache(None);
+        {
+            let mut m = cache.storage_anchor_map.write();
+            m.insert("key_a".to_string(), vec![10, 20, 30]);
+            m.insert("key_b".to_string(), vec![40, 50]);
+        }
+        let m = cache.storage_anchor_map.read();
+        assert_eq!(m.len(), 2);
+        assert_eq!(m.get("key_a"), Some(&vec![10, 20, 30]));
+        assert_eq!(m.get("key_b"), Some(&vec![40, 50]));
+    }
+
+    // ---- cleanup_expired boundary ----
+
+    #[test]
+    fn cleanup_expired_exact_boundary_is_removed() {
+        let cache = make_cache(None);
+        let now = TokenPolicyCache::now();
+        {
+            let mut c = cache.cache.write();
+            c.insert(
+                "boundary".to_string(),
+                CacheEntry {
+                    policy: make_token_policy("B"),
+                    cached_at: 0,
+                    expires_at: now, // exactly now — retain keeps only > now
+                    last_accessed: 0,
+                    access_count: 1,
+                },
+            );
+        }
+        let removed = cache.cleanup_expired().unwrap();
+        assert_eq!(removed, 1);
+        assert!(!cache.is_cached("boundary"));
+    }
+
+    // ---- sequential evictions accumulate stats ----
+
+    #[test]
+    fn multiple_sequential_evictions_accumulate_stats() {
+        let cfg = PolicyCacheConfig {
+            max_cache_size: 1,
+            ..Default::default()
+        };
+        let cache = make_cache(Some(cfg));
+
+        for i in 0..4 {
+            let p = make_token_policy(&format!("P{i}"));
+            cache.cache_policy_internal(&format!("k{i}"), p).unwrap();
+        }
+        let stats = cache.stats.read();
+        assert!(stats.evictions >= 3);
+    }
+
+    // ---- pin_policy with custom TTL extends correctly ----
+
+    #[test]
+    fn pin_policy_custom_ttl_sets_correct_expiry() {
+        let cache = make_cache(None);
+        let p = make_token_policy("Pin");
+        cache.cache_policy_internal("pin_ttl", p).unwrap();
+
+        let now_before = TokenPolicyCache::now();
+        cache.pin_policy("pin_ttl", Some(12345)).unwrap();
+        let entry = cache.cache.read();
+        let e = entry.get("pin_ttl").unwrap();
+        assert!(e.expires_at >= now_before + 12345);
+    }
+
+    // ---- overwrite same key does not increase cache size ----
+
+    #[test]
+    fn overwrite_same_key_no_size_increase() {
+        let cfg = PolicyCacheConfig {
+            max_cache_size: 2,
+            ..Default::default()
+        };
+        let cache = make_cache(Some(cfg));
+        let p1 = make_token_policy("V1");
+        let p2 = make_token_policy("V2");
+        cache.cache_policy_internal("same", p1).unwrap();
+        cache.cache_policy_internal("same", p2).unwrap();
+        assert_eq!(cache.cache.read().len(), 1);
+        let stats = cache.stats.read();
+        assert_eq!(stats.evictions, 0);
+    }
+
+    // ---- PolicyResponse clone ----
+
+    #[test]
+    fn policy_response_clone() {
+        let resp = PolicyResponse {
+            policy_id: "xyz".to_string(),
+            found: true,
+            policy: Some(PolicyFile::new("CloneP", "2.0", "auth")),
+            from_cache: false,
+            tick: 99,
+        };
+        let cloned = resp.clone();
+        assert_eq!(cloned.policy_id, "xyz");
+        assert_eq!(cloned.tick, 99);
+        assert!(cloned.policy.is_some());
+    }
 }

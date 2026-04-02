@@ -721,7 +721,7 @@ impl<T: BleLink + ?Sized> BleLink for Box<T> {
 /// A minimal, no-op `BleLink` used ONLY for tests. Gated behind `#[cfg(test)]`
 /// to prevent accidental use in production builds.
 #[cfg(test)]
-#[derive(Default)]
+#[derive(Default, Debug, Clone)]
 pub struct InMemoryBleLink {}
 
 #[cfg(test)]
@@ -773,3 +773,668 @@ impl BleLink for InMemoryBleLink {
 // implement `BleLink` there.
 
 // (No generic tx_err helper; dead code under #[deny(warnings)] is not allowed here.)
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    // ── BluetoothDevice ────────────────────────────────────────────
+
+    #[test]
+    fn bluetooth_device_new() {
+        let dev = BluetoothDevice::new("AA:BB:CC", "Pixel 7");
+        assert_eq!(dev.device_id, "AA:BB:CC");
+        assert_eq!(dev.name, "Pixel 7");
+        assert!(dev.metadata.is_empty());
+    }
+
+    #[test]
+    fn bluetooth_device_eq() {
+        let a = BluetoothDevice::new("id1", "name1");
+        let b = BluetoothDevice::new("id1", "name1");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn bluetooth_device_ne() {
+        let a = BluetoothDevice::new("id1", "name1");
+        let b = BluetoothDevice::new("id2", "name1");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn bluetooth_device_with_metadata() {
+        let mut dev = BluetoothDevice::new("id", "name");
+        dev.metadata
+            .insert("rssi".into(), "-42".into());
+        assert_eq!(dev.metadata.get("rssi").unwrap(), "-42");
+    }
+
+    #[test]
+    fn bluetooth_device_debug_and_clone() {
+        let dev = BluetoothDevice::new("id", "name");
+        let dev2 = dev.clone();
+        let dbg = format!("{dev2:?}");
+        assert!(dbg.contains("BluetoothDevice"));
+    }
+
+    // ── BluetoothMode ──────────────────────────────────────────────
+
+    #[test]
+    fn mode_eq_and_copy() {
+        let m = BluetoothMode::Central;
+        let m2 = m;
+        assert_eq!(m, m2);
+        assert_ne!(m, BluetoothMode::Peripheral);
+        assert_ne!(m, BluetoothMode::Both);
+    }
+
+    #[test]
+    fn mode_debug() {
+        let dbg = format!("{:?}", BluetoothMode::Both);
+        assert!(dbg.contains("Both"));
+    }
+
+    // ── BleSecurityContext ─────────────────────────────────────────
+
+    #[test]
+    fn security_context_deterministic_key() {
+        let ctx1 = BleSecurityContext::new("device_a", "device_b");
+        let ctx2 = BleSecurityContext::new("device_a", "device_b");
+        assert_eq!(ctx1.session_key, ctx2.session_key);
+    }
+
+    #[test]
+    fn security_context_order_independent() {
+        let ctx1 = BleSecurityContext::new("alice", "bob");
+        let ctx2 = BleSecurityContext::new("bob", "alice");
+        assert_eq!(
+            ctx1.session_key, ctx2.session_key,
+            "key derivation must be order-independent"
+        );
+    }
+
+    #[test]
+    fn security_context_different_pairs_different_keys() {
+        let ctx1 = BleSecurityContext::new("alice", "bob");
+        let ctx2 = BleSecurityContext::new("alice", "charlie");
+        assert_ne!(ctx1.session_key, ctx2.session_key);
+    }
+
+    #[test]
+    fn security_context_encrypt_decrypt_roundtrip() {
+        let ctx = BleSecurityContext::new("local", "remote");
+        let plaintext = b"Hello, BLE world!";
+
+        let encrypted = ctx.encrypt(plaintext).unwrap();
+        assert_ne!(encrypted, plaintext.as_slice());
+        assert!(encrypted.len() > plaintext.len());
+
+        let decrypted = ctx.decrypt(&encrypted).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn security_context_encrypt_empty_data() {
+        let ctx = BleSecurityContext::new("a", "b");
+        let encrypted = ctx.encrypt(b"").unwrap();
+        let decrypted = ctx.decrypt(&encrypted).unwrap();
+        assert!(decrypted.is_empty());
+    }
+
+    #[test]
+    fn security_context_encrypt_large_data() {
+        let ctx = BleSecurityContext::new("a", "b");
+        let data = vec![0xABu8; 16384];
+        let encrypted = ctx.encrypt(&data).unwrap();
+        let decrypted = ctx.decrypt(&encrypted).unwrap();
+        assert_eq!(decrypted, data);
+    }
+
+    #[test]
+    fn security_context_decrypt_too_short() {
+        let ctx = BleSecurityContext::new("a", "b");
+        let err = ctx.decrypt(&[0u8; 5]);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn security_context_decrypt_corrupted() {
+        let ctx = BleSecurityContext::new("a", "b");
+        let encrypted = ctx.encrypt(b"test").unwrap();
+
+        let mut corrupted = encrypted.clone();
+        if let Some(last) = corrupted.last_mut() {
+            *last ^= 0xFF;
+        }
+        assert!(ctx.decrypt(&corrupted).is_err());
+    }
+
+    #[test]
+    fn security_context_wrong_key_fails() {
+        let ctx_a = BleSecurityContext::new("a", "b");
+        let ctx_b = BleSecurityContext::new("c", "d");
+
+        let encrypted = ctx_a.encrypt(b"secret").unwrap();
+        assert!(ctx_b.decrypt(&encrypted).is_err());
+    }
+
+    #[test]
+    fn security_context_nonce_prepended() {
+        let ctx = BleSecurityContext::new("x", "y");
+        let encrypted = ctx.encrypt(b"data").unwrap();
+        assert!(
+            encrypted.len() >= 12,
+            "encrypted must include 12-byte nonce prefix"
+        );
+    }
+
+    #[test]
+    fn security_context_sequence_increments() {
+        let ctx = BleSecurityContext::new("s", "r");
+        let e1 = ctx.encrypt(b"a").unwrap();
+        let e2 = ctx.encrypt(b"a").unwrap();
+        assert_ne!(
+            e1, e2,
+            "same plaintext should produce different ciphertexts (different nonces)"
+        );
+    }
+
+    #[test]
+    fn security_context_clone_and_debug() {
+        let ctx = BleSecurityContext::new("a", "b");
+        let ctx2 = ctx.clone();
+        let dbg = format!("{ctx2:?}");
+        assert!(dbg.contains("BleSecurityContext"));
+    }
+
+    // ── BleBridgeEvent ─────────────────────────────────────────────
+
+    #[test]
+    fn ble_bridge_event_variants() {
+        let events = vec![
+            BleBridgeEvent::Data {
+                message_type: "test".into(),
+                payload: vec![1, 2, 3],
+            },
+            BleBridgeEvent::ConnectionEstablished {
+                device_id: "d1".into(),
+            },
+            BleBridgeEvent::ConnectionLost {
+                device_id: "d2".into(),
+            },
+            BleBridgeEvent::Error {
+                error: "oops".into(),
+            },
+            BleBridgeEvent::ConnectionRequest {
+                device_id: "d3".into(),
+            },
+            BleBridgeEvent::ConnectionResponse {
+                device_id: "d4".into(),
+            },
+            BleBridgeEvent::TradeRequest {
+                device_id: "d5".into(),
+                payload: vec![],
+            },
+            BleBridgeEvent::TradeResponse {
+                device_id: "d6".into(),
+                payload: vec![],
+            },
+            BleBridgeEvent::PokemonTransfer {
+                device_id: "d7".into(),
+                payload: vec![],
+            },
+            BleBridgeEvent::AuthChallenge {
+                device_id: "d8".into(),
+                payload: vec![],
+            },
+            BleBridgeEvent::AuthResponse {
+                device_id: "d9".into(),
+                payload: vec![],
+            },
+            BleBridgeEvent::Ping,
+            BleBridgeEvent::Pong,
+            BleBridgeEvent::Disconnect {
+                reason: "done".into(),
+            },
+        ];
+        for e in &events {
+            let cloned = e.clone();
+            let dbg = format!("{cloned:?}");
+            assert!(!dbg.is_empty());
+        }
+    }
+
+    // ── BluetoothConnection ────────────────────────────────────────
+
+    #[test]
+    fn bluetooth_connection_without_security() {
+        let conn = BluetoothConnection {
+            device: BluetoothDevice::new("id", "name"),
+            security: None,
+        };
+        let conn2 = conn.clone();
+        assert!(conn2.security.is_none());
+        let dbg = format!("{conn:?}");
+        assert!(dbg.contains("BluetoothConnection"));
+    }
+
+    #[test]
+    fn bluetooth_connection_with_security() {
+        let conn = BluetoothConnection {
+            device: BluetoothDevice::new("id", "name"),
+            security: Some(BleSecurityContext::new("local", "remote")),
+        };
+        assert!(conn.security.is_some());
+    }
+
+    // ── BluetoothTransport with InMemoryBleLink ────────────────────
+
+    fn make_transport() -> BluetoothTransport<InMemoryBleLink> {
+        let link = Arc::new(InMemoryBleLink::new());
+        let local = BluetoothDevice::new("local", "TestDevice");
+        BluetoothTransport::new(BluetoothMode::Both, link, local)
+    }
+
+    #[test]
+    fn transport_mode() {
+        let t = make_transport();
+        assert_eq!(t.mode(), BluetoothMode::Both);
+    }
+
+    #[test]
+    fn transport_not_connected_initially() {
+        let t = make_transport();
+        assert!(!t.is_connected("peer"));
+        assert!(t.get_connection("peer").is_none());
+    }
+
+    #[test]
+    fn transport_is_not_secure_when_not_connected() {
+        let t = make_transport();
+        assert!(!t.is_secure_connection("peer"));
+    }
+
+    #[tokio::test]
+    async fn transport_connect_and_disconnect() {
+        let t = make_transport();
+
+        t.connect("peer1").await.unwrap();
+        assert!(t.is_connected("peer1"));
+        assert!(t.get_connection("peer1").is_some());
+
+        t.disconnect("peer1").await.unwrap();
+        assert!(!t.is_connected("peer1"));
+    }
+
+    #[tokio::test]
+    async fn transport_start_stop_service() {
+        let t = make_transport();
+        t.start_service().await.unwrap();
+        t.stop_service().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn transport_start_discovery() {
+        let t = make_transport();
+        t.start_discovery().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn transport_discovered_devices_empty() {
+        let t = make_transport();
+        let devs = t.discovered_devices().await.unwrap();
+        assert!(devs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn transport_establish_secure_connection() {
+        let t = make_transport();
+
+        t.connect("peer").await.unwrap();
+        assert!(!t.is_secure_connection("peer"));
+
+        t.establish_secure_connection("peer", "local").unwrap();
+        assert!(t.is_secure_connection("peer"));
+    }
+
+    #[test]
+    fn transport_establish_secure_not_connected() {
+        let t = make_transport();
+        let err = t.establish_secure_connection("unknown", "local");
+        assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn transport_send_secure_not_connected() {
+        let t = make_transport();
+        let err = t.send_secure("unknown", b"data").await;
+        assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn transport_send_secure_no_security() {
+        let t = make_transport();
+        t.connect("peer").await.unwrap();
+        let err = t.send_secure("peer", b"data").await;
+        assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn transport_send_secure_works() {
+        let t = make_transport();
+        t.connect("peer").await.unwrap();
+        t.establish_secure_connection("peer", "local").unwrap();
+        t.send_secure("peer", b"hello").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn transport_send_bytes() {
+        let t = make_transport();
+        t.connect("peer").await.unwrap();
+        t.send_bytes("peer", b"raw").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn transport_send_to() {
+        let t = make_transport();
+        t.connect("peer").await.unwrap();
+        t.send_to("peer", b"raw").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn transport_broadcast_empty() {
+        let t = make_transport();
+        t.broadcast(b"hello").await;
+    }
+
+    #[tokio::test]
+    async fn transport_broadcast_envelope_empty() {
+        let t = make_transport();
+        let env = pb::Envelope::default();
+        t.broadcast_envelope(&env).await;
+    }
+
+    #[tokio::test]
+    async fn transport_send_envelope() {
+        let t = make_transport();
+        t.connect("peer").await.unwrap();
+        let env = pb::Envelope::default();
+        t.send_envelope("peer", &env).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn transport_send_envelope_secure() {
+        let t = make_transport();
+        t.connect("peer").await.unwrap();
+        t.establish_secure_connection("peer", "local").unwrap();
+        let env = pb::Envelope::default();
+        t.send_envelope_secure("peer", &env).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn transport_subscribe_envelopes_empty_stream() {
+        let t = make_transport();
+        t.connect("peer").await.unwrap();
+        let stream = t.subscribe_envelopes("peer").await.unwrap();
+        futures::pin_mut!(stream);
+        let next = stream.next().await;
+        assert!(next.is_none(), "empty link stream yields None");
+    }
+
+    #[tokio::test]
+    async fn transport_fan_in_all_no_connections() {
+        let t = make_transport();
+        let mut rx = t.fan_in_all().await.unwrap();
+        let item = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await;
+        assert!(item.is_err() || item.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn transport_multiple_connections() {
+        let t = make_transport();
+        t.connect("p1").await.unwrap();
+        t.connect("p2").await.unwrap();
+
+        assert!(t.is_connected("p1"));
+        assert!(t.is_connected("p2"));
+
+        t.stop_service().await.unwrap();
+        assert!(!t.is_connected("p1"));
+        assert!(!t.is_connected("p2"));
+    }
+
+    // ── InMemoryBleLink ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn in_memory_ble_link_all_ops() {
+        let link = InMemoryBleLink::new();
+        link.start_scan().await.unwrap();
+        link.stop_scan().await.unwrap();
+        link.start_advertise().await.unwrap();
+        link.stop_advertise().await.unwrap();
+        link.connect("d").await.unwrap();
+        link.disconnect("d").await.unwrap();
+        link.send("d", b"hello").await.unwrap();
+        let devs = link.discovered().await.unwrap();
+        assert!(devs.is_empty());
+        let stream = link.recv_stream("d").await.unwrap();
+        futures::pin_mut!(stream);
+        assert!(stream.next().await.is_none());
+    }
+
+    // ── Mode-specific start_service behavior ───────────────────────
+
+    #[tokio::test]
+    async fn transport_central_mode_start_service() {
+        let link = Arc::new(InMemoryBleLink::new());
+        let local = BluetoothDevice::new("local", "Test");
+        let t = BluetoothTransport::new(BluetoothMode::Central, link, local);
+        t.start_service().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn transport_peripheral_mode_start_service() {
+        let link = Arc::new(InMemoryBleLink::new());
+        let local = BluetoothDevice::new("local", "Test");
+        let t = BluetoothTransport::new(BluetoothMode::Peripheral, link, local);
+        t.start_service().await.unwrap();
+    }
+
+    // ── BilateralBluetoothMessage type alias ───────────────────────
+
+    #[test]
+    fn bilateral_bluetooth_message_alias() {
+        let msg = BilateralBluetoothMessage::default();
+        let _ = format!("{msg:?}");
+    }
+
+    // ── BluetoothDevice metadata ───────────────────────────────────
+
+    #[test]
+    fn bluetooth_device_multiple_metadata() {
+        let mut dev = BluetoothDevice::new("id", "name");
+        dev.metadata.insert("rssi".into(), "-50".into());
+        dev.metadata.insert("mtu".into(), "512".into());
+        dev.metadata.insert("type".into(), "ble".into());
+        assert_eq!(dev.metadata.len(), 3);
+    }
+
+    #[test]
+    fn bluetooth_device_empty_strings() {
+        let dev = BluetoothDevice::new("", "");
+        assert_eq!(dev.device_id, "");
+        assert_eq!(dev.name, "");
+    }
+
+    // ── BleSecurityContext edge cases ──────────────────────────────
+
+    #[test]
+    fn security_context_same_device_id_both_sides() {
+        let ctx = BleSecurityContext::new("same", "same");
+        let encrypted = ctx.encrypt(b"test").unwrap();
+        let decrypted = ctx.decrypt(&encrypted).unwrap();
+        assert_eq!(decrypted, b"test");
+    }
+
+    #[test]
+    fn security_context_unicode_device_ids() {
+        let ctx = BleSecurityContext::new("日本語デバイス", "한국어기기");
+        let encrypted = ctx.encrypt(b"hello").unwrap();
+        let decrypted = ctx.decrypt(&encrypted).unwrap();
+        assert_eq!(decrypted, b"hello");
+    }
+
+    #[test]
+    fn security_context_decrypt_exactly_12_bytes() {
+        let ctx = BleSecurityContext::new("a", "b");
+        let result = ctx.decrypt(&[0u8; 12]);
+        assert!(result.is_err(), "12 bytes is nonce only, no ciphertext for non-empty");
+    }
+
+    #[test]
+    fn security_context_multiple_sequential_encryptions() {
+        let ctx = BleSecurityContext::new("x", "y");
+        let mut ciphertexts = Vec::new();
+        for i in 0..10 {
+            let ct = ctx.encrypt(format!("msg_{i}").as_bytes()).unwrap();
+            ciphertexts.push(ct);
+        }
+        for (i, ct) in ciphertexts.iter().enumerate() {
+            let pt = ctx.decrypt(ct).unwrap();
+            assert_eq!(pt, format!("msg_{i}").as_bytes());
+        }
+    }
+
+    // ── Transport connection lifecycle ──────────────────────────────
+
+    #[tokio::test]
+    async fn transport_connect_disconnect_reconnect() {
+        let t = make_transport();
+
+        t.connect("peer").await.unwrap();
+        assert!(t.is_connected("peer"));
+
+        t.disconnect("peer").await.unwrap();
+        assert!(!t.is_connected("peer"));
+
+        t.connect("peer").await.unwrap();
+        assert!(t.is_connected("peer"));
+    }
+
+    #[tokio::test]
+    async fn transport_get_connection_details() {
+        let t = make_transport();
+        t.connect("peer_x").await.unwrap();
+
+        let conn = t.get_connection("peer_x").unwrap();
+        assert_eq!(conn.device.device_id, "peer_x");
+        assert!(conn.security.is_none());
+    }
+
+    #[tokio::test]
+    async fn transport_establish_secure_then_verify() {
+        let t = make_transport();
+        t.connect("peer").await.unwrap();
+        t.establish_secure_connection("peer", "local_dev").unwrap();
+
+        let conn = t.get_connection("peer").unwrap();
+        assert!(conn.security.is_some());
+    }
+
+    // ── Transport broadcast with connections ────────────────────────
+
+    #[tokio::test]
+    async fn transport_broadcast_with_connections() {
+        let t = make_transport();
+        t.connect("p1").await.unwrap();
+        t.connect("p2").await.unwrap();
+        t.broadcast(b"hello all").await;
+    }
+
+    #[tokio::test]
+    async fn transport_broadcast_envelope_with_connections() {
+        let t = make_transport();
+        t.connect("p1").await.unwrap();
+        t.connect("p2").await.unwrap();
+        let env = pb::Envelope::default();
+        t.broadcast_envelope(&env).await;
+    }
+
+    // ── stop_service clears connections ─────────────────────────────
+
+    #[tokio::test]
+    async fn stop_service_clears_all_connections() {
+        let t = make_transport();
+        t.connect("a").await.unwrap();
+        t.connect("b").await.unwrap();
+        t.connect("c").await.unwrap();
+
+        t.stop_service().await.unwrap();
+        assert!(!t.is_connected("a"));
+        assert!(!t.is_connected("b"));
+        assert!(!t.is_connected("c"));
+    }
+
+    // ── fan_in_all with connections ─────────────────────────────────
+
+    #[tokio::test]
+    async fn transport_fan_in_all_with_connections() {
+        let t = make_transport();
+        t.connect("p1").await.unwrap();
+        t.connect("p2").await.unwrap();
+        let mut rx = t.fan_in_all().await.unwrap();
+        let item = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await;
+        assert!(
+            item.is_err() || item.unwrap().is_none(),
+            "InMemoryBleLink returns empty streams"
+        );
+    }
+
+    // ── Box<dyn BleLink> forwarding ─────────────────────────────────
+
+    #[tokio::test]
+    async fn boxed_ble_link_forwarding() {
+        let link: Box<dyn BleLink> = Box::new(InMemoryBleLink::new());
+        link.start_scan().await.unwrap();
+        link.stop_scan().await.unwrap();
+        link.start_advertise().await.unwrap();
+        link.stop_advertise().await.unwrap();
+        link.connect("dev").await.unwrap();
+        link.send("dev", b"data").await.unwrap();
+        link.disconnect("dev").await.unwrap();
+        let devs = link.discovered().await.unwrap();
+        assert!(devs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn transport_with_boxed_link() {
+        let link: Arc<Box<dyn BleLink>> = Arc::new(Box::new(InMemoryBleLink::new()));
+        let local = BluetoothDevice::new("local", "Test");
+        let t = BluetoothTransport::new(BluetoothMode::Both, link, local);
+        t.start_service().await.unwrap();
+        t.connect("peer").await.unwrap();
+        assert!(t.is_connected("peer"));
+        t.stop_service().await.unwrap();
+    }
+
+    // ── Transport clone ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn transport_clone_shares_connections() {
+        let t1 = make_transport();
+        let t2 = t1.clone();
+
+        t1.connect("shared_peer").await.unwrap();
+        assert!(t2.is_connected("shared_peer"));
+    }
+
+    // ── InMemoryBleLink default ─────────────────────────────────────
+
+    #[test]
+    fn in_memory_ble_link_default() {
+        let link = InMemoryBleLink::default();
+        let _ = format!("{link:?}");
+    }
+}

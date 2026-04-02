@@ -286,3 +286,578 @@ pub fn hash_genesis_state(genesis_state: &GenesisState) -> Vec<u8> {
     // For now, just return the existing hash
     genesis_state.hash.to_vec()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dummy_genesis(hash: [u8; 32]) -> GenesisState {
+        use dsm::core::identity::genesis::{GenesisState as GS, KyberKey, SigningKey};
+        GS {
+            hash,
+            initial_entropy: [0u8; 32],
+            threshold: 2,
+            participants: Default::default(),
+            merkle_root: None,
+            device_id: Some([0x01; 32]),
+            signing_key: SigningKey {
+                public_key: vec![0u8; 32],
+                secret_key: vec![0u8; 64],
+            },
+            kyber_keypair: KyberKey {
+                public_key: vec![0u8; 32],
+                secret_key: vec![0u8; 64],
+            },
+            contributions: vec![],
+        }
+    }
+
+    // ── GenesisStateCache construction ──
+
+    #[test]
+    fn default_cache_has_max_100() {
+        let cache = GenesisStateCache::default();
+        assert_eq!(cache.max_size, 100);
+    }
+
+    #[test]
+    fn new_cache_respects_max_size() {
+        let cache = GenesisStateCache::new(10);
+        assert_eq!(cache.max_size, 10);
+    }
+
+    // ── cache_genesis_state / get / remove ──
+
+    #[test]
+    fn cache_and_retrieve() {
+        let cache = GenesisStateCache::new(10);
+        let gs = dummy_genesis([0xAA; 32]);
+        cache
+            .cache_genesis_state("dev1", gs.clone(), vec![1, 2, 3], true, "http://node")
+            .unwrap();
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let result = rt.block_on(cache.get_genesis_state("dev1")).unwrap();
+        assert!(result.is_some());
+        let cached = result.unwrap();
+        assert_eq!(cached.device_id, "dev1");
+        assert!(cached.verified);
+        assert_eq!(cached.source, "http://node");
+        assert_eq!(cached.state_hash, vec![1, 2, 3]);
+        assert_eq!(cached.state.hash, [0xAA; 32]);
+    }
+
+    #[test]
+    fn get_missing_returns_none() {
+        let cache = GenesisStateCache::new(10);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let result = rt.block_on(cache.get_genesis_state("nonexistent")).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn is_cached_check() {
+        let cache = GenesisStateCache::new(10);
+        let gs = dummy_genesis([0x01; 32]);
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+
+        assert!(!rt.block_on(cache.is_genesis_state_cached("dev1")).unwrap());
+        cache
+            .cache_genesis_state("dev1", gs, vec![], false, "src")
+            .unwrap();
+        assert!(rt.block_on(cache.is_genesis_state_cached("dev1")).unwrap());
+    }
+
+    #[test]
+    fn remove_existing_returns_true() {
+        let cache = GenesisStateCache::new(10);
+        let gs = dummy_genesis([0x01; 32]);
+        cache
+            .cache_genesis_state("dev1", gs, vec![], false, "src")
+            .unwrap();
+
+        assert!(cache.remove_genesis_state("dev1").unwrap());
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        assert!(rt
+            .block_on(cache.get_genesis_state("dev1"))
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn remove_nonexistent_returns_false() {
+        let cache = GenesisStateCache::new(10);
+        assert!(!cache.remove_genesis_state("ghost").unwrap());
+    }
+
+    // ── mark_genesis_state_verified ──
+
+    #[test]
+    fn mark_verified_flips_flag() {
+        let cache = GenesisStateCache::new(10);
+        let gs = dummy_genesis([0x01; 32]);
+        cache
+            .cache_genesis_state("dev1", gs, vec![], false, "src")
+            .unwrap();
+
+        assert!(cache.mark_genesis_state_verified("dev1").unwrap());
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let cached = rt
+            .block_on(cache.get_genesis_state("dev1"))
+            .unwrap()
+            .unwrap();
+        assert!(cached.verified);
+    }
+
+    #[test]
+    fn mark_verified_missing_returns_false() {
+        let cache = GenesisStateCache::new(10);
+        assert!(!cache.mark_genesis_state_verified("ghost").unwrap());
+    }
+
+    // ── list_cached_genesis_states ──
+
+    #[test]
+    fn list_cached_states() {
+        let cache = GenesisStateCache::new(10);
+        let gs = dummy_genesis([0x01; 32]);
+        cache
+            .cache_genesis_state("a", gs.clone(), vec![], false, "s")
+            .unwrap();
+        cache
+            .cache_genesis_state("b", gs.clone(), vec![], false, "s")
+            .unwrap();
+        cache
+            .cache_genesis_state("c", gs, vec![], false, "s")
+            .unwrap();
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let mut list = rt.block_on(cache.list_cached_genesis_states()).unwrap();
+        list.sort();
+        assert_eq!(list, vec!["a", "b", "c"]);
+    }
+
+    // ── Eviction (insertion-order) ──
+
+    #[test]
+    fn eviction_removes_oldest() {
+        let cache = GenesisStateCache::new(3);
+        let gs = dummy_genesis([0x01; 32]);
+
+        cache
+            .cache_genesis_state("d1", gs.clone(), vec![], false, "s")
+            .unwrap();
+        cache
+            .cache_genesis_state("d2", gs.clone(), vec![], false, "s")
+            .unwrap();
+        cache
+            .cache_genesis_state("d3", gs.clone(), vec![], false, "s")
+            .unwrap();
+
+        // Now at capacity; adding d4 should evict d1
+        cache
+            .cache_genesis_state("d4", gs, vec![], false, "s")
+            .unwrap();
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        assert!(rt
+            .block_on(cache.get_genesis_state("d1"))
+            .unwrap()
+            .is_none());
+        assert!(rt
+            .block_on(cache.get_genesis_state("d2"))
+            .unwrap()
+            .is_some());
+        assert!(rt
+            .block_on(cache.get_genesis_state("d4"))
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn update_existing_resets_insertion_order() {
+        let cache = GenesisStateCache::new(3);
+        let gs = dummy_genesis([0x01; 32]);
+
+        cache
+            .cache_genesis_state("d1", gs.clone(), vec![], false, "s")
+            .unwrap();
+        cache
+            .cache_genesis_state("d2", gs.clone(), vec![], false, "s")
+            .unwrap();
+        cache
+            .cache_genesis_state("d3", gs.clone(), vec![], false, "s")
+            .unwrap();
+
+        // Re-insert d1 → moves to back; d2 is now oldest
+        cache
+            .cache_genesis_state("d1", gs.clone(), vec![9, 9], false, "updated")
+            .unwrap();
+
+        // Adding d4 should evict d2 (now oldest)
+        cache
+            .cache_genesis_state("d4", gs, vec![], false, "s")
+            .unwrap();
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        assert!(rt
+            .block_on(cache.get_genesis_state("d2"))
+            .unwrap()
+            .is_none());
+        assert!(rt
+            .block_on(cache.get_genesis_state("d1"))
+            .unwrap()
+            .is_some());
+        let updated = rt
+            .block_on(cache.get_genesis_state("d1"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.source, "updated");
+        assert_eq!(updated.state_hash, vec![9, 9]);
+    }
+
+    // ── create_genesis_binding ──
+
+    #[test]
+    fn create_genesis_binding_contains_both_hashes() {
+        let local = dummy_genesis([0x11; 32]);
+        let remote = dummy_genesis([0x22; 32]);
+        let binding = create_genesis_binding(&local, &remote, "bilateral").unwrap();
+
+        assert!(binding.starts_with(b"bilateral\0"));
+        assert!(binding
+            .windows(32)
+            .any(|w| w == [0x11; 32]));
+        assert!(binding
+            .windows(32)
+            .any(|w| w == [0x22; 32]));
+    }
+
+    #[test]
+    fn create_genesis_binding_deterministic() {
+        let local = dummy_genesis([0xAA; 32]);
+        let remote = dummy_genesis([0xBB; 32]);
+        let b1 = create_genesis_binding(&local, &remote, "test").unwrap();
+        let b2 = create_genesis_binding(&local, &remote, "test").unwrap();
+        assert_eq!(b1, b2);
+    }
+
+    #[test]
+    fn create_genesis_binding_type_affects_output() {
+        let local = dummy_genesis([0x01; 32]);
+        let remote = dummy_genesis([0x02; 32]);
+        let b1 = create_genesis_binding(&local, &remote, "typeA").unwrap();
+        let b2 = create_genesis_binding(&local, &remote, "typeB").unwrap();
+        assert_ne!(b1, b2);
+    }
+
+    #[test]
+    fn create_genesis_binding_length() {
+        let local = dummy_genesis([0x01; 32]);
+        let remote = dummy_genesis([0x02; 32]);
+        let binding = create_genesis_binding(&local, &remote, "xyz").unwrap();
+        // "xyz" (3) + null (1) + hash_a (32) + hash_b (32) = 68
+        assert_eq!(binding.len(), 3 + 1 + 32 + 32);
+    }
+
+    // ── create_bilateral_branch ──
+
+    #[test]
+    fn create_bilateral_branch_id_format() {
+        let sdk = HashChainSDK::new();
+        let binding = vec![0xAA; 16];
+        let branch = create_bilateral_branch(&sdk, "bob", &binding).unwrap();
+        assert!(branch.starts_with("bilateral_"));
+        assert!(branch.ends_with("_bob"));
+    }
+
+    #[test]
+    fn create_bilateral_branch_deterministic() {
+        let sdk = HashChainSDK::new();
+        let binding = vec![0xBB; 32];
+        let b1 = create_bilateral_branch(&sdk, "alice", &binding).unwrap();
+        let b2 = create_bilateral_branch(&sdk, "alice", &binding).unwrap();
+        assert_eq!(b1, b2);
+    }
+
+    // ── hash_genesis_state ──
+
+    #[test]
+    fn hash_genesis_state_returns_existing_hash() {
+        let gs = dummy_genesis([0xDE; 32]);
+        let h = hash_genesis_state(&gs);
+        assert_eq!(h, vec![0xDE; 32]);
+    }
+
+    #[test]
+    fn hash_genesis_state_length_32() {
+        let gs = dummy_genesis([0x01; 32]);
+        assert_eq!(hash_genesis_state(&gs).len(), 32);
+    }
+
+    // ── get_branch_tip_id ──
+
+    #[test]
+    fn get_branch_tip_id_named_branch() {
+        let sdk = HashChainSDK::new();
+        let tip = get_branch_tip_id(&sdk, "mybranch").unwrap();
+        assert_eq!(tip, "tip_mybranch");
+    }
+
+    // ── CachedGenesisState clone & debug ──
+
+    #[test]
+    fn cached_genesis_state_clone_and_debug() {
+        let gs = dummy_genesis([0x01; 32]);
+        let cached = CachedGenesisState {
+            state: gs,
+            state_hash: vec![1, 2],
+            verified: true,
+            source: "test".to_string(),
+            device_id: "dev".to_string(),
+        };
+        let cloned = cached.clone();
+        assert_eq!(cloned.device_id, "dev");
+        assert!(cloned.verified);
+        let dbg = format!("{:?}", cached);
+        assert!(dbg.contains("CachedGenesisState"));
+    }
+
+    // ── Cache with max_size = 1 ──
+
+    #[test]
+    fn cache_max_size_one_evicts_immediately() {
+        let cache = GenesisStateCache::new(1);
+        let gs = dummy_genesis([0x01; 32]);
+
+        cache
+            .cache_genesis_state("first", gs.clone(), vec![], false, "s")
+            .unwrap();
+        cache
+            .cache_genesis_state("second", gs, vec![], false, "s")
+            .unwrap();
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        assert!(rt
+            .block_on(cache.get_genesis_state("first"))
+            .unwrap()
+            .is_none());
+        assert!(rt
+            .block_on(cache.get_genesis_state("second"))
+            .unwrap()
+            .is_some());
+    }
+
+    // ── Cache: re-insert same key doesn't grow size ──
+
+    #[test]
+    fn reinsert_same_key_no_size_growth() {
+        let cache = GenesisStateCache::new(2);
+        let gs = dummy_genesis([0x01; 32]);
+
+        cache
+            .cache_genesis_state("a", gs.clone(), vec![1], false, "s1")
+            .unwrap();
+        cache
+            .cache_genesis_state("a", gs.clone(), vec![2], true, "s2")
+            .unwrap();
+        cache
+            .cache_genesis_state("a", gs.clone(), vec![3], false, "s3")
+            .unwrap();
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let list = rt.block_on(cache.list_cached_genesis_states()).unwrap();
+        assert_eq!(list.len(), 1);
+
+        let entry = rt
+            .block_on(cache.get_genesis_state("a"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.state_hash, vec![3]);
+        assert_eq!(entry.source, "s3");
+    }
+
+    // ── Cache: remove then re-add ──
+
+    #[test]
+    fn remove_then_readd() {
+        let cache = GenesisStateCache::new(10);
+        let gs = dummy_genesis([0x01; 32]);
+
+        cache
+            .cache_genesis_state("dev1", gs.clone(), vec![], false, "s")
+            .unwrap();
+        cache.remove_genesis_state("dev1").unwrap();
+
+        cache
+            .cache_genesis_state("dev1", gs, vec![9], true, "s2")
+            .unwrap();
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let entry = rt
+            .block_on(cache.get_genesis_state("dev1"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.state_hash, vec![9]);
+        assert!(entry.verified);
+    }
+
+    // ── Cache: list is empty initially ──
+
+    #[test]
+    fn list_empty_cache() {
+        let cache = GenesisStateCache::new(10);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let list = rt.block_on(cache.list_cached_genesis_states()).unwrap();
+        assert!(list.is_empty());
+    }
+
+    // ── create_genesis_binding: empty binding type ──
+
+    #[test]
+    fn create_genesis_binding_empty_type() {
+        let local = dummy_genesis([0x01; 32]);
+        let remote = dummy_genesis([0x02; 32]);
+        let binding = create_genesis_binding(&local, &remote, "").unwrap();
+        // "" (0) + null (1) + hash_a (32) + hash_b (32) = 65
+        assert_eq!(binding.len(), 0 + 1 + 32 + 32);
+        assert_eq!(binding[0], 0); // null separator right at start
+    }
+
+    // ── create_genesis_binding: same genesis for both ──
+
+    #[test]
+    fn create_genesis_binding_same_genesis() {
+        let gs = dummy_genesis([0x55; 32]);
+        let binding = create_genesis_binding(&gs, &gs, "self").unwrap();
+        // Both hash windows should be identical
+        let hash_start = "self".len() + 1; // after "self\0"
+        assert_eq!(
+            &binding[hash_start..hash_start + 32],
+            &binding[hash_start + 32..hash_start + 64]
+        );
+    }
+
+    // ── create_bilateral_branch: different counterparties ──
+
+    #[test]
+    fn create_bilateral_branch_different_counterparties() {
+        let sdk = HashChainSDK::new();
+        let binding = vec![0xAA; 16];
+        let b1 = create_bilateral_branch(&sdk, "alice", &binding).unwrap();
+        let b2 = create_bilateral_branch(&sdk, "bob", &binding).unwrap();
+        assert_ne!(b1, b2);
+        assert!(b1.ends_with("_alice"));
+        assert!(b2.ends_with("_bob"));
+    }
+
+    #[test]
+    fn create_bilateral_branch_different_bindings() {
+        let sdk = HashChainSDK::new();
+        let b1 = create_bilateral_branch(&sdk, "peer", &[0x01; 16]).unwrap();
+        let b2 = create_bilateral_branch(&sdk, "peer", &[0x02; 16]).unwrap();
+        assert_ne!(b1, b2);
+    }
+
+    // ── hash_genesis_state: different hashes ──
+
+    #[test]
+    fn hash_genesis_state_different_inputs() {
+        let gs1 = dummy_genesis([0x01; 32]);
+        let gs2 = dummy_genesis([0x02; 32]);
+        assert_ne!(hash_genesis_state(&gs1), hash_genesis_state(&gs2));
+    }
+
+    // ── mark_genesis_state_verified: idempotent ──
+
+    #[test]
+    fn mark_verified_idempotent() {
+        let cache = GenesisStateCache::new(10);
+        let gs = dummy_genesis([0x01; 32]);
+        cache
+            .cache_genesis_state("dev1", gs, vec![], false, "s")
+            .unwrap();
+
+        assert!(cache.mark_genesis_state_verified("dev1").unwrap());
+        assert!(cache.mark_genesis_state_verified("dev1").unwrap());
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        assert!(rt
+            .block_on(cache.get_genesis_state("dev1"))
+            .unwrap()
+            .unwrap()
+            .verified);
+    }
+
+    // ── Eviction order: multiple evictions ──
+
+    #[test]
+    fn eviction_multiple_rounds() {
+        let cache = GenesisStateCache::new(2);
+        let gs = dummy_genesis([0x01; 32]);
+
+        cache
+            .cache_genesis_state("a", gs.clone(), vec![], false, "s")
+            .unwrap();
+        cache
+            .cache_genesis_state("b", gs.clone(), vec![], false, "s")
+            .unwrap();
+        // Full. Adding "c" evicts "a".
+        cache
+            .cache_genesis_state("c", gs.clone(), vec![], false, "s")
+            .unwrap();
+        // Full with b,c. Adding "d" evicts "b".
+        cache
+            .cache_genesis_state("d", gs, vec![], false, "s")
+            .unwrap();
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        assert!(rt
+            .block_on(cache.get_genesis_state("a"))
+            .unwrap()
+            .is_none());
+        assert!(rt
+            .block_on(cache.get_genesis_state("b"))
+            .unwrap()
+            .is_none());
+        assert!(rt
+            .block_on(cache.get_genesis_state("c"))
+            .unwrap()
+            .is_some());
+        assert!(rt
+            .block_on(cache.get_genesis_state("d"))
+            .unwrap()
+            .is_some());
+    }
+}
