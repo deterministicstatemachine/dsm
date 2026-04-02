@@ -1403,3 +1403,1022 @@ pub mod bilateral {
 
 // Re-export the interface and types for easy access
 pub use bilateral::*;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn tmp_config(dir: &TempDir) -> BilateralStorageConfig {
+        BilateralStorageConfig {
+            base_path: dir.path().to_string_lossy().to_string(),
+            max_cache_size: 1024,
+            max_partitions: 10,
+            offline_mode: false,
+            compression_level: 0,
+        }
+    }
+
+    fn make_sdk(dir: &TempDir) -> BilateralStorageSDK {
+        BilateralStorageSDK::init(tmp_config(dir)).expect("init must succeed")
+    }
+
+    fn sample_key() -> BilateralKey {
+        BilateralKey {
+            sender: VaultId::new("alice"),
+            receiver: VaultId::new("bob"),
+        }
+    }
+
+    // ── BilateralStorageConfig ─────────────────────────────────────
+
+    #[test]
+    fn config_default_fields() {
+        let cfg = BilateralStorageConfig {
+            base_path: "/tmp/test".into(),
+            ..Default::default()
+        };
+        assert_eq!(cfg.max_cache_size, 100 * 1024 * 1024);
+        assert_eq!(cfg.max_partitions, 1000);
+        assert!(!cfg.offline_mode);
+        assert_eq!(cfg.compression_level, 6);
+    }
+
+    #[test]
+    fn config_default_respects_env() {
+        let sentinel = "/tmp/dsm_bilateral_test_env_dir";
+        std::env::set_var("DSM_BILATERAL_BASE_DIR", sentinel);
+        let cfg = BilateralStorageConfig::default();
+        std::env::remove_var("DSM_BILATERAL_BASE_DIR");
+        assert_eq!(cfg.base_path, sentinel);
+    }
+
+    #[test]
+    fn config_default_ignores_blank_env() {
+        std::env::set_var("DSM_BILATERAL_BASE_DIR", "   ");
+        let cfg = BilateralStorageConfig::default();
+        std::env::remove_var("DSM_BILATERAL_BASE_DIR");
+        assert_ne!(cfg.base_path, "   ");
+    }
+
+    // ── BilateralKey ───────────────────────────────────────────────
+
+    #[test]
+    fn bilateral_key_eq_and_hash() {
+        let k1 = BilateralKey {
+            sender: VaultId::new("a"),
+            receiver: VaultId::new("b"),
+        };
+        let k2 = BilateralKey {
+            sender: VaultId::new("a"),
+            receiver: VaultId::new("b"),
+        };
+        assert_eq!(k1, k2);
+
+        let mut m = std::collections::HashMap::new();
+        m.insert(k1.clone(), 42);
+        assert_eq!(m.get(&k2), Some(&42));
+    }
+
+    #[test]
+    fn bilateral_key_ne_swapped() {
+        let k1 = BilateralKey {
+            sender: VaultId::new("a"),
+            receiver: VaultId::new("b"),
+        };
+        let k2 = BilateralKey {
+            sender: VaultId::new("b"),
+            receiver: VaultId::new("a"),
+        };
+        assert_ne!(k1, k2);
+    }
+
+    // ── make_key_string ────────────────────────────────────────────
+
+    #[test]
+    fn make_key_string_format() {
+        let k = sample_key();
+        let s = BilateralStorageSDK::make_key_string(&k);
+        assert_eq!(s, "alice:bob");
+    }
+
+    #[test]
+    fn make_key_string_empty_ids() {
+        let k = BilateralKey {
+            sender: VaultId::new(""),
+            receiver: VaultId::new(""),
+        };
+        assert_eq!(BilateralStorageSDK::make_key_string(&k), ":");
+    }
+
+    // ── convenience helpers ────────────────────────────────────────
+
+    #[test]
+    fn bilateral_key_helper() {
+        let k = bilateral::key(VaultId::new("x"), VaultId::new("y"));
+        assert_eq!(k.sender, VaultId::new("x"));
+        assert_eq!(k.receiver, VaultId::new("y"));
+    }
+
+    // ── init & DB schema ───────────────────────────────────────────
+
+    #[test]
+    fn init_creates_db() {
+        let dir = TempDir::new().unwrap();
+        let _sdk = make_sdk(&dir);
+        assert!(dir.path().join("bilateral_chains.db").exists());
+    }
+
+    #[test]
+    fn init_idempotent() {
+        let dir = TempDir::new().unwrap();
+        let _sdk1 = make_sdk(&dir);
+        let _sdk2 = make_sdk(&dir);
+    }
+
+    // ── transaction CRUD ───────────────────────────────────────────
+
+    #[test]
+    fn store_and_get_transaction() {
+        let dir = TempDir::new().unwrap();
+        let sdk = make_sdk(&dir);
+        let key = sample_key();
+        let txid = TransactionId::new("tx1");
+        let data = b"hello world";
+
+        sdk.store_transaction(&key, &txid, data).unwrap();
+        let got = sdk.get_transaction(&key, &txid).unwrap();
+        assert_eq!(got.as_deref(), Some(data.as_slice()));
+    }
+
+    #[test]
+    fn get_transaction_missing() {
+        let dir = TempDir::new().unwrap();
+        let sdk = make_sdk(&dir);
+        let key = sample_key();
+        let txid = TransactionId::new("nonexistent");
+        assert_eq!(sdk.get_transaction(&key, &txid).unwrap(), None);
+    }
+
+    #[test]
+    fn store_transaction_overwrite() {
+        let dir = TempDir::new().unwrap();
+        let sdk = make_sdk(&dir);
+        let key = sample_key();
+        let txid = TransactionId::new("tx1");
+
+        sdk.store_transaction(&key, &txid, b"v1").unwrap();
+        sdk.store_transaction(&key, &txid, b"v2").unwrap();
+        let got = sdk.get_transaction(&key, &txid).unwrap();
+        assert_eq!(got.as_deref(), Some(b"v2".as_slice()));
+    }
+
+    #[test]
+    fn list_transactions_empty() {
+        let dir = TempDir::new().unwrap();
+        let sdk = make_sdk(&dir);
+        assert!(sdk.list_transactions(&sample_key()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_transactions_populated() {
+        let dir = TempDir::new().unwrap();
+        let sdk = make_sdk(&dir);
+        let key = sample_key();
+
+        sdk.store_transaction(&key, &TransactionId::new("t1"), b"a")
+            .unwrap();
+        sdk.store_transaction(&key, &TransactionId::new("t2"), b"b")
+            .unwrap();
+
+        let mut ids: Vec<String> = sdk
+            .list_transactions(&key)
+            .unwrap()
+            .into_iter()
+            .map(|t| String::from_utf8_lossy(t.as_bytes()).to_string())
+            .collect();
+        ids.sort();
+        assert_eq!(ids, vec!["t1", "t2"]);
+    }
+
+    // ── session CRUD ───────────────────────────────────────────────
+
+    #[test]
+    fn store_and_get_session() {
+        let dir = TempDir::new().unwrap();
+        let sdk = make_sdk(&dir);
+        let key = sample_key();
+        let sid = SessionId::new("s1");
+        let data = b"session-data";
+
+        sdk.store_session(&key, &sid, data).unwrap();
+        let got = sdk.get_session(&key, &sid).unwrap();
+        assert_eq!(got.as_deref(), Some(data.as_slice()));
+    }
+
+    #[test]
+    fn get_session_missing() {
+        let dir = TempDir::new().unwrap();
+        let sdk = make_sdk(&dir);
+        assert_eq!(
+            sdk.get_session(&sample_key(), &SessionId::new("x")).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn list_sessions_populated() {
+        let dir = TempDir::new().unwrap();
+        let sdk = make_sdk(&dir);
+        let key = sample_key();
+
+        sdk.store_session(&key, &SessionId::new("s1"), b"a")
+            .unwrap();
+        sdk.store_session(&key, &SessionId::new("s2"), b"b")
+            .unwrap();
+
+        let mut ids: Vec<String> = sdk
+            .list_sessions(&key)
+            .unwrap()
+            .into_iter()
+            .map(|s| String::from_utf8_lossy(s.as_bytes()).to_string())
+            .collect();
+        ids.sort();
+        assert_eq!(ids, vec!["s1", "s2"]);
+    }
+
+    // ── cleanup ────────────────────────────────────────────────────
+
+    #[test]
+    fn cleanup_partition_returns_count() {
+        let dir = TempDir::new().unwrap();
+        let sdk = make_sdk(&dir);
+        let key = sample_key();
+
+        sdk.store_transaction(&key, &TransactionId::new("t1"), b"a")
+            .unwrap();
+        sdk.store_session(&key, &SessionId::new("s1"), b"b")
+            .unwrap();
+
+        let removed = sdk.cleanup_partition(&key, 0).unwrap();
+        assert_eq!(removed, 2);
+
+        assert!(sdk.list_transactions(&key).unwrap().is_empty());
+        assert!(sdk.list_sessions(&key).unwrap().is_empty());
+    }
+
+    #[test]
+    fn cleanup_empty_partition() {
+        let dir = TempDir::new().unwrap();
+        let sdk = make_sdk(&dir);
+        assert_eq!(sdk.cleanup_partition(&sample_key(), 0).unwrap(), 0);
+    }
+
+    // ── get_stats ──────────────────────────────────────────────────
+
+    #[test]
+    fn stats_empty() {
+        let dir = TempDir::new().unwrap();
+        let sdk = make_sdk(&dir);
+        let stats = sdk.get_stats().unwrap();
+        assert_eq!(stats.total_partitions, 0);
+        assert_eq!(stats.total_size_bytes, 0);
+        assert_eq!(stats.transaction_count, 0);
+        assert_eq!(stats.session_count, 0);
+        assert!((stats.cache_hit_rate - 1.0).abs() < f64::EPSILON);
+        assert!(stats.persistent_available);
+    }
+
+    #[test]
+    fn stats_reflects_data() {
+        let dir = TempDir::new().unwrap();
+        let sdk = make_sdk(&dir);
+        let key = sample_key();
+
+        sdk.store_transaction(&key, &TransactionId::new("t1"), b"abc")
+            .unwrap();
+        sdk.store_session(&key, &SessionId::new("s1"), b"de")
+            .unwrap();
+
+        let stats = sdk.get_stats().unwrap();
+        assert_eq!(stats.transaction_count, 1);
+        assert_eq!(stats.session_count, 1);
+        assert_eq!(stats.total_size_bytes, 5); // 3 + 2
+    }
+
+    // ── chain tips (SQLite) ────────────────────────────────────────
+
+    #[test]
+    fn save_and_load_chain_tip() {
+        let dir = TempDir::new().unwrap();
+        let sdk = make_sdk(&dir);
+
+        let tip = BilateralChainTip {
+            counterparty_device_id: vec![1u8; 32],
+            chain_tip_id: vec![2u8; 32],
+            last_state_hash: vec![3u8; 32],
+            state_number: 7,
+            last_updated: 100,
+            is_synchronized: true,
+        };
+
+        sdk.save_chain_tip(&tip).unwrap();
+        let loaded = sdk.load_chain_tip(&tip.counterparty_device_id).unwrap();
+        assert!(loaded.is_some());
+        let loaded = loaded.unwrap();
+        assert_eq!(loaded.counterparty_device_id, tip.counterparty_device_id);
+        assert_eq!(loaded.chain_tip_id, tip.chain_tip_id);
+        assert_eq!(loaded.last_state_hash, tip.last_state_hash);
+        assert_eq!(loaded.state_number, tip.state_number);
+        assert!(loaded.is_synchronized);
+    }
+
+    #[test]
+    fn load_chain_tip_missing() {
+        let dir = TempDir::new().unwrap();
+        let sdk = make_sdk(&dir);
+        assert!(sdk.load_chain_tip(&[0u8; 32]).unwrap().is_none());
+    }
+
+    #[test]
+    fn save_chain_tip_upsert() {
+        let dir = TempDir::new().unwrap();
+        let sdk = make_sdk(&dir);
+        let device_id = vec![9u8; 32];
+
+        let tip1 = BilateralChainTip {
+            counterparty_device_id: device_id.clone(),
+            chain_tip_id: vec![1; 32],
+            last_state_hash: vec![1; 32],
+            state_number: 1,
+            last_updated: 10,
+            is_synchronized: false,
+        };
+        sdk.save_chain_tip(&tip1).unwrap();
+
+        let tip2 = BilateralChainTip {
+            counterparty_device_id: device_id.clone(),
+            chain_tip_id: vec![2; 32],
+            last_state_hash: vec![2; 32],
+            state_number: 2,
+            last_updated: 20,
+            is_synchronized: true,
+        };
+        sdk.save_chain_tip(&tip2).unwrap();
+
+        let loaded = sdk.load_chain_tip(&device_id).unwrap().unwrap();
+        assert_eq!(loaded.state_number, 2);
+        assert!(loaded.is_synchronized);
+    }
+
+    #[test]
+    fn list_chain_tips_order() {
+        let dir = TempDir::new().unwrap();
+        let sdk = make_sdk(&dir);
+
+        for i in 0u8..3 {
+            let tip = BilateralChainTip {
+                counterparty_device_id: vec![i; 32],
+                chain_tip_id: vec![i; 32],
+                last_state_hash: vec![i; 32],
+                state_number: i as u64,
+                last_updated: (i as u64) * 10,
+                is_synchronized: false,
+            };
+            sdk.save_chain_tip(&tip).unwrap();
+        }
+
+        let tips = sdk.list_chain_tips().unwrap();
+        assert_eq!(tips.len(), 3);
+        assert!(
+            tips[0].last_updated >= tips[1].last_updated
+                && tips[1].last_updated >= tips[2].last_updated,
+            "tips should be ordered by last_updated DESC"
+        );
+    }
+
+    // ── persist_bilateral_transaction ──────────────────────────────
+
+    #[test]
+    fn persist_bilateral_transaction_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let sdk = make_sdk(&dir);
+
+        sdk.persist_bilateral_transaction(
+            b"tx001",
+            b"remote_device",
+            b"commitment_hash",
+            b"op_data",
+            "PREPARE",
+            "PENDING",
+            Some(b"local_sig"),
+            None,
+        )
+        .unwrap();
+
+        let pending = sdk.get_pending_transactions().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].0, b"tx001"); // tx_id
+        assert_eq!(pending[0].4, "PREPARE"); // phase
+        assert_eq!(pending[0].6, "PENDING"); // status
+    }
+
+    #[test]
+    fn update_bilateral_transaction_phase() {
+        let dir = TempDir::new().unwrap();
+        let sdk = make_sdk(&dir);
+
+        sdk.persist_bilateral_transaction(
+            b"tx002",
+            b"remote",
+            b"hash",
+            b"data",
+            "PREPARE",
+            "PENDING",
+            None,
+            None,
+        )
+        .unwrap();
+
+        sdk.update_bilateral_transaction_phase(b"tx002", "COMMIT", "COMPLETED")
+            .unwrap();
+
+        let pending = sdk.get_pending_transactions().unwrap();
+        assert!(
+            pending.is_empty(),
+            "COMPLETED transactions should not appear in pending"
+        );
+    }
+
+    // ── persist_receipt ────────────────────────────────────────────
+
+    #[test]
+    fn persist_receipt_succeeds() {
+        let dir = TempDir::new().unwrap();
+        let sdk = make_sdk(&dir);
+
+        sdk.persist_bilateral_transaction(
+            b"txR",
+            b"remote",
+            b"ch",
+            b"od",
+            "COMMIT",
+            "PENDING",
+            None,
+            None,
+        )
+        .unwrap();
+
+        sdk.persist_receipt(
+            b"receipt_001",
+            b"txR",
+            b"remote",
+            b"receipt-body",
+            b"sig_local",
+            b"sig_remote",
+        )
+        .unwrap();
+    }
+
+    // ── has_pending_state ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn has_pending_state_false_when_empty() {
+        let dir = TempDir::new().unwrap();
+        let sdk = make_sdk(&dir);
+        assert!(!sdk.has_pending_state(b"device").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn has_pending_state_true_after_insert() {
+        let dir = TempDir::new().unwrap();
+        let sdk = make_sdk(&dir);
+
+        sdk.persist_bilateral_transaction(
+            b"txP",
+            b"device",
+            b"ch",
+            b"od",
+            "PREPARE",
+            "PENDING",
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert!(sdk.has_pending_state(b"device").await.unwrap());
+    }
+
+    // ── get_relationship_tip ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn get_relationship_tip_none_when_empty() {
+        let dir = TempDir::new().unwrap();
+        let sdk = make_sdk(&dir);
+        assert!(sdk.get_relationship_tip(b"remote").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn get_relationship_tip_after_save() {
+        let dir = TempDir::new().unwrap();
+        let sdk = make_sdk(&dir);
+
+        let tip = BilateralChainTip {
+            counterparty_device_id: b"remote".to_vec(),
+            chain_tip_id: vec![0xAA; 32],
+            last_state_hash: vec![0xBB; 32],
+            state_number: 5,
+            last_updated: 42,
+            is_synchronized: true,
+        };
+        sdk.save_chain_tip(&tip).unwrap();
+
+        let hash = sdk.get_relationship_tip(b"remote").await.unwrap();
+        assert_eq!(hash, Some(vec![0xBB; 32]));
+    }
+
+    // ── get_remote_tip_mirror ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn get_remote_tip_mirror_none_when_empty() {
+        let dir = TempDir::new().unwrap();
+        let sdk = make_sdk(&dir);
+        assert!(sdk
+            .get_remote_tip_mirror(b"remote")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    // ── get_device_tree_proof ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn get_device_tree_proof_is_decodable() {
+        let dir = TempDir::new().unwrap();
+        let sdk = make_sdk(&dir);
+
+        let bytes = sdk.get_device_tree_proof().await.unwrap();
+        assert!(!bytes.is_empty());
+
+        let proof =
+            crate::generated::DeviceTreeProof::decode(bytes.as_slice()).expect("must decode");
+        assert!(proof.leaf_to_root);
+        assert_eq!(proof.path_bits_len, 0);
+    }
+
+    // ── get_local_chain_history & get_remote_chain_history ────────
+
+    #[tokio::test]
+    async fn chain_history_empty() {
+        let dir = TempDir::new().unwrap();
+        let sdk = make_sdk(&dir);
+
+        assert!(sdk
+            .get_local_chain_history(b"dev")
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(sdk
+            .get_remote_chain_history(b"dev")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    // ── partition isolation ────────────────────────────────────────
+
+    #[test]
+    fn different_keys_are_isolated() {
+        let dir = TempDir::new().unwrap();
+        let sdk = make_sdk(&dir);
+
+        let k1 = BilateralKey {
+            sender: VaultId::new("a"),
+            receiver: VaultId::new("b"),
+        };
+        let k2 = BilateralKey {
+            sender: VaultId::new("c"),
+            receiver: VaultId::new("d"),
+        };
+
+        sdk.store_transaction(&k1, &TransactionId::new("t"), b"v1")
+            .unwrap();
+        sdk.store_transaction(&k2, &TransactionId::new("t"), b"v2")
+            .unwrap();
+
+        assert_eq!(
+            sdk.get_transaction(&k1, &TransactionId::new("t"))
+                .unwrap()
+                .as_deref(),
+            Some(b"v1".as_slice())
+        );
+        assert_eq!(
+            sdk.get_transaction(&k2, &TransactionId::new("t"))
+                .unwrap()
+                .as_deref(),
+            Some(b"v2".as_slice())
+        );
+    }
+
+    // ── BilateralChainTip struct ───────────────────────────────────
+
+    #[test]
+    fn chain_tip_clone_and_debug() {
+        let tip = BilateralChainTip {
+            counterparty_device_id: vec![1],
+            chain_tip_id: vec![2],
+            last_state_hash: vec![3],
+            state_number: 0,
+            last_updated: 0,
+            is_synchronized: false,
+        };
+        let tip2 = tip.clone();
+        assert_eq!(tip.counterparty_device_id, tip2.counterparty_device_id);
+        let dbg = format!("{tip:?}");
+        assert!(dbg.contains("BilateralChainTip"));
+    }
+
+    // ── BilateralStorageStats ──────────────────────────────────────
+
+    #[test]
+    fn storage_stats_debug_and_clone() {
+        let stats = BilateralStorageStats {
+            total_partitions: 1,
+            total_size_bytes: 100,
+            transaction_count: 2,
+            session_count: 3,
+            cache_hit_rate: 0.5,
+            persistent_available: true,
+        };
+        let stats2 = stats.clone();
+        assert_eq!(stats.total_partitions, stats2.total_partitions);
+        let dbg = format!("{stats:?}");
+        assert!(dbg.contains("BilateralStorageStats"));
+    }
+
+    // ── get_smt_proof_for_state ────────────────────────────────────
+
+    #[tokio::test]
+    async fn get_smt_proof_for_state_missing_proof() {
+        let dir = TempDir::new().unwrap();
+        let sdk = make_sdk(&dir);
+
+        let state = crate::generated::BilateralState {
+            state_bytes: vec![],
+            smt_proof: None,
+            device_tree_proof: None,
+            chain_tip: vec![0u8; 32],
+            state_number: 0,
+            smt_root: vec![0u8; 32],
+            device_tree_root: vec![0u8; 32],
+            relationship_key: vec![0u8; 32],
+        };
+        let mut buf = Vec::new();
+        prost::Message::encode(&state, &mut buf).unwrap();
+
+        let result = sdk.get_smt_proof_for_state(b"remote", &buf).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn get_smt_proof_for_state_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let sdk = make_sdk(&dir);
+
+        let proof = crate::generated::SmtProof {
+            key: vec![0xAA; 32],
+            v_path: None,
+            siblings: vec![],
+        };
+        let state = crate::generated::BilateralState {
+            state_bytes: vec![],
+            smt_proof: Some(proof.clone()),
+            device_tree_proof: None,
+            chain_tip: vec![0u8; 32],
+            state_number: 0,
+            smt_root: vec![0u8; 32],
+            device_tree_root: vec![0u8; 32],
+            relationship_key: vec![0u8; 32],
+        };
+        let mut buf = Vec::new();
+        prost::Message::encode(&state, &mut buf).unwrap();
+
+        let proof_bytes = sdk.get_smt_proof_for_state(b"remote", &buf).await.unwrap();
+        let decoded =
+            crate::generated::SmtProof::decode(proof_bytes.as_slice()).expect("must decode");
+        assert_eq!(decoded.key, vec![0xAA; 32]);
+    }
+
+    // ── bilateral::with_config ─────────────────────────────────────
+
+    #[test]
+    fn with_config_helper() {
+        let dir = TempDir::new().unwrap();
+        let sdk = bilateral::with_config(tmp_config(&dir)).unwrap();
+        let stats = sdk.get_stats().unwrap();
+        assert_eq!(stats.total_partitions, 0);
+    }
+
+    // ── multi-partition stats ──────────────────────────────────────
+
+    #[test]
+    fn stats_multiple_partitions() {
+        let dir = TempDir::new().unwrap();
+        let sdk = make_sdk(&dir);
+
+        let k1 = BilateralKey {
+            sender: VaultId::new("a"),
+            receiver: VaultId::new("b"),
+        };
+        let k2 = BilateralKey {
+            sender: VaultId::new("c"),
+            receiver: VaultId::new("d"),
+        };
+
+        sdk.store_transaction(&k1, &TransactionId::new("t1"), b"aaa")
+            .unwrap();
+        sdk.store_transaction(&k2, &TransactionId::new("t2"), b"bb")
+            .unwrap();
+        sdk.store_session(&k1, &SessionId::new("s1"), b"cccc")
+            .unwrap();
+
+        let stats = sdk.get_stats().unwrap();
+        assert_eq!(stats.transaction_count, 2);
+        assert_eq!(stats.session_count, 1);
+        assert_eq!(stats.total_size_bytes, 9); // 3 + 2 + 4
+        assert_eq!(stats.total_partitions, 2);
+    }
+
+    // ── stats after cleanup ────────────────────────────────────────
+
+    #[test]
+    fn stats_after_cleanup() {
+        let dir = TempDir::new().unwrap();
+        let sdk = make_sdk(&dir);
+        let key = sample_key();
+
+        sdk.store_transaction(&key, &TransactionId::new("t1"), b"data")
+            .unwrap();
+        sdk.store_session(&key, &SessionId::new("s1"), b"sess")
+            .unwrap();
+
+        sdk.cleanup_partition(&key, 0).unwrap();
+
+        let stats = sdk.get_stats().unwrap();
+        assert_eq!(stats.transaction_count, 0);
+        assert_eq!(stats.session_count, 0);
+        assert_eq!(stats.total_size_bytes, 0);
+    }
+
+    // ── store_transaction with empty data ──────────────────────────
+
+    #[test]
+    fn store_transaction_empty_data() {
+        let dir = TempDir::new().unwrap();
+        let sdk = make_sdk(&dir);
+        let key = sample_key();
+        let txid = TransactionId::new("empty_tx");
+
+        sdk.store_transaction(&key, &txid, b"").unwrap();
+        let got = sdk.get_transaction(&key, &txid).unwrap();
+        assert_eq!(got.as_deref(), Some(b"".as_slice()));
+    }
+
+    // ── store_session overwrites ───────────────────────────────────
+
+    #[test]
+    fn store_session_overwrite() {
+        let dir = TempDir::new().unwrap();
+        let sdk = make_sdk(&dir);
+        let key = sample_key();
+        let sid = SessionId::new("s1");
+
+        sdk.store_session(&key, &sid, b"v1").unwrap();
+        sdk.store_session(&key, &sid, b"v2").unwrap();
+        let got = sdk.get_session(&key, &sid).unwrap();
+        assert_eq!(got.as_deref(), Some(b"v2".as_slice()));
+    }
+
+    // ── cleanup only affects target partition ──────────────────────
+
+    #[test]
+    fn cleanup_does_not_affect_other_partitions() {
+        let dir = TempDir::new().unwrap();
+        let sdk = make_sdk(&dir);
+
+        let k1 = BilateralKey {
+            sender: VaultId::new("a"),
+            receiver: VaultId::new("b"),
+        };
+        let k2 = BilateralKey {
+            sender: VaultId::new("c"),
+            receiver: VaultId::new("d"),
+        };
+
+        sdk.store_transaction(&k1, &TransactionId::new("t1"), b"a")
+            .unwrap();
+        sdk.store_transaction(&k2, &TransactionId::new("t2"), b"b")
+            .unwrap();
+
+        sdk.cleanup_partition(&k1, 0).unwrap();
+
+        assert!(sdk.list_transactions(&k1).unwrap().is_empty());
+        assert_eq!(sdk.list_transactions(&k2).unwrap().len(), 1);
+    }
+
+    // ── persist multiple transactions, query pending ───────────────
+
+    #[test]
+    fn get_pending_transactions_filters_by_status() {
+        let dir = TempDir::new().unwrap();
+        let sdk = make_sdk(&dir);
+
+        sdk.persist_bilateral_transaction(
+            b"tx_a", b"dev_a", b"ch", b"data", "PREPARE", "PENDING", None, None,
+        )
+        .unwrap();
+        sdk.persist_bilateral_transaction(
+            b"tx_b", b"dev_b", b"ch", b"data", "COMMIT", "COMPLETED", None, None,
+        )
+        .unwrap();
+        sdk.persist_bilateral_transaction(
+            b"tx_c", b"dev_c", b"ch", b"data", "COMMIT", "IN_PROGRESS", None, None,
+        )
+        .unwrap();
+
+        let pending = sdk.get_pending_transactions().unwrap();
+        assert_eq!(pending.len(), 2);
+        let statuses: Vec<&str> = pending.iter().map(|t| t.6.as_str()).collect();
+        assert!(statuses.contains(&"PENDING"));
+        assert!(statuses.contains(&"IN_PROGRESS"));
+    }
+
+    // ── persist_receipt with signatures ─────────────────────────────
+
+    #[test]
+    fn persist_receipt_with_all_fields() {
+        let dir = TempDir::new().unwrap();
+        let sdk = make_sdk(&dir);
+
+        sdk.persist_bilateral_transaction(
+            b"tx_r2", b"remote", b"ch", b"od", "COMMIT", "PENDING", None, None,
+        )
+        .unwrap();
+
+        sdk.persist_receipt(
+            b"r_001", b"tx_r2", b"remote", b"receipt_body", b"sig_a", b"sig_b",
+        )
+        .unwrap();
+
+        sdk.persist_receipt(
+            b"r_002", b"tx_r2", b"remote", b"receipt_body_2", b"sig_c", b"sig_d",
+        )
+        .unwrap();
+    }
+
+    // ── make_key_string with special characters ────────────────────
+
+    #[test]
+    fn make_key_string_with_unicode() {
+        let k = BilateralKey {
+            sender: VaultId::new("älice"),
+            receiver: VaultId::new("böb"),
+        };
+        let s = BilateralStorageSDK::make_key_string(&k);
+        assert!(s.contains(':'));
+        assert!(s.starts_with("älice"));
+        assert!(s.ends_with("böb"));
+    }
+
+    // ── chain tips: is_synchronized false ───────────────────────────
+
+    #[test]
+    fn chain_tip_not_synchronized() {
+        let dir = TempDir::new().unwrap();
+        let sdk = make_sdk(&dir);
+
+        let tip = BilateralChainTip {
+            counterparty_device_id: vec![5u8; 32],
+            chain_tip_id: vec![6u8; 32],
+            last_state_hash: vec![7u8; 32],
+            state_number: 0,
+            last_updated: 0,
+            is_synchronized: false,
+        };
+        sdk.save_chain_tip(&tip).unwrap();
+
+        let loaded = sdk
+            .load_chain_tip(&tip.counterparty_device_id)
+            .unwrap()
+            .unwrap();
+        assert!(!loaded.is_synchronized);
+    }
+
+    // ── list_chain_tips empty ──────────────────────────────────────
+
+    #[test]
+    fn list_chain_tips_empty() {
+        let dir = TempDir::new().unwrap();
+        let sdk = make_sdk(&dir);
+        assert!(sdk.list_chain_tips().unwrap().is_empty());
+    }
+
+    // ── get_smt_proof_for_state with invalid data ──────────────────
+
+    #[tokio::test]
+    async fn get_smt_proof_for_state_invalid_bytes() {
+        let dir = TempDir::new().unwrap();
+        let sdk = make_sdk(&dir);
+        let result = sdk.get_smt_proof_for_state(b"remote", b"not-protobuf").await;
+        assert!(result.is_err());
+    }
+
+    // ── has_pending_state after completion ──────────────────────────
+
+    #[tokio::test]
+    async fn has_pending_state_false_after_phase_update() {
+        let dir = TempDir::new().unwrap();
+        let sdk = make_sdk(&dir);
+
+        sdk.persist_bilateral_transaction(
+            b"txQ", b"device2", b"ch", b"od", "PREPARE", "PENDING", None, None,
+        )
+        .unwrap();
+
+        assert!(sdk.has_pending_state(b"device2").await.unwrap());
+
+        sdk.update_bilateral_transaction_phase(b"txQ", "COMMIT", "COMPLETED")
+            .unwrap();
+
+        assert!(!sdk.has_pending_state(b"device2").await.unwrap());
+    }
+
+    // ── concurrent-like: Arc<BilateralStorageSDK> ──────────────────
+
+    #[test]
+    fn sdk_is_thread_safe() {
+        let dir = TempDir::new().unwrap();
+        let sdk = Arc::new(make_sdk(&dir));
+        let sdk2 = Arc::clone(&sdk);
+
+        let h = std::thread::spawn(move || {
+            let key = BilateralKey {
+                sender: VaultId::new("thread_a"),
+                receiver: VaultId::new("thread_b"),
+            };
+            sdk2.store_transaction(&key, &TransactionId::new("t_thread"), b"data")
+                .unwrap();
+        });
+        h.join().unwrap();
+
+        let key = BilateralKey {
+            sender: VaultId::new("thread_a"),
+            receiver: VaultId::new("thread_b"),
+        };
+        let got = sdk
+            .get_transaction(&key, &TransactionId::new("t_thread"))
+            .unwrap();
+        assert_eq!(got.as_deref(), Some(b"data".as_slice()));
+    }
+
+    // ── persist_bilateral_transaction with signatures ───────────────
+
+    #[test]
+    fn persist_bilateral_transaction_with_both_signatures() {
+        let dir = TempDir::new().unwrap();
+        let sdk = make_sdk(&dir);
+
+        sdk.persist_bilateral_transaction(
+            b"tx_sig",
+            b"remote",
+            b"commit_h",
+            b"op",
+            "COMMIT",
+            "PENDING",
+            Some(b"local_sig_bytes"),
+            Some(b"remote_sig_bytes"),
+        )
+        .unwrap();
+
+        let pending = sdk.get_pending_transactions().unwrap();
+        assert_eq!(pending.len(), 1);
+    }
+
+    // ── config clone and debug ─────────────────────────────────────
+
+    #[test]
+    fn config_clone_and_debug() {
+        let cfg = BilateralStorageConfig {
+            base_path: "/test".into(),
+            max_cache_size: 42,
+            max_partitions: 5,
+            offline_mode: true,
+            compression_level: 3,
+        };
+        let cfg2 = cfg.clone();
+        assert_eq!(cfg2.max_cache_size, 42);
+        assert!(cfg2.offline_mode);
+        let dbg = format!("{cfg:?}");
+        assert!(dbg.contains("BilateralStorageConfig"));
+    }
+}

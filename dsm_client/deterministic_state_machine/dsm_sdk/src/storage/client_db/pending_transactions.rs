@@ -93,3 +93,88 @@ pub fn recover_pending_transactions() -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+
+    fn init_test_db() {
+        unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+    }
+
+    #[test]
+    #[serial]
+    fn store_and_get_pending_transaction() {
+        init_test_db();
+
+        store_pending_transaction("tx-pend-1", b"payload-data").expect("store");
+
+        let all = get_pending_transactions(None).expect("get all");
+        assert!(all.iter().any(|p| p.tx_id == "tx-pend-1"));
+
+        let found = all.iter().find(|p| p.tx_id == "tx-pend-1").unwrap();
+        assert_eq!(found.payload, b"payload-data");
+        assert_eq!(found.state, "CREATED");
+        assert_eq!(found.retry_count, 0);
+    }
+
+    #[test]
+    #[serial]
+    fn mark_state_increments_retry_count() {
+        init_test_db();
+
+        store_pending_transaction("tx-retry-1", b"data").expect("store");
+        mark_pending_transaction_state("tx-retry-1", "SUBMITTED").expect("mark submitted");
+
+        let all = get_pending_transactions(Some("SUBMITTED")).expect("get");
+        let found = all.iter().find(|p| p.tx_id == "tx-retry-1").unwrap();
+        assert_eq!(found.state, "SUBMITTED");
+        assert_eq!(found.retry_count, 1);
+
+        mark_pending_transaction_state("tx-retry-1", "FAILED").expect("mark failed");
+        let all2 = get_pending_transactions(Some("FAILED")).expect("get");
+        let found2 = all2.iter().find(|p| p.tx_id == "tx-retry-1").unwrap();
+        assert_eq!(found2.retry_count, 2);
+    }
+
+    #[test]
+    #[serial]
+    fn filter_returns_only_matching_state() {
+        init_test_db();
+
+        store_pending_transaction("tx-filter-a", b"a").expect("store a");
+        store_pending_transaction("tx-filter-b", b"b").expect("store b");
+        mark_pending_transaction_state("tx-filter-b", "COMMITTED").expect("mark committed");
+
+        let created = get_pending_transactions(Some("CREATED")).expect("get created");
+        assert!(created.iter().any(|p| p.tx_id == "tx-filter-a"));
+        assert!(!created.iter().any(|p| p.tx_id == "tx-filter-b"));
+
+        let committed = get_pending_transactions(Some("COMMITTED")).expect("get committed");
+        assert!(committed.iter().any(|p| p.tx_id == "tx-filter-b"));
+    }
+
+    #[test]
+    #[serial]
+    fn store_pending_transaction_upserts() {
+        init_test_db();
+
+        store_pending_transaction("tx-upsert", b"first").expect("store first");
+        store_pending_transaction("tx-upsert", b"second").expect("store second");
+
+        let all = get_pending_transactions(None).expect("get all");
+        let matches: Vec<_> = all.iter().filter(|p| p.tx_id == "tx-upsert").collect();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].payload, b"second");
+    }
+
+    #[test]
+    #[serial]
+    fn recover_pending_transactions_does_not_error_on_empty() {
+        init_test_db();
+        recover_pending_transactions().expect("recover should succeed on empty table");
+    }
+}

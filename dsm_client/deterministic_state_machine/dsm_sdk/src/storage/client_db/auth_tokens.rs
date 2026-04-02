@@ -118,3 +118,156 @@ pub fn delete_auth_token(endpoint: &str, device_id: &str, genesis: &str) -> Resu
     .map_err(|e| e.to_string())?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+
+    fn init_test_db() {
+        unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+    }
+
+    #[test]
+    #[serial]
+    fn store_and_get_auth_token() {
+        init_test_db();
+        store_auth_token("https://node.example", "dev-1", "gen-1", "tok-abc").unwrap();
+
+        let token = get_auth_token("https://node.example", "dev-1", "gen-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(token, "tok-abc");
+    }
+
+    #[test]
+    #[serial]
+    fn get_auth_token_returns_none_when_missing() {
+        init_test_db();
+        let token = get_auth_token("https://node.example", "dev-x", "gen-x").unwrap();
+        assert!(token.is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn delete_auth_token_removes_entry() {
+        init_test_db();
+        store_auth_token("https://n.example", "dev-2", "gen-2", "tok-del").unwrap();
+        delete_auth_token("https://n.example", "dev-2", "gen-2").unwrap();
+
+        let token = get_auth_token("https://n.example", "dev-2", "gen-2").unwrap();
+        assert!(token.is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn store_auth_token_upserts_on_conflict() {
+        init_test_db();
+        store_auth_token("https://ep", "d1", "g1", "old-token").unwrap();
+        store_auth_token("https://ep", "d1", "g1", "new-token").unwrap();
+
+        let token = get_auth_token("https://ep", "d1", "g1").unwrap().unwrap();
+        assert_eq!(token, "new-token");
+    }
+
+    #[test]
+    #[serial]
+    fn get_mismatched_genesis_detects_stale_token() {
+        init_test_db();
+        store_auth_token("https://ep", "d1", "gen-old", "tok").unwrap();
+
+        let mismatch = get_mismatched_genesis("https://ep", "d1", "gen-new")
+            .unwrap()
+            .unwrap();
+        assert_eq!(mismatch, "gen-old");
+    }
+
+    #[test]
+    #[serial]
+    fn get_mismatched_genesis_returns_none_when_matching() {
+        init_test_db();
+        store_auth_token("https://ep", "d1", "gen-same", "tok").unwrap();
+
+        let result = get_mismatched_genesis("https://ep", "d1", "gen-same").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn ensure_auth_tokens_bound_to_identity_purges_on_change() {
+        init_test_db();
+        ensure_auth_tokens_bound_to_identity("dev-a", "gen-a").unwrap();
+        store_auth_token("https://ep", "dev-a", "gen-a", "tok-1").unwrap();
+
+        ensure_auth_tokens_bound_to_identity("dev-b", "gen-b").unwrap();
+
+        let token = get_auth_token("https://ep", "dev-a", "gen-a").unwrap();
+        assert!(token.is_none(), "tokens should be purged after identity change");
+    }
+
+    #[test]
+    #[serial]
+    fn ensure_auth_tokens_bound_to_identity_idempotent_same_identity() {
+        init_test_db();
+        ensure_auth_tokens_bound_to_identity("dev-c", "gen-c").unwrap();
+        store_auth_token("https://ep", "dev-c", "gen-c", "tok-keep").unwrap();
+
+        ensure_auth_tokens_bound_to_identity("dev-c", "gen-c").unwrap();
+
+        let token = get_auth_token("https://ep", "dev-c", "gen-c")
+            .unwrap()
+            .unwrap();
+        assert_eq!(token, "tok-keep");
+    }
+
+    #[test]
+    #[serial]
+    fn multiple_endpoints_store_independently() {
+        init_test_db();
+        store_auth_token("https://ep1", "dev-m", "gen-m", "tok-1").unwrap();
+        store_auth_token("https://ep2", "dev-m", "gen-m", "tok-2").unwrap();
+
+        assert_eq!(
+            get_auth_token("https://ep1", "dev-m", "gen-m")
+                .unwrap()
+                .unwrap(),
+            "tok-1"
+        );
+        assert_eq!(
+            get_auth_token("https://ep2", "dev-m", "gen-m")
+                .unwrap()
+                .unwrap(),
+            "tok-2"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn delete_auth_token_does_not_affect_other_endpoints() {
+        init_test_db();
+        store_auth_token("https://ep1", "dev-n", "gen-n", "tok-a").unwrap();
+        store_auth_token("https://ep2", "dev-n", "gen-n", "tok-b").unwrap();
+
+        delete_auth_token("https://ep1", "dev-n", "gen-n").unwrap();
+
+        assert!(get_auth_token("https://ep1", "dev-n", "gen-n")
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            get_auth_token("https://ep2", "dev-n", "gen-n")
+                .unwrap()
+                .unwrap(),
+            "tok-b"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn get_mismatched_genesis_returns_none_when_no_tokens() {
+        init_test_db();
+        let result = get_mismatched_genesis("https://ep", "dev-z", "gen-z").unwrap();
+        assert!(result.is_none());
+    }
+}

@@ -72,3 +72,79 @@ pub async fn is_pending_online(smt_key: &[u8; 32]) -> bool {
     let guard = set.read().await;
     guard.contains(smt_key)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn init_shared_smt_returns_instance() {
+        let smt = init_shared_smt(1024);
+        assert!(Arc::strong_count(&smt) >= 1);
+    }
+
+    #[test]
+    fn init_shared_smt_is_idempotent() {
+        let a = init_shared_smt(1024);
+        let b = init_shared_smt(2048);
+        assert!(Arc::ptr_eq(&a, &b), "repeated init must return same Arc");
+    }
+
+    #[test]
+    fn get_shared_smt_after_init() {
+        let _ = init_shared_smt(1024);
+        let fetched = get_shared_smt();
+        assert!(fetched.is_some());
+    }
+
+    #[tokio::test]
+    async fn pending_online_set_insert_and_check() {
+        let key = [0xAA; 32];
+        clear_pending_online(&key).await;
+
+        assert!(!is_pending_online(&key).await);
+        let inserted = set_pending_online(&key).await;
+        assert!(inserted, "first insert should return true");
+        assert!(is_pending_online(&key).await);
+    }
+
+    #[tokio::test]
+    async fn pending_online_duplicate_insert_returns_false() {
+        let key = [0xBB; 32];
+        clear_pending_online(&key).await;
+
+        set_pending_online(&key).await;
+        let second = set_pending_online(&key).await;
+        assert!(!second, "duplicate insert should return false");
+    }
+
+    #[tokio::test]
+    async fn pending_online_clear_removes_key() {
+        let key = [0xCC; 32];
+        set_pending_online(&key).await;
+        assert!(is_pending_online(&key).await);
+
+        clear_pending_online(&key).await;
+        assert!(!is_pending_online(&key).await);
+    }
+
+    #[tokio::test]
+    async fn pending_online_independent_keys() {
+        let k1 = [0x01; 32];
+        let k2 = [0x02; 32];
+        clear_pending_online(&k1).await;
+        clear_pending_online(&k2).await;
+
+        set_pending_online(&k1).await;
+        assert!(is_pending_online(&k1).await);
+        assert!(!is_pending_online(&k2).await);
+    }
+
+    #[tokio::test]
+    async fn pending_online_clear_nonexistent_is_noop() {
+        let key = [0xDD; 32];
+        clear_pending_online(&key).await;
+        clear_pending_online(&key).await;
+        assert!(!is_pending_online(&key).await);
+    }
+}

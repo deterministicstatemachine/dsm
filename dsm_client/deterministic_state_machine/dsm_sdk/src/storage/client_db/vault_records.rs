@@ -394,3 +394,274 @@ fn read_persisted_vault_record(row: &Row) -> rusqlite::Result<PersistedVaultReco
         deposit_nonce: row.get(23)?,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+
+    fn init_test_db() {
+        unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+    }
+
+    fn make_vault_record(op_id: &str, direction: &str, state: &str) -> PersistedVaultRecord {
+        PersistedVaultRecord {
+            vault_op_id: op_id.to_string(),
+            direction: direction.to_string(),
+            vault_state: state.to_string(),
+            hash_lock: vec![0x11; 32],
+            vault_id: Some(format!("vid-{}", op_id)),
+            btc_amount_sats: 100_000,
+            btc_pubkey: vec![0x22; 33],
+            htlc_script: Some(vec![0x33; 64]),
+            htlc_address: Some("bc1qtest".to_string()),
+            external_commitment: None,
+            refund_iterations: 144,
+            created_at_state: 1,
+            entry_header: Some(vec![0x44; 80]),
+            parent_vault_id: None,
+            successor_depth: 0,
+            is_fractional_successor: false,
+            refund_hash_lock: vec![0x55; 32],
+            destination_address: None,
+            funding_txid: None,
+            exit_amount_sats: 0,
+            exit_header: None,
+            exit_confirm_depth: 0,
+            entry_txid: None,
+            deposit_nonce: Some(vec![0x66; 32]),
+        }
+    }
+
+    #[test]
+    fn vault_cols_has_24_columns() {
+        let count = VAULT_COLS.split(',').count();
+        assert_eq!(count, 24);
+    }
+
+    #[test]
+    #[serial]
+    fn upsert_and_get_vault_record_by_id() {
+        init_test_db();
+        let rec = make_vault_record("op-1", "btc_to_dbtc", "Initiated");
+        upsert_vault_record(&rec).unwrap();
+
+        let loaded = get_vault_record_by_id("op-1").unwrap().unwrap();
+        assert_eq!(loaded.vault_op_id, "op-1");
+        assert_eq!(loaded.direction, "btc_to_dbtc");
+        assert_eq!(loaded.btc_amount_sats, 100_000);
+        assert_eq!(loaded.refund_iterations, 144);
+        assert!(!loaded.is_fractional_successor);
+    }
+
+    #[test]
+    #[serial]
+    fn lookup_by_vault_id() {
+        init_test_db();
+        let rec = make_vault_record("op-2", "btc_to_dbtc", "completed");
+        upsert_vault_record(&rec).unwrap();
+
+        let loaded = super::get_vault_record_by_vault_id("vid-op-2").unwrap().unwrap();
+        assert_eq!(loaded.vault_op_id, "op-2");
+    }
+
+    #[test]
+    #[serial]
+    fn update_vault_record_state_persists() {
+        init_test_db();
+        let rec = make_vault_record("op-3", "btc_to_dbtc", "Initiated");
+        upsert_vault_record(&rec).unwrap();
+        update_vault_record_state("op-3", "SweepPending").unwrap();
+
+        let loaded = get_vault_record_by_id("op-3").unwrap().unwrap();
+        assert_eq!(loaded.vault_state, "SweepPending");
+    }
+
+    #[test]
+    #[serial]
+    fn update_vault_record_destination_address_persists() {
+        init_test_db();
+        let rec = make_vault_record("op-4", "btc_to_dbtc", "Initiated");
+        upsert_vault_record(&rec).unwrap();
+        set_vault_record_destination_address("op-4", "bc1qnewdest").unwrap();
+
+        let loaded = get_vault_record_by_id("op-4").unwrap().unwrap();
+        assert_eq!(loaded.destination_address.as_deref(), Some("bc1qnewdest"));
+    }
+
+    #[test]
+    #[serial]
+    fn update_vault_record_exit_amount_persists() {
+        init_test_db();
+        let rec = make_vault_record("op-5", "dbtc_to_btc", "Initiated");
+        upsert_vault_record(&rec).unwrap();
+        update_vault_record_exit_amount("op-5", 42_000).unwrap();
+
+        let loaded = get_vault_record_by_id("op-5").unwrap().unwrap();
+        assert_eq!(loaded.exit_amount_sats, 42_000);
+    }
+
+    #[test]
+    #[serial]
+    fn list_and_delete_vault_records() {
+        init_test_db();
+        upsert_vault_record(&make_vault_record("op-6a", "btc_to_dbtc", "completed")).unwrap();
+        upsert_vault_record(&make_vault_record("op-6b", "btc_to_dbtc", "completed")).unwrap();
+
+        let all = list_vault_records_db().unwrap();
+        assert_eq!(all.len(), 2);
+
+        delete_vault_record("op-6a").unwrap();
+        let all = list_vault_records_db().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].vault_op_id, "op-6b");
+    }
+
+    #[test]
+    #[serial]
+    fn list_pending_exit_burns_filters_correctly() {
+        init_test_db();
+        let mut rec = make_vault_record("op-7", "dbtc_to_btc", "SweepPending");
+        rec.is_fractional_successor = true;
+        upsert_vault_record(&rec).unwrap();
+
+        let mut rec2 = make_vault_record("op-8", "btc_to_dbtc", "completed");
+        rec2.vault_id = Some("vid-op-8".to_string());
+        upsert_vault_record(&rec2).unwrap();
+
+        let pending = list_pending_exit_burns().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].vault_op_id, "op-7");
+    }
+
+    #[test]
+    #[serial]
+    fn get_nonexistent_vault_record_returns_none() {
+        init_test_db();
+        assert!(get_vault_record_by_id("nonexistent").unwrap().is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn update_vault_record_funding_txid_persists() {
+        init_test_db();
+        let rec = make_vault_record("op-ft", "btc_to_dbtc", "Initiated");
+        upsert_vault_record(&rec).unwrap();
+        update_vault_record_funding_txid("op-ft", "txid-funding-abc").unwrap();
+
+        let loaded = get_vault_record_by_id("op-ft").unwrap().unwrap();
+        assert_eq!(loaded.funding_txid.as_deref(), Some("txid-funding-abc"));
+    }
+
+    #[test]
+    #[serial]
+    fn update_vault_record_entry_txid_persists() {
+        init_test_db();
+        let rec = make_vault_record("op-et", "btc_to_dbtc", "completed");
+        upsert_vault_record(&rec).unwrap();
+        let entry_txid = [0x99u8; 32];
+        update_vault_record_entry_txid("op-et", &entry_txid).unwrap();
+
+        let loaded = get_vault_record_by_id("op-et").unwrap().unwrap();
+        assert_eq!(loaded.entry_txid.as_deref(), Some(entry_txid.as_ref()));
+    }
+
+    #[test]
+    #[serial]
+    fn update_vault_record_exit_anchor_persists() {
+        init_test_db();
+        let rec = make_vault_record("op-ea", "dbtc_to_btc", "SweepPending");
+        upsert_vault_record(&rec).unwrap();
+        let exit_header = [0xBB; 80];
+        update_vault_record_exit_anchor("op-ea", &exit_header, 6).unwrap();
+
+        let loaded = get_vault_record_by_id("op-ea").unwrap().unwrap();
+        assert_eq!(loaded.exit_header.as_deref(), Some(exit_header.as_ref()));
+        assert_eq!(loaded.exit_confirm_depth, 6);
+    }
+
+    #[test]
+    #[serial]
+    fn list_orphaned_fractional_successors_filters() {
+        init_test_db();
+        let mut orphan = make_vault_record("op-orph", "dbtc_to_btc", "Initiated");
+        orphan.is_fractional_successor = true;
+        orphan.funding_txid = None;
+        upsert_vault_record(&orphan).unwrap();
+
+        let mut not_orphan = make_vault_record("op-norph", "dbtc_to_btc", "Initiated");
+        not_orphan.vault_id = Some("vid-op-norph".to_string());
+        not_orphan.is_fractional_successor = true;
+        not_orphan.funding_txid = Some("some-txid".to_string());
+        upsert_vault_record(&not_orphan).unwrap();
+
+        let orphans = list_orphaned_fractional_successors().unwrap();
+        assert_eq!(orphans.len(), 1);
+        assert_eq!(orphans[0].vault_op_id, "op-orph");
+    }
+
+    #[test]
+    #[serial]
+    fn get_fractional_successor_by_parent_finds_child() {
+        init_test_db();
+        let parent = make_vault_record("op-parent", "btc_to_dbtc", "completed");
+        upsert_vault_record(&parent).unwrap();
+
+        let mut child = make_vault_record("op-child", "dbtc_to_btc", "Initiated");
+        child.vault_id = Some("vid-op-child".to_string());
+        child.parent_vault_id = Some("vid-op-parent".to_string());
+        child.is_fractional_successor = true;
+        upsert_vault_record(&child).unwrap();
+
+        let found = get_fractional_successor_by_parent("vid-op-parent")
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.vault_op_id, "op-child");
+        assert!(found.is_fractional_successor);
+    }
+
+    #[test]
+    #[serial]
+    fn find_vault_anchor_for_amount_returns_smallest_sufficient() {
+        init_test_db();
+        let mut r1 = make_vault_record("op-anc1", "btc_to_dbtc", "completed");
+        r1.btc_amount_sats = 50_000;
+        upsert_vault_record(&r1).unwrap();
+
+        let mut r2 = make_vault_record("op-anc2", "btc_to_dbtc", "completed");
+        r2.vault_id = Some("vid-op-anc2".to_string());
+        r2.btc_amount_sats = 200_000;
+        r2.deposit_nonce = Some(vec![0x77; 32]);
+        upsert_vault_record(&r2).unwrap();
+
+        let anchor = find_vault_anchor_for_amount(60_000).unwrap().unwrap();
+        assert_eq!(anchor.0, "vid-op-anc2");
+    }
+
+    #[test]
+    #[serial]
+    fn upsert_vault_record_replaces_existing() {
+        init_test_db();
+        let mut rec = make_vault_record("op-ups", "btc_to_dbtc", "Initiated");
+        upsert_vault_record(&rec).unwrap();
+
+        rec.vault_state = "completed".to_string();
+        rec.btc_amount_sats = 999_000;
+        upsert_vault_record(&rec).unwrap();
+
+        let loaded = get_vault_record_by_id("op-ups").unwrap().unwrap();
+        assert_eq!(loaded.vault_state, "completed");
+        assert_eq!(loaded.btc_amount_sats, 999_000);
+    }
+
+    #[test]
+    #[serial]
+    fn get_fractional_successor_by_parent_returns_none() {
+        init_test_db();
+        assert!(get_fractional_successor_by_parent("no-parent")
+            .unwrap()
+            .is_none());
+    }
+}

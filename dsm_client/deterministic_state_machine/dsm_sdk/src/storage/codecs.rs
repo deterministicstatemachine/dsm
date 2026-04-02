@@ -358,3 +358,254 @@ pub fn read_string(r: &mut &[u8]) -> std::io::Result<String> {
     let v = read_vec(r)?;
     Ok(str::from_utf8(&v).unwrap_or("").to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn hash_blake3_bytes_deterministic_and_nonzero() {
+        let h1 = hash_blake3_bytes(b"hello");
+        let h2 = hash_blake3_bytes(b"hello");
+        assert_eq!(h1, h2);
+        assert_ne!(h1, [0u8; 32]);
+    }
+
+    #[test]
+    fn hash_blake3_bytes_different_inputs() {
+        let h1 = hash_blake3_bytes(b"alpha");
+        let h2 = hash_blake3_bytes(b"beta");
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn smt_proof_bytes_varies_with_root() {
+        let data = b"some-encoded-data";
+        let p1 = smt_proof_bytes(b"root-a", data);
+        let p2 = smt_proof_bytes(b"root-b", data);
+        assert_ne!(p1, p2);
+    }
+
+    #[test]
+    fn smt_proof_bytes_varies_with_data() {
+        let root = b"merkle-root";
+        let p1 = smt_proof_bytes(root, b"data-1");
+        let p2 = smt_proof_bytes(root, b"data-2");
+        assert_ne!(p1, p2);
+    }
+
+    #[test]
+    fn generate_hash_chain_proof_equals_hash() {
+        let data = b"chain-data";
+        assert_eq!(generate_hash_chain_proof_bytes(data), hash_blake3_bytes(data));
+    }
+
+    #[test]
+    fn meta_round_trip_empty() {
+        let m: HashMap<String, Vec<u8>> = HashMap::new();
+        let blob = meta_to_blob(&m);
+        let back = meta_from_blob(&blob).expect("deserialize empty");
+        assert!(back.is_empty());
+    }
+
+    #[test]
+    fn meta_round_trip_single_entry() {
+        let mut m = HashMap::new();
+        m.insert("key1".to_string(), b"value1".to_vec());
+        let blob = meta_to_blob(&m);
+        let back = meta_from_blob(&blob).expect("deserialize");
+        assert_eq!(back.get("key1").unwrap(), b"value1");
+    }
+
+    #[test]
+    fn meta_round_trip_multiple_entries_preserves_all() {
+        let mut m = HashMap::new();
+        m.insert("alpha".to_string(), vec![1, 2, 3]);
+        m.insert("beta".to_string(), vec![4, 5]);
+        m.insert("gamma".to_string(), vec![]);
+        let blob = meta_to_blob(&m);
+        let back = meta_from_blob(&blob).expect("deserialize");
+        assert_eq!(back.len(), 3);
+        assert_eq!(back.get("alpha").unwrap(), &vec![1, 2, 3]);
+        assert_eq!(back.get("beta").unwrap(), &vec![4, 5]);
+        assert_eq!(back.get("gamma").unwrap(), &Vec::<u8>::new());
+    }
+
+    #[test]
+    fn meta_from_blob_rejects_truncated_data() {
+        assert!(meta_from_blob(&[]).is_err());
+        assert!(meta_from_blob(&[0x01, 0x00, 0x00, 0x00]).is_err());
+    }
+
+    #[test]
+    fn meta_from_blob_rejects_excessive_count() {
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&(20_000u32).to_le_bytes());
+        assert!(meta_from_blob(&blob).is_err());
+    }
+
+    #[test]
+    fn serialize_deserialize_genesis_op() {
+        let op = Operation::Genesis;
+        let bytes = serialize_operation(&op);
+        let back = deserialize_operation(&bytes).expect("deserialize genesis");
+        assert!(matches!(back, Operation::Genesis));
+    }
+
+    #[test]
+    fn deserialize_rejects_empty_bytes() {
+        let err = deserialize_operation(&[]).unwrap_err();
+        assert!(err.to_string().contains("Empty operation bytes"));
+    }
+
+    #[test]
+    fn deserialize_rejects_unknown_tag() {
+        let err = deserialize_operation(&[200u8]).unwrap_err();
+        assert!(err.to_string().contains("Unknown operation tag"));
+    }
+
+    #[test]
+    fn serialize_deserialize_noop_via_tag_255() {
+        let bytes = serialize_operation(&Operation::Noop);
+        assert_eq!(bytes, vec![255u8]);
+        let back = deserialize_operation(&bytes).expect("deserialize noop");
+        assert!(matches!(back, Operation::Noop));
+    }
+
+    #[test]
+    fn serialize_deserialize_transfer_round_trip() {
+        let balance = dsm::types::token_types::Balance::from_state(1000, [0u8; 32], 0);
+        let op = Operation::Transfer {
+            to_device_id: vec![0xAAu8; 32],
+            amount: balance,
+            token_id: b"dBTC".to_vec(),
+            mode: dsm::types::operations::TransactionMode::Bilateral,
+            nonce: vec![0xBBu8; 16],
+            verification: dsm::types::operations::VerificationType::Bilateral,
+            pre_commit: None,
+            recipient: vec![0xCCu8; 32],
+            to: vec![0xDDu8; 32],
+            message: "test transfer".to_string(),
+            signature: vec![0xEEu8; 64],
+        };
+        let bytes = serialize_operation(&op);
+        let back = deserialize_operation(&bytes).expect("deserialize transfer");
+        match back {
+            Operation::Transfer {
+                to_device_id,
+                amount,
+                token_id,
+                mode,
+                nonce,
+                verification,
+                pre_commit,
+                recipient,
+                to,
+                message,
+                ..
+            } => {
+                assert_eq!(to_device_id, vec![0xAAu8; 32]);
+                assert_eq!(amount.value(), 1000);
+                assert_eq!(token_id, b"dBTC".to_vec());
+                assert!(matches!(mode, dsm::types::operations::TransactionMode::Bilateral));
+                assert_eq!(nonce, vec![0xBBu8; 16]);
+                assert!(matches!(verification, dsm::types::operations::VerificationType::Bilateral));
+                assert!(pre_commit.is_none());
+                assert_eq!(recipient, vec![0xCCu8; 32]);
+                assert_eq!(to, vec![0xDDu8; 32]);
+                assert_eq!(message, "test transfer");
+            }
+            _ => panic!("expected Transfer variant"),
+        }
+    }
+
+    #[test]
+    fn encode_genesis_record_bytes_is_nonempty_and_deterministic() {
+        let rec = GenesisRecord {
+            genesis_id: "gen-1".into(),
+            device_id: "dev-1".into(),
+            mpc_proof: "mpc".into(),
+            dbrw_binding: "bind".into(),
+            merkle_root: "root".into(),
+            participant_count: 3,
+            progress_marker: "P".into(),
+            publication_hash: "pub".into(),
+            storage_nodes: vec!["n1".into(), "n2".into()],
+            entropy_hash: "ent".into(),
+            protocol_version: "1.0".into(),
+            hash_chain_proof: None,
+            smt_proof: None,
+            verification_step: None,
+        };
+        let enc1 = encode_genesis_record_bytes(&rec);
+        let enc2 = encode_genesis_record_bytes(&rec);
+        assert_eq!(enc1, enc2);
+        assert!(!enc1.is_empty());
+    }
+
+    #[test]
+    fn take_reads_exact_bytes() {
+        let data = [1u8, 2, 3, 4, 5, 6, 7, 8];
+        let mut cursor: &[u8] = &data;
+        let first4 = take::<4>(&mut cursor).expect("take 4");
+        assert_eq!(first4, [1, 2, 3, 4]);
+        assert_eq!(cursor, &[5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn take_fails_on_insufficient_data() {
+        let data = [1u8, 2];
+        let mut cursor: &[u8] = &data;
+        assert!(take::<4>(&mut cursor).is_err());
+    }
+
+    #[test]
+    fn read_len_u32_parses_little_endian() {
+        let val = 42u32;
+        let bytes = val.to_le_bytes();
+        let mut cursor: &[u8] = &bytes;
+        assert_eq!(read_len_u32(&mut cursor).unwrap(), 42);
+    }
+
+    #[test]
+    fn read_u8_reads_single_byte() {
+        let data = [0xABu8, 0xCD];
+        let mut cursor: &[u8] = &data;
+        assert_eq!(read_u8(&mut cursor).unwrap(), 0xAB);
+        assert_eq!(cursor, &[0xCD]);
+    }
+
+    #[test]
+    fn read_u64_parses_little_endian() {
+        let val = 123456789u64;
+        let bytes = val.to_le_bytes();
+        let mut cursor: &[u8] = &bytes;
+        assert_eq!(read_u64(&mut cursor).unwrap(), 123456789);
+    }
+
+    #[test]
+    fn read_vec_reads_length_prefixed_data() {
+        let payload = b"hello";
+        let mut data = Vec::new();
+        data.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        data.extend_from_slice(payload);
+        data.extend_from_slice(b"extra");
+
+        let mut cursor: &[u8] = &data;
+        let v = read_vec(&mut cursor).unwrap();
+        assert_eq!(v, b"hello");
+        assert_eq!(cursor, b"extra");
+    }
+
+    #[test]
+    fn read_string_reads_length_prefixed_utf8() {
+        let s = "world";
+        let mut data = Vec::new();
+        data.extend_from_slice(&(s.len() as u32).to_le_bytes());
+        data.extend_from_slice(s.as_bytes());
+
+        let mut cursor: &[u8] = &data;
+        assert_eq!(read_string(&mut cursor).unwrap(), "world");
+    }
+}

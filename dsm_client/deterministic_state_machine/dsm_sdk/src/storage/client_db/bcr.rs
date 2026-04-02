@@ -209,3 +209,129 @@ fn decode_bcr_state_from_bytes(bytes: &[u8]) -> Result<State> {
 
     Ok(state)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+
+    fn init_test_db() {
+        unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+    }
+
+    #[test]
+    fn decode_bcr_state_from_bytes_rejects_empty_input() {
+        let result = decode_bcr_state_from_bytes(&[]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn decode_bcr_state_from_bytes_rejects_truncated_input() {
+        let result = decode_bcr_state_from_bytes(&[0x01, 0x00]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn get_bcr_states_rejects_wrong_device_id_length() {
+        let err = get_bcr_states(&[0u8; 16], false).unwrap_err();
+        assert!(err.to_string().contains("Invalid device_id length"));
+    }
+
+    #[test]
+    #[serial]
+    fn store_and_get_bcr_report() {
+        init_test_db();
+        let report = b"suspicious-activity-report-data";
+        store_bcr_report(report).unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn store_bcr_state_with_conn_roundtrip() {
+        use dsm::types::operations::Operation;
+        use dsm::types::state_types::{DeviceInfo, StateParams};
+
+        init_test_db();
+        let device_id = [0xAAu8; 32];
+        let device_info = DeviceInfo {
+            device_id,
+            public_key: vec![0xBB; 64],
+            metadata: vec![],
+        };
+        let operation = Operation::Genesis;
+        let params = StateParams::new(0, vec![0; 32], operation, device_info);
+        let state = State::new(params);
+
+        store_bcr_state(&state, true).unwrap();
+
+        let states = get_bcr_states(&device_id, true).unwrap();
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].state_number, 0);
+        assert_eq!(states[0].device_info.device_id, device_id);
+    }
+
+    #[test]
+    #[serial]
+    fn get_bcr_states_published_filter() {
+        use dsm::types::operations::Operation;
+        use dsm::types::state_types::{DeviceInfo, StateParams};
+
+        init_test_db();
+        let device_id = [0xCCu8; 32];
+        let device_info = DeviceInfo {
+            device_id,
+            public_key: vec![0xDD; 64],
+            metadata: vec![],
+        };
+
+        let params0 = StateParams::new(0, vec![0; 32], Operation::Genesis, device_info.clone());
+        let state0 = State::new(params0);
+        store_bcr_state(&state0, true).unwrap();
+
+        let mut params1 = StateParams::new(1, vec![1; 32], Operation::Genesis, device_info);
+        params1.prev_state_hash = state0.hash;
+        let state1 = State::new(params1);
+        store_bcr_state(&state1, false).unwrap();
+
+        let published = get_bcr_states(&device_id, true).unwrap();
+        assert_eq!(published.len(), 1);
+
+        let all = get_bcr_states(&device_id, false).unwrap();
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    #[serial]
+    fn get_bcr_states_returns_empty_for_valid_unknown_device() {
+        init_test_db();
+        let states = get_bcr_states(&[0xFFu8; 32], false).unwrap();
+        assert!(states.is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn store_multiple_bcr_reports() {
+        init_test_db();
+        store_bcr_report(b"report-1").unwrap();
+        store_bcr_report(b"report-2").unwrap();
+        store_bcr_report(b"report-3").unwrap();
+    }
+
+    #[test]
+    fn decode_bcr_state_rejects_bad_prev_hash_length() {
+        let mut buf = Vec::new();
+        buf.push(0x01); // version
+        buf.extend_from_slice(&0u64.to_le_bytes()); // state_number
+
+        // prev_state_hash with wrong length (16 bytes instead of 32)
+        let bad_hash = vec![0u8; 16];
+        buf.extend_from_slice(&(bad_hash.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&bad_hash);
+
+        let result = decode_bcr_state_from_bytes(&buf);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("32 bytes"));
+    }
+}

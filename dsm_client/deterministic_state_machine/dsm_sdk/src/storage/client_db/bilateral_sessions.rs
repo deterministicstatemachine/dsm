@@ -295,3 +295,183 @@ pub fn delete_pending_confirm_delivery(commitment_hash: &[u8]) -> Result<()> {
     )?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+
+    fn init_test_db() {
+        unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+    }
+
+    fn make_session(phase: &str) -> BilateralSessionRecord {
+        BilateralSessionRecord {
+            commitment_hash: vec![0x11; 32],
+            counterparty_device_id: vec![0x22; 32],
+            counterparty_genesis_hash: Some(vec![0x33; 32]),
+            operation_bytes: vec![0x44; 16],
+            phase: phase.to_string(),
+            local_signature: Some(vec![0x55; 64]),
+            counterparty_signature: None,
+            created_at_step: 1,
+            sender_ble_address: None,
+        }
+    }
+
+    #[test]
+    fn store_bilateral_session_rejects_empty_commitment_hash() {
+        let mut s = make_session("prepare");
+        s.commitment_hash = vec![];
+        let err = store_bilateral_session(&s).unwrap_err();
+        assert!(err.to_string().contains("commitment_hash"));
+    }
+
+    #[test]
+    fn store_bilateral_session_rejects_oversized_commitment_hash() {
+        let mut s = make_session("prepare");
+        s.commitment_hash = vec![0; 33];
+        let err = store_bilateral_session(&s).unwrap_err();
+        assert!(err.to_string().contains("commitment_hash"));
+    }
+
+    #[test]
+    fn store_bilateral_session_rejects_wrong_counterparty_length() {
+        let mut s = make_session("prepare");
+        s.counterparty_device_id = vec![0; 16];
+        let err = store_bilateral_session(&s).unwrap_err();
+        assert!(err.to_string().contains("counterparty_device_id"));
+    }
+
+    #[test]
+    fn store_bilateral_session_rejects_empty_operation_bytes() {
+        let mut s = make_session("prepare");
+        s.operation_bytes = vec![];
+        let err = store_bilateral_session(&s).unwrap_err();
+        assert!(err.to_string().contains("operation_bytes"));
+    }
+
+    #[test]
+    fn store_bilateral_session_rejects_invalid_phase() {
+        let s = make_session("invalid_phase");
+        let err = store_bilateral_session(&s).unwrap_err();
+        assert!(err.to_string().contains("Invalid phase"));
+    }
+
+    #[test]
+    fn store_bilateral_session_accepts_all_valid_phases() {
+        let valid_phases = [
+            "prepare",
+            "accept",
+            "commit",
+            "preparing",
+            "prepared",
+            "pending_user_action",
+            "accepted",
+            "rejected",
+            "confirm_pending",
+            "committed",
+            "failed",
+        ];
+        for phase in valid_phases {
+            let s = make_session(phase);
+            let result = store_bilateral_session(&s);
+            if let Err(e) = &result {
+                assert!(
+                    !e.to_string().contains("Invalid phase"),
+                    "phase {} rejected",
+                    phase
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cleanup_expired_returns_zero() {
+        assert_eq!(cleanup_expired_bilateral_sessions(999).unwrap(), 0);
+    }
+
+    #[test]
+    #[serial]
+    fn store_and_get_all_bilateral_sessions() {
+        init_test_db();
+        let s = make_session("prepare");
+        store_bilateral_session(&s).unwrap();
+
+        let all = get_all_bilateral_sessions().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].phase, "prepare");
+        assert_eq!(all[0].commitment_hash, vec![0x11; 32]);
+    }
+
+    #[test]
+    #[serial]
+    fn delete_bilateral_session_removes_entry() {
+        init_test_db();
+        let s = make_session("commit");
+        store_bilateral_session(&s).unwrap();
+
+        delete_bilateral_session(&vec![0x11; 32]).unwrap();
+        let all = get_all_bilateral_sessions().unwrap();
+        assert!(all.is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn store_bilateral_session_upserts_phase_on_conflict() {
+        init_test_db();
+        let s = make_session("prepare");
+        store_bilateral_session(&s).unwrap();
+
+        let mut updated = s.clone();
+        updated.phase = "committed".to_string();
+        updated.counterparty_signature = Some(vec![0x66; 64]);
+        store_bilateral_session(&updated).unwrap();
+
+        let all = get_all_bilateral_sessions().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].phase, "committed");
+        assert_eq!(all[0].counterparty_signature, Some(vec![0x66; 64]));
+    }
+
+    #[test]
+    #[serial]
+    fn store_multiple_bilateral_sessions() {
+        init_test_db();
+        let s1 = make_session("prepare");
+        store_bilateral_session(&s1).unwrap();
+
+        let mut s2 = make_session("accept");
+        s2.commitment_hash = vec![0x99; 32];
+        store_bilateral_session(&s2).unwrap();
+
+        let all = get_all_bilateral_sessions().unwrap();
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    #[serial]
+    fn delete_nonexistent_bilateral_session_is_noop() {
+        init_test_db();
+        delete_bilateral_session(&vec![0xFF; 32]).unwrap();
+        let all = get_all_bilateral_sessions().unwrap();
+        assert!(all.is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn bilateral_session_preserves_ble_address() {
+        init_test_db();
+        let mut s = make_session("prepare");
+        s.sender_ble_address = Some("AA:BB:CC:DD:EE:FF".to_string());
+        store_bilateral_session(&s).unwrap();
+
+        let all = get_all_bilateral_sessions().unwrap();
+        assert_eq!(
+            all[0].sender_ble_address.as_deref(),
+            Some("AA:BB:CC:DD:EE:FF")
+        );
+    }
+}

@@ -445,3 +445,346 @@ pub fn get_all_system_peers() -> Result<Vec<SystemPeerRecord>> {
     }
     Ok(peers)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+
+    fn init_test_db() {
+        unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+    }
+
+    fn make_peer(peer_key: &str, peer_type: SystemPeerType) -> SystemPeerRecord {
+        SystemPeerRecord {
+            peer_key: peer_key.to_string(),
+            device_id: vec![0xABu8; 32],
+            display_name: format!("Test {}", peer_key),
+            peer_type,
+            current_chain_tip: None,
+            created_at: 0,
+            updated_at: 0,
+            metadata: std::collections::HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn store_system_peer_rejects_wrong_device_id_length() {
+        let mut peer = make_peer("dlv", SystemPeerType::Dlv);
+        peer.device_id = vec![0u8; 16];
+        let err = store_system_peer(&peer).unwrap_err();
+        assert!(err.to_string().contains("32-byte device_id"));
+    }
+
+    #[test]
+    fn store_system_peer_rejects_empty_peer_key() {
+        let mut peer = make_peer("dlv", SystemPeerType::Dlv);
+        peer.peer_key = "  ".to_string();
+        let err = store_system_peer(&peer).unwrap_err();
+        assert!(err.to_string().contains("non-empty peer_key"));
+    }
+
+    #[test]
+    fn store_system_peer_rejects_seeded_chain_tip() {
+        let mut peer = make_peer("dlv", SystemPeerType::Dlv);
+        peer.current_chain_tip = Some(vec![1u8; 32]);
+        let err = store_system_peer(&peer).unwrap_err();
+        assert!(err.to_string().contains("must not seed current_chain_tip"));
+    }
+
+    #[test]
+    fn advance_system_chain_tip_rejects_empty_peer_key() {
+        let err = advance_system_chain_tip(
+            "  ",
+            SystemPeerType::Dlv,
+            &[0u8; 32],
+            b"payload",
+            &[0u8; 32],
+            1,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("non-empty peer_key"));
+    }
+
+    #[test]
+    fn advance_system_chain_tip_rejects_empty_payload() {
+        let err = advance_system_chain_tip(
+            "dlv",
+            SystemPeerType::Dlv,
+            &[0u8; 32],
+            b"",
+            &[0u8; 32],
+            1,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("payload must be non-empty"));
+    }
+
+    #[test]
+    fn advance_system_chain_tip_rejects_short_parent_tip() {
+        let err = advance_system_chain_tip(
+            "dlv",
+            SystemPeerType::Dlv,
+            &[0u8; 16],
+            b"payload",
+            &[0u8; 32],
+            1,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("expected_parent_tip must be 32 bytes"));
+    }
+
+    #[test]
+    fn advance_system_chain_tip_rejects_short_source_state_hash() {
+        let err = advance_system_chain_tip(
+            "dlv",
+            SystemPeerType::Dlv,
+            &[0u8; 32],
+            b"payload",
+            &[0u8; 10],
+            1,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("source_state_hash must be 32 bytes"));
+    }
+
+    #[test]
+    fn get_system_peer_by_device_id_rejects_wrong_length() {
+        let err = get_system_peer_by_device_id(&[0u8; 16]).unwrap_err();
+        assert!(err.to_string().contains("Invalid device_id length"));
+    }
+
+    #[test]
+    #[serial]
+    fn store_and_get_system_peer_roundtrip() {
+        init_test_db();
+        let peer = make_peer("dlv", SystemPeerType::Dlv);
+        store_system_peer(&peer).expect("store");
+
+        let loaded = get_system_peer("dlv").expect("get").expect("should exist");
+        assert_eq!(loaded.peer_key, "dlv");
+        assert_eq!(loaded.display_name, "Test dlv");
+        assert_eq!(loaded.peer_type, SystemPeerType::Dlv);
+        assert_eq!(loaded.device_id, vec![0xABu8; 32]);
+        assert!(loaded.current_chain_tip.is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn store_system_peer_rejects_duplicate() {
+        init_test_db();
+        let peer = make_peer("faucet", SystemPeerType::Faucet);
+        store_system_peer(&peer).expect("first store");
+        let err = store_system_peer(&peer).unwrap_err();
+        assert!(err.to_string().contains("already exists"));
+    }
+
+    #[test]
+    #[serial]
+    fn get_all_system_peers_returns_stored() {
+        init_test_db();
+        let p1 = make_peer("dlv", SystemPeerType::Dlv);
+        let mut p2 = make_peer("faucet", SystemPeerType::Faucet);
+        p2.device_id = vec![0xCDu8; 32];
+        store_system_peer(&p1).unwrap();
+        store_system_peer(&p2).unwrap();
+
+        let all = get_all_system_peers().unwrap();
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    #[serial]
+    fn get_system_peer_by_device_id_roundtrip() {
+        init_test_db();
+        let peer = make_peer("dlv", SystemPeerType::Dlv);
+        store_system_peer(&peer).unwrap();
+
+        let loaded = get_system_peer_by_device_id(&vec![0xABu8; 32])
+            .unwrap()
+            .expect("should find peer");
+        assert_eq!(loaded.peer_key, "dlv");
+    }
+
+    #[test]
+    #[serial]
+    fn get_system_peer_not_found() {
+        init_test_db();
+        assert!(get_system_peer("nonexistent").unwrap().is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn advance_system_chain_tip_roundtrip() {
+        init_test_db();
+        let peer = make_peer("dlv", SystemPeerType::Dlv);
+        store_system_peer(&peer).unwrap();
+
+        let event = advance_system_chain_tip(
+            "dlv",
+            SystemPeerType::Dlv,
+            &[0u8; 32],
+            b"payload-1",
+            &[0xAA; 32],
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(event.peer_key, "dlv");
+        assert_eq!(event.peer_type, SystemPeerType::Dlv);
+        assert_eq!(event.parent_tip, vec![0u8; 32]);
+        assert_eq!(event.source_state_number, 1);
+        assert_eq!(event.child_tip.len(), 32);
+        assert_ne!(event.child_tip, vec![0u8; 32]);
+
+        let loaded = get_system_peer("dlv").unwrap().unwrap();
+        assert_eq!(loaded.current_chain_tip.as_ref().unwrap(), &event.child_tip);
+    }
+
+    #[test]
+    #[serial]
+    fn advance_system_chain_tip_two_steps() {
+        init_test_db();
+        let peer = make_peer("faucet", SystemPeerType::Faucet);
+        store_system_peer(&peer).unwrap();
+
+        let e1 = advance_system_chain_tip(
+            "faucet",
+            SystemPeerType::Faucet,
+            &[0u8; 32],
+            b"step-1",
+            &[0xBB; 32],
+            1,
+        )
+        .unwrap();
+
+        let e2 = advance_system_chain_tip(
+            "faucet",
+            SystemPeerType::Faucet,
+            &e1.child_tip.clone().try_into().unwrap_or([0u8; 32]),
+            b"step-2",
+            &[0xCC; 32],
+            2,
+        )
+        .unwrap();
+
+        assert_eq!(e2.parent_tip, e1.child_tip);
+        assert_ne!(e2.child_tip, e1.child_tip);
+    }
+
+    #[test]
+    #[serial]
+    fn get_system_peer_events_returns_ordered() {
+        init_test_db();
+        let peer = make_peer("dlv", SystemPeerType::Dlv);
+        store_system_peer(&peer).unwrap();
+
+        let e1 = advance_system_chain_tip(
+            "dlv",
+            SystemPeerType::Dlv,
+            &[0u8; 32],
+            b"ev-1",
+            &[0x11; 32],
+            1,
+        )
+        .unwrap();
+
+        let parent: [u8; 32] = e1.child_tip.clone().try_into().unwrap();
+        advance_system_chain_tip(
+            "dlv",
+            SystemPeerType::Dlv,
+            &parent,
+            b"ev-2",
+            &[0x22; 32],
+            2,
+        )
+        .unwrap();
+
+        let events = get_system_peer_events("dlv").unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].source_state_number, 1);
+        assert_eq!(events[1].source_state_number, 2);
+        assert_eq!(events[1].parent_tip, events[0].child_tip);
+    }
+
+    #[test]
+    #[serial]
+    fn advance_rejects_non_monotonic_state_number() {
+        init_test_db();
+        let peer = make_peer("dlv", SystemPeerType::Dlv);
+        store_system_peer(&peer).unwrap();
+
+        let e1 = advance_system_chain_tip(
+            "dlv",
+            SystemPeerType::Dlv,
+            &[0u8; 32],
+            b"first",
+            &[0xAA; 32],
+            5,
+        )
+        .unwrap();
+
+        let parent: [u8; 32] = e1.child_tip.try_into().unwrap();
+        let err = advance_system_chain_tip(
+            "dlv",
+            SystemPeerType::Dlv,
+            &parent,
+            b"second",
+            &[0xBB; 32],
+            3,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("monotonically"));
+    }
+
+    #[test]
+    #[serial]
+    fn advance_rejects_type_mismatch() {
+        init_test_db();
+        let peer = make_peer("dlv", SystemPeerType::Dlv);
+        store_system_peer(&peer).unwrap();
+
+        let err = advance_system_chain_tip(
+            "dlv",
+            SystemPeerType::Faucet,
+            &[0u8; 32],
+            b"payload",
+            &[0xAA; 32],
+            1,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("type mismatch"));
+    }
+
+    #[test]
+    #[serial]
+    fn get_system_peer_events_empty_for_unknown() {
+        init_test_db();
+        let events = get_system_peer_events("nonexistent").unwrap();
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn store_system_peer_with_metadata() {
+        init_test_db();
+        let mut peer = make_peer("meta-peer", SystemPeerType::Protocol);
+        peer.metadata
+            .insert("key1".to_string(), b"value1".to_vec());
+        peer.metadata
+            .insert("key2".to_string(), b"value2".to_vec());
+        store_system_peer(&peer).unwrap();
+
+        let loaded = get_system_peer("meta-peer").unwrap().unwrap();
+        assert_eq!(
+            loaded.metadata.get("key1").map(|v| v.as_slice()),
+            Some(b"value1".as_ref())
+        );
+        assert_eq!(
+            loaded.metadata.get("key2").map(|v| v.as_slice()),
+            Some(b"value2".as_ref())
+        );
+    }
+}

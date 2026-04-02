@@ -1338,3 +1338,157 @@ pub fn remove_contact(contact_id: &str) -> Result<bool> {
         Ok(false)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+    use std::collections::HashMap;
+
+    fn init_test_db() {
+        unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+    }
+
+    fn make_contact(device_id: [u8; 32], alias: &str) -> ContactRecord {
+        ContactRecord {
+            contact_id: format!("cid-{alias}"),
+            device_id: device_id.to_vec(),
+            alias: alias.to_string(),
+            genesis_hash: [0xAAu8; 32].to_vec(),
+            public_key: vec![0xBBu8; 64],
+            current_chain_tip: None,
+            added_at: 1,
+            verified: false,
+            verification_proof: None,
+            metadata: HashMap::new(),
+            ble_address: None,
+            status: "Created".to_string(),
+            needs_online_reconcile: false,
+            last_seen_online_counter: 0,
+            last_seen_ble_counter: 0,
+            previous_chain_tip: None,
+        }
+    }
+
+    #[test]
+    fn has_contact_for_device_id_rejects_short_device_id() {
+        let short = vec![0u8; 16];
+        assert_eq!(has_contact_for_device_id(&short).unwrap(), false);
+    }
+
+    #[test]
+    fn get_contact_by_device_id_returns_none_for_invalid_length() {
+        assert!(get_contact_by_device_id(&[0u8; 31]).unwrap().is_none());
+        assert!(get_contact_by_device_id(&[0u8; 33]).unwrap().is_none());
+    }
+
+    #[test]
+    fn delete_contact_by_id_rejects_empty_id() {
+        let err = delete_contact_by_id("").unwrap_err();
+        assert!(err.to_string().contains("Invalid contact_id"));
+        let err2 = delete_contact_by_id("   ").unwrap_err();
+        assert!(err2.to_string().contains("Invalid contact_id"));
+    }
+
+    #[test]
+    fn is_ble_address_paired_returns_false_for_empty_address() {
+        assert_eq!(is_ble_address_paired("").unwrap(), false);
+    }
+
+    #[test]
+    fn update_contact_ble_status_rejects_short_device_id() {
+        let err = update_contact_ble_status(&[0u8; 16], None, None).unwrap_err();
+        assert!(err.to_string().contains("Invalid device_id length"));
+    }
+
+    #[test]
+    fn record_observed_remote_chain_tip_rejects_invalid_lengths() {
+        let err = record_observed_remote_chain_tip(&[0u8; 16], &[0u8; 32]).unwrap_err();
+        assert!(err.to_string().contains("Invalid device_id length"));
+        let err2 = record_observed_remote_chain_tip(&[0u8; 32], &[0u8; 16]).unwrap_err();
+        assert!(err2.to_string().contains("Invalid observed_chain_tip length"));
+    }
+
+    #[test]
+    fn try_advance_rejects_same_parent_and_child_tip() {
+        let tip = [0x11u8; 32];
+        let err = try_advance_finalized_bilateral_chain_tip(&[0u8; 32], &tip, &tip).unwrap_err();
+        assert!(err.to_string().contains("different from parent"));
+    }
+
+    #[test]
+    fn is_contact_bricked_returns_false_for_invalid_device_id() {
+        assert!(!is_contact_bricked(&[0u8; 10]));
+    }
+
+    #[test]
+    fn get_contact_device_tree_root_returns_none_for_invalid_device_id() {
+        assert!(get_contact_device_tree_root(&[0u8; 10]).is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn store_and_retrieve_contact_round_trip() {
+        init_test_db();
+        let device_id = [0x01u8; 32];
+        let contact = make_contact(device_id, "alice");
+        store_contact(&contact).expect("store contact");
+
+        let loaded = get_contact_by_device_id(&device_id)
+            .expect("query")
+            .expect("contact exists");
+        assert_eq!(loaded.alias, "alice");
+        assert_eq!(loaded.device_id, device_id.to_vec());
+        assert_eq!(loaded.public_key, vec![0xBBu8; 64]);
+    }
+
+    #[test]
+    #[serial]
+    fn get_all_contacts_returns_stored_contacts() {
+        init_test_db();
+        let c1 = make_contact([0x02u8; 32], "bob");
+        let c2 = make_contact([0x03u8; 32], "carol");
+        store_contact(&c1).expect("store c1");
+        store_contact(&c2).expect("store c2");
+
+        let all = get_all_contacts().expect("get all");
+        assert!(all.len() >= 2);
+        assert!(all.iter().any(|c| c.alias == "bob"));
+        assert!(all.iter().any(|c| c.alias == "carol"));
+    }
+
+    #[test]
+    #[serial]
+    fn get_contact_by_alias_finds_stored_contact() {
+        init_test_db();
+        let contact = make_contact([0x04u8; 32], "dave");
+        store_contact(&contact).expect("store");
+
+        let found = get_contact_by_alias("dave")
+            .expect("query")
+            .expect("contact exists");
+        assert_eq!(found.device_id, [0x04u8; 32].to_vec());
+    }
+
+    #[test]
+    #[serial]
+    fn remove_contact_returns_false_for_nonexistent() {
+        init_test_db();
+        let removed = remove_contact("nonexistent-id").expect("remove");
+        assert!(!removed);
+    }
+
+    #[test]
+    #[serial]
+    fn remove_contact_deletes_existing() {
+        init_test_db();
+        let contact = make_contact([0x05u8; 32], "eve");
+        store_contact(&contact).expect("store");
+
+        let removed = remove_contact("cid-eve").expect("remove");
+        assert!(removed);
+        assert!(get_contact_by_alias("eve").expect("query").is_none());
+    }
+}

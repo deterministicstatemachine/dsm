@@ -511,6 +511,216 @@ impl SecureAppState {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_master_key() -> DeviceMasterKey {
+        DeviceMasterKey::generate_from_hardware().expect("key generation should succeed")
+    }
+
+    #[test]
+    fn derive_storage_key_deterministic() {
+        let mk = test_master_key();
+        let k1 = mk.derive_storage_key("purpose_a", b"ctx1");
+        let k2 = mk.derive_storage_key("purpose_a", b"ctx1");
+        assert_eq!(k1, k2, "same inputs must yield same derived key");
+    }
+
+    #[test]
+    fn derive_storage_key_varies_with_purpose() {
+        let mk = test_master_key();
+        let k1 = mk.derive_storage_key("purpose_a", b"ctx");
+        let k2 = mk.derive_storage_key("purpose_b", b"ctx");
+        assert_ne!(k1, k2, "different purposes must yield different keys");
+    }
+
+    #[test]
+    fn derive_storage_key_varies_with_context() {
+        let mk = test_master_key();
+        let k1 = mk.derive_storage_key("purpose", b"ctx_1");
+        let k2 = mk.derive_storage_key("purpose", b"ctx_2");
+        assert_ne!(k1, k2, "different contexts must yield different keys");
+    }
+
+    #[test]
+    fn sensitive_app_data_roundtrip() {
+        let data = SensitiveAppData {
+            device_id: vec![1; 32],
+            public_key: vec![2; 64],
+            genesis_hash: vec![3; 32],
+            smt_root: vec![4; 32],
+        };
+        let bytes = data.to_bytes().unwrap();
+        let restored = SensitiveAppData::from_bytes(&bytes).unwrap();
+        assert_eq!(data.device_id, restored.device_id);
+        assert_eq!(data.public_key, restored.public_key);
+        assert_eq!(data.genesis_hash, restored.genesis_hash);
+        assert_eq!(data.smt_root, restored.smt_root);
+    }
+
+    #[test]
+    fn encrypted_app_state_encrypt_decrypt_roundtrip() {
+        let mk = test_master_key();
+        let device_id = vec![10u8; 32];
+        let public_key = vec![20u8; 64];
+        let genesis_hash = vec![30u8; 32];
+        let smt_root = vec![40u8; 32];
+
+        let enc = EncryptedAppState::encrypt(
+            &mk,
+            &device_id,
+            &public_key,
+            &genesis_hash,
+            &smt_root,
+        )
+        .unwrap();
+
+        assert_eq!(enc.version, 1);
+        assert!(!enc.encrypted_data.is_empty());
+
+        let dec = enc.decrypt(&mk).unwrap();
+        assert_eq!(dec.device_id, device_id);
+        assert_eq!(dec.public_key, public_key);
+        assert_eq!(dec.genesis_hash, genesis_hash);
+        assert_eq!(dec.smt_root, smt_root);
+    }
+
+    #[test]
+    fn encrypted_app_state_binary_roundtrip() {
+        let mk = test_master_key();
+        let enc = EncryptedAppState::encrypt(&mk, b"did", b"pk", b"gh", b"sr").unwrap();
+        let bytes = enc.to_bytes();
+        let restored = EncryptedAppState::from_bytes(&bytes).unwrap();
+        assert_eq!(restored.version, enc.version);
+        assert_eq!(restored.nonce, enc.nonce);
+        assert_eq!(restored.key_context, enc.key_context);
+        assert_eq!(restored.encrypted_data, enc.encrypted_data);
+
+        let dec = restored.decrypt(&mk).unwrap();
+        assert_eq!(dec.device_id, b"did");
+    }
+
+    #[test]
+    fn encrypted_app_state_wrong_key_fails() {
+        let mk1 = test_master_key();
+        let mk2 = test_master_key();
+        let enc =
+            EncryptedAppState::encrypt(&mk1, b"did", b"pk", b"gh", b"sr").unwrap();
+        assert!(enc.decrypt(&mk2).is_err());
+    }
+
+    #[test]
+    fn encrypted_app_state_from_bytes_truncated() {
+        assert!(EncryptedAppState::from_bytes(&[]).is_err());
+        assert!(EncryptedAppState::from_bytes(&[0u8; 3]).is_err());
+    }
+
+    #[test]
+    fn encrypted_transaction_binary_roundtrip() {
+        let et = EncryptedTransaction {
+            encrypted_data: vec![0xAA; 48],
+            nonce: [0xBB; 12],
+            key_context: vec![0xCC; 32],
+            tick_index: 42,
+        };
+        let bytes = et.to_bytes();
+        let restored = EncryptedTransaction::from_bytes(&bytes).unwrap();
+        assert_eq!(restored.tick_index, 42);
+        assert_eq!(restored.nonce, [0xBB; 12]);
+        assert_eq!(restored.key_context, vec![0xCC; 32]);
+        assert_eq!(restored.encrypted_data, vec![0xAA; 48]);
+    }
+
+    #[test]
+    fn encrypted_transaction_from_bytes_truncated() {
+        assert!(EncryptedTransaction::from_bytes(&[]).is_err());
+        assert!(EncryptedTransaction::from_bytes(&[0u8; 7]).is_err());
+    }
+
+    #[test]
+    fn offline_queue_enqueue_decrypt_roundtrip() {
+        let mk = test_master_key();
+        let queue = OfflineTransactionQueue::new(mk);
+
+        let tx_data = b"test transaction payload";
+        queue.enqueue_transaction(tx_data).unwrap();
+
+        let pending = queue.get_pending_transactions();
+        assert_eq!(pending.len(), 1);
+
+        let decrypted = queue.decrypt_queued_transaction(&pending[0]).unwrap();
+        assert_eq!(decrypted, tx_data);
+    }
+
+    #[test]
+    fn offline_queue_clear_synced() {
+        let mk = test_master_key();
+        let queue = OfflineTransactionQueue::new(mk);
+
+        queue.enqueue_transaction(b"tx1").unwrap();
+        queue.enqueue_transaction(b"tx2").unwrap();
+        queue.enqueue_transaction(b"tx3").unwrap();
+        assert_eq!(queue.get_pending_transactions().len(), 3);
+
+        queue.clear_synced_transactions(2);
+        let remaining = queue.get_pending_transactions();
+        assert_eq!(remaining.len(), 1);
+
+        let dec = queue.decrypt_queued_transaction(&remaining[0]).unwrap();
+        assert_eq!(dec, b"tx3");
+    }
+
+    #[test]
+    fn offline_queue_clear_more_than_available() {
+        let mk = test_master_key();
+        let queue = OfflineTransactionQueue::new(mk);
+        queue.enqueue_transaction(b"only").unwrap();
+        queue.clear_synced_transactions(100);
+        assert!(queue.get_pending_transactions().is_empty());
+    }
+
+    #[test]
+    fn secure_app_state_lifecycle() {
+        let mut state = SecureAppState::new().unwrap();
+        assert!(!state.has_identity);
+        assert!(!state.sdk_initialized);
+        assert!(state.get_device_id().unwrap().is_none());
+        assert!(state.get_public_key().unwrap().is_none());
+
+        state
+            .set_identity_info(
+                vec![1; 32],
+                vec![2; 64],
+                vec![3; 32],
+                vec![4; 32],
+            )
+            .unwrap();
+        assert!(state.has_identity);
+        assert_eq!(state.get_device_id().unwrap().unwrap(), vec![1; 32]);
+        assert_eq!(state.get_public_key().unwrap().unwrap(), vec![2; 64]);
+    }
+
+    #[test]
+    fn secure_app_state_transaction_queue() {
+        let mut state = SecureAppState::new().unwrap();
+        // Queue not initialized before identity
+        assert!(state.queue_transaction(b"tx").is_err());
+        assert!(state.get_pending_transactions().is_empty());
+
+        state
+            .set_identity_info(vec![1; 32], vec![2; 32], vec![3; 32], vec![4; 32])
+            .unwrap();
+
+        state.queue_transaction(b"tx_a").unwrap();
+        state.queue_transaction(b"tx_b").unwrap();
+        assert_eq!(state.get_pending_transactions().len(), 2);
+
+        state.clear_synced_transactions(1);
+        assert_eq!(state.get_pending_transactions().len(), 1);
+    }
+}
+
 #[cfg(target_os = "android")]
 fn android_device_id() -> Result<String, DsmError> {
     // Android-specific device ID retrieval (best-effort; purely for local key mixing).

@@ -201,3 +201,149 @@ pub fn verify_wallet_against_stored_genesis() -> Result<VerificationResult> {
         details,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+
+    fn init_test_db() {
+        unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+    }
+
+    fn make_genesis() -> GenesisRecord {
+        GenesisRecord {
+            genesis_id: "gen-test-001".to_string(),
+            device_id: "dev-test-001".to_string(),
+            mpc_proof: "proof".to_string(),
+            dbrw_binding: "binding".to_string(),
+            merkle_root: "root123".to_string(),
+            participant_count: 1,
+            progress_marker: "complete".to_string(),
+            publication_hash: "pubhash".to_string(),
+            storage_nodes: vec!["node1".to_string()],
+            entropy_hash: "entropy".to_string(),
+            protocol_version: "1.0".to_string(),
+            hash_chain_proof: None,
+            smt_proof: None,
+            verification_step: None,
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn initialize_wallet_from_genesis_produces_correct_info() {
+        init_test_db();
+        let gen = make_genesis();
+        let info = initialize_wallet_from_verified_genesis(&gen).unwrap();
+
+        assert_eq!(info.wallet_id, "wallet_dev-test-001");
+        assert_eq!(info.genesis_id.as_deref(), Some("gen-test-001"));
+        assert_eq!(info.device_id, "dev-test-001");
+        assert_eq!(info.status, "initialized_from_genesis");
+        assert_eq!(info.protocol_version, "1.0");
+        assert_eq!(info.chain_height, 0);
+        assert_eq!(info.balance, 0);
+        assert_eq!(info.merkle_root, "root123");
+    }
+
+    #[test]
+    #[serial]
+    fn verify_wallet_with_no_data_returns_unverified() {
+        init_test_db();
+        let result = verify_wallet_against_stored_genesis().unwrap();
+        assert!(!result.verified);
+        assert!(result.genesis_hash.is_none());
+        assert!(result.wallet_hash.is_none());
+        let status = result.details.get("status").unwrap();
+        assert_eq!(status, b"no_wallet_or_genesis");
+    }
+
+    #[test]
+    #[serial]
+    fn initialize_wallet_sets_zero_chain_height() {
+        init_test_db();
+        let gen = make_genesis();
+        let info = initialize_wallet_from_verified_genesis(&gen).unwrap();
+        assert_eq!(info.chain_height, 0);
+    }
+
+    #[test]
+    #[serial]
+    fn wallet_id_is_deterministic_from_device_id() {
+        init_test_db();
+        let gen = make_genesis();
+        let info1 = initialize_wallet_from_verified_genesis(&gen).unwrap();
+        let info2 = initialize_wallet_from_verified_genesis(&gen).unwrap();
+        assert_eq!(info1.wallet_id, info2.wallet_id);
+        assert_eq!(info1.wallet_id, "wallet_dev-test-001");
+    }
+
+    #[test]
+    #[serial]
+    fn verify_wallet_with_matching_genesis_returns_verified() {
+        init_test_db();
+        let gen = make_genesis();
+
+        let binding = get_connection().unwrap();
+        let conn = binding.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO genesis_records (
+                genesis_id, device_id, mpc_proof, dbrw_binding, merkle_root,
+                participant_count, chain_tip, publication_hash, storage_nodes,
+                entropy_hash, protocol_version, created_at
+            ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+            rusqlite::params![
+                gen.genesis_id,
+                gen.device_id,
+                gen.mpc_proof,
+                gen.dbrw_binding,
+                gen.merkle_root,
+                gen.participant_count as i64,
+                gen.progress_marker,
+                gen.publication_hash,
+                "node1",
+                gen.entropy_hash,
+                gen.protocol_version,
+                100i64,
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        initialize_wallet_from_verified_genesis(&gen).unwrap();
+        let result = verify_wallet_against_stored_genesis().unwrap();
+        assert!(result.verified);
+        assert!(result.genesis_hash.is_some());
+        assert!(result.wallet_hash.is_some());
+        assert!(result.merkle_proof.is_some());
+    }
+
+    #[test]
+    #[serial]
+    fn initialize_wallet_different_devices_produce_different_ids() {
+        init_test_db();
+        let gen1 = make_genesis();
+        let info1 = initialize_wallet_from_verified_genesis(&gen1).unwrap();
+
+        let mut gen2 = make_genesis();
+        gen2.device_id = "dev-test-002".to_string();
+        gen2.genesis_id = "gen-test-002".to_string();
+        let info2 = initialize_wallet_from_verified_genesis(&gen2).unwrap();
+
+        assert_ne!(info1.wallet_id, info2.wallet_id);
+        assert_eq!(info1.wallet_id, "wallet_dev-test-001");
+        assert_eq!(info2.wallet_id, "wallet_dev-test-002");
+    }
+
+    #[test]
+    #[serial]
+    fn initialize_wallet_metadata_contains_protocol_version() {
+        init_test_db();
+        let gen = make_genesis();
+        let info = initialize_wallet_from_verified_genesis(&gen).unwrap();
+        assert_eq!(info.protocol_version, "1.0");
+    }
+}

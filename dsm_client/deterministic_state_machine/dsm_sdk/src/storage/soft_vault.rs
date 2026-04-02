@@ -912,4 +912,184 @@ mod tests {
         let loaded = vault2.retrieve_key("alias", KeyType::PeerKey).unwrap();
         assert_eq!(loaded, key);
     }
+
+    #[test]
+    fn key_type_as_tag_stable_strings() {
+        assert_eq!(KeyType::DeviceSphincsSk.as_tag(), "dev_sphincs_sk");
+        assert_eq!(KeyType::DeviceKyberSk.as_tag(), "dev_kyber_sk");
+        assert_eq!(KeyType::PeerKey.as_tag(), "peer_key");
+        assert_eq!(KeyType::TokenKey.as_tag(), "token_key");
+        assert_eq!(KeyType::Other("custom".into()).as_tag(), "other");
+    }
+
+    #[test]
+    fn dbrw_binding_key_deterministic() {
+        let b1 = DbrwBindingKeyProvider::new("device-A".into());
+        let b2 = DbrwBindingKeyProvider::new("device-A".into());
+        assert_eq!(
+            b1.device_binding_key().unwrap(),
+            b2.device_binding_key().unwrap(),
+            "same hint must yield same binding key"
+        );
+    }
+
+    #[test]
+    fn dbrw_binding_key_varies_with_hint() {
+        let k1 = DbrwBindingKeyProvider::new("dev-1".into())
+            .device_binding_key()
+            .unwrap();
+        let k2 = DbrwBindingKeyProvider::new("dev-2".into())
+            .device_binding_key()
+            .unwrap();
+        assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn derive_kek_deterministic() {
+        let dir = tempfile::tempdir().unwrap();
+        let device_id = "dev-kek".to_string();
+        let binder = TestBindingKeyProvider::new(device_id.clone());
+        let vault = SoftVaultKeyStorage::new(dir.path(), device_id, binder, None).unwrap();
+        let k1 = vault.derive_kek("alias", "purpose", &KeyType::PeerKey).unwrap();
+        let k2 = vault.derive_kek("alias", "purpose", &KeyType::PeerKey).unwrap();
+        assert_eq!(k1, k2);
+    }
+
+    #[test]
+    fn derive_kek_varies_with_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        let device_id = "dev-kek2".to_string();
+        let binder = TestBindingKeyProvider::new(device_id.clone());
+        let vault = SoftVaultKeyStorage::new(dir.path(), device_id, binder, None).unwrap();
+        let k1 = vault.derive_kek("alias_a", "purpose", &KeyType::PeerKey).unwrap();
+        let k2 = vault.derive_kek("alias_b", "purpose", &KeyType::PeerKey).unwrap();
+        assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn derive_nonce_deterministic() {
+        let dir = tempfile::tempdir().unwrap();
+        let device_id = "dev-nonce".to_string();
+        let binder = TestBindingKeyProvider::new(device_id.clone());
+        let vault = SoftVaultKeyStorage::new(dir.path(), device_id, binder, None).unwrap();
+        let n1 = vault.derive_nonce("a", "p", &KeyType::TokenKey, 1);
+        let n2 = vault.derive_nonce("a", "p", &KeyType::TokenKey, 1);
+        assert_eq!(n1, n2);
+    }
+
+    #[test]
+    fn derive_nonce_varies_with_seqno() {
+        let dir = tempfile::tempdir().unwrap();
+        let device_id = "dev-nonce2".to_string();
+        let binder = TestBindingKeyProvider::new(device_id.clone());
+        let vault = SoftVaultKeyStorage::new(dir.path(), device_id, binder, None).unwrap();
+        let n1 = vault.derive_nonce("a", "p", &KeyType::TokenKey, 1);
+        let n2 = vault.derive_nonce("a", "p", &KeyType::TokenKey, 2);
+        assert_ne!(n1, n2);
+    }
+
+    #[test]
+    fn overwrite_increments_seqno() {
+        let dir = tempfile::tempdir().unwrap();
+        let device_id = "dev-seqno".to_string();
+        let binder = TestBindingKeyProvider::new(device_id.clone());
+        let vault = SoftVaultKeyStorage::new(dir.path(), device_id, binder, None).unwrap();
+
+        vault.store_key("ow", KeyType::PeerKey, b"v1").unwrap();
+        let path = vault.key_path("ow", "private_key", &KeyType::PeerKey);
+        let seq1 = SoftVaultKeyStorage::<TestBindingKeyProvider>::try_read_existing_seqno(&path)
+            .unwrap()
+            .unwrap();
+        assert_eq!(seq1, 1);
+
+        vault.store_key("ow", KeyType::PeerKey, b"v2").unwrap();
+        let seq2 = SoftVaultKeyStorage::<TestBindingKeyProvider>::try_read_existing_seqno(&path)
+            .unwrap()
+            .unwrap();
+        assert_eq!(seq2, 2);
+
+        let loaded = vault.retrieve_key("ow", KeyType::PeerKey).unwrap();
+        assert_eq!(loaded, b"v2");
+    }
+
+    #[test]
+    fn different_key_types_store_separately() {
+        let dir = tempfile::tempdir().unwrap();
+        let device_id = "dev-sep".to_string();
+        let binder = TestBindingKeyProvider::new(device_id.clone());
+        let vault = SoftVaultKeyStorage::new(dir.path(), device_id, binder, None).unwrap();
+
+        vault
+            .store_key("k", KeyType::DeviceSphincsSk, b"sphincs_key")
+            .unwrap();
+        vault
+            .store_key("k", KeyType::DeviceKyberSk, b"kyber_key")
+            .unwrap();
+
+        let s = vault.retrieve_key("k", KeyType::DeviceSphincsSk).unwrap();
+        let ky = vault.retrieve_key("k", KeyType::DeviceKyberSk).unwrap();
+        assert_eq!(s, b"sphincs_key");
+        assert_eq!(ky, b"kyber_key");
+    }
+
+    #[test]
+    fn store_address_nonzero_and_deterministic() {
+        let dir = tempfile::tempdir().unwrap();
+        let device_id = "dev-addr".to_string();
+        let binder = TestBindingKeyProvider::new(device_id.clone());
+        let vault = SoftVaultKeyStorage::new(dir.path(), device_id, binder, None).unwrap();
+
+        let a1 = vault
+            .store_key("det", KeyType::TokenKey, b"payload")
+            .unwrap();
+        assert_ne!(a1, [0u8; 32]);
+    }
+
+    #[test]
+    fn delete_nonexistent_key_is_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let device_id = "dev-del".to_string();
+        let binder = TestBindingKeyProvider::new(device_id.clone());
+        let vault = SoftVaultKeyStorage::new(dir.path(), device_id, binder, None).unwrap();
+        vault
+            .delete_key("no_such_alias", KeyType::PeerKey)
+            .unwrap();
+    }
+
+    #[test]
+    fn import_envelope_rejects_truncated() {
+        let dir = tempfile::tempdir().unwrap();
+        let device_id = "dev-imp".to_string();
+        let binder = TestBindingKeyProvider::new(device_id.clone());
+        let vault = SoftVaultKeyStorage::new(dir.path(), device_id, binder, None).unwrap();
+        assert!(vault
+            .import_envelope("a", KeyType::PeerKey, &[0u8; 2])
+            .is_err());
+    }
+
+    #[test]
+    fn vault_header_encode_decode_roundtrip() {
+        let h = VaultHeader::from_fields(
+            &KeyType::DeviceSphincsSk,
+            "my_alias",
+            "private_key",
+            &[0xAA; 32],
+            Some("policy1"),
+            5,
+        );
+        let mut buf = Vec::new();
+        h.encode(&mut buf, "my_alias", "private_key", &[0xAA; 32], Some("policy1"));
+
+        let (decoded, off) = VaultHeader::decode_fixed(&buf).unwrap();
+        assert_eq!(decoded.version, 3);
+        assert_eq!(decoded.algo_id, 1);
+        assert_eq!(decoded.nonce_len, 24);
+        assert_eq!(decoded.key_len, 32);
+        assert_eq!(decoded.write_seqno, 5);
+        assert_eq!(decoded.alias_len, 8);
+        assert_eq!(decoded.purpose_len, 11);
+        assert_eq!(decoded.commit_id_len, 32);
+        assert_eq!(decoded.policy_len, 7);
+        assert_eq!(off, 36);
+    }
 }

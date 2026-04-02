@@ -195,6 +195,86 @@ async fn queue_follow_up_chunks(
     ))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transport_outbound_new_sets_fields() {
+        let payload = vec![1, 2, 3, 4];
+        let out = TransportOutbound::new(BleFrameType::BilateralPrepare, payload.clone());
+        assert_eq!(out.frame_type, BleFrameType::BilateralPrepare);
+        assert_eq!(out.payload, payload);
+        assert!(out.peer_address.is_none());
+    }
+
+    #[test]
+    fn transport_outbound_new_unspecified() {
+        let out = TransportOutbound::new(BleFrameType::Unspecified, vec![]);
+        assert_eq!(out.frame_type, BleFrameType::Unspecified);
+        assert!(out.payload.is_empty());
+    }
+
+    #[test]
+    fn transport_inbound_message_equality() {
+        let m1 = TransportInboundMessage {
+            peer_address: "AA:BB:CC:DD:EE:FF".to_string(),
+            frame_type: BleFrameType::BilateralConfirm,
+            payload: vec![0xFF; 16],
+        };
+        let m2 = m1.clone();
+        assert_eq!(m1, m2);
+    }
+
+    #[test]
+    fn transport_inbound_message_inequality_payload() {
+        let m1 = TransportInboundMessage {
+            peer_address: "addr".to_string(),
+            frame_type: BleFrameType::BilateralPrepare,
+            payload: vec![1],
+        };
+        let m2 = TransportInboundMessage {
+            peer_address: "addr".to_string(),
+            frame_type: BleFrameType::BilateralPrepare,
+            payload: vec![2],
+        };
+        assert_ne!(m1, m2);
+    }
+
+    #[test]
+    fn transport_inbound_message_inequality_frame_type() {
+        let m1 = TransportInboundMessage {
+            peer_address: "addr".to_string(),
+            frame_type: BleFrameType::BilateralPrepare,
+            payload: vec![],
+        };
+        let m2 = TransportInboundMessage {
+            peer_address: "addr".to_string(),
+            frame_type: BleFrameType::BilateralConfirm,
+            payload: vec![],
+        };
+        assert_ne!(m1, m2);
+    }
+
+    #[test]
+    fn transport_outbound_clone() {
+        let out = TransportOutbound {
+            peer_address: Some("peer".to_string()),
+            frame_type: BleFrameType::Ack,
+            payload: vec![0xAB; 8],
+        };
+        let cloned = out.clone();
+        assert_eq!(out, cloned);
+    }
+
+    #[test]
+    fn transport_outbound_debug() {
+        let out = TransportOutbound::new(BleFrameType::Nack, vec![]);
+        let dbg = format!("{:?}", out);
+        assert!(dbg.contains("Nack"));
+    }
+}
+
 impl BleTransportDelegate for BilateralTransportAdapter {
     fn on_transport_message(
         &self,

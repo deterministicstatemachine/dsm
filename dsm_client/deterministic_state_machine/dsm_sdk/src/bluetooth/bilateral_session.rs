@@ -443,6 +443,11 @@ impl SessionStore {
 
     // -- Internal helpers ----------------------------------------------------
 
+    #[cfg(test)]
+    pub(crate) async fn all_sessions(&self) -> HashMap<[u8; 32], BilateralBleSession> {
+        self.sessions.lock().await.clone()
+    }
+
     fn record_to_session(&self, record: &BilateralSessionRecord) -> Option<BilateralBleSession> {
         let operation = match deserialize_operation(&record.operation_bytes) {
             Ok(op) => op,
@@ -491,5 +496,196 @@ impl SessionStore {
             created_at_wall: Instant::now(),
             pre_finalize_entropy: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_session(commitment: [u8; 32], phase: BilateralPhase) -> BilateralBleSession {
+        BilateralBleSession {
+            commitment_hash: commitment,
+            local_commitment_hash: None,
+            counterparty_device_id: [0x01; 32],
+            counterparty_genesis_hash: None,
+            operation: Operation::default(),
+            phase,
+            local_signature: None,
+            counterparty_signature: None,
+            created_at_ticks: 0,
+            expires_at_ticks: u64::MAX,
+            sender_ble_address: None,
+            created_at_wall: Instant::now(),
+            pre_finalize_entropy: None,
+        }
+    }
+
+    #[test]
+    fn phase_to_str_covers_all_variants() {
+        assert_eq!(phase_to_str(&BilateralPhase::Preparing), "preparing");
+        assert_eq!(phase_to_str(&BilateralPhase::Prepared), "prepared");
+        assert_eq!(phase_to_str(&BilateralPhase::PendingUserAction), "pending_user_action");
+        assert_eq!(phase_to_str(&BilateralPhase::Accepted), "accepted");
+        assert_eq!(phase_to_str(&BilateralPhase::Rejected), "rejected");
+        assert_eq!(phase_to_str(&BilateralPhase::ConfirmPending), "confirm_pending");
+        assert_eq!(phase_to_str(&BilateralPhase::Committed), "committed");
+        assert_eq!(phase_to_str(&BilateralPhase::Failed), "failed");
+    }
+
+    #[test]
+    fn phase_from_str_roundtrip() {
+        let phases = [
+            BilateralPhase::Preparing,
+            BilateralPhase::Prepared,
+            BilateralPhase::PendingUserAction,
+            BilateralPhase::Accepted,
+            BilateralPhase::Rejected,
+            BilateralPhase::ConfirmPending,
+            BilateralPhase::Committed,
+            BilateralPhase::Failed,
+        ];
+        for phase in &phases {
+            let tag = phase_to_str(phase);
+            let restored = phase_from_str(tag);
+            assert_eq!(&restored, phase);
+        }
+    }
+
+    #[test]
+    fn phase_from_str_unknown_defaults_to_failed() {
+        assert_eq!(phase_from_str("nonexistent"), BilateralPhase::Failed);
+        assert_eq!(phase_from_str(""), BilateralPhase::Failed);
+    }
+
+    #[test]
+    fn is_inflight_phase_true_cases() {
+        assert!(is_inflight_phase(&BilateralPhase::Preparing));
+        assert!(is_inflight_phase(&BilateralPhase::Prepared));
+        assert!(is_inflight_phase(&BilateralPhase::PendingUserAction));
+        assert!(is_inflight_phase(&BilateralPhase::Accepted));
+        assert!(is_inflight_phase(&BilateralPhase::ConfirmPending));
+    }
+
+    #[test]
+    fn is_inflight_phase_false_cases() {
+        assert!(!is_inflight_phase(&BilateralPhase::Committed));
+        assert!(!is_inflight_phase(&BilateralPhase::Rejected));
+        assert!(!is_inflight_phase(&BilateralPhase::Failed));
+    }
+
+    #[tokio::test]
+    async fn session_store_insert_get_remove() {
+        let store = SessionStore::new();
+        assert!(store.is_empty().await);
+
+        let hash = [0x42; 32];
+        let session = make_session(hash, BilateralPhase::Preparing);
+        store.insert(session).await;
+
+        assert_eq!(store.len().await, 1);
+        assert!(store.contains(&hash).await);
+
+        let fetched = store.get(&hash).await.unwrap();
+        assert_eq!(fetched.commitment_hash, hash);
+        assert_eq!(fetched.phase, BilateralPhase::Preparing);
+
+        let removed = store.remove(&hash).await;
+        assert!(removed.is_some());
+        assert!(store.is_empty().await);
+    }
+
+    #[tokio::test]
+    async fn session_store_get_phase() {
+        let store = SessionStore::new();
+        let hash = [0x10; 32];
+        store
+            .insert(make_session(hash, BilateralPhase::Accepted))
+            .await;
+        assert_eq!(
+            store.get_phase(&hash).await,
+            Some(BilateralPhase::Accepted)
+        );
+        assert_eq!(store.get_phase(&[0xFF; 32]).await, None);
+    }
+
+    #[tokio::test]
+    async fn session_store_detect_inflight_counterparty() {
+        let store = SessionStore::new();
+        let counterparty = [0x01; 32];
+        let hash = [0x20; 32];
+        let mut session = make_session(hash, BilateralPhase::Prepared);
+        session.counterparty_device_id = counterparty;
+        store.insert(session).await;
+
+        let found = store
+            .detect_inflight_counterparty_session(&counterparty)
+            .await;
+        assert!(found.is_some());
+        let (h, phase, _) = found.unwrap();
+        assert_eq!(h, hash);
+        assert_eq!(phase, BilateralPhase::Prepared);
+
+        let not_found = store
+            .detect_inflight_counterparty_session(&[0xFF; 32])
+            .await;
+        assert!(not_found.is_none());
+    }
+
+    #[tokio::test]
+    async fn session_store_no_inflight_for_terminal_sessions() {
+        let store = SessionStore::new();
+        let counterparty = [0x01; 32];
+        let mut s = make_session([0x30; 32], BilateralPhase::Committed);
+        s.counterparty_device_id = counterparty;
+        store.insert(s).await;
+
+        assert!(store
+            .detect_inflight_counterparty_session(&counterparty)
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn session_store_find_recoverable_sessions() {
+        let store = SessionStore::new();
+
+        let mut recoverable = make_session([0x40; 32], BilateralPhase::Accepted);
+        recoverable.counterparty_signature = Some(vec![0xAB; 16]);
+        store.insert(recoverable).await;
+
+        let mut not_recoverable = make_session([0x41; 32], BilateralPhase::Accepted);
+        not_recoverable.counterparty_signature = None;
+        store.insert(not_recoverable).await;
+
+        store
+            .insert(make_session([0x42; 32], BilateralPhase::Committed))
+            .await;
+
+        let found = store.find_recoverable_sessions().await;
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, [0x40; 32]);
+    }
+
+    #[tokio::test]
+    async fn session_store_cleanup_expired_is_noop() {
+        let store = SessionStore::new();
+        store
+            .insert(make_session([0x50; 32], BilateralPhase::Preparing))
+            .await;
+        let cleaned = store.cleanup_expired().await;
+        assert_eq!(cleaned, 0);
+        assert_eq!(store.len().await, 1);
+    }
+
+    #[tokio::test]
+    async fn session_store_with_lock() {
+        let store = SessionStore::new();
+        store
+            .insert(make_session([0x60; 32], BilateralPhase::Failed))
+            .await;
+
+        let count = store.with_lock(|map| map.len()).await;
+        assert_eq!(count, 1);
     }
 }

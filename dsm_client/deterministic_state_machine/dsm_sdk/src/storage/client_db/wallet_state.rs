@@ -194,3 +194,143 @@ pub fn store_wallet_state(wallet_state: &WalletState) -> Result<()> {
     )?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+
+    fn init_test_db() {
+        unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+    }
+
+    fn make_wallet_state(device_id: &str) -> WalletState {
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert("key1".to_string(), b"value1".to_vec());
+        WalletState {
+            wallet_id: format!("wallet_{}", device_id),
+            device_id: device_id.to_string(),
+            genesis_id: Some("gen-1".to_string()),
+            chain_tip: "tip000".to_string(),
+            chain_height: 0,
+            merkle_root: "merkle000".to_string(),
+            balance: 0,
+            created_at: 100,
+            updated_at: 100,
+            status: "active".to_string(),
+            metadata,
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn store_and_get_wallet_state_roundtrip() {
+        init_test_db();
+        let ws = make_wallet_state("dev-ws-1");
+        store_wallet_state(&ws).unwrap();
+
+        let loaded = get_wallet_state("dev-ws-1").unwrap().unwrap();
+        assert_eq!(loaded.wallet_id, "wallet_dev-ws-1");
+        assert_eq!(loaded.device_id, "dev-ws-1");
+        assert_eq!(loaded.genesis_id.as_deref(), Some("gen-1"));
+        assert_eq!(loaded.status, "active");
+        assert_eq!(loaded.balance, 0);
+    }
+
+    #[test]
+    #[serial]
+    fn get_wallet_state_returns_none_when_missing() {
+        init_test_db();
+        assert!(get_wallet_state("missing-dev").unwrap().is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn store_wallet_state_forces_balance_zero() {
+        init_test_db();
+        let mut ws = make_wallet_state("dev-bal");
+        ws.balance = 999;
+        store_wallet_state(&ws).unwrap();
+
+        let loaded = get_wallet_state("dev-bal").unwrap().unwrap();
+        assert_eq!(loaded.balance, 0);
+    }
+
+    #[test]
+    #[serial]
+    fn ensure_wallet_state_for_device_creates_when_missing() {
+        init_test_db();
+        ensure_wallet_state_for_device("dev-ensure").unwrap();
+        let loaded = get_wallet_state("dev-ensure").unwrap().unwrap();
+        assert_eq!(loaded.wallet_id, "wallet_dev-ensure");
+        assert_eq!(loaded.status, "active");
+    }
+
+    #[test]
+    #[serial]
+    fn ensure_wallet_state_for_device_is_idempotent() {
+        init_test_db();
+        ensure_wallet_state_for_device("dev-idem").unwrap();
+        ensure_wallet_state_for_device("dev-idem").unwrap();
+        let loaded = get_wallet_state("dev-idem").unwrap().unwrap();
+        assert_eq!(loaded.wallet_id, "wallet_dev-idem");
+    }
+
+    #[test]
+    #[serial]
+    fn store_wallet_state_metadata_roundtrips() {
+        init_test_db();
+        let ws = make_wallet_state("dev-meta");
+        store_wallet_state(&ws).unwrap();
+        let loaded = get_wallet_state("dev-meta").unwrap().unwrap();
+        assert_eq!(
+            loaded.metadata.get("key1").map(|v| v.as_slice()),
+            Some(b"value1".as_ref())
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn store_wallet_state_upserts_on_conflict() {
+        init_test_db();
+        let mut ws = make_wallet_state("dev-ups");
+        store_wallet_state(&ws).unwrap();
+
+        ws.status = "suspended".to_string();
+        ws.chain_height = 42;
+        ws.chain_tip = "newtip".to_string();
+        store_wallet_state(&ws).unwrap();
+
+        let loaded = get_wallet_state("dev-ups").unwrap().unwrap();
+        assert_eq!(loaded.status, "suspended");
+        assert_eq!(loaded.chain_height, 42);
+        assert_eq!(loaded.chain_tip, "newtip");
+    }
+
+    #[test]
+    #[serial]
+    fn ensure_wallet_state_does_not_overwrite_existing() {
+        init_test_db();
+        let mut ws = make_wallet_state("dev-noow");
+        ws.status = "custom_status".to_string();
+        store_wallet_state(&ws).unwrap();
+
+        ensure_wallet_state_for_device("dev-noow").unwrap();
+
+        let loaded = get_wallet_state("dev-noow").unwrap().unwrap();
+        assert_eq!(loaded.status, "custom_status");
+    }
+
+    #[test]
+    #[serial]
+    fn wallet_state_genesis_id_roundtrips() {
+        init_test_db();
+        let ws = make_wallet_state("dev-gen");
+        store_wallet_state(&ws).unwrap();
+
+        let loaded = get_wallet_state("dev-gen").unwrap().unwrap();
+        assert_eq!(loaded.genesis_id.as_deref(), Some("gen-1"));
+    }
+}
