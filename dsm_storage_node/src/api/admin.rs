@@ -64,6 +64,7 @@ async fn admin_auth(
     Ok(next.run(req).await)
 }
 
+#[derive(Debug, PartialEq)]
 pub struct CleanupParams {
     /// Delete objects where iter_expires < before_iter
     before_iter: i64,
@@ -205,4 +206,137 @@ pub fn router(state: Arc<AppState>) -> Router<()> {
         .route("/maintenance", post(maintenance_handler))
         .layer(axum::middleware::from_fn(admin_auth))
         .layer(Extension(state))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::StatusCode;
+
+    #[test]
+    fn token_matches_equal() {
+        assert!(token_matches("secret123", "secret123"));
+    }
+
+    #[test]
+    fn token_matches_not_equal() {
+        assert!(!token_matches("secret123", "wrong"));
+    }
+
+    #[test]
+    fn token_matches_empty() {
+        assert!(token_matches("", ""));
+        assert!(!token_matches("x", ""));
+        assert!(!token_matches("", "x"));
+    }
+
+    #[test]
+    fn from_hex_digits() {
+        assert_eq!(from_hex(b'0').unwrap(), 0);
+        assert_eq!(from_hex(b'9').unwrap(), 9);
+        assert_eq!(from_hex(b'a').unwrap(), 10);
+        assert_eq!(from_hex(b'f').unwrap(), 15);
+        assert_eq!(from_hex(b'A').unwrap(), 10);
+        assert_eq!(from_hex(b'F').unwrap(), 15);
+    }
+
+    #[test]
+    fn from_hex_invalid() {
+        assert_eq!(from_hex(b'g'), Err(StatusCode::BAD_REQUEST));
+        assert_eq!(from_hex(b'z'), Err(StatusCode::BAD_REQUEST));
+        assert_eq!(from_hex(b' '), Err(StatusCode::BAD_REQUEST));
+    }
+
+    #[test]
+    fn decode_percent_plain() {
+        assert_eq!(decode_percent("hello").unwrap(), "hello");
+    }
+
+    #[test]
+    fn decode_percent_encoded_chars() {
+        assert_eq!(decode_percent("hello%20world").unwrap(), "hello world");
+        assert_eq!(decode_percent("%41%42%43").unwrap(), "ABC");
+    }
+
+    #[test]
+    fn decode_percent_plus_is_space() {
+        assert_eq!(decode_percent("a+b").unwrap(), "a b");
+    }
+
+    #[test]
+    fn decode_percent_truncated() {
+        assert!(decode_percent("%2").is_err());
+        assert!(decode_percent("%").is_err());
+    }
+
+    #[test]
+    fn decode_percent_invalid_hex() {
+        assert!(decode_percent("%GG").is_err());
+    }
+
+    #[test]
+    fn parse_cleanup_query_valid() {
+        let p = parse_cleanup_query(Some("before_iter=42")).unwrap();
+        assert_eq!(p.before_iter, 42);
+    }
+
+    #[test]
+    fn parse_cleanup_query_with_extra_params() {
+        let p = parse_cleanup_query(Some("foo=bar&before_iter=100&baz=1")).unwrap();
+        assert_eq!(p.before_iter, 100);
+    }
+
+    #[test]
+    fn parse_cleanup_query_missing_param() {
+        assert_eq!(
+            parse_cleanup_query(Some("foo=bar")),
+            Err(StatusCode::BAD_REQUEST)
+        );
+    }
+
+    #[test]
+    fn parse_cleanup_query_none() {
+        assert_eq!(parse_cleanup_query(None), Err(StatusCode::BAD_REQUEST));
+    }
+
+    #[test]
+    fn parse_cleanup_query_non_numeric() {
+        assert_eq!(
+            parse_cleanup_query(Some("before_iter=abc")),
+            Err(StatusCode::BAD_REQUEST)
+        );
+    }
+
+    #[test]
+    fn parse_tick_query_valid() {
+        assert_eq!(parse_tick_query(Some("tick=999")), Ok(999));
+    }
+
+    #[test]
+    fn parse_tick_query_missing() {
+        assert_eq!(parse_tick_query(None), Err(StatusCode::BAD_REQUEST));
+        assert_eq!(
+            parse_tick_query(Some("foo=1")),
+            Err(StatusCode::BAD_REQUEST)
+        );
+    }
+
+    #[test]
+    fn parse_tick_query_non_numeric() {
+        assert_eq!(
+            parse_tick_query(Some("tick=xyz")),
+            Err(StatusCode::BAD_REQUEST)
+        );
+    }
+
+    #[test]
+    fn parse_tick_query_negative() {
+        assert_eq!(parse_tick_query(Some("tick=-5")), Ok(-5));
+    }
+
+    #[test]
+    fn parse_cleanup_query_percent_encoded_value() {
+        let p = parse_cleanup_query(Some("before_iter=%33%37")).unwrap();
+        assert_eq!(p.before_iter, 37);
+    }
 }

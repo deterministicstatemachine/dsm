@@ -250,3 +250,118 @@ fn b64_url_no_pad(input: &[u8]) -> String {
 
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::{HeaderMap, HeaderValue};
+
+    #[test]
+    fn b64_url_no_pad_empty_input() {
+        assert_eq!(b64_url_no_pad(&[]), "");
+    }
+
+    #[test]
+    fn b64_url_no_pad_one_byte() {
+        let result = b64_url_no_pad(&[0xFF]);
+        assert_eq!(result.len(), 2);
+        // 0xFF = 11111111 -> sextets: 111111 (63='_'), 110000 (48='w')
+        assert_eq!(result, "_w");
+    }
+
+    #[test]
+    fn b64_url_no_pad_two_bytes() {
+        let result = b64_url_no_pad(&[0x00, 0x00]);
+        assert_eq!(result.len(), 3);
+        assert_eq!(result, "AAA");
+    }
+
+    #[test]
+    fn b64_url_no_pad_three_bytes() {
+        let result = b64_url_no_pad(&[0x00, 0x00, 0x00]);
+        assert_eq!(result.len(), 4);
+        assert_eq!(result, "AAAA");
+    }
+
+    #[test]
+    fn b64_url_no_pad_uses_url_safe_alphabet() {
+        // Byte values that would produce '+' and '/' in standard base64
+        // should instead produce '-' and '_'
+        let result = b64_url_no_pad(&[0xFB, 0xFF, 0xFE]);
+        assert!(!result.contains('+'));
+        assert!(!result.contains('/'));
+        assert!(!result.contains('='));
+    }
+
+    #[test]
+    fn b64_url_no_pad_known_vector() {
+        // "Hello" in standard base64 = "SGVsbG8=", url-safe no-pad = "SGVsbG8"
+        let result = b64_url_no_pad(b"Hello");
+        assert_eq!(result, "SGVsbG8");
+    }
+
+    #[test]
+    fn content_addr_b64url_deterministic() {
+        let body = Bytes::from_static(b"test-evidence-data");
+        let addr1 = content_addr_b64url(&body);
+        let addr2 = content_addr_b64url(&body);
+        assert_eq!(addr1, addr2);
+        assert!(!addr1.is_empty());
+    }
+
+    #[test]
+    fn content_addr_b64url_different_bodies_differ() {
+        let addr1 = content_addr_b64url(&Bytes::from_static(b"payload-a"));
+        let addr2 = content_addr_b64url(&Bytes::from_static(b"payload-b"));
+        assert_ne!(addr1, addr2);
+    }
+
+    #[test]
+    fn content_addr_b64url_domain_separation() {
+        // The hash is domain-separated with "DSM/registry\0", so even identical raw
+        // bytes hashed without the domain tag would produce a different result.
+        let body = Bytes::from_static(b"data");
+        let addr = content_addr_b64url(&body);
+        let raw = blake3::hash(b"data");
+        let raw_b64 = b64_url_no_pad(raw.as_bytes());
+        assert_ne!(addr, raw_b64);
+    }
+
+    #[test]
+    fn registry_metadata_plain_formats_rows() {
+        let rows = vec![
+            ("abc123".to_string(), 1i16, 256i64),
+            ("def456".to_string(), 2i16, 1024i64),
+        ];
+        let out = registry_metadata_plain(&rows);
+        let text = std::str::from_utf8(&out).unwrap();
+        assert_eq!(text, "abc123\t1\t256\ndef456\t2\t1024\n");
+    }
+
+    #[test]
+    fn registry_metadata_plain_empty_rows() {
+        let rows: Vec<(String, i16, i64)> = vec![];
+        let out = registry_metadata_plain(&rows);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn parse_optional_dlv_id_missing_header() {
+        let headers = HeaderMap::new();
+        assert!(parse_optional_dlv_id(&headers).is_empty());
+    }
+
+    #[test]
+    fn parse_optional_dlv_id_empty_value() {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-DSM-DLV-ID", HeaderValue::from_static(""));
+        assert!(parse_optional_dlv_id(&headers).is_empty());
+    }
+
+    #[test]
+    fn parse_optional_dlv_id_whitespace_only() {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-DSM-DLV-ID", HeaderValue::from_static("   "));
+        assert!(parse_optional_dlv_id(&headers).is_empty());
+    }
+}

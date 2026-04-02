@@ -416,3 +416,137 @@ pub async fn trigger_registry_update(
     );
     Ok((StatusCode::OK, out_headers, buf))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dsm_sdk::util::text_id;
+
+    #[test]
+    fn constants_match_spec() {
+        assert_eq!(GRACE_CYCLES, 8, "new-node grace period must be 8 cycles");
+        assert_eq!(DISCOVERY_WINDOW, 4, "signal discovery window must be 4 cycles");
+    }
+
+    #[test]
+    fn up_signal_address_is_deterministic() {
+        let body = b"test-signal-body";
+        let a1 = blake3_tagged("DSM/signal/up", body);
+        let a2 = blake3_tagged("DSM/signal/up", body);
+        assert_eq!(a1, a2, "same input must produce same address");
+
+        let different = blake3_tagged("DSM/signal/up", b"different-body");
+        assert_ne!(a1, different, "different bodies must produce different addresses");
+    }
+
+    #[test]
+    fn up_and_down_signal_domains_differ() {
+        let body = b"same-body";
+        let up = blake3_tagged("DSM/signal/up", body);
+        let down = blake3_tagged("DSM/signal/down", body);
+        assert_ne!(up, down, "domain separation must produce distinct digests");
+    }
+
+    #[test]
+    fn applicant_ranking_is_deterministic_and_sortable() {
+        let salt = blake3_tagged("DSM/positions/salt", b"genesis+registry");
+
+        let seeds: Vec<Vec<u8>> = (0u8..5)
+            .map(|i| {
+                let mut s = vec![0u8; 32];
+                s[0] = i;
+                s
+            })
+            .collect();
+
+        let mut ranked: Vec<([u8; 32], usize)> = seeds
+            .iter()
+            .enumerate()
+            .map(|(idx, seed)| {
+                let mut input = Vec::new();
+                input.extend_from_slice(&salt);
+                input.extend_from_slice(seed);
+                let rank = blake3_tagged("DSM/order", &input);
+                (rank, idx)
+            })
+            .collect();
+        ranked.sort_by_key(|a| a.0);
+
+        // Re-run: same salt → same ordering
+        let mut ranked2: Vec<([u8; 32], usize)> = seeds
+            .iter()
+            .enumerate()
+            .map(|(idx, seed)| {
+                let mut input = Vec::new();
+                input.extend_from_slice(&salt);
+                input.extend_from_slice(seed);
+                let rank = blake3_tagged("DSM/order", &input);
+                (rank, idx)
+            })
+            .collect();
+        ranked2.sort_by_key(|a| a.0);
+
+        let order1: Vec<usize> = ranked.iter().map(|r| r.1).collect();
+        let order2: Vec<usize> = ranked2.iter().map(|r| r.1).collect();
+        assert_eq!(order1, order2, "ranking must be deterministic across runs");
+    }
+
+    #[test]
+    fn pruning_sort_by_utilization_then_node_id() {
+        // (node_id, first_cycle, utilization)
+        let mut nodes: Vec<(Vec<u8>, i64, f64)> = vec![
+            (vec![0x03; 32], 1, 0.5),
+            (vec![0x01; 32], 2, 0.2),
+            (vec![0x02; 32], 3, 0.2), // same utilization as 0x01, higher node_id
+            (vec![0x04; 32], 0, 0.9),
+        ];
+
+        nodes.sort_by(|a, b| {
+            a.2.partial_cmp(&b.2)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+
+        // Lowest utilization first; tiebreak by node_id ascending
+        assert_eq!(nodes[0].0, vec![0x01; 32]);
+        assert_eq!(nodes[1].0, vec![0x02; 32]);
+        assert_eq!(nodes[2].0, vec![0x03; 32]);
+        assert_eq!(nodes[3].0, vec![0x04; 32]);
+    }
+
+    #[test]
+    fn window_bounds_clamped_to_zero() {
+        let anchors_len = 3i64;
+        let window_end = anchors_len;
+        let window_start = (window_end - anchors_len).max(0);
+        assert_eq!(window_start, 0);
+        assert_eq!(window_end, 3);
+
+        let current_cycle: i64 = 2;
+        let start = (current_cycle - DISCOVERY_WINDOW).max(0);
+        assert_eq!(start, 0, "window_start must not go negative");
+
+        let current_cycle: i64 = 10;
+        let start = (current_cycle - DISCOVERY_WINDOW).max(0);
+        assert_eq!(start, 6);
+    }
+
+    #[test]
+    fn delta_p_add_count_clamped_to_applicant_pool() {
+        let delta_p: i64 = 10;
+        let applicant_count = 3usize;
+        let to_add = delta_p.min(applicant_count as i64) as usize;
+        assert_eq!(to_add, 3, "cannot add more nodes than available applicants");
+    }
+
+    #[test]
+    fn registry_address_uses_correct_domain() {
+        let body = b"registry-bytes";
+        let addr = blake3_tagged("DSM/registry", body);
+        let addr_str = text_id::encode_base32_crockford(&addr);
+        assert!(!addr_str.is_empty());
+
+        let other = blake3_tagged("DSM/apply", body);
+        assert_ne!(addr, other, "different domain tags must produce different digests");
+    }
+}

@@ -179,3 +179,81 @@ pub async fn mirror_policy_anchor(
 
     Ok(StatusCode::NO_CONTENT)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn anchor_to_db_key_correct_length() {
+        let anchor = [0u8; 32];
+        let key = anchor_to_db_key(&anchor);
+        assert_eq!(key.len(), 64);
+    }
+
+    #[test]
+    fn anchor_to_db_key_all_zeros() {
+        let anchor = [0u8; 32];
+        let key = anchor_to_db_key(&anchor);
+        assert_eq!(key, "0".repeat(64));
+    }
+
+    #[test]
+    fn anchor_to_db_key_all_ff() {
+        let anchor = [0xFFu8; 32];
+        let key = anchor_to_db_key(&anchor);
+        assert_eq!(key, "f".repeat(64));
+    }
+
+    #[test]
+    fn anchor_to_db_key_mixed() {
+        let mut anchor = [0u8; 32];
+        anchor[0] = 0xAB;
+        anchor[1] = 0xCD;
+        let key = anchor_to_db_key(&anchor);
+        assert!(key.starts_with("abcd"));
+        assert_eq!(key.len(), 64);
+    }
+
+    #[test]
+    fn anchor_to_db_key_lowercase_hex() {
+        let anchor = [0xAB; 32];
+        let key = anchor_to_db_key(&anchor);
+        assert!(key.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(key.chars().all(|c| !c.is_ascii_uppercase()));
+    }
+
+    #[test]
+    fn blake3_policy_tag_is_deterministic() {
+        let body = b"some policy bytes";
+        let d1 = blake3_tagged("DSM/policy", body);
+        let d2 = blake3_tagged("DSM/policy", body);
+        assert_eq!(d1, d2);
+    }
+
+    #[test]
+    fn blake3_different_tags_differ() {
+        let body = b"same body";
+        let d1 = blake3_tagged("DSM/policy", body);
+        let d2 = blake3_tagged("DSM/policy/anchor", body);
+        assert_ne!(d1, d2);
+    }
+
+    #[test]
+    fn mirror_path_format() {
+        let body = b"token policy bytes";
+        let digest = blake3_tagged("DSM/policy", body);
+        let path = format!("policy/{}", anchor_to_db_key(&digest));
+        assert!(path.starts_with("policy/"));
+        assert_eq!(path.len(), "policy/".len() + 64);
+    }
+
+    #[test]
+    fn anchor_mirror_path_format() {
+        let body = b"anchor bytes";
+        let digest = blake3_tagged("DSM/policy/anchor", body);
+        let path = format!("policy/anchor/{}", anchor_to_db_key(&digest));
+        assert!(path.starts_with("policy/anchor/"));
+        assert_eq!(path.len(), "policy/anchor/".len() + 64);
+    }
+}

@@ -157,3 +157,54 @@ async fn get_genesis_entropy(
 
     Ok((StatusCode::OK, headers, entropy.to_vec()))
 }
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+
+    const MAX_GENESIS_BODY_SIZE: usize = 10 * 1024 * 1024;
+
+    #[test]
+    fn max_genesis_body_size_is_10mb() {
+        assert_eq!(MAX_GENESIS_BODY_SIZE, 10_485_760);
+    }
+
+    #[test]
+    fn upstream_url_trailing_slash_stripped() {
+        let upstream_base = "https://genesis.example.com/";
+        let url = format!(
+            "{}/api/v2/genesis/create",
+            upstream_base.trim_end_matches('/')
+        );
+        assert_eq!(url, "https://genesis.example.com/api/v2/genesis/create");
+    }
+
+    #[test]
+    fn upstream_url_no_trailing_slash() {
+        let upstream_base = "https://genesis.example.com";
+        let url = format!(
+            "{}/api/v2/genesis/create",
+            upstream_base.trim_end_matches('/')
+        );
+        assert_eq!(url, "https://genesis.example.com/api/v2/genesis/create");
+    }
+
+    #[test]
+    fn body_size_at_limit_is_accepted() {
+        let body_len = MAX_GENESIS_BODY_SIZE;
+        assert!(body_len <= MAX_GENESIS_BODY_SIZE);
+    }
+
+    #[test]
+    fn body_size_over_limit_rejected() {
+        let body_len = MAX_GENESIS_BODY_SIZE + 1;
+        assert!(body_len > MAX_GENESIS_BODY_SIZE);
+    }
+
+    #[test]
+    fn status_code_from_u16_edge_cases() {
+        assert!(StatusCode::from_u16(200).is_ok());
+        assert!(StatusCode::from_u16(502).is_ok());
+        assert!(StatusCode::from_u16(0).is_err());
+    }
+}

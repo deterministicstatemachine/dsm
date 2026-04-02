@@ -129,3 +129,79 @@ async fn put_leaf(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(StatusCode::OK)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn key_head_is_deterministic() {
+        let device = [0x01u8; 32];
+        let k1 = key_head(&device);
+        let k2 = key_head(&device);
+        assert_eq!(k1, k2, "same device must produce same head key");
+    }
+
+    #[test]
+    fn key_head_differs_for_different_devices() {
+        let d1 = [0x01u8; 32];
+        let d2 = [0x02u8; 32];
+        assert_ne!(key_head(&d1), key_head(&d2));
+    }
+
+    #[test]
+    fn key_leaf_is_deterministic() {
+        let device = [0x0Au8; 32];
+        let rel = [0x0Bu8; 32];
+        let k1 = key_leaf(&device, &rel);
+        let k2 = key_leaf(&device, &rel);
+        assert_eq!(k1, k2);
+    }
+
+    #[test]
+    fn key_leaf_differs_for_different_rel() {
+        let device = [0x01u8; 32];
+        let r1 = [0x0Au8; 32];
+        let r2 = [0x0Bu8; 32];
+        assert_ne!(key_leaf(&device, &r1), key_leaf(&device, &r2));
+    }
+
+    #[test]
+    fn key_leaf_is_order_sensitive() {
+        let a = [0x01u8; 32];
+        let b = [0x02u8; 32];
+        assert_ne!(
+            key_leaf(&a, &b),
+            key_leaf(&b, &a),
+            "swapping device/rel must produce different keys"
+        );
+    }
+
+    #[test]
+    fn key_head_and_key_leaf_use_different_domains() {
+        let data = [0xFFu8; 32];
+        let head = key_head(&data);
+        let leaf = key_leaf(&data, &data);
+        assert_ne!(head, leaf, "head and leaf keys must differ due to domain tags");
+    }
+
+    #[test]
+    fn size_constants_are_reasonable() {
+        assert_eq!(MAX_HEAD_BYTES, 256);
+        assert_eq!(MAX_LEAF_BYTES, 2048);
+        assert!(MAX_LEAF_BYTES > MAX_HEAD_BYTES);
+    }
+
+    #[test]
+    fn key_outputs_are_nonempty_base32() {
+        let device = [0x42u8; 32];
+        let head = key_head(&device);
+        assert!(!head.is_empty());
+        assert!(head.len() > 10);
+
+        let rel = [0x43u8; 32];
+        let leaf = key_leaf(&device, &rel);
+        assert!(!leaf.is_empty());
+        assert!(leaf.len() > 10);
+    }
+}

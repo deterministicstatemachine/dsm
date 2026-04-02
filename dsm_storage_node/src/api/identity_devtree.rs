@@ -178,3 +178,111 @@ fn from_hex(b: u8) -> Result<u8, StatusCode> {
         _ => Err(StatusCode::BAD_REQUEST),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn key_root_is_deterministic() {
+        let genesis = [0xABu8; 32];
+        let k1 = key_root(&genesis);
+        let k2 = key_root(&genesis);
+        assert_eq!(k1, k2, "same genesis must produce same root key");
+    }
+
+    #[test]
+    fn key_root_differs_for_different_genesis() {
+        let g1 = [0x01u8; 32];
+        let g2 = [0x02u8; 32];
+        assert_ne!(key_root(&g1), key_root(&g2));
+    }
+
+    #[test]
+    fn key_proof_is_deterministic_and_order_sensitive() {
+        let genesis = [0x01u8; 32];
+        let devid = [0x02u8; 32];
+        let k1 = key_proof(&genesis, &devid);
+        let k2 = key_proof(&genesis, &devid);
+        assert_eq!(k1, k2);
+
+        // Swapping genesis/devid must produce different key
+        let swapped = key_proof(&devid, &genesis);
+        assert_ne!(k1, swapped, "key_proof must be order-sensitive");
+    }
+
+    #[test]
+    fn key_proof_differs_for_different_devid() {
+        let genesis = [0x01u8; 32];
+        let d1 = [0x0Au8; 32];
+        let d2 = [0x0Bu8; 32];
+        assert_ne!(key_proof(&genesis, &d1), key_proof(&genesis, &d2));
+    }
+
+    #[test]
+    fn parse_devid_extracts_value() {
+        let b32 = dsm_sdk::util::text_id::encode_base32_crockford(&[0x42u8; 32]);
+        let raw = format!("devid={b32}");
+        let result = parse_devid(Some(&raw)).unwrap();
+        assert_eq!(result, vec![0x42u8; 32]);
+    }
+
+    #[test]
+    fn parse_devid_missing_param_is_error() {
+        assert!(parse_devid(None).is_err());
+        assert!(parse_devid(Some("other=abc")).is_err());
+    }
+
+    #[test]
+    fn parse_devid_with_multiple_params() {
+        let b32 = dsm_sdk::util::text_id::encode_base32_crockford(&[0x33u8; 32]);
+        let raw = format!("foo=bar&devid={b32}&baz=qux");
+        let result = parse_devid(Some(&raw)).unwrap();
+        assert_eq!(result, vec![0x33u8; 32]);
+    }
+
+    #[test]
+    fn decode_percent_passthrough() {
+        assert_eq!(decode_percent("hello").unwrap(), "hello");
+    }
+
+    #[test]
+    fn decode_percent_hex_sequences() {
+        assert_eq!(decode_percent("a%20b").unwrap(), "a b");
+        assert_eq!(decode_percent("%41%42%43").unwrap(), "ABC");
+    }
+
+    #[test]
+    fn decode_percent_plus_becomes_space() {
+        assert_eq!(decode_percent("a+b").unwrap(), "a b");
+    }
+
+    #[test]
+    fn decode_percent_truncated_hex_is_error() {
+        assert!(decode_percent("%2").is_err());
+        assert!(decode_percent("%").is_err());
+    }
+
+    #[test]
+    fn from_hex_digits() {
+        assert_eq!(from_hex(b'0').unwrap(), 0);
+        assert_eq!(from_hex(b'9').unwrap(), 9);
+        assert_eq!(from_hex(b'a').unwrap(), 10);
+        assert_eq!(from_hex(b'f').unwrap(), 15);
+        assert_eq!(from_hex(b'A').unwrap(), 10);
+        assert_eq!(from_hex(b'F').unwrap(), 15);
+    }
+
+    #[test]
+    fn from_hex_invalid() {
+        assert!(from_hex(b'g').is_err());
+        assert!(from_hex(b'G').is_err());
+        assert!(from_hex(b' ').is_err());
+    }
+
+    #[test]
+    fn size_constants_are_reasonable() {
+        assert_eq!(MAX_ROOT_BYTES, 256);
+        assert_eq!(MAX_PROOF_BYTES, 128 * 1024);
+    }
+}

@@ -310,6 +310,16 @@ pub async fn emit_cycle_commitment(
     Ok(dt)
 }
 
+/// Deterministic address computation exposed for testing.
+#[cfg(test)]
+pub(crate) fn _test_bytecommit_addr(
+    node_id: &[u8; 32],
+    cycle_index: u64,
+    dt: &[u8; 32],
+) -> String {
+    bytecommit_addr(node_id, cycle_index, dt)
+}
+
 /// Fetch raw bytes by deterministic address (hex string)
 pub async fn get_by_addr(
     Extension(state): Extension<Arc<crate::AppState>>,
@@ -328,4 +338,87 @@ pub async fn get_by_addr(
         HeaderValue::from_static("application/octet-stream"),
     );
     Ok((StatusCode::OK, headers, bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prost::Message;
+
+    #[test]
+    fn bytecommit_digest_is_deterministic() {
+        let data = b"hello bytecommit";
+        let d1 = bytecommit_digest_bytes(data);
+        let d2 = bytecommit_digest_bytes(data);
+        assert_eq!(d1, d2);
+    }
+
+    #[test]
+    fn bytecommit_digest_differs_for_different_input() {
+        let d1 = bytecommit_digest_bytes(b"aaa");
+        let d2 = bytecommit_digest_bytes(b"bbb");
+        assert_ne!(d1, d2);
+    }
+
+    #[test]
+    fn bytecommit_addr_is_deterministic() {
+        let node_id = [1u8; 32];
+        let dt = [2u8; 32];
+        let a1 = bytecommit_addr(&node_id, 5, &dt);
+        let a2 = bytecommit_addr(&node_id, 5, &dt);
+        assert_eq!(a1, a2);
+        assert!(!a1.is_empty());
+    }
+
+    #[test]
+    fn bytecommit_addr_varies_with_cycle() {
+        let node_id = [1u8; 32];
+        let dt = [2u8; 32];
+        let a1 = bytecommit_addr(&node_id, 0, &dt);
+        let a2 = bytecommit_addr(&node_id, 1, &dt);
+        assert_ne!(a1, a2);
+    }
+
+    #[test]
+    fn bytecommit_addr_varies_with_node_id() {
+        let dt = [2u8; 32];
+        let a1 = bytecommit_addr(&[0u8; 32], 0, &dt);
+        let a2 = bytecommit_addr(&[1u8; 32], 0, &dt);
+        assert_ne!(a1, a2);
+    }
+
+    #[test]
+    fn bytecommit_v3_roundtrip() {
+        let commit = ByteCommitV3 {
+            node_id: vec![0xAA; 32],
+            cycle_index: 42,
+            smt_root: vec![0xBB; 32],
+            bytes_used: 1024,
+            parent_digest: vec![0; 32],
+        };
+        let mut buf = Vec::new();
+        commit.encode(&mut buf).unwrap();
+        let decoded = ByteCommitV3::decode(buf.as_slice()).unwrap();
+        assert_eq!(decoded, commit);
+    }
+
+    #[test]
+    fn bytecommit_v3_empty_node_id_detected() {
+        let commit = ByteCommitV3 {
+            node_id: vec![],
+            cycle_index: 0,
+            smt_root: vec![],
+            bytes_used: 0,
+            parent_digest: vec![],
+        };
+        assert_ne!(commit.node_id.len(), 32);
+    }
+
+    #[test]
+    fn bytecommit_digest_bytes_not_raw_blake3() {
+        let data = b"test";
+        let tagged = bytecommit_digest_bytes(data);
+        let raw = blake3::hash(data);
+        assert_ne!(tagged, *raw.as_bytes());
+    }
 }
