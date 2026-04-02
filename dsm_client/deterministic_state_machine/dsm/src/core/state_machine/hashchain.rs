@@ -51,7 +51,7 @@ impl HashChain {
     /// This implements the core logic described in whitepaper Section 3.1:
     /// Each state contains a cryptographic hash of its predecessor:
     /// S(n+1).prev_hash = H(S(n))
-    pub fn add_state(&mut self, state: State) -> Result<(), DsmError> {
+    pub fn add_state(&mut self, mut state: State) -> Result<(), DsmError> {
         // Check for existing state with the same number
         if self
             .states
@@ -78,6 +78,11 @@ impl HashChain {
                     return Err(DsmError::invalid_operation("Sparse index must include previous state reference for proper chain traversal"));
                 }
             }
+        }
+
+        // Persist canonical hash when callers (e.g. SDK) construct states with hash == 0
+        if state.hash == [0u8; 32] {
+            state.hash = state.compute_hash()?;
         }
 
         // Store the state

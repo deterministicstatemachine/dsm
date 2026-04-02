@@ -137,33 +137,17 @@ impl State {
     }
 
     /// Calculate sparse indices for a state
+    ///
+    /// Delegates to [`SparseIndex::calculate_sparse_indices`] (whitepaper §3.2). The
+    /// previous implementation used `checkpoint.next_power_of_two() / 2`, which is **0**
+    /// when `checkpoint == 1`, so the loop never terminated.
     pub fn calculate_sparse_indices(state_number: u64) -> Result<Vec<u64>, DsmError> {
         if state_number == 0 {
             return Err(DsmError::invalid_parameter(
                 "Genesis state (state_number == 0) should not have sparse indices",
             ));
         }
-
-        let mut indices = Vec::new();
-
-        // Always include previous state
-        indices.push(state_number - 1);
-
-        // Add exponentially spaced checkpoints
-        let mut checkpoint = state_number;
-        while checkpoint > 0 {
-            checkpoint = checkpoint.saturating_sub(checkpoint.next_power_of_two() / 2);
-            if checkpoint > 0 && checkpoint < state_number {
-                indices.push(checkpoint);
-            }
-        }
-
-        // Add genesis state if not already included
-        if !indices.contains(&0) {
-            indices.push(0);
-        }
-
-        Ok(indices)
+        SparseIndex::calculate_sparse_indices(state_number)
     }
 
     /// Validate state integrity using BLAKE3-only verification
@@ -226,5 +210,362 @@ impl State {
         // Verify hash chain linkage
         let prev_hash = prev_state.compute_hash()?;
         Ok(ct_eq(&prev_hash, &next_state.prev_state_hash))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::operations::Operation;
+    use crate::types::state_types::{DeviceInfo, StateParams};
+
+    fn test_device_info() -> DeviceInfo {
+        DeviceInfo::new([0x11; 32], vec![0x22; 64])
+    }
+
+    fn test_entropy() -> Vec<u8> {
+        (1..=32).collect()
+    }
+
+    fn test_entropy_array() -> [u8; 32] {
+        let mut arr = [0u8; 32];
+        for i in 0..32 {
+            arr[i] = (i + 1) as u8;
+        }
+        arr
+    }
+
+    fn finalize_hash(state: &mut State) {
+        let computed = state.compute_hash().unwrap();
+        let mut h = [0u8; 32];
+        h.copy_from_slice(&computed);
+        state.hash = h;
+    }
+
+    // ---- ct_eq ----
+
+    #[test]
+    fn ct_eq_equal_slices_returns_true() {
+        assert!(ct_eq(&[1, 2, 3, 4, 5], &[1, 2, 3, 4, 5]));
+    }
+
+    #[test]
+    fn ct_eq_different_slices_returns_false() {
+        assert!(!ct_eq(&[1, 2, 3, 4, 5], &[1, 2, 3, 4, 6]));
+    }
+
+    #[test]
+    fn ct_eq_different_lengths_returns_false() {
+        assert!(!ct_eq(&[1, 2, 3], &[1, 2, 3, 4]));
+    }
+
+    #[test]
+    fn ct_eq_empty_slices_returns_true() {
+        assert!(ct_eq(&[], &[]));
+    }
+
+    #[test]
+    fn ct_eq_single_bit_difference_returns_false() {
+        assert!(!ct_eq(&[0b1111_1111], &[0b1111_1110]));
+    }
+
+    // ---- State::new ----
+
+    #[test]
+    fn new_state_has_correct_state_number() {
+        let params = StateParams::new(42, test_entropy(), Operation::Noop, test_device_info());
+        let state = State::new(params);
+        assert_eq!(state.state_number, 42);
+    }
+
+    #[test]
+    fn new_state_has_zero_hash() {
+        let params = StateParams::new(1, test_entropy(), Operation::Noop, test_device_info());
+        let state = State::new(params);
+        assert_eq!(state.hash, [0u8; 32]);
+    }
+
+    #[test]
+    fn new_state_preserves_entropy() {
+        let entropy = test_entropy();
+        let params = StateParams::new(1, entropy.clone(), Operation::Noop, test_device_info());
+        let state = State::new(params);
+        assert_eq!(state.entropy, entropy);
+    }
+
+    #[test]
+    fn new_state_preserves_prev_hash() {
+        let prev_hash = [0xAA; 32];
+        let params = StateParams::new(1, test_entropy(), Operation::Noop, test_device_info())
+            .with_prev_state_hash(prev_hash);
+        let state = State::new(params);
+        assert_eq!(state.prev_state_hash, prev_hash);
+    }
+
+    #[test]
+    fn new_state_preserves_operation() {
+        let params = StateParams::new(1, test_entropy(), Operation::Genesis, test_device_info());
+        let state = State::new(params);
+        assert!(matches!(state.operation, Operation::Genesis));
+    }
+
+    // ---- State::new_genesis ----
+
+    #[test]
+    fn genesis_state_has_state_number_zero() {
+        let state = State::new_genesis(test_entropy_array(), test_device_info());
+        assert_eq!(state.state_number, 0);
+    }
+
+    #[test]
+    fn genesis_state_has_zero_prev_hash() {
+        let state = State::new_genesis(test_entropy_array(), test_device_info());
+        assert_eq!(state.prev_state_hash, [0u8; 32]);
+    }
+
+    #[test]
+    fn genesis_state_has_correct_entropy() {
+        let entropy = test_entropy_array();
+        let state = State::new_genesis(entropy, test_device_info());
+        assert_eq!(state.entropy, entropy.to_vec());
+    }
+
+    #[test]
+    fn genesis_state_has_genesis_operation() {
+        let state = State::new_genesis(test_entropy_array(), test_device_info());
+        assert!(matches!(state.operation, Operation::Genesis));
+    }
+
+    #[test]
+    fn genesis_state_has_no_forward_commitment() {
+        let state = State::new_genesis(test_entropy_array(), test_device_info());
+        assert!(state.forward_commitment.is_none());
+    }
+
+    // ---- State::compute_hash ----
+
+    #[test]
+    fn compute_hash_is_deterministic() {
+        let s1 = State::new(StateParams::new(
+            1,
+            test_entropy(),
+            Operation::Noop,
+            test_device_info(),
+        ));
+        let s2 = State::new(StateParams::new(
+            1,
+            test_entropy(),
+            Operation::Noop,
+            test_device_info(),
+        ));
+        assert_eq!(s1.compute_hash().unwrap(), s2.compute_hash().unwrap());
+    }
+
+    #[test]
+    fn compute_hash_returns_32_bytes() {
+        let state = State::new_genesis(test_entropy_array(), test_device_info());
+        assert_eq!(state.compute_hash().unwrap().len(), 32);
+    }
+
+    #[test]
+    fn compute_hash_different_entropy_yields_different_hash() {
+        let s1 = State::new(StateParams::new(
+            1,
+            vec![1, 2, 3],
+            Operation::Noop,
+            test_device_info(),
+        ));
+        let s2 = State::new(StateParams::new(
+            1,
+            vec![4, 5, 6],
+            Operation::Noop,
+            test_device_info(),
+        ));
+        assert_ne!(s1.compute_hash().unwrap(), s2.compute_hash().unwrap());
+    }
+
+    #[test]
+    fn compute_hash_different_state_number_yields_different_hash() {
+        let s1 = State::new(StateParams::new(
+            1,
+            test_entropy(),
+            Operation::Noop,
+            test_device_info(),
+        ));
+        let s2 = State::new(StateParams::new(
+            2,
+            test_entropy(),
+            Operation::Noop,
+            test_device_info(),
+        ));
+        assert_ne!(s1.compute_hash().unwrap(), s2.compute_hash().unwrap());
+    }
+
+    // ---- State::hash ----
+
+    #[test]
+    fn hash_returns_same_as_compute_hash() {
+        let state = State::new_genesis(test_entropy_array(), test_device_info());
+        assert_eq!(state.hash().unwrap(), state.compute_hash().unwrap());
+    }
+
+    #[test]
+    fn hash_always_computes_fresh_value() {
+        let mut state = State::new_genesis(test_entropy_array(), test_device_info());
+        state.hash = [0xFF; 32];
+        let result = state.hash().unwrap();
+        let computed = state.compute_hash().unwrap();
+        assert_eq!(result, computed);
+    }
+
+    // ---- State::calculate_sparse_indices ----
+
+    #[test]
+    fn sparse_indices_state_zero_returns_error() {
+        assert!(State::calculate_sparse_indices(0).is_err());
+    }
+
+    #[test]
+    fn sparse_indices_state_one_returns_vec_with_zero() {
+        let indices = State::calculate_sparse_indices(1).unwrap();
+        assert_eq!(indices, vec![0]);
+    }
+
+    #[test]
+    fn sparse_indices_state_two_contains_zero_and_one() {
+        let indices = State::calculate_sparse_indices(2).unwrap();
+        assert!(indices.contains(&0));
+        assert!(indices.contains(&1));
+    }
+
+    #[test]
+    fn sparse_indices_large_state_has_logarithmic_count() {
+        let indices = State::calculate_sparse_indices(1024).unwrap();
+        assert!(
+            indices.len() <= 20,
+            "expected logarithmic count, got {}",
+            indices.len()
+        );
+        assert!(indices.len() >= 2);
+    }
+
+    #[test]
+    fn sparse_indices_always_include_genesis() {
+        for n in [1u64, 2, 5, 10, 100, 1000] {
+            let indices = State::calculate_sparse_indices(n).unwrap();
+            assert!(indices.contains(&0), "state {n} missing genesis");
+        }
+    }
+
+    #[test]
+    fn sparse_indices_always_include_predecessor() {
+        for n in [1u64, 2, 5, 10, 100, 1000] {
+            let indices = State::calculate_sparse_indices(n).unwrap();
+            assert!(
+                indices.contains(&(n - 1)),
+                "state {n} missing predecessor"
+            );
+        }
+    }
+
+    #[test]
+    fn sparse_indices_are_sorted_and_deduped() {
+        let indices = State::calculate_sparse_indices(100).unwrap();
+        for w in indices.windows(2) {
+            assert!(w[0] < w[1], "not sorted/deduped: {indices:?}");
+        }
+    }
+
+    // ---- State::validate_state_integrity ----
+
+    #[test]
+    fn validate_genesis_with_matching_hash_is_valid() {
+        let mut state = State::new_genesis(test_entropy_array(), test_device_info());
+        finalize_hash(&mut state);
+        assert!(State::validate_state_integrity(&state).unwrap());
+    }
+
+    #[test]
+    fn validate_genesis_with_nonzero_prev_hash_is_invalid() {
+        let mut state = State::new_genesis(test_entropy_array(), test_device_info());
+        finalize_hash(&mut state);
+        state.prev_state_hash = [0xFF; 32];
+        assert!(!State::validate_state_integrity(&state).unwrap());
+    }
+
+    #[test]
+    fn validate_nongenesis_with_zero_prev_hash_is_invalid() {
+        let params = StateParams::new(1, test_entropy(), Operation::Noop, test_device_info());
+        let mut state = State::new(params);
+        finalize_hash(&mut state);
+        assert!(!State::validate_state_integrity(&state).unwrap());
+    }
+
+    #[test]
+    fn validate_nongenesis_with_correct_hash_is_valid() {
+        let prev_hash = [0xBB; 32];
+        let params = StateParams::new(1, test_entropy(), Operation::Noop, test_device_info())
+            .with_prev_state_hash(prev_hash);
+        let mut state = State::new(params);
+        finalize_hash(&mut state);
+        assert!(State::validate_state_integrity(&state).unwrap());
+    }
+
+    #[test]
+    fn validate_state_with_mismatched_hash_is_invalid() {
+        let prev_hash = [0xBB; 32];
+        let params = StateParams::new(1, test_entropy(), Operation::Noop, test_device_info())
+            .with_prev_state_hash(prev_hash);
+        let mut state = State::new(params);
+        state.hash = [0xCC; 32];
+        assert!(!State::validate_state_integrity(&state).unwrap());
+    }
+
+    // ---- State::verify_hash_chain ----
+
+    #[test]
+    fn verify_hash_chain_valid_sequential_states() {
+        let mut genesis = State::new_genesis(test_entropy_array(), test_device_info());
+        finalize_hash(&mut genesis);
+
+        let mut prev_hash = [0u8; 32];
+        prev_hash.copy_from_slice(&genesis.compute_hash().unwrap());
+
+        let params = StateParams::new(1, vec![99; 16], Operation::Noop, test_device_info())
+            .with_prev_state_hash(prev_hash);
+        let mut next = State::new(params);
+        finalize_hash(&mut next);
+
+        assert!(State::verify_hash_chain(&genesis, &next).unwrap());
+    }
+
+    #[test]
+    fn verify_hash_chain_nonsequential_state_numbers_is_invalid() {
+        let mut genesis = State::new_genesis(test_entropy_array(), test_device_info());
+        finalize_hash(&mut genesis);
+
+        let mut prev_hash = [0u8; 32];
+        prev_hash.copy_from_slice(&genesis.compute_hash().unwrap());
+
+        let params = StateParams::new(5, vec![99; 16], Operation::Noop, test_device_info())
+            .with_prev_state_hash(prev_hash);
+        let mut next = State::new(params);
+        finalize_hash(&mut next);
+
+        assert!(!State::verify_hash_chain(&genesis, &next).unwrap());
+    }
+
+    #[test]
+    fn verify_hash_chain_broken_linkage_is_invalid() {
+        let mut genesis = State::new_genesis(test_entropy_array(), test_device_info());
+        finalize_hash(&mut genesis);
+
+        let wrong_prev = [0xDD; 32];
+        let params = StateParams::new(1, vec![99; 16], Operation::Noop, test_device_info())
+            .with_prev_state_hash(wrong_prev);
+        let mut next = State::new(params);
+        finalize_hash(&mut next);
+
+        assert!(!State::verify_hash_chain(&genesis, &next).unwrap());
     }
 }
