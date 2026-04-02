@@ -2610,8 +2610,7 @@ impl BilateralBleHandler {
                 .public_key
                 .clone()
         };
-        // §ISSUE-B4 FIX: use canonical "DSM/<domain>\0" format consistent with every
-        // other domain separator in the codebase.
+        // Bilateral confirm signature: `DSM/bilateral-sign\0` || commitment_hash (canonical domain tag).
         let mut signature_msg = Vec::with_capacity(22 + 32);
         signature_msg.extend_from_slice(b"DSM/bilateral-sign\0");
         signature_msg.extend_from_slice(&commitment_hash);
@@ -3069,7 +3068,7 @@ impl BilateralBleHandler {
                 .clone()
         };
 
-        // §ISSUE-B4 FIX: use canonical "DSM/<domain>\0" format.
+        // Confirm-request sender sig: `DSM/bilateral-sign\0` || commitment_hash.
         let mut signature_msg = Vec::with_capacity(22 + 32);
         signature_msg.extend_from_slice(b"DSM/bilateral-sign\0");
         signature_msg.extend_from_slice(&commitment_hash);
