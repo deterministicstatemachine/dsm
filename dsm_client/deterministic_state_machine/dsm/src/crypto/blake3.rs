@@ -564,7 +564,14 @@ mod tests {
             handles.push(handle);
         }
 
-        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let mut results = Vec::with_capacity(handles.len());
+        for h in handles {
+            let v = match h.join() {
+                Ok(v) => v,
+                Err(_) => panic!("generate_deterministic_entropy_concurrent worker panicked"),
+            };
+            results.push(v);
+        }
         for w in results.windows(2) {
             assert_eq!(w[0], w[1]);
         }

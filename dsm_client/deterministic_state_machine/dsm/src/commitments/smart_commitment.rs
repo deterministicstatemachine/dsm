@@ -173,15 +173,15 @@ impl SmartCommitment {
         }
     }
 
-    fn make_decimal_id(prefix: &str, commitment_hash: &[u8]) -> String {
+    fn make_decimal_id(prefix: &str, commitment_hash: &[u8]) -> Result<String, DsmError> {
         let mut h = crate::crypto::blake3::dsm_domain_hasher("DSM/smart-commit/id/v2");
-        crate::crypto::canonical_lp::write_lp(&mut h, prefix.as_bytes());
-        crate::crypto::canonical_lp::write_lp(&mut h, commitment_hash);
+        crate::crypto::canonical_lp::write_lp(&mut h, prefix.as_bytes())?;
+        crate::crypto::canonical_lp::write_lp(&mut h, commitment_hash)?;
         let out = h.finalize();
         let mut eight = [0u8; 8];
         eight.copy_from_slice(&out.as_bytes()[..8]);
         let num = u64::from_le_bytes(eight);
-        format!("{}_{}", prefix, num)
+        Ok(format!("{}_{}", prefix, num))
     }
 
     /// Canonical commitment hash:
@@ -193,20 +193,20 @@ impl SmartCommitment {
         amount: u64,
         ctype: &CommitmentType,
         cond: &CommitmentCondition,
-    ) -> [u8; 32] {
+    ) -> Result<[u8; 32], DsmError> {
         let opb = operation.to_bytes();
 
         let mut h = crate::crypto::blake3::dsm_domain_hasher("DSM/smart-commit/hash/v2");
 
-        crate::crypto::canonical_lp::write_lp(&mut h, origin_state_hash);
-        crate::crypto::canonical_lp::write_lp(&mut h, &opb);
-        crate::crypto::canonical_lp::write_lp(&mut h, recipient);
+        crate::crypto::canonical_lp::write_lp(&mut h, origin_state_hash)?;
+        crate::crypto::canonical_lp::write_lp(&mut h, &opb)?;
+        crate::crypto::canonical_lp::write_lp(&mut h, recipient)?;
         h.update(&amount.to_le_bytes());
 
-        encode_commitment_type(&mut h, ctype);
-        encode_condition(&mut h, cond);
+        encode_commitment_type(&mut h, ctype)?;
+        encode_condition(&mut h, cond)?;
 
-        *h.finalize().as_bytes()
+        Ok(*h.finalize().as_bytes())
     }
 
     /// Create a new smart commitment bound to `origin_state`
@@ -237,11 +237,11 @@ impl SmartCommitment {
             amount,
             &commitment_type,
             &conditions,
-        );
+        )?;
 
         // If caller provided a blank ID, make one deterministically.
         let final_id = if id.is_empty() {
-            Self::make_decimal_id("smart", &commitment_hash)
+            Self::make_decimal_id("smart", &commitment_hash)?
         } else {
             id.to_string()
         };
@@ -377,8 +377,8 @@ impl SmartCommitment {
             amount,
             &ctype,
             &cond,
-        );
-        let id = Self::make_decimal_id("conditional", &commitment_hash);
+        )?;
+        let id = Self::make_decimal_id("conditional", &commitment_hash)?;
 
         let mut c = Self {
             id,
@@ -450,8 +450,8 @@ impl SmartCommitment {
             amount,
             &ctype,
             &compound,
-        );
-        let id = Self::make_decimal_id(&format!("{}_compound", name), &commitment_hash);
+        )?;
+        let id = Self::make_decimal_id(&format!("{}_compound", name), &commitment_hash)?;
 
         let mut s = Self {
             id,
@@ -523,8 +523,8 @@ impl SmartCommitment {
             amount,
             &ctype,
             &compound,
-        );
-        let id = Self::make_decimal_id(&format!("{}_or_compound", name), &commitment_hash);
+        )?;
+        let id = Self::make_decimal_id(&format!("{}_or_compound", name), &commitment_hash)?;
 
         let mut s = Self {
             id,
@@ -641,7 +641,7 @@ impl SmartCommitment {
             self.amount,
             &self.commitment_type,
             &self.conditions,
-        );
+        )?;
         if expected != self.commitment_hash {
             return Ok(false);
         }
@@ -687,40 +687,40 @@ impl SmartCommitment {
     }
 
     /// Canonical binding bytes (stable, binary, deterministic)
-    pub fn to_bytes(&self) -> Vec<u8> {
+    pub fn to_bytes(&self) -> Result<Vec<u8>, DsmError> {
         // This is the commitment preimage in wire-stable form.
         // Keep it binary and stable. Do NOT use Debug strings here.
         let mut out = Vec::new();
 
         out.extend_from_slice(WIRE_MAGIC);
 
-        push_lp(&mut out, self.id.as_bytes());
-        push_lp(&mut out, &self.origin_state_hash);
-        push_lp(&mut out, &self.commitment_hash);
+        crate::crypto::canonical_lp::append_lp(&mut out, self.id.as_bytes())?;
+        crate::crypto::canonical_lp::append_lp(&mut out, &self.origin_state_hash)?;
+        crate::crypto::canonical_lp::append_lp(&mut out, &self.commitment_hash)?;
 
         // commitment_type
         {
             let mut tmp = Vec::new();
-            encode_commitment_type_bytes(&mut tmp, &self.commitment_type);
-            push_lp(&mut out, &tmp);
+            encode_commitment_type_bytes(&mut tmp, &self.commitment_type)?;
+            crate::crypto::canonical_lp::append_lp(&mut out, &tmp)?;
         }
         // conditions
         {
             let mut tmp = Vec::new();
-            encode_condition_bytes(&mut tmp, &self.conditions);
-            push_lp(&mut out, &tmp);
+            encode_condition_bytes(&mut tmp, &self.conditions)?;
+            crate::crypto::canonical_lp::append_lp(&mut out, &tmp)?;
         }
 
         // operation bytes
         let opb = self.operation.to_bytes();
-        push_lp(&mut out, &opb);
+        crate::crypto::canonical_lp::append_lp(&mut out, &opb)?;
 
         // recipient + amount + value
-        push_lp(&mut out, &self.recipient);
+        crate::crypto::canonical_lp::append_lp(&mut out, &self.recipient)?;
         out.extend_from_slice(&self.amount.to_le_bytes());
         out.extend_from_slice(&self.value.to_le_bytes());
 
-        out
+        Ok(out)
     }
 
     /// Encrypt via PQ KEM + AEAD (commitment hash + wire bytes)
@@ -729,7 +729,7 @@ impl SmartCommitment {
         &self,
         recipient_pubkey: &[u8],
     ) -> Result<(Vec<u8>, Vec<u8>), DsmError> {
-        let body = self.to_wire_bytes();
+        let body = self.to_wire_bytes()?;
         let ccommit = self.commitment_hash;
 
         let (shared, kem_ct) = kyber::kyber_encapsulate(recipient_pubkey)
@@ -739,8 +739,8 @@ impl SmartCommitment {
         // No wall clocks, no external randomness required here.
         let nonce_full = {
             let mut h = crate::crypto::blake3::dsm_domain_hasher("DSM/smart-commit/nonce/v2");
-            crate::crypto::canonical_lp::write_lp(&mut h, &shared);
-            crate::crypto::canonical_lp::write_lp(&mut h, &ccommit);
+            crate::crypto::canonical_lp::write_lp(&mut h, &shared)?;
+            crate::crypto::canonical_lp::write_lp(&mut h, &ccommit)?;
             h.finalize()
         };
         let mut nonce = [0u8; 12];
@@ -830,42 +830,41 @@ impl SmartCommitment {
         out.extend_from_slice(&v.to_le_bytes());
     }
     #[inline]
-    fn push_len_prefixed(out: &mut Vec<u8>, bytes: &[u8]) {
-        Self::push_u32(out, bytes.len() as u32);
-        out.extend_from_slice(bytes);
+    fn push_len_prefixed(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), DsmError> {
+        crate::crypto::canonical_lp::append_lp(out, bytes)
     }
     #[inline]
-    fn push_str(out: &mut Vec<u8>, s: &str) {
-        Self::push_len_prefixed(out, s.as_bytes());
+    fn push_str(out: &mut Vec<u8>, s: &str) -> Result<(), DsmError> {
+        Self::push_len_prefixed(out, s.as_bytes())
     }
 
     /// Deterministic wire encoding (stable, binary)
-    pub fn to_wire_bytes(&self) -> Vec<u8> {
+    pub fn to_wire_bytes(&self) -> Result<Vec<u8>, DsmError> {
         let mut out = Vec::new();
 
         out.extend_from_slice(WIRE_MAGIC);
 
-        Self::push_str(&mut out, &self.id);
-        Self::push_len_prefixed(&mut out, &self.origin_state_hash);
-        Self::push_len_prefixed(&mut out, &self.commitment_hash);
+        Self::push_str(&mut out, &self.id)?;
+        Self::push_len_prefixed(&mut out, &self.origin_state_hash)?;
+        Self::push_len_prefixed(&mut out, &self.commitment_hash)?;
 
         // commitment type (binary)
         {
             let mut tmp = Vec::new();
-            encode_commitment_type_bytes(&mut tmp, &self.commitment_type);
-            Self::push_len_prefixed(&mut out, &tmp);
+            encode_commitment_type_bytes(&mut tmp, &self.commitment_type)?;
+            Self::push_len_prefixed(&mut out, &tmp)?;
         }
 
         // conditions (binary)
         {
             let mut tmp = Vec::new();
-            encode_condition_bytes(&mut tmp, &self.conditions);
-            Self::push_len_prefixed(&mut out, &tmp);
+            encode_condition_bytes(&mut tmp, &self.conditions)?;
+            Self::push_len_prefixed(&mut out, &tmp)?;
         }
 
         // operation bytes
         let opb = self.operation.to_bytes();
-        Self::push_len_prefixed(&mut out, &opb);
+        Self::push_len_prefixed(&mut out, &opb)?;
 
         // verification positions
         Self::push_u32(&mut out, self.verification_positions.len() as u32);
@@ -878,7 +877,7 @@ impl SmartCommitment {
         }
 
         // recipient bytes
-        Self::push_len_prefixed(&mut out, &self.recipient);
+        Self::push_len_prefixed(&mut out, &self.recipient)?;
         // amounts
         Self::push_u64(&mut out, self.amount);
         Self::push_u64(&mut out, self.value);
@@ -888,18 +887,18 @@ impl SmartCommitment {
         keys.sort_unstable();
         Self::push_u32(&mut out, keys.len() as u32);
         for k in keys {
-            Self::push_str(&mut out, &k);
+            Self::push_str(&mut out, &k)?;
             Self::push_str(
                 &mut out,
                 self.parameters.get(&k).map(|s| s.as_str()).unwrap_or(""),
-            );
+            )?;
         }
 
         // signatures
         Self::push_u32(&mut out, self.signatures.len() as u32);
         for (pk, sig) in &self.signatures {
-            Self::push_len_prefixed(&mut out, pk);
-            Self::push_len_prefixed(&mut out, sig);
+            Self::push_len_prefixed(&mut out, pk)?;
+            Self::push_len_prefixed(&mut out, sig)?;
         }
 
         // planned_step (optional)
@@ -911,7 +910,7 @@ impl SmartCommitment {
             None => out.push(0),
         }
 
-        out
+        Ok(out)
     }
 
     /// Parse from to_wire_bytes() encoding
@@ -1103,16 +1102,6 @@ impl Default for SmartCommitmentRegistry {
 // -------------------------
 
 #[inline]
-fn push_lp(out: &mut Vec<u8>, bytes: &[u8]) {
-    // Keep LP encoding canonical and centralized.
-    // Vec encoding is used only for building nested proof/commitment byte blobs; it must match
-    // the same u32-le length prefix rule as `canonical_lp::write_lp`.
-    let len = bytes.len() as u32;
-    out.extend_from_slice(&len.to_le_bytes());
-    out.extend_from_slice(bytes);
-}
-
-#[inline]
 fn enc_u32(out: &mut Vec<u8>, v: u32) {
     out.extend_from_slice(&v.to_le_bytes());
 }
@@ -1122,31 +1111,36 @@ fn enc_u64(out: &mut Vec<u8>, v: u64) {
     out.extend_from_slice(&v.to_le_bytes());
 }
 #[inline]
-fn enc_lp(out: &mut Vec<u8>, b: &[u8]) {
-    push_lp(out, b);
+fn enc_lp(out: &mut Vec<u8>, b: &[u8]) -> Result<(), DsmError> {
+    crate::crypto::canonical_lp::append_lp(out, b)
 }
 #[inline]
-fn enc_str(out: &mut Vec<u8>, s: &str) {
-    enc_lp(out, s.as_bytes());
+fn enc_str(out: &mut Vec<u8>, s: &str) -> Result<(), DsmError> {
+    enc_lp(out, s.as_bytes())
 }
 
-fn encode_commitment_type(h: &mut ::blake3::Hasher, ctype: &CommitmentType) {
+fn encode_commitment_type(
+    h: &mut ::blake3::Hasher,
+    ctype: &CommitmentType,
+) -> Result<(), DsmError> {
     let mut tmp = Vec::new();
-    encode_commitment_type_bytes(&mut tmp, ctype);
-    crate::crypto::canonical_lp::write_lp(h, &tmp);
+    encode_commitment_type_bytes(&mut tmp, ctype)?;
+    crate::crypto::canonical_lp::write_lp(h, &tmp)?;
+    Ok(())
 }
 
-fn encode_commitment_type_bytes(out: &mut Vec<u8>, ctype: &CommitmentType) {
+fn encode_commitment_type_bytes(out: &mut Vec<u8>, ctype: &CommitmentType) -> Result<(), DsmError> {
     match ctype {
         CommitmentType::Conditional {
             condition,
             oracle_pubkey,
         } => {
             out.push(2);
-            enc_str(out, condition);
-            enc_lp(out, oracle_pubkey);
+            enc_str(out, condition)?;
+            enc_lp(out, oracle_pubkey)?;
         }
     }
+    Ok(())
 }
 
 fn decode_commitment_type_bytes(bytes: &[u8]) -> Result<CommitmentType, ()> {
@@ -1169,13 +1163,14 @@ fn decode_commitment_type_bytes(bytes: &[u8]) -> Result<CommitmentType, ()> {
     }
 }
 
-fn encode_condition(h: &mut ::blake3::Hasher, cond: &CommitmentCondition) {
+fn encode_condition(h: &mut ::blake3::Hasher, cond: &CommitmentCondition) -> Result<(), DsmError> {
     let mut tmp = Vec::new();
-    encode_condition_bytes(&mut tmp, cond);
-    crate::crypto::canonical_lp::write_lp(h, &tmp);
+    encode_condition_bytes(&mut tmp, cond)?;
+    crate::crypto::canonical_lp::write_lp(h, &tmp)?;
+    Ok(())
 }
 
-fn encode_condition_bytes(out: &mut Vec<u8>, cond: &CommitmentCondition) {
+fn encode_condition_bytes(out: &mut Vec<u8>, cond: &CommitmentCondition) -> Result<(), DsmError> {
     match cond {
         CommitmentCondition::ValueThreshold {
             parameter_name,
@@ -1183,7 +1178,7 @@ fn encode_condition_bytes(out: &mut Vec<u8>, cond: &CommitmentCondition) {
             operator,
         } => {
             out.push(3);
-            enc_str(out, parameter_name);
+            enc_str(out, parameter_name)?;
             enc_u64(out, *threshold);
             out.push(match operator {
                 ThresholdOperator::GreaterThan => 1,
@@ -1199,8 +1194,8 @@ fn encode_condition_bytes(out: &mut Vec<u8>, cond: &CommitmentCondition) {
             data_source,
         } => {
             out.push(4);
-            enc_lp(out, expected_hash);
-            enc_str(out, data_source);
+            enc_lp(out, expected_hash)?;
+            enc_str(out, data_source)?;
         }
         CommitmentCondition::MultiSignature {
             required_keys,
@@ -1210,7 +1205,7 @@ fn encode_condition_bytes(out: &mut Vec<u8>, cond: &CommitmentCondition) {
             enc_u32(out, *threshold as u32);
             enc_u32(out, required_keys.len() as u32);
             for k in required_keys {
-                enc_lp(out, k);
+                enc_lp(out, k)?;
             }
         }
         CommitmentCondition::And(cs) => {
@@ -1218,8 +1213,8 @@ fn encode_condition_bytes(out: &mut Vec<u8>, cond: &CommitmentCondition) {
             enc_u32(out, cs.len() as u32);
             for c in cs {
                 let mut tmp = Vec::new();
-                encode_condition_bytes(&mut tmp, c);
-                enc_lp(out, &tmp);
+                encode_condition_bytes(&mut tmp, c)?;
+                enc_lp(out, &tmp)?;
             }
         }
         CommitmentCondition::Or(cs) => {
@@ -1227,11 +1222,12 @@ fn encode_condition_bytes(out: &mut Vec<u8>, cond: &CommitmentCondition) {
             enc_u32(out, cs.len() as u32);
             for c in cs {
                 let mut tmp = Vec::new();
-                encode_condition_bytes(&mut tmp, c);
-                enc_lp(out, &tmp);
+                encode_condition_bytes(&mut tmp, c)?;
+                enc_lp(out, &tmp)?;
             }
         }
     }
+    Ok(())
 }
 
 fn decode_condition_bytes(bytes: &[u8]) -> Result<CommitmentCondition, ()> {

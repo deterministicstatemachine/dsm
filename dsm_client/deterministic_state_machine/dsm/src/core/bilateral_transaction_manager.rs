@@ -81,8 +81,8 @@ impl BilateralRelationshipAnchor {
     pub fn generate_mutual_anchor_hash(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
         let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
         let mut h = dsm_domain_hasher("DSM/bilateral-session");
-        canonical_lp::write_lp(&mut h, lo);
-        canonical_lp::write_lp(&mut h, hi);
+        canonical_lp::write_lp_b32(&mut h, lo);
+        canonical_lp::write_lp_b32(&mut h, hi);
         let out = h.finalize();
         let mut bytes = [0u8; 32];
         bytes.copy_from_slice(out.as_bytes());
@@ -214,9 +214,9 @@ impl BilateralPreCommitment {
         op: &Operation,
     ) -> Result<[u8; 32], DsmError> {
         let mut h = dsm_domain_hasher("DSM/bilateral-session");
-        canonical_lp::write_lp(&mut h, &local.hash);
-        canonical_lp::write_lp(&mut h, &remote.hash);
-        canonical_lp::write_lp(&mut h, &op.to_bytes());
+        canonical_lp::write_lp_b32(&mut h, &local.hash);
+        canonical_lp::write_lp_b32(&mut h, &remote.hash);
+        canonical_lp::write_lp(&mut h, &op.to_bytes())?;
         let out = h.finalize();
         let mut bytes = [0u8; 32];
         bytes.copy_from_slice(out.as_bytes());
@@ -234,19 +234,11 @@ impl BilateralPreCommitment {
         let mut m = Vec::new();
         m.extend_from_slice(b"DSM/bilateral-pre-commitment\0");
 
-        // Canonical LP delimiting for variable-length fields.
-        // NOTE: Vec encoding must match canonical LP: u32-le length prefix + bytes.
-        // We inline it here to avoid introducing new exported helpers.
-        fn push_lp(out: &mut Vec<u8>, bytes: &[u8]) {
-            let len = bytes.len() as u32;
-            out.extend_from_slice(&len.to_le_bytes());
-            out.extend_from_slice(bytes);
-        }
-
-        push_lp(&mut m, &self.bilateral_commitment_hash);
-        push_lp(&mut m, &self.local_commitment.hash);
-        push_lp(&mut m, &self.remote_commitment.hash);
-        push_lp(&mut m, &self.operation.to_bytes());
+        // Canonical LP delimiting for variable-length fields (same as `canonical_lp::append_lp`).
+        canonical_lp::append_lp(&mut m, &self.bilateral_commitment_hash)?;
+        canonical_lp::append_lp(&mut m, &self.local_commitment.hash)?;
+        canonical_lp::append_lp(&mut m, &self.remote_commitment.hash)?;
+        canonical_lp::append_lp(&mut m, &self.operation.to_bytes())?;
         m.extend_from_slice(&self.target_state_number.to_le_bytes());
         m.extend_from_slice(&self.created_at.to_le_bytes());
         m.extend_from_slice(&self.expires_at.to_le_bytes());

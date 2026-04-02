@@ -4,6 +4,7 @@
 //! and state transition parameters. All commitments are deterministic: the
 //! same inputs always produce the same 32-byte digest.
 
+use crate::types::error::DsmError;
 use crate::types::operations::Operation;
 
 const OUT_LEN: usize = 32;
@@ -52,6 +53,7 @@ pub fn create_deterministic_commitment(
         cond.as_deref(),
         None,
     )
+    .unwrap_or_default()
 }
 
 /// Create a deterministic commitment that unlocks at a deterministic *slot*.
@@ -79,6 +81,7 @@ pub fn create_time_locked_commitment(
         None,
         Some(&extra),
     )
+    .unwrap_or_default()
 }
 
 /// Create a conditional deterministic commitment.
@@ -117,6 +120,7 @@ pub fn create_conditional_commitment(
         Some(&combined),
         None,
     )
+    .unwrap_or_default()
 }
 
 /// Create a recurring payment deterministic commitment.
@@ -148,6 +152,7 @@ pub fn create_recurring_commitment(
         None,
         Some(&extra),
     )
+    .unwrap_or_default()
 }
 
 /// Verify a deterministic commitment (base variant).
@@ -203,35 +208,35 @@ fn hash_fields(
     recipient_info: &[u8],
     opt_text: Option<&str>,
     opt_extra: Option<&[u8]>,
-) -> Vec<u8> {
+) -> Result<Vec<u8>, DsmError> {
     let mut hasher = crate::crypto::blake3::dsm_domain_hasher("DSM/commitment-fields");
     hasher.update(domain);
 
     // field 1: state hash (length-prefixed)
-    crate::crypto::canonical_lp::write_lp(&mut hasher, current_state_hash);
+    crate::crypto::canonical_lp::write_lp(&mut hasher, current_state_hash)?;
 
     // field 2: operation bytes (length-prefixed)
-    crate::crypto::canonical_lp::write_lp(&mut hasher, op_bytes);
+    crate::crypto::canonical_lp::write_lp(&mut hasher, op_bytes)?;
 
     // field 3: recipient info (length-prefixed)
-    crate::crypto::canonical_lp::write_lp(&mut hasher, recipient_info);
+    crate::crypto::canonical_lp::write_lp(&mut hasher, recipient_info)?;
 
     // field 4: optional text (length-prefixed; empty if absent)
     if let Some(s) = opt_text {
         let bytes = s.as_bytes();
-        crate::crypto::canonical_lp::write_lp(&mut hasher, bytes);
+        crate::crypto::canonical_lp::write_lp(&mut hasher, bytes)?;
     } else {
-        crate::crypto::canonical_lp::write_lp(&mut hasher, &[]);
+        crate::crypto::canonical_lp::write_lp(&mut hasher, &[])?;
     }
 
     // field 5: optional extra bytes (length-prefixed; empty if absent)
     if let Some(e) = opt_extra {
-        crate::crypto::canonical_lp::write_lp(&mut hasher, e);
+        crate::crypto::canonical_lp::write_lp(&mut hasher, e)?;
     } else {
-        crate::crypto::canonical_lp::write_lp(&mut hasher, &[]);
+        crate::crypto::canonical_lp::write_lp(&mut hasher, &[])?;
     }
 
-    hasher.finalize().as_bytes().to_vec()
+    Ok(hasher.finalize().as_bytes().to_vec())
 }
 
 #[cfg(test)]

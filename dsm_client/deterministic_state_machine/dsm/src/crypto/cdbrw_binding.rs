@@ -84,9 +84,9 @@ pub fn derive_cdbrw_binding_key(
     }
 
     let mut hasher = dsm_domain_hasher("DSM/dbrw-bind");
-    canonical_lp::write_lp(&mut hasher, hw_entropy);
-    canonical_lp::write_lp(&mut hasher, env_fingerprint);
-    canonical_lp::write_lp(&mut hasher, salt);
+    canonical_lp::write_lp(&mut hasher, hw_entropy)?;
+    canonical_lp::write_lp(&mut hasher, env_fingerprint)?;
+    canonical_lp::write_lp(&mut hasher, salt)?;
     Ok(*hasher.finalize().as_bytes())
 }
 
@@ -300,20 +300,21 @@ mod tests {
 
     /// TV-3: K_DBRW derivation with canonical inputs.
     #[test]
-    fn tv3_k_dbrw_derivation() {
+    fn tv3_k_dbrw_derivation() -> Result<(), DsmError> {
         let hw = [0x01u8; 16];
         let env = [0x02u8; 16];
         let salt = [0x03u8; 16];
 
-        let k = derive_cdbrw_binding_key(&hw, &env, &salt).expect("valid");
+        let k = derive_cdbrw_binding_key(&hw, &env, &salt)?;
 
         // Verify LP encoding: LE32(16) || 0x01*16 || LE32(16) || 0x02*16 || LE32(16) || 0x03*16
         let mut expected_hasher = dsm_domain_hasher("DSM/dbrw-bind");
-        canonical_lp::write_lp(&mut expected_hasher, &hw);
-        canonical_lp::write_lp(&mut expected_hasher, &env);
-        canonical_lp::write_lp(&mut expected_hasher, &salt);
+        canonical_lp::write_lp(&mut expected_hasher, &hw)?;
+        canonical_lp::write_lp(&mut expected_hasher, &env)?;
+        canonical_lp::write_lp(&mut expected_hasher, &salt)?;
         let expected = *expected_hasher.finalize().as_bytes();
         assert_eq!(k, expected);
+        Ok(())
     }
 
     /// TV-4: ACD computation with all-zero histogram (B=256 bins per paper default).

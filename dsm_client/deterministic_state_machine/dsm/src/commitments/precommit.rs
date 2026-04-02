@@ -216,16 +216,11 @@ impl PreCommitment {
             .into());
         }
 
-        Ok(canonical_lp::hash_lp3(
-            DOM_PRECOMMIT_ROOT,
-            &state_hash,
-            &op_bytes,
-            next_entropy,
-        ))
+        canonical_lp::hash_lp3(DOM_PRECOMMIT_ROOT, &state_hash, &op_bytes, next_entropy)
     }
 
     pub fn new(hash: [u8; 32]) -> Self {
-        let commitment_hash = canonical_lp::hash_lp1(DOM_PRECOMMIT_COMMITMENT_HASH, &hash);
+        let commitment_hash = canonical_lp::hash_lp1_b32(DOM_PRECOMMIT_COMMITMENT_HASH, &hash);
         Self {
             hash,
             signatures: HashMap::new(),
@@ -241,7 +236,7 @@ impl PreCommitment {
     }
 
     pub fn new_with_signatures(hash: [u8; 32], signatures: HashMap<String, Vec<u8>>) -> Self {
-        let commitment_hash = canonical_lp::hash_lp1(DOM_PRECOMMIT_COMMITMENT_HASH, &hash);
+        let commitment_hash = canonical_lp::hash_lp1_b32(DOM_PRECOMMIT_COMMITMENT_HASH, &hash);
         Self {
             hash,
             signatures,
@@ -291,9 +286,9 @@ impl PreCommitment {
 
             let fork_context =
                 build_fork_context(&base_hash, &fork_id, &fixed_params, &variable_params);
-            let fork_hash = canonical_lp::hash_lp1(DOM_FORK_CONTEXT, &fork_context);
+            let fork_hash = canonical_lp::hash_lp1(DOM_FORK_CONTEXT, &fork_context)?;
 
-            let positions = Self::create_fork_positions(&fork_hash, hash_positions);
+            let positions = Self::create_fork_positions(&fork_hash, hash_positions)?;
 
             forks.push(PreCommitmentFork {
                 fork_id,
@@ -307,7 +302,7 @@ impl PreCommitment {
             });
         }
 
-        let commitment_hash = canonical_lp::hash_lp1(DOM_PRECOMMIT_COMMITMENT_HASH, &base_hash);
+        let commitment_hash = canonical_lp::hash_lp1_b32(DOM_PRECOMMIT_COMMITMENT_HASH, &base_hash);
 
         Ok(Self {
             hash: base_hash,
@@ -365,7 +360,7 @@ impl PreCommitment {
             })?;
 
         // Deterministic event index derived from immutable proof context (NOT time).
-        let idx = derive_event_index(fork_id, &fork_to_invalidate.hash, &selected_fork.hash);
+        let idx = derive_event_index(fork_id, &fork_to_invalidate.hash, &selected_fork.hash)?;
 
         let proof_bytes = build_invalidation_proof_bytes(
             fork_id,
@@ -373,7 +368,7 @@ impl PreCommitment {
             &selected_fork.hash,
             idx,
         );
-        let _proof_commit = canonical_lp::hash_lp1(DOM_INVALIDATION_PROOF, &proof_bytes);
+        let _proof_commit = canonical_lp::hash_lp1(DOM_INVALIDATION_PROOF, &proof_bytes)?;
         // _proof_commit is optional but kept as a stable internal commitment anchor if you later want it.
 
         Ok(ForkInvalidationProof {
@@ -454,7 +449,7 @@ impl PreCommitment {
         }
 
         let expected_positions =
-            Self::create_fork_positions(&fork.hash, self.security_params.min_positions);
+            Self::create_fork_positions(&fork.hash, self.security_params.min_positions)?;
         if expected_positions != fork.positions {
             return Ok(false);
         }
@@ -466,7 +461,7 @@ impl PreCommitment {
             &fork.fixed_params,
             &fork.variable_params,
         );
-        let expected_hash = canonical_lp::hash_lp1(DOM_FORK_CONTEXT, &ctx);
+        let expected_hash = canonical_lp::hash_lp1(DOM_FORK_CONTEXT, &ctx)?;
         if expected_hash.as_slice() != fork.hash.as_slice() {
             return Ok(false);
         }
@@ -534,18 +529,18 @@ impl PreCommitment {
     }
 
     /// Deterministic positions (random-walk style) derived from fork_hash.
-    pub fn create_fork_positions(fork_hash: &[u8], count: usize) -> Vec<u8> {
+    pub fn create_fork_positions(fork_hash: &[u8], count: usize) -> Result<Vec<u8>, DsmError> {
         let mut positions = Vec::with_capacity(count);
-        let base = canonical_lp::hash_lp1(DOM_FORK_POSITIONS, fork_hash);
+        let base = canonical_lp::hash_lp1(DOM_FORK_POSITIONS, fork_hash)?;
 
         for i in 0..count {
             let mut i_le = [0u8; 8];
             i_le.copy_from_slice(&(i as u64).to_le_bytes());
-            let h = canonical_lp::hash_lp2(DOM_FORK_POSITIONS, &base, &i_le);
+            let h = canonical_lp::hash_lp2(DOM_FORK_POSITIONS, &base, &i_le)?;
             positions.push(h[0]);
         }
 
-        positions
+        Ok(positions)
     }
 
     pub fn add_forward_commitment(&mut self, commitment: ForwardLinkedCommitment) {
@@ -566,7 +561,7 @@ impl PreCommitment {
         let _state_hash = state.hash()?; // kept to preserve callsite expectations (and future tightening).
 
         let expected_commitment_hash =
-            canonical_lp::hash_lp1(DOM_PRECOMMIT_COMMITMENT_HASH, &self.hash);
+            canonical_lp::hash_lp1_b32(DOM_PRECOMMIT_COMMITMENT_HASH, &self.hash);
         if self.commitment_hash.as_slice() != expected_commitment_hash.as_slice() {
             return Ok(false);
         }
@@ -682,7 +677,7 @@ impl PreCommitment {
 impl Default for PreCommitment {
     fn default() -> Self {
         let hash = [0u8; 32];
-        let commitment_hash = canonical_lp::hash_lp1(DOM_PRECOMMIT_COMMITMENT_HASH, &hash);
+        let commitment_hash = canonical_lp::hash_lp1_b32(DOM_PRECOMMIT_COMMITMENT_HASH, &hash);
         Self {
             hash,
             signatures: HashMap::new(),
@@ -764,21 +759,21 @@ impl ForwardLinkedCommitment {
         validate_variable_params(&self.variable_parameters)?;
 
         let mut h = crate::crypto::blake3::dsm_domain_hasher("DSM/flc/hash/v2");
-        canonical_lp::write_lp(&mut h, &self.next_state_hash);
-        canonical_lp::write_lp(&mut h, self.counterparty_id.as_bytes());
+        canonical_lp::write_lp_b32(&mut h, &self.next_state_hash);
+        canonical_lp::write_lp(&mut h, self.counterparty_id.as_bytes())?;
 
         // Deterministic map iteration
         let mut sorted_fixed: Vec<_> = self.fixed_parameters.iter().collect();
         sorted_fixed.sort_by_key(|(k, _)| *k);
         for (k, v) in sorted_fixed {
-            canonical_lp::write_lp(&mut h, k.as_bytes());
-            canonical_lp::write_lp(&mut h, v);
+            canonical_lp::write_lp(&mut h, k.as_bytes())?;
+            canonical_lp::write_lp(&mut h, v)?;
         }
 
         let mut sorted_vars: Vec<_> = self.variable_parameters.iter().collect();
         sorted_vars.sort();
         for v in sorted_vars {
-            canonical_lp::write_lp(&mut h, v.as_bytes());
+            canonical_lp::write_lp(&mut h, v.as_bytes())?;
         }
 
         Ok(*h.finalize().as_bytes())
@@ -1031,16 +1026,20 @@ fn build_invalidation_proof_bytes(
     b
 }
 
-fn derive_event_index(fork_id: &str, fork_hash: &[u8], selected_hash: &[u8]) -> u64 {
+fn derive_event_index(
+    fork_id: &str,
+    fork_hash: &[u8],
+    selected_hash: &[u8],
+) -> Result<u64, DsmError> {
     let mut h = crate::crypto::blake3::dsm_domain_hasher("DSM/precommit/invalidation-proof/v2");
-    canonical_lp::write_lp(&mut h, fork_id.as_bytes());
-    canonical_lp::write_lp(&mut h, fork_hash);
-    canonical_lp::write_lp(&mut h, selected_hash);
+    canonical_lp::write_lp(&mut h, fork_id.as_bytes())?;
+    canonical_lp::write_lp(&mut h, fork_hash)?;
+    canonical_lp::write_lp(&mut h, selected_hash)?;
     let out = h.finalize();
     let bytes = out.as_bytes();
     let mut u = [0u8; 8];
     u.copy_from_slice(&bytes[0..8]);
-    u64::from_le_bytes(u)
+    Ok(u64::from_le_bytes(u))
 }
 
 #[cfg(test)]
@@ -1067,18 +1066,19 @@ mod tests {
     }
 
     #[test]
-    fn test_fork_positions_deterministic() {
+    fn test_fork_positions_deterministic() -> Result<(), DsmError> {
         let hash1 = test_buffer("hash1", 32);
         let hash2 = hash1.clone();
 
-        let p1 = PreCommitment::create_fork_positions(&hash1, 32);
-        let p2 = PreCommitment::create_fork_positions(&hash2, 32);
+        let p1 = PreCommitment::create_fork_positions(&hash1, 32)?;
+        let p2 = PreCommitment::create_fork_positions(&hash2, 32)?;
         assert_eq!(p1, p2);
 
         let mut hash3 = hash1.clone();
         hash3[0] = hash3[0].wrapping_add(1);
-        let p3 = PreCommitment::create_fork_positions(&hash3, 32);
+        let p3 = PreCommitment::create_fork_positions(&hash3, 32)?;
         assert_ne!(p1, p3);
+        Ok(())
     }
 
     #[test]
@@ -1093,16 +1093,17 @@ mod tests {
     }
 
     #[test]
-    fn test_invalidation_index_deterministic() {
+    fn test_invalidation_index_deterministic() -> Result<(), DsmError> {
         let fork_id = "forkA";
         let fork_hash = test_buffer("fork_hash", 32);
         let selected_hash = test_buffer("sel_hash", 32);
 
-        let i1 = derive_event_index(fork_id, &fork_hash, &selected_hash);
-        let i2 = derive_event_index(fork_id, &fork_hash, &selected_hash);
+        let i1 = derive_event_index(fork_id, &fork_hash, &selected_hash)?;
+        let i2 = derive_event_index(fork_id, &fork_hash, &selected_hash)?;
         assert_eq!(i1, i2);
 
-        let i3 = derive_event_index("forkB", &fork_hash, &selected_hash);
+        let i3 = derive_event_index("forkB", &fork_hash, &selected_hash)?;
         assert_ne!(i1, i3);
+        Ok(())
     }
 }

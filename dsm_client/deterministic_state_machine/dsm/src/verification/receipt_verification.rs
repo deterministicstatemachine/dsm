@@ -281,8 +281,10 @@ mod tests {
     #[test]
     fn test_parent_uniqueness_enforcement() {
         // Create keypairs for testing
-        let keypair_a = crate::crypto::signatures::SignatureKeyPair::generate_for_testing();
-        let keypair_b = crate::crypto::signatures::SignatureKeyPair::generate_for_testing();
+        let keypair_a = crate::crypto::signatures::SignatureKeyPair::generate_for_testing()
+            .expect("test SPHINCS+ keygen");
+        let keypair_b = crate::crypto::signatures::SignatureKeyPair::generate_for_testing()
+            .expect("test SPHINCS+ keygen");
 
         // Empty proof bytes — with non-zero roots ([0x01] / [0x02]), the sentinel
         // check in verify_smt_inclusion_proof_bytes returns Ok(false) cleanly

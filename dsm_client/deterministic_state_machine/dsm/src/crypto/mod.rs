@@ -31,6 +31,12 @@
 //! - **Privacy**: [`random_walk_privacy`]
 //! - **Device memory**: [`device_memory_manager`]
 //! - **Testing**: [`adb_test_utils`] (ADB-based hardware testing for C-DBRW)
+//!
+//! # Error handling
+//!
+//! Public APIs return [`DsmError`]. Panicking helpers are not used on production paths;
+//! test-only helpers such as `SignatureKeyPair::generate_for_testing` in [`signatures`] return
+//! [`Result`] so callers control failure behavior.
 
 use crate::types::error::DsmError;
 
