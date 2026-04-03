@@ -276,29 +276,26 @@ export async function offlineSend(transfer: GenericTransaction): Promise<Generic
     // The receiver may process the prepare and fire back a commit/event before
     // wallet.sendOffline returns. By registering listeners first and buffering
     // events until we know the commitmentHash, we never miss fast responses.
-    const BLE_COMPLETION_TIMEOUT_MS = 60_000;
-    const FAILURE_GRACE_MS = 3000;
+    // Status polling interval: instead of a hard timeout that declares failure,
+    // poll the backend session status and only resolve when the backend confirms
+    // the session is terminal (committed, failed, or rejected).
+    const STATUS_POLL_INTERVAL_MS = 3_000;
+    const STATUS_POLL_MAX_ATTEMPTS = 40; // ~2 minutes max
 
     let commitmentHash: Uint8Array | null = null;
     let settled = false;
     let settledResult: GenericTxResponse | null = null;
-    let pendingFailure: GenericTxResponse | null = null;
-    let pendingFailureTimer: ReturnType<typeof setTimeout> | null = null;
+    let statusPollTimer: ReturnType<typeof setInterval> | null = null;
     const earlyEventBuffer: pb.BilateralEventNotification[] = [];
     let resolvePromise: ((res: GenericTxResponse) => void) | null = null;
-
-    const timer = setTimeout(() => {
-      finish({ accepted: false, result: 'offlineSend: bilateral transfer timed out (60s)' });
-    }, BLE_COMPLETION_TIMEOUT_MS);
 
     const finish = (res: GenericTxResponse) => {
       if (settled) return;
       settled = true;
       settledResult = res;
-      clearTimeout(timer);
-      if (pendingFailureTimer) {
-        clearTimeout(pendingFailureTimer);
-        pendingFailureTimer = null;
+      if (statusPollTimer) {
+        clearInterval(statusPollTimer);
+        statusPollTimer = null;
       }
       offEvent();
       offBle();
@@ -307,26 +304,58 @@ export async function offlineSend(transfer: GenericTransaction): Promise<Generic
       if (resolvePromise) resolvePromise(res);
     };
 
+    // Poll backend for authoritative session status. The backend tracks the
+    // real phase (Preparing → Accepted → ConfirmPending → Committed/Failed).
+    // Only the backend knows whether the transfer actually succeeded or failed.
+    let pollAttempts = 0;
+    const pollSessionStatus = async () => {
+      if (settled || !commitmentHash) return;
+      pollAttempts++;
+      try {
+        const { decodeOfflinePendingList } = await import('../domain/bilateral');
+        const listBytes = await getPendingBilateralListStrictBridge();
+        const pending = await decodeOfflinePendingList(listBytes);
+        const hashB32 = (await import('../utils/textId')).encodeBase32Crockford(commitmentHash);
+        const session = pending.find(p => p.commitmentHash === hashB32);
+
+        if (!session) {
+          // Session absent — committed sessions are deleted from SQLite after success,
+          // so absence after a prepare+send means the transfer completed.
+          finish({ accepted: true, result: 'Bilateral transfer complete' });
+          return;
+        }
+        if (session.status === 'verified' || session.status === 'committed') {
+          // OFFLINE_TX_CONFIRMED — terminal success
+          finish({ accepted: true, result: 'Bilateral transfer complete' });
+        } else if (session.status === 'failed') {
+          // OFFLINE_TX_FAILED — terminal failure (session persisted for poller visibility)
+          finish({ accepted: false, result: 'Bilateral transfer failed' });
+        } else if (session.status === 'rejected') {
+          // OFFLINE_TX_REJECTED — terminal rejection (session persisted for poller visibility)
+          finish({ accepted: false, result: 'Bilateral transfer rejected' });
+        }
+        // 'pending', 'accepted', 'hash_mismatch' — still in progress, keep polling
+      } catch {
+        // Query failed — keep polling, don't declare failure
+      }
+      if (pollAttempts >= STATUS_POLL_MAX_ATTEMPTS && !settled) {
+        finish({ accepted: false, result: 'Bilateral transfer did not complete in time' });
+      }
+    };
+
     const processEvent = (note: pb.BilateralEventNotification) => {
       if (settled) return;
       const h = note.commitmentHash instanceof Uint8Array ? note.commitmentHash : undefined;
       if (!h || h.length !== 32) return;
       if (!commitmentHash || !bytesEqual(h, commitmentHash)) return;
       if (note.eventType === pb.BilateralEventType.BILATERAL_EVENT_TRANSFER_COMPLETE) {
-        if (pendingFailureTimer) { clearTimeout(pendingFailureTimer); pendingFailureTimer = null; }
-        pendingFailure = null;
         finish({ accepted: true, result: note.message || 'Bilateral transfer complete' });
       } else if (note.eventType === pb.BilateralEventType.BILATERAL_EVENT_REJECTED) {
-        if (pendingFailureTimer) { clearTimeout(pendingFailureTimer); pendingFailureTimer = null; }
-        pendingFailure = null;
         finish({ accepted: false, result: note.message || 'Bilateral transfer rejected', failureReason: note.failureReason });
       } else if (note.eventType === pb.BilateralEventType.BILATERAL_EVENT_FAILED) {
-        pendingFailure = { accepted: false, result: note.message || 'Bilateral transfer failed', failureReason: note.failureReason };
-        if (pendingFailureTimer) clearTimeout(pendingFailureTimer);
-        pendingFailureTimer = setTimeout(() => {
-          const res = pendingFailure; pendingFailure = null; pendingFailureTimer = null;
-          if (res) finish(res);
-        }, FAILURE_GRACE_MS);
+        // Don't immediately fail — poll backend to confirm the failure is real.
+        // The backend may still be processing (e.g., settlement in progress).
+        void pollSessionStatus();
       }
     };
 
@@ -420,7 +449,12 @@ export async function offlineSend(transfer: GenericTransaction): Promise<Generic
       return settledResult;
     }
 
-    // --- Await remaining completion events ---
+    // Start polling backend for session status. Events are the fast path
+    // (instant notification), but polling is the reliable fallback that
+    // catches cases where the event was missed or delayed.
+    statusPollTimer = setInterval(() => { void pollSessionStatus(); }, STATUS_POLL_INTERVAL_MS);
+
+    // --- Await remaining completion events or status poll resolution ---
     return await new Promise<GenericTxResponse>((resolve) => {
       resolvePromise = resolve;
       // If finish was called during buffer drain (race), resolve immediately

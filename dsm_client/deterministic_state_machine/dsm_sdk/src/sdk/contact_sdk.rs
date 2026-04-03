@@ -361,12 +361,18 @@ impl ContactManager {
 
             match store_contact(&contact_record) {
                 Ok(_) => {
-                    if let Err(e) = crate::storage::client_db::update_local_bilateral_chain_tip(
-                        &contact_device_id,
-                        &initial_chain_tip,
-                    ) {
+                    // Atomic tip sync: ensure both chain_tip and local_bilateral_chain_tip
+                    // are aligned at the initial value.
+                    let request = crate::storage::client_db::bilateral_tip_sync::TipSyncRequest {
+                        counterparty_device_id: contact_device_id,
+                        expected_parent_tip: initial_chain_tip,
+                        target_tip: initial_chain_tip,
+                        observed_gate: None,
+                        clear_gate_on_success: false,
+                    };
+                    if let Err(e) = crate::storage::client_db::bilateral_tip_sync::sync_bilateral_tips_atomically(&request) {
                         log::warn!(
-                            "[DSM_SDK] ⚠️ Failed to persist initial local bilateral chain tip: {}",
+                            "[DSM_SDK] ⚠️ Failed to persist initial bilateral chain tip atomically: {}",
                             e
                         );
                     }
@@ -672,12 +678,16 @@ impl ContactManager {
             match store_contact(&contact_record) {
                 Ok(_) => {
                     log::info!("[DSM_SDK] ✅ Contact stored successfully in SQLite");
-                    if let Err(e) = crate::storage::client_db::update_local_bilateral_chain_tip(
-                        &contact_device_id,
-                        &initial_chain_tip,
-                    ) {
+                    let request = crate::storage::client_db::bilateral_tip_sync::TipSyncRequest {
+                        counterparty_device_id: contact_device_id,
+                        expected_parent_tip: initial_chain_tip,
+                        target_tip: initial_chain_tip,
+                        observed_gate: None,
+                        clear_gate_on_success: false,
+                    };
+                    if let Err(e) = crate::storage::client_db::bilateral_tip_sync::sync_bilateral_tips_atomically(&request) {
                         log::error!(
-                            "[DSM_SDK] ❌ Failed to persist initial local bilateral chain tip: {}",
+                            "[DSM_SDK] ❌ Failed to persist initial bilateral chain tip atomically: {}",
                             e
                         );
                         return Err(ContactError::InvalidChainTip(format!(
@@ -826,21 +836,30 @@ impl ContactManager {
         let mut mgr = self.dsm_manager.write().await;
         mgr.update_contact_chain_tip_unilateral(&contact_device_id, new_chain_tip, &smt, &smt_key)?;
 
-        match crate::storage::client_db::try_advance_finalized_bilateral_chain_tip(
-            &contact_device_id,
-            &expected_parent_tip,
-            &new_chain_tip,
-        ) {
-            Ok(true) => {}
-            Ok(false) => {
-                return Err(ContactError::InvalidChainTip(
-                    "Finalized unilateral chain tip parent mismatch".to_string(),
-                ));
-            }
-            Err(e) => {
-                return Err(ContactError::InvalidChainTip(format!(
-                    "Failed to persist finalized unilateral chain tip update: {e}"
-                )));
+        {
+            let request = crate::storage::client_db::bilateral_tip_sync::TipSyncRequest {
+                counterparty_device_id: contact_device_id,
+                expected_parent_tip,
+                target_tip: new_chain_tip,
+                observed_gate: None,
+                clear_gate_on_success: false,
+            };
+            match crate::storage::client_db::bilateral_tip_sync::sync_bilateral_tips_atomically(&request) {
+                Ok(outcome) => match outcome {
+                    crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::Advanced { .. }
+                    | crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::RepairedAtTarget { .. }
+                    | crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::AlreadyAtTarget { .. } => {}
+                    _ => {
+                        return Err(ContactError::InvalidChainTip(
+                            "Finalized unilateral chain tip parent mismatch".to_string(),
+                        ));
+                    }
+                },
+                Err(e) => {
+                    return Err(ContactError::InvalidChainTip(format!(
+                        "Failed to persist finalized unilateral chain tip update: {e}"
+                    )));
+                }
             }
         }
 

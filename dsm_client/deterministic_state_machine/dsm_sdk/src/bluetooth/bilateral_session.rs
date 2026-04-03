@@ -134,8 +134,8 @@ pub enum BilateralPhase {
     PendingUserAction, // Received proposal, awaiting local user accept/reject
     Accepted,          // Counterparty accepted, ready to commit
     Rejected,          // Counterparty rejected
-    ConfirmPending,    // Confirm envelope built and in-flight to receiver; not yet delivered
-    Committed,         // Transaction finalized (confirm delivered and acknowledged)
+    ConfirmPending,    // Confirm sent; awaiting receiver acknowledgment before sender finalize
+    Committed,         // Transaction finalized on both sides after receiver acknowledgment
     Failed,            // Error occurred
 }
 
@@ -323,13 +323,10 @@ impl SessionStore {
             sessions
                 .iter()
                 .filter(|(_, s)| {
+                    // Only prune committed sessions. Failed/rejected sessions must
+                    // persist for frontend poller visibility (bilateral.pending_list).
                     s.counterparty_device_id == *counterparty_device_id
-                        && matches!(
-                            s.phase,
-                            BilateralPhase::Committed
-                                | BilateralPhase::Rejected
-                                | BilateralPhase::Failed
-                        )
+                        && matches!(s.phase, BilateralPhase::Committed)
                 })
                 .map(|(h, _)| *h)
                 .collect()

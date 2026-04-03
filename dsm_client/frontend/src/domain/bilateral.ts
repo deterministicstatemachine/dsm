@@ -70,7 +70,7 @@ export async function decodeOfflinePendingList(bytes: Uint8Array): Promise<Pendi
         statusStr = 'rejected';
         break;
       case pb.OfflineBilateralTransactionStatus.OFFLINE_TX_IN_PROGRESS:
-        statusStr = 'committed';
+        statusStr = 'accepted';
         break;
       case pb.OfflineBilateralTransactionStatus.OFFLINE_TX_PENDING:
       default:

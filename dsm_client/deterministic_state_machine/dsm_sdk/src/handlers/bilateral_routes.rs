@@ -28,7 +28,19 @@ impl AppRouterImpl {
 
                 for s in sessions {
                     let phase = s.phase.as_str();
-                    if !matches!(phase, "pending_user_action" | "accepted") {
+                    // Include active AND terminal phases so the frontend poller
+                    // can distinguish real failures from completed transfers.
+                    if !matches!(
+                        phase,
+                        "pending_user_action"
+                            | "accepted"
+                            | "committed"
+                            | "failed"
+                            | "rejected"
+                            | "confirm_pending"
+                            | "preparing"
+                            | "prepared"
+                    ) {
                         continue;
                     }
 
@@ -82,10 +94,18 @@ impl AppRouterImpl {
                         )
                     };
 
-                    let status = if phase == "pending_user_action" {
-                        generated::OfflineBilateralTransactionStatus::OfflineTxPending
-                    } else {
-                        generated::OfflineBilateralTransactionStatus::OfflineTxInProgress
+                    let status = match phase {
+                        "pending_user_action" => {
+                            generated::OfflineBilateralTransactionStatus::OfflineTxPending
+                        }
+                        "committed" => {
+                            generated::OfflineBilateralTransactionStatus::OfflineTxConfirmed
+                        }
+                        "failed" => generated::OfflineBilateralTransactionStatus::OfflineTxFailed,
+                        "rejected" => {
+                            generated::OfflineBilateralTransactionStatus::OfflineTxRejected
+                        }
+                        _ => generated::OfflineBilateralTransactionStatus::OfflineTxInProgress,
                     };
 
                     let mut metadata: HashMap<String, String> = HashMap::new();

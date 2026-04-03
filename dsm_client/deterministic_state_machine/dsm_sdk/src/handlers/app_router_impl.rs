@@ -839,116 +839,156 @@ impl AppRouterImpl {
                     ),
                 };
 
+                let observed_gate =
+                    crate::storage::client_db::bilateral_tip_sync::ObservedPendingGate {
+                        counterparty_device_id: {
+                            let mut arr = [0u8; 32];
+                            arr.copy_from_slice(&to_device_id);
+                            arr
+                        },
+                        parent_tip: pending_parent,
+                        next_tip: pending_next,
+                    };
+
                 if chain_tip_arr == pending_next {
-                    if let Err(e) =
-                        crate::storage::client_db::clear_pending_online_outbox(&to_device_id)
-                    {
-                        return err(format!(
-                            "wallet.send: failed to clear completed online gate: {e}"
-                        ));
+                    // Fast path: chain_tip already at pending_next. Ensure both
+                    // columns match and clear the exact gate atomically.
+                    let request = crate::storage::client_db::bilateral_tip_sync::TipSyncRequest {
+                        counterparty_device_id: observed_gate.counterparty_device_id,
+                        expected_parent_tip: pending_next,
+                        target_tip: pending_next,
+                        observed_gate: Some(observed_gate),
+                        clear_gate_on_success: true,
+                    };
+                    match crate::storage::client_db::bilateral_tip_sync::sync_bilateral_tips_atomically(&request) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            return err(format!(
+                                "wallet.send: failed to sync tips on fast path: {e}"
+                            ));
+                        }
                     }
                 } else {
-                    if storage_endpoints.is_empty() {
-                        return err(
-                            "wallet.send: previous online transfer is still pending and recipient catch-up cannot be verified"
-                                .to_string(),
-                        );
-                    }
-
-                    let mut b0x_sdk = match crate::sdk::b0x_sdk::B0xSDK::new(
-                        sender_device_id_str.clone(),
-                        self.core_sdk.clone(),
-                        storage_endpoints.clone(),
-                    ) {
-                        Ok(sdk) => sdk,
-                        Err(e) => {
-                            return err(format!(
-                                "wallet.send: failed to initialize sender inbox status client: {e}"
-                            ))
-                        }
-                    };
-
-                    let recipient_caught_up = match b0x_sdk
-                        .is_message_acknowledged(&pending.message_id)
-                        .await
+                    // Chain tip != pending_next. Need recipient ACK to advance.
+                    // Per Atomic Interlock Tripwire theorem: we cannot assume any
+                    // arbitrary tip value is safe forward progress. If the ACK check
+                    // succeeds and CAS fails, ParentConsumed fires correctly.
                     {
-                        Ok(acked) => acked,
-                        Err(e) => {
-                            let _ = crate::storage::client_db::mark_contact_needs_online_reconcile(
-                                &to_device_id,
+                        if storage_endpoints.is_empty() {
+                            return err(
+                                "wallet.send: previous online transfer is still pending and recipient catch-up cannot be verified"
+                                    .to_string(),
                             );
-                            return err(format!(
-                                    "wallet.send: previous online transfer status could not be verified ({e}); online reconciliation required"
-                                ));
                         }
-                    };
 
-                    if !recipient_caught_up {
-                        return err(
-                            "wallet.send: previous online transfer is still awaiting recipient catch-up"
-                                .to_string(),
-                        );
-                    }
+                        let mut b0x_sdk = match crate::sdk::b0x_sdk::B0xSDK::new(
+                            sender_device_id_str.clone(),
+                            self.core_sdk.clone(),
+                            storage_endpoints.clone(),
+                        ) {
+                            Ok(sdk) => sdk,
+                            Err(e) => return err(format!(
+                                "wallet.send: failed to initialize sender inbox status client: {e}"
+                            )),
+                        };
 
-                    match crate::storage::client_db::try_advance_finalized_bilateral_chain_tip(
-                        &to_device_id,
-                        &pending_parent,
-                        &pending_next,
-                    ) {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            let current_tip =
-                                crate::storage::client_db::get_contact_by_device_id(&to_device_id)
-                                    .ok()
-                                    .flatten()
-                                    .and_then(|contact| {
-                                        relationship_tip_for_contact_restore(
-                                            self.device_id_bytes,
-                                            local_genesis_for_routing,
-                                            &contact,
-                                        )
-                                    })
-                                    .unwrap_or([0u8; 32]);
-                            if current_tip != pending_next {
+                        let recipient_caught_up = match b0x_sdk
+                            .is_message_acknowledged(&pending.message_id)
+                            .await
+                        {
+                            Ok(acked) => acked,
+                            Err(e) => {
                                 let _ =
                                     crate::storage::client_db::mark_contact_needs_online_reconcile(
                                         &to_device_id,
                                     );
-                                return err(
-                                    "wallet.send: ParentConsumed - relationship tip changed while finalizing previous online transfer; online reconciliation required"
-                                        .to_string(),
-                                );
+                                return err(format!(
+                                    "wallet.send: previous online transfer status could not be verified ({e}); online reconciliation required"
+                                ));
+                            }
+                        };
+
+                        if !recipient_caught_up {
+                            return err(
+                                "wallet.send: previous online transfer is still awaiting recipient catch-up"
+                                    .to_string(),
+                            );
+                        }
+
+                        // Recipient ACKed — advance tips atomically and clear gate
+                        let request =
+                            crate::storage::client_db::bilateral_tip_sync::TipSyncRequest {
+                                counterparty_device_id: observed_gate.counterparty_device_id,
+                                expected_parent_tip: pending_parent,
+                                target_tip: pending_next,
+                                observed_gate: Some(observed_gate),
+                                clear_gate_on_success: true,
+                            };
+                        match crate::storage::client_db::bilateral_tip_sync::sync_bilateral_tips_atomically(&request) {
+                            Ok(outcome) => {
+                                match &outcome {
+                                    crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::Advanced { .. }
+                                    | crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::RepairedAtTarget { .. }
+                                    | crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::AlreadyAtTarget { .. } => {
+                                        let new_tip_b32 = crate::util::text_id::encode_base32_crockford(&pending_next);
+                                        if let Err(e) = self.wallet.update_bilateral_chain_tip(
+                                            &to_device_id_str,
+                                            &new_tip_b32,
+                                            &new_tip_b32,
+                                            0,
+                                        ) {
+                                            log::warn!(
+                                                "[wallet.send] Failed to sync in-memory bilateral cache after recipient ACK: {e}"
+                                            );
+                                        }
+                                        chain_tip_arr = pending_next;
+                                    }
+                                    crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::CanonicalMovedToDifferentTip { current_tip } => {
+                                        // ACK confirmed recipient received the online transfer,
+                                        // but BLE transfers advanced the tip past pending_next.
+                                        // The gate is stale — clear it and use the current tip.
+                                        // This is safe because: (1) ACK proves online delivery,
+                                        // (2) BLE transfers verified by Tripwire at each step.
+                                        log::info!(
+                                            "[wallet.send] ACK confirmed but tip advanced past pending_next via BLE; clearing stale gate and using current tip {}",
+                                            crate::util::text_id::encode_base32_crockford(current_tip).get(..8).unwrap_or("?"),
+                                        );
+                                        let _ = crate::storage::client_db::clear_pending_online_outbox_if_matches(
+                                            &to_device_id,
+                                            &pending_parent,
+                                            &pending_next,
+                                        );
+                                        let tip_b32 = crate::util::text_id::encode_base32_crockford(current_tip);
+                                        if let Err(e) = self.wallet.update_bilateral_chain_tip(
+                                            &to_device_id_str,
+                                            &tip_b32,
+                                            &tip_b32,
+                                            0,
+                                        ) {
+                                            log::warn!("[wallet.send] Failed to sync cache after stale gate clear: {e}");
+                                        }
+                                        chain_tip_arr = *current_tip;
+                                    }
+                                    _ => {
+                                        // ParentMismatch, GateMismatch, InvariantViolation
+                                        // without ACK confirmation — genuine error.
+                                        let _ = crate::storage::client_db::mark_contact_needs_online_reconcile(
+                                            &to_device_id,
+                                        );
+                                        return err(
+                                            "wallet.send: ParentConsumed - relationship tip changed while finalizing previous online transfer; online reconciliation required"
+                                                .to_string(),
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                return err(format!(
+                                    "wallet.send: failed to finalize previous online transfer: {e}"
+                                ))
                             }
                         }
-                        Err(e) => {
-                            return err(format!(
-                                "wallet.send: failed to finalize previous online transfer: {e}"
-                            ))
-                        }
                     }
-
-                    if let Err(e) =
-                        crate::storage::client_db::clear_pending_online_outbox(&to_device_id)
-                    {
-                        return err(format!(
-                            "wallet.send: failed to clear previous online transfer gate: {e}"
-                        ));
-                    }
-
-                    let new_tip_b32 = crate::util::text_id::encode_base32_crockford(&pending_next);
-                    if let Err(e) = self.wallet.update_bilateral_chain_tip(
-                        &to_device_id_str,
-                        &new_tip_b32,
-                        &new_tip_b32,
-                        0,
-                    ) {
-                        log::warn!(
-                            "[wallet.send] Failed to sync in-memory bilateral cache after recipient ACK: {}",
-                            e
-                        );
-                    }
-
-                    chain_tip_arr = pending_next;
                 }
             }
             Ok(None) => {}
@@ -1290,6 +1330,20 @@ impl AppRouterImpl {
         // signature: Vec::new() — the same unsigned preimage used by the receiver when it
         // calls compute_precommit on the cleared operation. Both sides now hash identical bytes.
         let op_bytes_for_tip = signing_bytes.clone();
+
+        // Ensure in-memory state machine reflects the latest BCR state.
+        // Bilateral BLE settlements may have updated BCR without syncing
+        // the token SDK's in-memory balance. Without this, send_transfer_op
+        // sees a stale balance and rejects with "Insufficient balance."
+        if let Err(e) = self.core_sdk.restore_latest_archived_state_for_device() {
+            log::warn!("[wallet.send] BCR state refresh before transfer failed: {e}");
+        }
+        // Reload token SDK balance cache from the restored core_sdk state.
+        // Without this, the token SDK's stale in-memory balance cache rejects
+        // transfers with "Insufficient balance" even though BCR has enough.
+        if let Err(e) = self.wallet.reload_balance_cache_for_self() {
+            log::warn!("[wallet.send] Balance cache reload failed: {e}");
+        }
 
         // Execute local state update using the pre-built signed Operation directly.
         // This bypasses execute_signed_transfer which would reconstruct a different
@@ -1768,33 +1822,35 @@ impl AppRouterImpl {
                     e
                 );
             }
-            // §2.1: Advance the sender's SQLite chain tip to h_{n+1}.
-            // Both devices must agree on the current tip. The sender computed
-            // and signed h_{n+1} — it's authoritative. Without this, a
-            // subsequent BLE bilateral from the receiver uses h_{n+1} as
-            // parent, but the sender's SQLite still has h_n → tripwire.
-            match crate::storage::client_db::try_advance_finalized_bilateral_chain_tip(
-                &to_device_id,
-                &chain_tip_arr,
-                &new_chain_tip,
-            ) {
-                Ok(true) => {
-                    log::info!(
-                        "[wallet.send] §2.1 Sender SQLite chain tip advanced: {} → {}",
-                        &crate::util::text_id::encode_base32_crockford(&chain_tip_arr)[..8],
-                        &new_tip_b32[..8],
-                    );
-                }
-                Ok(false) => {
-                    log::warn!(
-                        "[wallet.send] §2.1 Sender SQLite chain tip CAS rejected (tip already advanced?)"
-                    );
-                }
-                Err(e) => {
-                    log::warn!(
-                        "[wallet.send] §2.1 Sender SQLite chain tip advance failed: {}",
-                        e
-                    );
+            // §2.1: Advance the sender's SQLite chain tip to h_{n+1} atomically.
+            // Both columns (chain_tip + local_bilateral_chain_tip) updated in one tx.
+            {
+                let to_device_id_arr: [u8; 32] = {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&to_device_id);
+                    arr
+                };
+                let request = crate::storage::client_db::bilateral_tip_sync::TipSyncRequest {
+                    counterparty_device_id: to_device_id_arr,
+                    expected_parent_tip: chain_tip_arr,
+                    target_tip: new_chain_tip,
+                    observed_gate: None,
+                    clear_gate_on_success: false,
+                };
+                match crate::storage::client_db::bilateral_tip_sync::sync_bilateral_tips_atomically(
+                    &request,
+                ) {
+                    Ok(outcome) => {
+                        log::info!(
+                            "[wallet.send] §2.1 Sender tip sync outcome: {:?} ({} → {})",
+                            std::mem::discriminant(&outcome),
+                            &crate::util::text_id::encode_base32_crockford(&chain_tip_arr)[..8],
+                            &new_tip_b32[..8],
+                        );
+                    }
+                    Err(e) => {
+                        log::warn!("[wallet.send] §2.1 Sender tip sync failed: {}", e);
+                    }
                 }
             }
         }

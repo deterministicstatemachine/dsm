@@ -153,10 +153,89 @@ pub fn delete_bilateral_session(commitment_hash: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Update a bilateral session's phase without deleting it.
+/// Used to persist terminal phases (failed, rejected) so the frontend
+/// poller can read them via bilateral.pending_list.
+pub fn update_bilateral_session_phase(commitment_hash: &[u8], phase: &str) -> Result<()> {
+    let binding = get_db_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|_| anyhow!("Database lock poisoned - concurrent access error"))?;
+    conn.execute(
+        "UPDATE bilateral_sessions SET phase = ?1 WHERE commitment_hash = ?2",
+        params![phase, commitment_hash],
+    )?;
+    Ok(())
+}
+
 /// Clean up expired bilateral sessions
 pub fn cleanup_expired_bilateral_sessions(current_ticks: u64) -> Result<usize> {
     // Clockless protocol: bilateral sessions do not expire by any local notion of duration.
     // Cleanup must be driven by explicit state transitions, not by a ticking counter.
     let _ = current_ticks;
     Ok(0)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// §5.3 Pending Confirm Delivery — crash-safe receipt persistence
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Store a confirm envelope for re-delivery. Called atomically with sender
+/// finalization so the receipt survives crashes.
+pub fn store_pending_confirm_delivery(
+    commitment_hash: &[u8],
+    counterparty_device_id: &[u8],
+    confirm_envelope: &[u8],
+) -> Result<()> {
+    if commitment_hash.len() != 32 || counterparty_device_id.len() != 32 {
+        return Err(anyhow!("Invalid hash or device_id length"));
+    }
+    let binding = get_db_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|_| anyhow!("Database lock poisoned"))?;
+    let tick_val = tick() as i64;
+    conn.execute(
+        "INSERT OR REPLACE INTO pending_confirm_delivery (commitment_hash, counterparty_device_id, confirm_envelope, created_at_tick) VALUES (?1, ?2, ?3, ?4)",
+        params![commitment_hash, counterparty_device_id, confirm_envelope, tick_val],
+    )?;
+    Ok(())
+}
+
+/// Get pending confirm envelopes for a counterparty (for re-delivery on reconnect).
+pub fn get_pending_confirm_deliveries(
+    counterparty_device_id: &[u8],
+) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+    if counterparty_device_id.len() != 32 {
+        return Err(anyhow!("Invalid device_id length"));
+    }
+    let binding = get_db_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|_| anyhow!("Database lock poisoned"))?;
+    let mut stmt = conn.prepare(
+        "SELECT commitment_hash, confirm_envelope FROM pending_confirm_delivery WHERE counterparty_device_id = ?1",
+    )?;
+    let rows = stmt
+        .query_map(params![counterparty_device_id], |row| {
+            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Delete a pending confirm delivery after successful BLE delivery.
+pub fn delete_pending_confirm_delivery(commitment_hash: &[u8]) -> Result<()> {
+    if commitment_hash.len() != 32 {
+        return Err(anyhow!("Invalid commitment_hash length"));
+    }
+    let binding = get_db_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|_| anyhow!("Database lock poisoned"))?;
+    conn.execute(
+        "DELETE FROM pending_confirm_delivery WHERE commitment_hash = ?1",
+        params![commitment_hash],
+    )?;
+    Ok(())
 }

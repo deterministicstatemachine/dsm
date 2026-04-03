@@ -18,6 +18,7 @@ pub use crate::storage::codecs::{
 mod auth_tokens;
 mod bcr;
 mod bilateral_sessions;
+pub mod bilateral_tip_sync;
 mod bitcoin_accounts;
 mod ble_chunk_buffer;
 mod contacts;
@@ -403,6 +404,15 @@ fn create_schema(conn: &Connection) -> Result<()> {
             created_at_step           INTEGER NOT NULL,
             sender_ble_address        TEXT,
             updated_at                INTEGER NOT NULL
+        );
+
+        -- §5.3 Atomic bilateral commit: persists the confirm envelope atomically
+        -- with sender finalization so it survives crashes for re-delivery.
+        CREATE TABLE IF NOT EXISTS pending_confirm_delivery(
+            commitment_hash        BLOB PRIMARY KEY,
+            counterparty_device_id BLOB NOT NULL,
+            confirm_envelope       BLOB NOT NULL,
+            created_at_tick        INTEGER NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS system_peers(
@@ -1828,5 +1838,330 @@ mod tests {
         assert_eq!(stored.added_at, 7);
         assert_eq!(stored.status, "Active");
         assert!(!stored.needs_online_reconcile);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // §5.4 Atomic bilateral tip sync tests
+    // ═══════════════════════════════════════════════════════════════
+
+    #[test]
+    #[serial]
+    fn test_sync_bilateral_tips_advance_both_columns_atomically() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        reset_database_for_tests();
+        init_database().expect("init db");
+
+        let device_id = [0xE1u8; 32];
+        let genesis_hash = [0xF1u8; 32];
+        let parent_tip = [0x01u8; 32];
+        let new_tip = [0x02u8; 32];
+
+        seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable");
+        restore_finalized_bilateral_chain_tip(&device_id, &parent_tip).expect("seed");
+
+        let request = bilateral_tip_sync::TipSyncRequest {
+            counterparty_device_id: device_id,
+            expected_parent_tip: parent_tip,
+            target_tip: new_tip,
+            observed_gate: None,
+            clear_gate_on_success: false,
+        };
+        let outcome = bilateral_tip_sync::sync_bilateral_tips_atomically(&request)
+            .expect("sync should succeed");
+
+        assert!(matches!(
+            outcome,
+            bilateral_tip_sync::TipSyncOutcome::Advanced { .. }
+        ));
+        assert_eq!(get_contact_chain_tip_raw(&device_id), Some(new_tip));
+        assert_eq!(get_local_bilateral_chain_tip(&device_id), Some(new_tip));
+    }
+
+    #[test]
+    #[serial]
+    fn test_sync_bilateral_tips_repairs_stale_local() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        reset_database_for_tests();
+        init_database().expect("init db");
+
+        let device_id = [0xE2u8; 32];
+        let genesis_hash = [0xF2u8; 32];
+        let target_tip = [0x03u8; 32];
+        let stale_local = [0x04u8; 32];
+
+        seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable");
+        restore_finalized_bilateral_chain_tip(&device_id, &target_tip).expect("seed canonical");
+        update_local_bilateral_chain_tip(&device_id, &stale_local).expect("seed stale local");
+
+        let request = bilateral_tip_sync::TipSyncRequest {
+            counterparty_device_id: device_id,
+            expected_parent_tip: target_tip,
+            target_tip,
+            observed_gate: None,
+            clear_gate_on_success: false,
+        };
+        let outcome = bilateral_tip_sync::sync_bilateral_tips_atomically(&request)
+            .expect("sync should succeed");
+
+        assert!(matches!(
+            outcome,
+            bilateral_tip_sync::TipSyncOutcome::RepairedAtTarget { .. }
+        ));
+        assert_eq!(get_contact_chain_tip_raw(&device_id), Some(target_tip));
+        assert_eq!(get_local_bilateral_chain_tip(&device_id), Some(target_tip));
+    }
+
+    #[test]
+    #[serial]
+    fn test_sync_bilateral_tips_already_at_target() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        reset_database_for_tests();
+        init_database().expect("init db");
+
+        let device_id = [0xE3u8; 32];
+        let genesis_hash = [0xF3u8; 32];
+        let tip = [0x05u8; 32];
+
+        seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable");
+        restore_finalized_bilateral_chain_tip(&device_id, &tip).expect("seed");
+
+        let request = bilateral_tip_sync::TipSyncRequest {
+            counterparty_device_id: device_id,
+            expected_parent_tip: tip,
+            target_tip: tip,
+            observed_gate: None,
+            clear_gate_on_success: false,
+        };
+        let outcome = bilateral_tip_sync::sync_bilateral_tips_atomically(&request)
+            .expect("sync should succeed");
+
+        assert!(matches!(
+            outcome,
+            bilateral_tip_sync::TipSyncOutcome::AlreadyAtTarget { .. }
+        ));
+    }
+
+    #[test]
+    #[serial]
+    fn test_sync_bilateral_tips_parent_mismatch_commits_nothing() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        reset_database_for_tests();
+        init_database().expect("init db");
+
+        let device_id = [0xE4u8; 32];
+        let genesis_hash = [0xF4u8; 32];
+        let current_tip = [0x06u8; 32];
+        let wrong_parent = [0x07u8; 32];
+        let new_tip = [0x08u8; 32];
+
+        seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable");
+        restore_finalized_bilateral_chain_tip(&device_id, &current_tip).expect("seed");
+
+        let request = bilateral_tip_sync::TipSyncRequest {
+            counterparty_device_id: device_id,
+            expected_parent_tip: wrong_parent,
+            target_tip: new_tip,
+            observed_gate: None,
+            clear_gate_on_success: false,
+        };
+        let outcome = bilateral_tip_sync::sync_bilateral_tips_atomically(&request)
+            .expect("sync should not error");
+
+        assert!(matches!(
+            outcome,
+            bilateral_tip_sync::TipSyncOutcome::CanonicalMovedToDifferentTip { .. }
+        ));
+        // Tips unchanged
+        assert_eq!(get_contact_chain_tip_raw(&device_id), Some(current_tip));
+        assert_eq!(get_local_bilateral_chain_tip(&device_id), Some(current_tip));
+    }
+
+    #[test]
+    #[serial]
+    fn test_sync_bilateral_tips_exact_gate_clear_on_success() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        reset_database_for_tests();
+        init_database().expect("init db");
+
+        let device_id = [0xE5u8; 32];
+        let genesis_hash = [0xF5u8; 32];
+        let parent_tip = [0x09u8; 32];
+        let next_tip = [0x0Au8; 32];
+
+        seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable");
+        restore_finalized_bilateral_chain_tip(&device_id, &parent_tip).expect("seed");
+        store_pending_online_outbox(&device_id, "msg123", &parent_tip, &next_tip)
+            .expect("insert gate");
+
+        let observed = bilateral_tip_sync::ObservedPendingGate {
+            counterparty_device_id: device_id,
+            parent_tip,
+            next_tip,
+        };
+        let request = bilateral_tip_sync::TipSyncRequest {
+            counterparty_device_id: device_id,
+            expected_parent_tip: parent_tip,
+            target_tip: next_tip,
+            observed_gate: Some(observed),
+            clear_gate_on_success: true,
+        };
+        let outcome = bilateral_tip_sync::sync_bilateral_tips_atomically(&request)
+            .expect("sync should succeed");
+
+        assert!(matches!(
+            outcome,
+            bilateral_tip_sync::TipSyncOutcome::Advanced {
+                gate_cleared: true,
+                ..
+            }
+        ));
+        assert_eq!(get_contact_chain_tip_raw(&device_id), Some(next_tip));
+        assert_eq!(get_local_bilateral_chain_tip(&device_id), Some(next_tip));
+        assert!(get_pending_online_outbox(&device_id)
+            .expect("load")
+            .is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn test_sync_bilateral_tips_gate_mismatch_does_not_clear() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        reset_database_for_tests();
+        init_database().expect("init db");
+
+        let device_id = [0xE6u8; 32];
+        let genesis_hash = [0xF6u8; 32];
+        let parent_tip = [0x0Bu8; 32];
+        let next_tip = [0x0Cu8; 32];
+        let wrong_next = [0x0Du8; 32];
+
+        seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable");
+        restore_finalized_bilateral_chain_tip(&device_id, &parent_tip).expect("seed");
+        store_pending_online_outbox(&device_id, "msg456", &parent_tip, &next_tip)
+            .expect("insert gate");
+
+        // Observe a gate with wrong next_tip
+        let stale_observed = bilateral_tip_sync::ObservedPendingGate {
+            counterparty_device_id: device_id,
+            parent_tip,
+            next_tip: wrong_next,
+        };
+        let request = bilateral_tip_sync::TipSyncRequest {
+            counterparty_device_id: device_id,
+            expected_parent_tip: parent_tip,
+            target_tip: next_tip,
+            observed_gate: Some(stale_observed),
+            clear_gate_on_success: true,
+        };
+        let outcome = bilateral_tip_sync::sync_bilateral_tips_atomically(&request)
+            .expect("sync should not error");
+
+        assert!(matches!(
+            outcome,
+            bilateral_tip_sync::TipSyncOutcome::GateMismatch
+        ));
+        // Gate still exists
+        assert!(get_pending_online_outbox(&device_id)
+            .expect("load")
+            .is_some());
+        // Tips unchanged
+        assert_eq!(get_contact_chain_tip_raw(&device_id), Some(parent_tip));
+    }
+
+    #[test]
+    #[serial]
+    fn test_exact_gate_delete_does_not_kill_newer_gate() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        reset_database_for_tests();
+        init_database().expect("init db");
+
+        let device_id = [0xE7u8; 32];
+        let old_parent = [0x10u8; 32];
+        let old_next = [0x11u8; 32];
+        let new_parent = [0x12u8; 32];
+        let new_next = [0x13u8; 32];
+
+        // Insert gate A
+        let genesis = [0xF7u8; 32];
+        seed_contact_for_chain_tip_tests(device_id, genesis, "BleCapable");
+        store_pending_online_outbox(&device_id, "old_msg", &old_parent, &old_next)
+            .expect("insert gate A");
+
+        // Replace with gate B (simulates concurrent online send)
+        clear_pending_online_outbox(&device_id).expect("clear A");
+        store_pending_online_outbox(&device_id, "new_msg", &new_parent, &new_next)
+            .expect("insert gate B");
+
+        // Attempt exact-match delete using gate A's identity — should NOT delete gate B
+        let deleted = clear_pending_online_outbox_if_matches(&device_id, &old_parent, &old_next)
+            .expect("exact delete should not error");
+        assert!(!deleted, "old gate identity must not match newer gate");
+
+        // Gate B survives
+        let gate = get_pending_online_outbox(&device_id)
+            .expect("load")
+            .expect("gate exists");
+        assert_eq!(gate.message_id, "new_msg");
+        assert_eq!(gate.parent_tip, new_parent.to_vec());
+        assert_eq!(gate.next_tip, new_next.to_vec());
+    }
+
+    #[test]
+    #[serial]
+    fn test_success_invariant_chain_tip_equals_local_bilateral() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        reset_database_for_tests();
+        init_database().expect("init db");
+
+        let device_id = [0xE8u8; 32];
+        let genesis = [0xF8u8; 32];
+        let tip_a = [0x20u8; 32];
+        let tip_b = [0x21u8; 32];
+        let tip_c = [0x22u8; 32];
+
+        seed_contact_for_chain_tip_tests(device_id, genesis, "BleCapable");
+        restore_finalized_bilateral_chain_tip(&device_id, &tip_a).expect("seed");
+
+        // Advance A→B
+        let req1 = bilateral_tip_sync::TipSyncRequest {
+            counterparty_device_id: device_id,
+            expected_parent_tip: tip_a,
+            target_tip: tip_b,
+            observed_gate: None,
+            clear_gate_on_success: false,
+        };
+        bilateral_tip_sync::sync_bilateral_tips_atomically(&req1).expect("advance A→B");
+        assert_eq!(get_contact_chain_tip_raw(&device_id), Some(tip_b));
+        assert_eq!(get_local_bilateral_chain_tip(&device_id), Some(tip_b));
+
+        // Advance B→C
+        let req2 = bilateral_tip_sync::TipSyncRequest {
+            counterparty_device_id: device_id,
+            expected_parent_tip: tip_b,
+            target_tip: tip_c,
+            observed_gate: None,
+            clear_gate_on_success: false,
+        };
+        bilateral_tip_sync::sync_bilateral_tips_atomically(&req2).expect("advance B→C");
+        assert_eq!(get_contact_chain_tip_raw(&device_id), Some(tip_c));
+        assert_eq!(get_local_bilateral_chain_tip(&device_id), Some(tip_c));
+
+        // Invariant: both columns equal at every step
     }
 }

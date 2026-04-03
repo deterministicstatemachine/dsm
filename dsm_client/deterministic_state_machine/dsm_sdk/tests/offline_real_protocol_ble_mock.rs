@@ -82,6 +82,7 @@ async fn offline_transfer_roundtrip(
     coord_receiver: Arc<BleFrameCoordinator>,
     adapter_sender: Arc<BilateralTransportAdapter>,
     adapter_receiver: Arc<BilateralTransportAdapter>,
+    receiver_handler: Arc<BilateralBleHandler>,
     sender_mgr: Arc<RwLock<BilateralTransactionManager>>,
     receiver_mgr: Arc<RwLock<BilateralTransactionManager>>,
     sender_id: [u8; 32],
@@ -166,28 +167,48 @@ async fn offline_transfer_roundtrip(
         .expect("confirm chunks");
 
     configure_local_identity_for_receipts(receiver_id, receiver_genesis_hash, receiver_public_key);
+    let mut maybe_ack = None;
     for ch in &confirm_chunks {
         match coord_receiver.ingest_chunk(ch).await.expect("recv confirm") {
             FrameIngressResult::MessageComplete { message } => {
-                let outbound = adapter_receiver
-                    .on_transport_message(TransportInboundMessage {
-                        peer_address: "offline-mock-receiver".to_string(),
-                        frame_type: message.frame_type,
-                        payload: message.payload,
-                    })
-                    .await
-                    .expect("process confirm");
-                assert!(outbound.is_empty(), "confirm should not produce a response");
+                maybe_ack = Some(
+                    receiver_handler
+                        .handle_confirm_request(&message.payload)
+                        .await
+                        .expect("process confirm"),
+                );
             }
             FrameIngressResult::NeedMoreChunks | FrameIngressResult::ProtocolControl(_) => {}
         }
     }
 
-    // Simulate Kotlin's BLE delivery callback: mark the sender session as Committed
-    adapter_sender
-        .mark_confirm_delivered(commitment)
-        .await
-        .expect("mark_confirm_delivered");
+    let ack_payload = maybe_ack.expect("receiver commit response ack");
+    let ack_chunks = coord_receiver
+        .encode_message(BleFrameType::BilateralCommitResponse, &ack_payload)
+        .expect("commit response chunks");
+    for ch in &ack_chunks {
+        match coord_sender
+            .ingest_chunk(ch)
+            .await
+            .expect("recv commit response")
+        {
+            FrameIngressResult::MessageComplete { message } => {
+                let outbound = adapter_sender
+                    .on_transport_message(TransportInboundMessage {
+                        peer_address: "offline-mock-sender".to_string(),
+                        frame_type: message.frame_type,
+                        payload: message.payload,
+                    })
+                    .await
+                    .expect("process commit response");
+                assert!(
+                    outbound.is_empty(),
+                    "commit response should not produce a response"
+                );
+            }
+            FrameIngressResult::NeedMoreChunks | FrameIngressResult::ProtocolControl(_) => {}
+        }
+    }
 
     // Both sides finalized after 3-step confirm
     {
@@ -465,28 +486,48 @@ async fn offline_real_protocol_ble_mock_roundtrip() {
     println!("[OFFLINE] confirm chunks={}", confirm_chunks.len());
 
     configure_local_identity_for_receipts(bob_dev_id, bob_gen_hash, bob_kp.public_key().to_vec());
+    let mut maybe_ack = None;
     for ch in &confirm_chunks {
         match coord_b.ingest_chunk(ch).await.expect("b recv confirm") {
             FrameIngressResult::MessageComplete { message } => {
-                let outbound = adapter_b
-                    .on_transport_message(TransportInboundMessage {
-                        peer_address: "offline-b".to_string(),
-                        frame_type: message.frame_type,
-                        payload: message.payload,
-                    })
-                    .await
-                    .expect("b process confirm");
-                assert!(outbound.is_empty(), "confirm should not produce a response");
+                maybe_ack = Some(
+                    handler_b
+                        .handle_confirm_request(&message.payload)
+                        .await
+                        .expect("b process confirm"),
+                );
             }
             FrameIngressResult::NeedMoreChunks | FrameIngressResult::ProtocolControl(_) => {}
         }
     }
 
-    // Simulate Kotlin's BLE delivery callback: mark the sender session as Committed
-    handler_a
-        .mark_confirm_delivered(commitment)
-        .await
-        .expect("mark_confirm_delivered");
+    let ack_payload = maybe_ack.expect("receiver commit response ack");
+    let ack_chunks = coord_b
+        .encode_message(BleFrameType::BilateralCommitResponse, &ack_payload)
+        .expect("commit response chunks");
+    for ch in &ack_chunks {
+        match coord_a
+            .ingest_chunk(ch)
+            .await
+            .expect("a recv commit response")
+        {
+            FrameIngressResult::MessageComplete { message } => {
+                let outbound = adapter_a
+                    .on_transport_message(TransportInboundMessage {
+                        peer_address: "offline-a".to_string(),
+                        frame_type: message.frame_type,
+                        payload: message.payload,
+                    })
+                    .await
+                    .expect("a process commit response");
+                assert!(
+                    outbound.is_empty(),
+                    "commit response should not produce a response"
+                );
+            }
+            FrameIngressResult::NeedMoreChunks | FrameIngressResult::ProtocolControl(_) => {}
+        }
+    }
 
     // Both sides finalized after 3-step confirm
     {
@@ -790,6 +831,7 @@ async fn offline_real_protocol_ble_mock_multi_relationship_multi_tx() {
         coord_b.clone(),
         adapter_a.clone(),
         adapter_b.clone(),
+        handler_b.clone(),
         alice_mgr.clone(),
         bob_mgr.clone(),
         alice_dev_id,
@@ -813,6 +855,7 @@ async fn offline_real_protocol_ble_mock_multi_relationship_multi_tx() {
         coord_b.clone(),
         adapter_a.clone(),
         adapter_b.clone(),
+        handler_b.clone(),
         alice_mgr.clone(),
         bob_mgr.clone(),
         alice_dev_id,
@@ -837,6 +880,7 @@ async fn offline_real_protocol_ble_mock_multi_relationship_multi_tx() {
         coord_c.clone(),
         adapter_a.clone(),
         adapter_c.clone(),
+        handler_c.clone(),
         alice_mgr.clone(),
         carol_mgr.clone(),
         alice_dev_id,
@@ -860,6 +904,7 @@ async fn offline_real_protocol_ble_mock_multi_relationship_multi_tx() {
         coord_c.clone(),
         adapter_a.clone(),
         adapter_c.clone(),
+        handler_c.clone(),
         alice_mgr.clone(),
         carol_mgr.clone(),
         alice_dev_id,

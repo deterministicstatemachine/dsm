@@ -882,10 +882,7 @@ class GattServerHost(private val context: Context) {
 
             // Extract response fields via JNI helpers (no proto codegen in Kotlin).
             val chunks = com.dsm.wallet.bridge.Unified.bleDataResponseExtractChunks(responseProto)
-            val flags = com.dsm.wallet.bridge.Unified.bleDataResponseGetFlags(responseProto)
-            val confirmCommitmentHash = com.dsm.wallet.bridge.Unified.bleDataResponseExtractConfirmCommitmentHash(responseProto)
-            val pairingComplete = (flags and 1) != 0
-            val useReliableWrite = (flags and 2) != 0
+            val useReliableWrite = com.dsm.wallet.bridge.Unified.bleDataResponseUsesReliableWrite(responseProto)
 
             // If Rust produced bilateral follow-up chunks, send them on a coroutine to
             // avoid blocking the GATT server callback thread. requestGattWriteChunks uses
@@ -896,18 +893,6 @@ class GattServerHost(private val context: Context) {
                     try {
                         val queued = com.dsm.wallet.bridge.Unified.dispatchRustBleFollowUp(addr, chunks, useReliableWrite)
                         Log.i("GattServerHost", "Follow-up queued=$queued, chunks=${chunks.size}, reliableWrite=$useReliableWrite for $addr")
-                        if (pairingComplete && queued) {
-                            try {
-                                if (confirmCommitmentHash.size == 32) {
-                                    val ok = com.dsm.wallet.bridge.Unified.markBilateralConfirmDelivered(confirmCommitmentHash)
-                                    Log.i("GattServerHost", "markBilateralConfirmDelivered: ok=$ok after confirm to $addr")
-                                } else {
-                                    Log.w("GattServerHost", "Missing confirm commitment hash after confirm to $addr; refusing broad ConfirmPending sweep")
-                                }
-                            } catch (t: Throwable) {
-                                Log.w("GattServerHost", "markBilateralConfirmDelivered failed for $addr: ${t.message}")
-                            }
-                        }
                     } catch (e: Throwable) {
                         Log.e("GattServerHost", "Follow-up chunking/routing failed for $addr", e)
                     }

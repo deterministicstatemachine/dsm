@@ -8217,7 +8217,7 @@ export class AppStateStorage extends Message<AppStateStorage> {
   sdkInitialized = false;
 
   /**
-   * binary device id (non-canonical)
+   * Canonical 32-byte device identifier
    *
    * @generated from field: optional bytes device_id = 3;
    */
@@ -8249,11 +8249,28 @@ export class AppStateStorage extends Message<AppStateStorage> {
   keyValueStore: { [key: string]: string } = {};
 
   /**
-   * R_G — Device Tree root (§2.3)
+   * (§2.3.1) Device Tree root R_G — current concrete authenticated commitment
+   * used for receipt paths that verify π_dev: DevID ∈ R_G.
+   * Computed at genesis via: R_G = DeviceTree::single(device_id).root()
+   * Persisted IMMEDIATELY after genesis, device addition, or recovery.
+   * If None: build_bilateral_receipt_with_smt() → None → proof_data=None → the affected
+   * receipt path rejects during settlement.
+   * INVARIANT: any local acceptance path carrying π_dev must have R_G or an equivalent
+   * authenticated persisted device-tree commitment available.
    *
    * @generated from field: optional bytes device_tree_root = 9;
    */
   deviceTreeRoot?: Uint8Array;
+
+  /**
+   * (§2.3.1) Contact-side authenticated device-tree commitments — indexed by contact
+   * device_id (base32 Crockford). Used during bilateral settlement to verify
+   * counterparty receipt proofs relationship-locally.
+   * Each device maintains its own unique R_G; devices do not share roots.
+   *
+   * @generated from field: map<string, bytes> contact_device_tree_roots = 10;
+   */
+  contactDeviceTreeRoots: { [key: string]: Uint8Array } = {};
 
   constructor(data?: PartialMessage<AppStateStorage>) {
     super();
@@ -8272,6 +8289,7 @@ export class AppStateStorage extends Message<AppStateStorage> {
     { no: 7, name: "recovery_sessions", kind: "map", K: 9 /* ScalarType.STRING */, V: {kind: "scalar", T: 9 /* ScalarType.STRING */} },
     { no: 8, name: "key_value_store", kind: "map", K: 9 /* ScalarType.STRING */, V: {kind: "scalar", T: 9 /* ScalarType.STRING */} },
     { no: 9, name: "device_tree_root", kind: "scalar", T: 12 /* ScalarType.BYTES */, opt: true },
+    { no: 10, name: "contact_device_tree_roots", kind: "map", K: 9 /* ScalarType.STRING */, V: {kind: "scalar", T: 12 /* ScalarType.BYTES */} },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AppStateStorage {
@@ -11413,6 +11431,20 @@ export class BleGattIdentityReadResult extends Message<BleGattIdentityReadResult
    */
   errorMessage = "";
 
+  /**
+   * Peer's deviceId (for Kotlin identity anchoring)
+   *
+   * @generated from field: bytes peer_device_id = 4;
+   */
+  peerDeviceId = new Uint8Array(0);
+
+  /**
+   * Peer's genesisHash
+   *
+   * @generated from field: bytes peer_genesis_hash = 5;
+   */
+  peerGenesisHash = new Uint8Array(0);
+
   constructor(data?: PartialMessage<BleGattIdentityReadResult>) {
     super();
     proto3.util.initPartial(data, this);
@@ -11424,6 +11456,8 @@ export class BleGattIdentityReadResult extends Message<BleGattIdentityReadResult
     { no: 1, name: "success", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
     { no: 2, name: "write_back_envelope", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 3, name: "error_message", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 4, name: "peer_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "peer_genesis_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BleGattIdentityReadResult {
@@ -11460,25 +11494,11 @@ export class BleIncomingDataResponse extends Message<BleIncomingDataResponse> {
   responseChunks: Uint8Array[] = [];
 
   /**
-   * true = bilateral confirm delivered, Kotlin may clean up
-   *
-   * @generated from field: bool pairing_complete = 2;
-   */
-  pairingComplete = false;
-
-  /**
    * true = send via requestGattWriteChunks (bilateral follow-ups)
    *
    * @generated from field: bool use_reliable_write = 3;
    */
   useReliableWrite = false;
-
-  /**
-   * exact ConfirmPending session to finalize after BilateralConfirm delivery
-   *
-   * @generated from field: bytes confirm_commitment_hash = 4;
-   */
-  confirmCommitmentHash = new Uint8Array(0);
 
   constructor(data?: PartialMessage<BleIncomingDataResponse>) {
     super();
@@ -11489,9 +11509,7 @@ export class BleIncomingDataResponse extends Message<BleIncomingDataResponse> {
   static readonly typeName = "dsm.BleIncomingDataResponse";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "response_chunks", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
-    { no: 2, name: "pairing_complete", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
     { no: 3, name: "use_reliable_write", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
-    { no: 4, name: "confirm_commitment_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BleIncomingDataResponse {
@@ -11827,9 +11845,9 @@ export class BleEvent extends Message<BleEvent> {
     /**
      * human text (transport only)
      *
-     * @generated from field: string connection_failed = 10;
+     * @generated from field: dsm.BleConnectionFailed connection_failed = 10;
      */
-    value: string;
+    value: BleConnectionFailed;
     case: "connectionFailed";
   } | {
     /**
@@ -11892,7 +11910,7 @@ export class BleEvent extends Message<BleEvent> {
     { no: 7, name: "scan_stopped", kind: "scalar", T: 8 /* ScalarType.BOOL */, oneof: "ev" },
     { no: 8, name: "advertising_started", kind: "scalar", T: 8 /* ScalarType.BOOL */, oneof: "ev" },
     { no: 9, name: "advertising_stopped", kind: "scalar", T: 8 /* ScalarType.BOOL */, oneof: "ev" },
-    { no: 10, name: "connection_failed", kind: "scalar", T: 9 /* ScalarType.STRING */, oneof: "ev" },
+    { no: 10, name: "connection_failed", kind: "message", T: BleConnectionFailed, oneof: "ev" },
     { no: 11, name: "pairing_request", kind: "message", T: BlePairingRequest, oneof: "ev" },
     { no: 12, name: "pairing_accept", kind: "message", T: BlePairingAccept, oneof: "ev" },
     { no: 13, name: "identity_observed", kind: "message", T: BleIdentityObserved, oneof: "ev" },
@@ -16368,6 +16386,16 @@ export class OnlineTransferRequest extends Message<OnlineTransferRequest> {
    */
   receiptCommit = new Uint8Array(0);
 
+  /**
+   * §4.2.1 Canonical unsigned Operation bytes (signing preimage).
+   * Sender populates with signing_op.to_bytes() (signature field empty).
+   * Receiver MUST use these bytes directly for SPHINCS+ verification and
+   * h_{n+1} tip computation — no reconstruction from individual fields.
+   *
+   * @generated from field: bytes canonical_operation_bytes = 11;
+   */
+  canonicalOperationBytes = new Uint8Array(0);
+
   constructor(data?: PartialMessage<OnlineTransferRequest>) {
     super();
     proto3.util.initPartial(data, this);
@@ -16386,6 +16414,7 @@ export class OnlineTransferRequest extends Message<OnlineTransferRequest> {
     { no: 8, name: "chain_tip", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 9, name: "seq", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 10, name: "receipt_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 11, name: "canonical_operation_bytes", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): OnlineTransferRequest {
@@ -21189,6 +21218,49 @@ export class DrainVerifyV3 extends Message<DrainVerifyV3> {
 
   static equals(a: DrainVerifyV3 | PlainMessage<DrainVerifyV3> | undefined, b: DrainVerifyV3 | PlainMessage<DrainVerifyV3> | undefined): boolean {
     return proto3.util.equals(DrainVerifyV3, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.BleConnectionFailed
+ */
+export class BleConnectionFailed extends Message<BleConnectionFailed> {
+  /**
+   * @generated from field: string address = 1;
+   */
+  address = "";
+
+  /**
+   * @generated from field: string error = 2;
+   */
+  error = "";
+
+  constructor(data?: PartialMessage<BleConnectionFailed>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.BleConnectionFailed";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "address", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 2, name: "error", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BleConnectionFailed {
+    return new BleConnectionFailed().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): BleConnectionFailed {
+    return new BleConnectionFailed().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): BleConnectionFailed {
+    return new BleConnectionFailed().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: BleConnectionFailed | PlainMessage<BleConnectionFailed> | undefined, b: BleConnectionFailed | PlainMessage<BleConnectionFailed> | undefined): boolean {
+    return proto3.util.equals(BleConnectionFailed, a, b);
   }
 }
 

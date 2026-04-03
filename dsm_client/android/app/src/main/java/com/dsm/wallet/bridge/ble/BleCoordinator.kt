@@ -839,13 +839,9 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                         try {
                             val responseProto = com.dsm.wallet.bridge.Unified.processIncomingBleData(event.deviceAddress, event.data)
                             val chunks = com.dsm.wallet.bridge.Unified.bleDataResponseExtractChunks(responseProto)
-                            val flags = com.dsm.wallet.bridge.Unified.bleDataResponseGetFlags(responseProto)
-                            val confirmCommitmentHash = com.dsm.wallet.bridge.Unified.bleDataResponseExtractConfirmCommitmentHash(responseProto)
-                            Log.i("BleTransferTrace", "Response received from ${event.deviceAddress}|chunks=${chunks.size}|flags=$flags|confirmCommit=${confirmCommitmentHash.joinToString("") { "%02x".format(it) }}")
-                            Log.i("BleTransferTrace", "Response received from ${event.deviceAddress}|chunks=${chunks.size}|flags=$flags|confirmCommit=${confirmCommitmentHash.joinToString("") { "%02x".format(it) }}")
-                            val pairingComplete = (flags and 1) != 0
-                            val useReliableWrite = (flags and 2) != 0
-                            Log.d("BleCoordinator", "Response processed from ${event.deviceAddress}: chunks=${chunks.size}, flags=$flags")
+                            val useReliableWrite = com.dsm.wallet.bridge.Unified.bleDataResponseUsesReliableWrite(responseProto)
+                            Log.i("BleTransferTrace", "Response received from ${event.deviceAddress}|chunks=${chunks.size}|reliableWrite=$useReliableWrite")
+                            Log.d("BleCoordinator", "Response processed from ${event.deviceAddress}: chunks=${chunks.size}, reliableWrite=$useReliableWrite")
 
                             // If Rust produced follow-up chunks, send them outside the actor
                             // to avoid self-deadlock (requestGattWriteChunks uses runBlocking).
@@ -859,20 +855,6 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                                             BleErrorCategory.CHARACTERISTIC_WRITE_FAILED,
                                             "coordinator_followup_queue_failed"
                                         )
-                                    }
-                                    if (pairingComplete && queued) {
-                                        try {
-                                            if (confirmCommitmentHash.size == 32) {
-                                                val ok = com.dsm.wallet.bridge.Unified.markBilateralConfirmDelivered(confirmCommitmentHash)
-                                                                    Log.i("BleTransferTrace", "markBilateralConfirmDelivered for confirmCommit=${confirmCommitmentHash.joinToString("") { "%02x".format(it) }} ok=$ok")
-                                                                    Log.i("BleTransferTrace", "markBilateralConfirmDelivered for confirmCommit=${confirmCommitmentHash.joinToString("") { "%02x".format(it) }} ok=$ok")
-                                                Log.i("BleCoordinator", "markBilateralConfirmDelivered: ok=$ok after confirm to $addr")
-                                            } else {
-                                                Log.w("BleCoordinator", "Missing confirm commitment hash after confirm to $addr; refusing broad ConfirmPending sweep")
-                                            }
-                                        } catch (t: Throwable) {
-                                            Log.w("BleCoordinator", "markBilateralConfirmDelivered failed for $addr: ${t.message}")
-                                        }
                                     }
                                 }
                             }

@@ -45,7 +45,7 @@ enum class BleOpLane { LIFECYCLE, PAIRING, TRANSFER }
  * busy-spins on an empty queue.
  *
  * `dispatch()` is non-blocking (trySend); callers that need the result use
- * `dispatchBlocking()` which waits up to 5 s via runBlocking + withTimeoutOrNull.
+ * `dispatchBlocking()` which waits up to 15 s via runBlocking + withTimeoutOrNull.
  * This matches the previous `runOperationBool` contract.
  *
  * Thread-safety: `dispatch` / `dispatchBlocking` may be called from any thread.
@@ -108,7 +108,8 @@ class BleOperationDispatcher(private val scope: CoroutineScope) {
      *
      * This preserves the previous `runOperationBool` contract used in the public API
      * (startAdvertising, startScanning, etc.) which ultimately flows from JNI callers
-     * that expect a synchronous Boolean return.
+     * that expect a synchronous Boolean return. Timeout is 15s to accommodate
+     * SPHINCS+ signature operations and chunked BLE transfers.
      */
     fun dispatchBlocking(lane: BleOpLane, block: suspend () -> Boolean): Boolean {
         val deferred = CompletableDeferred<Boolean>()

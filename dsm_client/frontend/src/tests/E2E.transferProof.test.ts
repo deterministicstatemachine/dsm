@@ -141,6 +141,7 @@ function makeHeaders(overrides?: Partial<{ deviceId: Uint8Array; genesisHash: Ui
 let capturedMethods: string[] = [];
 let onlineTransferOverride: (() => Uint8Array) | null = null;
 let bilateralResponseOverride: (() => Uint8Array) | null = null;
+let bilateralPendingListOverride: (() => pb.OfflineBilateralTransaction[]) | null = null;
 let headersOverride: pb.Headers | null = null;
 
 function installBridge(opts?: { contactBleAddress?: string }) {
@@ -183,6 +184,22 @@ function installBridge(opts?: { contactBleAddress?: string }) {
         if (appRouterMethodName === 'contacts.list') {
           // Return framed Envelope with 8-byte prefix (bridge strips the prefix)
           return wrapSuccess(withRouterPrefix(makeContactsFramedEnvelope(opts?.contactBleAddress)));
+        }
+        if (appRouterMethodName === 'bilateral.pending_list') {
+          // Return empty pending list — session absent means terminal (committed or cleaned up).
+          // Tests that need specific statuses override bilateralPendingListOverride.
+          const resp = new pb.OfflineBilateralPendingListResponse({
+            transactions: bilateralPendingListOverride ? bilateralPendingListOverride() : [],
+          });
+          const env = new pb.Envelope({
+            version: 3,
+            payload: { case: 'offlineBilateralPendingListResponse' as const, value: resp },
+          } as any);
+          const envBytes = env.toBinary();
+          const framed = new Uint8Array(1 + envBytes.length);
+          framed[0] = 0x03;
+          framed.set(envBytes, 1);
+          return wrapSuccess(withRouterPrefix(framed));
         }
         return wrapSuccess(withRouterPrefix(new Uint8Array(0)));
       }
@@ -231,6 +248,7 @@ beforeEach(() => {
   capturedMethods = [];
   onlineTransferOverride = null;
   bilateralResponseOverride = null;
+  bilateralPendingListOverride = null;
   headersOverride = null;
   testIndex++;
   initializeEventBridge();
@@ -601,7 +619,21 @@ describe('Offline Transfer — Full Cycle', () => {
     expect(String(res.result)).toMatch(/rejected/i);
   });
 
-  test('BILATERAL_EVENT_FAILED event → accepted=false with reason', async () => {
+  test('BILATERAL_EVENT_FAILED event → polls backend, confirms failure → accepted=false', async () => {
+    // When a FAILED event arrives, the frontend polls the backend for
+    // authoritative session status instead of immediately declaring failure.
+    // Set up the pending list to return the session as failed.
+    bilateralPendingListOverride = () => [
+      new pb.OfflineBilateralTransaction({
+        id: encodeBase32Crockford(COMMITMENT_HASH),
+        commitmentHash: COMMITMENT_HASH,
+        senderId: DEVICE_A,
+        recipientId: DEVICE_B,
+        status: pb.OfflineBilateralTransactionStatus.OFFLINE_TX_FAILED,
+        metadata: { direction: 'outgoing', amount: '7' },
+      } as any),
+    ];
+
     const promise = dsm.offlineSend({
       to: DEVICE_B,
       amount: BigInt(13000 + testIndex),
@@ -621,7 +653,7 @@ describe('Offline Transfer — Full Cycle', () => {
 
     const res = await promise;
     expect(res.accepted).toBe(false);
-    expect(String(res.result)).toMatch(/disconnected|failed/i);
+    expect(String(res.result)).toMatch(/failed/i);
   });
 
   test('missing BLE address with no resolution → error', async () => {
@@ -744,9 +776,9 @@ describe('Offline Transfer — Proto Constraints', () => {
 describe('Offline Transfer — Timeout & Event Matching', () => {
   beforeEach(() => installBridge());
 
-  test('60-second timeout fires when no completion event arrives', async () => {
-    jest.useFakeTimers();
-
+  test('status polling resolves as success when session absent from pending list', async () => {
+    // With no events, the status poller eventually queries the backend.
+    // Default mock returns empty pending list → session absent → assumed committed.
     const promise = dsm.offlineSend({
       to: DEVICE_B,
       amount: BigInt(15000 + testIndex),
@@ -754,22 +786,14 @@ describe('Offline Transfer — Timeout & Event Matching', () => {
       bleAddress: 'AA:BB:CC:DD:EE:FF',
     } as any);
 
-    // Let async bridge calls resolve through fake timer queue
-    await jest.advanceTimersByTimeAsync(500);
-
-    // Advance past the 60-second timeout
-    await jest.advanceTimersByTimeAsync(61_000);
+    // Allow bridge calls and first poll interval to fire
+    await new Promise(r => setTimeout(r, 4000));
 
     const res = await promise;
-    expect(res.accepted).toBe(false);
-    expect(String(res.result)).toMatch(/timed out|timeout/i);
-
-    jest.useRealTimers();
-  });
+    expect(res.accepted).toBe(true);
+  }, 10000);
 
   test('event with wrong commitment hash does NOT resolve; correct hash does', async () => {
-    jest.useFakeTimers();
-
     const promise = dsm.offlineSend({
       to: DEVICE_B,
       amount: BigInt(16000 + testIndex),
@@ -778,7 +802,7 @@ describe('Offline Transfer — Timeout & Event Matching', () => {
     } as any);
 
     // Let async bridge calls complete
-    await jest.advanceTimersByTimeAsync(500);
+    await new Promise(r => setTimeout(r, 200));
 
     // Emit event with WRONG commitment hash — should NOT resolve
     const wrongHash = new Uint8Array(32).fill(0x99);
@@ -790,7 +814,7 @@ describe('Offline Transfer — Timeout & Event Matching', () => {
     } as any).toBinary());
 
     // Give event loop a tick
-    await jest.advanceTimersByTimeAsync(100);
+    await new Promise(r => setTimeout(r, 100));
 
     // Emit event with CORRECT commitment hash — SHOULD resolve
     emit('bilateral.event', new pb.BilateralEventNotification({
@@ -800,14 +824,12 @@ describe('Offline Transfer — Timeout & Event Matching', () => {
       message: 'correct hash',
     } as any).toBinary());
 
-    await jest.advanceTimersByTimeAsync(100);
+    await new Promise(r => setTimeout(r, 100));
 
     const res = await promise;
     expect(res.accepted).toBe(true);
     expect(String(res.result)).toContain('correct hash');
-
-    jest.useRealTimers();
-  });
+  }, 10000);
 });
 
 // ─────────────────────────────────────────────────────────────────

@@ -317,37 +317,52 @@ async fn verify_frontend_event_guarantees() {
 
     let confirm_payload = maybe_confirm.expect("confirm envelope from coordinator");
 
-    // Transport A -> B (Confirm) — Bob finalizes, no response needed
+    // Transport A -> B (Confirm), then B -> A (CommitResponse ack).
     let chunks = coord_a
         .encode_message(BleFrameType::BilateralConfirm, &confirm_payload)
         .expect("a confirm chunks");
     println!("[EVENT-TEST] Bob receiving confirmation...");
     configure_local_identity_for_receipts(bob_dev_id, bob_gen_hash, bob_kp.public_key().to_vec());
+    let mut maybe_ack = None;
     for ch in &chunks {
         match coord_b.ingest_chunk(ch).await.expect("b recv confirm") {
             FrameIngressResult::MessageComplete { message } => {
-                let outbound = adapter_b
-                    .on_transport_message(TransportInboundMessage {
-                        peer_address: "event-test-b".to_string(),
-                        frame_type: message.frame_type,
-                        payload: message.payload,
-                    })
-                    .await
-                    .expect("b process confirm");
-                assert!(outbound.is_empty(), "confirm should not produce a response");
+                maybe_ack = Some(
+                    handler_b
+                        .handle_confirm_request(&message.payload)
+                        .await
+                        .expect("b process confirm"),
+                );
             }
             FrameIngressResult::NeedMoreChunks => {}
             FrameIngressResult::ProtocolControl(_) => {}
         }
     }
 
-    // Simulate what Kotlin does after BLE delivery succeeds:
-    // mark_confirm_delivered() transitions the sender session from ConfirmPending → Committed
-    // and emits the TRANSFER_COMPLETE event that the frontend depends on.
-    handler_a
-        .mark_confirm_delivered(commitment)
-        .await
-        .expect("mark_confirm_delivered");
+    let ack_payload = maybe_ack.expect("receiver commit response ack");
+    let ack_chunks = coord_b
+        .encode_message(BleFrameType::BilateralCommitResponse, &ack_payload)
+        .expect("b ack chunks");
+    for ch in &ack_chunks {
+        match coord_a.ingest_chunk(ch).await.expect("a recv ack") {
+            FrameIngressResult::MessageComplete { message } => {
+                let outbound = adapter_a
+                    .on_transport_message(TransportInboundMessage {
+                        peer_address: "event-test-a".to_string(),
+                        frame_type: message.frame_type,
+                        payload: message.payload,
+                    })
+                    .await
+                    .expect("a process ack");
+                assert!(
+                    outbound.is_empty(),
+                    "commit response should not produce a response"
+                );
+            }
+            FrameIngressResult::NeedMoreChunks => {}
+            FrameIngressResult::ProtocolControl(_) => {}
+        }
+    }
 
     // --- VERIFICATION ---
     let events = captured_events.lock().unwrap();

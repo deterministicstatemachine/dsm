@@ -805,20 +805,86 @@ impl AppRouterImpl {
                     } else {
                         req.validity_iterations
                     };
+                    // Try to get the adapter; if not yet injected, trigger on-demand
+                    // injection via ensure_bluetooth_manager_and_sync_contact. This
+                    // handles the race where the frontend fires sendOffline immediately
+                    // after pairing finalized but before the Kotlin-side 15s pairing
+                    // timeout fires the bilateral preconditions check.
                     let transport_adapter = match crate::bridge::get_ble_transport_adapter().await {
                         Ok(adapter) => adapter,
-                        Err(e) => {
-                            return err(format!(
-                                "wallet.sendOffline: BLE transport adapter not ready: {e}"
-                            ))
+                        Err(_) => {
+                            log::warn!(
+                                "[wallet.sendOffline] BLE transport adapter not yet injected; attempting on-demand injection"
+                            );
+                            // Build a minimal contact from SQLite to trigger late-init
+                            match crate::storage::client_db::get_contact_by_device_id(
+                                &counterparty_device_id,
+                            ) {
+                                Ok(Some(contact_record)) => {
+                                    let verified_contact =
+                                        dsm::types::contact_types::DsmVerifiedContact {
+                                            alias: contact_record.alias.clone(),
+                                            device_id: counterparty_device_id,
+                                            genesis_hash: {
+                                                let mut gh = [0u8; 32];
+                                                if contact_record.genesis_hash.len() == 32 {
+                                                    gh.copy_from_slice(
+                                                        &contact_record.genesis_hash,
+                                                    );
+                                                }
+                                                gh
+                                            },
+                                            public_key: contact_record.public_key.clone(),
+                                            genesis_material: Vec::new(),
+                                            chain_tip: None,
+                                            chain_tip_smt_proof: None,
+                                            genesis_verified_online: true,
+                                            verified_at_commit_height: 0,
+                                            added_at_commit_height: 0,
+                                            last_updated_commit_height: 0,
+                                            verifying_storage_nodes: Vec::new(),
+                                            ble_address: contact_record.ble_address.clone(),
+                                        };
+                                    if let Err(e) =
+                                        crate::bluetooth::ensure_bluetooth_manager_and_sync_contact(
+                                            verified_contact,
+                                        )
+                                        .await
+                                    {
+                                        log::warn!(
+                                            "[wallet.sendOffline] On-demand BLE init failed: {e}"
+                                        );
+                                    }
+                                }
+                                _ => {
+                                    log::warn!("[wallet.sendOffline] Cannot trigger on-demand BLE init: contact not found in SQLite");
+                                }
+                            }
+                            // Retry after on-demand injection
+                            match crate::bridge::get_ble_transport_adapter().await {
+                                Ok(adapter) => adapter,
+                                Err(e) => {
+                                    return err(format!(
+                                        "wallet.sendOffline: BLE transport adapter not ready after on-demand injection attempt: {e}"
+                                    ))
+                                }
+                            }
                         }
                     };
                     let coordinator = match crate::bridge::get_ble_coordinator().await {
                         Ok(c) => c,
-                        Err(e) => {
-                            return err(format!(
-                                "wallet.sendOffline: BLE coordinator not ready: {e}"
-                            ))
+                        Err(_) => {
+                            // Same pattern: coordinator should have been injected alongside adapter
+                            log::warn!("[wallet.sendOffline] BLE coordinator not yet injected; retrying after brief yield");
+                            tokio::task::yield_now().await;
+                            match crate::bridge::get_ble_coordinator().await {
+                                Ok(c) => c,
+                                Err(e) => {
+                                    return err(format!(
+                                        "wallet.sendOffline: BLE coordinator not ready: {e}"
+                                    ))
+                                }
+                            }
                         }
                     };
                     let (prepare_envelope, commitment_hash) = match transport_adapter

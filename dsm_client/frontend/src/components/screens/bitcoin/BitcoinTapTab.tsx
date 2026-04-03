@@ -38,9 +38,15 @@ export default function BitcoinTapTab({ btcLogoSrc = 'images/logos/btc-logo.gif'
   return (
     <div className="bitcoin-tap-tab" style={{ padding: '0 4px' }}>
       {data.error && (
-        <div style={{ padding: '8px 12px', marginBottom: 8, background: 'var(--bg-secondary)', border: '2px dashed var(--border)', fontSize: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center', color: 'var(--text-dark)' }}>
+        <div style={{ padding: '8px 12px', marginBottom: 8, background: 'var(--bg-secondary)', border: '1px solid var(--border)', borderRadius: 4, fontSize: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center', color: 'var(--text-dark)' }}>
           <span>{data.error}</span>
           <button onClick={() => data.setError(null)} style={{ background: 'transparent', border: 'none', color: 'inherit', cursor: 'pointer', fontSize: 14 }}>x</button>
+        </div>
+      )}
+      {data.nativeBalance && data.nativeBalance.source === 'UNAVAILABLE' && !data.error && (
+        <div style={{ padding: '6px 12px', marginBottom: 8, background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 4, fontSize: 11, display: 'flex', justifyContent: 'space-between', alignItems: 'center', color: 'var(--text-disabled)' }}>
+          <span>Balance unavailable — check connection</span>
+          <button onClick={() => data.loadData()} style={{ background: 'transparent', border: '1px solid var(--border)', borderRadius: 4, color: 'var(--text-dark)', cursor: 'pointer', fontSize: 10, padding: '2px 8px' }}>Retry</button>
         </div>
       )}
 
