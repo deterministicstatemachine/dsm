@@ -887,9 +887,11 @@ impl AppRouterImpl {
                             storage_endpoints.clone(),
                         ) {
                             Ok(sdk) => sdk,
-                            Err(e) => return err(format!(
+                            Err(e) => {
+                                return err(format!(
                                 "wallet.send: failed to initialize sender inbox status client: {e}"
-                            )),
+                            ))
+                            }
                         };
 
                         let recipient_caught_up = match b0x_sdk
