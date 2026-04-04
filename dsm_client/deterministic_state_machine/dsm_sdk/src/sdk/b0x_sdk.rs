@@ -18,7 +18,7 @@ use crate::util::{deterministic_time as dt, text_id};
 
 use log::{info, warn, debug};
 use prost::Message;
-use rand::{rngs::OsRng, RngCore};
+use rand_core06::{OsRng, RngCore};
 use reqwest;
 use std::collections::HashMap;
 use std::sync::Arc;

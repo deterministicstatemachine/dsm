@@ -513,7 +513,7 @@ impl BilateralTransactionManager {
     /// This is used by the BLE handler when registering a sender session for bilateral transfers.
     /// The signature is required for the commit phase.
     pub fn sign_commitment(&self, commitment_hash: &[u8; 32]) -> Vec<u8> {
-        // §ISSUE-B4 FIX: canonical "DSM/<domain>\0" domain separator format.
+        // Message: `DSM/bilateral-sign\0` || commitment_hash.
         let mut msg = Vec::with_capacity(22 + 32);
         msg.extend_from_slice(b"DSM/bilateral-sign\0");
         msg.extend_from_slice(commitment_hash);

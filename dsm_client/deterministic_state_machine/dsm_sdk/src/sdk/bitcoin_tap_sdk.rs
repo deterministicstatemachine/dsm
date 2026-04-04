@@ -45,7 +45,7 @@ use std::sync::{Arc, OnceLock};
 use tokio::sync::RwLock;
 
 use prost::Message;
-use rand::{rngs::OsRng, RngCore};
+use rand_core06::{OsRng, RngCore};
 
 use dsm::{
     bitcoin::{

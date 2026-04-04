@@ -15,7 +15,7 @@ use crate::crypto::sphincs;
 use crate::types::error::DsmError;
 use crate::types::identifiers::NodeId;
 
-use rand::RngCore;
+use rand::Rng;
 use std::collections::HashSet;
 use crate::crypto::blake3::dsm_domain_hasher;
 
@@ -23,7 +23,7 @@ use crate::crypto::blake3::dsm_domain_hasher;
 
 #[inline]
 #[allow(dead_code)]
-fn generate_secure_random(rng: &mut impl RngCore, len: usize) -> Result<Vec<u8>, DsmError> {
+fn generate_secure_random(rng: &mut impl Rng, len: usize) -> Result<Vec<u8>, DsmError> {
     let mut bytes = vec![0u8; len];
     rng.fill_bytes(&mut bytes);
     Ok(bytes)
@@ -38,7 +38,7 @@ fn blake3_hash(data: &[u8]) -> Result<[u8; 32], DsmError> {
 fn select_random_subset<T: Clone>(
     items: &[T],
     count: usize,
-    rng: &mut impl RngCore,
+    rng: &mut impl Rng,
 ) -> Result<Vec<T>, DsmError> {
     if count > items.len() {
         return Err(DsmError::invalid_parameter(

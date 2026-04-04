@@ -980,10 +980,9 @@ impl WalletSDK {
                 chain_height: new_state.state_number,
                 step_index: tx_copy.tick,
                 commitment_hash: None,
-                // §ISSUE-W1 FIX: proof_data must carry relationship chain tips h_n / h_{n+1},
-                // NOT entity-level state hashes. The real ReceiptCommit with correct SMT
-                // proofs is built and stored by the caller (app_router_impl.rs) after this
-                // function returns. Set None so the subsequent upsert preserves authority.
+                // `proof_data` is filled when the receipt is available: `app_router_impl` calls
+                // `update_transaction_proof_data` with canonical receipt bytes (relationship-level
+                // chain context). None here avoids persisting the wrong preimage before that step.
                 proof_data: None,
                 metadata: meta,
                 created_at: 0,

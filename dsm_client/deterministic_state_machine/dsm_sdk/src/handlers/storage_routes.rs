@@ -814,10 +814,9 @@ impl AppRouterImpl {
                                                     // §4.3 item 6 + §16.6: Receiver independently recomputes h_{n+1}.
                                                     // σ = Cpre = BLAKE3("DSM/pre\0" || h_n || op || nonce) — symmetric inputs only,
                                                     // identical to the sender's computation in compute_precommit.
-                                                    // §ISSUE-R1 FIX: Use signing_bytes (signature field cleared) — NOT
-                                                    // entry.transaction.to_bytes() which includes the SPHINCS+ signature.
-                                                    // signing_bytes was computed above (op_for_sig.signature.clear()) and is
-                                                    // the exact same unsigned preimage the sender passed to compute_precommit.
+                                                    // Tip recomputation must use `signing_bytes` (signature cleared), not
+                                                    // `entry.transaction.to_bytes()` (includes SPHINCS+), matching the sender's
+                                                    // `compute_precommit` preimage.
                                                     let op_bytes_for_tip = signing_bytes.clone();
                                                     let receipt_sigma = dsm::core::bilateral_transaction_manager::compute_precommit(
                                                                 &chain_tip_arr,

@@ -87,7 +87,7 @@ export default function DiagnosticsOverlay() {
   // Show overlay if there's an env config error, diagnostics are shown, or there's a bridge error
   if (!envConfigError && !showDiagnostics && !hasBridgeError) return null;
 
-  const EnvConfigErrorBanner = () => {
+  const renderEnvConfigErrorBanner = () => {
     if (!envConfigError) return null;
 
     // Parse error detail if available
@@ -123,7 +123,7 @@ export default function DiagnosticsOverlay() {
     );
   };
 
-  const BridgeErrorBanner = () => {
+  const renderBridgeErrorBanner = () => {
     if (!hasBridgeError) return null;
     return (
       <div style={{ position: 'absolute', left: 8, right: 8, top: 8, zIndex: 120, background: 'var(--bg)', color: 'var(--text-dark)', padding: '8px', borderRadius: 8, boxShadow: '0 2px 6px rgba(var(--text-rgb),0.2)', border: '2px solid var(--border)', display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap', maxHeight: 'calc(100% - 16px)', maxWidth: 'calc(100% - 16px)', overflow: 'auto', wordBreak: 'break-word', overflowWrap: 'anywhere', fontSize: '10px' }}>
@@ -136,7 +136,7 @@ export default function DiagnosticsOverlay() {
     );
   };
 
-  const DiagnosticsModal = () => {
+  const renderDiagnosticsModal = () => {
     if (!showDiagnostics) return null;
     return (
       <div style={overlayBackdropStyle} data-testid="diagnostics-overlay">
@@ -275,9 +275,9 @@ export default function DiagnosticsOverlay() {
 
   return (
     <>
-      <EnvConfigErrorBanner />
-      <BridgeErrorBanner />
-      <DiagnosticsModal />
+      {renderEnvConfigErrorBanner()}
+      {renderBridgeErrorBanner()}
+      {renderDiagnosticsModal()}
     </>
   );
 }

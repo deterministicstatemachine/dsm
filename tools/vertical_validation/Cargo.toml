@@ -21,10 +21,10 @@ reqwest = { version = "0.12.28", default-features = false, features = ["rustls-t
 clap = { version = "4.4", features = ["derive"] }
 
 # Protobuf encoding for ByteCommitV3
-prost = "0.13"
+prost = "0.14"
 
 # BLAKE3 hashing with domain separation for test data
-blake3 = "1.4"
+blake3 = "1.8"
 
 # Error handling
 anyhow = "1.0"
@@ -43,8 +43,8 @@ instant = "0.1"
 dsm = { version = "0.1.0-beta.1", path = "../../dsm_client/deterministic_state_machine/dsm" }
 
 # Deterministic seeded RNG for reproducible property tests
-rand = "0.8"
-rand_chacha = "0.3.1"
+rand = "0.10"
+chacha20 = "0.10"
 
 [lints]
 workspace = true

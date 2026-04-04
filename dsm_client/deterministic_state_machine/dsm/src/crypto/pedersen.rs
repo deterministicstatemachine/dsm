@@ -13,7 +13,7 @@ use std::str::FromStr;
 
 use num_bigint::BigUint;
 use num_primes::Generator;
-use rand::{CryptoRng, RngCore};
+use rand::{CryptoRng, Rng};
 
 use crate::types::error::DsmError;
 
@@ -201,7 +201,7 @@ impl PedersenCommitment {
     }
 
     /// Create a new quantum-resistant commitment with RNG
-    pub fn commit_with_rng<R: RngCore + CryptoRng>(
+    pub fn commit_with_rng<R: Rng + CryptoRng>(
         params: &PedersenParams,
         value: &[u8],
         rng: &mut R,
@@ -232,7 +232,7 @@ impl PedersenCommitment {
     }
 
     /// Generate secure randomness for the commitment
-    fn generate_randomness<R: RngCore + CryptoRng>(
+    fn generate_randomness<R: Rng + CryptoRng>(
         rng: &mut R,
         q: &BigUint,
     ) -> Result<BigUint, DsmError> {
@@ -309,7 +309,7 @@ impl PedersenCommitment {
         Ok(constant_time_eq(&self.commitment_hash, &expected_hash) && self.commitment == expected)
     }
 
-    pub fn smart_commit<R: RngCore + CryptoRng>(
+    pub fn smart_commit<R: Rng + CryptoRng>(
         params: &PedersenParams,
         value: &[u8],
         recipient: &[u8],
@@ -583,13 +583,13 @@ pub fn verify_commitment(commitment: &[u8], value: &[u8], randomness: &[u8]) -> 
 
 #[cfg(test)]
 mod tests {
-    use rand::thread_rng;
+    use rand::rng;
 
     use super::*;
 
     #[test]
     fn test_commitment_flow() {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         let params = PedersenParams::new(SecurityLevel::Standard128)
             .expect("Params generation should succeed in test");
 
@@ -602,7 +602,7 @@ mod tests {
 
     #[test]
     fn test_homomorphic_combination() {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         let params = PedersenParams::new(SecurityLevel::Standard128)
             .expect("Params generation should succeed in test");
 
@@ -618,7 +618,7 @@ mod tests {
 
     #[test]
     fn test_verify_commitment() {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         let params = PedersenParams::new(SecurityLevel::Standard128)
             .expect("Params generation should succeed in test");
 
@@ -636,7 +636,7 @@ mod tests {
 
     #[test]
     fn test_smart_commitment() {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         let params = PedersenParams::new(SecurityLevel::Standard128)
             .expect("Params generation should succeed in test");
 
@@ -663,7 +663,7 @@ mod tests {
         assert_eq!(params.q, params2.q);
 
         let (c, _) =
-            PedersenCommitment::commit_with_rng(&params, b"abc", &mut rand::thread_rng()).unwrap();
+            PedersenCommitment::commit_with_rng(&params, b"abc", &mut rand::rng()).unwrap();
         let cb = c.to_bytes();
         let c2 = PedersenCommitment::from_bytes(&cb).unwrap();
         assert_eq!(c.security_level as u8, c2.security_level as u8);

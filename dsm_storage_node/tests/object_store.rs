@@ -9,7 +9,7 @@ use dsm_storage_node::{
     replication::{ReplicationConfig, ReplicationManager},
     AppState,
 };
-use rand::Rng;
+use rand::RngExt;
 use std::sync::Arc;
 use tower::ServiceExt; // for .oneshot
 
@@ -97,8 +97,8 @@ async fn put_requires_slot_or_bootstrap_headers() {
     };
 
     // Generate random DLV ID to avoid collisions
-    let mut rng = rand::thread_rng();
-    let dlv_bytes: [u8; 32] = rng.gen();
+    let mut rng = rand::rng();
+    let dlv_bytes: [u8; 32] = rng.random();
     let dlv_hex = dlv_bytes
         .iter()
         .map(|b| format!("{:02x}", b))

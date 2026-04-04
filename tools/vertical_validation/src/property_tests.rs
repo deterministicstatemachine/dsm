@@ -10,10 +10,10 @@
 // Validation harness: panicking on crypto setup failures is correct behavior.
 #![allow(clippy::expect_used)]
 
+use chacha20::rand_core::SeedableRng;
+use chacha20::ChaCha20Rng;
 use instant::Instant;
-use rand::Rng;
-use rand_chacha::rand_core::SeedableRng;
-use rand_chacha::ChaCha20Rng;
+use rand::RngExt;
 use serde::Serialize;
 
 use dsm::core::state_machine::transition::verify_token_balance_consistency;
@@ -284,7 +284,7 @@ fn test_hash_chain_continuity(
     machine.set_state(state.clone());
 
     for i in 0..iterations {
-        let nonce: Vec<u8> = (0..8).map(|_| rng.gen()).collect();
+        let nonce: Vec<u8> = (0..8).map(|_| rng.random()).collect();
         let op = build_signed_transfer(sk, &state, nonce, 1);
 
         let prev_hash = state.hash;
@@ -335,7 +335,7 @@ fn test_state_number_monotonicity(
     machine.set_state(state.clone());
 
     for i in 0..iterations {
-        let nonce: Vec<u8> = (0..8).map(|_| rng.gen()).collect();
+        let nonce: Vec<u8> = (0..8).map(|_| rng.random()).collect();
         let op = build_signed_transfer(sk, &state, nonce, 1);
 
         let prev_num = state.state_number;
@@ -395,7 +395,7 @@ fn test_entropy_determinism(
     machine.set_state(state.clone());
 
     for i in 0..iterations {
-        let nonce: Vec<u8> = (0..8).map(|_| rng.gen()).collect();
+        let nonce: Vec<u8> = (0..8).map(|_| rng.random()).collect();
         let op = build_signed_transfer(sk, &state, nonce, 1);
 
         // Manually compute expected entropy: H(current_entropy || op_bytes || next_state_number)
@@ -448,8 +448,8 @@ fn test_token_conservation(
         let recipient_before = balance_for_key(&harness.state, &harness.recipient_key);
         let total_before = sender_before + recipient_before;
         let spendable = balance_for_key(&harness.state, &harness.sender_key);
-        let amount = rng.gen_range(1..=spendable.min(250));
-        let nonce: Vec<u8> = (0..8).map(|_| rng.gen()).collect();
+        let amount = rng.random_range(1..=spendable.min(250));
+        let nonce: Vec<u8> = (0..8).map(|_| rng.random()).collect();
         let op = build_signed_token_transfer(
             sk,
             &harness.state,
@@ -543,9 +543,9 @@ fn test_non_negative_balances(
         let sender_before = balance_for_key(&harness.state, &harness.sender_key);
         let recipient_before = balance_for_key(&harness.state, &harness.recipient_key);
         let amount = sender_before
-            .saturating_add(rng.gen_range(1..=1_000))
+            .saturating_add(rng.random_range(1..=1_000))
             .max(sender_before + 1);
-        let nonce: Vec<u8> = (0..8).map(|_| rng.gen()).collect();
+        let nonce: Vec<u8> = (0..8).map(|_| rng.random()).collect();
         let op = build_signed_token_transfer(
             sk,
             &harness.state,
@@ -609,8 +609,8 @@ fn test_fork_exclusion(
 
     for i in 0..iterations {
         // Two different operations from the same parent state
-        let nonce_a: Vec<u8> = (0..8).map(|_| rng.gen()).collect();
-        let nonce_b: Vec<u8> = (0..8).map(|_| rng.gen()).collect();
+        let nonce_a: Vec<u8> = (0..8).map(|_| rng.random()).collect();
+        let nonce_b: Vec<u8> = (0..8).map(|_| rng.random()).collect();
 
         let op_a = build_signed_transfer(sk, &state, nonce_a, 1);
         let op_b = build_signed_transfer(sk, &state, nonce_b, 2);
@@ -666,8 +666,8 @@ fn test_signature_binding(
 
     for i in 0..iterations {
         // Create a message, sign it, verify it
-        let msg_len: usize = rng.gen_range(16..128);
-        let msg: Vec<u8> = (0..msg_len).map(|_| rng.gen()).collect();
+        let msg_len: usize = rng.random_range(16..128);
+        let msg: Vec<u8> = (0..msg_len).map(|_| rng.random()).collect();
 
         let sig = match sphincs_sign(sk, &msg) {
             Ok(s) => s,
