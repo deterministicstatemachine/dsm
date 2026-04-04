@@ -1358,9 +1358,8 @@ message BleGattIdentityReadResult {
 // write verbatim over the BLE characteristic. Kotlin MUST NOT inspect content.
 message BleIncomingDataResponse {
   repeated bytes response_chunks = 1 [(dsm_max_len)=1024]; // BLE chunks to write back (may be empty)
-  bool pairing_complete          = 2; // true = bilateral confirm delivered, Kotlin may clean up
+  reserved 2, 4;
   bool use_reliable_write        = 3; // true = send via requestGattWriteChunks (bilateral follow-ups)
-  bytes confirm_commitment_hash  = 4 [(dsm_max_len)=32]; // exact ConfirmPending session to finalize after BilateralConfirm delivery
 }
 
 // Status update emitted by PairingOrchestrator during the pairing loop.

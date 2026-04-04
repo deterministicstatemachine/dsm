@@ -153,18 +153,46 @@ impl BilateralTransportAdapter {
             .get_counterparty_for_commitment(&commitment_hash)
             .await
     }
+}
 
-    pub async fn mark_confirm_delivered(&self, commitment_hash: [u8; 32]) -> Result<(), DsmError> {
-        self.bilateral_handler
-            .mark_confirm_delivered(commitment_hash)
-            .await
-    }
+#[cfg(all(target_os = "android", feature = "bluetooth", feature = "jni"))]
+async fn queue_follow_up_chunks(
+    peer_address: &str,
+    frame_type: BleFrameType,
+    payload: &[u8],
+) -> Result<(), DsmError> {
+    let coordinator = crate::bridge::get_ble_coordinator().await.map_err(|e| {
+        DsmError::invalid_operation(format!("BLE coordinator not ready for follow-up: {e}"))
+    })?;
 
-    pub async fn mark_any_confirm_pending_delivered(&self) -> Result<usize, DsmError> {
-        self.bilateral_handler
-            .mark_any_confirm_pending_delivered()
-            .await
-    }
+    let chunks = coordinator
+        .encode_message(frame_type, payload)
+        .map_err(|e| DsmError::invalid_operation(format!("BLE follow-up framing failed: {e}")))?;
+
+    crate::jni::jni_common::with_env(|env| {
+        let mut env = unsafe { jni::JNIEnv::from_raw(env.get_raw() as *mut _) }
+            .map_err(|e| format!("clone JNIEnv failed: {e}"))?;
+        match crate::jni::unified_protobuf_bridge::send_ble_chunks_via_unified(
+            &mut env,
+            peer_address,
+            &chunks,
+        )? {
+            true => Ok(()),
+            false => Err("requestGattWriteChunks returned false".to_string()),
+        }
+    })
+    .map_err(|e| DsmError::invalid_operation(format!("BLE follow-up dispatch failed: {e}")))
+}
+
+#[cfg(not(all(target_os = "android", feature = "bluetooth", feature = "jni")))]
+async fn queue_follow_up_chunks(
+    _peer_address: &str,
+    _frame_type: BleFrameType,
+    _payload: &[u8],
+) -> Result<(), DsmError> {
+    Err(DsmError::invalid_operation(
+        "BLE follow-up dispatch requires Android JNI Bluetooth build".to_string(),
+    ))
 }
 
 impl BleTransportDelegate for BilateralTransportAdapter {
@@ -313,16 +341,31 @@ impl BleTransportDelegate for BilateralTransportAdapter {
                     // bilateral_tx_manager read+write locks. If any other tokio
                     // task holds a write lock, block_on deadlocks because it
                     // cannot yield the thread. Spawning detaches the heavy
-                    // state-machine work from the GATT thread. The confirm
-                    // handler returns no response data (Ok(Vec::new())), so the
-                    // caller does not need the result.
+                    // state-machine work from the GATT thread, then routes the
+                    // receiver's terminal acknowledgment back over BLE.
                     {
                         let handler = bilateral_handler;
                         let payload = message.payload;
+                        let peer_address = message.peer_address;
                         tokio::spawn(async move {
                             match handler.handle_confirm_request(&payload).await {
-                                Ok(_meta) => {
-                                    info!("[BILATERAL] Confirm handler completed successfully");
+                                Ok(ack_envelope) => {
+                                    match queue_follow_up_chunks(
+                                        &peer_address,
+                                        BleFrameType::BilateralCommitResponse,
+                                        &ack_envelope,
+                                    )
+                                    .await
+                                    {
+                                        Ok(()) => {
+                                            info!("[BILATERAL] Confirm handler completed successfully and queued receiver ack");
+                                        }
+                                        Err(e) => {
+                                            log::error!(
+                                                "[BILATERAL] Receiver ack dispatch failed: {e}"
+                                            );
+                                        }
+                                    }
                                 }
                                 Err(e)
                                     if e.to_string().contains("silent_drop_duplicate_packet") =>
@@ -338,6 +381,32 @@ impl BleTransportDelegate for BilateralTransportAdapter {
                         });
                         Ok(Vec::new())
                     }
+                }
+                BleFrameType::BilateralCommitResponse => {
+                    let is_commit_response = match crate::generated::Envelope::decode(
+                        &mut std::io::Cursor::new(&message.payload),
+                    ) {
+                        Ok(env) => matches!(
+                            env.payload,
+                            Some(crate::generated::envelope::Payload::BilateralCommitResponse(_))
+                        ),
+                        Err(_) => false,
+                    };
+                    if !is_commit_response {
+                        debug!(
+                            "Pass-through BilateralCommitResponse frame (non-commit-response envelope detected) size={}",
+                            message.payload.len()
+                        );
+                        return Ok(vec![TransportOutbound::new(
+                            BleFrameType::BilateralCommitResponse,
+                            message.payload,
+                        )]);
+                    }
+
+                    bilateral_handler
+                        .handle_commit_response(&message.payload)
+                        .await?;
+                    Ok(Vec::new())
                 }
                 BleFrameType::Unspecified => Ok(vec![TransportOutbound::new(
                     BleFrameType::Unspecified,
@@ -359,7 +428,7 @@ impl BleTransportDelegate for BilateralTransportAdapter {
                 .await;
             if failed > 0 {
                 info!(
-                    "BLE disconnect {peer_address}: failed {failed} early-phase session(s); late-phase sessions preserved"
+                    "BLE disconnect {peer_address}: failed {failed} in-flight bilateral session(s)"
                 );
             }
         })

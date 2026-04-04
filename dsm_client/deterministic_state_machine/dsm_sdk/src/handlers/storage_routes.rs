@@ -1021,19 +1021,26 @@ impl AppRouterImpl {
                                                         smt_result.child_proof.to_bytes(),
                                                     );
 
-                                                    // Advance shared chain tip using the verified h_{n+1}
-                                                    match crate::storage::client_db::try_advance_finalized_bilateral_chain_tip(
-                                                                    &from_device_id,
-                                                                    &chain_tip_arr,
-                                                                    &expected_h_next,
-                                                                ) {
-                                                                    Ok(true) => {
+                                                    // Advance shared chain tip atomically using the verified h_{n+1}
+                                                    {
+                                                        let request = crate::storage::client_db::bilateral_tip_sync::TipSyncRequest {
+                                                            counterparty_device_id: from_device_id,
+                                                            expected_parent_tip: chain_tip_arr,
+                                                            target_tip: expected_h_next,
+                                                            observed_gate: None,
+                                                            clear_gate_on_success: false,
+                                                        };
+                                                        match crate::storage::client_db::bilateral_tip_sync::sync_bilateral_tips_atomically(&request) {
+                                                                    Ok(outcome) => match outcome {
+                                                                        crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::Advanced { .. }
+                                                                        | crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::RepairedAtTarget { .. }
+                                                                        | crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::AlreadyAtTarget { .. } => {
                                                                         log::info!(
                                                                             "[storage.sync] §4.1 Finalized chain tip advanced for relationship with {} tx={}",
                                                                             &entry.sender_device_id[..8], entry.transaction_id
                                                                         );
                                                                     }
-                                                                    Ok(false) => {
+                                                                    _ => {
                                                                         let _ = crate::storage::client_db::mark_contact_needs_online_reconcile(&from_device_id);
                                                                         let mut state_guard = batch_state.lock().await;
                                                                         state_guard.errors.push(format!(
@@ -1042,6 +1049,7 @@ impl AppRouterImpl {
                                                                         ));
                                                                         continue;
                                                                     }
+                                                                    },
                                                                     Err(e) => {
                                                                         log::warn!(
                                                                             "[storage.sync] Failed to advance finalized chain tip for sender {}: {}",
@@ -1055,6 +1063,7 @@ impl AppRouterImpl {
                                                                         continue;
                                                                     }
                                                                 }
+                                                    }
 
                                                     // §S3: Persist stitched receipt with real SMT roots (post-SMT-Replace)
                                                     if let Some((
@@ -1303,21 +1312,57 @@ impl AppRouterImpl {
                                         // advanced (possibly multiple times), so the gate is stale.
                                         let pending_parent: Option<[u8; 32]> =
                                             pending.parent_tip.as_slice().try_into().ok();
-                                        let already_advanced = match (current_tip, pending_parent) {
-                                            (Some(ct), Some(pp)) => ct != pp,
-                                            (Some(_ct), None) => true, // no parent means gate is bogus
+                                        // Only consider the gate stale if current_tip == pending_next
+                                        // (the exact expected successor). Per Tripwire, we cannot assume
+                                        // any other different tip is safe forward progress.
+                                        let already_advanced = match (current_tip, pending_next) {
+                                            (Some(ct), Some(pn)) => ct == pn,
                                             _ => false,
+                                        };
+
+                                        // Build observed gate for exact-match operations
+                                        let gate_parent: [u8; 32] =
+                                            pending_parent.unwrap_or([0u8; 32]);
+                                        let gate_next: [u8; 32] = pending_next.unwrap_or([0u8; 32]);
+                                        let cp_arr: [u8; 32] = match pending
+                                            .counterparty_device_id
+                                            .as_slice()
+                                            .try_into()
+                                        {
+                                            Ok(a) => a,
+                                            Err(_) => {
+                                                continue;
+                                            }
+                                        };
+                                        let observed_gate = crate::storage::client_db::bilateral_tip_sync::ObservedPendingGate {
+                                            counterparty_device_id: cp_arr,
+                                            parent_tip: gate_parent,
+                                            next_tip: gate_next,
                                         };
 
                                         if already_advanced {
                                             log::info!(
-                                                "[storage.sync] §5.4 sweep: outbox gate stale (tip at next_tip); clearing for counterparty {:02x}{:02x}{:02x}{:02x}...",
+                                                "[storage.sync] §5.4 sweep: outbox gate stale (tip advanced); clearing for counterparty {:02x}{:02x}{:02x}{:02x}...",
                                                 pending.counterparty_device_id[0], pending.counterparty_device_id[1],
                                                 pending.counterparty_device_id[2], pending.counterparty_device_id[3],
                                             );
-                                            let _ = crate::storage::client_db::clear_pending_online_outbox(
-                                                &pending.counterparty_device_id,
-                                            );
+                                            // Atomic: ensure tips aligned and clear exact gate
+                                            if let Some(ct) = current_tip {
+                                                let request = crate::storage::client_db::bilateral_tip_sync::TipSyncRequest {
+                                                    counterparty_device_id: cp_arr,
+                                                    expected_parent_tip: ct,
+                                                    target_tip: ct,
+                                                    observed_gate: Some(observed_gate),
+                                                    clear_gate_on_success: true,
+                                                };
+                                                let _ = crate::storage::client_db::bilateral_tip_sync::sync_bilateral_tips_atomically(&request);
+                                            } else {
+                                                let _ = crate::storage::client_db::clear_pending_online_outbox_if_matches(
+                                                    &pending.counterparty_device_id,
+                                                    &gate_parent,
+                                                    &gate_next,
+                                                );
+                                            }
                                             continue;
                                         }
 
@@ -1328,37 +1373,38 @@ impl AppRouterImpl {
                                         {
                                             Ok(true) => {
                                                 log::info!(
-                                                    "[storage.sync] §5.4 sweep: message {} ACKed; finalizing tip",
+                                                    "[storage.sync] §5.4 sweep: message {} ACKed; finalizing tip atomically",
                                                     pending.message_id,
                                                 );
-                                                // §5.4: Only clear the serialization gate if the
-                                                // chain-tip CAS succeeds. If the parent was already
-                                                // consumed (Tripwire) or the tip/parent bytes are
-                                                // malformed, the gate MUST stay in place.
-                                                let finalized = match (pending_next, <[u8; 32]>::try_from(pending.parent_tip.as_slice())) {
+                                                // Atomic tip advance + gate clear
+                                                match (
+                                                    pending_next,
+                                                    <[u8; 32]>::try_from(
+                                                        pending.parent_tip.as_slice(),
+                                                    ),
+                                                ) {
                                                     (Some(pn), Ok(parent)) => {
-                                                        match crate::storage::client_db::try_advance_finalized_bilateral_chain_tip(
-                                                            &pending.counterparty_device_id,
-                                                            &parent,
-                                                            &pn,
-                                                        ) {
-                                                            Ok(true) => true,
-                                                            Ok(false) => {
-                                                                log::warn!(
-                                                                    "[storage.sync] §5.4 sweep: ParentConsumed for message {}; gate retained",
-                                                                    pending.message_id,
-                                                                );
-                                                                let _ = crate::storage::client_db::mark_contact_needs_online_reconcile(
-                                                                    &pending.counterparty_device_id,
-                                                                );
-                                                                false
-                                                            }
+                                                        let request = crate::storage::client_db::bilateral_tip_sync::TipSyncRequest {
+                                                            counterparty_device_id: cp_arr,
+                                                            expected_parent_tip: parent,
+                                                            target_tip: pn,
+                                                            observed_gate: Some(observed_gate),
+                                                            clear_gate_on_success: true,
+                                                        };
+                                                        match crate::storage::client_db::bilateral_tip_sync::sync_bilateral_tips_atomically(&request) {
+                                                            Ok(outcome) => match outcome {
+                                                                crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::Advanced { .. }
+                                                                | crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::RepairedAtTarget { .. }
+                                                                | crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::AlreadyAtTarget { .. } => {
+                                                                    log::info!("[storage.sync] §5.4 sweep: tip advanced and gate cleared for {}", pending.message_id);
+                                                                }
+                                                                _ => {
+                                                                    log::warn!("[storage.sync] §5.4 sweep: ParentConsumed for message {}; gate retained", pending.message_id);
+                                                                    let _ = crate::storage::client_db::mark_contact_needs_online_reconcile(&pending.counterparty_device_id);
+                                                                }
+                                                            },
                                                             Err(e) => {
-                                                                log::warn!(
-                                                                    "[storage.sync] §5.4 sweep: finalize failed for {}: {}; gate retained",
-                                                                    pending.message_id, e,
-                                                                );
-                                                                false
+                                                                log::warn!("[storage.sync] §5.4 sweep: finalize failed for {}: {}; gate retained", pending.message_id, e);
                                                             }
                                                         }
                                                     }
@@ -1367,14 +1413,8 @@ impl AppRouterImpl {
                                                             "[storage.sync] §5.4 sweep: missing next_tip or malformed parent_tip for {}; gate retained",
                                                             pending.message_id,
                                                         );
-                                                        false
                                                     }
                                                 };
-                                                if finalized {
-                                                    let _ = crate::storage::client_db::clear_pending_online_outbox(
-                                                        &pending.counterparty_device_id,
-                                                    );
-                                                }
                                             }
                                             Ok(false) => {
                                                 log::debug!(

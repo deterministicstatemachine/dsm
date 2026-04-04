@@ -5,8 +5,8 @@
 //! 1. Early-phase sessions (Preparing, Prepared, PendingUserAction) are marked
 //!    `Failed` immediately when the BLE link drops, unblocking the 120-second
 //!    stale timer so the caller can retry without delay.
-//! 2. Late-phase sessions (Accepted, ConfirmPending) are preserved on disconnect
-//!    so they can be finalized once reconnected.
+//! 2. Accepted / ConfirmPending sessions are also failed on disconnect so the
+//!    next attempt restarts from prepare instead of resuming stale state.
 //! 3. Multiple sequential back-and-forth transfers (prepare→accept→confirm cycles)
 //!    succeed correctly, simulating repeated sender-receiver interactions.
 //! 4. A dropped connection mid-prepare is transparent to the next transfer attempt.
@@ -212,22 +212,21 @@ async fn test_disconnect_fails_early_phase_sessions() {
         .await;
     assert_eq!(failed, 1, "one early-phase session should be failed");
 
-    // Session must now be in Failed state, unblocking immediate retry
+    // Session is failed and dropped from in-memory state, unblocking immediate retry.
     let phase_after = handler_a.get_session_phase(&fake_hash).await;
     assert_eq!(
-        phase_after,
-        Some(BilateralPhase::Failed),
-        "Preparing session must be Failed after disconnect"
+        phase_after, None,
+        "Preparing session must be removed from in-memory state after disconnect failure"
     );
 }
 
 // =============================================================================
-// Test 2: handle_peer_disconnected preserves late-phase sessions (Accepted,
-//         ConfirmPending) — they carry all crypto material for recovery.
+// Test 2: handle_peer_disconnected fails all in-flight sessions, including
+//         Accepted and ConfirmPending.
 // =============================================================================
 #[tokio::test]
 #[serial]
-async fn test_disconnect_preserves_late_phase_sessions() {
+async fn test_disconnect_fails_late_phase_sessions() {
     reset_db();
 
     let a_dev = dev(0xA3);
@@ -284,25 +283,22 @@ async fn test_disconnect_preserves_late_phase_sessions() {
         .handle_peer_disconnected("BB:BB:BB:BB:BB:BB")
         .await;
 
-    // No late-phase sessions should have been failed
     assert_eq!(
-        failed, 0,
-        "late-phase sessions must not be failed on disconnect"
+        failed, 2,
+        "all in-flight sessions must be failed on disconnect"
     );
 
-    // Both late-phase sessions must remain intact with their original phases
+    // Both late-phase sessions must be failed and removed so the next attempt restarts cleanly.
     let accepted_phase = handler_a.get_session_phase(&accepted_hash).await;
     assert_eq!(
-        accepted_phase,
-        Some(BilateralPhase::Accepted),
-        "Accepted session must survive disconnect"
+        accepted_phase, None,
+        "Accepted session must be removed from in-memory state on disconnect"
     );
 
     let confirm_phase = handler_a.get_session_phase(&confirm_hash).await;
     assert_eq!(
-        confirm_phase,
-        Some(BilateralPhase::ConfirmPending),
-        "ConfirmPending session must survive disconnect"
+        confirm_phase, None,
+        "ConfirmPending session must be removed from in-memory state on disconnect"
     );
 }
 
@@ -410,16 +406,15 @@ async fn test_disconnect_then_retry_succeeds() {
         b_gen.to_vec(),
         vec![0u8; 32],
     );
-    handler_b
+    let ack2 = handler_b
         .handle_confirm_request(&confirm2)
         .await
         .expect("receiver confirms 2nd");
 
-    // Mark confirm delivered on sender side
     handler_a
-        .mark_confirm_delivered(commitment2)
+        .handle_commit_response(&ack2)
         .await
-        .expect("mark delivered");
+        .expect("sender handles 2nd ack");
 
     let sender_phase = handler_a.get_session_phase(&commitment2).await;
     assert_eq!(
@@ -489,7 +484,7 @@ async fn run_one_transfer(
         receiver.gen.to_vec(),
         vec![0u8; 32],
     );
-    receiver
+    let ack = receiver
         .handler
         .handle_confirm_request(&confirm)
         .await
@@ -497,9 +492,9 @@ async fn run_one_transfer(
 
     sender
         .handler
-        .mark_confirm_delivered(commit)
+        .handle_commit_response(&ack)
         .await
-        .unwrap_or_else(|e| panic!("mark_delivered nonce={nonce}: {e}"));
+        .unwrap_or_else(|e| panic!("handle_commit_response nonce={nonce}: {e}"));
 
     let phase = sender.handler.get_session_phase(&commit).await;
     assert_eq!(
@@ -617,9 +612,8 @@ async fn test_disconnect_fails_pending_user_action_sessions() {
 
     let phase = handler_b.get_session_phase(&pua_hash).await;
     assert_eq!(
-        phase,
-        Some(BilateralPhase::Failed),
-        "PendingUserAction must be Failed after sender disconnects"
+        phase, None,
+        "PendingUserAction must be removed from in-memory state after sender disconnects"
     );
 }
 
@@ -667,9 +661,8 @@ async fn test_disconnect_fails_prepared_phase_sessions() {
 
     let phase = handler_a.get_session_phase(&prepared_hash).await;
     assert_eq!(
-        phase,
-        Some(BilateralPhase::Failed),
-        "Prepared session must be Failed after disconnect"
+        phase, None,
+        "Prepared session must be removed from in-memory state after disconnect failure"
     );
 }
 

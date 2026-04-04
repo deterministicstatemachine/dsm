@@ -31,11 +31,23 @@ impl ChainTipStore for SqliteChainTipStore {
         expected_parent_tip: [u8; 32],
         new_tip: [u8; 32],
     ) -> Result<bool, DsmError> {
-        client_db::try_advance_finalized_bilateral_chain_tip(
-            device_id,
-            &expected_parent_tip,
-            &new_tip,
-        )
-        .map_err(|e| DsmError::InvalidState(format!("SqliteChainTipStore persist failed: {e}")))
+        let request = client_db::bilateral_tip_sync::TipSyncRequest {
+            counterparty_device_id: *device_id,
+            expected_parent_tip,
+            target_tip: new_tip,
+            observed_gate: None,
+            clear_gate_on_success: false,
+        };
+        match client_db::bilateral_tip_sync::sync_bilateral_tips_atomically(&request) {
+            Ok(outcome) => match outcome {
+                client_db::bilateral_tip_sync::TipSyncOutcome::Advanced { .. }
+                | client_db::bilateral_tip_sync::TipSyncOutcome::RepairedAtTarget { .. }
+                | client_db::bilateral_tip_sync::TipSyncOutcome::AlreadyAtTarget { .. } => Ok(true),
+                _ => Ok(false),
+            },
+            Err(e) => Err(DsmError::InvalidState(format!(
+                "SqliteChainTipStore persist failed: {e}"
+            ))),
+        }
     }
 }

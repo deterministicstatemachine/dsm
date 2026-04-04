@@ -48,7 +48,7 @@ export default function DepositView({ balance, nativeBalance, network, onBack, o
         setDepositResult(`Deposit initiated (${res.vaultOpId.slice(0, 12)}…) but funding failed: ${fundErr instanceof Error ? fundErr.message : 'Fund failed'}`);
       }
       setDepositAmount('');
-      await onRefresh();
+      try { await onRefresh(); } catch { /* balance refresh failure must not override deposit success */ }
       bridgeEvents.emit('wallet.refresh', { source: 'bitcoin.tap' });
     } catch (e) {
       setDepositResult(`Error: ${e instanceof Error ? e.message : 'Deposit failed'}`);

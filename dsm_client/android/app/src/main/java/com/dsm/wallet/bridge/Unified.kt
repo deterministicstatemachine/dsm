@@ -393,13 +393,9 @@ object Unified {
     @Keep @JvmStatic fun bleDataResponseExtractChunks(responseProto: ByteArray): Array<ByteArray> =
         UnifiedNativeApi.bleDataResponseExtractChunks(responseProto)
 
-    /** Extract flags from a BleIncomingDataResponse proto. Bit 0 = pairing_complete, bit 1 = use_reliable_write. */
-    @Keep @JvmStatic fun bleDataResponseGetFlags(responseProto: ByteArray): Int =
-        UnifiedNativeApi.bleDataResponseGetFlags(responseProto)
-
-    /** Extract exact BilateralConfirm commitment hash from a BleIncomingDataResponse proto, if present. */
-    @Keep @JvmStatic fun bleDataResponseExtractConfirmCommitmentHash(responseProto: ByteArray): ByteArray =
-        UnifiedNativeApi.bleDataResponseExtractConfirmCommitmentHash(responseProto)
+    /** Extract use_reliable_write from a BleIncomingDataResponse proto. */
+    @Keep @JvmStatic fun bleDataResponseUsesReliableWrite(responseProto: ByteArray): Boolean =
+        UnifiedNativeApi.bleDataResponseUsesReliableWrite(responseProto)
 
     /** Extract success flag from a BleGattIdentityReadResult proto (returned by processGattIdentityRead). */
     @Keep @JvmStatic fun identityReadResultGetSuccess(responseProto: ByteArray): Boolean =
@@ -456,25 +452,6 @@ object Unified {
      */
     @Keep @JvmStatic fun rejectBilateralByCommitment(commitmentHashBytes: ByteArray, reason: String): ByteArray =
         UnifiedNativeApi.rejectBilateralByCommitment(commitmentHashBytes, reason)
-
-    /**
-     * Notify Rust that the BilateralConfirm envelope was successfully delivered to the receiver
-     * over BLE. Transitions the sender's session from ConfirmPending → Committed, prunes the
-     * persisted session, and fires BilateralEventTransferComplete so the sender UI refreshes.
-     * commitmentHashBytes: exactly 32 bytes — the commitment hash of the completed transfer.
-     * Returns true on success, false if the session is not found or already committed (idempotent).
-     */
-    @Keep @JvmStatic fun markBilateralConfirmDelivered(commitmentHashBytes: ByteArray): Boolean =
-        UnifiedNativeApi.markBilateralConfirmDelivered(commitmentHashBytes)
-
-    /**
-     * No-argument variant: sweeps all ConfirmPending sessions and marks each Committed.
-     * Use this when the 32-byte commitment hash is not available at the Kotlin call-site
-     * (e.g., post BilateralConfirm chunk queueing in BleCoordinator).
-     * Returns the number of sessions transitioned; typically 1 for a BLE connection.
-     */
-    @Keep @JvmStatic fun markAnyBilateralConfirmDelivered(): Int =
-        UnifiedNativeApi.markAnyBilateralConfirmDelivered()
 
     /**
      * Canonical offline send validation + response generation.

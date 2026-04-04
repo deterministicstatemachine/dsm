@@ -359,10 +359,18 @@ async fn bilateral_offline_prepare_accept_commit_finalize_flow() {
     // Phase 3: Confirm (receiver finalizes + settlement)
     configure_local_identity_for_receipts(s.b_dev, s.b_gen, s.b_kp.public_key().to_vec())
         .unwrap_or_else(|e| panic!("configure identity for b failed: {e}"));
-    let _meta = handler_b
+    let commit_response = handler_b
         .handle_confirm_request(&confirm_envelope)
         .await
         .unwrap_or_else(|e| panic!("handle_confirm_request failed: {e}"));
+
+    // Phase 3b: Sender processes commit response (finalizes + settlement)
+    configure_local_identity_for_receipts(s.a_dev, s.a_gen, s.a_kp.public_key().to_vec())
+        .unwrap_or_else(|e| panic!("configure identity for a (commit response) failed: {e}"));
+    handler_a
+        .handle_commit_response(&commit_response)
+        .await
+        .unwrap_or_else(|e| panic!("handle_commit_response failed: {e}"));
 
     // ── Verification: commitment cleared ─────────────────────────────────
     {
@@ -479,10 +487,18 @@ async fn bilateral_offline_state_consistency_across_peers() {
 
     configure_local_identity_for_receipts(s.b_dev, s.b_gen, s.b_kp.public_key().to_vec())
         .unwrap_or_else(|e| panic!("configure identity for b failed: {e}"));
-    let _meta = handler_b
+    let commit_response = handler_b
         .handle_confirm_request(&confirm_envelope)
         .await
         .unwrap_or_else(|e| panic!("handle_confirm_request failed: {e}"));
+
+    // Sender processes commit response (finalizes + settlement)
+    configure_local_identity_for_receipts(s.a_dev, s.a_gen, s.a_kp.public_key().to_vec())
+        .unwrap_or_else(|e| panic!("configure identity for a (commit response) failed: {e}"));
+    handler_a
+        .handle_commit_response(&commit_response)
+        .await
+        .unwrap_or_else(|e| panic!("handle_commit_response failed: {e}"));
 
     // ── Chain tip consistency ────────────────────────────────────────────
     let a_anchor =

@@ -21,6 +21,7 @@
     "incremental": true,
     "tsBuildInfoFile": "node_modules/.cache/tsconfig.tsbuildinfo",
     "declaration": true,
+    "rootDir": "src",
     "outDir": "dist",
     "baseUrl": "src",
     "paths": {

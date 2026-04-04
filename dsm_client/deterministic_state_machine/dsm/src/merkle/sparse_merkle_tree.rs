@@ -112,6 +112,7 @@ pub fn get_bit(key: &[u8; 32], bit_index: usize) -> u8 {
 /// This is the canonical SMT described in §2.2 of the whitepaper. Each device
 /// maintains one of these trees indexing its bilateral relationships. Keys are
 /// 256-bit relationship identifiers; values are 32-byte chain tip digests.
+#[derive(Clone)]
 pub struct SparseMerkleTree {
     /// Sparse leaf storage: relationship key → chain tip. Bounded by `max_leaves`.
     leaves: HashMap<[u8; 32], [u8; 32]>,

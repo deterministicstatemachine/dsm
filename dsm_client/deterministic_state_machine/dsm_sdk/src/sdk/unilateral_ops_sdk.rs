@@ -290,22 +290,35 @@ impl UnilateralOpsSDK {
                         "UnilateralOpsSDK: failed to update in-memory contact chain tip after submission: {e}"
                     )));
                 }
-                match client_db::try_advance_finalized_bilateral_chain_tip(
-                    &recipient,
-                    &sender_chain_tip_arr,
-                    &next_tip,
-                ) {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        return Err(DsmError::InvalidState(
-                            "UnilateralOpsSDK: finalized chain tip parent mismatch after submission"
-                                .to_string(),
-                        ));
-                    }
-                    Err(e) => {
-                        return Err(DsmError::InvalidState(format!(
-                            "UnilateralOpsSDK: failed to persist finalized chain tip after submission: {e}"
-                        )));
+                {
+                    let request = client_db::bilateral_tip_sync::TipSyncRequest {
+                        counterparty_device_id: recipient,
+                        expected_parent_tip: sender_chain_tip_arr,
+                        target_tip: next_tip,
+                        observed_gate: None,
+                        clear_gate_on_success: false,
+                    };
+                    match client_db::bilateral_tip_sync::sync_bilateral_tips_atomically(&request) {
+                        Ok(outcome) => match outcome {
+                            client_db::bilateral_tip_sync::TipSyncOutcome::Advanced { .. }
+                            | client_db::bilateral_tip_sync::TipSyncOutcome::RepairedAtTarget {
+                                ..
+                            }
+                            | client_db::bilateral_tip_sync::TipSyncOutcome::AlreadyAtTarget {
+                                ..
+                            } => {}
+                            _ => {
+                                return Err(DsmError::InvalidState(
+                                    "UnilateralOpsSDK: finalized chain tip parent mismatch after submission"
+                                        .to_string(),
+                                ));
+                            }
+                        },
+                        Err(e) => {
+                            return Err(DsmError::InvalidState(format!(
+                                "UnilateralOpsSDK: failed to persist finalized chain tip after submission: {e}"
+                            )));
+                        }
                     }
                 }
             } else {

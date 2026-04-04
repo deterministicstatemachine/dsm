@@ -11,11 +11,23 @@ import { appRouterQueryBin, appRouterInvokeBin } from '../dsm/WebViewBridge';
 import { decodeFramedEnvelopeV3 } from '../dsm/decoding';
 import logger from '../utils/logger';
 
+/** Map raw backend error to a user-friendly message. Full detail is logged. */
+function userFriendlyBtcError(msg: string): string {
+  const lower = msg.toLowerCase();
+  if (lower.includes('error sending request') || lower.includes('connect') || lower.includes('timed out') || lower.includes('dns')) {
+    return 'Unable to check Bitcoin balance. Check your internet connection and try again.';
+  }
+  if (lower.includes('http 4') || lower.includes('http 5')) {
+    return 'Bitcoin network query failed. Please try again.';
+  }
+  return 'Bitcoin service temporarily unavailable.';
+}
+
 /** Log and throw a Bitcoin service error so it appears in DevTools console. */
 function btcError(route: string, msg: string): never {
   const full = `${route} failed: ${msg}`;
   logger.error(`[BitcoinTap] ${full}`);
-  throw new Error(full);
+  throw new Error(userFriendlyBtcError(msg));
 }
 
 /** Safe decode: returns null for empty/insufficient bridge responses instead of throwing. */
@@ -171,7 +183,7 @@ export interface DbtcBalance {
 export interface NativeBtcBalance {
   available: bigint;
   locked: bigint;
-  source?: 'CHAIN' | 'UNKNOWN';
+  source?: 'CHAIN' | 'UNKNOWN' | 'UNAVAILABLE';
 }
 
 export interface BitcoinWalletHealth {
@@ -228,9 +240,11 @@ export async function getNativeBtcBalance(): Promise<NativeBtcBalance> {
     };
   }
   if (payload.case === 'error') {
-    btcError('bitcoin.wallet.balance', (payload.value as any).message);
+    const rawMsg = (payload.value as any).message || 'unknown error';
+    logger.error(`[BitcoinTap] bitcoin.wallet.balance failed: ${rawMsg}`);
+    return { available: BigInt(0), locked: BigInt(0), source: 'UNAVAILABLE' };
   }
-  btcError('bitcoin.wallet.balance', 'unexpected response type');
+  return { available: BigInt(0), locked: BigInt(0), source: 'UNKNOWN' };
 }
 
 export async function getBitcoinWalletHealth(): Promise<BitcoinWalletHealth> {
