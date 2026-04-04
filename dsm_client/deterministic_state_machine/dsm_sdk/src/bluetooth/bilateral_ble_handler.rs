@@ -2642,6 +2642,11 @@ impl BilateralBleHandler {
                 DsmError::invalid_operation("sender finalize failed after receiver acknowledgment")
             })?;
 
+        // Clear the persisted confirm envelope now that the sender has finalized
+        // successfully. Without this, the record would remain indefinitely and
+        // the confirm would be re-delivered on every reconnect.
+        self.clear_pending_confirm_delivery(&commitment_hash);
+
         crate::sdk::transfer_hooks::post_transfer_cleanup(
             &meta.token_id,
             crate::sdk::transfer_hooks::TransferCleanupRole::SenderRemove,
