@@ -34,7 +34,7 @@ use aes_gcm::{
     Aes256Gcm, Nonce,
 };
 use dsm::crypto::blake3::dsm_domain_hasher;
-use rand::{rngs::OsRng, RngCore};
+use rand_core06::{OsRng, RngCore};
 
 use crate::generated as pb;
 use dsm::types::error::DsmError;

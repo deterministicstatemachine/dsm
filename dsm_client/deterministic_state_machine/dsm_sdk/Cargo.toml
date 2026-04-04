@@ -44,9 +44,9 @@ perf-metrics = []
 softvault-kek-strict = []
 [build-dependencies]
 cbindgen = "0.29.2"
-blake3 = "1.5.0"
+blake3 = "1.8.4"
 anyhow = "1.0"
-prost = "0.13"
+prost = "0.14"
 prost-build = "0.14"
 prost-types = "0.12"
 tonic-build = { version = "0.13", default-features = false, features = ["prost"] }
@@ -60,13 +60,13 @@ ctor = "0.6"
 dsm = { version = "0.1.0-beta.1", path = "../dsm", default-features = false }
 
 # JNI for Android integration
-jni = { version = "0.21", optional = true }
+jni = { version = "0.22", optional = true }
 
 # mDNS service discovery
 mdns-sd = { version = "0.18.2", optional = true }
 
 # Protobuf support
-prost = "0.13"
+prost = "0.14"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 base32 = "0.4"
@@ -87,19 +87,20 @@ thiserror = "2.0.18"
 anyhow = "1.0.99"
 toml_edit = "0.22"
 
-toml = "0.8.20"
+toml = "1.1.0"
 
 # Storage
 
 # Bitcoin bridge support
 bitcoin = { version = "0.32", default-features = false, features = ["std"] }
 # Cryptography
-blake3 = "1.5.0"
+blake3 = "1.8.4"
 # AEAD
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc", "std"] }
 hmac = "0.12.1"
-rand = "0.8.5"
-rand_chacha = "0.3.1"
+rand = "0.10.0"
+rand_core06 = { package = "rand_core", version = "0.6" }
+chacha20 = "0.10"
 getrandom = "0.4.2"
 merlin = "3.0.0"
 zeroize = { version = "1.7.0", features = ["zeroize_derive"] }
@@ -112,7 +113,7 @@ ff = "0.13.0"
 # Networking
 rustls = { version = "0.23.37", features = ["ring"] }
 reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls", "json"] }
-rcgen = "0.12"
+rcgen = "0.14"
 tokio-rustls = "0.26.4"
 url = "2.4.0"
 urlencoding = "2"
@@ -150,7 +151,7 @@ argon2 = "0.5.3"
 # Additional utilities
 fastrand = "2.0.1"
 num_cpus = "1.16.0"
-hostname = "0.3.1"
+hostname = "0.4.2"
 rustc_version = "0.4.0"
 tempfile = "3.10.0"
 aes-gcm = "0.10.3"

@@ -55,9 +55,9 @@ fn ensure_release_build() -> Result<(), String> {
 /// Generate deterministic bytes for testing (reduces variance in CI)
 #[cfg(test)]
 fn deterministic_bytes(len: usize) -> Vec<u8> {
-    use rand_chacha::{rand_core::SeedableRng, ChaCha20Rng};
+    use chacha20::{rand_core::SeedableRng, ChaCha20Rng};
     let mut rng = ChaCha20Rng::from_seed([0u8; 32]);
-    use rand::RngCore;
+    use rand::Rng;
     let mut v = vec![0u8; len];
     rng.fill_bytes(&mut v);
     v

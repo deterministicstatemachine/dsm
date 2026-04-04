@@ -15,7 +15,7 @@ use dsm_sdk::storage::client_db::{
 };
 use std::process::Command;
 use std::collections::HashMap;
-use rand::{rngs::OsRng, RngCore};
+use rand_core06::{OsRng, RngCore};
 use tokio::time::{timeout, Duration};
 
 fn seed_era_projection(device_txt: &str, available: u64) {

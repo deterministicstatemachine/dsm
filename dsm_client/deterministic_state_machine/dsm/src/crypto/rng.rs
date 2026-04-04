@@ -11,9 +11,9 @@ use std::sync::OnceLock;
 use std::sync::Mutex;
 
 use crate::types::error::DsmError;
-use rand::{rngs::OsRng, RngCore, SeedableRng};
-use rand_chacha::ChaCha20Rng;
-use rand::CryptoRng;
+use chacha20::ChaCha20Rng;
+use chacha20::rand_core::{self as rand_core, TryRng, SeedableRng};
+use rand::{rngs::SysRng, Rng};
 
 // Global flags/state
 static RNG_INITIALIZED: AtomicBool = AtomicBool::new(false);
@@ -26,31 +26,29 @@ static DETERMINISTIC_RNG: OnceLock<Mutex<ChaCha20Rng>> = OnceLock::new();
 /// and delegates to `random_bytes` (which respects the deterministic flag).
 pub struct SecureRng;
 
-impl RngCore for SecureRng {
-    fn next_u32(&mut self) -> u32 {
+impl rand_core::TryRng for SecureRng {
+    type Error = core::convert::Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
         let mut buf = [0u8; 4];
-        self.fill_bytes(&mut buf);
-        u32::from_le_bytes(buf)
+        self.try_fill_bytes(&mut buf)?;
+        Ok(u32::from_le_bytes(buf))
     }
 
-    fn next_u64(&mut self) -> u64 {
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
         let mut buf = [0u8; 8];
-        self.fill_bytes(&mut buf);
-        u64::from_le_bytes(buf)
+        self.try_fill_bytes(&mut buf)?;
+        Ok(u64::from_le_bytes(buf))
     }
 
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
         let bytes = random_bytes(dest.len());
         dest.copy_from_slice(&bytes);
-    }
-
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
-        self.fill_bytes(dest);
         Ok(())
     }
 }
 
-impl CryptoRng for SecureRng {}
+impl rand_core::TryCryptoRng for SecureRng {}
 
 /// Ensure the RNG subsystem is initialized (idempotent & race-safe).
 pub fn ensure_rng_initialization() {
@@ -118,7 +116,10 @@ pub fn random_bytes(len: usize) -> Vec<u8> {
     }
 
     // Fall back to strong OS entropy
-    OsRng.fill_bytes(&mut bytes);
+    if let Err(e) = SysRng.try_fill_bytes(&mut bytes) {
+        tracing::error!("OS RNG failed while generating random bytes: {e}");
+        bytes.fill(0);
+    }
     bytes
 }
 
@@ -128,7 +129,9 @@ pub fn random_bytes(len: usize) -> Vec<u8> {
 /// handling, wire this to `getrandom`/`try_fill_bytes` in your rand version.
 pub fn generate_secure_random(len: usize) -> Result<Vec<u8>, DsmError> {
     let mut bytes = vec![0u8; len];
-    OsRng.fill_bytes(&mut bytes);
+    SysRng
+        .try_fill_bytes(&mut bytes)
+        .map_err(|e| DsmError::crypto("OS RNG failed", Some(e)))?;
     Ok(bytes)
 }
 
@@ -146,6 +149,7 @@ pub fn generate_deterministic_random(seed: &[u8], len: usize) -> Vec<u8> {
     let mut rng = ChaCha20Rng::from_seed(key);
 
     let mut out = vec![0u8; len];
+    use rand::Rng;
     rng.fill_bytes(&mut out);
     out
 }

@@ -29,15 +29,14 @@ export function useDpadNav({
   onSelect,
   initialIndex = 0,
 }: UseDpadNavOptions): UseDpadNavResult {
-  const [focusedIndex, setFocusedIndex] = useState(initialIndex);
+  const [focusedIndexRaw, setFocusedIndex] = useState(initialIndex);
   const onSelectRef = useRef(onSelect);
-  onSelectRef.current = onSelect;
 
-  // Clamp focused index when item count changes
   useEffect(() => {
-    if (itemCount <= 0) return;
-    setFocusedIndex((prev) => (prev >= itemCount ? itemCount - 1 : prev));
-  }, [itemCount]);
+    onSelectRef.current = onSelect;
+  }, [onSelect]);
+
+  const focusedIndex = itemCount <= 0 ? 0 : Math.min(focusedIndexRaw, itemCount - 1);
 
   // Set global flag so app-level useKeyboardBindings defers to us
   useEffect(() => {
@@ -50,12 +49,18 @@ export function useDpadNav({
   // Stable nav callbacks
   const prev = useCallback(() => {
     if (itemCount <= 0) return;
-    setFocusedIndex((i) => (i > 0 ? i - 1 : itemCount - 1));
+    setFocusedIndex((i) => {
+      const current = Math.min(i, itemCount - 1);
+      return current > 0 ? current - 1 : itemCount - 1;
+    });
   }, [itemCount]);
 
   const next = useCallback(() => {
     if (itemCount <= 0) return;
-    setFocusedIndex((i) => (i < itemCount - 1 ? i + 1 : 0));
+    setFocusedIndex((i) => {
+      const current = Math.min(i, itemCount - 1);
+      return current < itemCount - 1 ? current + 1 : 0;
+    });
   }, [itemCount]);
 
   const select = useCallback(() => {
