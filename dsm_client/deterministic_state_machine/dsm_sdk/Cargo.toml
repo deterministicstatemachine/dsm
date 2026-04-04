@@ -60,7 +60,7 @@ ctor = "0.6"
 dsm = { version = "0.1.0-beta.1", path = "../dsm", default-features = false }
 
 # JNI for Android integration
-jni = { version = "0.21", optional = true }
+jni = { version = "0.22", optional = true }
 
 # mDNS service discovery
 mdns-sd = { version = "0.18.2", optional = true }
