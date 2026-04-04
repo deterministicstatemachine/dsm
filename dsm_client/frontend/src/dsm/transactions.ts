@@ -285,7 +285,7 @@ export async function offlineSend(transfer: GenericTransaction): Promise<Generic
     let commitmentHash: Uint8Array | null = null;
     let settled = false;
     let settledResult: GenericTxResponse | null = null;
-    let statusPollTimer: ReturnType<typeof setInterval> | null = null;
+    let statusPollTimer: ReturnType<typeof setTimeout> | null = null;
     const earlyEventBuffer: pb.BilateralEventNotification[] = [];
     let resolvePromise: ((res: GenericTxResponse) => void) | null = null;
 
@@ -294,7 +294,7 @@ export async function offlineSend(transfer: GenericTransaction): Promise<Generic
       settled = true;
       settledResult = res;
       if (statusPollTimer) {
-        clearInterval(statusPollTimer);
+        clearTimeout(statusPollTimer);
         statusPollTimer = null;
       }
       offEvent();
@@ -340,6 +340,12 @@ export async function offlineSend(transfer: GenericTransaction): Promise<Generic
       }
       if (pollAttempts >= STATUS_POLL_MAX_ATTEMPTS && !settled) {
         finish({ accepted: false, result: 'Bilateral transfer did not complete in time' });
+        return;
+      }
+      // Self-schedule the next poll only after this one completes to prevent
+      // overlapping concurrent invocations when bridge calls take longer than the interval.
+      if (!settled) {
+        statusPollTimer = setTimeout(() => { void pollSessionStatus(); }, STATUS_POLL_INTERVAL_MS);
       }
     };
 
@@ -452,7 +458,9 @@ export async function offlineSend(transfer: GenericTransaction): Promise<Generic
     // Start polling backend for session status. Events are the fast path
     // (instant notification), but polling is the reliable fallback that
     // catches cases where the event was missed or delayed.
-    statusPollTimer = setInterval(() => { void pollSessionStatus(); }, STATUS_POLL_INTERVAL_MS);
+    // Use self-scheduling setTimeout (not setInterval) so a slow bridge call
+    // never causes concurrent overlapping polls.
+    statusPollTimer = setTimeout(() => { void pollSessionStatus(); }, STATUS_POLL_INTERVAL_MS);
 
     // --- Await remaining completion events or status poll resolution ---
     return await new Promise<GenericTxResponse>((resolve) => {
