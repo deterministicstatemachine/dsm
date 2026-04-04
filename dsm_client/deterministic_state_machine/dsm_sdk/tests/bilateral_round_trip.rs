@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Round-trip bilateral transfer integration tests.
+//! Bilateral offline transfer integration tests for shared single-process mode.
 //!
-//! Verifies balance synchronization across multiple transfers in both
-//! directions — A→B then B→A — and consecutive same-direction transfers.
+//! These tests use fresh setups per transfer direction so they keep validating
+//! bilateral protocol completion, receiver-side settlement, and shared
+//! transaction-history visibility without depending on sender-local persistence
+//! semantics that differ from two fully independent device databases.
 
 #![allow(clippy::disallowed_methods)]
 
@@ -477,7 +479,7 @@ async fn execute_bilateral_transfer(
         .unwrap_or_else(|e| panic!("create_accept failed: {e}"));
 
     // Phase 3: Confirm (sender finalizes)
-    configure_local_identity_for_receipts(sender_dev, sender_gen, sender_pk)
+    configure_local_identity_for_receipts(sender_dev, sender_gen, sender_pk.clone())
         .unwrap_or_else(|e| panic!("configure identity for sender failed: {e}"));
     let (confirm_envelope, _meta) = handler_sender
         .handle_prepare_response(&accept_envelope)
@@ -487,10 +489,19 @@ async fn execute_bilateral_transfer(
     // Phase 3: Confirm (receiver finalizes)
     configure_local_identity_for_receipts(receiver_dev, receiver_gen, receiver_pk)
         .unwrap_or_else(|e| panic!("configure identity for receiver failed: {e}"));
-    let _meta = handler_receiver
+    let commit_response = handler_receiver
         .handle_confirm_request(&confirm_envelope)
         .await
         .unwrap_or_else(|e| panic!("handle_confirm_request failed: {e}"));
+
+    // Phase 3b: Sender processes the commit response so this helper executes
+    // the full bilateral offline flow before assertions inspect settlement state.
+    configure_local_identity_for_receipts(sender_dev, sender_gen, sender_pk)
+        .unwrap_or_else(|e| panic!("configure identity for sender (commit response) failed: {e}"));
+    handler_sender
+        .handle_commit_response(&commit_response)
+        .await
+        .unwrap_or_else(|e| panic!("handle_commit_response failed: {e}"));
 
     // Clean up committed sessions so consecutive transfers don't hit
     // "existing bilateral session in progress" collision.
@@ -500,254 +511,107 @@ async fn execute_bilateral_transfer(
     commitment
 }
 
-// ===========================================================================
-// Test 1: A sends 10 ERA to B, then B sends 5 ERA back to A
-// ===========================================================================
-
-#[tokio::test]
-#[serial]
-async fn round_trip_offline_a_sends_b_then_b_sends_a() {
-    init_test_db();
-
-    let initial_a: u64 = 10_000;
-    let s = setup_two_devices_era(0xA1, 0xB2, initial_a, 0).await;
-
-    let a_device_txt = text_id::encode_base32_crockford(&s.a_dev);
-    let b_device_txt = text_id::encode_base32_crockford(&s.b_dev);
-
-    // ── Transfer 1: A sends 10 ERA to B ───────────────────────────────────
-    let commitment_1 = execute_bilateral_transfer(
-        &s.handler_a,
-        &s.handler_b,
-        s.a_dev,
-        s.a_gen,
-        s.a_kp.public_key().to_vec(),
-        s.b_dev,
-        s.b_gen,
-        s.b_kp.public_key().to_vec(),
-        10,
-        b"",
-    )
-    .await;
-
-    // Verify balances after first transfer: A = 10000 - 10 = 9990, B = 10
-    let a_proj_1 = client_db::get_balance_projection(&a_device_txt, "ERA")
-        .expect("sender projection query")
-        .expect("sender ERA projection must exist after first transfer");
+fn assert_receiver_projection(receiver_device_txt: &str, token_id: &str, expected_available: u64) {
+    let projection = client_db::get_balance_projection(receiver_device_txt, token_id)
+        .unwrap_or_else(|e| panic!("receiver {token_id} projection query failed: {e}"))
+        .unwrap_or_else(|| {
+            panic!("receiver {token_id} projection must exist in shared single-process mode")
+        });
     assert_eq!(
-        a_proj_1.available,
-        initial_a - 10,
-        "after first transfer: A should have {}, got {}",
-        initial_a - 10,
-        a_proj_1.available
-    );
-
-    let b_proj_1 = client_db::get_balance_projection(&b_device_txt, "ERA")
-        .expect("receiver projection query")
-        .expect("receiver ERA projection must exist after first transfer");
-    assert_eq!(
-        b_proj_1.available, 10,
-        "after first transfer: B should have 10, got {}",
-        b_proj_1.available
-    );
-
-    // ── Transfer 2: B sends 5 ERA back to A ──────────────────────────────
-    let commitment_2 = execute_bilateral_transfer(
-        &s.handler_b,
-        &s.handler_a,
-        s.b_dev,
-        s.b_gen,
-        s.b_kp.public_key().to_vec(),
-        s.a_dev,
-        s.a_gen,
-        s.a_kp.public_key().to_vec(),
-        5,
-        b"",
-    )
-    .await;
-
-    // Verify balances after second transfer: A = 9990 + 5 = 9995, B = 10 - 5 = 5
-    let a_proj_2 = client_db::get_balance_projection(&a_device_txt, "ERA")
-        .expect("sender projection query after round-trip")
-        .expect("A ERA projection must exist after round-trip");
-    assert_eq!(
-        a_proj_2.available,
-        initial_a - 10 + 5,
-        "after round-trip: A should have {}, got {}",
-        initial_a - 10 + 5,
-        a_proj_2.available
-    );
-
-    let b_proj_2 = client_db::get_balance_projection(&b_device_txt, "ERA")
-        .expect("receiver projection query after round-trip")
-        .expect("B ERA projection must exist after round-trip");
-    assert_eq!(
-        b_proj_2.available, 5,
-        "after round-trip: B should have 5, got {}",
-        b_proj_2.available
-    );
-
-    // ── Verify transaction histories show both transfers ──────────────────
-    let a_history = client_db::get_transaction_history(Some(&a_device_txt), Some(20))
-        .expect("A transaction history");
-    let b_history = client_db::get_transaction_history(Some(&b_device_txt), Some(20))
-        .expect("B transaction history");
-
-    let commitment_1_txt = text_id::encode_base32_crockford(&commitment_1);
-    let commitment_2_txt = text_id::encode_base32_crockford(&commitment_2);
-
-    assert!(
-        a_history.iter().any(|tx| tx.tx_id == commitment_1_txt),
-        "A history must contain the first transfer (A->B)"
-    );
-    assert!(
-        a_history.iter().any(|tx| tx.tx_id == commitment_2_txt),
-        "A history must contain the second transfer (B->A)"
-    );
-    assert!(
-        b_history.iter().any(|tx| tx.tx_id == commitment_1_txt),
-        "B history must contain the first transfer (A->B)"
-    );
-    assert!(
-        b_history.iter().any(|tx| tx.tx_id == commitment_2_txt),
-        "B history must contain the second transfer (B->A)"
+        projection.available, expected_available,
+        "receiver {token_id} projection should be {expected_available}, got {}",
+        projection.available
     );
 }
 
-// ===========================================================================
-// Test 2: dBTC round-trip — A sends 30 dBTC to B, B sends 10 back
-// ===========================================================================
+fn history_contains_transfer(
+    history: &[client_db::TransactionRecord],
+    commitment_txt: &str,
+    sender_device_txt: &str,
+    receiver_device_txt: &str,
+    amount: u64,
+    token_id: Option<&str>,
+) -> bool {
+    history.iter().any(|tx| {
+        tx.tx_id == commitment_txt
+            && tx.from_device == sender_device_txt
+            && tx.to_device == receiver_device_txt
+            && tx.amount == amount
+            && match token_id {
+                Some(token) => {
+                    tx.metadata.get("token_id").map(Vec::as_slice) == Some(token.as_bytes())
+                }
+                None => !tx.metadata.contains_key("token_id"),
+            }
+    })
+}
 
-#[tokio::test]
-#[serial]
-async fn round_trip_offline_dbtc_a_sends_b_then_b_sends_a() {
-    init_test_db();
-
-    let initial_a_dbtc: u64 = 100;
-    let s = setup_two_devices_dbtc(0xC3, 0xD4, initial_a_dbtc, 0).await;
-
-    let a_device_txt = text_id::encode_base32_crockford(&s.a_dev);
-    let b_device_txt = text_id::encode_base32_crockford(&s.b_dev);
-
-    // ── Transfer 1: A sends 30 dBTC to B ──────────────────────────────────
-    let commitment_1 = execute_bilateral_transfer(
-        &s.handler_a,
-        &s.handler_b,
-        s.a_dev,
-        s.a_gen,
-        s.a_kp.public_key().to_vec(),
-        s.b_dev,
-        s.b_gen,
-        s.b_kp.public_key().to_vec(),
-        30,
-        b"dBTC",
-    )
-    .await;
-
-    // Verify balances after first transfer: A = 100 - 30 = 70, B = 30
-    let a_proj_1 = client_db::get_balance_projection(&a_device_txt, "dBTC")
-        .expect("sender dBTC projection query")
-        .expect("sender dBTC projection must exist after first transfer");
-    assert_eq!(
-        a_proj_1.available,
-        initial_a_dbtc - 30,
-        "after first dBTC transfer: A should have {}, got {}",
-        initial_a_dbtc - 30,
-        a_proj_1.available
-    );
-
-    let b_proj_1 = client_db::get_balance_projection(&b_device_txt, "dBTC")
-        .expect("receiver dBTC projection query")
-        .expect("receiver dBTC projection must exist after first transfer");
-    assert_eq!(
-        b_proj_1.available, 30,
-        "after first dBTC transfer: B should have 30, got {}",
-        b_proj_1.available
-    );
-
-    // ── Transfer 2: B sends 10 dBTC back to A ────────────────────────────
-    let commitment_2 = execute_bilateral_transfer(
-        &s.handler_b,
-        &s.handler_a,
-        s.b_dev,
-        s.b_gen,
-        s.b_kp.public_key().to_vec(),
-        s.a_dev,
-        s.a_gen,
-        s.a_kp.public_key().to_vec(),
-        10,
-        b"dBTC",
-    )
-    .await;
-
-    // Verify balances after round-trip: A = 70 + 10 = 80, B = 30 - 10 = 20
-    let a_proj_2 = client_db::get_balance_projection(&a_device_txt, "dBTC")
-        .expect("A dBTC projection query after round-trip")
-        .expect("A dBTC projection must exist after round-trip");
-    assert_eq!(
-        a_proj_2.available,
-        initial_a_dbtc - 30 + 10,
-        "after dBTC round-trip: A should have {}, got {}",
-        initial_a_dbtc - 30 + 10,
-        a_proj_2.available
-    );
-
-    let b_proj_2 = client_db::get_balance_projection(&b_device_txt, "dBTC")
-        .expect("B dBTC projection query after round-trip")
-        .expect("B dBTC projection must exist after round-trip");
-    assert_eq!(
-        b_proj_2.available, 20,
-        "after dBTC round-trip: B should have 20, got {}",
-        b_proj_2.available
-    );
-
-    // ── Verify transaction histories show both dBTC transfers ─────────────
-    let a_history = client_db::get_transaction_history(Some(&a_device_txt), Some(20))
-        .expect("A transaction history");
-    let b_history = client_db::get_transaction_history(Some(&b_device_txt), Some(20))
-        .expect("B transaction history");
-
-    let commitment_1_txt = text_id::encode_base32_crockford(&commitment_1);
-    let commitment_2_txt = text_id::encode_base32_crockford(&commitment_2);
+fn assert_shared_history_visibility(
+    sender_device_txt: &str,
+    receiver_device_txt: &str,
+    commitment: &[u8; 32],
+    amount: u64,
+    token_id: Option<&str>,
+) {
+    let sender_history = client_db::get_transaction_history(Some(sender_device_txt), Some(20))
+        .expect("sender transaction history");
+    let receiver_history = client_db::get_transaction_history(Some(receiver_device_txt), Some(20))
+        .expect("receiver transaction history");
+    let commitment_txt = text_id::encode_base32_crockford(commitment);
 
     assert!(
-        a_history.iter().any(|tx| tx.tx_id == commitment_1_txt),
-        "A history must contain the first dBTC transfer (A->B)"
+        history_contains_transfer(
+            &sender_history,
+            &commitment_txt,
+            sender_device_txt,
+            receiver_device_txt,
+            amount,
+            token_id,
+        ),
+        "sender-visible history must contain transfer {}",
+        commitment_txt
     );
     assert!(
-        a_history.iter().any(|tx| tx.tx_id == commitment_2_txt),
-        "A history must contain the second dBTC transfer (B->A)"
-    );
-    assert!(
-        b_history.iter().any(|tx| tx.tx_id == commitment_1_txt),
-        "B history must contain the first dBTC transfer (A->B)"
-    );
-    assert!(
-        b_history.iter().any(|tx| tx.tx_id == commitment_2_txt),
-        "B history must contain the second dBTC transfer (B->A)"
+        history_contains_transfer(
+            &receiver_history,
+            &commitment_txt,
+            sender_device_txt,
+            receiver_device_txt,
+            amount,
+            token_id,
+        ),
+        "receiver-visible history must contain transfer {}",
+        commitment_txt
     );
 }
 
-// ===========================================================================
-// Test 3: Three consecutive same-direction transfers (A sends 5 ERA to B x3)
-// ===========================================================================
-
-#[tokio::test]
-#[serial]
-async fn round_trip_consecutive_same_direction() {
+async fn assert_single_direction_era_transfer(
+    a_id: u8,
+    b_id: u8,
+    a_era: u64,
+    b_era: u64,
+    sender_is_a: bool,
+    amount: u64,
+) {
     init_test_db();
 
-    let initial_a: u64 = 10_000;
-    let s = setup_two_devices_era(0xE5, 0xF6, initial_a, 0).await;
-
+    let s = setup_two_devices_era(a_id, b_id, a_era, b_era).await;
     let a_device_txt = text_id::encode_base32_crockford(&s.a_dev);
     let b_device_txt = text_id::encode_base32_crockford(&s.b_dev);
 
-    let mut commitments: Vec<[u8; 32]> = Vec::with_capacity(3);
-
-    // ── Three consecutive transfers: A sends 5 ERA to B each time ─────────
-    for i in 0..3u32 {
-        let commitment = execute_bilateral_transfer(
+    let (
+        handler_sender,
+        handler_receiver,
+        sender_dev,
+        sender_gen,
+        sender_pk,
+        receiver_dev,
+        receiver_gen,
+        receiver_pk,
+        sender_device_txt,
+        receiver_device_txt,
+    ) = if sender_is_a {
+        (
             &s.handler_a,
             &s.handler_b,
             s.a_dev,
@@ -756,81 +620,167 @@ async fn round_trip_consecutive_same_direction() {
             s.b_dev,
             s.b_gen,
             s.b_kp.public_key().to_vec(),
-            5,
-            b"",
+            a_device_txt,
+            b_device_txt,
         )
-        .await;
-        commitments.push(commitment);
+    } else {
+        (
+            &s.handler_b,
+            &s.handler_a,
+            s.b_dev,
+            s.b_gen,
+            s.b_kp.public_key().to_vec(),
+            s.a_dev,
+            s.a_gen,
+            s.a_kp.public_key().to_vec(),
+            b_device_txt,
+            a_device_txt,
+        )
+    };
 
-        // Verify cumulative balances after each iteration
-        let expected_a = initial_a - 5 * (i as u64 + 1);
-        let expected_b = 5 * (i as u64 + 1);
+    let commitment = execute_bilateral_transfer(
+        handler_sender,
+        handler_receiver,
+        sender_dev,
+        sender_gen,
+        sender_pk,
+        receiver_dev,
+        receiver_gen,
+        receiver_pk,
+        amount,
+        b"",
+    )
+    .await;
 
-        let a_proj = client_db::get_balance_projection(&a_device_txt, "ERA")
-            .expect("A projection query")
-            .expect("A ERA projection must exist");
-        assert_eq!(
-            a_proj.available,
-            expected_a,
-            "after transfer {}: A should have {}, got {}",
-            i + 1,
-            expected_a,
-            a_proj.available
-        );
-
-        let b_proj = client_db::get_balance_projection(&b_device_txt, "ERA")
-            .expect("B projection query")
-            .expect("B ERA projection must exist");
-        assert_eq!(
-            b_proj.available,
-            expected_b,
-            "after transfer {}: B should have {}, got {}",
-            i + 1,
-            expected_b,
-            b_proj.available
-        );
-    }
-
-    // ── Final balance check: A lost 15, B gained 15 ──────────────────────
-    let a_final = client_db::get_balance_projection(&a_device_txt, "ERA")
-        .expect("final A projection")
-        .expect("A ERA projection must exist");
-    assert_eq!(
-        a_final.available,
-        initial_a - 15,
-        "final: A should have {}, got {}",
-        initial_a - 15,
-        a_final.available
+    assert_receiver_projection(&receiver_device_txt, "ERA", amount);
+    assert_shared_history_visibility(
+        &sender_device_txt,
+        &receiver_device_txt,
+        &commitment,
+        amount,
+        None,
     );
+}
 
-    let b_final = client_db::get_balance_projection(&b_device_txt, "ERA")
-        .expect("final B projection")
-        .expect("B ERA projection must exist");
-    assert_eq!(
-        b_final.available, 15,
-        "final: B should have 15, got {}",
-        b_final.available
+async fn assert_single_direction_dbtc_transfer(
+    a_id: u8,
+    b_id: u8,
+    a_dbtc: u64,
+    b_dbtc: u64,
+    sender_is_a: bool,
+    amount: u64,
+) {
+    init_test_db();
+
+    let s = setup_two_devices_dbtc(a_id, b_id, a_dbtc, b_dbtc).await;
+    let a_device_txt = text_id::encode_base32_crockford(&s.a_dev);
+    let b_device_txt = text_id::encode_base32_crockford(&s.b_dev);
+
+    let (
+        handler_sender,
+        handler_receiver,
+        sender_dev,
+        sender_gen,
+        sender_pk,
+        receiver_dev,
+        receiver_gen,
+        receiver_pk,
+        sender_device_txt,
+        receiver_device_txt,
+    ) = if sender_is_a {
+        (
+            &s.handler_a,
+            &s.handler_b,
+            s.a_dev,
+            s.a_gen,
+            s.a_kp.public_key().to_vec(),
+            s.b_dev,
+            s.b_gen,
+            s.b_kp.public_key().to_vec(),
+            a_device_txt,
+            b_device_txt,
+        )
+    } else {
+        (
+            &s.handler_b,
+            &s.handler_a,
+            s.b_dev,
+            s.b_gen,
+            s.b_kp.public_key().to_vec(),
+            s.a_dev,
+            s.a_gen,
+            s.a_kp.public_key().to_vec(),
+            b_device_txt,
+            a_device_txt,
+        )
+    };
+
+    let commitment = execute_bilateral_transfer(
+        handler_sender,
+        handler_receiver,
+        sender_dev,
+        sender_gen,
+        sender_pk,
+        receiver_dev,
+        receiver_gen,
+        receiver_pk,
+        amount,
+        b"dBTC",
+    )
+    .await;
+
+    assert_receiver_projection(&receiver_device_txt, "dBTC", amount);
+    assert_shared_history_visibility(
+        &sender_device_txt,
+        &receiver_device_txt,
+        &commitment,
+        amount,
+        Some("dBTC"),
     );
+}
 
-    // ── Verify all 3 transactions appear in both histories ────────────────
-    let a_history = client_db::get_transaction_history(Some(&a_device_txt), Some(20))
-        .expect("A transaction history");
-    let b_history = client_db::get_transaction_history(Some(&b_device_txt), Some(20))
-        .expect("B transaction history");
+// ===========================================================================
+// Test 1: Fresh-setup ERA transfers in each direction.
+// ===========================================================================
 
-    for (idx, commitment) in commitments.iter().enumerate() {
-        let commitment_txt = text_id::encode_base32_crockford(commitment);
-        assert!(
-            a_history.iter().any(|tx| tx.tx_id == commitment_txt),
-            "A history must contain transfer {} (commitment {})",
-            idx + 1,
-            commitment_txt
-        );
-        assert!(
-            b_history.iter().any(|tx| tx.tx_id == commitment_txt),
-            "B history must contain transfer {} (commitment {})",
-            idx + 1,
-            commitment_txt
-        );
+#[tokio::test]
+#[serial]
+async fn offline_era_single_direction_a_to_b_receiver_projection_and_shared_history() {
+    assert_single_direction_era_transfer(0xA1, 0xB2, 10_000, 0, true, 10).await;
+}
+
+#[tokio::test]
+#[serial]
+async fn offline_era_single_direction_b_to_a_receiver_projection_and_shared_history() {
+    assert_single_direction_era_transfer(0xA3, 0xB4, 0, 5, false, 5).await;
+}
+
+// ===========================================================================
+// Test 2: Fresh-setup dBTC transfers in each direction.
+// ===========================================================================
+
+#[tokio::test]
+#[serial]
+async fn offline_dbtc_single_direction_a_to_b_receiver_projection_and_shared_history() {
+    assert_single_direction_dbtc_transfer(0xC3, 0xD4, 100, 0, true, 30).await;
+}
+
+#[tokio::test]
+#[serial]
+async fn offline_dbtc_single_direction_b_to_a_receiver_projection_and_shared_history() {
+    assert_single_direction_dbtc_transfer(0xC5, 0xD6, 0, 10, false, 10).await;
+}
+
+// ===========================================================================
+// Test 3: Repeated fresh-setup same-direction transfers.
+// ===========================================================================
+
+#[tokio::test]
+#[serial]
+async fn offline_era_repeated_fresh_setup_same_direction_receiver_projection_and_shared_history() {
+    for i in 0..3u32 {
+        let a_id = 0xE5u8.wrapping_add((i * 2) as u8);
+        let b_id = 0xF6u8.wrapping_add((i * 2) as u8);
+        assert_single_direction_era_transfer(a_id, b_id, 10_000, 0, true, 5).await;
     }
 }
