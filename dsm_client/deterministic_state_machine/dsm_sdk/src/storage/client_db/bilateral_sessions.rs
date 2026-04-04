@@ -41,91 +41,7 @@ pub fn store_bilateral_session(session: &BilateralSessionRecord) -> Result<()> {
         "prepared",
         "pending_user_action",
         "accepted",
-        "rejected",
-        "confirm_pending",
-        "committed",
-        "failed",
-    ]
-    .contains(&session.phase.as_str())
-    {
-        return Err(anyhow!(
-            "Invalid phase: '{}' (must be one of prepare/accept/commit/preparing/prepared/pending_user_action/accepted/rejected/confirm_pending/committed/failed)",
-            session.phase
-        ));
-    }
 
-    let binding = get_db_connection()?;
-    let conn = binding
-        .lock()
-        .map_err(|_| anyhow!("Database lock poisoned - concurrent access error"))?;
-    let now = tick();
-
-    conn.execute("BEGIN IMMEDIATE", [])?;
-    let result = conn.execute(
-        "INSERT INTO bilateral_sessions(
-            commitment_hash, counterparty_device_id, counterparty_genesis_hash, operation_bytes, phase,
-            local_signature, counterparty_signature, created_at_step,
-                sender_ble_address, updated_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-         ON CONFLICT(commitment_hash) DO UPDATE SET
-            phase = excluded.phase,
-            local_signature = excluded.local_signature,
-            counterparty_signature = excluded.counterparty_signature,
-            counterparty_genesis_hash = excluded.counterparty_genesis_hash,
-            sender_ble_address = excluded.sender_ble_address,
-            updated_at = excluded.updated_at",
-        params![
-            &session.commitment_hash,
-            &session.counterparty_device_id,
-            &session.counterparty_genesis_hash,
-            &session.operation_bytes,
-            &session.phase,
-            &session.local_signature,
-            &session.counterparty_signature,
-            session.created_at_step as i64,
-            &session.sender_ble_address,
-            now as i64,
-        ],
-    );
-    match result {
-        Ok(_) => {
-            conn.execute("COMMIT", [])?;
-        }
-        Err(e) => {
-            let _ = conn.execute("ROLLBACK", []);
-            return Err(anyhow!("Failed to store bilateral session: {}", e));
-        }
-    }
-
-    debug!(
-        "[CLIENT_DB] Stored bilateral session: phase={} commitment={}",
-        session.phase,
-        encode_base32_crockford(&session.commitment_hash[..8.min(session.commitment_hash.len())])
-    );
-    Ok(())
-}
-
-/// Get all bilateral sessions (for restoration on startup)
-pub fn get_all_bilateral_sessions() -> Result<Vec<BilateralSessionRecord>> {
-    let binding = get_db_connection()?;
-    let conn = binding
-        .lock()
-        .map_err(|_| anyhow!("Database lock poisoned - concurrent access error"))?;
-    let mut stmt = conn.prepare(
-        "SELECT commitment_hash, counterparty_device_id, operation_bytes, phase,
-               counterparty_genesis_hash, local_signature, counterparty_signature, created_at_step,
-               sender_ble_address
-         FROM bilateral_sessions
-           ORDER BY created_at_step DESC",
-    )?;
-
-    let iter = stmt.query_map([], |row| {
-        Ok(BilateralSessionRecord {
-            commitment_hash: row.get(0)?,
-            counterparty_device_id: row.get(1)?,
-            operation_bytes: row.get(2)?,
-            phase: row.get(3)?,
-            counterparty_genesis_hash: row.get(4)?,
             local_signature: row.get(5)?,
             counterparty_signature: row.get(6)?,
             created_at_step: row.get::<_, i64>(7)? as u64,
@@ -211,6 +127,7 @@ pub fn cleanup_expired_bilateral_sessions(current_ticks: u64) -> Result<usize> {
 // ═══════════════════════════════════════════════════════════════════════
 // §5.3 Pending Confirm Delivery — crash-safe receipt persistence
 // ═══════════════════════════════════════════════════════════════════════
+<<<<<<< HEAD
 
 /// Store a confirm envelope for re-delivery. Called atomically with sender
 /// finalization so the receipt survives crashes.
@@ -473,5 +390,65 @@ mod tests {
             all[0].sender_ble_address.as_deref(),
             Some("AA:BB:CC:DD:EE:FF")
         );
+=======
+
+/// Store a confirm envelope for re-delivery. Called atomically with sender
+/// finalization so the receipt survives crashes.
+pub fn store_pending_confirm_delivery(
+    commitment_hash: &[u8],
+    counterparty_device_id: &[u8],
+    confirm_envelope: &[u8],
+) -> Result<()> {
+    if commitment_hash.len() != 32 || counterparty_device_id.len() != 32 {
+        return Err(anyhow!("Invalid hash or device_id length"));
+>>>>>>> d490faf (Revert non-test logic changes to main implementations)
     }
+    let binding = get_db_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|_| anyhow!("Database lock poisoned"))?;
+    let tick_val = tick() as i64;
+    conn.execute(
+        "INSERT OR REPLACE INTO pending_confirm_delivery (commitment_hash, counterparty_device_id, confirm_envelope, created_at_tick) VALUES (?1, ?2, ?3, ?4)",
+        params![commitment_hash, counterparty_device_id, confirm_envelope, tick_val],
+    )?;
+    Ok(())
+}
+
+/// Get pending confirm envelopes for a counterparty (for re-delivery on reconnect).
+pub fn get_pending_confirm_deliveries(
+    counterparty_device_id: &[u8],
+) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+    if counterparty_device_id.len() != 32 {
+        return Err(anyhow!("Invalid device_id length"));
+    }
+    let binding = get_db_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|_| anyhow!("Database lock poisoned"))?;
+    let mut stmt = conn.prepare(
+        "SELECT commitment_hash, confirm_envelope FROM pending_confirm_delivery WHERE counterparty_device_id = ?1",
+    )?;
+    let rows = stmt
+        .query_map(params![counterparty_device_id], |row| {
+            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Delete a pending confirm delivery after successful BLE delivery.
+pub fn delete_pending_confirm_delivery(commitment_hash: &[u8]) -> Result<()> {
+    if commitment_hash.len() != 32 {
+        return Err(anyhow!("Invalid commitment_hash length"));
+    }
+    let binding = get_db_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|_| anyhow!("Database lock poisoned"))?;
+    conn.execute(
+        "DELETE FROM pending_confirm_delivery WHERE commitment_hash = ?1",
+        params![commitment_hash],
+    )?;
+    Ok(())
 }
