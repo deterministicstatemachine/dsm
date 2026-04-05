@@ -2,6 +2,20 @@
 
 [![codecov](https://codecov.io/gh/deterministicstatemachine/dsm/graph/badge.svg?branch=main)](https://app.codecov.io/gh/deterministicstatemachine/dsm)
 
+## 📲 Beta Testers — Start Here
+
+The fastest way to get started is to install the APK directly from the latest tagged release:
+
+**[⬇ Download dsm-beta.apk (v0.1.0-beta.1)](https://github.com/deterministicstatemachine/dsm/releases/download/v0.1.0-beta.1/dsm-beta.apk)**
+
+1. Download the APK to your Android device.
+2. Enable **Install from unknown sources** in your device settings if prompted.
+3. Open the downloaded file to install and launch the DSM Wallet.
+
+All release assets (APK, signature, SBOM) are on the [v0.1.0-beta.1 releases page](https://github.com/deterministicstatemachine/dsm/releases/tag/v0.1.0-beta.1).
+
+---
+
 > **🚧 EARLY BETA RELEASE** 🚧
 >
 > This is an early beta release intended for **developer onboarding and community feedback**. It contains novel cryptographic protocols and is not yet ready for production use or end-user deployment. The codebase is under active development with known gaps remaining before mainnet readiness.
