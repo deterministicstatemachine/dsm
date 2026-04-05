@@ -3,12 +3,12 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { dsmClient } from '../../../../services/dsmClient';
 import { formatBtc } from '../../../../services/bitcoinTap';
-import { encodeBase32Crockford } from '../../../../utils/textId';
 import { useWalletRefreshListener } from '../../../../hooks/useWalletRefreshListener';
 import { bridgeEvents } from '../../../../bridge/bridgeEvents';
 import { buildAliasLookup } from '../helpers';
 import type { Balance } from '../helpers';
 import type { DomainContact, DomainIdentity, DomainTransaction } from '../../../../domain/types';
+import { mapContactList } from '../../../../domain/mappers';
 import logger from '../../../../utils/logger';
 
 export type WalletScreenData = {
@@ -77,35 +77,10 @@ export function useWalletScreenData(activeTab: string): WalletScreenData {
 
       try {
         const list = await dsmClient.getContacts();
-        const normalized: DomainContact[] = list.contacts.map((c) => {
-          const deviceId = typeof c.deviceId === 'string'
-            ? c.deviceId
-            : encodeBase32Crockford(c.deviceId as unknown as Uint8Array);
-          const genesisHash = typeof (c as { genesisHash?: unknown }).genesisHash === 'string'
-            ? (c as { genesisHash?: string }).genesisHash || ''
-            : encodeBase32Crockford((c as { genesisHash?: Uint8Array }).genesisHash ?? new Uint8Array(0));
-          const anyC = c as unknown as Record<string, unknown>;
-          const tipObj = anyC.chainTip as { tipHash?: Uint8Array } | undefined;
-          const chainTipStr = (tipObj && tipObj.tipHash instanceof Uint8Array && tipObj.tipHash.length === 32)
-            ? encodeBase32Crockford(tipObj.tipHash)
-            : undefined;
-          const lastSeen = anyC.lastSeenTick;
-          const counterVal = typeof lastSeen === 'bigint' ? Number(lastSeen)
-            : typeof lastSeen === 'number' ? lastSeen : undefined;
-          return {
-            alias: c.alias,
-            deviceId,
-            genesisHash,
-            chainTip: chainTipStr,
-            bleAddress: (anyC.bleAddress as string) || undefined,
-            status: (anyC.status as string) || undefined,
-            needsOnlineReconcile: (anyC.needsOnlineReconcile as boolean) || undefined,
-            genesisVerifiedOnline: (anyC.genesisVerifiedOnline as boolean) || undefined,
-            verifyCounter: counterVal,
-            addedCounter: counterVal,
-            verifyingStorageNodes: (anyC.verifyingStorageNodes as number) || undefined,
-          };
-        });
+        const snapshot = typeof (dsmClient as unknown as { getBleIdentitySnapshot?: () => { deviceIds: Record<string, string>; genesis: Record<string, string> } }).getBleIdentitySnapshot === 'function'
+          ? (dsmClient as unknown as { getBleIdentitySnapshot: () => { deviceIds: Record<string, string>; genesis: Record<string, string> } }).getBleIdentitySnapshot()
+          : undefined;
+        const normalized: DomainContact[] = mapContactList(list.contacts, snapshot);
         setContacts(normalized);
       } catch (e) {
         warnings.push(e instanceof Error ? e.message : 'Failed to load contacts');

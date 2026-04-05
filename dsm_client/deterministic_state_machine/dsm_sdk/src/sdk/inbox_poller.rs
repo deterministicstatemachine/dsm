@@ -22,6 +22,12 @@ const DEFAULT_POLL_INTERVAL_MS: u64 = 60_000;
 /// so follow-up messages (e.g. ACKs or rapid exchanges) are picked up faster.
 const EAGER_POLL_INTERVAL_MS: u64 = 8_000;
 
+/// Poll interval while sender-side pending online catch-up gates exist.
+///
+/// This keeps ACK/finalization hot until the relationship actually converges,
+/// instead of falling back to the idle 60s cadence after one early wake-up.
+const PENDING_GATE_POLL_INTERVAL_MS: u64 = 5_000;
+
 /// Number of consecutive eager-interval polls before reverting to default.
 const EAGER_POLL_CYCLES: u32 = 5;
 
@@ -62,6 +68,7 @@ pub fn start_poller() {
             }
 
             let (processed, _pulled) = run_inbox_sync_cycle_counted("poll").await;
+            let pending_gate_active = has_pending_online_catchup();
 
             // Enter eager mode when items are processed, so follow-up
             // messages (ACKs, rapid exchanges) are discovered faster.
@@ -76,7 +83,9 @@ pub fn start_poller() {
                 eager_remaining = eager_remaining.saturating_sub(1);
             }
 
-            let interval_ms = if eager_remaining > 0 {
+            let interval_ms = if pending_gate_active {
+                PENDING_GATE_POLL_INTERVAL_MS
+            } else if eager_remaining > 0 {
                 EAGER_POLL_INTERVAL_MS
             } else {
                 DEFAULT_POLL_INTERVAL_MS
@@ -94,6 +103,12 @@ pub fn start_poller() {
         POLLER_RUNNING.store(false, Ordering::SeqCst);
         log::info!("[inbox_poller] Background poller stopped");
     });
+}
+
+fn has_pending_online_catchup() -> bool {
+    crate::storage::client_db::get_all_pending_online_outbox()
+        .map(|entries| !entries.is_empty())
+        .unwrap_or(false)
 }
 
 /// Stop the inbox poller. The task will exit on its next iteration.
@@ -208,6 +223,13 @@ fn decode_sync_response(data: &[u8]) -> Option<(u32, u32)> {
     let envelope = generated::Envelope::decode(envelope_bytes).ok()?;
     match envelope.payload {
         Some(generated::envelope::Payload::StorageSyncResponse(resp)) => {
+            if !resp.errors.is_empty() {
+                log::warn!(
+                    "[inbox_poller] storage.sync reported {} error(s): {:?}",
+                    resp.errors.len(),
+                    resp.errors
+                );
+            }
             Some((resp.processed, resp.pulled))
         }
         _ => None,

@@ -12,7 +12,6 @@ import ScreenContainer from './components/ScreenContainer';
 import { useLockState } from './hooks/useLockState';
 import { getLockPrefs } from './services/lock/lockService';
 import { getAvailableThemes } from './utils/theme';
-import BluetoothIndicatorController from './components/BluetoothIndicatorController';
 import DiagnosticsOverlay from './components/DiagnosticsOverlay';
 import { useGenesisFlow } from './hooks/useGenesisFlow';
 import { useIntroGate } from './hooks/useIntroGate';
@@ -71,7 +70,7 @@ export default function App() {
     dsmLogoSrc,
   } = useThemeAssets(runtime.theme);
 
-  const { unlock } = useLockState({ appState: runtime.appState, setAppState: appRuntimeStore.setAppState });
+  const { unlock } = useLockState({ appState: runtime.appState });
   useBottomNav({ currentScreen: navigation.currentScreen, navigate: navigationStore.navigate });
 
   useEffect(() => navigationStore.installGlobalNavigate(), []);
@@ -163,7 +162,6 @@ export default function App() {
                     <GlobalToast />
                     <DiagnosticsOverlay />
                     <BilateralTransferDialog />
-                    <BluetoothIndicatorController />
                   </ScreenContainer>
                 </StateBoyInputProvider>
               </ErrorBoundary>

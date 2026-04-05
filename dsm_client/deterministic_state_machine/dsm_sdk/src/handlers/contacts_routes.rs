@@ -10,6 +10,9 @@ use dsm::types::proto as generated;
 use crate::bridge::{AppInvoke, AppQuery, AppResult};
 
 use super::app_router_impl::{resolve_counterparty_via_transport, AppRouterImpl, ResolvedCounterparty};
+use super::relationship_status::{
+    derive_local_send_status_for_contact, derive_local_send_status_for_device_id,
+};
 use super::response_helpers::{err, pack_envelope_ok};
 
 impl AppRouterImpl {
@@ -50,6 +53,7 @@ impl AppRouterImpl {
                         .collect(),
                     ble_address: existing.ble_address.clone().unwrap_or_default(),
                     signing_public_key: existing.public_key.clone(),
+                    send_status: Some(derive_local_send_status_for_device_id(&existing.device_id)),
                 };
                 return pack_envelope_ok(generated::envelope::Payload::ContactAddResponse(resp));
             }
@@ -235,6 +239,13 @@ impl AppRouterImpl {
                             .collect(),
                         ble_address: c.ble_address.clone().unwrap_or_default(),
                         signing_public_key: c.public_key.clone(),
+                        send_status: crate::storage::client_db::get_contact_by_device_id(
+                            &c.device_id,
+                        )
+                        .ok()
+                        .flatten()
+                        .map(|record| derive_local_send_status_for_contact(&record))
+                        .or_else(|| Some(derive_local_send_status_for_device_id(&c.device_id))),
                     })
                     .collect();
 

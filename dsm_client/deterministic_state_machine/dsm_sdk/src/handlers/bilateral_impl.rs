@@ -577,20 +577,6 @@ impl BilateralHandler for BiImpl {
         Ok(vec![])
     }
 
-    async fn reconcile_before_send(&self, counterparty_device_id: &[u8]) -> Result<(), String> {
-        // Clear the `needs_online_reconcile` flag before each send.
-        // IMPORTANT: Only clear the flag — do NOT write any observed/placeholder
-        // tip into the canonical chain-tip columns here. Doing so would destroy
-        // the real SQLite chain tip, causing the Prepare to go out with
-        // sender_chain_tip=0000… and be rejected by the receiver every time.
-        if let Err(e) =
-            crate::storage::client_db::clear_contact_reconcile_flag(counterparty_device_id)
-        {
-            log::warn!("[bilateral] reconcile_before_send: could not clear reconcile flag: {e}");
-        }
-        Ok(())
-    }
-
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }

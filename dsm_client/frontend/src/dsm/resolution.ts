@@ -156,13 +156,28 @@ export function subscribeBleEvents(callback: (event: any) => void): () => void {
   const unsubs: Array<() => void> = [];
 
   unsubs.push(bridgeEvents.on('ble.deviceFound', (d) => {
-    try { callback({ type: 'deviceFound', ...d }); } catch {}
+    try { callback({ type: 'deviceFound', state: 'scanning', ...d }); } catch {}
+  }));
+  unsubs.push(bridgeEvents.on('ble.scanStarted', () => {
+    try { callback({ type: 'scanStarted', state: 'scanning' }); } catch {}
+  }));
+  unsubs.push(bridgeEvents.on('ble.scanStopped', () => {
+    try { callback({ type: 'scanStopped', state: 'idle' }); } catch {}
+  }));
+  unsubs.push(bridgeEvents.on('ble.advertisingStarted', () => {
+    try { callback({ type: 'advertisingStarted', state: 'advertising' }); } catch {}
+  }));
+  unsubs.push(bridgeEvents.on('ble.advertisingStopped', () => {
+    try { callback({ type: 'advertisingStopped', state: 'idle' }); } catch {}
   }));
   unsubs.push(bridgeEvents.on('ble.deviceConnected', (d) => {
-    try { callback({ type: 'deviceConnected', ...d }); } catch {}
+    try { callback({ type: 'deviceConnected', state: 'connected', ...d }); } catch {}
   }));
   unsubs.push(bridgeEvents.on('ble.deviceDisconnected', (d) => {
-    try { callback({ type: 'deviceDisconnected', ...d }); } catch {}
+    try { callback({ type: 'deviceDisconnected', state: 'idle', ...d }); } catch {}
+  }));
+  unsubs.push(bridgeEvents.on('ble.connectionFailed', (d) => {
+    try { callback({ type: 'connectionFailed', state: 'idle', ...d }); } catch {}
   }));
 
   return () => {

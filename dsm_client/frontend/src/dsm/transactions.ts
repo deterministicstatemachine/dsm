@@ -13,13 +13,13 @@ import {
     setBleIdentityForAdvertising,
     startBleAdvertisingViaRouter,
     startBleScanViaRouter,
+    readPeerRelationshipStatusBridge,
 } from './WebViewBridge';
 import { on as eventBridgeOn } from './EventBridge';
 import { bridgeEvents } from '../bridge/bridgeEvents';
 import { getHeaders } from './identity';
-import { getContacts } from './contacts';
 
-import { normalizeBleAddress, resolveBleAddressForContact } from './resolution';
+import { normalizeBleAddress } from './resolution';
 import logger from '../utils/logger';
 
 import { GenericTransaction, GenericTxResponse } from './types';
@@ -102,6 +102,18 @@ export async function getLocalDeviceIdAsync(): Promise<Uint8Array> {
   } catch {
     return new Uint8Array();
   }
+}
+
+export async function readPeerRelationshipStatus(
+  bleAddress: string,
+): Promise<pb.BleRelationshipStatusCharValue | null> {
+  const normalized = normalizeBleAddress(bleAddress);
+  if (!normalized) return null;
+  const bytes = await readPeerRelationshipStatusBridge(normalized);
+  if (!(bytes instanceof Uint8Array) || bytes.length === 0) {
+    return null;
+  }
+  return pb.BleRelationshipStatusCharValue.fromBinary(bytes);
 }
 
 export async function sendOnlineTransfer(transfer: GenericTransaction): Promise<GenericTxResponse> {
@@ -724,46 +736,6 @@ export async function acceptBilateral(payload: any): Promise<boolean> {
     return Boolean(result.success);
   } catch (e) {
     logger.warn('acceptBilateral failed:', e);
-    return false;
-  }
-}
-
-export async function transferToken(tokenId: string, recipient: string, amount: number): Promise<boolean> {
-  try {
-    const token = canonicalizeTransferTokenId(tokenId);
-    const amt = amount;
-    if (amt === undefined || amt === null || Number.isNaN(Number(amt))) {
-      throw new Error('transferToken: amount required');
-    }
-    const to = String(recipient || '').trim();
-    if (!to) throw new Error('transferToken: recipient required');
-
-    const online = await sendOnlineTransfer({ tokenId: token, to, amount: amt, memo: '' });
-    if (online.accepted) return true;
-
-    let bleAddress: string | undefined;
-    try {
-      const contacts = await getContacts();
-      const recipientBytes = new Uint8Array(decodeBase32Crockford(to));
-      const match = contacts.contacts.find(
-        (c) => c.deviceId instanceof Uint8Array && c.deviceId.length === 32 && c.deviceId.every((b, i) => b === recipientBytes[i])
-      );
-      if (match) {
-        bleAddress = await resolveBleAddressForContact(match);
-      }
-    } catch {
-      bleAddress = undefined;
-    }
-
-    if (!bleAddress) {
-      logger.warn('[transferToken] online failed; no BLE address available for offline send');
-      return false;
-    }
-
-    const offline = await offlineSend({ tokenId: token, to, amount: amt, memo: '', bleAddress });
-    return Boolean(offline.accepted);
-  } catch (e) {
-    logger.warn('transferToken failed:', e);
     return false;
   }
 }

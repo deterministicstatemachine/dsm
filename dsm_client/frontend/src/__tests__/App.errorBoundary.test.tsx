@@ -102,11 +102,6 @@ jest.mock('../components/DiagnosticsOverlay', () => ({
   default: () => null,
 }));
 
-jest.mock('../components/BluetoothIndicatorController', () => ({
-  __esModule: true,
-  default: () => null,
-}));
-
 jest.mock('../components/SplashController', () => ({
   __esModule: true,
   default: () => null,

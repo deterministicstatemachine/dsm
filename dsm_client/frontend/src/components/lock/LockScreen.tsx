@@ -147,7 +147,6 @@ export default function LockScreen({ onUnlock }: Props) {
       )}
       <div className="lock-header">
         <div className="lock-icon">[LOCKED]</div>
-        <div className="lock-title">DSM LOCKED</div>
         <div className="lock-subtitle">AUTHENTICATION REQUIRED</div>
       </div>
 
@@ -182,4 +181,3 @@ export default function LockScreen({ onUnlock }: Props) {
     </div>
   );
 }
-

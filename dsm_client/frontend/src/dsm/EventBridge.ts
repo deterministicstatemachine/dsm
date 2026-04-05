@@ -424,43 +424,11 @@ export function initializeEventBridge(): void {
           const status = String(note?.status ?? '');
           const needsReconcile =
             status === 'needs_online_reconcile' ||
-            status === 'needsOnlineReconcile' ||
-            (typeof note?.message === 'string' && note.message.includes('Online reconciliation required'));
+            status === 'needsOnlineReconcile';
 
           if (needsReconcile) {
-            // Auto-trigger reconcile (fire-and-forget) so the flag is cleared
-            // without requiring explicit user action.  IIFE required because
-            // the enclosing callback is not async.
-            const devForReconcile = note?.counterpartyDeviceId;
-            void (async () => {
-              try {
-                const pb2 = await import('../proto/dsm_app_pb');
-                const wb2 = await import('./WebViewBridge');
-                const remoteId: Uint8Array<ArrayBuffer> =
-                  devForReconcile instanceof Uint8Array && devForReconcile.length === 32
-                    ? (devForReconcile as Uint8Array<ArrayBuffer>)
-                    : new Uint8Array(32) as Uint8Array<ArrayBuffer>;
-                const reqBytes = new pb2.ArgPack({
-                  codec: pb2.Codec.PROTO,
-                  body: new pb2.BilateralReconciliationRequest({
-                    remoteDeviceId: remoteId,
-                  }).toBinary() as Uint8Array<ArrayBuffer>,
-                }).toBinary();
-                wb2.appRouterInvokeBin('bilateral.reconcile', reqBytes).catch(() => {});
-              } catch {/* fire-and-forget */}
-            })();
-
-            let deviceIdB32: string | undefined = undefined;
             try {
-              if (devForReconcile instanceof Uint8Array && devForReconcile.length === 32) {
-                deviceIdB32 = encodeBase32Crockford(devForReconcile);
-              }
-            } catch {}
-            try {
-              bridgeEvents.emit('contact.reconcileNeeded', {
-                deviceId: deviceIdB32,
-                message: note?.message || 'Online reconciliation required',
-              });
+              bridgeEvents.emit('wallet.refresh', { source: 'bilateral.reconcile_status' });
             } catch {}
           }
 

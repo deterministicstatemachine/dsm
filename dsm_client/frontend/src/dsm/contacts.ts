@@ -43,6 +43,7 @@ function mapContactToDTO(c: any): BilateralRelationshipDTO {
     bleAddress: typeof bleAddr === 'string' && bleAddr.length > 0 ? bleAddr : undefined,
     genesisVerifiedOnline: c.genesisVerifiedOnline === true,
     addedCounter: typeof c.addedCounter === 'bigint' ? c.addedCounter : BigInt(c.addedCounter || 0),
+    sendStatus: c.sendStatus ?? undefined,
   };
 }
 

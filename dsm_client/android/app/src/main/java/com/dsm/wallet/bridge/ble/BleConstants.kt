@@ -13,6 +13,7 @@ object BleConstants {
     val TX_REQUEST_UUID: UUID = UUID.fromString("8e7f0002-7c07-4f3f-9b32-7bf3ba6c2a01")
     val TX_RESPONSE_UUID: UUID = UUID.fromString("8e7f0003-7c07-4f3f-9b32-7bf3ba6c2a01")
     val IDENTITY_UUID: UUID = UUID.fromString("8e7f00ff-7c07-4f3f-9b32-7bf3ba6c2a01")
+    val RELATIONSHIP_STATUS_UUID: UUID = UUID.fromString("8e7f00fc-7c07-4f3f-9b32-7bf3ba6c2a01")
     val PAIRING_UUID: UUID = UUID.fromString("8e7f00fe-7c07-4f3f-9b32-7bf3ba6c2a01")
     val PAIRING_ACK_UUID: UUID = UUID.fromString("8e7f00fd-7c07-4f3f-9b32-7bf3ba6c2a01")
 

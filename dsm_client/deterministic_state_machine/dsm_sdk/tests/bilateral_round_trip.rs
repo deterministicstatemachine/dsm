@@ -10,6 +10,9 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use dsm::core::bilateral_transaction_manager::BilateralTransactionManager;
+use dsm::core::contact_manager::DsmContactManager;
+use dsm::types::contact_types::DsmVerifiedContact;
+use dsm::types::identifiers::NodeId;
 use dsm::types::operations::Operation;
 use dsm::types::token_types::Balance;
 use dsm_sdk as sdk;
@@ -177,8 +180,23 @@ async fn setup_two_devices_era(a_id: u8, b_id: u8, a_era: u64, b_era: u64) -> Tw
         vec![dsm::types::identifiers::NodeId::new("n")],
     );
 
-    let mut mgr_a = BilateralTransactionManager::new(a_cm, a_kp.clone(), a_dev, a_gen);
-    let mut mgr_b = BilateralTransactionManager::new(b_cm, b_kp.clone(), b_dev, b_gen);
+    let chain_tip_store =
+        Arc::new(dsm_sdk::sdk::chain_tip_store::SqliteChainTipStore::new())
+            as Arc<dyn dsm::core::chain_tip_store::ChainTipStore>;
+    let mut mgr_a = BilateralTransactionManager::new_with_chain_tip_store(
+        a_cm,
+        a_kp.clone(),
+        a_dev,
+        a_gen,
+        chain_tip_store.clone(),
+    );
+    let mut mgr_b = BilateralTransactionManager::new_with_chain_tip_store(
+        b_cm,
+        b_kp.clone(),
+        b_dev,
+        b_gen,
+        chain_tip_store,
+    );
 
     let contact_b = dsm::types::contact_types::DsmVerifiedContact {
         alias: "B".to_string(),
@@ -241,6 +259,16 @@ async fn setup_two_devices_era(a_id: u8, b_id: u8, a_era: u64, b_era: u64) -> Tw
             .unwrap_or_else(|e| panic!("establish relationship b->a failed: {e}"));
     }
 
+    // Capture the deterministic initial bilateral chain tips before moving the
+    // managers into Arcs. In production, contacts are persisted with this tip
+    // during pairing; recovery paths rely on it as the expected_parent_tip.
+    let a_initial_tip = mgr_a
+        .get_chain_tip_for(&b_dev)
+        .expect("a→b initial chain tip");
+    let b_initial_tip = mgr_b
+        .get_chain_tip_for(&a_dev)
+        .expect("b→a initial chain tip");
+
     let a = Arc::new(RwLock::new(mgr_a));
     let b = Arc::new(RwLock::new(mgr_b));
 
@@ -263,6 +291,17 @@ async fn setup_two_devices_era(a_id: u8, b_id: u8, a_era: u64, b_era: u64) -> Tw
         "ERA",
         &policy_commit,
         b_era,
+    );
+
+    persist_contact_pair_to_client_db(
+        a_dev,
+        a_gen,
+        a_kp.public_key(),
+        a_initial_tip,
+        b_dev,
+        b_gen,
+        b_kp.public_key(),
+        b_initial_tip,
     );
 
     let delegate = Arc::new(DefaultBilateralSettlementDelegate);
@@ -307,8 +346,23 @@ async fn setup_two_devices_dbtc(a_id: u8, b_id: u8, a_dbtc: u64, b_dbtc: u64) ->
         vec![dsm::types::identifiers::NodeId::new("n")],
     );
 
-    let mut mgr_a = BilateralTransactionManager::new(a_cm, a_kp.clone(), a_dev, a_gen);
-    let mut mgr_b = BilateralTransactionManager::new(b_cm, b_kp.clone(), b_dev, b_gen);
+    let chain_tip_store =
+        Arc::new(dsm_sdk::sdk::chain_tip_store::SqliteChainTipStore::new())
+            as Arc<dyn dsm::core::chain_tip_store::ChainTipStore>;
+    let mut mgr_a = BilateralTransactionManager::new_with_chain_tip_store(
+        a_cm,
+        a_kp.clone(),
+        a_dev,
+        a_gen,
+        chain_tip_store.clone(),
+    );
+    let mut mgr_b = BilateralTransactionManager::new_with_chain_tip_store(
+        b_cm,
+        b_kp.clone(),
+        b_dev,
+        b_gen,
+        chain_tip_store,
+    );
 
     let contact_b = dsm::types::contact_types::DsmVerifiedContact {
         alias: "B".to_string(),
@@ -371,6 +425,13 @@ async fn setup_two_devices_dbtc(a_id: u8, b_id: u8, a_dbtc: u64, b_dbtc: u64) ->
             .unwrap_or_else(|e| panic!("establish relationship b->a failed: {e}"));
     }
 
+    let a_initial_tip = mgr_a
+        .get_chain_tip_for(&b_dev)
+        .expect("a→b initial chain tip");
+    let b_initial_tip = mgr_b
+        .get_chain_tip_for(&a_dev)
+        .expect("b→a initial chain tip");
+
     let a = Arc::new(RwLock::new(mgr_a));
     let b = Arc::new(RwLock::new(mgr_b));
 
@@ -393,6 +454,17 @@ async fn setup_two_devices_dbtc(a_id: u8, b_id: u8, a_dbtc: u64, b_dbtc: u64) ->
         "dBTC",
         &dbtc_policy,
         b_dbtc,
+    );
+
+    persist_contact_pair_to_client_db(
+        a_dev,
+        a_gen,
+        a_kp.public_key(),
+        a_initial_tip,
+        b_dev,
+        b_gen,
+        b_kp.public_key(),
+        b_initial_tip,
     );
 
     let delegate = Arc::new(DefaultBilateralSettlementDelegate);
@@ -425,6 +497,58 @@ fn init_test_db() {
     if let Err(e) = client_db::init_database() {
         eprintln!("[bilateral_round_trip] init_database skipped (already init): {e}");
     }
+}
+
+/// Persist a reciprocal pair of contacts to client_db so later lookups
+/// (get_contact_chain_tip, get_balance_projection) resolve correctly.
+/// Mirrors the real-world pairing flow which stores contacts before any
+/// transfer — including the deterministic initial bilateral chain tip that
+/// sender recovery paths use as expected_parent_tip.
+#[allow(clippy::too_many_arguments)]
+fn persist_contact_pair_to_client_db(
+    a_dev: [u8; 32],
+    a_gen: [u8; 32],
+    a_pk: &[u8],
+    a_initial_tip: [u8; 32],
+    b_dev: [u8; 32],
+    b_gen: [u8; 32],
+    b_pk: &[u8],
+    b_initial_tip: [u8; 32],
+) {
+    use dsm_sdk::storage::client_db::types::ContactRecord;
+
+    let make_record = |alias: &str,
+                       device_id: [u8; 32],
+                       genesis_hash: [u8; 32],
+                       public_key: &[u8],
+                       initial_tip: [u8; 32]|
+     -> ContactRecord {
+        ContactRecord {
+            contact_id: text_id::encode_base32_crockford(&device_id),
+            device_id: device_id.to_vec(),
+            alias: alias.to_string(),
+            genesis_hash: genesis_hash.to_vec(),
+            public_key: public_key.to_vec(),
+            current_chain_tip: Some(initial_tip.to_vec()),
+            added_at: 0,
+            verified: true,
+            verification_proof: None,
+            metadata: std::collections::HashMap::new(),
+            ble_address: None,
+            status: "OnlineCapable".to_string(),
+            needs_online_reconcile: false,
+            last_seen_online_counter: 0,
+            last_seen_ble_counter: 0,
+            previous_chain_tip: None,
+        }
+    };
+
+    // A's view of B (A's initial tip for the A↔B relationship from A's side)
+    client_db::store_contact(&make_record("B", b_dev, b_gen, b_pk, a_initial_tip))
+        .expect("persist contact B on A side");
+    // B's view of A (B's initial tip for the A↔B relationship from B's side)
+    client_db::store_contact(&make_record("A", a_dev, a_gen, a_pk, b_initial_tip))
+        .expect("persist contact A on B side");
 }
 
 // ---------------------------------------------------------------------------
@@ -477,20 +601,29 @@ async fn execute_bilateral_transfer(
         .unwrap_or_else(|e| panic!("create_accept failed: {e}"));
 
     // Phase 3: Confirm (sender finalizes)
-    configure_local_identity_for_receipts(sender_dev, sender_gen, sender_pk)
+    configure_local_identity_for_receipts(sender_dev, sender_gen, sender_pk.clone())
         .unwrap_or_else(|e| panic!("configure identity for sender failed: {e}"));
     let (confirm_envelope, _meta) = handler_sender
         .handle_prepare_response(&accept_envelope)
         .await
         .unwrap_or_else(|e| panic!("handle_prepare_response failed: {e}"));
 
-    // Phase 3: Confirm (receiver finalizes)
+    // Phase 3: Confirm (receiver finalizes; returns commit response ack for sender)
     configure_local_identity_for_receipts(receiver_dev, receiver_gen, receiver_pk)
         .unwrap_or_else(|e| panic!("configure identity for receiver failed: {e}"));
-    let _meta = handler_receiver
+    let commit_response = handler_receiver
         .handle_confirm_request(&confirm_envelope)
         .await
         .unwrap_or_else(|e| panic!("handle_confirm_request failed: {e}"));
+
+    // Phase 3b: Sender processes commit response (finalizes sender settlement
+    // + writes sender balance projection + canonical chain tip).
+    configure_local_identity_for_receipts(sender_dev, sender_gen, sender_pk)
+        .unwrap_or_else(|e| panic!("configure identity for sender (commit response) failed: {e}"));
+    handler_sender
+        .handle_commit_response(&commit_response)
+        .await
+        .unwrap_or_else(|e| panic!("handle_commit_response failed: {e}"));
 
     // Clean up committed sessions so consecutive transfers don't hit
     // "existing bilateral session in progress" collision.
@@ -611,6 +744,162 @@ async fn round_trip_offline_a_sends_b_then_b_sends_a() {
     assert!(
         b_history.iter().any(|tx| tx.tx_id == commitment_2_txt),
         "B history must contain the second transfer (B->A)"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn sender_restart_recovers_persisted_confirm_and_realigns_chain_tips() {
+    init_test_db();
+
+    let s = setup_two_devices_era(0xC7, 0xD8, 10_000, 0).await;
+
+    let transfer_op = Operation::Transfer {
+        to_device_id: s.b_dev.to_vec(),
+        amount: Balance::from_state(7, [1u8; 32], 0),
+        token_id: b"ERA".to_vec(),
+        mode: dsm::types::operations::TransactionMode::Bilateral,
+        nonce: vec![9u8; 8],
+        verification: dsm::types::operations::VerificationType::Standard,
+        pre_commit: None,
+        recipient: s.b_kp.public_key().to_vec(),
+        to: s.b_dev.to_vec(),
+        message: "restart-recovery".to_string(),
+        signature: Vec::new(),
+    };
+
+    let (prepare_bytes, commitment) = s
+        .handler_a
+        .prepare_bilateral_transaction(s.b_dev, transfer_op, 300)
+        .await
+        .unwrap_or_else(|e| panic!("prepare failed: {e}"));
+
+    s.handler_b
+        .handle_prepare_request(&prepare_bytes, None)
+        .await
+        .unwrap_or_else(|e| panic!("receiver handle_prepare_request failed: {e}"));
+
+    let accept_envelope = s
+        .handler_b
+        .create_prepare_accept_envelope(commitment)
+        .await
+        .unwrap_or_else(|e| panic!("create_prepare_accept_envelope failed: {e}"));
+
+    configure_local_identity_for_receipts(s.a_dev, s.a_gen, s.a_kp.public_key().to_vec())
+        .unwrap_or_else(|e| panic!("configure sender identity failed: {e}"));
+    let (confirm_envelope, _) = s
+        .handler_a
+        .handle_prepare_response(&accept_envelope)
+        .await
+        .unwrap_or_else(|e| panic!("handle_prepare_response failed: {e}"));
+
+    // Sender's canonical chain_tip for B is written during handle_commit_response
+    // (apply_sender_settlement_bundle_atomic). At this point, pre-commit-response,
+    // the tip is legitimately NULL — capture it as Option and verify expectations
+    // accordingly.
+    let sender_tip_before_restart = client_db::get_contact_chain_tip(&s.b_dev);
+
+    let restarted_contact_manager = DsmContactManager::new(s.a_dev, vec![NodeId::new("n")]);
+    let mut restarted_manager = BilateralTransactionManager::new(
+        restarted_contact_manager,
+        s.a_kp.clone(),
+        s.a_dev,
+        s.a_gen,
+    );
+    restarted_manager
+        .add_verified_contact(DsmVerifiedContact {
+            alias: "B".to_string(),
+            device_id: s.b_dev,
+            genesis_hash: s.b_gen,
+            public_key: s.b_kp.public_key().to_vec(),
+            genesis_material: vec![0u8; 32],
+            chain_tip: sender_tip_before_restart,
+            chain_tip_smt_proof: None,
+            genesis_verified_online: true,
+            verified_at_commit_height: 1,
+            added_at_commit_height: 1,
+            last_updated_commit_height: 1,
+            verifying_storage_nodes: vec![],
+            ble_address: None,
+        })
+        .unwrap_or_else(|e| panic!("add restarted contact failed: {e}"));
+
+    let restarted_manager = Arc::new(RwLock::new(restarted_manager));
+    let mut restarted_handler = BilateralBleHandler::new(restarted_manager, s.a_dev);
+    restarted_handler.set_settlement_delegate(Arc::new(DefaultBilateralSettlementDelegate));
+
+    let restored = restarted_handler
+        .restore_sessions_from_storage()
+        .await
+        .unwrap_or_else(|e| panic!("restore_sessions_from_storage failed: {e}"));
+    assert_eq!(
+        restored, 0,
+        "startup should not rehydrate interrupted bilateral sessions into memory"
+    );
+
+    let confirm_redelivery = restarted_handler
+        .get_pending_confirm_for_counterparty(&s.b_dev)
+        .await
+        .expect("persisted confirm should survive restart");
+    assert_eq!(confirm_redelivery, confirm_envelope);
+
+    // In single-process tests both devices share one DB. The receiver's
+    // handle_confirm_request deletes the bilateral_session row that the sender
+    // still needs for crash-recovery. Snapshot and restore it to simulate the
+    // production invariant where each device owns its own DB.
+    let session_snapshot =
+        client_db::get_bilateral_session(&commitment).expect("get_bilateral_session snapshot");
+
+    configure_local_identity_for_receipts(s.b_dev, s.b_gen, s.b_kp.public_key().to_vec())
+        .unwrap_or_else(|e| panic!("configure receiver identity failed: {e}"));
+    let ack = s
+        .handler_b
+        .handle_confirm_request(&confirm_redelivery)
+        .await
+        .unwrap_or_else(|e| panic!("receiver handle_confirm_request failed: {e}"));
+
+    // Restore sender-owned session row that the shared-DB receiver deleted.
+    if let Some(snapshot) = session_snapshot.as_ref() {
+        client_db::store_bilateral_session(snapshot).expect("restore sender session snapshot");
+    }
+
+    let receiver_tip_after_confirm =
+        client_db::get_contact_chain_tip(&s.a_dev).expect("receiver canonical tip after confirm");
+    let sender_tip_before_ack_recovery = client_db::get_contact_chain_tip(&s.b_dev);
+    assert_eq!(
+        sender_tip_before_ack_recovery, sender_tip_before_restart,
+        "sender canonical tip should still match pre-restart snapshot before ack recovery"
+    );
+    assert_ne!(
+        sender_tip_before_ack_recovery,
+        Some(receiver_tip_after_confirm),
+        "sender tip must still be stale (not yet advanced to receiver's new tip)"
+    );
+
+    configure_local_identity_for_receipts(s.a_dev, s.a_gen, s.a_kp.public_key().to_vec())
+        .unwrap_or_else(|e| panic!("configure restarted sender identity failed: {e}"));
+    restarted_handler
+        .handle_commit_response(&ack)
+        .await
+        .unwrap_or_else(|e| panic!("restarted sender handle_commit_response failed: {e}"));
+
+    let sender_tip_after_recovery =
+        client_db::get_contact_chain_tip(&s.b_dev).expect("sender tip after recovery");
+    let receiver_tip_after_recovery =
+        client_db::get_contact_chain_tip(&s.a_dev).expect("receiver tip after recovery");
+
+    assert_ne!(
+        Some(sender_tip_after_recovery),
+        sender_tip_before_restart,
+        "sender tip must have advanced after recovery"
+    );
+    assert_eq!(sender_tip_after_recovery, receiver_tip_after_recovery);
+    assert!(
+        restarted_handler
+            .get_pending_confirm_for_counterparty(&s.b_dev)
+            .await
+            .is_none(),
+        "recovered sender commit should clear the persisted confirm envelope"
     );
 }
 

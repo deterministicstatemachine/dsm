@@ -3,7 +3,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { toBase32Crockford } from '../dsm/decoding';
-import type { DomainBalance, DomainContact, DomainIdentity, DomainTransaction } from './types';
+import {
+  RelationshipSendBlockReason,
+  RelationshipSendCheckState,
+} from '../proto/dsm_app_pb';
+import type {
+  DomainBalance,
+  DomainContact,
+  DomainIdentity,
+  DomainRelationshipSendBlockReason,
+  DomainRelationshipSendCheckState,
+  DomainRelationshipSendStatus,
+  DomainTransaction,
+} from './types';
 
 function toBase32(bytes?: Uint8Array | null): string {
   if (!(bytes instanceof Uint8Array)) return '';
@@ -57,6 +69,51 @@ export function normalizeBleAddress(input?: string): string | undefined {
   return undefined;
 }
 
+function mapSendCheckState(value: unknown): DomainRelationshipSendCheckState | undefined {
+  switch (value) {
+    case RelationshipSendCheckState.CHECKING:
+      return 'checking';
+    case RelationshipSendCheckState.READY:
+      return 'ready';
+    case RelationshipSendCheckState.BLOCKED:
+      return 'blocked';
+    default:
+      return undefined;
+  }
+}
+
+function mapSendBlockReason(value: unknown): DomainRelationshipSendBlockReason | undefined {
+  switch (value) {
+    case RelationshipSendBlockReason.PENDING_CATCHUP:
+      return 'pending_catchup';
+    case RelationshipSendBlockReason.STATE_DIVERGENCE:
+      return 'state_divergence';
+    case RelationshipSendBlockReason.INTERNAL_ERROR:
+      return 'internal_error';
+    default:
+      return undefined;
+  }
+}
+
+export function mapRelationshipSendStatus(status: any): DomainRelationshipSendStatus | undefined {
+  if (!status || typeof status !== 'object') return undefined;
+  const sendReady = Boolean(status.sendReady);
+  const sendCheckState = mapSendCheckState(status.sendCheckState);
+  const sendBlockReason = mapSendBlockReason(status.sendBlockReason);
+  const sendBlockMessage = typeof status.sendBlockMessage === 'string' && status.sendBlockMessage.trim().length > 0
+    ? status.sendBlockMessage
+    : undefined;
+  if (!sendReady && !sendCheckState && !sendBlockReason && !sendBlockMessage) {
+    return undefined;
+  }
+  return {
+    sendReady,
+    sendCheckState,
+    sendBlockReason,
+    sendBlockMessage,
+  };
+}
+
 export function mapIdentity(id: any): DomainIdentity | null {
   // Strict proto field names — camelCase from @bufbuild/protobuf codegen.
   if (id && ('genesis_hash' in id || 'device_id' in id)) {
@@ -95,12 +152,21 @@ export function mapContactList(list: any[], bleSnapshot?: { deviceIds: Record<st
     const alias = c.alias instanceof Uint8Array ? toBase32(c.alias) : String(c.alias ?? 'Unknown');
     const deviceId = normalizeIdField(c.deviceId);
     const genesisHash = normalizeIdField(c.genesisHash);
-    const chainTip = c.chainTip instanceof Uint8Array ? toBase32(c.chainTip) : String(c.chainTip ?? '');
+    let chainTip = '';
+    if (c.chainTip instanceof Uint8Array) {
+      chainTip = toBase32(c.chainTip);
+    } else if (c.chainTip?.tipHash instanceof Uint8Array) {
+      chainTip = toBase32(c.chainTip.tipHash);
+    } else if (c.chainTip?.v instanceof Uint8Array) {
+      chainTip = toBase32(c.chainTip.v);
+    } else if (typeof c.chainTip === 'string') {
+      chainTip = c.chainTip;
+    }
     const chainTipSmtProof = c.chainTipSmtProof;
+    const sendStatus = mapRelationshipSendStatus(c.sendStatus);
 
     const directBle = normalizeBleAddress(String(c.bleAddress || ''));
     const mappedBle = directBle || snapshot.deviceIds[deviceId] || snapshot.genesis[genesisHash] || undefined;
-
     return {
       alias,
       deviceId,
@@ -109,13 +175,16 @@ export function mapContactList(list: any[], bleSnapshot?: { deviceIds: Record<st
       chainTipSmtProof: chainTipSmtProof || undefined,
       bleAddress: mappedBle,
       status: c.status,
-      needsOnlineReconcile: c.needsOnlineReconcile,
       genesisVerifiedOnline: c.genesisVerifiedOnline,
       verifyCounter: typeof c.lastSeenTick === 'bigint' ? Number(c.lastSeenTick) : c.verifyCounter,
       addedCounter: typeof c.addedCounter === 'bigint' ? Number(c.addedCounter) : c.addedCounter,
       verifyingStorageNodes: c.verifyingStorageNodes,
       signingPublicKey: c.publicKey instanceof Uint8Array && c.publicKey.length > 0
         ? toBase32(c.publicKey) : undefined,
+      sendReady: sendStatus?.sendReady,
+      sendCheckState: sendStatus?.sendCheckState,
+      sendBlockReason: sendStatus?.sendBlockReason,
+      sendBlockMessage: sendStatus?.sendBlockMessage,
     };
   });
 }

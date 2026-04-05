@@ -1,4 +1,4 @@
 [toolchain]
-channel = "stable" # latest stable release
+channel = "1.91.0" # pinned workspace compiler; update docs/checks together when bumping
 components = ["rustfmt", "clippy", "llvm-tools-preview"]
 profile = "minimal"

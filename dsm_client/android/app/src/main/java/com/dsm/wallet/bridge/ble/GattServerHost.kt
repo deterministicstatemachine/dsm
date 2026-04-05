@@ -123,6 +123,9 @@ class GattServerHost(private val context: Context) {
                 BleConstants.IDENTITY_UUID -> {
                     handleIdentityRead(device, requestId, offset)
                 }
+                BleConstants.RELATIONSHIP_STATUS_UUID -> {
+                    handleRelationshipStatusRead(device, requestId, offset)
+                }
                 else -> {
                     try {
                         gattServer.get()?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, 0, null)
@@ -618,6 +621,13 @@ class GattServerHost(private val context: Context) {
         )
         service.addCharacteristic(identityChar)
 
+        val relationshipStatusChar = BluetoothGattCharacteristic(
+            BleConstants.RELATIONSHIP_STATUS_UUID,
+            BluetoothGattCharacteristic.PROPERTY_READ,
+            BluetoothGattCharacteristic.PERMISSION_READ
+        )
+        service.addCharacteristic(relationshipStatusChar)
+
         // TX Request characteristic (write-only)
         val txRequestChar = BluetoothGattCharacteristic(
             BleConstants.TX_REQUEST_UUID,
@@ -711,6 +721,56 @@ class GattServerHost(private val context: Context) {
                 "GattServerHost",
                 "Identity read invalid offset for ${device.address}: offset=$offset size=${value.size}"
             )
+            try {
+                gattServer.get()?.sendResponse(device, requestId, BluetoothGatt.GATT_INVALID_OFFSET, 0, null)
+            } catch (e: SecurityException) {
+                Log.e("GattServerHost", "Security exception sending response to ${device.address}", e)
+                BleCoordinator.getInstance(context).let { coordinator ->
+                    coordinator.permissionsGate.recordPermissionFailure()
+                    coordinator.callback?.onBlePermissionError("Bluetooth connection permission required")
+                }
+            }
+            return
+        }
+
+        val chunk = if (offset + BleConstants.MTU_SIZE > value.size) {
+            value.copyOfRange(offset, value.size)
+        } else {
+            value.copyOfRange(offset, offset + BleConstants.MTU_SIZE)
+        }
+
+        try {
+            gattServer.get()?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, chunk)
+        } catch (e: SecurityException) {
+            Log.e("GattServerHost", "Security exception sending response to ${device.address}", e)
+            BleCoordinator.getInstance(context).let { coordinator ->
+                coordinator.permissionsGate.recordPermissionFailure()
+                coordinator.callback?.onBlePermissionError("Bluetooth connection permission required")
+            }
+        }
+    }
+
+    private fun handleRelationshipStatusRead(device: BluetoothDevice, requestId: Int, offset: Int) {
+        val value = try {
+            com.dsm.wallet.bridge.Unified.getRelationshipStatusCharValue(device.address)
+        } catch (t: Throwable) {
+            Log.w("GattServerHost", "Relationship-status read failed for ${device.address}", t)
+            ByteArray(0)
+        }
+
+        if (value.isEmpty()) {
+            try {
+                gattServer.get()?.sendResponse(device, requestId, BluetoothGatt.GATT_FAILURE, 0, null)
+            } catch (e: SecurityException) {
+                Log.e("GattServerHost", "Security exception sending response to ${device.address}", e)
+                BleCoordinator.getInstance(context).let { coordinator ->
+                    coordinator.permissionsGate.recordPermissionFailure()
+                    coordinator.callback?.onBlePermissionError("Bluetooth connection permission required")
+                }
+            }
+            return
+        }
+        if (offset >= value.size) {
             try {
                 gattServer.get()?.sendResponse(device, requestId, BluetoothGatt.GATT_INVALID_OFFSET, 0, null)
             } catch (e: SecurityException) {

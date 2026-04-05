@@ -3,7 +3,7 @@
 
 use anyhow::{anyhow, Result};
 use log::debug;
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 
 use super::get_connection;
 use super::types::BilateralSessionRecord;
@@ -140,6 +140,38 @@ pub fn get_all_bilateral_sessions() -> Result<Vec<BilateralSessionRecord>> {
     Ok(sessions)
 }
 
+/// Get a single bilateral session by commitment hash.
+pub fn get_bilateral_session(commitment_hash: &[u8]) -> Result<Option<BilateralSessionRecord>> {
+    let binding = get_db_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|_| anyhow!("Database lock poisoned - concurrent access error"))?;
+
+    conn.query_row(
+        "SELECT commitment_hash, counterparty_device_id, operation_bytes, phase,
+                counterparty_genesis_hash, local_signature, counterparty_signature, created_at_step,
+                sender_ble_address
+           FROM bilateral_sessions
+          WHERE commitment_hash = ?1",
+        params![commitment_hash],
+        |row| {
+            Ok(BilateralSessionRecord {
+                commitment_hash: row.get(0)?,
+                counterparty_device_id: row.get(1)?,
+                operation_bytes: row.get(2)?,
+                phase: row.get(3)?,
+                counterparty_genesis_hash: row.get(4)?,
+                local_signature: row.get(5)?,
+                counterparty_signature: row.get(6)?,
+                created_at_step: row.get::<_, i64>(7)? as u64,
+                sender_ble_address: row.get(8)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
 /// Delete a bilateral session by commitment hash
 pub fn delete_bilateral_session(commitment_hash: &[u8]) -> Result<()> {
     let binding = get_db_connection()?;
@@ -222,6 +254,30 @@ pub fn get_pending_confirm_deliveries(
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(rows)
+}
+
+/// Get a pending confirm envelope by commitment hash.
+pub fn get_pending_confirm_delivery(
+    commitment_hash: &[u8],
+) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+    if commitment_hash.len() != 32 {
+        return Err(anyhow!("Invalid commitment_hash length"));
+    }
+
+    let binding = get_db_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|_| anyhow!("Database lock poisoned"))?;
+
+    conn.query_row(
+        "SELECT counterparty_device_id, confirm_envelope
+           FROM pending_confirm_delivery
+          WHERE commitment_hash = ?1",
+        params![commitment_hash],
+        |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 /// Delete a pending confirm delivery after successful BLE delivery.

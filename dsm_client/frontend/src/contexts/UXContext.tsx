@@ -70,12 +70,6 @@ export const UXProvider: React.FC<{ defaultHideComplexity?: boolean; children?: 
     notifyToast('success', 'Bluetooth features re-enabled.');
   }, [notifyToast]);
 
-  useBridgeEvent('contact.reconcileNeeded', (detail?: { deviceId?: string; message?: string }) => {
-    const suffix = detail?.deviceId ? ` (${String(detail.deviceId).slice(0, 8)}...)` : '';
-    const msg = detail?.message || 'Online reconciliation required for a contact.';
-    notifyToast('warning', `${msg}${suffix}`);
-  }, [notifyToast]);
-
   // Global notification when a dBTC deposit auto-completes (visible on any screen)
   useBridgeEvent('deposit.completed', (detail?: { depositId: string; amount: string }) => {
     notifyToast('success', `Deposit complete: ${detail?.amount || '?'} BTC`);

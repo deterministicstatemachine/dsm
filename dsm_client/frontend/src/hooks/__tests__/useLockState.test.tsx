@@ -11,7 +11,7 @@ jest.mock('../../dsm/WebViewBridge', () => ({
 
 let hookResult: { lock: () => void; unlock: () => Promise<void> };
 
-function Harness(props: { appState: string; setAppState: (s: string) => void }) {
+function Harness(props: { appState: string }) {
   hookResult = useLockState(props);
   return null;
 }
@@ -26,8 +26,7 @@ describe('useLockState', () => {
   });
 
   it('lock() calls lockSessionViaRouter when wallet_ready', () => {
-    const setAppState = jest.fn();
-    render(<Harness appState="wallet_ready" setAppState={setAppState} />);
+    render(<Harness appState="wallet_ready" />);
 
     act(() => { hookResult.lock(); });
 
@@ -35,8 +34,7 @@ describe('useLockState', () => {
   });
 
   it('lock() is a no-op when not wallet_ready', () => {
-    const setAppState = jest.fn();
-    render(<Harness appState="needs_genesis" setAppState={setAppState} />);
+    render(<Harness appState="needs_genesis" />);
 
     act(() => { hookResult.lock(); });
 
@@ -44,8 +42,7 @@ describe('useLockState', () => {
   });
 
   it('unlock() calls unlockSessionViaRouter', async () => {
-    const setAppState = jest.fn();
-    render(<Harness appState="locked" setAppState={setAppState} />);
+    render(<Harness appState="locked" />);
 
     await act(async () => { await hookResult.unlock(); });
 
@@ -54,8 +51,7 @@ describe('useLockState', () => {
 
   it('locks after LOCK_SETUP_COMPLETE_EVENT with delay', () => {
     jest.useFakeTimers();
-    const setAppState = jest.fn();
-    render(<Harness appState="wallet_ready" setAppState={setAppState} />);
+    render(<Harness appState="wallet_ready" />);
 
     act(() => {
       window.dispatchEvent(new CustomEvent(LOCK_SETUP_COMPLETE_EVENT));

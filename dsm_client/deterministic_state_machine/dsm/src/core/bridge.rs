@@ -1237,6 +1237,7 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
             | gp::envelope::Payload::ContactAddResponse(_)
             | gp::envelope::Payload::BalanceGetResponse(_)
             | gp::envelope::Payload::BleCommandResponse(_)
+            | gp::envelope::Payload::ReconciliationResponse(_)
             | gp::envelope::Payload::StateInfoResponse(_)
             | gp::envelope::Payload::SecondaryDeviceResponse(_)
             | gp::envelope::Payload::ContactQrResponse(_)

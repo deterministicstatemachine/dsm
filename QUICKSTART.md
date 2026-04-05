@@ -67,8 +67,9 @@ sudo apt install -y build-essential git curl protobuf-compiler nodejs npm openjd
 
 All platforms:
 
-- Rust via [rustup.rs](https://rustup.rs)
-- Android Studio + Android NDK 27.x if you want Android builds
+- Rust via [rustup.rs](https://rustup.rs) (the repo pins `1.91.0` in `rust-toolchain.toml`)
+- Android Studio + Android NDK `27.0.12077973` if you want Android builds
+- `cargo-ndk` if you want Android native builds
 - Set `ANDROID_NDK_HOME` (or `ANDROID_NDK_ROOT`) before `make android`, `make android-libs`, or `make install`
 
 Windows:
@@ -98,7 +99,7 @@ Install frontend dependencies and generate the Android cargo config:
 make setup
 ```
 
-`make setup` is valid before Android tooling is installed. It only writes the Android cargo config when `ANDROID_NDK_HOME` or `ANDROID_NDK_ROOT` is set.
+`make setup` is valid before Android tooling is installed. It only writes the Android cargo config when `ANDROID_NDK_HOME` or `ANDROID_NDK_ROOT` is set. `make doctor` and `make setup` both report the pinned Rust version, the resolved NDK root, the detected host tag, and the generated Android cargo-config status when Android tooling is present.
 
 Build the Rust workspace:
 
@@ -139,6 +140,24 @@ make install
 ```
 
 The app connects to the AWS storage nodes by default. No port forwarding is required.
+
+Refresh only the JNI libraries:
+
+```bash
+make android-libs
+```
+
+This is the canonical wrapper around:
+
+```bash
+cd dsm_client/deterministic_state_machine
+DSM_PROTO_ROOT=/absolute/path/to/dsm/proto \
+cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 \
+  -o /absolute/path/to/dsm/dsm_client/android/app/src/main/jniLibs \
+  --platform 23 build --release --package dsm_sdk --features=jni,bluetooth
+```
+
+The Makefile then mirrors the built `.so` files into `dsm_client/deterministic_state_machine/jniLibs/` as well.
 
 ## `dsm-gen`
 

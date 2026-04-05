@@ -521,20 +521,17 @@ impl AppRouterImpl {
 
             // -------- balance.list --------
             "balance.list" => {
-                // Canonical in-memory state is the authoritative balance source.
-                // Only restore from BCR archive on cold start when no in-memory
-                // state exists. Unconditional restore can race with bilateral
-                // settlement and read stale deltas instead of post-settlement
-                // balances.
-                if self.core_sdk.get_current_state().is_err() {
-                    if let Err(e) = self.core_sdk.restore_latest_archived_state_for_device() {
-                        log::warn!("[balance.list] cold-start archive refresh failed: {}", e);
+                let current_state = match self.ensure_authoritative_wallet_state("balance.list") {
+                    Ok(state) => Some(state),
+                    Err(e) => {
+                        log::warn!("[balance.list] authoritative state refresh failed: {}", e);
+                        self.core_sdk.get_current_state().ok()
                     }
-                }
+                };
                 log::debug!("[balance.list] query handler entered");
 
                 // Log the restored BCR state for debugging
-                if let Some(cs) = self.core_sdk.get_current_state().ok().as_ref() {
+                if let Some(cs) = current_state.as_ref() {
                     let era_balance = cs
                         .token_balances
                         .values()
@@ -555,7 +552,6 @@ impl AppRouterImpl {
 
                 let device_id_txt =
                     crate::util::text_id::encode_base32_crockford(&self.device_id_bytes);
-                let current_state = self.core_sdk.get_current_state().ok();
                 let current_state_number = current_state.as_ref().map(|cs| cs.state_number);
                 let current_state_hash = current_state
                     .as_ref()
@@ -782,21 +778,6 @@ impl AppRouterImpl {
                             ))
                         }
                     };
-
-                if let Some(handler) = crate::bridge::bilateral_handler() {
-                    if let Err(e) = handler
-                        .reconcile_before_send(&req.counterparty_device_id)
-                        .await
-                    {
-                        log::warn!(
-                            "[wallet.sendOffline] reconcile_before_send failed for {}: {}",
-                            crate::util::text_id::encode_base32_crockford(
-                                &req.counterparty_device_id
-                            ),
-                            e
-                        );
-                    }
-                }
 
                 #[cfg(all(target_os = "android", feature = "bluetooth", feature = "jni"))]
                 {

@@ -315,6 +315,13 @@ object Unified {
         UnifiedNativeApi.encodeIdentityCharValue(genesisHash, deviceId)
 
     /**
+     * Encode the local relationship send-status protobuf for the connected BLE peer.
+     * Rust owns the relationship-readiness logic; Kotlin relays the raw bytes.
+     */
+    @Keep @JvmStatic fun getRelationshipStatusCharValue(bleAddress: String): ByteArray =
+        UnifiedNativeApi.getRelationshipStatusCharValue(bleAddress)
+
+    /**
      * Process raw protobuf bytes read from the GATT identity characteristic.
      * Rust decodes BleIdentityCharValue, dispatches identity events, and returns
      * BleGattIdentityReadResult with the write-back envelope.

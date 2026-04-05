@@ -289,6 +289,12 @@ export async function resolveBleAddressForDeviceIdBridge(deviceId: Uint8Array): 
   return s || undefined;
 }
 
+export async function readPeerRelationshipStatusBridge(bleAddress: string): Promise<Uint8Array> {
+  const normalized = String(bleAddress ?? '').trim();
+  if (!normalized) return new Uint8Array(0);
+  return bridgeGate.enqueue(() => callBin('readPeerRelationshipStatus', new TextEncoder().encode(normalized)));
+}
+
 /**
  * Decrypt an encrypted recovery capsule (e.g., imported via NFC) using the provided mnemonic key.
  *

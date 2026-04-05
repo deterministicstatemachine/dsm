@@ -9,7 +9,7 @@
 use anyhow::Result;
 use rusqlite::{params, OptionalExtension};
 
-use super::get_connection;
+use super::{get_connection, ObservedRemoteTipRecord, ObservedRemoteTipSource};
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -87,14 +87,22 @@ pub fn sync_bilateral_tips_atomically(request: &TipSyncRequest) -> Result<TipSyn
     let tx = conn.transaction()?;
 
     // Step 1: Load current bilateral row
-    let (chain_tip, local_tip): (Vec<u8>, Vec<u8>) = {
+    let (chain_tip, local_tip, observed_remote_tip, observed_remote_tip_source): (
+        Vec<u8>,
+        Vec<u8>,
+        Option<Vec<u8>>,
+        Option<i64>,
+    ) = {
         let mut stmt = tx.prepare(
-            "SELECT chain_tip, local_bilateral_chain_tip FROM contacts WHERE device_id = ?1",
+            "SELECT chain_tip, local_bilateral_chain_tip, observed_remote_chain_tip, observed_remote_tip_source
+               FROM contacts WHERE device_id = ?1",
         )?;
         match stmt.query_row(params![&request.counterparty_device_id[..]], |row| {
             Ok((
                 row.get::<_, Option<Vec<u8>>>(0)?.unwrap_or_default(),
                 row.get::<_, Option<Vec<u8>>>(1)?.unwrap_or_default(),
+                row.get::<_, Option<Vec<u8>>>(2)?,
+                row.get::<_, Option<i64>>(3)?,
             ))
         }) {
             Ok(v) => v,
@@ -128,6 +136,27 @@ pub fn sync_bilateral_tips_atomically(request: &TipSyncRequest) -> Result<TipSyn
                 ),
             });
         }
+    };
+
+    let observed_remote_tip_record = match observed_remote_tip {
+        Some(tip) if tip.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&tip);
+            Some(ObservedRemoteTipRecord {
+                tip: arr,
+                updated_at: 0,
+                source: ObservedRemoteTipSource::from_db(observed_remote_tip_source),
+            })
+        }
+        Some(tip) => {
+            return Ok(TipSyncOutcome::InvariantViolation {
+                message: format!(
+                    "observed_remote_chain_tip is {} bytes, expected 32",
+                    tip.len()
+                ),
+            });
+        }
+        None => None,
     };
 
     // Step 2: Validate observed gate if supplied
@@ -170,11 +199,21 @@ pub fn sync_bilateral_tips_atomically(request: &TipSyncRequest) -> Result<TipSyn
     // Step 3: Branch on canonical/local state
     let target = &request.target_tip;
     let parent = &request.expected_parent_tip;
+    let clear_observed_tip_on_success =
+        should_clear_observed_tip_after_success(observed_remote_tip_record.as_ref(), target);
 
     let outcome = if chain_tip_arr == *target {
         // Case A: canonical already at target
         if local_tip_arr == *target {
             // Both already aligned — no mutation needed
+            if request.clear_gate_on_success || request.observed_gate.is_some() {
+                tx.execute(
+                    "UPDATE contacts
+                        SET needs_online_reconcile = 0
+                      WHERE device_id = ?1",
+                    params![&request.counterparty_device_id[..]],
+                )?;
+            }
             let gc = if request.clear_gate_on_success && gate_matched {
                 clear_gate_in_tx(
                     &tx,
@@ -184,6 +223,11 @@ pub fn sync_bilateral_tips_atomically(request: &TipSyncRequest) -> Result<TipSyn
             } else {
                 false
             };
+            clear_observed_remote_tip_in_tx(
+                &tx,
+                &request.counterparty_device_id,
+                clear_observed_tip_on_success,
+            )?;
             TipSyncOutcome::AlreadyAtTarget {
                 tip: *target,
                 gate_cleared: gc,
@@ -191,7 +235,10 @@ pub fn sync_bilateral_tips_atomically(request: &TipSyncRequest) -> Result<TipSyn
         } else {
             // Canonical at target but local is stale — repair local
             tx.execute(
-                "UPDATE contacts SET local_bilateral_chain_tip = ?1 WHERE device_id = ?2",
+                "UPDATE contacts
+                    SET local_bilateral_chain_tip = ?1,
+                        needs_online_reconcile = 0
+                  WHERE device_id = ?2",
                 params![&target[..], &request.counterparty_device_id[..]],
             )?;
             let gc = if request.clear_gate_on_success && gate_matched {
@@ -203,6 +250,11 @@ pub fn sync_bilateral_tips_atomically(request: &TipSyncRequest) -> Result<TipSyn
             } else {
                 false
             };
+            clear_observed_remote_tip_in_tx(
+                &tx,
+                &request.counterparty_device_id,
+                clear_observed_tip_on_success,
+            )?;
             TipSyncOutcome::RepairedAtTarget {
                 tip: *target,
                 gate_cleared: gc,
@@ -216,8 +268,6 @@ pub fn sync_bilateral_tips_atomically(request: &TipSyncRequest) -> Result<TipSyn
                 previous_chain_tip = chain_tip, \
                 chain_tip = ?1, \
                 local_bilateral_chain_tip = ?1, \
-                observed_remote_chain_tip = NULL, \
-                observed_remote_tip_updated_at = NULL, \
                 needs_online_reconcile = 0, \
                 last_seen_online_counter = ?2 \
              WHERE device_id = ?3",
@@ -232,6 +282,11 @@ pub fn sync_bilateral_tips_atomically(request: &TipSyncRequest) -> Result<TipSyn
         } else {
             false
         };
+        clear_observed_remote_tip_in_tx(
+            &tx,
+            &request.counterparty_device_id,
+            clear_observed_tip_on_success,
+        )?;
         TipSyncOutcome::Advanced {
             new_tip: *target,
             gate_cleared: gc,
@@ -368,4 +423,35 @@ fn clear_gate_in_tx(
         params![&counterparty_device_id[..], &gate.parent_tip[..], &gate.next_tip[..]],
     )?;
     Ok(rows > 0)
+}
+
+fn should_clear_observed_tip_after_success(
+    observed: Option<&ObservedRemoteTipRecord>,
+    target_tip: &[u8; 32],
+) -> bool {
+    match observed {
+        Some(record) if record.tip == *target_tip => true,
+        Some(record) if !record.source.blocks_send_without_local_corroboration() => true,
+        _ => false,
+    }
+}
+
+fn clear_observed_remote_tip_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    counterparty_device_id: &[u8; 32],
+    should_clear: bool,
+) -> Result<()> {
+    if !should_clear {
+        return Ok(());
+    }
+
+    tx.execute(
+        "UPDATE contacts
+            SET observed_remote_chain_tip = NULL,
+                observed_remote_tip_updated_at = NULL,
+                observed_remote_tip_source = NULL
+          WHERE device_id = ?1",
+        params![&counterparty_device_id[..]],
+    )?;
+    Ok(())
 }

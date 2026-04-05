@@ -1541,6 +1541,17 @@ impl WalletSDK {
         self.token_sdk.reload_balance_cache_for_self(device_id)
     }
 
+    /// Project the local in-memory balance cache from a caller-supplied
+    /// canonical state snapshot.
+    pub fn project_balance_cache_for_self(
+        &self,
+        state: &dsm::types::state_types::State,
+    ) -> Result<(), DsmError> {
+        let device_id = self.device_id_array();
+        self.token_sdk
+            .project_balance_cache_from_state(device_id, state)
+    }
+
     pub(crate) fn rollback_failed_online_send(
         &self,
         rollback: &FailedOnlineSendRollback<'_>,

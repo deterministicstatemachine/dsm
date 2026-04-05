@@ -41,7 +41,7 @@ impl AppRouterImpl {
             "session.lock" => {
                 let mut mgr = SESSION_MANAGER.lock().unwrap_or_else(|p| p.into_inner());
                 mgr.sync_lock_config_from_app_state();
-                mgr.lock_locked = true;
+                mgr.lock_now();
                 log::info!("SessionRoutes: session locked via invoke");
                 let snapshot = mgr.compute_snapshot();
                 pack_envelope_ok(generated::envelope::Payload::SessionStateResponse(snapshot))
@@ -50,7 +50,7 @@ impl AppRouterImpl {
             "session.unlock" => {
                 let mut mgr = SESSION_MANAGER.lock().unwrap_or_else(|p| p.into_inner());
                 mgr.sync_lock_config_from_app_state();
-                mgr.lock_locked = false;
+                mgr.unlock_now();
                 log::info!("SessionRoutes: session unlocked via invoke");
                 let snapshot = mgr.compute_snapshot();
                 pack_envelope_ok(generated::envelope::Payload::SessionStateResponse(snapshot))

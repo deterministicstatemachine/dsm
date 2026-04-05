@@ -98,9 +98,6 @@ export function ContactsProvider({ children }: { children: React.ReactNode }) {
   useBridgeEvent('contact.added', () => {
     void contactsStore.refreshContacts();
   }, []);
-  useBridgeEvent('contact.reconcileNeeded', () => {
-    void contactsStore.refreshContacts();
-  }, []);
   useBridgeEvent('identity.ready', () => {
     // After identity is ready, refresh contacts then start advertising
     // so peers can discover us for bilateral transfers.

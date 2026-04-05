@@ -13,8 +13,8 @@ Run from the repository root. `make help` lists all targets, `make menu` opens a
 | Target | Description |
 |--------|-------------|
 | `make menu` | Interactive launcher for the most common tasks |
-| `make doctor` | Read-only prerequisite check for cargo, node, npm, protoc, adb, PostgreSQL, Java, and Android NDK state |
-| `make setup` | First-time onboarding: check prerequisites, install frontend dependencies, generate `.cargo/config.toml` when the Android NDK is configured |
+| `make doctor` | Read-only prerequisite check for Rust/cargo, the pinned Rust toolchain version, node, npm, protoc, adb, PostgreSQL, Java, `cargo-ndk`, Android NDK state, and generated Android cargo-config metadata |
+| `make setup` | First-time onboarding: verify the pinned Rust toolchain, install frontend dependencies, resolve the local Android NDK/host tag, and generate `.cargo/config.toml` when the Android NDK is configured |
 | `make help` | List all available targets |
 
 ### Build
@@ -23,7 +23,7 @@ Run from the repository root. `make help` lists all targets, `make menu` opens a
 |--------|-------------|
 | `make build` | Build full Rust workspace (`cargo build --locked --workspace --all-features`) |
 | `make build-release` | Build Rust workspace in release mode |
-| `make android-libs` | Build native `.so` libs for all 3 Android ABIs (arm64-v8a, armeabi-v7a, x86_64) |
+| `make android-libs` | Canonical Android JNI build wrapper: runs `cargo ndk` for all 3 Android ABIs (arm64-v8a, armeabi-v7a, x86_64) and mirrors the resulting `.so` files into both `jniLibs/` trees |
 | `make frontend` | Build React frontend (copies assets into Android) |
 | `make android` | Full debug APK: native libs + frontend + Gradle assemble |
 | `make android-release` | Full release APK |

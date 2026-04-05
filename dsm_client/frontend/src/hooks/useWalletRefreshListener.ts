@@ -19,6 +19,8 @@ const PRIORITY_SOURCES = new Set([
   'bilateral.transfer_complete',
   'bilateral_transfer_complete',
   'reconcile.complete',
+  'bilateral.reconcile_status',
+  'native',
 ]);
 
 export function useWalletRefreshListener(refresh: RefreshFn, deps: unknown[] = []): void {

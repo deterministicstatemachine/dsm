@@ -32,6 +32,7 @@ fn resultpack_roundtrip_preserves_canonical_schema_hash() {
         verifying_storage_nodes: Vec::new(),
         ble_address: "".to_string(),
         signing_public_key: vec![3u8; 64],
+        send_status: None,
     };
 
     let mut body = Vec::new();
@@ -54,4 +55,3 @@ fn resultpack_roundtrip_preserves_canonical_schema_hash() {
     let decoded_contact = ContactAddResponse::decode(&decoded.body[..]).expect("decode contact");
     assert_eq!(decoded_contact.alias, "alice");
 }
-

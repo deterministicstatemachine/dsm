@@ -222,7 +222,12 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
         // (the UPDATE contacts SET chain_tip = ?1 WHERE device_id = ?3 only
         // succeeds once for the same tip value).  In production each device
         // has its own DB so a bare tx_id check suffices for senders.
-        if ctx.is_sender && crate::storage::client_db::is_settlement_completed(&tx_id_candidate) {
+        if ctx.is_sender
+            && crate::storage::client_db::is_sender_settlement_completed(
+                &tx_id_candidate,
+                &local_txt,
+            )
+        {
             log::warn!(
                 "[BILATERAL][settle] Idempotency guard: sender settlement already completed for {}",
                 tx_id_candidate,

@@ -19,7 +19,16 @@ type Props = {
   setError: (err: string | null) => void;
 };
 
-function SendTabInner({ contacts, balances, eraGif, btcGif, onCancel, onSendComplete, loadWalletData, setError }: Props): JSX.Element {
+function SendTabInner({
+  contacts,
+  balances,
+  eraGif,
+  btcGif,
+  onCancel,
+  onSendComplete,
+  loadWalletData,
+  setError,
+}: Props): JSX.Element {
   const [sendForm, setSendForm] = useState<{ selectedContactKey: string; amount: string; token: string; note: string }>({
     selectedContactKey: contacts.length > 0 ? contacts[0].deviceId : '',
     amount: '',
@@ -42,12 +51,27 @@ function SendTabInner({ contacts, balances, eraGif, btcGif, onCancel, onSendComp
     return tokenOptions.find((b) => b.tokenId === sendForm.token) ?? tokenOptions[0];
   }, [tokenOptions, sendForm.token]);
 
+  const selectedContact = useMemo(
+    () => contacts.find((c) => c.deviceId === sendForm.selectedContactKey) ?? null,
+    [contacts, sendForm.selectedContactKey],
+  );
+
   useEffect(() => {
     if (tokenOptions.length === 0) return;
     if (!tokenOptions.some((b) => b.tokenId === sendForm.token)) {
       setSendForm((prev) => ({ ...prev, token: tokenOptions[0].tokenId }));
     }
   }, [tokenOptions, sendForm.token]);
+
+  useEffect(() => {
+    if (contacts.length === 0) {
+      setSendForm((prev) => ({ ...prev, selectedContactKey: '' }));
+      return;
+    }
+    if (!contacts.some((c) => c.deviceId === sendForm.selectedContactKey)) {
+      setSendForm((prev) => ({ ...prev, selectedContactKey: contacts[0].deviceId }));
+    }
+  }, [contacts, sendForm.selectedContactKey]);
 
   const handleSendTransaction = useCallback(async () => {
     if (!sendForm.selectedContactKey || !sendForm.amount) {
@@ -58,7 +82,7 @@ function SendTabInner({ contacts, balances, eraGif, btcGif, onCancel, onSendComp
       setSendingTx(true);
       setError(null);
 
-      const contact = contacts.find(c => c.deviceId === sendForm.selectedContactKey);
+      const contact = selectedContact;
       if (!contact) {
         throw new Error('Selected contact not found');
       }
@@ -115,7 +139,12 @@ function SendTabInner({ contacts, balances, eraGif, btcGif, onCancel, onSendComp
     } finally {
       setSendingTx(false);
     }
-  }, [sendForm, contacts, txMode, loadWalletData, setError, onSendComplete]);
+  }, [sendForm, selectedContact, txMode, loadWalletData, setError, onSendComplete]);
+
+  const handleSubmit = useCallback((event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setShowSendConfirm(true);
+  }, []);
 
   return (
     <div className="send-tab">
@@ -158,7 +187,7 @@ function SendTabInner({ contacts, balances, eraGif, btcGif, onCancel, onSendComp
           <strong>OFFLINE MODE REQUIRES BLUETOOTH</strong><br/>Both devices must be present and have Bluetooth enabled.
         </div>
       )}
-      <form onSubmit={(e) => { e.preventDefault(); setShowSendConfirm(true); }}>
+      <form onSubmit={handleSubmit}>
         <div className="form-group">
           <label htmlFor="recipient">Recipient Contact</label>
           {contacts.length === 0 ? (
@@ -189,13 +218,13 @@ function SendTabInner({ contacts, balances, eraGif, btcGif, onCancel, onSendComp
         <div className="form-group"><label htmlFor="note">Note (Optional)</label><input id="note" type="text" value={sendForm.note} onChange={(e) => setSendForm((p) => ({ ...p, note: e.target.value }))} placeholder="Transaction note" className="form-input" /></div>
         <div className="form-actions">
           <button type="button" onClick={onCancel} className="cancel-button">Cancel</button>
-          <button type="submit" className="send-button button-brick" disabled={contacts.length === 0 || sendingTx}>{sendingTx ? 'Sending\u2026' : 'Send'}</button>
+          <button type="submit" className="send-button button-brick" disabled={contacts.length === 0 || sendingTx}>{sendingTx ? 'Sending…' : 'Send'}</button>
         </div>
       </form>
       <ConfirmModal
         visible={showSendConfirm}
         title="Send"
-        message={`Send ${sendForm.amount} ${sendForm.token || 'ERA'} to ${contacts.find(c => c.deviceId === sendForm.selectedContactKey)?.alias || 'recipient'}?${txMode === 'offline' ? ' (Bluetooth)' : ''}`}
+        message={`Send ${sendForm.amount} ${sendForm.token || 'ERA'} to ${selectedContact?.alias || 'recipient'}?${txMode === 'offline' ? ' (Bluetooth)' : ''}`}
         onConfirm={() => { setShowSendConfirm(false); void handleSendTransaction(); }}
         onCancel={() => setShowSendConfirm(false)}
       />

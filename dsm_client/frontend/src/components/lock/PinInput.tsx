@@ -62,6 +62,7 @@ export default function PinInput({ onComplete, label }: Props) {
         {KEYS.map((k) => (
           <button
             key={k}
+            type="button"
             className={`pin-key${k === '#' ? ' pin-key--confirm' : ''}${k === '*' ? ' pin-key--back' : ''}`}
             onClick={() => handleKey(k)}
             aria-label={k === '*' ? 'backspace' : k === '#' ? 'confirm' : k}

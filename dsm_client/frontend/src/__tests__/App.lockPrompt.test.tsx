@@ -47,11 +47,6 @@ jest.mock('../components/ScreenContainer', () => ({
   default: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }));
 
-jest.mock('../components/BluetoothIndicatorController', () => ({
-  __esModule: true,
-  default: () => null,
-}));
-
 jest.mock('../components/DiagnosticsOverlay', () => ({
   __esModule: true,
   default: () => null,

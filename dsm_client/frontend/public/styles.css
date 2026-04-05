@@ -184,15 +184,6 @@ html, body {
   -webkit-user-drag: none;
 }
 
-/* Bluetooth active indicator (moved out of html, body block to avoid nested selector syntax) */
-.battery-light.bluetooth span {
-  background-color: #1486ff !important;
-  box-shadow: 0 0 6px rgba(20,134,255,.9), 0 0 12px rgba(20,134,255,.6);
-}
-.battery-light.bluetooth {
-  animation: batteryPulse 2s infinite;
-}
-
 #root {
   width: 100%;
   height: 100%;

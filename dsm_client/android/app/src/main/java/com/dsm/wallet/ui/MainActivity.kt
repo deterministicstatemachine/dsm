@@ -2,9 +2,11 @@ package com.dsm.wallet.ui
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.net.Uri
@@ -14,6 +16,7 @@ import android.nfc.NfcAdapter
 import android.nfc.Tag
 import android.nfc.tech.Ndef
 import android.os.Build
+import android.os.BatteryManager
 import android.os.IBinder
 import android.os.Bundle
 import android.util.Log
@@ -98,6 +101,8 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
     @Volatile private var qrScannerActive = false
     @Volatile private var walletRefreshHint = 0L
     @Volatile private var isAppForeground = true
+    @Volatile private var batteryCharging = false
+    @Volatile private var batteryLevelPercent = 100
     // NFC inline reader state (ring reads happen on MainActivity, not a separate Activity)
     @Volatile private var nfcReaderActive = false
     private var nfcAdapter: NfcAdapter? = null
@@ -112,6 +117,13 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
     @Volatile private var dsmPort: WebMessagePortCompat? = null
     @Volatile private var pendingJsPort: WebMessagePortCompat? = null
     @Volatile private var bleBackgroundService: BleBackgroundService? = null
+    private val batteryChangedReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (updateBatterySnapshotFromIntent(intent)) {
+                publishSessionState("battery")
+            }
+        }
+    }
     private var bleServiceBound = false
     private val bleServiceConnection = object : android.content.ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
@@ -385,6 +397,8 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
             .setQrAvailable(true)
             .setQrActive(qrScannerActive)
             .setCameraPermission(NativeFirstCutoverReset.hasCameraPermission(this))
+            .setBatteryCharging(batteryCharging)
+            .setBatteryLevelPercent(batteryLevelPercent.coerceIn(0, 100))
             .build()
             .toByteArray()
 
@@ -402,6 +416,50 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
 
     fun publishCurrentSessionState(reason: String = "native") {
         publishSessionState(reason)
+    }
+
+    private fun updateBatterySnapshotFromIntent(intent: Intent?): Boolean {
+        if (intent == null) return false
+        val status = intent.getIntExtra(BatteryManager.EXTRA_STATUS, BatteryManager.BATTERY_STATUS_UNKNOWN)
+        val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+        val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, -1)
+        val nextCharging =
+            status == BatteryManager.BATTERY_STATUS_CHARGING ||
+            status == BatteryManager.BATTERY_STATUS_FULL
+        val nextLevelPercent = if (level >= 0 && scale > 0) {
+            ((level * 100) / scale).coerceIn(0, 100)
+        } else {
+            batteryLevelPercent
+        }
+        val changed = nextCharging != batteryCharging || nextLevelPercent != batteryLevelPercent
+        batteryCharging = nextCharging
+        batteryLevelPercent = nextLevelPercent
+        return changed
+    }
+
+    private fun registerBatteryReceiver() {
+        val filter = IntentFilter(Intent.ACTION_BATTERY_CHANGED)
+        val stickyIntent = try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(batteryChangedReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                @Suppress("DEPRECATION")
+                registerReceiver(batteryChangedReceiver, filter)
+            }
+        } catch (t: Throwable) {
+            Log.w(tag, "registerBatteryReceiver: failed", t)
+            null
+        }
+        updateBatterySnapshotFromIntent(stickyIntent)
+    }
+
+    private fun unregisterBatteryReceiver() {
+        try {
+            unregisterReceiver(batteryChangedReceiver)
+        } catch (_: IllegalArgumentException) {
+        } catch (t: Throwable) {
+            Log.w(tag, "unregisterBatteryReceiver: failed", t)
+        }
     }
 
     fun setBleAdvertisingDesired(desired: Boolean) {
@@ -896,6 +954,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         }
         setContentView(rootContainer)
         setupWebView(webView)
+        registerBatteryReceiver()
 
 
         initDsmAndSignalReady()
@@ -1028,6 +1087,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         if (activeInstance?.get() === this) {
             activeInstance = null
         }
+        unregisterBatteryReceiver()
         super.onDestroy()
         com.dsm.wallet.EventPoller.stop()
     }

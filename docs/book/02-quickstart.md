@@ -16,7 +16,7 @@ Get from zero to a running DSM development environment in under 30 minutes. Ever
 | Tool | macOS | Linux | Windows |
 |------|-------|-------|---------|
 | Git | `brew install git` | `sudo apt install git` | [git-scm.com](https://git-scm.com) |
-| Rust | [rustup.rs](https://rustup.rs) | [rustup.rs](https://rustup.rs) | [rustup.rs](https://rustup.rs) |
+| Rust (`1.91.0`, pinned in `rust-toolchain.toml`) | [rustup.rs](https://rustup.rs) | [rustup.rs](https://rustup.rs) | [rustup.rs](https://rustup.rs) |
 | Node.js 20+ | `brew install node` | `sudo apt install nodejs npm` | [nodejs.org](https://nodejs.org) |
 | protoc | `brew install protobuf` | `sudo apt install protobuf-compiler` | [protobuf releases](https://github.com/protocolbuffers/protobuf/releases) |
 
@@ -45,7 +45,7 @@ make setup
 make build
 ```
 
-`make setup` is valid before Android tooling is installed. It only generates the Android cargo config when `ANDROID_NDK_HOME` or `ANDROID_NDK_ROOT` is configured.
+`make setup` is valid before Android tooling is installed. It only generates the Android cargo config when `ANDROID_NDK_HOME` or `ANDROID_NDK_ROOT` is configured. `make doctor` reports the pinned Rust toolchain version, `cargo-ndk`, the resolved NDK path, the detected NDK host tag, and the generated Android cargo config state when Android tooling is present.
 
 First build takes 3–8 minutes (downloading and compiling all dependencies). You will see many `Compiling ...` lines — wait for `Finished`.
 
@@ -121,7 +121,7 @@ make test
 
 ### Prerequisites
 
-- Android Studio with NDK 27.x (Tools → SDK Manager → SDK Tools → NDK)
+- Android Studio with Android NDK `27.0.12077973` installed (Tools → SDK Manager → SDK Tools → NDK; must match Gradle `ndkVersion`)
 - Java 17 (`brew install --cask temurin@17` on macOS)
 - `cargo-ndk` (`cargo install cargo-ndk`)
 - `ANDROID_NDK_HOME` set in your shell profile before Android builds
@@ -149,6 +149,18 @@ cd dsm_client/android && ./gradlew :app:assembleDebug && cd ../..
 # 4. Install on connected device
 adb install -r dsm_client/android/app/build/outputs/apk/debug/app-debug.apk
 ```
+
+`make android-libs` is the canonical wrapper around:
+
+```bash
+cd dsm_client/deterministic_state_machine
+DSM_PROTO_ROOT=/absolute/path/to/dsm/proto \
+cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 \
+  -o /absolute/path/to/dsm/dsm_client/android/app/src/main/jniLibs \
+  --platform 23 build --release --package dsm_sdk --features=jni,bluetooth
+```
+
+After the `cargo ndk` build, the Makefile mirrors the resulting `libdsm_sdk.so` files into `dsm_client/deterministic_state_machine/jniLibs/` as well.
 
 The app connects to the AWS storage nodes by default. No port forwarding is needed.
 

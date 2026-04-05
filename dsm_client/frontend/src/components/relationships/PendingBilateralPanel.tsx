@@ -214,7 +214,6 @@ const PendingBilateralPanel: React.FC<Props> = ({ onNavigate }) => {
                   fontWeight: 'bold',
                 }}>
                   {tx.status === 'verified' ? '[VERIFIED]' : 
-                   tx.status === 'hash_mismatch' ? '[HASH MISMATCH]' :
                    tx.status === 'rejected' ? '[REJECTED]' :
                    tx.status === 'committed' ? `[COMMITTED ${tx.commitmentHash.slice(0, 8)}]` :
                    tx.status === 'accepted' ? `[ACCEPTED ${tx.commitmentHash.slice(0, 8)}]` :
@@ -223,7 +222,7 @@ const PendingBilateralPanel: React.FC<Props> = ({ onNavigate }) => {
                 </span>
               </div>
 
-              {tx.verificationStatus && (
+              {tx.statusMessage && (
                 <div style={{
                   padding: '8px',
                   marginBottom: '12px',
@@ -233,9 +232,7 @@ const PendingBilateralPanel: React.FC<Props> = ({ onNavigate }) => {
                   border: '1px solid var(--border)',
                   color: 'var(--text)',
                 }}>
-                  {tx.verificationStatus === 'verified' && '> Chain tip verified - sender has correct view of your state'}
-                  {tx.verificationStatus === 'failed' && '> Chain tip mismatch - sender has stale view, needs online sync'}
-                  {tx.verificationStatus === 'pending' && '> Verification pending...'}
+                  {tx.statusMessage}
                 </div>
               )}
 
@@ -302,19 +299,6 @@ const PendingBilateralPanel: React.FC<Props> = ({ onNavigate }) => {
                   >
                     REJECT
                   </button>
-                </div>
-              )}
-
-              {tx.status === 'hash_mismatch' && (
-                <div style={{ 
-                  padding: '8px', 
-                  background: 'rgba(var(--text-rgb),0.15)', 
-                  borderRadius: '4px',
-                  fontSize: '10px',
-                  color: 'var(--text)',
-                  border: '1px solid var(--border)',
-                }}>
-                  {'>'} Auto-rejected: Chain tip mismatch detected. Sender needs to perform online reconciliation.
                 </div>
               )}
 

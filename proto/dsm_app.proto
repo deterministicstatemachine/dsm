@@ -898,10 +898,16 @@ message AppSessionQrHardwareStatusProto {
   bool camera_permission = 3;
 }
 
+message AppSessionBatteryHardwareStatusProto {
+  bool charging = 1;
+  uint32 level_percent = 2;
+}
+
 message AppSessionHardwareStatusProto {
   bool app_foreground = 1;
   AppSessionBleHardwareStatusProto ble = 2;
   AppSessionQrHardwareStatusProto qr = 3;
+  AppSessionBatteryHardwareStatusProto battery = 4;
 }
 
 message AppSessionStateProto {
@@ -925,6 +931,8 @@ message SessionHardwareFactsProto {
   bool qr_available = 6;
   bool qr_active = 7;
   bool camera_permission = 8;
+  bool battery_charging = 9;
+  uint32 battery_level_percent = 10;
 }
 
 // Frontend -> Rust: lock policy configuration. Secret verification remains app-local.
@@ -1150,10 +1158,33 @@ message BilateralPrepareResponse {
   bytes  responder_signing_public_key = 6 [(dsm_fixed_len)=64];
   // Field 7 reserved (removed: old DBRW warning)
 }
+
+enum RelationshipSendCheckState {
+  RELATIONSHIP_SEND_CHECK_STATE_UNSPECIFIED = 0;
+  RELATIONSHIP_SEND_CHECK_STATE_CHECKING = 1;
+  RELATIONSHIP_SEND_CHECK_STATE_READY = 2;
+  RELATIONSHIP_SEND_CHECK_STATE_BLOCKED = 3;
+}
+
+enum RelationshipSendBlockReason {
+  RELATIONSHIP_SEND_BLOCK_REASON_UNSPECIFIED = 0;
+  RELATIONSHIP_SEND_BLOCK_REASON_PENDING_CATCHUP = 1;
+  RELATIONSHIP_SEND_BLOCK_REASON_STATE_DIVERGENCE = 2;
+  RELATIONSHIP_SEND_BLOCK_REASON_INTERNAL_ERROR = 3;
+}
+
+message RelationshipSendStatus {
+  bool send_ready = 1;
+  RelationshipSendCheckState send_check_state = 2;
+  RelationshipSendBlockReason send_block_reason = 3;
+  string send_block_message = 4;
+}
+
 message BilateralPrepareReject {
   Hash32 commitment_hash        = 1;
   string reason                 = 2;
   bytes  rejector_device_id     = 3 [(dsm_fixed_len)=32];
+  RelationshipSendStatus send_status = 4;
 }
 
 message BilateralTransferRequest {
@@ -1352,6 +1383,13 @@ message BleGattIdentityReadResult {
   bytes  peer_genesis_hash   = 5 [(dsm_fixed_len)=32]; // Peer's genesisHash
 }
 
+// Protobuf value carried on the BLE relationship-status GATT characteristic.
+// The advertiser computes the status in Rust for the connected peer relationship.
+message BleRelationshipStatusCharValue {
+  bytes counterparty_device_id = 1 [(dsm_fixed_len)=32];
+  RelationshipSendStatus send_status = 2;
+}
+
 // Response from processIncomingBleData JNI call.
 // Rust decides internally whether to route as chunk or Envelope v3, runs any
 // frame-type detection, and returns pre-chunked follow-up bytes for Kotlin to
@@ -1530,6 +1568,8 @@ message BilateralReconciliationRequest {
   bytes remote_device_id = 1 [(dsm_fixed_len)=32];
   bytes local_tip = 2 [(dsm_fixed_len)=32]; // Our view of the relationship tip
   bool force_reconcile = 3; // Force reconciliation even if no mismatch
+  bool include_peer_status = 4; // Offline UI may request peer advisory status
+  string ble_address = 5; // Optional peer BLE address for advisory status read
 }
 
 message BilateralReconciliationResponse {
@@ -1537,6 +1577,8 @@ message BilateralReconciliationResponse {
   bool reconciled = 2;
   bytes remote_tip = 3 [(dsm_fixed_len)=32]; // Remote's actual tip
   string error_message = 4;
+  RelationshipSendStatus local_status = 5;
+  RelationshipSendStatus peer_status = 6;
 }
 
 message BilateralMessageEnvelope {
@@ -1825,6 +1867,7 @@ message Envelope {
     AppSessionStateProto              session_state_response           = 95;
     NfcRecoveryCapsule                nfc_recovery_capsule             = 96;
     TokenPolicyListResponse           token_policy_list_response       = 97;
+    BilateralReconciliationResponse   reconciliation_response          = 98;
 
     Error                             error                            = 99;
   }
@@ -1922,6 +1965,7 @@ message ContactAddResponse {
   repeated string verifying_storage_nodes = 10;
   string ble_address = 11; // BLE MAC address for offline bilateral transfers
   bytes  signing_public_key = 12 [(dsm_fixed_len)=64]; // SPHINCS+ SPX256s public key for bilateral verification
+  RelationshipSendStatus send_status = 13;
 }
 
 // ======================== Faucet Operations =========================

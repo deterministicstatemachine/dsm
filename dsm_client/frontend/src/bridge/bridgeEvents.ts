@@ -17,7 +17,6 @@ export type BridgeEventMap = {
   'contact.added': { contact?: unknown };
   'contact.bleMapped': { address: string; deviceId?: string; genesisHash?: string };
   'contact.bleUpdated': { bleAddress?: string; alias?: string; deviceId?: string; genesisHash?: string };
-  'contact.reconcileNeeded': { deviceId?: string; message?: string };
   'bilateral.event': Uint8Array;
   'bilateral.transferComplete': void;
   'env.config.error': { message: string };

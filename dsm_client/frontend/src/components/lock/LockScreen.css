@@ -38,7 +38,6 @@
   transition: background 0.1s, color 0.1s;
 }
 
-.lock-screen--flash .lock-title,
 .lock-screen--flash .lock-subtitle,
 .lock-screen--flash .lock-icon {
   color: var(--bg, #9bbc0f);
@@ -66,14 +65,6 @@
 .lock-icon {
   font-size: 36px;
   margin-bottom: 8px;
-}
-
-.lock-title {
-  font-size: 16px;
-  font-weight: bold;
-  letter-spacing: 2px;
-  color: var(--text-dark, #0f380f);
-  margin-bottom: 4px;
 }
 
 .lock-subtitle {
@@ -267,11 +258,18 @@
   text-align: center;
 }
 
-.pin-key:active,
-.pin-key:focus {
+.pin-key:active {
   background: var(--border, #306230);
   transform: scale(0.94);
+}
+
+.pin-key:focus {
   outline: none;
+}
+
+.pin-key:focus-visible {
+  outline: 2px solid var(--border, #306230);
+  outline-offset: 2px;
 }
 
 .pin-key--confirm {
@@ -356,4 +354,3 @@
 .combo-back-btn:active {
   background: rgba(var(--text-rgb),0.15);
 }
-

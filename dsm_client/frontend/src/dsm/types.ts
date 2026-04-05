@@ -87,6 +87,7 @@ export interface BilateralRelationshipDTO {
   bleAddress?: string;           // BLE MAC address for offline bilateral transfers
   genesisVerifiedOnline?: boolean; // genesis hash verified via storage node
   addedCounter?: bigint;           // commit height when contact was added
+  sendStatus?: pb.RelationshipSendStatus;
 }
 
 export interface BilateralRelationshipsListDTO {

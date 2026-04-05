@@ -210,6 +210,70 @@ proto3.util.setEnumType(Codec, "dsm.Codec", [
 ]);
 
 /**
+ * @generated from enum dsm.RelationshipSendCheckState
+ */
+export enum RelationshipSendCheckState {
+  /**
+   * @generated from enum value: RELATIONSHIP_SEND_CHECK_STATE_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: RELATIONSHIP_SEND_CHECK_STATE_CHECKING = 1;
+   */
+  CHECKING = 1,
+
+  /**
+   * @generated from enum value: RELATIONSHIP_SEND_CHECK_STATE_READY = 2;
+   */
+  READY = 2,
+
+  /**
+   * @generated from enum value: RELATIONSHIP_SEND_CHECK_STATE_BLOCKED = 3;
+   */
+  BLOCKED = 3,
+}
+// Retrieve enum metadata with: proto3.getEnumType(RelationshipSendCheckState)
+proto3.util.setEnumType(RelationshipSendCheckState, "dsm.RelationshipSendCheckState", [
+  { no: 0, name: "RELATIONSHIP_SEND_CHECK_STATE_UNSPECIFIED" },
+  { no: 1, name: "RELATIONSHIP_SEND_CHECK_STATE_CHECKING" },
+  { no: 2, name: "RELATIONSHIP_SEND_CHECK_STATE_READY" },
+  { no: 3, name: "RELATIONSHIP_SEND_CHECK_STATE_BLOCKED" },
+]);
+
+/**
+ * @generated from enum dsm.RelationshipSendBlockReason
+ */
+export enum RelationshipSendBlockReason {
+  /**
+   * @generated from enum value: RELATIONSHIP_SEND_BLOCK_REASON_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: RELATIONSHIP_SEND_BLOCK_REASON_PENDING_CATCHUP = 1;
+   */
+  PENDING_CATCHUP = 1,
+
+  /**
+   * @generated from enum value: RELATIONSHIP_SEND_BLOCK_REASON_STATE_DIVERGENCE = 2;
+   */
+  STATE_DIVERGENCE = 2,
+
+  /**
+   * @generated from enum value: RELATIONSHIP_SEND_BLOCK_REASON_INTERNAL_ERROR = 3;
+   */
+  INTERNAL_ERROR = 3,
+}
+// Retrieve enum metadata with: proto3.getEnumType(RelationshipSendBlockReason)
+proto3.util.setEnumType(RelationshipSendBlockReason, "dsm.RelationshipSendBlockReason", [
+  { no: 0, name: "RELATIONSHIP_SEND_BLOCK_REASON_UNSPECIFIED" },
+  { no: 1, name: "RELATIONSHIP_SEND_BLOCK_REASON_PENDING_CATCHUP" },
+  { no: 2, name: "RELATIONSHIP_SEND_BLOCK_REASON_STATE_DIVERGENCE" },
+  { no: 3, name: "RELATIONSHIP_SEND_BLOCK_REASON_INTERNAL_ERROR" },
+]);
+
+/**
  * UI-friendly offline bilateral summary (transport-only; not hashed).
  *
  * @generated from enum dsm.OfflineBilateralTransactionStatus
@@ -9809,6 +9873,61 @@ export class BilateralPrepareResponse extends Message<BilateralPrepareResponse> 
 }
 
 /**
+ * @generated from message dsm.RelationshipSendStatus
+ */
+export class RelationshipSendStatus extends Message<RelationshipSendStatus> {
+  /**
+   * @generated from field: bool send_ready = 1;
+   */
+  sendReady = false;
+
+  /**
+   * @generated from field: dsm.RelationshipSendCheckState send_check_state = 2;
+   */
+  sendCheckState = RelationshipSendCheckState.UNSPECIFIED;
+
+  /**
+   * @generated from field: dsm.RelationshipSendBlockReason send_block_reason = 3;
+   */
+  sendBlockReason = RelationshipSendBlockReason.UNSPECIFIED;
+
+  /**
+   * @generated from field: string send_block_message = 4;
+   */
+  sendBlockMessage = "";
+
+  constructor(data?: PartialMessage<RelationshipSendStatus>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.RelationshipSendStatus";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "send_ready", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 2, name: "send_check_state", kind: "enum", T: proto3.getEnumType(RelationshipSendCheckState) },
+    { no: 3, name: "send_block_reason", kind: "enum", T: proto3.getEnumType(RelationshipSendBlockReason) },
+    { no: 4, name: "send_block_message", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RelationshipSendStatus {
+    return new RelationshipSendStatus().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): RelationshipSendStatus {
+    return new RelationshipSendStatus().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): RelationshipSendStatus {
+    return new RelationshipSendStatus().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: RelationshipSendStatus | PlainMessage<RelationshipSendStatus> | undefined, b: RelationshipSendStatus | PlainMessage<RelationshipSendStatus> | undefined): boolean {
+    return proto3.util.equals(RelationshipSendStatus, a, b);
+  }
+}
+
+/**
  * @generated from message dsm.BilateralPrepareReject
  */
 export class BilateralPrepareReject extends Message<BilateralPrepareReject> {
@@ -9827,6 +9946,11 @@ export class BilateralPrepareReject extends Message<BilateralPrepareReject> {
    */
   rejectorDeviceId = new Uint8Array(0);
 
+  /**
+   * @generated from field: dsm.RelationshipSendStatus send_status = 4;
+   */
+  sendStatus?: RelationshipSendStatus;
+
   constructor(data?: PartialMessage<BilateralPrepareReject>) {
     super();
     proto3.util.initPartial(data, this);
@@ -9838,6 +9962,7 @@ export class BilateralPrepareReject extends Message<BilateralPrepareReject> {
     { no: 1, name: "commitment_hash", kind: "message", T: Hash32 },
     { no: 2, name: "reason", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 3, name: "rejector_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "send_status", kind: "message", T: RelationshipSendStatus },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BilateralPrepareReject {
@@ -11478,6 +11603,52 @@ export class BleGattIdentityReadResult extends Message<BleGattIdentityReadResult
 }
 
 /**
+ * Protobuf value carried on the BLE relationship-status GATT characteristic.
+ * The advertiser computes the status in Rust for the connected peer relationship.
+ *
+ * @generated from message dsm.BleRelationshipStatusCharValue
+ */
+export class BleRelationshipStatusCharValue extends Message<BleRelationshipStatusCharValue> {
+  /**
+   * @generated from field: bytes counterparty_device_id = 1;
+   */
+  counterpartyDeviceId = new Uint8Array(0);
+
+  /**
+   * @generated from field: dsm.RelationshipSendStatus send_status = 2;
+   */
+  sendStatus?: RelationshipSendStatus;
+
+  constructor(data?: PartialMessage<BleRelationshipStatusCharValue>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.BleRelationshipStatusCharValue";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "counterparty_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "send_status", kind: "message", T: RelationshipSendStatus },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BleRelationshipStatusCharValue {
+    return new BleRelationshipStatusCharValue().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): BleRelationshipStatusCharValue {
+    return new BleRelationshipStatusCharValue().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): BleRelationshipStatusCharValue {
+    return new BleRelationshipStatusCharValue().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: BleRelationshipStatusCharValue | PlainMessage<BleRelationshipStatusCharValue> | undefined, b: BleRelationshipStatusCharValue | PlainMessage<BleRelationshipStatusCharValue> | undefined): boolean {
+    return proto3.util.equals(BleRelationshipStatusCharValue, a, b);
+  }
+}
+
+/**
  * Response from processIncomingBleData JNI call.
  * Rust decides internally whether to route as chunk or Envelope v3, runs any
  * frame-type detection, and returns pre-chunked follow-up bytes for Kotlin to
@@ -12992,6 +13163,20 @@ export class BilateralReconciliationRequest extends Message<BilateralReconciliat
    */
   forceReconcile = false;
 
+  /**
+   * Offline UI may request peer advisory status
+   *
+   * @generated from field: bool include_peer_status = 4;
+   */
+  includePeerStatus = false;
+
+  /**
+   * Optional peer BLE address for advisory status read
+   *
+   * @generated from field: string ble_address = 5;
+   */
+  bleAddress = "";
+
   constructor(data?: PartialMessage<BilateralReconciliationRequest>) {
     super();
     proto3.util.initPartial(data, this);
@@ -13003,6 +13188,8 @@ export class BilateralReconciliationRequest extends Message<BilateralReconciliat
     { no: 1, name: "remote_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 2, name: "local_tip", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 3, name: "force_reconcile", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 4, name: "include_peer_status", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 5, name: "ble_address", kind: "scalar", T: 9 /* ScalarType.STRING */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BilateralReconciliationRequest {
@@ -13048,6 +13235,16 @@ export class BilateralReconciliationResponse extends Message<BilateralReconcilia
    */
   errorMessage = "";
 
+  /**
+   * @generated from field: dsm.RelationshipSendStatus local_status = 5;
+   */
+  localStatus?: RelationshipSendStatus;
+
+  /**
+   * @generated from field: dsm.RelationshipSendStatus peer_status = 6;
+   */
+  peerStatus?: RelationshipSendStatus;
+
   constructor(data?: PartialMessage<BilateralReconciliationResponse>) {
     super();
     proto3.util.initPartial(data, this);
@@ -13060,6 +13257,8 @@ export class BilateralReconciliationResponse extends Message<BilateralReconcilia
     { no: 2, name: "reconciled", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
     { no: 3, name: "remote_tip", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 4, name: "error_message", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 5, name: "local_status", kind: "message", T: RelationshipSendStatus },
+    { no: 6, name: "peer_status", kind: "message", T: RelationshipSendStatus },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BilateralReconciliationResponse {
@@ -14928,6 +15127,12 @@ export class Envelope extends Message<Envelope> {
     case: "tokenPolicyListResponse";
   } | {
     /**
+     * @generated from field: dsm.BilateralReconciliationResponse reconciliation_response = 98;
+     */
+    value: BilateralReconciliationResponse;
+    case: "reconciliationResponse";
+  } | {
+    /**
      * @generated from field: dsm.Error error = 99;
      */
     value: Error;
@@ -15028,6 +15233,7 @@ export class Envelope extends Message<Envelope> {
     { no: 95, name: "session_state_response", kind: "message", T: AppSessionStateProto, oneof: "payload" },
     { no: 96, name: "nfc_recovery_capsule", kind: "message", T: NfcRecoveryCapsule, oneof: "payload" },
     { no: 97, name: "token_policy_list_response", kind: "message", T: TokenPolicyListResponse, oneof: "payload" },
+    { no: 98, name: "reconciliation_response", kind: "message", T: BilateralReconciliationResponse, oneof: "payload" },
     { no: 99, name: "error", kind: "message", T: Error, oneof: "payload" },
   ]);
 
@@ -16183,6 +16389,11 @@ export class ContactAddResponse extends Message<ContactAddResponse> {
    */
   signingPublicKey = new Uint8Array(0);
 
+  /**
+   * @generated from field: dsm.RelationshipSendStatus send_status = 13;
+   */
+  sendStatus?: RelationshipSendStatus;
+
   constructor(data?: PartialMessage<ContactAddResponse>) {
     super();
     proto3.util.initPartial(data, this);
@@ -16203,6 +16414,7 @@ export class ContactAddResponse extends Message<ContactAddResponse> {
     { no: 10, name: "verifying_storage_nodes", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
     { no: 11, name: "ble_address", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 12, name: "signing_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 13, name: "send_status", kind: "message", T: RelationshipSendStatus },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ContactAddResponse {

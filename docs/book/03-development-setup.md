@@ -23,9 +23,9 @@ The supported Windows story is: native Windows for most day-to-day development, 
 
 | Tool | Version | Required For | Install |
 |------|---------|-------------|---------|
-| Rust | stable | Core, SDK, storage node | [rustup.rs](https://rustup.rs) |
+| Rust | 1.91.0 (pinned in `rust-toolchain.toml`) | Core, SDK, storage node | [rustup.rs](https://rustup.rs) |
 | cargo-ndk | latest | Android native libs | `cargo install cargo-ndk` |
-| Android NDK | 27.x | JNI compilation | Android Studio SDK Manager |
+| Android NDK | 27.0.12077973 | JNI compilation | Android Studio SDK Manager |
 | Android SDK + platform-tools | — | APK build, adb | Android Studio |
 | Java | 17 | Gradle/Android build | `brew install --cask temurin@17` (macOS) |
 | Node.js | 20+ | Frontend build | [nvm](https://github.com/nvm-sh/nvm) recommended |
@@ -59,6 +59,8 @@ brew services start postgresql@15
 ```bash
 rustup-init -y
 source "$HOME/.cargo/env"
+rustup toolchain install 1.91.0
+rustup default 1.91.0
 cargo install cargo-ndk
 ```
 
@@ -95,7 +97,7 @@ make doctor
 make setup
 ```
 
-`make doctor` reports missing prerequisites without changing the repo. `make setup` verifies the toolchain, tries to auto-detect the Android SDK and writes the ignored `dsm_client/android/local.properties` for Gradle, installs frontend dependencies if needed, and generates the `.cargo/config.toml` for NDK cross-compilation when `ANDROID_NDK_HOME` is configured.
+`make doctor` reports missing prerequisites without changing the repo, including the installed Rust version, the pinned Rust toolchain version, `cargo-ndk`, the resolved NDK root, the detected NDK host tag, and the generated Android cargo-config state. `make setup` verifies the toolchain, tries to auto-detect the Android SDK and writes the ignored `dsm_client/android/local.properties` for Gradle, installs frontend dependencies if needed, and generates the `.cargo/config.toml` for NDK cross-compilation when `ANDROID_NDK_HOME` or `ANDROID_NDK_ROOT` is configured.
 
 ---
 
@@ -116,6 +118,8 @@ sudo systemctl enable postgresql
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source "$HOME/.cargo/env"
+rustup toolchain install 1.91.0
+rustup default 1.91.0
 cargo install cargo-ndk
 ```
 
@@ -221,7 +225,7 @@ Portable exceptions:
 
 ## `.cargo/config.toml` Template
 
-After running `make setup`, the file `dsm_client/deterministic_state_machine/dsm_sdk/.cargo/config.toml` is generated from the template using your `ANDROID_NDK_HOME`. It configures the NDK linkers for all three Android targets:
+After running `make setup`, the file `dsm_client/deterministic_state_machine/dsm_sdk/.cargo/config.toml` is generated from the template using your `ANDROID_NDK_HOME` or `ANDROID_NDK_ROOT`. `make setup` prints the resolved NDK path, the detected host tag, and the pinned Gradle `ndkVersion` while it generates the file. The generated config configures the NDK linkers for all three Android targets:
 
 - `aarch64-linux-android` (arm64-v8a)
 - `armv7-linux-androideabi` (armeabi-v7a)
@@ -295,6 +299,16 @@ cd dsm_client/android && ./gradlew clean :app:installDebug   # reinstall
 
 - `dsm_client/android/app/src/main/jniLibs/`
 - `dsm_client/deterministic_state_machine/jniLibs/`
+
+It is the canonical wrapper around the JNI build command:
+
+```bash
+cd dsm_client/deterministic_state_machine
+DSM_PROTO_ROOT=/absolute/path/to/dsm/proto \
+cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 \
+  -o /absolute/path/to/dsm/dsm_client/android/app/src/main/jniLibs \
+  --platform 23 build --release --package dsm_sdk --features=jni,bluetooth
+```
 
 This keeps the packaged APK path and the Rust-side mirror in sync.
 

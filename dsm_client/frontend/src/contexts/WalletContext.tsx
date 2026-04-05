@@ -26,7 +26,6 @@ export interface WalletContact {
   chainTipSmtProof?: Uint8Array;
   bleAddress?: string;
   status?: string;
-  needsOnlineReconcile?: boolean;
   genesisVerifiedOnline?: boolean;
   verifyCounter?: number;
   addedCounter?: number;

@@ -12,6 +12,7 @@ sealed class BleSessionEvent {
     data class MtuNegotiated(override val deviceAddress: String, val mtu: Int) : BleSessionEvent()
     data class ServiceDiscoveryCompleted(override val deviceAddress: String, val success: Boolean) : BleSessionEvent()
     data class IdentityReadCompleted(override val deviceAddress: String, val data: ByteArray?) : BleSessionEvent()
+    data class RelationshipStatusReadCompleted(override val deviceAddress: String, val data: ByteArray?) : BleSessionEvent()
     data class TransactionWriteCompleted(override val deviceAddress: String, val success: Boolean) : BleSessionEvent()
     data class ResponseReceived(override val deviceAddress: String, val data: ByteArray) : BleSessionEvent()
     /** Advertiser confirmed it processed our identity — bilateral pairing can complete. */

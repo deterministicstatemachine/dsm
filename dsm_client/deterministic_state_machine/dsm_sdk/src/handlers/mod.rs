@@ -35,6 +35,7 @@ pub mod misc_routes;
 pub mod prefs_routes;
 pub mod recovery_impl;
 pub mod recovery_routes;
+pub mod relationship_status;
 pub mod response_helpers;
 pub mod session_routes;
 pub mod storage_routes;

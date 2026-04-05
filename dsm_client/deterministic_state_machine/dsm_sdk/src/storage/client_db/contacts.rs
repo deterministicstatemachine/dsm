@@ -11,6 +11,38 @@ use super::types::ContactRecord;
 use crate::storage::codecs::{meta_from_blob, meta_to_blob};
 use crate::util::deterministic_time::tick;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObservedRemoteTipSource {
+    Unknown = 0,
+    DeferredInbox = 1,
+    LivePeerClaim = 2,
+}
+
+impl ObservedRemoteTipSource {
+    pub(crate) fn from_db(value: Option<i64>) -> Self {
+        match value {
+            Some(1) => Self::DeferredInbox,
+            Some(2) => Self::LivePeerClaim,
+            _ => Self::Unknown,
+        }
+    }
+
+    pub(crate) fn db_value(self) -> i64 {
+        self as i64
+    }
+
+    pub(crate) fn blocks_send_without_local_corroboration(self) -> bool {
+        matches!(self, Self::LivePeerClaim)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObservedRemoteTipRecord {
+    pub tip: [u8; 32],
+    pub updated_at: u64,
+    pub source: ObservedRemoteTipSource,
+}
+
 pub fn store_contact(contact: &ContactRecord) -> Result<()> {
     info!(
         "Storing contact: {} (device_id {} bytes, public_key {} bytes)",
@@ -291,6 +323,59 @@ pub fn get_contact_by_alias(alias: &str) -> Result<Option<ContactRecord>> {
     Ok(result)
 }
 
+/// Get contact by normalized BLE address.
+/// Returns None if not found.
+pub fn get_contact_by_ble_address(ble_address: &str) -> Result<Option<ContactRecord>> {
+    let normalized = ble_address.trim().to_uppercase();
+    if normalized.is_empty() {
+        return Ok(None);
+    }
+
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|poisoned| {
+        log::warn!("DB lock poisoned, recovering");
+        poisoned.into_inner()
+    });
+
+    let result = conn
+        .query_row(
+            "SELECT contact_id, device_id, alias, genesis_hash, public_key, chain_tip,
+                added_at, verified, verification_proof, metadata, ble_address,
+                status, needs_online_reconcile, last_seen_online_counter, last_seen_ble_counter,
+                previous_chain_tip
+           FROM contacts
+          WHERE UPPER(ble_address) = ?1",
+            params![normalized],
+            |row| {
+                let meta_blob: Vec<u8> = row.get(9)?;
+                let metadata = meta_from_blob(&meta_blob).unwrap_or_default();
+                Ok(ContactRecord {
+                    contact_id: row.get(0)?,
+                    device_id: row.get(1)?,
+                    alias: row.get(2)?,
+                    genesis_hash: row.get(3)?,
+                    public_key: row.get::<_, Option<Vec<u8>>>(4)?.unwrap_or_default(),
+                    current_chain_tip: row.get(5)?,
+                    added_at: row.get::<_, i64>(6)? as u64,
+                    verified: row.get::<_, i32>(7)? != 0,
+                    verification_proof: row.get::<_, Option<Vec<u8>>>(8)?,
+                    metadata,
+                    ble_address: row.get(10)?,
+                    status: row
+                        .get::<_, String>(11)
+                        .unwrap_or_else(|_| "Created".to_string()),
+                    needs_online_reconcile: row.get::<_, i32>(12).unwrap_or(0) != 0,
+                    last_seen_online_counter: row.get::<_, i64>(13).unwrap_or(0) as u64,
+                    last_seen_ble_counter: row.get::<_, i64>(14).unwrap_or(0) as u64,
+                    previous_chain_tip: row.get(15).unwrap_or(None),
+                })
+            },
+        )
+        .optional()?;
+
+    Ok(result)
+}
+
 /// Delete a contact by contact_id.
 pub fn delete_contact_by_id(contact_id: &str) -> Result<()> {
     if contact_id.trim().is_empty() {
@@ -407,6 +492,9 @@ pub fn update_contact_ble_status(
 
     let updated_ble_address = ble_address.or(contact.ble_address.as_deref());
     let observed_tip_bytes = observed_chain_tip.filter(|tip| tip.len() == 32);
+    let observed_tip_source = observed_tip_bytes
+        .as_ref()
+        .map(|_| ObservedRemoteTipSource::LivePeerClaim.db_value());
 
     conn.execute(
         "UPDATE contacts SET
@@ -418,14 +506,19 @@ pub fn update_contact_ble_status(
             observed_remote_tip_updated_at = CASE
                 WHEN ?5 IS NULL THEN observed_remote_tip_updated_at
                 ELSE ?3
+            END,
+            observed_remote_tip_source = CASE
+                WHEN ?5 IS NULL THEN observed_remote_tip_source
+                ELSE ?6
             END
-         WHERE device_id = ?6",
+         WHERE device_id = ?7",
         params![
             new_status,
             if needs_reconcile { 1i32 } else { 0i32 },
             now as i64,
             updated_ble_address,
             observed_tip_bytes,
+            observed_tip_source,
             device_id,
         ],
     )?;
@@ -442,7 +535,11 @@ pub fn update_contact_ble_status(
 ///
 /// This is advisory durability for BLE/session recovery. It MUST NOT be used as
 /// the canonical bilateral relationship tip.
-pub fn record_observed_remote_chain_tip(device_id: &[u8], observed_chain_tip: &[u8]) -> Result<()> {
+pub fn record_observed_remote_chain_tip(
+    device_id: &[u8],
+    observed_chain_tip: &[u8],
+    source: ObservedRemoteTipSource,
+) -> Result<()> {
     if device_id.len() != 32 {
         return Err(anyhow!("Invalid device_id length"));
     }
@@ -460,9 +557,10 @@ pub fn record_observed_remote_chain_tip(device_id: &[u8], observed_chain_tip: &[
     let updated = conn.execute(
         "UPDATE contacts SET
             observed_remote_chain_tip = ?1,
-            observed_remote_tip_updated_at = ?2
-         WHERE device_id = ?3",
-        params![observed_chain_tip, now as i64, device_id],
+            observed_remote_tip_updated_at = ?2,
+            observed_remote_tip_source = ?3
+         WHERE device_id = ?4",
+        params![observed_chain_tip, now as i64, source.db_value(), device_id],
     )?;
     if updated == 0 {
         return Err(anyhow!(
@@ -478,7 +576,7 @@ pub fn record_observed_remote_chain_tip(device_id: &[u8], observed_chain_tip: &[
 }
 
 /// Load the last observed unverified remote chain tip, if any.
-pub fn get_observed_remote_chain_tip(device_id: &[u8]) -> Result<Option<[u8; 32]>> {
+pub fn get_observed_remote_tip_record(device_id: &[u8]) -> Result<Option<ObservedRemoteTipRecord>> {
     if device_id.len() != 32 {
         return Err(anyhow!("Invalid device_id length"));
     }
@@ -489,27 +587,36 @@ pub fn get_observed_remote_chain_tip(device_id: &[u8]) -> Result<Option<[u8; 32]
         poisoned.into_inner()
     });
 
-    let value: Option<Vec<u8>> = conn
+    let value: Option<(Option<Vec<u8>>, Option<i64>, Option<i64>)> = conn
         .query_row(
-            "SELECT observed_remote_chain_tip FROM contacts WHERE device_id = ?1",
+            "SELECT observed_remote_chain_tip, observed_remote_tip_updated_at, observed_remote_tip_source
+               FROM contacts WHERE device_id = ?1",
             params![device_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
-        .optional()?
-        .flatten();
+        .optional()?;
 
     match value {
-        Some(tip) if tip.len() == 32 => {
+        Some((Some(tip), updated_at, source)) if tip.len() == 32 => {
             let mut arr = [0u8; 32];
             arr.copy_from_slice(&tip);
-            Ok(Some(arr))
+            Ok(Some(ObservedRemoteTipRecord {
+                tip: arr,
+                updated_at: updated_at.unwrap_or_default() as u64,
+                source: ObservedRemoteTipSource::from_db(source),
+            }))
         }
-        Some(tip) => Err(anyhow!(
+        Some((Some(tip), _, _)) => Err(anyhow!(
             "Observed remote chain tip has invalid length {}",
             tip.len()
         )),
+        Some((None, _, _)) => Ok(None),
         None => Ok(None),
     }
+}
+
+pub fn get_observed_remote_chain_tip(device_id: &[u8]) -> Result<Option<[u8; 32]>> {
+    Ok(get_observed_remote_tip_record(device_id)?.map(|record| record.tip))
 }
 
 /// Clear any observed-only remote chain-tip claim for a contact.
@@ -527,11 +634,41 @@ pub fn clear_observed_remote_chain_tip(device_id: &[u8]) -> Result<()> {
     conn.execute(
         "UPDATE contacts
             SET observed_remote_chain_tip = NULL,
-                observed_remote_tip_updated_at = NULL
+                observed_remote_tip_updated_at = NULL,
+                observed_remote_tip_source = NULL
           WHERE device_id = ?1",
         params![device_id],
     )?;
     Ok(())
+}
+
+pub fn clear_observed_remote_chain_tip_if_matches(
+    device_id: &[u8],
+    observed_chain_tip: &[u8],
+) -> Result<bool> {
+    if device_id.len() != 32 {
+        return Err(anyhow!("Invalid device_id length"));
+    }
+    if observed_chain_tip.len() != 32 {
+        return Err(anyhow!("Invalid observed_chain_tip length"));
+    }
+
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|poisoned| {
+        log::warn!("DB lock poisoned, recovering");
+        poisoned.into_inner()
+    });
+
+    let rows = conn.execute(
+        "UPDATE contacts
+            SET observed_remote_chain_tip = NULL,
+                observed_remote_tip_updated_at = NULL,
+                observed_remote_tip_source = NULL
+          WHERE device_id = ?1
+            AND observed_remote_chain_tip = ?2",
+        params![device_id, observed_chain_tip],
+    )?;
+    Ok(rows > 0)
 }
 
 /// Restore a finalized bilateral chain tip only when storage is empty, zero, or already equal.
@@ -588,6 +725,7 @@ pub fn restore_finalized_bilateral_chain_tip(device_id: &[u8], restored_tip: &[u
             local_bilateral_chain_tip = ?2,
             observed_remote_chain_tip = NULL,
             observed_remote_tip_updated_at = NULL,
+            observed_remote_tip_source = NULL,
             needs_online_reconcile = 0,
             last_seen_online_counter = ?3,
             status = CASE
@@ -675,6 +813,7 @@ pub fn try_advance_finalized_bilateral_chain_tip(
                 local_bilateral_chain_tip = ?1,
                 observed_remote_chain_tip = NULL,
                 observed_remote_tip_updated_at = NULL,
+                observed_remote_tip_source = NULL,
                 needs_online_reconcile = 0,
                 last_seen_online_counter = ?2,
                 status = CASE
@@ -693,6 +832,7 @@ pub fn try_advance_finalized_bilateral_chain_tip(
                 local_bilateral_chain_tip = ?1,
                 observed_remote_chain_tip = NULL,
                 observed_remote_tip_updated_at = NULL,
+                observed_remote_tip_source = NULL,
                 needs_online_reconcile = 0,
                 last_seen_online_counter = ?2,
                 status = CASE

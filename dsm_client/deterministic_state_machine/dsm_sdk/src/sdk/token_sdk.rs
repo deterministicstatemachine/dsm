@@ -618,18 +618,42 @@ impl<I: Send + Sync> TokenSDK<I> {
         None
     }
 
-    fn state_balance_for_token(
+    pub(crate) fn project_balance_cache_from_state(
         &self,
+        device_id: DevId,
         state: &State,
-        token_id: &str,
-    ) -> Result<Option<Balance>, DsmError> {
-        let policy_commit = self.resolve_policy_commit_strict(token_id)?;
-        let canonical = dsm::core::token::derive_canonical_balance_key(
-            &policy_commit,
-            &state.device_info.public_key,
-            token_id,
-        );
-        Ok(state.token_balances.get(&canonical).cloned())
+    ) -> Result<(), DsmError> {
+        if state.device_info.device_id != device_id {
+            return Err(DsmError::invalid_operation(
+                "canonical projection device mismatch",
+            ));
+        }
+
+        let mut projected = HashMap::new();
+        for (token_key, balance) in &state.token_balances {
+            let Some(token_id) = canonical_token_id_from_balance_key(token_key) else {
+                continue;
+            };
+            if token_id == "BTC_CHAIN" {
+                continue;
+            }
+            projected.insert(token_id.to_string(), balance.clone());
+        }
+
+        let mut balances = self.balances.write();
+        let refreshed = balances
+            .get(&device_id)
+            .map(|existing| existing != &projected)
+            .unwrap_or(!projected.is_empty());
+        if refreshed {
+            log::info!(
+                "[TokenSDK] canonical projection refreshed local cache for {} at state #{}",
+                crate::util::text_id::encode_base32_crockford(&device_id),
+                state.state_number,
+            );
+        }
+        balances.insert(device_id, projected);
+        Ok(())
     }
 
     fn cache_token_metadata_strict(
@@ -802,47 +826,6 @@ impl<I: Send + Sync> TokenSDK<I> {
     ) -> Result<State, DsmError> {
         self.validate_token_operation(&operation)?;
         self.execute_generic_token_operation(&operation).await
-    }
-
-    fn update_balance(
-        &self,
-        device_id: [u8; 32],
-        token_id: String,
-        balance: Balance,
-        is_addition: bool,
-    ) -> Result<(), DsmError> {
-        let current_state = self.core_sdk.get_current_state()?;
-        let state_hash = current_state.hash;
-        let mut balances = self.balances.write();
-
-        let device_balances = balances.entry(device_id).or_default();
-
-        if is_addition {
-            device_balances
-                .entry(token_id)
-                .and_modify(|existing| {
-                    let new_value = existing.value() + balance.value();
-                    *existing =
-                        Balance::from_state(new_value, state_hash, current_state.state_number);
-                })
-                .or_insert(balance);
-        } else if let Some(existing) = device_balances.get_mut(&token_id) {
-            let current_value = existing.value();
-            if current_value < balance.value() {
-                return Err(DsmError::invalid_operation(
-                    "Insufficient balance for operation",
-                ));
-            }
-            *existing = Balance::from_state(
-                current_value - balance.value(),
-                state_hash,
-                current_state.state_number,
-            );
-        } else {
-            return Err(DsmError::invalid_operation("No balance found for token"));
-        }
-
-        Ok(())
     }
 
     pub async fn validate_token_conservation(&self) -> Result<bool, DsmError> {
@@ -1021,42 +1004,7 @@ impl<I: Send + Sync> TokenSDK<I> {
 
                 // Use full DSM operation path to preserve authorization fields
                 let new_state = self.core_sdk.execute_dsm_operation(op)?;
-
-                {
-                    let mut balances = self.balances.write();
-
-                    if let Some(device_id_balances) = balances.get_mut(&sender) {
-                        if let Some(balance) = device_id_balances.get_mut(token_id) {
-                            let current_value = balance.value();
-                            if current_value < *amount {
-                                return Err(DsmError::invalid_operation(
-                                    "Insufficient balance for transfer",
-                                ));
-                            }
-                            *balance = Balance::from_state(
-                                current_value - *amount,
-                                state_hash,
-                                current_state.state_number,
-                            );
-                        }
-                    }
-
-                    balances
-                        .entry(*recipient)
-                        .or_default()
-                        .entry(token_id.clone())
-                        .and_modify(|balance| {
-                            let new_value = balance.value() + *amount;
-                            *balance = Balance::from_state(
-                                new_value,
-                                state_hash,
-                                current_state.state_number,
-                            );
-                        })
-                        .or_insert_with(|| {
-                            Balance::from_state(*amount, state_hash, current_state.state_number)
-                        });
-                }
+                self.project_balance_cache_from_state(sender, &new_state)?;
 
                 {
                     let mut history = self.transaction_history.write();
@@ -1067,7 +1015,7 @@ impl<I: Send + Sync> TokenSDK<I> {
             }
             TokenOperation::Mint {
                 token_id,
-                recipient,
+                recipient: _,
                 amount,
                 ..
             } => {
@@ -1113,32 +1061,17 @@ impl<I: Send + Sync> TokenSDK<I> {
                 };
 
                 let new_state = self.core_sdk.execute_dsm_operation(op)?;
-
-                {
-                    let mut balances = self.balances.write();
-                    balances
-                        .entry(*recipient)
-                        .or_default()
-                        .entry(token_id.clone())
-                        .and_modify(|balance| {
-                            let new_value = balance.value() + *amount;
-                            *balance = Balance::from_state(
-                                new_value,
-                                state_hash,
-                                current_state.state_number,
-                            );
-                        })
-                        .or_insert_with(|| {
-                            Balance::from_state(*amount, state_hash, current_state.state_number)
-                        });
-                }
+                self.project_balance_cache_from_state(
+                    current_state.device_info.device_id,
+                    &new_state,
+                )?;
 
                 if token_id == "ERA" {
                     let mut era_token = self.era_token.write();
                     let new_circulation = Balance::from_state(
                         era_token.circulating_supply.value() + *amount,
-                        state_hash,
-                        current_state.state_number,
+                        new_state.hash,
+                        new_state.state_number,
                     );
                     era_token.circulating_supply = new_circulation;
                 }
@@ -1195,33 +1128,14 @@ impl<I: Send + Sync> TokenSDK<I> {
                 }
 
                 let new_state = self.core_sdk.execute_dsm_operation(op)?;
-
-                {
-                    let mut balances = self.balances.write();
-
-                    if let Some(device_id_balances) = balances.get_mut(&owner_id) {
-                        if let Some(balance) = device_id_balances.get_mut(token_id) {
-                            let current_value = balance.value();
-                            if current_value < *amount {
-                                return Err(DsmError::invalid_operation(
-                                    "Insufficient balance for burn operation",
-                                ));
-                            }
-                            *balance = Balance::from_state(
-                                current_value - *amount,
-                                state_hash,
-                                current_state.state_number,
-                            );
-                        }
-                    }
-                }
+                self.project_balance_cache_from_state(owner_id, &new_state)?;
 
                 if token_id == "ERA" {
                     let mut era_token = self.era_token.write();
                     let new_circulation = Balance::from_state(
                         era_token.circulating_supply.value().saturating_sub(*amount),
-                        state_hash,
-                        current_state.state_number,
+                        new_state.hash,
+                        new_state.state_number,
                     );
                     era_token.circulating_supply = new_circulation;
                 }
@@ -1290,23 +1204,7 @@ impl<I: Send + Sync> TokenSDK<I> {
                     metadata_cache.insert(token_id.clone(), token_metadata);
                 }
 
-                match supply {
-                    TokenSupply::Fixed(initial_amount) => {
-                        self.update_balance(
-                            creator_id,
-                            token_id.clone(),
-                            Balance::from_state(
-                                *initial_amount,
-                                state_hash,
-                                current_state.state_number,
-                            ),
-                            true,
-                        )?;
-                    }
-                    TokenSupply::Unlimited => {
-                        self.update_balance(creator_id, token_id.clone(), Balance::zero(), true)?;
-                    }
-                }
+                self.project_balance_cache_from_state(creator_id, &new_state)?;
 
                 {
                     let mut history = self.transaction_history.write();
@@ -1352,14 +1250,7 @@ impl<I: Send + Sync> TokenSDK<I> {
                 let core_op = Self::convert_to_core_operation(op);
                 let new_state = self.core_sdk.execute_transition(core_op)?;
 
-                // Update in-memory locked balance
-                self.update_locked_balance(
-                    &owner_id,
-                    token_id,
-                    &String::from_utf8_lossy(purpose),
-                    Balance::from_state(*amount, state_hash, current_state.state_number),
-                    true,
-                )?;
+                self.project_balance_cache_from_state(owner_id, &new_state)?;
 
                 {
                     let mut history = self.transaction_history.write();
@@ -1402,14 +1293,7 @@ impl<I: Send + Sync> TokenSDK<I> {
                 let core_op = Self::convert_to_core_operation(op);
                 let new_state = self.core_sdk.execute_transition(core_op)?;
 
-                // Update in-memory locked balance: remove from locked
-                self.update_locked_balance(
-                    &owner_id,
-                    token_id,
-                    &String::from_utf8_lossy(purpose),
-                    Balance::from_state(*amount, state_hash, current_state.state_number),
-                    false,
-                )?;
+                self.project_balance_cache_from_state(owner_id, &new_state)?;
 
                 {
                     let mut history = self.transaction_history.write();
@@ -1450,12 +1334,7 @@ impl<I: Send + Sync> TokenSDK<I> {
                 let core_op = Self::convert_to_core_operation(op);
                 let new_state = self.core_sdk.execute_transition(core_op)?;
 
-                self.update_balance(
-                    device_id,
-                    token_id.clone(),
-                    Balance::from_state(*amount, state_hash, current_state.state_number),
-                    true,
-                )?;
+                self.project_balance_cache_from_state(device_id, &new_state)?;
 
                 {
                     let mut history = self.transaction_history.write();
@@ -1795,39 +1674,30 @@ impl<I: Send + Sync> TokenSDK<I> {
         false
     }
 
-    /// Reload the local in-memory balance cache from canonical state reads,
-    /// re-materializing any missing derived projection rows along the way.
+    /// Reload the local in-memory balance cache from the authoritative
+    /// canonical state when present, falling back to validated projections
+    /// only on cold start.
     pub fn reload_balance_cache_for_self(&self, device_id: DevId) -> Result<(), DsmError> {
         let device_id_str = crate::util::text_id::encode_base32_crockford(&device_id);
-        let current_state = self.core_sdk.get_current_state().ok();
-        let (state_hash, state_number) = current_state
-            .as_ref()
-            .map(|s| (s.hash, s.state_number))
-            .unwrap_or(([0u8; 32], 0));
-        let mut reloaded = HashMap::new();
+        if let Ok(current_state) = self.core_sdk.get_current_state() {
+            return self.project_balance_cache_from_state(device_id, &current_state);
+        }
 
-        // Rebuild balances from canonical state first. This also re-materializes
-        // missing projection rows through the normal read path.
-        if let Some(state) = current_state.as_ref() {
-            let mut token_ids = Vec::new();
-            for token_key in state.token_balances.keys() {
-                if let Some(token_id) = canonical_token_id_from_balance_key(token_key) {
-                    if token_id != "BTC_CHAIN" {
-                        token_ids.push(token_id.to_string());
-                    }
-                }
-            }
-            token_ids.sort();
-            token_ids.dedup();
-            for token_id in token_ids {
-                let balance = self.get_token_balance(&device_id, &token_id);
-                reloaded.insert(token_id, balance);
-            }
-        } else if let Ok(token_balances) =
+        let mut reloaded = HashMap::new();
+        if let Ok(token_balances) =
             crate::storage::client_db::list_balance_projections(&device_id_str)
         {
             for record in token_balances {
-                let mut balance = Balance::from_state(record.available, state_hash, state_number);
+                let source_hash = crate::util::text_id::decode_base32_crockford(
+                    &record.source_state_hash,
+                )
+                .and_then(|bytes| bytes.try_into().ok())
+                .unwrap_or([0u8; 32]);
+                let mut balance = Balance::from_state(
+                    record.available,
+                    source_hash,
+                    record.source_state_number,
+                );
                 if record.locked > 0 {
                     let _ = balance.lock(record.locked);
                 }
@@ -2061,48 +1931,9 @@ impl<I: Send + Sync> TokenSDK<I> {
 
         // Preserve full authorization fields (signature/proofs) if present
         let new_state = self.core_sdk.execute_dsm_operation(bilateral_transfer_op)?;
+        self.project_balance_cache_from_state(sender, &new_state)?;
 
         let recipient_id = crate::util::domain_helpers::device_id_hash_bytes(&recipient);
-
-        {
-            let mut balances = self.balances.write();
-
-            if let Some(device_id_balances) = balances.get_mut(&sender) {
-                if let Some(balance) = device_id_balances.get_mut(&token_id) {
-                    let current_value = balance.value();
-                    if current_value < amount {
-                        return Err(DsmError::invalid_operation(
-                            "Insufficient balance for transfer",
-                        ));
-                    }
-                    *balance = Balance::from_state(
-                        current_value - amount,
-                        state_hash.clone().try_into().unwrap_or([0u8; 32]),
-                        current_state.state_number,
-                    );
-                }
-            }
-
-            balances
-                .entry(recipient_id)
-                .or_default()
-                .entry(token_id.clone())
-                .and_modify(|balance| {
-                    let new_value = balance.value() + amount;
-                    *balance = Balance::from_state(
-                        new_value,
-                        state_hash.clone().try_into().unwrap_or([0u8; 32]),
-                        current_state.state_number,
-                    );
-                })
-                .or_insert_with(|| {
-                    Balance::from_state(
-                        amount,
-                        state_hash.clone().try_into().unwrap_or([0u8; 32]),
-                        current_state.state_number,
-                    )
-                });
-        }
 
         {
             let token_op = TokenOperation::Transfer {
@@ -2507,7 +2338,8 @@ impl<I: Send + Sync> TokenSDK<I> {
             *sig = signature;
         }
 
-        self.core_sdk.execute_dsm_operation(fee_transfer_op)?;
+        let new_state = self.core_sdk.execute_dsm_operation(fee_transfer_op)?;
+        self.project_balance_cache_from_state(current_state.device_info.device_id, &new_state)?;
         Ok(())
     }
 
@@ -2562,56 +2394,6 @@ impl<I: Send + Sync> TokenSDK<I> {
         }
 
         Ok(Balance::zero())
-    }
-
-    fn update_locked_balance(
-        &self,
-        device_id: &[u8; 32],
-        token_id: &str,
-        purpose: &str,
-        amount: Balance,
-        is_addition: bool,
-    ) -> Result<(), DsmError> {
-        let device_id_str = crate::util::text_id::encode_base32_crockford(device_id);
-        let _locked_key = format!("{device_id_str}:{token_id}:{purpose}");
-
-        {
-            let mut balances = self.balances.write();
-            if let Some(device_balances) = balances.get_mut(device_id) {
-                if let Some(balance) = device_balances.get_mut(token_id) {
-                    if is_addition {
-                        balance.lock(amount.value()).map_err(|e| {
-                            DsmError::invalid_operation(format!("Failed to lock balance: {e}"))
-                        })?;
-                    } else {
-                        balance.unlock(amount.value()).map_err(|e| {
-                            DsmError::invalid_operation(format!("Failed to unlock balance: {e}"))
-                        })?;
-                    }
-                } else {
-                    return Err(DsmError::invalid_operation(format!(
-                        "No balance found for token {token_id} on device {}",
-                        crate::util::text_id::encode_base32_crockford(device_id)
-                    )));
-                }
-            } else {
-                return Err(DsmError::invalid_operation(format!(
-                    "No device balance found for device {}",
-                    crate::util::text_id::encode_base32_crockford(device_id)
-                )));
-            }
-        }
-
-        log::info!(
-            "Updated locked balance for {}:{} purpose '{}': {} {} tokens",
-            crate::util::text_id::encode_base32_crockford(device_id),
-            token_id,
-            purpose,
-            if is_addition { "locked" } else { "unlocked" },
-            amount.value()
-        );
-
-        Ok(())
     }
 
     pub async fn import_token_metadata(
@@ -2740,53 +2522,8 @@ impl<I: Send + Sync> TokenSDK<I> {
         let new_state = self.core_sdk.execute_dsm_operation(op)?;
         log::debug!("[TOKEN] execute_signed_transfer: execute_dsm_operation OK");
 
-        // Update balances cache to reflect transition (sender -amount)
-        log::debug!("[TOKEN] execute_signed_transfer: updating balances cache...");
-        {
-            let mut balances = self.balances.write();
-            let current_balance = self
-                .state_balance_for_token(&current_state, &token_id)?
-                .unwrap_or_else(Balance::zero);
-
-            // CRITICAL FIX: Use .entry().or_default() to ensure sender's device_id exists in cache
-            let sender_balances = balances.entry(sender).or_default();
-            if let Some(bal) = sender_balances.get_mut(&token_id) {
-                let cur = bal.value();
-                if cur < amount {
-                    return Err(DsmError::invalid_operation(
-                        "Insufficient balance for transfer",
-                    ));
-                }
-                *bal = Balance::from_state(cur - amount, state_hash, current_state.state_number);
-            } else {
-                let cur = current_balance.value();
-                if cur < amount {
-                    return Err(DsmError::invalid_operation(
-                        "Insufficient balance for transfer",
-                    ));
-                }
-                sender_balances.insert(
-                    token_id.clone(),
-                    Balance::from_state(cur - amount, state_hash, current_state.state_number),
-                );
-            }
-
-            // Recipient update (same write lock)
-            let mut recipient_id_arr = [0u8; 32];
-            recipient_id_arr.copy_from_slice(&recipient_device_id);
-            balances
-                .entry(recipient_id_arr)
-                .or_default()
-                .entry(token_id.clone())
-                .and_modify(|bal| {
-                    let nv = bal.value() + amount;
-                    *bal = Balance::from_state(nv, state_hash, current_state.state_number);
-                })
-                .or_insert_with(|| {
-                    Balance::from_state(amount, state_hash, current_state.state_number)
-                });
-        }
-        log::debug!("[TOKEN] execute_signed_transfer: balances cache updated");
+        self.project_balance_cache_from_state(sender, &new_state)?;
+        log::debug!("[TOKEN] execute_signed_transfer: local cache projected");
 
         // Record history in local cache
         {
@@ -2837,55 +2574,9 @@ impl<I: Send + Sync> TokenSDK<I> {
         let new_state = self.core_sdk.execute_dsm_operation(op)?;
         log::debug!("[TOKEN] execute_transfer_op: execute_dsm_operation OK");
 
-        // Anchor balance cache entries to the POST-transition state (not pre-transition).
-        let state_hash = new_state.hash;
-        let state_number = new_state.state_number;
-
-        // Update balances cache (same logic as execute_signed_transfer)
-        log::debug!("[TOKEN] execute_transfer_op: updating balances cache...");
-        {
-            let mut balances = self.balances.write();
-            let current_balance = self
-                .state_balance_for_token(&current_state, &token_id)?
-                .unwrap_or_else(Balance::zero);
-
-            let sender_balances = balances.entry(sender).or_default();
-            if let Some(bal) = sender_balances.get_mut(&token_id) {
-                let cur = bal.value();
-                if cur < amount_val {
-                    return Err(DsmError::invalid_operation(
-                        "Insufficient balance for transfer",
-                    ));
-                }
-                *bal = Balance::from_state(cur - amount_val, state_hash, state_number);
-            } else {
-                let cur = current_balance.value();
-                if cur < amount_val {
-                    return Err(DsmError::invalid_operation(
-                        "Insufficient balance for transfer",
-                    ));
-                }
-                sender_balances.insert(
-                    token_id.clone(),
-                    Balance::from_state(cur - amount_val, state_hash, state_number),
-                );
-            }
-
-            if recipient_device_id.len() == 32 {
-                let mut recipient_id_arr = [0u8; 32];
-                recipient_id_arr.copy_from_slice(&recipient_device_id);
-                balances
-                    .entry(recipient_id_arr)
-                    .or_default()
-                    .entry(token_id.clone())
-                    .and_modify(|bal| {
-                        let nv = bal.value() + amount_val;
-                        *bal = Balance::from_state(nv, state_hash, state_number);
-                    })
-                    .or_insert_with(|| Balance::from_state(amount_val, state_hash, state_number));
-            }
-        }
-        log::debug!("[TOKEN] execute_transfer_op: balances cache updated");
+        log::debug!("[TOKEN] execute_transfer_op: projecting local cache from canonical state...");
+        self.project_balance_cache_from_state(sender, &new_state)?;
+        log::debug!("[TOKEN] execute_transfer_op: local cache projected");
 
         // Record history
         {
@@ -2987,5 +2678,123 @@ impl TokenManagerTrait for TokenSDK<IdentitySDK> {
             }
         }
         Ok(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dsm::types::{
+        operations::Operation,
+        state_types::{DeviceInfo, State, StateParams},
+    };
+
+    fn build_state(
+        device_info: DeviceInfo,
+        state_number: u64,
+        balances: &[(&str, Balance)],
+        operation: Operation,
+    ) -> State {
+        let mut state = State::new(StateParams::new(
+            state_number,
+            vec![state_number as u8; 32],
+            operation,
+            device_info,
+        ));
+        state.hash = [state_number as u8; 32];
+        for (token_id, balance) in balances {
+            state
+                .token_balances
+                .insert((*token_id).to_string(), balance.clone());
+        }
+        state
+    }
+
+    #[test]
+    fn reload_balance_cache_for_self_projects_from_current_state() {
+        let device_info = DeviceInfo::from_hashed_label("projection-reload", vec![7u8; 32]);
+        let core_sdk = Arc::new(
+            CoreSDK::new_with_device(device_info.clone())
+                .expect("CoreSDK should initialize for projection test"),
+        );
+        let sdk: TokenSDK<()> = TokenSDK::new(core_sdk.clone(), device_info.device_id);
+        let canonical_balance = Balance::from_state(100, [7u8; 32], 7);
+        let state = build_state(
+            device_info.clone(),
+            7,
+            &[("ERA", canonical_balance.clone())],
+            Operation::Generic {
+                operation_type: b"noop".to_vec(),
+                data: Vec::new(),
+                message: "noop".to_string(),
+                signature: Vec::new(),
+            },
+        );
+        core_sdk
+            .restore_state_snapshot(&state)
+            .expect("state snapshot restore should succeed");
+
+        sdk.balances.write().insert(
+            device_info.device_id,
+            HashMap::from([(
+                "ERA".to_string(),
+                Balance::from_state(1, [1u8; 32], 1),
+            )]),
+        );
+
+        sdk.reload_balance_cache_for_self(device_info.device_id)
+            .expect("reload should project from canonical state");
+
+        let cached = sdk
+            .balances
+            .read()
+            .get(&device_info.device_id)
+            .and_then(|balances| balances.get("ERA"))
+            .cloned()
+            .expect("ERA balance should exist after projection");
+        assert_eq!(cached, canonical_balance);
+    }
+
+    #[test]
+    fn project_balance_cache_from_state_replaces_stale_tokens_on_non_token_transition() {
+        let device_info = DeviceInfo::from_hashed_label("projection-generic", vec![9u8; 32]);
+        let core_sdk = Arc::new(
+            CoreSDK::new_with_device(device_info.clone())
+                .expect("CoreSDK should initialize for generic projection test"),
+        );
+        let sdk: TokenSDK<()> = TokenSDK::new(core_sdk, device_info.device_id);
+        sdk.balances.write().insert(
+            device_info.device_id,
+            HashMap::from([
+                ("ERA".to_string(), Balance::from_state(3, [3u8; 32], 3)),
+                ("dBTC".to_string(), Balance::from_state(9, [3u8; 32], 3)),
+            ]),
+        );
+
+        let carried_forward = Balance::from_state(55, [8u8; 32], 8);
+        let generic_state = build_state(
+            device_info.clone(),
+            8,
+            &[("ERA", carried_forward.clone())],
+            Operation::Generic {
+                operation_type: b"noop".to_vec(),
+                data: Vec::new(),
+                message: "non-token state advance".to_string(),
+                signature: Vec::new(),
+            },
+        );
+
+        sdk.project_balance_cache_from_state(device_info.device_id, &generic_state)
+            .expect("projection from carried-forward state should succeed");
+
+        let cached = sdk
+            .balances
+            .read()
+            .get(&device_info.device_id)
+            .cloned()
+            .expect("device cache should exist after projection");
+        assert_eq!(cached.len(), 1);
+        assert_eq!(cached.get("ERA"), Some(&carried_forward));
+        assert!(!cached.contains_key("dBTC"));
     }
 }

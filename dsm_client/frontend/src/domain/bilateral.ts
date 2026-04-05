@@ -33,10 +33,10 @@ export interface PendingBilateralDto {
   amount: string;
   tokenId: string;
   commitmentHash: string;
-  status: 'pending' | 'verified' | 'hash_mismatch' | 'accepted' | 'committed' | 'failed' | 'rejected';
+  status: 'pending' | 'verified' | 'accepted' | 'committed' | 'failed' | 'rejected';
   tick: number;
   bleAddress?: string;
-  verificationStatus?: 'verified' | 'failed' | 'pending';
+  statusMessage?: string;
 }
 
 // Decode protobuf OfflineBilateralPendingListResponse bytes into DTOs.
@@ -83,19 +83,21 @@ export async function decodeOfflinePendingList(bytes: Uint8Array): Promise<Pendi
     const tokenId = it.metadata?.['token_id'] || 'ERA';
     const alias = it.metadata?.['counterparty_alias'] || 'peer';
     const bleAddr = it.metadata?.['ble_address'];
+    const statusMessage = it.metadata?.['status_message'];
+    const counterpartyId = dir === 'outgoing' ? it.recipientId : it.senderId;
 
     return {
       id: encodeBase32Crockford(it.commitmentHash),
       type: dir === 'outgoing' ? 'outgoing' : 'incoming',
       counterpartyAlias: alias,
-      counterpartyDeviceId: encodeBase32Crockford(it.senderId),
+      counterpartyDeviceId: encodeBase32Crockford(counterpartyId),
       amount,
       tokenId,
       commitmentHash: encodeBase32Crockford(it.commitmentHash),
       status: statusStr,
       tick: idx + 1,
       bleAddress: bleAddr,
-      verificationStatus: 'pending',
+      statusMessage: statusMessage || undefined,
     };
   });
 }

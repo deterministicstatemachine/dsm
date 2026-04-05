@@ -383,6 +383,22 @@ class SinglePathWebViewBridge(private val context: Context) {
                     UnifiedContactBridge.resolveBleAddressForDeviceIdBin(payload)
                 }
 
+                "readPeerRelationshipStatus" -> {
+                    val bleAddress = payload.toString(Charsets.UTF_8).trim()
+                    if (bleAddress.isEmpty()) {
+                        ByteArray(0)
+                    } else {
+                        try {
+                            BleCoordinator.getInstance(inst.context)
+                                .readPeerRelationshipStatus(bleAddress)
+                                ?: ByteArray(0)
+                        } catch (t: Throwable) {
+                            Log.w(TAG, "readPeerRelationshipStatus failed for $bleAddress", t)
+                            ByteArray(0)
+                        }
+                    }
+                }
+
                 // Diagnostics: append raw payload to persisted bridge log
                 "diagnosticsLog" -> {
                     BridgeLogger.logDiagnosticsPayload(payload)

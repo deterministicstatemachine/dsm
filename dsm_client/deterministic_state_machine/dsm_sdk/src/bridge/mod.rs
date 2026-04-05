@@ -375,17 +375,6 @@ pub trait BilateralHandler: Send + Sync {
     /// Returns serialized pb::OfflineBilateralTransaction messages.
     async fn get_pending_transactions(&self) -> Result<Vec<Vec<u8>>, String>;
 
-    /// Pre-flight reconciliation before initiating a new send.
-    ///
-    /// Ensures the sender's view of the counterparty's chain tip is current
-    /// before constructing a BilateralPrepareRequest. This prevents TipMismatch
-    /// rejections after role-swaps where the final ACK of the previous transaction
-    /// was dropped.
-    async fn reconcile_before_send(&self, counterparty_device_id: &[u8]) -> Result<(), String> {
-        let _ = counterparty_device_id;
-        Ok(())
-    }
-
     /// Allow downcasting to concrete type for SDK injection.
     fn as_any(&self) -> &dyn std::any::Any;
 }

@@ -85,6 +85,12 @@ pub fn apply_sender_settlement_and_store_transaction_atomic(
     let token = token_id.unwrap_or("ERA");
 
     let affected = upsert_transaction_row(&txdb, tx, now)?;
+    txdb.execute(
+        "INSERT OR REPLACE INTO bilateral_sender_settlements(
+            tx_id, sender_device_id, completed_at
+         ) VALUES (?1, ?2, ?3)",
+        params![tx.tx_id, sender_device_id, now as i64],
+    )?;
     txdb.commit()?;
 
     if affected > 0 {
@@ -123,6 +129,12 @@ pub fn apply_sender_settlement_bundle_atomic(
     }
 
     let affected = upsert_transaction_row(&txdb, tx, now)?;
+    txdb.execute(
+        "INSERT OR REPLACE INTO bilateral_sender_settlements(
+            tx_id, sender_device_id, completed_at
+         ) VALUES (?1, ?2, ?3)",
+        params![tx.tx_id, sender_device_id, now as i64],
+    )?;
     txdb.commit()?;
 
     if affected > 0 {
@@ -352,9 +364,13 @@ pub fn rollback_failed_online_send_atomic(
     Ok(())
 }
 
-/// Check whether a completed transaction record already exists for the given tx_id.
-/// Used as an idempotency guard before applying bilateral settlement deltas.
-pub fn is_settlement_completed(tx_id: &str) -> bool {
+/// Check whether sender-side settlement already completed for a specific local device.
+///
+/// Sender idempotency must be scoped to the local device, not just `tx_id`.
+/// In production each device has its own DB, but single-process integration
+/// tests share one SQLite instance, so the receiver's completed transaction row
+/// must not suppress the sender's settlement bundle.
+pub fn is_sender_settlement_completed(tx_id: &str, sender_device_id: &str) -> bool {
     let binding = match get_connection() {
         Ok(b) => b,
         Err(_) => return false,
@@ -364,8 +380,10 @@ pub fn is_settlement_completed(tx_id: &str) -> bool {
         poisoned.into_inner()
     });
     conn.query_row(
-        "SELECT 1 FROM transactions WHERE tx_id = ?1 AND status = 'completed' LIMIT 1",
-        params![tx_id],
+        "SELECT 1 FROM bilateral_sender_settlements
+         WHERE tx_id = ?1 AND sender_device_id = ?2
+         LIMIT 1",
+        params![tx_id, sender_device_id],
         |_| Ok(true),
     )
     .unwrap_or(false)

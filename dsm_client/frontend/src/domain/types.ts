@@ -15,6 +15,20 @@ export type DomainBalance = {
   symbol: string;
 };
 
+export type DomainRelationshipSendCheckState = 'checking' | 'ready' | 'blocked';
+
+export type DomainRelationshipSendBlockReason =
+  | 'pending_catchup'
+  | 'state_divergence'
+  | 'internal_error';
+
+export type DomainRelationshipSendStatus = {
+  sendReady: boolean;
+  sendCheckState?: DomainRelationshipSendCheckState;
+  sendBlockReason?: DomainRelationshipSendBlockReason;
+  sendBlockMessage?: string;
+};
+
 export type DomainContact = {
   alias: string;
   deviceId: string;
@@ -23,12 +37,15 @@ export type DomainContact = {
   chainTipSmtProof?: unknown;
   bleAddress?: string;
   status?: string;
-  needsOnlineReconcile?: boolean;
   genesisVerifiedOnline?: boolean;
   verifyCounter?: number;
   addedCounter?: number;
   verifyingStorageNodes?: number;
   signingPublicKey?: string;  // base32 Crockford encoded
+  sendReady?: boolean;
+  sendCheckState?: DomainRelationshipSendCheckState;
+  sendBlockReason?: DomainRelationshipSendBlockReason;
+  sendBlockMessage?: string;
 };
 
 export type DomainTransaction = {

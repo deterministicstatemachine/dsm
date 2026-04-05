@@ -190,6 +190,15 @@ export class DsmClient {
     };
   }
 
+  async readPeerRelationshipStatus(
+    bleAddress: string,
+  ): Promise<import('../proto/dsm_app_pb').BleRelationshipStatusCharValue | null> {
+    if (!(await this.isReady())) {
+      throw new Error('Identity not initialized');
+    }
+    return dsm.readPeerRelationshipStatus(bleAddress);
+  }
+
   async offlineSend(params: {
     tokenId: string;
     to: Uint8Array;

@@ -42,8 +42,8 @@ Open an issue with the **Enhancement** label. Describe the use case, not just th
 See [Chapter 3 — Development Setup](docs/book/03-development-setup.md) for the full environment setup guide.
 
 ```
-Base development: Rust stable (rustup), Node.js 20+ (via nvm recommended), protoc
-Android work only: cargo-ndk, Android NDK 27.x, Android SDK with platform-tools (adb), Java 17+, ANDROID_NDK_HOME
+Base development: Rust 1.91.0 pinned by rust-toolchain.toml (via rustup), Node.js 20+ (via nvm recommended), protoc
+Android work only: cargo-ndk, Android NDK 27.0.12077973, Android SDK with platform-tools (adb), Java 17+, ANDROID_NDK_HOME or ANDROID_NDK_ROOT
 ```
 
 ### Branching

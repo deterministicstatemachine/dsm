@@ -474,6 +474,11 @@ impl ContactManager {
                 .as_ref()
                 .map(|c| c.public_key.clone())
                 .unwrap_or_else(|| signing_public_key.clone()),
+            send_status: Some(
+                crate::handlers::relationship_status::derive_local_send_status_for_device_id(
+                    &contact_device_id,
+                ),
+            ),
         })
     }
 
@@ -793,6 +798,11 @@ impl ContactManager {
                 .as_ref()
                 .map(|c| c.public_key.clone())
                 .unwrap_or_else(|| signing_public_key.clone()),
+            send_status: Some(
+                crate::handlers::relationship_status::derive_local_send_status_for_device_id(
+                    &contact_device_id,
+                ),
+            ),
         })
     }
 
@@ -948,6 +958,11 @@ impl ContactManager {
                     .collect(),
                 ble_address: c.ble_address.clone().unwrap_or_default(),
                 signing_public_key: c.public_key.clone(),
+                send_status: Some(
+                    crate::handlers::relationship_status::derive_local_send_status_for_device_id(
+                        &c.device_id,
+                    ),
+                ),
             });
         }
 

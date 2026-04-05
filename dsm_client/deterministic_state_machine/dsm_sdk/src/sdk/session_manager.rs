@@ -43,6 +43,7 @@ pub static SESSION_MANAGER: Lazy<Mutex<SessionManager>> =
 const LOCK_ENABLED_KEY: &str = "lock_enabled";
 const LOCK_METHOD_KEY: &str = "lock_method";
 const LOCK_ON_PAUSE_KEY: &str = "lock_on_pause";
+const LOCK_LOCKED_KEY: &str = "lock_locked";
 
 /// Hardware facts reported by Kotlin (no other Rust source for these).
 #[derive(Debug, Clone, Default)]
@@ -55,6 +56,8 @@ pub struct HardwareFacts {
     pub qr_available: bool,
     pub qr_active: bool,
     pub camera_permission: bool,
+    pub battery_charging: bool,
+    pub battery_level_percent: u32,
 }
 
 /// Session manager — sole authority for session state projection.
@@ -68,6 +71,7 @@ pub struct SessionManager {
     pub fatal_error: Option<String>,
     pub wallet_refresh_hint: u64,
     pub hardware: HardwareFacts,
+    pub lock_state_initialized: bool,
 }
 
 impl Default for SessionManager {
@@ -80,6 +84,7 @@ impl Default for SessionManager {
             fatal_error: None,
             wallet_refresh_hint: 0,
             hardware: HardwareFacts::default(),
+            lock_state_initialized: false,
         }
     }
 }
@@ -118,7 +123,21 @@ impl SessionManager {
         self.lock_on_pause = lock_on_pause;
         if !enabled {
             self.lock_locked = false;
+            self.persist_lock_state_to_app_state();
         }
+    }
+
+    pub fn set_locked(&mut self, locked: bool) {
+        self.lock_locked = self.lock_enabled && locked;
+        self.persist_lock_state_to_app_state();
+    }
+
+    pub fn lock_now(&mut self) {
+        self.set_locked(true);
+    }
+
+    pub fn unlock_now(&mut self) {
+        self.set_locked(false);
     }
 
     pub fn sync_lock_config_from_app_state(&mut self) {
@@ -132,6 +151,20 @@ impl SessionManager {
         let lock_on_pause =
             Self::parse_pref_bool(&Self::read_pref(LOCK_ON_PAUSE_KEY), self.lock_on_pause);
         self.configure_lock(enabled, &method, lock_on_pause);
+        if !self.lock_state_initialized {
+            self.lock_state_initialized = true;
+            if self.lock_enabled {
+                // Fresh process start: an enabled lock must come back locked instead of
+                // silently inheriting an unlocked in-memory session from a dead process.
+                self.lock_now();
+            } else {
+                self.unlock_now();
+            }
+            return;
+        }
+        let persisted_locked =
+            Self::parse_pref_bool(&Self::read_pref(LOCK_LOCKED_KEY), self.lock_locked);
+        self.lock_locked = self.lock_enabled && persisted_locked;
     }
 
     pub fn persist_lock_config_to_app_state(&self) {
@@ -143,6 +176,14 @@ impl SessionManager {
         Self::write_pref(
             LOCK_ON_PAUSE_KEY,
             if self.lock_on_pause { "true" } else { "false" },
+        );
+        self.persist_lock_state_to_app_state();
+    }
+
+    pub fn persist_lock_state_to_app_state(&self) {
+        Self::write_pref(
+            LOCK_LOCKED_KEY,
+            if self.lock_locked { "true" } else { "false" },
         );
     }
 
@@ -193,11 +234,20 @@ impl SessionManager {
         self.hardware.qr_available = facts.qr_available;
         self.hardware.qr_active = facts.qr_active;
         self.hardware.camera_permission = facts.camera_permission;
+        self.hardware.battery_charging = facts.battery_charging;
+        self.hardware.battery_level_percent = facts.battery_level_percent.min(100);
 
-        // Lock policy: if app went to background and lock_on_pause is set, lock.
+        // Lock policy: if app went to background and lock_on_pause is set, lock,
+        // except while the native QR/camera flow is actively running.
         if !facts.app_foreground && self.lock_on_pause && self.lock_enabled && !self.lock_locked {
-            self.lock_locked = true;
-            log::info!("SessionManager: auto-locked on app background (lock_on_pause policy)");
+            if facts.qr_active {
+                log::info!(
+                    "SessionManager: skipped auto-lock on app background because QR scanner is active"
+                );
+            } else {
+                self.lock_now();
+                log::info!("SessionManager: auto-locked on app background (lock_on_pause policy)");
+            }
         }
     }
 
@@ -226,6 +276,10 @@ impl SessionManager {
                     available: self.hardware.qr_available,
                     active: self.hardware.qr_active,
                     camera_permission: self.hardware.camera_permission,
+                }),
+                battery: Some(generated::AppSessionBatteryHardwareStatusProto {
+                    charging: self.hardware.battery_charging,
+                    level_percent: self.hardware.battery_level_percent,
                 }),
             }),
             fatal_error: self.fatal_error.clone().unwrap_or_default(),
@@ -389,6 +443,23 @@ mod tests {
     }
 
     #[test]
+    fn no_auto_lock_while_qr_scanner_active() {
+        let mut mgr = SessionManager {
+            lock_enabled: true,
+            lock_on_pause: true,
+            ..SessionManager::default()
+        };
+
+        let facts = generated::SessionHardwareFactsProto {
+            app_foreground: false,
+            qr_active: true,
+            ..Default::default()
+        };
+        mgr.apply_hardware_facts(&facts);
+        assert!(!mgr.lock_locked);
+    }
+
+    #[test]
     fn hardware_facts_round_trip() {
         let _g = setup_test_env();
         // SDK_READY already reset to false by setup_test_env
@@ -402,6 +473,8 @@ mod tests {
             qr_available: true,
             qr_active: false,
             camera_permission: true,
+            battery_charging: false,
+            battery_level_percent: 100,
         };
         let bytes = facts.encode_to_vec();
         let result = update_hardware_and_snapshot(&bytes);
@@ -436,6 +509,51 @@ mod tests {
         assert!(mgr.lock_enabled);
         assert_eq!(mgr.lock_method, "combo");
         assert!(!mgr.lock_on_pause);
+        assert!(mgr.lock_locked);
+    }
+
+    #[test]
+    fn cold_start_with_enabled_lock_defaults_to_locked() {
+        let _g = setup_test_env();
+        AppState::handle_app_state_request(LOCK_ENABLED_KEY, "set", "true");
+        AppState::handle_app_state_request(LOCK_METHOD_KEY, "set", "pin");
+        AppState::handle_app_state_request(LOCK_ON_PAUSE_KEY, "set", "true");
+        AppState::handle_app_state_request(LOCK_LOCKED_KEY, "set", "false");
+
+        let mut mgr = SessionManager::default();
+        mgr.sync_lock_config_from_app_state();
+
+        assert!(mgr.lock_enabled);
+        assert!(mgr.lock_locked);
+        assert_eq!(
+            AppState::handle_app_state_request(LOCK_LOCKED_KEY, "get", ""),
+            "true"
+        );
+    }
+
+    #[test]
+    fn runtime_unlock_persists_until_next_process_start() {
+        let _g = setup_test_env();
+        AppState::handle_app_state_request(LOCK_ENABLED_KEY, "set", "true");
+        AppState::handle_app_state_request(LOCK_METHOD_KEY, "set", "pin");
+        AppState::handle_app_state_request(LOCK_ON_PAUSE_KEY, "set", "true");
+
+        let mut mgr = SessionManager::default();
+        mgr.sync_lock_config_from_app_state();
+        assert!(mgr.lock_locked);
+
+        mgr.unlock_now();
+        assert_eq!(
+            AppState::handle_app_state_request(LOCK_LOCKED_KEY, "get", ""),
+            "false"
+        );
+
+        mgr.sync_lock_config_from_app_state();
+        assert!(!mgr.lock_locked);
+
+        let mut restarted = SessionManager::default();
+        restarted.sync_lock_config_from_app_state();
+        assert!(restarted.lock_locked);
     }
 
     #[test]

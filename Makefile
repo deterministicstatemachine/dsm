@@ -32,6 +32,8 @@ REPO_JNILIBS_DIR := $(NDK_DIR)/jniLibs
 CARGO_CONFIG := $(NDK_DIR)/dsm_sdk/.cargo/config.toml
 CARGO_CONFIG_TEMPLATE := $(NDK_DIR)/dsm_sdk/.cargo/config.toml.template
 ANDROID_LOCAL_PROPERTIES := $(ANDROID_DIR)/local.properties
+RUST_TOOLCHAIN_FILE := $(REPO_ROOT)/rust-toolchain.toml
+ANDROID_APP_GRADLE := $(ANDROID_DIR)/app/build.gradle.kts
 
 .DEFAULT_GOAL := help
 
@@ -64,7 +66,10 @@ help: ## Show this help
 .PHONY: doctor
 doctor: ## Check local prerequisites and repo state without changing files
 	@echo "==> DSM doctor"
-	@command -v cargo >/dev/null 2>&1 && echo "    cargo: $$(cargo --version)" || echo "    MISSING: cargo (install from https://rustup.rs)"
+	@PINNED_RUST="$$(sed -n 's/^channel = \"\([^\"]*\)\".*/\1/p' "$(RUST_TOOLCHAIN_FILE)" | head -1)"; \
+	command -v cargo >/dev/null 2>&1 && echo "    cargo: $$(cargo --version)" || echo "    MISSING: cargo (install from https://rustup.rs)"; \
+	command -v rustc >/dev/null 2>&1 && echo "    rustc: $$(rustc --version)" || echo "    MISSING: rustc (install from https://rustup.rs)"; \
+	[ -n "$$PINNED_RUST" ] && echo "    rust toolchain pin: $$PINNED_RUST ($(notdir $(RUST_TOOLCHAIN_FILE)))" || true
 	@command -v rustfmt >/dev/null 2>&1 && echo "    rustfmt: installed" || echo "    MISSING: rustfmt (run: rustup component add rustfmt)"
 	@command -v cargo-clippy >/dev/null 2>&1 && echo "    clippy: installed" || echo "    MISSING: clippy (run: rustup component add clippy)"
 	@command -v protoc >/dev/null 2>&1 && echo "    protoc: $$(protoc --version)" || echo "    MISSING: protoc"
@@ -73,14 +78,35 @@ doctor: ## Check local prerequisites and repo state without changing files
 	@command -v adb >/dev/null 2>&1 && echo "    adb: available" || echo "    adb: optional (needed only for device install/debug)"
 	@command -v psql >/dev/null 2>&1 && echo "    psql: available" || echo "    psql: optional until you run local storage nodes"
 	@command -v java >/dev/null 2>&1 && echo "    java: $$(java -version 2>&1 | head -1)" || echo "    java: optional until Android builds"
-	@if [ -n "$$ANDROID_NDK_HOME$$ANDROID_NDK_ROOT" ]; then \
-		if [ -n "$$ANDROID_NDK_HOME" ]; then \
-			echo "    android ndk: configured via ANDROID_NDK_HOME"; \
+	@command -v cargo-ndk >/dev/null 2>&1 && echo "    cargo-ndk: $$(cargo ndk --version)" || echo "    cargo-ndk: optional until Android builds (install via cargo install cargo-ndk)"
+	@GRADLE_NDK_VERSION="$$(sed -n 's/.*ndkVersion = \"\([^\"]*\)\".*/\1/p' "$(ANDROID_APP_GRADLE)" | head -1)"; \
+	NDK=""; \
+	NDK_SOURCE=""; \
+	NDK_VERSION=""; \
+	HOST_TAG=""; \
+	if [ -n "$$ANDROID_NDK_HOME" ]; then \
+		NDK="$$ANDROID_NDK_HOME"; \
+		NDK_SOURCE="ANDROID_NDK_HOME"; \
+	elif [ -n "$$ANDROID_NDK_ROOT" ]; then \
+		NDK="$$ANDROID_NDK_ROOT"; \
+		NDK_SOURCE="ANDROID_NDK_ROOT"; \
+	fi; \
+	if [ -n "$$NDK" ]; then \
+		if [ -d "$$NDK" ]; then \
+			NDK_VERSION="$$(basename "$$NDK")"; \
+			HOST_TAG="$$(ls "$$NDK/toolchains/llvm/prebuilt" 2>/dev/null | head -1)"; \
+			echo "    android ndk: $$NDK_SOURCE -> $$NDK"; \
+			echo "    android ndk version: $$NDK_VERSION"; \
+			[ -n "$$HOST_TAG" ] && echo "    android ndk host tag: $$HOST_TAG" || echo "    android ndk host tag: unresolved"; \
 		else \
-			echo "    android ndk: configured via ANDROID_NDK_ROOT"; \
+			echo "    android ndk: $$NDK_SOURCE points to missing directory ($$NDK)"; \
 		fi; \
 	else \
 		echo "    android ndk: not configured (run make setup before Android builds)"; \
+	fi; \
+	[ -n "$$GRADLE_NDK_VERSION" ] && echo "    gradle ndkVersion: $$GRADLE_NDK_VERSION" || true; \
+	if [ -n "$$NDK_VERSION" ] && [ -n "$$GRADLE_NDK_VERSION" ] && [ "$$NDK_VERSION" != "$$GRADLE_NDK_VERSION" ]; then \
+		echo "    WARNING: configured NDK version ($$NDK_VERSION) does not match Gradle ndkVersion ($$GRADLE_NDK_VERSION)"; \
 	fi
 	@SDK=""; \
 	SDK_SOURCE=""; \
@@ -104,8 +130,19 @@ doctor: ## Check local prerequisites and repo state without changing files
 	else \
 		echo "    frontend deps: missing (run make setup)"; \
 	fi
-	@if [ -f "$(CARGO_CONFIG)" ]; then \
+	@CURRENT_NDK="$${ANDROID_NDK_HOME:-$$ANDROID_NDK_ROOT}"; \
+	if [ -f "$(CARGO_CONFIG)" ]; then \
+		CFG_NDK="$$(sed -n 's/^ANDROID_NDK_ROOT = { value = \"\([^\"]*\)\",.*/\1/p' "$(CARGO_CONFIG)" | head -1)"; \
+		CFG_VERSION=""; \
+		CFG_HOST_TAG="$$(sed -n 's|.*toolchains/llvm/prebuilt/\([^/]*\)/bin/.*|\1|p' "$(CARGO_CONFIG)" | head -1)"; \
+		[ -n "$$CFG_NDK" ] && CFG_VERSION="$$(basename "$$CFG_NDK")"; \
 		echo "    android cargo config: present"; \
+		[ -n "$$CFG_NDK" ] && echo "      ndk root: $$CFG_NDK" || true; \
+		[ -n "$$CFG_VERSION" ] && echo "      ndk version: $$CFG_VERSION" || true; \
+		[ -n "$$CFG_HOST_TAG" ] && echo "      host tag: $$CFG_HOST_TAG" || true; \
+		if [ -n "$$CURRENT_NDK" ] && [ -n "$$CFG_NDK" ] && [ "$$CFG_NDK" != "$$CURRENT_NDK" ]; then \
+			echo "    WARNING: .cargo/config.toml NDK root differs from the current environment"; \
+		fi; \
 	else \
 		echo "    android cargo config: missing (run make setup)"; \
 	fi
@@ -137,25 +174,45 @@ android-sdk-config: ## Detect Android SDK and write ignored local.properties for
 .PHONY: setup
 setup: ## First-time developer setup: check deps, auto-configure Android, install frontend deps
 	@echo "==> Checking prerequisites..."
+	@PINNED_RUST="$$(sed -n 's/^channel = \"\([^\"]*\)\".*/\1/p' "$(RUST_TOOLCHAIN_FILE)" | head -1)"; \
+	[ -n "$$PINNED_RUST" ] && echo "==> Rust toolchain pin: $$PINNED_RUST ($(notdir $(RUST_TOOLCHAIN_FILE)))" || true
 	@command -v cargo >/dev/null 2>&1 || { echo "ERROR: Rust/cargo not found. Install from https://rustup.rs"; exit 1; }
+	@command -v rustc >/dev/null 2>&1 || { echo "ERROR: rustc not found. Install from https://rustup.rs"; exit 1; }
+	@echo "    cargo: $$(cargo --version)"
+	@echo "    rustc: $$(rustc --version)"
 	@command -v npm >/dev/null 2>&1 || { echo "ERROR: npm not found. Install Node.js 20+"; exit 1; }
 	@command -v protoc >/dev/null 2>&1 || { echo "ERROR: protoc not found. Install protobuf compiler"; exit 1; }
 	@command -v adb >/dev/null 2>&1 || echo "WARNING: adb not found — install Android Platform Tools for device installs"
 	@$(MAKE) android-sdk-config
-	@if [ -z "$$ANDROID_NDK_HOME" ] && [ -z "$$ANDROID_NDK_ROOT" ]; then \
+	@GRADLE_NDK_VERSION="$$(sed -n 's/.*ndkVersion = \"\([^\"]*\)\".*/\1/p' "$(ANDROID_APP_GRADLE)" | head -1)"; \
+	if [ -z "$$ANDROID_NDK_HOME" ] && [ -z "$$ANDROID_NDK_ROOT" ]; then \
 		echo "WARNING: ANDROID_NDK_HOME is not set — skipping Android cargo config generation."; \
 		echo "  Set it later and re-run 'make setup' before Android builds."; \
 	else \
-		command -v cargo-ndk >/dev/null 2>&1 || { echo "Installing cargo-ndk..."; cargo install cargo-ndk; }; \
 		NDK="$${ANDROID_NDK_HOME:-$$ANDROID_NDK_ROOT}"; \
+		[ -d "$$NDK" ] || { echo "ERROR: configured Android NDK path does not exist: $$NDK"; exit 1; }; \
+		HOST_TAG="$$(ls "$$NDK/toolchains/llvm/prebuilt" 2>/dev/null | head -1)"; \
+		[ -n "$$HOST_TAG" ] || { echo "ERROR: could not detect Android NDK host tag under $$NDK/toolchains/llvm/prebuilt"; exit 1; }; \
+		NDK_VERSION="$$(basename "$$NDK")"; \
+		echo "==> Android NDK resolved: $$NDK"; \
+		echo "    version: $$NDK_VERSION"; \
+		echo "    host tag: $$HOST_TAG"; \
+		[ -n "$$GRADLE_NDK_VERSION" ] && echo "    gradle ndkVersion: $$GRADLE_NDK_VERSION" || true; \
+		if [ -n "$$GRADLE_NDK_VERSION" ] && [ "$$NDK_VERSION" != "$$GRADLE_NDK_VERSION" ]; then \
+			echo "WARNING: configured NDK version ($$NDK_VERSION) does not match Gradle ndkVersion ($$GRADLE_NDK_VERSION)."; \
+		fi; \
+		command -v cargo-ndk >/dev/null 2>&1 || { echo "Installing cargo-ndk..."; cargo install cargo-ndk; }; \
+		echo "    cargo-ndk: $$(cargo ndk --version)"; \
 		mkdir -p "$$(dirname "$(CARGO_CONFIG)")"; \
 		echo "==> Refreshing dsm_client/deterministic_state_machine/dsm_sdk/.cargo/config.toml from template..."; \
 		sed \
 			-e "s|__NDK_ROOT__|$$NDK|g" \
-			-e "s|__NDK_HOST_TAG__|$$(ls $$NDK/toolchains/llvm/prebuilt/ | head -1)|g" \
+			-e "s|__NDK_HOST_TAG__|$$HOST_TAG|g" \
 			$(CARGO_CONFIG_TEMPLATE) > "$(CARGO_CONFIG).tmp"; \
 		mv "$(CARGO_CONFIG).tmp" "$(CARGO_CONFIG)"; \
 		echo "    Refreshed: dsm_client/deterministic_state_machine/dsm_sdk/.cargo/config.toml"; \
+		echo "    Configured NDK root: $$NDK"; \
+		echo "    Configured NDK host tag: $$HOST_TAG"; \
 	fi
 	@if [ ! -d "$(FRONTEND_DIR)/node_modules" ]; then \
 		echo "==> Installing frontend dependencies..."; \

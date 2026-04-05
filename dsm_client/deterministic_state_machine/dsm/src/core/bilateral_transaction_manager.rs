@@ -385,7 +385,38 @@ impl BilateralTransactionManager {
 
     /// Advance the shared relationship chain tip forward.
     /// Requires a valid stitched receipt (enforced by caller). Divergence = Tripwire.
+    ///
+    /// This helper is the single mutation primitive that re-syncs the in-memory
+    /// BTM anchor AND contact_manager's contact-cache to a new authoritative tip
+    /// (typically pulled from SQLite). Both in-memory caches MUST be updated
+    /// atomically here so no caller can leave them asymmetric — otherwise the
+    /// intra-device consistency tripwire inside finalize_offline_transfer_with_entropy
+    /// fires as a self-inflicted wound.
+    ///
+    /// The SMT proof on the contact is cleared because this raw-tip sync carries
+    /// no proof material; a fresh proof is recorded on the next authoritative
+    /// bilateral commit (update_contact_chain_tip_bilateral) or unilateral send
+    /// (update_contact_chain_tip_unilateral).
     pub fn advance_chain_tip(&mut self, remote_device_id: &[u8; 32], new_tip: [u8; 32]) {
+        // log::info! (NOT tracing!) so this appears in Android logcat for
+        // deployment verification — the dsm crate's tracing events are not
+        // bridged to android_logger.
+        let prev_anchor_short = self
+            .relationships
+            .get(remote_device_id)
+            .map(|a| labeling::hash_to_short_id(&a.chain_tip))
+            .unwrap_or_else(|| "None".to_string());
+        let prev_contact_short = self
+            .contact_manager
+            .get_contact(remote_device_id)
+            .and_then(|c| c.chain_tip.map(|t| labeling::hash_to_short_id(&t)))
+            .unwrap_or_else(|| "None".to_string());
+        log::info!(
+            "[BTM] advance_chain_tip: anchor={} contact={} -> new={}",
+            prev_anchor_short,
+            prev_contact_short,
+            labeling::hash_to_short_id(&new_tip)
+        );
         if let Some(anchor) = self.relationships.get_mut(remote_device_id) {
             info!(
                 "[BTM] advance_chain_tip: {} -> {}",
@@ -394,6 +425,10 @@ impl BilateralTransactionManager {
             );
             anchor.chain_tip = new_tip;
             anchor.last_sync_at = mono_commit_height();
+        }
+        if let Some(contact_mut) = self.contact_manager.get_contact_mut(remote_device_id) {
+            contact_mut.chain_tip = Some(new_tip);
+            contact_mut.chain_tip_smt_proof = None;
         }
     }
 
@@ -814,6 +849,11 @@ impl BilateralTransactionManager {
         if let Some(contact) = self.contact_manager.get_contact(remote_device_id) {
             if let Some(contact_tip) = contact.chain_tip {
                 if anchor.chain_tip != contact_tip {
+                    log::warn!(
+                        "[BTM][TRIPWIRE:exec_offline] anchor={} contact={}",
+                        labeling::hash_to_short_id(&anchor.chain_tip),
+                        labeling::hash_to_short_id(&contact_tip),
+                    );
                     return Err(DsmError::deterministic_safety(
                         DeterministicSafetyClass::ParentConsumed,
                         "Tripwire: relationship chain tip diverged from persisted value",
@@ -870,6 +910,11 @@ impl BilateralTransactionManager {
         if let Some(contact) = self.contact_manager.get_contact(remote_device_id) {
             if let Some(contact_tip) = contact.chain_tip {
                 if anchor.chain_tip != contact_tip {
+                    log::warn!(
+                        "[BTM][TRIPWIRE:exec_online] anchor={} contact={}",
+                        labeling::hash_to_short_id(&anchor.chain_tip),
+                        labeling::hash_to_short_id(&contact_tip),
+                    );
                     return Err(DsmError::deterministic_safety(
                         DeterministicSafetyClass::ParentConsumed,
                         "Tripwire: relationship chain tip diverged from persisted value",
@@ -1138,6 +1183,10 @@ impl BilateralTransactionManager {
             if let Some(anchor_mut) = self.relationships.get_mut(remote_device_id) {
                 anchor_mut.chain_tip = tip;
             }
+            if let Some(contact_mut) = self.contact_manager.get_contact_mut(remote_device_id) {
+                contact_mut.chain_tip = Some(tip);
+                contact_mut.chain_tip_smt_proof = None;
+            }
             anchor.chain_tip = tip;
         }
 
@@ -1147,6 +1196,14 @@ impl BilateralTransactionManager {
         // the parent hash, and finalizing would violate the Tripwire theorem.
         if Some(anchor.chain_tip) != pre.local_chain_tip_at_creation {
             let class = DeterministicSafetyClass::ParentConsumed;
+            log::warn!(
+                "[BTM][TRIPWIRE:precommit-parent-consumed] anchor={} precommit_tip={} class={}",
+                labeling::hash_to_short_id(&anchor.chain_tip),
+                pre.local_chain_tip_at_creation
+                    .map(|t| labeling::hash_to_short_id(&t))
+                    .unwrap_or_else(|| "None".to_string()),
+                class.as_str()
+            );
             error!(
                 "[BTM] Deterministic safety rejection [{}]: chain_tip={} precommit_tip={}",
                 class.as_str(),
@@ -1165,6 +1222,18 @@ impl BilateralTransactionManager {
         if let Some(contact) = self.contact_manager.get_contact(remote_device_id) {
             if let Some(contact_tip) = contact.chain_tip {
                 if anchor.chain_tip != contact_tip {
+                    log::warn!(
+                        "[BTM][TRIPWIRE:finalize] anchor={} contact={} precommit_tip={} store={}",
+                        labeling::hash_to_short_id(&anchor.chain_tip),
+                        labeling::hash_to_short_id(&contact_tip),
+                        pre.local_chain_tip_at_creation
+                            .map(|t| labeling::hash_to_short_id(&t))
+                            .unwrap_or_else(|| "None".to_string()),
+                        self.chain_tip_store
+                            .get_contact_chain_tip(remote_device_id)
+                            .map(|t| labeling::hash_to_short_id(&t))
+                            .unwrap_or_else(|| "None".to_string()),
+                    );
                     return Err(DsmError::deterministic_safety(
                         DeterministicSafetyClass::ParentConsumed,
                         "Tripwire: relationship chain tip diverged from persisted value",

@@ -12,24 +12,21 @@ import { lockSessionViaRouter, unlockSessionViaRouter } from '../dsm/WebViewBrid
 
 interface Args {
   appState: AppState;
-  setAppState: (s: AppState) => void;
 }
 
-export function useLockState({ appState, setAppState }: Args) {
+export function useLockState({ appState }: Args) {
   const lock = useCallback(() => {
     if (appState !== 'wallet_ready') return;
-    void lockSessionViaRouter().catch(() => setAppState('locked'));
-  }, [appState, setAppState]);
+    void lockSessionViaRouter().catch(() => {});
+  }, [appState]);
 
   // Always-current ref so event handlers fired asynchronously get the live callback.
   const lockRef = useRef(lock);
   lockRef.current = lock;
 
   const unlock = useCallback(() => {
-    return unlockSessionViaRouter().catch(() => {
-      setAppState('wallet_ready');
-    });
-  }, [setAppState]);
+    return unlockSessionViaRouter().catch(() => {});
+  }, []);
 
   // Track QR scanner active state to suppress lock during scanning
   const nativeQrScannerActiveRef = useRef<boolean>(false);

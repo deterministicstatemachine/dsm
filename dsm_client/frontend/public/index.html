@@ -57,8 +57,6 @@
     .battery-light.full span{background-color:#44ffe3!important}
     .battery-light.low span{background-color:#ffe344!important}
     .battery-light.medium span{background-color:#ff00ea!important}
-  /* Bluetooth active indicator: force blue glow and subtle pulse */
-  .battery-light.bluetooth span{background-color:#1486ff!important;box-shadow:0 0 4px rgba(20,134,255,.95),0 0 8px rgba(20,134,255,.8),0 0 14px rgba(20,134,255,.55);animation:batteryPulse 2s infinite!important}
     @keyframes batteryCharging{0%{background-color:#a244ff;box-shadow:0 0 4px rgba(162,68,255,.95),0 0 8px rgba(162,68,255,.75),0 0 14px rgba(162,68,255,.45)}33%{background-color:#41eef8;box-shadow:0 0 4px rgba(65,238,248,.95),0 0 8px rgba(65,238,248,.75),0 0 14px rgba(65,238,248,.45)}66%{background-color:#44ffe3;box-shadow:0 0 4px rgba(68,255,227,.95),0 0 8px rgba(68,255,227,.75),0 0 14px rgba(68,255,227,.45)}100%{background-color:#fff644;box-shadow:0 0 4px rgba(255,246,68,.95),0 0 8px rgba(255,246,68,.75),0 0 14px rgba(255,246,68,.45)}}
     @keyframes batteryPulse{0%,100%{opacity:1}50%{opacity:.6}}
     .dsm-shell-logo{position:absolute;top:0;left:50%;transform:translateX(-50%);z-index:10;pointer-events:none;width:112px;height:45px;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#333}
@@ -1105,7 +1103,6 @@ html[data-shell-theme] .stateboy::before {
     if (navItems[0]) navItems[0].classList.add('active');
  // Initialize battery monitoring after DOM is ready to ensure elements exist
    document.addEventListener('DOMContentLoaded', initBatteryMonitoring);
-
     // Wire physical StateBoy buttons → 'sb-btn' CustomEvent for combo/lock input
     document.addEventListener('DOMContentLoaded', function() {
       var btnMap = {
@@ -1174,7 +1171,7 @@ html[data-shell-theme] .stateboy::before {
         fallbackChargingDetection(batteryLight);
       }
     }
-    
+
     function updateBatteryDisplay(battery, batteryLight) {
       // Remove all battery classes
       batteryLight.classList.remove('charging', 'full', 'medium', 'low');

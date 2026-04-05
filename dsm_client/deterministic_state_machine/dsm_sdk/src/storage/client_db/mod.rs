@@ -298,7 +298,8 @@ fn create_schema(conn: &Connection) -> Result<()> {
             local_bilateral_chain_tip   BLOB,
             previous_chain_tip          BLOB,
             observed_remote_chain_tip   BLOB,
-            observed_remote_tip_updated_at INTEGER
+            observed_remote_tip_updated_at INTEGER,
+            observed_remote_tip_source   INTEGER
         );
 
         CREATE TABLE IF NOT EXISTS auth_tokens(
@@ -469,6 +470,16 @@ fn create_schema(conn: &Connection) -> Result<()> {
 
         CREATE INDEX IF NOT EXISTS idx_transactions_created
             ON transactions(created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS bilateral_sender_settlements(
+            tx_id             TEXT NOT NULL,
+            sender_device_id  TEXT NOT NULL,
+            completed_at      INTEGER NOT NULL,
+            PRIMARY KEY(tx_id, sender_device_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_bilateral_sender_settlements_device
+            ON bilateral_sender_settlements(sender_device_id);
 
         CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_device_id
             ON contacts(device_id);
@@ -857,10 +868,12 @@ fn ensure_contacts_observed_remote_tip_columns(conn: &Connection) -> Result<()> 
     let cols = stmt.query_map([], |row| row.get::<_, String>(1))?;
     let mut has_observed_tip = false;
     let mut has_observed_tip_updated_at = false;
+    let mut has_observed_tip_source = false;
     for col in cols {
         match col?.as_str() {
             "observed_remote_chain_tip" => has_observed_tip = true,
             "observed_remote_tip_updated_at" => has_observed_tip_updated_at = true,
+            "observed_remote_tip_source" => has_observed_tip_source = true,
             _ => {}
         }
     }
@@ -873,6 +886,12 @@ fn ensure_contacts_observed_remote_tip_columns(conn: &Connection) -> Result<()> 
     if !has_observed_tip_updated_at {
         conn.execute(
             "ALTER TABLE contacts ADD COLUMN observed_remote_tip_updated_at INTEGER",
+            [],
+        )?;
+    }
+    if !has_observed_tip_source {
+        conn.execute(
+            "ALTER TABLE contacts ADD COLUMN observed_remote_tip_source INTEGER",
             [],
         )?;
     }
@@ -1413,13 +1432,139 @@ mod tests {
         seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable");
         update_local_bilateral_chain_tip(&device_id, &local_tip).expect("seed local tip");
 
-        record_observed_remote_chain_tip(&device_id, &observed_tip).expect("record observed tip");
+        record_observed_remote_chain_tip(
+            &device_id,
+            &observed_tip,
+            ObservedRemoteTipSource::DeferredInbox,
+        )
+        .expect("record observed tip");
 
         assert_eq!(get_contact_chain_tip_raw(&device_id), None);
         assert_eq!(get_local_bilateral_chain_tip(&device_id), Some(local_tip));
         assert_eq!(
             get_observed_remote_chain_tip(&device_id).expect("load observed tip"),
             Some(observed_tip)
+        );
+        assert_eq!(
+            get_observed_remote_tip_record(&device_id)
+                .expect("load observed tip record")
+                .expect("observed tip record exists")
+                .source,
+            ObservedRemoteTipSource::DeferredInbox
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_deferred_observed_remote_tip_does_not_block_send_ready_relationship() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        reset_database_for_tests();
+        init_database().expect("init db");
+
+        let device_id = [0x42u8; 32];
+        let genesis_hash = [0x52u8; 32];
+        let canonical_tip = [0x62u8; 32];
+        let deferred_tip = [0x72u8; 32];
+
+        seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable");
+        restore_finalized_bilateral_chain_tip(&device_id, &canonical_tip)
+            .expect("seed canonical tip");
+        record_observed_remote_chain_tip(
+            &device_id,
+            &deferred_tip,
+            ObservedRemoteTipSource::DeferredInbox,
+        )
+        .expect("record deferred observation");
+
+        let status =
+            crate::handlers::relationship_status::derive_local_send_status_for_device_id(&device_id);
+        assert!(
+            status.send_ready,
+            "deferred inbox observation should not hard-block a healthy relationship"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_live_peer_claim_blocks_send_ready_relationship() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        reset_database_for_tests();
+        init_database().expect("init db");
+
+        let device_id = [0x43u8; 32];
+        let genesis_hash = [0x53u8; 32];
+        let canonical_tip = [0x63u8; 32];
+        let peer_claim_tip = [0x73u8; 32];
+
+        seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable");
+        restore_finalized_bilateral_chain_tip(&device_id, &canonical_tip)
+            .expect("seed canonical tip");
+        record_observed_remote_chain_tip(
+            &device_id,
+            &peer_claim_tip,
+            ObservedRemoteTipSource::LivePeerClaim,
+        )
+        .expect("record live peer claim");
+
+        let status =
+            crate::handlers::relationship_status::derive_local_send_status_for_device_id(&device_id);
+        assert!(
+            !status.send_ready,
+            "live peer claim mismatch should still block send readiness"
+        );
+        assert!(
+            status
+                .send_block_message
+                .contains("Live peer reported a different relationship tip"),
+            "unexpected block message: {}",
+            status.send_block_message
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_sync_bilateral_tips_clears_deferred_observation_after_success() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        reset_database_for_tests();
+        init_database().expect("init db");
+
+        let device_id = [0x44u8; 32];
+        let genesis_hash = [0x54u8; 32];
+        let target_tip = [0x64u8; 32];
+        let stale_local = [0x65u8; 32];
+        let deferred_tip = [0x66u8; 32];
+
+        seed_contact_for_chain_tip_tests(device_id, genesis_hash, "BleCapable");
+        restore_finalized_bilateral_chain_tip(&device_id, &target_tip).expect("seed canonical");
+        update_local_bilateral_chain_tip(&device_id, &stale_local).expect("seed stale local");
+        record_observed_remote_chain_tip(
+            &device_id,
+            &deferred_tip,
+            ObservedRemoteTipSource::DeferredInbox,
+        )
+        .expect("record deferred observation");
+
+        let request = bilateral_tip_sync::TipSyncRequest {
+            counterparty_device_id: device_id,
+            expected_parent_tip: target_tip,
+            target_tip,
+            observed_gate: None,
+            clear_gate_on_success: false,
+        };
+        bilateral_tip_sync::sync_bilateral_tips_atomically(&request)
+            .expect("sync should succeed");
+
+        assert!(
+            get_observed_remote_tip_record(&device_id)
+                .expect("load observed tip record")
+                .is_none(),
+            "authoritative convergence should retire deferred observations"
         );
     }
 
