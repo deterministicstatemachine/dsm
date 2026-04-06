@@ -140,7 +140,9 @@ VARIABLES
     \* Offline bilateral state
     offlineSessions,   \* offlineSessions = active BLE/NFC sessions
     \* Tripwire State
-    ledger             \* Set of accepted receipts: [rel: {d1,d2}, oldTip: Nat, newTip: Nat]
+    ledger,            \* Set of accepted receipts: [rel: {d1,d2}, oldTip: Nat, newTip: Nat]
+    \* Token balances (§8 conservation)
+    deviceBalance      \* deviceBalance[d] = available ERA balance for device d
 
 \* ---------------------------------------------------------------------------
 \* Refinement mapping (Concrete DSM -> DSM_Abstract)
@@ -313,6 +315,7 @@ TypeInvariant ==
     /\ phase \in 0..3
     /\ step \in Nat
     /\ offlineSessions \subseteq DeviceIds \X DeviceIds  \* Active offline sessions
+    /\ deviceBalance \in [DeviceIds -> Nat]
 
 Init ==
     /\ devices = [g \in GenesisIds |-> {}]
@@ -337,6 +340,7 @@ Init ==
     /\ step = 0
     /\ offlineSessions = {}
     /\ ledger = {}
+    /\ deviceBalance = [d \in DeviceIds |-> MaxPayload]  \* §8: devices start with max supply for model checking
 
 \* Add a device to a genesis
 AddDevice(g, d) ==
@@ -345,7 +349,7 @@ AddDevice(g, d) ==
     /\ Cardinality(devices[g]) < MaxDevices
     /\ devices' = [devices EXCEPT ![g] = devices[g] \union {d}]
     /\ step' = step + 1
-    /\ UNCHANGED <<relationships, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, offlineSessions, ledger>>
+    /\ UNCHANGED <<relationships, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, offlineSessions, ledger, deviceBalance>>
 
 \* Create a bilateral relationship between two devices
 CreateRelationship(d1, d2) ==
@@ -358,7 +362,7 @@ CreateRelationship(d1, d2) ==
     \* Tripwire: Record the transition 0 -> 1
     /\ ledger' = ledger \union {[rel |-> {d1, d2}, oldTip |-> 0, newTip |-> 1]}
     /\ step' = step + 1
-    /\ UNCHANGED <<devices, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, offlineSessions>>
+    /\ UNCHANGED <<devices, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, offlineSessions, deviceBalance>>
 
 \* ---------------------------------------------------------------------------
 \* GLOBAL ADVERSARIAL NETWORK MODEL (online/unilateral transport)
@@ -372,15 +376,18 @@ CreateRelationship(d1, d2) ==
 NetSend(d1, d2, payload) ==
     /\ d1 # d2
     /\ Cardinality(net) < MaxNet
+    /\ payload > 0                        \* §8: cannot send zero
+    /\ deviceBalance[d1] >= payload       \* §8: sender must have sufficient balance
     /\ net' = net \union { [id |-> nextMsgId, to |-> d2, from |-> d1, payload |-> payload, dupLeft |-> MaxDupPerMsg, parentTip |-> relationships[<<d1, d2>>].tip] }
     /\ nextMsgId' = nextMsgId + 1
+    /\ deviceBalance' = [deviceBalance EXCEPT ![d1] = @ - payload]
     /\ relationships' = [relationships EXCEPT
          ![<<d1, d2>>] = [tip |-> relationships[<<d1, d2>>].tip,
                           state |-> "active"],
          ![<<d2, d1>>] = [tip |-> relationships[<<d2, d1>>].tip,
                           state |-> "active"]]
     /\ step' = step + 1
-    /\ UNCHANGED <<devices, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, phase, ledger>>
+    /\ UNCHANGED <<devices, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, phase, ledger, deviceBalance>>
 
 \* Deliver any message from the bag (unordered delivery semantics).
 NetDeliver ==
@@ -393,6 +400,7 @@ NetDeliver ==
              /\ relationships' = [relationships EXCEPT
                   ![<<d1, d2>>] = [tip |-> relationships[<<d1, d2>>].tip + 1, state |-> "active"],
                   ![<<d2, d1>>] = [tip |-> relationships[<<d2, d1>>].tip + 1, state |-> "active"]]
+             /\ deviceBalance' = [deviceBalance EXCEPT ![d2] = @ + msg.payload]
              /\ ledger' = ledger \union {[rel |-> {d1, d2}, oldTip |-> msg.parentTip, newTip |-> msg.parentTip + 1]}
              /\ net' = net \ {msg}
              /\ step' = step + 1
@@ -404,7 +412,7 @@ NetDrop ==
     /\ \E msg \in net :
          /\ net' = net \ {msg}
          /\ step' = step + 1
-         /\ UNCHANGED <<devices, relationships, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, phase, ledger>>
+         /\ UNCHANGED <<devices, relationships, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, phase, ledger, deviceBalance>>
 
 \* Duplicate any message (adversary) if its dup budget remains and MaxNet not exceeded.
 NetDuplicate ==
@@ -419,7 +427,7 @@ NetDuplicate ==
                                         }
                  /\ nextMsgId' = nextMsgId + 1
                  /\ step' = step + 1
-                 /\ UNCHANGED <<devices, relationships, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, phase, ledger>>
+                 /\ UNCHANGED <<devices, relationships, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, phase, ledger, deviceBalance>>
 
 \* NOTE: NetReorder intentionally removed.
 
@@ -429,7 +437,7 @@ AddStorageNode(d) ==
     /\ d \notin storageNodes
     /\ storageNodes' = storageNodes \union {d}
     /\ step' = step + 1
-    /\ UNCHANGED <<devices, relationships, net, nextMsgId, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, offlineSessions, ledger>>
+    /\ UNCHANGED <<devices, relationships, net, nextMsgId, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, offlineSessions, ledger, deviceBalance>>
 
 \* ============================================================================
 \* CRYPTOGRAPHIC OPERATIONS (ABSTRACTED)
@@ -445,19 +453,19 @@ GenerateKeys(d) ==
     /\ keys[d].sphincs = 0  \* Not yet generated
     /\ keys' = [keys EXCEPT ![d] = [sphincs |-> 1, kyber |-> 1]]  \* Mark as generated
     /\ step' = step + 1
-    /\ UNCHANGED <<devices, relationships, net, nextMsgId, storageNodes, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, offlineSessions, ledger>>
+    /\ UNCHANGED <<devices, relationships, net, nextMsgId, storageNodes, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, offlineSessions, ledger, deviceBalance>>
 
 \* Sign a message (abstracted)
 SignMessage(d, msg) ==
     /\ keys[d].sphincs = 1  \* Keys must be generated
     /\ step' = step + 1
-    /\ UNCHANGED <<devices, relationships, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, ledger>>
+    /\ UNCHANGED <<devices, relationships, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, ledger, deviceBalance>>
 
 \* Encrypt using a KEM (abstracted)
 EncryptWithKyber(d1, d2, msg) ==
     /\ keys[d1].kyber = 1 /\ keys[d2].kyber = 1  \* Both devices must have keys
     /\ step' = step + 1
-    /\ UNCHANGED <<devices, relationships, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, ledger>>
+    /\ UNCHANGED <<devices, relationships, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, ledger, deviceBalance>>
 
 \* ============================================================================
 \* OFFLINE BILATERAL TRANSFERS (ABSTRACTED)
@@ -477,7 +485,7 @@ StartOfflineSession(d1, d2) ==
     /\ relationships[<<d2, d1>>].state = "active"
     /\ offlineSessions' = offlineSessions \union {<<d1, d2>>, <<d2, d1>>}
     /\ step' = step + 1
-    /\ UNCHANGED <<devices, relationships, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, ledger>>
+    /\ UNCHANGED <<devices, relationships, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, ledger, deviceBalance>>
 
 \* Perform offline bilateral transfer (abstracted)
 OfflineTransfer(d1, d2, amount) ==
@@ -489,7 +497,7 @@ OfflineTransfer(d1, d2, amount) ==
     /\ ledger' = ledger \union {[rel |-> {d1, d2}, oldTip |-> relationships[<<d1, d2>>].tip, newTip |-> relationships[<<d1, d2>>].tip + 1]}
     /\ offlineSessions' = offlineSessions \ {<<d1, d2>>, <<d2, d1>>}
         /\ step' = step + 1
-        /\ UNCHANGED <<devices, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase>>
+        /\ UNCHANGED <<devices, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, deviceBalance>>
 
 \* ============================================================================
 \* DLV (ABSTRACTED)
@@ -508,7 +516,7 @@ CreateVault(d, v, initialBalance, condition) ==
     /\ vaults' = [vaults EXCEPT ![d] = vaults[d] \union {v}]
     /\ vaultState' = [vaultState EXCEPT ![v] = [owner |-> d, balance |-> initialBalance, locked |-> TRUE, condition |-> condition]]
     /\ step' = step + 1
-    /\ UNCHANGED <<devices, relationships, net, nextMsgId, storageNodes, keys, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, offlineSessions, ledger>>
+    /\ UNCHANGED <<devices, relationships, net, nextMsgId, storageNodes, keys, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, offlineSessions, ledger, deviceBalance>>
 
 \* Unlock a DLV vault when condition is met
 UnlockVault(v, proof) ==
@@ -516,7 +524,7 @@ UnlockVault(v, proof) ==
     /\ proof = vaultState[v].condition  \* Simplified: proof matches condition
     /\ vaultState' = [vaultState EXCEPT ![v] = [vaultState[v] EXCEPT !.locked = FALSE]]
     /\ step' = step + 1
-    /\ UNCHANGED <<devices, relationships, net, nextMsgId, storageNodes, keys, vaults, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, offlineSessions, ledger>>
+    /\ UNCHANGED <<devices, relationships, net, nextMsgId, storageNodes, keys, vaults, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, offlineSessions, ledger, deviceBalance>>
 
 \* ============================================================================
 \* STORAGE NODES (ABSTRACTED)
@@ -530,13 +538,13 @@ UnlockVault(v, proof) ==
 StoreData(d, data) ==
     /\ d \in storageNodes
     /\ step' = step + 1
-    /\ UNCHANGED <<devices, relationships, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, offlineSessions, ledger>>
+    /\ UNCHANGED <<devices, relationships, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, offlineSessions, ledger, deviceBalance>>
 
 \* Replicate data across storage nodes
 ReplicateData(data) ==
     /\ Cardinality(storageNodes) >= 3  \* Need at least 3 nodes for replication
     /\ step' = step + 1
-    /\ UNCHANGED <<devices, relationships, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, offlineSessions, ledger>>
+    /\ UNCHANGED <<devices, relationships, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, offlineSessions, ledger, deviceBalance>>
 
 \* ============================================================================
 \* DJTE (ABSTRACTED)
@@ -570,7 +578,7 @@ UnlockSpendGate(d) ==
     /\ djteSeed' = djteSeed + 1
     /\ phase' = 0
     /\ step' = step + 1
-    /\ UNCHANGED <<devices, relationships, net, nextMsgId, storageNodes, keys, vaults, vaultState, emissionIndex, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, ledger>>
+    /\ UNCHANGED <<devices, relationships, net, nextMsgId, storageNodes, keys, vaults, vaultState, emissionIndex, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, ledger, deviceBalance>>
 
 \* Additional activation instances for an already-activated device.
 \* This models re-activation / re-issuance without turning the model into an infinite JAP printer:
@@ -583,7 +591,7 @@ ActivateAgain(d) ==
      /\ djteSeed' = djteSeed + 1
     /\ phase' = 0
      /\ step' = step + 1
-    /\ UNCHANGED <<devices, relationships, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, emissionIndex, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, ledger>>
+    /\ UNCHANGED <<devices, relationships, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, emissionIndex, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, ledger, deviceBalance>>
 
 \* Trigger DJTE emission event
 \*
@@ -634,7 +642,7 @@ ConsumeJAPAndEmit ==
            /\ phase' = 1
            /\ step' = step + 1
            /\ actCount' = actCount
-           /\ UNCHANGED <<devices, relationships, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, shardLists, phase, actCount, offlineSessions, ledger>>
+           /\ UNCHANGED <<devices, relationships, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, shardLists, phase, actCount, offlineSessions, ledger, deviceBalance>>
 
 
 \* Backwards-compat stub (deprecated): keep as stutter to avoid changing historical docs.
@@ -642,7 +650,7 @@ ConsumeJAPAndEmit ==
 SelectWinner ==
     /\ phase = 3
     /\ step' = step + 1
-    /\ UNCHANGED <<devices, relationships, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, offlineSessions, ledger>>
+    /\ UNCHANGED <<devices, relationships, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, offlineSessions, ledger, deviceBalance>>
 
 \* Phase 2 "consume" step: abstracts the SpentProofSMT leaf insertion effect being
 \* recognized. Since spentJaps is already updated in ConsumeJAPAndEmit, this action
@@ -654,7 +662,7 @@ ConsumeSpentProof ==
          /\ consumedProofs' = consumedProofs \union {p}
          /\ phase' = 2
          /\ step' = step + 1
-         /\ UNCHANGED <<devices, relationships, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, sourceRemaining, offlineSessions, ledger>>
+         /\ UNCHANGED <<devices, relationships, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, sourceRemaining, offlineSessions, ledger, deviceBalance>>
 
 \* Milestone transitions: advance between phase buckets without forcing a single scripted step.
 EnterPhase1 ==
@@ -662,27 +670,27 @@ EnterPhase1 ==
     /\ activatedDevices # {}
     /\ phase' = 1
     /\ step' = step + 1
-    /\ UNCHANGED <<devices, relationships, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, ledger>>
+    /\ UNCHANGED <<devices, relationships, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, ledger, deviceBalance>>
 
 EnterPhase2 ==
     /\ phase = 1
     /\ spentJaps # {}
     /\ phase' = 2
     /\ step' = step + 1
-    /\ UNCHANGED <<devices, relationships, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, ledger>>
+    /\ UNCHANGED <<devices, relationships, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, ledger, deviceBalance>>
 
 EnterPhase3 ==
     /\ phase = 2
     /\ phase' = 3
     /\ step' = step + 1
-    /\ UNCHANGED <<devices, relationships, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, ledger>>
+    /\ UNCHANGED <<devices, relationships, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, ledger, deviceBalance>>
 
 \* Deterministic stutter/termination once phase 3 reached (keeps state space finite).
 PhaseDone ==
     /\ phase = 3
     /\ phase' = 3
     /\ step' = step + 1
-    /\ UNCHANGED <<devices, relationships, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, ledger>>
+    /\ UNCHANGED <<devices, relationships, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, ledger, deviceBalance>>
 
 \* Total stutter/termination for bounded runs: keep state fixed.
 \*
@@ -692,7 +700,7 @@ PhaseDone ==
 \* Explicit stuttering action (useful for debugging enablement/coverage).
 \* It keeps all state variables unchanged. NOTE: this still increments no counters.
 Stutter ==
-    /\ UNCHANGED <<devices, relationships, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, step, offlineSessions, ledger>>
+    /\ UNCHANGED <<devices, relationships, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, step, offlineSessions, ledger, deviceBalance>>
 
 \* Regression harness Next: preserves previous structure.
 HarnessNext ==
@@ -758,7 +766,7 @@ Next ==
     \* - System mode explores the full interleavings without phase gating.
     IF UseHarness THEN HarnessNext ELSE SystemNext
 
-vars == <<devices, relationships, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, step, offlineSessions, ledger>>
+vars == <<devices, relationships, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, step, offlineSessions, ledger, deviceBalance>>
 
 Spec == Init /\ [][Next]_vars
 
