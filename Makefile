@@ -21,7 +21,9 @@
 # Android builds on Windows require WSL2 — see docs/book/03-development-setup.md#windows-setup.
 # ---------------------------------------------------------------------------
 
-SHELL := /bin/bash
+# Prefer homebrew bash (4+) for associative arrays used by SBOM scripts.
+# Fall back to system bash if homebrew isn't installed.
+SHELL := $(shell command -v /opt/homebrew/bin/bash 2>/dev/null || echo /bin/bash)
 REPO_ROOT := $(shell cd "$(dir $(abspath $(lastword $(MAKEFILE_LIST))))" && pwd)
 ANDROID_DIR := $(REPO_ROOT)/dsm_client/android
 NDK_DIR := $(REPO_ROOT)/dsm_client/deterministic_state_machine
@@ -75,6 +77,12 @@ doctor: ## Check local prerequisites and repo state without changing files
 	@command -v protoc >/dev/null 2>&1 && echo "    protoc: $$(protoc --version)" || echo "    MISSING: protoc"
 	@command -v node >/dev/null 2>&1 && echo "    node: $$(node --version)" || echo "    MISSING: node"
 	@command -v npm >/dev/null 2>&1 && echo "    npm: $$(npm --version)" || echo "    MISSING: npm"
+	@BASH_VER=$$(bash --version | head -1 | sed 's/.*version \([0-9]*\).*/\1/'); \
+	if [ "$$BASH_VER" -ge 4 ] 2>/dev/null; then \
+		echo "    bash: version $$BASH_VER (OK)"; \
+	else \
+		echo "    bash: version $$BASH_VER (SBOM scripts need bash 4+; brew install bash)"; \
+	fi
 	@command -v adb >/dev/null 2>&1 && echo "    adb: available" || echo "    adb: optional (needed only for device install/debug)"
 	@command -v psql >/dev/null 2>&1 && echo "    psql: available" || echo "    psql: optional until you run local storage nodes"
 	@command -v java >/dev/null 2>&1 && echo "    java: $$(java -version 2>&1 | head -1)" || echo "    java: optional until Android builds"
@@ -450,8 +458,8 @@ release-preflight: ## Run the full pre-tag release gate (lint, test, audit, CI s
 	@echo "╔══════════════════════════════════════════════════════════╗"
 	@echo "║  ✓ All gates passed — ready to tag                      ║"
 	@echo "║                                                          ║"
-	@echo "║    git tag v0.1.0-beta.1                                 ║"
-	@echo "║    git push origin v0.1.0-beta.1                         ║"
+	@echo "║    git tag v0.1.0-beta.2                                 ║"
+	@echo "║    git push origin v0.1.0-beta.2                         ║"
 	@echo "╚══════════════════════════════════════════════════════════╝"
 
 # ---------------------------------------------------------------------------
