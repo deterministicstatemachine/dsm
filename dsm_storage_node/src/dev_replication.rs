@@ -208,3 +208,66 @@ pub async fn pump_replication_outbox(
 
     delivered
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+
+    #[test]
+    #[serial]
+    fn dev_ports_empty_when_env_unset() {
+        std::env::remove_var("DSM_DEV_NODE_PORTS");
+        assert!(dev_ports().is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn dev_ports_empty_when_env_blank() {
+        std::env::set_var("DSM_DEV_NODE_PORTS", "   ");
+        assert!(dev_ports().is_empty());
+        std::env::remove_var("DSM_DEV_NODE_PORTS");
+    }
+
+    #[test]
+    #[serial]
+    fn dev_ports_parses_single_port() {
+        std::env::set_var("DSM_DEV_NODE_PORTS", "8080");
+        assert_eq!(dev_ports(), vec![8080]);
+        std::env::remove_var("DSM_DEV_NODE_PORTS");
+    }
+
+    #[test]
+    #[serial]
+    fn dev_ports_parses_multiple_ports() {
+        std::env::set_var("DSM_DEV_NODE_PORTS", "8080,8081,8082");
+        assert_eq!(dev_ports(), vec![8080, 8081, 8082]);
+        std::env::remove_var("DSM_DEV_NODE_PORTS");
+    }
+
+    #[test]
+    #[serial]
+    fn dev_ports_ignores_invalid_entries() {
+        std::env::set_var("DSM_DEV_NODE_PORTS", "8080,abc,8082,,9999");
+        assert_eq!(dev_ports(), vec![8080, 8082, 9999]);
+        std::env::remove_var("DSM_DEV_NODE_PORTS");
+    }
+
+    #[test]
+    #[serial]
+    fn dev_ports_handles_whitespace() {
+        std::env::set_var("DSM_DEV_NODE_PORTS", " 8080 , 8081 ");
+        assert_eq!(dev_ports(), vec![8080, 8081]);
+        std::env::remove_var("DSM_DEV_NODE_PORTS");
+    }
+
+    #[test]
+    fn hdr_replicated_constant() {
+        assert_eq!(HDR_REPLICATED, "x-dsm-replicated");
+    }
+
+    #[test]
+    fn hdr_idempotency_key_constant() {
+        assert_eq!(HDR_IDEMPOTENCY_KEY, "x-dsm-idempotency");
+    }
+}

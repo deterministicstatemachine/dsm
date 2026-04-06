@@ -116,3 +116,67 @@ pub fn gossip_routes(state: Arc<AppState>) -> Router<()> {
         .layer(axum::middleware::from_fn(gossip_auth))
         .layer(Extension(state))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prost::Message;
+
+    #[test]
+    fn token_matches_equal() {
+        assert!(token_matches("my-gossip-secret", "my-gossip-secret"));
+    }
+
+    #[test]
+    fn token_matches_not_equal() {
+        assert!(!token_matches("my-gossip-secret", "wrong-token"));
+    }
+
+    #[test]
+    fn token_matches_empty_strings() {
+        assert!(token_matches("", ""));
+        assert!(!token_matches("a", ""));
+        assert!(!token_matches("", "b"));
+    }
+
+    #[test]
+    fn token_matches_constant_time_property() {
+        let t1 = token_matches("aaaa", "aaab");
+        let t2 = token_matches("aaaa", "bbbb");
+        assert!(!t1);
+        assert!(!t2);
+    }
+
+    #[test]
+    fn gossip_message_v1_roundtrip() {
+        let msg = pb::GossipMessageV1 {
+            sender_node_id: "node-1".to_string(),
+            sender_tick: 42,
+            node_states: vec![],
+        };
+        let mut buf = Vec::new();
+        msg.encode(&mut buf).unwrap();
+        let decoded = pb::GossipMessageV1::decode(buf.as_slice()).unwrap();
+        assert_eq!(decoded.sender_node_id, "node-1");
+        assert_eq!(decoded.sender_tick, 42);
+    }
+
+    #[test]
+    fn gossip_status_v1_roundtrip() {
+        let status = pb::GossipStatusV1 {
+            alive_nodes_count: 3,
+            nodes: vec![],
+        };
+        let mut buf = Vec::new();
+        status.encode(&mut buf).unwrap();
+        let decoded = pb::GossipStatusV1::decode(buf.as_slice()).unwrap();
+        assert_eq!(decoded.alive_nodes_count, 3);
+    }
+
+    #[test]
+    fn gossip_message_decode_invalid_bytes() {
+        let bad = vec![0xFF, 0xFF, 0xFF];
+        let result = pb::GossipMessageV1::decode(bad.as_slice());
+        assert!(result.is_err());
+    }
+}
