@@ -17,7 +17,6 @@ fn get_db_connection() -> Result<std::sync::Arc<std::sync::Mutex<rusqlite::Conne
 
 /// Store or update a bilateral session
 pub fn store_bilateral_session(session: &BilateralSessionRecord) -> Result<()> {
-    // Validate inputs
     if session.commitment_hash.is_empty() || session.commitment_hash.len() > 32 {
         return Err(anyhow!(
             "Invalid commitment_hash length: {} bytes (must be 1-32)",
@@ -41,7 +40,91 @@ pub fn store_bilateral_session(session: &BilateralSessionRecord) -> Result<()> {
         "prepared",
         "pending_user_action",
         "accepted",
+        "rejected",
+        "confirm_pending",
+        "committed",
+        "failed",
+    ]
+    .contains(&session.phase.as_str())
+    {
+        return Err(anyhow!(
+            "Invalid phase: '{}' (must be one of prepare/accept/commit/preparing/prepared/pending_user_action/accepted/rejected/confirm_pending/committed/failed)",
+            session.phase
+        ));
+    }
 
+    let binding = get_db_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|_| anyhow!("Database lock poisoned - concurrent access error"))?;
+    let now = tick();
+
+    conn.execute("BEGIN IMMEDIATE", [])?;
+    let result = conn.execute(
+        "INSERT INTO bilateral_sessions(
+            commitment_hash, counterparty_device_id, counterparty_genesis_hash, operation_bytes, phase,
+            local_signature, counterparty_signature, created_at_step,
+            sender_ble_address, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+         ON CONFLICT(commitment_hash) DO UPDATE SET
+            phase = excluded.phase,
+            local_signature = excluded.local_signature,
+            counterparty_signature = excluded.counterparty_signature,
+            counterparty_genesis_hash = excluded.counterparty_genesis_hash,
+            sender_ble_address = excluded.sender_ble_address,
+            updated_at = excluded.updated_at",
+        params![
+            &session.commitment_hash,
+            &session.counterparty_device_id,
+            &session.counterparty_genesis_hash,
+            &session.operation_bytes,
+            &session.phase,
+            &session.local_signature,
+            &session.counterparty_signature,
+            session.created_at_step as i64,
+            &session.sender_ble_address,
+            now as i64,
+        ],
+    );
+    match result {
+        Ok(_) => {
+            conn.execute("COMMIT", [])?;
+        }
+        Err(e) => {
+            let _ = conn.execute("ROLLBACK", []);
+            return Err(anyhow!("Failed to store bilateral session: {}", e));
+        }
+    }
+
+    debug!(
+        "[CLIENT_DB] Stored bilateral session: phase={} commitment={}",
+        session.phase,
+        encode_base32_crockford(&session.commitment_hash[..8.min(session.commitment_hash.len())])
+    );
+    Ok(())
+}
+
+/// Get all bilateral sessions (for restoration on startup)
+pub fn get_all_bilateral_sessions() -> Result<Vec<BilateralSessionRecord>> {
+    let binding = get_db_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|_| anyhow!("Database lock poisoned - concurrent access error"))?;
+    let mut stmt = conn.prepare(
+        "SELECT commitment_hash, counterparty_device_id, operation_bytes, phase,
+                counterparty_genesis_hash, local_signature, counterparty_signature, created_at_step,
+                sender_ble_address
+           FROM bilateral_sessions
+          ORDER BY created_at_step DESC",
+    )?;
+
+    let iter = stmt.query_map([], |row| {
+        Ok(BilateralSessionRecord {
+            commitment_hash: row.get(0)?,
+            counterparty_device_id: row.get(1)?,
+            operation_bytes: row.get(2)?,
+            phase: row.get(3)?,
+            counterparty_genesis_hash: row.get(4)?,
             local_signature: row.get(5)?,
             counterparty_signature: row.get(6)?,
             created_at_step: row.get::<_, i64>(7)? as u64,
@@ -50,8 +133,8 @@ pub fn store_bilateral_session(session: &BilateralSessionRecord) -> Result<()> {
     })?;
 
     let mut sessions = Vec::new();
-    for s in iter {
-        sessions.push(s?);
+    for session in iter {
+        sessions.push(session?);
     }
     Ok(sessions)
 }
@@ -118,16 +201,9 @@ pub fn update_bilateral_session_phase(commitment_hash: &[u8], phase: &str) -> Re
 
 /// Clean up expired bilateral sessions
 pub fn cleanup_expired_bilateral_sessions(current_ticks: u64) -> Result<usize> {
-    // Clockless protocol: bilateral sessions do not expire by any local notion of duration.
-    // Cleanup must be driven by explicit state transitions, not by a ticking counter.
     let _ = current_ticks;
     Ok(0)
 }
-
-// ═══════════════════════════════════════════════════════════════════════
-// §5.3 Pending Confirm Delivery — crash-safe receipt persistence
-// ═══════════════════════════════════════════════════════════════════════
-<<<<<<< HEAD
 
 /// Store a confirm envelope for re-delivery. Called atomically with sender
 /// finalization so the receipt survives crashes.
@@ -240,40 +316,40 @@ mod tests {
 
     #[test]
     fn store_bilateral_session_rejects_empty_commitment_hash() {
-        let mut s = make_session("prepare");
-        s.commitment_hash = vec![];
-        let err = store_bilateral_session(&s).unwrap_err();
+        let mut session = make_session("prepare");
+        session.commitment_hash = vec![];
+        let err = store_bilateral_session(&session).unwrap_err();
         assert!(err.to_string().contains("commitment_hash"));
     }
 
     #[test]
     fn store_bilateral_session_rejects_oversized_commitment_hash() {
-        let mut s = make_session("prepare");
-        s.commitment_hash = vec![0; 33];
-        let err = store_bilateral_session(&s).unwrap_err();
+        let mut session = make_session("prepare");
+        session.commitment_hash = vec![0; 33];
+        let err = store_bilateral_session(&session).unwrap_err();
         assert!(err.to_string().contains("commitment_hash"));
     }
 
     #[test]
     fn store_bilateral_session_rejects_wrong_counterparty_length() {
-        let mut s = make_session("prepare");
-        s.counterparty_device_id = vec![0; 16];
-        let err = store_bilateral_session(&s).unwrap_err();
+        let mut session = make_session("prepare");
+        session.counterparty_device_id = vec![0; 16];
+        let err = store_bilateral_session(&session).unwrap_err();
         assert!(err.to_string().contains("counterparty_device_id"));
     }
 
     #[test]
     fn store_bilateral_session_rejects_empty_operation_bytes() {
-        let mut s = make_session("prepare");
-        s.operation_bytes = vec![];
-        let err = store_bilateral_session(&s).unwrap_err();
+        let mut session = make_session("prepare");
+        session.operation_bytes = vec![];
+        let err = store_bilateral_session(&session).unwrap_err();
         assert!(err.to_string().contains("operation_bytes"));
     }
 
     #[test]
     fn store_bilateral_session_rejects_invalid_phase() {
-        let s = make_session("invalid_phase");
-        let err = store_bilateral_session(&s).unwrap_err();
+        let session = make_session("invalid_phase");
+        let err = store_bilateral_session(&session).unwrap_err();
         assert!(err.to_string().contains("Invalid phase"));
     }
 
@@ -293,11 +369,11 @@ mod tests {
             "failed",
         ];
         for phase in valid_phases {
-            let s = make_session(phase);
-            let result = store_bilateral_session(&s);
-            if let Err(e) = &result {
+            let session = make_session(phase);
+            let result = store_bilateral_session(&session);
+            if let Err(err) = &result {
                 assert!(
-                    !e.to_string().contains("Invalid phase"),
+                    !err.to_string().contains("Invalid phase"),
                     "phase {} rejected",
                     phase
                 );
@@ -314,8 +390,8 @@ mod tests {
     #[serial]
     fn store_and_get_all_bilateral_sessions() {
         init_test_db();
-        let s = make_session("prepare");
-        store_bilateral_session(&s).unwrap();
+        let session = make_session("prepare");
+        store_bilateral_session(&session).unwrap();
 
         let all = get_all_bilateral_sessions().unwrap();
         assert_eq!(all.len(), 1);
@@ -327,8 +403,8 @@ mod tests {
     #[serial]
     fn delete_bilateral_session_removes_entry() {
         init_test_db();
-        let s = make_session("commit");
-        store_bilateral_session(&s).unwrap();
+        let session = make_session("commit");
+        store_bilateral_session(&session).unwrap();
 
         delete_bilateral_session(&[0x11; 32]).unwrap();
         let all = get_all_bilateral_sessions().unwrap();
@@ -339,10 +415,10 @@ mod tests {
     #[serial]
     fn store_bilateral_session_upserts_phase_on_conflict() {
         init_test_db();
-        let s = make_session("prepare");
-        store_bilateral_session(&s).unwrap();
+        let session = make_session("prepare");
+        store_bilateral_session(&session).unwrap();
 
-        let mut updated = s.clone();
+        let mut updated = session.clone();
         updated.phase = "committed".to_string();
         updated.counterparty_signature = Some(vec![0x66; 64]);
         store_bilateral_session(&updated).unwrap();
@@ -357,12 +433,12 @@ mod tests {
     #[serial]
     fn store_multiple_bilateral_sessions() {
         init_test_db();
-        let s1 = make_session("prepare");
-        store_bilateral_session(&s1).unwrap();
+        let session_one = make_session("prepare");
+        store_bilateral_session(&session_one).unwrap();
 
-        let mut s2 = make_session("accept");
-        s2.commitment_hash = vec![0x99; 32];
-        store_bilateral_session(&s2).unwrap();
+        let mut session_two = make_session("accept");
+        session_two.commitment_hash = vec![0x99; 32];
+        store_bilateral_session(&session_two).unwrap();
 
         let all = get_all_bilateral_sessions().unwrap();
         assert_eq!(all.len(), 2);
@@ -381,74 +457,14 @@ mod tests {
     #[serial]
     fn bilateral_session_preserves_ble_address() {
         init_test_db();
-        let mut s = make_session("prepare");
-        s.sender_ble_address = Some("AA:BB:CC:DD:EE:FF".to_string());
-        store_bilateral_session(&s).unwrap();
+        let mut session = make_session("prepare");
+        session.sender_ble_address = Some("AA:BB:CC:DD:EE:FF".to_string());
+        store_bilateral_session(&session).unwrap();
 
         let all = get_all_bilateral_sessions().unwrap();
         assert_eq!(
             all[0].sender_ble_address.as_deref(),
             Some("AA:BB:CC:DD:EE:FF")
         );
-=======
-
-/// Store a confirm envelope for re-delivery. Called atomically with sender
-/// finalization so the receipt survives crashes.
-pub fn store_pending_confirm_delivery(
-    commitment_hash: &[u8],
-    counterparty_device_id: &[u8],
-    confirm_envelope: &[u8],
-) -> Result<()> {
-    if commitment_hash.len() != 32 || counterparty_device_id.len() != 32 {
-        return Err(anyhow!("Invalid hash or device_id length"));
->>>>>>> d490faf (Revert non-test logic changes to main implementations)
     }
-    let binding = get_db_connection()?;
-    let conn = binding
-        .lock()
-        .map_err(|_| anyhow!("Database lock poisoned"))?;
-    let tick_val = tick() as i64;
-    conn.execute(
-        "INSERT OR REPLACE INTO pending_confirm_delivery (commitment_hash, counterparty_device_id, confirm_envelope, created_at_tick) VALUES (?1, ?2, ?3, ?4)",
-        params![commitment_hash, counterparty_device_id, confirm_envelope, tick_val],
-    )?;
-    Ok(())
-}
-
-/// Get pending confirm envelopes for a counterparty (for re-delivery on reconnect).
-pub fn get_pending_confirm_deliveries(
-    counterparty_device_id: &[u8],
-) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-    if counterparty_device_id.len() != 32 {
-        return Err(anyhow!("Invalid device_id length"));
-    }
-    let binding = get_db_connection()?;
-    let conn = binding
-        .lock()
-        .map_err(|_| anyhow!("Database lock poisoned"))?;
-    let mut stmt = conn.prepare(
-        "SELECT commitment_hash, confirm_envelope FROM pending_confirm_delivery WHERE counterparty_device_id = ?1",
-    )?;
-    let rows = stmt
-        .query_map(params![counterparty_device_id], |row| {
-            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    Ok(rows)
-}
-
-/// Delete a pending confirm delivery after successful BLE delivery.
-pub fn delete_pending_confirm_delivery(commitment_hash: &[u8]) -> Result<()> {
-    if commitment_hash.len() != 32 {
-        return Err(anyhow!("Invalid commitment_hash length"));
-    }
-    let binding = get_db_connection()?;
-    let conn = binding
-        .lock()
-        .map_err(|_| anyhow!("Database lock poisoned"))?;
-    conn.execute(
-        "DELETE FROM pending_confirm_delivery WHERE commitment_hash = ?1",
-        params![commitment_hash],
-    )?;
-    Ok(())
 }
