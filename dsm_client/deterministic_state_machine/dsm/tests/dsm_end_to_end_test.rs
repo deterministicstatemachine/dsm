@@ -230,8 +230,8 @@ fn create_next_state(
 }
 
 #[test]
-#[ignore] // Skip due to batch manager access issues
 fn test_random_walk_verification() -> Result<(), DsmError> {
+    // Pre-commitment random-walk positions via StateMachine (no external batch service).
     // This test focuses solely on random walk verification which appears to be working correctly
     // initialize() removed; core has no global init.
 
