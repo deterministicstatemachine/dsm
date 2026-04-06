@@ -22,7 +22,7 @@
 # Android builds on Windows require WSL2 — see docs/book/03-development-setup.md#windows-setup.
 # ---------------------------------------------------------------------------
 
-SHELL := /bin/bash
+SHELL := bash
 empty :=
 space := $(empty) $(empty)
 comma := ,
@@ -40,7 +40,10 @@ RUST_TOOLCHAIN_FILE := $(REPO_ROOT)/rust-toolchain.toml
 ANDROID_APP_GRADLE := $(ANDROID_DIR)/app/build.gradle.kts
 ANDROID_ABIS ?= arm64-v8a armeabi-v7a
 ANDROID_ABIS_CSV := $(subst $(space),$(comma),$(strip $(ANDROID_ABIS)))
-ANDROID_NDK_TARGETS := $(foreach abi,$(ANDROID_ABIS),-t $(abi))
+define android_rust_target
+$(if $(filter arm64-v8a,$1),aarch64-linux-android,$(if $(filter armeabi-v7a,$1),armv7-linux-androideabi,$(if $(filter x86_64,$1),x86_64-linux-android,unsupported:$1)))
+endef
+ANDROID_RUST_TARGETS := $(strip $(foreach abi,$(ANDROID_ABIS),$(call android_rust_target,$(abi))))
 
 .DEFAULT_GOAL := help
 
@@ -85,7 +88,7 @@ doctor: ## Check local prerequisites and repo state without changing files
 	@command -v adb >/dev/null 2>&1 && echo "    adb: available" || echo "    adb: optional (needed only for device install/debug)"
 	@command -v psql >/dev/null 2>&1 && echo "    psql: available" || echo "    psql: optional until you run local storage nodes"
 	@command -v java >/dev/null 2>&1 && echo "    java: $$(java -version 2>&1 | head -1)" || echo "    java: optional until Android builds"
-	@command -v cargo-ndk >/dev/null 2>&1 && echo "    cargo-ndk: $$(cargo ndk --version)" || echo "    cargo-ndk: optional until Android builds (install via cargo install cargo-ndk)"
+	@command -v rustup >/dev/null 2>&1 && echo "    rustup: $$(rustup --version | head -1)" || echo "    MISSING: rustup (install from https://rustup.rs)"
 	@GRADLE_NDK_VERSION="$$(sed -n 's/.*ndkVersion = \"\([^\"]*\)\".*/\1/p' "$(ANDROID_APP_GRADLE)" | head -1)"; \
 	NDK=""; \
 	NDK_SOURCE=""; \
@@ -178,6 +181,30 @@ android-sdk-config: ## Detect Android SDK and write ignored local.properties for
 	printf 'sdk.dir=%s\n' "$$ESCAPED_SDK" > "$(ANDROID_LOCAL_PROPERTIES)"; \
 	echo "    Android SDK configured for Gradle (local.properties updated)"
 
+.PHONY: android-rust-targets
+android-rust-targets: ## Ensure Rust Android targets exist for configured ABIs
+	@command -v rustup >/dev/null 2>&1 || { echo "ERROR: rustup not found. Install rustup from https://rustup.rs first."; exit 1; }
+	@missing_targets=""; \
+	for rust_target in $(ANDROID_RUST_TARGETS); do \
+		case "$$rust_target" in \
+			unsupported:*) \
+				echo "ERROR: Unsupported Android ABI '$${rust_target#unsupported:}' in ANDROID_ABIS ($(ANDROID_ABIS))"; \
+				exit 1; \
+				;; \
+			*) \
+				if ! rustup target list --installed | grep -Fxq "$$rust_target"; then \
+					missing_targets="$$missing_targets $$rust_target"; \
+				fi; \
+				;; \
+		esac; \
+	done; \
+	if [ -n "$$missing_targets" ]; then \
+		echo "==> Installing missing Rust Android targets:$${missing_targets}"; \
+		rustup target add $$missing_targets; \
+	else \
+		echo "    Rust Android targets already installed: $(ANDROID_RUST_TARGETS)"; \
+	fi
+
 .PHONY: setup
 setup: ## First-time developer setup: check deps, auto-configure Android, install frontend deps
 	@echo "==> Checking prerequisites..."
@@ -208,8 +235,7 @@ setup: ## First-time developer setup: check deps, auto-configure Android, instal
 		if [ -n "$$GRADLE_NDK_VERSION" ] && [ "$$NDK_VERSION" != "$$GRADLE_NDK_VERSION" ]; then \
 			echo "WARNING: configured NDK version ($$NDK_VERSION) does not match Gradle ndkVersion ($$GRADLE_NDK_VERSION)."; \
 		fi; \
-		command -v cargo-ndk >/dev/null 2>&1 || { echo "Installing cargo-ndk..."; cargo install cargo-ndk; }; \
-		echo "    cargo-ndk: $$(cargo ndk --version)"; \
+		$(MAKE) android-rust-targets; \
 		mkdir -p "$$(dirname "$(CARGO_CONFIG)")"; \
 		echo "==> Refreshing dsm_client/deterministic_state_machine/dsm_sdk/.cargo/config.toml from template..."; \
 		sed \
@@ -253,36 +279,49 @@ android-libs: ## Build native .so libs for configured Android ABIs (requires NDK
 	        $(REPO_JNILIBS_DIR)/arm64-v8a/libdsm_sdk.so \
 	        $(REPO_JNILIBS_DIR)/armeabi-v7a/libdsm_sdk.so \
 	        $(REPO_JNILIBS_DIR)/x86_64/libdsm_sdk.so
-	@mkdir -p $(REPO_JNILIBS_DIR)/arm64-v8a \
+	@mkdir -p $(JNILIBS_DIR)/arm64-v8a \
+	          $(JNILIBS_DIR)/armeabi-v7a \
+	          $(JNILIBS_DIR)/x86_64 \
+	          $(REPO_JNILIBS_DIR)/arm64-v8a \
 	          $(REPO_JNILIBS_DIR)/armeabi-v7a \
 	          $(REPO_JNILIBS_DIR)/x86_64
 	cd $(NDK_DIR) && \
 		NDK_ROOT="$${ANDROID_NDK_HOME:-$$ANDROID_NDK_ROOT}"; \
 		HOST_TAG="$$(ls "$$NDK_ROOT/toolchains/llvm/prebuilt" | head -1)"; \
 		TOOLCHAIN="$$NDK_ROOT/toolchains/llvm/prebuilt/$$HOST_TAG/bin"; \
-		DSM_PROTO_ROOT=$(REPO_ROOT)/proto \
-		CC_aarch64_linux_android="$$TOOLCHAIN/aarch64-linux-android23-clang" \
-		CXX_aarch64_linux_android="$$TOOLCHAIN/aarch64-linux-android23-clang++" \
-		AR_aarch64_linux_android="$$TOOLCHAIN/llvm-ar" \
-		CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$$TOOLCHAIN/aarch64-linux-android23-clang" \
-		CC_armv7_linux_androideabi="$$TOOLCHAIN/armv7a-linux-androideabi23-clang" \
-		CXX_armv7_linux_androideabi="$$TOOLCHAIN/armv7a-linux-androideabi23-clang++" \
-		AR_armv7_linux_androideabi="$$TOOLCHAIN/llvm-ar" \
-		CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="$$TOOLCHAIN/armv7a-linux-androideabi23-clang" \
-		CC_x86_64_linux_android="$$TOOLCHAIN/x86_64-linux-android23-clang" \
-		CXX_x86_64_linux_android="$$TOOLCHAIN/x86_64-linux-android23-clang++" \
-		AR_x86_64_linux_android="$$TOOLCHAIN/llvm-ar" \
-		CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$$TOOLCHAIN/x86_64-linux-android23-clang" \
-		cargo ndk \
-			$(ANDROID_NDK_TARGETS) \
-			-o $(JNILIBS_DIR) \
-			--platform 23 \
-			build --release --package dsm_sdk --features=jni,bluetooth
+		export DSM_PROTO_ROOT=$(REPO_ROOT)/proto; \
+		export CC_aarch64_linux_android="$$TOOLCHAIN/aarch64-linux-android23-clang"; \
+		export CXX_aarch64_linux_android="$$TOOLCHAIN/aarch64-linux-android23-clang++"; \
+		export AR_aarch64_linux_android="$$TOOLCHAIN/llvm-ar"; \
+		export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$$TOOLCHAIN/aarch64-linux-android23-clang"; \
+		export CC_armv7_linux_androideabi="$$TOOLCHAIN/armv7a-linux-androideabi23-clang"; \
+		export CXX_armv7_linux_androideabi="$$TOOLCHAIN/armv7a-linux-androideabi23-clang++"; \
+		export AR_armv7_linux_androideabi="$$TOOLCHAIN/llvm-ar"; \
+		export CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER="$$TOOLCHAIN/armv7a-linux-androideabi23-clang"; \
+		export CC_x86_64_linux_android="$$TOOLCHAIN/x86_64-linux-android23-clang"; \
+		export CXX_x86_64_linux_android="$$TOOLCHAIN/x86_64-linux-android23-clang++"; \
+		export AR_x86_64_linux_android="$$TOOLCHAIN/llvm-ar"; \
+		export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$$TOOLCHAIN/x86_64-linux-android23-clang"; \
+		for abi in $(ANDROID_ABIS); do \
+			case "$$abi" in \
+				arm64-v8a) rust_target="aarch64-linux-android" ;; \
+				armeabi-v7a) rust_target="armv7-linux-androideabi" ;; \
+				x86_64) rust_target="x86_64-linux-android" ;; \
+				*) echo "ERROR: Unsupported Android ABI '$$abi'"; exit 1 ;; \
+			esac; \
+			cargo build --release --target "$$rust_target" --package dsm_sdk --features=jni,bluetooth || exit $$?; \
+		done
 	@for abi in $(ANDROID_ABIS); do \
 		case "$$abi" in \
-			arm64-v8a) cp $(NDK_DIR)/target/aarch64-linux-android/release/libdsm_sdk.so $(REPO_JNILIBS_DIR)/arm64-v8a/ ;; \
-			armeabi-v7a) cp $(NDK_DIR)/target/armv7-linux-androideabi/release/libdsm_sdk.so $(REPO_JNILIBS_DIR)/armeabi-v7a/ ;; \
-			x86_64) cp $(NDK_DIR)/target/x86_64-linux-android/release/libdsm_sdk.so $(REPO_JNILIBS_DIR)/x86_64/ ;; \
+			arm64-v8a) \
+				cp $(NDK_DIR)/target/aarch64-linux-android/release/libdsm_sdk.so $(JNILIBS_DIR)/arm64-v8a/; \
+				cp $(NDK_DIR)/target/aarch64-linux-android/release/libdsm_sdk.so $(REPO_JNILIBS_DIR)/arm64-v8a/ ;; \
+			armeabi-v7a) \
+				cp $(NDK_DIR)/target/armv7-linux-androideabi/release/libdsm_sdk.so $(JNILIBS_DIR)/armeabi-v7a/; \
+				cp $(NDK_DIR)/target/armv7-linux-androideabi/release/libdsm_sdk.so $(REPO_JNILIBS_DIR)/armeabi-v7a/ ;; \
+			x86_64) \
+				cp $(NDK_DIR)/target/x86_64-linux-android/release/libdsm_sdk.so $(JNILIBS_DIR)/x86_64/; \
+				cp $(NDK_DIR)/target/x86_64-linux-android/release/libdsm_sdk.so $(REPO_JNILIBS_DIR)/x86_64/ ;; \
 			*) echo "ERROR: Unsupported Android ABI '$$abi'"; exit 1 ;; \
 		esac; \
 	done
@@ -290,11 +329,11 @@ android-libs: ## Build native .so libs for configured Android ABIs (requires NDK
 
 .PHONY: android-ndk-check
 android-ndk-check: ## Validate Rust Android NDK build for configured ABIs (override ANDROID_ABIS=...)
-	@command -v cargo-ndk >/dev/null 2>&1 || { echo "ERROR: cargo-ndk not found. Run 'make setup' or 'cargo install cargo-ndk' first."; exit 1; }
 	@if [ -z "$$ANDROID_NDK_HOME" ] && [ -z "$$ANDROID_NDK_ROOT" ]; then \
 		echo "ERROR: ANDROID_NDK_HOME or ANDROID_NDK_ROOT must be set for Android NDK validation."; \
 		exit 1; \
 	fi
+	@$(MAKE) android-rust-targets
 	@echo "==> Validating Android NDK Rust build (ABIs: $(ANDROID_ABIS))..."
 	@$(MAKE) android-libs
 	@echo "==> Android NDK validation passed."
