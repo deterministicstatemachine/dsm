@@ -192,3 +192,175 @@ pub fn cleanup_orphan_chunk_buffers() -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::types::ChunkPersistenceParams;
+    use serial_test::serial;
+
+    fn init_test_db() {
+        unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+    }
+
+    fn make_chunk_params<'a>(
+        fc: &'a [u8; 32],
+        index: u16,
+        data: &'a [u8],
+    ) -> ChunkPersistenceParams<'a> {
+        ChunkPersistenceParams {
+            frame_commitment: fc,
+            chunk_index: index,
+            frame_type: 1,
+            total_chunks: 4,
+            payload_len: 1024,
+            chunk_data: data,
+            checksum: 0xDEAD,
+            counterparty_id: None,
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn persist_and_load_chunks_roundtrip() {
+        init_test_db();
+        let fc = [0xAA; 32];
+        let data0 = b"chunk-data-0";
+        let data1 = b"chunk-data-1";
+
+        persist_ble_chunk(make_chunk_params(&fc, 0, data0)).unwrap();
+        persist_ble_chunk(make_chunk_params(&fc, 1, data1)).unwrap();
+
+        let loaded = load_persisted_chunks(&fc).unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].chunk_index, 0);
+        assert_eq!(loaded[0].chunk_data, data0);
+        assert_eq!(loaded[0].checksum, 0xDEAD);
+        assert_eq!(loaded[1].chunk_index, 1);
+        assert_eq!(loaded[1].total_chunks, 4);
+        assert_eq!(loaded[1].payload_len, 1024);
+    }
+
+    #[test]
+    #[serial]
+    fn persist_ble_chunk_is_idempotent() {
+        init_test_db();
+        let fc = [0xBB; 32];
+        let data = b"dupe-data";
+
+        persist_ble_chunk(make_chunk_params(&fc, 0, data)).unwrap();
+        persist_ble_chunk(make_chunk_params(&fc, 0, data)).unwrap();
+
+        let count = count_persisted_chunks(&fc).unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    #[serial]
+    fn count_persisted_chunks_counts_correctly() {
+        init_test_db();
+        let fc = [0xCC; 32];
+        persist_ble_chunk(make_chunk_params(&fc, 0, b"a")).unwrap();
+        persist_ble_chunk(make_chunk_params(&fc, 1, b"b")).unwrap();
+        persist_ble_chunk(make_chunk_params(&fc, 2, b"c")).unwrap();
+
+        assert_eq!(count_persisted_chunks(&fc).unwrap(), 3);
+    }
+
+    #[test]
+    #[serial]
+    fn delete_frame_chunks_removes_all_for_commitment() {
+        init_test_db();
+        let fc = [0xDD; 32];
+        persist_ble_chunk(make_chunk_params(&fc, 0, b"a")).unwrap();
+        persist_ble_chunk(make_chunk_params(&fc, 1, b"b")).unwrap();
+
+        delete_frame_chunks(&fc).unwrap();
+        assert_eq!(count_persisted_chunks(&fc).unwrap(), 0);
+    }
+
+    #[test]
+    #[serial]
+    fn delete_single_chunk_removes_only_one() {
+        init_test_db();
+        let fc = [0xEE; 32];
+        persist_ble_chunk(make_chunk_params(&fc, 0, b"a")).unwrap();
+        persist_ble_chunk(make_chunk_params(&fc, 1, b"b")).unwrap();
+
+        delete_single_chunk(&fc, 0).unwrap();
+        let remaining = load_persisted_chunks(&fc).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].chunk_index, 1);
+    }
+
+    #[test]
+    #[serial]
+    fn delete_chunks_by_counterparty_sweeps_related() {
+        init_test_db();
+        let fc = [0xFF; 32];
+        let cp = [0x11; 32];
+        let params = ChunkPersistenceParams {
+            frame_commitment: &fc,
+            chunk_index: 0,
+            frame_type: 1,
+            total_chunks: 2,
+            payload_len: 100,
+            chunk_data: b"data",
+            checksum: 42,
+            counterparty_id: Some(&cp),
+        };
+        persist_ble_chunk(params).unwrap();
+
+        delete_chunks_by_counterparty(&cp).unwrap();
+        assert_eq!(count_persisted_chunks(&fc).unwrap(), 0);
+    }
+
+    #[test]
+    #[serial]
+    fn different_frame_commitments_are_isolated() {
+        init_test_db();
+        let fc1 = [0x01; 32];
+        let fc2 = [0x02; 32];
+
+        persist_ble_chunk(make_chunk_params(&fc1, 0, b"data-fc1")).unwrap();
+        persist_ble_chunk(make_chunk_params(&fc2, 0, b"data-fc2")).unwrap();
+        persist_ble_chunk(make_chunk_params(&fc2, 1, b"data-fc2-b")).unwrap();
+
+        assert_eq!(count_persisted_chunks(&fc1).unwrap(), 1);
+        assert_eq!(count_persisted_chunks(&fc2).unwrap(), 2);
+
+        delete_frame_chunks(&fc1).unwrap();
+        assert_eq!(count_persisted_chunks(&fc1).unwrap(), 0);
+        assert_eq!(count_persisted_chunks(&fc2).unwrap(), 2);
+    }
+
+    #[test]
+    #[serial]
+    fn cleanup_orphan_chunk_buffers_noop_under_threshold() {
+        init_test_db();
+        let fc = [0x03; 32];
+        persist_ble_chunk(make_chunk_params(&fc, 0, b"data")).unwrap();
+
+        cleanup_orphan_chunk_buffers().unwrap();
+        assert_eq!(count_persisted_chunks(&fc).unwrap(), 1);
+    }
+
+    #[test]
+    #[serial]
+    fn load_empty_frame_returns_empty_vec() {
+        init_test_db();
+        let fc = [0x04; 32];
+        let chunks = load_persisted_chunks(&fc).unwrap();
+        assert!(chunks.is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn delete_single_chunk_nonexistent_is_noop() {
+        init_test_db();
+        let fc = [0x05; 32];
+        delete_single_chunk(&fc, 99).unwrap();
+    }
+}

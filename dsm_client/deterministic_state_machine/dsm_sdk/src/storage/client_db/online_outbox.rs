@@ -328,3 +328,171 @@ pub fn clear_pending_online_outbox_if_matches(
 
     Ok(rows > 0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn store_rejects_short_counterparty_device_id() {
+        let err =
+            store_pending_online_outbox(&[0u8; 16], "msg-1", &[1u8; 32], &[2u8; 32]).unwrap_err();
+        assert!(err.to_string().contains("counterparty_device_id"));
+    }
+
+    #[test]
+    fn store_rejects_short_parent_tip() {
+        let err =
+            store_pending_online_outbox(&[0u8; 32], "msg-1", &[1u8; 16], &[2u8; 32]).unwrap_err();
+        assert!(err.to_string().contains("parent_tip"));
+    }
+
+    #[test]
+    fn store_rejects_short_next_tip() {
+        let err =
+            store_pending_online_outbox(&[0u8; 32], "msg-1", &[1u8; 32], &[2u8; 16]).unwrap_err();
+        assert!(err.to_string().contains("next_tip"));
+    }
+
+    #[test]
+    fn store_rejects_empty_message_id() {
+        let err =
+            store_pending_online_outbox(&[0u8; 32], "  ", &[1u8; 32], &[2u8; 32]).unwrap_err();
+        assert!(err.to_string().contains("message_id"));
+    }
+
+    #[test]
+    fn store_rejects_identical_parent_and_next_tip() {
+        let tip = [0xAAu8; 32];
+        let err = store_pending_online_outbox(&[0u8; 32], "msg-1", &tip, &tip).unwrap_err();
+        assert!(err.to_string().contains("next_tip != parent_tip"));
+    }
+
+    #[test]
+    fn record_rejects_short_counterparty_device_id() {
+        let err = record_pending_online_transition(&[0u8; 16], "msg-1", &[1u8; 32], &[2u8; 32])
+            .unwrap_err();
+        assert!(err.to_string().contains("counterparty_device_id"));
+    }
+
+    #[test]
+    fn record_rejects_empty_message_id() {
+        let err =
+            record_pending_online_transition(&[0u8; 32], " ", &[1u8; 32], &[2u8; 32]).unwrap_err();
+        assert!(err.to_string().contains("message_id"));
+    }
+
+    #[test]
+    fn record_rejects_identical_tips() {
+        let tip = [0xBBu8; 32];
+        let err = record_pending_online_transition(&[0u8; 32], "msg-1", &tip, &tip).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("next_tip different from parent_tip"));
+    }
+
+    #[test]
+    fn get_pending_rejects_wrong_device_id_length() {
+        let err = get_pending_online_outbox(&[0u8; 10]).unwrap_err();
+        assert!(err.to_string().contains("counterparty_device_id"));
+    }
+
+    #[test]
+    fn clear_pending_rejects_wrong_device_id_length() {
+        let err = clear_pending_online_outbox(&[0u8; 10]).unwrap_err();
+        assert!(err.to_string().contains("counterparty_device_id"));
+    }
+
+    #[test]
+    fn record_rejects_short_parent_tip() {
+        let err = record_pending_online_transition(&[0u8; 32], "msg-1", &[1u8; 16], &[2u8; 32])
+            .unwrap_err();
+        assert!(err.to_string().contains("parent_tip"));
+    }
+
+    #[test]
+    fn record_rejects_short_next_tip() {
+        let err = record_pending_online_transition(&[0u8; 32], "msg-1", &[1u8; 32], &[2u8; 16])
+            .unwrap_err();
+        assert!(err.to_string().contains("next_tip"));
+    }
+
+    use serial_test::serial;
+
+    fn init_test_db() {
+        unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+    }
+
+    #[test]
+    #[serial]
+    fn store_and_get_pending_online_outbox_roundtrip() {
+        init_test_db();
+        let cp = [0xAAu8; 32];
+        let parent = [0x11u8; 32];
+        let next = [0x22u8; 32];
+        store_pending_online_outbox(&cp, "msg-rt", &parent, &next).unwrap();
+
+        let loaded = get_pending_online_outbox(&cp).unwrap().unwrap();
+        assert_eq!(loaded.message_id, "msg-rt");
+        assert_eq!(loaded.parent_tip, parent);
+        assert_eq!(loaded.next_tip, next);
+    }
+
+    #[test]
+    #[serial]
+    fn store_pending_idempotent_for_identical_gate() {
+        init_test_db();
+        let cp = [0xBBu8; 32];
+        let parent = [0x33u8; 32];
+        let next = [0x44u8; 32];
+        store_pending_online_outbox(&cp, "msg-idem", &parent, &next).unwrap();
+        store_pending_online_outbox(&cp, "msg-idem", &parent, &next).unwrap();
+
+        let loaded = get_pending_online_outbox(&cp).unwrap().unwrap();
+        assert_eq!(loaded.message_id, "msg-idem");
+    }
+
+    #[test]
+    #[serial]
+    fn store_pending_rejects_different_gate_for_same_counterparty() {
+        init_test_db();
+        let cp = [0xCCu8; 32];
+        store_pending_online_outbox(&cp, "msg-1", &[0x11u8; 32], &[0x22u8; 32]).unwrap();
+        let err =
+            store_pending_online_outbox(&cp, "msg-2", &[0x33u8; 32], &[0x44u8; 32]).unwrap_err();
+        assert!(err.to_string().contains("different gate"));
+    }
+
+    #[test]
+    #[serial]
+    fn clear_and_verify_pending_online_outbox() {
+        init_test_db();
+        let cp = [0xDDu8; 32];
+        store_pending_online_outbox(&cp, "msg-clr", &[0x55u8; 32], &[0x66u8; 32]).unwrap();
+        clear_pending_online_outbox(&cp).unwrap();
+
+        assert!(get_pending_online_outbox(&cp).unwrap().is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn get_all_pending_online_outbox_returns_all() {
+        init_test_db();
+        let cp1 = [0xE1u8; 32];
+        let cp2 = [0xE2u8; 32];
+        store_pending_online_outbox(&cp1, "msg-a", &[0x01u8; 32], &[0x02u8; 32]).unwrap();
+        store_pending_online_outbox(&cp2, "msg-b", &[0x03u8; 32], &[0x04u8; 32]).unwrap();
+
+        let all = get_all_pending_online_outbox().unwrap();
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    #[serial]
+    fn get_pending_online_outbox_returns_none_when_empty() {
+        init_test_db();
+        assert!(get_pending_online_outbox(&[0xFFu8; 32]).unwrap().is_none());
+    }
+}

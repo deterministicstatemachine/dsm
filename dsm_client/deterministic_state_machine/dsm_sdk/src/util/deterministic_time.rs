@@ -41,3 +41,48 @@ pub fn peek() -> u64 {
 pub fn reset() {
     dsm::utils::deterministic_time::reset_for_tests();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tick_returns_value() {
+        reset();
+        let _t = tick();
+    }
+
+    #[test]
+    fn tick_index_matches_tick() {
+        reset();
+        let a = tick();
+        let b = tick_index();
+        assert_eq!(
+            a, b,
+            "tick() and tick_index() should delegate to the same source"
+        );
+    }
+
+    #[test]
+    fn clean_tick_index_matches_tick() {
+        reset();
+        let a = tick();
+        let b = clean_tick_index();
+        assert_eq!(a, b, "clean_tick_index() should match tick()");
+    }
+
+    #[test]
+    fn peek_returns_value() {
+        reset();
+        let _p = peek();
+    }
+
+    #[test]
+    fn reset_is_idempotent() {
+        reset();
+        let a = tick();
+        reset();
+        let b = tick();
+        assert_eq!(a, b, "reset should restore to the same initial state");
+    }
+}
