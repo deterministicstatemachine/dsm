@@ -264,3 +264,185 @@ impl Default for DLVManager {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::pedersen::{PedersenCommitment, PedersenParams, SecurityLevel};
+    use crate::vault::limbo_vault::{EncryptedContent, VaultState as VS};
+
+    fn dummy_vault(id: &str, state: VS) -> LimboVault {
+        let params = PedersenParams::new(SecurityLevel::Standard128).expect("pedersen params");
+        let commitment =
+            PedersenCommitment::commit(b"test_content", &params).expect("pedersen commit");
+        LimboVault {
+            id: id.to_string(),
+            created_at_state: 0,
+            creator_public_key: vec![0x01; 32],
+            fulfillment_condition: FulfillmentMechanism::CryptoCondition {
+                condition_hash: vec![0x02; 32],
+                public_params: vec![0x03; 16],
+            },
+            intended_recipient: None,
+            state,
+            content_type: "application/octet-stream".into(),
+            encrypted_content: EncryptedContent {
+                encapsulated_key: vec![],
+                encrypted_data: vec![],
+                nonce: vec![],
+                aad: vec![],
+            },
+            content_commitment: commitment,
+            parameters_hash: vec![0xAA; 32],
+            creator_signature: vec![0xBB; 64],
+            verification_positions: vec![],
+            reference_state_hash: [0xCC; 32],
+            entry_header: None,
+        }
+    }
+
+    // ── Construction ────────────────────────────────────────────────
+
+    #[test]
+    fn dlv_manager_default() {
+        let mgr = DLVManager::default();
+        let dbg = format!("{:?}", mgr.vaults);
+        assert!(dbg.contains("RwLock"));
+    }
+
+    // ── add_vault + get_vault ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn add_and_get_vault() {
+        let mgr = DLVManager::new();
+        let vault = dummy_vault("vault_1", VS::Limbo);
+
+        let id = mgr.add_vault(vault).await.unwrap();
+        assert_eq!(id, "vault_1");
+
+        let lock = mgr.get_vault("vault_1").await.unwrap();
+        let v = lock.lock().await;
+        assert_eq!(v.id, "vault_1");
+        assert_eq!(v.state, VS::Limbo);
+    }
+
+    #[tokio::test]
+    async fn get_vault_not_found() {
+        let mgr = DLVManager::new();
+        let result = mgr.get_vault("nonexistent").await;
+        assert!(result.is_err());
+    }
+
+    // ── list_vaults ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn list_vaults_empty() {
+        let mgr = DLVManager::new();
+        let ids = mgr.list_vaults().await.unwrap();
+        assert!(ids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_vaults_after_adds() {
+        let mgr = DLVManager::new();
+        mgr.add_vault(dummy_vault("v1", VS::Limbo)).await.unwrap();
+        mgr.add_vault(dummy_vault("v2", VS::Limbo)).await.unwrap();
+
+        let mut ids = mgr.list_vaults().await.unwrap();
+        ids.sort();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&"v1".to_string()));
+        assert!(ids.contains(&"v2".to_string()));
+    }
+
+    // ── get_vaults_by_status ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn get_vaults_by_status_empty() {
+        let mgr = DLVManager::new();
+        let result = mgr.get_vaults_by_status(VS::Limbo).await.unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_vaults_by_status_filters() {
+        let mgr = DLVManager::new();
+        mgr.add_vault(dummy_vault("limbo_1", VS::Limbo))
+            .await
+            .unwrap();
+        mgr.add_vault(dummy_vault("limbo_2", VS::Limbo))
+            .await
+            .unwrap();
+        mgr.add_vault(dummy_vault(
+            "active_1",
+            VS::Active {
+                activated_state_number: 10,
+            },
+        ))
+        .await
+        .unwrap();
+
+        let limbo = mgr.get_vaults_by_status(VS::Limbo).await.unwrap();
+        assert_eq!(limbo.len(), 2);
+
+        let active = mgr
+            .get_vaults_by_status(VS::Active {
+                activated_state_number: 10,
+            })
+            .await
+            .unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0], "active_1");
+    }
+
+    // ── add_vault overwrites existing ───────────────────────────────
+
+    #[tokio::test]
+    async fn add_vault_overwrites_same_id() {
+        let mgr = DLVManager::new();
+        mgr.add_vault(dummy_vault("dup", VS::Limbo)).await.unwrap();
+        mgr.add_vault(dummy_vault(
+            "dup",
+            VS::Active {
+                activated_state_number: 5,
+            },
+        ))
+        .await
+        .unwrap();
+
+        let ids = mgr.list_vaults().await.unwrap();
+        assert_eq!(ids.len(), 1);
+
+        let lock = mgr.get_vault("dup").await.unwrap();
+        let v = lock.lock().await;
+        assert_eq!(
+            v.state,
+            VS::Active {
+                activated_state_number: 5
+            }
+        );
+    }
+
+    // ── concurrent access safety ────────────────────────────────────
+
+    #[tokio::test]
+    async fn concurrent_add_and_list() {
+        let mgr = std::sync::Arc::new(DLVManager::new());
+        let mut handles = Vec::new();
+
+        for i in 0..10 {
+            let mgr = mgr.clone();
+            handles.push(tokio::spawn(async move {
+                let vault = dummy_vault(&format!("v_{i}"), VS::Limbo);
+                mgr.add_vault(vault).await.unwrap();
+            }));
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let ids = mgr.list_vaults().await.unwrap();
+        assert_eq!(ids.len(), 10);
+    }
+}

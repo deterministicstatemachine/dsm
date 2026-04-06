@@ -82,3 +82,119 @@ impl Default for SpentProofSmt {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_smt_is_empty() {
+        let smt = SpentProofSmt::new();
+        assert!(smt.is_empty());
+        assert_eq!(smt.len(), 0);
+    }
+
+    #[test]
+    fn default_equals_new() {
+        let from_new = SpentProofSmt::new();
+        let from_default = SpentProofSmt::default();
+        assert_eq!(from_new.spent.len(), from_default.spent.len());
+        assert_eq!(from_new.root(), from_default.root());
+    }
+
+    #[test]
+    fn mark_spent_tracks_jap_hash() {
+        let mut smt = SpentProofSmt::new();
+        let jap = [0xAA; 32];
+
+        assert!(!smt.is_spent(&jap));
+        smt.mark_spent(jap);
+        assert!(smt.is_spent(&jap));
+        assert_eq!(smt.len(), 1);
+        assert!(!smt.is_empty());
+    }
+
+    #[test]
+    fn is_spent_returns_false_for_unknown() {
+        let smt = SpentProofSmt::new();
+        assert!(!smt.is_spent(&[0x01; 32]));
+        assert!(!smt.is_spent(&[0x00; 32]));
+    }
+
+    #[test]
+    fn multiple_marks_are_idempotent_on_len() {
+        let mut smt = SpentProofSmt::new();
+        let jap = [0x42; 32];
+        smt.mark_spent(jap);
+        smt.mark_spent(jap);
+        assert_eq!(smt.len(), 1);
+        assert!(smt.is_spent(&jap));
+    }
+
+    #[test]
+    fn root_empty_is_deterministic() {
+        let smt1 = SpentProofSmt::new();
+        let smt2 = SpentProofSmt::new();
+        assert_eq!(smt1.root(), smt2.root());
+    }
+
+    #[test]
+    fn root_changes_when_jap_marked() {
+        let mut smt = SpentProofSmt::new();
+        let root_empty = smt.root();
+
+        smt.mark_spent([0x01; 32]);
+        let root_one = smt.root();
+        assert_ne!(root_empty, root_one);
+
+        smt.mark_spent([0x02; 32]);
+        let root_two = smt.root();
+        assert_ne!(root_one, root_two);
+    }
+
+    #[test]
+    fn root_is_order_independent() {
+        let mut smt_a = SpentProofSmt::new();
+        smt_a.mark_spent([0x01; 32]);
+        smt_a.mark_spent([0x02; 32]);
+
+        let mut smt_b = SpentProofSmt::new();
+        smt_b.mark_spent([0x02; 32]);
+        smt_b.mark_spent([0x01; 32]);
+
+        assert_eq!(
+            smt_a.root(),
+            smt_b.root(),
+            "root should be deterministic regardless of insertion order"
+        );
+    }
+
+    #[test]
+    fn root_differs_for_different_keys() {
+        let mut smt_a = SpentProofSmt::new();
+        smt_a.mark_spent([0xAA; 32]);
+
+        let mut smt_b = SpentProofSmt::new();
+        smt_b.mark_spent([0xBB; 32]);
+
+        assert_ne!(smt_a.root(), smt_b.root());
+    }
+
+    #[test]
+    fn many_entries_tracked_correctly() {
+        let mut smt = SpentProofSmt::new();
+        for i in 0..100u8 {
+            let mut key = [0u8; 32];
+            key[0] = i;
+            smt.mark_spent(key);
+        }
+        assert_eq!(smt.len(), 100);
+
+        let mut check_key = [0u8; 32];
+        check_key[0] = 50;
+        assert!(smt.is_spent(&check_key));
+
+        check_key[0] = 200;
+        assert!(!smt.is_spent(&check_key));
+    }
+}
