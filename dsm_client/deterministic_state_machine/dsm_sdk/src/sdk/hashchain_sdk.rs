@@ -61,11 +61,15 @@ impl HashChainSDK {
     }
 
     /// Initialize with a genesis state (state_number must be 0).
-    pub fn initialize_with_genesis(&self, genesis_state: State) -> Result<(), DsmError> {
+    pub fn initialize_with_genesis(&self, mut genesis_state: State) -> Result<(), DsmError> {
         if genesis_state.state_number != 0 {
             return Err(DsmError::invalid_operation(
                 "Cannot initialize hash chain with non-genesis state",
             ));
+        }
+
+        if genesis_state.hash == [0u8; 32] {
+            genesis_state.hash = genesis_state.compute_hash()?;
         }
 
         {
@@ -339,7 +343,8 @@ impl HashChainSDK {
         .with_prev_state_hash(prev_state_hash)
         .with_sparse_index(SparseIndex::new(sparse_indices));
 
-        let new_state = State::new(params);
+        let mut new_state = State::new(params);
+        new_state.hash = new_state.compute_hash()?;
         self.add_state(new_state)
     }
 
@@ -900,6 +905,18 @@ mod tests {
     fn add_data_fails_without_genesis() {
         let sdk = HashChainSDK::new();
         assert!(sdk.add_data(b"orphan").is_err());
+    }
+
+    #[test]
+    fn add_data_persists_current_state_hash() {
+        let sdk = HashChainSDK::new();
+        sdk.initialize_with_genesis(make_genesis_state()).unwrap();
+        sdk.add_data(b"payload").unwrap();
+
+        let state = sdk.current_state().unwrap();
+        assert_eq!(state.state_number, 1);
+        assert_ne!(state.hash, [0u8; 32]);
+        assert_eq!(sdk.get_state_by_number(1).unwrap().hash, state.hash);
     }
 
     #[test]
