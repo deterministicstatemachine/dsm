@@ -1375,7 +1375,7 @@ mod tests {
     #[test]
     fn has_contact_for_device_id_rejects_short_device_id() {
         let short = vec![0u8; 16];
-        assert_eq!(has_contact_for_device_id(&short).unwrap(), false);
+        assert!(!has_contact_for_device_id(&short).unwrap());
     }
 
     #[test]
@@ -1394,7 +1394,7 @@ mod tests {
 
     #[test]
     fn is_ble_address_paired_returns_false_for_empty_address() {
-        assert_eq!(is_ble_address_paired("").unwrap(), false);
+        assert!(!is_ble_address_paired("").unwrap());
     }
 
     #[test]
@@ -1405,9 +1405,19 @@ mod tests {
 
     #[test]
     fn record_observed_remote_chain_tip_rejects_invalid_lengths() {
-        let err = record_observed_remote_chain_tip(&[0u8; 16], &[0u8; 32]).unwrap_err();
+        let err = record_observed_remote_chain_tip(
+            &[0u8; 16],
+            &[0u8; 32],
+            ObservedRemoteTipSource::Unknown,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("Invalid device_id length"));
-        let err2 = record_observed_remote_chain_tip(&[0u8; 32], &[0u8; 16]).unwrap_err();
+        let err2 = record_observed_remote_chain_tip(
+            &[0u8; 32],
+            &[0u8; 16],
+            ObservedRemoteTipSource::Unknown,
+        )
+        .unwrap_err();
         assert!(err2
             .to_string()
             .contains("Invalid observed_chain_tip length"));

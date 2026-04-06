@@ -411,7 +411,7 @@ mod tests {
         let s = make_session("commit");
         store_bilateral_session(&s).unwrap();
 
-        delete_bilateral_session(&vec![0x11; 32]).unwrap();
+        delete_bilateral_session(&[0x11; 32]).unwrap();
         let all = get_all_bilateral_sessions().unwrap();
         assert!(all.is_empty());
     }
@@ -453,7 +453,7 @@ mod tests {
     #[serial]
     fn delete_nonexistent_bilateral_session_is_noop() {
         init_test_db();
-        delete_bilateral_session(&vec![0xFF; 32]).unwrap();
+        delete_bilateral_session(&[0xFF; 32]).unwrap();
         let all = get_all_bilateral_sessions().unwrap();
         assert!(all.is_empty());
     }

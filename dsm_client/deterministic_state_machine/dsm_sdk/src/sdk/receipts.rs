@@ -748,7 +748,7 @@ mod tests {
     fn encode_protocol_transition_empty_label() {
         let encoded = encode_protocol_transition_payload(b"", &[b"data"]);
         // label_len(4) + label(0) + data_len(4) + data(4) = 12
-        assert_eq!(encoded.len(), 4 + 0 + 4 + 4);
+        assert_eq!(encoded.len(), 4 + 4 + 4);
     }
 
     #[test]

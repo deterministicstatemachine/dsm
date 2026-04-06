@@ -294,6 +294,41 @@ pub fn clear_pending_online_outbox(counterparty_device_id: &[u8]) -> Result<()> 
     Ok(())
 }
 
+/// Exact-match gate delete: only clears the gate if counterparty, parent_tip,
+/// and next_tip ALL match the stored row. Prevents TOCTOU races where a BLE
+/// cleanup path could accidentally delete a freshly-created gate from a
+/// concurrent online send.
+///
+/// Returns `Ok(true)` if the exact row was deleted, `Ok(false)` if no match.
+pub fn clear_pending_online_outbox_if_matches(
+    counterparty_device_id: &[u8],
+    expected_parent_tip: &[u8],
+    expected_next_tip: &[u8],
+) -> Result<bool> {
+    if counterparty_device_id.len() != 32 {
+        return Err(anyhow!("Invalid counterparty_device_id length"));
+    }
+    if expected_parent_tip.len() != 32 {
+        return Err(anyhow!("Invalid expected_parent_tip length"));
+    }
+    if expected_next_tip.len() != 32 {
+        return Err(anyhow!("Invalid expected_next_tip length"));
+    }
+
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|poisoned| {
+        log::warn!("DB lock poisoned, recovering");
+        poisoned.into_inner()
+    });
+
+    let rows = conn.execute(
+        "DELETE FROM pending_online_outbox WHERE counterparty_device_id = ?1 AND parent_tip = ?2 AND next_tip = ?3",
+        params![counterparty_device_id, expected_parent_tip, expected_next_tip],
+    )?;
+
+    Ok(rows > 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

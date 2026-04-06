@@ -416,6 +416,7 @@ mod tests {
             verifying_storage_nodes: vec!["node1".into(), "node2".into()],
             ble_address: "AA:BB:CC:DD:EE:FF".into(),
             signing_public_key: vec![0x88; 64],
+            send_status: None,
         };
 
         let bytes = resp.encode_to_vec();

@@ -600,7 +600,7 @@ mod tests {
         let peer = make_peer("dlv", SystemPeerType::Dlv);
         store_system_peer(&peer).unwrap();
 
-        let loaded = get_system_peer_by_device_id(&vec![0xABu8; 32])
+        let loaded = get_system_peer_by_device_id(&[0xABu8; 32])
             .unwrap()
             .expect("should find peer");
         assert_eq!(loaded.peer_key, "dlv");

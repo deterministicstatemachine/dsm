@@ -73,7 +73,7 @@ mod tests {
         let _ = set_storage_base_dir(dir1.clone());
         let result = set_storage_base_dir(dir2.clone());
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), false);
+        assert!(!result.unwrap());
         std::fs::remove_dir_all(&dir1).ok();
         std::fs::remove_dir_all(&dir2).ok();
     }
