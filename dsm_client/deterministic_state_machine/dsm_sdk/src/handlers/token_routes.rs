@@ -512,6 +512,7 @@ mod tests {
     }
 
     /// Build a V2 policy_bytes blob with the full field layout.
+    #[allow(clippy::too_many_arguments)]
     fn build_v2_policy_bytes(
         kind_byte: u8,
         flags: u8,
@@ -522,11 +523,7 @@ mod tests {
         description: &str,
         icon_url: &str,
     ) -> Vec<u8> {
-        let mut buf = Vec::new();
-        buf.push(2); // version
-        buf.push(kind_byte);
-        buf.push(flags);
-        buf.push(0); // mintBurnThreshold
+        let mut buf = vec![2, kind_byte, flags, 0]; // version + mintBurnThreshold
 
         buf.push(ticker.len() as u8);
         buf.extend_from_slice(ticker.as_bytes());

@@ -19,6 +19,20 @@
 
 #![forbid(unsafe_code)]
 #![deny(warnings, clippy::all, clippy::pedantic)]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::approx_constant,
+        clippy::assertions_on_constants,
+        clippy::disallowed_methods,
+        clippy::expect_used,
+        clippy::field_reassign_with_default,
+        clippy::too_many_arguments,
+        clippy::unnecessary_get_then_check,
+        clippy::unwrap_used,
+        clippy::vec_init_then_push
+    )
+)]
 
 use core::pin::Pin;
 // core::task::Context, Poll not needed here

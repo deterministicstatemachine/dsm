@@ -49,8 +49,7 @@ mod tests {
     #[test]
     fn tick_returns_value() {
         reset();
-        let t = tick();
-        assert!(t <= u64::MAX);
+        let _t = tick();
     }
 
     #[test]
@@ -75,8 +74,7 @@ mod tests {
     #[test]
     fn peek_returns_value() {
         reset();
-        let p = peek();
-        assert!(p <= u64::MAX);
+        let _p = peek();
     }
 
     #[test]

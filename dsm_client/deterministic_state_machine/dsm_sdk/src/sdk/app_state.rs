@@ -665,11 +665,13 @@ mod tests {
 
     #[test]
     fn storage_identity_fields_can_be_set() {
-        let mut s = AppStateStorage::default();
-        s.device_id = Some(vec![0x11; 32]);
-        s.public_key = Some(vec![0x22; 32]);
-        s.genesis_hash = Some(vec![0x33; 32]);
-        s.smt_root = Some(vec![0x44; 32]);
+        let s = AppStateStorage {
+            device_id: Some(vec![0x11; 32]),
+            public_key: Some(vec![0x22; 32]),
+            genesis_hash: Some(vec![0x33; 32]),
+            smt_root: Some(vec![0x44; 32]),
+            ..Default::default()
+        };
 
         assert_eq!(s.device_id.as_ref().unwrap(), &vec![0x11; 32]);
         assert_eq!(s.public_key.as_ref().unwrap(), &vec![0x22; 32]);
@@ -679,8 +681,10 @@ mod tests {
 
     #[test]
     fn storage_device_tree_root_can_be_set() {
-        let mut s = AppStateStorage::default();
-        s.device_tree_root = Some(vec![0xDD; 32]);
+        let s = AppStateStorage {
+            device_tree_root: Some(vec![0xDD; 32]),
+            ..Default::default()
+        };
         assert_eq!(s.device_tree_root.as_ref().unwrap().len(), 32);
     }
 
@@ -698,7 +702,7 @@ mod tests {
         assert_eq!(s.recovery_sessions.get("r1").unwrap(), "done");
 
         s.recovery_sessions.remove("r1");
-        assert!(s.recovery_sessions.get("r1").is_none());
+        assert!(!s.recovery_sessions.contains_key("r1"));
         assert_eq!(s.recovery_sessions.get("r2").unwrap(), "active");
     }
 
@@ -712,7 +716,7 @@ mod tests {
         s.key_value_store
             .insert("lang".to_string(), "fr".to_string());
         assert_eq!(s.key_value_store.get("lang").unwrap(), "fr");
-        assert!(s.key_value_store.get("missing").is_none());
+        assert!(!s.key_value_store.contains_key("missing"));
     }
 
     #[test]
@@ -876,9 +880,11 @@ mod tests {
 
     #[test]
     fn app_state_storage_clone() {
-        let mut s = AppStateStorage::default();
-        s.has_identity = true;
-        s.device_id = Some(vec![1, 2, 3]);
+        let mut s = AppStateStorage {
+            has_identity: true,
+            device_id: Some(vec![1, 2, 3]),
+            ..Default::default()
+        };
         s.key_value_store.insert("k".to_string(), "v".to_string());
 
         let cloned = s.clone();

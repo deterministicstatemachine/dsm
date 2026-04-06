@@ -249,12 +249,12 @@ mod tests {
 
     #[test]
     fn eager_poll_interval_shorter_than_default() {
-        assert!(EAGER_POLL_INTERVAL_MS < DEFAULT_POLL_INTERVAL_MS);
+        assert_eq!(DEFAULT_POLL_INTERVAL_MS - EAGER_POLL_INTERVAL_MS, 52_000);
     }
 
     #[test]
     fn eager_poll_cycles_nonzero() {
-        assert!(EAGER_POLL_CYCLES > 0);
+        assert_eq!(EAGER_POLL_CYCLES, 5);
     }
 
     #[test]

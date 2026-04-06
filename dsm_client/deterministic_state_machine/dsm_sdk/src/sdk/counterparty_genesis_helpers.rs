@@ -737,7 +737,7 @@ mod tests {
         let remote = dummy_genesis([0x02; 32]);
         let binding = create_genesis_binding(&local, &remote, "").unwrap();
         // "" (0) + null (1) + hash_a (32) + hash_b (32) = 65
-        assert_eq!(binding.len(), 0 + 1 + 32 + 32);
+        assert_eq!(binding.len(), 1 + 32 + 32);
         assert_eq!(binding[0], 0); // null separator right at start
     }
 

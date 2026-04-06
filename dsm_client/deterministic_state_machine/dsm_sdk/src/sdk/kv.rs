@@ -97,7 +97,7 @@ mod tests {
     #[test]
     fn encode_number() {
         assert_eq!(to_string(&Value::Number(42.0)), "42");
-        assert_eq!(to_string(&Value::Number(3.14)), "3.14");
+        assert_eq!(to_string(&Value::Number(2.5)), "2.5");
         assert_eq!(to_string(&Value::Number(-1.0)), "-1");
     }
 

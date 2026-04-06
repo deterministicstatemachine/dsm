@@ -158,7 +158,7 @@ mod tests {
 
     #[test]
     fn is_nonce_spent_returns_false_for_empty_nonce() {
-        assert_eq!(is_nonce_spent(&[]).unwrap(), false);
+        assert!(!is_nonce_spent(&[]).unwrap());
     }
 
     #[test]
