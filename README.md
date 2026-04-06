@@ -6,15 +6,14 @@
 
 The fastest way to get started is to install the APK directly from the latest tagged release:
 
-**[⬇ Download dsm-beta.apk (v0.1.0-beta.1)](https://github.com/deterministicstatemachine/dsm/releases/download/v0.1.0-beta.1/dsm-beta.apk)**
+**[⬇ Download dsm-wallet-v0.1.0-beta.2.apk](https://github.com/deterministicstatemachine/dsm/releases/download/v0.1.0-beta.2/dsm-wallet-v0.1.0-beta.2.apk)**
 
-1. Download the APK to your Android device.
-2. Enable **Install from unknown sources** in your device settings if prompted.
-3. Open the downloaded file to install and launch the DSM Wallet.
+1. **Uninstall any previous beta version first.**
+2. Download the APK to your Android device.
+3. Enable **Install from unknown sources** in your device settings if prompted.
+4. Open the downloaded file to install and launch the DSM Wallet.
 
-All release assets (APK, signature, SBOM) are on the [v0.1.0-beta.1 releases page](https://github.com/deterministicstatemachine/dsm/releases/tag/v0.1.0-beta.1).
-
-*(Make sure you uninstall any previous beta release versions 1st)*
+All release assets (APK, SBOM) are on the [v0.1.0-beta.2 releases page](https://github.com/deterministicstatemachine/dsm/releases/tag/v0.1.0-beta.2).
 
 ---
 
