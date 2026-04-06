@@ -1,0 +1,67 @@
+name: Architecture Refactor
+description: Track architecture and boundary refactors across SDK and platform layers
+title: "[ARCH] "
+labels: ["architecture", "sdk", "refactor", "high-priority", "android", "ios"]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for architecture-level refactors that change layer boundaries, shared contracts, or platform integration seams.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Brief description of the architectural change.
+      placeholder: Introduce a shared ingress and unify Android/iOS native boundaries.
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is wrong with the current architecture?
+    validations:
+      required: true
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What should the resulting architecture look like?
+    validations:
+      required: true
+  - type: textarea
+    id: proposed_design
+    attributes:
+      label: Proposed design
+      description: Describe the target design and the main structural changes.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: What is included and excluded in this pass?
+    validations:
+      required: true
+  - type: textarea
+    id: files
+    attributes:
+      label: Files expected to change
+      description: List the main files or modules that will be touched.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance_criteria
+    attributes:
+      label: Acceptance criteria
+      description: What must be true for this issue to be considered complete?
+    validations:
+      required: true
+  - type: textarea
+    id: testing
+    attributes:
+      label: Testing
+      description: What tests or checks are required?
+    validations:
+      required: true
