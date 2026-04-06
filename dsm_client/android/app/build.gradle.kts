@@ -12,6 +12,24 @@ plugins {
     id("com.google.protobuf")
 }
 
+val supportedRustAbis = mapOf(
+    "arm64-v8a" to "aarch64-linux-android",
+    "armeabi-v7a" to "armv7-linux-androideabi",
+    "x86_64" to "x86_64-linux-android",
+)
+
+val configuredRustAbis = (providers.gradleProperty("dsm.android.abis").orNull
+    ?: providers.environmentVariable("DSM_ANDROID_ABIS").orNull)
+    ?.split(",")
+    ?.map { it.trim() }
+    ?.filter { it.isNotEmpty() }
+    ?.ifEmpty { null }
+    ?: supportedRustAbis.keys.toList()
+
+require(configuredRustAbis.all { it in supportedRustAbis }) {
+    "Unsupported DSM_ANDROID_ABIS value: ${configuredRustAbis.joinToString(", ")}"
+}
+
 android {
     namespace = "com.dsm.wallet"
     compileSdk = 35
@@ -34,7 +52,7 @@ android {
         // Benefits: 3-8% faster app launch, 4.5% lower power draw, 4-6% faster camera
         // If you bundle prebuilt JNI libs in src/main/jniLibs/**, keep ABI listing explicit
         ndk {
-            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+            abiFilters += configuredRustAbis
         }
 
         // CMake build flags for Silicon Fingerprint NDK library
@@ -249,11 +267,9 @@ val refreshDsmJniLibs = tasks.register("refreshDsmJniLibs") {
     val repoJniLibs = project.file("../../deterministic_state_machine/jniLibs")
 
     // ABI -> Rust target triple
-    val abiToTriple = mapOf(
-        "arm64-v8a"   to "aarch64-linux-android",
-        "armeabi-v7a" to "armv7-linux-androideabi",
-        "x86_64"      to "x86_64-linux-android",
-    )
+    val abiToTriple = configuredRustAbis.associateWith { abi ->
+        supportedRustAbis.getValue(abi)
+    }
 
     // Resolve .so path: prefer cargo target release/debug, then accept direct
     // cargo-ndk `-o` output already written into jniLibs.

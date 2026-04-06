@@ -51,6 +51,19 @@ info "Checking proto guards..."
 bash scripts/guard_protos.sh
 pass "Proto guards"
 
+# ---------------------------------------------------------------------------
+# 4. Android NDK validation (when configured locally)
+# ---------------------------------------------------------------------------
+if [[ -n "${ANDROID_NDK_HOME:-}" || -n "${ANDROID_NDK_ROOT:-}" ]]; then
+  info "Running Android NDK validation..."
+  if ! make android-ndk-check 2>&1; then
+    fail "make android-ndk-check failed — fix Android NDK build errors before pushing"
+  fi
+  pass "Android NDK validation"
+else
+  info "Skipping Android NDK validation (ANDROID_NDK_HOME / ANDROID_NDK_ROOT not set locally)"
+fi
+
 echo ""
 echo -e "${GREEN}All pre-push checks passed.${NC}"
 echo ""
