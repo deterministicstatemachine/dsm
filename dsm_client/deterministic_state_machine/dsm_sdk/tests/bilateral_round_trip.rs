@@ -817,11 +817,10 @@ fn history_contains_transfer(
             && tx.to_device == receiver_device_txt
             && tx.amount == amount
             && match token_id {
-                Some(expected_token_id) => tx
-                    .metadata
-                    .get("token_id")
-                    .map(Vec::as_slice)
-                    == Some(expected_token_id.as_bytes()),
+                Some(expected_token_id) => {
+                    tx.metadata.get("token_id").map(Vec::as_slice)
+                        == Some(expected_token_id.as_bytes())
+                }
                 None => !tx.metadata.contains_key("token_id"),
             }
     })
