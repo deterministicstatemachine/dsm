@@ -182,9 +182,8 @@ async fn setup_two_devices_era(a_id: u8, b_id: u8, a_era: u64, b_era: u64) -> Tw
         vec![dsm::types::identifiers::NodeId::new("n")],
     );
 
-    let chain_tip_store =
-        Arc::new(dsm_sdk::sdk::chain_tip_store::SqliteChainTipStore::new())
-            as Arc<dyn dsm::core::chain_tip_store::ChainTipStore>;
+    let chain_tip_store = Arc::new(dsm_sdk::sdk::chain_tip_store::SqliteChainTipStore::new())
+        as Arc<dyn dsm::core::chain_tip_store::ChainTipStore>;
     let mut mgr_a = BilateralTransactionManager::new_with_chain_tip_store(
         a_cm,
         a_kp.clone(),
@@ -348,9 +347,8 @@ async fn setup_two_devices_dbtc(a_id: u8, b_id: u8, a_dbtc: u64, b_dbtc: u64) ->
         vec![dsm::types::identifiers::NodeId::new("n")],
     );
 
-    let chain_tip_store =
-        Arc::new(dsm_sdk::sdk::chain_tip_store::SqliteChainTipStore::new())
-            as Arc<dyn dsm::core::chain_tip_store::ChainTipStore>;
+    let chain_tip_store = Arc::new(dsm_sdk::sdk::chain_tip_store::SqliteChainTipStore::new())
+        as Arc<dyn dsm::core::chain_tip_store::ChainTipStore>;
     let mut mgr_a = BilateralTransactionManager::new_with_chain_tip_store(
         a_cm,
         a_kp.clone(),
