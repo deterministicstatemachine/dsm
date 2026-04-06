@@ -229,8 +229,8 @@ mod tests {
 
     fn test_entropy_array() -> [u8; 32] {
         let mut arr = [0u8; 32];
-        for i in 0..32 {
-            arr[i] = (i + 1) as u8;
+        for (i, byte) in arr.iter_mut().enumerate() {
+            *byte = (i + 1) as u8;
         }
         arr
     }
