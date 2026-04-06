@@ -359,7 +359,9 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn store_bilateral_session_accepts_all_valid_phases() {
+        init_test_db();
         let valid_phases = [
             "prepare",
             "accept",
