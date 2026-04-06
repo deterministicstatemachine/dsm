@@ -15,4 +15,4 @@ chmod +x .githooks/pre-commit .githooks/pre-push
 
 echo "Git hooks installed — .githooks/ is now active."
 echo "  pre-commit : fmt, protocol purity, forbidden symbols, bilateral gates"
-echo "  pre-push   : clippy, tests, codegen enforcement, proto guards"
+echo "  pre-push   : clippy, tests, codegen enforcement, proto guards, Android NDK build (when NDK is configured)"

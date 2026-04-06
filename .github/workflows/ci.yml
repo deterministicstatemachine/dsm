@@ -71,6 +71,42 @@ jobs:
           cargo audit
 
   # --------------------------------------------------------------------------
+  # Android NDK: native Rust mobile build validation
+  # --------------------------------------------------------------------------
+  android-ndk:
+    name: Android NDK
+    runs-on: ubuntu-latest
+    needs: [rust]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, armv7-linux-androideabi
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Android NDK validation deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+          cargo install cargo-ndk --locked --quiet || true
+          sdkmanager --install "ndk;27.0.12077973"
+          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/27.0.12077973" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=${ANDROID_SDK_ROOT}/ndk/27.0.12077973" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=${ANDROID_SDK_ROOT}" >> "$GITHUB_ENV"
+
+      - name: Validate Android Rust NDK build
+        run: make android-ndk-check
+
+  # --------------------------------------------------------------------------
   # Formal validation: TLA+ model checking + real-code bridge harness
   # --------------------------------------------------------------------------
   formal-validation:
