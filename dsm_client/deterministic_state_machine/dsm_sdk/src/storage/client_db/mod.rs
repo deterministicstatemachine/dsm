@@ -1478,8 +1478,9 @@ mod tests {
         )
         .expect("record deferred observation");
 
-        let status =
-            crate::handlers::relationship_status::derive_local_send_status_for_device_id(&device_id);
+        let status = crate::handlers::relationship_status::derive_local_send_status_for_device_id(
+            &device_id,
+        );
         assert!(
             status.send_ready,
             "deferred inbox observation should not hard-block a healthy relationship"
@@ -1510,8 +1511,9 @@ mod tests {
         )
         .expect("record live peer claim");
 
-        let status =
-            crate::handlers::relationship_status::derive_local_send_status_for_device_id(&device_id);
+        let status = crate::handlers::relationship_status::derive_local_send_status_for_device_id(
+            &device_id,
+        );
         assert!(
             !status.send_ready,
             "live peer claim mismatch should still block send readiness"
@@ -1557,8 +1559,7 @@ mod tests {
             observed_gate: None,
             clear_gate_on_success: false,
         };
-        bilateral_tip_sync::sync_bilateral_tips_atomically(&request)
-            .expect("sync should succeed");
+        bilateral_tip_sync::sync_bilateral_tips_atomically(&request).expect("sync should succeed");
 
         assert!(
             get_observed_remote_tip_record(&device_id)

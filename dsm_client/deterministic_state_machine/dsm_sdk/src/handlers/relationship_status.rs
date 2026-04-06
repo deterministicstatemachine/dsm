@@ -19,12 +19,8 @@ fn check_state_i32(state: generated::RelationshipSendCheckState) -> i32 {
 pub(crate) fn ready_status() -> generated::RelationshipSendStatus {
     generated::RelationshipSendStatus {
         send_ready: true,
-        send_check_state: check_state_i32(
-            generated::RelationshipSendCheckState::Ready,
-        ),
-        send_block_reason: block_reason_i32(
-            generated::RelationshipSendBlockReason::Unspecified,
-        ),
+        send_check_state: check_state_i32(generated::RelationshipSendCheckState::Ready),
+        send_block_reason: block_reason_i32(generated::RelationshipSendBlockReason::Unspecified),
         send_block_message: "Ready to send".to_string(),
     }
 }
@@ -35,9 +31,7 @@ pub(crate) fn blocked_status(
 ) -> generated::RelationshipSendStatus {
     generated::RelationshipSendStatus {
         send_ready: false,
-        send_check_state: check_state_i32(
-            generated::RelationshipSendCheckState::Blocked,
-        ),
+        send_check_state: check_state_i32(generated::RelationshipSendCheckState::Blocked),
         send_block_reason: block_reason_i32(reason),
         send_block_message: message.into(),
     }
@@ -53,7 +47,9 @@ pub(crate) fn status_message(status: &generated::RelationshipSendStatus) -> Stri
     }
 }
 
-pub(crate) fn derive_local_send_status_for_device_id(device_id: &[u8]) -> generated::RelationshipSendStatus {
+pub(crate) fn derive_local_send_status_for_device_id(
+    device_id: &[u8],
+) -> generated::RelationshipSendStatus {
     match client_db::get_contact_by_device_id(device_id) {
         Ok(Some(contact)) => derive_local_send_status_for_contact(&contact),
         Ok(None) => blocked_status(
@@ -128,11 +124,12 @@ pub(crate) fn derive_local_send_status_for_contact(
             "Relationship tip columns are inconsistent",
         ),
         _ => {
-            let observed_remote_tip =
-                client_db::get_observed_remote_tip_record(&contact.device_id);
+            let observed_remote_tip = client_db::get_observed_remote_tip_record(&contact.device_id);
             match observed_remote_tip {
                 Ok(Some(observed_tip))
-                    if observed_tip.source.blocks_send_without_local_corroboration() =>
+                    if observed_tip
+                        .source
+                        .blocks_send_without_local_corroboration() =>
                 {
                     let reference_tip = canonical_tip.or(local_tip).unwrap_or([0u8; 32]);
                     if observed_tip.tip != reference_tip {

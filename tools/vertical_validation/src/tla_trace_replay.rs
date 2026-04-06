@@ -444,7 +444,9 @@ impl DsmImplementationHarness {
             "unlock_vault" => self.apply_unlock_vault(current, next)?,
             "consume_jap_and_emit" => self.apply_consume_jap_and_emit(current, next)?,
             "consume_spent_proof" => self.apply_sync_from_tlc(next)?,
-            "select_winner" => { self.step += 1; }
+            "select_winner" => {
+                self.step += 1;
+            }
             "activate_again" => self.apply_activate_again(current, next)?,
             "phase_transition" => self.apply_phase_transition(next)?,
             "step_only" => self.step += 1,
@@ -901,7 +903,11 @@ impl DsmImplementationHarness {
         Ok(())
     }
 
-    fn apply_consume_jap_and_emit(&mut self, _current: &TlaState, next: &TlaState) -> anyhow::Result<()> {
+    fn apply_consume_jap_and_emit(
+        &mut self,
+        _current: &TlaState,
+        next: &TlaState,
+    ) -> anyhow::Result<()> {
         // Mirror TLA+ ConsumeJAPAndEmit: sync DJTE state from TLC.
         self.apply_sync_from_tlc(next)
     }
