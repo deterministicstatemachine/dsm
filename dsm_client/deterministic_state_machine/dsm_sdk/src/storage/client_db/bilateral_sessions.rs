@@ -17,7 +17,6 @@ fn get_db_connection() -> Result<std::sync::Arc<std::sync::Mutex<rusqlite::Conne
 
 /// Store or update a bilateral session
 pub fn store_bilateral_session(session: &BilateralSessionRecord) -> Result<()> {
-    // Validate inputs
     if session.commitment_hash.is_empty() || session.commitment_hash.len() > 32 {
         return Err(anyhow!(
             "Invalid commitment_hash length: {} bytes (must be 1-32)",
@@ -65,7 +64,7 @@ pub fn store_bilateral_session(session: &BilateralSessionRecord) -> Result<()> {
         "INSERT INTO bilateral_sessions(
             commitment_hash, counterparty_device_id, counterparty_genesis_hash, operation_bytes, phase,
             local_signature, counterparty_signature, created_at_step,
-                sender_ble_address, updated_at)
+            sender_ble_address, updated_at)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
          ON CONFLICT(commitment_hash) DO UPDATE SET
             phase = excluded.phase,
@@ -104,7 +103,6 @@ pub fn store_bilateral_session(session: &BilateralSessionRecord) -> Result<()> {
     );
     Ok(())
 }
-
 /// Get all bilateral sessions (for restoration on startup)
 pub fn get_all_bilateral_sessions() -> Result<Vec<BilateralSessionRecord>> {
     let binding = get_db_connection()?;
@@ -113,10 +111,10 @@ pub fn get_all_bilateral_sessions() -> Result<Vec<BilateralSessionRecord>> {
         .map_err(|_| anyhow!("Database lock poisoned - concurrent access error"))?;
     let mut stmt = conn.prepare(
         "SELECT commitment_hash, counterparty_device_id, operation_bytes, phase,
-               counterparty_genesis_hash, local_signature, counterparty_signature, created_at_step,
-               sender_ble_address
-         FROM bilateral_sessions
-           ORDER BY created_at_step DESC",
+                counterparty_genesis_hash, local_signature, counterparty_signature, created_at_step,
+                sender_ble_address
+           FROM bilateral_sessions
+          ORDER BY created_at_step DESC",
     )?;
 
     let iter = stmt.query_map([], |row| {
@@ -134,8 +132,8 @@ pub fn get_all_bilateral_sessions() -> Result<Vec<BilateralSessionRecord>> {
     })?;
 
     let mut sessions = Vec::new();
-    for s in iter {
-        sessions.push(s?);
+    for session in iter {
+        sessions.push(session?);
     }
     Ok(sessions)
 }
@@ -202,16 +200,9 @@ pub fn update_bilateral_session_phase(commitment_hash: &[u8], phase: &str) -> Re
 
 /// Clean up expired bilateral sessions
 pub fn cleanup_expired_bilateral_sessions(current_ticks: u64) -> Result<usize> {
-    // Clockless protocol: bilateral sessions do not expire by any local notion of duration.
-    // Cleanup must be driven by explicit state transitions, not by a ticking counter.
     let _ = current_ticks;
     Ok(0)
 }
-
-// ═══════════════════════════════════════════════════════════════════════
-// §5.3 Pending Confirm Delivery — crash-safe receipt persistence
-// ═══════════════════════════════════════════════════════════════════════
-
 /// Store a confirm envelope for re-delivery. Called atomically with sender
 /// finalization so the receipt survives crashes.
 pub fn store_pending_confirm_delivery(
