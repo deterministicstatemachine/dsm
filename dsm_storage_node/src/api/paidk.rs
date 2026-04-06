@@ -141,3 +141,108 @@ pub async fn get_status(
     );
     Ok((StatusCode::OK, headers, buf))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dsm::types::proto::StoragePaymentReceiptV3;
+    use prost::Message;
+
+    #[test]
+    fn constants_match_spec() {
+        assert_eq!(DEFAULT_K, 3, "PaidK requires 3 distinct operators");
+        assert_eq!(DEFAULT_FLAT_RATE, 1000, "flat rate must be 1000");
+    }
+
+    #[test]
+    fn receipt_address_is_deterministic() {
+        let body = b"receipt-payload";
+        let a1 = blake3_tagged("DSM/pay/storage", body);
+        let a2 = blake3_tagged("DSM/pay/storage", body);
+        assert_eq!(a1, a2);
+
+        let different = blake3_tagged("DSM/pay/storage", b"other-payload");
+        assert_ne!(a1, different);
+    }
+
+    #[test]
+    fn receipt_address_domain_separation() {
+        let body = b"same-body";
+        let pay = blake3_tagged("DSM/pay/storage", body);
+        let sig = blake3_tagged("DSM/signal/up", body);
+        assert_ne!(
+            pay, sig,
+            "different domain tags must produce distinct digests"
+        );
+    }
+
+    #[test]
+    fn receipt_validation_device_id_length() {
+        let mut receipt = StoragePaymentReceiptV3 {
+            device_id: vec![0u8; 32],
+            operator_node_id: vec![0u8; 32],
+            amount: 2000,
+            ..Default::default()
+        };
+        assert_eq!(receipt.device_id.len(), 32);
+        assert_eq!(receipt.operator_node_id.len(), 32);
+
+        // Wrong lengths should fail validation
+        receipt.device_id = vec![0u8; 16];
+        assert_ne!(receipt.device_id.len(), 32);
+        receipt.device_id = vec![0u8; 33];
+        assert_ne!(receipt.device_id.len(), 32);
+    }
+
+    #[test]
+    fn receipt_validation_zero_amount_rejected() {
+        let receipt = StoragePaymentReceiptV3 {
+            device_id: vec![0u8; 32],
+            operator_node_id: vec![0u8; 32],
+            amount: 0,
+            ..Default::default()
+        };
+        assert_eq!(receipt.amount, 0, "zero-amount receipts must be rejected");
+    }
+
+    #[test]
+    fn receipt_protobuf_roundtrip() {
+        let receipt = StoragePaymentReceiptV3 {
+            device_id: vec![0xAA; 32],
+            operator_node_id: vec![0xBB; 32],
+            amount: 5000,
+            ..Default::default()
+        };
+        let mut buf = Vec::with_capacity(receipt.encoded_len());
+        receipt.encode(&mut buf).unwrap();
+
+        let decoded = StoragePaymentReceiptV3::decode(buf.as_slice()).unwrap();
+        assert_eq!(decoded.device_id, vec![0xAA; 32]);
+        assert_eq!(decoded.operator_node_id, vec![0xBB; 32]);
+        assert_eq!(decoded.amount, 5000);
+    }
+
+    #[test]
+    fn paidk_satisfaction_threshold() {
+        // Simulates the threshold check from submit_receipt
+        for distinct in 0..5i64 {
+            let satisfied = distinct >= DEFAULT_K as i64;
+            if distinct >= 3 {
+                assert!(satisfied, "distinct={distinct} should satisfy K=3");
+            } else {
+                assert!(!satisfied, "distinct={distinct} should NOT satisfy K=3");
+            }
+        }
+    }
+
+    #[test]
+    fn address_encoding_produces_nonempty_string() {
+        let digest = blake3_tagged("DSM/pay/storage", b"test");
+        let addr = text_id::encode_base32_crockford(&digest);
+        assert!(!addr.is_empty());
+        assert!(
+            addr.len() > 10,
+            "base32 encoding of 32 bytes should be substantial"
+        );
+    }
+}

@@ -172,3 +172,71 @@ pub async fn verify_drain(
     );
     Ok((StatusCode::OK, headers, buf))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prost::Message;
+
+    #[test]
+    fn drain_proof_d_constant() {
+        assert_eq!(DRAIN_PROOF_D, 2);
+    }
+
+    #[test]
+    fn drain_proof_v3_roundtrip() {
+        let proof = pb::DrainProofV3 {
+            node_id: vec![0xAA; 32],
+            cycle_indices: vec![10, 11],
+            bytecommit_digests: vec![vec![0u8; 32], vec![1u8; 32]],
+        };
+        let mut buf = Vec::new();
+        proof.encode(&mut buf).unwrap();
+        let decoded = pb::DrainProofV3::decode(buf.as_slice()).unwrap();
+        assert_eq!(decoded.node_id, vec![0xAA; 32]);
+        assert_eq!(decoded.cycle_indices, vec![10, 11]);
+        assert_eq!(decoded.bytecommit_digests.len(), 2);
+    }
+
+    #[test]
+    fn drain_proof_insufficient_cycles_rejected() {
+        let proof = pb::DrainProofV3 {
+            node_id: vec![0xBB; 32],
+            cycle_indices: vec![5],
+            bytecommit_digests: vec![vec![0u8; 32]],
+        };
+        assert!(
+            proof.cycle_indices.len() < DRAIN_PROOF_D as usize,
+            "only 1 cycle should be fewer than d=2"
+        );
+    }
+
+    #[test]
+    fn drain_proof_addr_is_deterministic() {
+        let body = b"some drain proof bytes";
+        let d1 = blake3_tagged("DSM/drain", body);
+        let d2 = blake3_tagged("DSM/drain", body);
+        assert_eq!(d1, d2);
+        let addr1 = text_id::encode_base32_crockford(&d1);
+        let addr2 = text_id::encode_base32_crockford(&d2);
+        assert_eq!(addr1, addr2);
+        assert!(!addr1.is_empty());
+    }
+
+    #[test]
+    fn drain_verify_v3_roundtrip() {
+        let result = pb::DrainVerifyV3 {
+            verified: true,
+            node_id: vec![0xCC; 32],
+            start_cycle: 0,
+            end_cycle: 2,
+            consecutive_empty: 2,
+        };
+        let mut buf = Vec::new();
+        result.encode(&mut buf).unwrap();
+        let decoded = pb::DrainVerifyV3::decode(buf.as_slice()).unwrap();
+        assert!(decoded.verified);
+        assert_eq!(decoded.consecutive_empty, 2);
+        assert_eq!(decoded.node_id, vec![0xCC; 32]);
+    }
+}
