@@ -3303,8 +3303,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_processIncomi
                 let frame_type = outbound.frame_type as i32;
                 let needs_chunking = frame_type
                     == crate::generated::BleFrameType::BilateralPrepareReject as i32
-                    || frame_type
-                    == crate::generated::BleFrameType::BilateralCommit as i32
+                    || frame_type == crate::generated::BleFrameType::BilateralCommit as i32
                     || frame_type == crate::generated::BleFrameType::BilateralCommitResponse as i32
                     || frame_type == crate::generated::BleFrameType::BilateralConfirm as i32;
 
