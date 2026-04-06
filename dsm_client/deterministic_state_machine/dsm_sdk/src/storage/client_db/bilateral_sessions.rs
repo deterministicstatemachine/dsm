@@ -17,6 +17,7 @@ fn get_db_connection() -> Result<std::sync::Arc<std::sync::Mutex<rusqlite::Conne
 
 /// Store or update a bilateral session
 pub fn store_bilateral_session(session: &BilateralSessionRecord) -> Result<()> {
+    // Validate inputs
     if session.commitment_hash.is_empty() || session.commitment_hash.len() > 32 {
         return Err(anyhow!(
             "Invalid commitment_hash length: {} bytes (must be 1-32)",
@@ -64,7 +65,7 @@ pub fn store_bilateral_session(session: &BilateralSessionRecord) -> Result<()> {
         "INSERT INTO bilateral_sessions(
             commitment_hash, counterparty_device_id, counterparty_genesis_hash, operation_bytes, phase,
             local_signature, counterparty_signature, created_at_step,
-            sender_ble_address, updated_at)
+                sender_ble_address, updated_at)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
          ON CONFLICT(commitment_hash) DO UPDATE SET
             phase = excluded.phase,
@@ -112,10 +113,10 @@ pub fn get_all_bilateral_sessions() -> Result<Vec<BilateralSessionRecord>> {
         .map_err(|_| anyhow!("Database lock poisoned - concurrent access error"))?;
     let mut stmt = conn.prepare(
         "SELECT commitment_hash, counterparty_device_id, operation_bytes, phase,
-                counterparty_genesis_hash, local_signature, counterparty_signature, created_at_step,
-                sender_ble_address
-           FROM bilateral_sessions
-          ORDER BY created_at_step DESC",
+               counterparty_genesis_hash, local_signature, counterparty_signature, created_at_step,
+               sender_ble_address
+         FROM bilateral_sessions
+           ORDER BY created_at_step DESC",
     )?;
 
     let iter = stmt.query_map([], |row| {
@@ -133,8 +134,8 @@ pub fn get_all_bilateral_sessions() -> Result<Vec<BilateralSessionRecord>> {
     })?;
 
     let mut sessions = Vec::new();
-    for session in iter {
-        sessions.push(session?);
+    for s in iter {
+        sessions.push(s?);
     }
     Ok(sessions)
 }
@@ -201,9 +202,15 @@ pub fn update_bilateral_session_phase(commitment_hash: &[u8], phase: &str) -> Re
 
 /// Clean up expired bilateral sessions
 pub fn cleanup_expired_bilateral_sessions(current_ticks: u64) -> Result<usize> {
+    // Clockless protocol: bilateral sessions do not expire by any local notion of duration.
+    // Cleanup must be driven by explicit state transitions, not by a ticking counter.
     let _ = current_ticks;
     Ok(0)
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// §5.3 Pending Confirm Delivery — crash-safe receipt persistence
+// ═══════════════════════════════════════════════════════════════════════
 
 /// Store a confirm envelope for re-delivery. Called atomically with sender
 /// finalization so the receipt survives crashes.
@@ -316,40 +323,40 @@ mod tests {
 
     #[test]
     fn store_bilateral_session_rejects_empty_commitment_hash() {
-        let mut session = make_session("prepare");
-        session.commitment_hash = vec![];
-        let err = store_bilateral_session(&session).unwrap_err();
+        let mut s = make_session("prepare");
+        s.commitment_hash = vec![];
+        let err = store_bilateral_session(&s).unwrap_err();
         assert!(err.to_string().contains("commitment_hash"));
     }
 
     #[test]
     fn store_bilateral_session_rejects_oversized_commitment_hash() {
-        let mut session = make_session("prepare");
-        session.commitment_hash = vec![0; 33];
-        let err = store_bilateral_session(&session).unwrap_err();
+        let mut s = make_session("prepare");
+        s.commitment_hash = vec![0; 33];
+        let err = store_bilateral_session(&s).unwrap_err();
         assert!(err.to_string().contains("commitment_hash"));
     }
 
     #[test]
     fn store_bilateral_session_rejects_wrong_counterparty_length() {
-        let mut session = make_session("prepare");
-        session.counterparty_device_id = vec![0; 16];
-        let err = store_bilateral_session(&session).unwrap_err();
+        let mut s = make_session("prepare");
+        s.counterparty_device_id = vec![0; 16];
+        let err = store_bilateral_session(&s).unwrap_err();
         assert!(err.to_string().contains("counterparty_device_id"));
     }
 
     #[test]
     fn store_bilateral_session_rejects_empty_operation_bytes() {
-        let mut session = make_session("prepare");
-        session.operation_bytes = vec![];
-        let err = store_bilateral_session(&session).unwrap_err();
+        let mut s = make_session("prepare");
+        s.operation_bytes = vec![];
+        let err = store_bilateral_session(&s).unwrap_err();
         assert!(err.to_string().contains("operation_bytes"));
     }
 
     #[test]
     fn store_bilateral_session_rejects_invalid_phase() {
-        let session = make_session("invalid_phase");
-        let err = store_bilateral_session(&session).unwrap_err();
+        let s = make_session("invalid_phase");
+        let err = store_bilateral_session(&s).unwrap_err();
         assert!(err.to_string().contains("Invalid phase"));
     }
 
@@ -369,11 +376,11 @@ mod tests {
             "failed",
         ];
         for phase in valid_phases {
-            let session = make_session(phase);
-            let result = store_bilateral_session(&session);
-            if let Err(err) = &result {
+            let s = make_session(phase);
+            let result = store_bilateral_session(&s);
+            if let Err(e) = &result {
                 assert!(
-                    !err.to_string().contains("Invalid phase"),
+                    !e.to_string().contains("Invalid phase"),
                     "phase {} rejected",
                     phase
                 );
@@ -390,8 +397,8 @@ mod tests {
     #[serial]
     fn store_and_get_all_bilateral_sessions() {
         init_test_db();
-        let session = make_session("prepare");
-        store_bilateral_session(&session).unwrap();
+        let s = make_session("prepare");
+        store_bilateral_session(&s).unwrap();
 
         let all = get_all_bilateral_sessions().unwrap();
         assert_eq!(all.len(), 1);
@@ -403,8 +410,8 @@ mod tests {
     #[serial]
     fn delete_bilateral_session_removes_entry() {
         init_test_db();
-        let session = make_session("commit");
-        store_bilateral_session(&session).unwrap();
+        let s = make_session("commit");
+        store_bilateral_session(&s).unwrap();
 
         delete_bilateral_session(&[0x11; 32]).unwrap();
         let all = get_all_bilateral_sessions().unwrap();
@@ -415,10 +422,10 @@ mod tests {
     #[serial]
     fn store_bilateral_session_upserts_phase_on_conflict() {
         init_test_db();
-        let session = make_session("prepare");
-        store_bilateral_session(&session).unwrap();
+        let s = make_session("prepare");
+        store_bilateral_session(&s).unwrap();
 
-        let mut updated = session.clone();
+        let mut updated = s.clone();
         updated.phase = "committed".to_string();
         updated.counterparty_signature = Some(vec![0x66; 64]);
         store_bilateral_session(&updated).unwrap();
@@ -433,12 +440,12 @@ mod tests {
     #[serial]
     fn store_multiple_bilateral_sessions() {
         init_test_db();
-        let session_one = make_session("prepare");
-        store_bilateral_session(&session_one).unwrap();
+        let s1 = make_session("prepare");
+        store_bilateral_session(&s1).unwrap();
 
-        let mut session_two = make_session("accept");
-        session_two.commitment_hash = vec![0x99; 32];
-        store_bilateral_session(&session_two).unwrap();
+        let mut s2 = make_session("accept");
+        s2.commitment_hash = vec![0x99; 32];
+        store_bilateral_session(&s2).unwrap();
 
         let all = get_all_bilateral_sessions().unwrap();
         assert_eq!(all.len(), 2);
@@ -457,9 +464,9 @@ mod tests {
     #[serial]
     fn bilateral_session_preserves_ble_address() {
         init_test_db();
-        let mut session = make_session("prepare");
-        session.sender_ble_address = Some("AA:BB:CC:DD:EE:FF".to_string());
-        store_bilateral_session(&session).unwrap();
+        let mut s = make_session("prepare");
+        s.sender_ble_address = Some("AA:BB:CC:DD:EE:FF".to_string());
+        store_bilateral_session(&s).unwrap();
 
         let all = get_all_bilateral_sessions().unwrap();
         assert_eq!(
