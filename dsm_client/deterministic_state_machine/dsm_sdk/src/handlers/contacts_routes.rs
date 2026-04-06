@@ -315,3 +315,117 @@ impl AppRouterImpl {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use prost::Message;
+    use dsm::types::proto as generated;
+
+    #[test]
+    fn argpack_codec_proto_value_matches_expected() {
+        assert_eq!(generated::Codec::Proto as i32, 1);
+        assert_eq!(generated::Codec::Unspecified as i32, 0);
+    }
+
+    #[test]
+    fn contact_qr_v3_roundtrip() {
+        let device_id = vec![0xABu8; 32];
+        let genesis_hash = vec![0xCDu8; 32];
+        let qr = generated::ContactQrV3 {
+            device_id: device_id.clone(),
+            network: "test".into(),
+            storage_nodes: vec!["http://node1:8080".into(), "http://node2:8081".into()],
+            sdk_fingerprint: vec![0x11; 32],
+            genesis_hash: genesis_hash.clone(),
+            signing_public_key: vec![0x22; 64],
+            preferred_alias: "Alice".into(),
+        };
+
+        let encoded = qr.encode_to_vec();
+        let decoded = generated::ContactQrV3::decode(&*encoded).expect("decode");
+
+        assert_eq!(decoded.device_id, device_id);
+        assert_eq!(decoded.genesis_hash, genesis_hash);
+        assert_eq!(decoded.preferred_alias, "Alice");
+        assert_eq!(decoded.network, "test");
+        assert_eq!(decoded.storage_nodes.len(), 2);
+        assert_eq!(decoded.signing_public_key.len(), 64);
+    }
+
+    #[test]
+    fn contact_manual_add_request_roundtrip() {
+        let req = generated::ContactManualAddRequest {
+            alias: "Bob".into(),
+            device_id: vec![0x01; 32],
+            genesis_hash: vec![0x02; 32],
+            signing_public_key: vec![0x03; 64],
+        };
+
+        let encoded = req.encode_to_vec();
+        let decoded = generated::ContactManualAddRequest::decode(&*encoded).expect("decode");
+
+        assert_eq!(decoded.alias, "Bob");
+        assert_eq!(decoded.device_id, vec![0x01; 32]);
+        assert_eq!(decoded.genesis_hash, vec![0x02; 32]);
+        assert_eq!(decoded.signing_public_key, vec![0x03; 64]);
+    }
+
+    #[test]
+    fn argpack_wrapping_contact_qr_v3() {
+        let qr = generated::ContactQrV3 {
+            device_id: vec![0xAA; 32],
+            genesis_hash: vec![0xBB; 32],
+            ..Default::default()
+        };
+        let arg_pack = generated::ArgPack {
+            schema_hash: Some(generated::Hash32 { v: vec![0u8; 32] }),
+            codec: generated::Codec::Proto as i32,
+            body: qr.encode_to_vec(),
+        };
+        let pack_bytes = arg_pack.encode_to_vec();
+
+        let decoded_pack = generated::ArgPack::decode(&*pack_bytes).expect("decode ArgPack");
+        assert_eq!(decoded_pack.codec, generated::Codec::Proto as i32);
+        let decoded_qr =
+            generated::ContactQrV3::decode(&*decoded_pack.body).expect("decode ContactQrV3");
+        assert_eq!(decoded_qr.device_id, vec![0xAA; 32]);
+    }
+
+    #[test]
+    fn argpack_with_wrong_codec_is_detectable() {
+        let arg_pack = generated::ArgPack {
+            schema_hash: None,
+            codec: generated::Codec::Unspecified as i32,
+            body: vec![1, 2, 3],
+        };
+        assert_ne!(arg_pack.codec, generated::Codec::Proto as i32);
+    }
+
+    #[test]
+    fn contact_add_response_preserves_all_fields() {
+        let resp = generated::ContactAddResponse {
+            alias: "Carol".into(),
+            device_id: vec![0x55; 32],
+            genesis_hash: Some(generated::Hash32 { v: vec![0x66; 32] }),
+            chain_tip: Some(generated::Hash32 { v: vec![0x77; 32] }),
+            chain_tip_smt_proof: None,
+            alias_binding: None,
+            genesis_verified_online: true,
+            verify_counter: 42,
+            added_counter: 10,
+            verifying_storage_nodes: vec!["node1".into(), "node2".into()],
+            ble_address: "AA:BB:CC:DD:EE:FF".into(),
+            signing_public_key: vec![0x88; 64],
+        };
+
+        let bytes = resp.encode_to_vec();
+        let decoded = generated::ContactAddResponse::decode(&*bytes).expect("decode");
+
+        assert_eq!(decoded.alias, "Carol");
+        assert!(decoded.genesis_verified_online);
+        assert_eq!(decoded.verify_counter, 42);
+        assert_eq!(decoded.added_counter, 10);
+        assert_eq!(decoded.verifying_storage_nodes.len(), 2);
+        assert_eq!(decoded.ble_address, "AA:BB:CC:DD:EE:FF");
+    }
+}

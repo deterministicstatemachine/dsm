@@ -51,3 +51,62 @@ impl ChainTipStore for SqliteChainTipStore {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_creates_instance() {
+        let store = SqliteChainTipStore::new();
+        let _ = format!("{:?}", &store as &dyn ChainTipStore);
+    }
+
+    #[test]
+    fn default_creates_instance() {
+        let store = SqliteChainTipStore::default();
+        let store2 = store.clone();
+        let _ = store2;
+    }
+
+    #[test]
+    fn implements_chain_tip_store_trait() {
+        fn assert_impl<T: ChainTipStore>(_: &T) {}
+        assert_impl(&SqliteChainTipStore::new());
+    }
+
+    #[test]
+    fn implements_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<SqliteChainTipStore>();
+    }
+
+    #[test]
+    fn clone_produces_equivalent_instance() {
+        let s1 = SqliteChainTipStore::new();
+        let s2 = s1.clone();
+        let fmt1 = format!("{:?}", &s1 as &dyn ChainTipStore);
+        let fmt2 = format!("{:?}", &s2 as &dyn ChainTipStore);
+        assert_eq!(fmt1, fmt2);
+    }
+
+    #[test]
+    fn multiple_instances_independent() {
+        let _a = SqliteChainTipStore::new();
+        let _b = SqliteChainTipStore::default();
+        let _c = SqliteChainTipStore::new();
+    }
+
+    #[test]
+    fn can_be_boxed_as_trait_object() {
+        let store: Box<dyn ChainTipStore> = Box::new(SqliteChainTipStore::new());
+        let _ = format!("{store:?}");
+    }
+
+    #[test]
+    fn can_be_arc_wrapped() {
+        let store = std::sync::Arc::new(SqliteChainTipStore::new());
+        let store2 = std::sync::Arc::clone(&store);
+        let _ = store2;
+    }
+}

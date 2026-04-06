@@ -253,3 +253,85 @@ fn read_bitcoin_account_row(row: &Row) -> rusqlite::Result<BitcoinAccountRecord>
         updated_at: row.get::<_, i64>(9)? as u64,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn derive_enc_key_is_deterministic() {
+        let key1 = derive_enc_key(b"test-dbrw-binding-key");
+        let key2 = derive_enc_key(b"test-dbrw-binding-key");
+        assert_eq!(key1, key2);
+        assert_ne!(key1, [0u8; 32]);
+    }
+
+    #[test]
+    fn derive_enc_key_varies_with_input() {
+        let key1 = derive_enc_key(b"binding-key-alpha");
+        let key2 = derive_enc_key(b"binding-key-beta");
+        assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn encrypt_decrypt_round_trip() {
+        let enc_key = derive_enc_key(b"round-trip-test-key");
+        let plaintext = b"secret wallet material xprv...";
+        let encrypted = encrypt_secret(&enc_key, "acct-1", plaintext).expect("encrypt");
+
+        assert!(encrypted.len() >= MIN_ENCRYPTED_LEN);
+        assert_ne!(&encrypted[NONCE_LEN..], plaintext.as_slice());
+
+        let decrypted = decrypt_secret(&enc_key, &encrypted).expect("decrypt");
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn decrypt_rejects_truncated_blob() {
+        let enc_key = derive_enc_key(b"truncation-test");
+        let short_blob = vec![0u8; MIN_ENCRYPTED_LEN - 1];
+        let err = decrypt_secret(&enc_key, &short_blob).unwrap_err();
+        assert!(err.to_string().contains("too short"));
+    }
+
+    #[test]
+    fn decrypt_rejects_tampered_ciphertext() {
+        let enc_key = derive_enc_key(b"tamper-test-key");
+        let plaintext = b"sensitive-data-12345";
+        let mut encrypted = encrypt_secret(&enc_key, "acct-tamper", plaintext).expect("encrypt");
+
+        let last = encrypted.len() - 1;
+        encrypted[last] ^= 0xFF;
+
+        assert!(decrypt_secret(&enc_key, &encrypted).is_err());
+    }
+
+    #[test]
+    fn decrypt_with_wrong_key_fails() {
+        let key_a = derive_enc_key(b"correct-key");
+        let key_b = derive_enc_key(b"wrong-key");
+        let plaintext = b"confidential";
+        let encrypted = encrypt_secret(&key_a, "acct-wrong-key", plaintext).expect("encrypt");
+
+        assert!(decrypt_secret(&key_b, &encrypted).is_err());
+    }
+
+    #[test]
+    fn bitcoin_account_record_default_fields() {
+        let rec = BitcoinAccountRecord {
+            account_id: "acct-test".to_string(),
+            label: "My Wallet".to_string(),
+            import_kind: "xprv".to_string(),
+            secret_material: vec![1, 2, 3],
+            network: 0,
+            first_address: Some("tb1q...".to_string()),
+            active: true,
+            active_receive_index: 0,
+            created_at: 100,
+            updated_at: 200,
+        };
+        assert!(rec.active);
+        assert_eq!(rec.network, 0);
+        assert_eq!(rec.first_address.as_deref(), Some("tb1q..."));
+    }
+}

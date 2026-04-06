@@ -48,3 +48,60 @@ pub fn assert_builtins_sound() {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_policy_commit_is_32_bytes() {
+        assert_eq!(NATIVE_POLICY_COMMIT.len(), 32);
+    }
+
+    #[test]
+    fn dbtc_policy_commit_is_32_bytes() {
+        assert_eq!(DBTC_POLICY_COMMIT.len(), 32);
+    }
+
+    #[test]
+    fn bytes_and_commit_native_matches_constants() {
+        let (bytes, commit) = bytes_and_commit(BuiltinPolicy::Native);
+        assert_eq!(bytes, NATIVE_POLICY_BYTES);
+        assert_eq!(commit, NATIVE_POLICY_COMMIT);
+    }
+
+    #[test]
+    fn bytes_and_commit_dbtc_matches_constants() {
+        let (bytes, commit) = bytes_and_commit(BuiltinPolicy::Dbtc);
+        assert_eq!(bytes, DBTC_POLICY_BYTES);
+        assert_eq!(commit, DBTC_POLICY_COMMIT);
+    }
+
+    #[test]
+    fn native_commit_not_all_zeros() {
+        assert_ne!(NATIVE_POLICY_COMMIT, &[0u8; 32]);
+    }
+
+    #[test]
+    fn dbtc_commit_not_all_zeros() {
+        assert_ne!(DBTC_POLICY_COMMIT, &[0u8; 32]);
+    }
+
+    #[test]
+    fn assert_builtins_sound_does_not_panic() {
+        assert_builtins_sound();
+    }
+
+    #[test]
+    fn native_and_dbtc_commits_differ() {
+        assert_ne!(NATIVE_POLICY_COMMIT, DBTC_POLICY_COMMIT);
+    }
+
+    #[test]
+    fn builtin_enum_debug_format() {
+        let native = format!("{:?}", BuiltinPolicy::Native);
+        let dbtc = format!("{:?}", BuiltinPolicy::Dbtc);
+        assert_eq!(native, "Native");
+        assert_eq!(dbtc, "Dbtc");
+    }
+}

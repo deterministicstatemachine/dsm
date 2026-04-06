@@ -177,3 +177,226 @@ macro_rules! device_log {
     (error, $($arg:tt)*) => { log::error!($($arg)*); };
     (debug, $($arg:tt)*) => { log::debug!($($arg)*); };
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── init functions ─────────────────────────────────────────────
+
+    #[test]
+    fn init_logging_does_not_panic() {
+        init_android_device_logging();
+    }
+
+    #[test]
+    fn init_logging_idempotent() {
+        init_android_device_logging();
+        init_android_device_logging();
+    }
+
+    #[test]
+    fn init_panic_handler_does_not_panic() {
+        init_panic_handler();
+    }
+
+    #[test]
+    fn init_panic_handler_idempotent() {
+        init_panic_handler();
+        init_panic_handler();
+    }
+
+    // ── log_library_loading ────────────────────────────────────────
+
+    #[test]
+    fn log_library_loading_success() {
+        log_library_loading("libfoo.so", true, None);
+    }
+
+    #[test]
+    fn log_library_loading_failure() {
+        log_library_loading("libbar.so", false, Some("dlopen failed"));
+    }
+
+    #[test]
+    fn log_library_loading_failure_no_msg() {
+        log_library_loading("libbar.so", false, None);
+    }
+
+    // ── log_jni_call ───────────────────────────────────────────────
+
+    #[test]
+    fn log_jni_call_minimal() {
+        log_jni_call("nativeInit", None, None, None);
+    }
+
+    #[test]
+    fn log_jni_call_full() {
+        log_jni_call("nativeTransfer", Some("amount=100"), Some("ok"), Some(42));
+    }
+
+    #[test]
+    fn log_jni_call_partial_params() {
+        log_jni_call("doWork", Some("key=val"), None, Some(10));
+    }
+
+    // ── log_performance_metric ─────────────────────────────────────
+
+    #[test]
+    fn log_performance_metric_without_details() {
+        log_performance_metric("hash_computation", 15, None);
+    }
+
+    #[test]
+    fn log_performance_metric_with_details() {
+        log_performance_metric("serialize", 3, Some("1024 bytes"));
+    }
+
+    // ── log_crypto_operation ───────────────────────────────────────
+
+    #[test]
+    fn log_crypto_success() {
+        log_crypto_operation("sign", Some("Ed25519"), true, Some(5));
+    }
+
+    #[test]
+    fn log_crypto_failure() {
+        log_crypto_operation("verify", None, false, None);
+    }
+
+    #[test]
+    fn log_crypto_all_none() {
+        log_crypto_operation("keygen", None, true, None);
+    }
+
+    // ── log_bluetooth_operation ────────────────────────────────────
+
+    #[test]
+    fn log_bluetooth_success() {
+        log_bluetooth_operation("connect", Some("AA:BB:CC"), true);
+    }
+
+    #[test]
+    fn log_bluetooth_failure() {
+        log_bluetooth_operation("disconnect", None, false);
+    }
+
+    // ── log_dsm_operation ──────────────────────────────────────────
+
+    #[test]
+    fn log_dsm_operation_success() {
+        log_dsm_operation("advance_state", Some("state=42"), true, Some("fast path"));
+    }
+
+    #[test]
+    fn log_dsm_operation_failure() {
+        log_dsm_operation("validate", None, false, None);
+    }
+
+    #[test]
+    fn log_dsm_operation_partial() {
+        log_dsm_operation("genesis", Some("init"), true, None);
+    }
+
+    // ── log_network_operation ──────────────────────────────────────
+
+    #[test]
+    fn log_network_success() {
+        log_network_operation("POST", Some("/api/submit"), true, Some(200));
+    }
+
+    #[test]
+    fn log_network_failure() {
+        log_network_operation("GET", None, false, None);
+    }
+
+    #[test]
+    fn log_network_partial() {
+        log_network_operation("PUT", Some("/api/update"), false, Some(500));
+    }
+
+    // ── device_log macro ───────────────────────────────────────────
+
+    #[test]
+    fn device_log_macro_all_levels() {
+        device_log!(info, "test info {}", 1);
+        device_log!(warn, "test warn");
+        device_log!(error, "test error {}", "msg");
+        device_log!(debug, "test debug");
+    }
+
+    // ── edge cases: empty strings ──────────────────────────────────
+
+    #[test]
+    fn log_jni_call_empty_method() {
+        log_jni_call("", None, None, None);
+    }
+
+    #[test]
+    fn log_library_loading_empty_name() {
+        log_library_loading("", true, None);
+        log_library_loading("", false, Some(""));
+    }
+
+    #[test]
+    fn log_performance_metric_zero_duration() {
+        log_performance_metric("op", 0, None);
+    }
+
+    #[test]
+    fn log_crypto_empty_op() {
+        log_crypto_operation("", None, true, Some(0));
+        log_crypto_operation("", Some(""), false, None);
+    }
+
+    #[test]
+    fn log_bluetooth_empty_fields() {
+        log_bluetooth_operation("", Some(""), true);
+        log_bluetooth_operation("", None, false);
+    }
+
+    #[test]
+    fn log_dsm_operation_all_none() {
+        log_dsm_operation("", None, true, None);
+        log_dsm_operation("", None, false, None);
+    }
+
+    #[test]
+    fn log_network_operation_all_fields() {
+        log_network_operation("DELETE", Some("/api/resource"), true, Some(0));
+    }
+
+    #[test]
+    fn log_network_operation_all_none() {
+        log_network_operation("", None, true, None);
+        log_network_operation("", None, false, None);
+    }
+
+    // ── combined init ──────────────────────────────────────────────
+
+    #[test]
+    fn init_both_logging_and_panic_handler() {
+        init_android_device_logging();
+        init_panic_handler();
+        init_android_device_logging();
+        init_panic_handler();
+    }
+
+    // ── unicode / special characters ───────────────────────────────
+
+    #[test]
+    fn log_jni_call_unicode() {
+        log_jni_call("日本語メソッド", Some("키=값"), Some("résultat"), Some(999));
+    }
+
+    #[test]
+    fn log_performance_metric_large_duration() {
+        log_performance_metric("heavy_op", u64::MAX, Some("max duration"));
+    }
+
+    #[test]
+    fn log_dsm_operation_with_all_fields() {
+        log_dsm_operation("full_op", Some("state=ready"), true, Some("detail=extra"));
+        log_dsm_operation("full_op", Some("state=broken"), false, Some("detail=crash"));
+    }
+}

@@ -158,3 +158,102 @@ pub fn get_verified_genesis_record() -> Result<Option<GenesisRecord>> {
     }
     Ok(None)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+
+    fn init_test_db() {
+        unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+    }
+
+    fn sample_genesis() -> GenesisRecord {
+        GenesisRecord {
+            genesis_id: "gen-test-001".into(),
+            device_id: "dev-test-001".into(),
+            mpc_proof: "mpc-proof-data".into(),
+            dbrw_binding: "binding-data".into(),
+            merkle_root: "merkle-root-hash".into(),
+            participant_count: 5,
+            progress_marker: "PM".into(),
+            publication_hash: "pub-hash".into(),
+            storage_nodes: vec!["node-a".into(), "node-b".into(), "node-c".into()],
+            entropy_hash: "entropy".into(),
+            protocol_version: "2.0.0".into(),
+            hash_chain_proof: None,
+            smt_proof: None,
+            verification_step: None,
+        }
+    }
+
+    #[test]
+    fn encode_genesis_record_bytes_is_deterministic() {
+        let rec = sample_genesis();
+        let enc1 = encode_genesis_record_bytes(&rec);
+        let enc2 = encode_genesis_record_bytes(&rec);
+        assert_eq!(enc1, enc2);
+        assert!(!enc1.is_empty());
+    }
+
+    #[test]
+    fn hash_chain_proof_matches_recomputed() {
+        let rec = sample_genesis();
+        let enc = encode_genesis_record_bytes(&rec);
+        let proof = generate_hash_chain_proof_bytes(&enc);
+        let recomputed = generate_hash_chain_proof_bytes(&enc);
+        assert_eq!(proof, recomputed);
+        assert_ne!(proof, [0u8; 32]);
+    }
+
+    #[test]
+    fn smt_proof_uses_both_root_and_data() {
+        let rec = sample_genesis();
+        let enc = encode_genesis_record_bytes(&rec);
+        let proof1 = smt_proof_bytes(rec.merkle_root.as_bytes(), &enc);
+        let proof2 = smt_proof_bytes(b"different-root", &enc);
+        assert_ne!(proof1, proof2);
+    }
+
+    #[test]
+    #[serial]
+    fn store_and_retrieve_genesis_record() {
+        init_test_db();
+
+        let rec = sample_genesis();
+        store_genesis_record_with_verification(&rec).expect("store genesis");
+
+        let loaded = get_verified_genesis_record()
+            .expect("query")
+            .expect("genesis record exists");
+        assert_eq!(loaded.genesis_id, "gen-test-001");
+        assert_eq!(loaded.device_id, "dev-test-001");
+        assert_eq!(loaded.participant_count, 5);
+        assert_eq!(loaded.protocol_version, "2.0.0");
+        assert_eq!(loaded.storage_nodes, vec!["node-a", "node-b", "node-c"]);
+        assert!(loaded.hash_chain_proof.is_some());
+        assert!(loaded.smt_proof.is_some());
+    }
+
+    #[test]
+    #[serial]
+    fn stored_genesis_hash_chain_proof_verifies() {
+        init_test_db();
+
+        let rec = sample_genesis();
+        store_genesis_record_with_verification(&rec).expect("store genesis");
+
+        let loaded = get_verified_genesis_record()
+            .expect("query")
+            .expect("genesis record exists");
+
+        let enc = encode_genesis_record_bytes(&loaded);
+        let recomputed = generate_hash_chain_proof_bytes(&enc);
+        assert_eq!(
+            loaded.hash_chain_proof.as_deref(),
+            Some(recomputed.as_slice())
+        );
+    }
+}

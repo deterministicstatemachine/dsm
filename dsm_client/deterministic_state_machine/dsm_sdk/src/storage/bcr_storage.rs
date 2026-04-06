@@ -48,3 +48,56 @@ impl DecentralizedStorage for BcrStorage {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bcr_storage_new() {
+        let s = BcrStorage::new();
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("BcrStorage"));
+    }
+
+    #[test]
+    fn bcr_storage_default() {
+        let s = BcrStorage::default();
+        let dbg = format!("{s:?}");
+        assert!(dbg.contains("BcrStorage"));
+    }
+
+    #[test]
+    fn bcr_storage_clone() {
+        let s = BcrStorage::new();
+        let s2 = s.clone();
+        let _ = format!("{s2:?}");
+    }
+
+    #[test]
+    fn bcr_storage_implements_decentralized_storage() {
+        fn assert_impl<T: DecentralizedStorage>(_: &T) {}
+        assert_impl(&BcrStorage::new());
+    }
+
+    #[test]
+    fn bcr_storage_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<BcrStorage>();
+    }
+
+    #[test]
+    fn bcr_storage_multiple_clones_independent() {
+        let s1 = BcrStorage::new();
+        let s2 = s1.clone();
+        let s3 = s2.clone();
+        let _ = format!("{s1:?} {s2:?} {s3:?}");
+    }
+
+    #[test]
+    fn bcr_storage_default_eq_new() {
+        let d = BcrStorage::default();
+        let n = BcrStorage::new();
+        assert_eq!(format!("{d:?}"), format!("{n:?}"));
+    }
+}

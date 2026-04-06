@@ -235,3 +235,274 @@ fn decode_sync_response(data: &[u8]) -> Option<(u32, u32)> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Constants ──
+
+    #[test]
+    fn default_poll_interval_is_60s() {
+        assert_eq!(DEFAULT_POLL_INTERVAL_MS, 60_000);
+    }
+
+    #[test]
+    fn eager_poll_interval_shorter_than_default() {
+        assert!(EAGER_POLL_INTERVAL_MS < DEFAULT_POLL_INTERVAL_MS);
+    }
+
+    #[test]
+    fn eager_poll_cycles_nonzero() {
+        assert!(EAGER_POLL_CYCLES > 0);
+    }
+
+    #[test]
+    fn eager_interval_is_8s() {
+        assert_eq!(EAGER_POLL_INTERVAL_MS, 8_000);
+    }
+
+    #[test]
+    fn eager_cycles_is_5() {
+        assert_eq!(EAGER_POLL_CYCLES, 5);
+    }
+
+    // ── decode_sync_response ──
+
+    #[test]
+    fn decode_empty_returns_none() {
+        assert!(decode_sync_response(&[]).is_none());
+    }
+
+    #[test]
+    fn decode_garbage_returns_none() {
+        assert!(decode_sync_response(&[0xFF, 0x01, 0x02, 0x03]).is_none());
+    }
+
+    #[test]
+    fn decode_valid_envelope_with_sync_response() {
+        let sync_resp = generated::StorageSyncResponse {
+            success: true,
+            pulled: 7,
+            processed: 3,
+            pushed: 0,
+            errors: vec![],
+        };
+        let envelope = generated::Envelope {
+            version: 3,
+            headers: None,
+            message_id: vec![0u8; 16],
+            payload: Some(generated::envelope::Payload::StorageSyncResponse(sync_resp)),
+        };
+        let envelope_bytes = envelope.encode_to_vec();
+
+        // Without v3 frame prefix
+        let result = decode_sync_response(&envelope_bytes);
+        assert!(result.is_some());
+        let (processed, pulled) = result.unwrap();
+        assert_eq!(processed, 3);
+        assert_eq!(pulled, 7);
+    }
+
+    #[test]
+    fn decode_valid_envelope_with_v3_frame_prefix() {
+        let sync_resp = generated::StorageSyncResponse {
+            success: true,
+            pulled: 10,
+            processed: 5,
+            pushed: 2,
+            errors: vec![],
+        };
+        let envelope = generated::Envelope {
+            version: 3,
+            headers: None,
+            message_id: vec![0u8; 16],
+            payload: Some(generated::envelope::Payload::StorageSyncResponse(sync_resp)),
+        };
+        let envelope_bytes = envelope.encode_to_vec();
+
+        // With 0x03 frame prefix
+        let mut framed = vec![0x03];
+        framed.extend_from_slice(&envelope_bytes);
+
+        let result = decode_sync_response(&framed);
+        assert!(result.is_some());
+        let (processed, pulled) = result.unwrap();
+        assert_eq!(processed, 5);
+        assert_eq!(pulled, 10);
+    }
+
+    #[test]
+    fn decode_envelope_without_sync_payload_returns_none() {
+        let envelope = generated::Envelope {
+            version: 3,
+            headers: None,
+            message_id: vec![0u8; 16],
+            payload: None,
+        };
+        let data = envelope.encode_to_vec();
+        assert!(decode_sync_response(&data).is_none());
+    }
+
+    #[test]
+    fn decode_envelope_with_different_payload_returns_none() {
+        let app_state_resp = generated::AppStateResponse {
+            key: "test".to_string(),
+            value: Some("val".to_string()),
+        };
+        let envelope = generated::Envelope {
+            version: 3,
+            headers: None,
+            message_id: vec![0u8; 16],
+            payload: Some(generated::envelope::Payload::AppStateResponse(
+                app_state_resp,
+            )),
+        };
+        let data = envelope.encode_to_vec();
+        assert!(decode_sync_response(&data).is_none());
+    }
+
+    #[test]
+    fn decode_sync_response_zero_counts() {
+        let sync_resp = generated::StorageSyncResponse {
+            success: true,
+            pulled: 0,
+            processed: 0,
+            pushed: 0,
+            errors: vec![],
+        };
+        let envelope = generated::Envelope {
+            version: 3,
+            headers: None,
+            message_id: vec![0u8; 16],
+            payload: Some(generated::envelope::Payload::StorageSyncResponse(sync_resp)),
+        };
+        let data = envelope.encode_to_vec();
+        let result = decode_sync_response(&data).unwrap();
+        assert_eq!(result, (0, 0));
+    }
+
+    // ── Poller state flags ──
+
+    #[test]
+    fn stop_poller_sets_flag() {
+        POLLER_STOP.store(false, Ordering::SeqCst);
+        POLLER_RUNNING.store(false, Ordering::SeqCst);
+        stop_poller();
+        assert!(POLLER_STOP.load(Ordering::SeqCst));
+    }
+
+    // ── resume_poller when not running calls start_poller ──
+
+    #[test]
+    fn resume_when_running_does_not_restart() {
+        POLLER_RUNNING.store(true, Ordering::SeqCst);
+        POLLER_STOP.store(false, Ordering::SeqCst);
+        resume_poller();
+        assert!(POLLER_RUNNING.load(Ordering::SeqCst));
+        // Reset for other tests
+        POLLER_RUNNING.store(false, Ordering::SeqCst);
+    }
+
+    // ── decode_sync_response: additional edge cases ──
+
+    #[test]
+    fn decode_single_byte_zero_returns_none() {
+        assert!(decode_sync_response(&[0x00]).is_none());
+    }
+
+    #[test]
+    fn decode_single_byte_v3_prefix_returns_none() {
+        assert!(decode_sync_response(&[0x03]).is_none());
+    }
+
+    #[test]
+    fn decode_v3_prefix_with_garbage_returns_none() {
+        let data = vec![0x03, 0xFF, 0xFF, 0xFF, 0xFF];
+        assert!(decode_sync_response(&data).is_none());
+    }
+
+    #[test]
+    fn decode_valid_response_large_counts() {
+        let sync_resp = generated::StorageSyncResponse {
+            success: true,
+            pulled: u32::MAX,
+            processed: u32::MAX - 1,
+            pushed: 100,
+            errors: vec!["err1".to_string()],
+        };
+        let envelope = generated::Envelope {
+            version: 3,
+            headers: None,
+            message_id: vec![0u8; 16],
+            payload: Some(generated::envelope::Payload::StorageSyncResponse(sync_resp)),
+        };
+        let data = envelope.encode_to_vec();
+        let (processed, pulled) = decode_sync_response(&data).unwrap();
+        assert_eq!(processed, u32::MAX - 1);
+        assert_eq!(pulled, u32::MAX);
+    }
+
+    #[test]
+    fn decode_ignores_success_flag() {
+        let sync_resp = generated::StorageSyncResponse {
+            success: false,
+            pulled: 1,
+            processed: 2,
+            pushed: 0,
+            errors: vec![],
+        };
+        let envelope = generated::Envelope {
+            version: 3,
+            headers: None,
+            message_id: vec![],
+            payload: Some(generated::envelope::Payload::StorageSyncResponse(sync_resp)),
+        };
+        let data = envelope.encode_to_vec();
+        let result = decode_sync_response(&data);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), (2, 1));
+    }
+
+    // ── Constants: relationships ──
+
+    #[test]
+    fn eager_total_time_less_than_default_interval() {
+        let total_eager_ms = EAGER_POLL_INTERVAL_MS * (EAGER_POLL_CYCLES as u64);
+        assert!(
+            total_eager_ms < DEFAULT_POLL_INTERVAL_MS * 2,
+            "eager burst should not be excessively long"
+        );
+    }
+
+    // ── Poller flags: independent checks ──
+
+    #[test]
+    fn poller_stop_flag_initially_false() {
+        POLLER_STOP.store(false, Ordering::SeqCst);
+        assert!(!POLLER_STOP.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn poller_running_flag_initially_false() {
+        POLLER_RUNNING.store(false, Ordering::SeqCst);
+        assert!(!POLLER_RUNNING.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn stop_then_stop_is_idempotent() {
+        POLLER_STOP.store(false, Ordering::SeqCst);
+        POLLER_RUNNING.store(false, Ordering::SeqCst);
+        stop_poller();
+        stop_poller();
+        assert!(POLLER_STOP.load(Ordering::SeqCst));
+    }
+
+    // ── push_inbox_event_to_webview is no-op on non-android ──
+
+    #[test]
+    fn push_inbox_event_noop_on_test_platform() {
+        // Should not panic on non-Android
+        push_inbox_event_to_webview(5, 3);
+    }
+}

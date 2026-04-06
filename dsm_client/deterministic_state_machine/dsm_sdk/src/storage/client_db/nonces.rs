@@ -144,3 +144,122 @@ pub fn atomic_receive_transfer(
 
     Ok(new_tip)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+
+    fn init_test_db() {
+        unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+    }
+
+    #[test]
+    fn is_nonce_spent_returns_false_for_empty_nonce() {
+        assert_eq!(is_nonce_spent(&[]).unwrap(), false);
+    }
+
+    #[test]
+    fn mark_nonce_spent_rejects_empty_nonce() {
+        let err = mark_nonce_spent(&[], "tx-1", b"sender", 100).unwrap_err();
+        assert!(err.to_string().contains("empty nonce"));
+    }
+
+    #[test]
+    fn hash_blake3_bytes_is_deterministic() {
+        let h1 = hash_blake3_bytes(b"test-nonce-data");
+        let h2 = hash_blake3_bytes(b"test-nonce-data");
+        assert_eq!(h1, h2);
+        assert_ne!(h1, [0u8; 32]);
+    }
+
+    #[test]
+    fn hash_blake3_bytes_different_inputs_differ() {
+        let h1 = hash_blake3_bytes(b"nonce-alpha");
+        let h2 = hash_blake3_bytes(b"nonce-beta");
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    #[serial]
+    fn mark_and_check_nonce_spent() {
+        init_test_db();
+
+        let nonce = b"unique-nonce-42";
+        assert!(!is_nonce_spent(nonce).unwrap());
+
+        mark_nonce_spent(nonce, "tx-42", b"sender-a", 500).expect("mark spent");
+        assert!(is_nonce_spent(nonce).unwrap());
+    }
+
+    #[test]
+    #[serial]
+    fn mark_nonce_spent_detects_replay() {
+        init_test_db();
+
+        let nonce = b"replay-nonce";
+        mark_nonce_spent(nonce, "tx-first", b"sender", 100).expect("first mark");
+
+        let err = mark_nonce_spent(nonce, "tx-duplicate", b"sender", 100).unwrap_err();
+        assert!(err.to_string().contains("Replay attack"));
+    }
+
+    #[test]
+    #[serial]
+    fn atomic_receive_transfer_produces_deterministic_tip() {
+        init_test_db();
+
+        let nonce = b"atomic-nonce-1";
+        let current_tip = [0x11u8; 32];
+        let policy_commit = [0x22u8; 32];
+
+        let tip1 = atomic_receive_transfer(
+            "device-1",
+            nonce,
+            "tx-atomic-1",
+            b"sender-1",
+            1000,
+            &current_tip,
+            &policy_commit,
+        )
+        .expect("first receive");
+
+        assert_ne!(tip1, [0u8; 32]);
+        assert_ne!(tip1, current_tip);
+    }
+
+    #[test]
+    #[serial]
+    fn atomic_receive_transfer_rejects_replay_nonce() {
+        init_test_db();
+
+        let nonce = b"atomic-replay-nonce";
+        let current_tip = [0x33u8; 32];
+        let policy_commit = [0x44u8; 32];
+
+        atomic_receive_transfer(
+            "device-2",
+            nonce,
+            "tx-first-atomic",
+            b"sender-2",
+            500,
+            &current_tip,
+            &policy_commit,
+        )
+        .expect("first receive");
+
+        let err = atomic_receive_transfer(
+            "device-2",
+            nonce,
+            "tx-second-atomic",
+            b"sender-2",
+            500,
+            &current_tip,
+            &policy_commit,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("Replay attack"));
+    }
+}
