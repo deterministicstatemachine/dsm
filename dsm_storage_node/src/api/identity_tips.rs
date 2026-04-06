@@ -192,7 +192,6 @@ mod tests {
     fn size_constants_are_reasonable() {
         assert_eq!(MAX_HEAD_BYTES, 256);
         assert_eq!(MAX_LEAF_BYTES, 2048);
-        assert!(MAX_LEAF_BYTES > MAX_HEAD_BYTES);
     }
 
     #[test]
