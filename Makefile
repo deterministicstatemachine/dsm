@@ -21,7 +21,9 @@
 # Android builds on Windows require WSL2 — see docs/book/03-development-setup.md#windows-setup.
 # ---------------------------------------------------------------------------
 
-SHELL := /bin/bash
+# Prefer homebrew bash (4+) for associative arrays used by SBOM scripts.
+# Fall back to system bash if homebrew isn't installed.
+SHELL := $(shell command -v /opt/homebrew/bin/bash 2>/dev/null || echo /bin/bash)
 REPO_ROOT := $(shell cd "$(dir $(abspath $(lastword $(MAKEFILE_LIST))))" && pwd)
 ANDROID_DIR := $(REPO_ROOT)/dsm_client/android
 NDK_DIR := $(REPO_ROOT)/dsm_client/deterministic_state_machine
@@ -75,6 +77,12 @@ doctor: ## Check local prerequisites and repo state without changing files
 	@command -v protoc >/dev/null 2>&1 && echo "    protoc: $$(protoc --version)" || echo "    MISSING: protoc"
 	@command -v node >/dev/null 2>&1 && echo "    node: $$(node --version)" || echo "    MISSING: node"
 	@command -v npm >/dev/null 2>&1 && echo "    npm: $$(npm --version)" || echo "    MISSING: npm"
+	@BASH_VER=$$(bash --version | head -1 | sed 's/.*version \([0-9]*\).*/\1/'); \
+	if [ "$$BASH_VER" -ge 4 ] 2>/dev/null; then \
+		echo "    bash: version $$BASH_VER (OK)"; \
+	else \
+		echo "    bash: version $$BASH_VER (SBOM scripts need bash 4+; brew install bash)"; \
+	fi
 	@command -v adb >/dev/null 2>&1 && echo "    adb: available" || echo "    adb: optional (needed only for device install/debug)"
 	@command -v psql >/dev/null 2>&1 && echo "    psql: available" || echo "    psql: optional until you run local storage nodes"
 	@command -v java >/dev/null 2>&1 && echo "    java: $$(java -version 2>&1 | head -1)" || echo "    java: optional until Android builds"
@@ -411,47 +419,64 @@ flow-mapping-assertions: ## Run flow mapping assertion checks
 # ---------------------------------------------------------------------------
 
 .PHONY: release-preflight
-release-preflight: ## Run the full pre-tag release gate (lint, test, audit, CI scan, formal verification, frontend, SBOM)
+release-preflight: ## Run the full pre-tag release gate (lint, test, audit, CI scan, PII scan, formal verification, frontend, SBOM)
 	@echo ""
 	@echo "╔══════════════════════════════════════════════════════════╗"
 	@echo "║              DSM Release Preflight                      ║"
 	@echo "╚══════════════════════════════════════════════════════════╝"
 	@echo ""
-	@echo "── [1/7] Lint ──────────────────────────────────────────────"
+	@echo "── [1/8] Lint ──────────────────────────────────────────────"
 	cargo fmt --all -- --check
 	cargo clippy --all-targets -- -D warnings
 	@echo ""
-	@echo "── [2/7] Rust tests ────────────────────────────────────────"
+	@echo "── [2/8] Rust tests ────────────────────────────────────────"
 	cargo test --workspace --exclude dsm_storage_node -- --nocapture
 	cargo test -p dsm_storage_node --no-default-features --features local-dev,strict -- --nocapture
 	@echo ""
-	@echo "── [3/7] Security audit ────────────────────────────────────"
+	@echo "── [3/8] Security audit ────────────────────────────────────"
 	cargo deny check
 	cargo audit
 	@echo ""
-	@echo "── [4/7] Protocol purity (CI scan) ─────────────────────────"
+	@echo "── [4/8] Protocol purity (CI scan) ─────────────────────────"
 	bash scripts/ci_scan.sh
 	bash scripts/flow_assertions.sh
 	bash scripts/flow_mapping_assertions.sh
 	bash scripts/check_forbidden_symbols.sh
 	@echo ""
-	@echo "── [5/7] Frontend (typecheck + test + build) ───────────────"
+	@echo "── [5/8] PII / personal info scan ──────────────────────────"
+	@PII_FOUND=0; \
+	echo "  Checking for local file paths in source..."; \
+	PATH_HITS=$$(git grep -lE '/Users/[a-zA-Z]+/(Desktop|Documents|Downloads)' -- ':(exclude).claude/' ':(exclude)*.lock' 2>/dev/null | head -5); \
+	if [ -n "$$PATH_HITS" ]; then \
+		echo "FAIL: Local file paths found:"; echo "$$PATH_HITS"; PII_FOUND=1; \
+	fi; \
+	echo "  Checking for hardcoded credentials..."; \
+	CRED_HITS=$$(git grep -lEi '(password|secret|api_key)\s*=\s*"[^"]{4,}"' -- ':(exclude).claude/' ':(exclude)*.lock' ':(exclude)*.md' ':(exclude)*.sh' 2>/dev/null | head -5); \
+	if [ -n "$$CRED_HITS" ]; then \
+		echo "FAIL: Hardcoded credentials found:"; echo "$$CRED_HITS"; PII_FOUND=1; \
+	fi; \
+	echo "  Checking for SBOM scatter files..."; \
+	SCATTER=$$(find . -name 'dsm-*-beta*.json' -o -name 'dsm-*-preflight*.json' 2>/dev/null | grep -v node_modules | grep -v target | head -5); \
+	if [ -n "$$SCATTER" ]; then \
+		echo "FAIL: SBOM scatter files with local paths found:"; echo "$$SCATTER"; PII_FOUND=1; \
+	fi; \
+	if [ $$PII_FOUND -eq 0 ]; then echo "PII scan PASS: no personal info in tracked files"; \
+	else echo ""; echo "FAIL: Personal information detected. Clean before release."; exit 1; fi
+	@echo ""
+	@echo "── [6/8] Frontend (typecheck + test + build) ───────────────"
 	cd $(FRONTEND_DIR) && \
 		[ -s $$HOME/.nvm/nvm.sh ] && . $$HOME/.nvm/nvm.sh; \
 		nvm use --silent 2>/dev/null || true; \
 		npm run type-check && npm test -- --passWithNoTests && npm run build
 	@echo ""
-	@echo "── [6/7] Formal verification (TLA+ vertical validation) ────"
+	@echo "── [7/8] Formal verification (TLA+ vertical validation) ────"
 	cargo run -p dsm_vertical_validation -- tla-check
 	@echo ""
-	@echo "── [7/7] SBOM generation ───────────────────────────────────"
+	@echo "── [8/8] SBOM generation ───────────────────────────────────"
 	bash scripts/generate-sbom.sh --run-id preflight-$$(date +%Y%m%d)
 	@echo ""
 	@echo "╔══════════════════════════════════════════════════════════╗"
 	@echo "║  ✓ All gates passed — ready to tag                      ║"
-	@echo "║                                                          ║"
-	@echo "║    git tag v0.1.0-beta.1                                 ║"
-	@echo "║    git push origin v0.1.0-beta.1                         ║"
 	@echo "╚══════════════════════════════════════════════════════════╝"
 
 # ---------------------------------------------------------------------------

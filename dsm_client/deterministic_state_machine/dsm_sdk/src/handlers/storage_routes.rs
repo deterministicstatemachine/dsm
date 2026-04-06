@@ -781,7 +781,10 @@ impl AppRouterImpl {
                                                     }
                                                     if !gap_closed {
                                                         log::warn!("[storage.sync] Parent-tip mismatch pre-apply for tx {}: stored={:02x?}.. claimed={:02x?}.. recording observed remote tip and marking reconcile", entry.transaction_id, &stored[..4], &chain_tip_arr[..4]);
-                                                        record_observed_remote_tip_and_refresh(&from_device_id, &chain_tip_arr);
+                                                        record_observed_remote_tip_and_refresh(
+                                                            &from_device_id,
+                                                            &chain_tip_arr,
+                                                        );
                                                         mark_contact_needs_online_reconcile_and_refresh(&from_device_id);
                                                         let mut sg = batch_state.lock().await;
                                                         sg.errors.push(format!(
@@ -915,7 +918,10 @@ impl AppRouterImpl {
                                                                         &stored[..4],
                                                                         &chain_tip_arr[..4],
                                                                     );
-                                                            record_observed_remote_tip_and_refresh(&from_device_id, &chain_tip_arr);
+                                                            record_observed_remote_tip_and_refresh(
+                                                                &from_device_id,
+                                                                &chain_tip_arr,
+                                                            );
                                                             mark_contact_needs_online_reconcile_and_refresh(&from_device_id);
                                                             let mut state_guard =
                                                                 batch_state.lock().await;
@@ -1470,8 +1476,7 @@ impl AppRouterImpl {
                                         _ => false,
                                     };
 
-                                    let gate_parent: [u8; 32] =
-                                        pending_parent.unwrap_or([0u8; 32]);
+                                    let gate_parent: [u8; 32] = pending_parent.unwrap_or([0u8; 32]);
                                     let gate_next: [u8; 32] = pending_next.unwrap_or([0u8; 32]);
                                     let cp_arr: [u8; 32] = match pending
                                         .counterparty_device_id
@@ -1519,9 +1524,7 @@ impl AppRouterImpl {
                                     }
 
                                     // Network path: check ACK via storage nodes
-                                    match b0x_sdk
-                                        .is_message_acknowledged(&pending.message_id)
-                                        .await
+                                    match b0x_sdk.is_message_acknowledged(&pending.message_id).await
                                     {
                                         Ok(true) => {
                                             log::info!(
@@ -1530,9 +1533,7 @@ impl AppRouterImpl {
                                             );
                                             match (
                                                 pending_next,
-                                                <[u8; 32]>::try_from(
-                                                    pending.parent_tip.as_slice(),
-                                                ),
+                                                <[u8; 32]>::try_from(pending.parent_tip.as_slice()),
                                             ) {
                                                 (Some(pn), Ok(parent)) => {
                                                     let request = crate::storage::client_db::bilateral_tip_sync::TipSyncRequest {

@@ -285,14 +285,20 @@ PairIsolation ==
 \* cross-relationship state modification exists, each pair's balance
 \* is a closed system.
 \* ------------------------------------------------------------------
-RECURSIVE SumBalRel(_, _)
-SumBalRel(S, rel) == IF S = {} THEN 0
-                     ELSE LET d == CHOOSE x \in S : TRUE
-                          IN balance[d][rel] + SumBalRel(S \ {d}, rel)
+\* Sum per-relationship balances without RECURSIVE (TLAPS limitation).
+\* Each relationship has exactly 2 devices — unfold directly.
+LOCAL SumBalRel_Impl(S, rel) ==
+    LET devs == { d \in S : TRUE }
+    IN  IF Cardinality(devs) = 0 THEN 0
+        ELSE IF Cardinality(devs) = 1
+             THEN LET d1 == CHOOSE x \in devs : TRUE IN balance[d1][rel]
+             ELSE LET d1 == CHOOSE x \in devs : TRUE
+                      d2 == CHOOSE x \in devs : x # d1
+                  IN  balance[d1][rel] + balance[d2][rel]
 
 PerPairConservation ==
     \A rel \in Relationship :
-        SumBalRel(DevicesOf(rel), rel) =
+        SumBalRel_Impl(DevicesOf(rel), rel) =
             Cardinality(DevicesOf(rel)) * INITIAL_BALANCE
 
 \* ------------------------------------------------------------------
