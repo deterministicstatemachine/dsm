@@ -79,7 +79,7 @@ mod tests {
         let id = [1u8; 32];
         let parent = [2u8; 32];
         let tip = [3u8; 32];
-        assert_eq!(store.set_contact_chain_tip(&id, parent, tip).unwrap(), true);
+        assert!(store.set_contact_chain_tip(&id, parent, tip).unwrap());
     }
 
     #[test]

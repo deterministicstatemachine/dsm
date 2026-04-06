@@ -2670,7 +2670,7 @@ mod tests {
         let v = LimboVault::default();
         let post = v.to_vault_post("op", None).unwrap();
         assert_eq!(post.metadata.get("purpose").unwrap(), "op");
-        assert!(post.metadata.get("timeout").is_none());
+        assert!(!post.metadata.contains_key("timeout"));
     }
 
     #[test]
@@ -2710,8 +2710,10 @@ mod tests {
     fn from_limbo_vault_status_mapping() {
         let cond = VaultCondition::Hash(vec![]);
 
-        let mut v = LimboVault::default();
-        v.state = VaultState::Limbo;
+        let mut v = LimboVault {
+            state: VaultState::Limbo,
+            ..Default::default()
+        };
         let dlv = DeterministicLimboVault::from_limbo_vault(&v, cond.clone()).unwrap();
         assert_eq!(*dlv.status(), VaultStatus::Active);
 

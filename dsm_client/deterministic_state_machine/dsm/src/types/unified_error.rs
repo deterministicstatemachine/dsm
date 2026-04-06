@@ -834,7 +834,7 @@ mod tests {
 
     #[test]
     fn source_returns_inner_when_present() {
-        let inner = std::io::Error::new(std::io::ErrorKind::Other, "disk");
+        let inner = std::io::Error::other("disk");
         let e = UnifiedDsmError::Storage {
             context: "write".into(),
             component: None,

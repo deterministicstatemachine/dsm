@@ -2293,7 +2293,7 @@ mod tests {
 
     #[test]
     fn error_source_present_for_storage_with_source() {
-        let inner = std::io::Error::new(std::io::ErrorKind::Other, "disk");
+        let inner = std::io::Error::other("disk");
         let err = DsmError::storage("write failed", Some(inner));
         assert!(err.source().is_some());
     }

@@ -2520,7 +2520,7 @@ mod tests {
                 message: String::new(),
                 signature: vec![],
             };
-            assert_eq!(Ops::validate(&op).unwrap(), false);
+            assert!(!Ops::validate(&op).unwrap());
         }
 
         #[test]
@@ -2538,17 +2538,17 @@ mod tests {
                 message: String::new(),
                 signature: vec![],
             };
-            assert_eq!(Ops::validate(&op).unwrap(), true);
+            assert!(Ops::validate(&op).unwrap());
         }
 
         #[test]
         fn validate_genesis_is_true() {
-            assert_eq!(Ops::validate(&Operation::Genesis).unwrap(), true);
+            assert!(Ops::validate(&Operation::Genesis).unwrap());
         }
 
         #[test]
         fn validate_noop_is_true() {
-            assert_eq!(Ops::validate(&Operation::Noop).unwrap(), true);
+            assert!(Ops::validate(&Operation::Noop).unwrap());
         }
 
         #[test]

@@ -532,7 +532,7 @@ mod tests {
     fn operation_type_clone_copy_debug() {
         let op = OperationType::HttpRequest;
         let op2 = op;
-        let op3 = op.clone();
+        let op3 = op;
         let _ = format!("{:?}", op2);
         let _ = format!("{:?}", op3);
     }
