@@ -19,6 +19,7 @@ use dsm::types::operations::Operation;
 use dsm::types::token_types::Balance;
 use dsm_sdk as sdk;
 use dsm_sdk::storage::client_db;
+use dsm_sdk::storage::client_db::types::TransactionRecord;
 use dsm_sdk::util::text_id;
 use sdk::bluetooth::bilateral_ble_handler::BilateralBleHandler;
 use sdk::handlers::bilateral_settlement::DefaultBilateralSettlementDelegate;
@@ -800,6 +801,30 @@ async fn sender_restart_recovers_persisted_confirm_and_realigns_chain_tips() {
             .is_none(),
         "recovered sender commit should clear the persisted confirm envelope"
     );
+}
+
+fn history_contains_transfer(
+    history: &[TransactionRecord],
+    commitment_txt: &str,
+    sender_device_txt: &str,
+    receiver_device_txt: &str,
+    amount: u64,
+    token_id: Option<&str>,
+) -> bool {
+    history.iter().any(|tx| {
+        tx.tx_id == commitment_txt
+            && tx.from_device == sender_device_txt
+            && tx.to_device == receiver_device_txt
+            && tx.amount == amount
+            && match token_id {
+                Some(expected_token_id) => tx
+                    .metadata
+                    .get("token_id")
+                    .map(Vec::as_slice)
+                    == Some(expected_token_id.as_bytes()),
+                None => !tx.metadata.contains_key("token_id"),
+            }
+    })
 }
 
 fn assert_shared_history_visibility(
