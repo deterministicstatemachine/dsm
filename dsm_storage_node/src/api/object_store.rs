@@ -341,3 +341,122 @@ pub async fn get_object_handler(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encode_b32_empty() {
+        assert_eq!(encode_b32(&[]), "");
+    }
+
+    #[test]
+    fn encode_b32_single_byte() {
+        let encoded = encode_b32(&[0xFF]);
+        assert!(!encoded.is_empty());
+        let decoded = decode_b32(&encoded).unwrap();
+        assert_eq!(decoded[0], 0xFF);
+    }
+
+    #[test]
+    fn encode_b32_roundtrip() {
+        let data: Vec<u8> = (0..32).collect();
+        let encoded = encode_b32(&data);
+        let decoded = decode_b32(&encoded).unwrap();
+        assert_eq!(decoded.len(), data.len());
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn encode_b32_all_zeros() {
+        let data = [0u8; 32];
+        let encoded = encode_b32(&data);
+        let decoded = decode_b32(&encoded).unwrap();
+        assert_eq!(decoded, data.to_vec());
+    }
+
+    #[test]
+    fn encode_b32_all_ones() {
+        let data = [0xFFu8; 32];
+        let encoded = encode_b32(&data);
+        let decoded = decode_b32(&encoded).unwrap();
+        assert_eq!(decoded, data.to_vec());
+    }
+
+    #[test]
+    fn decode_b32_ignores_hyphens_and_spaces() {
+        let data = vec![0xAB, 0xCD];
+        let encoded = encode_b32(&data);
+        let with_hyphens = format!("{}-{}", &encoded[..1], &encoded[1..]);
+        let decoded = decode_b32(&with_hyphens).unwrap();
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn decode_b32_case_insensitive() {
+        let data: Vec<u8> = (0..10).collect();
+        let encoded = encode_b32(&data);
+        let lower = encoded.to_lowercase();
+        let d_upper = decode_b32(&encoded).unwrap();
+        let d_lower = decode_b32(&lower).unwrap();
+        assert_eq!(d_upper, d_lower);
+    }
+
+    #[test]
+    fn decode_b32_confusable_chars() {
+        // O -> 0, I/L -> 1 per Crockford spec
+        let result_o = decode_b32("O");
+        let result_0 = decode_b32("0");
+        assert_eq!(result_o, result_0);
+
+        let result_i = decode_b32("I");
+        let result_l = decode_b32("L");
+        let result_1 = decode_b32("1");
+        assert_eq!(result_i, result_l);
+        assert_eq!(result_i, result_1);
+    }
+
+    #[test]
+    fn decode_b32_invalid_char() {
+        assert!(decode_b32("!!!").is_none());
+        assert!(decode_b32("U").is_none());
+    }
+
+    #[test]
+    fn compute_object_address_deterministic() {
+        let dlv = [1u8; 32];
+        let a1 = compute_object_address(&dlv, "foo/bar", b"hello");
+        let a2 = compute_object_address(&dlv, "foo/bar", b"hello");
+        assert_eq!(a1, a2);
+    }
+
+    #[test]
+    fn compute_object_address_differs_by_path() {
+        let dlv = [1u8; 32];
+        let a1 = compute_object_address(&dlv, "path/a", b"data");
+        let a2 = compute_object_address(&dlv, "path/b", b"data");
+        assert_ne!(a1, a2);
+    }
+
+    #[test]
+    fn compute_object_address_differs_by_content() {
+        let dlv = [1u8; 32];
+        let a1 = compute_object_address(&dlv, "same", b"content_a");
+        let a2 = compute_object_address(&dlv, "same", b"content_b");
+        assert_ne!(a1, a2);
+    }
+
+    #[test]
+    fn compute_object_address_differs_by_dlv() {
+        let a1 = compute_object_address(&[0u8; 32], "p", b"d");
+        let a2 = compute_object_address(&[1u8; 32], "p", b"d");
+        assert_ne!(a1, a2);
+    }
+
+    #[test]
+    fn compute_object_address_not_empty() {
+        let addr = compute_object_address(&[0u8; 32], "", b"x");
+        assert!(!addr.is_empty());
+    }
+}

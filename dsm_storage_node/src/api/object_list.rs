@@ -151,3 +151,119 @@ fn from_hex(b: u8) -> Result<u8, StatusCode> {
         _ => Err(StatusCode::BAD_REQUEST),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_query_empty_or_none() {
+        let q = parse_query(None).unwrap();
+        assert!(q.prefix.is_none());
+        assert!(q.limit.is_none());
+        assert!(q.cursor.is_none());
+
+        let q = parse_query(Some("")).unwrap();
+        assert!(q.prefix.is_none());
+    }
+
+    #[test]
+    fn parse_query_all_params() {
+        let q = parse_query(Some("prefix=abc&limit=50&cursor=xyz")).unwrap();
+        assert_eq!(q.prefix.as_deref(), Some("abc"));
+        assert_eq!(q.limit, Some(50));
+        assert_eq!(q.cursor.as_deref(), Some("xyz"));
+    }
+
+    #[test]
+    fn parse_query_prefix_only() {
+        let q = parse_query(Some("prefix=foo")).unwrap();
+        assert_eq!(q.prefix.as_deref(), Some("foo"));
+        assert!(q.limit.is_none());
+        assert!(q.cursor.is_none());
+    }
+
+    #[test]
+    fn parse_query_unknown_keys_ignored() {
+        let q = parse_query(Some("prefix=bar&unknown=val")).unwrap();
+        assert_eq!(q.prefix.as_deref(), Some("bar"));
+    }
+
+    #[test]
+    fn parse_query_invalid_limit_is_error() {
+        assert!(parse_query(Some("limit=abc")).is_err());
+        assert!(parse_query(Some("limit=-1")).is_err());
+    }
+
+    #[test]
+    fn parse_query_percent_encoded_prefix() {
+        let q = parse_query(Some("prefix=hello%20world")).unwrap();
+        assert_eq!(q.prefix.as_deref(), Some("hello world"));
+    }
+
+    #[test]
+    fn limit_clamping_in_handler() {
+        // Simulates the clamping logic from list_objects
+        let q = ListQuery {
+            prefix: None,
+            limit: Some(0),
+            cursor: None,
+        };
+        let clamped = q.limit.unwrap_or(100).clamp(1, 1000) as i64;
+        assert_eq!(clamped, 1, "limit=0 must clamp to 1");
+
+        let q2 = ListQuery {
+            prefix: None,
+            limit: Some(5000),
+            cursor: None,
+        };
+        let clamped2 = q2.limit.unwrap_or(100).clamp(1, 1000) as i64;
+        assert_eq!(clamped2, 1000, "limit=5000 must clamp to 1000");
+
+        let q3 = ListQuery {
+            prefix: None,
+            limit: None,
+            cursor: None,
+        };
+        let clamped3 = q3.limit.unwrap_or(100).clamp(1, 1000) as i64;
+        assert_eq!(clamped3, 100, "missing limit defaults to 100");
+    }
+
+    #[test]
+    fn decode_percent_mixed() {
+        assert_eq!(decode_percent("hello").unwrap(), "hello");
+        assert_eq!(decode_percent("a%2Fb").unwrap(), "a/b");
+        assert_eq!(decode_percent("a+b").unwrap(), "a b");
+        assert_eq!(decode_percent("%48%49").unwrap(), "HI");
+    }
+
+    #[test]
+    fn decode_percent_invalid_hex_is_error() {
+        assert!(decode_percent("%GG").is_err());
+        assert!(decode_percent("%0").is_err());
+        assert!(decode_percent("%").is_err());
+    }
+
+    #[test]
+    fn from_hex_all_valid_digits() {
+        for b in b'0'..=b'9' {
+            assert!(from_hex(b).is_ok());
+        }
+        for b in b'a'..=b'f' {
+            assert!(from_hex(b).is_ok());
+        }
+        for b in b'A'..=b'F' {
+            assert!(from_hex(b).is_ok());
+        }
+        assert!(from_hex(b'g').is_err());
+        assert!(from_hex(b'z').is_err());
+    }
+
+    #[test]
+    fn list_query_default() {
+        let q = ListQuery::default();
+        assert!(q.prefix.is_none());
+        assert!(q.limit.is_none());
+        assert!(q.cursor.is_none());
+    }
+}

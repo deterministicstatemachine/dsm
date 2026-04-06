@@ -466,3 +466,308 @@ pub fn default_production_config() -> ReplicationConfig {
         max_concurrent_jobs: 10,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dsm::types::proto as pb;
+
+    fn test_config() -> ReplicationConfig {
+        ReplicationConfig {
+            replication_factor: 2,
+            gossip_interval_ticks: 10,
+            failure_timeout_ticks: 50,
+            gossip_fanout: 2,
+            max_concurrent_jobs: 5,
+        }
+    }
+
+    fn make_manager(node_id: &str, addr: &str) -> ReplicationManager {
+        ReplicationManager::new_for_tests(test_config(), node_id.to_string(), addr.to_string())
+            .unwrap()
+    }
+
+    #[test]
+    fn default_production_config_values() {
+        let cfg = default_production_config();
+        assert_eq!(cfg.replication_factor, 3);
+        assert_eq!(cfg.gossip_interval_ticks, 100);
+        assert_eq!(cfg.failure_timeout_ticks, 1000);
+        assert_eq!(cfg.gossip_fanout, 3);
+        assert_eq!(cfg.max_concurrent_jobs, 10);
+    }
+
+    #[test]
+    fn status_from_i32_parses_known_variants() {
+        assert_eq!(
+            status_from_i32(pb::StorageNodeStatus::Alive as i32),
+            Some(pb::StorageNodeStatus::Alive)
+        );
+        assert_eq!(
+            status_from_i32(pb::StorageNodeStatus::Suspected as i32),
+            Some(pb::StorageNodeStatus::Suspected)
+        );
+        assert_eq!(
+            status_from_i32(pb::StorageNodeStatus::Dead as i32),
+            Some(pb::StorageNodeStatus::Dead)
+        );
+    }
+
+    #[test]
+    fn status_from_i32_rejects_invalid() {
+        assert_eq!(status_from_i32(999), None);
+        assert_eq!(status_from_i32(-1), None);
+    }
+
+    #[test]
+    fn new_for_tests_initializes_local_node_alive() {
+        let mgr = make_manager("node-1", "http://127.0.0.1:8080");
+        let alive = mgr.get_alive_nodes();
+        assert_eq!(alive.len(), 1);
+        assert_eq!(alive[0].node_id, "node-1");
+        assert_eq!(alive[0].address, "http://127.0.0.1:8080");
+        assert_eq!(alive[0].status, pb::StorageNodeStatus::Alive as i32);
+    }
+
+    #[test]
+    fn get_alive_nodes_excludes_dead_and_suspected() {
+        let mgr = make_manager("node-local", "http://127.0.0.1:8080");
+        {
+            let mut states = mgr.node_states.write().unwrap();
+            states.insert(
+                "node-dead".to_string(),
+                pb::StorageNodeInfoV1 {
+                    node_id: "node-dead".to_string(),
+                    address: "http://127.0.0.1:8081".to_string(),
+                    last_seen_tick: 0,
+                    status: pb::StorageNodeStatus::Dead as i32,
+                },
+            );
+            states.insert(
+                "node-suspected".to_string(),
+                pb::StorageNodeInfoV1 {
+                    node_id: "node-suspected".to_string(),
+                    address: "http://127.0.0.1:8082".to_string(),
+                    last_seen_tick: 0,
+                    status: pb::StorageNodeStatus::Suspected as i32,
+                },
+            );
+            states.insert(
+                "node-alive".to_string(),
+                pb::StorageNodeInfoV1 {
+                    node_id: "node-alive".to_string(),
+                    address: "http://127.0.0.1:8083".to_string(),
+                    last_seen_tick: 0,
+                    status: pb::StorageNodeStatus::Alive as i32,
+                },
+            );
+        }
+        let alive = mgr.get_alive_nodes();
+        assert_eq!(alive.len(), 2);
+        let ids: Vec<&str> = alive.iter().map(|n| n.node_id.as_str()).collect();
+        assert!(ids.contains(&"node-local"));
+        assert!(ids.contains(&"node-alive"));
+    }
+
+    #[tokio::test]
+    async fn get_replication_targets_deterministic() {
+        let mgr = make_manager("node-a", "http://127.0.0.1:8080");
+        {
+            let mut states = mgr.node_states.write().unwrap();
+            for i in 0..5 {
+                let id = format!("node-{}", (b'b' + i) as char);
+                states.insert(
+                    id.clone(),
+                    pb::StorageNodeInfoV1 {
+                        node_id: id.clone(),
+                        address: format!("http://127.0.0.1:{}", 8081 + i as u16),
+                        last_seen_tick: 0,
+                        status: pb::StorageNodeStatus::Alive as i32,
+                    },
+                );
+            }
+        }
+        let targets1 = mgr.get_replication_targets("obj-key-1").await;
+        let targets2 = mgr.get_replication_targets("obj-key-1").await;
+        assert_eq!(targets1.len(), 2); // replication_factor=2
+        assert_eq!(
+            targets1.iter().map(|n| &n.node_id).collect::<Vec<_>>(),
+            targets2.iter().map(|n| &n.node_id).collect::<Vec<_>>(),
+        );
+    }
+
+    #[tokio::test]
+    async fn get_replication_targets_empty_when_no_nodes() {
+        let mgr = make_manager("node-a", "http://127.0.0.1:8080");
+        {
+            let mut states = mgr.node_states.write().unwrap();
+            states.get_mut("node-a").unwrap().status = pb::StorageNodeStatus::Dead as i32;
+        }
+        let targets = mgr.get_replication_targets("any-key").await;
+        assert!(targets.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_replication_targets_different_keys_may_differ() {
+        let mgr = make_manager("node-a", "http://127.0.0.1:8080");
+        {
+            let mut states = mgr.node_states.write().unwrap();
+            for i in 0..10 {
+                let id = format!("node-extra-{}", i);
+                states.insert(
+                    id.clone(),
+                    pb::StorageNodeInfoV1 {
+                        node_id: id,
+                        address: format!("http://127.0.0.1:{}", 9000 + i),
+                        last_seen_tick: 0,
+                        status: pb::StorageNodeStatus::Alive as i32,
+                    },
+                );
+            }
+        }
+        let t1 = mgr.get_replication_targets("key-alpha").await;
+        let t2 = mgr.get_replication_targets("key-beta").await;
+        // With 11 nodes and RF=2, different keys should (very likely) produce different placements
+        let ids1: Vec<&str> = t1.iter().map(|n| n.node_id.as_str()).collect();
+        let ids2: Vec<&str> = t2.iter().map(|n| n.node_id.as_str()).collect();
+        // At minimum both should return the correct count
+        assert_eq!(ids1.len(), 2);
+        assert_eq!(ids2.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn process_gossip_adds_new_nodes() {
+        let mgr = make_manager("node-local", "http://127.0.0.1:8080");
+        let gossip = pb::GossipMessageV1 {
+            sender_node_id: "node-remote".to_string(),
+            sender_tick: 10,
+            node_states: vec![pb::StorageNodeInfoV1 {
+                node_id: "node-remote".to_string(),
+                address: "http://127.0.0.1:9090".to_string(),
+                last_seen_tick: 10,
+                status: pb::StorageNodeStatus::Alive as i32,
+            }],
+        };
+        mgr.process_gossip(gossip, 10).await;
+        let alive = mgr.get_alive_nodes();
+        assert_eq!(alive.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn process_gossip_ignores_own_node_id() {
+        let mgr = make_manager("node-local", "http://127.0.0.1:8080");
+        let gossip = pb::GossipMessageV1 {
+            sender_node_id: "node-remote".to_string(),
+            sender_tick: 10,
+            node_states: vec![pb::StorageNodeInfoV1 {
+                node_id: "node-local".to_string(),
+                address: "http://attacker:6666".to_string(),
+                last_seen_tick: 10,
+                status: pb::StorageNodeStatus::Dead as i32,
+            }],
+        };
+        mgr.process_gossip(gossip, 10).await;
+        let alive = mgr.get_alive_nodes();
+        assert_eq!(alive.len(), 1);
+        assert_eq!(alive[0].address, "http://127.0.0.1:8080");
+    }
+
+    #[tokio::test]
+    async fn process_gossip_suspects_stale_nodes() {
+        let mgr = make_manager("node-local", "http://127.0.0.1:8080");
+        let gossip = pb::GossipMessageV1 {
+            sender_node_id: "node-remote".to_string(),
+            sender_tick: 5,
+            node_states: vec![pb::StorageNodeInfoV1 {
+                node_id: "node-remote".to_string(),
+                address: "http://127.0.0.1:9090".to_string(),
+                last_seen_tick: 5,
+                status: pb::StorageNodeStatus::Alive as i32,
+            }],
+        };
+        // Process gossip at tick=5 first to insert the node
+        mgr.process_gossip(gossip, 5).await;
+
+        // Now process again at tick far in the future (beyond failure_timeout_ticks=50)
+        let gossip2 = pb::GossipMessageV1 {
+            sender_node_id: "other".to_string(),
+            sender_tick: 100,
+            node_states: vec![pb::StorageNodeInfoV1 {
+                node_id: "node-remote".to_string(),
+                address: "http://127.0.0.1:9090".to_string(),
+                last_seen_tick: 5, // stale
+                status: pb::StorageNodeStatus::Alive as i32,
+            }],
+        };
+        mgr.process_gossip(gossip2, 100).await;
+
+        let states = mgr.node_states.read().unwrap();
+        let remote = states.get("node-remote").unwrap();
+        assert_eq!(remote.status, pb::StorageNodeStatus::Suspected as i32);
+    }
+
+    #[tokio::test]
+    async fn process_gossip_marks_suspected_as_dead() {
+        let mgr = make_manager("node-local", "http://127.0.0.1:8080");
+        {
+            let mut states = mgr.node_states.write().unwrap();
+            states.insert(
+                "node-stale".to_string(),
+                pb::StorageNodeInfoV1 {
+                    node_id: "node-stale".to_string(),
+                    address: "http://127.0.0.1:9091".to_string(),
+                    last_seen_tick: 1,
+                    status: pb::StorageNodeStatus::Suspected as i32,
+                },
+            );
+        }
+        let gossip = pb::GossipMessageV1 {
+            sender_node_id: "other".to_string(),
+            sender_tick: 200,
+            node_states: vec![pb::StorageNodeInfoV1 {
+                node_id: "node-stale".to_string(),
+                address: "http://127.0.0.1:9091".to_string(),
+                last_seen_tick: 1,
+                status: pb::StorageNodeStatus::Suspected as i32,
+            }],
+        };
+        mgr.process_gossip(gossip, 200).await;
+
+        let states = mgr.node_states.read().unwrap();
+        let stale = states.get("node-stale").unwrap();
+        assert_eq!(stale.status, pb::StorageNodeStatus::Dead as i32);
+    }
+
+    #[tokio::test]
+    async fn process_gossip_updates_last_seen_tick_to_max() {
+        let mgr = make_manager("node-local", "http://127.0.0.1:8080");
+        {
+            let mut states = mgr.node_states.write().unwrap();
+            states.insert(
+                "node-b".to_string(),
+                pb::StorageNodeInfoV1 {
+                    node_id: "node-b".to_string(),
+                    address: "http://127.0.0.1:9091".to_string(),
+                    last_seen_tick: 50,
+                    status: pb::StorageNodeStatus::Alive as i32,
+                },
+            );
+        }
+        // Gossip with an older tick should not regress last_seen_tick
+        let gossip = pb::GossipMessageV1 {
+            sender_node_id: "other".to_string(),
+            sender_tick: 30,
+            node_states: vec![pb::StorageNodeInfoV1 {
+                node_id: "node-b".to_string(),
+                address: "http://127.0.0.1:9091".to_string(),
+                last_seen_tick: 30,
+                status: pb::StorageNodeStatus::Alive as i32,
+            }],
+        };
+        mgr.process_gossip(gossip, 30).await;
+
+        let states = mgr.node_states.read().unwrap();
+        let b = states.get("node-b").unwrap();
+        assert_eq!(b.last_seen_tick, 50); // should keep max(50, 30)
+    }
+}

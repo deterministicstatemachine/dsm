@@ -109,3 +109,166 @@ pub fn validate_vaultpost_smart_policy_if_present(body: &[u8]) -> Result<(), ()>
         _ => Ok(()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dsm::types::proto as P;
+    use prost::Message;
+
+    fn encode_smart_policy(version: u32, num_clauses: usize) -> Vec<u8> {
+        let policy = P::SmartPolicy {
+            version,
+            logic: 0,
+            clauses: (0..num_clauses)
+                .map(|_| P::SmartClause::default())
+                .collect(),
+        };
+        policy.encode_to_vec()
+    }
+
+    #[test]
+    fn validate_smart_policy_bytes_valid_single_clause() {
+        let bytes = encode_smart_policy(1, 1);
+        assert!(validate_smart_policy_bytes(&bytes).is_ok());
+    }
+
+    #[test]
+    fn validate_smart_policy_bytes_valid_multiple_clauses() {
+        let bytes = encode_smart_policy(1, 5);
+        assert!(validate_smart_policy_bytes(&bytes).is_ok());
+    }
+
+    #[test]
+    fn validate_smart_policy_bytes_rejects_empty_clauses() {
+        let bytes = encode_smart_policy(1, 0);
+        assert!(validate_smart_policy_bytes(&bytes).is_err());
+    }
+
+    #[test]
+    fn validate_smart_policy_bytes_rejects_garbage() {
+        assert!(validate_smart_policy_bytes(b"not-a-protobuf").is_err());
+    }
+
+    #[test]
+    fn validate_smart_policy_bytes_rejects_empty_input() {
+        // Empty bytes decode to SmartPolicy with all defaults (0 clauses)
+        assert!(validate_smart_policy_bytes(&[]).is_err());
+    }
+
+    #[test]
+    fn validate_smart_policy_bytes_version_zero_allowed() {
+        let bytes = encode_smart_policy(0, 1);
+        assert!(validate_smart_policy_bytes(&bytes).is_ok());
+    }
+
+    #[test]
+    fn validate_vaultpost_not_a_vaultpost_returns_ok() {
+        // Non-VaultPostProto bytes should be silently accepted
+        assert!(validate_vaultpost_smart_policy_if_present(b"random-bytes").is_ok());
+    }
+
+    #[test]
+    fn validate_vaultpost_empty_returns_ok() {
+        assert!(validate_vaultpost_smart_policy_if_present(&[]).is_ok());
+    }
+
+    #[test]
+    fn validate_vaultpost_with_valid_crypto_condition() {
+        let policy_bytes = encode_smart_policy(1, 2);
+        let cc = P::CryptoCondition {
+            condition_hash: vec![0u8; 32],
+            public_params: policy_bytes,
+        };
+        let fm = P::FulfillmentMechanism {
+            kind: Some(P::fulfillment_mechanism::Kind::CryptoCondition(cc)),
+        };
+        let limbo = P::LimboVaultProto {
+            id: "vault-1".to_string(),
+            fulfillment_condition: Some(fm),
+            ..Default::default()
+        };
+        let post = P::VaultPostProto {
+            vault_id: "vault-1".to_string(),
+            vault_data: limbo.encode_to_vec(),
+            ..Default::default()
+        };
+        assert!(validate_vaultpost_smart_policy_if_present(&post.encode_to_vec()).is_ok());
+    }
+
+    #[test]
+    fn validate_vaultpost_crypto_condition_empty_public_params_rejected() {
+        let cc = P::CryptoCondition {
+            condition_hash: vec![0u8; 32],
+            public_params: vec![], // empty — should be rejected
+        };
+        let fm = P::FulfillmentMechanism {
+            kind: Some(P::fulfillment_mechanism::Kind::CryptoCondition(cc)),
+        };
+        let limbo = P::LimboVaultProto {
+            id: "vault-1".to_string(),
+            fulfillment_condition: Some(fm),
+            ..Default::default()
+        };
+        let post = P::VaultPostProto {
+            vault_id: "vault-1".to_string(),
+            vault_data: limbo.encode_to_vec(),
+            ..Default::default()
+        };
+        assert!(validate_vaultpost_smart_policy_if_present(&post.encode_to_vec()).is_err());
+    }
+
+    #[test]
+    fn validate_vaultpost_no_fulfillment_mechanism_accepted() {
+        let limbo = P::LimboVaultProto {
+            id: "vault-1".to_string(),
+            fulfillment_condition: None,
+            ..Default::default()
+        };
+        let post = P::VaultPostProto {
+            vault_id: "vault-1".to_string(),
+            vault_data: limbo.encode_to_vec(),
+            ..Default::default()
+        };
+        assert!(validate_vaultpost_smart_policy_if_present(&post.encode_to_vec()).is_ok());
+    }
+
+    #[test]
+    fn validate_envelope_none_payload_accepted() {
+        let env = P::Envelope {
+            payload: None,
+            ..Default::default()
+        };
+        assert!(validate_envelope_smart_policy(&env).is_ok());
+    }
+
+    #[test]
+    fn validate_envelope_empty_universal_tx_accepted() {
+        let tx = P::UniversalTx {
+            ops: vec![],
+            ..Default::default()
+        };
+        let env = P::Envelope {
+            payload: Some(P::envelope::Payload::UniversalTx(tx)),
+            ..Default::default()
+        };
+        assert!(validate_envelope_smart_policy(&env).is_ok());
+    }
+
+    #[test]
+    fn validate_envelope_batch_recurses() {
+        let inner = P::Envelope {
+            payload: None,
+            ..Default::default()
+        };
+        let batch = P::BatchEnvelope {
+            envelopes: vec![inner.clone(), inner],
+            ..Default::default()
+        };
+        let env = P::Envelope {
+            payload: Some(P::envelope::Payload::BatchEnvelope(batch)),
+            ..Default::default()
+        };
+        assert!(validate_envelope_smart_policy(&env).is_ok());
+    }
+}

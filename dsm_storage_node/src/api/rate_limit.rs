@@ -127,3 +127,112 @@ pub async fn rate_limit_by_ip(
 pub async fn rate_limit_noop(req: Request, next: Next) -> Response {
     next.run(req).await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rate_limit_entry_starts_full() {
+        let entry = RateLimitEntry::new();
+        assert_eq!(entry.tokens, RATE_LIMIT_REQUESTS);
+    }
+
+    #[test]
+    fn rate_limit_entry_consume_decrements() {
+        let mut entry = RateLimitEntry::new();
+        let initial = entry.tokens;
+        assert!(entry.consume());
+        assert_eq!(entry.tokens, initial - 1);
+    }
+
+    #[test]
+    fn rate_limit_entry_consume_exhausts_tokens() {
+        let mut entry = RateLimitEntry::new();
+        for _ in 0..RATE_LIMIT_REQUESTS {
+            assert!(entry.consume());
+        }
+        assert!(!entry.consume());
+        assert_eq!(entry.tokens, 0);
+    }
+
+    #[test]
+    fn rate_limit_entry_refill_within_window_no_change() {
+        let mut entry = RateLimitEntry::new();
+        for _ in 0..10 {
+            entry.consume();
+        }
+        let remaining = entry.tokens;
+        entry.refill(); // Still within the same window
+        assert_eq!(entry.tokens, remaining);
+    }
+
+    #[test]
+    fn should_prune_recent_entry_false() {
+        let entry = RateLimitEntry::new();
+        assert!(!RateLimiter::should_prune(&entry, Instant::now()));
+    }
+
+    #[test]
+    fn should_prune_old_entry_true() {
+        let mut entry = RateLimitEntry::new();
+        // Simulate an entry from long ago by backdating last_refill
+        entry.last_refill = Instant::now() - RATE_LIMIT_WINDOW.saturating_mul(11);
+        assert!(RateLimiter::should_prune(&entry, Instant::now()));
+    }
+
+    #[test]
+    fn should_prune_boundary_false() {
+        let mut entry = RateLimitEntry::new();
+        let now = Instant::now();
+        // Exactly 10x window — should NOT be pruned (> required, not >=)
+        entry.last_refill = now - RATE_LIMIT_WINDOW.saturating_mul(10);
+        assert!(!RateLimiter::should_prune(&entry, now));
+    }
+
+    #[tokio::test]
+    async fn check_rate_limit_allows_requests() {
+        let limiter = RateLimiter::new();
+        assert!(limiter.check_rate_limit("192.168.1.1").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn check_rate_limit_exhaustion_returns_429() {
+        let limiter = RateLimiter::new();
+        for _ in 0..RATE_LIMIT_REQUESTS {
+            limiter.check_rate_limit("192.168.1.1").await.unwrap();
+        }
+        let result = limiter.check_rate_limit("192.168.1.1").await;
+        assert_eq!(result.unwrap_err(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn check_rate_limit_per_key_isolation() {
+        let limiter = RateLimiter::new();
+        for _ in 0..RATE_LIMIT_REQUESTS {
+            limiter.check_rate_limit("192.168.1.1").await.unwrap();
+        }
+        // Different key should still have tokens
+        assert!(limiter.check_rate_limit("10.0.0.1").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn check_rate_limit_bypass_always_ok() {
+        let limiter = RateLimiter::new_bypass();
+        for _ in 0..(RATE_LIMIT_REQUESTS + 100) {
+            assert!(limiter.check_rate_limit("192.168.1.1").await.is_ok());
+        }
+    }
+
+    #[test]
+    fn default_creates_non_bypass_limiter() {
+        let limiter = RateLimiter::default();
+        assert!(!limiter.bypass);
+    }
+
+    #[test]
+    fn new_bypass_sets_bypass_flag() {
+        let limiter = RateLimiter::new_bypass();
+        assert!(limiter.bypass);
+    }
+}
