@@ -257,9 +257,7 @@ pub fn get_pending_confirm_deliveries(
 }
 
 /// Get a pending confirm envelope by commitment hash.
-pub fn get_pending_confirm_delivery(
-    commitment_hash: &[u8],
-) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+pub fn get_pending_confirm_delivery(commitment_hash: &[u8]) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
     if commitment_hash.len() != 32 {
         return Err(anyhow!("Invalid commitment_hash length"));
     }

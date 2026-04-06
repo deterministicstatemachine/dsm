@@ -167,14 +167,13 @@ impl AppRouterImpl {
         counterparty_device_id: &[u8; 32],
         tip: &[u8; 32],
     ) {
-        let counterparty_b32 = crate::util::text_id::encode_base32_crockford(counterparty_device_id);
+        let counterparty_b32 =
+            crate::util::text_id::encode_base32_crockford(counterparty_device_id);
         let tip_b32 = crate::util::text_id::encode_base32_crockford(tip);
-        if let Err(e) = self.wallet.update_bilateral_chain_tip(
-            &counterparty_b32,
-            &tip_b32,
-            &tip_b32,
-            0,
-        ) {
+        if let Err(e) =
+            self.wallet
+                .update_bilateral_chain_tip(&counterparty_b32, &tip_b32, &tip_b32, 0)
+        {
             log::warn!(
                 "[bilateral.reconcile] failed to sync in-memory bilateral cache for {}: {}",
                 counterparty_b32.get(..8).unwrap_or("?"),
@@ -338,8 +337,7 @@ impl AppRouterImpl {
             }
         };
 
-        let recipient_caught_up = match b0x_sdk.is_message_acknowledged(&pending.message_id).await
-        {
+        let recipient_caught_up = match b0x_sdk.is_message_acknowledged(&pending.message_id).await {
             Ok(acked) => acked,
             Err(e) => {
                 return blocked_status(
@@ -421,10 +419,7 @@ impl AppRouterImpl {
         }
     }
 
-    pub(crate) async fn handle_bilateral_reconcile_invoke(
-        &self,
-        i: AppInvoke,
-    ) -> AppResult {
+    pub(crate) async fn handle_bilateral_reconcile_invoke(&self, i: AppInvoke) -> AppResult {
         use prost::Message;
 
         let pack = match generated::ArgPack::decode(&*i.args) {

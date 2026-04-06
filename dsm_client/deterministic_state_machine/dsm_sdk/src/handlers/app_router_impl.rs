@@ -857,15 +857,17 @@ impl AppRouterImpl {
         }
         let contact_record =
             match crate::storage::client_db::get_contact_by_device_id(&to_device_id) {
-            Ok(Some(contact)) => contact,
-            Ok(None) => {
-                return err("wallet.send: recipient relationship disappeared during send".to_string())
-            }
-            Err(e) => {
-                return err(format!(
-                    "wallet.send: failed to reload recipient relationship state: {e}"
-                ))
-            }
+                Ok(Some(contact)) => contact,
+                Ok(None) => {
+                    return err(
+                        "wallet.send: recipient relationship disappeared during send".to_string(),
+                    )
+                }
+                Err(e) => {
+                    return err(format!(
+                        "wallet.send: failed to reload recipient relationship state: {e}"
+                    ))
+                }
             };
 
         let chain_tip_arr: [u8; 32] = match relationship_tip_for_contact_restore(
@@ -1221,9 +1223,7 @@ impl AppRouterImpl {
             Err(e) => {
                 crate::security::shared_smt::clear_pending_online(&smt_key).await;
                 let failure_class = self.classify_local_state_update_failure(&e);
-                log::error!(
-                    "[wallet.send] ❌ send_transfer_op FAILED class={failure_class}: {e}"
-                );
+                log::error!("[wallet.send] ❌ send_transfer_op FAILED class={failure_class}: {e}");
                 return err(format!("wallet.send: local state update failed: {e}"));
             }
         };

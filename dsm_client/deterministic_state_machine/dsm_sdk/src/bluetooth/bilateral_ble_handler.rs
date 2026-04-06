@@ -433,11 +433,8 @@ impl BilateralBleHandler {
         &self,
         record: &BilateralSessionRecord,
     ) -> Result<BilateralBleSession, DsmError> {
-        let commitment_hash: [u8; 32] = record
-            .commitment_hash
-            .as_slice()
-            .try_into()
-            .map_err(|_| {
+        let commitment_hash: [u8; 32] =
+            record.commitment_hash.as_slice().try_into().map_err(|_| {
                 DsmError::invalid_operation(
                     "persisted bilateral session commitment_hash must be 32 bytes",
                 )
@@ -461,13 +458,13 @@ impl BilateralBleHandler {
         };
         let operation = crate::storage::client_db::deserialize_operation(&record.operation_bytes)
             .map_err(|e| {
-                DsmError::serialization_error(
-                    "recover_sender_commit_from_storage",
-                    "operation_bytes",
-                    Some(e.to_string()),
-                    None::<std::io::Error>,
-                )
-            })?;
+            DsmError::serialization_error(
+                "recover_sender_commit_from_storage",
+                "operation_bytes",
+                Some(e.to_string()),
+                None::<std::io::Error>,
+            )
+        })?;
 
         Ok(BilateralBleSession {
             commitment_hash,
@@ -520,16 +517,15 @@ impl BilateralBleHandler {
             ));
         }
 
-        let confirm_message = generated::Envelope::decode(confirm_envelope.as_slice()).map_err(
-            |e| {
+        let confirm_message =
+            generated::Envelope::decode(confirm_envelope.as_slice()).map_err(|e| {
                 DsmError::serialization_error(
                     "decode_persisted_confirm_envelope",
                     "protobuf",
                     Some(e.to_string()),
                     Some(e),
                 )
-            },
-        )?;
+            })?;
         let confirm_request = self.extract_confirm_request(&confirm_message)?;
 
         let shared_chain_tip_new: [u8; 32] = confirm_request
@@ -558,12 +554,14 @@ impl BilateralBleHandler {
                     Some(e),
                 )
             })?;
-        let expected_parent_tip: [u8; 32] = receipt.parent_tip.as_slice().try_into().map_err(
-            |_| DsmError::invalid_operation("persisted confirm receipt parent_tip must be 32 bytes"),
-        )?;
-        let receipt_child_tip: [u8; 32] = receipt.child_tip.as_slice().try_into().map_err(|_| {
-            DsmError::invalid_operation("persisted confirm receipt child_tip must be 32 bytes")
-        })?;
+        let expected_parent_tip: [u8; 32] =
+            receipt.parent_tip.as_slice().try_into().map_err(|_| {
+                DsmError::invalid_operation("persisted confirm receipt parent_tip must be 32 bytes")
+            })?;
+        let receipt_child_tip: [u8; 32] =
+            receipt.child_tip.as_slice().try_into().map_err(|_| {
+                DsmError::invalid_operation("persisted confirm receipt child_tip must be 32 bytes")
+            })?;
         if receipt_child_tip != shared_chain_tip_new {
             return Err(DsmError::invalid_operation(
                 "persisted confirm receipt child_tip mismatch",
@@ -640,19 +638,20 @@ impl BilateralBleHandler {
         }
 
         let op_bytes = session.operation.to_bytes();
-        let (event_amount_opt, event_token_id_opt) = if let Some(ref delegate) = self.settlement_delegate {
-            delegate.operation_metadata(&op_bytes)
-        } else {
-            (None, None)
-        };
+        let (event_amount_opt, event_token_id_opt) =
+            if let Some(ref delegate) = self.settlement_delegate {
+                delegate.operation_metadata(&op_bytes)
+            } else {
+                (None, None)
+            };
 
         let settlement_outcome = if let Some(ref delegate) = self.settlement_delegate {
             let canonical_state = {
                 let bcr_state = crate::storage::client_db::get_bcr_states(&self.device_id, false)
                     .ok()
                     .and_then(|states| states.into_iter().last());
-                let mem_state =
-                    crate::bridge::app_router().and_then(|router| router.get_device_current_state());
+                let mem_state = crate::bridge::app_router()
+                    .and_then(|router| router.get_device_current_state());
                 bcr_state.or(mem_state).ok_or_else(|| {
                     DsmError::invalid_operation(
                         "sender recovery settlement: missing canonical device state",
@@ -674,9 +673,7 @@ impl BilateralBleHandler {
                     canonical_state: Some(canonical_state),
                 })
                 .map_err(|e| {
-                    DsmError::invalid_operation(format!(
-                        "sender recovery settlement failed: {e}"
-                    ))
+                    DsmError::invalid_operation(format!("sender recovery settlement failed: {e}"))
                 })?
         } else {
             BilateralSettlementOutcome::default()

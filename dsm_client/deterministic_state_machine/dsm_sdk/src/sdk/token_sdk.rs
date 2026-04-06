@@ -1688,16 +1688,12 @@ impl<I: Send + Sync> TokenSDK<I> {
             crate::storage::client_db::list_balance_projections(&device_id_str)
         {
             for record in token_balances {
-                let source_hash = crate::util::text_id::decode_base32_crockford(
-                    &record.source_state_hash,
-                )
-                .and_then(|bytes| bytes.try_into().ok())
-                .unwrap_or([0u8; 32]);
-                let mut balance = Balance::from_state(
-                    record.available,
-                    source_hash,
-                    record.source_state_number,
-                );
+                let source_hash =
+                    crate::util::text_id::decode_base32_crockford(&record.source_state_hash)
+                        .and_then(|bytes| bytes.try_into().ok())
+                        .unwrap_or([0u8; 32]);
+                let mut balance =
+                    Balance::from_state(record.available, source_hash, record.source_state_number);
                 if record.locked > 0 {
                     let _ = balance.lock(record.locked);
                 }
@@ -2736,10 +2732,7 @@ mod tests {
 
         sdk.balances.write().insert(
             device_info.device_id,
-            HashMap::from([(
-                "ERA".to_string(),
-                Balance::from_state(1, [1u8; 32], 1),
-            )]),
+            HashMap::from([("ERA".to_string(), Balance::from_state(1, [1u8; 32], 1))]),
         );
 
         sdk.reload_balance_cache_for_self(device_info.device_id)

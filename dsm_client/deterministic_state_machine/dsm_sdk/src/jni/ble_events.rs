@@ -1084,7 +1084,8 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getRelationsh
                 }
             };
 
-            let contact = match crate::storage::client_db::get_contact_by_ble_address(&ble_address) {
+            let contact = match crate::storage::client_db::get_contact_by_ble_address(&ble_address)
+            {
                 Ok(Some(contact)) => contact,
                 Ok(None) => {
                     log::warn!(
@@ -1111,7 +1112,10 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getRelationsh
                 return empty(&mut env);
             }
 
-            let send_status = crate::handlers::relationship_status::derive_local_send_status_for_contact(&contact);
+            let send_status =
+                crate::handlers::relationship_status::derive_local_send_status_for_contact(
+                    &contact,
+                );
             let char_value = pb::BleRelationshipStatusCharValue {
                 counterparty_device_id: contact.device_id.clone(),
                 send_status: Some(pb_send_status_from_router_status(send_status)),
