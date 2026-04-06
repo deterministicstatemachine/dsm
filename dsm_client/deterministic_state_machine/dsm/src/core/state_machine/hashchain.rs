@@ -381,6 +381,7 @@ mod tests {
             state.state_number = state_number;
             state.id = format!("state_{}", state_number);
             state.prev_state_hash = prev_hash;
+            state.hash = state.compute_hash().unwrap_or([0; 32]);
             state
         }
     }
