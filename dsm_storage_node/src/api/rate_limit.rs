@@ -129,6 +129,7 @@ pub async fn rate_limit_noop(req: Request, next: Next) -> Response {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
 

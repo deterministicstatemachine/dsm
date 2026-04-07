@@ -6,3 +6,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
+
+uint8_t *dsm_process_envelope_protobuf(const uint8_t *envelope_bytes,
+                                       uintptr_t envelope_len,
+                                       uintptr_t *out_len);
+
+void dsm_free_envelope_bytes(uint8_t *bytes, uintptr_t len);

@@ -126,6 +126,20 @@ pub fn app_router() -> Option<Arc<dyn AppRouter>> {
     APP_ROUTER.read().ok()?.clone()
 }
 
+#[cfg(test)]
+pub(crate) unsafe fn reset_bridge_handlers_for_tests() {
+    if let Ok(mut guard) = APP_ROUTER.write() {
+        *guard = None;
+    }
+    if let Ok(mut guard) = UNILATERAL_HANDLER.write() {
+        *guard = None;
+    }
+    std::ptr::write(
+        std::ptr::addr_of!(BILATERAL_HANDLER) as *mut OnceCell<Arc<dyn BilateralHandler>>,
+        OnceCell::new(),
+    );
+}
+
 // ---------- Unilateral Ops ----------
 
 #[derive(Debug, Clone)]

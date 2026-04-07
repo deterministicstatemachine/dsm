@@ -143,6 +143,7 @@ pub async fn get_status(
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
     use dsm::types::proto::StoragePaymentReceiptV3;

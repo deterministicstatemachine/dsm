@@ -468,6 +468,7 @@ pub fn default_production_config() -> ReplicationConfig {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
     use dsm::types::proto as pb;

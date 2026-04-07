@@ -174,6 +174,7 @@ pub async fn verify_drain(
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
     use prost::Message;

@@ -6,12 +6,10 @@
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-use prost::Message;
 use log::error;
+use prost::Message;
 
-use crate::generated::Envelope;
-use crate::sdk::core_sdk::CoreSDK;
-use crate::storage_utils;
+use crate::generated::{ingress_request, ingress_response, Envelope, IngressRequest};
 use crate::util::deterministic_time;
 
 /// Process envelope with protobuf-native transport (iOS/Swift optimized)
@@ -112,60 +110,68 @@ fn process_envelope_native(input_bytes: &[u8]) -> Vec<u8> {
     // 3) Extract message_id for error handling
     let message_id = envelope_in.message_id.clone();
 
-    // 4) Forward to CORE dispatcher
-    let envelope_out =
-        match crate::jni::unified_protobuf_bridge::process_envelope_unified(envelope_in) {
-            Ok(env_out) => {
-                log::info!("iOS transport: processed envelope (deterministic timing)");
-                env_out
-            }
-            Err(e) => {
-                error!("iOS transport: core processing failed: {}", e);
-                let tick = deterministic_time::tick_index();
-                create_error_envelope(
-                    message_id,
-                    1,
-                    &format!("core processing failed: {}", e),
-                    tick,
-                )
-            }
-        };
+    // 4) Forward to the shared ingress (platform-agnostic semantic boundary).
+    //    Both the Android JNI shim and this iOS FFI shim use the same dispatch
+    //    path after this point; no JNI-specific logic is involved here.
+    let request = IngressRequest {
+        operation: Some(ingress_request::Operation::Envelope(
+            crate::generated::EnvelopeOp {
+                envelope_bytes: input_bytes.to_vec(),
+            },
+        )),
+    };
 
-    // 5) Encode back to raw protobuf bytes
-    match envelope_out.encode_to_vec() {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            error!("iOS transport: Envelope encode failed: {}", e);
-            create_error_envelope_bytes(&format!("Envelope encode failed: {}", e))
+    match crate::ingress::dispatch_ingress(request).result {
+        Some(ingress_response::Result::OkBytes(ok_bytes)) => {
+            log::info!("iOS transport: processed envelope via shared ingress");
+            if ok_bytes.first() == Some(&0x03) {
+                ok_bytes[1..].to_vec()
+            } else {
+                error!("iOS transport: ingress returned unframed envelope payload");
+                create_error_envelope_bytes("ingress returned unframed envelope payload")
+            }
+        }
+        Some(ingress_response::Result::Error(err)) => {
+            error!("iOS transport: ingress failed: {}", err.message);
+            create_error_envelope(message_id, err.code, &err.message).encode_to_vec()
+        }
+        None => {
+            error!("iOS transport: ingress returned empty response");
+            create_error_envelope_bytes("ingress returned empty response")
         }
     }
 }
 
 /// Create error envelope from message
 fn create_error_envelope_bytes(message: &str) -> Vec<u8> {
-    let (hash, tick) = deterministic_time::tick();
-    let message_id = hash[..16].to_vec();
-    let envelope = create_error_envelope(message_id, 1, message, tick);
+    let tick = deterministic_time::tick();
+    let mut message_id = Vec::with_capacity(16);
+    message_id.extend_from_slice(&tick.to_be_bytes());
+    message_id.extend_from_slice(&tick.to_be_bytes());
+    let envelope = create_error_envelope(message_id, 1, message);
 
-    envelope.encode_to_vec().unwrap_or_else(|_| Vec::new())
+    envelope.encode_to_vec()
 }
 
 /// Create error envelope with specified message ID and error details
-fn create_error_envelope(message_id: Vec<u8>, code: u32, message: &str, tick: u64) -> Envelope {
+fn create_error_envelope(message_id: Vec<u8>, code: u32, message: &str) -> Envelope {
     use prost::bytes::Bytes;
 
     Envelope {
         version: 3,
-        tick,
+        headers: None,
         message_id,
         payload: Some(crate::generated::envelope::Payload::Error(
             crate::generated::Error {
                 code,
                 message: message.to_string(),
                 context: Bytes::new().to_vec(),
+                source_tag: 0,
                 is_recoverable: false,
+                debug_b32: String::new(),
             },
         )),
+        ..Default::default()
     }
 }
 
@@ -177,11 +183,10 @@ mod tests {
     #[test]
     fn test_error_envelope_creation() {
         let message_id = vec![1, 2, 3, 4];
-        let envelope = create_error_envelope(message_id.clone(), 500, "test error", 42);
+        let envelope = create_error_envelope(message_id.clone(), 500, "test error");
 
         assert_eq!(envelope.version, 3);
         assert_eq!(envelope.message_id, message_id);
-        assert_eq!(envelope.tick, 42);
 
         if let Some(envelope::Payload::Error(err)) = envelope.payload {
             assert_eq!(err.code, 500);

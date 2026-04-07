@@ -48,6 +48,7 @@ async fn discover_nodes(
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use dsm::types::proto as pb;
     use prost::Message;

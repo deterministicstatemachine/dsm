@@ -10,6 +10,7 @@ Building custom wallets, replacing the frontend, and integrating with the DSM pr
 |------|-------|--------|
 | Custom React frontend | Replace the UI, keep the bridge | Medium |
 | Native Android app | Use JNI directly, skip WebView | High |
+| Native iOS app | Use FFI directly via shared ingress-backed envelope transport | High |
 | Protocol extension | Add new operations to the core | Very High |
 
 ---
@@ -108,6 +109,24 @@ object NativeApi {
 
 ---
 
+## Native iOS Integration (FFI Direct)
+
+The current iOS surface keeps the envelope-based FFI stable while routing through the same shared Rust ingress used by Android.
+
+### Setup
+
+1. Build and link the Rust SDK for your Apple targets
+2. Expose `dsm_process_envelope_protobuf` and `dsm_free_envelope_bytes` through your bridging header
+3. Pass raw protobuf-encoded `Envelope` bytes in and receive raw protobuf-encoded `Envelope` bytes out
+
+### Important Constraints
+
+- iOS keeps the envelope-native ABI in this pass; it does not expose raw `IngressRequest` / `IngressResponse` as a public FFI yet
+- The shared ingress sits behind the FFI shim, so envelope semantics match Android after ABI translation
+- Error returns remain envelope-shaped for Swift callers
+
+---
+
 ## Storage Node Service Integration
 
 Build app-specific services or operator tools that communicate with storage nodes.
@@ -167,11 +186,12 @@ Adding new operations to the DSM protocol requires changes across all four layer
 ### Checklist
 
 1. **Spec first** — write or update the public specification in `docs/book/`, `docs/papers/`, or `proto/dsm_app.proto`
-2. **Proto schema** — add message types to `proto/dsm_app.proto`
+2. **Proto schema** — add message types to `proto/dsm_app.proto`; if the operation is native-facing, extend `IngressRequest` / `IngressResponse`
 3. **Core logic** — implement validation in `dsm/src/`
-4. **SDK integration** — add JNI methods in `dsm_sdk/src/jni/`
-5. **Kotlin bridge** — declare external methods in `UnifiedNativeApi.kt`
-6. **Frontend** — regenerate proto types (`npm run proto:gen`), add UI
+4. **Shared ingress** — route the native operation through `dsm_sdk/src/ingress.rs`
+5. **SDK integration** — keep ABI shims thin in `dsm_sdk/src/jni/` and `platform/ios/transport.rs`
+6. **Kotlin bridge** — declare external methods in `UnifiedNativeApi.kt`
+7. **Frontend** — regenerate proto types (`npm run proto:gen`), add UI
 
 ### Cross-Layer Consistency
 

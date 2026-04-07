@@ -153,6 +153,7 @@ fn from_hex(b: u8) -> Result<u8, StatusCode> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
 

@@ -343,6 +343,7 @@ pub async fn get_object_handler(
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
 

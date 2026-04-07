@@ -134,6 +134,122 @@ fn error_transport_bytes(code: u32, msg: &str) -> Vec<u8> {
     }
 }
 
+#[derive(Debug, Clone)]
+struct IngressShimError {
+    code: u32,
+    message: String,
+}
+
+impl IngressShimError {
+    fn new(code: u32, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for IngressShimError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for IngressShimError {}
+
+#[inline]
+fn map_ingress_error_code_to_jni(code: u32) -> u32 {
+    match code {
+        crate::ingress::ERROR_CODE_INVALID_INPUT => helpers::JniErrorCode::InvalidInput as u32,
+        crate::ingress::ERROR_CODE_NOT_READY => helpers::JniErrorCode::NotReady as u32,
+        _ => helpers::JniErrorCode::ProcessingFailed as u32,
+    }
+}
+
+#[inline]
+fn ingress_ok_bytes(response: pb::IngressResponse) -> Result<Vec<u8>, IngressShimError> {
+    match response.result {
+        Some(pb::ingress_response::Result::OkBytes(bytes)) => Ok(bytes),
+        Some(pb::ingress_response::Result::Error(error)) => Err(IngressShimError::new(
+            map_ingress_error_code_to_jni(error.code),
+            error.message,
+        )),
+        None => Err(IngressShimError::new(
+            helpers::JniErrorCode::ProcessingFailed as u32,
+            "ingress returned empty response",
+        )),
+    }
+}
+
+#[inline]
+fn dispatch_envelope_via_ingress(envelope_bytes: &[u8]) -> Result<Vec<u8>, IngressShimError> {
+    let response = crate::ingress::dispatch_ingress(pb::IngressRequest {
+        operation: Some(pb::ingress_request::Operation::Envelope(pb::EnvelopeOp {
+            envelope_bytes: envelope_bytes.to_vec(),
+        })),
+    });
+    let ok_bytes = ingress_ok_bytes(response)?;
+    if ok_bytes.first() != Some(&0x03) {
+        return Err(IngressShimError::new(
+            helpers::JniErrorCode::ProcessingFailed as u32,
+            "ingress returned unframed envelope payload",
+        ));
+    }
+    Ok(ok_bytes)
+}
+
+#[inline]
+fn route_query_via_ingress(req_id: &[u8], path: String, params: Vec<u8>) -> Vec<u8> {
+    let response = crate::ingress::dispatch_ingress(pb::IngressRequest {
+        operation: Some(pb::ingress_request::Operation::RouterQuery(
+            pb::RouterQueryOp {
+                method: path,
+                args: params,
+            },
+        )),
+    });
+
+    let payload = match ingress_ok_bytes(response) {
+        Ok(bytes) => bytes,
+        Err(error) => error_transport_bytes(error.code, &error.message),
+    };
+
+    let mut out = Vec::with_capacity(8 + payload.len());
+    out.extend_from_slice(req_id);
+    out.extend_from_slice(&payload);
+    out
+}
+
+#[inline]
+fn route_invoke_via_ingress(method: String, args: Vec<u8>) -> Result<Vec<u8>, IngressShimError> {
+    let response = crate::ingress::dispatch_ingress(pb::IngressRequest {
+        operation: Some(pb::ingress_request::Operation::RouterInvoke(
+            pb::RouterInvokeOp { method, args },
+        )),
+    });
+    ingress_ok_bytes(response)
+}
+
+#[inline]
+fn route_invoke_via_ingress_bytes(method: String, args: Vec<u8>) -> Vec<u8> {
+    match route_invoke_via_ingress(method, args) {
+        Ok(bytes) => bytes,
+        Err(error) => error_transport_bytes(error.code, &error.message),
+    }
+}
+
+#[inline]
+fn route_hardware_facts_via_ingress(
+    facts: pb::SessionHardwareFactsProto,
+) -> Result<Vec<u8>, IngressShimError> {
+    let response = crate::ingress::dispatch_ingress(pb::IngressRequest {
+        operation: Some(pb::ingress_request::Operation::HardwareFacts(
+            pb::HardwareFactsOp { facts: Some(facts) },
+        )),
+    });
+    ingress_ok_bytes(response)
+}
+
 #[inline]
 fn ensure_bootstrap() {
     // This function is intentionally side-effect free: it does NOT bootstrap.
@@ -1066,7 +1182,7 @@ Strict Envelope v3 processing (JNI export)
 
 /// Backward-compatible wrapper — existing call sites (diagnostics, pairing) use this.
 #[inline]
-fn process_envelope_v3(req: &[u8]) -> Result<Vec<u8>, String> {
+fn process_envelope_v3(req: &[u8]) -> Result<Vec<u8>, IngressShimError> {
     process_envelope_v3_impl(req, None)
 }
 
@@ -1076,7 +1192,10 @@ fn process_envelope_v3(req: &[u8]) -> Result<Vec<u8>, String> {
 /// the core bridge which rejects them with error 409). The `device_address`
 /// parameter enables session routing for bilateral messages received as complete
 /// 0x03 envelopes rather than BLE chunks.
-fn process_envelope_v3_impl(req: &[u8], device_address: Option<&str>) -> Result<Vec<u8>, String> {
+fn process_envelope_v3_impl(
+    req: &[u8],
+    device_address: Option<&str>,
+) -> Result<Vec<u8>, IngressShimError> {
     ensure_bootstrap();
 
     // Intercept BleEvent.identity_observed at SDK layer before forwarding to core.
@@ -1089,7 +1208,12 @@ fn process_envelope_v3_impl(req: &[u8], device_address: Option<&str>) -> Result<
     if let Ok(env) = pb::Envelope::decode(raw) {
         if let Some(pb::envelope::Payload::BleEvent(ref ble)) = env.payload {
             if let Some(pb::ble_event::Ev::IdentityObserved(ref obs)) = ble.ev {
-                return handle_ble_identity_observed_from_envelope(obs);
+                return handle_ble_identity_observed_from_envelope(obs).map_err(|message| {
+                    IngressShimError::new(
+                        helpers::JniErrorCode::ProcessingFailed as u32,
+                        message,
+                    )
+                });
             }
             // Other BleEvent variants: return empty ack (not an error)
             log::debug!("process_envelope_v3: BleEvent variant handled (non-identity)");
@@ -1130,7 +1254,12 @@ fn process_envelope_v3_impl(req: &[u8], device_address: Option<&str>) -> Result<
                 );
                 let adapter = crate::runtime::get_runtime()
                     .block_on(crate::bridge::get_ble_transport_adapter())
-                    .map_err(|e| format!("BLE transport adapter not ready: {e}"))?;
+                    .map_err(|e| {
+                        IngressShimError::new(
+                            helpers::JniErrorCode::NotReady as u32,
+                            format!("BLE transport adapter not ready: {e}"),
+                        )
+                    })?;
                 let result = crate::runtime::get_runtime()
                     .block_on(adapter.on_transport_message(
                         crate::bluetooth::TransportInboundMessage {
@@ -1139,7 +1268,12 @@ fn process_envelope_v3_impl(req: &[u8], device_address: Option<&str>) -> Result<
                             payload: raw.to_vec(),
                         },
                     ))
-                    .map_err(|e| format!("bilateral via envelope: {e}"))?;
+                    .map_err(|e| {
+                        IngressShimError::new(
+                            helpers::JniErrorCode::ProcessingFailed as u32,
+                            format!("bilateral via envelope: {e}"),
+                        )
+                    })?;
                 return Ok(result
                     .into_iter()
                     .next()
@@ -1149,15 +1283,15 @@ fn process_envelope_v3_impl(req: &[u8], device_address: Option<&str>) -> Result<
         }
     }
 
-    let out = dsm::core::bridge::handle_envelope_universal(raw);
-    if out.is_empty() || out.first() == Some(&0x03) {
-        Ok(out)
-    } else {
-        let mut framed = Vec::with_capacity(1 + out.len());
-        framed.push(0x03);
-        framed.extend_from_slice(&out);
-        Ok(framed)
-    }
+    // All platform-specific intercepts are above this line.
+    // Route the final dispatch through the shared ingress so that the semantic
+    // path is identical for Android JNI and iOS FFI.
+    dispatch_envelope_via_ingress(raw).map_err(|error| {
+        IngressShimError::new(
+            error.code,
+            format!("processEnvelopeV3 failed: {}", error.message),
+        )
+    })
 }
 
 /// Handle a BleEvent.identity_observed extracted from a protobuf Envelope.
@@ -1281,12 +1415,7 @@ pub extern "system" fn Java_com_dsm_wallet_mcp_McpServiceBus_jniSubmitEnvelope(
         let resp = match process_envelope_v3(&req) {
             Ok(bytes) => bytes,
             Err(e) => {
-                return error_byte_array(
-                    &mut env,
-                    helpers::JniErrorCode::ProcessingFailed as u32,
-                    &format!("processEnvelopeV3 failed: {e}"),
-                )
-                .into_raw();
+                return error_byte_array(&mut env, e.code, &e.message).into_raw();
             }
         };
 
@@ -1566,12 +1695,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_processEnvelo
         let resp = match process_envelope_v3_impl(&req, Some(&addr)) {
             Ok(bytes) => bytes,
             Err(e) => {
-                return error_byte_array(
-                    &mut env,
-                    helpers::JniErrorCode::ProcessingFailed as u32,
-                    &format!("processEnvelopeV3WithAddress failed: {e}"),
-                )
-                .into_raw();
+                return error_byte_array(&mut env, e.code, &e.message).into_raw();
             }
         };
 
@@ -1978,15 +2102,6 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_appRouterQuer
         };
 
         let path = payload.method_name;
-        if path.is_empty() {
-            log::error!("appRouterQueryFramed: empty path in AppRouterPayload");
-            return frame_error_response(
-                &mut env,
-                req_id,
-                helpers::JniErrorCode::InvalidInput as u32,
-                "empty path",
-            );
-        }
         // Record query path for the panic handler before any panicking code runs.
         if let Ok(mut g) = query_path_for_panic.lock() {
             *g = path.clone();
@@ -2000,45 +2115,12 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_appRouterQuer
         );
 
         ensure_bootstrap();
-
-        let router = match crate::bridge::app_router() {
-            Some(r) => r,
-            None => {
-                log::warn!("appRouterQueryFramed: AppRouter not installed");
-                return frame_error_response(
-                    &mut env,
-                    req_id,
-                    helpers::JniErrorCode::NotReady as u32,
-                    "router not ready",
-                );
-            }
-        };
-
-        // Build AppQuery and block on router.query
-        let q = crate::bridge::AppQuery { path, params };
-        let res = crate::runtime::get_runtime().block_on(router.query(q));
-
-        if !res.success {
-            let msg = res
-                .error_message
-                .unwrap_or_else(|| "appRouterQueryFramed failed".to_string());
-            return frame_error_response(
-                &mut env,
-                req_id,
-                helpers::JniErrorCode::ProcessingFailed as u32,
-                &msg,
-            );
-        }
-
-        // Return framed response: [8-byte reqId][payload]
-        let mut out = Vec::with_capacity(8 + res.data.len());
-        out.extend_from_slice(req_id);
-        out.extend_from_slice(&res.data);
+        let out = route_query_via_ingress(req_id, path, params);
 
         log::debug!(
             "appRouterQueryFramed: returning {} bytes total (8-byte reqId + {} payload bytes)",
             out.len(),
-            res.data.len(),
+            out.len().saturating_sub(8),
         );
 
         match env.byte_array_from_slice(&out) {
@@ -2174,14 +2256,6 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_appRouterInvo
         if let Ok(mut g) = invoke_method_for_panic.lock() {
             *g = method.clone();
         }
-        if method.is_empty() {
-            return error_byte_array(
-                &mut env,
-                helpers::JniErrorCode::InvalidInput as u32,
-                "empty method",
-            )
-            .into_raw();
-        }
 
         let args = payload.args;
         log::info!(
@@ -2218,37 +2292,9 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_appRouterInvo
                 }
             }
         }
+        let response_bytes = route_invoke_via_ingress_bytes(method, args);
 
-        let router = match crate::bridge::app_router() {
-            Some(r) => r,
-            None => {
-                log::warn!("appRouterInvokeFramed: AppRouter not installed");
-                return error_byte_array(
-                    &mut env,
-                    helpers::JniErrorCode::NotReady as u32,
-                    "router not ready",
-                )
-                .into_raw();
-            }
-        };
-
-        let invoke = crate::bridge::AppInvoke { method, args };
-        let res = crate::runtime::get_runtime().block_on(router.invoke(invoke));
-
-        if !res.success {
-            let msg = res
-                .error_message
-                .unwrap_or_else(|| "appRouterInvokeFramed failed".to_string());
-            let err_bytes =
-                error_transport_bytes(helpers::JniErrorCode::ProcessingFailed as u32, &msg);
-            return env
-                .byte_array_from_slice(&err_bytes)
-                .unwrap_or_else(|_| empty_byte_array_or_empty(&mut env))
-                .into_raw();
-        }
-
-        // Return raw response bytes
-        match env.byte_array_from_slice(&res.data) {
+        match env.byte_array_from_slice(&response_bytes) {
             Ok(arr) => arr.into_raw(),
             Err(e) => {
                 log::error!(
@@ -3648,9 +3694,52 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_chunkEnvelope
 
 #[cfg(test)]
 mod unified_protobuf_bridge_tests {
-    use super::{detect_ble_frame_type_from_bytes, strip_envelope_v3_framing};
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
     use crate::generated as pb;
+    use crate::bridge::{install_app_router, AppInvoke, AppQuery, AppResult, AppRouter};
+    use once_cell::sync::Lazy;
     use prost::Message;
+    use super::{
+        detect_ble_frame_type_from_bytes, dispatch_envelope_via_ingress,
+        route_hardware_facts_via_ingress, route_invoke_via_ingress_bytes, route_query_via_ingress,
+        strip_envelope_v3_framing,
+    };
+
+    static TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+    struct ShimRouter;
+
+    #[async_trait]
+    impl AppRouter for ShimRouter {
+        async fn query(&self, q: AppQuery) -> AppResult {
+            AppResult {
+                success: true,
+                data: format!("shim-query:{}:{}", q.path, q.params.len()).into_bytes(),
+                error_message: None,
+            }
+        }
+
+        async fn invoke(&self, i: AppInvoke) -> AppResult {
+            AppResult {
+                success: true,
+                data: format!("shim-invoke:{}:{}", i.method, i.args.len()).into_bytes(),
+                error_message: None,
+            }
+        }
+    }
+
+    fn setup_test_env() -> std::sync::MutexGuard<'static, ()> {
+        let guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        let _ =
+            crate::storage_utils::set_storage_base_dir(std::path::PathBuf::from("./.dsm_testdata"));
+        crate::sdk::app_state::AppState::reset_memory_for_testing();
+        crate::sdk::app_state::AppState::ensure_storage_loaded();
+        unsafe { crate::bridge::reset_bridge_handlers_for_tests() };
+        guard
+    }
 
     fn build_bilateral_confirm_envelope() -> Vec<u8> {
         let envelope = pb::Envelope {
@@ -3711,6 +3800,100 @@ mod unified_protobuf_bridge_tests {
 
         assert_eq!(strip_envelope_v3_framing(&raw), raw.as_slice());
         assert_eq!(strip_envelope_v3_framing(&framed), raw.as_slice());
+    }
+
+    #[test]
+    fn query_frame_preserves_req_id_on_success_and_error() {
+        let _guard = setup_test_env();
+        let req_id = [1, 2, 3, 4, 5, 6, 7, 8];
+
+        install_app_router(Arc::new(ShimRouter)).expect("install router");
+        let ok = route_query_via_ingress(&req_id, "wallet.balance".to_string(), vec![9, 9]);
+        assert_eq!(&ok[..8], &req_id);
+        assert_eq!(&ok[8..], b"shim-query:wallet.balance:2");
+
+        unsafe { crate::bridge::reset_bridge_handlers_for_tests() };
+        let err = route_query_via_ingress(&req_id, "wallet.balance".to_string(), Vec::new());
+        assert_eq!(&err[..8], &req_id);
+        assert_eq!(err[8], 0x03);
+        let envelope = pb::Envelope::decode(&err[9..]).expect("decode error envelope");
+        match envelope.payload {
+            Some(pb::envelope::Payload::Error(error)) => {
+                assert_eq!(
+                    error.code,
+                    crate::jni::helpers::JniErrorCode::NotReady as u32
+                );
+            }
+            other => panic!("expected error payload, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn invoke_frame_preserves_existing_success_and_error_wire_shape() {
+        let _guard = setup_test_env();
+
+        install_app_router(Arc::new(ShimRouter)).expect("install router");
+        let ok = route_invoke_via_ingress_bytes("wallet.send".to_string(), vec![1, 2, 3]);
+        assert_eq!(ok, b"shim-invoke:wallet.send:3".to_vec());
+
+        unsafe { crate::bridge::reset_bridge_handlers_for_tests() };
+        let err = route_invoke_via_ingress_bytes("wallet.send".to_string(), Vec::new());
+        assert_eq!(err.first(), Some(&0x03));
+        let envelope = pb::Envelope::decode(&err[1..]).expect("decode invoke error");
+        match envelope.payload {
+            Some(pb::envelope::Payload::Error(error)) => {
+                assert_eq!(
+                    error.code,
+                    crate::jni::helpers::JniErrorCode::NotReady as u32
+                );
+            }
+            other => panic!("expected error payload, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn hardware_facts_wrapper_matches_previous_session_manager_bytes() {
+        let _guard = setup_test_env();
+        let facts = pb::SessionHardwareFactsProto {
+            app_foreground: true,
+            ble_enabled: true,
+            ble_permissions: true,
+            ble_scanning: false,
+            ble_advertising: true,
+            qr_available: true,
+            qr_active: false,
+            camera_permission: true,
+            battery_charging: false,
+            battery_level_percent: 77,
+        };
+        let expected =
+            crate::sdk::session_manager::update_hardware_and_snapshot(&facts.encode_to_vec())
+                .expect("legacy snapshot bytes");
+        let actual = route_hardware_facts_via_ingress(facts).expect("ingress snapshot bytes");
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn envelope_wrapper_preserves_framed_response_behavior() {
+        let _guard = setup_test_env();
+        let request = pb::Envelope {
+            version: 3,
+            message_id: vec![4; 16],
+            payload: Some(pb::envelope::Payload::Error(pb::Error {
+                code: 123,
+                message: "already a response".to_string(),
+                context: Vec::new(),
+                source_tag: 0,
+                is_recoverable: false,
+                debug_b32: String::new(),
+            })),
+            ..Default::default()
+        };
+        let response =
+            dispatch_envelope_via_ingress(&request.encode_to_vec()).expect("dispatch via ingress");
+        assert_eq!(response.first(), Some(&0x03));
+        let decoded = pb::Envelope::decode(&response[1..]).expect("decode framed response");
+        assert_eq!(decoded.version, 3);
     }
 }
 
@@ -5676,15 +5859,27 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_updateSession
                     return empty_byte_array_or_empty(&env).into_raw();
                 }
             };
+            let facts = match pb::SessionHardwareFactsProto::decode(bytes.as_slice()) {
+                Ok(facts) => facts,
+                Err(e) => {
+                    log::error!("updateSessionHardwareFacts: decode failed: {e}");
+                    return error_byte_array(
+                        &env,
+                        helpers::JniErrorCode::InvalidInput as u32,
+                        &format!("decode SessionHardwareFactsProto failed: {e}"),
+                    )
+                    .into_raw();
+                }
+            };
 
-            match crate::sdk::session_manager::update_hardware_and_snapshot(&bytes) {
+            match route_hardware_facts_via_ingress(facts) {
                 Ok(snapshot_bytes) => env
                     .byte_array_from_slice(&snapshot_bytes)
                     .map(|a| a.into_raw())
                     .unwrap_or_else(|_| empty_byte_array_or_empty(&env).into_raw()),
                 Err(e) => {
-                    log::error!("updateSessionHardwareFacts: {e}");
-                    empty_byte_array_or_empty(&env).into_raw()
+                    log::error!("updateSessionHardwareFacts: {}", e.message);
+                    error_byte_array(&env, e.code, &e.message).into_raw()
                 }
             }
         }),

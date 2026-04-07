@@ -2,18 +2,51 @@
 //!
 //! The `dsm_sdk` crate bridges the pure, deterministic [`dsm`] core library to
 //! platform-specific runtimes (Android/JNI, iOS/FFI, desktop test harnesses).
-//! It enforces the single authoritative path:
+//!
+//! ## Architecture: One Agnostic Ingress
+//!
+//! The crate is organised into three tiers:
+//!
+//! 1. **ABI shims** - platform-specific marshalling only, no semantic logic:
+//!    - Android: `jni/unified_protobuf_bridge.rs` - `extern "system"` JNI exports
+//!    - iOS: `platform/ios/transport.rs` - `extern "C"` FFI exports
+//!
+//! 2. **Shared ingress** (`ingress`) - the single semantic boundary:
+//!    - Both shims translate ABI inputs into [`generated::IngressRequest`] and
+//!      call [`ingress::dispatch_ingress`].
+//!    - Equivalent Android and iOS operations map to the same `IngressRequest`
+//!      and produce the same `IngressResponse`.
+//!
+//! 3. **SDK internals** - `sdk`, `handlers`, `bluetooth`, `bridge`, etc.
+//!
+//! The canonical contract is expressed in `proto/dsm_app.proto`:
+//! `IngressRequest` / `IngressResponse`. No platform-specific semantics are
+//! permitted past the ABI shim.
+//!
+//! ## Authoritative Data Paths
 //!
 //! ```text
-//! UI/WebView → MessagePort → Kotlin Bridge → JNI → SDK → Core
+//! Android: UI -> MessagePort -> Kotlin Bridge -> JNI shim
+//!                                              |
+//!                                              v
+//!                                        IngressRequest
+//!                                              |
+//! iOS:     Swift caller -> FFI shim -----------+
+//!                                              |
+//!                                              v
+//!                              ingress::dispatch_ingress
+//!                                              |
+//!                                              v
+//!                                       SDK / Core
 //! ```
 //!
-//! ## Crate Architecture
+//! ## Crate Modules
 //!
 //! | Module | Purpose |
 //! |--------|---------|
+//! | [`ingress`] | Shared platform-agnostic ingress dispatch |
 //! | [`sdk`] | High-level SDK facades (wallet, token, bilateral, DLV, Bitcoin tap) |
-//! | `jni` | Android JNI entry points (87+ `extern "system"` functions, cfg-gated) |
+//! | `jni` | Android JNI ABI shim (87+ `extern "system"` functions, cfg-gated) |
 //! | [`handlers`] | `AppRouter`, `BilateralHandler`, `UnilateralHandler` implementations |
 //! | [`bluetooth`] | BLE bilateral sessions, frame chunking, pairing orchestration |
 //! | [`bridge`] | Trait-object dispatch layer connecting handlers to core |
@@ -24,7 +57,6 @@
 //! | [`event`] | Protobuf-encoded broadcast event stream for UI subscriptions |
 //! | [`recovery`] | Capsule, tombstone, and rollup recovery flows |
 //! | [`vault`] | DLV (Deterministic Limbo Vault) SDK operations |
-//! | [`policy`] | Built-in policy integrity checks (assert on library load) |
 //!
 //! ## Readiness Lifecycle
 //!
@@ -83,6 +115,7 @@ pub mod prelude;
 pub mod jni;
 
 pub mod bridge;
+pub mod ingress;
 pub mod crypto_performance;
 pub mod envelope;
 pub mod event;

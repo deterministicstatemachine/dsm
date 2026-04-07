@@ -252,6 +252,7 @@ fn b64_url_no_pad(input: &[u8]) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
     use axum::http::{HeaderMap, HeaderValue};

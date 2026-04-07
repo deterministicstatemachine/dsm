@@ -196,13 +196,19 @@ impl RecoveryHandler for RecoveryImpl {
         )
         .map_err(|e| format!("Core tombstone creation failed: {}", e))?;
 
+        // Build the response — store the full serialised receipt so counterparties
+        // can reconstruct it for validation (not just the raw signature bytes).
+        let tombstone_receipt_bytes = tombstone
+            .to_bytes()
+            .map_err(|e| format!("Failed to serialize tombstone receipt: {}", e))?;
+
         // Build the response
         let response = gp::RecoveryTombstoneResponse {
             success: true,
             tombstone_hash: Some(gp::Hash32 {
                 v: tombstone.tombstone_hash.clone(),
             }),
-            tombstone_receipt: tombstone.signature.clone(),
+            tombstone_receipt: tombstone_receipt_bytes,
         };
 
         let mut body = Vec::new();

@@ -2516,6 +2516,56 @@ message DlvReceiptResponse {
   repeated DlvReceiptSubmission receipts = 1;
 }
 
+// ====================== Native Ingress Contract ======================
+// Platform-agnostic ingress contract for native clients (Android JNI, iOS FFI).
+//
+// Both platforms translate ABI-specific inputs to IngressRequest, pass them
+// through the single shared Rust ingress, and translate IngressResponse back
+// to their respective ABI outputs. The only platform-specific code is the
+// thin ABI marshalling layer; all semantic behaviour is identical after that
+// point.
+
+// AppRouter read-only query: method name + opaque protobuf args.
+message RouterQueryOp {
+  string method = 1 [(dsm_max_len)=256];
+  bytes  args   = 2 [(dsm_max_len)=65535];
+}
+
+// AppRouter mutating invoke: method name + opaque protobuf args.
+message RouterInvokeOp {
+  string method = 1 [(dsm_max_len)=256];
+  bytes  args   = 2 [(dsm_max_len)=65535];
+}
+
+// Generic Envelope v3 dispatch: raw protobuf-encoded Envelope bytes.
+// The 0x03 framing prefix is optional; the ingress strips it if present.
+message EnvelopeOp {
+  bytes envelope_bytes = 1 [(dsm_max_len)=65535];
+}
+
+// Session hardware-state snapshot update.
+message HardwareFactsOp {
+  SessionHardwareFactsProto facts = 1;
+}
+
+// Canonical platform-agnostic ingress request.
+message IngressRequest {
+  oneof operation {
+    RouterQueryOp   router_query   = 1;
+    RouterInvokeOp  router_invoke  = 2;
+    EnvelopeOp      envelope       = 3;
+    HardwareFactsOp hardware_facts = 4;
+  }
+}
+
+// Canonical platform-agnostic ingress response.
+message IngressResponse {
+  oneof result {
+    bytes ok_bytes = 1 [(dsm_max_len)=65535];
+    Error error    = 2;
+  }
+}
+
 // ─── Storage Node Regulation (clockless, signature-free) ────────────────────
 
 // Capacity up-signal: node utilization >= U_UP for w consecutive cycles.

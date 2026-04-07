@@ -63,7 +63,7 @@ pub fn send_data(device_addr: &str, data: &[u8]) -> Result<(), String> {
     log::debug!("Sending {} bytes to device: {}", data.len(), device_addr);
 
     // Call into Swift/Objective-C via FFI to send data to the device
-    match unsafe { ios_bluetooth_send_data(device_addr, data.as_ptr(), data.len() as u32) } {
+    match unsafe { ios_bluetooth_send_data(device_addr, data) } {
         0 => {
             log::debug!(
                 "Successfully sent {} bytes to device: {}",
@@ -90,20 +90,15 @@ pub fn receive_data(device_addr: &str, timeout_ms: u32) -> Result<Vec<u8>, Strin
         timeout_ms
     );
 
-    // Allocate buffer for result size
-    let mut size: u32 = 0;
-
     // Call into Swift/Objective-C via FFI to check data size first
-    let status =
-        unsafe { ios_bluetooth_receive_data_size(device_addr, timeout_ms, &mut size as *mut u32) };
+    let (status, size) = unsafe { ios_bluetooth_receive_data_size(device_addr, timeout_ms) };
 
     match status {
         0 => {
             // Size returned successfully, now allocate buffer and get data
             let mut buffer = vec![0u8; size as usize];
 
-            let recv_status =
-                unsafe { ios_bluetooth_receive_data(device_addr, buffer.as_mut_ptr(), size) };
+            let recv_status = unsafe { ios_bluetooth_receive_data(device_addr, &mut buffer) };
 
             match recv_status {
                 0 => {
@@ -134,19 +129,24 @@ pub fn receive_data(device_addr: &str, timeout_ms: u32) -> Result<Vec<u8>, Strin
 
 // FFI declarations for Swift/Objective-C functions
 extern "C" {
-    fn ios_bluetooth_connect(device_addr: *const libc::c_char) -> libc::c_int;
-    fn ios_bluetooth_disconnect(device_addr: *const libc::c_char) -> libc::c_int;
-    fn ios_bluetooth_send_data(
+    #[link_name = "ios_bluetooth_connect"]
+    fn ios_bluetooth_connect_raw(device_addr: *const libc::c_char) -> libc::c_int;
+    #[link_name = "ios_bluetooth_disconnect"]
+    fn ios_bluetooth_disconnect_raw(device_addr: *const libc::c_char) -> libc::c_int;
+    #[link_name = "ios_bluetooth_send_data"]
+    fn ios_bluetooth_send_data_raw(
         device_addr: *const libc::c_char,
         data: *const u8,
         data_len: u32,
     ) -> libc::c_int;
-    fn ios_bluetooth_receive_data_size(
+    #[link_name = "ios_bluetooth_receive_data_size"]
+    fn ios_bluetooth_receive_data_size_raw(
         device_addr: *const libc::c_char,
         timeout_ms: u32,
         size_out: *mut u32,
     ) -> libc::c_int;
-    fn ios_bluetooth_receive_data(
+    #[link_name = "ios_bluetooth_receive_data"]
+    fn ios_bluetooth_receive_data_raw(
         device_addr: *const libc::c_char,
         data_out: *mut u8,
         data_len: u32,
@@ -173,7 +173,7 @@ unsafe fn ios_bluetooth_connect(device_addr: &str) -> libc::c_int {
     if c_addr.is_null() {
         return -1;
     }
-    let result = ios_bluetooth_connect(c_addr);
+    let result = ios_bluetooth_connect_raw(c_addr);
     let _ = std::ffi::CString::from_raw(c_addr as *mut libc::c_char);
     result
 }
@@ -183,7 +183,7 @@ unsafe fn ios_bluetooth_disconnect(device_addr: &str) -> libc::c_int {
     if c_addr.is_null() {
         return -1;
     }
-    let result = ios_bluetooth_disconnect(c_addr);
+    let result = ios_bluetooth_disconnect_raw(c_addr);
     let _ = std::ffi::CString::from_raw(c_addr as *mut libc::c_char);
     result
 }
@@ -193,7 +193,7 @@ unsafe fn ios_bluetooth_send_data(device_addr: &str, data: &[u8]) -> libc::c_int
     if c_addr.is_null() {
         return -1;
     }
-    let result = ios_bluetooth_send_data(c_addr, data.as_ptr(), data.len() as u32);
+    let result = ios_bluetooth_send_data_raw(c_addr, data.as_ptr(), data.len() as u32);
     let _ = std::ffi::CString::from_raw(c_addr as *mut libc::c_char);
     result
 }
@@ -207,7 +207,7 @@ unsafe fn ios_bluetooth_receive_data_size(
         return (-1, 0);
     }
     let mut size: u32 = 0;
-    let result = ios_bluetooth_receive_data_size(c_addr, timeout_ms, &mut size);
+    let result = ios_bluetooth_receive_data_size_raw(c_addr, timeout_ms, &mut size);
     let _ = std::ffi::CString::from_raw(c_addr as *mut libc::c_char);
     (result, size)
 }
@@ -217,7 +217,7 @@ unsafe fn ios_bluetooth_receive_data(device_addr: &str, buffer: &mut [u8]) -> li
     if c_addr.is_null() {
         return -1;
     }
-    let result = ios_bluetooth_receive_data(c_addr, buffer.as_mut_ptr(), buffer.len() as u32);
+    let result = ios_bluetooth_receive_data_raw(c_addr, buffer.as_mut_ptr(), buffer.len() as u32);
     let _ = std::ffi::CString::from_raw(c_addr as *mut libc::c_char);
     result
 }

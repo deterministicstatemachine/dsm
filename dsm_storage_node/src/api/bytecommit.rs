@@ -337,6 +337,7 @@ pub async fn get_by_addr(
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
     use prost::Message;

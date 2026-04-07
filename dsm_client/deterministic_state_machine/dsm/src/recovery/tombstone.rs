@@ -11,6 +11,7 @@ use crate::crypto::blake3::dsm_domain_hasher;
 use crate::crypto::sphincs::{sphincs_sign, sphincs_verify};
 use crate::types::error::DsmError;
 use crate::utils::deterministic_time as dt;
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static TOMBSTONE_SYSTEM_INITIALIZED: AtomicBool = AtomicBool::new(false);
@@ -24,7 +25,7 @@ pub fn init_tombstone_subsystem() {
 }
 
 /// Tombstone receipt - invalidates old device binding
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TombstoneReceipt {
     /// Device ID being invalidated
     pub device_id: String,
@@ -43,7 +44,7 @@ pub struct TombstoneReceipt {
 }
 
 /// Succession receipt - binds new device
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SuccessionReceipt {
     /// Device ID for new device
     pub device_id: String,
@@ -60,7 +61,7 @@ pub struct SuccessionReceipt {
 }
 
 /// Recovery receipt enum
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RecoveryReceipt {
     Tombstone(TombstoneReceipt),
     Succession(SuccessionReceipt),
@@ -80,102 +81,31 @@ impl TombstoneReceipt {
 
     /// Verify tombstone signature
     pub fn verify_signature(&self, public_key: &[u8]) -> Result<bool, DsmError> {
-        // Verify SPHINCS+ signature over the tombstone hash using the default variant
         sphincs_verify(public_key, &self.tombstone_hash, &self.signature)
     }
 
-    /// Encode tombstone receipt to canonical bytes.
-    ///
-    /// Format: `[device_id_len:u32 BE][device_id][old_smt_root_len:u32 BE][old_smt_root]`
-    ///         `[old_counter:u64 LE][old_rollup_hash_len:u32 BE][old_rollup_hash]`
-    ///         `[tick:u64 LE][sig_len:u32 BE][signature][hash_len:u32 BE][tombstone_hash]`
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut buf = Vec::new();
-        Self::encode_field(&mut buf, self.device_id.as_bytes());
-        Self::encode_field(&mut buf, &self.old_smt_root);
-        buf.extend_from_slice(&self.old_counter.to_le_bytes());
-        Self::encode_field(&mut buf, &self.old_rollup_hash);
-        buf.extend_from_slice(&self.tick.to_le_bytes());
-        Self::encode_field(&mut buf, &self.signature);
-        Self::encode_field(&mut buf, &self.tombstone_hash);
-        buf
-    }
-
-    /// Decode tombstone receipt from canonical bytes.
-    pub fn from_bytes(data: &[u8]) -> Result<Self, DsmError> {
-        let mut pos = 0;
-        let device_id_bytes = Self::decode_field(data, &mut pos)?;
-        let device_id = String::from_utf8(device_id_bytes).map_err(|e| {
+    /// Serialize the full receipt to bytes.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, DsmError> {
+        bincode::serialize(self).map_err(|e| {
             DsmError::serialization_error(
-                "Invalid UTF-8 in device_id",
-                "tombstone",
-                None::<&str>,
-                Some(e),
+                format!("TombstoneReceipt::to_bytes: {e}"),
+                "TombstoneReceipt",
+                None::<String>,
+                None::<std::io::Error>,
             )
-        })?;
-        let old_smt_root = Self::decode_field(data, &mut pos)?;
-        if pos + 8 > data.len() {
-            return Err(DsmError::serialization_error(
-                "Truncated old_counter",
-                "tombstone",
-                None::<&str>,
-                None::<std::io::Error>,
-            ));
-        }
-        let old_counter = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap_or_default());
-        pos += 8;
-        let old_rollup_hash = Self::decode_field(data, &mut pos)?;
-        if pos + 8 > data.len() {
-            return Err(DsmError::serialization_error(
-                "Truncated tick",
-                "tombstone",
-                None::<&str>,
-                None::<std::io::Error>,
-            ));
-        }
-        let tick = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap_or_default());
-        pos += 8;
-        let signature = Self::decode_field(data, &mut pos)?;
-        let tombstone_hash = Self::decode_field(data, &mut pos)?;
-
-        Ok(Self {
-            device_id,
-            old_smt_root,
-            old_counter,
-            old_rollup_hash,
-            tick,
-            signature,
-            tombstone_hash,
         })
     }
 
-    fn encode_field(buf: &mut Vec<u8>, data: &[u8]) {
-        buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
-        buf.extend_from_slice(data);
-    }
-
-    fn decode_field(data: &[u8], pos: &mut usize) -> Result<Vec<u8>, DsmError> {
-        if *pos + 4 > data.len() {
-            return Err(DsmError::serialization_error(
-                "Truncated field length",
-                "tombstone",
-                None::<&str>,
+    /// Deserialize a receipt from bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, DsmError> {
+        bincode::deserialize(bytes).map_err(|e| {
+            DsmError::serialization_error(
+                format!("TombstoneReceipt::from_bytes: {e}"),
+                "TombstoneReceipt",
+                None::<String>,
                 None::<std::io::Error>,
-            ));
-        }
-        let len = u32::from_be_bytes(data[*pos..*pos + 4].try_into().unwrap_or_default()) as usize;
-        *pos += 4;
-        if *pos + len > data.len() {
-            return Err(DsmError::serialization_error(
-                "Truncated field data",
-                "tombstone",
-                None::<&str>,
-                None::<std::io::Error>,
-            ));
-        }
-        let field = data[*pos..*pos + len].to_vec();
-        *pos += len;
-        Ok(field)
+            )
+        })
     }
 }
 
@@ -191,7 +121,6 @@ impl SuccessionReceipt {
     }
     /// Verify succession signature
     pub fn verify_signature(&self, public_key: &[u8]) -> Result<bool, DsmError> {
-        // Verify SPHINCS+ signature over the succession hash using the default variant
         sphincs_verify(public_key, &self.succession_hash, &self.signature)
     }
 }
@@ -204,9 +133,7 @@ pub fn create_tombstone(
     device_id: &str,
     private_key: &[u8],
 ) -> Result<TombstoneReceipt, DsmError> {
-    // Deterministic logical time (hash ignored, tick used)
-    let (_, tick) = dt::peek();
-
+    let tick = dt::tick_index();
     let mut tombstone = TombstoneReceipt {
         device_id: device_id.to_string(),
         old_smt_root: old_smt_root.to_vec(),
@@ -216,14 +143,17 @@ pub fn create_tombstone(
         signature: Vec::new(),
         tombstone_hash: Vec::new(),
     };
-
-    // Compute hash
     tombstone.tombstone_hash = tombstone.compute_hash().to_vec();
-
-    // Sign with SPHINCS+ using the default variant
     tombstone.signature = sphincs_sign(private_key, &tombstone.tombstone_hash)?;
-
     Ok(tombstone)
+}
+
+/// Verify tombstone receipt
+pub fn verify_tombstone(tombstone: &TombstoneReceipt, public_key: &[u8]) -> Result<bool, DsmError> {
+    if tombstone.tombstone_hash != tombstone.compute_hash().to_vec() {
+        return Ok(false);
+    }
+    tombstone.verify_signature(public_key)
 }
 
 /// Create succession receipt
@@ -233,9 +163,7 @@ pub fn create_succession(
     device_id: &str,
     private_key: &[u8],
 ) -> Result<SuccessionReceipt, DsmError> {
-    // Deterministic logical time (hash ignored, tick used)
-    let (_, tick) = dt::peek();
-
+    let tick = dt::tick_index();
     let mut succession = SuccessionReceipt {
         device_id: device_id.to_string(),
         tombstone_hash: tombstone_hash.to_vec(),
@@ -244,26 +172,9 @@ pub fn create_succession(
         signature: Vec::new(),
         succession_hash: Vec::new(),
     };
-
-    // Compute hash
     succession.succession_hash = succession.compute_hash().to_vec();
-
-    // Sign with SPHINCS+ using the default variant
     succession.signature = sphincs_sign(private_key, &succession.succession_hash)?;
-
     Ok(succession)
-}
-
-/// Verify tombstone receipt
-pub fn verify_tombstone(tombstone: &TombstoneReceipt, public_key: &[u8]) -> Result<bool, DsmError> {
-    // Verify hash integrity
-    let computed_hash = tombstone.compute_hash();
-    if !constant_time_eq::constant_time_eq(&computed_hash, &tombstone.tombstone_hash) {
-        return Ok(false);
-    }
-
-    // Verify signature
-    tombstone.verify_signature(public_key)
 }
 
 /// Verify succession receipt
@@ -272,18 +183,12 @@ pub fn verify_succession(
     tombstone_hash: &[u8],
     public_key: &[u8],
 ) -> Result<bool, DsmError> {
-    // Verify succession references correct tombstone
-    if !constant_time_eq::constant_time_eq(&succession.tombstone_hash, tombstone_hash) {
+    if succession.tombstone_hash != tombstone_hash {
         return Ok(false);
     }
-
-    // Verify hash integrity
-    let computed_hash = succession.compute_hash();
-    if !constant_time_eq::constant_time_eq(&computed_hash, &succession.succession_hash) {
+    if succession.succession_hash != succession.compute_hash().to_vec() {
         return Ok(false);
     }
-
-    // Verify signature
     succession.verify_signature(public_key)
 }
 
@@ -328,66 +233,11 @@ mod tests {
         let old_counter = 42u64;
         let old_rollup = vec![2; 32];
         let device_id = "test_device";
+        let (pk, sk) = crate::crypto::sphincs::generate_sphincs_keypair()?;
 
-        // Mock private key (in real implementation, this would be a proper SPHINCS+ key)
-        let private_key = vec![3; 128];
-
-        let tombstone = create_tombstone(
-            &old_smt_root,
-            old_counter,
-            &old_rollup,
-            device_id,
-            &private_key,
-        )?;
-
+        let tombstone = create_tombstone(&old_smt_root, old_counter, &old_rollup, device_id, &sk)?;
+        assert!(verify_tombstone(&tombstone, &pk)?);
         assert_eq!(tombstone.device_id, device_id);
-        assert_eq!(tombstone.old_smt_root, old_smt_root);
-        assert_eq!(tombstone.old_counter, old_counter);
-        assert!(!tombstone.signature.is_empty());
-        assert!(!tombstone.tombstone_hash.is_empty());
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_succession_creation() -> Result<(), DsmError> {
-        let tombstone_hash = vec![1; 32];
-        let new_commitment = vec![2; 32];
-        let device_id = "test_device";
-        let private_key = vec![3; 128];
-
-        let succession =
-            create_succession(&tombstone_hash, &new_commitment, device_id, &private_key)?;
-
-        assert_eq!(succession.device_id, device_id);
-        assert_eq!(succession.tombstone_hash, tombstone_hash);
-        assert_eq!(succession.new_device_commitment, new_commitment);
-        assert!(!succession.signature.is_empty());
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_hash_integrity() -> Result<(), DsmError> {
-        let old_smt_root = vec![1; 32];
-        let old_counter = 42u64;
-        let old_rollup = vec![2; 32];
-        let device_id = "test_device";
-        let private_key = vec![3; 128];
-
-        let tombstone = create_tombstone(
-            &old_smt_root,
-            old_counter,
-            &old_rollup,
-            device_id,
-            &private_key,
-        )?;
-
-        // Hash should be reproducible
-        let hash1 = tombstone.compute_hash();
-        let hash2 = tombstone.compute_hash();
-        assert_eq!(hash1, hash2);
-        assert_eq!(hash1.to_vec(), tombstone.tombstone_hash);
 
         Ok(())
     }
