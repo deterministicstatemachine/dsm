@@ -355,33 +355,28 @@ mod tests {
     fn encode_b32_single_byte() {
         let encoded = encode_b32(&[0xFF]);
         assert!(!encoded.is_empty());
-        let decoded = decode_b32(&encoded).unwrap();
-        assert_eq!(decoded[0], 0xFF);
+        assert_eq!(decode_b32(&encoded), Some(vec![0xFF]));
     }
 
     #[test]
     fn encode_b32_roundtrip() {
         let data: Vec<u8> = (0..32).collect();
         let encoded = encode_b32(&data);
-        let decoded = decode_b32(&encoded).unwrap();
-        assert_eq!(decoded.len(), data.len());
-        assert_eq!(decoded, data);
+        assert_eq!(decode_b32(&encoded), Some(data));
     }
 
     #[test]
     fn encode_b32_all_zeros() {
         let data = [0u8; 32];
         let encoded = encode_b32(&data);
-        let decoded = decode_b32(&encoded).unwrap();
-        assert_eq!(decoded, data.to_vec());
+        assert_eq!(decode_b32(&encoded), Some(data.to_vec()));
     }
 
     #[test]
     fn encode_b32_all_ones() {
         let data = [0xFFu8; 32];
         let encoded = encode_b32(&data);
-        let decoded = decode_b32(&encoded).unwrap();
-        assert_eq!(decoded, data.to_vec());
+        assert_eq!(decode_b32(&encoded), Some(data.to_vec()));
     }
 
     #[test]
@@ -389,8 +384,7 @@ mod tests {
         let data = vec![0xAB, 0xCD];
         let encoded = encode_b32(&data);
         let with_hyphens = format!("{}-{}", &encoded[..1], &encoded[1..]);
-        let decoded = decode_b32(&with_hyphens).unwrap();
-        assert_eq!(decoded, data);
+        assert_eq!(decode_b32(&with_hyphens), Some(data));
     }
 
     #[test]
@@ -398,9 +392,7 @@ mod tests {
         let data: Vec<u8> = (0..10).collect();
         let encoded = encode_b32(&data);
         let lower = encoded.to_lowercase();
-        let d_upper = decode_b32(&encoded).unwrap();
-        let d_lower = decode_b32(&lower).unwrap();
-        assert_eq!(d_upper, d_lower);
+        assert_eq!(decode_b32(&encoded), decode_b32(&lower));
     }
 
     #[test]

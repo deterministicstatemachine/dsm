@@ -46,11 +46,18 @@ jobs:
       - name: Production safety lints
         run: bash ci/production_safety_checks.sh
 
-      - name: Format check
-        run: cargo fmt --all -- --check
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: dsm_client/frontend/package-lock.json
 
-      - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings -A clippy::disallowed_methods
+      - name: Install frontend lint dependencies
+        working-directory: dsm_client/frontend
+        run: npm ci
+
+      - name: Lint
+        run: make lint
 
       - name: Build
         run: cargo build --locked --workspace --all-features
