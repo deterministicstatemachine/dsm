@@ -142,7 +142,7 @@ tower = { version = "0.5.3", features = ["util", "timeout", "load-shed", "limit"
 
 [dev-dependencies]
 criterion = { version = "0.5.1", features = ["async_tokio", "html_reports"] }
-mockall = "0.12.1"
+mockall = "0.14.0"
 tempfile = "3.10.0"
 test-log = { version = "0.2.14", features = ["trace"] }
 quickcheck = "1.0.3"
