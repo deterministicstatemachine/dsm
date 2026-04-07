@@ -85,7 +85,7 @@ futures = { version = "0.3.30", default-features = false, features = ["std"] }
 # Error handling
 thiserror = "2.0.18"
 anyhow = "1.0.99"
-toml_edit = "0.22"
+toml_edit = "0.25"
 
 toml = "0.8.20"
 
