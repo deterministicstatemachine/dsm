@@ -9,7 +9,6 @@
 //! - Hashing: BLAKE3 everywhere (32-byte outputs).
 
 use crate::core::identity::Identity;
-use crate::core::utility::labeling;
 use crate::crypto::kyber;
 use crate::crypto::sphincs;
 use crate::types::error::DsmError;
@@ -254,29 +253,57 @@ pub fn derive_device_sub_genesis(
 
 // -------------------- Invalidation --------------------
 
+const INVALIDATION_REQUEST_DOMAIN: &[u8] = b"DSM/identity/invalidate\0";
+
 pub fn create_invalidation_request(identity: &Identity, reason: &str) -> Result<Vec<u8>, DsmError> {
-    let id_str = labeling::identity_to_string(identity);
-    let mut out = Vec::with_capacity(11 + id_str.len() + 1 + reason.len());
-    out.extend_from_slice(b"INVALIDATE:");
-    out.extend_from_slice(id_str.as_bytes());
-    out.extend_from_slice(b":");
-    out.extend_from_slice(reason.as_bytes());
+    let reason_bytes = reason.as_bytes();
+    let reason_len = u32::try_from(reason_bytes.len())
+        .map_err(|_| DsmError::invalid_operation("Invalidation reason exceeds u32 length"))?;
+
+    let mut out = Vec::with_capacity(
+        INVALIDATION_REQUEST_DOMAIN.len()
+            + identity.master_genesis.hash.len()
+            + 4
+            + reason_bytes.len(),
+    );
+    out.extend_from_slice(INVALIDATION_REQUEST_DOMAIN);
+    out.extend_from_slice(&identity.master_genesis.hash);
+    out.extend_from_slice(&reason_len.to_be_bytes());
+    out.extend_from_slice(reason_bytes);
     Ok(out)
 }
 
 pub fn process_invalidation(identity: &Identity, request: &[u8]) -> Result<bool, DsmError> {
-    let s = std::str::from_utf8(request)
-        .map_err(|_| DsmError::invalid_operation("Invalid UTF-8 in invalidation request"))?;
-    if !s.starts_with("INVALIDATE:") {
+    let expected_prefix_len =
+        INVALIDATION_REQUEST_DOMAIN.len() + identity.master_genesis.hash.len() + 4;
+    if request.len() < expected_prefix_len {
         return Ok(false);
     }
-    let parts: Vec<&str> = s.split(':').collect();
-    if parts.len() < 3 {
+
+    let domain_end = INVALIDATION_REQUEST_DOMAIN.len();
+    if &request[..domain_end] != INVALIDATION_REQUEST_DOMAIN {
         return Ok(false);
     }
-    if parts[1] != labeling::identity_to_string(identity) {
+
+    let genesis_end = domain_end + identity.master_genesis.hash.len();
+    if request[domain_end..genesis_end] != identity.master_genesis.hash {
         return Ok(false);
     }
+
+    let reason_len_end = genesis_end + 4;
+    let reason_len = u32::from_be_bytes(
+        request[genesis_end..reason_len_end]
+            .try_into()
+            .map_err(|_| DsmError::invalid_operation("Invalid invalidation length header"))?,
+    ) as usize;
+
+    if request.len() != reason_len_end + reason_len {
+        return Ok(false);
+    }
+
+    std::str::from_utf8(&request[reason_len_end..])
+        .map_err(|_| DsmError::invalid_operation("Invalid UTF-8 in invalidation request reason"))?;
+
     Ok(true)
 }
 
@@ -448,6 +475,25 @@ pub fn convert_session_to_genesis_state_compat(
 mod tests {
     use super::*;
 
+    fn test_identity(name: &str, hash_byte: u8) -> Identity {
+        Identity::with_genesis(
+            name.to_string(),
+            GenesisState {
+                hash: [hash_byte; 32],
+                initial_entropy: [hash_byte.wrapping_add(1); 32],
+                threshold: 3,
+                participants: ["p1".to_string(), "p2".to_string(), "p3".to_string()]
+                    .into_iter()
+                    .collect(),
+                merkle_root: None,
+                device_id: None,
+                signing_key: SigningKey::new().expect("signing key"),
+                kyber_keypair: KyberKey::new().expect("kyber key"),
+                contributions: vec![],
+            },
+        )
+    }
+
     #[tokio::test]
     async fn test_genesis_state_creation_mpc_only() {
         let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
@@ -546,5 +592,23 @@ mod tests {
         );
         assert_eq!(g.kyber_keypair.public_key.len(), kyber::public_key_bytes());
         assert_eq!(g.kyber_keypair.secret_key.len(), kyber::secret_key_bytes());
+    }
+
+    #[test]
+    fn test_invalidation_request_is_bound_to_exact_master_genesis_hash() {
+        let identity_a = test_identity("alice", 0x11);
+        let identity_b = test_identity("alice-clone", 0x22);
+
+        let request = create_invalidation_request(&identity_a, "device compromise")
+            .expect("binary invalidation request should be created");
+
+        assert!(
+            request.starts_with(INVALIDATION_REQUEST_DOMAIN),
+            "request must use the canonical binary invalidation domain"
+        );
+        assert!(process_invalidation(&identity_a, &request)
+            .expect("owner identity must accept its own request"));
+        assert!(!process_invalidation(&identity_b, &request)
+            .expect("different identities must not accept replayed requests"));
     }
 }
