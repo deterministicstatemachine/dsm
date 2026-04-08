@@ -77,11 +77,16 @@ pub struct StateParams {
     /// Sparse index referencing prior states for logarithmic traversal.
     pub sparse_index: SparseIndex,
     /// Operation performed in this state transition.
-    pub operation: Operation,
+    ///
+    /// Boxed to keep `StateParams` itself compact while preserving the full live
+    /// operation payload for `State::new`.
+    pub operation: Box<Operation>,
     /// Device identification and public key material.
     pub device_info: DeviceInfo,
     /// Optional forward commitment binding this state to a future transition.
-    pub forward_commitment: Option<PreCommitment>,
+    ///
+    /// Boxed for the same compactness reason as `operation`.
+    pub forward_commitment: Option<Box<PreCommitment>>,
     /// Whether the state matches externally supplied parameters.
     pub matches_parameters: bool,
     /// Advisory state type label (e.g., "standard", "benchmark").
@@ -95,25 +100,6 @@ pub struct StateParams {
     /// This MUST NOT be the raw DBRW binding key or any secret. It is intended to be a
     /// small, canonical digest produced from local DBRW health telemetry.
     pub dbrw_summary_hash: Option<[u8; 32]>,
-    pub previous_hash: [u8; 32],
-    #[allow(dead_code)]
-    pub(crate) none_field: Option<Vec<u8>>,
-    #[allow(dead_code)]
-    pub(crate) metadata: Vec<u8>,
-    #[allow(dead_code)]
-    pub(crate) token_balance: Option<Balance>,
-    #[allow(dead_code)]
-    pub(crate) signature: Option<Vec<u8>>,
-    #[allow(dead_code)]
-    pub(crate) version: i32,
-    #[allow(dead_code)]
-    pub(crate) forward_link: Option<Vec<u8>>,
-    #[allow(dead_code)]
-    pub(crate) large_state: Box<State>,
-    #[allow(dead_code)]
-    pub entity_sig: Option<Vec<u8>>,
-    #[allow(dead_code)]
-    pub counterparty_sig: Option<Vec<u8>>,
 }
 
 impl StateParams {
@@ -130,7 +116,7 @@ impl StateParams {
             encapsulated_entropy: None,
             prev_state_hash: [0u8; 32],
             sparse_index: SparseIndex::default(),
-            operation,
+            operation: Box::new(operation),
             device_info,
             forward_commitment: None,
             matches_parameters: false,
@@ -138,16 +124,6 @@ impl StateParams {
             value: Vec::new(),
             commitment: Vec::new(),
             dbrw_summary_hash: None,
-            previous_hash: [0u8; 32],
-            none_field: None,
-            metadata: Vec::new(),
-            token_balance: None,
-            signature: None,
-            version: 0,
-            forward_link: None,
-            large_state: Box::new(State::default()),
-            entity_sig: None,
-            counterparty_sig: None,
         }
     }
 
@@ -177,7 +153,7 @@ impl StateParams {
 
     /// Set forward commitment
     pub fn with_forward_commitment(mut self, forward_commitment: PreCommitment) -> Self {
-        self.forward_commitment = Some(forward_commitment);
+        self.forward_commitment = Some(Box::new(forward_commitment));
         self
     }
 }
@@ -433,14 +409,14 @@ impl State {
             hash: [0u8; 32], // Will be computed after construction
             prev_state_hash: params.prev_state_hash,
             sparse_index: params.sparse_index,
-            operation: params.operation,
+            operation: *params.operation,
             encapsulated_entropy: params.encapsulated_entropy,
             device_info: params.device_info,
             flags: HashSet::new(),
             token_balances: HashMap::new(),
             relationship_context: None,
             dbrw_summary_hash: params.dbrw_summary_hash,
-            forward_commitment: params.forward_commitment,
+            forward_commitment: params.forward_commitment.map(|commitment| *commitment),
             positions: Vec::new(),
             position_sequence: None,
             public_key,
@@ -1686,6 +1662,16 @@ mod tests {
         let sp = StateParams::new(5, vec![], Operation::Noop, test_device_info())
             .with_dbrw_summary_hash([0xDD; 32]);
         assert_eq!(sp.dbrw_summary_hash, Some([0xDD; 32]));
+    }
+
+    #[test]
+    fn state_params_stays_compact_without_legacy_bloat() {
+        let size = std::mem::size_of::<StateParams>();
+        println!("StateParams size = {size} bytes");
+        assert!(
+            size <= 384,
+            "StateParams should stay compact; got {size} bytes"
+        );
     }
 
     // ── State hash varies with different inputs ─────────────────────

@@ -79,7 +79,7 @@ impl State {
             prev_state_hash: params.prev_state_hash,
             entropy: params.entropy,
             encapsulated_entropy: params.encapsulated_entropy,
-            operation: params.operation,
+            operation: *params.operation,
             device_info: params.device_info,
             // Convert the PreCommitment to Vec<u8> if present
             forward_commitment: params.forward_commitment.map(|pc| pc.to_bytes()),
