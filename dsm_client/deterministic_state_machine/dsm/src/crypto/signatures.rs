@@ -138,6 +138,11 @@ impl SignatureKeyPair {
         &self.public_key
     }
 
+    /// Convenience accessor
+    pub fn secret_key(&self) -> &[u8] {
+        &self.secret_key
+    }
+
     /// Test-only convenience: generate a keypair quickly for unit tests.
     /// Panics on failure, so do not use in production paths.
     #[cfg(any(test, feature = "testing"))]

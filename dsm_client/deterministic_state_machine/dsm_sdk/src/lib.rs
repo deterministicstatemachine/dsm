@@ -115,6 +115,7 @@ pub mod prelude;
 pub mod jni;
 
 pub mod bridge;
+mod binding_key;
 pub mod ingress;
 pub mod crypto_performance;
 pub mod envelope;
@@ -166,7 +167,10 @@ pub mod platform;
 
 // iOS protobuf-native transport functions (extern "C" for Swift bridging)
 #[cfg(target_os = "ios")]
-pub use platform::ios::transport::{dsm_process_envelope_protobuf, dsm_free_envelope_bytes};
+pub use platform::ios::transport::{
+    dsm_free_envelope_bytes, dsm_init_dsm_sdk, dsm_initialize_sdk_context,
+    dsm_process_envelope_protobuf, dsm_set_storage_base_dir,
+};
 
 pub mod runtime;
 
@@ -289,7 +293,7 @@ pub fn initialize_sdk_context(
 ///
 /// Inputs are expected to be 32 bytes for `device_id` and `genesis_hash`. `dbrw_binding`
 /// Derive production entropy from device identity + C-DBRW binding.
-fn derive_production_entropy(
+pub(crate) fn derive_production_entropy(
     device_id: &[u8],
     genesis_hash: &[u8],
     cdbrw_binding: &[u8],
@@ -302,26 +306,22 @@ fn derive_production_entropy(
 }
 
 pub(crate) fn fetch_dbrw_binding_key() -> Result<Vec<u8>, dsm::types::error::DsmError> {
-    #[cfg(target_os = "android")]
-    {
-        let key = crate::jni::cdbrw::get_cdbrw_binding_key().ok_or_else(|| {
-            dsm::types::error::DsmError::invalid_parameter(
-                "C-DBRW binding key unavailable; initialize C-DBRW before SDK context",
-            )
-        })?;
-        if key.len() != 32 {
-            return Err(dsm::types::error::DsmError::invalid_parameter(
-                "C-DBRW binding key must be 32 bytes",
-            ));
-        }
-        Ok(key)
-    }
-    #[cfg(not(target_os = "android"))]
-    {
-        Err(dsm::types::error::DsmError::invalid_parameter(
-            "C-DBRW binding key unavailable on this platform",
-        ))
-    }
+    crate::binding_key::get_binding_key().ok_or_else(|| {
+        dsm::types::error::DsmError::invalid_parameter(
+            "C-DBRW binding key unavailable; initialize startup/bootstrap before SDK context",
+        )
+    })
+}
+
+pub(crate) fn install_canonical_binding_key(
+    binding_key: Vec<u8>,
+) -> Result<(), dsm::types::error::DsmError> {
+    crate::binding_key::install_binding_key(binding_key)
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn set_cdbrw_binding_key_for_testing(key: Vec<u8>) {
+    let _ = crate::binding_key::install_binding_key(key);
 }
 
 /// Check if the global SDK context is properly initialized
@@ -333,6 +333,7 @@ pub fn is_sdk_context_initialized() -> bool {
 #[cfg(any(test, feature = "test-utils"))]
 pub fn reset_sdk_context_for_testing() {
     get_sdk_context().reset_for_testing();
+    crate::binding_key::clear_binding_key_for_testing();
 }
 
 /// Get transport headers from SDK context for envelope v3

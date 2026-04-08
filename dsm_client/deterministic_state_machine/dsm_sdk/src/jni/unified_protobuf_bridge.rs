@@ -182,6 +182,21 @@ fn ingress_ok_bytes(response: pb::IngressResponse) -> Result<Vec<u8>, IngressShi
 }
 
 #[inline]
+fn startup_ok_bytes(response: pb::StartupResponse) -> Result<Vec<u8>, IngressShimError> {
+    match response.result {
+        Some(pb::startup_response::Result::OkBytes(bytes)) => Ok(bytes),
+        Some(pb::startup_response::Result::Error(error)) => Err(IngressShimError::new(
+            map_ingress_error_code_to_jni(error.code),
+            error.message,
+        )),
+        None => Err(IngressShimError::new(
+            helpers::JniErrorCode::ProcessingFailed as u32,
+            "startup ingress returned empty response",
+        )),
+    }
+}
+
+#[inline]
 fn dispatch_envelope_via_ingress(envelope_bytes: &[u8]) -> Result<Vec<u8>, IngressShimError> {
     let response = crate::ingress::dispatch_ingress(pb::IngressRequest {
         operation: Some(pb::ingress_request::Operation::Envelope(pb::EnvelopeOp {
@@ -251,6 +266,15 @@ fn route_hardware_facts_via_ingress(
 }
 
 #[inline]
+fn route_startup_via_ingress(
+    operation: pb::startup_request::Operation,
+) -> Result<Vec<u8>, IngressShimError> {
+    startup_ok_bytes(crate::ingress::dispatch_startup(pb::StartupRequest {
+        operation: Some(operation),
+    }))
+}
+
+#[inline]
 fn ensure_bootstrap() {
     // This function is intentionally side-effect free: it does NOT bootstrap.
     // Platform layers (Android/Kotlin) may choose to bootstrap from prefs before
@@ -260,13 +284,13 @@ fn ensure_bootstrap() {
     }
 
     if SDK_READY.load(Ordering::SeqCst) {
-        let dbrw_ok = crate::jni::cdbrw::get_cdbrw_binding_key()
+        let dbrw_ok = crate::fetch_dbrw_binding_key()
             .map(|k| k.len() == 32)
             .unwrap_or(false);
         if !dbrw_ok {
-            // Beta policy: DBRW is collect-only telemetry and MUST NOT gate readiness.
-            log::info!(
-                "ensure_bootstrap: DBRW not initialized (or invalid); continuing (beta collect-only mode)."
+            SDK_READY.store(false, Ordering::SeqCst);
+            log::warn!(
+                "ensure_bootstrap: C-DBRW binding key missing or invalid after readiness; failing closed."
             );
         }
     }
@@ -658,23 +682,22 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_initSdk(
             if base.is_empty() {
                 return jni::sys::JNI_FALSE;
             }
-            let _ =
-                crate::storage_utils::set_storage_base_dir(std::path::PathBuf::from(base.clone()));
-            let dbrw_ok = crate::jni::cdbrw::get_cdbrw_binding_key()
-                .map(|k| k.len() == 32)
-                .unwrap_or(false);
-            if !dbrw_ok {
-                log::info!("initSdk: DBRW binding key not available (pre-genesis device)");
-            }
-            // SDK_READY gates SessionManager phase computation.
-            // Must be true even without DBRW so fresh devices get "needs_genesis"
-            // instead of being stuck on "runtime_loading". DBRW key is created
-            // during genesis enrollment; its absence is expected pre-genesis.
-            SDK_READY.store(true, Ordering::SeqCst);
-            if dbrw_ok {
-                jni::sys::JNI_TRUE
-            } else {
-                jni::sys::JNI_FALSE
+            match route_startup_via_ingress(pb::startup_request::Operation::SetStorageBaseDir(
+                pb::SetStorageBaseDirOp { path_utf8: base },
+            )) {
+                Ok(_) => match route_startup_via_ingress(
+                    pb::startup_request::Operation::InitializeSdk(pb::InitializeSdkOp {}),
+                ) {
+                    Ok(_) => jni::sys::JNI_TRUE,
+                    Err(error) => {
+                        log::warn!("initSdk: shared startup init failed: {}", error.message);
+                        jni::sys::JNI_FALSE
+                    }
+                },
+                Err(error) => {
+                    log::error!("initSdk: failed to set storage base dir: {}", error.message);
+                    jni::sys::JNI_FALSE
+                }
             }
         }),
     )
@@ -709,19 +732,14 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_initStorageBa
                 }
             };
             let path = std::path::PathBuf::from(path_str);
-            match crate::storage_utils::set_storage_base_dir(path) {
-                Ok(success) => {
-                    if success {
-                        log::info!("initStorageBaseDir: storage base directory set successfully");
-                    } else {
-                        log::warn!("initStorageBaseDir: storage base directory already set");
-                    }
-                }
-                Err(e) => {
-                    log::error!(
-                        "initStorageBaseDir: failed to set storage base directory: {}",
-                        e
-                    );
+            match route_startup_via_ingress(pb::startup_request::Operation::SetStorageBaseDir(
+                pb::SetStorageBaseDirOp {
+                    path_utf8: path.to_string_lossy().to_string(),
+                },
+            )) {
+                Ok(_) => log::info!("initStorageBaseDir: storage base directory ready"),
+                Err(error) => {
+                    log::error!("initStorageBaseDir: {}", error.message);
                 }
             }
         }),
@@ -829,21 +847,29 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_initDsmSdk(
                     return;
                 }
             };
-            crate::network::set_env_config_path(config_path);
-            log::info!(
-                "initDsmSdk: environment config path set to: {}",
-                crate::network::get_env_config_path().unwrap_or("none")
-            );
-            // Dev convenience: allow localhost endpoints on Android when using adb reverse.
-            // Only allow localhost endpoints in debug builds. Production/release builds
-            // must use real network endpoints.
-            #[cfg(debug_assertions)]
-            {
-                std::env::set_var("DSM_ALLOW_LOCALHOST", "1");
-                log::info!("initDsmSdk: DSM_ALLOW_LOCALHOST=1 set (debug build)");
+            match route_startup_via_ingress(pb::startup_request::Operation::ConfigureEnv(
+                pb::ConfigureEnvOp {
+                    config_path_utf8: config_path,
+                },
+            )) {
+                Ok(_) => log::info!(
+                    "initDsmSdk: environment config path set to: {}",
+                    crate::network::get_env_config_path().unwrap_or("none")
+                ),
+                Err(error) => {
+                    log::error!("initDsmSdk: failed to configure env path: {}", error.message);
+                    return;
+                }
             }
-            #[cfg(not(debug_assertions))]
-            log::info!("initDsmSdk: DSM_ALLOW_LOCALHOST not set (release build)");
+
+            match route_startup_via_ingress(pb::startup_request::Operation::InitializeSdk(
+                pb::InitializeSdkOp {},
+            )) {
+                Ok(_) => log::info!("initDsmSdk: shared startup initialization succeeded"),
+                Err(error) => {
+                    log::error!("initDsmSdk: shared startup initialization failed: {}", error.message);
+                }
+            }
         }),
     );
 }

@@ -20,8 +20,6 @@ function makeDbrwStatusResponse(overrides: Record<string, unknown> = {}): pb.Dbr
     bindingKeyPresent: true,
     verifierKeypairPresent: true,
     storageBaseDirSet: true,
-    observeOnly: false,
-    accessMode: 'full',
     enrollmentRevision: 3,
     arenaBytes: 4096,
     probes: 9,
@@ -37,7 +35,7 @@ function makeDbrwStatusResponse(overrides: Record<string, unknown> = {}): pb.Dbr
     storageBaseDir: '/data/dbrw',
     statusNote: 'healthy',
     runtimeMetricsPresent: true,
-    runtimeAccessLevel: 'full',
+    runtimeAccessLevel: 'FULL_ACCESS',
     runtimeTrustScore: 0.95,
     runtimeHealthCheckRan: true,
     runtimeHealthCheckPassed: true,
@@ -73,8 +71,6 @@ describe('dbrw.ts', () => {
       expect(status.bindingKeyPresent).toBe(true);
       expect(status.verifierKeypairPresent).toBe(true);
       expect(status.storageBaseDirSet).toBe(true);
-      expect(status.observeOnly).toBe(false);
-      expect(status.accessMode).toBe('full');
       expect(status.enrollmentRevision).toBe(3);
       expect(status.arenaBytes).toBe(4096);
       expect(status.probes).toBe(9);
@@ -155,7 +151,6 @@ describe('dbrw.ts', () => {
 
       const status = await getDbrwStatus();
       expect(status.enrolled).toBe(false);
-      expect(status.accessMode).toBe('');
       expect(status.arenaBytes).toBe(0);
     });
 

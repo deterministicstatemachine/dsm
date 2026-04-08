@@ -210,10 +210,9 @@ pub fn ensure_bootstrap() {
             .map(|k| k.len() == 32)
             .unwrap_or(false);
         if !dbrw_ok {
-            // Beta policy: DBRW is collect-only telemetry and MUST NOT gate readiness.
-            // Keep SDK ready and continue; diagnostics can still be exported separately.
-            log::info!(
-                "ensure_bootstrap: DBRW not initialized (or invalid); continuing (beta collect-only mode)."
+            SDK_READY.store(false, Ordering::SeqCst);
+            log::warn!(
+                "ensure_bootstrap: C-DBRW binding key missing or invalid after readiness; failing closed."
             );
         }
     }

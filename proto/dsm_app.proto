@@ -2194,8 +2194,8 @@ message DbrwStatusResponse {
   bool binding_key_present = 2;
   bool verifier_keypair_present = 3;
   bool storage_base_dir_set = 4;
-  bool observe_only = 5;
-  string access_mode = 6;
+  bool observe_only = 5 [deprecated = true]; // Legacy beta field; use runtime_access_level/runtime_resonant_status.
+  string access_mode = 6 [deprecated = true]; // Legacy beta field; use runtime_access_level/runtime_resonant_status.
   uint32 enrollment_revision = 7;
   uint32 arena_bytes = 8;
   uint32 probes = 9;
@@ -2560,6 +2560,47 @@ message IngressRequest {
 
 // Canonical platform-agnostic ingress response.
 message IngressResponse {
+  oneof result {
+    bytes ok_bytes = 1 [(dsm_max_len)=65535];
+    Error error    = 2;
+  }
+}
+
+// Startup/bootstrap operations are modeled separately from request ingress.
+// They express one-time native platform setup rather than protocol requests.
+
+// Configure the SDK storage base directory.
+message SetStorageBaseDirOp {
+  string path_utf8 = 1 [(dsm_max_len)=2048];
+}
+
+// Configure the authoritative env-config TOML path used by the SDK.
+message ConfigureEnvOp {
+  string config_path_utf8 = 1 [(dsm_max_len)=2048];
+}
+
+// Initialize the SDK runtime, storage-node registry, and router layer.
+message InitializeSdkOp {}
+
+// Install canonical identity context using the already-validated binding key.
+message InitializeIdentityContextOp {
+  bytes device_id    = 1 [(dsm_fixed_len)=32];
+  bytes genesis_hash = 2 [(dsm_fixed_len)=32];
+  bytes binding_key  = 3 [(dsm_fixed_len)=32];
+}
+
+// Canonical startup/bootstrap request shared by native platforms.
+message StartupRequest {
+  oneof operation {
+    SetStorageBaseDirOp        set_storage_base_dir     = 1;
+    ConfigureEnvOp             configure_env            = 2;
+    InitializeSdkOp            initialize_sdk           = 3;
+    InitializeIdentityContextOp initialize_identity_context = 4;
+  }
+}
+
+// Canonical startup/bootstrap response.
+message StartupResponse {
   oneof result {
     bytes ok_bytes = 1 [(dsm_max_len)=65535];
     Error error    = 2;

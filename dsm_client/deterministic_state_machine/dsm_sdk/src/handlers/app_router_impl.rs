@@ -2864,10 +2864,21 @@ mod tests {
         crate::storage::client_db::reset_database_for_tests();
         let storage_dir = std::env::temp_dir().join("dsm_app_router_shared_smt_test");
         let _ = crate::storage_utils::set_storage_base_dir(storage_dir);
+        crate::reset_sdk_context_for_testing();
+        crate::sdk::app_state::AppState::reset_memory_for_testing();
+        crate::sdk::app_state::AppState::prime_memory_for_testing();
+        crate::sdk::signing_authority::clear_binding_key_for_testing();
 
         let device_id = vec![0x21u8; 32];
         let genesis_hash = vec![0x31u8; 32];
-        let public_key = vec![0x41u8; 32];
+        let binding_key = vec![0x41u8; 32];
+        let (public_key, _secret_key) = crate::sdk::signing_authority::derive_signing_keys_for_testing(
+            &device_id,
+            &genesis_hash,
+            &binding_key,
+        )
+        .expect("derive canonical signing keypair");
+        crate::sdk::signing_authority::set_binding_key_for_testing(binding_key);
         let smt_root = dsm::merkle::sparse_merkle_tree::empty_root(
             dsm::merkle::sparse_merkle_tree::DEFAULT_SMT_HEIGHT,
         )

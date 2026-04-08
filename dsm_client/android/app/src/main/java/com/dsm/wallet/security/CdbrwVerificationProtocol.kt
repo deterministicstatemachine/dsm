@@ -91,8 +91,8 @@ class CdbrwVerificationProtocol(
         // Step 2: Health test (3-condition, before any auth)
         val healthResult = CdbrwEntropyHealth.healthTest(rawTimings, siliconFp.config.histogramBins)
         if (!healthResult.passed) {
-            Log.w(TAG, "Entropy health test FAILED: H=${healthResult.hHat}, rho=${healthResult.rhoHat}, L=${healthResult.lHat}")
-            // Continue but flag — Phase 6 is observe-only in beta
+            Log.w(TAG, "Entropy health test rejected challenge response: status=${healthResult.resonantStatus}, H=${healthResult.hHat}, rho=${healthResult.rhoHat}, L=${healthResult.lHat}")
+            throw IllegalStateException("Device entropy health failed; cannot authenticate challenge")
         }
 
         // Step 3: Build histogram -> H_bar
@@ -125,7 +125,7 @@ class CdbrwVerificationProtocol(
             challenge = challenge
         )
 
-        Log.d(TAG, "Challenge response: gamma=${gamma.take(4).joinToString("") { "%02x".format(it) }}..., health=${healthResult.passed}")
+        Log.d(TAG, "Challenge response: gamma=${gamma.take(4).joinToString("") { "%02x".format(it) }}..., status=${healthResult.resonantStatus}")
 
         return DeviceResponse(
             gamma = gamma,

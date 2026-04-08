@@ -212,7 +212,7 @@ impl DLVManager {
         &self,
         vault_id: &str,
         reason: &str,
-        creator_private_key: &[u8],
+        creator_signature: &[u8],
         reference_state: &State,
     ) -> Result<Operation, DsmError> {
         let vault_lock = self.get_vault(vault_id).await?;
@@ -221,7 +221,7 @@ impl DLVManager {
         // Get the creator_public_key before invalidation mutates the vault state
         let creator_pk = vault.creator_public_key.clone();
 
-        vault.invalidate(reason, creator_private_key, reference_state)?;
+        vault.invalidate(reason, creator_signature, reference_state)?;
 
         let operation = Operation::DlvInvalidate {
             vault_id: vault_id.as_bytes().to_vec(),

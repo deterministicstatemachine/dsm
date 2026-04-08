@@ -11,5 +11,5 @@ noop_api = []
 [dependencies]
 anyhow = "1"
 walkdir = "2"
-dsm = { version = "0.1.0-beta.1", path = "../../dsm_client/deterministic_state_machine/dsm" }
+dsm = { version = "0.1.0-beta.2", path = "../../dsm_client/deterministic_state_machine/dsm" }
 prost = "0.13"

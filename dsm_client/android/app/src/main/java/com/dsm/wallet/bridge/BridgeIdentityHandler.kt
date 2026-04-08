@@ -146,15 +146,16 @@ internal object BridgeIdentityHandler {
                         sdkContextInitialized.set(true)
                         Log.i(logTag, "bootstrapFromPrefs: SDK context initialized")
 
-                        val hwAnchorResult = AntiCloneGate.getStableHwAnchorMonitoring(context)
+                        val hwAnchorResult = AntiCloneGate.getStableHwAnchorWithTrust(context)
                         when (hwAnchorResult.accessLevel) {
                             AccessLevel.FULL_ACCESS -> Log.i(logTag, "bootstrapFromPrefs: DBRW hardware validation passed (full access)")
                             AccessLevel.PIN_REQUIRED -> Log.w(logTag, "bootstrapFromPrefs: DBRW hardware validation degraded (PIN required) - allowing with reduced trust")
-                            AccessLevel.READ_ONLY -> Log.w(logTag, "bootstrapFromPrefs: DBRW hardware validation failed (read-only access) - allowing limited functionality")
-                            AccessLevel.BLOCKED -> Log.e(logTag, "bootstrapFromPrefs: DBRW hardware validation blocked - wallet functionality limited")
+                            AccessLevel.READ_ONLY -> throw SecurityException("bootstrapFromPrefs: C-DBRW health rejected device state")
+                            AccessLevel.BLOCKED -> throw SecurityException("bootstrapFromPrefs: C-DBRW hardware validation blocked")
                         }
 
-                        val hwEntropy = hwAnchorResult.anchor ?: ByteArray(32)
+                        val hwEntropy = hwAnchorResult.anchor
+                            ?: throw SecurityException("bootstrapFromPrefs: C-DBRW anchor unavailable")
                         val envEntropy = AntiCloneGate.getEnvironmentFingerprint(context)
                         val dbrwSalt: ByteArray = run {
                             val existing = prefs.getString(keyDbrwSalt, null)
@@ -322,8 +323,8 @@ internal object BridgeIdentityHandler {
                     UnifiedNativeApi.createGenesisSecuringProgressEnvelope(pct).let { if (it.isNotEmpty()) BleEventRelay.dispatchEnvelope(it) }
                 }
             } catch (e: Exception) {
-                Log.e(logTag, "createGenesis: silicon FP enrollment failed, using static HW hash", e)
-                null
+                Log.e(logTag, "createGenesis: silicon FP enrollment failed", e)
+                throw SecurityException("createGenesis: C-DBRW enrollment failed", e)
             }
 
             UnifiedNativeApi.createGenesisSecuringCompleteEnvelope().let { if (it.isNotEmpty()) BleEventRelay.dispatchEnvelope(it) }
@@ -339,8 +340,11 @@ internal object BridgeIdentityHandler {
                 keyDbrwSalt = keyDbrwSalt,
             )
 
-            // Now get the anchor (fast mode if enrollment succeeded, static HW fallback if not)
-            val hwResult = AntiCloneGate.getStableHwAnchorMonitoring(context)
+            // Enrollment must produce a valid C-DBRW anchor before bootstrap continues.
+            val hwResult = AntiCloneGate.getStableHwAnchorWithTrust(context)
+            if (hwResult.accessLevel == AccessLevel.READ_ONLY || hwResult.accessLevel == AccessLevel.BLOCKED) {
+                throw SecurityException("createGenesis: C-DBRW verification rejected the enrolled device state")
+            }
             val hwEntropy = hwResult.anchor ?: throw IllegalStateException("Hardware anchor not available")
             val envEntropy = AntiCloneGate.getEnvironmentFingerprint(context)
             val dbrwSalt = ByteArray(32)

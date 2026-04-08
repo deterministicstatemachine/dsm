@@ -1313,7 +1313,6 @@ impl BitcoinTapSdk {
     ///   becomes the dBTC mint amount (1:1 ratio).
     /// - `btc_pubkey`: Depositor's compressed Bitcoin public key (33 bytes)
     /// - `refund_iterations`: State iterations before creator can reclaim
-    /// - `creator_keypair`: (SPHINCS+ public key, SPHINCS+ private key)
     /// - `reference_state`: Current DSM state for anchoring
     /// - `network`: Bitcoin network for header chain verification
     ///
@@ -1321,8 +1320,6 @@ impl BitcoinTapSdk {
     /// - `btc_amount_sats`: Amount of BTC in satoshis (= dBTC to mint, 1:1)
     /// - `btc_pubkey`: Bitcoin compressed public key (33 bytes)
     /// - `refund_iterations`: DSM iterations before creator can reclaim the DLV
-    /// - `creator_keypair`: (SPHINCS+ public key, SPHINCS+ private key) — used for
-    ///   DLV creator authentication (signing + verification during refund)
     /// - `kem_public_key`: Kyber public key (1184 bytes) for DLV content encryption
     ///   and intended-recipient access control.
     /// - `reference_state`: Current DSM state
@@ -1333,7 +1330,6 @@ impl BitcoinTapSdk {
         btc_amount_sats: u64,
         btc_pubkey: &[u8],
         refund_iterations: u64,
-        creator_keypair: (&[u8], &[u8]),
         reference_state: &State,
         network: BitcoinNetwork,
         kem_public_key: &[u8],
@@ -1405,11 +1401,14 @@ impl BitcoinTapSdk {
 
         // Content encodes the dBTC mint amount (= BTC sats, 1:1)
         let content = Self::encode_dbtc_content(btc_amount_sats);
+        let creator_keypair = crate::sdk::signing_authority::derive_current_signing_keypair()?;
+        let creator_public_key = creator_keypair.public_key().to_vec();
+        let creator_secret_key = creator_keypair.secret_key().to_vec();
 
         let (vault_id, _op) = self
             .dlv_manager
             .create_vault(
-                creator_keypair,
+            (&creator_public_key, &creator_secret_key),
                 condition,
                 &content,
                 "application/dsm-dbtc-mint",
@@ -1511,7 +1510,6 @@ impl BitcoinTapSdk {
         source_successor_depth: u32,
         exit_amount_sats: u64,
         refund_iterations: u64,
-        creator_keypair: (&[u8], &[u8]),
         reference_state: &State,
         network: BitcoinNetwork,
         kem_public_key: &[u8],
@@ -1643,11 +1641,14 @@ impl BitcoinTapSdk {
         };
 
         let successor_content = Self::encode_dbtc_content(remainder_sats);
+    let creator_keypair = crate::sdk::signing_authority::derive_current_signing_keypair()?;
+    let creator_public_key = creator_keypair.public_key().to_vec();
+    let creator_secret_key = creator_keypair.secret_key().to_vec();
 
         let (successor_vault_id, _op) = self
             .dlv_manager
             .create_vault(
-                creator_keypair,
+        (&creator_public_key, &creator_secret_key),
                 successor_condition,
                 &successor_content,
                 "application/dsm-dbtc-successor",
@@ -1962,7 +1963,6 @@ impl BitcoinTapSdk {
     pub async fn close_tap(
         &self,
         vault_op_id: &str,
-        creator_private_key: &[u8],
         reference_state: &State,
     ) -> Result<Option<TokenOperation>, DsmError> {
         let (vault_id, direction, btc_amount_sats, refund_iterations, created_at_state) = {
@@ -2007,13 +2007,25 @@ impl BitcoinTapSdk {
              refund preimage will be derived on demand by bitcoin.refund.build"
         );
 
+        let invalidation_message = [
+            vault_id.as_bytes(),
+            b"deposit_timeout_refund".as_slice(),
+            &reference_state.hash[..],
+        ]
+        .concat();
+        let creator_signature = dsm::crypto::sphincs::sphincs_sign(
+            &crate::sdk::signing_authority::current_secret_key()?,
+            &invalidation_message,
+        )
+        .map_err(|e| DsmError::crypto("sphincs_sign", Some(e)))?;
+
         // Invalidate the vault
         let _op = self
             .dlv_manager
             .invalidate_vault(
                 &vault_id,
                 "deposit_timeout_refund",
-                creator_private_key,
+                &creator_signature,
                 reference_state,
             )
             .await?;

@@ -523,11 +523,8 @@ impl AppRouterImpl {
             .wallet
             .get_kyber_public_key()
             .map_err(|e| format!("{route}: wallet Kyber key unavailable: {e}"))?;
-        let signing_public_key = self
-            .wallet
-            .get_signing_keypair()
-            .map(|(pk, _)| pk)
-            .map_err(|e| format!("{route}: wallet SPHINCS key unavailable: {e}"))?;
+        let signing_public_key = crate::sdk::signing_authority::current_public_key()
+            .map_err(|e| format!("{route}: canonical signing key unavailable: {e}"))?;
 
         let deposit_record = self
             .bitcoin_tap
@@ -1635,14 +1632,6 @@ impl AppRouterImpl {
                         return err(format!("bitcoin.deposit.initiate: state unavailable: {e}"))
                     }
                 };
-                let (creator_pk, creator_sk) = match self.wallet.get_signing_keypair() {
-                    Ok(k) => k,
-                    Err(e) => {
-                        return err(format!(
-                            "bitcoin.deposit.initiate: wallet signing key unavailable: {e}"
-                        ))
-                    }
-                };
                 let kem_public_key = match self.wallet.get_kyber_public_key() {
                     Ok(k) => k,
                     Err(e) => {
@@ -1690,7 +1679,6 @@ impl AppRouterImpl {
                             req.btc_amount_sats,
                             btc_pubkey,
                             req.refund_iterations.max(1),
-                            (&creator_pk, &creator_sk),
                             &current_state,
                             network,
                             kem_public_key.as_slice(),
@@ -2108,18 +2096,9 @@ impl AppRouterImpl {
                         return err(format!("bitcoin.deposit.refund: state unavailable: {e}"))
                     }
                 };
-                let (_creator_pk, creator_sk) = match self.wallet.get_signing_keypair() {
-                    Ok(k) => k,
-                    Err(e) => {
-                        return err(format!(
-                            "bitcoin.deposit.refund: wallet signing key unavailable: {e}"
-                        ))
-                    }
-                };
-
                 match self
                     .bitcoin_tap
-                    .close_tap(&req.vault_op_id, &creator_sk, &current_state)
+                    .close_tap(&req.vault_op_id, &current_state)
                     .await
                 {
                     Ok(restore_op) => {
@@ -2585,15 +2564,6 @@ impl AppRouterImpl {
                         ))
                     }
                 };
-                let (sphincs_pk, sphincs_sk) =
-                    match dsm::crypto::sphincs::generate_sphincs_keypair() {
-                        Ok(kp) => kp,
-                        Err(e) => {
-                            return err(format!(
-                                "bitcoin.fractional.exit: SPHINCS keygen failed: {e}"
-                            ))
-                        }
-                    };
                 let kyber_kp = match dsm::crypto::kyber::generate_kyber_keypair() {
                     Ok(kp) => kp,
                     Err(e) => {
@@ -2611,7 +2581,6 @@ impl AppRouterImpl {
                         exec_data.successor_depth,
                         req.exit_amount_sats,
                         req.refund_iterations,
-                        (&sphincs_pk, &sphincs_sk),
                         &state,
                         network,
                         &kyber_kp.public_key,
@@ -4874,6 +4843,31 @@ mod tests {
     use crate::init::SdkConfig;
     use crate::storage::client_db;
 
+    fn install_test_identity(
+        device_id: Vec<u8>,
+        genesis_hash: Vec<u8>,
+        binding_key: Vec<u8>,
+    ) {
+        crate::reset_sdk_context_for_testing();
+        crate::sdk::app_state::AppState::reset_memory_for_testing();
+        crate::sdk::app_state::AppState::prime_memory_for_testing();
+        crate::sdk::signing_authority::clear_binding_key_for_testing();
+        let (public_key, _secret_key) = crate::sdk::signing_authority::derive_signing_keys_for_testing(
+            &device_id,
+            &genesis_hash,
+            &binding_key,
+        )
+        .expect("derive canonical signing keypair");
+        crate::sdk::signing_authority::set_binding_key_for_testing(binding_key);
+        crate::sdk::app_state::AppState::set_identity_info(
+            device_id,
+            public_key,
+            genesis_hash,
+            vec![0u8; 32],
+        );
+        crate::sdk::app_state::AppState::set_has_identity(true);
+    }
+
     fn init_withdrawal_invoke_test_router(test_name: &str) -> AppRouterImpl {
         unsafe {
             std::env::set_var("DSM_SDK_TEST_MODE", "1");
@@ -4883,13 +4877,11 @@ mod tests {
         let _ = crate::storage_utils::set_storage_base_dir(PathBuf::from(format!(
             "./.dsm_testdata_{test_name}"
         )));
-        crate::sdk::app_state::AppState::set_identity_info(
+        install_test_identity(
             vec![0xA1; 32],
-            vec![0xB1; 32],
             vec![0xC1; 32],
             vec![0xD1; 32],
         );
-        crate::sdk::app_state::AppState::set_has_identity(true);
         client_db::init_database().expect("init db");
         set_withdrawal_bridge_sync_test_results(Vec::new());
         crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::reset_dbtc_storage_test_state();

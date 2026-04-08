@@ -1840,7 +1840,7 @@ impl LimboVault {
     pub fn invalidate(
         &mut self,
         reason: &str,
-        creator_private_key: &[u8],
+        creator_signature: &[u8],
         reference_state: &State,
     ) -> Result<(), DsmError> {
         // Terminal states (Claimed, Invalidated) are irreversible.
@@ -1865,10 +1865,7 @@ impl LimboVault {
         data.extend_from_slice(reason.as_bytes());
         data.extend_from_slice(&reference_state.hash);
 
-        let sig = sphincs::sphincs_sign(creator_private_key, &data)
-            .map_err(|e| DsmError::crypto("sphincs_sign", Some(e)))?;
-
-        let ok = sphincs::sphincs_verify(&self.creator_public_key, &data, &sig)?;
+        let ok = sphincs::sphincs_verify(&self.creator_public_key, &data, creator_signature)?;
         if !ok {
             return Err(DsmError::invalid_operation("invalid creator signature"));
         }
@@ -1876,7 +1873,7 @@ impl LimboVault {
         self.state = VaultState::Invalidated {
             invalidated_state_number: reference_state.state_number,
             reason: reason.to_string(),
-            creator_signature: sig,
+            creator_signature: creator_signature.to_vec(),
         };
         Ok(())
     }
@@ -1982,6 +1979,7 @@ mod tests {
     use super::*;
     use crate::core::state_machine::random_walk::algorithms::Position;
     use crate::types::policy_types::VaultCondition;
+    use crate::types::state_types::DeviceInfo;
 
     // ───────── secure_eq ─────────
 
@@ -2559,6 +2557,85 @@ mod tests {
             fulfillment_condition: cond,
             ..LimboVault::default()
         }
+    }
+
+    fn make_signed_test_vault() -> (LimboVault, Vec<u8>, State) {
+        let (creator_public_key, creator_secret_key) =
+            crate::crypto::sphincs::generate_sphincs_keypair().expect("sphincs keypair");
+        let kyber_pair = crate::crypto::kyber::generate_kyber_keypair().expect("kyber keypair");
+        let device_info = DeviceInfo::from_hashed_label("dlv-invalidate-test", vec![0x42]);
+        let reference_state = State::new_genesis([0x24; 32], device_info);
+        let vault = LimboVault::new(
+            (&creator_public_key, &creator_secret_key),
+            FulfillmentMechanism::CryptoCondition {
+                condition_hash: vec![0x11; 32],
+                public_params: vec![0x22; 16],
+            },
+            b"invalidate test content",
+            "application/octet-stream",
+            None,
+            &kyber_pair.public_key,
+            &reference_state,
+        )
+        .expect("limbo vault");
+        (vault, creator_secret_key, reference_state)
+    }
+
+    #[test]
+    fn invalidate_accepts_precomputed_creator_signature() {
+        let (mut vault, creator_secret_key, reference_state) = make_signed_test_vault();
+        let invalidation_message = [
+            vault.id.as_bytes(),
+            b"creator-requested",
+            &reference_state.hash[..],
+        ]
+        .concat();
+        let expected_signature = crate::crypto::sphincs::sphincs_sign(
+            &creator_secret_key,
+            &invalidation_message,
+        )
+        .expect("invalidation signature");
+
+        vault
+            .invalidate("creator-requested", &expected_signature, &reference_state)
+            .expect("vault invalidation");
+
+        match vault.state {
+            VaultState::Invalidated {
+                invalidated_state_number,
+                ref reason,
+                ref creator_signature,
+            } => {
+                assert_eq!(invalidated_state_number, reference_state.state_number);
+                assert_eq!(reason, "creator-requested");
+                assert_eq!(creator_signature, &expected_signature);
+            }
+            _ => panic!("vault should be invalidated"),
+        }
+    }
+
+    #[test]
+    fn invalidate_rejects_signature_from_wrong_creator() {
+        let (mut vault, _creator_secret_key, reference_state) = make_signed_test_vault();
+        let (_wrong_public_key, wrong_secret_key) =
+            crate::crypto::sphincs::generate_sphincs_keypair().expect("wrong sphincs keypair");
+        let invalidation_message = [
+            vault.id.as_bytes(),
+            b"creator-requested",
+            &reference_state.hash[..],
+        ]
+        .concat();
+        let wrong_signature = crate::crypto::sphincs::sphincs_sign(
+            &wrong_secret_key,
+            &invalidation_message,
+        )
+        .expect("wrong invalidation signature");
+
+        let error = vault
+            .invalidate("creator-requested", &wrong_signature, &reference_state)
+            .expect_err("wrong signer must be rejected");
+
+        assert!(error.to_string().contains("invalid creator signature"));
     }
 
     #[test]

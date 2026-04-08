@@ -974,7 +974,7 @@ checksum = "1435fa1053d8b2fbbe9be7e97eca7f33d37b28409959813daefc1446a14247f1"
 
 [[package]]
 name = "dsm"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -1048,7 +1048,7 @@ dependencies = [
 
 [[package]]
 name = "dsm_sdk"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "aes-gcm",
  "android_logger",

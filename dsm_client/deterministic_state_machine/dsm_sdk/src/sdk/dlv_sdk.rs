@@ -1,7 +1,7 @@
 //! Deterministic Limbo Vault SDK (STRICT, fail-closed)
 //!
 //! This SDK exposes high-level, *identity-centric* helpers for DLVs.
-//! - SPHINCS+ keys here are **identity/signing** keys only.
+//! - SPHINCS+ signing authority is derived from canonical C-DBRW state.
 //! - Content Encryption Key (CEK) and unsealing KEK are managed **inside DLVManager**.
 //! - No alternate paths, no discovery shortcuts, explicit errors on missing inputs.
 
@@ -17,7 +17,7 @@ use dsm::crypto::blake3;
 
 // No hex/base64 here; bytes-only.
 
-// Identity key store (SPHINCS+): identity -> (pk, sk)
+// Byte-key store: identity -> (public, secret)
 type KeyStore = Arc<RwLock<HashMap<String, (Vec<u8>, Vec<u8>)>>>;
 
 /// Helper: Get canonical protobuf bytes for SmartPolicy
@@ -63,8 +63,6 @@ pub struct DlvSdk {
     manager: Arc<DLVManager>,
     /// Asset manager for handling digital assets
     asset_manager: Arc<Mutex<AssetManager>>,
-    /// Identity key store (SPHINCS+ for signing)
-    key_store: KeyStore,
     /// Encryption key store (Kyber for vault encryption)
     kyber_key_store: KeyStore,
 }
@@ -125,10 +123,8 @@ pub struct VaultInfo {
 pub struct UnlockOptions {
     /// Requester's public key — Kyber key checked against vault's `intended_recipient`.
     pub requester_public_key: Vec<u8>,
-    /// Requester's private key (for signing auth if manager requires) — **NOT** used to derive KEK
-    pub requester_private_key: Vec<u8>,
     /// SPHINCS+ public key embedded in the DlvUnlock operation for signature verification.
-    /// If `None`, falls back to `requester_public_key` (appropriate when `intended_recipient` is `None`).
+    /// If `None`, the SDK derives the current canonical C-DBRW signing public key.
     pub signing_public_key: Option<Vec<u8>>,
     /// Additional context data
     pub context: HashMap<String, String>,
@@ -143,45 +139,8 @@ impl DlvSdk {
         Self {
             manager: Arc::new(DLVManager::new()),
             asset_manager: Arc::new(Mutex::new(AssetManager::new())),
-            key_store: Arc::new(RwLock::new(HashMap::new())),
             kyber_key_store: Arc::new(RwLock::new(HashMap::new())),
         }
-    }
-
-    // ------------------------------------------------------------------------
-    // Identity key management (SPHINCS+) — identity/signing keys only
-    // ------------------------------------------------------------------------
-
-    /// Generate SPHINCS+ **identity** keypair (for signing vault actions).
-    pub fn generate_identity_keypair(&self) -> Result<(Vec<u8>, Vec<u8>), DsmError> {
-        sphincs::generate_sphincs_keypair()
-    }
-
-    /// Store SPHINCS+ identity keys.
-    pub fn store_identity_keys(
-        &self,
-        identity: &str,
-        public_key: Vec<u8>,
-        private_key: Vec<u8>,
-    ) -> Result<(), DsmError> {
-        let mut ks = self.key_store.write().map_err(|_| {
-            DsmError::internal("Key store lock poisoned", None::<std::convert::Infallible>)
-        })?;
-        ks.insert(identity.to_string(), (public_key, private_key));
-        Ok(())
-    }
-
-    /// Retrieve SPHINCS+ identity keys.
-    pub async fn get_identity_keys(&self, identity: &str) -> Result<(Vec<u8>, Vec<u8>), DsmError> {
-        let ks = self.key_store.read().map_err(|_| {
-            DsmError::internal("Key store lock poisoned", None::<std::convert::Infallible>)
-        })?;
-        ks.get(identity).cloned().ok_or_else(|| {
-            DsmError::not_found(
-                "Identity keys",
-                Some(format!("No keys for identity: {identity}")),
-            )
-        })
     }
 
     // ------------------------------------------------------------------------
@@ -241,8 +200,9 @@ impl DlvSdk {
         config: VaultConfig,
         reference_state: &State,
     ) -> Result<VaultCreationResult, DsmError> {
-        // Load creator identity keys (signing/auth only)
-        let (creator_pk, creator_sk) = self.get_identity_keys(creator_identity).await?;
+        let creator_keypair = crate::sdk::signing_authority::derive_current_signing_keypair()?;
+        let creator_pk = creator_keypair.public_key().to_vec();
+        let creator_sk = creator_keypair.secret_key().to_vec();
 
         // Determine encryption key (Kyber PK):
         // - If config specifies a recipient key, use it
@@ -338,7 +298,7 @@ impl DlvSdk {
         reference_state: &State,
     ) -> Result<VaultCreationResult, DsmError> {
         let recipient_public_key = if let Some(recipient) = recipient_identity {
-            Some(self.get_identity_keys(recipient).await?.0)
+            Some(self.get_encryption_keys(recipient).await?.0)
         } else {
             None
         };
@@ -462,17 +422,16 @@ impl DlvSdk {
             stitched_receipt_sigma,
         };
 
-        let spk = options
+        let signing_public_key = options
             .signing_public_key
-            .as_deref()
-            .unwrap_or(&options.requester_public_key);
+            .unwrap_or(crate::sdk::signing_authority::current_public_key()?);
         let (unlocked, _op) = self
             .manager
             .try_unlock_vault(
                 vault_id,
                 proof,
                 &options.requester_public_key,
-                spk,
+                &signing_public_key,
                 reference_state,
             )
             .await?;
@@ -486,7 +445,7 @@ impl DlvSdk {
         claimant_identity: &str,
         reference_state: &State,
     ) -> Result<Vec<u8>, DsmError> {
-        let (claimant_pk, _) = self.get_identity_keys(claimant_identity).await?;
+        let claimant_pk = crate::sdk::signing_authority::current_public_key()?;
         let (_, kyber_sk) = self.get_encryption_keys(claimant_identity).await?;
         let (content, _op) = self
             .manager
@@ -499,14 +458,24 @@ impl DlvSdk {
     pub async fn invalidate_vault(
         &self,
         vault_id: &str,
-        creator_identity: &str,
+        _creator_identity: &str,
         reason: &str,
         reference_state: &State,
     ) -> Result<(), DsmError> {
-        let (_, creator_sk) = self.get_identity_keys(creator_identity).await?;
+        let invalidation_message = [
+            vault_id.as_bytes(),
+            reason.as_bytes(),
+            &reference_state.hash[..],
+        ]
+        .concat();
+        let creator_signature = dsm::crypto::sphincs::sphincs_sign(
+            &crate::sdk::signing_authority::current_secret_key()?,
+            &invalidation_message,
+        )
+        .map_err(|e| DsmError::crypto("sphincs_sign", Some(e)))?;
         let _op = self
             .manager
-            .invalidate_vault(vault_id, reason, &creator_sk, reference_state)
+            .invalidate_vault(vault_id, reason, &creator_signature, reference_state)
             .await?;
         Ok(())
     }
@@ -685,6 +654,30 @@ mod tests {
     use dsm::types::state_types::DeviceInfo;
     use dsm::types::proto::{SmartPolicy, SmartClause, SmartBalance};
 
+    const TEST_DEVICE_ID: [u8; 32] = [0xD2; 32];
+    const TEST_GENESIS_HASH: [u8; 32] = [0xD4; 32];
+    const TEST_BINDING_KEY: [u8; 32] = [0xD5; 32];
+
+    fn install_test_identity() -> Vec<u8> {
+        std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        crate::sdk::app_state::AppState::reset_memory_for_testing();
+        crate::sdk::app_state::AppState::prime_memory_for_testing();
+        let (public_key, _) = crate::sdk::signing_authority::derive_signing_keys_for_testing(
+            &TEST_DEVICE_ID,
+            &TEST_GENESIS_HASH,
+            &TEST_BINDING_KEY,
+        )
+        .expect("canonical test signing key derivation failed");
+        crate::sdk::app_state::AppState::set_identity_info(
+            TEST_DEVICE_ID.to_vec(),
+            public_key.clone(),
+            TEST_GENESIS_HASH.to_vec(),
+            vec![0u8; 32],
+        );
+        crate::set_cdbrw_binding_key_for_testing(TEST_BINDING_KEY.to_vec());
+        public_key
+    }
+
     fn create_test_state() -> State {
         let device_info = DeviceInfo::from_hashed_label("test_device", vec![1, 2, 3, 4]);
         let mut entropy = [0u8; 32];
@@ -695,10 +688,7 @@ mod tests {
     #[tokio::test]
     async fn test_sdk_vault_creation() -> Result<(), DsmError> {
         let sdk = DlvSdk::new();
-
-        // Generate and store SPHINCS+ identity keys (for signing)
-        let (pk, sk) = sdk.generate_identity_keypair()?;
-        sdk.store_identity_keys("test_creator", pk, sk)?;
+        install_test_identity();
 
         // Generate and store Kyber encryption keys (for vault encryption)
         let (kyber_pk, kyber_sk) = sdk.generate_encryption_keypair()?;
@@ -721,10 +711,7 @@ mod tests {
     #[tokio::test]
     async fn test_vault_info_retrieval() -> Result<(), DsmError> {
         let sdk = DlvSdk::new();
-
-        // Generate and store SPHINCS+ identity keys (for signing)
-        let (pk, sk) = sdk.generate_identity_keypair()?;
-        sdk.store_identity_keys("test_creator", pk, sk)?;
+        install_test_identity();
 
         // Generate and store Kyber encryption keys (for vault encryption)
         let (kyber_pk, kyber_sk) = sdk.generate_encryption_keypair()?;
@@ -748,10 +735,7 @@ mod tests {
     #[tokio::test]
     async fn test_vault_statistics() -> Result<(), DsmError> {
         let sdk = DlvSdk::new();
-
-        // Generate and store SPHINCS+ identity keys (for signing)
-        let (pk, sk) = sdk.generate_identity_keypair()?;
-        sdk.store_identity_keys("test_creator", pk, sk)?;
+        install_test_identity();
 
         // Generate and store Kyber encryption keys (for vault encryption)
         let (kyber_pk, kyber_sk) = sdk.generate_encryption_keypair()?;
@@ -778,10 +762,7 @@ mod tests {
     #[tokio::test]
     async fn test_dlv_with_smart_commitments() -> Result<(), DsmError> {
         let sdk = DlvSdk::new();
-
-        // Generate and store SPHINCS+ identity keys (for signing)
-        let (creator_pk, creator_sk) = sdk.generate_identity_keypair()?;
-        sdk.store_identity_keys("smart_commitment_creator", creator_pk.clone(), creator_sk)?;
+        let creator_pk = install_test_identity();
 
         // Generate and store Kyber encryption keys (for vault encryption)
         let (kyber_pk, kyber_sk) = sdk.generate_encryption_keypair()?;

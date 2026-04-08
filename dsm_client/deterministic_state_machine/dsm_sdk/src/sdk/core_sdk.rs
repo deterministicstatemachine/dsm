@@ -62,10 +62,6 @@ pub struct CoreSDK {
     device_info: DeviceInfo,
     policy_system: TokenPolicySystem,
     audit_ctr: AtomicU64, // monotonic counter, not a clock
-    /// Device SPHINCS+ secret key for signing operations before state machine submission.
-    /// Set via `set_signing_key()` after bootstrap; when absent, only pre-signed
-    /// operations (via `execute_dsm_operation`) are accepted.
-    signing_key: parking_lot::RwLock<Option<Vec<u8>>>,
 }
 
 /* ------------------------------- Helpers -------------------------------- */
@@ -211,20 +207,11 @@ impl CoreSDK {
             device_info,
             policy_system,
             audit_ctr: AtomicU64::new(0),
-            signing_key: parking_lot::RwLock::new(None),
         })
     }
 
     pub fn get_device_identity(&self) -> DeviceInfo {
         self.device_info.clone()
-    }
-
-    /// Set the SPHINCS+ secret key used to auto-sign operations submitted through
-    /// `execute_transition()`. The corresponding public key must already be set in
-    /// the state machine's current state via `update_signing_public_key()`.
-    pub fn set_signing_key(&self, sk: Vec<u8>) {
-        *self.signing_key.write() = Some(sk);
-        log::info!("[CoreSDK] Signing key set");
     }
 
     /// Sign a dsm `Operation` in-place using the device's SPHINCS+ secret key.
@@ -237,12 +224,7 @@ impl CoreSDK {
         &self,
         mut operation: DsmOperation,
     ) -> Result<DsmOperation, DsmError> {
-        let sk = self.signing_key.read().clone().ok_or_else(|| {
-            DsmError::unauthorized(
-                "Signing key not set in CoreSDK; call set_signing_key() first",
-                None::<std::io::Error>,
-            )
-        })?;
+        let sk = crate::sdk::signing_authority::current_secret_key()?;
 
         let cleared = operation.with_cleared_signature();
         let payload = cleared.to_bytes();
@@ -280,12 +262,7 @@ impl CoreSDK {
     /// Used for receipt counter-signatures where the payload is a 32-byte
     /// commitment hash rather than a full `DsmOperation`.
     pub fn sign_bytes_sphincs(&self, payload: &[u8]) -> Result<Vec<u8>, DsmError> {
-        let sk = self.signing_key.read().clone().ok_or_else(|| {
-            DsmError::unauthorized(
-                "Signing key not set in CoreSDK; call set_signing_key() first",
-                None::<std::io::Error>,
-            )
-        })?;
+        let sk = crate::sdk::signing_authority::current_secret_key()?;
 
         dsm::crypto::sphincs::sphincs_sign(&sk, payload).map_err(|e| {
             DsmError::crypto(
@@ -293,30 +270,6 @@ impl CoreSDK {
                 None::<std::io::Error>,
             )
         })
-    }
-
-    /// Update the SPHINCS+ public key in both the CoreSDK device_info and the current state.
-    /// This is necessary because the wallet generates its own signing keypair, which must
-    /// match the public key used for signature verification in state transitions.
-    pub fn update_signing_public_key(&self, public_key: Vec<u8>) {
-        // Note: device_info is not &mut self, but we need to update the state machine's state.
-        // We update the current state's device_info.public_key directly.
-        let mut sm = self.state_machine.lock();
-        if let Some(state) = sm.current_state().cloned() {
-            let mut updated = state;
-            updated.device_info.public_key = public_key.clone();
-            // Recompute hash since device_info changed
-            if let Ok(h) = updated.compute_hash() {
-                updated.hash = h;
-            }
-            sm.set_state(updated);
-            log::info!(
-                "[CoreSDK] Updated state device_info.public_key (len={})",
-                public_key.len()
-            );
-        } else {
-            log::warn!("[CoreSDK] No current state to update public key in");
-        }
     }
 
     /// Current tip state (fail-closed if none)
@@ -494,10 +447,7 @@ impl CoreSDK {
             signature: vec![],
         };
 
-        // Auto-sign the operation if a signing key is available
-        if self.signing_key.read().is_some() {
-            dsm_op = self.sign_operation_sphincs(dsm_op)?;
-        }
+        dsm_op = self.sign_operation_sphincs(dsm_op)?;
 
         self.state_machine.lock().execute_transition(dsm_op)
     }
@@ -1908,18 +1858,40 @@ mod tests {
         unsafe {
             std::env::set_var("DSM_SDK_TEST_MODE", "1");
         }
+        let _ = crate::storage_utils::set_storage_base_dir(
+            std::env::temp_dir().join("dsm_core_sdk_archive_state_test"),
+        );
         crate::storage::client_db::reset_database_for_tests();
         crate::storage::client_db::init_database().expect("init db");
 
-        let device = DeviceInfo::from_hashed_label("archived_state_device", vec![3u8; 32]);
+        crate::sdk::app_state::AppState::reset_memory_for_testing();
+        crate::sdk::app_state::AppState::prime_memory_for_testing();
+        crate::sdk::signing_authority::clear_binding_key_for_testing();
+        let device_id = vec![0x43; 32];
+        let genesis_hash = vec![0x53; 32];
+        let binding_key = vec![0x63; 32];
+        let (public_key, _secret_key) = crate::sdk::signing_authority::derive_signing_keys_for_testing(
+            &device_id,
+            &genesis_hash,
+            &binding_key,
+        )
+        .expect("derive canonical signing keypair");
+        crate::sdk::signing_authority::set_binding_key_for_testing(binding_key);
+        crate::sdk::app_state::AppState::set_identity_info(
+            device_id.clone(),
+            public_key.clone(),
+            genesis_hash,
+            vec![0u8; 32],
+        );
+        let device = DeviceInfo::new(
+            device_id.try_into().expect("device id"),
+            public_key.clone(),
+        );
         let sdk = CoreSDK::new_with_device(device.clone()).expect("init sdk");
         sdk.initialize_with_genesis_state()
             .expect("initialize genesis state");
-
-        let (pk, sk) =
-            dsm::crypto::sphincs::generate_sphincs_keypair().expect("generate test keypair");
-        sdk.set_signing_key(sk);
-        sdk.update_signing_public_key(pk);
+        let current = sdk.get_current_state().expect("current state after genesis");
+        assert_eq!(current.device_info.public_key, device.public_key);
 
         let op = sdk
             .sign_operation_sphincs(DsmOperation::Generic {
@@ -1929,6 +1901,13 @@ mod tests {
                 signature: vec![],
             })
             .expect("sign operation");
+        let signature = op.get_signature().expect("signature present");
+        let payload = op.with_cleared_signature().to_bytes();
+        assert!(
+            dsm::crypto::sphincs::sphincs_verify(&device.public_key, &payload, &signature)
+                .expect("direct signature verify"),
+            "canonical CoreSDK test signature must self-verify"
+        );
 
         let executed = sdk.execute_dsm_operation(op).expect("execute operation");
         assert!(executed.state_number > 0, "state number should advance");
@@ -1960,19 +1939,41 @@ mod tests {
         unsafe {
             std::env::set_var("DSM_SDK_TEST_MODE", "1");
         }
+        let _ = crate::storage_utils::set_storage_base_dir(
+            std::env::temp_dir().join("dsm_core_sdk_rollback_state_test"),
+        );
         crate::storage::client_db::reset_database_for_tests();
         crate::storage::client_db::init_database().expect("init db");
 
-        let device = DeviceInfo::from_hashed_label("rollback_state_device", vec![7u8; 32]);
+        crate::sdk::app_state::AppState::reset_memory_for_testing();
+        crate::sdk::app_state::AppState::prime_memory_for_testing();
+        crate::sdk::signing_authority::clear_binding_key_for_testing();
+        let device_id = vec![0x47; 32];
+        let genesis_hash = vec![0x57; 32];
+        let binding_key = vec![0x67; 32];
+        let (public_key, _secret_key) = crate::sdk::signing_authority::derive_signing_keys_for_testing(
+            &device_id,
+            &genesis_hash,
+            &binding_key,
+        )
+        .expect("derive canonical signing keypair");
+        crate::sdk::signing_authority::set_binding_key_for_testing(binding_key);
+        crate::sdk::app_state::AppState::set_identity_info(
+            device_id.clone(),
+            public_key.clone(),
+            genesis_hash,
+            vec![0u8; 32],
+        );
+        let device = DeviceInfo::new(
+            device_id.try_into().expect("device id"),
+            public_key.clone(),
+        );
         let sdk = CoreSDK::new_with_device(device.clone()).expect("init sdk");
         sdk.initialize_with_genesis_state()
             .expect("initialize genesis state");
+        let current = sdk.get_current_state().expect("current state after genesis");
+        assert_eq!(current.device_info.public_key, device.public_key);
         let prior = sdk.get_current_state().expect("prior state");
-
-        let (pk, sk) =
-            dsm::crypto::sphincs::generate_sphincs_keypair().expect("generate test keypair");
-        sdk.set_signing_key(sk);
-        sdk.update_signing_public_key(pk);
 
         let op = sdk
             .sign_operation_sphincs(DsmOperation::Generic {
@@ -1982,6 +1983,13 @@ mod tests {
                 signature: vec![],
             })
             .expect("sign operation");
+        let signature = op.get_signature().expect("signature present");
+        let payload = op.with_cleared_signature().to_bytes();
+        assert!(
+            dsm::crypto::sphincs::sphincs_verify(&device.public_key, &payload, &signature)
+                .expect("direct signature verify"),
+            "canonical CoreSDK test signature must self-verify"
+        );
         let advanced = sdk.execute_dsm_operation(op).expect("execute operation");
         assert!(
             advanced.state_number > prior.state_number,

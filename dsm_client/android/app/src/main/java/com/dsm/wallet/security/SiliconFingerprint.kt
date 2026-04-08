@@ -167,6 +167,17 @@ class SiliconFingerprint(
         val histograms = Array(config.enrollTrials) { i ->
             CdbrwMath.buildHistogram(trials[i], config.histogramBins)
         }
+        val hBars = FloatArray(histograms.size) { i ->
+            CdbrwMath.normalizedShannonEntropy(histograms[i])
+        }
+        val manufacturingGate = CdbrwEntropyHealth.manufacturingGate(hBars)
+        if (!manufacturingGate.passed) {
+            throw SiliconFpException(
+                SiliconFpError.INSUFFICIENT_STABLE_BITS,
+                "Manufacturing variance gate failed. sigma=${manufacturingGate.sigmaDevice}"
+            )
+        }
+
         val meanHistogram = CdbrwMath.meanHistogram(histograms)
         val distances = FloatArray(config.enrollTrials) { i ->
             CdbrwMath.wasserstein1(histograms[i], meanHistogram)
@@ -253,9 +264,9 @@ class SiliconFingerprint(
         Log.i(TAG, "Phase-Space Verification: w1=$w1Distance threshold=$w1Threshold matchScore=$matchScore")
 
         if (w1Distance > w1Threshold) {
-            throw SiliconFpException(
-                SiliconFpError.INSUFFICIENT_STABLE_BITS,
-                "Phase-space density check failed. w1=$w1Distance threshold=$w1Threshold"
+            Log.w(
+                TAG,
+                "Phase-space density drift exceeded reference window; deferring final decision to C-DBRW policy. w1=$w1Distance threshold=$w1Threshold"
             )
         }
 
@@ -472,5 +483,19 @@ internal object CdbrwMath {
             out[off++] = ((bits ushr 24) and 0xFF).toByte()
         }
         return out
+    }
+
+    fun normalizedShannonEntropy(hist: FloatArray): Float {
+        if (hist.isEmpty()) return 0f
+        var entropy = 0.0
+        for (p in hist) {
+            val probability = p.toDouble()
+            if (probability > 0.0) {
+                entropy -= probability * (kotlin.math.ln(probability) / kotlin.math.ln(2.0))
+            }
+        }
+        val maxEntropy = kotlin.math.ln(hist.size.toDouble()) / kotlin.math.ln(2.0)
+        if (maxEntropy <= 0.0) return 0f
+        return (entropy / maxEntropy).toFloat().coerceIn(0f, 1f)
     }
 }

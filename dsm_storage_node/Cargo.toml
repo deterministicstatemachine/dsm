@@ -1,6 +1,6 @@
 [package]
 name = "dsm_storage_node"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Storage node for the Deterministic State Machine (DSM)"
@@ -61,10 +61,10 @@ async-trait = "0.1"
 # Deterministic tick sources live in dsm core
 
 # DSM Core (for SPHINCS+ and shared types)
-dsm = { version = "0.1.0-beta.1", path = "../dsm_client/deterministic_state_machine/dsm" }
+dsm = { version = "0.1.0-beta.2", path = "../dsm_client/deterministic_state_machine/dsm" }
 
 # DSM SDK (for centralized utilities like base32 Crockford)
-dsm_sdk = { version = "0.1.0-beta.1", path = "../dsm_client/deterministic_state_machine/dsm_sdk" }
+dsm_sdk = { version = "0.1.0-beta.2", path = "../dsm_client/deterministic_state_machine/dsm_sdk" }
 
 # Protobuf support
 prost = "0.13"

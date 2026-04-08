@@ -25,7 +25,6 @@
     }
   },
   "device_binding": {
-    "enable_dbrw": true,
     "entropy_source": "hybrid"
   },
   "_note": "All endpoints are loaded dynamically from ../dsm_env_config.json at runtime",

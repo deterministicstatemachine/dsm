@@ -41,7 +41,6 @@
     }
   },
   "device_binding": {
-    "enable_dbrw": true,
     "entropy_source": "hybrid"
   }
 }

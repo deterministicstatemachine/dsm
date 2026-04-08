@@ -4427,7 +4427,10 @@ mod tests {
         let device_id = [1u8; 32];
         let genesis_hash = [2u8; 32];
         let key_entropy = [device_id.as_slice(), genesis_hash.as_slice()].concat();
-        let keypair = match SignatureKeyPair::generate_from_entropy(&key_entropy) {
+        let keypair = match SignatureKeyPair::generate_from_entropy_with_params(
+            &key_entropy,
+            dsm::crypto::signatures::ParameterSet::SPX256f,
+        ) {
             Ok(kp) => kp,
             Err(e) => panic!("keypair generation failed in test: {}", e),
         };
@@ -4457,7 +4460,10 @@ mod tests {
         let device_id = [1u8; 32];
         let genesis_hash = [2u8; 32];
         let key_entropy = [device_id.as_slice(), genesis_hash.as_slice()].concat();
-        let keypair = match SignatureKeyPair::generate_from_entropy(&key_entropy) {
+        let keypair = match SignatureKeyPair::generate_from_entropy_with_params(
+            &key_entropy,
+            dsm::crypto::signatures::ParameterSet::SPX256f,
+        ) {
             Ok(kp) => kp,
             Err(e) => panic!("keypair generation failed in test: {}", e),
         };
@@ -4535,8 +4541,11 @@ mod tests {
         let genesis_hash = [32u8; 32];
         let counterparty_device_id = [33u8; 32];
         let counterparty_genesis = [34u8; 32];
-        let keypair = SignatureKeyPair::generate_from_entropy(b"stale-local-pending-cleanup")
-            .expect("keypair");
+        let keypair = SignatureKeyPair::generate_from_entropy_with_params(
+            b"stale-local-pending-cleanup",
+            dsm::crypto::signatures::ParameterSet::SPX256f,
+        )
+        .expect("keypair");
 
         let contact_manager = DsmContactManager::new(device_id, vec![NodeId::new("test")]);
         let bilateral_manager = Arc::new(RwLock::new(BilateralTransactionManager::new(
@@ -4653,8 +4662,11 @@ mod tests {
         let genesis_hash = [42u8; 32];
         let counterparty_device_id = [43u8; 32];
         let counterparty_genesis = [44u8; 32];
-        let keypair =
-            SignatureKeyPair::generate_from_entropy(b"fail-accepted-session").expect("keypair");
+        let keypair = SignatureKeyPair::generate_from_entropy_with_params(
+            b"fail-accepted-session",
+            dsm::crypto::signatures::ParameterSet::SPX256f,
+        )
+        .expect("keypair");
 
         let contact_manager = DsmContactManager::new(device_id, vec![NodeId::new("test")]);
         let bilateral_manager = Arc::new(RwLock::new(BilateralTransactionManager::new(
@@ -4762,8 +4774,11 @@ mod tests {
     #[ignore]
     async fn test_alias_mapping_persists_and_restores() {
         // Setup similar to register_sender_session test
-        let keypair =
-            SignatureKeyPair::generate_from_entropy(b"alias-restore-test").expect("keypair");
+        let keypair = SignatureKeyPair::generate_from_entropy_with_params(
+            b"alias-restore-test",
+            dsm::crypto::signatures::ParameterSet::SPX256f,
+        )
+        .expect("keypair");
         let device_id = [11u8; 32];
         let counterparty_device_id = [13u8; 32];
         let genesis_hash = [12u8; 32];
@@ -4864,7 +4879,10 @@ mod tests {
         let device_id = [1u8; 32];
         let genesis_hash = [2u8; 32];
         let key_entropy = [device_id.as_slice(), genesis_hash.as_slice()].concat();
-        let keypair = match SignatureKeyPair::generate_from_entropy(&key_entropy) {
+        let keypair = match SignatureKeyPair::generate_from_entropy_with_params(
+            &key_entropy,
+            dsm::crypto::signatures::ParameterSet::SPX256f,
+        ) {
             Ok(kp) => kp,
             Err(e) => panic!("keypair generation failed in test: {}", e),
         };
@@ -4932,8 +4950,11 @@ mod tests {
     #[ignore]
     async fn test_mark_sender_committed_resolves_alias() {
         // Setup similar to register_sender_session test
-        let keypair = SignatureKeyPair::generate_from_entropy(b"mark-sender-committed-test")
-            .expect("keypair");
+        let keypair = SignatureKeyPair::generate_from_entropy_with_params(
+            b"mark-sender-committed-test",
+            dsm::crypto::signatures::ParameterSet::SPX256f,
+        )
+        .expect("keypair");
         let device_id = [21u8; 32];
         let counterparty_device_id = [23u8; 32];
         let genesis_hash = [22u8; 32];

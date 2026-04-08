@@ -101,8 +101,8 @@ internal object UnifiedCdbrwBridge {
         val enrolled = siliconFp.isEnrolled(context)
         val errors = mutableListOf<String>()
 
-        var accessLevel = "FULL_ACCESS"
-        var trustScore = 1.0f
+        var accessLevel = "UNAVAILABLE"
+        var trustScore = 0.0f
         var matchScore = 0f
         var w1Distance = 0f
         var w1Threshold = 0f
@@ -116,7 +116,7 @@ internal object UnifiedCdbrwBridge {
         var anchorPrefix = ByteArray(0)
 
         val monitoringAnchor = try {
-            val result = AntiCloneGate.getStableHwAnchorMonitoring(context)
+            val result = AntiCloneGate.getStableHwAnchorWithTrust(context)
             accessLevel = result.accessLevel.name
             trustScore = result.trustScore
             result.anchor
@@ -162,13 +162,12 @@ internal object UnifiedCdbrwBridge {
                     hHat = health.hHat
                     rhoHat = health.rhoHat
                     lHat = health.lHat
-                    // Trust penalty scaled by resonant tier (C-DBRW spec §7, §8.1)
-                    when (health.resonantStatus) {
+                    trustScore = minOf(trustScore, when (health.resonantStatus) {
                         CdbrwEntropyHealth.ResonantStatus.PASS,
-                        CdbrwEntropyHealth.ResonantStatus.RESONANT -> { /* no penalty */ }
-                        CdbrwEntropyHealth.ResonantStatus.ADAPTED -> trustScore *= 0.75f
-                        CdbrwEntropyHealth.ResonantStatus.FAIL -> trustScore *= 0.5f
-                    }
+                        CdbrwEntropyHealth.ResonantStatus.RESONANT -> 1.0f
+                        CdbrwEntropyHealth.ResonantStatus.ADAPTED -> 0.75f
+                        CdbrwEntropyHealth.ResonantStatus.FAIL -> 0.0f
+                    })
                 } else {
                     errors += "health=no_samples"
                 }

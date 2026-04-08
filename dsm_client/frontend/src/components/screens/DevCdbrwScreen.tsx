@@ -32,8 +32,6 @@ function buildCdbrwReport(status: DbrwStatus, logBytes: Uint8Array): string {
     'DSM C-DBRW diagnostics report',
     `repo=${DSM_RELEASE_REPO_URL}`,
     `enrolled=${status.enrolled ? 'yes' : 'no'}`,
-    `observe_only=${status.observeOnly ? 'yes' : 'no'}`,
-    `access_mode=${status.accessMode || 'N/A'}`,
     `binding_key_present=${status.bindingKeyPresent ? 'yes' : 'no'}`,
     `verifier_keypair_present=${status.verifierKeypairPresent ? 'yes' : 'no'}`,
     `storage_base_dir_set=${status.storageBaseDirSet ? 'yes' : 'no'}`,
@@ -279,8 +277,8 @@ export default function DevCdbrwScreen(): JSX.Element {
                   <div className="snd-stat-label">Enrolled</div>
                 </div>
                 <div className="snd-stat-cell">
-                  <div className="snd-stat-val-sm">{status?.observeOnly ? 'BETA' : 'ACTIVE'}</div>
-                  <div className="snd-stat-label">Mode</div>
+                  <div className="snd-stat-val-sm">{status?.enrolled ? 'ENFORCED' : 'BLOCKED'}</div>
+                  <div className="snd-stat-label">Policy</div>
                 </div>
                 <div className="snd-stat-cell">
                   <div className="snd-stat-val-sm">{status?.bindingKeyPresent ? 'YES' : 'NO'}</div>
@@ -304,7 +302,7 @@ export default function DevCdbrwScreen(): JSX.Element {
               </div>
               <div className="snd-info-row">
                 <span className="snd-info-label">Access</span>
-                <span className="snd-info-val">{hs?.runtimeAccessLevel || status?.accessMode || 'N/A'}</span>
+                <span className="snd-info-val">{hs?.runtimeAccessLevel || 'N/A'}</span>
               </div>
               <div className="snd-info-row">
                 <span className="snd-info-label">Storage Dir</span>
