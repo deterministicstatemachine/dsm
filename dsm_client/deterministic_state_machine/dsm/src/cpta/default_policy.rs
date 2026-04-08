@@ -54,7 +54,7 @@ pub fn generate_default_policy(
 
     // Basic operation restrictions (allow transfer by default)
     policy.add_condition(PolicyCondition::OperationRestriction {
-        allowed_operations: vec!["Transfer".to_string()],
+        allowed_operations: vec!["transfer".to_string()],
     });
 
     // Minimal metadata (no wall-clock fields)
@@ -66,16 +66,16 @@ pub fn generate_default_policy(
     policy.add_role(PolicyRole {
         id: "owner".to_string(),
         name: "Token Owner".to_string(),
-        permissions: vec!["Transfer".to_string()],
+        permissions: vec!["transfer".to_string()],
     });
 
     policy.add_role(PolicyRole {
         id: "user".to_string(),
         name: "Token User".to_string(),
         permissions: vec![
-            "Transfer".to_string(),
-            "LockToken".to_string(),
-            "UnlockToken".to_string(),
+            "transfer".to_string(),
+            "lock_token".to_string(),
+            "unlock_token".to_string(),
         ],
     });
 
@@ -142,7 +142,7 @@ pub fn generate_specialized_policy(
                 ops.split(',').map(|s| s.trim().to_string()).collect()
             } else {
                 // Default to transfer-only if not specified
-                vec!["Transfer".to_string()]
+                vec!["transfer".to_string()]
             };
 
             // Replace default operation restrictions
@@ -172,7 +172,7 @@ pub fn create_policy(params: PolicyParameters) -> Result<PolicyFile, DsmError> {
 
     // Add verification/operation condition driven by parameters
     policy.add_condition(PolicyCondition::OperationRestriction {
-        allowed_operations: vec!["Transfer".to_string()],
+        allowed_operations: vec!["transfer".to_string()],
     });
 
     Ok(policy)
@@ -213,12 +213,12 @@ mod tests {
             matches!(
                 c,
                 PolicyCondition::OperationRestriction { allowed_operations }
-                if allowed_operations == &["Transfer".to_string()]
+                if allowed_operations == &["transfer".to_string()]
             )
         });
         assert!(
             has_ops,
-            "default policy must restrict operations to Transfer"
+            "default policy must restrict operations to transfer"
         );
     }
 
@@ -231,10 +231,10 @@ mod tests {
         assert_eq!(policy.roles[1].id, "user");
         assert!(policy.roles[1]
             .permissions
-            .contains(&"LockToken".to_string()));
+            .contains(&"lock_token".to_string()));
         assert!(policy.roles[1]
             .permissions
-            .contains(&"UnlockToken".to_string()));
+            .contains(&"unlock_token".to_string()));
     }
 
     #[test]
@@ -337,7 +337,7 @@ mod tests {
             Some(PolicyCondition::OperationRestriction { allowed_operations }) => {
                 assert_eq!(
                     allowed_operations,
-                    &["Transfer".to_string(), "Burn".to_string()]
+                    &["burn".to_string(), "transfer".to_string()]
                 );
             }
             _ => panic!("expected OperationRestriction"),
@@ -356,7 +356,7 @@ mod tests {
             .find(|c| matches!(c, PolicyCondition::OperationRestriction { .. }));
         match ops_condition {
             Some(PolicyCondition::OperationRestriction { allowed_operations }) => {
-                assert_eq!(allowed_operations, &["Transfer".to_string()]);
+                assert_eq!(allowed_operations, &["transfer".to_string()]);
             }
             _ => panic!("expected OperationRestriction"),
         }

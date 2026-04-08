@@ -261,7 +261,7 @@ impl PolicyEnforcer {
             PolicyCondition::OperationRestriction { allowed_operations } => {
                 let allowed = allowed_operations
                     .iter()
-                    .any(|op| op.eq_ignore_ascii_case(&ctx.operation_type));
+                    .any(|op| op == &ctx.operation_type);
                 if allowed {
                     Ok(EnforcementResult::allowed("Operation permitted", tick))
                 } else {
@@ -487,10 +487,7 @@ impl PolicyEnforcer {
 
         for role in roles {
             if self.user_has_role(identity, &role.id).await {
-                let permitted = role
-                    .permissions
-                    .iter()
-                    .any(|op| op.eq_ignore_ascii_case(&ctx.operation_type));
+                let permitted = role.permissions.iter().any(|op| op == &ctx.operation_type);
                 if permitted {
                     return Ok(true);
                 }
@@ -511,13 +508,9 @@ impl PolicyEnforcer {
             return false;
         }
         match &id.derivation_path {
-            Some(path) if !path.is_empty() => {
-                if let Some(tail) = path.last() {
-                    allowed.iter().any(|a| a == tail)
-                } else {
-                    false
-                }
-            }
+            Some(path) if !path.is_empty() => path
+                .iter()
+                .any(|ancestor| allowed.iter().any(|allowed_id| allowed_id == ancestor)),
             _ => false,
         }
     }
@@ -547,6 +540,74 @@ mod tests {
 
         let res = enforcer.enforce_policy(&pol, "transfer", &ctx).await?;
         assert!(!res.allowed);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn operation_restriction_requires_canonical_case_match(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let cache = Arc::new(PolicyCache::new(PolicyCacheConfig::default()));
+        let enforcer = PolicyEnforcer::new(cache);
+
+        let mut pf = PolicyFile::new("OP", "1.0.0", "a");
+        pf.add_condition(PolicyCondition::OperationRestriction {
+            allowed_operations: vec!["Transfer".into()],
+        });
+        let pol = TokenPolicy::new(pf)?;
+
+        let mut ctx = HashMap::new();
+        ctx.insert("tick".into(), 7_u64.to_le_bytes().to_vec());
+
+        let allowed = enforcer.enforce_policy(&pol, "transfer", &ctx).await?;
+        assert!(
+            allowed.allowed,
+            "canonical lower-case operation should pass"
+        );
+
+        let denied = enforcer.enforce_policy(&pol, "Transfer", &ctx).await?;
+        assert!(
+            !denied.allowed,
+            "mixed-case operation input must not pass via case-insensitive matching"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn identity_constraint_accepts_any_allowed_ancestor(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let cache = Arc::new(PolicyCache::new(PolicyCacheConfig::default()));
+        let enforcer = PolicyEnforcer::new(cache);
+
+        let ctx = EnforcementContext {
+            operation_type: "transfer".to_string(),
+            tick: 9,
+            identity: Some(IdentityContext {
+                id: "leaf".to_string(),
+                assigned_roles: None,
+                derivation_path: Some(vec![
+                    "root".to_string(),
+                    "mid".to_string(),
+                    "parent".to_string(),
+                ]),
+            }),
+            region: None,
+            data: HashMap::new(),
+            vault_context: None,
+        };
+
+        let res = enforcer
+            .check_condition(
+                &PolicyCondition::IdentityConstraint {
+                    allowed_identities: vec!["root".to_string()],
+                    allow_derived: true,
+                },
+                &ctx,
+            )
+            .await?;
+        assert!(
+            res.allowed,
+            "full ancestry should satisfy allow_derived checks"
+        );
         Ok(())
     }
 

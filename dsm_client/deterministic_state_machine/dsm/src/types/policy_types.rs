@@ -17,6 +17,65 @@ use prost::Message;
 /// Fixed-length digest type for anchors and policy-bound hashes.
 pub type Digest32 = [u8; 32];
 
+fn canonical_operation_name(value: &str) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    let mut out = String::with_capacity(value.len());
+
+    for (idx, ch) in chars.iter().copied().enumerate() {
+        if ch.is_ascii_alphanumeric() {
+            let prev = idx.checked_sub(1).and_then(|i| chars.get(i)).copied();
+            let next = chars.get(idx + 1).copied();
+            let prev_is_lower_or_digit = prev
+                .map(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+                .unwrap_or(false);
+            let next_is_lower = next.map(|c| c.is_ascii_lowercase()).unwrap_or(false);
+
+            if ch.is_ascii_uppercase()
+                && !out.is_empty()
+                && !out.ends_with('_')
+                && (prev_is_lower_or_digit || next_is_lower)
+            {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+        } else if !out.is_empty() && !out.ends_with('_') {
+            out.push('_');
+        }
+    }
+
+    while out.ends_with('_') {
+        out.pop();
+    }
+
+    out
+}
+
+fn canonical_operation_set(values: &[String]) -> Vec<String> {
+    let mut normalized: Vec<String> = values
+        .iter()
+        .map(|value| canonical_operation_name(value))
+        .collect();
+    normalized.sort();
+    normalized.dedup();
+    normalized
+}
+
+fn normalize_policy_condition(condition: PolicyCondition) -> PolicyCondition {
+    match condition {
+        PolicyCondition::OperationRestriction { allowed_operations } => {
+            PolicyCondition::OperationRestriction {
+                allowed_operations: canonical_operation_set(&allowed_operations),
+            }
+        }
+        other => other,
+    }
+}
+
+fn normalize_policy_role(mut role: PolicyRole) -> PolicyRole {
+    role.permissions = canonical_operation_set(&role.permissions);
+    role
+}
+
 /// PolicyAnchor is the 32-byte identifier (BLAKE3) of a canonical policy file.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PolicyAnchor(pub Digest32);
@@ -234,12 +293,12 @@ impl PolicyFile {
     }
 
     pub fn add_condition(&mut self, condition: PolicyCondition) -> &mut Self {
-        self.conditions.push(condition);
+        self.conditions.push(normalize_policy_condition(condition));
         self
     }
 
     pub fn add_role(&mut self, role: PolicyRole) -> &mut Self {
-        self.roles.push(role);
+        self.roles.push(normalize_policy_role(role));
         self
     }
 
@@ -392,8 +451,7 @@ impl From<&PolicyCondition> for crate::types::proto::PolicyConditionProto {
                 })
             }
             PolicyCondition::OperationRestriction { allowed_operations } => {
-                let mut sorted = allowed_operations.clone();
-                sorted.sort();
+                let sorted = canonical_operation_set(allowed_operations);
                 Kind::OperationRestriction(OperationRestrictionProto {
                     allowed_operations: sorted,
                 })
@@ -440,7 +498,7 @@ impl From<&PolicyCondition> for crate::types::proto::PolicyConditionProto {
                 kv.sort_by(|a, b| a.key.cmp(&b.key));
                 Kind::Custom(CustomConstraintProto {
                     constraint_type: constraint_type.clone(),
-                    parameters: parameters.clone(),
+                    parameters: HashMap::new(),
                     parameters_kv: kv,
                 })
             }
@@ -482,7 +540,7 @@ impl TryFrom<&crate::types::proto::PolicyConditionProto> for PolicyCondition {
                     .try_into()?,
             }),
             Some(Kind::OperationRestriction(p)) => Ok(PolicyCondition::OperationRestriction {
-                allowed_operations: p.allowed_operations.clone(),
+                allowed_operations: canonical_operation_set(&p.allowed_operations),
             }),
             Some(Kind::LogicalTimeConstraint(p)) => Ok(PolicyCondition::LogicalTimeConstraint {
                 min_tick: p.min_tick,
@@ -555,8 +613,7 @@ impl TryFrom<&crate::types::proto::VaultConditionProto> for VaultCondition {
 
 impl From<&PolicyRole> for crate::types::proto::PolicyRoleProto {
     fn from(role: &PolicyRole) -> Self {
-        let mut sorted_permissions = role.permissions.clone();
-        sorted_permissions.sort();
+        let sorted_permissions = canonical_operation_set(&role.permissions);
         Self {
             id: role.id.clone(),
             name: role.name.clone(),
@@ -570,7 +627,7 @@ impl From<&crate::types::proto::PolicyRoleProto> for PolicyRole {
         Self {
             id: proto.id.clone(),
             name: proto.name.clone(),
-            permissions: proto.permissions.clone(),
+            permissions: canonical_operation_set(&proto.permissions),
         }
     }
 }
@@ -585,7 +642,14 @@ pub struct TokenPolicy {
 }
 
 impl TokenPolicy {
-    pub fn new(file: PolicyFile) -> Result<Self, DsmError> {
+    pub fn new(mut file: PolicyFile) -> Result<Self, DsmError> {
+        file.conditions = file
+            .conditions
+            .into_iter()
+            .map(normalize_policy_condition)
+            .collect();
+        file.roles = file.roles.into_iter().map(normalize_policy_role).collect();
+
         let anchor = file.generate_anchor()?;
         let now = dt::tick().1;
         Ok(Self {
@@ -601,13 +665,39 @@ impl TokenPolicy {
         self.last_verified = dt::tick().1;
     }
 
-    /// No time-based conditions are supported.
-    pub fn is_condition_satisfied(&self, _condition: &PolicyCondition) -> bool {
-        true
+    /// Conservative standalone check for stateless callers.
+    ///
+    /// This helper must never bypass full `PolicyEnforcer` evaluation. Conditions
+    /// that require contextual witnesses fail closed here.
+    pub fn is_condition_satisfied(&self, condition: &PolicyCondition) -> bool {
+        if !self.file.conditions.iter().any(|c| c == condition) {
+            return false;
+        }
+
+        match condition {
+            PolicyCondition::LogicalTimeConstraint { min_tick, max_tick } => {
+                self.last_verified >= *min_tick && self.last_verified <= *max_tick
+            }
+            PolicyCondition::EmissionsSchedule { .. }
+            | PolicyCondition::CreditBundlePolicy { .. }
+            | PolicyCondition::BitcoinTapConstraint { .. } => true,
+            PolicyCondition::IdentityConstraint { .. }
+            | PolicyCondition::VaultEnforcement { .. }
+            | PolicyCondition::OperationRestriction { .. }
+            | PolicyCondition::Custom { .. } => false,
+        }
     }
 
     pub fn are_time_conditions_satisfied(&self) -> bool {
-        true
+        self.file
+            .conditions
+            .iter()
+            .all(|condition| match condition {
+                PolicyCondition::LogicalTimeConstraint { min_tick, max_tick } => {
+                    self.last_verified >= *min_tick && self.last_verified <= *max_tick
+                }
+                _ => true,
+            })
     }
 }
 
@@ -843,15 +933,79 @@ mod tests {
     }
 
     #[test]
-    fn token_policy_conditions_always_satisfied() {
-        let pf = PolicyFile::new("tp", "v1", "auth");
-        let tp = TokenPolicy::new(pf).unwrap();
-        let cond = PolicyCondition::LogicalTimeConstraint {
-            min_tick: 0,
-            max_tick: 100,
+    fn token_policy_condition_checks_fail_closed_without_context() {
+        let mut pf = PolicyFile::new("tp", "v1", "auth");
+        let identity_cond = PolicyCondition::IdentityConstraint {
+            allowed_identities: vec!["alice".into()],
+            allow_derived: true,
         };
-        assert!(tp.is_condition_satisfied(&cond));
-        assert!(tp.are_time_conditions_satisfied());
+        pf.add_condition(identity_cond.clone());
+        pf.add_condition(PolicyCondition::LogicalTimeConstraint {
+            min_tick: u64::MAX - 10,
+            max_tick: u64::MAX,
+        });
+        let tp = TokenPolicy::new(pf).unwrap();
+
+        assert!(
+            !tp.is_condition_satisfied(&identity_cond),
+            "context-free identity checks must fail closed"
+        );
+        assert!(
+            !tp.are_time_conditions_satisfied(),
+            "time checks must evaluate the real stored tick window"
+        );
+    }
+
+    #[test]
+    fn canonical_custom_policy_uses_only_sorted_parameters_kv() {
+        use crate::types::proto::policy_condition_proto::Kind;
+
+        let mut params = HashMap::new();
+        params.insert("z_key".to_string(), "last".to_string());
+        params.insert("a_key".to_string(), "first".to_string());
+
+        let mut pf = PolicyFile::new("custom", "v1", "author");
+        pf.add_condition(PolicyCondition::Custom {
+            constraint_type: "rate_limit".to_string(),
+            parameters: params,
+        });
+
+        let canonical = pf.canonical_bytes().unwrap();
+        let proto = crate::types::proto::CanonicalPolicy::decode(canonical.as_slice()).unwrap();
+        let custom = match proto.conditions[0].kind.as_ref().unwrap() {
+            Kind::Custom(custom) => custom,
+            other => panic!("expected custom constraint, got {:?}", other),
+        };
+
+        assert!(
+            custom.parameters.is_empty(),
+            "canonical hashing must exclude the non-deterministic map field"
+        );
+        let ordered_keys: Vec<&str> = custom
+            .parameters_kv
+            .iter()
+            .map(|kv| kv.key.as_str())
+            .collect();
+        assert_eq!(ordered_keys, vec!["a_key", "z_key"]);
+    }
+
+    #[test]
+    fn operation_restriction_anchor_normalizes_case() {
+        let mut lower = PolicyFile::new("ops", "v1", "author");
+        lower.add_condition(PolicyCondition::OperationRestriction {
+            allowed_operations: vec!["transfer".into(), "mint".into()],
+        });
+
+        let mut mixed = PolicyFile::new("ops", "v1", "author");
+        mixed.add_condition(PolicyCondition::OperationRestriction {
+            allowed_operations: vec!["Transfer".into(), "MINT".into()],
+        });
+
+        assert_eq!(
+            lower.generate_anchor().unwrap().0,
+            mixed.generate_anchor().unwrap().0,
+            "operation casing should not fork policy anchors"
+        );
     }
 
     #[test]
