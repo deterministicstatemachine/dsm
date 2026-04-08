@@ -147,10 +147,8 @@ impl TokenPolicySystem {
                 metadata.token_id
             ))
         })?;
-        let declared_anchor = declared_anchor
-            .strip_prefix("dsm:policy:")
-            .unwrap_or(declared_anchor);
-        if declared_anchor != anchor.to_base32() {
+        let declared_anchor = PolicyAnchor::from_policy_uri(declared_anchor)?;
+        if declared_anchor != anchor {
             return Err(DsmError::invalid_operation(format!(
                 "Token {} metadata policy anchor does not match registered policy",
                 metadata.token_id
@@ -329,5 +327,34 @@ mod tests {
 
         let result = system.validate_token_metadata(&metadata).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_token_metadata_validation_accepts_equivalent_lowercase_policy_anchor_uri() {
+        let system = TokenPolicySystem::new().unwrap();
+
+        let policy = PolicyFile::new("Test Policy", "1.0.0", "test_creator");
+        let anchor = system
+            .register_token_policy("test_token", policy)
+            .await
+            .unwrap();
+
+        let owner_id = blake3::hash(b"test_owner").into();
+        let metadata = TokenMetadata::new(
+            "test_token",
+            "Test Token",
+            "TEST",
+            18,
+            TokenType::Created,
+            owner_id,
+            0,
+            Some(anchor.to_policy_uri().to_lowercase()),
+        );
+
+        let result = system.validate_token_metadata(&metadata).await;
+        assert!(
+            result.is_ok(),
+            "lowercase policy URI should validate by bytes"
+        );
     }
 }

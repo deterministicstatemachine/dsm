@@ -16,10 +16,7 @@ pub fn builtin_policy_commit(token_id: &str) -> Option<[u8; 32]> {
 }
 
 pub fn parse_policy_anchor_uri(policy_anchor_uri: &str) -> Result<[u8; 32], DsmError> {
-    let anchor_b32 = policy_anchor_uri
-        .strip_prefix("dsm:policy:")
-        .unwrap_or(policy_anchor_uri);
-    let anchor = PolicyAnchor::from_base32(anchor_b32)?;
+    let anchor = PolicyAnchor::from_policy_uri(policy_anchor_uri)?;
     Ok(*anchor.as_bytes())
 }
 
@@ -45,11 +42,8 @@ mod tests {
     #[test]
     fn strict_policy_commit_accepts_prefixed_anchor_uri() {
         let anchor = PolicyAnchor::from_bytes([0x11; 32]);
-        let commit = strict_policy_commit_for_token(
-            "USER",
-            Some(&format!("dsm:policy:{}", anchor.to_base32())),
-        )
-        .expect("policy anchor should parse");
+        let commit = strict_policy_commit_for_token("USER", Some(&anchor.to_policy_uri()))
+            .expect("policy anchor should parse");
         assert_eq!(commit, [0x11; 32]);
     }
 

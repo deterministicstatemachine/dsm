@@ -29,8 +29,8 @@ impl FsPolicyPersistence {
     fn get_policy_path(&self, anchor: &PolicyAnchor) -> PathBuf {
         #[cfg(target_os = "macos")]
         {
-            // macOS enforces UTF-8 filenames. Use Base32.
-            let name = format!("p_{}.cpta", anchor.to_base32());
+            // macOS enforces UTF-8 filenames. Use display Base32.
+            let name = format!("p_{}.cpta", anchor.to_display_base32());
             self.base_dir.join(name)
         }
         #[cfg(all(unix, not(target_os = "macos")))]
@@ -44,7 +44,7 @@ impl FsPolicyPersistence {
         #[cfg(not(unix))]
         {
             // Fallback for non-Unix (Windows)
-            let name = format!("p_{}.cpta", anchor.to_base32());
+            let name = format!("p_{}.cpta", anchor.to_display_base32());
             self.base_dir.join(name)
         }
     }
@@ -110,7 +110,7 @@ impl PolicyPersistence for FsPolicyPersistence {
                 if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                     if name.starts_with("p_") && name.ends_with(".cpta") {
                         let base32_part = &name[2..name.len() - 5];
-                        if let Ok(anchor) = PolicyAnchor::from_base32(base32_part) {
+                        if let Ok(anchor) = PolicyAnchor::from_policy_uri(base32_part) {
                             anchors.push(anchor);
                         }
                     }
@@ -133,7 +133,7 @@ impl PolicyPersistence for FsPolicyPersistence {
                 if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                     if name.starts_with("p_") && name.ends_with(".cpta") {
                         let base32_part = &name[2..name.len() - 5];
-                        if let Ok(anchor) = PolicyAnchor::from_base32(base32_part) {
+                        if let Ok(anchor) = PolicyAnchor::from_policy_uri(base32_part) {
                             anchors.push(anchor);
                         }
                     }
