@@ -95,11 +95,13 @@ pub(crate) fn derive_signing_keys_for_testing(
     Ok((keypair.public_key().to_vec(), keypair.secret_key().to_vec()))
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 #[cfg(not(all(target_os = "android", feature = "jni")))]
 pub(crate) fn set_binding_key_for_testing(binding_key: Vec<u8>) {
     let _ = crate::binding_key::install_binding_key(binding_key);
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 #[cfg(not(all(target_os = "android", feature = "jni")))]
 pub(crate) fn clear_binding_key_for_testing() {
     crate::binding_key::clear_binding_key_for_testing();

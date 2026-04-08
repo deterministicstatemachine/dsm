@@ -514,8 +514,20 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_initSdkV3(
                 );
             }
 
-            let _ =
-                crate::storage_utils::set_storage_base_dir(std::path::PathBuf::from(base.clone()));
+            if let Err(error) = route_startup_via_ingress(
+                pb::startup_request::Operation::SetStorageBaseDir(pb::SetStorageBaseDirOp {
+                    path_utf8: base.clone(),
+                }),
+            ) {
+                SDK_READY.store(false, Ordering::SeqCst);
+                return respond(
+                    pb::envelope::Payload::InitFailed(pb::InitFailed {
+                        reason: pb::init_failed::Reason::RuntimeUnavailable as i32,
+                        message: format!("failed to set storage base dir: {}", error.message),
+                    }),
+                    &mut env,
+                );
+            }
 
             let dbrw_ok = crate::jni::cdbrw::get_cdbrw_binding_key()
                 .map(|k| k.len() == 32)

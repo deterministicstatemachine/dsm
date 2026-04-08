@@ -301,15 +301,18 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
     dsm::core::bridge::install_unilateral_handler(core_uni_bridge);
 
     // 4) Install AppRouter into BOTH SDK and core layers
-    //    - If device_id is ready: full AppRouter
-    //    - If device_id is missing: minimal bootstrap router (sys.tick only)
+    //    - If canonical identity context is ready: full AppRouter
+    //    - Otherwise: minimal bootstrap router (sys.tick only)
     //
     // IMPORTANT:
     // This init function can be called more than once per process lifetime (e.g. Android
     // WebView/bridge re-inits after createGenesisV2). Therefore, we must always prefer the
     // full router when identity is available, even if a MinimalBootstrapRouter was installed
     // earlier.
-    if crate::sdk::app_state::AppState::get_device_id().is_some() {
+    let canonical_identity_ready = crate::sdk::app_state::AppState::get_device_id().is_some()
+        && crate::fetch_dbrw_binding_key().is_ok();
+
+    if canonical_identity_ready {
         let app_router = Arc::new(
             AppRouterImpl::new(cfg.clone())
                 .map_err(|e| format!("Failed to create AppRouter: {:?}", e))?,

@@ -14,3 +14,16 @@ uint8_t *dsm_process_envelope_protobuf(const uint8_t *envelope_bytes,
 void dsm_free_envelope_bytes(uint8_t *bytes, uintptr_t len);
 
 bool dsm_set_storage_base_dir(const char *path_utf8);
+
+bool dsm_configure_env(const char *config_path_utf8);
+
+bool dsm_initialize_sdk(void);
+
+bool dsm_init_dsm_sdk(const char *config_path_utf8);
+
+bool dsm_initialize_sdk_context(const uint8_t *device_id,
+                                uintptr_t device_id_len,
+                                const uint8_t *genesis_hash,
+                                uintptr_t genesis_hash_len,
+                                const uint8_t *binding_key,
+                                uintptr_t binding_key_len);

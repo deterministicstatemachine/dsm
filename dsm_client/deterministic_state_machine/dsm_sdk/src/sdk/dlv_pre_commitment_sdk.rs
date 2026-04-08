@@ -102,14 +102,10 @@ impl DlvPreCommitmentSdk {
             let intended_recipient = dlv_cfg.required_params.get("recipient_public_key").cloned();
             let encryption_key = intended_recipient.as_deref().unwrap_or(creator_kyber_pk);
 
-            // Create vault strictly with provided inputs
-            let (vault_id, _op) = self
+            let draft = self
                 .dlv_manager
-                .create_vault(
-                    (
-                        creator_signing_keypair.public_key(),
-                        creator_signing_keypair.secret_key(),
-                    ),
+                .prepare_vault(
+                    creator_signing_keypair.public_key(),
                     dlv_cfg.unlock_condition.clone(),
                     content,
                     std::str::from_utf8(mime)
@@ -117,9 +113,16 @@ impl DlvPreCommitmentSdk {
                     intended_recipient.clone(),
                     encryption_key,
                     reference_state,
-                    None,
-                    None,
-                )
+                )?;
+            let creator_signature = dsm::crypto::sphincs::sphincs_sign(
+                creator_signing_keypair.secret_key(),
+                &draft.parameters_hash,
+            )
+            .map_err(|e| DsmError::crypto("sphincs_sign", Some(e)))?;
+            // Create vault strictly with provided inputs
+            let (vault_id, _op) = self
+                .dlv_manager
+                .finalize_vault(draft, &creator_signature, None, None)
                 .await?;
 
             fork_vault_bindings.insert(fork_id.clone(), vault_id.clone());

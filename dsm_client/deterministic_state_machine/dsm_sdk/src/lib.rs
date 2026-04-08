@@ -168,8 +168,8 @@ pub mod platform;
 // iOS protobuf-native transport functions (extern "C" for Swift bridging)
 #[cfg(target_os = "ios")]
 pub use platform::ios::transport::{
-    dsm_free_envelope_bytes, dsm_init_dsm_sdk, dsm_initialize_sdk_context,
-    dsm_process_envelope_protobuf, dsm_set_storage_base_dir,
+    dsm_configure_env, dsm_free_envelope_bytes, dsm_init_dsm_sdk, dsm_initialize_sdk,
+    dsm_initialize_sdk_context, dsm_process_envelope_protobuf, dsm_set_storage_base_dir,
 };
 
 pub mod runtime;
@@ -234,10 +234,18 @@ pub async fn init_dsm_sdk() -> Result<(), dsm::types::error::DsmError> {
                     gen.len()
                 );
                 if dev.len() == 32 && gen.len() == 32 {
-                    log::info!("Initializing SDK context from persisted AppState");
-                    let dbrw = fetch_dbrw_binding_key()?;
-                    let entropy = derive_production_entropy(&dev, &gen, &dbrw);
-                    initialize_sdk_context(dev, gen.clone(), entropy)?;
+                    match fetch_dbrw_binding_key() {
+                        Ok(dbrw) => {
+                            log::info!("Initializing SDK context from persisted AppState");
+                            let entropy = derive_production_entropy(&dev, &gen, &dbrw);
+                            initialize_sdk_context(dev, gen.clone(), entropy)?;
+                        }
+                        Err(_) => {
+                            log::info!(
+                                "Persisted identity found without C-DBRW binding key; deferring SDK context initialization"
+                            );
+                        }
+                    }
                 } else {
                     return Err(dsm::types::error::DsmError::invalid_parameter(format!(
                         "Invalid persisted identity sizes: device_id={}, genesis={}",

@@ -7,7 +7,7 @@
 //! must sign with SPHINCS+ before submitting to the state machine.
 //! NOTE: No bincode/serde. `create_vault_post` encodes with `prost`.
 
-use super::{FulfillmentMechanism, FulfillmentProof, LimboVault, VaultState};
+use super::{FulfillmentMechanism, FulfillmentProof, LimboVault, LimboVaultDraft, VaultState};
 use crate::types::operations::{Operation, TransactionMode};
 use crate::types::token_types::Balance;
 use crate::types::{error::DsmError, state_types::State};
@@ -28,42 +28,52 @@ impl DLVManager {
         }
     }
 
-    /// Create a new vault and return the vault ID with an unsigned `Operation::DlvCreate`.
-    ///
-    /// The caller (SDK) must sign the returned operation before submitting it
-    /// to the state machine via `apply_transition()`.
+    /// Prepare a secret-free vault draft.
     #[allow(clippy::too_many_arguments)]
-    pub async fn create_vault(
+    pub fn prepare_vault(
         &self,
-        creator_keypair: (&[u8], &[u8]),
+        creator_public_key: &[u8],
         condition: FulfillmentMechanism,
         content: &[u8],
         content_type: &str,
         intended_recipient: Option<Vec<u8>>,
         encryption_public_key: &[u8],
         reference_state: &State,
-        token_id: Option<&str>,
-        locked_amount: Option<u64>,
-    ) -> Result<(String, Operation), DsmError> {
-        let vault = LimboVault::new(
-            creator_keypair,
+    ) -> Result<LimboVaultDraft, DsmError> {
+        LimboVault::create_draft(
+            creator_public_key,
             condition.clone(),
             content,
             content_type,
             intended_recipient.clone(),
             encryption_public_key,
             reference_state,
-        )?;
+        )
+    }
+
+    /// Finalize a vault draft and return the vault ID with an unsigned `Operation::DlvCreate`.
+    ///
+    /// `creator_signature` authenticates the vault's `parameters_hash` and is stored
+    /// in the vault metadata. The caller (SDK) must still sign the returned operation
+    /// before submitting it to the state machine via `apply_transition()`.
+    pub async fn finalize_vault(
+        &self,
+        draft: LimboVaultDraft,
+        creator_signature: &[u8],
+        token_id: Option<&str>,
+        locked_amount: Option<u64>,
+    ) -> Result<(String, Operation), DsmError> {
+        let vault = draft.finalize(creator_signature)?;
 
         let vault_id = vault.id.clone();
 
         // Serialize the fulfillment condition via proto for the operation
-        let fm_proto: crate::types::proto::FulfillmentMechanism = (&condition).into();
+        let fm_proto: crate::types::proto::FulfillmentMechanism = (&vault.fulfillment_condition).into();
         let fulfillment_bytes = fm_proto.encode_to_vec();
 
         // Build the unsigned DlvCreate operation
         let locked_balance = locked_amount.map(|amt| {
-            Balance::from_state(amt, reference_state.hash, reference_state.state_number)
+            Balance::from_state(amt, vault.reference_state_hash, vault.created_at_state)
         });
 
         let operation = Operation::DlvCreate {
@@ -71,7 +81,7 @@ impl DLVManager {
             creator_public_key: vault.creator_public_key.clone(),
             parameters_hash: vault.parameters_hash.clone(),
             fulfillment_condition: fulfillment_bytes,
-            intended_recipient: intended_recipient.clone(),
+            intended_recipient: vault.intended_recipient.clone(),
             token_id: token_id.map(|s| s.as_bytes().to_vec()),
             locked_amount: locked_balance,
             signature: vec![], // unsigned — caller must sign

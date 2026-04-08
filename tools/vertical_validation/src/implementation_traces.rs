@@ -853,40 +853,62 @@ fn trace_dlv_manager_inventory_consistency(
             public_params: vec![0xB2; 16],
         };
 
-        let (vault_a, op_a) = match manager
-            .create_vault(
-                (&creator_kp.public_key, &creator_kp.secret_key),
+        let draft_a = match manager
+            .prepare_vault(
+                &creator_kp.public_key,
                 condition.clone(),
                 b"trace vault alpha",
                 "text/plain",
                 None,
                 &encryption_pk,
                 &reference_state,
-                Some("ERA"),
-                Some(5),
             )
+        {
+            Ok(result) => result,
+            Err(e) => return vec![format!("prepare_vault alpha failed: {e}")],
+        };
+        let creator_signature_a = match dsm::crypto::sphincs::sphincs_sign(
+            &creator_kp.secret_key,
+            &draft_a.parameters_hash,
+        ) {
+            Ok(result) => result,
+            Err(e) => return vec![format!("sign_vault alpha failed: {e}")],
+        };
+        let (vault_a, op_a) = match manager
+            .finalize_vault(draft_a, &creator_signature_a, Some("ERA"), Some(5))
             .await
         {
             Ok(result) => result,
-            Err(e) => return vec![format!("create_vault alpha failed: {e}")],
+            Err(e) => return vec![format!("finalize_vault alpha failed: {e}")],
         };
 
-        let (vault_b, op_b) = match manager
-            .create_vault(
-                (&creator_kp.public_key, &creator_kp.secret_key),
+        let draft_b = match manager
+            .prepare_vault(
+                &creator_kp.public_key,
                 condition,
                 b"trace vault beta",
                 "text/plain",
                 None,
                 &encryption_pk,
                 &reference_state,
-                None,
-                None,
             )
+        {
+            Ok(result) => result,
+            Err(e) => return vec![format!("prepare_vault beta failed: {e}")],
+        };
+        let creator_signature_b = match dsm::crypto::sphincs::sphincs_sign(
+            &creator_kp.secret_key,
+            &draft_b.parameters_hash,
+        ) {
+            Ok(result) => result,
+            Err(e) => return vec![format!("sign_vault beta failed: {e}")],
+        };
+        let (vault_b, op_b) = match manager
+            .finalize_vault(draft_b, &creator_signature_b, None, None)
             .await
         {
             Ok(result) => result,
-            Err(e) => return vec![format!("create_vault beta failed: {e}")],
+            Err(e) => return vec![format!("finalize_vault beta failed: {e}")],
         };
 
         if vault_a == vault_b {

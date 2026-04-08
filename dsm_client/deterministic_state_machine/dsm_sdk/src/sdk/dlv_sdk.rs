@@ -202,7 +202,6 @@ impl DlvSdk {
     ) -> Result<VaultCreationResult, DsmError> {
         let creator_keypair = crate::sdk::signing_authority::derive_current_signing_keypair()?;
         let creator_pk = creator_keypair.public_key().to_vec();
-        let creator_sk = creator_keypair.secret_key().to_vec();
 
         // Determine encryption key (Kyber PK):
         // - If config specifies a recipient key, use it
@@ -217,20 +216,27 @@ impl DlvSdk {
         // Convert high-level condition to concrete mechanism
         let mech = self.convert_condition_to_mechanism(&config.condition, reference_state)?;
 
-        // Create the vault (manager owns CEK/KEK & proof commitments)
-        let (vault_id, _op) = self
+        let draft = self
             .manager
-            .create_vault(
-                (&creator_pk, &creator_sk),
+            .prepare_vault(
+                creator_keypair.public_key(),
                 mech,
                 &config.content,
                 &config.content_type,
                 intended_recipient,
                 &encryption_key,
                 reference_state,
-                None,
-                None,
-            )
+            )?;
+        let creator_signature = dsm::crypto::sphincs::sphincs_sign(
+            creator_keypair.secret_key(),
+            &draft.parameters_hash,
+        )
+        .map_err(|e| DsmError::crypto("sphincs_sign", Some(e)))?;
+
+        // Create the vault (manager owns CEK/KEK & proof commitments)
+        let (vault_id, _op) = self
+            .manager
+            .finalize_vault(draft, &creator_signature, None, None)
             .await?; // Produce a shareable post
         let vault_post_data = self
             .manager

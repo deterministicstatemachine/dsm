@@ -4,13 +4,18 @@
 //! Unlike the JSON-wrapped JNI bridge for Android, this provides direct protobuf
 //! handling optimized for BLE and Swift interop.
 
+use std::ffi::CStr;
+use std::os::raw::c_char;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::PathBuf;
 
 use log::error;
 use prost::Message;
 
-use crate::generated::{ingress_request, ingress_response, Envelope, IngressRequest};
+use crate::generated::{
+    ingress_request, ingress_response, startup_request, startup_response, ConfigureEnvOp, Envelope,
+    IngressRequest, InitializeIdentityContextOp, InitializeSdkOp, SetStorageBaseDirOp,
+    StartupRequest, StartupResponse,
+};
 use crate::util::deterministic_time;
 
 /// Process envelope with protobuf-native transport (iOS/Swift optimized)
@@ -94,44 +99,146 @@ pub extern "C" fn dsm_free_envelope_bytes(bytes: *mut u8, len: usize) {
     }
 }
 
-/// Configure the SDK storage base directory for iOS callers.
-///
-/// Returns `true` when the directory is configured or was already configured.
-/// Returns `false` for null pointers, invalid UTF-8, or storage setup errors.
-#[no_mangle]
-pub extern "C" fn dsm_set_storage_base_dir(path_utf8: *const std::os::raw::c_char) -> bool {
-    if path_utf8.is_null() {
-        error!("iOS transport: null storage path provided");
-        return false;
+fn parse_nonempty_cstr(arg_name: &str, value: *const c_char) -> Option<String> {
+    if value.is_null() {
+        error!("iOS transport: null {} provided", arg_name);
+        return None;
     }
 
-    let path = unsafe { std::ffi::CStr::from_ptr(path_utf8) };
-    let path = match path.to_str() {
-        Ok(v) if !v.is_empty() => v,
+    let value = unsafe { CStr::from_ptr(value) };
+    match value.to_str() {
+        Ok(v) if !v.is_empty() => Some(v.to_string()),
         Ok(_) => {
-            error!("iOS transport: empty storage path provided");
-            return false;
+            error!("iOS transport: empty {} provided", arg_name);
+            None
         }
         Err(e) => {
-            error!("iOS transport: invalid UTF-8 storage path: {}", e);
-            return false;
+            error!("iOS transport: invalid UTF-8 {}: {}", arg_name, e);
+            None
         }
-    };
+    }
+}
 
-    match crate::storage_utils::set_storage_base_dir(PathBuf::from(path)) {
-        Ok(_) => true,
-        Err(e) => {
-            error!("iOS transport: failed to set storage base dir: {}", e);
+fn copy_required_bytes(arg_name: &str, bytes: *const u8, len: usize) -> Option<Vec<u8>> {
+    if bytes.is_null() {
+        error!("iOS transport: null {} provided", arg_name);
+        return None;
+    }
+    Some(unsafe { std::slice::from_raw_parts(bytes, len) }.to_vec())
+}
+
+fn startup_ok(operation_name: &str, response: StartupResponse) -> bool {
+    match response.result {
+        Some(startup_response::Result::OkBytes(_)) => true,
+        Some(startup_response::Result::Error(error_pb)) => {
+            error!("iOS transport: {} failed: {}", operation_name, error_pb.message);
+            false
+        }
+        None => {
+            error!("iOS transport: {} returned empty response", operation_name);
             false
         }
     }
 }
 
+fn dispatch_startup_helper(operation_name: &str, operation: startup_request::Operation) -> bool {
+    startup_ok(
+        operation_name,
+        crate::ingress::dispatch_startup(StartupRequest {
+            operation: Some(operation),
+        }),
+    )
+}
+
+/// Configure the SDK storage base directory for iOS callers.
+///
+/// Returns `true` when the directory is configured or was already configured.
+/// Returns `false` for null pointers, invalid UTF-8, or storage setup errors.
+#[no_mangle]
+pub extern "C" fn dsm_set_storage_base_dir(path_utf8: *const c_char) -> bool {
+    let path = match parse_nonempty_cstr("storage path", path_utf8) {
+        Some(path) => path,
+        None => return false,
+    };
+
+    dispatch_startup_helper(
+        "set storage base dir",
+        startup_request::Operation::SetStorageBaseDir(SetStorageBaseDirOp { path_utf8: path }),
+    )
+}
+
+/// Configure the authoritative env-config path for iOS callers.
+#[no_mangle]
+pub extern "C" fn dsm_configure_env(config_path_utf8: *const c_char) -> bool {
+    let config_path = match parse_nonempty_cstr("env config path", config_path_utf8) {
+        Some(path) => path,
+        None => return false,
+    };
+
+    dispatch_startup_helper(
+        "configure env",
+        startup_request::Operation::ConfigureEnv(ConfigureEnvOp {
+            config_path_utf8: config_path,
+        }),
+    )
+}
+
+/// Initialize the shared SDK runtime after storage/env configuration.
+#[no_mangle]
+pub extern "C" fn dsm_initialize_sdk() -> bool {
+    dispatch_startup_helper(
+        "initialize sdk",
+        startup_request::Operation::InitializeSdk(InitializeSdkOp {}),
+    )
+}
+
+/// Convenience bootstrap helper for iOS callers: configure env then initialize SDK.
+#[no_mangle]
+pub extern "C" fn dsm_init_dsm_sdk(config_path_utf8: *const c_char) -> bool {
+    if !dsm_configure_env(config_path_utf8) {
+        return false;
+    }
+    dsm_initialize_sdk()
+}
+
+/// Install canonical identity context using the validated C-DBRW binding key.
+#[no_mangle]
+pub extern "C" fn dsm_initialize_sdk_context(
+    device_id: *const u8,
+    device_id_len: usize,
+    genesis_hash: *const u8,
+    genesis_hash_len: usize,
+    binding_key: *const u8,
+    binding_key_len: usize,
+) -> bool {
+    let device_id = match copy_required_bytes("device_id", device_id, device_id_len) {
+        Some(bytes) => bytes,
+        None => return false,
+    };
+    let genesis_hash = match copy_required_bytes("genesis_hash", genesis_hash, genesis_hash_len) {
+        Some(bytes) => bytes,
+        None => return false,
+    };
+    let binding_key = match copy_required_bytes("binding_key", binding_key, binding_key_len) {
+        Some(bytes) => bytes,
+        None => return false,
+    };
+
+    dispatch_startup_helper(
+        "initialize identity context",
+        startup_request::Operation::InitializeIdentityContext(InitializeIdentityContextOp {
+            device_id,
+            genesis_hash,
+            binding_key,
+        }),
+    )
+}
+
 /// Process envelope with native protobuf handling (internal function)
 fn process_envelope_native(input_bytes: &[u8]) -> Vec<u8> {
     // 1) Decode Envelope from raw protobuf bytes
-    let envelope_in = match Envelope::decode(input_bytes) {
-        Ok(e) => e,
+    let message_id = match Envelope::decode(input_bytes) {
+        Ok(envelope_in) => envelope_in.message_id,
         Err(e) => {
             error!("iOS transport: Envelope decode failed: {}", e);
             return create_error_envelope_bytes(&format!("Envelope decode failed: {}", e));
@@ -141,10 +248,7 @@ fn process_envelope_native(input_bytes: &[u8]) -> Vec<u8> {
     // 2) Ensure storage is loaded (critical for iOS)
     crate::sdk::app_state::AppState::ensure_storage_loaded();
 
-    // 3) Extract message_id for error handling
-    let message_id = envelope_in.message_id.clone();
-
-    // 4) Forward to the shared ingress (platform-agnostic semantic boundary).
+    // 3) Forward to the shared ingress (platform-agnostic semantic boundary).
     //    Both the Android JNI shim and this iOS FFI shim use the same dispatch
     //    path after this point; no JNI-specific logic is involved here.
     let request = IngressRequest {
@@ -251,5 +355,17 @@ mod tests {
         } else {
             panic!("Expected error payload in response");
         }
+    }
+
+    #[test]
+    fn test_initialize_sdk_context_rejects_null_device_id() {
+        assert!(!dsm_initialize_sdk_context(
+            std::ptr::null(),
+            32,
+            [0u8; 32].as_ptr(),
+            32,
+            [1u8; 32].as_ptr(),
+            32,
+        ));
     }
 }
