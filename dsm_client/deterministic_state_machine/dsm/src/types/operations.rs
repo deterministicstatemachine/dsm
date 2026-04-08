@@ -484,6 +484,10 @@ pub enum Operation {
         claim_proof: Vec<u8>,
         /// SPHINCS+ public key of the claimant.
         claimant_public_key: Vec<u8>,
+        /// Binary token type locked in the vault, when token settlement is required.
+        token_id: Option<Vec<u8>>,
+        /// Amount of locked tokens to release atomically, when applicable.
+        locked_amount: Option<Balance>,
         /// SPHINCS+ signature by the claimant over canonical bytes.
         signature: Vec<u8>,
         /// Execution mode (typically Unilateral).
@@ -497,6 +501,10 @@ pub enum Operation {
         reason: String,
         /// SPHINCS+ public key of the vault creator.
         creator_public_key: Vec<u8>,
+        /// Binary token type locked in the vault, when token settlement is required.
+        token_id: Option<Vec<u8>>,
+        /// Amount of locked tokens to release atomically, when applicable.
+        locked_amount: Option<Balance>,
         /// SPHINCS+ signature by the creator over canonical bytes.
         signature: Vec<u8>,
         /// Execution mode (typically Unilateral).
@@ -997,6 +1005,8 @@ impl Operation {
                 vault_id,
                 claim_proof,
                 claimant_public_key,
+                token_id,
+                locked_amount,
                 signature,
                 mode,
             } => {
@@ -1004,6 +1014,21 @@ impl Operation {
                 put_bytes(&mut out, vault_id);
                 put_bytes(&mut out, claim_proof);
                 put_bytes(&mut out, claimant_public_key);
+                match token_id {
+                    Some(t) => {
+                        put_u8(&mut out, 1);
+                        put_bytes(&mut out, t);
+                    }
+                    None => put_u8(&mut out, 0),
+                }
+                match locked_amount {
+                    Some(a) => {
+                        put_u8(&mut out, 1);
+                        let bal = a.to_le_bytes();
+                        put_bytes(&mut out, &bal);
+                    }
+                    None => put_u8(&mut out, 0),
+                }
                 put_bytes(&mut out, signature);
                 put_mode(&mut out, mode);
             }
@@ -1011,6 +1036,8 @@ impl Operation {
                 vault_id,
                 reason,
                 creator_public_key,
+                token_id,
+                locked_amount,
                 signature,
                 mode,
             } => {
@@ -1018,6 +1045,21 @@ impl Operation {
                 put_bytes(&mut out, vault_id);
                 put_str(&mut out, reason);
                 put_bytes(&mut out, creator_public_key);
+                match token_id {
+                    Some(t) => {
+                        put_u8(&mut out, 1);
+                        put_bytes(&mut out, t);
+                    }
+                    None => put_u8(&mut out, 0),
+                }
+                match locked_amount {
+                    Some(a) => {
+                        put_u8(&mut out, 1);
+                        let bal = a.to_le_bytes();
+                        put_bytes(&mut out, &bal);
+                    }
+                    None => put_u8(&mut out, 0),
+                }
                 put_bytes(&mut out, signature);
                 put_mode(&mut out, mode);
             }
@@ -1624,12 +1666,24 @@ impl Operation {
                 let vault_id = get_bytes(&mut input)?;
                 let claim_proof = get_bytes(&mut input)?;
                 let claimant_public_key = get_bytes(&mut input)?;
+                let token_id = match get_u8(&mut input)? {
+                    0 => None,
+                    1 => Some(get_bytes(&mut input)?),
+                    _ => return Err(DsmError::invalid_operation("bad opt flag")),
+                };
+                let locked_amount = match get_u8(&mut input)? {
+                    0 => None,
+                    1 => Some(dec_balance(&mut input)?),
+                    _ => return Err(DsmError::invalid_operation("bad opt flag")),
+                };
                 let signature = get_bytes(&mut input)?;
                 let mode = dec_mode(&mut input)?;
                 DlvClaim {
                     vault_id,
                     claim_proof,
                     claimant_public_key,
+                    token_id,
+                    locked_amount,
                     signature,
                     mode,
                 }
@@ -1638,12 +1692,24 @@ impl Operation {
                 let vault_id = get_bytes(&mut input)?;
                 let reason = get_str(&mut input)?;
                 let creator_public_key = get_bytes(&mut input)?;
+                let token_id = match get_u8(&mut input)? {
+                    0 => None,
+                    1 => Some(get_bytes(&mut input)?),
+                    _ => return Err(DsmError::invalid_operation("bad opt flag")),
+                };
+                let locked_amount = match get_u8(&mut input)? {
+                    0 => None,
+                    1 => Some(dec_balance(&mut input)?),
+                    _ => return Err(DsmError::invalid_operation("bad opt flag")),
+                };
                 let signature = get_bytes(&mut input)?;
                 let mode = dec_mode(&mut input)?;
                 DlvInvalidate {
                     vault_id,
                     reason,
                     creator_public_key,
+                    token_id,
+                    locked_amount,
                     signature,
                     mode,
                 }
@@ -2453,6 +2519,8 @@ mod tests {
                 vault_id: vec![0x01; 32],
                 claim_proof: vec![0x02; 64],
                 claimant_public_key: vec![0x03; 64],
+                token_id: Some(b"ERA".to_vec()),
+                locked_amount: Some(Balance::from_state(7, [0u8; 32], 0)),
                 signature: vec![0x04; 48],
                 mode: TransactionMode::Bilateral,
             });
@@ -2464,6 +2532,8 @@ mod tests {
                 vault_id: vec![0x01; 32],
                 reason: "timeout expired".into(),
                 creator_public_key: vec![0x02; 64],
+                token_id: Some(b"ERA".to_vec()),
+                locked_amount: Some(Balance::from_state(9, [0u8; 32], 0)),
                 signature: vec![0x03; 48],
                 mode: TransactionMode::Unilateral,
             });
@@ -2716,6 +2786,8 @@ mod tests {
                     vault_id: vec![],
                     claim_proof: vec![],
                     claimant_public_key: vec![],
+                    token_id: None,
+                    locked_amount: None,
                     signature: vec![],
                     mode: TransactionMode::Bilateral,
                 }
@@ -2728,6 +2800,8 @@ mod tests {
                     vault_id: vec![],
                     reason: String::new(),
                     creator_public_key: vec![],
+                    token_id: None,
+                    locked_amount: None,
                     signature: vec![],
                     mode: TransactionMode::Bilateral,
                 }
