@@ -1,105 +1,152 @@
 //! # SDK Event Bus
 //!
-//! Global protobuf-encoded broadcast channel for asynchronous event delivery.
-//! SDK components push pre-encoded protobuf bytes into the stream; UI or
-//! bridge subscribers receive them without coupling to any specific generated
-//! message type. The channel capacity is 256 messages; lagging receivers
-//! silently drop older events.
+//! Typed protobuf event queue shared by Android JNI, iOS FFI, and tests.
+//! Producers enqueue encoded [`crate::generated::SdkEvent`] messages; platform
+//! adapters drain them through the shared ingress using `DrainEventsOp`.
+
+use std::collections::VecDeque;
+use std::sync::Mutex;
 
 use once_cell::sync::Lazy;
-use tokio::sync::broadcast::{self, Sender, Receiver};
+use prost::Message;
+use tokio::sync::broadcast::{self, Receiver, Sender};
 
-static EVENTS: Lazy<Sender<Vec<u8>>> = Lazy::new(|| broadcast::channel(256).0);
+use crate::generated as pb;
 
-/// Push a pre-encoded event notification (protobuf bytes) into the stream.
-/// This avoids coupling to any specific generated message type.
-pub fn push_event_bytes(bytes: Vec<u8>) {
-    let _ = EVENTS.send(bytes); // ignore lagging receivers
+const EVENT_QUEUE_CAPACITY: usize = 256;
+const DEFAULT_DRAIN_MAX_EVENTS: usize = 64;
+
+static EVENT_QUEUE: Lazy<Mutex<VecDeque<Vec<u8>>>> =
+    Lazy::new(|| Mutex::new(VecDeque::with_capacity(EVENT_QUEUE_CAPACITY)));
+static EVENT_BROADCAST: Lazy<Sender<Vec<u8>>> =
+    Lazy::new(|| broadcast::channel(EVENT_QUEUE_CAPACITY).0);
+
+fn normalize_max_events(max_events: usize) -> usize {
+    if max_events == 0 {
+        DEFAULT_DRAIN_MAX_EVENTS
+    } else {
+        max_events.min(EVENT_QUEUE_CAPACITY)
+    }
 }
 
-/// Subscribe to the event stream
+fn encode_event(event: &pb::SdkEvent) -> Vec<u8> {
+    event.encode_to_vec()
+}
+
+/// Queue an already-encoded `SdkEvent` payload.
+pub fn push_event_bytes(bytes: Vec<u8>) {
+    {
+        let mut queue = EVENT_QUEUE.lock().expect("event queue poisoned");
+        if queue.len() >= EVENT_QUEUE_CAPACITY {
+            let _ = queue.pop_front();
+        }
+        queue.push_back(bytes.clone());
+    }
+    let _ = EVENT_BROADCAST.send(bytes);
+}
+
+/// Queue a typed SDK event.
+pub fn push_sdk_event(kind: i32, payload: Vec<u8>) {
+    let event = pb::SdkEvent { kind, payload };
+    push_event_bytes(encode_event(&event));
+}
+
+/// Queue a typed SDK event from a protobuf message payload.
+pub fn push_sdk_message<M: Message>(kind: i32, payload: &M) {
+    push_sdk_event(kind, payload.encode_to_vec());
+}
+
+/// Drain up to `max_events` queued SDK events in FIFO order.
+pub fn drain_events(max_events: usize) -> pb::SdkEventBatch {
+    let take = normalize_max_events(max_events);
+    let mut drained = Vec::with_capacity(take);
+    let has_more = {
+        let mut queue = EVENT_QUEUE.lock().expect("event queue poisoned");
+        for _ in 0..take {
+            let Some(bytes) = queue.pop_front() else {
+                break;
+            };
+            match pb::SdkEvent::decode(bytes.as_slice()) {
+                Ok(event) => drained.push(event),
+                Err(e) => {
+                    log::warn!("dropping malformed sdk event from queue: {e}");
+                }
+            }
+        }
+        !queue.is_empty()
+    };
+
+    pb::SdkEventBatch {
+        events: drained,
+        has_more,
+    }
+}
+
+/// Subscribe to encoded `SdkEvent` bytes. Primarily used by tests.
 pub fn subscribe() -> Receiver<Vec<u8>> {
-    EVENTS.subscribe()
+    EVENT_BROADCAST.subscribe()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Helper: subscribe, push a unique tagged payload, then drain until we
-    /// find it. This avoids interference from the global broadcast channel
-    /// when tests run in parallel.
-    async fn push_and_drain(tag: u8, body: &[u8]) -> Vec<u8> {
-        let mut rx = subscribe();
-        let mut payload = vec![tag];
-        payload.extend_from_slice(body);
-        push_event_bytes(payload.clone());
+    const TEST_KIND: i32 = 123;
+    static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+    fn drain_all_test_events() {
         loop {
-            let msg = rx.recv().await.unwrap();
-            if msg.first() == Some(&tag) {
-                return msg;
+            let batch = drain_events(EVENT_QUEUE_CAPACITY);
+            if batch.events.is_empty() && !batch.has_more {
+                break;
             }
         }
-    }
-
-    #[tokio::test]
-    async fn push_and_receive_single_event() {
-        let received = push_and_drain(0xA1, &[1, 2, 3, 4]).await;
-        assert_eq!(received, vec![0xA1, 1, 2, 3, 4]);
-    }
-
-    #[tokio::test]
-    async fn multiple_subscribers_receive_same_event() {
-        let mut rx1 = subscribe();
-        let mut rx2 = subscribe();
-        let payload = vec![0xA2, 10, 20];
-        push_event_bytes(payload.clone());
-
-        let find = |rx: &mut Receiver<Vec<u8>>| loop {
-            match rx.try_recv() {
-                Ok(msg) if msg.first() == Some(&0xA2) => return msg,
-                Ok(_) => continue,
-                Err(broadcast::error::TryRecvError::Empty) => {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                }
-                Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
-                Err(e) => panic!("unexpected recv error: {e:?}"),
-            }
-        };
-        assert_eq!(find(&mut rx1), payload);
-        assert_eq!(find(&mut rx2), payload);
-    }
-
-    #[tokio::test]
-    async fn events_arrive_in_order() {
-        let mut rx = subscribe();
-        push_event_bytes(vec![0xA3, 1]);
-        push_event_bytes(vec![0xA3, 2]);
-        push_event_bytes(vec![0xA3, 3]);
-
-        let mut collected = Vec::new();
-        loop {
-            let msg = rx.recv().await.unwrap();
-            if msg.first() == Some(&0xA3) {
-                collected.push(msg);
-                if collected.len() == 3 {
-                    break;
-                }
-            }
-        }
-        assert_eq!(collected[0], vec![0xA3, 1]);
-        assert_eq!(collected[1], vec![0xA3, 2]);
-        assert_eq!(collected[2], vec![0xA3, 3]);
     }
 
     #[test]
-    fn push_without_subscriber_does_not_panic() {
-        push_event_bytes(vec![0xFF; 100]);
+    fn drain_events_preserves_fifo_order() {
+        let _guard = TEST_MUTEX.lock().expect("test mutex poisoned");
+        drain_all_test_events();
+        push_sdk_event(TEST_KIND, vec![1]);
+        push_sdk_event(TEST_KIND, vec![2]);
+        push_sdk_event(TEST_KIND, vec![3]);
+
+        let batch = drain_events(8);
+        let has_more = batch.has_more;
+        let payloads: Vec<Vec<u8>> = batch.events.into_iter().map(|event| event.payload).collect();
+
+        assert_eq!(payloads, vec![vec![1], vec![2], vec![3]]);
+        assert!(!has_more);
     }
 
-    #[tokio::test]
-    async fn empty_tagged_payload_roundtrips() {
-        let received = push_and_drain(0xA4, &[]).await;
-        assert_eq!(received, vec![0xA4]);
+    #[test]
+    fn drain_events_reports_has_more() {
+        let _guard = TEST_MUTEX.lock().expect("test mutex poisoned");
+        drain_all_test_events();
+        for value in 0..3u8 {
+            push_sdk_event(TEST_KIND, vec![value]);
+        }
+
+        let batch = drain_events(2);
+        assert_eq!(batch.events.len(), 2);
+        assert!(batch.has_more);
+
+        let second = drain_events(2);
+        assert_eq!(second.events.len(), 1);
+        assert!(!second.has_more);
+    }
+
+    #[test]
+    fn subscribers_receive_encoded_sdk_events() {
+        let _guard = TEST_MUTEX.lock().expect("test mutex poisoned");
+        drain_all_test_events();
+        let mut rx = subscribe();
+
+        push_sdk_event(TEST_KIND, vec![0xAA, 0xBB]);
+        let bytes = rx.try_recv().expect("missing broadcast event");
+        let decoded = pb::SdkEvent::decode(bytes.as_slice()).expect("event should decode");
+
+        assert_eq!(decoded.kind, TEST_KIND);
+        assert_eq!(decoded.payload, vec![0xAA, 0xBB]);
     }
 }

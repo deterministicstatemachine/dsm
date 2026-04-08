@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Genesis helpers.
 // IMPORTANT: Genesis creation is handled via the bytes-only MessagePort bridge
-// (see `src/dsm/WebViewBridge.ts` / `createGenesisBin`).
+// (see `src/dsm/WebViewBridge.ts` / `createGenesisViaRouter`).
 
 import { addSecondaryDeviceBin } from '../dsm/WebViewBridge';
 import { SecondaryDeviceResponse } from '../proto/dsm_app_pb';

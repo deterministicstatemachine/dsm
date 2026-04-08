@@ -3,6 +3,7 @@
 import { decodeBase32Crockford, encodeBase32Crockford } from '../../utils/textId';
 import { appRouterInvokeBin, appRouterQueryBin } from '../../dsm/WebViewBridge';
 import { decodeFramedEnvelopeV3 } from '../../dsm/decoding';
+import { startNfcReaderHost, stopNfcReaderHost, writeNfcTagPayloadHost } from '../../dsm/NativeHostBridge';
 import {
   AppStateRequest,
   ArgPack,
@@ -281,11 +282,12 @@ export async function readNfcRing(): Promise<void> {
   if (env.payload.case === 'error') {
     throw new Error(env.payload.value.message || 'NFC read failed');
   }
+  await startNfcReaderHost();
 }
 
 export async function stopNfcRead(): Promise<void> {
   try {
-    await appRouterInvokeBin('nfc.ring.stopRead', new Uint8Array(0));
+    await stopNfcReaderHost();
   } catch {
     // Best-effort teardown — ignore errors.
   }
@@ -296,5 +298,9 @@ export async function writeToNfcRing(): Promise<void> {
   const env = decodeFramedEnvelopeV3(res);
   if (env.payload.case === 'error') {
     throw new Error(env.payload.value.message || 'NFC write failed');
+  }
+  const writeResult = await writeNfcTagPayloadHost();
+  if (!writeResult.launched) {
+    throw new Error('NFC write launcher did not start');
   }
 }

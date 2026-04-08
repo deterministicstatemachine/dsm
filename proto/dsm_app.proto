@@ -2548,6 +2548,42 @@ message HardwareFactsOp {
   SessionHardwareFactsProto facts = 1;
 }
 
+// Drain queued SDK events as a typed protobuf batch.
+message DrainEventsOp {
+  uint32 max_events = 1;
+}
+
+enum SdkEventKind {
+  SDK_EVENT_KIND_UNSPECIFIED = 0;
+  SDK_EVENT_KIND_SESSION_STATE = 1;
+  SDK_EVENT_KIND_BILATERAL_EVENT = 2;
+  SDK_EVENT_KIND_BLE_ENVELOPE = 3;
+  SDK_EVENT_KIND_INBOX_UPDATED = 4;
+  SDK_EVENT_KIND_WALLET_REFRESH = 5;
+  SDK_EVENT_KIND_IDENTITY_READY = 6;
+  SDK_EVENT_KIND_ENV_CONFIG_ERROR = 7;
+  SDK_EVENT_KIND_BIOMETRIC_RESULT = 8;
+  SDK_EVENT_KIND_QR_SCAN_RESULT = 9;
+  SDK_EVENT_KIND_BLUETOOTH_PERMISSIONS = 10;
+  SDK_EVENT_KIND_DETERMINISTIC_SAFETY = 11;
+  SDK_EVENT_KIND_CONTACT_BLE_UPDATED = 12;
+  SDK_EVENT_KIND_NFC_RECOVERY_CAPSULE = 13;
+  SDK_EVENT_KIND_NFC_BACKUP_WRITTEN = 14;
+  SDK_EVENT_KIND_BRIDGE_READY = 15;
+}
+
+// Typed async SDK event envelope. `payload` contains the canonical protobuf
+// bytes for the declared event kind.
+message SdkEvent {
+  SdkEventKind kind = 1;
+  bytes payload = 2 [(dsm_max_len)=65535];
+}
+
+message SdkEventBatch {
+  repeated SdkEvent events = 1;
+  bool has_more = 2;
+}
+
 // Canonical platform-agnostic ingress request.
 message IngressRequest {
   oneof operation {
@@ -2555,6 +2591,7 @@ message IngressRequest {
     RouterInvokeOp  router_invoke  = 2;
     EnvelopeOp      envelope       = 3;
     HardwareFactsOp hardware_facts = 4;
+    DrainEventsOp   drain_events   = 5;
   }
 }
 
@@ -2605,6 +2642,170 @@ message StartupResponse {
     bytes ok_bytes = 1 [(dsm_max_len)=65535];
     Error error    = 2;
   }
+}
+
+// Project-private native host boundary for WebView <-> platform host control.
+enum NativeHostRequestKind {
+  NATIVE_HOST_REQUEST_KIND_UNSPECIFIED = 0;
+
+  // host_control.*
+  NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_CAPABILITIES_GET = 1;
+  NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_QR_START_SCAN = 2;
+  NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_QR_STOP_SCAN = 3;
+  NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_SCAN_START = 4;
+  NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_SCAN_STOP = 5;
+  NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_ADVERTISE_START = 6;
+  NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_ADVERTISE_STOP = 7;
+  NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_NFC_READER_START = 8;
+  NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_NFC_READER_STOP = 9;
+  NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_PERMISSIONS_REQUEST = 10;
+
+  // platform_primitive.*
+  NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_DEVICE_BINDING_CAPTURE = 101;
+  NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BIOMETRIC_AUTHORIZE = 102;
+  NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_SECURE_HARDWARE_GENERATE_KEY = 103;
+  NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_SECURE_HARDWARE_SIGN = 104;
+  NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_READ_PAYLOAD = 105;
+  NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_WRITE_PAYLOAD = 106;
+  NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BLE_TRANSPORT_OPEN = 107;
+  NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BLE_TRANSPORT_SEND_CHUNKS = 108;
+  NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BLE_TRANSPORT_CLOSE = 109;
+}
+
+message NativeHostRequest {
+  NativeHostRequestKind kind = 1;
+  bytes payload = 2 [(dsm_max_len)=65535];
+}
+
+message NativeHostCapabilities {
+  repeated NativeHostRequestKind supported_requests = 1;
+}
+
+message NativeHostResponse {
+  oneof result {
+    bytes ok_bytes = 1 [(dsm_max_len)=65535];
+    NativeHostCapabilities capabilities = 2;
+    Error error = 3;
+  }
+}
+
+enum NativeHostEventKind {
+  NATIVE_HOST_EVENT_KIND_UNSPECIFIED = 0;
+  NATIVE_HOST_EVENT_KIND_QR_SCAN_RESULT = 1;
+  NATIVE_HOST_EVENT_KIND_BLUETOOTH_PERMISSIONS = 2;
+  NATIVE_HOST_EVENT_KIND_BIOMETRIC_RESULT = 3;
+  NATIVE_HOST_EVENT_KIND_NFC_TAG_READ = 4;
+  NATIVE_HOST_EVENT_KIND_NFC_TAG_WRITE = 5;
+  NATIVE_HOST_EVENT_KIND_SESSION_STATE_HINT = 6;
+}
+
+message NativeHostEvent {
+  NativeHostEventKind kind = 1;
+  bytes payload = 2 [(dsm_max_len)=65535];
+}
+
+message NativeHostAck {
+  bool success = 1;
+}
+
+message HostPermissionsRequestPayload {
+  repeated string permissions = 1;
+}
+
+message HostPermissionsResult {
+  repeated string granted_permissions = 1;
+  bool all_granted = 2;
+}
+
+message DeviceBindingCapturePayload {
+  bytes genesis_envelope = 1 [(dsm_max_len)=65535];
+}
+
+message DeviceBindingCaptureResult {
+  bool installed = 1;
+  bytes device_id = 2 [(dsm_fixed_len)=32];
+  bytes genesis_hash = 3 [(dsm_fixed_len)=32];
+}
+
+message BiometricAuthorizePayload {
+  string prompt_title = 1 [(dsm_max_len)=128];
+  string prompt_subtitle = 2 [(dsm_max_len)=256];
+  string negative_text = 3 [(dsm_max_len)=64];
+}
+
+message BiometricAuthorizeResult {
+  bool success = 1;
+  uint32 error_code = 2;
+  string error_message = 3 [(dsm_max_len)=256];
+}
+
+message SecureHardwareGenerateKeyPayload {
+  string key_alias = 1 [(dsm_max_len)=128];
+  bytes key_context = 2 [(dsm_max_len)=4096];
+}
+
+message SecureHardwareGenerateKeyResult {
+  bytes key_handle = 1 [(dsm_max_len)=4096];
+}
+
+message SecureHardwareSignPayload {
+  string key_alias = 1 [(dsm_max_len)=128];
+  bytes message = 2 [(dsm_max_len)=65535];
+  bytes key_handle = 3 [(dsm_max_len)=4096];
+}
+
+message SecureHardwareSignResult {
+  bytes signature = 1 [(dsm_max_len)=65535];
+}
+
+message NfcTagReadPayload {
+  string mime_type = 1 [(dsm_max_len)=128];
+}
+
+message NfcTagReadResult {
+  bool reader_started = 1;
+}
+
+message NfcTagWritePayload {
+  string mime_type = 1 [(dsm_max_len)=128];
+  bytes payload = 2 [(dsm_max_len)=65535];
+}
+
+message NfcTagWriteResult {
+  bool launched = 1;
+}
+
+message BleTransportOpenPayload {
+  string ble_address = 1 [(dsm_max_len)=128];
+}
+
+message BleTransportOpenResult {
+  bool ready = 1;
+}
+
+message BleTransportSendChunksPayload {
+  string ble_address = 1 [(dsm_max_len)=128];
+  bytes envelope_bytes = 2 [(dsm_max_len)=65535];
+}
+
+message BleTransportSendChunksResult {
+  bytes response_envelope = 1 [(dsm_max_len)=65535];
+}
+
+message BleTransportClosePayload {
+  string ble_address = 1 [(dsm_max_len)=128];
+}
+
+message BleTransportCloseResult {
+  bool closed = 1;
+}
+
+message QrScanResultPayload {
+  string text_utf8 = 1 [(dsm_max_len)=4096];
+}
+
+message HostSessionStateHint {
+  string reason = 1 [(dsm_max_len)=128];
 }
 
 // ─── Storage Node Regulation (clockless, signature-free) ────────────────────

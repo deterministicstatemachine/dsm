@@ -47,6 +47,7 @@ import androidx.webkit.WebMessagePortCompat
 import androidx.webkit.WebViewAssetLoader
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
+import com.google.protobuf.ByteString
 import com.dsm.wallet.BuildConfig
 import com.dsm.wallet.bridge.BleEventRelay
 import com.dsm.wallet.bridge.SinglePathWebViewBridge
@@ -57,6 +58,12 @@ import com.dsm.wallet.permissions.BluetoothPermissionHelper
 import com.dsm.wallet.security.AccessLevel
 import com.dsm.wallet.service.BleBackgroundService
 import com.dsm.wallet.session.NativeFirstCutoverReset
+import dsm.types.proto.BiometricAuthorizeResult
+import dsm.types.proto.NativeHostRequest
+import dsm.types.proto.NativeHostEvent
+import dsm.types.proto.NativeHostEventKind
+import dsm.types.proto.NativeHostRequestKind
+import dsm.types.proto.QrScanResultPayload
 import dsm.types.proto.SessionHardwareFactsProto
 import java.io.ByteArrayInputStream
 import java.io.File
@@ -205,11 +212,17 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
 
     /**
      * Dispatch QR scan result into WebView via binary MessagePort.
-     * Payload is UTF-8 encoded QR text (empty = cancelled/no result).
+     * Payload is NativeHostEvent(QR_SCAN_RESULT) carrying a typed QR result proto.
      */
     fun dispatchQrScanResult(qrText: String?) {
-        val payload = (qrText ?: "").toByteArray(Charsets.UTF_8)
-        dispatchDsmEventOnUi("qr_scan_result", payload)
+        val payload = QrScanResultPayload.newBuilder()
+            .setTextUtf8(qrText ?: "")
+            .build()
+            .toByteArray()
+        dispatchNativeHostEventOnUi(
+            NativeHostEventKind.NATIVE_HOST_EVENT_KIND_QR_SCAN_RESULT,
+            payload,
+        )
     }
 
     /**
@@ -366,6 +379,32 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                 }
             } catch (e: Throwable) {
                 Log.w(EVENT_DISPATCH_TAG, "dispatch failed (topic=$topic): ${e.message}")
+            }
+        }
+    }
+
+    fun dispatchNativeHostEventOnUi(kind: NativeHostEventKind, payload: ByteArray) {
+        runOnUiThread {
+            try {
+                val port = dsmPort
+                if (port == null) {
+                    Log.w(EVENT_DISPATCH_TAG, "host dispatch failed (no MessagePort) kind=$kind")
+                    return@runOnUiThread
+                }
+                if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_ARRAY_BUFFER)) {
+                    Log.w(EVENT_DISPATCH_TAG, "host dispatch failed: ArrayBuffer not supported")
+                    return@runOnUiThread
+                }
+                val eventBytes = NativeHostEvent.newBuilder()
+                    .setKind(kind)
+                    .setPayload(ByteString.copyFrom(payload))
+                    .build()
+                    .toByteArray()
+                if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_PORT_POST_MESSAGE)) {
+                    port.postMessage(WebMessageCompat(eventBytes))
+                }
+            } catch (e: Throwable) {
+                Log.w(EVENT_DISPATCH_TAG, "host dispatch failed (kind=$kind): ${e.message}")
             }
         }
     }
@@ -657,10 +696,20 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                 return
             }
 
-            // createGenesisBin includes silicon fingerprint enrollment (~60s on first boot).
-            // Running it on the main thread causes ANR. Dispatch to background executor;
-            // port.postMessage is thread-safe and can be called from any thread.
-            if (method == "createGenesisBin") {
+            val isLongRunningNativeHostRequest = if (method == "nativeHostRequest") {
+                try {
+                    NativeHostRequest.parseFrom(body).kind ==
+                        NativeHostRequestKind.NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_DEVICE_BINDING_CAPTURE
+                } catch (_: Throwable) {
+                    false
+                }
+            } else {
+                false
+            }
+
+            // Device-binding capture includes silicon fingerprint enrollment (~60s on first boot).
+            // Run it on the dedicated executor to avoid starving the general bridge worker pool.
+            if (isLongRunningNativeHostRequest) {
                 genesisExecutor.execute {
                     val respBytes: ByteArray = try {
                         SinglePathWebViewBridge.handleBinaryRpc(method, body)
@@ -769,6 +818,18 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         } else {
             ensureBluetoothEnabled()
         }
+    }
+
+    fun requestNamedPermissionsFromUi(permissions: Array<String>) {
+        val needed = permissions
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
+            .toTypedArray()
+        if (needed.isEmpty()) {
+            return
+        }
+        requestPermissions(needed, cameraPermCode)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -1022,22 +1083,32 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         // No-op: bars are permanently dark. Kept so the bridge route doesn't error.
     }
 
-    private fun showBiometricPrompt() {
+    fun showBiometricPrompt(
+        promptTitle: String = "DSM Wallet",
+        promptSubtitle: String = "Authenticate to unlock",
+        negativeText: String = "Use PIN / Combo",
+    ) {
         val executor = ContextCompat.getMainExecutor(this)
         val callback = object : BiometricPrompt.AuthenticationCallback() {
             override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                // Payload: [0x01] = success
-                dispatchDsmEventOnUi("dsm-biometric-result", byteArrayOf(0x01))
+                dispatchNativeHostEventOnUi(
+                    NativeHostEventKind.NATIVE_HOST_EVENT_KIND_BIOMETRIC_RESULT,
+                    BiometricAuthorizeResult.newBuilder()
+                        .setSuccess(true)
+                        .build()
+                        .toByteArray(),
+                )
             }
             override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
-                // Payload: [0x00][errorCode as u16 BE][UTF-8 error message]
-                val msgBytes = errString.toString().toByteArray(Charsets.UTF_8)
-                val payload = ByteArray(3 + msgBytes.size)
-                payload[0] = 0x00
-                payload[1] = ((errorCode shr 8) and 0xFF).toByte()
-                payload[2] = (errorCode and 0xFF).toByte()
-                System.arraycopy(msgBytes, 0, payload, 3, msgBytes.size)
-                dispatchDsmEventOnUi("dsm-biometric-result", payload)
+                dispatchNativeHostEventOnUi(
+                    NativeHostEventKind.NATIVE_HOST_EVENT_KIND_BIOMETRIC_RESULT,
+                    BiometricAuthorizeResult.newBuilder()
+                        .setSuccess(false)
+                        .setErrorCode(errorCode)
+                        .setErrorMessage(errString.toString())
+                        .build()
+                        .toByteArray(),
+                )
             }
             override fun onAuthenticationFailed() {
                 // Finger not recognised — BiometricPrompt shows retry UI automatically.
@@ -1045,9 +1116,9 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         }
         val prompt = BiometricPrompt(this, executor, callback)
         val promptInfo = BiometricPrompt.PromptInfo.Builder()
-            .setTitle("DSM Wallet")
-            .setSubtitle("Authenticate to unlock")
-            .setNegativeButtonText("Use PIN / Combo")
+            .setTitle(if (promptTitle.isBlank()) "DSM Wallet" else promptTitle)
+            .setSubtitle(if (promptSubtitle.isBlank()) "Authenticate to unlock" else promptSubtitle)
+            .setNegativeButtonText(if (negativeText.isBlank()) "Use PIN / Combo" else negativeText)
             .build()
         prompt.authenticate(promptInfo)
     }
@@ -1461,14 +1532,18 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
             val allGranted = grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }
             if (!allGranted) {
                 Log.w(tag, "Bluetooth permissions not granted")
-                // Payload: [0x00] = denied
-                dispatchDsmEventOnUi("bluetooth-permissions", byteArrayOf(0x00))
+                dispatchNativeHostEventOnUi(
+                    NativeHostEventKind.NATIVE_HOST_EVENT_KIND_BLUETOOTH_PERMISSIONS,
+                    byteArrayOf(0x00),
+                )
             } else {
                 Log.i(tag, "Bluetooth permissions granted, notifying WebView")
                 // BLE ops are NOT auto-started here. The UI must explicitly request
-                // scanning/advertising via bridge RPC (device.ble.scan.start, device.ble.advertise.start).
-                // Payload: [0x01] = granted
-                dispatchDsmEventOnUi("bluetooth-permissions", byteArrayOf(0x01))
+                // scanning/advertising via the native host boundary.
+                dispatchNativeHostEventOnUi(
+                    NativeHostEventKind.NATIVE_HOST_EVENT_KIND_BLUETOOTH_PERMISSIONS,
+                    byteArrayOf(0x01),
+                )
             }
             publishSessionState("runtimePermissions")
         }

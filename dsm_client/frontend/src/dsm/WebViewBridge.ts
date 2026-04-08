@@ -43,12 +43,28 @@
  */
 
 import { bridgeGate } from './BridgeGate';
-import { BridgeRpcRequest, BridgeRpcResponse, BytesPayload, EmptyPayload, ArgPack, Codec, AppStateRequest, InboxRequest, StorageSyncRequest, CreateGenesisPayload, BleIdentityPayload, BilateralPayload, AppRouterPayload, ArchitectureInfoProto, SessionConfigureLockRequest } from '../proto/dsm_app_pb';
+import { BridgeRpcRequest, BridgeRpcResponse, BytesPayload, EmptyPayload, ArgPack, Codec, AppStateRequest, InboxRequest, StorageSyncRequest, SystemGenesisRequest, BleIdentityPayload, BilateralPayload, AppRouterPayload, ArchitectureInfoProto, SessionConfigureLockRequest } from '../proto/dsm_app_pb';
 import { bridgeEvents } from '../bridge/bridgeEvents';
 import { getBridgeInstance } from '../bridge/BridgeRegistry';
 import type { AndroidBridgeV3 } from './bridgeTypes';
 import { emitDeterministicSafetyIfPresent } from '../utils/deterministicSafety';
 import { decodeFramedEnvelopeV3 } from './decoding';
+import {
+  buildEnvelopeIngressRequest,
+  buildRouterInvokeIngressRequest,
+  buildRouterQueryIngressRequest,
+  ingressBoundaryOk,
+  isBoundaryUnavailableError,
+} from './NativeBoundaryBridge';
+import {
+  captureDeviceBindingForGenesisEnvelope,
+  sendBleTransportChunksHost,
+  startBleAdvertisingHost,
+  startBleScanHost,
+  startNativeQrScan,
+  stopBleAdvertisingHost,
+  stopBleScanHost,
+} from './NativeHostBridge';
 import { dispatchNativeQrScannerActive } from './qrScannerState';
 import { logger as appLogger } from '../utils/logger';
 
@@ -452,7 +468,16 @@ async function maybeThrowOnEmpty(result: Uint8Array): Promise<Uint8Array> {
 
 // --- Public API ---
 export async function processEnvelopeV3Bin(envelopeBytes: Uint8Array): Promise<Uint8Array> {
-  return bridgeGate.enqueue(() => callBin('processEnvelopeV3', envelopeBytes));
+  return bridgeGate.enqueue(async () => {
+    try {
+      return await ingressBoundaryOk(buildEnvelopeIngressRequest(envelopeBytes));
+    } catch (error) {
+      if (!isBoundaryUnavailableError(error)) {
+        throw error;
+      }
+      return callBin('processEnvelopeV3', envelopeBytes);
+    }
+  });
 }
 
 // --- App router invoke/query (bytes-only) ---
@@ -460,34 +485,50 @@ export async function appRouterInvokeBin(method: string, args?: Uint8Array): Pro
   if (typeof method !== 'string' || method.length === 0) {
     throw new Error('appRouterInvokeBin: method required');
   }
-  const appRouterPayload = new AppRouterPayload({
-    methodName: method,
-    args: args instanceof Uint8Array ? new Uint8Array(args) : new Uint8Array(0),
+  return bridgeGate.enqueue(async () => {
+    try {
+      return await ingressBoundaryOk(buildRouterInvokeIngressRequest(method, args));
+    } catch (error) {
+      if (!isBoundaryUnavailableError(error)) {
+        throw error;
+      }
+      const appRouterPayload = new AppRouterPayload({
+        methodName: method,
+        args: args instanceof Uint8Array ? new Uint8Array(args) : new Uint8Array(0),
+      });
+      const req = new BridgeRpcRequest({
+        method: 'appRouterInvoke',
+        payload: { case: 'appRouter', value: appRouterPayload },
+      });
+      return sendBridgeRequestBytes('appRouterInvoke', req.toBinary());
+    }
   });
-  const req = new BridgeRpcRequest({
-    method: 'appRouterInvoke',
-    payload: { case: 'appRouter', value: appRouterPayload },
-  });
-  const reqBytes = req.toBinary();
-  return bridgeGate.enqueue(() => sendBridgeRequestBytes('appRouterInvoke', reqBytes));
 }
 
 export async function appRouterQueryBin(path: string, params?: Uint8Array): Promise<Uint8Array> {
   if (typeof path !== 'string' || path.length === 0) {
     throw new Error('appRouterQueryBin: path required');
   }
-  const req = new BridgeRpcRequest({
-    method: 'appRouterQuery',
-    payload: {
-      case: 'appRouter',
-      value: new AppRouterPayload({
-        methodName: path,
-        args: params instanceof Uint8Array ? new Uint8Array(params) : new Uint8Array(0),
-      }),
-    },
+  return bridgeGate.enqueue(async () => {
+    try {
+      return await ingressBoundaryOk(buildRouterQueryIngressRequest(path, params));
+    } catch (error) {
+      if (!isBoundaryUnavailableError(error)) {
+        throw error;
+      }
+      const req = new BridgeRpcRequest({
+        method: 'appRouterQuery',
+        payload: {
+          case: 'appRouter',
+          value: new AppRouterPayload({
+            methodName: path,
+            args: params instanceof Uint8Array ? new Uint8Array(params) : new Uint8Array(0),
+          }),
+        },
+      });
+      return sendBridgeRequestBytes('appRouterQuery', req.toBinary());
+    }
   });
-  const reqBytes = req.toBinary();
-  return bridgeGate.enqueue(() => sendBridgeRequestBytes('appRouterQuery', reqBytes));
 }
 
 /**
@@ -508,19 +549,37 @@ export async function queryTransportHeadersV3(): Promise<Uint8Array> {
 
 export async function createGenesisViaRouter(locale: string, networkId: string, entropy: Uint8Array): Promise<Uint8Array> {
   if (entropy.length !== 32) throw new Error('entropy must be 32 bytes');
-  const req = new CreateGenesisPayload({
+  const req = new SystemGenesisRequest({
     locale: String(locale ?? ''),
     networkId: String(networkId ?? ''),
-    entropy: new Uint8Array(entropy),
+    deviceEntropy: new Uint8Array(entropy),
   });
-  const res = await appRouterInvokeBin('identity.genesis.create', req.toBinary());
-  return maybeThrowOnEmpty(res);
+  const argPack = new ArgPack({
+    codec: Codec.PROTO,
+    body: new Uint8Array(req.toBinary()),
+  });
+  const res = await maybeThrowOnEmpty(await appRouterQueryBin('system.genesis', argPack.toBinary()));
+  const env = decodeFramedEnvelopeV3(res);
+  if (env.payload.case === 'error') {
+    return res;
+  }
+  if (env.payload.case !== 'genesisCreatedResponse') {
+    throw new Error(`system.genesis returned unexpected payload: ${env.payload.case}`);
+  }
+  const installResult = await captureDeviceBindingForGenesisEnvelope(res);
+  if (!installResult.installed) {
+    throw new Error('device binding capture did not complete');
+  }
+  if (installResult.deviceId.length !== 32 || installResult.genesisHash.length !== 32) {
+    throw new Error('device binding capture returned incomplete identity');
+  }
+  return res;
 }
 
 export async function startNativeQrScannerViaRouter(): Promise<void> {
   dispatchNativeQrScannerActive(true);
   try {
-    await appRouterInvokeBin('device.qr.scan.start', new Uint8Array(0));
+    await startNativeQrScan();
   } catch (error) {
     dispatchNativeQrScannerActive(false);
     throw error;
@@ -528,17 +587,17 @@ export async function startNativeQrScannerViaRouter(): Promise<void> {
 }
 
 export async function startBleScanViaRouter(): Promise<void> {
-  await appRouterInvokeBin('device.ble.scan.start', new Uint8Array(0));
+  await startBleScanHost();
 }
 
 export async function stopBleScanViaRouter(): Promise<void> {
-  await appRouterInvokeBin('device.ble.scan.stop', new Uint8Array(0));
+  await stopBleScanHost();
 }
 
 export async function startBleAdvertisingViaRouter(): Promise<{ success: boolean; error?: { message?: string } }> {
   try {
-    await appRouterInvokeBin('device.ble.advertise.start', new Uint8Array(0));
-    return { success: true };
+    const ack = await startBleAdvertisingHost();
+    return { success: Boolean(ack.success) };
   } catch (e) {
     return { success: false, error: { message: e instanceof Error ? e.message : 'device.ble.advertise.start failed' } };
   }
@@ -546,8 +605,8 @@ export async function startBleAdvertisingViaRouter(): Promise<{ success: boolean
 
 export async function stopBleAdvertisingViaRouter(): Promise<{ success: boolean; error?: { message?: string } }> {
   try {
-    await appRouterInvokeBin('device.ble.advertise.stop', new Uint8Array(0));
-    return { success: true };
+    const ack = await stopBleAdvertisingHost();
+    return { success: Boolean(ack.success) };
   } catch (e) {
     return { success: false, error: { message: e instanceof Error ? e.message : 'device.ble.advertise.stop failed' } };
   }
@@ -588,29 +647,7 @@ export async function bilateralOfflineSendBin(envelopeBytes: Uint8Array, bleAddr
   if (typeof bleAddress !== 'string' || bleAddress.length === 0) {
     throw new Error('bilateralOfflineSendBin: bleAddress required');
   }
-
-  const addrBytes = new TextEncoder().encode(bleAddress);
-  const args = new Uint8Array(4 + addrBytes.length + envelopeBytes.length);
-  const addrLen = addrBytes.length;
-  args[0] = (addrLen >>> 24) & 0xff;
-  args[1] = (addrLen >>> 16) & 0xff;
-  args[2] = (addrLen >>> 8) & 0xff;
-  args[3] = addrLen & 0xff;
-  args.set(addrBytes, 4);
-  args.set(envelopeBytes, 4 + addrBytes.length);
-
-  const req = new BridgeRpcRequest({
-    method: 'appRouterInvoke',
-    payload: {
-      case: 'appRouter',
-      value: new AppRouterPayload({
-        methodName: 'bilateralOfflineSend',
-        args,
-      }),
-    },
-  });
-  const res = await bridgeGate.enqueue(() => sendBridgeRequestBytes('appRouterInvoke', req.toBinary()));
-  return res;
+  return bridgeGate.enqueue(() => sendBleTransportChunksHost(envelopeBytes, bleAddress));
 }
 
 export async function getTransportHeadersV3Bin(): Promise<Uint8Array> {

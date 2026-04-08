@@ -86,6 +86,10 @@ object Unified {
     @Keep @JvmStatic fun initDsmSdk(configPath: String) {
         UnifiedNativeApi.initDsmSdk(configPath)
     }
+    @Keep @JvmStatic fun dispatchStartup(requestBytes: ByteArray): ByteArray =
+        UnifiedNativeApi.dispatchStartup(requestBytes)
+    @Keep @JvmStatic fun dispatchIngress(requestBytes: ByteArray): ByteArray =
+        UnifiedNativeApi.dispatchIngress(requestBytes)
     @Keep @JvmStatic fun getTransportHeadersV3Status(): Byte =
         UnifiedNativeApi.getTransportHeadersV3Status()
     @Keep @JvmStatic fun getTransportHeadersV3(): ByteArray =

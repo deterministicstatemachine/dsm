@@ -11,6 +11,14 @@ uint8_t *dsm_process_envelope_protobuf(const uint8_t *envelope_bytes,
                                        uintptr_t envelope_len,
                                        uintptr_t *out_len);
 
+uint8_t *dsm_dispatch_startup_request(const uint8_t *request_bytes,
+                                      uintptr_t request_len,
+                                      uintptr_t *out_len);
+
+uint8_t *dsm_dispatch_ingress_request(const uint8_t *request_bytes,
+                                      uintptr_t request_len,
+                                      uintptr_t *out_len);
+
 void dsm_free_envelope_bytes(uint8_t *bytes, uintptr_t len);
 
 bool dsm_set_storage_base_dir(const char *path_utf8);

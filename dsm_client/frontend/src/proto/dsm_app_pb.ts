@@ -692,6 +692,294 @@ proto3.util.setEnumType(StorageNodeAuthType, "dsm.StorageNodeAuthType", [
 ]);
 
 /**
+ * @generated from enum dsm.SdkEventKind
+ */
+export enum SdkEventKind {
+  /**
+   * @generated from enum value: SDK_EVENT_KIND_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: SDK_EVENT_KIND_SESSION_STATE = 1;
+   */
+  SESSION_STATE = 1,
+
+  /**
+   * @generated from enum value: SDK_EVENT_KIND_BILATERAL_EVENT = 2;
+   */
+  BILATERAL_EVENT = 2,
+
+  /**
+   * @generated from enum value: SDK_EVENT_KIND_BLE_ENVELOPE = 3;
+   */
+  BLE_ENVELOPE = 3,
+
+  /**
+   * @generated from enum value: SDK_EVENT_KIND_INBOX_UPDATED = 4;
+   */
+  INBOX_UPDATED = 4,
+
+  /**
+   * @generated from enum value: SDK_EVENT_KIND_WALLET_REFRESH = 5;
+   */
+  WALLET_REFRESH = 5,
+
+  /**
+   * @generated from enum value: SDK_EVENT_KIND_IDENTITY_READY = 6;
+   */
+  IDENTITY_READY = 6,
+
+  /**
+   * @generated from enum value: SDK_EVENT_KIND_ENV_CONFIG_ERROR = 7;
+   */
+  ENV_CONFIG_ERROR = 7,
+
+  /**
+   * @generated from enum value: SDK_EVENT_KIND_BIOMETRIC_RESULT = 8;
+   */
+  BIOMETRIC_RESULT = 8,
+
+  /**
+   * @generated from enum value: SDK_EVENT_KIND_QR_SCAN_RESULT = 9;
+   */
+  QR_SCAN_RESULT = 9,
+
+  /**
+   * @generated from enum value: SDK_EVENT_KIND_BLUETOOTH_PERMISSIONS = 10;
+   */
+  BLUETOOTH_PERMISSIONS = 10,
+
+  /**
+   * @generated from enum value: SDK_EVENT_KIND_DETERMINISTIC_SAFETY = 11;
+   */
+  DETERMINISTIC_SAFETY = 11,
+
+  /**
+   * @generated from enum value: SDK_EVENT_KIND_CONTACT_BLE_UPDATED = 12;
+   */
+  CONTACT_BLE_UPDATED = 12,
+
+  /**
+   * @generated from enum value: SDK_EVENT_KIND_NFC_RECOVERY_CAPSULE = 13;
+   */
+  NFC_RECOVERY_CAPSULE = 13,
+
+  /**
+   * @generated from enum value: SDK_EVENT_KIND_NFC_BACKUP_WRITTEN = 14;
+   */
+  NFC_BACKUP_WRITTEN = 14,
+
+  /**
+   * @generated from enum value: SDK_EVENT_KIND_BRIDGE_READY = 15;
+   */
+  BRIDGE_READY = 15,
+}
+// Retrieve enum metadata with: proto3.getEnumType(SdkEventKind)
+proto3.util.setEnumType(SdkEventKind, "dsm.SdkEventKind", [
+  { no: 0, name: "SDK_EVENT_KIND_UNSPECIFIED" },
+  { no: 1, name: "SDK_EVENT_KIND_SESSION_STATE" },
+  { no: 2, name: "SDK_EVENT_KIND_BILATERAL_EVENT" },
+  { no: 3, name: "SDK_EVENT_KIND_BLE_ENVELOPE" },
+  { no: 4, name: "SDK_EVENT_KIND_INBOX_UPDATED" },
+  { no: 5, name: "SDK_EVENT_KIND_WALLET_REFRESH" },
+  { no: 6, name: "SDK_EVENT_KIND_IDENTITY_READY" },
+  { no: 7, name: "SDK_EVENT_KIND_ENV_CONFIG_ERROR" },
+  { no: 8, name: "SDK_EVENT_KIND_BIOMETRIC_RESULT" },
+  { no: 9, name: "SDK_EVENT_KIND_QR_SCAN_RESULT" },
+  { no: 10, name: "SDK_EVENT_KIND_BLUETOOTH_PERMISSIONS" },
+  { no: 11, name: "SDK_EVENT_KIND_DETERMINISTIC_SAFETY" },
+  { no: 12, name: "SDK_EVENT_KIND_CONTACT_BLE_UPDATED" },
+  { no: 13, name: "SDK_EVENT_KIND_NFC_RECOVERY_CAPSULE" },
+  { no: 14, name: "SDK_EVENT_KIND_NFC_BACKUP_WRITTEN" },
+  { no: 15, name: "SDK_EVENT_KIND_BRIDGE_READY" },
+]);
+
+/**
+ * Project-private native host boundary for WebView <-> platform host control.
+ *
+ * @generated from enum dsm.NativeHostRequestKind
+ */
+export enum NativeHostRequestKind {
+  /**
+   * @generated from enum value: NATIVE_HOST_REQUEST_KIND_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * host_control.*
+   *
+   * @generated from enum value: NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_CAPABILITIES_GET = 1;
+   */
+  HOST_CONTROL_CAPABILITIES_GET = 1,
+
+  /**
+   * @generated from enum value: NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_QR_START_SCAN = 2;
+   */
+  HOST_CONTROL_QR_START_SCAN = 2,
+
+  /**
+   * @generated from enum value: NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_QR_STOP_SCAN = 3;
+   */
+  HOST_CONTROL_QR_STOP_SCAN = 3,
+
+  /**
+   * @generated from enum value: NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_SCAN_START = 4;
+   */
+  HOST_CONTROL_BLE_SCAN_START = 4,
+
+  /**
+   * @generated from enum value: NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_SCAN_STOP = 5;
+   */
+  HOST_CONTROL_BLE_SCAN_STOP = 5,
+
+  /**
+   * @generated from enum value: NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_ADVERTISE_START = 6;
+   */
+  HOST_CONTROL_BLE_ADVERTISE_START = 6,
+
+  /**
+   * @generated from enum value: NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_ADVERTISE_STOP = 7;
+   */
+  HOST_CONTROL_BLE_ADVERTISE_STOP = 7,
+
+  /**
+   * @generated from enum value: NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_NFC_READER_START = 8;
+   */
+  HOST_CONTROL_NFC_READER_START = 8,
+
+  /**
+   * @generated from enum value: NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_NFC_READER_STOP = 9;
+   */
+  HOST_CONTROL_NFC_READER_STOP = 9,
+
+  /**
+   * @generated from enum value: NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_PERMISSIONS_REQUEST = 10;
+   */
+  HOST_CONTROL_PERMISSIONS_REQUEST = 10,
+
+  /**
+   * platform_primitive.*
+   *
+   * @generated from enum value: NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_DEVICE_BINDING_CAPTURE = 101;
+   */
+  PLATFORM_PRIMITIVE_DEVICE_BINDING_CAPTURE = 101,
+
+  /**
+   * @generated from enum value: NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BIOMETRIC_AUTHORIZE = 102;
+   */
+  PLATFORM_PRIMITIVE_BIOMETRIC_AUTHORIZE = 102,
+
+  /**
+   * @generated from enum value: NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_SECURE_HARDWARE_GENERATE_KEY = 103;
+   */
+  PLATFORM_PRIMITIVE_SECURE_HARDWARE_GENERATE_KEY = 103,
+
+  /**
+   * @generated from enum value: NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_SECURE_HARDWARE_SIGN = 104;
+   */
+  PLATFORM_PRIMITIVE_SECURE_HARDWARE_SIGN = 104,
+
+  /**
+   * @generated from enum value: NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_READ_PAYLOAD = 105;
+   */
+  PLATFORM_PRIMITIVE_NFC_TAG_READ_PAYLOAD = 105,
+
+  /**
+   * @generated from enum value: NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_WRITE_PAYLOAD = 106;
+   */
+  PLATFORM_PRIMITIVE_NFC_TAG_WRITE_PAYLOAD = 106,
+
+  /**
+   * @generated from enum value: NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BLE_TRANSPORT_OPEN = 107;
+   */
+  PLATFORM_PRIMITIVE_BLE_TRANSPORT_OPEN = 107,
+
+  /**
+   * @generated from enum value: NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BLE_TRANSPORT_SEND_CHUNKS = 108;
+   */
+  PLATFORM_PRIMITIVE_BLE_TRANSPORT_SEND_CHUNKS = 108,
+
+  /**
+   * @generated from enum value: NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BLE_TRANSPORT_CLOSE = 109;
+   */
+  PLATFORM_PRIMITIVE_BLE_TRANSPORT_CLOSE = 109,
+}
+// Retrieve enum metadata with: proto3.getEnumType(NativeHostRequestKind)
+proto3.util.setEnumType(NativeHostRequestKind, "dsm.NativeHostRequestKind", [
+  { no: 0, name: "NATIVE_HOST_REQUEST_KIND_UNSPECIFIED" },
+  { no: 1, name: "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_CAPABILITIES_GET" },
+  { no: 2, name: "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_QR_START_SCAN" },
+  { no: 3, name: "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_QR_STOP_SCAN" },
+  { no: 4, name: "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_SCAN_START" },
+  { no: 5, name: "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_SCAN_STOP" },
+  { no: 6, name: "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_ADVERTISE_START" },
+  { no: 7, name: "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_ADVERTISE_STOP" },
+  { no: 8, name: "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_NFC_READER_START" },
+  { no: 9, name: "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_NFC_READER_STOP" },
+  { no: 10, name: "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_PERMISSIONS_REQUEST" },
+  { no: 101, name: "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_DEVICE_BINDING_CAPTURE" },
+  { no: 102, name: "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BIOMETRIC_AUTHORIZE" },
+  { no: 103, name: "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_SECURE_HARDWARE_GENERATE_KEY" },
+  { no: 104, name: "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_SECURE_HARDWARE_SIGN" },
+  { no: 105, name: "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_READ_PAYLOAD" },
+  { no: 106, name: "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_WRITE_PAYLOAD" },
+  { no: 107, name: "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BLE_TRANSPORT_OPEN" },
+  { no: 108, name: "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BLE_TRANSPORT_SEND_CHUNKS" },
+  { no: 109, name: "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BLE_TRANSPORT_CLOSE" },
+]);
+
+/**
+ * @generated from enum dsm.NativeHostEventKind
+ */
+export enum NativeHostEventKind {
+  /**
+   * @generated from enum value: NATIVE_HOST_EVENT_KIND_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: NATIVE_HOST_EVENT_KIND_QR_SCAN_RESULT = 1;
+   */
+  QR_SCAN_RESULT = 1,
+
+  /**
+   * @generated from enum value: NATIVE_HOST_EVENT_KIND_BLUETOOTH_PERMISSIONS = 2;
+   */
+  BLUETOOTH_PERMISSIONS = 2,
+
+  /**
+   * @generated from enum value: NATIVE_HOST_EVENT_KIND_BIOMETRIC_RESULT = 3;
+   */
+  BIOMETRIC_RESULT = 3,
+
+  /**
+   * @generated from enum value: NATIVE_HOST_EVENT_KIND_NFC_TAG_READ = 4;
+   */
+  NFC_TAG_READ = 4,
+
+  /**
+   * @generated from enum value: NATIVE_HOST_EVENT_KIND_NFC_TAG_WRITE = 5;
+   */
+  NFC_TAG_WRITE = 5,
+
+  /**
+   * @generated from enum value: NATIVE_HOST_EVENT_KIND_SESSION_STATE_HINT = 6;
+   */
+  SESSION_STATE_HINT = 6,
+}
+// Retrieve enum metadata with: proto3.getEnumType(NativeHostEventKind)
+proto3.util.setEnumType(NativeHostEventKind, "dsm.NativeHostEventKind", [
+  { no: 0, name: "NATIVE_HOST_EVENT_KIND_UNSPECIFIED" },
+  { no: 1, name: "NATIVE_HOST_EVENT_KIND_QR_SCAN_RESULT" },
+  { no: 2, name: "NATIVE_HOST_EVENT_KIND_BLUETOOTH_PERMISSIONS" },
+  { no: 3, name: "NATIVE_HOST_EVENT_KIND_BIOMETRIC_RESULT" },
+  { no: 4, name: "NATIVE_HOST_EVENT_KIND_NFC_TAG_READ" },
+  { no: 5, name: "NATIVE_HOST_EVENT_KIND_NFC_TAG_WRITE" },
+  { no: 6, name: "NATIVE_HOST_EVENT_KIND_SESSION_STATE_HINT" },
+]);
+
+/**
  * ============================ WRAPPERS ===============================
  *
  * @generated from message dsm.Hash32
@@ -21139,6 +21427,134 @@ export class HardwareFactsOp extends Message<HardwareFactsOp> {
 }
 
 /**
+ * Drain queued SDK events as a typed protobuf batch.
+ *
+ * @generated from message dsm.DrainEventsOp
+ */
+export class DrainEventsOp extends Message<DrainEventsOp> {
+  /**
+   * @generated from field: uint32 max_events = 1;
+   */
+  maxEvents = 0;
+
+  constructor(data?: PartialMessage<DrainEventsOp>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.DrainEventsOp";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "max_events", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DrainEventsOp {
+    return new DrainEventsOp().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DrainEventsOp {
+    return new DrainEventsOp().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DrainEventsOp {
+    return new DrainEventsOp().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: DrainEventsOp | PlainMessage<DrainEventsOp> | undefined, b: DrainEventsOp | PlainMessage<DrainEventsOp> | undefined): boolean {
+    return proto3.util.equals(DrainEventsOp, a, b);
+  }
+}
+
+/**
+ * Typed async SDK event envelope. `payload` contains the canonical protobuf
+ * bytes for the declared event kind.
+ *
+ * @generated from message dsm.SdkEvent
+ */
+export class SdkEvent extends Message<SdkEvent> {
+  /**
+   * @generated from field: dsm.SdkEventKind kind = 1;
+   */
+  kind = SdkEventKind.UNSPECIFIED;
+
+  /**
+   * @generated from field: bytes payload = 2;
+   */
+  payload = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<SdkEvent>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.SdkEvent";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "kind", kind: "enum", T: proto3.getEnumType(SdkEventKind) },
+    { no: 2, name: "payload", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SdkEvent {
+    return new SdkEvent().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SdkEvent {
+    return new SdkEvent().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SdkEvent {
+    return new SdkEvent().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: SdkEvent | PlainMessage<SdkEvent> | undefined, b: SdkEvent | PlainMessage<SdkEvent> | undefined): boolean {
+    return proto3.util.equals(SdkEvent, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.SdkEventBatch
+ */
+export class SdkEventBatch extends Message<SdkEventBatch> {
+  /**
+   * @generated from field: repeated dsm.SdkEvent events = 1;
+   */
+  events: SdkEvent[] = [];
+
+  /**
+   * @generated from field: bool has_more = 2;
+   */
+  hasMore = false;
+
+  constructor(data?: PartialMessage<SdkEventBatch>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.SdkEventBatch";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "events", kind: "message", T: SdkEvent, repeated: true },
+    { no: 2, name: "has_more", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SdkEventBatch {
+    return new SdkEventBatch().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SdkEventBatch {
+    return new SdkEventBatch().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SdkEventBatch {
+    return new SdkEventBatch().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: SdkEventBatch | PlainMessage<SdkEventBatch> | undefined, b: SdkEventBatch | PlainMessage<SdkEventBatch> | undefined): boolean {
+    return proto3.util.equals(SdkEventBatch, a, b);
+  }
+}
+
+/**
  * Canonical platform-agnostic ingress request.
  *
  * @generated from message dsm.IngressRequest
@@ -21171,6 +21587,12 @@ export class IngressRequest extends Message<IngressRequest> {
      */
     value: HardwareFactsOp;
     case: "hardwareFacts";
+  } | {
+    /**
+     * @generated from field: dsm.DrainEventsOp drain_events = 5;
+     */
+    value: DrainEventsOp;
+    case: "drainEvents";
   } | { case: undefined; value?: undefined } = { case: undefined };
 
   constructor(data?: PartialMessage<IngressRequest>) {
@@ -21185,6 +21607,7 @@ export class IngressRequest extends Message<IngressRequest> {
     { no: 2, name: "router_invoke", kind: "message", T: RouterInvokeOp, oneof: "operation" },
     { no: 3, name: "envelope", kind: "message", T: EnvelopeOp, oneof: "operation" },
     { no: 4, name: "hardware_facts", kind: "message", T: HardwareFactsOp, oneof: "operation" },
+    { no: 5, name: "drain_events", kind: "message", T: DrainEventsOp, oneof: "operation" },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): IngressRequest {
@@ -21253,6 +21676,1389 @@ export class IngressResponse extends Message<IngressResponse> {
 
   static equals(a: IngressResponse | PlainMessage<IngressResponse> | undefined, b: IngressResponse | PlainMessage<IngressResponse> | undefined): boolean {
     return proto3.util.equals(IngressResponse, a, b);
+  }
+}
+
+/**
+ * Configure the SDK storage base directory.
+ *
+ * @generated from message dsm.SetStorageBaseDirOp
+ */
+export class SetStorageBaseDirOp extends Message<SetStorageBaseDirOp> {
+  /**
+   * @generated from field: string path_utf8 = 1;
+   */
+  pathUtf8 = "";
+
+  constructor(data?: PartialMessage<SetStorageBaseDirOp>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.SetStorageBaseDirOp";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "path_utf8", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SetStorageBaseDirOp {
+    return new SetStorageBaseDirOp().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SetStorageBaseDirOp {
+    return new SetStorageBaseDirOp().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SetStorageBaseDirOp {
+    return new SetStorageBaseDirOp().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: SetStorageBaseDirOp | PlainMessage<SetStorageBaseDirOp> | undefined, b: SetStorageBaseDirOp | PlainMessage<SetStorageBaseDirOp> | undefined): boolean {
+    return proto3.util.equals(SetStorageBaseDirOp, a, b);
+  }
+}
+
+/**
+ * Configure the authoritative env-config TOML path used by the SDK.
+ *
+ * @generated from message dsm.ConfigureEnvOp
+ */
+export class ConfigureEnvOp extends Message<ConfigureEnvOp> {
+  /**
+   * @generated from field: string config_path_utf8 = 1;
+   */
+  configPathUtf8 = "";
+
+  constructor(data?: PartialMessage<ConfigureEnvOp>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConfigureEnvOp";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "config_path_utf8", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConfigureEnvOp {
+    return new ConfigureEnvOp().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConfigureEnvOp {
+    return new ConfigureEnvOp().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConfigureEnvOp {
+    return new ConfigureEnvOp().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConfigureEnvOp | PlainMessage<ConfigureEnvOp> | undefined, b: ConfigureEnvOp | PlainMessage<ConfigureEnvOp> | undefined): boolean {
+    return proto3.util.equals(ConfigureEnvOp, a, b);
+  }
+}
+
+/**
+ * Initialize the SDK runtime, storage-node registry, and router layer.
+ *
+ * @generated from message dsm.InitializeSdkOp
+ */
+export class InitializeSdkOp extends Message<InitializeSdkOp> {
+  constructor(data?: PartialMessage<InitializeSdkOp>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.InitializeSdkOp";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): InitializeSdkOp {
+    return new InitializeSdkOp().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): InitializeSdkOp {
+    return new InitializeSdkOp().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): InitializeSdkOp {
+    return new InitializeSdkOp().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: InitializeSdkOp | PlainMessage<InitializeSdkOp> | undefined, b: InitializeSdkOp | PlainMessage<InitializeSdkOp> | undefined): boolean {
+    return proto3.util.equals(InitializeSdkOp, a, b);
+  }
+}
+
+/**
+ * Install canonical identity context using the already-validated binding key.
+ *
+ * @generated from message dsm.InitializeIdentityContextOp
+ */
+export class InitializeIdentityContextOp extends Message<InitializeIdentityContextOp> {
+  /**
+   * @generated from field: bytes device_id = 1;
+   */
+  deviceId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes genesis_hash = 2;
+   */
+  genesisHash = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes binding_key = 3;
+   */
+  bindingKey = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<InitializeIdentityContextOp>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.InitializeIdentityContextOp";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "genesis_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "binding_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): InitializeIdentityContextOp {
+    return new InitializeIdentityContextOp().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): InitializeIdentityContextOp {
+    return new InitializeIdentityContextOp().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): InitializeIdentityContextOp {
+    return new InitializeIdentityContextOp().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: InitializeIdentityContextOp | PlainMessage<InitializeIdentityContextOp> | undefined, b: InitializeIdentityContextOp | PlainMessage<InitializeIdentityContextOp> | undefined): boolean {
+    return proto3.util.equals(InitializeIdentityContextOp, a, b);
+  }
+}
+
+/**
+ * Canonical startup/bootstrap request shared by native platforms.
+ *
+ * @generated from message dsm.StartupRequest
+ */
+export class StartupRequest extends Message<StartupRequest> {
+  /**
+   * @generated from oneof dsm.StartupRequest.operation
+   */
+  operation: {
+    /**
+     * @generated from field: dsm.SetStorageBaseDirOp set_storage_base_dir = 1;
+     */
+    value: SetStorageBaseDirOp;
+    case: "setStorageBaseDir";
+  } | {
+    /**
+     * @generated from field: dsm.ConfigureEnvOp configure_env = 2;
+     */
+    value: ConfigureEnvOp;
+    case: "configureEnv";
+  } | {
+    /**
+     * @generated from field: dsm.InitializeSdkOp initialize_sdk = 3;
+     */
+    value: InitializeSdkOp;
+    case: "initializeSdk";
+  } | {
+    /**
+     * @generated from field: dsm.InitializeIdentityContextOp initialize_identity_context = 4;
+     */
+    value: InitializeIdentityContextOp;
+    case: "initializeIdentityContext";
+  } | { case: undefined; value?: undefined } = { case: undefined };
+
+  constructor(data?: PartialMessage<StartupRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.StartupRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "set_storage_base_dir", kind: "message", T: SetStorageBaseDirOp, oneof: "operation" },
+    { no: 2, name: "configure_env", kind: "message", T: ConfigureEnvOp, oneof: "operation" },
+    { no: 3, name: "initialize_sdk", kind: "message", T: InitializeSdkOp, oneof: "operation" },
+    { no: 4, name: "initialize_identity_context", kind: "message", T: InitializeIdentityContextOp, oneof: "operation" },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): StartupRequest {
+    return new StartupRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): StartupRequest {
+    return new StartupRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): StartupRequest {
+    return new StartupRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: StartupRequest | PlainMessage<StartupRequest> | undefined, b: StartupRequest | PlainMessage<StartupRequest> | undefined): boolean {
+    return proto3.util.equals(StartupRequest, a, b);
+  }
+}
+
+/**
+ * Canonical startup/bootstrap response.
+ *
+ * @generated from message dsm.StartupResponse
+ */
+export class StartupResponse extends Message<StartupResponse> {
+  /**
+   * @generated from oneof dsm.StartupResponse.result
+   */
+  result: {
+    /**
+     * @generated from field: bytes ok_bytes = 1;
+     */
+    value: Uint8Array;
+    case: "okBytes";
+  } | {
+    /**
+     * @generated from field: dsm.Error error = 2;
+     */
+    value: Error;
+    case: "error";
+  } | { case: undefined; value?: undefined } = { case: undefined };
+
+  constructor(data?: PartialMessage<StartupResponse>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.StartupResponse";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "ok_bytes", kind: "scalar", T: 12 /* ScalarType.BYTES */, oneof: "result" },
+    { no: 2, name: "error", kind: "message", T: Error, oneof: "result" },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): StartupResponse {
+    return new StartupResponse().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): StartupResponse {
+    return new StartupResponse().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): StartupResponse {
+    return new StartupResponse().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: StartupResponse | PlainMessage<StartupResponse> | undefined, b: StartupResponse | PlainMessage<StartupResponse> | undefined): boolean {
+    return proto3.util.equals(StartupResponse, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.NativeHostRequest
+ */
+export class NativeHostRequest extends Message<NativeHostRequest> {
+  /**
+   * @generated from field: dsm.NativeHostRequestKind kind = 1;
+   */
+  kind = NativeHostRequestKind.UNSPECIFIED;
+
+  /**
+   * @generated from field: bytes payload = 2;
+   */
+  payload = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<NativeHostRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.NativeHostRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "kind", kind: "enum", T: proto3.getEnumType(NativeHostRequestKind) },
+    { no: 2, name: "payload", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): NativeHostRequest {
+    return new NativeHostRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): NativeHostRequest {
+    return new NativeHostRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): NativeHostRequest {
+    return new NativeHostRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: NativeHostRequest | PlainMessage<NativeHostRequest> | undefined, b: NativeHostRequest | PlainMessage<NativeHostRequest> | undefined): boolean {
+    return proto3.util.equals(NativeHostRequest, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.NativeHostCapabilities
+ */
+export class NativeHostCapabilities extends Message<NativeHostCapabilities> {
+  /**
+   * @generated from field: repeated dsm.NativeHostRequestKind supported_requests = 1;
+   */
+  supportedRequests: NativeHostRequestKind[] = [];
+
+  constructor(data?: PartialMessage<NativeHostCapabilities>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.NativeHostCapabilities";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "supported_requests", kind: "enum", T: proto3.getEnumType(NativeHostRequestKind), repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): NativeHostCapabilities {
+    return new NativeHostCapabilities().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): NativeHostCapabilities {
+    return new NativeHostCapabilities().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): NativeHostCapabilities {
+    return new NativeHostCapabilities().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: NativeHostCapabilities | PlainMessage<NativeHostCapabilities> | undefined, b: NativeHostCapabilities | PlainMessage<NativeHostCapabilities> | undefined): boolean {
+    return proto3.util.equals(NativeHostCapabilities, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.NativeHostResponse
+ */
+export class NativeHostResponse extends Message<NativeHostResponse> {
+  /**
+   * @generated from oneof dsm.NativeHostResponse.result
+   */
+  result: {
+    /**
+     * @generated from field: bytes ok_bytes = 1;
+     */
+    value: Uint8Array;
+    case: "okBytes";
+  } | {
+    /**
+     * @generated from field: dsm.NativeHostCapabilities capabilities = 2;
+     */
+    value: NativeHostCapabilities;
+    case: "capabilities";
+  } | {
+    /**
+     * @generated from field: dsm.Error error = 3;
+     */
+    value: Error;
+    case: "error";
+  } | { case: undefined; value?: undefined } = { case: undefined };
+
+  constructor(data?: PartialMessage<NativeHostResponse>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.NativeHostResponse";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "ok_bytes", kind: "scalar", T: 12 /* ScalarType.BYTES */, oneof: "result" },
+    { no: 2, name: "capabilities", kind: "message", T: NativeHostCapabilities, oneof: "result" },
+    { no: 3, name: "error", kind: "message", T: Error, oneof: "result" },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): NativeHostResponse {
+    return new NativeHostResponse().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): NativeHostResponse {
+    return new NativeHostResponse().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): NativeHostResponse {
+    return new NativeHostResponse().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: NativeHostResponse | PlainMessage<NativeHostResponse> | undefined, b: NativeHostResponse | PlainMessage<NativeHostResponse> | undefined): boolean {
+    return proto3.util.equals(NativeHostResponse, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.NativeHostEvent
+ */
+export class NativeHostEvent extends Message<NativeHostEvent> {
+  /**
+   * @generated from field: dsm.NativeHostEventKind kind = 1;
+   */
+  kind = NativeHostEventKind.UNSPECIFIED;
+
+  /**
+   * @generated from field: bytes payload = 2;
+   */
+  payload = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<NativeHostEvent>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.NativeHostEvent";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "kind", kind: "enum", T: proto3.getEnumType(NativeHostEventKind) },
+    { no: 2, name: "payload", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): NativeHostEvent {
+    return new NativeHostEvent().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): NativeHostEvent {
+    return new NativeHostEvent().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): NativeHostEvent {
+    return new NativeHostEvent().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: NativeHostEvent | PlainMessage<NativeHostEvent> | undefined, b: NativeHostEvent | PlainMessage<NativeHostEvent> | undefined): boolean {
+    return proto3.util.equals(NativeHostEvent, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.NativeHostAck
+ */
+export class NativeHostAck extends Message<NativeHostAck> {
+  /**
+   * @generated from field: bool success = 1;
+   */
+  success = false;
+
+  constructor(data?: PartialMessage<NativeHostAck>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.NativeHostAck";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "success", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): NativeHostAck {
+    return new NativeHostAck().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): NativeHostAck {
+    return new NativeHostAck().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): NativeHostAck {
+    return new NativeHostAck().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: NativeHostAck | PlainMessage<NativeHostAck> | undefined, b: NativeHostAck | PlainMessage<NativeHostAck> | undefined): boolean {
+    return proto3.util.equals(NativeHostAck, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.HostPermissionsRequestPayload
+ */
+export class HostPermissionsRequestPayload extends Message<HostPermissionsRequestPayload> {
+  /**
+   * @generated from field: repeated string permissions = 1;
+   */
+  permissions: string[] = [];
+
+  constructor(data?: PartialMessage<HostPermissionsRequestPayload>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.HostPermissionsRequestPayload";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "permissions", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): HostPermissionsRequestPayload {
+    return new HostPermissionsRequestPayload().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): HostPermissionsRequestPayload {
+    return new HostPermissionsRequestPayload().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): HostPermissionsRequestPayload {
+    return new HostPermissionsRequestPayload().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: HostPermissionsRequestPayload | PlainMessage<HostPermissionsRequestPayload> | undefined, b: HostPermissionsRequestPayload | PlainMessage<HostPermissionsRequestPayload> | undefined): boolean {
+    return proto3.util.equals(HostPermissionsRequestPayload, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.HostPermissionsResult
+ */
+export class HostPermissionsResult extends Message<HostPermissionsResult> {
+  /**
+   * @generated from field: repeated string granted_permissions = 1;
+   */
+  grantedPermissions: string[] = [];
+
+  /**
+   * @generated from field: bool all_granted = 2;
+   */
+  allGranted = false;
+
+  constructor(data?: PartialMessage<HostPermissionsResult>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.HostPermissionsResult";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "granted_permissions", kind: "scalar", T: 9 /* ScalarType.STRING */, repeated: true },
+    { no: 2, name: "all_granted", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): HostPermissionsResult {
+    return new HostPermissionsResult().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): HostPermissionsResult {
+    return new HostPermissionsResult().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): HostPermissionsResult {
+    return new HostPermissionsResult().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: HostPermissionsResult | PlainMessage<HostPermissionsResult> | undefined, b: HostPermissionsResult | PlainMessage<HostPermissionsResult> | undefined): boolean {
+    return proto3.util.equals(HostPermissionsResult, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.DeviceBindingCapturePayload
+ */
+export class DeviceBindingCapturePayload extends Message<DeviceBindingCapturePayload> {
+  /**
+   * @generated from field: bytes genesis_envelope = 1;
+   */
+  genesisEnvelope = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<DeviceBindingCapturePayload>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.DeviceBindingCapturePayload";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "genesis_envelope", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DeviceBindingCapturePayload {
+    return new DeviceBindingCapturePayload().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DeviceBindingCapturePayload {
+    return new DeviceBindingCapturePayload().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DeviceBindingCapturePayload {
+    return new DeviceBindingCapturePayload().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: DeviceBindingCapturePayload | PlainMessage<DeviceBindingCapturePayload> | undefined, b: DeviceBindingCapturePayload | PlainMessage<DeviceBindingCapturePayload> | undefined): boolean {
+    return proto3.util.equals(DeviceBindingCapturePayload, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.DeviceBindingCaptureResult
+ */
+export class DeviceBindingCaptureResult extends Message<DeviceBindingCaptureResult> {
+  /**
+   * @generated from field: bool installed = 1;
+   */
+  installed = false;
+
+  /**
+   * @generated from field: bytes device_id = 2;
+   */
+  deviceId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes genesis_hash = 3;
+   */
+  genesisHash = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<DeviceBindingCaptureResult>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.DeviceBindingCaptureResult";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "installed", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 2, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "genesis_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DeviceBindingCaptureResult {
+    return new DeviceBindingCaptureResult().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DeviceBindingCaptureResult {
+    return new DeviceBindingCaptureResult().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DeviceBindingCaptureResult {
+    return new DeviceBindingCaptureResult().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: DeviceBindingCaptureResult | PlainMessage<DeviceBindingCaptureResult> | undefined, b: DeviceBindingCaptureResult | PlainMessage<DeviceBindingCaptureResult> | undefined): boolean {
+    return proto3.util.equals(DeviceBindingCaptureResult, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.BiometricAuthorizePayload
+ */
+export class BiometricAuthorizePayload extends Message<BiometricAuthorizePayload> {
+  /**
+   * @generated from field: string prompt_title = 1;
+   */
+  promptTitle = "";
+
+  /**
+   * @generated from field: string prompt_subtitle = 2;
+   */
+  promptSubtitle = "";
+
+  /**
+   * @generated from field: string negative_text = 3;
+   */
+  negativeText = "";
+
+  constructor(data?: PartialMessage<BiometricAuthorizePayload>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.BiometricAuthorizePayload";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "prompt_title", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 2, name: "prompt_subtitle", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 3, name: "negative_text", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BiometricAuthorizePayload {
+    return new BiometricAuthorizePayload().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): BiometricAuthorizePayload {
+    return new BiometricAuthorizePayload().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): BiometricAuthorizePayload {
+    return new BiometricAuthorizePayload().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: BiometricAuthorizePayload | PlainMessage<BiometricAuthorizePayload> | undefined, b: BiometricAuthorizePayload | PlainMessage<BiometricAuthorizePayload> | undefined): boolean {
+    return proto3.util.equals(BiometricAuthorizePayload, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.BiometricAuthorizeResult
+ */
+export class BiometricAuthorizeResult extends Message<BiometricAuthorizeResult> {
+  /**
+   * @generated from field: bool success = 1;
+   */
+  success = false;
+
+  /**
+   * @generated from field: uint32 error_code = 2;
+   */
+  errorCode = 0;
+
+  /**
+   * @generated from field: string error_message = 3;
+   */
+  errorMessage = "";
+
+  constructor(data?: PartialMessage<BiometricAuthorizeResult>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.BiometricAuthorizeResult";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "success", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 2, name: "error_code", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 3, name: "error_message", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BiometricAuthorizeResult {
+    return new BiometricAuthorizeResult().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): BiometricAuthorizeResult {
+    return new BiometricAuthorizeResult().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): BiometricAuthorizeResult {
+    return new BiometricAuthorizeResult().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: BiometricAuthorizeResult | PlainMessage<BiometricAuthorizeResult> | undefined, b: BiometricAuthorizeResult | PlainMessage<BiometricAuthorizeResult> | undefined): boolean {
+    return proto3.util.equals(BiometricAuthorizeResult, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.SecureHardwareGenerateKeyPayload
+ */
+export class SecureHardwareGenerateKeyPayload extends Message<SecureHardwareGenerateKeyPayload> {
+  /**
+   * @generated from field: string key_alias = 1;
+   */
+  keyAlias = "";
+
+  /**
+   * @generated from field: bytes key_context = 2;
+   */
+  keyContext = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<SecureHardwareGenerateKeyPayload>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.SecureHardwareGenerateKeyPayload";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "key_alias", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 2, name: "key_context", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SecureHardwareGenerateKeyPayload {
+    return new SecureHardwareGenerateKeyPayload().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SecureHardwareGenerateKeyPayload {
+    return new SecureHardwareGenerateKeyPayload().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SecureHardwareGenerateKeyPayload {
+    return new SecureHardwareGenerateKeyPayload().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: SecureHardwareGenerateKeyPayload | PlainMessage<SecureHardwareGenerateKeyPayload> | undefined, b: SecureHardwareGenerateKeyPayload | PlainMessage<SecureHardwareGenerateKeyPayload> | undefined): boolean {
+    return proto3.util.equals(SecureHardwareGenerateKeyPayload, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.SecureHardwareGenerateKeyResult
+ */
+export class SecureHardwareGenerateKeyResult extends Message<SecureHardwareGenerateKeyResult> {
+  /**
+   * @generated from field: bytes key_handle = 1;
+   */
+  keyHandle = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<SecureHardwareGenerateKeyResult>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.SecureHardwareGenerateKeyResult";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "key_handle", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SecureHardwareGenerateKeyResult {
+    return new SecureHardwareGenerateKeyResult().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SecureHardwareGenerateKeyResult {
+    return new SecureHardwareGenerateKeyResult().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SecureHardwareGenerateKeyResult {
+    return new SecureHardwareGenerateKeyResult().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: SecureHardwareGenerateKeyResult | PlainMessage<SecureHardwareGenerateKeyResult> | undefined, b: SecureHardwareGenerateKeyResult | PlainMessage<SecureHardwareGenerateKeyResult> | undefined): boolean {
+    return proto3.util.equals(SecureHardwareGenerateKeyResult, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.SecureHardwareSignPayload
+ */
+export class SecureHardwareSignPayload extends Message<SecureHardwareSignPayload> {
+  /**
+   * @generated from field: string key_alias = 1;
+   */
+  keyAlias = "";
+
+  /**
+   * @generated from field: bytes message = 2;
+   */
+  message = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes key_handle = 3;
+   */
+  keyHandle = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<SecureHardwareSignPayload>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.SecureHardwareSignPayload";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "key_alias", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 2, name: "message", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "key_handle", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SecureHardwareSignPayload {
+    return new SecureHardwareSignPayload().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SecureHardwareSignPayload {
+    return new SecureHardwareSignPayload().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SecureHardwareSignPayload {
+    return new SecureHardwareSignPayload().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: SecureHardwareSignPayload | PlainMessage<SecureHardwareSignPayload> | undefined, b: SecureHardwareSignPayload | PlainMessage<SecureHardwareSignPayload> | undefined): boolean {
+    return proto3.util.equals(SecureHardwareSignPayload, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.SecureHardwareSignResult
+ */
+export class SecureHardwareSignResult extends Message<SecureHardwareSignResult> {
+  /**
+   * @generated from field: bytes signature = 1;
+   */
+  signature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<SecureHardwareSignResult>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.SecureHardwareSignResult";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SecureHardwareSignResult {
+    return new SecureHardwareSignResult().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SecureHardwareSignResult {
+    return new SecureHardwareSignResult().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SecureHardwareSignResult {
+    return new SecureHardwareSignResult().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: SecureHardwareSignResult | PlainMessage<SecureHardwareSignResult> | undefined, b: SecureHardwareSignResult | PlainMessage<SecureHardwareSignResult> | undefined): boolean {
+    return proto3.util.equals(SecureHardwareSignResult, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.NfcTagReadPayload
+ */
+export class NfcTagReadPayload extends Message<NfcTagReadPayload> {
+  /**
+   * @generated from field: string mime_type = 1;
+   */
+  mimeType = "";
+
+  constructor(data?: PartialMessage<NfcTagReadPayload>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.NfcTagReadPayload";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "mime_type", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): NfcTagReadPayload {
+    return new NfcTagReadPayload().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): NfcTagReadPayload {
+    return new NfcTagReadPayload().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): NfcTagReadPayload {
+    return new NfcTagReadPayload().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: NfcTagReadPayload | PlainMessage<NfcTagReadPayload> | undefined, b: NfcTagReadPayload | PlainMessage<NfcTagReadPayload> | undefined): boolean {
+    return proto3.util.equals(NfcTagReadPayload, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.NfcTagReadResult
+ */
+export class NfcTagReadResult extends Message<NfcTagReadResult> {
+  /**
+   * @generated from field: bool reader_started = 1;
+   */
+  readerStarted = false;
+
+  constructor(data?: PartialMessage<NfcTagReadResult>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.NfcTagReadResult";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "reader_started", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): NfcTagReadResult {
+    return new NfcTagReadResult().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): NfcTagReadResult {
+    return new NfcTagReadResult().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): NfcTagReadResult {
+    return new NfcTagReadResult().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: NfcTagReadResult | PlainMessage<NfcTagReadResult> | undefined, b: NfcTagReadResult | PlainMessage<NfcTagReadResult> | undefined): boolean {
+    return proto3.util.equals(NfcTagReadResult, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.NfcTagWritePayload
+ */
+export class NfcTagWritePayload extends Message<NfcTagWritePayload> {
+  /**
+   * @generated from field: string mime_type = 1;
+   */
+  mimeType = "";
+
+  /**
+   * @generated from field: bytes payload = 2;
+   */
+  payload = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<NfcTagWritePayload>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.NfcTagWritePayload";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "mime_type", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 2, name: "payload", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): NfcTagWritePayload {
+    return new NfcTagWritePayload().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): NfcTagWritePayload {
+    return new NfcTagWritePayload().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): NfcTagWritePayload {
+    return new NfcTagWritePayload().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: NfcTagWritePayload | PlainMessage<NfcTagWritePayload> | undefined, b: NfcTagWritePayload | PlainMessage<NfcTagWritePayload> | undefined): boolean {
+    return proto3.util.equals(NfcTagWritePayload, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.NfcTagWriteResult
+ */
+export class NfcTagWriteResult extends Message<NfcTagWriteResult> {
+  /**
+   * @generated from field: bool launched = 1;
+   */
+  launched = false;
+
+  constructor(data?: PartialMessage<NfcTagWriteResult>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.NfcTagWriteResult";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "launched", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): NfcTagWriteResult {
+    return new NfcTagWriteResult().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): NfcTagWriteResult {
+    return new NfcTagWriteResult().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): NfcTagWriteResult {
+    return new NfcTagWriteResult().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: NfcTagWriteResult | PlainMessage<NfcTagWriteResult> | undefined, b: NfcTagWriteResult | PlainMessage<NfcTagWriteResult> | undefined): boolean {
+    return proto3.util.equals(NfcTagWriteResult, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.BleTransportOpenPayload
+ */
+export class BleTransportOpenPayload extends Message<BleTransportOpenPayload> {
+  /**
+   * @generated from field: string ble_address = 1;
+   */
+  bleAddress = "";
+
+  constructor(data?: PartialMessage<BleTransportOpenPayload>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.BleTransportOpenPayload";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "ble_address", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BleTransportOpenPayload {
+    return new BleTransportOpenPayload().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): BleTransportOpenPayload {
+    return new BleTransportOpenPayload().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): BleTransportOpenPayload {
+    return new BleTransportOpenPayload().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: BleTransportOpenPayload | PlainMessage<BleTransportOpenPayload> | undefined, b: BleTransportOpenPayload | PlainMessage<BleTransportOpenPayload> | undefined): boolean {
+    return proto3.util.equals(BleTransportOpenPayload, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.BleTransportOpenResult
+ */
+export class BleTransportOpenResult extends Message<BleTransportOpenResult> {
+  /**
+   * @generated from field: bool ready = 1;
+   */
+  ready = false;
+
+  constructor(data?: PartialMessage<BleTransportOpenResult>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.BleTransportOpenResult";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "ready", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BleTransportOpenResult {
+    return new BleTransportOpenResult().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): BleTransportOpenResult {
+    return new BleTransportOpenResult().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): BleTransportOpenResult {
+    return new BleTransportOpenResult().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: BleTransportOpenResult | PlainMessage<BleTransportOpenResult> | undefined, b: BleTransportOpenResult | PlainMessage<BleTransportOpenResult> | undefined): boolean {
+    return proto3.util.equals(BleTransportOpenResult, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.BleTransportSendChunksPayload
+ */
+export class BleTransportSendChunksPayload extends Message<BleTransportSendChunksPayload> {
+  /**
+   * @generated from field: string ble_address = 1;
+   */
+  bleAddress = "";
+
+  /**
+   * @generated from field: bytes envelope_bytes = 2;
+   */
+  envelopeBytes = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<BleTransportSendChunksPayload>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.BleTransportSendChunksPayload";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "ble_address", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 2, name: "envelope_bytes", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BleTransportSendChunksPayload {
+    return new BleTransportSendChunksPayload().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): BleTransportSendChunksPayload {
+    return new BleTransportSendChunksPayload().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): BleTransportSendChunksPayload {
+    return new BleTransportSendChunksPayload().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: BleTransportSendChunksPayload | PlainMessage<BleTransportSendChunksPayload> | undefined, b: BleTransportSendChunksPayload | PlainMessage<BleTransportSendChunksPayload> | undefined): boolean {
+    return proto3.util.equals(BleTransportSendChunksPayload, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.BleTransportSendChunksResult
+ */
+export class BleTransportSendChunksResult extends Message<BleTransportSendChunksResult> {
+  /**
+   * @generated from field: bytes response_envelope = 1;
+   */
+  responseEnvelope = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<BleTransportSendChunksResult>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.BleTransportSendChunksResult";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "response_envelope", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BleTransportSendChunksResult {
+    return new BleTransportSendChunksResult().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): BleTransportSendChunksResult {
+    return new BleTransportSendChunksResult().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): BleTransportSendChunksResult {
+    return new BleTransportSendChunksResult().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: BleTransportSendChunksResult | PlainMessage<BleTransportSendChunksResult> | undefined, b: BleTransportSendChunksResult | PlainMessage<BleTransportSendChunksResult> | undefined): boolean {
+    return proto3.util.equals(BleTransportSendChunksResult, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.BleTransportClosePayload
+ */
+export class BleTransportClosePayload extends Message<BleTransportClosePayload> {
+  /**
+   * @generated from field: string ble_address = 1;
+   */
+  bleAddress = "";
+
+  constructor(data?: PartialMessage<BleTransportClosePayload>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.BleTransportClosePayload";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "ble_address", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BleTransportClosePayload {
+    return new BleTransportClosePayload().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): BleTransportClosePayload {
+    return new BleTransportClosePayload().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): BleTransportClosePayload {
+    return new BleTransportClosePayload().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: BleTransportClosePayload | PlainMessage<BleTransportClosePayload> | undefined, b: BleTransportClosePayload | PlainMessage<BleTransportClosePayload> | undefined): boolean {
+    return proto3.util.equals(BleTransportClosePayload, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.BleTransportCloseResult
+ */
+export class BleTransportCloseResult extends Message<BleTransportCloseResult> {
+  /**
+   * @generated from field: bool closed = 1;
+   */
+  closed = false;
+
+  constructor(data?: PartialMessage<BleTransportCloseResult>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.BleTransportCloseResult";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "closed", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BleTransportCloseResult {
+    return new BleTransportCloseResult().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): BleTransportCloseResult {
+    return new BleTransportCloseResult().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): BleTransportCloseResult {
+    return new BleTransportCloseResult().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: BleTransportCloseResult | PlainMessage<BleTransportCloseResult> | undefined, b: BleTransportCloseResult | PlainMessage<BleTransportCloseResult> | undefined): boolean {
+    return proto3.util.equals(BleTransportCloseResult, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.QrScanResultPayload
+ */
+export class QrScanResultPayload extends Message<QrScanResultPayload> {
+  /**
+   * @generated from field: string text_utf8 = 1;
+   */
+  textUtf8 = "";
+
+  constructor(data?: PartialMessage<QrScanResultPayload>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.QrScanResultPayload";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "text_utf8", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): QrScanResultPayload {
+    return new QrScanResultPayload().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): QrScanResultPayload {
+    return new QrScanResultPayload().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): QrScanResultPayload {
+    return new QrScanResultPayload().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: QrScanResultPayload | PlainMessage<QrScanResultPayload> | undefined, b: QrScanResultPayload | PlainMessage<QrScanResultPayload> | undefined): boolean {
+    return proto3.util.equals(QrScanResultPayload, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.HostSessionStateHint
+ */
+export class HostSessionStateHint extends Message<HostSessionStateHint> {
+  /**
+   * @generated from field: string reason = 1;
+   */
+  reason = "";
+
+  constructor(data?: PartialMessage<HostSessionStateHint>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.HostSessionStateHint";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "reason", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): HostSessionStateHint {
+    return new HostSessionStateHint().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): HostSessionStateHint {
+    return new HostSessionStateHint().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): HostSessionStateHint {
+    return new HostSessionStateHint().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: HostSessionStateHint | PlainMessage<HostSessionStateHint> | undefined, b: HostSessionStateHint | PlainMessage<HostSessionStateHint> | undefined): boolean {
+    return proto3.util.equals(HostSessionStateHint, a, b);
   }
 }
 

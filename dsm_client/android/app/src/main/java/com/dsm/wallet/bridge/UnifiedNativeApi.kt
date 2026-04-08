@@ -49,6 +49,8 @@ internal object UnifiedNativeApi {
     @Keep @JvmStatic external fun initSdkV3(baseDir: String): ByteArray
     @Keep @JvmStatic external fun initStorageBaseDir(path: ByteArray)
     @Keep @JvmStatic external fun initDsmSdk(configPath: String)
+    @Keep @JvmStatic external fun dispatchStartup(requestBytes: ByteArray): ByteArray
+    @Keep @JvmStatic external fun dispatchIngress(requestBytes: ByteArray): ByteArray
     @Keep @JvmStatic external fun getTransportHeadersV3Status(): Byte
     @Keep @JvmStatic external fun getTransportHeadersV3(): ByteArray
     @Keep @JvmStatic external fun processEnvelopeV3(envelope: ByteArray): ByteArray

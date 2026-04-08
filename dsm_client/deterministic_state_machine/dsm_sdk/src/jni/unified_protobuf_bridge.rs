@@ -296,6 +296,73 @@ fn ensure_bootstrap() {
     }
 }
 
+#[no_mangle]
+pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_dispatchStartup(
+    env: jni::sys::JNIEnv,
+    _clazz: jni::sys::jclass,
+    jrequest: jni::sys::jbyteArray,
+) -> jni::sys::jbyteArray {
+    crate::jni::bridge_utils::jni_catch_unwind_jbytearray(
+        "dispatchStartup",
+        std::panic::AssertUnwindSafe(|| {
+            let mut env = match unsafe { env_from(env) } {
+                Some(e) => e,
+                None => return std::ptr::null_mut(),
+            };
+            let jrequest = unsafe { jba_from(jrequest) };
+            let request_bytes = match env.convert_byte_array(&jrequest) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    log::error!("dispatchStartup: failed to read request bytes: {e}");
+                    return empty_byte_array_or_empty(&env).into_raw();
+                }
+            };
+            let response_bytes = crate::ingress::dispatch_startup_bytes(&request_bytes);
+            match env.byte_array_from_slice(&response_bytes) {
+                Ok(arr) => arr.into_raw(),
+                Err(e) => {
+                    log::error!("dispatchStartup: failed to allocate response bytes: {e}");
+                    empty_byte_array_or_empty(&env).into_raw()
+                }
+            }
+        }),
+    )
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_dispatchIngress(
+    env: jni::sys::JNIEnv,
+    _clazz: jni::sys::jclass,
+    jrequest: jni::sys::jbyteArray,
+) -> jni::sys::jbyteArray {
+    crate::jni::bridge_utils::jni_catch_unwind_jbytearray(
+        "dispatchIngress",
+        std::panic::AssertUnwindSafe(|| {
+            let mut env = match unsafe { env_from(env) } {
+                Some(e) => e,
+                None => return std::ptr::null_mut(),
+            };
+            let jrequest = unsafe { jba_from(jrequest) };
+            let request_bytes = match env.convert_byte_array(&jrequest) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    log::error!("dispatchIngress: failed to read request bytes: {e}");
+                    return empty_byte_array_or_empty(&env).into_raw();
+                }
+            };
+            ensure_bootstrap();
+            let response_bytes = crate::ingress::dispatch_ingress_bytes(&request_bytes);
+            match env.byte_array_from_slice(&response_bytes) {
+                Ok(arr) => arr.into_raw(),
+                Err(e) => {
+                    log::error!("dispatchIngress: failed to allocate response bytes: {e}");
+                    empty_byte_array_or_empty(&env).into_raw()
+                }
+            }
+        }),
+    )
+}
+
 fn fetch_transport_headers_bytes() -> Result<Vec<u8>, String> {
     crate::get_transport_headers_v3_bytes().map_err(|e| format!("headers fetch failed: {e}"))
 }
@@ -4924,15 +4991,17 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_ensureAppRout
                 return 1; // true
             }
 
-            // AppRouter not installed - try to install it if device identity is available
+            // AppRouter not installed - try to install it only when canonical identity is ready.
             log::info!(
                 "ensureAppRouterInstalled: AppRouter not available, attempting to install..."
             );
 
-            // Check if we have device identity (required for full AppRouter)
-            if crate::sdk::app_state::AppState::get_device_id().is_some() {
+            let has_device_identity = crate::sdk::app_state::AppState::get_device_id().is_some();
+            let has_binding_key = crate::fetch_dbrw_binding_key().is_ok();
+
+            if has_device_identity && has_binding_key {
                 log::info!(
-                    "ensureAppRouterInstalled: Device identity available, installing AppRouter"
+                    "ensureAppRouterInstalled: Canonical identity ready, installing AppRouter"
                 );
 
                 // Get storage endpoints: try registry first, fall back to env config
@@ -4975,9 +5044,15 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_ensureAppRout
                 return 1; // true
             }
 
-            log::error!(
-                "ensureAppRouterInstalled: Cannot install AppRouter - no device identity available"
-            );
+            if !has_device_identity {
+                log::error!(
+                    "ensureAppRouterInstalled: Cannot install AppRouter - no device identity available"
+                );
+            } else {
+                log::error!(
+                    "ensureAppRouterInstalled: Cannot install AppRouter - canonical C-DBRW binding key missing or invalid"
+                );
+            }
             0 // false
         }),
     )
@@ -5025,9 +5100,12 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getAppRouterS
                 return 1;
             }
 
-            // Conservative status: genesis present and DBRW has a key, but AppRouter still not installed.
-            // Return DBRW_NOT_READY to indicate SDK initialization incomplete.
-            log::warn!("getAppRouterStatus: genesis present and DBRW has key but AppRouter missing; returning DBRW_NOT_READY");
+            // Conservative status: genesis and canonical binding are ready, but AppRouter still
+            // is not installed. Return DBRW_NOT_READY to indicate startup/router initialization is
+            // still incomplete.
+            log::warn!(
+                "getAppRouterStatus: genesis present and canonical C-DBRW binding ready but AppRouter missing; returning DBRW_NOT_READY"
+            );
             1
         }),
     )

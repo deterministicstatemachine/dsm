@@ -10,7 +10,7 @@ class SinglePathWebViewBridgeStrictRawTest {
     @Test
     fun handleBinaryRpcRawStrictThrowsDecodedBridgeError() {
         val err = try {
-            SinglePathWebViewBridge.handleBinaryRpcRawStrict("createGenesisBin", ByteArray(0))
+            SinglePathWebViewBridge.handleBinaryRpcRawStrict("nativeBoundaryIngress", ByteArray(0))
             null
         } catch (e: IllegalStateException) {
             e

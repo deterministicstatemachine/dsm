@@ -168,7 +168,8 @@ pub mod platform;
 // iOS protobuf-native transport functions (extern "C" for Swift bridging)
 #[cfg(target_os = "ios")]
 pub use platform::ios::transport::{
-    dsm_configure_env, dsm_free_envelope_bytes, dsm_init_dsm_sdk, dsm_initialize_sdk,
+    dsm_configure_env, dsm_dispatch_ingress_request, dsm_dispatch_startup_request,
+    dsm_free_envelope_bytes, dsm_init_dsm_sdk, dsm_initialize_sdk,
     dsm_initialize_sdk_context, dsm_process_envelope_protobuf, dsm_set_storage_base_dir,
 };
 

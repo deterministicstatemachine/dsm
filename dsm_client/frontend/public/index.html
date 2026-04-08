@@ -1504,7 +1504,85 @@ html[data-shell-theme] .stateboy::before {
         return { bytes: buf.slice(v.off, end), off: end };
       }
 
-      function dispatchEventPayload(bytes) {
+      function skipField(buf, start, wireType) {
+        if (wireType === 0) {
+          const v = readVarint(buf, start);
+          return v ? v.off : null;
+        }
+        if (wireType === 2) {
+          const ld = readLenDelimited(buf, start);
+          return ld ? ld.off : null;
+        }
+        return null;
+      }
+
+      function decodeBridgeRpcErrorMessage(bytes) {
+        let off = 0;
+        while (off < bytes.length) {
+          const key = readVarint(bytes, off);
+          if (!key) return 'bridge error';
+          off = key.off;
+          const field = key.value >>> 3;
+          const wire = key.value & 0x07;
+          if (field === 2 && wire === 2) {
+            const ld = readLenDelimited(bytes, off);
+            if (!ld) return 'bridge error';
+            try {
+              return new TextDecoder().decode(ld.bytes);
+            } catch (_) {
+              return 'bridge error';
+            }
+          }
+          const next = skipField(bytes, off, wire);
+          if (next == null) return 'bridge error';
+          off = next;
+        }
+        return 'bridge error';
+      }
+
+      function unwrapBridgeRpcSuccess(bytes, method) {
+        let off = 0;
+        while (off < bytes.length) {
+          const key = readVarint(bytes, off);
+          if (!key) break;
+          off = key.off;
+          const field = key.value >>> 3;
+          const wire = key.value & 0x07;
+          if (wire !== 2) {
+            const next = skipField(bytes, off, wire);
+            if (next == null) break;
+            off = next;
+            continue;
+          }
+          const ld = readLenDelimited(bytes, off);
+          if (!ld) break;
+          off = ld.off;
+          if (field === 1) {
+            let innerOff = 0;
+            while (innerOff < ld.bytes.length) {
+              const innerKey = readVarint(ld.bytes, innerOff);
+              if (!innerKey) break;
+              innerOff = innerKey.off;
+              const innerField = innerKey.value >>> 3;
+              const innerWire = innerKey.value & 0x07;
+              if (innerField === 1 && innerWire === 2) {
+                const innerLd = readLenDelimited(ld.bytes, innerOff);
+                if (!innerLd) break;
+                return innerLd.bytes;
+              }
+              const nextInner = skipField(ld.bytes, innerOff, innerWire);
+              if (nextInner == null) break;
+              innerOff = nextInner;
+            }
+          }
+          if (field === 2) {
+            throw new Error(decodeBridgeRpcErrorMessage(ld.bytes) || `bridge error while calling ${method}`);
+          }
+        }
+        throw new Error(`invalid bridge response for ${method}`);
+      }
+
+      function dispatchLegacyTopicEvent(bytes) {
         let off = 0;
         let topic = '';
         let payload = new Uint8Array(0);
@@ -1532,6 +1610,45 @@ html[data-shell-theme] .stateboy::before {
           window.dispatchEvent(new CustomEvent('dsm-event-bin', { detail: { topic, payload } }));
         } catch (_) {}
         return true;
+      }
+
+      function dispatchNativeHostEventPayload(bytes) {
+        let off = 0;
+        let kind = 0;
+        let sawPayload = false;
+        while (off < bytes.length) {
+          const k = readVarint(bytes, off);
+          if (!k) return false;
+          off = k.off;
+          const field = k.value >>> 3;
+          const wire = k.value & 0x07;
+          if (field === 1 && wire === 0) {
+            const v = readVarint(bytes, off);
+            if (!v) return false;
+            kind = v.value;
+            off = v.off;
+            continue;
+          }
+          if (field === 2 && wire === 2) {
+            const ld = readLenDelimited(bytes, off);
+            if (!ld) return false;
+            sawPayload = true;
+            off = ld.off;
+            continue;
+          }
+          const next = skipField(bytes, off, wire);
+          if (next == null) return false;
+          off = next;
+        }
+        if (kind <= 0 || !sawPayload) return false;
+        try {
+          window.dispatchEvent(new CustomEvent('dsm-native-host-event-bin', { detail: { payload: bytes } }));
+        } catch (_) {}
+        return true;
+      }
+
+      function dispatchAsyncBridgePayload(bytes) {
+        return dispatchLegacyTopicEvent(bytes) || dispatchNativeHostEventPayload(bytes);
       }
       
       // ============================================================================
@@ -1564,7 +1681,7 @@ html[data-shell-theme] .stateboy::before {
             // Canonical async event payload is protobuf AppRouterPayload(method_name, args)
             // and does not carry an 8-byte request id prefix.
             if (bytes.length > 0 && bytes.length < 8) {
-              dispatchEventPayload(bytes);
+              dispatchAsyncBridgePayload(bytes);
               return;
             }
 
@@ -1574,7 +1691,7 @@ html[data-shell-theme] .stateboy::before {
               const hiMaybe = idViewMaybe.getUint32(0, false);
               const loMaybe = idViewMaybe.getUint32(4, false);
               const maybeId = (BigInt(hiMaybe) << 32n) | BigInt(loMaybe);
-              if (!pending.has(maybeId) && dispatchEventPayload(bytes)) {
+              if (!pending.has(maybeId) && dispatchAsyncBridgePayload(bytes)) {
                 return;
               }
             }
@@ -1653,6 +1770,12 @@ html[data-shell-theme] .stateboy::before {
         });
       }
 
+      async function callBridgeMethod(method, payload) {
+        const req = encodeBridgeRequest(method, payload instanceof Uint8Array ? payload : new Uint8Array(0));
+        const response = await sendMessageBin(req);
+        return unwrapBridgeRpcSuccess(response, method);
+      }
+
       // Async wrapper for hasIdentityDirect (calls through binary bridge)
       async function hasIdentityDirect() {
         if (!port) return false;
@@ -1672,6 +1795,9 @@ html[data-shell-theme] .stateboy::before {
         __binary: true,
         isAvailable: () => !!port,
         sendMessageBin,
+        startup: (payload) => callBridgeMethod('nativeBoundaryStartup', payload),
+        ingress: (payload) => callBridgeMethod('nativeBoundaryIngress', payload),
+        hostRequest: (payload) => callBridgeMethod('nativeHostRequest', payload),
         getBridgeStatus: () => (port ? 3 : 0),
         hasIdentityDirect,
       };

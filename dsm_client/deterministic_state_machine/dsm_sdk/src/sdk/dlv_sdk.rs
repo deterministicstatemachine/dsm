@@ -659,6 +659,7 @@ mod tests {
     use super::*;
     use dsm::types::state_types::DeviceInfo;
     use dsm::types::proto::{SmartPolicy, SmartClause, SmartBalance};
+    use serial_test::serial;
 
     const TEST_DEVICE_ID: [u8; 32] = [0xD2; 32];
     const TEST_GENESIS_HASH: [u8; 32] = [0xD4; 32];
@@ -692,6 +693,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_sdk_vault_creation() -> Result<(), DsmError> {
         let sdk = DlvSdk::new();
         install_test_identity();
@@ -715,6 +717,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_vault_info_retrieval() -> Result<(), DsmError> {
         let sdk = DlvSdk::new();
         install_test_identity();
@@ -739,6 +742,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_vault_statistics() -> Result<(), DsmError> {
         let sdk = DlvSdk::new();
         install_test_identity();
@@ -766,6 +770,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_dlv_with_smart_commitments() -> Result<(), DsmError> {
         let sdk = DlvSdk::new();
         let creator_pk = install_test_identity();

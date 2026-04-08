@@ -26,15 +26,11 @@ import com.dsm.wallet.security.AccessLevel
 //   removed. The WebView sends [8-byte msgId][BridgeRpcRequest proto]
 //   and receives [0x03][Envelope v3 proto] responses.
 //
-// METHOD ROUTING (50+ methods, grouped by domain):
-//   Bootstrap:  "sdkBootstrap"
-//   Protocol:   "processEnvelopeV3"
-//   AppRouter:  "appRouterQuery", "appRouterInvoke"
-//   Bilateral:  "bilateralOfflineSend", "bilateralAcceptByCommitment", ...
-//   BLE:        "bleCommand", "getBleStats", "retryBle", ...
-//   Contacts:   "contactAdd", "contactRemove", "handleContactQrV3"
-//   System:     "getTransportHeaders", "setSystemBarColor", "setPreference"
-//   Recovery:   appRouter routes "recovery.*", "nfc.ring.write"
+// METHOD ROUTING (grouped by boundary):
+//   Shared boundary: "nativeBoundaryStartup", "nativeBoundaryIngress"
+//   Private host boundary: "nativeHostRequest"
+//   App router: "appRouterQuery", "appRouterInvoke"
+//   Legacy native helpers that still back non-WebView callers remain internal only.
 //
 // ERROR CODES (returned in response envelope):
 //   0 = success
@@ -430,6 +426,28 @@ class SinglePathWebViewBridge(private val context: Context) {
                     BridgePreferencesHandler.setPreference(inst.prefs(), payload)
                 }
 
+                "nativeBoundaryStartup" -> {
+                    NativeBoundaryBridge.startup(payload)
+                }
+
+                "nativeBoundaryIngress" -> {
+                    NativeBoundaryBridge.ingress(payload)
+                }
+
+                "nativeHostRequest" -> {
+                    NativeHostBridge.hostRequest(
+                        context = inst.context,
+                        prefs = inst.prefs(),
+                        sdkContextInitialized = sdkContextInitialized,
+                        logTag = TAG,
+                        keyDeviceId = KEY_DEVICE_ID,
+                        keyGenesisHash = KEY_GENESIS_HASH,
+                        keyGenesisEnvelope = KEY_GENESIS_ENVELOPE,
+                        keyDbrwSalt = KEY_DBRW_SALT,
+                        requestBytes = payload,
+                    )
+                }
+
                 // Unified router calls - pass full framed payload to Rust
                 "appRouterInvoke" -> {
                     val result = BridgeRouterHandler.appRouterInvoke(payload, ::nextRouterReqId, TAG)
@@ -446,22 +464,6 @@ class SinglePathWebViewBridge(private val context: Context) {
                     isSdkReady = { sdkContextInitialized.get() },
                     bootstrap = { inst.bootstrapFromPrefs() }
                 )
-
-                "createGenesisBin" -> {
-                    val parsed = try {
-                        dsm.types.proto.CreateGenesisPayload.parseFrom(payload)
-                    } catch (e: com.google.protobuf.InvalidProtocolBufferException) {
-                        throw IllegalArgumentException("createGenesisBin: invalid protobuf payload: ${e.message}")
-                    }
-                    val locale = parsed.locale
-                    val networkId = parsed.networkId
-                    val entropy = parsed.entropy.toByteArray()
-                    if (entropy.size != 32) throw IllegalArgumentException("createGenesisBin: entropy must be 32 bytes")
-                    val result = inst.createGenesis(locale, networkId, entropy)
-                    // State mutated (genesis created) — refresh NFC capsule if backup enabled.
-                    try { UnifiedNativeApi.maybeRefreshNfcCapsule() } catch (_: Throwable) {}
-                    result
-                }
 
                 // Rust-driven pairing orchestration: scan all unpaired contacts automatically
                 "startPairingAll" -> {

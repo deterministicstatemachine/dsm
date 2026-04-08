@@ -13,7 +13,7 @@ use prost::Message;
 
 use crate::generated::{
     ingress_request, ingress_response, startup_request, startup_response, ConfigureEnvOp, Envelope,
-    IngressRequest, InitializeIdentityContextOp, InitializeSdkOp, SetStorageBaseDirOp,
+    IngressRequest, IngressResponse, InitializeIdentityContextOp, InitializeSdkOp, SetStorageBaseDirOp,
     StartupRequest, StartupResponse,
 };
 use crate::util::deterministic_time;
@@ -61,28 +61,7 @@ pub extern "C" fn dsm_process_envelope_protobuf(
         }
     };
 
-    // Allocate and return result
-    if result_bytes.is_empty() {
-        unsafe { *out_len = 0 };
-        return std::ptr::null_mut();
-    }
-
-    unsafe { *out_len = result_bytes.len() };
-    let ptr = unsafe {
-        let layout = std::alloc::Layout::from_size_align(result_bytes.len(), 1)
-            .unwrap_or_else(|e| panic!("Invalid layout: {e}"));
-        let ptr = std::alloc::alloc(layout);
-        if ptr.is_null() {
-            error!("iOS transport: memory allocation failed");
-            // out_len is already validated non-null above
-            *out_len = 0;
-            return std::ptr::null_mut();
-        }
-        std::ptr::copy_nonoverlapping(result_bytes.as_ptr(), ptr, result_bytes.len());
-        ptr
-    };
-
-    ptr as *mut u8
+    allocate_response_buffer(result_bytes, out_len)
 }
 
 /// Free memory allocated by dsm_process_envelope_protobuf
@@ -97,6 +76,141 @@ pub extern "C" fn dsm_free_envelope_bytes(bytes: *mut u8, len: usize) {
             std::alloc::dealloc(bytes, layout);
         }
     }
+}
+
+fn allocate_response_buffer(result_bytes: Vec<u8>, out_len: *mut usize) -> *mut u8 {
+    if out_len.is_null() {
+        error!("iOS transport: null out_len provided");
+        return std::ptr::null_mut();
+    }
+    if result_bytes.is_empty() {
+        unsafe { *out_len = 0 };
+        return std::ptr::null_mut();
+    }
+
+    unsafe { *out_len = result_bytes.len() };
+    let ptr = unsafe {
+        let layout = std::alloc::Layout::from_size_align(result_bytes.len(), 1)
+            .unwrap_or_else(|e| panic!("Invalid layout: {e}"));
+        let ptr = std::alloc::alloc(layout);
+        if ptr.is_null() {
+            error!("iOS transport: memory allocation failed");
+            *out_len = 0;
+            return std::ptr::null_mut();
+        }
+        std::ptr::copy_nonoverlapping(result_bytes.as_ptr(), ptr, result_bytes.len());
+        ptr
+    };
+
+    ptr as *mut u8
+}
+
+fn ingress_error_response_bytes(code: u32, message: String) -> Vec<u8> {
+    StartupOrIngressResponse::Ingress(IngressResponse {
+        result: Some(ingress_response::Result::Error(crate::generated::Error {
+            code,
+            message,
+            context: Vec::new(),
+            source_tag: 0,
+            is_recoverable: false,
+            debug_b32: String::new(),
+        })),
+    })
+    .encode()
+}
+
+fn startup_error_response_bytes(code: u32, message: String) -> Vec<u8> {
+    StartupOrIngressResponse::Startup(StartupResponse {
+        result: Some(startup_response::Result::Error(crate::generated::Error {
+            code,
+            message,
+            context: Vec::new(),
+            source_tag: 0,
+            is_recoverable: false,
+            debug_b32: String::new(),
+        })),
+    })
+    .encode()
+}
+
+enum StartupOrIngressResponse {
+    Startup(StartupResponse),
+    Ingress(IngressResponse),
+}
+
+impl StartupOrIngressResponse {
+    fn encode(self) -> Vec<u8> {
+        match self {
+            StartupOrIngressResponse::Startup(response) => response.encode_to_vec(),
+            StartupOrIngressResponse::Ingress(response) => response.encode_to_vec(),
+        }
+    }
+}
+
+fn dispatch_bytes_ffi(
+    request_bytes: *const u8,
+    request_len: usize,
+    out_len: *mut usize,
+    dispatch: fn(&[u8]) -> Vec<u8>,
+    null_response: fn(u32, String) -> Vec<u8>,
+    operation_name: &str,
+) -> *mut u8 {
+    if out_len.is_null() {
+        error!("iOS transport: null out_len provided for {operation_name}");
+        return std::ptr::null_mut();
+    }
+
+    let response_bytes = if request_bytes.is_null() {
+        null_response(1, format!("{operation_name}: null request bytes"))
+    } else {
+        let input_bytes = unsafe { std::slice::from_raw_parts(request_bytes, request_len) };
+        match catch_unwind(AssertUnwindSafe(|| dispatch(input_bytes))) {
+            Ok(bytes) => bytes,
+            Err(panic_payload) => {
+                let msg = panic_payload
+                    .downcast_ref::<&str>()
+                    .map(|s| *s)
+                    .or_else(|| panic_payload.downcast_ref::<String>().map(|s| s.as_str()))
+                    .unwrap_or("panic in iOS raw boundary transport");
+                error!("iOS transport panic in {}: {}", operation_name, msg);
+                null_response(2, format!("{operation_name}: panic: {msg}"))
+            }
+        }
+    };
+
+    allocate_response_buffer(response_bytes, out_len)
+}
+
+#[no_mangle]
+pub extern "C" fn dsm_dispatch_startup_request(
+    request_bytes: *const u8,
+    request_len: usize,
+    out_len: *mut usize,
+) -> *mut u8 {
+    dispatch_bytes_ffi(
+        request_bytes,
+        request_len,
+        out_len,
+        crate::ingress::dispatch_startup_bytes,
+        startup_error_response_bytes,
+        "startup request",
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn dsm_dispatch_ingress_request(
+    request_bytes: *const u8,
+    request_len: usize,
+    out_len: *mut usize,
+) -> *mut u8 {
+    dispatch_bytes_ffi(
+        request_bytes,
+        request_len,
+        out_len,
+        crate::ingress::dispatch_ingress_bytes,
+        ingress_error_response_bytes,
+        "ingress request",
+    )
 }
 
 fn parse_nonempty_cstr(arg_name: &str, value: *const c_char) -> Option<String> {

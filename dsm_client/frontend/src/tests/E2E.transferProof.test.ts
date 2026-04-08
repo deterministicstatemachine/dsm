@@ -204,6 +204,26 @@ function installBridge(opts?: { contactBleAddress?: string }) {
         return wrapSuccess(withRouterPrefix(new Uint8Array(0)));
       }
 
+      if (method === 'nativeHostRequest') {
+        const hostRequest = pb.NativeHostRequest.fromBinary(payload);
+        if (hostRequest.kind === pb.NativeHostRequestKind.PLATFORM_PRIMITIVE_BLE_TRANSPORT_SEND_CHUNKS) {
+          const responseEnvelope = bilateralResponseOverride
+            ? bilateralResponseOverride()
+            : makeBilateralPrepareResponseEnvelope(COMMITMENT_HASH);
+          return wrapSuccess(
+            new pb.NativeHostResponse({
+              result: {
+                case: 'okBytes',
+                value: new pb.BleTransportSendChunksResult({
+                  responseEnvelope,
+                }).toBinary(),
+              },
+            }).toBinary(),
+          );
+        }
+        return wrapError(`unhandled nativeHostRequest kind: ${hostRequest.kind}`);
+      }
+
       if (method === 'appRouterInvoke') {
         // sendOnlineTransfer uses appRouterInvokeBin('wallet.send', ...)
         // Check the AppRouterPayload for the method name
@@ -213,7 +233,6 @@ function installBridge(opts?: { contactBleAddress?: string }) {
           }
           return wrapSuccess(withRouterPrefix(makeOnlineResponseEnvelope(true, 'ok', 123n)));
         }
-        // bilateralOfflineSendBin uses appRouterInvoke
         if (bilateralResponseOverride) {
           return wrapSuccess(withRouterPrefix(bilateralResponseOverride()));
         }
