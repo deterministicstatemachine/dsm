@@ -73,23 +73,16 @@ pub fn builtin_policy_commit_for_token(token_id: &str) -> Option<[u8; 32]> {
     }
 }
 
-/// Resolve policy_commit for any token, including non-builtins.
+/// Resolve the canonical CPTA `policy_commit` for direct state-machine token ops.
 ///
-/// §9.1: All TokenOps MUST include `policy_commit`. For builtins (ERA, dBTC),
-/// the precomputed constants are returned. For CPTA-anchored custom tokens,
-/// the policy_commit is derived deterministically from the token_id using
-/// BLAKE3 domain separation. The full CPTA bytes should ideally be cached
-/// locally and verified by digest, but this derivation ensures balance
-/// mutations are never skipped for valid token operations.
-pub fn resolve_policy_commit(token_id: &str) -> [u8; 32] {
-    builtin_policy_commit_for_token(token_id).unwrap_or_else(|| {
-        // §9.3: policy_commit := BLAKE3-256("DSM/cpta\0" || canonical_cpta_bytes)
-        // For non-builtin tokens without cached CPTA bytes, derive a
-        // deterministic placeholder from the token_id. This ensures the
-        // state machine applies balance deltas for all tokens, not just
-        // builtins. The real policy_commit is verified at the receipt
-        // acceptance layer (§9.5 binding to policy).
-        crate::crypto::blake3::domain_hash_bytes("DSM/token-policy\0", token_id.as_bytes())
+/// Builtins (`ERA`, `dBTC`) resolve to their frozen anchors. Any other token must
+/// already have a verified policy anchor in the higher-level policy system; this
+/// low-level helper now fails closed instead of synthesizing a placeholder digest.
+pub fn resolve_policy_commit(token_id: &str) -> Result<[u8; 32], DsmError> {
+    builtin_policy_commit_for_token(token_id).ok_or_else(|| {
+        DsmError::invalid_operation(format!(
+            "Missing canonical policy anchor for token {token_id}"
+        ))
     })
 }
 
@@ -133,6 +126,10 @@ impl TokenStateManager {
     /// Uses an explicit token-local anchor when available, otherwise delegates
     /// to the configured `TokenPolicySystem`. Missing anchors fail closed.
     fn resolve_policy_commit(&self, token_id: &str) -> Result<[u8; 32], DsmError> {
+        if let Some(policy_commit) = builtin_policy_commit_for_token(token_id) {
+            return Ok(policy_commit);
+        }
+
         if let Some(token) = self.token_store.read().get(token_id) {
             if let Some(policy_anchor) = token.policy_anchor() {
                 return Ok(*policy_anchor);
@@ -145,6 +142,32 @@ impl TokenStateManager {
             Err(DsmError::invalid_operation(format!(
                 "Missing policy anchor for token {token_id}"
             )))
+        }
+    }
+
+    fn decode_dlv_lock_metadata(
+        token_id: &Option<Vec<u8>>,
+        locked_amount: &Option<Balance>,
+        op_name: &str,
+    ) -> Result<Option<(String, Balance)>, DsmError> {
+        match (token_id.as_ref(), locked_amount.as_ref()) {
+            (None, None) => Ok(None),
+            (Some(_), None) | (None, Some(_)) => Err(DsmError::invalid_operation(format!(
+                "{op_name} requires both token_id and locked_amount when settling locked tokens"
+            ))),
+            (Some(token_id), Some(locked_amount)) => {
+                let token_id_str = std::str::from_utf8(token_id).map_err(|_| {
+                    DsmError::invalid_operation(format!(
+                        "{op_name} token_id must be valid UTF-8 bytes"
+                    ))
+                })?;
+                if token_id_str.is_empty() {
+                    return Err(DsmError::invalid_operation(format!(
+                        "{op_name} token_id must not be empty"
+                    )));
+                }
+                Ok(Some((token_id_str.to_string(), locked_amount.clone())))
+            }
         }
     }
 
@@ -384,9 +407,10 @@ impl TokenStateManager {
                 creator_public_key,
                 ..
             } => {
-                if let (Some(tid), Some(amount)) = (token_id, locked_amount) {
+                if let Some((tid_str, amount)) =
+                    Self::decode_dlv_lock_metadata(token_id, locked_amount, "DlvCreate")?
+                {
                     if amount.value() > 0 {
-                        let tid_str = String::from_utf8_lossy(tid);
                         let creator_key =
                             self.make_balance_key(creator_public_key.as_slice(), &tid_str)?;
 
@@ -401,13 +425,12 @@ impl TokenStateManager {
 
                         if creator_balance.value() < amount.value() {
                             return Err(DsmError::insufficient_balance(
-                                tid_str.into_owned(),
+                                tid_str,
                                 creator_balance.value(),
                                 amount.value(),
                             ));
                         }
 
-                        // Deduct locked amount from creator's available balance
                         new_balances.insert(
                             creator_key,
                             Balance::from_state(
@@ -421,28 +444,81 @@ impl TokenStateManager {
             }
 
             Operation::DlvInvalidate {
-                creator_public_key, ..
+                creator_public_key,
+                token_id,
+                locked_amount,
+                ..
             } => {
-                // Vault invalidation returns locked tokens to the creator.
-                // The vault's locked_amount and token_id are not embedded in
-                // DlvInvalidate directly — the caller (DLVManager in Phase 5)
-                // is responsible for ensuring the DlvInvalidate operation is
-                // paired with correct balance restoration via the state's
-                // token_balances map before reaching this function.
-                //
-                // If the vault had no locked tokens, this is a no-op.
-                let _ = creator_public_key;
+                if let Some((tid_str, amount)) =
+                    Self::decode_dlv_lock_metadata(token_id, locked_amount, "DlvInvalidate")?
+                {
+                    if amount.value() > 0 {
+                        let creator_key =
+                            self.make_balance_key(creator_public_key.as_slice(), &tid_str)?;
+                        let creator_balance =
+                            new_balances.get(&creator_key).cloned().unwrap_or_else(|| {
+                                Balance::from_state(
+                                    0,
+                                    current_state.hash,
+                                    current_state.state_number,
+                                )
+                            });
+                        let restored_value = creator_balance
+                            .value()
+                            .checked_add(amount.value())
+                            .ok_or_else(|| {
+                                DsmError::invalid_operation(
+                                    "Balance overflow on DLV invalidation restore",
+                                )
+                            })?;
+                        new_balances.insert(
+                            creator_key,
+                            Balance::from_state(
+                                restored_value,
+                                current_state.hash,
+                                current_state.state_number,
+                            ),
+                        );
+                    }
+                }
             }
 
             Operation::DlvClaim {
                 claimant_public_key,
+                token_id,
+                locked_amount,
                 ..
             } => {
-                // Claim releases locked tokens to the claimant.
-                // Similar to DlvInvalidate, the vault's locked_amount and
-                // token_id are resolved by DLVManager and applied to the
-                // state's token_balances map before this function is called.
-                let _ = claimant_public_key;
+                if let Some((tid_str, amount)) =
+                    Self::decode_dlv_lock_metadata(token_id, locked_amount, "DlvClaim")?
+                {
+                    if amount.value() > 0 {
+                        let claimant_key =
+                            self.make_balance_key(claimant_public_key.as_slice(), &tid_str)?;
+                        let claimant_balance =
+                            new_balances.get(&claimant_key).cloned().unwrap_or_else(|| {
+                                Balance::from_state(
+                                    0,
+                                    current_state.hash,
+                                    current_state.state_number,
+                                )
+                            });
+                        let released_value = claimant_balance
+                            .value()
+                            .checked_add(amount.value())
+                            .ok_or_else(|| {
+                            DsmError::invalid_operation("Balance overflow on DLV claim release")
+                        })?;
+                        new_balances.insert(
+                            claimant_key,
+                            Balance::from_state(
+                                released_value,
+                                current_state.hash,
+                                current_state.state_number,
+                            ),
+                        );
+                    }
+                }
             }
 
             // DlvUnlock is a state-only transition (no balance change).
@@ -949,7 +1025,11 @@ impl TokenStateManager {
 
 #[cfg(test)]
 mod tests {
-    use super::derive_canonical_balance_key;
+    use super::{
+        builtin_policy_commit_for_token, derive_canonical_balance_key, resolve_policy_commit,
+        TokenStateManager,
+    };
+    use crate::types::{operations::Operation, state_types::State, token_types::Balance};
 
     #[test]
     fn canonical_balance_key_is_stable_for_same_semantic_input() {
@@ -980,5 +1060,82 @@ mod tests {
         let b = derive_canonical_balance_key(&policy_commit, &[0x44; 32], "dBTC");
 
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn resolve_policy_commit_rejects_unknown_token_without_anchor() {
+        let result = resolve_policy_commit("custom-unanchored-token");
+        assert!(
+            result.is_err(),
+            "unknown tokens must fail closed instead of synthesizing a placeholder policy commit"
+        );
+    }
+
+    #[test]
+    fn dlv_invalidate_returns_locked_balance_to_creator_atomically() {
+        use crate::types::operations::TransactionMode;
+        use crate::types::state_types::DeviceInfo;
+
+        let manager = TokenStateManager::new();
+        let era_policy = builtin_policy_commit_for_token("ERA").expect("ERA policy anchor");
+        manager.register_token_policy_anchor("ERA", era_policy);
+
+        let creator_pk = vec![0x33; 32];
+        let state = State::new_genesis([0x11; 32], DeviceInfo::new([0x22; 32], creator_pk.clone()));
+        let creator_key = manager
+            .make_balance_key(&creator_pk, "ERA")
+            .expect("creator balance key");
+
+        let op = Operation::DlvInvalidate {
+            vault_id: vec![0x44; 32],
+            reason: "invalidate".to_string(),
+            creator_public_key: creator_pk,
+            token_id: Some(b"ERA".to_vec()),
+            locked_amount: Some(Balance::from_state(25, state.hash, state.state_number)),
+            signature: vec![0x55; 16],
+            mode: TransactionMode::Unilateral,
+        };
+
+        let updated = manager
+            .apply_token_operation(&state, &op)
+            .expect("DLV invalidate should apply atomically");
+        let bal = updated
+            .get(&creator_key)
+            .unwrap_or_else(|| panic!("creator balance key should be credited"));
+        assert_eq!(bal.value(), 25);
+    }
+
+    #[test]
+    fn dlv_claim_credits_claimant_atomically() {
+        use crate::types::operations::TransactionMode;
+        use crate::types::state_types::DeviceInfo;
+
+        let manager = TokenStateManager::new();
+        let era_policy = builtin_policy_commit_for_token("ERA").expect("ERA policy anchor");
+        manager.register_token_policy_anchor("ERA", era_policy);
+
+        let claimant_pk = vec![0x66; 32];
+        let state = State::new_genesis([0x12; 32], DeviceInfo::new([0x23; 32], vec![0x99; 32]));
+        let claimant_key = manager
+            .make_balance_key(&claimant_pk, "ERA")
+            .expect("claimant balance key");
+
+        let op = Operation::DlvClaim {
+            vault_id: vec![0x77; 32],
+            claim_proof: vec![0x88; 48],
+            claimant_public_key: claimant_pk,
+            token_id: Some(b"ERA".to_vec()),
+            locked_amount: Some(Balance::from_state(40, state.hash, state.state_number)),
+            signature: vec![0x99; 16],
+            mode: TransactionMode::Unilateral,
+        };
+
+        let updated = manager
+            .apply_token_operation(&state, &op)
+            .expect("DLV claim should apply atomically");
+        let bal = updated
+            .get(&claimant_key)
+            .unwrap_or_else(|| panic!("claimant balance key should be credited"));
+        assert_eq!(bal.value(), 40);
     }
 }

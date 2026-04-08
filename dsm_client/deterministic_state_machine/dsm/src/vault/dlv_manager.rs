@@ -14,10 +14,15 @@ use crate::types::{error::DsmError, state_types::State};
 use prost::Message; // for encode_to_vec()
 use std::{collections::HashMap, sync::Arc};
 
+type VaultSettlementMetadata = (Option<Vec<u8>>, Option<Balance>);
+
 /// Manages Limbo Vaults
 pub struct DLVManager {
     /// Vaults managed by this instance, keyed by vault ID
     vaults: tokio::sync::RwLock<HashMap<String, Arc<tokio::sync::Mutex<LimboVault>>>>,
+    /// Token-lock metadata tracked alongside each vault so claim/invalidate
+    /// can settle balances atomically in the same state transition.
+    settlement_metadata: tokio::sync::RwLock<HashMap<String, VaultSettlementMetadata>>,
 }
 
 impl DLVManager {
@@ -25,7 +30,59 @@ impl DLVManager {
     pub fn new() -> Self {
         Self {
             vaults: tokio::sync::RwLock::new(HashMap::new()),
+            settlement_metadata: tokio::sync::RwLock::new(HashMap::new()),
         }
+    }
+
+    fn fallback_settlement_metadata(
+        vault: &LimboVault,
+        state_hash: [u8; 32],
+        state_number: u64,
+    ) -> VaultSettlementMetadata {
+        match &vault.fulfillment_condition {
+            FulfillmentMechanism::Payment {
+                amount, token_id, ..
+            } if *amount > 0 && !token_id.is_empty() => (
+                Some(token_id.as_bytes().to_vec()),
+                Some(Balance::from_state(*amount, state_hash, state_number)),
+            ),
+            _ => (None, None),
+        }
+    }
+
+    async fn settlement_metadata_for_vault(
+        &self,
+        vault_id: &str,
+        vault: &LimboVault,
+        reference_state: &State,
+    ) -> Result<VaultSettlementMetadata, DsmError> {
+        let tracked = {
+            let metadata = self.settlement_metadata.read().await;
+            metadata.get(vault_id).cloned()
+        };
+
+        if let Some((token_id, locked_amount)) = tracked {
+            return match (&token_id, &locked_amount) {
+                (None, None) => Ok((None, None)),
+                (Some(_), Some(amount)) => Ok((
+                    token_id,
+                    Some(Balance::from_state(
+                        amount.value(),
+                        reference_state.hash,
+                        reference_state.state_number,
+                    )),
+                )),
+                _ => Err(DsmError::invalid_operation(format!(
+                    "Vault {vault_id} has incomplete settlement metadata"
+                ))),
+            };
+        }
+
+        Ok(Self::fallback_settlement_metadata(
+            vault,
+            reference_state.hash,
+            reference_state.state_number,
+        ))
     }
 
     /// Create a new vault and return the vault ID with an unsigned `Operation::DlvCreate`.
@@ -62,6 +119,7 @@ impl DLVManager {
         let fulfillment_bytes = fm_proto.encode_to_vec();
 
         // Build the unsigned DlvCreate operation
+        let locked_token_id = token_id.map(|s| s.as_bytes().to_vec());
         let locked_balance = locked_amount.map(|amt| {
             Balance::from_state(amt, reference_state.hash, reference_state.state_number)
         });
@@ -72,15 +130,18 @@ impl DLVManager {
             parameters_hash: vault.parameters_hash.clone(),
             fulfillment_condition: fulfillment_bytes,
             intended_recipient: intended_recipient.clone(),
-            token_id: token_id.map(|s| s.as_bytes().to_vec()),
-            locked_amount: locked_balance,
+            token_id: locked_token_id.clone(),
+            locked_amount: locked_balance.clone(),
             signature: vec![], // unsigned — caller must sign
             mode: TransactionMode::Unilateral,
         };
 
-        // Store the vault
+        // Store the vault and its settlement metadata.
         let mut vaults = self.vaults.write().await;
         vaults.insert(vault_id.clone(), Arc::new(tokio::sync::Mutex::new(vault)));
+        drop(vaults);
+        let mut settlement_metadata = self.settlement_metadata.write().await;
+        settlement_metadata.insert(vault_id.clone(), (locked_token_id, locked_balance));
 
         Ok((vault_id, operation))
     }
@@ -192,11 +253,19 @@ impl DLVManager {
         let vault_lock = self.get_vault(vault_id).await?;
         let mut vault = vault_lock.lock().await;
         let result = vault.claim(claimant_kyber_sk, reference_state)?;
+        let vault_snapshot = result.vault.clone();
+        drop(vault);
+
+        let (token_id, locked_amount) = self
+            .settlement_metadata_for_vault(vault_id, &vault_snapshot, reference_state)
+            .await?;
 
         let operation = Operation::DlvClaim {
             vault_id: vault_id.as_bytes().to_vec(),
             claim_proof: result.claim_proof.clone(),
             claimant_public_key: claimant_signing_pk.to_vec(),
+            token_id,
+            locked_amount,
             signature: vec![], // unsigned — caller must sign
             mode: TransactionMode::Unilateral,
         };
@@ -222,11 +291,19 @@ impl DLVManager {
         let creator_pk = vault.creator_public_key.clone();
 
         vault.invalidate(reason, creator_private_key, reference_state)?;
+        let vault_snapshot = vault.clone();
+        drop(vault);
+
+        let (token_id, locked_amount) = self
+            .settlement_metadata_for_vault(vault_id, &vault_snapshot, reference_state)
+            .await?;
 
         let operation = Operation::DlvInvalidate {
             vault_id: vault_id.as_bytes().to_vec(),
             reason: reason.to_string(),
             creator_public_key: creator_pk,
+            token_id,
+            locked_amount,
             signature: vec![], // unsigned — caller must sign
             mode: TransactionMode::Unilateral,
         };
@@ -237,8 +314,16 @@ impl DLVManager {
     /// Add an existing vault to the manager
     pub async fn add_vault(&self, vault: LimboVault) -> Result<String, DsmError> {
         let vault_id = vault.id.clone();
+        let fallback = Self::fallback_settlement_metadata(
+            &vault,
+            vault.reference_state_hash,
+            vault.created_at_state,
+        );
         let mut vaults = self.vaults.write().await;
         vaults.insert(vault_id.clone(), Arc::new(tokio::sync::Mutex::new(vault)));
+        drop(vaults);
+        let mut settlement_metadata = self.settlement_metadata.write().await;
+        settlement_metadata.insert(vault_id.clone(), fallback);
         Ok(vault_id)
     }
 
