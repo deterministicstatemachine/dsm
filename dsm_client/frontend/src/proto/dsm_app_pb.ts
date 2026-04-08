@@ -7947,6 +7947,49 @@ export class AppSessionQrHardwareStatusProto extends Message<AppSessionQrHardwar
 }
 
 /**
+ * @generated from message dsm.AppSessionBatteryHardwareStatusProto
+ */
+export class AppSessionBatteryHardwareStatusProto extends Message<AppSessionBatteryHardwareStatusProto> {
+  /**
+   * @generated from field: bool charging = 1;
+   */
+  charging = false;
+
+  /**
+   * @generated from field: uint32 level_percent = 2;
+   */
+  levelPercent = 0;
+
+  constructor(data?: PartialMessage<AppSessionBatteryHardwareStatusProto>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AppSessionBatteryHardwareStatusProto";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "charging", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 2, name: "level_percent", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AppSessionBatteryHardwareStatusProto {
+    return new AppSessionBatteryHardwareStatusProto().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AppSessionBatteryHardwareStatusProto {
+    return new AppSessionBatteryHardwareStatusProto().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AppSessionBatteryHardwareStatusProto {
+    return new AppSessionBatteryHardwareStatusProto().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AppSessionBatteryHardwareStatusProto | PlainMessage<AppSessionBatteryHardwareStatusProto> | undefined, b: AppSessionBatteryHardwareStatusProto | PlainMessage<AppSessionBatteryHardwareStatusProto> | undefined): boolean {
+    return proto3.util.equals(AppSessionBatteryHardwareStatusProto, a, b);
+  }
+}
+
+/**
  * @generated from message dsm.AppSessionHardwareStatusProto
  */
 export class AppSessionHardwareStatusProto extends Message<AppSessionHardwareStatusProto> {
@@ -7965,6 +8008,11 @@ export class AppSessionHardwareStatusProto extends Message<AppSessionHardwareSta
    */
   qr?: AppSessionQrHardwareStatusProto;
 
+  /**
+   * @generated from field: dsm.AppSessionBatteryHardwareStatusProto battery = 4;
+   */
+  battery?: AppSessionBatteryHardwareStatusProto;
+
   constructor(data?: PartialMessage<AppSessionHardwareStatusProto>) {
     super();
     proto3.util.initPartial(data, this);
@@ -7976,6 +8024,7 @@ export class AppSessionHardwareStatusProto extends Message<AppSessionHardwareSta
     { no: 1, name: "app_foreground", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
     { no: 2, name: "ble", kind: "message", T: AppSessionBleHardwareStatusProto },
     { no: 3, name: "qr", kind: "message", T: AppSessionQrHardwareStatusProto },
+    { no: 4, name: "battery", kind: "message", T: AppSessionBatteryHardwareStatusProto },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AppSessionHardwareStatusProto {
@@ -8115,6 +8164,16 @@ export class SessionHardwareFactsProto extends Message<SessionHardwareFactsProto
    */
   cameraPermission = false;
 
+  /**
+   * @generated from field: bool battery_charging = 9;
+   */
+  batteryCharging = false;
+
+  /**
+   * @generated from field: uint32 battery_level_percent = 10;
+   */
+  batteryLevelPercent = 0;
+
   constructor(data?: PartialMessage<SessionHardwareFactsProto>) {
     super();
     proto3.util.initPartial(data, this);
@@ -8131,6 +8190,8 @@ export class SessionHardwareFactsProto extends Message<SessionHardwareFactsProto
     { no: 6, name: "qr_available", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
     { no: 7, name: "qr_active", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
     { no: 8, name: "camera_permission", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 9, name: "battery_charging", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 10, name: "battery_level_percent", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SessionHardwareFactsProto {
@@ -18433,12 +18494,18 @@ export class DbrwStatusResponse extends Message<DbrwStatusResponse> {
   storageBaseDirSet = false;
 
   /**
-   * @generated from field: bool observe_only = 5;
+   * Legacy beta field; use runtime_access_level/runtime_resonant_status.
+   *
+   * @generated from field: bool observe_only = 5 [deprecated = true];
+   * @deprecated
    */
   observeOnly = false;
 
   /**
-   * @generated from field: string access_mode = 6;
+   * Legacy beta field; use runtime_access_level/runtime_resonant_status.
+   *
+   * @generated from field: string access_mode = 6 [deprecated = true];
+   * @deprecated
    */
   accessMode = "";
 
@@ -20899,6 +20966,293 @@ export class DlvReceiptResponse extends Message<DlvReceiptResponse> {
 
   static equals(a: DlvReceiptResponse | PlainMessage<DlvReceiptResponse> | undefined, b: DlvReceiptResponse | PlainMessage<DlvReceiptResponse> | undefined): boolean {
     return proto3.util.equals(DlvReceiptResponse, a, b);
+  }
+}
+
+/**
+ * AppRouter read-only query: method name + opaque protobuf args.
+ *
+ * @generated from message dsm.RouterQueryOp
+ */
+export class RouterQueryOp extends Message<RouterQueryOp> {
+  /**
+   * @generated from field: string method = 1;
+   */
+  method = "";
+
+  /**
+   * @generated from field: bytes args = 2;
+   */
+  args = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<RouterQueryOp>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.RouterQueryOp";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "method", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 2, name: "args", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RouterQueryOp {
+    return new RouterQueryOp().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): RouterQueryOp {
+    return new RouterQueryOp().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): RouterQueryOp {
+    return new RouterQueryOp().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: RouterQueryOp | PlainMessage<RouterQueryOp> | undefined, b: RouterQueryOp | PlainMessage<RouterQueryOp> | undefined): boolean {
+    return proto3.util.equals(RouterQueryOp, a, b);
+  }
+}
+
+/**
+ * AppRouter mutating invoke: method name + opaque protobuf args.
+ *
+ * @generated from message dsm.RouterInvokeOp
+ */
+export class RouterInvokeOp extends Message<RouterInvokeOp> {
+  /**
+   * @generated from field: string method = 1;
+   */
+  method = "";
+
+  /**
+   * @generated from field: bytes args = 2;
+   */
+  args = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<RouterInvokeOp>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.RouterInvokeOp";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "method", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 2, name: "args", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RouterInvokeOp {
+    return new RouterInvokeOp().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): RouterInvokeOp {
+    return new RouterInvokeOp().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): RouterInvokeOp {
+    return new RouterInvokeOp().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: RouterInvokeOp | PlainMessage<RouterInvokeOp> | undefined, b: RouterInvokeOp | PlainMessage<RouterInvokeOp> | undefined): boolean {
+    return proto3.util.equals(RouterInvokeOp, a, b);
+  }
+}
+
+/**
+ * Generic Envelope v3 dispatch: raw protobuf-encoded Envelope bytes.
+ * The 0x03 framing prefix is optional; the ingress strips it if present.
+ *
+ * @generated from message dsm.EnvelopeOp
+ */
+export class EnvelopeOp extends Message<EnvelopeOp> {
+  /**
+   * @generated from field: bytes envelope_bytes = 1;
+   */
+  envelopeBytes = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<EnvelopeOp>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.EnvelopeOp";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "envelope_bytes", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): EnvelopeOp {
+    return new EnvelopeOp().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): EnvelopeOp {
+    return new EnvelopeOp().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): EnvelopeOp {
+    return new EnvelopeOp().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: EnvelopeOp | PlainMessage<EnvelopeOp> | undefined, b: EnvelopeOp | PlainMessage<EnvelopeOp> | undefined): boolean {
+    return proto3.util.equals(EnvelopeOp, a, b);
+  }
+}
+
+/**
+ * Session hardware-state snapshot update.
+ *
+ * @generated from message dsm.HardwareFactsOp
+ */
+export class HardwareFactsOp extends Message<HardwareFactsOp> {
+  /**
+   * @generated from field: dsm.SessionHardwareFactsProto facts = 1;
+   */
+  facts?: SessionHardwareFactsProto;
+
+  constructor(data?: PartialMessage<HardwareFactsOp>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.HardwareFactsOp";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "facts", kind: "message", T: SessionHardwareFactsProto },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): HardwareFactsOp {
+    return new HardwareFactsOp().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): HardwareFactsOp {
+    return new HardwareFactsOp().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): HardwareFactsOp {
+    return new HardwareFactsOp().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: HardwareFactsOp | PlainMessage<HardwareFactsOp> | undefined, b: HardwareFactsOp | PlainMessage<HardwareFactsOp> | undefined): boolean {
+    return proto3.util.equals(HardwareFactsOp, a, b);
+  }
+}
+
+/**
+ * Canonical platform-agnostic ingress request.
+ *
+ * @generated from message dsm.IngressRequest
+ */
+export class IngressRequest extends Message<IngressRequest> {
+  /**
+   * @generated from oneof dsm.IngressRequest.operation
+   */
+  operation: {
+    /**
+     * @generated from field: dsm.RouterQueryOp router_query = 1;
+     */
+    value: RouterQueryOp;
+    case: "routerQuery";
+  } | {
+    /**
+     * @generated from field: dsm.RouterInvokeOp router_invoke = 2;
+     */
+    value: RouterInvokeOp;
+    case: "routerInvoke";
+  } | {
+    /**
+     * @generated from field: dsm.EnvelopeOp envelope = 3;
+     */
+    value: EnvelopeOp;
+    case: "envelope";
+  } | {
+    /**
+     * @generated from field: dsm.HardwareFactsOp hardware_facts = 4;
+     */
+    value: HardwareFactsOp;
+    case: "hardwareFacts";
+  } | { case: undefined; value?: undefined } = { case: undefined };
+
+  constructor(data?: PartialMessage<IngressRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.IngressRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "router_query", kind: "message", T: RouterQueryOp, oneof: "operation" },
+    { no: 2, name: "router_invoke", kind: "message", T: RouterInvokeOp, oneof: "operation" },
+    { no: 3, name: "envelope", kind: "message", T: EnvelopeOp, oneof: "operation" },
+    { no: 4, name: "hardware_facts", kind: "message", T: HardwareFactsOp, oneof: "operation" },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): IngressRequest {
+    return new IngressRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): IngressRequest {
+    return new IngressRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): IngressRequest {
+    return new IngressRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: IngressRequest | PlainMessage<IngressRequest> | undefined, b: IngressRequest | PlainMessage<IngressRequest> | undefined): boolean {
+    return proto3.util.equals(IngressRequest, a, b);
+  }
+}
+
+/**
+ * Canonical platform-agnostic ingress response.
+ *
+ * @generated from message dsm.IngressResponse
+ */
+export class IngressResponse extends Message<IngressResponse> {
+  /**
+   * @generated from oneof dsm.IngressResponse.result
+   */
+  result: {
+    /**
+     * @generated from field: bytes ok_bytes = 1;
+     */
+    value: Uint8Array;
+    case: "okBytes";
+  } | {
+    /**
+     * @generated from field: dsm.Error error = 2;
+     */
+    value: Error;
+    case: "error";
+  } | { case: undefined; value?: undefined } = { case: undefined };
+
+  constructor(data?: PartialMessage<IngressResponse>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.IngressResponse";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "ok_bytes", kind: "scalar", T: 12 /* ScalarType.BYTES */, oneof: "result" },
+    { no: 2, name: "error", kind: "message", T: Error, oneof: "result" },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): IngressResponse {
+    return new IngressResponse().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): IngressResponse {
+    return new IngressResponse().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): IngressResponse {
+    return new IngressResponse().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: IngressResponse | PlainMessage<IngressResponse> | undefined, b: IngressResponse | PlainMessage<IngressResponse> | undefined): boolean {
+    return proto3.util.equals(IngressResponse, a, b);
   }
 }
 

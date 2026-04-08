@@ -82,6 +82,8 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_sdkBootstrap<'a>(
 
                     // Extract binding key before moving ctx
                     let binding_key = ctx.cdbrw_binding.clone();
+                    let device_id = ctx.device_id;
+                    let genesis_hash = ctx.genesis_hash;
 
                     // 4. Store the Canonical Context
                     match PLATFORM_CONTEXT.get() {
@@ -101,8 +103,35 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_sdkBootstrap<'a>(
                     log::info!("sdkBootstrap: setting C-DBRW binding key");
                     crate::jni::cdbrw::set_cdbrw_binding_key(binding_key.to_vec());
 
-                    log::info!("sdkBootstrap: C-DBRW initialization succeeded");
-                    1 // true
+                    match crate::ingress::dispatch_startup(crate::generated::StartupRequest {
+                        operation: Some(
+                            crate::generated::startup_request::Operation::InitializeIdentityContext(
+                                crate::generated::InitializeIdentityContextOp {
+                                    device_id: device_id.to_vec(),
+                                    genesis_hash: genesis_hash.to_vec(),
+                                    binding_key: binding_key.to_vec(),
+                                },
+                            ),
+                        ),
+                    })
+                    .result
+                    {
+                        Some(crate::generated::startup_response::Result::OkBytes(_)) => {
+                            log::info!("sdkBootstrap: shared startup identity initialization succeeded");
+                            1 // true
+                        }
+                        Some(crate::generated::startup_response::Result::Error(error)) => {
+                            log::error!(
+                                "sdkBootstrap: shared startup identity initialization failed: {}",
+                                error.message
+                            );
+                            0 // false
+                        }
+                        None => {
+                            log::error!("sdkBootstrap: shared startup returned empty response");
+                            0 // false
+                        }
+                    }
                 }
                 Err(e) => {
                     log::error!("sdkBootstrap: PlatformContext::bootstrap failed: {:?}", e);

@@ -707,7 +707,7 @@ impl VerticalValidationReport {
         out.push_str(&format!("| Date | {report_date} |\n"));
         out.push_str(&format!("| Git Commit | `{git_commit}` |\n"));
         out.push_str(&format!("| Branch | `{git_branch}` |\n"));
-        out.push_str("| DSM Version | 0.1.0-beta.1 |\n");
+        out.push_str("| DSM Version | 0.1.0-beta.2 |\n");
         if let Some(lean) = lean_results {
             out.push_str(&format!("| Lean Toolchain | {} |\n", lean.lean_version));
         }

@@ -365,8 +365,6 @@ pub struct TokenSDK<I: Send + Sync> {
     transaction_history: Arc<RwLock<Vec<(TokenOperation, u64)>>>,
     /// Canonical device identifier (binary) for balance ownership & metadata defaults.
     device_id: [u8; 32],
-    /// Device SPHINCS+ secret key used to sign transfer operations before submission.
-    signing_key: Arc<RwLock<Option<Vec<u8>>>>,
     _phantom: PhantomData<I>,
     genesis_state_cache: GenesisStateCache,
 }
@@ -721,16 +719,9 @@ impl<I: Send + Sync> TokenSDK<I> {
             balances: Arc::new(RwLock::new(HashMap::new())),
             transaction_history: Arc::new(RwLock::new(Vec::new())),
             device_id,
-            signing_key: Arc::new(RwLock::new(None)),
             _phantom: PhantomData,
             genesis_state_cache: GenesisStateCache::new(),
         }
-    }
-
-    /// Inject the device's SPHINCS+ secret key so transfers can be signed before
-    /// reaching the state machine.
-    pub fn set_signing_key(&self, secret_key: Vec<u8>) {
-        *self.signing_key.write() = Some(secret_key);
     }
 
     /// Sign a transfer operation by clearing the signature field and applying the
@@ -740,12 +731,7 @@ impl<I: Send + Sync> TokenSDK<I> {
     /// RETIRED: Use sign_transfer_canonical_v3() for online transfers to ensure
     /// sender and receiver use identical signing preimages.
     fn sign_transfer_operation(&self, op: &Operation) -> Result<Vec<u8>, DsmError> {
-        let signing_key = self.signing_key.read().as_ref().cloned().ok_or_else(|| {
-            DsmError::unauthorized(
-                "Signing key not initialized for TokenSDK transfers",
-                None::<std::io::Error>,
-            )
-        })?;
+        let signing_key = crate::sdk::signing_authority::current_secret_key()?;
 
         let mut op_clone = op.clone();
         if let Operation::Transfer { signature, .. } = &mut op_clone {
@@ -783,12 +769,7 @@ impl<I: Send + Sync> TokenSDK<I> {
         nonce: &[u8],
         memo: &str,
     ) -> Result<Vec<u8>, DsmError> {
-        let signing_key = self.signing_key.read().as_ref().cloned().ok_or_else(|| {
-            DsmError::unauthorized(
-                "Signing key not initialized for TokenSDK transfers",
-                None::<std::io::Error>,
-            )
-        })?;
+        let signing_key = crate::sdk::signing_authority::current_secret_key()?;
 
         // Compute canonical signing preimage (same function receiver uses to verify)
         let signing_bytes = dsm::envelope::compute_transfer_signing_bytes_v3(
@@ -1033,12 +1014,7 @@ impl<I: Send + Sync> TokenSDK<I> {
                 let policy_commit = self.resolve_policy_commit_strict(token_id)?;
                 let signer_pk = current_state.device_info.public_key.clone();
                 let authorized_by = current_state.device_info.device_id.to_vec();
-                let signing_key = self.signing_key.read().as_ref().cloned().ok_or_else(|| {
-                    DsmError::unauthorized(
-                        "Signing key not initialized for TokenSDK mint",
-                        None::<std::io::Error>,
-                    )
-                })?;
+                let signing_key = crate::sdk::signing_authority::current_secret_key()?;
                 let mut mint_msg = b"mint|".to_vec();
                 mint_msg.extend_from_slice(&authorized_by);
                 let mint_hash =
@@ -1100,13 +1076,7 @@ impl<I: Send + Sync> TokenSDK<I> {
 
                 // 2. Sign the serialised op with the device's SPHINCS+ key
                 {
-                    let signing_key =
-                        self.signing_key.read().as_ref().cloned().ok_or_else(|| {
-                            DsmError::unauthorized(
-                                "Signing key not initialized for TokenSDK burn",
-                                None::<std::io::Error>,
-                            )
-                        })?;
+                    let signing_key = crate::sdk::signing_authority::current_secret_key()?;
                     let mut burn_msg = b"burn|".to_vec();
                     burn_msg.extend_from_slice(token_id.as_bytes());
                     let burn_hash =

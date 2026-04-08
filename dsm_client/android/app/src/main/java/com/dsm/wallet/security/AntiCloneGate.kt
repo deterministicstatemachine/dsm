@@ -34,7 +34,6 @@ data class HardwareAnchorResult(
  * CdbrwEntropyHealth for 3-condition health test, and Rust-backed DBRW
  * crypto helpers for domain-separated hashing, ML-KEM-768, and SPHINCS+.
  *
- * Beta mode: observe-only. Logs anomalies but does not gate access.
  * tau = (epsilon_intra + epsilon_inter) / 2
  */
 class AntiCloneGate(private val context: Context) {
@@ -60,33 +59,39 @@ class AntiCloneGate(private val context: Context) {
 
     /**
      * Get hardware anchor in monitoring mode.
-     * Uses SiliconFingerprint for real hardware probing when enrolled,
-     * falls back to static hash otherwise. Always grants FULL_ACCESS in beta.
+     * Returns a live C-DBRW anchor when enrollment is present.
      */
     fun getStableHwAnchorMonitoring(): HardwareAnchorResult {
         return try {
-            if (siliconFp.isEnrolled(context)) {
-                val derived = siliconFp.derive(context)
-                Log.d(TAG, "C-DBRW monitoring: matchScore=${derived.matchScore}, w1=${derived.w1Distance}")
-                HardwareAnchorResult(
-                    anchor = derived.anchor32,
-                    accessLevel = AccessLevel.FULL_ACCESS,
-                    trustScore = derived.matchScore
-                )
-            } else {
-                Log.d(TAG, "C-DBRW: not enrolled, returning BLAKE3 hardware hash")
-                HardwareAnchorResult(
-                    anchor = getBlake3HardwareHash(),
-                    accessLevel = AccessLevel.FULL_ACCESS,
-                    trustScore = 1.0f
+            if (!siliconFp.isEnrolled(context)) {
+                Log.w(TAG, "C-DBRW monitoring blocked: device is not enrolled")
+                return HardwareAnchorResult(
+                    anchor = null,
+                    accessLevel = AccessLevel.BLOCKED,
+                    trustScore = 0.0f
                 )
             }
-        } catch (e: Exception) {
-            Log.w(TAG, "C-DBRW monitoring failed, fallback to static hash: ${e.message}")
+
+            val derived = siliconFp.derive(context)
+            val drifted = derived.w1Distance > derived.w1Threshold
+            val accessLevel = if (drifted) AccessLevel.PIN_REQUIRED else AccessLevel.FULL_ACCESS
+            if (drifted) {
+                Log.w(TAG, "C-DBRW monitoring detected reference drift; escalating to PIN_REQUIRED")
+            } else {
+                Log.d(TAG, "C-DBRW monitoring: matchScore=${derived.matchScore}, w1=${derived.w1Distance}")
+            }
+
             HardwareAnchorResult(
-                anchor = getBlake3HardwareHash(),
-                accessLevel = AccessLevel.FULL_ACCESS,
-                trustScore = 0.5f
+                anchor = derived.anchor32,
+                accessLevel = accessLevel,
+                trustScore = derived.matchScore.coerceIn(0.0f, 1.0f)
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "C-DBRW monitoring failed", e)
+            HardwareAnchorResult(
+                anchor = null,
+                accessLevel = AccessLevel.BLOCKED,
+                trustScore = 0.0f
             )
         }
     }
@@ -94,21 +99,21 @@ class AntiCloneGate(private val context: Context) {
     /**
      * Get hardware anchor with trust scoring.
      * Runs entropy health test when not in fast mode.
-     * Beta: always grants FULL_ACCESS regardless of health test result.
      */
     fun getStableHwAnchorWithTrust(fastMode: Boolean = false): HardwareAnchorResult {
         return try {
             if (!siliconFp.isEnrolled(context)) {
-                Log.d(TAG, "C-DBRW: not enrolled, returning BLAKE3 hardware hash")
+                Log.w(TAG, "C-DBRW trust check blocked: device is not enrolled")
                 return HardwareAnchorResult(
-                    anchor = getBlake3HardwareHash(),
-                    accessLevel = AccessLevel.FULL_ACCESS,
-                    trustScore = 1.0f
+                    anchor = null,
+                    accessLevel = AccessLevel.BLOCKED,
+                    trustScore = 0.0f
                 )
             }
 
             val derived = siliconFp.derive(context)
-            var trustScore = derived.matchScore
+            var trustScore = derived.matchScore.coerceIn(0.0f, 1.0f)
+            var resonantStatus: CdbrwEntropyHealth.ResonantStatus? = null
 
             // Run entropy health test unless fast mode
             if (!fastMode) {
@@ -124,29 +129,47 @@ class AntiCloneGate(private val context: Context) {
                     )
                     if (rawTimings != null) {
                         val healthResult = CdbrwEntropyHealth.healthTest(rawTimings, siliconFp.config.histogramBins)
-                        if (!healthResult.passed) {
-                            Log.w(TAG, "Entropy health FAILED: H=${healthResult.hHat}, rho=${healthResult.rhoHat}, L=${healthResult.lHat}")
-                            trustScore *= 0.5f // Degrade trust but don't block (beta)
-                        } else {
-                            Log.d(TAG, "Entropy health PASSED: H=${healthResult.hHat}, rho=${healthResult.rhoHat}, L=${healthResult.lHat}")
+                        resonantStatus = healthResult.resonantStatus
+                        when (healthResult.resonantStatus) {
+                            CdbrwEntropyHealth.ResonantStatus.PASS,
+                            CdbrwEntropyHealth.ResonantStatus.RESONANT -> {
+                                Log.d(TAG, "Entropy health accepted: status=${healthResult.resonantStatus}, H=${healthResult.hHat}, rho=${healthResult.rhoHat}, L=${healthResult.lHat}")
+                            }
+                            CdbrwEntropyHealth.ResonantStatus.ADAPTED -> {
+                                trustScore *= 0.75f
+                                Log.w(TAG, "Entropy health adapted: longer orbit or step-up auth required; H=${healthResult.hHat}, rho=${healthResult.rhoHat}, L=${healthResult.lHat}")
+                            }
+                            CdbrwEntropyHealth.ResonantStatus.FAIL -> {
+                                trustScore = 0.0f
+                                Log.w(TAG, "Entropy health rejected: H=${healthResult.hHat}, rho=${healthResult.rhoHat}, L=${healthResult.lHat}")
+                            }
                         }
+                    } else {
+                        resonantStatus = CdbrwEntropyHealth.ResonantStatus.FAIL
+                        trustScore = 0.0f
+                        Log.w(TAG, "Entropy health failed: orbit capture returned no samples")
                     }
                 } catch (e: Exception) {
-                    Log.w(TAG, "Entropy health test failed: ${e.message}")
+                    resonantStatus = CdbrwEntropyHealth.ResonantStatus.FAIL
+                    trustScore = 0.0f
+                    Log.e(TAG, "Entropy health test failed", e)
                 }
             }
 
+            val drifted = derived.w1Distance > derived.w1Threshold
+            val accessLevel = resolveAccessLevel(resonantStatus, drifted)
+
             HardwareAnchorResult(
                 anchor = derived.anchor32,
-                accessLevel = AccessLevel.FULL_ACCESS, // Beta: no gating
+                accessLevel = accessLevel,
                 trustScore = trustScore
             )
         } catch (e: Exception) {
-            Log.w(TAG, "C-DBRW trust check failed: ${e.message}")
+            Log.e(TAG, "C-DBRW trust check failed", e)
             HardwareAnchorResult(
-                anchor = getBlake3HardwareHash(),
-                accessLevel = AccessLevel.FULL_ACCESS,
-                trustScore = 0.5f
+                anchor = null,
+                accessLevel = AccessLevel.BLOCKED,
+                trustScore = 0.0f
             )
         }
     }
@@ -178,22 +201,15 @@ class AntiCloneGate(private val context: Context) {
         return CdbrwBlake3Native.domainHash("DSM/dbrw-bind", envData)
     }
 
-    /**
-     * BLAKE3 hardware hash from Build properties (replaces SHA-256 fallback).
-     */
-    @Suppress("DEPRECATION")
-    private fun getBlake3HardwareHash(): ByteArray {
-        val hwData = buildString {
-            append(android.os.Build.FINGERPRINT); append('|')
-            append(android.os.Build.HARDWARE); append('|')
-            append(android.os.Build.BOARD); append('|')
-            if (android.os.Build.VERSION.SDK_INT >= 31) {
-                try { append(android.os.Build.SOC_MODEL) } catch (_: Throwable) { append("unknown") }
-            } else {
-                append("pre31")
-            }
-        }.toByteArray(Charsets.UTF_8)
-
-        return CdbrwBlake3Native.domainHash("DSM/silicon_fp/v4", hwData)
+    private fun resolveAccessLevel(
+        resonantStatus: CdbrwEntropyHealth.ResonantStatus?,
+        drifted: Boolean
+    ): AccessLevel {
+        return when {
+            resonantStatus == CdbrwEntropyHealth.ResonantStatus.FAIL -> AccessLevel.READ_ONLY
+            drifted -> AccessLevel.PIN_REQUIRED
+            resonantStatus == CdbrwEntropyHealth.ResonantStatus.ADAPTED -> AccessLevel.PIN_REQUIRED
+            else -> AccessLevel.FULL_ACCESS
+        }
     }
 }

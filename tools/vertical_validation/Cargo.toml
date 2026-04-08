@@ -40,7 +40,7 @@ regex = "1.10"
 instant = "0.1"
 
 # Direct access to core DSM types, state machine, and crypto primitives
-dsm = { version = "0.1.0-beta.1", path = "../../dsm_client/deterministic_state_machine/dsm" }
+dsm = { version = "0.1.0-beta.2", path = "../../dsm_client/deterministic_state_machine/dsm" }
 
 # Deterministic seeded RNG for reproducible property tests
 rand = "0.8"

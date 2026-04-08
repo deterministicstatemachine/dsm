@@ -88,7 +88,7 @@ object CdbrwEntropyHealth {
             hHat = hHat,
             rhoHat = rhoHat,
             lHat = lHat,
-            passed = resonantStatus == ResonantStatus.PASS || resonantStatus == ResonantStatus.RESONANT,
+            passed = resonantStatus != ResonantStatus.FAIL,
             h0Eff = h0Eff,
             resonantStatus = resonantStatus,
         )

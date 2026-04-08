@@ -61,6 +61,7 @@ pub mod policy_cache;
 #[cfg(test)]
 mod qr; // QR code creation and parsing for contacts - enabled for tests only
 pub mod session_manager; // Native-first session state projection
+pub mod signing_authority;
 pub mod tls_transport_sdk;
 pub mod token_mpc_sdk;
 pub mod token_sdk;

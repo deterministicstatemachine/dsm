@@ -729,9 +729,28 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_cdbrwVerifyCh
 
 // Non-android stubs for compilation on host.
 #[cfg(not(target_os = "android"))]
-pub fn set_cdbrw_binding_key(_key: Vec<u8>) {}
+fn host_binding_slot() -> &'static std::sync::Mutex<Option<Vec<u8>>> {
+    static HOST_CDBRW_BINDING_KEY: std::sync::OnceLock<std::sync::Mutex<Option<Vec<u8>>>> =
+        std::sync::OnceLock::new();
+    HOST_CDBRW_BINDING_KEY.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn set_cdbrw_binding_key(key: Vec<u8>) {
+    let mut guard = host_binding_slot().lock().unwrap_or_else(|p| p.into_inner());
+    *guard = Some(key);
+}
 
 #[cfg(not(target_os = "android"))]
 pub fn get_cdbrw_binding_key() -> Option<Vec<u8>> {
-    None
+    host_binding_slot()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
+}
+
+#[cfg(all(not(target_os = "android"), test))]
+pub fn clear_cdbrw_binding_key_for_testing() {
+    let mut guard = host_binding_slot().lock().unwrap_or_else(|p| p.into_inner());
+    *guard = None;
 }

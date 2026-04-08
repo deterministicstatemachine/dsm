@@ -95,7 +95,6 @@ max_participants = 5
 session_timeout = 300
 contribution_timeout = 60
 enable_blind_signatures = true
-dbrw_enabled = true
 max_concurrent_sessions = 10
 cleanup_interval = 300
 participant_discovery_timeout = 30

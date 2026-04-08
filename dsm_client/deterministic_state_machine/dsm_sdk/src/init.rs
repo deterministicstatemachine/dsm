@@ -477,7 +477,10 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
         key_entropy.extend_from_slice(&gen_fixed);
         key_entropy.extend_from_slice(&dev_fixed);
         key_entropy.extend_from_slice(&dbrw_fixed);
-        let keypair = SignatureKeyPair::generate_from_entropy(&key_entropy)
+        let keypair = SignatureKeyPair::generate_from_entropy_with_params(
+            &key_entropy,
+            dsm::crypto::signatures::ParameterSet::SPX256f,
+        )
             .map_err(|e| format!("deterministic keypair derivation failed: {e}"))?;
         log::info!(
             "[SDK Init] Derived signing keypair, pubkey_len={}",

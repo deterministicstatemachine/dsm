@@ -81,10 +81,11 @@ impl DlvPreCommitmentSdk {
     pub async fn create_dlv_pre_commitment(
         &self,
         config: DlvPreCommitmentConfig,
-        creator_keypair: (&[u8], &[u8]), // (SPHINCS+ pk, sk)
         creator_kyber_pk: &[u8],         // Kyber PK for vault content encryption
         reference_state: &State,
     ) -> Result<DlvPreCommitmentResult, DsmError> {
+        let creator_signing_keypair = crate::sdk::signing_authority::derive_current_signing_keypair()?;
+
         // Validate base config early (no alternate paths)
         Self::ensure_non_empty("fixed_params", !config.base_config.fixed_params.is_empty())?;
         self.ensure_variable_params_valid(&config.base_config)?;
@@ -105,7 +106,10 @@ impl DlvPreCommitmentSdk {
             let (vault_id, _op) = self
                 .dlv_manager
                 .create_vault(
-                    creator_keypair,
+                    (
+                        creator_signing_keypair.public_key(),
+                        creator_signing_keypair.secret_key(),
+                    ),
                     dlv_cfg.unlock_condition.clone(),
                     content,
                     std::str::from_utf8(mime)
@@ -152,7 +156,6 @@ impl DlvPreCommitmentSdk {
             .create_pre_commitment_with_forks(
                 &config.base_config,
                 fork_configs,
-                creator_keypair,
                 reference_state,
             )
             .await?;
@@ -187,12 +190,14 @@ impl DlvPreCommitmentSdk {
         pre_commitment: &mut PreCommitment,
         selected_fork_id: &str,
         execution_params: &HashMap<String, Vec<u8>>,
-        executor_keypair: (&[u8], &[u8]), // (SPHINCS+ pk, sk)
+        requester_kyber_pk: &[u8],        // Kyber PK checked against intended_recipient
         executor_kyber_sk: &[u8],         // Kyber SK for vault content decapsulation
         reference_state: &State,
         fork_vault_bindings: &BTreeMap<String, String>,
         execution_proof: Option<FulfillmentProof>,
     ) -> Result<DlvPreCommitmentResult, DsmError> {
+        let executor_signing_public_key = crate::sdk::signing_authority::current_public_key()?;
+
         // Validate integrity before execution
         pre_commitment.validate_pre_commitment_integrity()?;
 
@@ -231,8 +236,8 @@ impl DlvPreCommitmentSdk {
             .try_unlock_vault(
                 &vault_id,
                 proof,
-                executor_keypair.1, // Kyber key for intended_recipient check
-                executor_keypair.0, // SPHINCS+ PK for operation signature verification
+                requester_kyber_pk,
+                &executor_signing_public_key,
                 reference_state,
             )
             .await?;
@@ -247,7 +252,7 @@ impl DlvPreCommitmentSdk {
             .claim_vault_content(
                 &vault_id,
                 executor_kyber_sk,
-                executor_keypair.0,
+                &executor_signing_public_key,
                 reference_state,
             )
             .await?;
@@ -266,7 +271,6 @@ impl DlvPreCommitmentSdk {
         &self,
         cfg: &PreCommitmentConfig,
         mut forks: Vec<PreCommitmentFork>,
-        creator_keypair: (&[u8], &[u8]), // (pk, sk)
         reference_state: &State,
     ) -> Result<PreCommitment, DsmError> {
         // Compute deterministic pre-commit hash
@@ -275,7 +279,7 @@ impl DlvPreCommitmentSdk {
 
         // Sign with creator SK
         let mut signatures = HashMap::new();
-        let sig = sphincs::sphincs_sign(creator_keypair.1, &pre_hash)?;
+        let sig = sphincs::sphincs_sign(&crate::sdk::signing_authority::current_secret_key()?, &pre_hash)?;
         signatures.insert("creator".to_string(), sig);
 
         let mut pc = PreCommitment::new_with_signatures(pre_hash, signatures);

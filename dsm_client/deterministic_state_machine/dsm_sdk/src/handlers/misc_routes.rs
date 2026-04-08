@@ -429,13 +429,21 @@ impl AppRouterImpl {
                     ("NOT_RUN", 0.0f32, 4096u32)
                 };
 
+                let runtime_access_level = runtime_snapshot
+                    .as_ref()
+                    .map(|v| v.runtime_access_level.clone())
+                    .unwrap_or_else(|| match resonant_status {
+                        "PASS" | "RESONANT" => "FULL_ACCESS".to_string(),
+                        "ADAPTED" => "PIN_REQUIRED".to_string(),
+                        "FAIL" => "READ_ONLY".to_string(),
+                        _ => String::new(),
+                    });
+
                 let response = generated::DbrwStatusResponse {
                     enrolled: enrollment.is_some(),
                     binding_key_present: binding_key.is_some(),
                     verifier_keypair_present: !verifier_public_key.is_empty(),
                     storage_base_dir_set: storage_base_dir.is_some(),
-                    observe_only: true,
-                    access_mode: "FULL_ACCESS".to_string(),
                     enrollment_revision: enrollment.as_ref().map(|v| v.revision).unwrap_or(0),
                     arena_bytes: enrollment.as_ref().map(|v| v.arena_bytes).unwrap_or(0),
                     probes: enrollment.as_ref().map(|v| v.probes).unwrap_or(0),
@@ -462,10 +470,7 @@ impl AppRouterImpl {
                         .as_ref()
                         .map(|v| v.runtime_metrics_present)
                         .unwrap_or(false),
-                    runtime_access_level: runtime_snapshot
-                        .as_ref()
-                        .map(|v| v.runtime_access_level.clone())
-                        .unwrap_or_default(),
+                    runtime_access_level,
                     runtime_trust_score: runtime_snapshot
                         .as_ref()
                         .map(|v| v.runtime_trust_score)
@@ -502,6 +507,7 @@ impl AppRouterImpl {
                     runtime_h0_eff: h0_eff,
                     runtime_recommended_n: recommended_n,
                     runtime_resonant_status: resonant_status.to_string(),
+                    ..Default::default()
                 };
 
                 pack_envelope_ok(generated::envelope::Payload::DbrwStatusResponse(response))
@@ -554,6 +560,38 @@ mod tests {
 
     fn push_f32_be(buf: &mut Vec<u8>, value: f32) {
         buf.extend_from_slice(&value.to_bits().to_be_bytes());
+    }
+
+    #[test]
+    fn compute_resonant_health_classifies_pass() {
+        let (status, h0_eff, recommended_n) = compute_resonant_health(0.60, 0.10, 0.55);
+        assert_eq!(status, "PASS");
+        assert!((h0_eff - 0.54).abs() < 1e-6);
+        assert_eq!(recommended_n, 4096);
+    }
+
+    #[test]
+    fn compute_resonant_health_classifies_resonant() {
+        let (status, h0_eff, recommended_n) = compute_resonant_health(0.80, 0.35, 0.60);
+        assert_eq!(status, "RESONANT");
+        assert!((h0_eff - 0.52).abs() < 1e-6);
+        assert_eq!(recommended_n, 4096);
+    }
+
+    #[test]
+    fn compute_resonant_health_classifies_adapted() {
+        let (status, h0_eff, recommended_n) = compute_resonant_health(0.58, 0.40, 0.55);
+        assert_eq!(status, "ADAPTED");
+        assert!((h0_eff - 0.348).abs() < 1e-6);
+        assert_eq!(recommended_n, 16384);
+    }
+
+    #[test]
+    fn compute_resonant_health_classifies_fail() {
+        let (status, h0_eff, recommended_n) = compute_resonant_health(0.30, 0.10, 0.20);
+        assert_eq!(status, "FAIL");
+        assert!((h0_eff - 0.27).abs() < 1e-6);
+        assert_eq!(recommended_n, 16384);
     }
 
     #[test]

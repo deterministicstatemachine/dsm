@@ -153,7 +153,10 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_createGenesis<'a>(
                     key_entropy.extend_from_slice(&genesis_device_id);
                     key_entropy.extend_from_slice(&entropy); // DBRW binding key
 
-                    match dsm::crypto::SignatureKeyPair::generate_from_entropy(&key_entropy) {
+                    match dsm::crypto::SignatureKeyPair::generate_from_entropy_with_params(
+                        &key_entropy,
+                        dsm::crypto::signatures::ParameterSet::SPX256f,
+                    ) {
                         Ok(kp) => {
                             log::info!(
                                 "createGenesis: derived signing keypair, pubkey_len={}",
@@ -305,8 +308,11 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_createGenesis<'a>(
                         let mut key_entropy_ble = Vec::with_capacity(64);
                         key_entropy_ble.extend_from_slice(&genesis_hash_bytes);
                         key_entropy_ble.extend_from_slice(&genesis_device_id);
-                        let keypair = SignatureKeyPair::generate_from_entropy(&key_entropy_ble)
-                            .map_err(|e| format!("keypair generation failed: {e}"))?;
+                        let keypair = SignatureKeyPair::generate_from_entropy_with_params(
+                            &key_entropy_ble,
+                            dsm::crypto::signatures::ParameterSet::SPX256f,
+                        )
+                        .map_err(|e| format!("keypair generation failed: {e}"))?;
                         log::info!(
                             "createGenesis: BLE keypair derived from genesis_hash||device_id, pubkey_len={}",
                             keypair.public_key.len()

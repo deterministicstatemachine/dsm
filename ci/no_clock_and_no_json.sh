@@ -56,8 +56,6 @@ common_allow_globs=(
   --glob '!**/handlers/app_router_impl.rs'        # Bitcoin Core JSON-RPC boundary (external API)
   --glob '!**/handlers/mempool_api.rs'             # mempool.space REST API boundary (external JSON API)
   --glob '!**/chaos_testing.rs'                   # testing/benchmarks
-  --glob '!**/crypto/dbrw.rs'                     # DBRW internal migration state (bincode at-rest, not protocol)
-  --glob '!**/jni/dbrw.rs'                        # DBRW JNI bridge (bincode for migration snapshot)
   --glob '!**/security/wal_transaction_queue.rs'   # WAL encrypted transaction (bincode at-rest, not protocol)
 )
 

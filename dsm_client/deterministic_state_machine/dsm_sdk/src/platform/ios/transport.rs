@@ -5,6 +5,7 @@
 //! handling optimized for BLE and Swift interop.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::path::PathBuf;
 
 use log::error;
 use prost::Message;
@@ -89,6 +90,39 @@ pub extern "C" fn dsm_free_envelope_bytes(bytes: *mut u8, len: usize) {
         unsafe {
             let layout = std::alloc::Layout::from_size_align_unchecked(len, 1);
             std::alloc::dealloc(bytes, layout);
+        }
+    }
+}
+
+/// Configure the SDK storage base directory for iOS callers.
+///
+/// Returns `true` when the directory is configured or was already configured.
+/// Returns `false` for null pointers, invalid UTF-8, or storage setup errors.
+#[no_mangle]
+pub extern "C" fn dsm_set_storage_base_dir(path_utf8: *const std::os::raw::c_char) -> bool {
+    if path_utf8.is_null() {
+        error!("iOS transport: null storage path provided");
+        return false;
+    }
+
+    let path = unsafe { std::ffi::CStr::from_ptr(path_utf8) };
+    let path = match path.to_str() {
+        Ok(v) if !v.is_empty() => v,
+        Ok(_) => {
+            error!("iOS transport: empty storage path provided");
+            return false;
+        }
+        Err(e) => {
+            error!("iOS transport: invalid UTF-8 storage path: {}", e);
+            return false;
+        }
+    };
+
+    match crate::storage_utils::set_storage_base_dir(PathBuf::from(path)) {
+        Ok(_) => true,
+        Err(e) => {
+            error!("iOS transport: failed to set storage base dir: {}", e);
+            false
         }
     }
 }

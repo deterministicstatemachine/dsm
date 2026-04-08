@@ -503,6 +503,7 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     fn setup_test_env() {
         std::env::set_var("DSM_SDK_TEST_MODE", "1");
@@ -532,12 +533,14 @@ mod tests {
     // ── Boolean flags ──
 
     #[test]
+    #[serial]
     fn has_identity_default_false() {
         setup_test_env();
         assert!(!AppState::get_has_identity());
     }
 
     #[test]
+    #[serial]
     fn set_and_get_has_identity() {
         setup_test_env();
         AppState::set_has_identity(true);
@@ -547,12 +550,14 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn sdk_initialized_default_false() {
         setup_test_env();
         assert!(!AppState::get_sdk_initialized());
     }
 
     #[test]
+    #[serial]
     fn set_and_get_sdk_initialized() {
         setup_test_env();
         AppState::set_sdk_initialized(true);
@@ -564,6 +569,7 @@ mod tests {
     // ── handle_app_state_request: has_identity ──
 
     #[test]
+    #[serial]
     fn handle_has_identity_get() {
         setup_test_env();
         let result = AppState::handle_app_state_request("has_identity", "get", "");
@@ -571,6 +577,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn handle_has_identity_set_true() {
         setup_test_env();
         let result = AppState::handle_app_state_request("has_identity", "set", "true");
@@ -579,6 +586,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn handle_has_identity_set_false() {
         setup_test_env();
         HAS_IDENTITY.store(true, Ordering::SeqCst);
@@ -587,6 +595,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn handle_has_identity_set_invalid_value_noop() {
         setup_test_env();
         AppState::handle_app_state_request("has_identity", "set", "maybe");
@@ -597,6 +606,7 @@ mod tests {
     // ── handle_app_state_request: sdk_initialized ──
 
     #[test]
+    #[serial]
     fn handle_sdk_initialized_get() {
         setup_test_env();
         let result = AppState::handle_app_state_request("sdk_initialized", "get", "");
@@ -604,6 +614,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn handle_sdk_initialized_set_true() {
         setup_test_env();
         let result = AppState::handle_app_state_request("sdk_initialized", "set", "true");
@@ -614,6 +625,7 @@ mod tests {
     // ── handle_app_state_request: binary-only keys ──
 
     #[test]
+    #[serial]
     fn handle_genesis_hash_returns_empty() {
         setup_test_env();
         let result = AppState::handle_app_state_request("genesis_hash", "get", "");
@@ -621,6 +633,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn handle_device_id_returns_empty() {
         setup_test_env();
         let result = AppState::handle_app_state_request("device_id", "get", "");
@@ -628,6 +641,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn handle_chain_tip_returns_zero() {
         setup_test_env();
         let result = AppState::handle_app_state_request("chain_tip", "get", "");
@@ -637,6 +651,7 @@ mod tests {
     // ── handle_app_state_request: custom K/V (in-memory only) ──
 
     #[test]
+    #[serial]
     fn handle_custom_key_set_returns_value() {
         setup_test_env();
         let set_result = AppState::handle_app_state_request("theme", "set", "dark");
@@ -645,6 +660,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn handle_unknown_operation_returns_marker() {
         setup_test_env();
         let result = AppState::handle_app_state_request("key", "delete", "");
@@ -743,6 +759,7 @@ mod tests {
     // ── reset_memory_for_testing ──
 
     #[test]
+    #[serial]
     fn reset_memory_clears_atomics() {
         HAS_IDENTITY.store(true, Ordering::SeqCst);
         SDK_INITIALIZED.store(true, Ordering::SeqCst);
@@ -758,6 +775,7 @@ mod tests {
     // ── set_identity_info overwrites ──
 
     #[test]
+    #[serial]
     fn set_identity_info_overwrites_existing() {
         setup_test_env();
         AppState::set_identity_info(
@@ -782,6 +800,7 @@ mod tests {
     // ── Multiple recovery sessions ──
 
     #[test]
+    #[serial]
     fn multiple_recovery_sessions_independent() {
         setup_test_env();
         AppState::set_recovery_state("r1", "pending").unwrap();
@@ -794,6 +813,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn clear_one_recovery_leaves_others() {
         setup_test_env();
         AppState::set_recovery_state("r1", "a").unwrap();
@@ -805,6 +825,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn clear_nonexistent_recovery_is_ok() {
         setup_test_env();
         assert!(AppState::clear_recovery_state("ghost").is_ok());
@@ -813,6 +834,7 @@ mod tests {
     // ── Custom K/V: multiple keys ──
 
     #[test]
+    #[serial]
     fn handle_multiple_custom_keys() {
         setup_test_env();
         AppState::handle_app_state_request("lang", "set", "en");
@@ -831,6 +853,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn handle_custom_key_empty_value() {
         setup_test_env();
         AppState::handle_app_state_request("key", "set", "");
@@ -841,6 +864,7 @@ mod tests {
     // ── Device tree root: overwrite ──
 
     #[test]
+    #[serial]
     fn set_device_tree_root_overwrites() {
         setup_test_env();
         AppState::set_device_tree_root([0x01; 32]);
@@ -851,6 +875,7 @@ mod tests {
     // ── set_identity_info_if_empty: partial fill ──
 
     #[test]
+    #[serial]
     fn set_identity_info_if_empty_partial_fill() {
         setup_test_env();
         // Set device_id directly, leave others empty
@@ -905,6 +930,7 @@ mod tests {
     // ── handle_app_state_request: sdk_initialized set false ──
 
     #[test]
+    #[serial]
     fn handle_sdk_initialized_set_false() {
         setup_test_env();
         SDK_INITIALIZED.store(true, Ordering::SeqCst);
@@ -914,6 +940,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn handle_sdk_initialized_set_invalid_noop() {
         setup_test_env();
         AppState::handle_app_state_request("sdk_initialized", "set", "maybe");

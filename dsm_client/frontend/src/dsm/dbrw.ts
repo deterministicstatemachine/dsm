@@ -6,8 +6,6 @@ export type DbrwStatus = {
   bindingKeyPresent: boolean;
   verifierKeypairPresent: boolean;
   storageBaseDirSet: boolean;
-  observeOnly: boolean;
-  accessMode: string;
   enrollmentRevision: number;
   arenaBytes: number;
   probes: number;
@@ -78,8 +76,6 @@ export async function getDbrwStatus(live = false): Promise<DbrwStatus> {
     bindingKeyPresent: resp.bindingKeyPresent,
     verifierKeypairPresent: resp.verifierKeypairPresent,
     storageBaseDirSet: resp.storageBaseDirSet,
-    observeOnly: resp.observeOnly,
-    accessMode: resp.accessMode,
     enrollmentRevision: resp.enrollmentRevision,
     arenaBytes: resp.arenaBytes,
     probes: resp.probes,

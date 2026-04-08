@@ -16,7 +16,11 @@ use std::sync::{Arc, Once};
 use bitcoin::hashes::Hash;
 use dsm::{
     bitcoin::script::sha256_hash_lock, // SHA256 for HTLC hash locks
-    crypto::{kyber::generate_kyber_keypair, sphincs::generate_sphincs_keypair},
+    crypto::{
+        kyber::generate_kyber_keypair,
+        signatures::ParameterSet,
+        SignatureKeyPair,
+    },
     types::{
         state_types::State,
         token_types::{TokenOperation, TokenSupply, TokenType},
@@ -24,10 +28,14 @@ use dsm::{
     vault::DLVManager,
 };
 use dsm_sdk::sdk::bitcoin_tap_sdk::{
-    VaultOpState, BitcoinTapSdk, VaultDirection, DBTC_DECIMALS, DBTC_MAX_SUPPLY_SATS,
+    BitcoinTapSdk, VaultDirection, VaultOpState, DBTC_DECIMALS, DBTC_MAX_SUPPLY_SATS,
     DBTC_MIN_CONFIRMATIONS, DBTC_MIN_VAULT_BALANCE_SATS, DBTC_TOKEN_ID,
 };
 use dsm_sdk::storage::client_db;
+
+const TEST_DEVICE_ID: [u8; 32] = [0xE2; 32];
+const TEST_GENESIS_HASH: [u8; 32] = [0xE4; 32];
+const TEST_BINDING_KEY: [u8; 32] = [0xE5; 32];
 
 fn test_policy_commit(token_id: &str) -> [u8; 32] {
     match token_id {
@@ -77,19 +85,39 @@ fn list_test_balances(device_id: &str) -> Vec<(String, u64, u64)> {
 struct TestKeys {
     /// SPHINCS+ public key (64 bytes) — for signing/identity
     sphincs_pk: Vec<u8>,
-    /// SPHINCS+ secret key (128 bytes) — for signing
-    sphincs_sk: Vec<u8>,
     /// Kyber public key (1184 bytes) — for vault content encryption
     kyber_pk: Vec<u8>,
 }
 
+fn canonical_test_signing_keys() -> (Vec<u8>, Vec<u8>) {
+    let mut entropy = Vec::with_capacity(96);
+    entropy.extend_from_slice(&TEST_GENESIS_HASH);
+    entropy.extend_from_slice(&TEST_DEVICE_ID);
+    entropy.extend_from_slice(&TEST_BINDING_KEY);
+    let keypair = SignatureKeyPair::generate_from_entropy_with_params(&entropy, ParameterSet::SPX256f)
+        .expect("canonical test signing key derivation failed");
+    (keypair.public_key().to_vec(), keypair.secret_key().to_vec())
+}
+
+fn install_test_identity() {
+    let (public_key, _) = canonical_test_signing_keys();
+    dsm_sdk::sdk::app_state::AppState::set_identity_info(
+        TEST_DEVICE_ID.to_vec(),
+        public_key,
+        TEST_GENESIS_HASH.to_vec(),
+        vec![0u8; 32],
+    );
+    dsm_sdk::set_cdbrw_binding_key_for_testing(TEST_BINDING_KEY.to_vec());
+}
+
 /// Create a full test key bundle (SPHINCS+ + Kyber).
 fn test_keys() -> TestKeys {
-    let (sphincs_pk, sphincs_sk) = generate_sphincs_keypair().expect("SPHINCS+ keygen failed");
+    init_test_db();
+    install_test_identity();
+    let (sphincs_pk, _sphincs_sk) = canonical_test_signing_keys();
     let kyber_kp = generate_kyber_keypair().expect("Kyber keygen failed");
     TestKeys {
         sphincs_pk,
-        sphincs_sk,
         kyber_pk: kyber_kp.public_key.clone(),
     }
 }
@@ -265,7 +293,6 @@ async fn btc_to_dbtc_initiation_creates_dlv() {
             amount_sats,
             &btc_pubkey,
             100, // refund after 100 iterations
-            (&keys.sphincs_pk, &keys.sphincs_sk),
             &state,
             dsm::bitcoin::types::BitcoinNetwork::Signet,
             &keys.kyber_pk,
@@ -319,7 +346,6 @@ async fn btc_to_dbtc_rejects_zero_amount() {
             0,
             &[0x02; 33],
             100,
-            (&keys.sphincs_pk, &keys.sphincs_sk),
             &state,
             dsm::bitcoin::types::BitcoinNetwork::Signet,
             &keys.kyber_pk,
@@ -341,7 +367,6 @@ async fn btc_to_dbtc_rejects_bad_pubkey() {
             100_000,
             &[0x02; 32],
             100,
-            (&keys.sphincs_pk, &keys.sphincs_sk),
             &state,
             dsm::bitcoin::types::BitcoinNetwork::Signet,
             &keys.kyber_pk,
@@ -366,7 +391,6 @@ async fn btc_to_dbtc_complete_produces_mint_operation() {
             amount_sats,
             &[0x02; 33],
             100,
-            (&keys.sphincs_pk, &keys.sphincs_sk),
             &state,
             dsm::bitcoin::types::BitcoinNetwork::Signet,
             &keys.kyber_pk,
@@ -450,7 +474,6 @@ async fn refund_not_available_before_timeout() {
             100_000,
             &[0x02; 33],
             100,
-            (&keys.sphincs_pk, &keys.sphincs_sk),
             &state,
             dsm::bitcoin::types::BitcoinNetwork::Signet,
             &keys.kyber_pk,
@@ -461,7 +484,7 @@ async fn refund_not_available_before_timeout() {
     // Try to refund at state 50 (need 100 iterations from state 1)
     let early_state = test_state(50);
     let result = bridge
-        .close_tap(&initiation.vault_op_id, &keys.sphincs_sk, &early_state)
+        .close_tap(&initiation.vault_op_id, &early_state)
         .await;
 
     assert!(result.is_err());
@@ -484,7 +507,6 @@ async fn refund_after_completed_deposit_rejected() {
             100_000,
             &[0x02; 33],
             50,
-            (&keys.sphincs_pk, &keys.sphincs_sk),
             &state,
             dsm::bitcoin::types::BitcoinNetwork::Signet,
             &keys.kyber_pk,
@@ -523,7 +545,7 @@ async fn refund_after_completed_deposit_rejected() {
     // Now try to refund — should be rejected
     let late_state = test_state(200);
     let result = bridge
-        .close_tap(&initiation.vault_op_id, &keys.sphincs_sk, &late_state)
+        .close_tap(&initiation.vault_op_id, &late_state)
         .await;
 
     assert!(result.is_err());
@@ -549,7 +571,6 @@ async fn cannot_complete_already_completed_deposit() {
             100_000,
             &[0x02; 33],
             100,
-            (&keys.sphincs_pk, &keys.sphincs_sk),
             &state,
             dsm::bitcoin::types::BitcoinNetwork::Signet,
             &keys.kyber_pk,
@@ -618,7 +639,6 @@ async fn wrong_preimage_rejected() {
             100_000,
             &[0x02; 33],
             100,
-            (&keys.sphincs_pk, &keys.sphincs_sk),
             &state,
             dsm::bitcoin::types::BitcoinNetwork::Signet,
             &keys.kyber_pk,
@@ -662,7 +682,6 @@ async fn legacy_receipt_commit_domain_is_rejected_for_draw_tap() {
             100_000,
             &[0x02; 33],
             100,
-            (&keys.sphincs_pk, &keys.sphincs_sk),
             &state,
             dsm::bitcoin::types::BitcoinNetwork::Signet,
             &keys.kyber_pk,
@@ -718,7 +737,6 @@ async fn list_vault_ops_tracks_all() {
             100_000,
             &[0x02; 33],
             100,
-            (&keys.sphincs_pk, &keys.sphincs_sk),
             &state,
             dsm::bitcoin::types::BitcoinNetwork::Signet,
             &keys.kyber_pk,
@@ -733,7 +751,6 @@ async fn list_vault_ops_tracks_all() {
             200_000,
             &[0x02; 33],
             50,
-            (&keys.sphincs_pk, &keys.sphincs_sk),
             &state,
             dsm::bitcoin::types::BitcoinNetwork::Signet,
             &keys.kyber_pk,
@@ -864,7 +881,6 @@ async fn fractional_exit_creates_successor_vault() {
             total_amount_sats,
             &[0x02; 33],
             100,
-            (&keys.sphincs_pk, &keys.sphincs_sk),
             &state,
             dsm::bitcoin::types::BitcoinNetwork::Signet,
             &keys.kyber_pk,
@@ -907,7 +923,6 @@ async fn fractional_exit_creates_successor_vault() {
             0,
             exit_amount_sats,
             100,
-            (&keys.sphincs_pk[..], &keys.sphincs_sk[..]),
             &state,
             dsm::bitcoin::types::BitcoinNetwork::Signet,
             &keys.kyber_pk,
@@ -956,14 +971,7 @@ fn init_test_db() {
         ));
         client_db::init_database().expect("[bitcoin_tap_e2e] init_database");
     });
-    // Vault publication (mandatory at creation) requires device_id from AppState.
-    // Set a test device_id so e2e tests can proceed through persist_vault().
-    dsm_sdk::sdk::app_state::AppState::set_identity_info(
-        vec![0xE2; 32],
-        vec![0xE3; 32],
-        vec![0xE4; 32],
-        vec![0u8; 32],
-    );
+    install_test_identity();
 }
 
 #[tokio::test]
@@ -979,7 +987,6 @@ async fn persistence_deposit_record_roundtrip() {
             100_000,
             &[0x02; 33],
             100,
-            (&keys.sphincs_pk, &keys.sphincs_sk),
             &state,
             dsm::bitcoin::types::BitcoinNetwork::Signet,
             &keys.kyber_pk,
@@ -1019,7 +1026,6 @@ async fn persistence_restore_after_sdk_drop() {
                 amount,
                 &[0x02; 33],
                 100,
-                (&keys.sphincs_pk, &keys.sphincs_sk),
                 &state,
                 dsm::bitcoin::types::BitcoinNetwork::Signet,
                 &keys.kyber_pk,
@@ -1072,7 +1078,6 @@ async fn persistence_completed_deposit_has_entry_header() {
             amount,
             &[0x02; 33],
             100,
-            (&keys.sphincs_pk, &keys.sphincs_sk),
             &state,
             dsm::bitcoin::types::BitcoinNetwork::Signet,
             &keys.kyber_pk,
@@ -1133,7 +1138,6 @@ async fn entry_header_cached_on_vault_after_complete() {
             amount,
             &[0x02; 33],
             100,
-            (&keys.sphincs_pk, &keys.sphincs_sk),
             &state,
             dsm::bitcoin::types::BitcoinNetwork::Signet,
             &keys.kyber_pk,
@@ -1187,7 +1191,6 @@ async fn entry_header_none_before_complete() {
             300_000,
             &[0x02; 33],
             100,
-            (&keys.sphincs_pk, &keys.sphincs_sk),
             &state,
             dsm::bitcoin::types::BitcoinNetwork::Signet,
             &keys.kyber_pk,
@@ -1446,7 +1449,6 @@ async fn destination_address_survives_restore() {
                 150_000,
                 &[0x02; 33],
                 100,
-                (&keys.sphincs_pk, &keys.sphincs_sk),
                 &state,
                 dsm::bitcoin::types::BitcoinNetwork::Signet,
                 &keys.kyber_pk,
@@ -1856,7 +1858,6 @@ async fn vector_deposit_record_sdk_roundtrip() {
             777_777,     // deterministic amount
             &[0x02; 33], // deterministic pubkey
             288,         // ~2 days refund iterations
-            (&keys.sphincs_pk, &keys.sphincs_sk),
             &state,
             dsm::bitcoin::types::BitcoinNetwork::Signet,
             &keys.kyber_pk,
@@ -1949,7 +1950,6 @@ async fn do_deposit_op(
             amount_sats,
             &[0x02; 33],
             100,
-            (&keys.sphincs_pk, &keys.sphincs_sk),
             state,
             dsm::bitcoin::types::BitcoinNetwork::Signet,
             &keys.kyber_pk,
@@ -2176,7 +2176,6 @@ async fn vault_transitions_through_lifecycle() {
             amount,
             &[0x02; 33],
             100,
-            (&keys.sphincs_pk, &keys.sphincs_sk),
             &state,
             dsm::bitcoin::types::BitcoinNetwork::Signet,
             &keys.kyber_pk,
@@ -2661,7 +2660,6 @@ async fn concurrent_pour_partial_only_one_succeeds() {
             total_amount_sats,
             &[0x02; 33],
             100,
-            (&keys.sphincs_pk, &keys.sphincs_sk),
             &state,
             dsm::bitcoin::types::BitcoinNetwork::Signet,
             &keys.kyber_pk,
@@ -2701,8 +2699,6 @@ async fn concurrent_pour_partial_only_one_succeeds() {
     let bridge2 = bridge.clone();
     let vid1 = vault_id.clone();
     let vid2 = vault_id.clone();
-    let (pk1, sk1) = (keys.sphincs_pk.clone(), keys.sphincs_sk.clone());
-    let (pk2, sk2) = (keys.sphincs_pk.clone(), keys.sphincs_sk.clone());
     let (kpk1, kpk2) = (keys.kyber_pk.clone(), keys.kyber_pk.clone());
     let (s1, s2) = (state.clone(), state.clone());
 
@@ -2715,7 +2711,6 @@ async fn concurrent_pour_partial_only_one_succeeds() {
                 0,
                 exit_amount,
                 100,
-                (&pk1[..], &sk1[..]),
                 &s1,
                 dsm::bitcoin::types::BitcoinNetwork::Signet,
                 &kpk1,
@@ -2731,7 +2726,6 @@ async fn concurrent_pour_partial_only_one_succeeds() {
                 0,
                 exit_amount,
                 100,
-                (&pk2[..], &sk2[..]),
                 &s2,
                 dsm::bitcoin::types::BitcoinNetwork::Signet,
                 &kpk2,

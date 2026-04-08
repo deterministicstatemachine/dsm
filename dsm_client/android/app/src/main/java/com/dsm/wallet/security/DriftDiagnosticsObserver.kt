@@ -4,9 +4,7 @@ import android.content.Context
 import android.util.Log
 import java.io.File
 import java.io.FileWriter
-import java.security.MessageDigest
 import java.util.concurrent.Executors
-import kotlin.concurrent.thread
 
 /**
  * Decoupled diagnostics observer for silicon fingerprint drift logging.
@@ -68,12 +66,12 @@ class DriftDiagnosticsObserver(private val context: Context) {
 
     /**
      * Create a safe digest of sensitive data for logging.
-     * Uses SHA-256 to create a non-reversible digest that can be safely logged.
+     * Uses domain-separated BLAKE3 to create a non-reversible digest that can be safely logged.
      */
     fun createSafeDigest(data: ByteArray?): String? {
         if (data == null) return null
         return try {
-            val digest = MessageDigest.getInstance("SHA-256").digest(data)
+            val digest = CdbrwBlake3Native.domainHash("DSM/diagnostics/drift", data)
             digest.joinToString("") { "%02x".format(it) }
         } catch (e: Exception) {
             Log.w(TAG, "Failed to create safe digest", e)

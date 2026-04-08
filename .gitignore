@@ -215,6 +215,11 @@ backups/
 # ---------------------------------------------------------------------------
 dsm_client/deterministic_state_machine/test_balance_fix.rs
 
+# ---------------------------------------------------------------------------
+# Local iOS smoke app / Swift experiment
+# ---------------------------------------------------------------------------
+tools/ios_ingress_smoke/
+
 # Claude IDE
 .claude/
 /.github/instructions
