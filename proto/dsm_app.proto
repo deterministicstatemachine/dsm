@@ -2553,6 +2553,22 @@ message DrainEventsOp {
   uint32 max_events = 1;
 }
 
+// Mark the genesis/device-securing phase in the Rust SessionManager. Used by
+// the Android bridge (and future iOS host) to flip the securing_in_progress
+// flag around DBRW silicon-fingerprint enrollment. All three phases funnel
+// through the same op so callers only need to switch a phase value — no new
+// per-platform JNI/FFI exports. See
+// .github/instructions/rules.instructions.md "Cross-Platform Ingress".
+message MarkGenesisSecuringOp {
+  enum Phase {
+    PHASE_UNSPECIFIED = 0;
+    PHASE_STARTED     = 1;
+    PHASE_COMPLETE    = 2;
+    PHASE_ABORTED     = 3;
+  }
+  Phase phase = 1;
+}
+
 enum SdkEventKind {
   SDK_EVENT_KIND_UNSPECIFIED = 0;
   SDK_EVENT_KIND_SESSION_STATE = 1;
@@ -2587,11 +2603,12 @@ message SdkEventBatch {
 // Canonical platform-agnostic ingress request.
 message IngressRequest {
   oneof operation {
-    RouterQueryOp   router_query   = 1;
-    RouterInvokeOp  router_invoke  = 2;
-    EnvelopeOp      envelope       = 3;
-    HardwareFactsOp hardware_facts = 4;
-    DrainEventsOp   drain_events   = 5;
+    RouterQueryOp         router_query          = 1;
+    RouterInvokeOp        router_invoke         = 2;
+    EnvelopeOp            envelope              = 3;
+    HardwareFactsOp       hardware_facts        = 4;
+    DrainEventsOp         drain_events          = 5;
+    MarkGenesisSecuringOp mark_genesis_securing = 6;
   }
 }
 

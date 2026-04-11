@@ -21466,6 +21466,82 @@ export class DrainEventsOp extends Message<DrainEventsOp> {
 }
 
 /**
+ * Mark the genesis/device-securing phase in the Rust SessionManager. Used by
+ * the Android bridge (and future iOS host) to flip the securing_in_progress
+ * flag around DBRW silicon-fingerprint enrollment. All three phases funnel
+ * through the same op so callers only need to switch a phase value — no new
+ * per-platform JNI/FFI exports. See
+ * .github/instructions/rules.instructions.md "Cross-Platform Ingress".
+ *
+ * @generated from message dsm.MarkGenesisSecuringOp
+ */
+export class MarkGenesisSecuringOp extends Message<MarkGenesisSecuringOp> {
+  /**
+   * @generated from field: dsm.MarkGenesisSecuringOp.Phase phase = 1;
+   */
+  phase = MarkGenesisSecuringOp_Phase.UNSPECIFIED;
+
+  constructor(data?: PartialMessage<MarkGenesisSecuringOp>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.MarkGenesisSecuringOp";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "phase", kind: "enum", T: proto3.getEnumType(MarkGenesisSecuringOp_Phase) },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): MarkGenesisSecuringOp {
+    return new MarkGenesisSecuringOp().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): MarkGenesisSecuringOp {
+    return new MarkGenesisSecuringOp().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): MarkGenesisSecuringOp {
+    return new MarkGenesisSecuringOp().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: MarkGenesisSecuringOp | PlainMessage<MarkGenesisSecuringOp> | undefined, b: MarkGenesisSecuringOp | PlainMessage<MarkGenesisSecuringOp> | undefined): boolean {
+    return proto3.util.equals(MarkGenesisSecuringOp, a, b);
+  }
+}
+
+/**
+ * @generated from enum dsm.MarkGenesisSecuringOp.Phase
+ */
+export enum MarkGenesisSecuringOp_Phase {
+  /**
+   * @generated from enum value: PHASE_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: PHASE_STARTED = 1;
+   */
+  STARTED = 1,
+
+  /**
+   * @generated from enum value: PHASE_COMPLETE = 2;
+   */
+  COMPLETE = 2,
+
+  /**
+   * @generated from enum value: PHASE_ABORTED = 3;
+   */
+  ABORTED = 3,
+}
+// Retrieve enum metadata with: proto3.getEnumType(MarkGenesisSecuringOp_Phase)
+proto3.util.setEnumType(MarkGenesisSecuringOp_Phase, "dsm.MarkGenesisSecuringOp.Phase", [
+  { no: 0, name: "PHASE_UNSPECIFIED" },
+  { no: 1, name: "PHASE_STARTED" },
+  { no: 2, name: "PHASE_COMPLETE" },
+  { no: 3, name: "PHASE_ABORTED" },
+]);
+
+/**
  * Typed async SDK event envelope. `payload` contains the canonical protobuf
  * bytes for the declared event kind.
  *
@@ -21593,6 +21669,12 @@ export class IngressRequest extends Message<IngressRequest> {
      */
     value: DrainEventsOp;
     case: "drainEvents";
+  } | {
+    /**
+     * @generated from field: dsm.MarkGenesisSecuringOp mark_genesis_securing = 6;
+     */
+    value: MarkGenesisSecuringOp;
+    case: "markGenesisSecuring";
   } | { case: undefined; value?: undefined } = { case: undefined };
 
   constructor(data?: PartialMessage<IngressRequest>) {
@@ -21608,6 +21690,7 @@ export class IngressRequest extends Message<IngressRequest> {
     { no: 3, name: "envelope", kind: "message", T: EnvelopeOp, oneof: "operation" },
     { no: 4, name: "hardware_facts", kind: "message", T: HardwareFactsOp, oneof: "operation" },
     { no: 5, name: "drain_events", kind: "message", T: DrainEventsOp, oneof: "operation" },
+    { no: 6, name: "mark_genesis_securing", kind: "message", T: MarkGenesisSecuringOp, oneof: "operation" },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): IngressRequest {
