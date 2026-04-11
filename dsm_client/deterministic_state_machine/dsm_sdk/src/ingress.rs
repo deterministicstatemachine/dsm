@@ -156,6 +156,24 @@ fn drain_events_core(max_events: u32) -> Result<Vec<u8>, pb::Error> {
     Ok(out)
 }
 
+fn mark_genesis_securing_core(phase: i32) -> Result<Vec<u8>, pb::Error> {
+    // Phase enum values mirror pb::mark_genesis_securing_op::Phase.
+    use pb::mark_genesis_securing_op::Phase as P;
+    let enum_phase = P::try_from(phase).unwrap_or(P::Unspecified);
+    let bytes = match enum_phase {
+        P::Started => crate::sdk::session_manager::mark_securing_started_and_snapshot(),
+        P::Complete => crate::sdk::session_manager::mark_securing_complete_and_snapshot(),
+        P::Aborted => crate::sdk::session_manager::mark_securing_aborted_and_snapshot(),
+        P::Unspecified => {
+            return Err(ingress_error(
+                ERROR_CODE_INVALID_INPUT,
+                "ingress: mark_genesis_securing phase is unspecified",
+            ));
+        }
+    };
+    Ok(bytes)
+}
+
 fn startup_ok() -> Vec<u8> {
     STARTUP_OK_BYTES.to_vec()
 }
@@ -359,6 +377,9 @@ pub fn dispatch_ingress(request: IngressRequest) -> IngressResponse {
             )),
         },
         Some(ingress_request::Operation::DrainEvents(op)) => drain_events_core(op.max_events),
+        Some(ingress_request::Operation::MarkGenesisSecuring(op)) => {
+            mark_genesis_securing_core(op.phase)
+        }
         None => Err(ingress_error(
             ERROR_CODE_INVALID_INPUT,
             "ingress: empty IngressRequest (no operation set)",
@@ -786,5 +807,93 @@ endpoint = "http://127.0.0.1:8080"
         let error = expect_startup_error(response);
         assert_eq!(error.code, ERROR_CODE_INVALID_INPUT);
         assert!(error.message.contains("binding_key must be 32 bytes"));
+    }
+
+    #[test]
+    fn dispatch_ingress_mark_genesis_securing_started_sets_flag() {
+        let _guard = setup_test_env();
+        // Reset flag deterministically
+        {
+            let mut mgr = crate::sdk::session_manager::SESSION_MANAGER
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            mgr.securing_in_progress = false;
+            mgr.fatal_error = None;
+        }
+
+        let response = dispatch_ingress(IngressRequest {
+            operation: Some(ingress_request::Operation::MarkGenesisSecuring(
+                pb::MarkGenesisSecuringOp {
+                    phase: pb::mark_genesis_securing_op::Phase::Started as i32,
+                },
+            )),
+        });
+        match response.result {
+            Some(ingress_response::Result::OkBytes(bytes)) => assert!(!bytes.is_empty()),
+            other => panic!("expected OkBytes, got {:?}", other),
+        }
+
+        let mgr = crate::sdk::session_manager::SESSION_MANAGER
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        assert!(
+            mgr.securing_in_progress,
+            "dispatch_ingress(STARTED) must flip securing_in_progress"
+        );
+
+        // Clean up so sibling tests are unaffected
+        drop(mgr);
+        let mut mgr = crate::sdk::session_manager::SESSION_MANAGER
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        mgr.securing_in_progress = false;
+    }
+
+    #[test]
+    fn dispatch_ingress_mark_genesis_securing_complete_clears_flag() {
+        let _guard = setup_test_env();
+        // Precondition: flag is set
+        {
+            let mut mgr = crate::sdk::session_manager::SESSION_MANAGER
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            mgr.mark_securing_started();
+            mgr.fatal_error = None;
+        }
+
+        let response = dispatch_ingress(IngressRequest {
+            operation: Some(ingress_request::Operation::MarkGenesisSecuring(
+                pb::MarkGenesisSecuringOp {
+                    phase: pb::mark_genesis_securing_op::Phase::Complete as i32,
+                },
+            )),
+        });
+        assert!(matches!(
+            response.result,
+            Some(ingress_response::Result::OkBytes(_))
+        ));
+
+        let mgr = crate::sdk::session_manager::SESSION_MANAGER
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        assert!(!mgr.securing_in_progress);
+    }
+
+    #[test]
+    fn dispatch_ingress_mark_genesis_securing_unspecified_errors() {
+        let _guard = setup_test_env();
+        let response = dispatch_ingress(IngressRequest {
+            operation: Some(ingress_request::Operation::MarkGenesisSecuring(
+                pb::MarkGenesisSecuringOp {
+                    phase: pb::mark_genesis_securing_op::Phase::Unspecified as i32,
+                },
+            )),
+        });
+        match response.result {
+            Some(ingress_response::Result::Error(err)) => {
+                assert_eq!(err.code, ERROR_CODE_INVALID_INPUT);
+            }
+            other => panic!("expected Error, got {:?}", other),
+        }
     }
 }

@@ -371,6 +371,34 @@ pub fn clear_fatal_error_and_snapshot() -> Vec<u8> {
     envelope_wrap_snapshot(mgr.compute_snapshot())
 }
 
+/// Mark device-securing started and return envelope-wrapped snapshot bytes.
+/// Used by JNI to flip the SessionManager flag at the start of DBRW securing.
+pub fn mark_securing_started_and_snapshot() -> Vec<u8> {
+    let mut mgr = SESSION_MANAGER.lock().unwrap_or_else(|p| p.into_inner());
+    mgr.sync_lock_config_from_app_state();
+    mgr.mark_securing_started();
+    envelope_wrap_snapshot(mgr.compute_snapshot())
+}
+
+/// Mark device-securing complete and return envelope-wrapped snapshot bytes.
+/// Used by JNI when sdkBootstrapStrict has succeeded and the flow is wallet-ready.
+pub fn mark_securing_complete_and_snapshot() -> Vec<u8> {
+    let mut mgr = SESSION_MANAGER.lock().unwrap_or_else(|p| p.into_inner());
+    mgr.sync_lock_config_from_app_state();
+    mgr.mark_securing_complete();
+    envelope_wrap_snapshot(mgr.compute_snapshot())
+}
+
+/// Mark device-securing aborted and return envelope-wrapped snapshot bytes.
+/// Used by JNI from handleHostPauseDuringGenesis and the catch path of
+/// installGenesisEnvelope, BEFORE the partial-state wipe.
+pub fn mark_securing_aborted_and_snapshot() -> Vec<u8> {
+    let mut mgr = SESSION_MANAGER.lock().unwrap_or_else(|p| p.into_inner());
+    mgr.sync_lock_config_from_app_state();
+    mgr.mark_securing_aborted();
+    envelope_wrap_snapshot(mgr.compute_snapshot())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -496,6 +524,32 @@ mod tests {
             "needs_genesis",
             "after abort, phase falls back to needs_genesis"
         );
+    }
+
+    #[test]
+    fn marker_helpers_round_trip_through_compute_phase() {
+        let _g = setup_test_env();
+        SDK_READY.store(true, Ordering::SeqCst);
+
+        // Reset global manager state for this test
+        {
+            let mut mgr = SESSION_MANAGER.lock().unwrap_or_else(|p| p.into_inner());
+            mgr.securing_in_progress = false;
+            mgr.fatal_error = None;
+        }
+
+        let started = mark_securing_started_and_snapshot();
+        assert!(!started.is_empty(), "started snapshot must not be empty");
+
+        let complete = mark_securing_complete_and_snapshot();
+        assert!(!complete.is_empty(), "complete snapshot must not be empty");
+
+        let aborted = mark_securing_aborted_and_snapshot();
+        assert!(!aborted.is_empty(), "aborted snapshot must not be empty");
+
+        // After these calls the manager flag is back to false
+        let mgr = SESSION_MANAGER.lock().unwrap_or_else(|p| p.into_inner());
+        assert!(!mgr.securing_in_progress, "flag must be cleared after sequence");
     }
 
     #[test]
