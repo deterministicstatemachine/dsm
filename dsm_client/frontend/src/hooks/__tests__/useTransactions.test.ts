@@ -37,27 +37,23 @@ describe('useTransactions', () => {
       sendMessageBin: async (reqBytes: Uint8Array) => {
         const req = pb.BridgeRpcRequest.fromBinary(reqBytes);
         const method = req.method || '';
-        const p = req.payload?.case === 'bytes' ? req.payload.value.data : new Uint8Array(0);
-        const readU32 = (buf: Uint8Array, off: number) => ((buf[off] ?? 0) << 24) | ((buf[off + 1] ?? 0) << 16) | ((buf[off + 2] ?? 0) << 8) | (buf[off + 3] ?? 0);
-        const withRid = (bytes: Uint8Array) => {
-          const rid = new Uint8Array(8);
-          const out = new Uint8Array(rid.length + bytes.length);
-          out.set(rid, 0);
-          out.set(bytes, rid.length);
-          return out;
-        };
         if (method === 'getTransportHeadersV3Bin') {
           return new pb.BridgeRpcResponse({ result: { case: 'success', value: { data: headers.toBinary() } } }).toBinary();
         }
-        if (method === 'appRouterQuery') {
-          const n = readU32(p, 0);
-          const path = new TextDecoder().decode(p.slice(4, 4 + n));
-          if (path === '/transport/headersV3') {
-            const data = withRid(headers.toBinary());
+        if (method === 'nativeBoundaryIngress') {
+          const p = req.payload?.case === 'bytes' ? req.payload.value.data : new Uint8Array(0);
+          const ingress = pb.IngressRequest.fromBinary(p);
+          if (ingress.operation.case === 'routerQuery' && ingress.operation.value.method === '/transport/headersV3') {
+            const data = new pb.IngressResponse({
+              result: { case: 'okBytes', value: headers.toBinary() },
+            }).toBinary();
             return new pb.BridgeRpcResponse({ result: { case: 'success', value: { data } } }).toBinary();
           }
         }
-        return new pb.BridgeRpcResponse({ result: { case: 'success', value: { data: withRid(new Uint8Array(0)) } } }).toBinary();
+        const emptyIngress = new pb.IngressResponse({
+          result: { case: 'okBytes', value: new Uint8Array(0) },
+        }).toBinary();
+        return new pb.BridgeRpcResponse({ result: { case: 'success', value: { data: emptyIngress } } }).toBinary();
       },
     };
   }

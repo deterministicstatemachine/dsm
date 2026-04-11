@@ -49,8 +49,12 @@ class AntiCloneGate(private val context: Context) {
             return AntiCloneGate(context).generateEnvironmentFingerprint()
         }
 
-        fun getStableHwAnchorWithTrust(context: Context, fastMode: Boolean = false): HardwareAnchorResult {
-            return AntiCloneGate(context).getStableHwAnchorWithTrust(fastMode)
+        fun getStableHwAnchorWithTrust(
+            context: Context,
+            fastMode: Boolean = false,
+            onDeriveProgress: ((completed: Int, total: Int) -> Unit)? = null,
+        ): HardwareAnchorResult {
+            return AntiCloneGate(context).getStableHwAnchorWithTrust(fastMode, onDeriveProgress)
         }
     }
 
@@ -100,7 +104,10 @@ class AntiCloneGate(private val context: Context) {
      * Get hardware anchor with trust scoring.
      * Runs entropy health test when not in fast mode.
      */
-    fun getStableHwAnchorWithTrust(fastMode: Boolean = false): HardwareAnchorResult {
+    fun getStableHwAnchorWithTrust(
+        fastMode: Boolean = false,
+        onDeriveProgress: ((completed: Int, total: Int) -> Unit)? = null,
+    ): HardwareAnchorResult {
         return try {
             if (!siliconFp.isEnrolled(context)) {
                 Log.w(TAG, "C-DBRW trust check blocked: device is not enrolled")
@@ -111,7 +118,7 @@ class AntiCloneGate(private val context: Context) {
                 )
             }
 
-            val derived = siliconFp.derive(context)
+            val derived = siliconFp.derive(context, onDeriveProgress)
             var trustScore = derived.matchScore.coerceIn(0.0f, 1.0f)
             var resonantStatus: CdbrwEntropyHealth.ResonantStatus? = null
 

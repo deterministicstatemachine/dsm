@@ -1457,7 +1457,10 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
         | Some(gp::envelope::Payload::SessionStateResponse(_))
         | Some(gp::envelope::Payload::TokenPolicyListResponse(_))
         // Outbound-only push envelopes — never arrive as inbound requests
-        | Some(gp::envelope::Payload::NfcRecoveryCapsule(_)) => {
+        | Some(gp::envelope::Payload::NfcRecoveryCapsule(_))
+        | Some(gp::envelope::Payload::GenesisLifecycle(_))
+        | Some(gp::envelope::Payload::BootstrapMeasurementReport(_))
+        | Some(gp::envelope::Payload::BootstrapFinalizeResponse(_)) => {
             gp::envelope::Payload::Error(gp::Error {
                 code: 501,
                 message: "SDK-owned payloads are handled at the SDK layer".to_string(),

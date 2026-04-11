@@ -8,8 +8,16 @@ import com.dsm.native.DsmNativeException
 import com.dsm.wallet.security.AccessLevel
 import com.dsm.wallet.security.AntiCloneGate
 import com.dsm.wallet.security.SiliconFingerprint
-import dsm.types.proto.DeviceBindingCaptureResult
 import dsm.types.proto.Envelope
+import dsm.types.proto.BootstrapFinalizeResponse
+import dsm.types.proto.BootstrapMeasurementReport
+import dsm.types.proto.ArgPack
+import dsm.types.proto.Codec
+import dsm.types.proto.EnvelopeOp
+import dsm.types.proto.IngressRequest
+import dsm.types.proto.IngressResponse
+import dsm.types.proto.RouterQueryOp
+import dsm.types.proto.SystemGenesisRequest
 import java.util.concurrent.atomic.AtomicBoolean
 
 internal object BridgeIdentityHandler {
@@ -30,6 +38,13 @@ internal object BridgeIdentityHandler {
         val entropyBytes: ByteArray,
     )
 
+    private data class BootstrapMeasurements(
+        val trustLevel: BootstrapMeasurementReport.TrustLevel,
+        val hwEntropy: ByteArray,
+        val envEntropy: ByteArray,
+        val dbrwSalt: ByteArray,
+    )
+
     private fun getFramedErrorEnvelopeCode(envelopeBytes: ByteArray): Int {
         if (envelopeBytes.isEmpty()) {
             return 0
@@ -44,6 +59,64 @@ internal object BridgeIdentityHandler {
         } catch (_: Throwable) {
             0
         }
+    }
+
+    private fun mapTrustLevel(accessLevel: AccessLevel): BootstrapMeasurementReport.TrustLevel {
+        return when (accessLevel) {
+            AccessLevel.FULL_ACCESS -> BootstrapMeasurementReport.TrustLevel.BOOTSTRAP_TRUST_LEVEL_FULL_ACCESS
+            AccessLevel.PIN_REQUIRED -> BootstrapMeasurementReport.TrustLevel.BOOTSTRAP_TRUST_LEVEL_PIN_REQUIRED
+            AccessLevel.READ_ONLY -> BootstrapMeasurementReport.TrustLevel.BOOTSTRAP_TRUST_LEVEL_READ_ONLY
+            AccessLevel.BLOCKED -> BootstrapMeasurementReport.TrustLevel.BOOTSTRAP_TRUST_LEVEL_BLOCKED
+        }
+    }
+
+    private fun sendBootstrapMeasurementReport(
+        report: BootstrapMeasurementReport,
+    ): ByteArray {
+        val envelope = Envelope.newBuilder()
+            .setVersion(3)
+            .setMessageId(ByteString.copyFrom(ByteArray(16)))
+            .setBootstrapMeasurementReport(report)
+            .build()
+        val rawEnvelope = envelope.toByteArray()
+        val envelopeBytes = ByteArray(1 + rawEnvelope.size)
+        envelopeBytes[0] = 0x03
+        System.arraycopy(rawEnvelope, 0, envelopeBytes, 1, rawEnvelope.size)
+
+        val ingressRequest = IngressRequest.newBuilder()
+            .setEnvelope(
+                EnvelopeOp.newBuilder()
+                    .setEnvelopeBytes(ByteString.copyFrom(envelopeBytes))
+                    .build()
+            )
+            .build()
+
+        val ingressResponse = IngressResponse.parseFrom(Unified.dispatchIngress(ingressRequest.toByteArray()))
+        return when (ingressResponse.resultCase) {
+            IngressResponse.ResultCase.OK_BYTES -> ingressResponse.okBytes.toByteArray()
+            IngressResponse.ResultCase.ERROR -> throw IllegalStateException(ingressResponse.error.message)
+            else -> throw IllegalStateException("bootstrap ingress returned no result")
+        }
+    }
+
+    private fun decodeBootstrapFinalizeResponseEnvelope(
+        envelopeBytes: ByteArray,
+    ): BootstrapFinalizeResponse {
+        if (envelopeBytes.isEmpty()) {
+            throw IllegalArgumentException("bootstrap finalize envelope empty")
+        }
+        val rawEnvelope = if (envelopeBytes.first() == 0x03.toByte() && envelopeBytes.size > 1) {
+            envelopeBytes.copyOfRange(1, envelopeBytes.size)
+        } else {
+            envelopeBytes
+        }
+        val envelope = Envelope.parseFrom(rawEnvelope)
+        if (envelope.payloadCase != Envelope.PayloadCase.BOOTSTRAP_FINALIZE_RESPONSE) {
+            throw IllegalArgumentException(
+                "expected bootstrapFinalizeResponse envelope, got ${envelope.payloadCase}"
+            )
+        }
+        return envelope.bootstrapFinalizeResponse
     }
 
     private fun clearGenesisArtifacts(
@@ -129,6 +202,103 @@ internal object BridgeIdentityHandler {
         )
     }
 
+    private fun collectBootstrapMeasurements(
+        context: Context,
+        prefs: SharedPreferences,
+        logTag: String,
+        keyDbrwSalt: String,
+    ): BootstrapMeasurements {
+        val siliconFp = SiliconFingerprint()
+        if (!siliconFp.isEnrolled(context)) {
+            siliconFp.enroll(context) { completed, total ->
+                val pct = ((completed * 100) / total).coerceIn(0, 100)
+                sendBootstrapMeasurementReport(
+                    BootstrapMeasurementReport.newBuilder()
+                        .setPhase(BootstrapMeasurementReport.Phase.BOOTSTRAP_PHASE_PROGRESS)
+                        .setProgressPercent(pct)
+                        .build()
+                )
+            }
+        } else {
+            Log.i(logTag, "collectBootstrapMeasurements: reusing existing silicon enrollment")
+        }
+
+        val hwResult = AntiCloneGate.getStableHwAnchorWithTrust(context)
+        val hwEntropy = hwResult.anchor ?: ByteArray(0)
+        val envEntropy = AntiCloneGate.getEnvironmentFingerprint(context)
+        val dbrwSalt = ByteArray(32)
+        java.security.SecureRandom().nextBytes(dbrwSalt)
+        prefs.edit().putString(keyDbrwSalt, BridgeEncoding.base32CrockfordEncode(dbrwSalt)).apply()
+        Log.i(logTag, "collectBootstrapMeasurements: persisted DBRW salt")
+        return BootstrapMeasurements(
+            trustLevel = mapTrustLevel(hwResult.accessLevel),
+            hwEntropy = hwEntropy,
+            envEntropy = envEntropy,
+            dbrwSalt = dbrwSalt,
+        )
+    }
+
+    private fun loadOrCreateDbrwSalt(
+        prefs: SharedPreferences,
+        keyDbrwSalt: String,
+        logTag: String,
+    ): ByteArray {
+        val existing = prefs.getString(keyDbrwSalt, null)
+        if (!existing.isNullOrEmpty()) {
+            try {
+                val decoded = BridgeEncoding.base32CrockfordDecode(existing)
+                if (decoded.size == 32) {
+                    Log.i(logTag, "loadOrCreateDbrwSalt: loaded persisted DBRW salt")
+                    return decoded
+                }
+            } catch (_: Throwable) {
+                Log.w(logTag, "loadOrCreateDbrwSalt: invalid persisted DBRW salt, regenerating")
+            }
+        }
+
+        val fresh = ByteArray(32)
+        java.security.SecureRandom().nextBytes(fresh)
+        prefs.edit().putString(keyDbrwSalt, BridgeEncoding.base32CrockfordEncode(fresh)).apply()
+        Log.i(logTag, "loadOrCreateDbrwSalt: generated and persisted new DBRW salt")
+        return fresh
+    }
+
+    private fun requestGenesisEnvelopeViaIngress(
+        locale: String,
+        networkId: String,
+        entropyBytes: ByteArray,
+    ): ByteArray {
+        val args = ArgPack.newBuilder()
+            .setCodec(Codec.CODEC_PROTO)
+            .setBody(
+                ByteString.copyFrom(
+                    SystemGenesisRequest.newBuilder()
+                        .setLocale(locale)
+                        .setNetworkId(networkId)
+                        .setDeviceEntropy(ByteString.copyFrom(entropyBytes))
+                        .build()
+                        .toByteArray()
+                )
+            )
+            .build()
+
+        val ingressRequest = IngressRequest.newBuilder()
+            .setRouterQuery(
+                RouterQueryOp.newBuilder()
+                    .setMethod("system.genesis")
+                    .setArgs(ByteString.copyFrom(args.toByteArray()))
+                    .build()
+            )
+            .build()
+
+        val ingressResponse = IngressResponse.parseFrom(Unified.dispatchIngress(ingressRequest.toByteArray()))
+        return when (ingressResponse.resultCase) {
+            IngressResponse.ResultCase.OK_BYTES -> ingressResponse.okBytes.toByteArray()
+            IngressResponse.ResultCase.ERROR -> throw IllegalStateException(ingressResponse.error.message)
+            else -> throw IllegalStateException("system.genesis returned no result")
+        }
+    }
+
     private fun installGenesisEnvelope(
         context: Context,
         prefs: SharedPreferences,
@@ -166,21 +336,8 @@ internal object BridgeIdentityHandler {
             return envelopeBytes
         }
 
-        // envelopeBytes is already a Rust-authored framed Envelope v3 — relay directly.
-        BleEventRelay.dispatchEnvelope(envelopeBytes)
-
-        run {
-            val envelopeB32 = BridgeEncoding.base32CrockfordEncode(envelopeBytes)
-            prefs.edit()
-                .putString(keyGenesisEnvelope, envelopeB32)
-                .apply()
-            Log.i(logTag, "installGenesisEnvelope: persisted genesis envelope (b32) early")
-        }
-
         val deviceIdBytes = installInput.deviceIdBytes
         val genesisHashBytes = installInput.genesisHashBytes
-        val entropyBytes = installInput.entropyBytes
-
         val deviceIdB32 = BridgeEncoding.base32CrockfordEncode(deviceIdBytes)
         val genesisHashB32 = BridgeEncoding.base32CrockfordEncode(genesisHashBytes)
         val envelopeB32 = BridgeEncoding.base32CrockfordEncode(envelopeBytes)
@@ -193,41 +350,13 @@ internal object BridgeIdentityHandler {
 
         Log.i(logTag, "installGenesisEnvelope: identity persisted (deviceId/genesisHash/envelope stored as b32)")
 
-        ensureGenesisNotInvalidated(
-            prefs = prefs,
-            sdkContextInitialized = sdkContextInitialized,
-            logTag = logTag,
-            keyDeviceId = keyDeviceId,
-            keyGenesisHash = keyGenesisHash,
-            keyGenesisEnvelope = keyGenesisEnvelope,
-            keyDbrwSalt = keyDbrwSalt,
+        sendBootstrapMeasurementReport(
+            BootstrapMeasurementReport.newBuilder()
+                .setPhase(BootstrapMeasurementReport.Phase.BOOTSTRAP_PHASE_STARTED)
+                .setDeviceId(ByteString.copyFrom(deviceIdBytes))
+                .setGenesisHash(ByteString.copyFrom(genesisHashBytes))
+                .build()
         )
-
-        val sdkInitOk = Unified.initializeSdkContext(deviceIdBytes, genesisHashBytes, entropyBytes)
-        if (!sdkInitOk) {
-            Log.e(logTag, "installGenesisEnvelope: failed to initialize SDK context")
-            return ByteArray(0)
-        }
-
-        // Run silicon fingerprint enrollment with progress reporting.
-        // This is the one-time heavy operation (~15-20s, 21 trials).
-        // Subsequent boots use fast mode (no hardware probing).
-        UnifiedNativeApi.createGenesisSecuringDeviceEnvelope().let { if (it.isNotEmpty()) BleEventRelay.dispatchEnvelope(it) }
-        Log.i(logTag, "installGenesisEnvelope: starting silicon fingerprint enrollment...")
-
-        val siliconFp = SiliconFingerprint()
-        try {
-            siliconFp.enroll(context) { completed, total ->
-                val pct = ((completed * 100) / total).coerceIn(0, 100)
-                UnifiedNativeApi.createGenesisSecuringProgressEnvelope(pct).let { if (it.isNotEmpty()) BleEventRelay.dispatchEnvelope(it) }
-            }
-        } catch (e: Exception) {
-            Log.e(logTag, "installGenesisEnvelope: silicon FP enrollment failed", e)
-            throw SecurityException("installGenesisEnvelope: C-DBRW enrollment failed", e)
-        }
-
-        UnifiedNativeApi.createGenesisSecuringCompleteEnvelope().let { if (it.isNotEmpty()) BleEventRelay.dispatchEnvelope(it) }
-        Log.i(logTag, "installGenesisEnvelope: silicon fingerprint enrollment complete")
 
         ensureGenesisNotInvalidated(
             prefs = prefs,
@@ -239,27 +368,12 @@ internal object BridgeIdentityHandler {
             keyDbrwSalt = keyDbrwSalt,
         )
 
-        // Enrollment must produce a valid C-DBRW anchor before bootstrap continues.
-        val hwResult = AntiCloneGate.getStableHwAnchorWithTrust(context)
-        if (hwResult.accessLevel == AccessLevel.READ_ONLY || hwResult.accessLevel == AccessLevel.BLOCKED) {
-            throw SecurityException("installGenesisEnvelope: C-DBRW verification rejected the enrolled device state")
-        }
-        val hwEntropy = hwResult.anchor ?: throw IllegalStateException("Hardware anchor not available")
-        val envEntropy = AntiCloneGate.getEnvironmentFingerprint(context)
-        val dbrwSalt = ByteArray(32)
-        java.security.SecureRandom().nextBytes(dbrwSalt)
-        prefs.edit().putString(keyDbrwSalt, BridgeEncoding.base32CrockfordEncode(dbrwSalt)).apply()
-        Log.i(logTag, "installGenesisEnvelope: persisted DBRW salt")
-
-        com.dsm.native.DsmNative.sdkBootstrapStrict(
-            deviceIdBytes,
-            genesisHashBytes,
-            hwEntropy,
-            envEntropy,
-            dbrwSalt
+        val measurements = collectBootstrapMeasurements(
+            context = context,
+            prefs = prefs,
+            logTag = logTag,
+            keyDbrwSalt = keyDbrwSalt,
         )
-
-        Log.i(logTag, "installGenesisEnvelope: DBRW initialized successfully with hardware entropy")
 
         ensureGenesisNotInvalidated(
             prefs = prefs,
@@ -271,65 +385,23 @@ internal object BridgeIdentityHandler {
             keyDbrwSalt = keyDbrwSalt,
         )
 
-        try {
-            val routerInstalled = Unified.ensureAppRouterInstalled()
-            Log.i(logTag, "installGenesisEnvelope: AppRouter installation result = $routerInstalled")
-            if (!routerInstalled) {
-                Log.w(logTag, "installGenesisEnvelope: AppRouter installation returned false")
-            }
-        } catch (e: Exception) {
-            Log.w(logTag, "installGenesisEnvelope: AppRouter installation failed", e)
-        }
-
-        try {
-            Unified.getTransportHeadersV3()
-            Log.i(logTag, "installGenesisEnvelope: transport headers populated successfully")
-        } catch (e: Exception) {
-            Log.w(logTag, "installGenesisEnvelope: failed to populate transport headers", e)
-        }
-
-        ensureGenesisNotInvalidated(
-            prefs = prefs,
-            sdkContextInitialized = sdkContextInitialized,
-            logTag = logTag,
-            keyDeviceId = keyDeviceId,
-            keyGenesisHash = keyGenesisHash,
-            keyGenesisEnvelope = keyGenesisEnvelope,
-            keyDbrwSalt = keyDbrwSalt,
+        val finalizeEnvelope = sendBootstrapMeasurementReport(
+            BootstrapMeasurementReport.newBuilder()
+                .setPhase(BootstrapMeasurementReport.Phase.BOOTSTRAP_PHASE_FINALIZE)
+                .setDeviceId(ByteString.copyFrom(deviceIdBytes))
+                .setGenesisHash(ByteString.copyFrom(genesisHashBytes))
+                .setCdbrwHwEntropy(ByteString.copyFrom(measurements.hwEntropy))
+                .setCdbrwEnvFingerprint(ByteString.copyFrom(measurements.envEntropy))
+                .setCdbrwSalt(ByteString.copyFrom(measurements.dbrwSalt))
+                .setTrustLevel(measurements.trustLevel)
+                .build()
         )
 
-        sdkContextInitialized.set(true)
-        UnifiedNativeApi.createGenesisOkEnvelope().let { if (it.isNotEmpty()) BleEventRelay.dispatchEnvelope(it) }
-
-        Log.i(logTag, "installGenesisEnvelope: atomic post-genesis initialization completed successfully")
-        return envelopeBytes
-    }
-
-    fun handleHostPauseDuringGenesis(
-        prefs: SharedPreferences,
-        sdkContextInitialized: AtomicBoolean,
-        logTag: String,
-        keyDeviceId: String,
-        keyGenesisHash: String,
-        keyGenesisEnvelope: String,
-        keyDbrwSalt: String,
-    ) {
-        if (!genesisLifecycleInFlight.get()) {
-            return
-        }
-        genesisLifecycleInvalidated.set(true)
-        clearGenesisArtifacts(
-            prefs = prefs,
-            sdkContextInitialized = sdkContextInitialized,
-            keyDeviceId = keyDeviceId,
-            keyGenesisHash = keyGenesisHash,
-            keyGenesisEnvelope = keyGenesisEnvelope,
-            keyDbrwSalt = keyDbrwSalt,
-            logTag = logTag,
+        val finalize = decodeBootstrapFinalizeResponseEnvelope(finalizeEnvelope)
+        sdkContextInitialized.set(
+            finalize.result == BootstrapFinalizeResponse.Result.BOOTSTRAP_RESULT_READY
         )
-        UnifiedNativeApi.createGenesisSecuringAbortedEnvelope().let { if (it.isNotEmpty()) BleEventRelay.dispatchEnvelope(it) }
-        UnifiedNativeApi.createGenesisErrorEnvelope().let { if (it.isNotEmpty()) BleEventRelay.dispatchEnvelope(it) }
-        Log.w(logTag, "handleHostPauseDuringGenesis: app left during DBRW securing; wiped partial state")
+        return finalizeEnvelope
     }
 
     fun bootstrapFromPrefs(
@@ -343,12 +415,6 @@ internal object BridgeIdentityHandler {
     ): Boolean {
         if (sdkContextInitialized.get()) {
             Log.i(logTag, "bootstrapFromPrefs: already initialized")
-            try {
-                val installed = Unified.ensureAppRouterInstalled()
-                Log.i(logTag, "bootstrapFromPrefs: AppRouter re-check result = $installed")
-            } catch (e: Throwable) {
-                Log.w(logTag, "bootstrapFromPrefs: Failed to ensure AppRouter installed on re-check", e)
-            }
             return true
         }
 
@@ -361,66 +427,66 @@ internal object BridgeIdentityHandler {
                 val genesisHashBytes = try { BridgeEncoding.base32CrockfordDecode(genesisHashStr) } catch (_: Throwable) { ByteArray(0) }
 
                 if (deviceIdBytes.size == 32 && genesisHashBytes.size == 32) {
-                    val ok = Unified.initializeSdkContext(deviceIdBytes, genesisHashBytes, genesisHashBytes)
-                    if (ok) {
-                        sdkContextInitialized.set(true)
-                        Log.i(logTag, "bootstrapFromPrefs: SDK context initialized")
-
-                        val hwAnchorResult = AntiCloneGate.getStableHwAnchorWithTrust(context)
-                        when (hwAnchorResult.accessLevel) {
-                            AccessLevel.FULL_ACCESS -> Log.i(logTag, "bootstrapFromPrefs: DBRW hardware validation passed (full access)")
-                            AccessLevel.PIN_REQUIRED -> Log.w(logTag, "bootstrapFromPrefs: DBRW hardware validation degraded (PIN required) - allowing with reduced trust")
-                            AccessLevel.READ_ONLY -> throw SecurityException("bootstrapFromPrefs: C-DBRW health rejected device state")
-                            AccessLevel.BLOCKED -> throw SecurityException("bootstrapFromPrefs: C-DBRW hardware validation blocked")
-                        }
-
-                        val hwEntropy = hwAnchorResult.anchor
-                            ?: throw SecurityException("bootstrapFromPrefs: C-DBRW anchor unavailable")
-                        val envEntropy = AntiCloneGate.getEnvironmentFingerprint(context)
-                        val dbrwSalt: ByteArray = run {
-                            val existing = prefs.getString(keyDbrwSalt, null)
-                            if (!existing.isNullOrEmpty()) {
-                                try {
-                                    val decoded = BridgeEncoding.base32CrockfordDecode(existing)
-                                    if (decoded.size == 32) {
-                                        Log.i(logTag, "bootstrapFromPrefs: loaded persisted DBRW salt")
-                                        return@run decoded
-                                    }
-                                } catch (_: Throwable) { }
-                            }
-                            val fresh = ByteArray(32)
-                            java.security.SecureRandom().nextBytes(fresh)
-                            prefs.edit().putString(keyDbrwSalt, BridgeEncoding.base32CrockfordEncode(fresh)).apply()
-                            Log.i(logTag, "bootstrapFromPrefs: generated and persisted new DBRW salt")
-                            fresh
-                        }
-                        com.dsm.native.DsmNative.sdkBootstrapStrict(
-                            deviceIdBytes,
-                            genesisHashBytes,
-                            hwEntropy,
-                            envEntropy,
-                            dbrwSalt
+                    // Signal to Rust that C-DBRW securing is starting.
+                    // This sets BOOTSTRAP_SECURING=true so the session manager returns
+                    // "securing_device" phase — the progress screen shows immediately
+                    // instead of staying on "needs_genesis" for the full 34s derivation.
+                    try {
+                        sendBootstrapMeasurementReport(
+                            BootstrapMeasurementReport.newBuilder()
+                                .setPhase(BootstrapMeasurementReport.Phase.BOOTSTRAP_PHASE_STARTED)
+                                .setDeviceId(ByteString.copyFrom(deviceIdBytes))
+                                .setGenesisHash(ByteString.copyFrom(genesisHashBytes))
+                                .build()
                         )
-                        Log.i(logTag, "bootstrapFromPrefs: DBRW initialization completed (access level: ${hwAnchorResult.accessLevel})")
+                    } catch (_: Throwable) { /* non-fatal; progress screen is best-effort */ }
 
-                        try {
-                            val installed = Unified.ensureAppRouterInstalled()
-                            Log.i(logTag, "bootstrapFromPrefs: AppRouter installation result = $installed")
-                        } catch (e: Throwable) {
-                            Log.w(logTag, "bootstrapFromPrefs: Failed to ensure AppRouter installed", e)
-                        }
-
-                        return true
-                    } else {
-                        Log.w(logTag, "bootstrapFromPrefs: Unified.initializeSdkContext returned false")
-                    }
+                    val hwAnchorResult = AntiCloneGate.getStableHwAnchorWithTrust(
+                        context = context,
+                        onDeriveProgress = { completed, total ->
+                            val pct = ((completed * 100) / total).coerceIn(0, 100)
+                            try {
+                                sendBootstrapMeasurementReport(
+                                    BootstrapMeasurementReport.newBuilder()
+                                        .setPhase(BootstrapMeasurementReport.Phase.BOOTSTRAP_PHASE_PROGRESS)
+                                        .setDeviceId(ByteString.copyFrom(deviceIdBytes))
+                                        .setGenesisHash(ByteString.copyFrom(genesisHashBytes))
+                                        .setProgressPercent(pct)
+                                        .build()
+                                )
+                            } catch (_: Throwable) { /* non-fatal */ }
+                        },
+                    )
+                    val hwEntropy = hwAnchorResult.anchor ?: ByteArray(0)
+                    val envEntropy = AntiCloneGate.getEnvironmentFingerprint(context)
+                    val dbrwSalt = loadOrCreateDbrwSalt(
+                        prefs = prefs,
+                        keyDbrwSalt = keyDbrwSalt,
+                        logTag = logTag,
+                    )
+                    val finalizeEnvelope = sendBootstrapMeasurementReport(
+                        BootstrapMeasurementReport.newBuilder()
+                            .setPhase(BootstrapMeasurementReport.Phase.BOOTSTRAP_PHASE_RESUME_FINALIZE)
+                            .setDeviceId(ByteString.copyFrom(deviceIdBytes))
+                            .setGenesisHash(ByteString.copyFrom(genesisHashBytes))
+                            .setCdbrwHwEntropy(ByteString.copyFrom(hwEntropy))
+                            .setCdbrwEnvFingerprint(ByteString.copyFrom(envEntropy))
+                            .setCdbrwSalt(ByteString.copyFrom(dbrwSalt))
+                            .setTrustLevel(mapTrustLevel(hwAnchorResult.accessLevel))
+                            .build()
+                    )
+                    val finalize = decodeBootstrapFinalizeResponseEnvelope(finalizeEnvelope)
+                    val ready = finalize.result == BootstrapFinalizeResponse.Result.BOOTSTRAP_RESULT_READY
+                    sdkContextInitialized.set(ready)
+                    Log.i(logTag, "bootstrapFromPrefs: Rust finalize result=${finalize.result} ready=$ready")
+                    return ready
                 }
             } else {
                 Log.i(logTag, "bootstrapFromPrefs: no persisted identity found")
             }
         } catch (t: Throwable) {
             Log.e(logTag, "bootstrapFromPrefs failed", t)
-            if (t is DsmNativeException || t is SecurityException) {
+            if (t is DsmNativeException) {
                 throw t
             }
         }
@@ -447,7 +513,6 @@ internal object BridgeIdentityHandler {
 
         genesisLifecycleInFlight.set(true)
         genesisLifecycleInvalidated.set(false)
-        UnifiedNativeApi.createGenesisStartedEnvelope().let { if (it.isNotEmpty()) BleEventRelay.dispatchEnvelope(it) }
 
         val result = try {
             val cachedDevId = prefs.getString(keyDeviceId, null)
@@ -458,13 +523,13 @@ internal object BridgeIdentityHandler {
                 prefs.edit().clear().apply()
             }
 
-            val envelopeBytes = com.dsm.native.DsmNative.createGenesisStrict(locale, networkId, entropyBytes)
+            val envelopeBytes = requestGenesisEnvelopeViaIngress(locale, networkId, entropyBytes)
             if (envelopeBytes.isEmpty()) {
-                Log.e(logTag, "createGenesis: JNI returned empty envelope")
+                Log.e(logTag, "createGenesis: ingress returned empty envelope")
                 return ByteArray(0)
             }
             val installInput = parseGenesisEnvelopeInstallInput(envelopeBytes)
-            installGenesisEnvelope(
+            val finalizeEnvelope = installGenesisEnvelope(
                 context = context,
                 prefs = prefs,
                 sdkContextInitialized = sdkContextInitialized,
@@ -475,9 +540,13 @@ internal object BridgeIdentityHandler {
                 keyDbrwSalt = keyDbrwSalt,
                 installInput = installInput,
             )
+            val finalize = decodeBootstrapFinalizeResponseEnvelope(finalizeEnvelope)
+            if (finalize.result != BootstrapFinalizeResponse.Result.BOOTSTRAP_RESULT_READY) {
+                return finalizeEnvelope
+            }
+            envelopeBytes
         } catch (t: Throwable) {
             Log.e(logTag, "createGenesis failed", t)
-            UnifiedNativeApi.createGenesisErrorEnvelope().let { if (it.isNotEmpty()) BleEventRelay.dispatchEnvelope(it) }
             if (genesisLifecycleInvalidated.get()) {
                 clearGenesisArtifacts(
                     prefs = prefs,
@@ -510,10 +579,9 @@ internal object BridgeIdentityHandler {
         keyGenesisEnvelope: String,
         keyDbrwSalt: String,
         genesisEnvelopeBytes: ByteArray,
-    ): DeviceBindingCaptureResult {
+    ): ByteArray {
         genesisLifecycleInFlight.set(true)
         genesisLifecycleInvalidated.set(false)
-        UnifiedNativeApi.createGenesisStartedEnvelope().let { if (it.isNotEmpty()) BleEventRelay.dispatchEnvelope(it) }
 
         val result = try {
             val cachedDevId = prefs.getString(keyDeviceId, null)
@@ -539,14 +607,9 @@ internal object BridgeIdentityHandler {
             if (errorCode != 0) {
                 throw IllegalStateException("captureDeviceBindingForGenesisEnvelope: refusing to install error envelope code=$errorCode")
             }
-            DeviceBindingCaptureResult.newBuilder()
-                .setInstalled(true)
-                .setDeviceId(ByteString.copyFrom(installInput.deviceIdBytes))
-                .setGenesisHash(ByteString.copyFrom(installInput.genesisHashBytes))
-                .build()
+            installedEnvelope
         } catch (t: Throwable) {
             Log.e(logTag, "captureDeviceBindingForGenesisEnvelope failed", t)
-            UnifiedNativeApi.createGenesisErrorEnvelope().let { if (it.isNotEmpty()) BleEventRelay.dispatchEnvelope(it) }
             if (genesisLifecycleInvalidated.get()) {
                 clearGenesisArtifacts(
                     prefs = prefs,

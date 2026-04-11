@@ -1,10 +1,10 @@
 jest.mock('../WebViewBridge', () => ({
-  appRouterQueryBin: jest.fn(),
+  routerQueryBin: jest.fn(),
 }));
 
 import * as pb from '../../proto/dsm_app_pb';
 import { getDbrwStatus } from '../dbrw';
-import { appRouterQueryBin } from '../WebViewBridge';
+import { routerQueryBin } from '../WebViewBridge';
 
 function frameEnvelope(envelope: pb.Envelope): Uint8Array {
   const bytes = envelope.toBinary();
@@ -64,7 +64,7 @@ describe('dbrw.ts', () => {
         version: 3,
         payload: { case: 'dbrwStatusResponse', value: resp },
       });
-      (appRouterQueryBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
+      (routerQueryBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
 
       const status = await getDbrwStatus();
       expect(status.enrolled).toBe(true);
@@ -91,10 +91,10 @@ describe('dbrw.ts', () => {
         version: 3,
         payload: { case: 'dbrwStatusResponse', value: resp },
       });
-      (appRouterQueryBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
+      (routerQueryBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
 
       await getDbrwStatus(true);
-      const [route, params] = (appRouterQueryBin as jest.Mock).mock.calls[0];
+      const [route, params] = (routerQueryBin as jest.Mock).mock.calls[0];
       expect(route).toBe('dbrw.status');
       expect(new TextDecoder().decode(params)).toBe('live');
     });
@@ -105,20 +105,20 @@ describe('dbrw.ts', () => {
         version: 3,
         payload: { case: 'dbrwStatusResponse', value: resp },
       });
-      (appRouterQueryBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
+      (routerQueryBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
 
       await getDbrwStatus(false);
-      const [, params] = (appRouterQueryBin as jest.Mock).mock.calls[0];
+      const [, params] = (routerQueryBin as jest.Mock).mock.calls[0];
       expect(params.length).toBe(0);
     });
 
     test('throws on empty response', async () => {
-      (appRouterQueryBin as jest.Mock).mockResolvedValue(new Uint8Array(0));
+      (routerQueryBin as jest.Mock).mockResolvedValue(new Uint8Array(0));
       await expect(getDbrwStatus()).rejects.toThrow(/empty response/);
     });
 
     test('throws on null response', async () => {
-      (appRouterQueryBin as jest.Mock).mockResolvedValue(null);
+      (routerQueryBin as jest.Mock).mockResolvedValue(null);
       await expect(getDbrwStatus()).rejects.toThrow(/empty response/);
     });
 
@@ -127,7 +127,7 @@ describe('dbrw.ts', () => {
         version: 3,
         payload: { case: 'error', value: new pb.Error({ message: 'dbrw not enrolled' }) },
       });
-      (appRouterQueryBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
+      (routerQueryBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
 
       await expect(getDbrwStatus()).rejects.toThrow(/dbrw not enrolled/);
     });
@@ -137,7 +137,7 @@ describe('dbrw.ts', () => {
         version: 3,
         payload: { case: 'balancesListResponse', value: new pb.BalancesListResponse() },
       });
-      (appRouterQueryBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
+      (routerQueryBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
 
       await expect(getDbrwStatus()).rejects.toThrow(/unexpected payload/);
     });
@@ -147,7 +147,7 @@ describe('dbrw.ts', () => {
         version: 3,
         payload: { case: 'dbrwStatusResponse', value: new pb.DbrwStatusResponse() },
       });
-      (appRouterQueryBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
+      (routerQueryBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
 
       const status = await getDbrwStatus();
       expect(status.enrolled).toBe(false);
@@ -164,7 +164,7 @@ describe('dbrw.ts', () => {
         version: 3,
         payload: { case: 'dbrwStatusResponse', value: resp },
       });
-      (appRouterQueryBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
+      (routerQueryBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
 
       const status = await getDbrwStatus();
       expect(status.enrolled).toBe(false);

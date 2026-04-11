@@ -1,22 +1,17 @@
 import {
   ArgPack,
-  AppRouterPayload,
   BitcoinWithdrawalExecuteRequest,
   BitcoinWithdrawalExecuteResponse,
   BitcoinWithdrawalPlanRequest,
   BitcoinWithdrawalPlanResponse,
   BridgeRpcRequest,
   Envelope,
+  IngressRequest,
+  IngressResponse,
 } from '../../proto/dsm_app_pb';
 
-function routerResponseBytes(framedEnv: Uint8Array): Uint8Array {
-  const out = new Uint8Array(8 + framedEnv.length);
-  out.set(framedEnv, 8);
-  return out;
-}
-
 describe('bitcoinTap withdrawal planner service', () => {
-  it('reviewWithdrawalPlan sends the planner request through appRouterQuery', async () => {
+  it('reviewWithdrawalPlan sends the planner request through nativeBoundaryIngress', async () => {
     let capturedReqBytes: Uint8Array | null = null;
 
     const plannerResponse = new BitcoinWithdrawalPlanResponse({
@@ -44,7 +39,11 @@ describe('bitcoinTap withdrawal planner service', () => {
     (global as any).window.DsmBridge = {
       __callBin: async (reqBytes: Uint8Array): Promise<Uint8Array> => {
         capturedReqBytes = new Uint8Array(reqBytes);
-        return (global as any).createDsmBridgeSuccessResponse(routerResponseBytes(framedEnv));
+        return (global as any).createDsmBridgeSuccessResponse(
+          new IngressResponse({
+            result: { case: 'okBytes', value: framedEnv },
+          }).toBinary(),
+        );
       },
     };
 
@@ -53,14 +52,12 @@ describe('bitcoinTap withdrawal planner service', () => {
 
     expect(capturedReqBytes).not.toBeNull();
     const bridgeReq = BridgeRpcRequest.fromBinary(capturedReqBytes!);
-    expect(bridgeReq.method).toBe('appRouterQuery');
+    expect(bridgeReq.method).toBe('nativeBoundaryIngress');
+    const ingressRequest = IngressRequest.fromBinary(bridgeReq.payload.value.data);
+    expect(ingressRequest.operation.case).toBe('routerQuery');
+    expect(ingressRequest.operation.value.method).toBe('bitcoin.withdraw.plan');
 
-    const routerPayload = bridgeReq.payload;
-    expect(routerPayload.case).toBe('appRouter');
-    const appRouter = routerPayload.value as AppRouterPayload;
-    expect(appRouter.methodName).toBe('bitcoin.withdraw.plan');
-
-    const argPack = ArgPack.fromBinary(appRouter.args);
+    const argPack = ArgPack.fromBinary(ingressRequest.operation.value.args);
     const req = BitcoinWithdrawalPlanRequest.fromBinary(argPack.body as Uint8Array);
     expect(req.requestedNetSats).toBe(250_000n);
     expect(req.destinationAddress).toBe('tb1qreviewdest');
@@ -96,7 +93,11 @@ describe('bitcoinTap withdrawal planner service', () => {
     (global as any).window.DsmBridge = {
       __callBin: async (reqBytes: Uint8Array): Promise<Uint8Array> => {
         capturedReqBytes = new Uint8Array(reqBytes);
-        return (global as any).createDsmBridgeSuccessResponse(routerResponseBytes(framedEnv));
+        return (global as any).createDsmBridgeSuccessResponse(
+          new IngressResponse({
+            result: { case: 'okBytes', value: framedEnv },
+          }).toBinary(),
+        );
       },
     };
 
@@ -108,14 +109,12 @@ describe('bitcoinTap withdrawal planner service', () => {
 
     expect(capturedReqBytes).not.toBeNull();
     const bridgeReq = BridgeRpcRequest.fromBinary(capturedReqBytes!);
-    expect(bridgeReq.method).toBe('appRouterInvoke');
+    expect(bridgeReq.method).toBe('nativeBoundaryIngress');
+    const ingressRequest = IngressRequest.fromBinary(bridgeReq.payload.value.data);
+    expect(ingressRequest.operation.case).toBe('routerInvoke');
+    expect(ingressRequest.operation.value.method).toBe('bitcoin.withdraw.execute');
 
-    const routerPayload = bridgeReq.payload;
-    expect(routerPayload.case).toBe('appRouter');
-    const appRouter = routerPayload.value as AppRouterPayload;
-    expect(appRouter.methodName).toBe('bitcoin.withdraw.execute');
-
-    const argPack = ArgPack.fromBinary(appRouter.args);
+    const argPack = ArgPack.fromBinary(ingressRequest.operation.value.args);
     const req = BitcoinWithdrawalExecuteRequest.fromBinary(argPack.body as Uint8Array);
     expect(req.planId).toBe('withdraw-1');
     expect(req.destinationAddress).toBe('tb1qexecutedest');

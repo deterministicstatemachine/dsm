@@ -3,10 +3,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // DeTFi (Deterministic Token Finance) launch helpers.
 // All calls go through the normal AppRouter protobuf envelope path:
-//   TypeScript → appRouterInvokeBin → MessagePort → Kotlin → JNI → Rust
+//   TypeScript → routerInvokeBin → MessagePort → Kotlin → JNI → Rust
 
 import * as pb from '../proto/dsm_app_pb';
-import { appRouterInvokeBin } from './WebViewBridge';
+import { routerInvokeBin } from './WebViewBridge';
 import { decodeBase32Crockford } from '../utils/textId';
 import { decodeFramedEnvelopeV3 } from './decoding';
 
@@ -118,7 +118,7 @@ export async function launchDeTFi(blob: string): Promise<{
       body: new Uint8Array(specBytes),
     });
 
-    const resBytes = await appRouterInvokeBin('detfi.launch', new Uint8Array(argPack.toBinary()));
+    const resBytes = await routerInvokeBin('detfi.launch', new Uint8Array(argPack.toBinary()));
     const env = decodeFramedEnvelopeV3(resBytes);
 
     if (env.payload.case === 'error') {

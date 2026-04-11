@@ -13,10 +13,9 @@ import androidx.annotation.Keep
 //
 // HOW TO HOOK IN:
 //   1. Unified initializes automatically (System.loadLibrary("dsm_sdk")).
-//   2. Bootstrap: SinglePathWebViewBridge.bootstrapFromPrefs() or manual
-//      Unified.sdkBootstrap(...) with device_id, genesis, DBRW entropy.
-//   3. Queries:  Unified.appRouterQueryFramed(framedRequest) -> ByteArray
-//   4. Invokes:  Unified.appRouterInvokeFramed(framedRequest) -> ByteArray
+//   2. Bootstrap: SinglePathWebViewBridge.bootstrapFromPrefs() or the
+//      shared startup/ingress boundary plus host measurement capture.
+//   3. Shared ingress: Unified.dispatchIngress(requestBytes) -> ByteArray
 //   5. Decode:   strip 0x03 prefix -> Envelope.parseFrom(rest)
 //
 // PROTOCOL RULES:
@@ -26,9 +25,9 @@ import androidx.annotation.Keep
 //   - All crypto (SPHINCS+, ML-KEM-768, DBRW) handled in Rust beneath.
 //
 // DOMAIN GROUPS:
-//   Identity:  sdkBootstrap, extractGenesisIdentity, recordPeerIdentity
+//   Identity:  extractGenesisIdentity, recordPeerIdentity
 //   Protocol:  processEnvelopeV3, processEnvelopeV3WithAddress
-//   AppRouter: appRouterQueryFramed, appRouterInvokeFramed
+//   Shared boundary: dispatchStartup, dispatchIngress
 //   Bilateral: bilateralOfflineSend, acceptBilateralByCommitment, ...
 //   BLE:       initBleCoordinator, processBleChunk, chunkEnvelopeForBle, ...
 //   Contacts:  removeContact, handleContactQrV3, hasContactForDeviceId
@@ -98,12 +97,6 @@ object Unified {
         UnifiedNativeApi.processEnvelopeV3(envelope)
     @Keep @JvmStatic fun processEnvelopeV3WithAddress(envelope: ByteArray, deviceAddress: String): ByteArray =
         UnifiedNativeApi.processEnvelopeV3WithAddress(envelope, deviceAddress)
-    @Keep @JvmStatic fun initializeSdkContext(
-        deviceId: ByteArray,
-        genesisHash: ByteArray,
-        entropy: ByteArray
-    ): Boolean = UnifiedNativeApi.initializeSdkContext(deviceId, genesisHash, entropy)
-
     /**
      * Extract device_id and genesis_hash from a GenesisCreated envelope
      * Returns byte array: [device_id 32 bytes][genesis_hash 32 bytes] or empty on error
@@ -124,15 +117,6 @@ object Unified {
      */
     @Keep @JvmStatic fun getWalletHistoryStrict(): ByteArray =
         UnifiedNativeApi.getWalletHistoryStrict()
-
-    // App router operations (protobuf payload transport)
-    // Query input format: [8-byte reqId][AppRouterPayload protobuf bytes]
-    // Invoke input format: [AppRouterPayload protobuf bytes]
-    // Query response format: [8-byte reqId][payload]
-    @Keep @JvmStatic fun appRouterQueryFramed(framedRequest: ByteArray): ByteArray? =
-        UnifiedNativeApi.appRouterQueryFramed(framedRequest)
-    @Keep @JvmStatic fun appRouterInvokeFramed(framedRequest: ByteArray): ByteArray? =
-        UnifiedNativeApi.appRouterInvokeFramed(framedRequest)
 
     // BLE bilateral operations
     @Keep @JvmStatic fun bilateralOfflineSend(deviceAddress: String, envelope: ByteArray): ByteArray {
@@ -624,20 +608,6 @@ object Unified {
 
     @Keep @JvmStatic fun onConnectionFailed(address: String, reason: String) {
         UnifiedBleEvents.onConnectionFailed(address, reason)
-    }
-
-    /**
-     * Safe wrapper for appRouterInvokeFramed that returns binary error envelope on failure.
-     */
-    @Keep @JvmStatic fun appRouterInvokeFramedSafe(framedRequest: ByteArray): ByteArray {
-        return UnifiedNativeDiagnostics.appRouterInvokeFramedSafe(framedRequest)
-    }
-
-    /**
-     * Safe wrapper for appRouterQueryFramed that returns binary error envelope on failure.
-     */
-    @Keep @JvmStatic fun appRouterQueryFramedSafe(framedRequest: ByteArray): ByteArray {
-        return UnifiedNativeDiagnostics.appRouterQueryFramedSafe(framedRequest)
     }
 
     /**

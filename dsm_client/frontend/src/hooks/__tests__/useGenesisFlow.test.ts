@@ -70,6 +70,10 @@ function makeHookArgs() {
   };
 }
 
+function makePendingGenesis() {
+  return new Promise<Uint8Array>(() => {});
+}
+
 describe('useGenesisFlow', () => {
   it('returns handleGenerateGenesis callback', () => {
     const args = makeHookArgs();
@@ -208,7 +212,12 @@ describe('useGenesisFlow', () => {
 
   it('responds to genesis.securing-device DSM event', () => {
     const args = makeHookArgs();
-    renderHook(() => useGenesisFlow(args));
+    mockCreateGenesisViaRouter.mockReturnValue(makePendingGenesis());
+    const { result } = renderHook(() => useGenesisFlow(args));
+
+    act(() => {
+      void result.current.handleGenerateGenesis();
+    });
 
     act(() => {
       emitDsmEvent('genesis.securing-device');
@@ -220,7 +229,12 @@ describe('useGenesisFlow', () => {
 
   it('responds to genesis.securing-device-progress DSM event', () => {
     const args = makeHookArgs();
-    renderHook(() => useGenesisFlow(args));
+    mockCreateGenesisViaRouter.mockReturnValue(makePendingGenesis());
+    const { result } = renderHook(() => useGenesisFlow(args));
+
+    act(() => {
+      void result.current.handleGenerateGenesis();
+    });
 
     act(() => {
       emitDsmEvent('genesis.securing-device-progress', new Uint8Array([75]));
@@ -231,7 +245,12 @@ describe('useGenesisFlow', () => {
 
   it('responds to genesis.securing-device-complete DSM event', () => {
     const args = makeHookArgs();
-    renderHook(() => useGenesisFlow(args));
+    mockCreateGenesisViaRouter.mockReturnValue(makePendingGenesis());
+    const { result } = renderHook(() => useGenesisFlow(args));
+
+    act(() => {
+      void result.current.handleGenerateGenesis();
+    });
 
     act(() => {
       emitDsmEvent('genesis.securing-device-complete');
@@ -242,7 +261,12 @@ describe('useGenesisFlow', () => {
 
   it('responds to genesis.securing-device-aborted DSM event', () => {
     const args = makeHookArgs();
-    renderHook(() => useGenesisFlow(args));
+    mockCreateGenesisViaRouter.mockReturnValue(makePendingGenesis());
+    const { result } = renderHook(() => useGenesisFlow(args));
+
+    act(() => {
+      void result.current.handleGenerateGenesis();
+    });
 
     act(() => {
       emitDsmEvent('genesis.securing-device-aborted');
@@ -251,6 +275,22 @@ describe('useGenesisFlow', () => {
     expect(args.setSecuringProgress).toHaveBeenCalledWith(0);
     expect(args.setError).toHaveBeenCalledWith(expect.stringContaining('Do not leave the screen'));
     expect(args.setAppState).toHaveBeenCalledWith('needs_genesis');
+  });
+
+  it('ignores stale genesis lifecycle events when no genesis is running', () => {
+    const args = makeHookArgs();
+    renderHook(() => useGenesisFlow(args));
+
+    act(() => {
+      emitDsmEvent('genesis.securing-device');
+      emitDsmEvent('genesis.securing-device-progress', new Uint8Array([75]));
+      emitDsmEvent('genesis.securing-device-complete');
+      emitDsmEvent('genesis.securing-device-aborted');
+    });
+
+    expect(args.setSecuringProgress).not.toHaveBeenCalled();
+    expect(args.setError).not.toHaveBeenCalled();
+    expect(args.setAppState).not.toHaveBeenCalled();
   });
 
   it('cleans up DSM event listeners on unmount', () => {

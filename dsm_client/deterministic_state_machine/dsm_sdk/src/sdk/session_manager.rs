@@ -30,6 +30,11 @@ use crate::sdk::app_state::AppState;
 /// Lives here (always compiled) rather than in the JNI module (cfg-gated).
 pub static SDK_READY: AtomicBool = AtomicBool::new(false);
 
+/// Set while C-DBRW bootstrap is in progress (between PHASE_STARTED and finalization).
+/// Forces phase = "securing_device" so the progress screen stays up during the 34-second
+/// SiliconFingerprint derivation, instead of falling back to "needs_genesis".
+pub static BOOTSTRAP_SECURING: AtomicBool = AtomicBool::new(false);
+
 /// Set SDK readiness flag.
 pub fn set_sdk_ready(ready: bool) {
     SDK_READY.store(ready, Ordering::SeqCst);
@@ -190,19 +195,35 @@ impl SessionManager {
     /// Compute the current session phase by reading from authoritative Rust sources.
     /// Called on every snapshot — never caches `sdk_ready` or `has_identity`.
     fn compute_phase(&self) -> &'static str {
-        if self.fatal_error.is_some() {
-            return "error";
-        }
-        if !SDK_READY.load(Ordering::SeqCst) {
-            return "runtime_loading";
-        }
-        if !AppState::get_has_identity() {
-            return "needs_genesis";
-        }
-        if self.lock_locked {
-            return "locked";
-        }
-        "wallet_ready"
+        let fatal = self.fatal_error.is_some();
+        let securing = BOOTSTRAP_SECURING.load(Ordering::SeqCst);
+        let sdk_ready = SDK_READY.load(Ordering::SeqCst);
+        let has_id = AppState::get_has_identity();
+        let locked = self.lock_locked;
+
+        let phase = if fatal {
+            "error"
+        } else if securing {
+            // If C-DBRW bootstrap is actively in progress (Kotlin sent BOOTSTRAP_PHASE_STARTED),
+            // show the securing screen even while SDK_READY is still false.  The 34-second
+            // SiliconFingerprint derivation window falls here; without this check the phase
+            // would stay "runtime_loading" the whole time and the progress screen would never show.
+            "securing_device"
+        } else if !sdk_ready {
+            "runtime_loading"
+        } else if !has_id {
+            "needs_genesis"
+        } else if locked {
+            "locked"
+        } else {
+            "wallet_ready"
+        };
+
+        log::info!(
+            "COMPUTE_PHASE: fatal={} securing={} sdk_ready={} has_id={} locked={} -> phase={}",
+            fatal, securing, sdk_ready, has_id, locked, phase
+        );
+        phase
     }
 
     /// Compute identity status from existing Rust truth.

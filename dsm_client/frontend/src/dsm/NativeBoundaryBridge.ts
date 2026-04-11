@@ -119,6 +119,19 @@ function unwrapIngressResponse(responseBytes: Uint8Array): Uint8Array {
   throw new Error('ingress boundary returned no result');
 }
 
+function isBridgePending(): boolean {
+  const bridge = getBridgeInstance();
+  if (!bridge) return true;
+  if (typeof bridge.isAvailable === 'function') {
+    try {
+      return !bridge.isAvailable();
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
 export async function startupBoundary(request: StartupRequest | Uint8Array): Promise<Uint8Array> {
   return callBoundaryMethod('nativeBoundaryStartup', encodeStartupRequest(request));
 }
@@ -210,6 +223,8 @@ export function decodeSdkEventToLegacyTopic(eventBytes: Uint8Array): { topic: st
       return { topic: 'nfc.backup_written', payload: event.payload };
     case SdkEventKind.BRIDGE_READY:
       return { topic: 'dsm-bridge-ready', payload: event.payload };
+    case SdkEventKind.CANONICAL_ENVELOPE:
+      return { topic: 'canonical.envelope.bin', payload: event.payload };
     default:
       return null;
   }
@@ -230,9 +245,13 @@ export function isBoundaryUnavailableError(error: unknown): boolean {
   );
 }
 
+function isBoundaryPendingError(error: unknown): boolean {
+  return error instanceof Error && error.message.includes('DSM binary bridge not ready');
+}
+
 async function drainSdkEventsOnce(): Promise<void> {
   if (eventPumpDisabled || drainInFlight) return;
-  if (!getBridgeInstance()) return;
+  if (!getBridgeInstance() || isBridgePending()) return;
   drainInFlight = true;
   try {
     let hasMore = true;
@@ -249,6 +268,9 @@ async function drainSdkEventsOnce(): Promise<void> {
       eventPumpDisabled = true;
       return;
     }
+    if (isBoundaryPendingError(error)) {
+      return;
+    }
     logger.debug('[NativeBoundaryBridge] drainSdkEventsOnce failed', error);
   } finally {
     drainInFlight = false;
@@ -258,8 +280,12 @@ async function drainSdkEventsOnce(): Promise<void> {
 export function startSdkEventPump(): void {
   if (eventPumpStarted || typeof window === 'undefined') return;
   eventPumpStarted = true;
-  void drainSdkEventsOnce();
+  const kick = () => { void drainSdkEventsOnce(); };
+  if (!isBridgePending()) {
+    kick();
+  }
+  window.addEventListener('dsm-bridge-ready', kick);
   window.setInterval(() => {
-    void drainSdkEventsOnce();
+    kick();
   }, EVENT_DRAIN_INTERVAL_MS);
 }

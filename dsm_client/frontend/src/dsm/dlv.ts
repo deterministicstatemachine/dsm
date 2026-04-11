@@ -3,10 +3,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // DLV (Deterministic Limbo Vault) lifecycle helpers.
 // All calls go through the normal AppRouter protobuf envelope path:
-//   TypeScript → appRouterInvokeBin → MessagePort → Kotlin → JNI → Rust
+//   TypeScript → routerInvokeBin → MessagePort → Kotlin → JNI → Rust
 
 import * as pb from '../proto/dsm_app_pb';
-import { appRouterInvokeBin } from './WebViewBridge';
+import { routerInvokeBin } from './WebViewBridge';
 import { decodeBase32Crockford, encodeBase32Crockford } from '../utils/textId';
 import { decodeFramedEnvelopeV3 } from './decoding';
 
@@ -52,7 +52,7 @@ export async function createCustomDlv(params: {
       body: new Uint8Array(lockBytes),
     });
 
-    const resBytes = await appRouterInvokeBin('dlv.create', new Uint8Array(argPack.toBinary()));
+    const resBytes = await routerInvokeBin('dlv.create', new Uint8Array(argPack.toBinary()));
     const env = decodeFramedEnvelopeV3(resBytes);
 
     if (env.payload.case === 'error') {

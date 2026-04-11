@@ -40,7 +40,7 @@ describe('getAllBalancesStrictBridge', () => {
       __callBin: async (reqBytes: Uint8Array) => {
         const pb = require('../../proto/dsm_app_pb');
         const req = pb.BridgeRpcRequest.fromBinary(reqBytes);
-        // Expect direct method call, NOT appRouterQuery
+        // Expect the dedicated strict balance RPC, not the shared ingress router path
         if (req.method === 'getAllBalancesStrict') {
           return createSuccessResponse(framedData);
         }

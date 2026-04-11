@@ -8,11 +8,11 @@
 // main communication artery to the DSM Rust Core.
 //
 // HOW TO HOOK IN:
-//   1. Import { appRouterQueryBin, appRouterInvokeBin } from this module.
+//   1. Import { routerQueryBin, routerInvokeBin } from this module.
 //   2. Construct a protobuf message (e.g., OnlineTransferRequest, ArgPack).
 //      Types are in '../proto/dsm_app_pb.ts' (regenerate: npm run proto:gen).
-//   3. For reads:  appRouterQueryBin(path, params)  -> Promise<Uint8Array>
-//      For writes: appRouterInvokeBin(method, args) -> Promise<Uint8Array>
+//   3. For reads:  routerQueryBin(path, params)  -> Promise<Uint8Array>
+//      For writes: routerInvokeBin(method, args) -> Promise<Uint8Array>
 //   4. Decode the response: strip 0x03 prefix, Envelope.fromBinary(rest).
 //      Use decodeFramedEnvelopeV3() from decoding.ts for this.
 //
@@ -28,10 +28,10 @@
 //   Transport: MessagePort binary (ArrayBuffer), NOT @JavascriptInterface.
 //
 // KEY EXPORTS:
-//   processEnvelopeV3Bin()   — generic Envelope v3 processing
-//   appRouterQueryBin()      — read-only queries (balance, history, contacts)
-//   appRouterInvokeBin()     — state-mutating ops (send, create token, claim)
-//   bilateralOfflineSendBin()— BLE offline bilateral transfers
+//   processEnvelopeV3Bin()    — generic Envelope v3 processing
+//   routerQueryBin()          — read-only queries (balance, history, contacts)
+//   routerInvokeBin()         — state-mutating ops (send, create token, claim)
+//   bilateralOfflineSendBin() — BLE offline bilateral transfers
 //
 // See docs/INTEGRATION_GUIDE.md for the full developer onboarding guide.
 // ============================================================================
@@ -43,7 +43,7 @@
  */
 
 import { bridgeGate } from './BridgeGate';
-import { BridgeRpcRequest, BridgeRpcResponse, BytesPayload, EmptyPayload, ArgPack, Codec, AppStateRequest, InboxRequest, StorageSyncRequest, SystemGenesisRequest, BleIdentityPayload, BilateralPayload, AppRouterPayload, ArchitectureInfoProto, SessionConfigureLockRequest } from '../proto/dsm_app_pb';
+import { BridgeRpcRequest, BridgeRpcResponse, BytesPayload, EmptyPayload, ArgPack, Codec, InboxRequest, PreferencePayload, StorageSyncRequest, SystemGenesisRequest, BleIdentityPayload, BilateralPayload, ArchitectureInfoProto, BootstrapFinalizeResponse_Result, SessionConfigureLockRequest } from '../proto/dsm_app_pb';
 import { bridgeEvents } from '../bridge/bridgeEvents';
 import { getBridgeInstance } from '../bridge/BridgeRegistry';
 import type { AndroidBridgeV3 } from './bridgeTypes';
@@ -54,7 +54,6 @@ import {
   buildRouterInvokeIngressRequest,
   buildRouterQueryIngressRequest,
   ingressBoundaryOk,
-  isBoundaryUnavailableError,
 } from './NativeBoundaryBridge';
 import {
   captureDeviceBindingForGenesisEnvelope,
@@ -248,15 +247,7 @@ const sendBridgeRequestBytes = async (
   // Contract: __callBin(BridgeRpcRequest bytes) -> Promise<Uint8Array>.
   if (typeof b.__callBin === 'function') {
     const respBytes = await b.__callBin(requestBytes);
-    const resp = await unwrapProtobufResponse(method, normalizeToBytes(respBytes));
-    // For router methods, strip the 8-byte request ID prefix that Kotlin always
-    // prepends (see BridgeRouterHandler.appRouterQuery/appRouterInvoke — all paths
-    // copy reqId into position 0). The reqId is random bytes, so checking the first
-    // byte for 0x03 is unreliable (breaks 1/256 of the time).
-    if ((method === 'appRouterQuery' || method === 'appRouterInvoke') && resp.length >= 8) {
-      return resp.slice(8);
-    }
-    return resp;
+    return await unwrapProtobufResponse(method, normalizeToBytes(respBytes));
   }
 
   if (b.__binary === true && typeof b.sendMessageBin === 'function') {
@@ -272,19 +263,7 @@ const sendBridgeRequestBytes = async (
     const respBytes = await b.sendMessageBin(requestBytes);
     const respFramed = normalizeToBytes(respBytes);
 
-    const resp = await unwrapProtobufResponse(method, maybeUnframe(respFramed));
-
-    // For router methods, strip the 8-byte request ID prefix that Kotlin always
-    // prepends (see BridgeRouterHandler.appRouterQuery/appRouterInvoke — all paths
-    // copy reqId into position 0). The reqId is random bytes, so checking the first
-    // byte for 0x03 is unreliable (breaks 1/256 of the time).
-    if ((method === 'appRouterQuery' || method === 'appRouterInvoke') && resp.length >= 8) {
-      return resp.slice(8);
-    }
-
-    // The response is the raw protobuf payload after unframing (page-level
-    // sendMessageBin already handled message ID correlation).
-    return resp;
+    return await unwrapProtobufResponse(method, maybeUnframe(respFramed));
   }
 
   throw new Error('DSM bridge not available (bytes-only MessagePort required)');
@@ -468,67 +447,22 @@ async function maybeThrowOnEmpty(result: Uint8Array): Promise<Uint8Array> {
 
 // --- Public API ---
 export async function processEnvelopeV3Bin(envelopeBytes: Uint8Array): Promise<Uint8Array> {
-  return bridgeGate.enqueue(async () => {
-    try {
-      return await ingressBoundaryOk(buildEnvelopeIngressRequest(envelopeBytes));
-    } catch (error) {
-      if (!isBoundaryUnavailableError(error)) {
-        throw error;
-      }
-      return callBin('processEnvelopeV3', envelopeBytes);
-    }
-  });
+  return bridgeGate.enqueue(() => ingressBoundaryOk(buildEnvelopeIngressRequest(envelopeBytes)));
 }
 
-// --- App router invoke/query (bytes-only) ---
-export async function appRouterInvokeBin(method: string, args?: Uint8Array): Promise<Uint8Array> {
+// --- Shared router invoke/query over ingress (bytes-only) ---
+export async function routerInvokeBin(method: string, args?: Uint8Array): Promise<Uint8Array> {
   if (typeof method !== 'string' || method.length === 0) {
-    throw new Error('appRouterInvokeBin: method required');
+    throw new Error('routerInvokeBin: method required');
   }
-  return bridgeGate.enqueue(async () => {
-    try {
-      return await ingressBoundaryOk(buildRouterInvokeIngressRequest(method, args));
-    } catch (error) {
-      if (!isBoundaryUnavailableError(error)) {
-        throw error;
-      }
-      const appRouterPayload = new AppRouterPayload({
-        methodName: method,
-        args: args instanceof Uint8Array ? new Uint8Array(args) : new Uint8Array(0),
-      });
-      const req = new BridgeRpcRequest({
-        method: 'appRouterInvoke',
-        payload: { case: 'appRouter', value: appRouterPayload },
-      });
-      return sendBridgeRequestBytes('appRouterInvoke', req.toBinary());
-    }
-  });
+  return bridgeGate.enqueue(() => ingressBoundaryOk(buildRouterInvokeIngressRequest(method, args)));
 }
 
-export async function appRouterQueryBin(path: string, params?: Uint8Array): Promise<Uint8Array> {
+export async function routerQueryBin(path: string, params?: Uint8Array): Promise<Uint8Array> {
   if (typeof path !== 'string' || path.length === 0) {
-    throw new Error('appRouterQueryBin: path required');
+    throw new Error('routerQueryBin: path required');
   }
-  return bridgeGate.enqueue(async () => {
-    try {
-      return await ingressBoundaryOk(buildRouterQueryIngressRequest(path, params));
-    } catch (error) {
-      if (!isBoundaryUnavailableError(error)) {
-        throw error;
-      }
-      const req = new BridgeRpcRequest({
-        method: 'appRouterQuery',
-        payload: {
-          case: 'appRouter',
-          value: new AppRouterPayload({
-            methodName: path,
-            args: params instanceof Uint8Array ? new Uint8Array(params) : new Uint8Array(0),
-          }),
-        },
-      });
-      return sendBridgeRequestBytes('appRouterQuery', req.toBinary());
-    }
-  });
+  return bridgeGate.enqueue(() => ingressBoundaryOk(buildRouterQueryIngressRequest(path, params)));
 }
 
 /**
@@ -558,7 +492,11 @@ export async function createGenesisViaRouter(locale: string, networkId: string, 
     codec: Codec.PROTO,
     body: new Uint8Array(req.toBinary()),
   });
-  const res = await maybeThrowOnEmpty(await appRouterQueryBin('system.genesis', argPack.toBinary()));
+  const res = await maybeThrowOnEmpty(
+    await ingressBoundaryOk(
+      buildRouterQueryIngressRequest('system.genesis', argPack.toBinary()),
+    ),
+  );
   const env = decodeFramedEnvelopeV3(res);
   if (env.payload.case === 'error') {
     return res;
@@ -566,12 +504,17 @@ export async function createGenesisViaRouter(locale: string, networkId: string, 
   if (env.payload.case !== 'genesisCreatedResponse') {
     throw new Error(`system.genesis returned unexpected payload: ${env.payload.case}`);
   }
-  const installResult = await captureDeviceBindingForGenesisEnvelope(res);
-  if (!installResult.installed) {
-    throw new Error('device binding capture did not complete');
+  const finalizeEnvelopeBytes = await captureDeviceBindingForGenesisEnvelope(res);
+  const finalizeEnvelope = decodeFramedEnvelopeV3(finalizeEnvelopeBytes);
+  if (finalizeEnvelope.payload.case !== 'bootstrapFinalizeResponse') {
+    throw new Error(`device binding capture returned unexpected payload: ${finalizeEnvelope.payload.case}`);
   }
-  if (installResult.deviceId.length !== 32 || installResult.genesisHash.length !== 32) {
-    throw new Error('device binding capture returned incomplete identity');
+  const finalize = finalizeEnvelope.payload.value;
+  if (finalize.result !== BootstrapFinalizeResponse_Result.BOOTSTRAP_RESULT_READY) {
+    throw new Error(finalize.message || `bootstrap finalize failed with result ${finalize.result}`);
+  }
+  if (finalize.deviceId.length !== 32 || finalize.genesisHash.length !== 32) {
+    throw new Error('bootstrap finalize returned incomplete identity');
   }
   return res;
 }
@@ -613,11 +556,11 @@ export async function stopBleAdvertisingViaRouter(): Promise<{ success: boolean;
 }
 
 export async function lockSessionViaRouter(): Promise<void> {
-  await appRouterInvokeBin('session.lock', new Uint8Array(0));
+  await routerInvokeBin('session.lock', new Uint8Array(0));
 }
 
 export async function unlockSessionViaRouter(): Promise<void> {
-  await appRouterInvokeBin('session.unlock', new Uint8Array(0));
+  await routerInvokeBin('session.unlock', new Uint8Array(0));
 }
 
 export async function configureLockViaRouter(args: {
@@ -634,7 +577,7 @@ export async function configureLockViaRouter(args: {
     codec: Codec.PROTO,
     body: new Uint8Array(req.toBinary()),
   });
-  await appRouterInvokeBin('session.configure_lock', argPack.toBinary());
+  await routerInvokeBin('session.configure_lock', argPack.toBinary());
 }
 
 // --- BLE bilateral offline send (bytes-only) ---
@@ -654,7 +597,7 @@ export async function getTransportHeadersV3Bin(): Promise<Uint8Array> {
   return queryTransportHeadersV3();
 }
 
-export async function createGenesisBin(locale: string, networkId: string, entropy: Uint8Array): Promise<Uint8Array> {
+export async function createGenesis(locale: string, networkId: string, entropy: Uint8Array): Promise<Uint8Array> {
   return createGenesisViaRouter(locale, networkId, entropy);
 }
 
@@ -693,7 +636,7 @@ export async function addSecondaryDeviceBin(genesisHash: Uint8Array, deviceEntro
     codec: pb.Codec.PROTO,
     body: toBytes(req.toBinary()),
   });
-  const res = await appRouterInvokeBin('system.secondary_device', arg.toBinary());
+  const res = await routerInvokeBin('system.secondary_device', arg.toBinary());
   // Canonical Envelope v3 decode
   const env = decodeFramedEnvelopeV3(res);
   if (env.payload.case === 'error') {
@@ -712,30 +655,12 @@ export async function addSecondaryDeviceBin(genesisHash: Uint8Array, deviceEntro
  */
 export async function getPreference(key: string): Promise<string | null> {
   try {
-    const req = new AppStateRequest({
+    const req = new PreferencePayload({
       key: String(key),
-      operation: 'get',
-      value: '',
     });
-    const arg = new ArgPack({
-      codec: Codec.PROTO,
-      body: toBytes(req.toBinary()),
-    });
-    const res = await appRouterQueryBin('prefs.get', arg.toBinary());
+    const res = await callBin('getPreference', req.toBinary());
     if (!res || res.length === 0) return null;
-    
-    // Canonical Envelope v3 decode
-    const env = decodeFramedEnvelopeV3(res);
-    if (env.payload.case === 'error') {
-      log.warn('getPreference native error:', env.payload.value.message);
-      return null;
-    }
-    if (env.payload.case !== 'appStateResponse') {
-      log.warn(`Expected appStateResponse, got ${env.payload.case}`);
-      return null;
-    }
-    const resp = env.payload.value;
-    return resp.value ?? null;
+    return new TextDecoder().decode(res);
   } catch (e) {
     log.warn('getPreference failed', e);
     return null;
@@ -749,28 +674,11 @@ export async function getPreference(key: string): Promise<string | null> {
  */
 export async function setPreference(key: string, value: string): Promise<void> {
   try {
-    const req = new AppStateRequest({
+    const req = new PreferencePayload({
       key: String(key),
-      operation: 'set',
       value: String(value ?? ''),
     });
-    const arg = new ArgPack({
-      codec: Codec.PROTO,
-      body: toBytes(req.toBinary()),
-    });
-    const res = await appRouterQueryBin('prefs.set', arg.toBinary());
-    if (!res || res.length === 0) return;
-
-    // Canonical Envelope v3 decode
-    const env = decodeFramedEnvelopeV3(res);
-    if (env.payload.case === 'error') {
-      log.warn('setPreference native error:', env.payload.value.message);
-      return;
-    }
-    if (env.payload.case === 'appStateResponse') {
-      // Success - state response decoded
-      return;
-    }
+    await callBin('setPreference', req.toBinary());
   } catch (e) {
     log.warn('setPreference failed', e);
   }
@@ -917,7 +825,7 @@ export async function getSigningPublicKeyBinBridgeAsync(): Promise<Uint8Array> {
 // - identity.pairing_qr for contact QR generation
 // - contacts.handle_contact_qr_v3 for QR scanning
 
-export function getAppRouterStatusBridge(): number {
+export function getRouterStatusBridge(): number {
   const b = mustBridge();
   if (typeof b.getAppRouterStatus !== 'function') {
     log.warn('[WebViewBridge] getAppRouterStatus not available');
@@ -980,7 +888,7 @@ export function runNativeBridgeSelfTest(): Record<string, any> {
 
 
 export async function getContactsStrictBridge(): Promise<Uint8Array> {
-  const res = await appRouterQueryBin('contacts.list');
+  const res = await routerQueryBin('contacts.list');
   return maybeThrowOnEmpty(res);
 }
 
@@ -1006,7 +914,7 @@ export async function getWalletHistoryStrictBridge(): Promise<Uint8Array> {
     codec: pb.Codec.PROTO,
     body: toBytes(limitOffset),
   });
-  const res = await appRouterQueryBin('wallet.history', arg.toBinary());
+  const res = await routerQueryBin('wallet.history', arg.toBinary());
   return maybeThrowOnEmpty(res);
 }
 
@@ -1023,7 +931,7 @@ export async function getInboxStrictBridge(args?: { limit?: number }): Promise<U
     body: toBytes(req.toBinary()),
   });
 
-  const res = await appRouterQueryBin('inbox.pull', arg.toBinary());
+  const res = await routerQueryBin('inbox.pull', arg.toBinary());
   return maybeThrowOnEmpty(res);
 }
 
@@ -1033,7 +941,7 @@ export async function getPendingBilateralListStrictBridge(): Promise<Uint8Array>
     codec: pb.Codec.PROTO,
     body: new Uint8Array(0),
   });
-  const res = await appRouterQueryBin('bilateral.pending_list', arg.toBinary());
+  const res = await routerQueryBin('bilateral.pending_list', arg.toBinary());
   return maybeThrowOnEmpty(res);
 }
 
@@ -1057,7 +965,7 @@ export async function syncWithStorageStrictBridge(args?: {
     body: toBytes(req.toBinary()),
   });
 
-  const res = await appRouterQueryBin('storage.sync', arg.toBinary());
+  const res = await routerQueryBin('storage.sync', arg.toBinary());
   return maybeThrowOnEmpty(res);
 }
 
@@ -1092,15 +1000,15 @@ export async function startNativeQrScanner(): Promise<void> {
 
 export async function publishTokenPolicyBytes(policyBytes: Uint8Array): Promise<Uint8Array> {
    // Assuming 'tokens.publishPolicy' is the router path
-   return await appRouterInvokeBin('tokens.publishPolicy', policyBytes);
+   return await routerInvokeBin('tokens.publishPolicy', policyBytes);
 }
 
 export async function getTokenPolicyBytes(policyId: Uint8Array): Promise<Uint8Array> {
-   return await appRouterQueryBin('tokens.getPolicy', policyId);
+   return await routerQueryBin('tokens.getPolicy', policyId);
 }
 
 export async function listCachedTokenPolicies(): Promise<Uint8Array> {
-   return await appRouterQueryBin('tokens.listCachedPolicies', new Uint8Array(0));
+   return await routerQueryBin('tokens.listCachedPolicies', new Uint8Array(0));
 }
 
 type ResultPackLike = { body?: Uint8Array };

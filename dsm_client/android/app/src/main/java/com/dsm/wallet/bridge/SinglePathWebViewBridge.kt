@@ -29,7 +29,6 @@ import com.dsm.wallet.security.AccessLevel
 // METHOD ROUTING (grouped by boundary):
 //   Shared boundary: "nativeBoundaryStartup", "nativeBoundaryIngress"
 //   Private host boundary: "nativeHostRequest"
-//   App router: "appRouterQuery", "appRouterInvoke"
 //   Legacy native helpers that still back non-WebView callers remain internal only.
 //
 // ERROR CODES (returned in response envelope):
@@ -97,15 +96,6 @@ class SinglePathWebViewBridge(private val context: Context) {
         
         @Volatile private var instance: SinglePathWebViewBridge? = null
         private val sdkContextInitialized = AtomicBoolean(false)
-        private val routerReqCounter = java.util.concurrent.atomic.AtomicLong(1L)
-
-        private fun nextRouterReqId(): ByteArray {
-            val id = routerReqCounter.getAndIncrement()
-            val buf = ByteArray(8)
-            val bb = java.nio.ByteBuffer.wrap(buf).order(java.nio.ByteOrder.BIG_ENDIAN)
-            bb.putLong(id)
-            return buf
-        }
         
         fun getInstance(context: Context): SinglePathWebViewBridge {
             return instance ?: synchronized(this) {
@@ -448,22 +438,22 @@ class SinglePathWebViewBridge(private val context: Context) {
                     )
                 }
 
-                // Unified router calls - pass full framed payload to Rust
-                "appRouterInvoke" -> {
-                    val result = BridgeRouterHandler.appRouterInvoke(payload, ::nextRouterReqId, TAG)
-                    // State may have mutated — refresh NFC capsule if backup enabled.
-                    try { UnifiedNativeApi.maybeRefreshNfcCapsule() } catch (_: Throwable) {}
-                    result
-                }
-                
-                "appRouterQuery" -> BridgeRouterHandler.appRouterQuery(payload, ::nextRouterReqId)
-
                 // Transport headers (bytes-only). Must be available early for identity/QR/faucet.
-                // This bypasses the appRouter to avoid decode ambiguity (Error envelope vs Headers).
-                "getTransportHeadersV3Bin" -> BridgeRouterHandler.getTransportHeadersV3Bin(
-                    isSdkReady = { sdkContextInitialized.get() },
-                    bootstrap = { inst.bootstrapFromPrefs() }
-                )
+                "getTransportHeadersV3Bin" -> {
+                    if (!sdkContextInitialized.get()) {
+                        try {
+                            inst.bootstrapFromPrefs()
+                        } catch (_: Throwable) {
+                            // fall through
+                        }
+                    }
+                    val st = try { Unified.getTransportHeadersV3Status().toInt() } catch (_: Throwable) { -1 }
+                    if (st >= 1) {
+                        Unified.getTransportHeadersV3()
+                    } else {
+                        ByteArray(0)
+                    }
+                }
 
                 // Rust-driven pairing orchestration: scan all unpaired contacts automatically
                 "startPairingAll" -> {
@@ -696,15 +686,4 @@ class SinglePathWebViewBridge(private val context: Context) {
         )
     }
 
-    fun handleHostPause() {
-        BridgeIdentityHandler.handleHostPauseDuringGenesis(
-            prefs = prefs(),
-            sdkContextInitialized = sdkContextInitialized,
-            logTag = TAG,
-            keyDeviceId = KEY_DEVICE_ID,
-            keyGenesisHash = KEY_GENESIS_HASH,
-            keyGenesisEnvelope = KEY_GENESIS_ENVELOPE,
-            keyDbrwSalt = KEY_DBRW_SALT
-        )
-    }
 }

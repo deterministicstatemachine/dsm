@@ -18,7 +18,9 @@ use std::sync::Arc;
 use crate::bridge::install_bilateral_handler as install_sdk_bilateral_handler;
 use crate::bridge::install_unilateral_handler as install_sdk_unilateral_handler;
 use crate::bridge::install_app_router as install_sdk_app_router;
-use crate::handlers::{BiImpl, UniImpl, AppRouterImpl, install_app_router_adapter};
+use crate::handlers::{
+    AppRouterImpl, BiImpl, UniImpl, handle_system_genesis_query, install_app_router_adapter,
+};
 use dsm::types::proto as pb;
 use prost::Message;
 
@@ -353,6 +355,7 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
                             error_message: None,
                         }
                     }
+                    "system.genesis" => handle_system_genesis_query(q),
                     _ => AppResult {
                         success: false,
                         data: Vec::new(),
@@ -460,9 +463,10 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
         // participate in genesis creation.
         //
         // Per whitepaper: S_master = HKDF(G || DevID || K_DBRW || s_0)
-        let dbrw_key = crate::jni::cdbrw::get_cdbrw_binding_key().ok_or_else(|| {
-            "C-DBRW not initialized: call sdkBootstrap (or platform C-DBRW init) before initializing wallet/signing"
-                .to_string()
+        let dbrw_key = crate::fetch_dbrw_binding_key().map_err(|e| {
+            format!(
+                "C-DBRW not initialized: call canonical bootstrap before initializing wallet/signing ({e})"
+            )
         })?;
         if dbrw_key.len() != 32 {
             return Err(format!(

@@ -7,7 +7,6 @@
 import { useEffect, useRef, useCallback } from 'react';
 import type { AppState } from '../types/app';
 import { LOCK_SETUP_COMPLETE_EVENT } from '../services/lock/lockService';
-import { NATIVE_QR_SCANNER_ACTIVE_EVENT } from '../dsm/qrScannerState';
 import { lockSessionViaRouter, unlockSessionViaRouter } from '../dsm/WebViewBridge';
 
 interface Args {
@@ -26,20 +25,6 @@ export function useLockState({ appState }: Args) {
 
   const unlock = useCallback(() => {
     return unlockSessionViaRouter().catch(() => {});
-  }, []);
-
-  // Track QR scanner active state to suppress lock during scanning
-  const nativeQrScannerActiveRef = useRef<boolean>(false);
-  useEffect(() => {
-    const handleScannerState = (event: Event) => {
-      const detail = (event as CustomEvent<{ active?: boolean } | undefined>).detail;
-      nativeQrScannerActiveRef.current = detail?.active === true;
-    };
-
-    window.addEventListener(NATIVE_QR_SCANNER_ACTIVE_EVENT, handleScannerState as EventListener);
-    return () => {
-      window.removeEventListener(NATIVE_QR_SCANNER_ACTIVE_EVENT, handleScannerState as EventListener);
-    };
   }, []);
 
   // Lock immediately when a new lock is saved — fires after the LockSetupScreen

@@ -105,7 +105,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
     // Native QR scanner launcher and callback
     lateinit var qrScannerLauncher: ActivityResultLauncher<Intent>
     @Volatile var qrScanCallback: ((String?) -> Unit)? = null
-    @Volatile private var qrScannerActive = false
+    @Volatile private var qrLockRoundTripState = QrLockRoundTripState()
     @Volatile private var walletRefreshHint = 0L
     @Volatile private var isAppForeground = true
     @Volatile private var batteryCharging = false
@@ -149,6 +149,8 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
 
     companion object {
         private const val EVENT_DISPATCH_TAG = "DsmEventDispatch"
+        private const val STATE_QR_SCANNER_ACTIVE = "qr_scanner_active"
+        private const val STATE_QR_SCANNER_RESUME_PENDING = "qr_scanner_resume_pending"
 
         // Weak reference to the currently active activity instance to avoid memory leaks.
         @Volatile
@@ -236,7 +238,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
 
     /**
      * Enable NFC reader mode on this activity so the ring can be read inline
-     * without leaving the WebView. Called from BridgeRouterHandler on nfc.ring.read.
+     * without leaving the WebView. Called from the native host bridge NFC control path.
      */
     fun startNfcReader() {
         runOnUiThread {
@@ -427,6 +429,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
     private fun publishSessionState(reason: String = "") {
         val adapter = getBluetoothAdapterSafely(this)
         val service = bleBackgroundService
+        val qrState = qrLockRoundTripState
         val facts = SessionHardwareFactsProto.newBuilder()
             .setAppForeground(isAppForeground && !isFinishing && !isDestroyed)
             .setBleEnabled(adapter?.isEnabled == true)
@@ -434,7 +437,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
             .setBleScanning(service?.isScanningActive() == true)
             .setBleAdvertising(service?.isAdvertisingActive() == true)
             .setQrAvailable(true)
-            .setQrActive(qrScannerActive)
+            .setQrActive(qrState.effectiveQrActive())
             .setCameraPermission(NativeFirstCutoverReset.hasCameraPermission(this))
             .setBatteryCharging(batteryCharging)
             .setBatteryLevelPercent(batteryLevelPercent.coerceIn(0, 100))
@@ -518,8 +521,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
     private fun invokeNativeRouterInvoke(method: String, args: ByteArray = ByteArray(0)) {
         bridgeExecutor.execute {
             try {
-                val payload = com.dsm.wallet.bridge.BridgeEnvelopeCodec.encodeAppRouterPayload(method, args)
-                com.dsm.wallet.bridge.SinglePathWebViewBridge.handleBinaryRpcRaw("appRouterInvoke", payload)
+                com.dsm.wallet.bridge.NativeBoundaryBridge.routerInvoke(method, args)
             } catch (t: Throwable) {
                 Log.w(tag, "invokeNativeRouterInvoke failed for $method", t)
             }
@@ -725,6 +727,12 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                     if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_PORT_POST_MESSAGE)) {
                         port.postMessage(WebMessageCompat(responseWithId))
                     }
+                    // After device-binding capture finalizes, Rust SDK_READY flips to true
+                    // and BOOTSTRAP_SECURING flips to false. Publish a fresh session snapshot
+                    // so React can transition securing_device → wallet_ready without waiting
+                    // for the next lifecycle event (resume/pause/etc). Without this push the
+                    // UI stays stuck on the progress screen until the user exits and returns.
+                    runOnUiThread { publishSessionState("deviceBindingCapture") }
                 }
                 return
             }
@@ -772,12 +780,12 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         Log.i(tag, "launchNativeQrScanner: starting native scanner")
         qrScanCallback = callback
         try {
-            qrScannerActive = true
+            qrLockRoundTripState = qrLockRoundTripState.onScannerLaunch()
             publishSessionState("qrStart")
             val intent = Intent(this, QrScannerActivity::class.java)
             qrScannerLauncher.launch(intent)
         } catch (t: Throwable) {
-            qrScannerActive = false
+            qrLockRoundTripState = qrLockRoundTripState.onScannerLaunchFailure()
             qrScanCallback = null
             Log.e(tag, "launchNativeQrScanner: failed to launch scanner", t)
             publishSessionState("qrLaunchFailed")
@@ -837,6 +845,10 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         // does not remain as the live window background after the first frame.
         setTheme(com.dsm.wallet.R.style.Theme_DsmClient)
         super.onCreate(savedInstanceState)
+        qrLockRoundTripState = QrLockRoundTripState(
+            scannerActive = savedInstanceState?.getBoolean(STATE_QR_SCANNER_ACTIVE, false) == true,
+            resumePending = savedInstanceState?.getBoolean(STATE_QR_SCANNER_RESUME_PENDING, false) == true,
+        )
 
         // Fade-in/fade-out transition from the Irrefutable Labs splash screen
         @Suppress("DEPRECATION")
@@ -949,7 +961,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         }
         
         qrScannerLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-            qrScannerActive = false
+            qrLockRoundTripState = qrLockRoundTripState.onScannerResult()
             val data = if (result.resultCode == RESULT_OK) {
                 result.data?.getStringExtra(QrScannerActivity.EXTRA_QR_DATA)
             } else {
@@ -1029,6 +1041,10 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         activeInstance = WeakReference(this)
         isAppForeground = true
         publishSessionState("resume")
+        if (qrLockRoundTripState.resumePending && !qrLockRoundTripState.scannerActive) {
+            qrLockRoundTripState = qrLockRoundTripState.onResumeSettled()
+            publishSessionState("qrResumeSettled")
+        }
         if (hasIdentityViaRust()) {
             invokeNativeRouterInvoke("inbox.resume")
         }
@@ -1063,13 +1079,6 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
             try { nfcAdapter?.disableReaderMode(this) } catch (_: Throwable) {}
         }
 
-        try {
-            if (::bridge.isInitialized) {
-                bridge.handleHostPause()
-            }
-        } catch (t: Throwable) {
-            Log.w(tag, "onPause: failed to notify genesis interruption guard", t)
-        }
         // Rust receives app_foreground=false via publishSessionState and decides lock policy
         publishSessionState("pause")
         // Do not stop advertising here; background service owns BLE state.
@@ -1168,6 +1177,8 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         try { if (::bridge.isInitialized) outState.putInt("bridge_status", bridge.getBridgeStatus()) } catch (_: Throwable) {}
+        outState.putBoolean(STATE_QR_SCANNER_ACTIVE, qrLockRoundTripState.scannerActive)
+        outState.putBoolean(STATE_QR_SCANNER_RESUME_PENDING, qrLockRoundTripState.resumePending)
     }
 
     override fun onRestoreInstanceState(savedInstanceState: Bundle) {
@@ -1203,9 +1214,6 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
             // initialize GATT/advertising after genesis (hasIdentityViaRust).
             try {
                 val svc = bleBackgroundService
-                if (svc == null) {
-                    BleBackgroundService.start(this@MainActivity)
-                }
                 if (hasIdentityViaRust()) {
                     val gattResult = svc?.ensureGattServerStarted() ?: false
                     Log.i(tag, "Bluetooth permissions granted: GATT server ensure-start result=$gattResult")
@@ -1340,13 +1348,13 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         Log.i(tag, "signalBridgeReady: Dispatching events to JS...")
         BleEventRelay.markBridgeReady(this)
         dispatchDsmEventOnUi("dsm-bridge-ready", ByteArray(0))
-        // Delay session state publish so JS has time to process the MessagePort
-        // delivery and install its onmessage handler. webView.post {} is insufficient
-        // because the JS engine may not have yielded between port receipt and the
-        // incoming data message. 100ms is conservative transport-layer delay (Invariant #4 allowed).
-        webView.postDelayed({
-            publishSessionState("bridgeReady")
-        }, 100)
+        // Publish session state at 100 ms, 500 ms, and 1500 ms.
+        // Redundant deliveries are harmless — the snapshot is idempotent.
+        // This covers any JS-side port-setup race without a frontend fallback timer;
+        // if one delivery races with the JS engine not yet ready, a later one wins.
+        webView.postDelayed({ publishSessionState("bridgeReady") }, 100)
+        webView.postDelayed({ publishSessionState("bridgeReady.r1") }, 500)
+        webView.postDelayed({ publishSessionState("bridgeReady.r2") }, 1500)
         Log.i(tag, "signalBridgeReady: COMPLETE")
     }
 
@@ -1472,11 +1480,6 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                         }
 
                         if (capturedDeviceId.size == 32 && capturedGenesis.size == 32) {
-                            try {
-                                BleBackgroundService.start(this@MainActivity)
-                            } catch (t: Throwable) {
-                                Log.w(tag, "initDsmAndSignalReady: BleBackgroundService.start failed before identity publish", t)
-                            }
                             // GATT server init + identity write are synchronous Bluetooth
                             // framework calls (100-500ms). Run on a background thread to
                             // avoid blocking the UI thread on slower chipsets (MediaTek).
@@ -1491,12 +1494,6 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                                     Log.w(tag, "initDsmAndSignalReady: GATT/identity setup failed", t)
                                 }
                             }.start()
-                            try {
-                                BleBackgroundService.start(this@MainActivity)
-                                Log.i(tag, "initDsmAndSignalReady: BleBackgroundService.start invoked")
-                            } catch (t: Throwable) {
-                                Log.w(tag, "initDsmAndSignalReady: BleBackgroundService.start failed", t)
-                            }
                         } else {
                             Log.i(tag, "initDsmAndSignalReady: BLE identity not yet present in persisted bytes; skipping setIdentityValue")
                         }

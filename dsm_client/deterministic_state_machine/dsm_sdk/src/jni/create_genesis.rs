@@ -272,9 +272,9 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_createGenesis<'a>(
                     match crate::init::init_dsm_sdk(&sdk_cfg) {
                         Ok(_) => log::info!("createGenesis: init_dsm_sdk completed successfully"),
                         Err(e) => {
-                            // Non-fatal: DBRW is not yet initialized at genesis time.
-                            // Kotlin calls sdkBootstrap() after extracting identity from
-                            // this envelope, which initializes DBRW and re-runs SDK init.
+                            // Non-fatal: strict bootstrap has not yet finalized on a fresh device.
+                            // The host now forwards measurement envelopes through ingress, and Rust
+                            // completes binding + identity installation during bootstrap finalize.
                             log::warn!("createGenesis: init_dsm_sdk deferred (expected on fresh device): {}", e);
                         }
                     }

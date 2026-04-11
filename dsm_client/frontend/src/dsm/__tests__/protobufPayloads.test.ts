@@ -1,14 +1,15 @@
-import { createGenesisBin, setBleIdentityForAdvertising, rejectBilateralByCommitmentBridge } from '../WebViewBridge';
+import { createGenesis, setBleIdentityForAdvertising, rejectBilateralByCommitmentBridge } from '../WebViewBridge';
 import {
   AppRouterPayload,
   ArgPack,
   BilateralPayload,
   BleIdentityPayload,
+  BootstrapFinalizeResponse,
+  BootstrapFinalizeResponse_Result,
   BridgeRpcRequest,
   BridgeRpcResponse,
   Codec,
   DeviceBindingCapturePayload,
-  DeviceBindingCaptureResult,
   Envelope,
   GenesisCreated,
   Hash32,
@@ -37,7 +38,7 @@ function setupBridge(onRequest: (req: BridgeRpcRequest) => void): void {
 }
 
 describe('protobuf-only bridge payloads', () => {
-  test('createGenesisBin sends system.genesis query and native host device-binding capture', async () => {
+  test('createGenesis sends system.genesis query and native host device-binding capture', async () => {
     const seenRequests: BridgeRpcRequest[] = [];
     const deviceId = new Uint8Array(32).fill(0x11);
     const genesisHash = new Uint8Array(32).fill(0x22);
@@ -72,16 +73,23 @@ describe('protobuf-only bridge payloads', () => {
           );
         }
         if (req.method === 'nativeHostRequest') {
-          const result = new DeviceBindingCaptureResult({
-            installed: true,
-            deviceId,
-            genesisHash,
+          const resultEnvelope = new Envelope({
+            version: 3,
+            payload: {
+              case: 'bootstrapFinalizeResponse',
+              value: new BootstrapFinalizeResponse({
+                result: BootstrapFinalizeResponse_Result.BOOTSTRAP_RESULT_READY,
+                deviceId,
+                genesisHash,
+                message: 'ready',
+              }),
+            },
           });
           return wrapSuccessEnvelope(
             new NativeHostResponse({
               result: {
                 case: 'okBytes',
-                value: result.toBinary(),
+                value: new Uint8Array([0x03, ...resultEnvelope.toBinary()]),
               },
             }).toBinary(),
           );
@@ -90,7 +98,7 @@ describe('protobuf-only bridge payloads', () => {
       },
     };
 
-    await createGenesisBin('en-US', 'testnet', entropy);
+    await createGenesis('en-US', 'testnet', entropy);
 
     expect(seenRequests).toHaveLength(2);
     expect(seenRequests[0].method).toBe('nativeBoundaryIngress');

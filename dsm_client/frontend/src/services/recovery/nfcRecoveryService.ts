@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { decodeBase32Crockford, encodeBase32Crockford } from '../../utils/textId';
-import { appRouterInvokeBin, appRouterQueryBin } from '../../dsm/WebViewBridge';
+import { routerInvokeBin, routerQueryBin } from '../../dsm/WebViewBridge';
 import { decodeFramedEnvelopeV3 } from '../../dsm/decoding';
 import { startNfcReaderHost, stopNfcReaderHost, writeNfcTagPayloadHost } from '../../dsm/NativeHostBridge';
 import {
@@ -158,22 +158,22 @@ export function capsulePreviewFromBase32(base32: string, maxBytes = 20): string 
 }
 
 export async function generateMnemonic(): Promise<string> {
-  const res = await appRouterInvokeBin('recovery.generateMnemonic', new Uint8Array(0));
+  const res = await routerInvokeBin('recovery.generateMnemonic', new Uint8Array(0));
   return extractAppStateValue(res);
 }
 
 export async function enableNfcBackup(mnemonic: string): Promise<void> {
-  const res = await appRouterInvokeBin('recovery.enable', packStringArg(normalizeMnemonic(mnemonic)));
+  const res = await routerInvokeBin('recovery.enable', packStringArg(normalizeMnemonic(mnemonic)));
   extractAppStateValue(res);
 }
 
 export async function disableNfcBackup(): Promise<void> {
-  const res = await appRouterInvokeBin('recovery.disable', new Uint8Array(0));
+  const res = await routerInvokeBin('recovery.disable', new Uint8Array(0));
   extractAppStateValue(res);
 }
 
 export async function cacheRecoveryMnemonic(mnemonic: string): Promise<void> {
-  const res = await appRouterInvokeBin(
+  const res = await routerInvokeBin(
     'recovery.cacheMnemonic',
     packStringArg(normalizeMnemonic(mnemonic)),
   );
@@ -181,7 +181,7 @@ export async function cacheRecoveryMnemonic(mnemonic: string): Promise<void> {
 }
 
 export async function getNfcBackupStatus(): Promise<NfcBackupStatus> {
-  const res = await appRouterQueryBin('recovery.status');
+  const res = await routerQueryBin('recovery.status');
   const pairs = parseKeyValuePairs(extractAppStateValue(res));
   return {
     enabled: pairs.enabled === 'true',
@@ -193,7 +193,7 @@ export async function getNfcBackupStatus(): Promise<NfcBackupStatus> {
 }
 
 export async function createCapsule(mnemonic: string): Promise<Uint8Array> {
-  const res = await appRouterInvokeBin(
+  const res = await routerInvokeBin(
     'recovery.createCapsule',
     packStringArg(normalizeMnemonic(mnemonic)),
   );
@@ -217,7 +217,7 @@ export async function decryptCapsuleBytes(
   const req = new NfcRecoveryCapsule({
     payload: toBytes(capsuleBytes),
   });
-  const res = await appRouterInvokeBin('recovery.decryptCapsule', req.toBinary());
+  const res = await routerInvokeBin('recovery.decryptCapsule', req.toBinary());
   const env = decodeFramedEnvelopeV3(res);
   if (env.payload.case === 'error') {
     throw new Error(env.payload.value.message || 'decryptCapsule failed');
@@ -239,7 +239,7 @@ export async function inspectCapsuleBytes(
   const req = new NfcRecoveryCapsule({
     payload: toBytes(capsuleBytes),
   });
-  const res = await appRouterInvokeBin('recovery.inspectCapsule', req.toBinary());
+  const res = await routerInvokeBin('recovery.inspectCapsule', req.toBinary());
   const env = decodeFramedEnvelopeV3(res);
   if (env.payload.case === 'error') {
     throw new Error(env.payload.value.message || 'inspectCapsule failed');
@@ -261,7 +261,7 @@ export async function decryptCapsuleFromBase32(params: {
 
 export async function getCapsulePreview(): Promise<CapsulePreview> {
   try {
-    const res = await appRouterQueryBin('recovery.capsulePreview');
+    const res = await routerQueryBin('recovery.capsulePreview');
     const val = extractAppStateValue(res);
     if (!val || val === 'none') return null;
     const pairs = parseKeyValuePairs(val);
@@ -277,7 +277,7 @@ export async function getCapsulePreview(): Promise<CapsulePreview> {
 }
 
 export async function readNfcRing(): Promise<void> {
-  const res = await appRouterInvokeBin('nfc.ring.read', new Uint8Array(0));
+  const res = await routerInvokeBin('nfc.ring.read', new Uint8Array(0));
   const env = decodeFramedEnvelopeV3(res);
   if (env.payload.case === 'error') {
     throw new Error(env.payload.value.message || 'NFC read failed');
@@ -294,7 +294,7 @@ export async function stopNfcRead(): Promise<void> {
 }
 
 export async function writeToNfcRing(): Promise<void> {
-  const res = await appRouterInvokeBin('nfc.ring.write', new Uint8Array(0));
+  const res = await routerInvokeBin('nfc.ring.write', new Uint8Array(0));
   const env = decodeFramedEnvelopeV3(res);
   if (env.payload.case === 'error') {
     throw new Error(env.payload.value.message || 'NFC write failed');

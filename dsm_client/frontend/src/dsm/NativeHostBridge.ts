@@ -14,7 +14,6 @@ import {
   BridgeRpcResponse,
   BytesPayload,
   DeviceBindingCapturePayload,
-  DeviceBindingCaptureResult,
   EmptyPayload,
   HostPermissionsRequestPayload,
   NativeHostAck,
@@ -183,15 +182,14 @@ export async function requestHostPermissions(permissions: string[]): Promise<voi
   );
 }
 
-export async function captureDeviceBindingForGenesisEnvelope(genesisEnvelope: Uint8Array): Promise<DeviceBindingCaptureResult> {
+export async function captureDeviceBindingForGenesisEnvelope(genesisEnvelope: Uint8Array): Promise<Uint8Array> {
   const payload = new DeviceBindingCapturePayload({ genesisEnvelope: new Uint8Array(genesisEnvelope) });
-  const bytes = await hostRequestOk(
+  return hostRequestOk(
     buildHostRequest(
       NativeHostRequestKind.PLATFORM_PRIMITIVE_DEVICE_BINDING_CAPTURE,
       payload.toBinary(),
     ),
   );
-  return DeviceBindingCaptureResult.fromBinary(bytes);
 }
 
 export async function authorizeBiometricHost(args?: Partial<BiometricAuthorizePayload>): Promise<void> {

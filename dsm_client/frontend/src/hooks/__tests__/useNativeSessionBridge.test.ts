@@ -44,6 +44,7 @@ function makeSession(overrides: Partial<NativeSessionSnapshot> = {}): NativeSess
 }
 
 beforeEach(() => {
+  jest.useRealTimers();
   mockGetPreference.mockReset();
   mockApplyTheme.mockReset();
   mockAppRuntimeStore.setAppState.mockReset();

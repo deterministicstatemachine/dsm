@@ -45,13 +45,12 @@ function wrapSuccessRaw(data: Uint8Array): Uint8Array {
   return br.toBinary();
 }
 
-function wrapSuccessRouter(data: Uint8Array): Uint8Array {
-  // AppRouter methods include an 8-byte request ID prefix that is stripped on receive.
-  const reqId = new Uint8Array(8).fill(0);
-  const dataWithReqId = new Uint8Array(reqId.length + data.length);
-  dataWithReqId.set(reqId, 0);
-  dataWithReqId.set(data, reqId.length);
-  return wrapSuccessRaw(dataWithReqId);
+function wrapIngressOk(data: Uint8Array): Uint8Array {
+  return wrapSuccessRaw(
+    new pb.IngressResponse({
+      result: { case: 'okBytes', value: data },
+    }).toBinary(),
+  );
 }
 
 describe('online send node fan-out', () => {
@@ -86,7 +85,11 @@ describe('online send node fan-out', () => {
           } as any);
           return wrapSuccessRaw(headers.toBinary());
         }
-        if (method === 'appRouterInvoke') {
+        if (method === 'nativeBoundaryIngress') {
+          const ingressRequest = pb.IngressRequest.fromBinary(p);
+          if (ingressRequest.operation.case !== 'routerInvoke') {
+            return wrapIngressOk(new Uint8Array(0));
+          }
           // Return a successful online transfer response as framed Envelope
           const resp = new pb.OnlineTransferResponse({
             success: true,
@@ -112,15 +115,7 @@ describe('online send node fan-out', () => {
           const framed = new Uint8Array(framingByte.length + envelopeBytes.length);
           framed.set(framingByte, 0);
           framed.set(envelopeBytes, framingByte.length);
-          // Add 8-byte request ID prefix (router methods strip this)
-          const reqId = new Uint8Array(8).fill(0);
-          const dataWithReqId = new Uint8Array(reqId.length + framed.length);
-          dataWithReqId.set(reqId, 0);
-          dataWithReqId.set(framed, reqId.length);
-          const br = new pb.BridgeRpcResponse({ 
-            result: { case: 'success', value: { data: dataWithReqId } } 
-          });
-          return br.toBinary();
+          return wrapIngressOk(framed);
         }
         return new Uint8Array(0);
       },
@@ -151,32 +146,27 @@ describe('online send node fan-out', () => {
       const req = pb.BridgeRpcRequest.fromBinary(reqBytes);
       const method = req.method || '';
       const p = req.payload?.case === 'bytes' ? req.payload.value.data : new Uint8Array(0);
-      const readU32 = (buf: Uint8Array, off: number) =>
-        ((buf[off] ?? 0) << 24) | ((buf[off + 1] ?? 0) << 16) | ((buf[off + 2] ?? 0) << 8) | (buf[off + 3] ?? 0);
-      const readHead = (buf: Uint8Array) => {
-        const n = readU32(buf, 0);
-        const head = new TextDecoder().decode(buf.slice(4, 4 + n));
-        return { head, rest: buf.slice(4 + n) };
-      };
-
       if (method === 'getTransportHeadersV3Bin') {
         const headers = new pb.Headers({ deviceId: devId, chainTip: new Uint8Array(32).fill(0xff), genesisHash: gh, seq: 1n } as any);
         return wrapSuccessRaw(headers.toBinary());
       }
 
-      if (method === 'appRouterQuery') {
-        const { head: path } = readHead(p);
-        if (path === '/transport/headersV3') {
-          const headers = new pb.Headers({ deviceId: devId, chainTip: new Uint8Array(32), genesisHash: gh, seq: 1n } as any);
-          return wrapSuccessRouter(headers.toBinary());
+      if (method === 'nativeBoundaryIngress') {
+        const ingressRequest = pb.IngressRequest.fromBinary(p);
+        if (ingressRequest.operation.case === 'routerQuery') {
+          const path = ingressRequest.operation.value.method;
+          if (path === '/transport/headersV3') {
+            const headers = new pb.Headers({ deviceId: devId, chainTip: new Uint8Array(32), genesisHash: gh, seq: 1n } as any);
+            return wrapIngressOk(headers.toBinary());
+          }
+          return wrapIngressOk(new Uint8Array(0));
         }
-        return wrapSuccessRouter(new Uint8Array(0));
-      }
-
-      if (method === 'appRouterInvoke') {
+        if (ingressRequest.operation.case !== 'routerInvoke') {
+          return wrapIngressOk(new Uint8Array(0));
+        }
         const envelope = makeOkEnvelope();
         const framedBytes = makeFramedEnvelope(envelope);
-        return wrapSuccessRouter(framedBytes);
+        return wrapIngressOk(framedBytes);
       }
 
       return new Uint8Array(0);

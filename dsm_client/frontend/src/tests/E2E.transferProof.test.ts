@@ -39,30 +39,47 @@ function wrapError(msg: string): Uint8Array {
   return (global as any).createDsmBridgeErrorResponse(msg);
 }
 
+function wrapIngressOk(data: Uint8Array): Uint8Array {
+  return wrapSuccess(
+    new pb.IngressResponse({
+      result: { case: 'okBytes', value: data },
+    }).toBinary(),
+  );
+}
+
 function zeroHash(): pb.Hash32 {
   return new pb.Hash32({ v: new Uint8Array(32) } as any);
 }
 
-/** Decode BridgeRpcRequest to extract method and payload (handles both bytes and appRouter cases) */
-function decodeBridgeReq(reqBytes: Uint8Array): { method: string; payload: Uint8Array; appRouterMethodName?: string } {
+/** Decode BridgeRpcRequest to extract method and payload bytes. */
+function decodeBridgeReq(reqBytes: Uint8Array): { method: string; payload: Uint8Array } {
   const req = pb.BridgeRpcRequest.fromBinary(reqBytes);
-  let payload = new Uint8Array(0);
-  let appRouterMethodName: string | undefined;
-
-  if (req.payload?.case === 'bytes') {
-    payload = req.payload.value.data || new Uint8Array(0);
-  } else if (req.payload?.case === 'appRouter') {
-    appRouterMethodName = (req.payload.value as any).methodName;
-    payload = (req.payload.value as any).args || new Uint8Array(0);
-  }
-  return { method: req.method, payload, appRouterMethodName };
+  const payload = req.payload?.case === 'bytes' ? (req.payload.value.data || new Uint8Array(0)) : new Uint8Array(0);
+  return { method: req.method, payload };
 }
 
-/** Add 8-byte router request-id prefix */
-function withRouterPrefix(data: Uint8Array): Uint8Array {
-  const out = new Uint8Array(8 + data.length);
-  out.set(data, 8);
-  return out;
+function decodeIngressReq(payload: Uint8Array): {
+  operationCase?: string;
+  method?: string;
+  args: Uint8Array;
+} {
+  const ingress = pb.IngressRequest.fromBinary(payload);
+  switch (ingress.operation.case) {
+    case 'routerQuery':
+      return {
+        operationCase: ingress.operation.case,
+        method: ingress.operation.value.method,
+        args: ingress.operation.value.args || new Uint8Array(0),
+      };
+    case 'routerInvoke':
+      return {
+        operationCase: ingress.operation.case,
+        method: ingress.operation.value.method,
+        args: ingress.operation.value.args || new Uint8Array(0),
+      };
+    default:
+      return { operationCase: ingress.operation.case, args: new Uint8Array(0) };
+  }
 }
 
 /** Wrap an Envelope as framed bytes (0x03 prefix) */
@@ -106,7 +123,7 @@ function makeBilateralPrepareResponseEnvelope(commitHash: Uint8Array): Uint8Arra
 }
 
 /** Build an OnlineTransferResponse inside Envelope with onlineTransferResponse payload.
- *  This matches the AppRouter response path (appRouterInvokeBin → wallet.send). */
+ *  This matches the AppRouter response path (routerInvokeBin → wallet.send). */
 function makeOnlineResponseEnvelope(success: boolean, message: string, newBalance: bigint = 123n): Uint8Array {
   const resp = new pb.OnlineTransferResponse({
     success,
@@ -123,7 +140,7 @@ function makeOnlineResponseEnvelope(success: boolean, message: string, newBalanc
     } as any),
     payload: { case: 'onlineTransferResponse', value: resp },
   } as any);
-  return frameEnvelope(env); // 0x03-framed, matching appRouterInvokeBin output
+  return frameEnvelope(env); // 0x03-framed, matching routerInvokeBin output
 }
 
 function makeHeaders(overrides?: Partial<{ deviceId: Uint8Array; genesisHash: Uint8Array; chainTip: Uint8Array; seq: bigint }>): pb.Headers {
@@ -156,7 +173,7 @@ function installBridge(opts?: { contactBleAddress?: string }) {
     hasIdentityDirect: () => true,
 
     __callBin: async (reqBytes: Uint8Array): Promise<Uint8Array> => {
-      const { method, payload, appRouterMethodName } = decodeBridgeReq(reqBytes);
+      const { method, payload } = decodeBridgeReq(reqBytes);
       capturedMethods.push(method);
 
       // --- Direct bridge methods (no router prefix) ---
@@ -177,31 +194,46 @@ function installBridge(opts?: { contactBleAddress?: string }) {
         return wrapSuccess(new TextEncoder().encode('AA:BB:CC:DD:EE:FF'));
       }
 
-      // --- Router methods (response includes 8-byte request-id prefix) ---
-
-      if (method === 'appRouterQuery') {
-        // appRouterQueryBin sends methodName via appRouter case
-        if (appRouterMethodName === 'contacts.list') {
-          // Return framed Envelope with 8-byte prefix (bridge strips the prefix)
-          return wrapSuccess(withRouterPrefix(makeContactsFramedEnvelope(opts?.contactBleAddress)));
+      if (method === 'nativeBoundaryIngress') {
+        const ingress = pb.IngressRequest.fromBinary(payload);
+        if (ingress.operation.case === 'routerQuery') {
+          const ingressMethod = ingress.operation.value.method;
+          if (ingressMethod === 'contacts.list') {
+            return wrapIngressOk(makeContactsFramedEnvelope(opts?.contactBleAddress));
+          }
+          if (ingressMethod === 'bilateral.pending_list') {
+            const resp = new pb.OfflineBilateralPendingListResponse({
+              transactions: bilateralPendingListOverride ? bilateralPendingListOverride() : [],
+            });
+            const env = new pb.Envelope({
+              version: 3,
+              payload: { case: 'offlineBilateralPendingListResponse' as const, value: resp },
+            } as any);
+            const envBytes = env.toBinary();
+            const framed = new Uint8Array(1 + envBytes.length);
+            framed[0] = 0x03;
+            framed.set(envBytes, 1);
+            return wrapIngressOk(framed);
+          }
+          return wrapIngressOk(new Uint8Array(0));
         }
-        if (appRouterMethodName === 'bilateral.pending_list') {
-          // Return empty pending list — session absent means terminal (committed or cleaned up).
-          // Tests that need specific statuses override bilateralPendingListOverride.
-          const resp = new pb.OfflineBilateralPendingListResponse({
-            transactions: bilateralPendingListOverride ? bilateralPendingListOverride() : [],
-          });
-          const env = new pb.Envelope({
-            version: 3,
-            payload: { case: 'offlineBilateralPendingListResponse' as const, value: resp },
-          } as any);
-          const envBytes = env.toBinary();
-          const framed = new Uint8Array(1 + envBytes.length);
-          framed[0] = 0x03;
-          framed.set(envBytes, 1);
-          return wrapSuccess(withRouterPrefix(framed));
+        if (ingress.operation.case === 'routerInvoke') {
+          const ingressMethod = ingress.operation.value.method;
+          if (ingressMethod === 'wallet.send' || ingressMethod === 'wallet.sendSmart') {
+            if (onlineTransferOverride) {
+              return wrapIngressOk(onlineTransferOverride());
+            }
+            return wrapIngressOk(makeOnlineResponseEnvelope(true, 'ok', 123n));
+          }
+          if (ingressMethod === 'wallet.sendOffline') {
+            if (bilateralResponseOverride) {
+              return wrapIngressOk(bilateralResponseOverride());
+            }
+            return wrapIngressOk(makeBilateralPrepareResponseEnvelope(COMMITMENT_HASH));
+          }
+          return wrapIngressOk(new Uint8Array(0));
         }
-        return wrapSuccess(withRouterPrefix(new Uint8Array(0)));
+        return wrapError(`unhandled ingress operation: ${ingress.operation.case}`);
       }
 
       if (method === 'nativeHostRequest') {
@@ -222,21 +254,6 @@ function installBridge(opts?: { contactBleAddress?: string }) {
           );
         }
         return wrapError(`unhandled nativeHostRequest kind: ${hostRequest.kind}`);
-      }
-
-      if (method === 'appRouterInvoke') {
-        // sendOnlineTransfer uses appRouterInvokeBin('wallet.send', ...)
-        // Check the AppRouterPayload for the method name
-        if (appRouterMethodName === 'wallet.send' || appRouterMethodName === 'wallet.sendSmart') {
-          if (onlineTransferOverride) {
-            return wrapSuccess(withRouterPrefix(onlineTransferOverride()));
-          }
-          return wrapSuccess(withRouterPrefix(makeOnlineResponseEnvelope(true, 'ok', 123n)));
-        }
-        if (bilateralResponseOverride) {
-          return wrapSuccess(withRouterPrefix(bilateralResponseOverride()));
-        }
-        return wrapSuccess(withRouterPrefix(makeBilateralPrepareResponseEnvelope(COMMITMENT_HASH)));
       }
 
       return wrapError(`unhandled method: ${method}`);
@@ -570,21 +587,24 @@ describe('Offline Transfer — Full Cycle', () => {
 
   test('CRITICAL: BilateralPrepareRequest fields sent to bridge are correct', async () => {
     // Verifies the TS-side fields in the BilateralPrepareRequest that offlineSend
-    // constructs and sends via appRouterInvokeBin('wallet.sendOffline', ArgPack).
+    // constructs and sends via routerInvokeBin('wallet.sendOffline', ArgPack).
     // The Rust layer adds senderSigningPublicKey/senderDeviceId/senderGenesisHash
     // before BLE transmission — those are NOT set by the TS side.
     let capturedPrepReq: pb.BilateralPrepareRequest | null = null;
 
-    // Intercept appRouterInvoke to capture the ArgPack → BilateralPrepareRequest
+    // Intercept nativeBoundaryIngress to capture the ArgPack → BilateralPrepareRequest
     const origCallBin = (global as any).window.DsmBridge.__callBin;
     (global as any).window.DsmBridge.__callBin = async (reqBytes: Uint8Array) => {
-      const { method, payload, appRouterMethodName } = decodeBridgeReq(reqBytes);
-      if (method === 'appRouterInvoke' && appRouterMethodName === 'wallet.sendOffline') {
-        try {
-          const argPack = pb.ArgPack.fromBinary(payload);
-          capturedPrepReq = pb.BilateralPrepareRequest.fromBinary(argPack.body);
-        } catch {
-          // fall through
+      const { method, payload } = decodeBridgeReq(reqBytes);
+      if (method === 'nativeBoundaryIngress') {
+        const ingress = decodeIngressReq(payload);
+        if (ingress.operationCase === 'routerInvoke' && ingress.method === 'wallet.sendOffline') {
+          try {
+            const argPack = pb.ArgPack.fromBinary(ingress.args);
+            capturedPrepReq = pb.BilateralPrepareRequest.fromBinary(argPack.body);
+          } catch {
+            // fall through
+          }
         }
       }
       return origCallBin(reqBytes);
@@ -680,22 +700,26 @@ describe('Offline Transfer — Full Cycle', () => {
     // the Rust layer rejects with a bilateralPrepareReject error.
     const origCallBin = (global as any).window.DsmBridge.__callBin;
     (global as any).window.DsmBridge.__callBin = async (reqBytes: Uint8Array) => {
-      const { method, payload, appRouterMethodName } = decodeBridgeReq(reqBytes);
-      if (method === 'appRouterInvoke' && appRouterMethodName === 'wallet.sendOffline') {
-        // Check if bleAddress is empty in the request
-        try {
-          const argPack = pb.ArgPack.fromBinary(payload);
-          const prep = pb.BilateralPrepareRequest.fromBinary(argPack.body);
-          if (!prep.bleAddress) {
-            // Simulate Rust-side rejection for missing BLE address
-            const reject = new pb.BilateralPrepareReject({ reason: 'bleAddress unavailable' } as any);
-            const env = new pb.Envelope({
-              version: 3,
-              payload: { case: 'bilateralPrepareReject', value: reject },
-            } as any);
-            return wrapSuccess(withRouterPrefix(frameEnvelope(env)));
+      const { method, payload } = decodeBridgeReq(reqBytes);
+      if (method === 'nativeBoundaryIngress') {
+        const ingress = decodeIngressReq(payload);
+        if (ingress.operationCase === 'routerInvoke' && ingress.method === 'wallet.sendOffline') {
+          // Check if bleAddress is empty in the request
+          try {
+            const argPack = pb.ArgPack.fromBinary(ingress.args);
+            const prep = pb.BilateralPrepareRequest.fromBinary(argPack.body);
+            if (!prep.bleAddress) {
+              const reject = new pb.BilateralPrepareReject({ reason: 'bleAddress unavailable' } as any);
+              const env = new pb.Envelope({
+                version: 3,
+                payload: { case: 'bilateralPrepareReject', value: reject },
+              } as any);
+              return wrapIngressOk(frameEnvelope(env));
+            }
+          } catch {
+            // ignore, let original handler run
           }
-        } catch { /* fall through */ }
+        }
       }
       return origCallBin(reqBytes);
     };

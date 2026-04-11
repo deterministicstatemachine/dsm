@@ -2,6 +2,7 @@
 
 import { useEffect } from 'react';
 import { dsmClient } from '../services/dsmClient';
+
 import { AudioManager } from '../utils/audio';
 import { applyTheme, type ThemeName } from '../utils/theme';
 import { appRuntimeStore } from '../runtime/appRuntimeStore';
@@ -24,8 +25,32 @@ export function useNativeSessionBridge({ themes, setThemeIndex }: Args): NativeS
   const session = useNativeSessionStore();
 
   useEffect(() => {
-    const appState = mapSessionPhaseToAppState(session);
-    appRuntimeStore.setAppState(appState);
+    const nextAppState = mapSessionPhaseToAppState(session);
+    const currentAppState = appRuntimeStore.getSnapshot().appState;
+
+    // Guard: once the UI enters `securing_device` (driven by genesis lifecycle
+    // events from the event pump), do NOT regress to `needs_genesis` when the
+    // Rust session phase briefly reports it. This replicates the old working
+    // architecture where the frontend state machine drove the securing screen,
+    // and Rust's session.phase only transitioned to wallet_ready/error at the
+    // end of genesis. The legitimate exits from securing_device are:
+    //   securing_device → wallet_ready  (genesis succeeded, identity installed)
+    //   securing_device → error         (fatal error during genesis)
+    //   securing_device → locked        (lock engaged mid-flow, extremely rare)
+    // Any transient `needs_genesis` (or `runtime_loading`/`loading`) reported
+    // during the finalize race window is swallowed so the INITIALIZE screen
+    // never flashes between the progress bar and the home screen.
+    if (
+      currentAppState === 'securing_device' &&
+      (nextAppState === 'needs_genesis' ||
+        nextAppState === 'runtime_loading' ||
+        nextAppState === 'loading')
+    ) {
+      appRuntimeStore.setError(session.fatal_error);
+      return;
+    }
+
+    appRuntimeStore.setAppState(nextAppState);
     appRuntimeStore.setError(session.fatal_error);
   }, [session]);
 

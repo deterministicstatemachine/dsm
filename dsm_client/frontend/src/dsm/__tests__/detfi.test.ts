@@ -2,7 +2,7 @@
 import { encodeBase32Crockford } from '../../utils/textId';
 
 jest.mock('../WebViewBridge', () => ({
-  appRouterInvokeBin: jest.fn(),
+  routerInvokeBin: jest.fn(),
 }));
 jest.mock('../decoding', () => ({
   decodeFramedEnvelopeV3: jest.fn(),

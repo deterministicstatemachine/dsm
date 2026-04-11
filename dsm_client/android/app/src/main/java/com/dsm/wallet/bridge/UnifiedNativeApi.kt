@@ -55,12 +55,9 @@ internal object UnifiedNativeApi {
     @Keep @JvmStatic external fun getTransportHeadersV3(): ByteArray
     @Keep @JvmStatic external fun processEnvelopeV3(envelope: ByteArray): ByteArray
     @Keep @JvmStatic external fun processEnvelopeV3WithAddress(envelope: ByteArray, deviceAddress: String): ByteArray
-    @Keep @JvmStatic external fun initializeSdkContext(deviceId: ByteArray, genesisHash: ByteArray, entropy: ByteArray): Boolean
     @Keep @JvmStatic external fun extractGenesisIdentity(envelopeBytes: ByteArray): ByteArray
     @Keep @JvmStatic external fun getAllBalancesStrict(): ByteArray
     @Keep @JvmStatic external fun getWalletHistoryStrict(): ByteArray
-    @Keep @JvmStatic external fun appRouterQueryFramed(framedRequest: ByteArray): ByteArray?
-    @Keep @JvmStatic external fun appRouterInvokeFramed(framedRequest: ByteArray): ByteArray?
     @Keep @JvmStatic external fun bilateralOfflineSend(envelopeBytes: ByteArray, bleAddress: String): ByteArray
     @Keep @JvmStatic external fun nowTick(): Long
     @Keep @JvmStatic external fun ensureAppRouterInstalled(): Boolean
@@ -174,14 +171,6 @@ internal object UnifiedNativeApi {
     @Keep @JvmStatic external fun createBleAdvertisingStoppedEnvelope(): ByteArray
     @Keep @JvmStatic external fun createBleConnectionEstablishedEnvelope(address: String, name: String): ByteArray
     @Keep @JvmStatic external fun createBleConnectionLostEnvelope(address: String): ByteArray
-    // Genesis lifecycle envelopes — Rust authors all content, Kotlin relays verbatim
-    @Keep @JvmStatic external fun createGenesisStartedEnvelope(): ByteArray
-    @Keep @JvmStatic external fun createGenesisOkEnvelope(): ByteArray
-    @Keep @JvmStatic external fun createGenesisErrorEnvelope(): ByteArray
-    @Keep @JvmStatic external fun createGenesisSecuringDeviceEnvelope(): ByteArray
-    @Keep @JvmStatic external fun createGenesisSecuringProgressEnvelope(progress: Int): ByteArray
-    @Keep @JvmStatic external fun createGenesisSecuringCompleteEnvelope(): ByteArray
-    @Keep @JvmStatic external fun createGenesisSecuringAbortedEnvelope(): ByteArray
     @Keep @JvmStatic external fun createBlePermissionDeniedEnvelope(operation: String): ByteArray
     @Keep @JvmStatic external fun createNfcRecoveryCapsuleEnvelope(payload: ByteArray): ByteArray
     @Keep @JvmStatic external fun createNfcBackupWrittenEnvelope(): ByteArray

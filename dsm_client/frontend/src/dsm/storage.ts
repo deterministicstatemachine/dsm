@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import * as pb from '../proto/dsm_app_pb';
-import { syncWithStorageStrictBridge, appRouterQueryBin, appRouterInvokeBin } from './WebViewBridge';
+import { syncWithStorageStrictBridge, routerQueryBin, routerInvokeBin } from './WebViewBridge';
 import { decodeFramedEnvelopeV3 } from './decoding';
 import { StorageStatus, DlvIndexEntry } from './types';
 import { bytesToBase32CrockfordPrefix } from '../utils/textId';
@@ -89,7 +89,7 @@ export async function syncWithStorage(params?: { pullInbox?: boolean; pushPendin
  */
 export async function getStorageStatus(): Promise<StorageStatus> {
   const arg = new pb.ArgPack({ codec: pb.Codec.PROTO, body: new Uint8Array(0) });
-  const resBytes = await appRouterQueryBin('storage.status', new Uint8Array(arg.toBinary()));
+  const resBytes = await routerQueryBin('storage.status', new Uint8Array(arg.toBinary()));
   if (!resBytes || resBytes.length === 0) {
     throw new Error('getStorageStatus: empty response from bridge');
   }
@@ -130,7 +130,7 @@ export async function getStorageStatus(): Promise<StorageStatus> {
 export async function getNodeHealth(endpoints?: string[]): Promise<pb.StorageNodeStatsResponse> {
   const req = new pb.StorageNodeStatsRequest({ endpoints: endpoints ?? [] });
   const arg = new pb.ArgPack({ codec: pb.Codec.PROTO, body: new Uint8Array(req.toBinary()) });
-  const resBytes = await appRouterQueryBin('storage.nodeHealth', new Uint8Array(arg.toBinary()));
+  const resBytes = await routerQueryBin('storage.nodeHealth', new Uint8Array(arg.toBinary()));
 
   if (!resBytes || resBytes.length === 0) {
     throw new Error('getNodeHealth: empty response from bridge');
@@ -158,7 +158,7 @@ export async function getNodeHealth(endpoints?: string[]): Promise<pb.StorageNod
 export async function addStorageNode(): Promise<pb.StorageNodeManageResponse> {
   const req = new pb.StorageNodeManageRequest({ action: 'add', autoAssign: true });
   const arg = new pb.ArgPack({ codec: pb.Codec.PROTO, body: new Uint8Array(req.toBinary()) });
-  const resBytes = await appRouterInvokeBin('storage.addNode', new Uint8Array(arg.toBinary()));
+  const resBytes = await routerInvokeBin('storage.addNode', new Uint8Array(arg.toBinary()));
 
   if (!resBytes || resBytes.length === 0) {
     throw new Error('addStorageNode: empty response from bridge');
@@ -181,7 +181,7 @@ export async function addStorageNode(): Promise<pb.StorageNodeManageResponse> {
 export async function removeStorageNode(url: string): Promise<pb.StorageNodeManageResponse> {
   const req = new pb.StorageNodeManageRequest({ action: 'remove', url });
   const arg = new pb.ArgPack({ codec: pb.Codec.PROTO, body: new Uint8Array(req.toBinary()) });
-  const resBytes = await appRouterInvokeBin('storage.removeNode', new Uint8Array(arg.toBinary()));
+  const resBytes = await routerInvokeBin('storage.removeNode', new Uint8Array(arg.toBinary()));
 
   if (!resBytes || resBytes.length === 0) {
     throw new Error('removeStorageNode: empty response from bridge');
@@ -206,7 +206,7 @@ export async function listLocalDlvs(): Promise<DlvIndexEntry[]> {
   const arg = new pb.ArgPack({ codec: pb.Codec.PROTO, body: new Uint8Array(0) });
   let resBytes: Uint8Array | undefined;
   try {
-    resBytes = await appRouterQueryBin('bitcoin.vault.list', new Uint8Array(arg.toBinary()));
+    resBytes = await routerQueryBin('bitcoin.vault.list', new Uint8Array(arg.toBinary()));
   } catch (e) {
     logger.warn('[DSM:listLocalDlvs] Bridge call failed:', e);
     return [];

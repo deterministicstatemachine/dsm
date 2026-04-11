@@ -1426,12 +1426,44 @@ html[data-shell-theme] .stateboy::before {
       if (window.DsmBridge && window.DsmBridge.__binary) return; // Already installed
       
       let port = null;
+      let portReadyWaiters = [];
       window.__DSM_EVENT_BUFFER__ = [];
       try { console.log('[DSM] Waiting for MessagePort from Android...'); } catch (_) {}
       
       function ensurePort() {
         if (!port) throw new Error('DSM binary bridge not ready');
         return port;
+      }
+
+      function resolvePortWaiters(readyPort) {
+        const waiters = portReadyWaiters;
+        portReadyWaiters = [];
+        for (const waiter of waiters) {
+          try { waiter.resolve(readyPort); } catch (_) {}
+        }
+      }
+
+      function waitForPort(timeoutMs) {
+        if (port) return Promise.resolve(port);
+        const timeout = typeof timeoutMs === 'number' ? timeoutMs : 4000;
+        return new Promise((resolve, reject) => {
+          const waiter = {
+            resolve: (readyPort) => {
+              clearTimeout(timer);
+              resolve(readyPort);
+            },
+            reject: (error) => {
+              clearTimeout(timer);
+              reject(error);
+            },
+          };
+          const timer = setTimeout(() => {
+            const idx = portReadyWaiters.indexOf(waiter);
+            if (idx >= 0) portReadyWaiters.splice(idx, 1);
+            reject(new Error('DSM binary bridge not ready'));
+          }, timeout);
+          portReadyWaiters.push(waiter);
+        });
       }
       
       function encodeVarint32(n) {
@@ -1736,7 +1768,7 @@ html[data-shell-theme] .stateboy::before {
       }
       
       async function sendMessageBin(requestBytes) {
-        const p = ensurePort();
+        const p = await waitForPort();
         
         // Install shared handler if first call
         if (!p.onmessage) {
@@ -1809,6 +1841,7 @@ html[data-shell-theme] .stateboy::before {
         if (ev.ports && ev.ports[0]) {
           port = ev.ports[0];
           installPortHandler(port);
+          resolvePortWaiters(port);
           window.dispatchEvent(new Event('dsm-bridge-ready'));
         }
       });

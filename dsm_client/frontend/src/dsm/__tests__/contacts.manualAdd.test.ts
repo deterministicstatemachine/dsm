@@ -2,7 +2,7 @@ jest.mock('../WebViewBridge', () => {
   const actual = jest.requireActual('../WebViewBridge');
   return {
     ...actual,
-    appRouterInvokeBin: jest.fn(),
+    routerInvokeBin: jest.fn(),
   };
 });
 
@@ -12,7 +12,7 @@ jest.mock('../../services/qr/contactQrService', () => ({
 
 import * as pb from '../../proto/dsm_app_pb';
 import { addContact } from '../contacts';
-import { appRouterInvokeBin } from '../WebViewBridge';
+import { routerInvokeBin } from '../WebViewBridge';
 import { encodeContactQrV3Payload } from '../../services/qr/contactQrService';
 
 function frameEnvelope(envelope: pb.Envelope): Uint8Array {
@@ -33,7 +33,7 @@ describe('contacts.addManual', () => {
     const genesisHash = new Uint8Array(32).fill(2);
     const signingPublicKey = new Uint8Array(64).fill(3);
 
-    (appRouterInvokeBin as jest.Mock).mockImplementation(async (method: string, args: Uint8Array) => {
+    (routerInvokeBin as jest.Mock).mockImplementation(async (method: string, args: Uint8Array) => {
       expect(method).toBe('contacts.addManual');
       const argPack = pb.ArgPack.fromBinary(args);
       const req = pb.ContactManualAddRequest.fromBinary(argPack.body);

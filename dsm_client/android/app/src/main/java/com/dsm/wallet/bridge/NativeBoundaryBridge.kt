@@ -1,9 +1,12 @@
 package com.dsm.wallet.bridge
 
 import android.util.Log
+import com.google.protobuf.ByteString
 import com.google.protobuf.InvalidProtocolBufferException
 import com.dsm.wallet.ui.MainActivity
 import dsm.types.proto.IngressRequest
+import dsm.types.proto.RouterInvokeOp
+import dsm.types.proto.RouterQueryOp
 
 internal object NativeBoundaryBridge {
     private const val TAG = "NativeBoundaryBridge"
@@ -16,6 +19,30 @@ internal object NativeBoundaryBridge {
         val response = Unified.dispatchIngress(requestBytes)
         runBestEffortPostIngressHooks(requestBytes)
         return response
+    }
+
+    fun routerInvoke(method: String, args: ByteArray = ByteArray(0)): ByteArray {
+        val request = IngressRequest.newBuilder()
+            .setRouterInvoke(
+                RouterInvokeOp.newBuilder()
+                    .setMethod(method)
+                    .setArgs(ByteString.copyFrom(args))
+                    .build()
+            )
+            .build()
+        return ingress(request.toByteArray())
+    }
+
+    fun routerQuery(method: String, args: ByteArray = ByteArray(0)): ByteArray {
+        val request = IngressRequest.newBuilder()
+            .setRouterQuery(
+                RouterQueryOp.newBuilder()
+                    .setMethod(method)
+                    .setArgs(ByteString.copyFrom(args))
+                    .build()
+            )
+            .build()
+        return ingress(request.toByteArray())
     }
 
     private fun runBestEffortPostIngressHooks(requestBytes: ByteArray) {

@@ -1,4 +1,4 @@
-import { appRouterQueryBin } from './WebViewBridge';
+import { routerQueryBin } from './WebViewBridge';
 import { decodeFramedEnvelopeV3 } from './decoding';
 
 export type DbrwStatus = {
@@ -52,7 +52,7 @@ export async function getDbrwStatus(live = false): Promise<DbrwStatus> {
   // can check q.params == b"live" to decide whether to run the heavy
   // runtime snapshot.  Empty params = stored enrollment only (instant).
   const params = live ? new TextEncoder().encode('live') : new Uint8Array(0);
-  const resBytes = await appRouterQueryBin('dbrw.status', params);
+  const resBytes = await routerQueryBin('dbrw.status', params);
 
   if (!resBytes || resBytes.length === 0) {
     throw new Error('getDbrwStatus: empty response from bridge');

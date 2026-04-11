@@ -1,31 +1,6 @@
 package com.dsm.wallet.bridge
 
 internal object UnifiedNativeDiagnostics {
-
-    /**
-     * Calls appRouterInvokeFramed and propagates exceptions to callers.
-     * Rust returns Envelope v3 (0x03 framed) for both success and error; no status-byte
-     * framing is applied. A null return indicates a JNI-level panic caught by jni_catch_unwind.
-     * Callers use try/catch for error handling.
-     */
-    fun appRouterInvokeFramedSafe(framedRequest: ByteArray): ByteArray {
-        val result = Unified.appRouterInvokeFramed(framedRequest)
-            ?: throw IllegalStateException("native panic: null return from appRouterInvokeFramed")
-        return result
-    }
-
-    /**
-     * Calls appRouterQueryFramed and propagates exceptions to callers.
-     * Rust returns Envelope v3 (0x03 framed) for both success and error; no status-byte
-     * framing is applied. A null return indicates a JNI-level panic.
-     * Callers use try/catch for error handling.
-     */
-    fun appRouterQueryFramedSafe(framedRequest: ByteArray): ByteArray {
-        val result = Unified.appRouterQueryFramed(framedRequest)
-            ?: throw IllegalStateException("native panic: null return from appRouterQueryFramed")
-        return result
-    }
-
     /**
      * Binary self-test report. Format per entry:
      *   [u16BE nameLen][name_utf8][ok_byte 0/1][u16BE detailLen][detail_utf8]

@@ -1,5 +1,5 @@
 jest.mock('../WebViewBridge', () => ({
-  appRouterInvokeBin: jest.fn(),
+  routerInvokeBin: jest.fn(),
   getTokenPolicyBytes: jest.fn(),
   listCachedTokenPolicies: jest.fn(),
   publishTokenPolicyBytes: jest.fn(),
@@ -15,7 +15,7 @@ import {
   publishTokenPolicy,
 } from '../policies';
 import {
-  appRouterInvokeBin,
+  routerInvokeBin,
   getTokenPolicyBytes as getTokenPolicyBytesBridge,
   listCachedTokenPolicies,
   publishTokenPolicyBytes as publishTokenPolicyBytesBridge,
@@ -88,7 +88,7 @@ describe('policies.ts', () => {
           }),
         },
       });
-      (appRouterInvokeBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
+      (routerInvokeBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
 
       const result = await createToken({
         ticker: 'MTK',
@@ -109,7 +109,7 @@ describe('policies.ts', () => {
         version: 3,
         payload: { case: 'error', value: new pb.Error({ message: 'token exists' }) },
       });
-      (appRouterInvokeBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
+      (routerInvokeBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
 
       const result = await createToken({
         ticker: 'DUP',
@@ -145,7 +145,7 @@ describe('policies.ts', () => {
           value: new pb.TokenCreateResponse({ success: true, tokenId: 'FT', policyAnchor: anchor as any }),
         },
       });
-      (appRouterInvokeBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
+      (routerInvokeBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
 
       const result = await createToken({
         ticker: 'FT',

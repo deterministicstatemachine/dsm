@@ -89,11 +89,15 @@ object BleEventRelay {
         }
     }
 
-    private fun postToBridgeBinary(topic: String, payload: ByteArray) {
+    private fun postToBridgeBinary(topic: String, payload: ByteArray, persistIfUnavailable: Boolean = true) {
         if (!bridgeReady) {
-            Log.d(TAG, "Bridge not ready, persisting event: topic=$topic")
-            eventLock.withLock {
-                persistEventNoContext(topic, payload)
+            if (persistIfUnavailable) {
+                Log.d(TAG, "Bridge not ready, persisting event: topic=$topic")
+                eventLock.withLock {
+                    persistEventNoContext(topic, payload)
+                }
+            } else {
+                Log.d(TAG, "Bridge not ready, dropping transient event: topic=$topic")
             }
             return
         }
@@ -104,9 +108,13 @@ object BleEventRelay {
             method.invoke(null, topic, payload)
             Log.v(TAG, "Event delivered to bridge: topic=$topic")
         } catch (t: Throwable) {
-            Log.w(TAG, "WebView bridge unavailable: ${t.message} — persisting: topic=$topic")
-            eventLock.withLock {
-                persistEventNoContext(topic, payload)
+            if (persistIfUnavailable) {
+                Log.w(TAG, "WebView bridge unavailable: ${t.message} — persisting: topic=$topic")
+                eventLock.withLock {
+                    persistEventNoContext(topic, payload)
+                }
+            } else {
+                Log.w(TAG, "WebView bridge unavailable: ${t.message} — dropping transient event: topic=$topic")
             }
         }
     }

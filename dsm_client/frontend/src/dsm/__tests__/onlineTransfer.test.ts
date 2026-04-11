@@ -40,19 +40,6 @@ function makeContactsResponse(): Uint8Array {
   return pack.toBinary();
 }
 
-function makeContactsResponseWire(): Uint8Array {
-  // In the MessagePort bridge, router responses echo an 8-byte request-id prefix.
-  // Our callBin implementation strips this prefix for router calls.
-  // The test's inline sendMessageBin mock does NOT automatically strip it, so have
-  // contacts.list return request-id-prefixed bytes to match the real transport.
-  const payload = makeContactsResponse();
-  const rid = new Uint8Array(8); // value doesn't matter
-  const out = new Uint8Array(rid.length + payload.length);
-  out.set(rid, 0);
-  out.set(payload, rid.length);
-  return out;
-}
-
 function makeOkEnvelope(): pb.Envelope {
   const resp = new pb.OnlineTransferResponse({
     success: true,
@@ -99,6 +86,14 @@ function wrapSuccessEnvelope(data: Uint8Array): Uint8Array {
     result: { case: 'success', value: { data: framed } } 
   });
   return br.toBinary();
+}
+
+function wrapIngressOk(data: Uint8Array): Uint8Array {
+  return wrapSuccessRaw(
+    new pb.IngressResponse({
+      result: { case: 'okBytes', value: data },
+    }).toBinary(),
+  );
 }
 
 function wrapErrorEnvelope(errorCode: number, message: string): Uint8Array {
@@ -168,39 +163,25 @@ describe('online transfer', () => {
         const method = req.method || '';
         const p = req.payload?.case === 'bytes' ? req.payload.value.data : new Uint8Array(0);
 
-        const readU32 = (buf: Uint8Array, off: number) =>
-          ((buf[off] ?? 0) << 24) | ((buf[off + 1] ?? 0) << 16) | ((buf[off + 2] ?? 0) << 8) | (buf[off + 3] ?? 0);
-
-        const readPath = (buf: Uint8Array) => {
-          const n = readU32(buf, 0);
-          return new TextDecoder().decode(buf.slice(4, 4 + n));
-        };
-
-        const readFrame = (buf: Uint8Array) => {
-          const n = readU32(buf, 0);
-          const m = new TextDecoder().decode(buf.slice(4, 4 + n));
-          const rest = buf.slice(4 + n);
-          return { method: m, payload: rest };
-        };
-
         if (method === 'getTransportHeadersV3Bin') {
           return wrapSuccessRaw(transportHeaders.toBinary());
         }
 
-        if (method === 'appRouterQuery') {
-          const path = readPath(p);
-          if (path === '/transport/headersV3') return wrapSuccessEnvelope(transportHeaders.toBinary());
-          if (path === 'contacts.list') {
-            // callBin will strip requestId already; for __callBin hook we return raw bytes.
-            return wrapSuccessEnvelope(makeContactsResponse());
+        if (method === 'nativeBoundaryIngress') {
+          const ingressRequest = pb.IngressRequest.fromBinary(p);
+          if (ingressRequest.operation.case === 'routerQuery') {
+            const path = ingressRequest.operation.value.method;
+            if (path === 'contacts.list') {
+              return wrapIngressOk(makeContactsResponse());
+            }
+            return wrapIngressOk(new Uint8Array(0));
           }
-          return wrapSuccessEnvelope(new Uint8Array(0));
-        }
-
-        if (method === 'appRouterInvoke') {
-          const inner = readFrame(p);
-          if (inner.method === 'wallet.send' || inner.method === 'onlineTransfer' || inner.method === 'wallet.sendSmart') {
-            return wrapSuccessEnvelope(new pb.ResultPack({
+          if (ingressRequest.operation.case !== 'routerInvoke') {
+            return wrapIngressOk(new Uint8Array(0));
+          }
+          const innerMethod = ingressRequest.operation.value.method;
+          if (innerMethod === 'wallet.send' || innerMethod === 'onlineTransfer' || innerMethod === 'wallet.sendSmart') {
+            return wrapIngressOk(new pb.ResultPack({
               schemaHash: zeroHash(),
               codec: pb.Codec.CODEC_PROTO,
               body: new pb.OnlineTransferResponse({
@@ -211,7 +192,7 @@ describe('online transfer', () => {
               } as any).toBinary() as any,
             }).toBinary());
           }
-          return wrapSuccessEnvelope(new Uint8Array(0));
+          return wrapIngressOk(new Uint8Array(0));
         }
 
         return wrapSuccessEnvelope(new Uint8Array(0));
@@ -221,60 +202,32 @@ describe('online transfer', () => {
         const method = req.method || '';
         const p = req.payload?.case === 'bytes' ? req.payload.value.data : new Uint8Array(0);
 
-        const readU32 = (buf: Uint8Array, off: number) =>
-          ((buf[off] ?? 0) << 24) | ((buf[off + 1] ?? 0) << 16) | ((buf[off + 2] ?? 0) << 8) | (buf[off + 3] ?? 0);
-
-        const readPath = (buf: Uint8Array) => {
-          const n = readU32(buf, 0);
-          return new TextDecoder().decode(buf.slice(4, 4 + n));
-        };
-
-        const readFrame = (buf: Uint8Array) => {
-          const n = readU32(buf, 0);
-          const m = new TextDecoder().decode(buf.slice(4, 4 + n));
-          const rest = buf.slice(4 + n);
-          return { method: m, payload: rest };
-        };
-
         if (method === 'getTransportHeadersV3Bin') {
           return wrapSuccessRaw(transportHeaders.toBinary());
         }
 
-          const withRid = (bytes: Uint8Array) => {
-            const rid = new Uint8Array(8);
-            const out = new Uint8Array(rid.length + bytes.length);
-            out.set(rid, 0);
-            out.set(bytes, rid.length);
-            return out;
-          };
-
-        if (method === 'appRouterQuery') {
-          const path = readPath(p.subarray(8));
-          if (path === '/transport/headersV3') return wrapSuccessEnvelope(withRid(transportHeaders.toBinary()));
-          // appRouterQuery responses include the request-id prefix; callBin will strip it.
-          if (path === 'contacts.list') return wrapSuccessEnvelope(withRid(makeContactsResponse()));
-          return wrapSuccessEnvelope(withRid(new Uint8Array(0)));
-        }
-
-        if (method === 'appRouterInvoke') {
-            const inner = readFrame(p);
-            console.log(`Mock appRouterInvoke inner.method: ${inner.method}`);
-          if (inner.method === 'wallet.send' || inner.method === 'onlineTransfer') {
-            // Parse the ArgPack and OnlineTransferRequest
-            const argPack = pb.ArgPack.fromBinary(inner.payload);
-            const req = pb.OnlineTransferRequest.fromBinary(argPack.body);
-            capturedEnvelopes.push(req as any);
-            const resultPackBytes = makeOkResultPack().toBinary();
-            const wrapped = wrapSuccessEnvelope(resultPackBytes);
-            console.log(`Mock returning wrapped response: ${Array.from(wrapped.slice(0, 10)).map(b => b.toString(16).padStart(2, '0')).join(' ')}`);
-            return wrapped;
+        if (method === 'nativeBoundaryIngress') {
+          const ingressRequest = pb.IngressRequest.fromBinary(p);
+          if (ingressRequest.operation.case === 'routerQuery') {
+            const path = ingressRequest.operation.value.method;
+            if (path === '/transport/headersV3') return wrapIngressOk(transportHeaders.toBinary());
+            if (path === 'contacts.list') return wrapIngressOk(makeContactsResponse());
+            return wrapIngressOk(new Uint8Array(0));
           }
-          if (inner.method === 'getContactsStrict' || inner.method === 'getContactsStrictBridge') {
-            return wrapSuccessEnvelope(makeContactsResponse());
+          if (ingressRequest.operation.case === 'routerInvoke') {
+            const innerMethod = ingressRequest.operation.value.method;
+            if (innerMethod === 'wallet.send' || innerMethod === 'onlineTransfer') {
+              const argPack = pb.ArgPack.fromBinary(ingressRequest.operation.value.args);
+              const req = pb.OnlineTransferRequest.fromBinary(argPack.body);
+              capturedEnvelopes.push(req as any);
+              return wrapIngressOk(makeOkResultPack().toBinary());
+            }
+            if (innerMethod === 'getContactsStrict' || innerMethod === 'getContactsStrictBridge') {
+              return wrapIngressOk(makeContactsResponse());
+            }
+            return wrapIngressOk(new Uint8Array(0));
           }
-          return wrapSuccessEnvelope(new Uint8Array(0));
         }
-
         return new Uint8Array(0);
       },
       hasIdentityDirect: () => true,
@@ -291,7 +244,7 @@ describe('online transfer', () => {
   it('accepts amount=0 at the JS layer (validation is native-side)', async () => {
     // Test that amount=0 passes JS validation and reaches the bridge call
     // The actual acceptance is decided by native code
-    // sendOnlineTransfer now calls appRouterInvokeBin('wallet.send', ...)
+    // sendOnlineTransfer now calls routerInvokeBin('wallet.send', ...)
     const minEnv = new pb.Envelope({
       version: 3,
       payload: { case: 'onlineTransferResponse', value: new pb.OnlineTransferResponse({ success: true, message: 'ok' } as any) },
@@ -301,7 +254,7 @@ describe('online transfer', () => {
     minFramed[0] = 0x03;
     minFramed.set(minEnvBytes, 1);
     const mockAppRouterInvoke = jest.fn().mockResolvedValue(minFramed);
-    jest.spyOn(require('../WebViewBridge'), 'appRouterInvokeBin').mockImplementation(mockAppRouterInvoke);
+    jest.spyOn(require('../WebViewBridge'), 'routerInvokeBin').mockImplementation(mockAppRouterInvoke);
 
     const res = await dsm.sendOnlineTransfer({ to: new Uint8Array(32), amount: 0n } as any);
     // The function should not throw at JS layer for amount=0
@@ -369,7 +322,7 @@ describe('online transfer', () => {
     const fetchMock = jest.fn().mockResolvedValue({ ok: true, status: 200 });
     (global as any).fetch = fetchMock;
 
-    // Mock appRouterInvokeBin to return framed Envelope with onlineTransferResponse
+    // Mock routerInvokeBin to return framed Envelope with onlineTransferResponse
     const transferResp = new pb.OnlineTransferResponse({
       success: true,
       transactionHash: zeroHash(),
@@ -381,7 +334,7 @@ describe('online transfer', () => {
       payload: { case: 'onlineTransferResponse', value: transferResp },
     } as any);
     const mockAppRouterInvoke = jest.fn().mockResolvedValue(makeFramedEnvelope(okEnv));
-    jest.spyOn(require('../WebViewBridge'), 'appRouterInvokeBin').mockImplementation(mockAppRouterInvoke);
+    jest.spyOn(require('../WebViewBridge'), 'routerInvokeBin').mockImplementation(mockAppRouterInvoke);
 
     const res = await dsm.sendOnlineTransfer({ to: new Uint8Array(32).fill(0xdd), amount: 5n, tokenId: 'ERA', memo: 'hi' });
     expect(res.accepted).toBe(true);

@@ -35,8 +35,8 @@
 //!
 //! Implement the handler in `handlers/app_router_impl.rs`, add a match arm in
 //! `query()` or `invoke()`, and define the protobuf types in `dsm_app.proto`.
-//! No JNI changes needed — `appRouterQueryFramed`/`appRouterInvokeFramed`
-//! dispatch generically by path string.
+//! No Android boundary changes are needed — `dispatchIngress`
+//! dispatches generically by path string.
 //!
 //! See `docs/INTEGRATION_GUIDE.md` for the full developer onboarding guide.
 //!

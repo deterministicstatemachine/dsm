@@ -35,8 +35,6 @@ class SinglePathWebViewBridgeFuzzTest {
             "nativeBoundaryStartup",
             "nativeBoundaryIngress",
             "nativeHostRequest",
-            "appRouterInvoke",
-            "appRouterQuery",
             "resolveBleAddressForDeviceId",
             "initiateBleContactPairing",
             "getTransportHeadersV3Bin",
@@ -152,7 +150,7 @@ class SinglePathWebViewBridgeFuzzTest {
         payloads.add(byteArrayOf(0x00, 0x00, 0x00, 0x00)) // keyLen=0
         payloads.add(byteArrayOf(0x00, 0x00, 0x00, 0x01)) // keyLen=1 but no key data
 
-        // For appRouterInvoke/appRouterQuery: malformed frames
+        // For generic bridge decode paths: malformed protobuf-like frames
         payloads.add(byteArrayOf(0x00, 0x00, 0x00, 0x05, 0x41, 0x42, 0x43)) // methodLen=5 but truncated
         payloads.add(byteArrayOf(0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte())) // huge method length
 
@@ -310,7 +308,7 @@ class SinglePathWebViewBridgeFuzzTest {
         // Test with extremely large payloads
         val hugePayload = ByteArray(10 * 1024 * 1024) { it.toByte() } // 10MB
 
-        val methods = listOf("appRouterInvoke", "nativeBoundaryIngress", "nativeHostRequest")
+        val methods = listOf("nativeBoundaryStartup", "nativeBoundaryIngress", "nativeHostRequest")
 
         methods.forEach { method ->
             try {

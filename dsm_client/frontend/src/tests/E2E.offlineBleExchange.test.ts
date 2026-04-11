@@ -30,10 +30,12 @@ function wrapSuccessEnvelope(data: Uint8Array): Uint8Array {
   return (global as any).createDsmBridgeSuccessResponse(data);
 }
 
-function withRouterPrefix(data: Uint8Array): Uint8Array {
-  const out = new Uint8Array(8 + data.length);
-  out.set(data, 8);
-  return out;
+function wrapIngressOk(data: Uint8Array): Uint8Array {
+  return wrapSuccessEnvelope(
+    new pb.IngressResponse({
+      result: { case: 'okBytes', value: data },
+    }).toBinary(),
+  );
 }
 
 function frameEnvelope(envelope: pb.Envelope): Uint8Array {
@@ -68,10 +70,9 @@ describe('E2E: Offline BLE exchange -> wallet refresh', () => {
         const req = pb.BridgeRpcRequest.fromBinary(reqBytes);
         const method = req.method || '';
         const data = req.payload?.case === 'bytes' ? req.payload.value.data : new Uint8Array(0);
-        if (method === 'appRouterQuery') {
-          const enc = new TextEncoder();
-          const path = enc.encode('contacts.list');
-          if (data.length === 4 + path.length && data[0] === 0 && data[1] === 0 && data[2] === 0 && data[3] === path.length) {
+        if (method === 'nativeBoundaryIngress') {
+          const ingress = pb.IngressRequest.fromBinary(data);
+          if (ingress.operation.case === 'routerQuery' && ingress.operation.value.method === 'contacts.list') {
             const contactsListResponse = new pb.ContactsListResponse({
               contacts: [
                 {
@@ -88,10 +89,9 @@ describe('E2E: Offline BLE exchange -> wallet refresh', () => {
               version: 3,
               payload: { case: 'contactsListResponse', value: contactsListResponse },
             } as any);
-            const framed = new Uint8Array([0x03, ...env.toBinary()]);
-            return wrapSuccessEnvelope(withRouterPrefix(framed));
+            return wrapIngressOk(frameEnvelope(env));
           }
-          return wrapSuccessEnvelope(withRouterPrefix(new Uint8Array(0)));
+          return wrapIngressOk(new Uint8Array(0));
         }
         throw new Error(`unhandled sendMessageBin: ${reqBytes.length} bytes`);
       },
@@ -111,25 +111,52 @@ describe('E2E: Offline BLE exchange -> wallet refresh', () => {
         if (method === 'getSigningPublicKeyBin') {
           return wrapSuccessEnvelope(new Uint8Array(64).fill(0x5a));
         }
-        if (method === 'appRouterQuery') {
-          const contactsListResponse = new pb.ContactsListResponse({
-            contacts: [
-              {
-                alias: 'Bob',
-                deviceId: BOB_DEVICE_ID,
-                genesisHash: new pb.Hash32({ v: BOB_GENESIS } as any),
-                chainTip: new pb.Hash32({ v: BOB_TIP } as any),
-                bleAddress: 'AA:BB:CC:DD:EE:FF',
-              },
-            ],
-          } as any);
-          // Return Envelope-wrapped response with framing byte and router prefix
-          const env = new pb.Envelope({
-            version: 3,
-            payload: { case: 'contactsListResponse', value: contactsListResponse },
-          } as any);
-          const framed = new Uint8Array([0x03, ...env.toBinary()]);
-          return wrapSuccessEnvelope(withRouterPrefix(framed));
+        if (method === 'nativeBoundaryIngress') {
+          const ingress = pb.IngressRequest.fromBinary(payload);
+          if (ingress.operation.case === 'routerQuery') {
+            const ingressMethod = ingress.operation.value.method;
+            if (ingressMethod === 'contacts.list') {
+              const contactsListResponse = new pb.ContactsListResponse({
+                contacts: [
+                  {
+                    alias: 'Bob',
+                    deviceId: BOB_DEVICE_ID,
+                    genesisHash: new pb.Hash32({ v: BOB_GENESIS } as any),
+                    chainTip: new pb.Hash32({ v: BOB_TIP } as any),
+                    bleAddress: 'AA:BB:CC:DD:EE:FF',
+                  },
+                ],
+              } as any);
+              const env = new pb.Envelope({
+                version: 3,
+                payload: { case: 'contactsListResponse', value: contactsListResponse },
+              } as any);
+              return wrapIngressOk(frameEnvelope(env));
+            }
+            if (ingressMethod === 'bilateral.pending_list') {
+              const resp = new pb.OfflineBilateralPendingListResponse({ transactions: [] });
+              const env = new pb.Envelope({
+                version: 3,
+                payload: { case: 'offlineBilateralPendingListResponse', value: resp },
+              } as any);
+              return wrapIngressOk(frameEnvelope(env));
+            }
+          }
+          if (ingress.operation.case === 'routerInvoke') {
+            const ingressMethod = ingress.operation.value.method;
+            if (ingressMethod === 'wallet.sendOffline') {
+              const resp = new pb.BilateralPrepareResponse({
+                commitmentHash: new pb.Hash32({ v: new Uint8Array(32) } as any),
+                localSignature: new Uint8Array(64),
+              });
+              const env = new pb.Envelope({
+                version: 3,
+                payload: { case: 'bilateralPrepareResponse', value: resp },
+              } as any);
+              return wrapIngressOk(frameEnvelope(env));
+            }
+          }
+          return wrapIngressOk(new Uint8Array(0));
         }
         if (method === 'nativeHostRequest') {
           const hostRequest = pb.NativeHostRequest.fromBinary(payload);
@@ -144,19 +171,16 @@ describe('E2E: Offline BLE exchange -> wallet refresh', () => {
             } as any);
             return wrapSuccessEnvelope(
               new pb.NativeHostResponse({
-                result: {
-                  case: 'okBytes',
-                  value: new pb.BleTransportSendChunksResult({
-                    responseEnvelope: withRouterPrefix(frameEnvelope(env)),
+              result: {
+                case: 'okBytes',
+                value: new pb.BleTransportSendChunksResult({
+                    responseEnvelope: frameEnvelope(env),
                   }).toBinary(),
                 },
               }).toBinary(),
             );
           }
           throw new Error(`unhandled nativeHostRequest kind: ${hostRequest.kind}`);
-        }
-        if (method === 'appRouterInvoke') {
-          return wrapSuccessEnvelope(withRouterPrefix(new Uint8Array(0)));
         }
         throw new Error(`unhandled __callBin method: ${method} (payloadLen=${payload.length})`);
       },

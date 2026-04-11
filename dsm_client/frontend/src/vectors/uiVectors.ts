@@ -2,7 +2,7 @@
 // UI-level runtime vectors (bridge processing where possible).
 
 import * as pb from '../proto/dsm_app_pb';
-import { appRouterInvokeBin, appRouterQueryBin } from '../dsm/WebViewBridge';
+import { routerInvokeBin, routerQueryBin } from '../dsm/WebViewBridge';
 import { decodeFramedEnvelopeV3 } from '../dsm/decoding';
 import { decodeBase32Crockford } from '../utils/textId';
 
@@ -35,7 +35,7 @@ async function invokeAndDecode(method: string, body: Uint8Array): Promise<pb.Env
     codec: pb.Codec.PROTO as any,
     body: body as any,
   });
-  const resBytes = await appRouterInvokeBin(method, argPack.toBinary());
+  const resBytes = await routerInvokeBin(method, argPack.toBinary());
   if (!resBytes || resBytes.length === 0) {
     throw new Error(`${method}: empty response`);
   }
@@ -43,7 +43,7 @@ async function invokeAndDecode(method: string, body: Uint8Array): Promise<pb.Env
 }
 
 async function queryAndDecode(path: string): Promise<pb.Envelope> {
-  const resBytes = await appRouterQueryBin(path);
+  const resBytes = await routerQueryBin(path);
   if (!resBytes || resBytes.length === 0) {
     throw new Error(`${path}: empty response`);
   }

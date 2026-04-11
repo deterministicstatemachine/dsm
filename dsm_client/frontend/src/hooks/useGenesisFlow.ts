@@ -35,9 +35,24 @@ export function useGenesisFlow({ appState, setAppState, setError, setSecuringPro
     return () => document.removeEventListener('visibilitychange', onVisibilityChange);
   }, [appState, interruptedMessage, setAppState, setError, setSecuringProgress]);
 
+  // When the session manager transitions to securing_device (driven by Rust BOOTSTRAP_SECURING flag
+  // on second-boot resume), mark genesis as in-flight so the progress event listener below
+  // will process GENESIS_KIND_SECURING_PROGRESS events and update the progress bar.
+  useEffect(() => {
+    if (appState === 'securing_device') {
+      genesisInFlight.current = true;
+    }
+  }, [appState]);
+
   // Listen for silicon fingerprint enrollment progress events from Kotlin
   useEffect(() => {
     const unsub = addDsmEventListener((evt) => {
+      if (!genesisInFlight.current) {
+        if (evt.topic.startsWith('genesis.')) {
+          logger.debug(`FRONTEND: Ignoring stale genesis lifecycle event '${evt.topic}' with no genesis in flight`);
+        }
+        return;
+      }
       if (evt.topic === 'genesis.securing-device') {
         logger.info('FRONTEND: Silicon fingerprint enrollment started');
         setSecuringProgress(0);

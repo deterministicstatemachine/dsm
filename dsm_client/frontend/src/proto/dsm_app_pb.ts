@@ -774,6 +774,11 @@ export enum SdkEventKind {
    * @generated from enum value: SDK_EVENT_KIND_BRIDGE_READY = 15;
    */
   BRIDGE_READY = 15,
+
+  /**
+   * @generated from enum value: SDK_EVENT_KIND_CANONICAL_ENVELOPE = 16;
+   */
+  CANONICAL_ENVELOPE = 16,
 }
 // Retrieve enum metadata with: proto3.getEnumType(SdkEventKind)
 proto3.util.setEnumType(SdkEventKind, "dsm.SdkEventKind", [
@@ -793,6 +798,7 @@ proto3.util.setEnumType(SdkEventKind, "dsm.SdkEventKind", [
   { no: 13, name: "SDK_EVENT_KIND_NFC_RECOVERY_CAPSULE" },
   { no: 14, name: "SDK_EVENT_KIND_NFC_BACKUP_WRITTEN" },
   { no: 15, name: "SDK_EVENT_KIND_BRIDGE_READY" },
+  { no: 16, name: "SDK_EVENT_KIND_CANONICAL_ENVELOPE" },
 ]);
 
 /**
@@ -12116,9 +12122,8 @@ export class PairingStatusUpdate extends Message<PairingStatusUpdate> {
 }
 
 /**
- * Genesis lifecycle events — authored by Rust, transported via BleEvent envelope.
- * Kotlin MUST NOT dispatch these directly; it calls createGenesis*Envelope() JNI
- * functions which return a framed Envelope v3 to relay verbatim.
+ * Genesis/bootstrap lifecycle events — authored by Rust and transported via
+ * canonical Envelope v3 payloads and async ingress event drain.
  *
  * @generated from message dsm.GenesisLifecycleEvent
  */
@@ -12218,6 +12223,286 @@ proto3.util.setEnumType(GenesisLifecycleEvent_Kind, "dsm.GenesisLifecycleEvent.K
   { no: 5, name: "GENESIS_KIND_SECURING_PROGRESS" },
   { no: 6, name: "GENESIS_KIND_SECURING_COMPLETE" },
   { no: 7, name: "GENESIS_KIND_SECURING_ABORTED" },
+]);
+
+/**
+ * Host-side measurement report forwarded into Rust bootstrap control.
+ *
+ * @generated from message dsm.BootstrapMeasurementReport
+ */
+export class BootstrapMeasurementReport extends Message<BootstrapMeasurementReport> {
+  /**
+   * @generated from field: dsm.BootstrapMeasurementReport.Phase phase = 1;
+   */
+  phase = BootstrapMeasurementReport_Phase.BOOTSTRAP_PHASE_UNSPECIFIED;
+
+  /**
+   * @generated from field: bytes device_id = 2;
+   */
+  deviceId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes genesis_hash = 3;
+   */
+  genesisHash = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint32 progress_percent = 4;
+   */
+  progressPercent = 0;
+
+  /**
+   * @generated from field: bytes cdbrw_hw_entropy = 5;
+   */
+  cdbrwHwEntropy = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes cdbrw_env_fingerprint = 6;
+   */
+  cdbrwEnvFingerprint = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes cdbrw_salt = 7;
+   */
+  cdbrwSalt = new Uint8Array(0);
+
+  /**
+   * @generated from field: dsm.BootstrapMeasurementReport.TrustLevel trust_level = 8;
+   */
+  trustLevel = BootstrapMeasurementReport_TrustLevel.BOOTSTRAP_TRUST_LEVEL_UNSPECIFIED;
+
+  /**
+   * @generated from field: string error_message = 9;
+   */
+  errorMessage = "";
+
+  constructor(data?: PartialMessage<BootstrapMeasurementReport>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.BootstrapMeasurementReport";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "phase", kind: "enum", T: proto3.getEnumType(BootstrapMeasurementReport_Phase) },
+    { no: 2, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "genesis_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "progress_percent", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 5, name: "cdbrw_hw_entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "cdbrw_env_fingerprint", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 7, name: "cdbrw_salt", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 8, name: "trust_level", kind: "enum", T: proto3.getEnumType(BootstrapMeasurementReport_TrustLevel) },
+    { no: 9, name: "error_message", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BootstrapMeasurementReport {
+    return new BootstrapMeasurementReport().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): BootstrapMeasurementReport {
+    return new BootstrapMeasurementReport().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): BootstrapMeasurementReport {
+    return new BootstrapMeasurementReport().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: BootstrapMeasurementReport | PlainMessage<BootstrapMeasurementReport> | undefined, b: BootstrapMeasurementReport | PlainMessage<BootstrapMeasurementReport> | undefined): boolean {
+    return proto3.util.equals(BootstrapMeasurementReport, a, b);
+  }
+}
+
+/**
+ * @generated from enum dsm.BootstrapMeasurementReport.Phase
+ */
+export enum BootstrapMeasurementReport_Phase {
+  /**
+   * @generated from enum value: BOOTSTRAP_PHASE_UNSPECIFIED = 0;
+   */
+  BOOTSTRAP_PHASE_UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: BOOTSTRAP_PHASE_STARTED = 1;
+   */
+  BOOTSTRAP_PHASE_STARTED = 1,
+
+  /**
+   * @generated from enum value: BOOTSTRAP_PHASE_PROGRESS = 2;
+   */
+  BOOTSTRAP_PHASE_PROGRESS = 2,
+
+  /**
+   * @generated from enum value: BOOTSTRAP_PHASE_FINALIZE = 3;
+   */
+  BOOTSTRAP_PHASE_FINALIZE = 3,
+
+  /**
+   * @generated from enum value: BOOTSTRAP_PHASE_ABORTED = 4;
+   */
+  BOOTSTRAP_PHASE_ABORTED = 4,
+
+  /**
+   * @generated from enum value: BOOTSTRAP_PHASE_ERROR = 5;
+   */
+  BOOTSTRAP_PHASE_ERROR = 5,
+
+  /**
+   * @generated from enum value: BOOTSTRAP_PHASE_RESUME_FINALIZE = 6;
+   */
+  BOOTSTRAP_PHASE_RESUME_FINALIZE = 6,
+}
+// Retrieve enum metadata with: proto3.getEnumType(BootstrapMeasurementReport_Phase)
+proto3.util.setEnumType(BootstrapMeasurementReport_Phase, "dsm.BootstrapMeasurementReport.Phase", [
+  { no: 0, name: "BOOTSTRAP_PHASE_UNSPECIFIED" },
+  { no: 1, name: "BOOTSTRAP_PHASE_STARTED" },
+  { no: 2, name: "BOOTSTRAP_PHASE_PROGRESS" },
+  { no: 3, name: "BOOTSTRAP_PHASE_FINALIZE" },
+  { no: 4, name: "BOOTSTRAP_PHASE_ABORTED" },
+  { no: 5, name: "BOOTSTRAP_PHASE_ERROR" },
+  { no: 6, name: "BOOTSTRAP_PHASE_RESUME_FINALIZE" },
+]);
+
+/**
+ * @generated from enum dsm.BootstrapMeasurementReport.TrustLevel
+ */
+export enum BootstrapMeasurementReport_TrustLevel {
+  /**
+   * @generated from enum value: BOOTSTRAP_TRUST_LEVEL_UNSPECIFIED = 0;
+   */
+  BOOTSTRAP_TRUST_LEVEL_UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: BOOTSTRAP_TRUST_LEVEL_FULL_ACCESS = 1;
+   */
+  BOOTSTRAP_TRUST_LEVEL_FULL_ACCESS = 1,
+
+  /**
+   * @generated from enum value: BOOTSTRAP_TRUST_LEVEL_PIN_REQUIRED = 2;
+   */
+  BOOTSTRAP_TRUST_LEVEL_PIN_REQUIRED = 2,
+
+  /**
+   * @generated from enum value: BOOTSTRAP_TRUST_LEVEL_READ_ONLY = 3;
+   */
+  BOOTSTRAP_TRUST_LEVEL_READ_ONLY = 3,
+
+  /**
+   * @generated from enum value: BOOTSTRAP_TRUST_LEVEL_BLOCKED = 4;
+   */
+  BOOTSTRAP_TRUST_LEVEL_BLOCKED = 4,
+}
+// Retrieve enum metadata with: proto3.getEnumType(BootstrapMeasurementReport_TrustLevel)
+proto3.util.setEnumType(BootstrapMeasurementReport_TrustLevel, "dsm.BootstrapMeasurementReport.TrustLevel", [
+  { no: 0, name: "BOOTSTRAP_TRUST_LEVEL_UNSPECIFIED" },
+  { no: 1, name: "BOOTSTRAP_TRUST_LEVEL_FULL_ACCESS" },
+  { no: 2, name: "BOOTSTRAP_TRUST_LEVEL_PIN_REQUIRED" },
+  { no: 3, name: "BOOTSTRAP_TRUST_LEVEL_READ_ONLY" },
+  { no: 4, name: "BOOTSTRAP_TRUST_LEVEL_BLOCKED" },
+]);
+
+/**
+ * @generated from message dsm.BootstrapFinalizeResponse
+ */
+export class BootstrapFinalizeResponse extends Message<BootstrapFinalizeResponse> {
+  /**
+   * @generated from field: dsm.BootstrapFinalizeResponse.Result result = 1;
+   */
+  result = BootstrapFinalizeResponse_Result.BOOTSTRAP_RESULT_UNSPECIFIED;
+
+  /**
+   * @generated from field: bytes device_id = 2;
+   */
+  deviceId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes genesis_hash = 3;
+   */
+  genesisHash = new Uint8Array(0);
+
+  /**
+   * @generated from field: string message = 4;
+   */
+  message = "";
+
+  constructor(data?: PartialMessage<BootstrapFinalizeResponse>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.BootstrapFinalizeResponse";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "result", kind: "enum", T: proto3.getEnumType(BootstrapFinalizeResponse_Result) },
+    { no: 2, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "genesis_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "message", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BootstrapFinalizeResponse {
+    return new BootstrapFinalizeResponse().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): BootstrapFinalizeResponse {
+    return new BootstrapFinalizeResponse().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): BootstrapFinalizeResponse {
+    return new BootstrapFinalizeResponse().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: BootstrapFinalizeResponse | PlainMessage<BootstrapFinalizeResponse> | undefined, b: BootstrapFinalizeResponse | PlainMessage<BootstrapFinalizeResponse> | undefined): boolean {
+    return proto3.util.equals(BootstrapFinalizeResponse, a, b);
+  }
+}
+
+/**
+ * @generated from enum dsm.BootstrapFinalizeResponse.Result
+ */
+export enum BootstrapFinalizeResponse_Result {
+  /**
+   * @generated from enum value: BOOTSTRAP_RESULT_UNSPECIFIED = 0;
+   */
+  BOOTSTRAP_RESULT_UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: BOOTSTRAP_RESULT_READY = 1;
+   */
+  BOOTSTRAP_RESULT_READY = 1,
+
+  /**
+   * @generated from enum value: BOOTSTRAP_RESULT_REJECTED = 2;
+   */
+  BOOTSTRAP_RESULT_REJECTED = 2,
+
+  /**
+   * @generated from enum value: BOOTSTRAP_RESULT_READ_ONLY = 3;
+   */
+  BOOTSTRAP_RESULT_READ_ONLY = 3,
+
+  /**
+   * @generated from enum value: BOOTSTRAP_RESULT_BLOCKED = 4;
+   */
+  BOOTSTRAP_RESULT_BLOCKED = 4,
+
+  /**
+   * @generated from enum value: BOOTSTRAP_RESULT_ABORTED = 5;
+   */
+  BOOTSTRAP_RESULT_ABORTED = 5,
+
+  /**
+   * @generated from enum value: BOOTSTRAP_RESULT_ERROR = 6;
+   */
+  BOOTSTRAP_RESULT_ERROR = 6,
+}
+// Retrieve enum metadata with: proto3.getEnumType(BootstrapFinalizeResponse_Result)
+proto3.util.setEnumType(BootstrapFinalizeResponse_Result, "dsm.BootstrapFinalizeResponse.Result", [
+  { no: 0, name: "BOOTSTRAP_RESULT_UNSPECIFIED" },
+  { no: 1, name: "BOOTSTRAP_RESULT_READY" },
+  { no: 2, name: "BOOTSTRAP_RESULT_REJECTED" },
+  { no: 3, name: "BOOTSTRAP_RESULT_READ_ONLY" },
+  { no: 4, name: "BOOTSTRAP_RESULT_BLOCKED" },
+  { no: 5, name: "BOOTSTRAP_RESULT_ABORTED" },
+  { no: 6, name: "BOOTSTRAP_RESULT_ERROR" },
 ]);
 
 /**
@@ -12401,12 +12686,6 @@ export class BleEvent extends Message<BleEvent> {
     case: "pairingConfirm";
   } | {
     /**
-     * @generated from field: dsm.GenesisLifecycleEvent genesis_lifecycle = 16;
-     */
-    value: GenesisLifecycleEvent;
-    case: "genesisLifecycle";
-  } | {
-    /**
      * @generated from field: dsm.BlePermissionEvent ble_permission = 17;
      */
     value: BlePermissionEvent;
@@ -12436,7 +12715,6 @@ export class BleEvent extends Message<BleEvent> {
     { no: 13, name: "identity_observed", kind: "message", T: BleIdentityObserved, oneof: "ev" },
     { no: 14, name: "pairing_status", kind: "message", T: PairingStatusUpdate, oneof: "ev" },
     { no: 15, name: "pairing_confirm", kind: "message", T: BlePairingConfirm, oneof: "ev" },
-    { no: 16, name: "genesis_lifecycle", kind: "message", T: GenesisLifecycleEvent, oneof: "ev" },
     { no: 17, name: "ble_permission", kind: "message", T: BlePermissionEvent, oneof: "ev" },
   ]);
 
@@ -15486,6 +15764,24 @@ export class Envelope extends Message<Envelope> {
      */
     value: Error;
     case: "error";
+  } | {
+    /**
+     * @generated from field: dsm.GenesisLifecycleEvent genesis_lifecycle = 100;
+     */
+    value: GenesisLifecycleEvent;
+    case: "genesisLifecycle";
+  } | {
+    /**
+     * @generated from field: dsm.BootstrapMeasurementReport bootstrap_measurement_report = 101;
+     */
+    value: BootstrapMeasurementReport;
+    case: "bootstrapMeasurementReport";
+  } | {
+    /**
+     * @generated from field: dsm.BootstrapFinalizeResponse bootstrap_finalize_response = 102;
+     */
+    value: BootstrapFinalizeResponse;
+    case: "bootstrapFinalizeResponse";
   } | { case: undefined; value?: undefined } = { case: undefined };
 
   constructor(data?: PartialMessage<Envelope>) {
@@ -15584,6 +15880,9 @@ export class Envelope extends Message<Envelope> {
     { no: 97, name: "token_policy_list_response", kind: "message", T: TokenPolicyListResponse, oneof: "payload" },
     { no: 98, name: "reconciliation_response", kind: "message", T: BilateralReconciliationResponse, oneof: "payload" },
     { no: 99, name: "error", kind: "message", T: Error, oneof: "payload" },
+    { no: 100, name: "genesis_lifecycle", kind: "message", T: GenesisLifecycleEvent, oneof: "payload" },
+    { no: 101, name: "bootstrap_measurement_report", kind: "message", T: BootstrapMeasurementReport, oneof: "payload" },
+    { no: 102, name: "bootstrap_finalize_response", kind: "message", T: BootstrapFinalizeResponse, oneof: "payload" },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): Envelope {
@@ -22290,55 +22589,6 @@ export class DeviceBindingCapturePayload extends Message<DeviceBindingCapturePay
 
   static equals(a: DeviceBindingCapturePayload | PlainMessage<DeviceBindingCapturePayload> | undefined, b: DeviceBindingCapturePayload | PlainMessage<DeviceBindingCapturePayload> | undefined): boolean {
     return proto3.util.equals(DeviceBindingCapturePayload, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.DeviceBindingCaptureResult
- */
-export class DeviceBindingCaptureResult extends Message<DeviceBindingCaptureResult> {
-  /**
-   * @generated from field: bool installed = 1;
-   */
-  installed = false;
-
-  /**
-   * @generated from field: bytes device_id = 2;
-   */
-  deviceId = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes genesis_hash = 3;
-   */
-  genesisHash = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<DeviceBindingCaptureResult>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.DeviceBindingCaptureResult";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "installed", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
-    { no: 2, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 3, name: "genesis_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DeviceBindingCaptureResult {
-    return new DeviceBindingCaptureResult().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DeviceBindingCaptureResult {
-    return new DeviceBindingCaptureResult().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DeviceBindingCaptureResult {
-    return new DeviceBindingCaptureResult().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: DeviceBindingCaptureResult | PlainMessage<DeviceBindingCaptureResult> | undefined, b: DeviceBindingCaptureResult | PlainMessage<DeviceBindingCaptureResult> | undefined): boolean {
-    return proto3.util.equals(DeviceBindingCaptureResult, a, b);
   }
 }
 

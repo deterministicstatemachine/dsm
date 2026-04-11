@@ -172,10 +172,12 @@ class SiliconFingerprint(
         }
         val manufacturingGate = CdbrwEntropyHealth.manufacturingGate(hBars)
         if (!manufacturingGate.passed) {
-            throw SiliconFpException(
-                SiliconFpError.INSUFFICIENT_STABLE_BITS,
-                "Manufacturing variance gate failed. sigma=${manufacturingGate.sigmaDevice}"
+            Log.w(
+                TAG,
+                "Manufacturing variance gate below target during enrollment; proceeding with stored enrollment and deferring final trust decision to verification policy. sigma=${manufacturingGate.sigmaDevice}"
             )
+        } else {
+            Log.d(TAG, "Manufacturing variance gate passed: sigma=${manufacturingGate.sigmaDevice}")
         }
 
         val meanHistogram = CdbrwMath.meanHistogram(histograms)
@@ -225,7 +227,7 @@ class SiliconFingerprint(
      * @return Derived result with current anchor, stable bits, and drift from reference
      * @throws SiliconFpException if not enrolled or config mismatch
      */
-    fun derive(context: Context): Derived {
+    fun derive(context: Context, onProgress: ((completed: Int, total: Int) -> Unit)? = null): Derived {
         Log.d(TAG, "Deriving C-DBRW fingerprint with ${config.verifyTrials} trials...")
         bumpPriority()
 
@@ -242,8 +244,8 @@ class SiliconFingerprint(
 
         val env = environmentBytes(context)
 
-        val trials = Array(config.verifyTrials) { _ ->
-            SiliconFingerprintNative.captureOrbitDensity(
+        val trials = Array(config.verifyTrials) { i ->
+            val result = SiliconFingerprintNative.captureOrbitDensity(
                 envBytes = env,
                 arenaBytes = config.arenaBytes,
                 probes = config.probes,
@@ -251,6 +253,8 @@ class SiliconFingerprint(
                 warmupRounds = config.warmupRounds,
                 rotationBits = config.rotationBits
             ) ?: throw SiliconFpException(SiliconFpError.INTERNAL, "Native capture returned null")
+            onProgress?.invoke(i + 1, config.verifyTrials)
+            result
         }
 
         val verifyHistograms = Array(config.verifyTrials) { i ->

@@ -6,7 +6,7 @@ jest.mock('../WebViewBridge', () => ({
     if (Array.isArray(data)) return new Uint8Array(data);
     throw new Error('normalizeToBytes: expected Uint8Array or number[]');
   }),
-  appRouterInvokeBin: jest.fn(),
+  routerInvokeBin: jest.fn(),
   requestBlePermissions: jest.fn(),
 }));
 
@@ -14,7 +14,7 @@ import * as pb from '../../proto/dsm_app_pb';
 import { getContacts, addContact, requestBlePermissions } from '../contacts';
 import {
   getContactsStrictBridge,
-  appRouterInvokeBin,
+  routerInvokeBin,
   requestBlePermissions as bridgeRequestBlePermissions,
 } from '../WebViewBridge';
 
@@ -207,7 +207,7 @@ describe('contacts.ts', () => {
           value: new pb.ContactAddResponse({ alias: 'TestContact', deviceId: deviceId as any }),
         },
       });
-      (appRouterInvokeBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
+      (routerInvokeBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
 
       const result = await addContact({ alias: 'TestContact', deviceId, genesisHash, signingPublicKey });
       expect(result.accepted).toBe(true);
@@ -225,7 +225,7 @@ describe('contacts.ts', () => {
           value: new pb.ContactAddResponse({ alias: '' }),
         },
       });
-      (appRouterInvokeBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
+      (routerInvokeBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
 
       const result = await addContact({ alias: 'Test', deviceId, genesisHash, signingPublicKey });
       expect(result.accepted).toBe(false);
@@ -241,7 +241,7 @@ describe('contacts.ts', () => {
         version: 3,
         payload: { case: 'error', value: new pb.Error({ code: 9, message: 'duplicate' }) },
       });
-      (appRouterInvokeBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
+      (routerInvokeBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
 
       const result = await addContact({ alias: 'Test', deviceId, genesisHash, signingPublicKey });
       expect(result.accepted).toBe(false);
@@ -253,7 +253,7 @@ describe('contacts.ts', () => {
       const genesisHash = new Uint8Array(32).fill(2);
       const signingPublicKey = new Uint8Array(64).fill(3);
 
-      (appRouterInvokeBin as jest.Mock).mockRejectedValue(new Error('bridge fail'));
+      (routerInvokeBin as jest.Mock).mockRejectedValue(new Error('bridge fail'));
 
       const result = await addContact({ alias: 'Test', deviceId, genesisHash, signingPublicKey });
       expect(result.accepted).toBe(false);

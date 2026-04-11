@@ -485,8 +485,8 @@ impl AppRouterImpl {
             // -------- nfc.ring.write --------
             // Validates NFC backup state (Rust is the authoritative source).
             // Returns a proper FramedEnvelopeV3 so Kotlin knows whether to launch
-            // NfcWriteActivity.  Kotlin must call this route first (via
-            // appRouterInvokeFramedSafe), check for an error response, and only
+            // NfcWriteActivity. Kotlin must call this route first via shared ingress,
+            // check for an error response, and only
             // launch the NFC activity on success.
             "nfc.ring.write" => {
                 // Check NFC backup is enabled.

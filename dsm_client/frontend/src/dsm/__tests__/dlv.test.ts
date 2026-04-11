@@ -1,10 +1,10 @@
 jest.mock('../WebViewBridge', () => ({
-  appRouterInvokeBin: jest.fn(),
+  routerInvokeBin: jest.fn(),
 }));
 
 import * as pb from '../../proto/dsm_app_pb';
 import { createCustomDlv } from '../dlv';
-import { appRouterInvokeBin } from '../WebViewBridge';
+import { routerInvokeBin } from '../WebViewBridge';
 import { encodeBase32Crockford } from '../../utils/textId';
 
 function frameEnvelope(envelope: pb.Envelope): Uint8Array {
@@ -43,7 +43,7 @@ describe('dlv.ts', () => {
           value: new pb.AppStateResponse({ value: 'VAULT_ID_B32' }),
         },
       });
-      (appRouterInvokeBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
+      (routerInvokeBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
 
       const result = await createCustomDlv({ lock: lockB32 });
       expect(result.success).toBe(true);
@@ -61,7 +61,7 @@ describe('dlv.ts', () => {
           value: new pb.AppStateResponse({ value: '' }),
         },
       });
-      (appRouterInvokeBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
+      (routerInvokeBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
 
       const result = await createCustomDlv({ lock: lockB32 });
       expect(result.success).toBe(true);
@@ -80,7 +80,7 @@ describe('dlv.ts', () => {
           value: new pb.AppStateResponse({}),
         },
       });
-      (appRouterInvokeBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
+      (routerInvokeBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
 
       const result = await createCustomDlv({ lock: lockB32 });
       expect(result.success).toBe(true);
@@ -108,7 +108,7 @@ describe('dlv.ts', () => {
         version: 3,
         payload: { case: 'error', value: new pb.Error({ message: 'vault limit reached' }) },
       });
-      (appRouterInvokeBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
+      (routerInvokeBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
 
       const result = await createCustomDlv({ lock: lockB32 });
       expect(result.success).toBe(false);
@@ -123,7 +123,7 @@ describe('dlv.ts', () => {
         version: 3,
         payload: { case: 'balancesListResponse', value: new pb.BalancesListResponse() },
       });
-      (appRouterInvokeBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
+      (routerInvokeBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
 
       const result = await createCustomDlv({ lock: lockB32 });
       expect(result.success).toBe(false);
@@ -162,7 +162,7 @@ describe('dlv.ts', () => {
       const dlv = makeValidDlvCreate();
       const lockB32 = encodeDlvToBase32(dlv);
 
-      (appRouterInvokeBin as jest.Mock).mockRejectedValue(new Error('network fail'));
+      (routerInvokeBin as jest.Mock).mockRejectedValue(new Error('network fail'));
 
       const result = await createCustomDlv({ lock: lockB32 });
       expect(result.success).toBe(false);

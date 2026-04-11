@@ -3,8 +3,8 @@ import * as pb from '../proto/dsm_app_pb';
 import { decodeBase32Crockford, encodeBase32Crockford } from '../utils/textId';
 import { decodeFramedEnvelopeV3 } from './decoding';
 import {
-    appRouterQueryBin,
-    appRouterInvokeBin,
+    routerQueryBin,
+    routerInvokeBin,
     getDeviceIdBinBridgeAsync,
     getSigningPublicKeyBinBridgeAsync,
     acceptBilateralByCommitmentBridge,
@@ -155,7 +155,7 @@ export async function sendOnlineTransfer(transfer: GenericTransaction): Promise<
       seq: safeSeq as any,
     } as any);
 
-    // Route through AppRouter via appRouterInvokeBin('wallet.send').
+    // Route through AppRouter via routerInvokeBin('wallet.send').
     // The Rust handler at AppRouterImpl.handle_wallet_invoke decodes the ArgPack,
     // runs process_online_transfer_logic, and returns Envelope.onlineTransferResponse.
     const argPack = new pb.ArgPack({
@@ -163,7 +163,7 @@ export async function sendOnlineTransfer(transfer: GenericTransaction): Promise<
       body: new Uint8Array(req.toBinary()),
     });
 
-    const resBytes = await appRouterInvokeBin('wallet.send', new Uint8Array(argPack.toBinary()));
+    const resBytes = await routerInvokeBin('wallet.send', new Uint8Array(argPack.toBinary()));
 
     if (!resBytes || resBytes.length === 0) {
       throw new Error('Empty response from wallet.send');
@@ -222,7 +222,7 @@ export async function sendOnlineTransferSmart(
         body: new Uint8Array(smartReq.toBinary()),
       });
 
-      const resBytes = await appRouterInvokeBin('wallet.sendSmart', new Uint8Array(argPack.toBinary()));
+      const resBytes = await routerInvokeBin('wallet.sendSmart', new Uint8Array(argPack.toBinary()));
 
       if (!resBytes || resBytes.length === 0) {
          throw new Error("Empty response from wallet.sendSmart");
@@ -420,7 +420,7 @@ export async function offlineSend(transfer: GenericTransaction): Promise<Generic
     }
 
     // --- Delegate native authoring + BLE dispatch to wallet.sendOffline ---
-    const respBytes = await appRouterInvokeBin('wallet.sendOffline', new Uint8Array(argPack.toBinary()));
+    const respBytes = await routerInvokeBin('wallet.sendOffline', new Uint8Array(argPack.toBinary()));
     if (!respBytes || respBytes.length === 0) {
       finish({ accepted: false, result: 'offlineSend: empty response from bridge' });
       return { accepted: false, result: 'offlineSend: empty response from bridge' };
@@ -580,7 +580,7 @@ export async function rejectOfflineTransfer(args: { commitmentHash: Uint8Array, 
 }
 
 export async function getLogicalTick(): Promise<bigint> {
-  const resBytes = await appRouterQueryBin('sys.tick');
+  const resBytes = await routerQueryBin('sys.tick');
   const pack = pb.ArgPack.fromBinary(resBytes);
   const tickBytes = pack.body;
   if (tickBytes.length !== 8) {
@@ -644,7 +644,7 @@ export async function sendOnlineMessage(recipientId: string, payload: any): Prom
       body: new Uint8Array(req.toBinary()),
     });
 
-    const resBytes = await appRouterInvokeBin('message.send', new Uint8Array(argPack.toBinary()));
+    const resBytes = await routerInvokeBin('message.send', new Uint8Array(argPack.toBinary()));
 
     // Canonical Envelope v3 decode
     let resp: pb.OnlineMessageResponse | null = null;
@@ -755,7 +755,7 @@ export async function claimFaucet(policyId: string): Promise<{ success: boolean;
       body,
     });
 
-    const bytes: Uint8Array = await appRouterInvokeBin('faucet.claim', argPack.toBinary());
+    const bytes: Uint8Array = await routerInvokeBin('faucet.claim', argPack.toBinary());
     const _debug: any = {
       resultBytesLen: bytes?.length ?? 0,
     };
@@ -837,7 +837,7 @@ export async function getPendingBilateralListStrict(): Promise<{ transactions: p
 
 /**
  * Claim tokens from the testnet faucet.
- * Wraps FaucetClaimRequest via appRouterInvokeBin('faucet.claim', ...).
+ * Wraps FaucetClaimRequest via routerInvokeBin('faucet.claim', ...).
  *
  * Note: The native backend handles the actual logic in `transition.rs` and `client_db.rs`,
  * including CPTA verification and balance updates. The frontend just invokes the operation.
@@ -860,11 +860,11 @@ export async function claimTestnetFaucet(): Promise<pb.FaucetClaimResponse> {
     codec: pb.Codec.PROTO,
     body: new Uint8Array(req.toBinary()),
   });
-  logger.debug('[transactions.claimTestnetFaucet] ArgPack created, calling appRouterInvokeBin(faucet.claim, ...)');
+  logger.debug('[transactions.claimTestnetFaucet] ArgPack created, calling routerInvokeBin(faucet.claim, ...)');
 
   // 'faucet.claim' maps to the FaucetClaimRequest handler in the native AppRouter
-  const resBytes = await appRouterInvokeBin('faucet.claim', argPack.toBinary());
-  logger.debug('[transactions.claimTestnetFaucet] appRouterInvokeBin returned, resBytes.length=', resBytes.length);
+  const resBytes = await routerInvokeBin('faucet.claim', argPack.toBinary());
+  logger.debug('[transactions.claimTestnetFaucet] routerInvokeBin returned, resBytes.length=', resBytes.length);
 
   // Canonical Envelope v3 decode
   const env5 = decodeFramedEnvelopeV3(resBytes);

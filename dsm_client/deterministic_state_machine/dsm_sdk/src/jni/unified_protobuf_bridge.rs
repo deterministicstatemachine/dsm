@@ -8,10 +8,10 @@
 //! If you are building a native Android app (Jetpack Compose, no WebView),
 //! your primary entry points are:
 //!
-//! - `appRouterQueryFramed(jbyteArray) -> jbyteArray`
-//!   Read-only queries: balance, history, contacts, system tick, etc.
-//! - `appRouterInvokeFramed(jbyteArray) -> jbyteArray`
-//!   State-mutating operations: send tokens, create tokens, claim faucet, etc.
+//! - `dispatchStartup(jbyteArray) -> jbyteArray`
+//!   Startup bootstrap and early identity initialization.
+//! - `dispatchIngress(jbyteArray) -> jbyteArray`
+//!   Shared semantic router/envelope boundary for queries and invokes.
 //! - `processEnvelopeV3(jbyteArray) -> jbyteArray`
 //!   Generic Envelope v3 processing (BLE messages, bilateral protocol).
 //!
@@ -50,7 +50,6 @@ use prost::Message;
 use tokio::runtime::Handle;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use dsm::crypto::blake3::dsm_domain_hasher;
 use dsm::utils::deterministic_time as dt;
 use crate::storage::client_db::{get_contact_by_device_id, get_contact_chain_tip};
 use crate::sdk::session_manager::SDK_READY;
@@ -283,7 +282,11 @@ fn ensure_bootstrap() {
         log::info!("ensure_bootstrap: SDK context not initialized (bootstrap is platform-managed)");
     }
 
-    if SDK_READY.load(Ordering::SeqCst) {
+    // C-DBRW check: only enforce after genesis. Pre-genesis the binding key does not
+    // exist yet — that is expected. Post-genesis a missing key indicates an attack.
+    if SDK_READY.load(Ordering::SeqCst)
+        && crate::sdk::app_state::AppState::get_has_identity()
+    {
         let dbrw_ok = crate::fetch_dbrw_binding_key()
             .map(|k| k.len() == 32)
             .unwrap_or(false);
@@ -305,7 +308,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_dispatchStart
     crate::jni::bridge_utils::jni_catch_unwind_jbytearray(
         "dispatchStartup",
         std::panic::AssertUnwindSafe(|| {
-            let mut env = match unsafe { env_from(env) } {
+            let env = match unsafe { env_from(env) } {
                 Some(e) => e,
                 None => return std::ptr::null_mut(),
             };
@@ -338,7 +341,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_dispatchIngre
     crate::jni::bridge_utils::jni_catch_unwind_jbytearray(
         "dispatchIngress",
         std::panic::AssertUnwindSafe(|| {
-            let mut env = match unsafe { env_from(env) } {
+            let env = match unsafe { env_from(env) } {
                 Some(e) => e,
                 None => return std::ptr::null_mut(),
             };
@@ -589,7 +592,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_initSdkV3(
                 SDK_READY.store(false, Ordering::SeqCst);
                 return respond(
                     pb::envelope::Payload::InitFailed(pb::InitFailed {
-                        reason: pb::init_failed::Reason::RuntimeUnavailable as i32,
+                        reason: pb::init_failed::Reason::PlatformContextMissing as i32,
                         message: format!("failed to set storage base dir: {}", error.message),
                     }),
                     &mut env,
@@ -2155,296 +2158,6 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_isSdkFullyRea
     )
 }
 
-/// Route a framed query through the installed SDK AppRouter.
-/// This is the primary JNI entrypoint for appRouterQuery - handles full framing.
-///
-/// Input frame format: [8-byte reqId][AppRouterPayload protobuf bytes]
-/// Output frame format: [8-byte reqId][payload]
-#[no_mangle]
-pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_appRouterQueryFramed(
-    env: jni::sys::JNIEnv,
-    _clazz: jni::sys::jclass,
-    jframed: jni::sys::jbyteArray,
-) -> jni::sys::jbyteArray {
-    let env_raw = env;
-    let jframed_raw = jframed;
-    // Shared slot so the panic handler can report which query path was executing.
-    let query_path_for_panic = std::sync::Mutex::new(String::new());
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut env = match unsafe { env_from(env_raw) } {
-            Some(e) => e,
-            None => return std::ptr::null_mut(),
-        };
-        let jframed = unsafe { jba_from(jframed_raw) };
-        let raw: Vec<u8> = match env.convert_byte_array(&jframed) {
-            Ok(v) => v,
-            Err(_) => Vec::new(),
-        };
-
-        // Parse frame: [8-byte reqId][AppRouterPayload protobuf bytes]
-        if raw.len() < 9 {
-            log::error!("appRouterQueryFramed: frame too short: {} bytes", raw.len());
-            return error_byte_array(
-                &mut env,
-                helpers::JniErrorCode::InvalidInput as u32,
-                "frame too short",
-            )
-            .into_raw();
-        }
-
-        let req_id = &raw[0..8];
-        let payload = match pb::AppRouterPayload::decode(&raw[8..]) {
-            Ok(v) => v,
-            Err(e) => {
-                log::error!("appRouterQueryFramed: invalid AppRouterPayload: {}", e);
-                return frame_error_response(
-                    &mut env,
-                    req_id,
-                    helpers::JniErrorCode::InvalidInput as u32,
-                    "invalid app router payload",
-                );
-            }
-        };
-
-        let path = payload.method_name;
-        // Record query path for the panic handler before any panicking code runs.
-        if let Ok(mut g) = query_path_for_panic.lock() {
-            *g = path.clone();
-        }
-
-        let params = payload.args;
-        log::info!(
-            "appRouterQueryFramed: path={} params_len={}",
-            path,
-            params.len()
-        );
-
-        ensure_bootstrap();
-        let out = route_query_via_ingress(req_id, path, params);
-
-        log::debug!(
-            "appRouterQueryFramed: returning {} bytes total (8-byte reqId + {} payload bytes)",
-            out.len(),
-            out.len().saturating_sub(8),
-        );
-
-        match env.byte_array_from_slice(&out) {
-            Ok(arr) => arr.into_raw(),
-            Err(e) => {
-                log::error!(
-                    "appRouterQueryFramed: failed to create return byte array: {}",
-                    e
-                );
-                error_byte_array(
-                    &mut env,
-                    helpers::JniErrorCode::EncodingFailed as u32,
-                    "failed to create return bytes",
-                )
-                .into_raw()
-            }
-        }
-    })) {
-        Ok(result) => result,
-        Err(panic) => {
-            let panic_msg = crate::jni::bridge_utils::panic_message(&panic);
-            let qpath = query_path_for_panic
-                .lock()
-                .map(|g| g.clone())
-                .unwrap_or_default();
-            log::error!(
-                "appRouterQueryFramed: panic captured: path={} panic={}",
-                qpath,
-                panic_msg
-            );
-            let mut env = match unsafe { env_from(env_raw) } {
-                Some(e) => e,
-                None => return std::ptr::null_mut(),
-            };
-            let detail = format!(
-                "panic in appRouterQueryFramed: path={} panic={}",
-                qpath, panic_msg
-            );
-            frame_error_response(
-                &mut env,
-                &[0u8; 8],
-                helpers::JniErrorCode::ProcessingFailed as u32,
-                &detail,
-            )
-        }
-    }
-}
-
-/// Helper to frame an error response with reqId prefix
-#[cfg(target_os = "android")]
-fn frame_error_response(
-    env: &mut jni::JNIEnv,
-    req_id: &[u8],
-    code: u32,
-    msg: &str,
-) -> jni::sys::jbyteArray {
-    let err_bytes = error_transport_bytes(code, msg);
-    let mut out = Vec::with_capacity(8 + err_bytes.len());
-    out.extend_from_slice(if req_id.len() >= 8 {
-        &req_id[0..8]
-    } else {
-        &[0u8; 8]
-    });
-    out.extend_from_slice(&err_bytes);
-    env.byte_array_from_slice(&out)
-        .unwrap_or_else(|_| empty_byte_array_or_empty(env))
-        .into_raw()
-}
-
-/// Invoke a method on the installed AppRouter with full framed request.
-/// This is the primary JNI entrypoint for appRouterInvoke - handles full framing.
-///
-/// Input frame format: [AppRouterPayload protobuf bytes]
-/// Output frame format: [payload] (no reqId for invoke - it's embedded in the frame)
-#[no_mangle]
-pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_appRouterInvokeFramed(
-    env: jni::sys::JNIEnv,
-    _clazz: jni::sys::jclass,
-    jframed: jni::sys::jbyteArray,
-) -> jni::sys::jbyteArray {
-    let env_raw = env;
-    let jframed_raw = jframed;
-    // Shared slot so the panic handler can report which method was executing.
-    let invoke_method_for_panic = std::sync::Mutex::new(String::new());
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut env = match unsafe { env_from(env_raw) } {
-            Some(e) => e,
-            None => return std::ptr::null_mut(),
-        };
-        let jframed = unsafe { jba_from(jframed_raw) };
-        let raw: Vec<u8> = match env.convert_byte_array(&jframed) {
-            Ok(v) => v,
-            Err(_) => Vec::new(),
-        };
-
-        // Parse frame: [AppRouterPayload protobuf bytes]
-        if raw.is_empty() {
-            log::error!(
-                "appRouterInvokeFramed: frame too short: {} bytes",
-                raw.len()
-            );
-            return error_byte_array(
-                &mut env,
-                helpers::JniErrorCode::InvalidInput as u32,
-                "frame too short",
-            )
-            .into_raw();
-        }
-
-        let payload = match pb::AppRouterPayload::decode(raw.as_slice()) {
-            Ok(v) => v,
-            Err(e) => {
-                let preview_len = std::cmp::min(raw.len(), 24);
-                let preview_b32 =
-                    crate::util::text_id::encode_base32_crockford(&raw[0..preview_len]);
-                log::error!(
-                "appRouterInvokeFramed: invalid AppRouterPayload (frame size: {}) preview_b32={} err={}",
-                raw.len(),
-                preview_b32,
-                e
-            );
-                return error_byte_array(
-                    &mut env,
-                    helpers::JniErrorCode::InvalidInput as u32,
-                    "invalid app router payload",
-                )
-                .into_raw();
-            }
-        };
-
-        let method = payload.method_name;
-        // Record method name for the panic handler before any panicking code runs.
-        if let Ok(mut g) = invoke_method_for_panic.lock() {
-            *g = method.clone();
-        }
-
-        let args = payload.args;
-        log::info!(
-            "appRouterInvokeFramed: method={} args_len={}",
-            method,
-            args.len()
-        );
-
-        ensure_bootstrap();
-
-        // Defensive: make sure the core bilateral handler is installed before invoking
-        // router methods that may route into the offline send path. Some app restarts
-        // or partial initializations can leave the handler unset, which triggers the
-        // core warning "Bilateral handler not installed". We attempt a minimal SDK
-        // init here to idempotently install handlers without depending on full env
-        // configuration. This is safe for both offline and online operations.
-        #[cfg(all(target_os = "android", feature = "bluetooth"))]
-        {
-            if crate::bridge::bilateral_handler().is_none() {
-                use crate::init::SdkConfig;
-                let cfg = SdkConfig {
-                    node_id: "default".to_string(),
-                    storage_endpoints: Vec::new(),
-                    enable_offline: true,
-                };
-                log::warn!("appRouterInvokeFramed: bilateral handler missing – attempting offline-only SDK init");
-                match crate::init::init_dsm_sdk(&cfg) {
-                    Ok(()) => {
-                        log::info!("appRouterInvokeFramed: offline-only SDK init completed")
-                    }
-                    Err(e) => {
-                        log::error!("appRouterInvokeFramed: offline-only SDK init failed: {}", e)
-                    }
-                }
-            }
-        }
-        let response_bytes = route_invoke_via_ingress_bytes(method, args);
-
-        match env.byte_array_from_slice(&response_bytes) {
-            Ok(arr) => arr.into_raw(),
-            Err(e) => {
-                log::error!(
-                    "appRouterInvokeFramed: failed to create return byte array: {}",
-                    e
-                );
-                error_byte_array(
-                    &mut env,
-                    helpers::JniErrorCode::EncodingFailed as u32,
-                    "failed to create return bytes",
-                )
-                .into_raw()
-            }
-        }
-    })) {
-        Ok(result) => result,
-        Err(panic) => {
-            let panic_msg = crate::jni::bridge_utils::panic_message(&panic);
-            let method_name = invoke_method_for_panic
-                .lock()
-                .map(|g| g.clone())
-                .unwrap_or_default();
-            log::error!(
-                "appRouterInvokeFramed: panic captured: method={} panic={}",
-                method_name,
-                panic_msg
-            );
-            let mut env = match unsafe { env_from(env_raw) } {
-                Some(e) => e,
-                None => return std::ptr::null_mut(),
-            };
-            let detail = format!(
-                "panic in appRouterInvokeFramed: method={} panic={}",
-                method_name, panic_msg
-            );
-            error_byte_array(
-                &mut env,
-                helpers::JniErrorCode::ProcessingFailed as u32,
-                &detail,
-            )
-            .into_raw()
-        }
-    }
-}
-
 /// Canonical offline send validation + response generation.
 ///
 /// This is a strict, protobuf-bytes JNI surface used by the Android MessagePort
@@ -2841,9 +2554,8 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bilateralOffl
     });
 
         // Prepend Envelope v3 framing byte so all return paths are [0x03][proto].
-        // The AppRouter path does this via pack_envelope_ok; the bilateral BLE
-        // direct path previously delegated to Kotlin BridgeRouterHandler, but
-        // content inspection (adding a protocol byte) must live in Rust.
+        // Content inspection (adding a protocol byte) must live in Rust, not in
+        // any platform bridge shim.
         let mut framed = Vec::with_capacity(1 + raw.len());
         framed.push(0x03);
         framed.extend_from_slice(&raw);
@@ -4854,121 +4566,6 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_createTransac
     )
 }
 
-/// Initialize SDK context with device identity
-/// Returns true on success, false on failure
-#[no_mangle]
-#[cfg(target_os = "android")]
-pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_initializeSdkContext(
-    env: jni::sys::JNIEnv,
-    _clazz: jni::sys::jclass,
-    device_id: jni::sys::jbyteArray,
-    genesis_hash: jni::sys::jbyteArray,
-    entropy: jni::sys::jbyteArray,
-) -> jni::sys::jboolean {
-    crate::jni::bridge_utils::jni_catch_unwind_jboolean(
-        "initializeSdkContext",
-        std::panic::AssertUnwindSafe(|| {
-            let env = match unsafe { env_from(env) } {
-                Some(e) => e,
-                None => return jni::sys::JNI_FALSE,
-            };
-            let jdev = unsafe { jba_from(device_id) };
-            let jgen = unsafe { jba_from(genesis_hash) };
-            let jent = unsafe { jba_from(entropy) };
-
-            let dev_bytes = match env.convert_byte_array(&jdev) {
-                Ok(v) => v,
-                Err(_) => return 0, // false
-            };
-
-            let gen_bytes = match env.convert_byte_array(&jgen) {
-                Ok(v) => v,
-                Err(_) => return 0, // false
-            };
-
-            let ent_bytes = match env.convert_byte_array(&jent) {
-                Ok(v) => v,
-                Err(_) => return 0, // false
-            };
-
-            // Validate input lengths
-            if dev_bytes.len() != 32 || gen_bytes.len() != 32 {
-                log::error!(
-                    "initializeSdkContext: invalid input lengths - device_id: {}, genesis_hash: {}",
-                    dev_bytes.len(),
-                    gen_bytes.len()
-                );
-                return 0; // false
-            }
-
-            match crate::initialize_sdk_context(dev_bytes.clone(), gen_bytes.clone(), ent_bytes) {
-                Ok(_) => {
-                    log::info!("initializeSdkContext: SDK context initialized successfully");
-
-                    // Run device performance calibration for dynamic timeouts
-                    // This must happen after SDK context is ready but before BLE operations
-                    let runtime = crate::runtime::get_runtime();
-                    let calibration_result = runtime.block_on(async {
-                        dsm::utils::timeout::calibrate_device_performance().await
-                    });
-
-                    match calibration_result {
-                        Ok(calibration) => {
-                            log::info!(
-                        "initializeSdkContext: Device calibration completed - performance_factor: {:.3}",
-                        calibration.performance_factor
-                    );
-
-                            // Beta Instruction: Warn on outlier hardware
-                            // Thresholds: < 0.2 (extremely slow) or > 5.0 (extremely fast) relative to baseline
-                            if calibration.performance_factor < 0.2
-                                || calibration.performance_factor > 5.0
-                            {
-                                log::warn!("DSM_HARDWARE_WARNING: Device performance outlier (factor {:.3}). Tick drift may occur.", calibration.performance_factor);
-                            }
-                        }
-                        Err(e) => {
-                            log::warn!(
-                        "initializeSdkContext: Device calibration failed (using defaults): {}",
-                        e
-                    );
-                        }
-                    }
-
-                    // Also set AppState for bootstrap compatibility (deterministic key generation)
-                    // Generate deterministic public key from device ID (same as bootstrap adapter)
-                    let mut hasher = dsm_domain_hasher("DSM/device-key");
-                    hasher.update(&dev_bytes);
-                    let seed = hasher.finalize();
-                    let public_key = seed.as_bytes()[0..32].to_vec();
-
-                    // Use the canonical empty SMT root (same as bootstrap adapter)
-                    let smt_root = dsm::merkle::sparse_merkle_tree::empty_root(
-                        dsm::merkle::sparse_merkle_tree::DEFAULT_SMT_HEIGHT,
-                    )
-                    .to_vec();
-
-                    // Set identity info in AppState (idempotent)
-                    crate::sdk::app_state::AppState::set_identity_info_if_empty(
-                        dev_bytes, public_key, gen_bytes, smt_root,
-                    );
-                    crate::sdk::app_state::AppState::set_has_identity(true);
-
-                    log::info!("initializeSdkContext: AppState identity info set successfully");
-                    1 // true
-                }
-                Err(e) => {
-                    log::error!(
-                        "initializeSdkContext: failed to initialize SDK context: {}",
-                        e
-                    );
-                    0 // false
-                }
-            }
-        }),
-    )
-}
-
 /// Ensure the AppRouter is installed (idempotent; safe to call multiple times).
 /// This should be called after SDK context initialization to enable wallet/contacts screens.
 /// Returns true if AppRouter is available, false otherwise.
@@ -6210,7 +5807,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getNfcRingPas
 }
 
 /// Silently refresh the pending NFC capsule if backup is enabled and a key is cached.
-/// Called by Kotlin after every state-mutating operation (processEnvelopeV3, appRouterInvoke).
+/// Called by Kotlin after every state-mutating operation (processEnvelopeV3, shared ingress invoke).
 /// Rust decides whether to actually create a capsule. No-op if backup disabled or no key.
 #[no_mangle]
 pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_maybeRefreshNfcCapsule(

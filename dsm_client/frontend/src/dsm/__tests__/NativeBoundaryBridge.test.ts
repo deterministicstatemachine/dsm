@@ -1,5 +1,5 @@
 import { setBridgeInstance } from '../../bridge/BridgeRegistry';
-import { appRouterQueryBin } from '../WebViewBridge';
+import { routerQueryBin } from '../WebViewBridge';
 import { decodeSdkEventToLegacyTopic } from '../NativeBoundaryBridge';
 import { IngressRequest, IngressResponse, SdkEvent, SdkEventKind } from '../../proto/dsm_app_pb';
 
@@ -13,7 +13,7 @@ describe('NativeBoundaryBridge', () => {
     delete (globalThis as any).window.DsmBridge;
   });
 
-  test('appRouterQueryBin uses ingress boundary when available', async () => {
+  test('routerQueryBin uses ingress boundary when available', async () => {
     let seenRequest: IngressRequest | undefined;
     const bridge = {
       __binary: true,
@@ -27,7 +27,7 @@ describe('NativeBoundaryBridge', () => {
     (globalThis as any).window.DsmBridge = bridge;
     setBridgeInstance(bridge);
 
-    const result = await appRouterQueryBin('wallet.balance', new Uint8Array([1, 2, 3]));
+    const result = await routerQueryBin('wallet.balance', new Uint8Array([1, 2, 3]));
 
     expect(result).toEqual(new Uint8Array([9, 8, 7]));
     expect(seenRequest?.operation.case).toBe('routerQuery');
@@ -44,6 +44,19 @@ describe('NativeBoundaryBridge', () => {
     expect(decodeSdkEventToLegacyTopic(bytes)).toEqual({
       topic: 'dsm-wallet-refresh',
       payload: new Uint8Array([0xaa]),
+    });
+  });
+
+  test('canonical envelope sdk events map to canonical.envelope.bin', () => {
+    const payload = new Uint8Array([0x03, 0x08, 0x01]);
+    const bytes = new SdkEvent({
+      kind: SdkEventKind.CANONICAL_ENVELOPE,
+      payload,
+    }).toBinary();
+
+    expect(decodeSdkEventToLegacyTopic(bytes)).toEqual({
+      topic: 'canonical.envelope.bin',
+      payload,
     });
   });
 });

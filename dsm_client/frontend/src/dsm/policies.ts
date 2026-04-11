@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import * as pb from '../proto/dsm_app_pb';
 import {
-  appRouterInvokeBin,
+  routerInvokeBin,
   getTokenPolicyBytes as getTokenPolicyBytesBridge,
   listCachedTokenPolicies,
   publishTokenPolicyBytes as publishTokenPolicyBytesBridge,
@@ -128,7 +128,7 @@ export async function createToken(details: any): Promise<{ success: boolean; tok
       body: new Uint8Array(req.toBinary()),
     });
 
-    const resBytes = await appRouterInvokeBin('token.create', new Uint8Array(argPack.toBinary()));
+    const resBytes = await routerInvokeBin('token.create', new Uint8Array(argPack.toBinary()));
 
     // Canonical Envelope v3 decode (TokenCreateResponse now in Envelope payload oneof)
     const env = decodeFramedEnvelopeV3(resBytes);

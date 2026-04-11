@@ -7,6 +7,7 @@
 
 use std::path::PathBuf;
 
+use dsm::pbi::{PlatformContext, RawPlatformInputs};
 use prost::Message;
 
 use crate::generated as pb;
@@ -32,7 +33,343 @@ fn ingress_error(code: u32, message: impl Into<String>) -> pb::Error {
     }
 }
 
+fn build_envelope(payload: pb::envelope::Payload) -> Envelope {
+    Envelope {
+        version: 3,
+        headers: None,
+        message_id: vec![0u8; 16],
+        payload: Some(payload),
+    }
+}
+
+fn encode_framed_envelope(payload: pb::envelope::Payload) -> Result<Vec<u8>, pb::Error> {
+    let envelope = build_envelope(payload);
+    let mut buf = Vec::with_capacity(1 + envelope.encoded_len());
+    buf.push(0x03);
+    envelope.encode(&mut buf).map_err(|e| {
+        ingress_error(
+            ERROR_CODE_PROCESSING_FAILED,
+            format!("ingress: envelope encode failed: {e}"),
+        )
+    })?;
+    Ok(buf)
+}
+
+fn push_canonical_envelope_event(payload: pb::envelope::Payload) -> Result<(), pb::Error> {
+    let framed = encode_framed_envelope(payload)?;
+    crate::event::push_sdk_event(pb::SdkEventKind::CanonicalEnvelope as i32, framed);
+    Ok(())
+}
+
+fn push_genesis_lifecycle_event(kind: i32, progress: u32) -> Result<(), pb::Error> {
+    push_canonical_envelope_event(pb::envelope::Payload::GenesisLifecycle(
+        pb::GenesisLifecycleEvent { kind, progress },
+    ))
+}
+
+fn bootstrap_finalize_envelope(
+    result: i32,
+    device_id: Vec<u8>,
+    genesis_hash: Vec<u8>,
+    message: impl Into<String>,
+) -> Envelope {
+    build_envelope(pb::envelope::Payload::BootstrapFinalizeResponse(
+        pb::BootstrapFinalizeResponse {
+            result,
+            device_id,
+            genesis_hash,
+            message: message.into(),
+        },
+    ))
+}
+
+fn startup_initialize_identity_context(
+    device_id: Vec<u8>,
+    genesis_hash: Vec<u8>,
+    binding_key: Vec<u8>,
+) -> Result<(), pb::Error> {
+    match dispatch_startup(StartupRequest {
+        operation: Some(startup_request::Operation::InitializeIdentityContext(
+            pb::InitializeIdentityContextOp {
+                device_id,
+                genesis_hash,
+                binding_key,
+            },
+        )),
+    })
+    .result
+    {
+        Some(startup_response::Result::OkBytes(_)) => Ok(()),
+        Some(startup_response::Result::Error(error)) => Err(error),
+        None => Err(ingress_error(
+            ERROR_CODE_PROCESSING_FAILED,
+            "startup: empty initialize identity response",
+        )),
+    }
+}
+
+fn finalize_bootstrap_core(
+    report: pb::BootstrapMeasurementReport,
+) -> Result<Envelope, pb::Error> {
+    log::info!("FINALIZE_BOOTSTRAP: ENTRY phase={} trust={}", report.phase, report.trust_level);
+    // Scope guard: keep BOOTSTRAP_SECURING=true until this function exits, then clear it
+    // unconditionally. This preserves phase=securing_device throughout the whole finalize
+    // (including startup_initialize_identity_context which writes the identity), so any
+    // concurrent session state read observes securing_device → wallet_ready atomically
+    // instead of the prior race where the flag was cleared BEFORE has_identity became true,
+    // exposing a transient phase=needs_genesis flash in the UI.
+    struct ClearBootstrapSecuringOnDrop;
+    impl Drop for ClearBootstrapSecuringOnDrop {
+        fn drop(&mut self) {
+            log::info!("FINALIZE_BOOTSTRAP: SCOPE_GUARD_DROP clearing BOOTSTRAP_SECURING=false");
+            crate::sdk::session_manager::BOOTSTRAP_SECURING
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            log::info!(
+                "FINALIZE_BOOTSTRAP: POST_DROP BOOTSTRAP_SECURING={} SDK_READY={} has_id={}",
+                crate::sdk::session_manager::BOOTSTRAP_SECURING.load(std::sync::atomic::Ordering::SeqCst),
+                crate::sdk::session_manager::SDK_READY.load(std::sync::atomic::Ordering::SeqCst),
+                crate::sdk::app_state::AppState::get_has_identity()
+            );
+        }
+    }
+    let _clear_on_exit = ClearBootstrapSecuringOnDrop;
+
+    if report.device_id.len() != 32 {
+        return Err(ingress_error(
+            ERROR_CODE_INVALID_INPUT,
+            format!(
+                "bootstrap_finalize: device_id must be 32 bytes, got {}",
+                report.device_id.len()
+            ),
+        ));
+    }
+    if report.genesis_hash.len() != 32 {
+        return Err(ingress_error(
+            ERROR_CODE_INVALID_INPUT,
+            format!(
+                "bootstrap_finalize: genesis_hash must be 32 bytes, got {}",
+                report.genesis_hash.len()
+            ),
+        ));
+    }
+
+    let device_id = report.device_id.clone();
+    let genesis_hash = report.genesis_hash.clone();
+
+    match report.trust_level {
+        x if x
+            == pb::bootstrap_measurement_report::TrustLevel::BootstrapTrustLevelReadOnly as i32 =>
+        {
+            push_genesis_lifecycle_event(
+                pb::genesis_lifecycle_event::Kind::GenesisKindError as i32,
+                0,
+            )?;
+            return Ok(bootstrap_finalize_envelope(
+                pb::bootstrap_finalize_response::Result::BootstrapResultReadOnly as i32,
+                device_id,
+                genesis_hash,
+                "bootstrap rejected by Rust: read-only trust state",
+            ));
+        }
+        x if x
+            == pb::bootstrap_measurement_report::TrustLevel::BootstrapTrustLevelBlocked as i32 =>
+        {
+            push_genesis_lifecycle_event(
+                pb::genesis_lifecycle_event::Kind::GenesisKindError as i32,
+                0,
+            )?;
+            return Ok(bootstrap_finalize_envelope(
+                pb::bootstrap_finalize_response::Result::BootstrapResultBlocked as i32,
+                device_id,
+                genesis_hash,
+                "bootstrap rejected by Rust: blocked trust state",
+            ));
+        }
+        x if x
+            == pb::bootstrap_measurement_report::TrustLevel::BootstrapTrustLevelUnspecified as i32 =>
+        {
+            push_genesis_lifecycle_event(
+                pb::genesis_lifecycle_event::Kind::GenesisKindError as i32,
+                0,
+            )?;
+            return Ok(bootstrap_finalize_envelope(
+                pb::bootstrap_finalize_response::Result::BootstrapResultRejected as i32,
+                device_id,
+                genesis_hash,
+                "bootstrap rejected by Rust: missing trust level",
+            ));
+        }
+        _ => {}
+    }
+
+    let context = PlatformContext::bootstrap(RawPlatformInputs {
+        device_id_raw: device_id.clone(),
+        genesis_hash_raw: genesis_hash.clone(),
+        cdbrw_hw_entropy: report.cdbrw_hw_entropy.clone(),
+        cdbrw_env_fingerprint: report.cdbrw_env_fingerprint.clone(),
+        cdbrw_salt: report.cdbrw_salt.clone(),
+    })
+    .map_err(|e| {
+        ingress_error(
+            ERROR_CODE_PROCESSING_FAILED,
+            format!("bootstrap_finalize: PlatformContext::bootstrap failed: {e}"),
+        )
+    })?;
+
+    #[cfg(target_os = "android")]
+    crate::jni::cdbrw::set_cdbrw_binding_key(context.cdbrw_binding.to_vec());
+
+    if let Err(error) = startup_initialize_identity_context(
+        context.device_id.to_vec(),
+        context.genesis_hash.to_vec(),
+        context.cdbrw_binding.to_vec(),
+    ) {
+        log::error!(
+            "FLASH_DEBUG: FINALIZE_BOOTSTRAP: startup_initialize_identity_context FAILED err={} BOOTSTRAP_SECURING={} SDK_READY={} has_id={}",
+            error.message,
+            crate::sdk::session_manager::BOOTSTRAP_SECURING.load(std::sync::atomic::Ordering::SeqCst),
+            crate::sdk::session_manager::SDK_READY.load(std::sync::atomic::Ordering::SeqCst),
+            crate::sdk::app_state::AppState::get_has_identity()
+        );
+        let _ = push_genesis_lifecycle_event(
+            pb::genesis_lifecycle_event::Kind::GenesisKindError as i32,
+            0,
+        );
+        return Ok(bootstrap_finalize_envelope(
+            pb::bootstrap_finalize_response::Result::BootstrapResultError as i32,
+            device_id,
+            genesis_hash,
+            error.message,
+        ));
+    }
+
+    // CRITICAL EVIDENCE POINT: at this moment, startup_initialize_identity_context has
+    // returned successfully, which means prime_identity_app_state has already stored
+    // has_identity=true AND initialize_sdk_core has stored SDK_READY=true. The scope
+    // guard is still holding BOOTSTRAP_SECURING=true. If compute_phase runs at this
+    // exact instant it should return `securing_device` (not `wallet_ready` yet). The
+    // scope guard drops only after we return from finalize_bootstrap_core below.
+    log::info!(
+        "FLASH_DEBUG: FINALIZE_BOOTSTRAP: IDENTITY_INSTALLED BOOTSTRAP_SECURING={} SDK_READY={} has_id={}",
+        crate::sdk::session_manager::BOOTSTRAP_SECURING.load(std::sync::atomic::Ordering::SeqCst),
+        crate::sdk::session_manager::SDK_READY.load(std::sync::atomic::Ordering::SeqCst),
+        crate::sdk::app_state::AppState::get_has_identity()
+    );
+
+    push_genesis_lifecycle_event(
+        pb::genesis_lifecycle_event::Kind::GenesisKindSecuringComplete as i32,
+        0,
+    )?;
+    push_genesis_lifecycle_event(
+        pb::genesis_lifecycle_event::Kind::GenesisKindOk as i32,
+        0,
+    )?;
+
+    let ready_message = if report.trust_level
+        == pb::bootstrap_measurement_report::TrustLevel::BootstrapTrustLevelPinRequired as i32
+    {
+        "bootstrap ready with degraded trust: PIN required"
+    } else {
+        "bootstrap ready"
+    };
+
+    Ok(bootstrap_finalize_envelope(
+        pb::bootstrap_finalize_response::Result::BootstrapResultReady as i32,
+        context.device_id.to_vec(),
+        context.genesis_hash.to_vec(),
+        ready_message,
+    ))
+}
+
+fn handle_bootstrap_measurement_report_core(
+    report: pb::BootstrapMeasurementReport,
+) -> Result<Envelope, pb::Error> {
+    match report.phase {
+        x if x
+            == pb::bootstrap_measurement_report::Phase::BootstrapPhaseStarted as i32 =>
+        {
+            // Mark that C-DBRW securing is in progress — session manager returns
+            // "securing_device" phase until finalization completes.
+            crate::sdk::session_manager::BOOTSTRAP_SECURING.store(true, std::sync::atomic::Ordering::SeqCst);
+            push_genesis_lifecycle_event(
+                pb::genesis_lifecycle_event::Kind::GenesisKindStarted as i32,
+                0,
+            )?;
+            push_genesis_lifecycle_event(
+                pb::genesis_lifecycle_event::Kind::GenesisKindSecuringDevice as i32,
+                0,
+            )?;
+            Ok(bootstrap_finalize_envelope(
+                pb::bootstrap_finalize_response::Result::BootstrapResultUnspecified as i32,
+                report.device_id,
+                report.genesis_hash,
+                "bootstrap measurement started",
+            ))
+        }
+        x if x
+            == pb::bootstrap_measurement_report::Phase::BootstrapPhaseProgress as i32 =>
+        {
+            push_genesis_lifecycle_event(
+                pb::genesis_lifecycle_event::Kind::GenesisKindSecuringProgress as i32,
+                report.progress_percent,
+            )?;
+            Ok(bootstrap_finalize_envelope(
+                pb::bootstrap_finalize_response::Result::BootstrapResultUnspecified as i32,
+                report.device_id,
+                report.genesis_hash,
+                "bootstrap progress",
+            ))
+        }
+        x if x == pb::bootstrap_measurement_report::Phase::BootstrapPhaseFinalize as i32
+            || x
+                == pb::bootstrap_measurement_report::Phase::BootstrapPhaseResumeFinalize as i32 =>
+        {
+            finalize_bootstrap_core(report)
+        }
+        x if x
+            == pb::bootstrap_measurement_report::Phase::BootstrapPhaseAborted as i32 =>
+        {
+            push_genesis_lifecycle_event(
+                pb::genesis_lifecycle_event::Kind::GenesisKindSecuringAborted as i32,
+                0,
+            )?;
+            push_genesis_lifecycle_event(
+                pb::genesis_lifecycle_event::Kind::GenesisKindError as i32,
+                0,
+            )?;
+            Ok(bootstrap_finalize_envelope(
+                pb::bootstrap_finalize_response::Result::BootstrapResultAborted as i32,
+                report.device_id,
+                report.genesis_hash,
+                report.error_message,
+            ))
+        }
+        x if x == pb::bootstrap_measurement_report::Phase::BootstrapPhaseError as i32 => {
+            push_genesis_lifecycle_event(
+                pb::genesis_lifecycle_event::Kind::GenesisKindError as i32,
+                0,
+            )?;
+            Ok(bootstrap_finalize_envelope(
+                pb::bootstrap_finalize_response::Result::BootstrapResultError as i32,
+                report.device_id,
+                report.genesis_hash,
+                report.error_message,
+            ))
+        }
+        _ => Err(ingress_error(
+            ERROR_CODE_INVALID_INPUT,
+            format!("bootstrap measurement: unsupported phase {}", report.phase),
+        )),
+    }
+}
+
 fn process_envelope_core(envelope_in: Envelope) -> Result<Envelope, pb::Error> {
+    if let Some(pb::envelope::Payload::BootstrapMeasurementReport(report)) =
+        envelope_in.payload.clone()
+    {
+        return handle_bootstrap_measurement_report_core(report);
+    }
+
     let mut raw = Vec::new();
     match envelope_in.encode(&mut raw) {
         Ok(()) => {}
@@ -65,6 +402,22 @@ fn router_query_core(method: String, args: Vec<u8>) -> Result<Vec<u8>, pb::Error
             ERROR_CODE_INVALID_INPUT,
             "ingress: router query path missing",
         ));
+    }
+
+    if method == "system.genesis" {
+        let res = crate::handlers::handle_system_genesis_query(crate::bridge::AppQuery {
+            path: method,
+            params: args,
+        });
+        return if res.success {
+            Ok(res.data)
+        } else {
+            Err(ingress_error(
+                ERROR_CODE_PROCESSING_FAILED,
+                res.error_message
+                    .unwrap_or_else(|| "router_query_core failed".to_string()),
+            ))
+        };
     }
 
     let router = match crate::bridge::app_router() {
@@ -290,6 +643,8 @@ fn install_identity_context_core(
             format!("startup: invalid binding key: {e}"),
         )
     })?;
+    #[cfg(target_os = "android")]
+    crate::jni::cdbrw::set_cdbrw_binding_key(binding_key.clone());
 
     prime_identity_app_state(&device_id, &genesis_hash);
 
@@ -757,6 +1112,40 @@ endpoint = "http://127.0.0.1:8080"
         });
         let ok_bytes = expect_ok_bytes(response);
         assert!(!ok_bytes.is_empty());
+    }
+
+    #[test]
+    fn startup_minimal_router_routes_system_genesis_validation() {
+        let _guard = setup_test_env();
+        let response = dispatch_startup(StartupRequest {
+            operation: Some(startup_request::Operation::InitializeSdk(
+                pb::InitializeSdkOp {},
+            )),
+        });
+        assert_eq!(expect_startup_ok(response), STARTUP_OK_BYTES);
+
+        let args = pb::ArgPack {
+            schema_hash: None,
+            codec: pb::Codec::Proto as i32,
+            body: pb::SystemGenesisRequest {
+                locale: "en-US".to_string(),
+                network_id: "testnet".to_string(),
+                device_entropy: vec![0x42; 8],
+            }
+            .encode_to_vec(),
+        }
+        .encode_to_vec();
+
+        let response = dispatch_ingress(IngressRequest {
+            operation: Some(ingress_request::Operation::RouterQuery(pb::RouterQueryOp {
+                method: "system.genesis".to_string(),
+                args,
+            })),
+        });
+        let error = expect_error(response);
+        assert_eq!(error.code, ERROR_CODE_PROCESSING_FAILED);
+        assert!(error.message.contains("device_entropy must be 32 bytes"));
+        assert!(!error.message.contains("requires genesis"));
     }
 
     #[test]

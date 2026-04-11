@@ -47,10 +47,6 @@ pub mod cdbrw;
 #[cfg(target_os = "android")]
 pub mod event_dispatch;
 
-/// SDK Bootstrap (PBI) (Android only)
-#[cfg(target_os = "android")]
-pub mod bootstrap;
-
 /// Unified protobuf bridge (Android only)
 #[cfg(target_os = "android")]
 pub mod unified_protobuf_bridge;
@@ -77,9 +73,6 @@ pub use self::secondary_device::*;
 #[cfg(target_os = "android")]
 #[allow(unused_imports)]
 pub use self::cdbrw::*;
-#[cfg(target_os = "android")]
-#[allow(unused_imports)]
-pub use self::bootstrap::*;
 #[cfg(target_os = "android")]
 #[allow(unused_imports)]
 pub use self::ble_events::*;
@@ -116,7 +109,6 @@ pub extern "system" fn JNI_OnLoad(
     // Prevent linker from dead-code eliminating JNI entry points by taking their addresses.
     // Cast to `*const ()` (not `usize`) — direct fn-item-to-integer casts are rejected by
     // recent Rust toolchains (E0606 / "direct cast of function item into an integer").
-    let _ = bootstrap::Java_com_dsm_native_DsmNative_sdkBootstrap as *const ();
     let _ = unified_protobuf_bridge::Java_com_dsm_wallet_bridge_UnifiedNativeApi_getSessionSnapshot
         as *const ();
     let _ = unified_protobuf_bridge::Java_com_dsm_wallet_bridge_UnifiedNativeApi_updateSessionHardwareFacts as *const ();

@@ -229,7 +229,7 @@ internal object NativeHostBridge {
                     keyDbrwSalt = keyDbrwSalt,
                     genesisEnvelopeBytes = payload.genesisEnvelope.toByteArray(),
                 )
-                okBytes(result.toByteArray())
+                okBytes(result)
             }
 
             NativeHostRequestKind.NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BIOMETRIC_AUTHORIZE -> {

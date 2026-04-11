@@ -1409,9 +1409,8 @@ message PairingStatusUpdate {
   string ble_address = 4; // peer BLE MAC if known
 }
 
-// Genesis lifecycle events — authored by Rust, transported via BleEvent envelope.
-// Kotlin MUST NOT dispatch these directly; it calls createGenesis*Envelope() JNI
-// functions which return a framed Envelope v3 to relay verbatim.
+// Genesis/bootstrap lifecycle events — authored by Rust and transported via
+// canonical Envelope v3 payloads and async ingress event drain.
 message GenesisLifecycleEvent {
   enum Kind {
     GENESIS_KIND_UNSPECIFIED        = 0;
@@ -1425,6 +1424,54 @@ message GenesisLifecycleEvent {
   }
   Kind   kind     = 1;
   uint32 progress = 2; // 0–100, only meaningful for SECURING_PROGRESS
+}
+
+// Host-side measurement report forwarded into Rust bootstrap control.
+message BootstrapMeasurementReport {
+  enum Phase {
+    BOOTSTRAP_PHASE_UNSPECIFIED = 0;
+    BOOTSTRAP_PHASE_STARTED = 1;
+    BOOTSTRAP_PHASE_PROGRESS = 2;
+    BOOTSTRAP_PHASE_FINALIZE = 3;
+    BOOTSTRAP_PHASE_ABORTED = 4;
+    BOOTSTRAP_PHASE_ERROR = 5;
+    BOOTSTRAP_PHASE_RESUME_FINALIZE = 6;
+  }
+
+  enum TrustLevel {
+    BOOTSTRAP_TRUST_LEVEL_UNSPECIFIED = 0;
+    BOOTSTRAP_TRUST_LEVEL_FULL_ACCESS = 1;
+    BOOTSTRAP_TRUST_LEVEL_PIN_REQUIRED = 2;
+    BOOTSTRAP_TRUST_LEVEL_READ_ONLY = 3;
+    BOOTSTRAP_TRUST_LEVEL_BLOCKED = 4;
+  }
+
+  Phase phase = 1;
+  bytes device_id = 2 [(dsm_fixed_len)=32];
+  bytes genesis_hash = 3 [(dsm_fixed_len)=32];
+  uint32 progress_percent = 4;
+  bytes cdbrw_hw_entropy = 5 [(dsm_max_len)=1024];
+  bytes cdbrw_env_fingerprint = 6 [(dsm_max_len)=1024];
+  bytes cdbrw_salt = 7 [(dsm_fixed_len)=32];
+  TrustLevel trust_level = 8;
+  string error_message = 9;
+}
+
+message BootstrapFinalizeResponse {
+  enum Result {
+    BOOTSTRAP_RESULT_UNSPECIFIED = 0;
+    BOOTSTRAP_RESULT_READY = 1;
+    BOOTSTRAP_RESULT_REJECTED = 2;
+    BOOTSTRAP_RESULT_READ_ONLY = 3;
+    BOOTSTRAP_RESULT_BLOCKED = 4;
+    BOOTSTRAP_RESULT_ABORTED = 5;
+    BOOTSTRAP_RESULT_ERROR = 6;
+  }
+
+  Result result = 1;
+  bytes device_id = 2 [(dsm_fixed_len)=32];
+  bytes genesis_hash = 3 [(dsm_fixed_len)=32];
+  string message = 4;
 }
 
 // BLE permission denied notification — authored by Rust, transport via BleEvent.
@@ -1454,7 +1501,6 @@ message BleEvent {
     BleIdentityObserved identity_observed = 13;
     PairingStatusUpdate pairing_status    = 14;
     BlePairingConfirm   pairing_confirm  = 15;
-    GenesisLifecycleEvent genesis_lifecycle = 16;
     BlePermissionEvent    ble_permission     = 17;
   }
 }
@@ -1870,6 +1916,9 @@ message Envelope {
     BilateralReconciliationResponse   reconciliation_response          = 98;
 
     Error                             error                            = 99;
+    GenesisLifecycleEvent             genesis_lifecycle                = 100;
+    BootstrapMeasurementReport        bootstrap_measurement_report     = 101;
+    BootstrapFinalizeResponse         bootstrap_finalize_response      = 102;
   }
 }
 
@@ -2570,6 +2619,7 @@ enum SdkEventKind {
   SDK_EVENT_KIND_NFC_RECOVERY_CAPSULE = 13;
   SDK_EVENT_KIND_NFC_BACKUP_WRITTEN = 14;
   SDK_EVENT_KIND_BRIDGE_READY = 15;
+  SDK_EVENT_KIND_CANONICAL_ENVELOPE = 16;
 }
 
 // Typed async SDK event envelope. `payload` contains the canonical protobuf
@@ -2719,12 +2769,6 @@ message HostPermissionsResult {
 
 message DeviceBindingCapturePayload {
   bytes genesis_envelope = 1 [(dsm_max_len)=65535];
-}
-
-message DeviceBindingCaptureResult {
-  bool installed = 1;
-  bytes device_id = 2 [(dsm_fixed_len)=32];
-  bytes genesis_hash = 3 [(dsm_fixed_len)=32];
 }
 
 message BiometricAuthorizePayload {

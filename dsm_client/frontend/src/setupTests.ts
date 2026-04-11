@@ -95,16 +95,26 @@ if (typeof (global as any).window !== 'undefined') {
         // Return success for setting preferences
         return createDsmBridgeSuccessResponse(new Uint8Array(0));
       }
-      
-      if (method === 'appRouterInvoke') {
-        // Return empty success for router invoke calls
-        return createDsmBridgeSuccessResponse(new Uint8Array(0));
+
+      if (method === 'nativeBoundaryStartup') {
+        const response = new pb.StartupResponse({
+          result: { case: 'okBytes', value: new Uint8Array(0) },
+        });
+        return createDsmBridgeSuccessResponse(response.toBinary());
       }
 
-      if (method === 'appRouterQuery') {
-        // Return empty success with 8-byte router request-ID prefix for router query calls
-        const prefix = new Uint8Array(8);
-        return createDsmBridgeSuccessResponse(prefix);
+      if (method === 'nativeBoundaryIngress') {
+        const response = new pb.IngressResponse({
+          result: { case: 'okBytes', value: new Uint8Array(0) },
+        });
+        return createDsmBridgeSuccessResponse(response.toBinary());
+      }
+
+      if (method === 'nativeHostRequest') {
+        const response = new pb.NativeHostResponse({
+          result: { case: 'okBytes', value: new Uint8Array(0) },
+        });
+        return createDsmBridgeSuccessResponse(response.toBinary());
       }
 
       // Default: return an error for unmocked methods
@@ -154,5 +164,4 @@ const _originalSetPreference = WebViewBridge.setPreference;
 
 (WebViewBridge as any).getPreference = jest.fn(async () => null);
 (WebViewBridge as any).setPreference = jest.fn(async () => {});
-
 

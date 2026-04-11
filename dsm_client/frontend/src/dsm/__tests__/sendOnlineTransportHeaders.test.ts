@@ -47,15 +47,15 @@ describe('sendOnlineTransfer uses modern bridge contract', () => {
     } as any);
     jest.spyOn(require('../WebViewBridge'), 'getTransportHeadersV3Bin').mockResolvedValue(headers.toBinary());
 
-    // Mock appRouterInvokeBin to return framed Envelope with onlineTransferResponse
+    // Mock routerInvokeBin to return framed Envelope with onlineTransferResponse
     const mockAppRouter = jest.fn().mockResolvedValue(makeOnlineResponseFramed(true, 'ok', 123n));
-    jest.spyOn(require('../WebViewBridge'), 'appRouterInvokeBin').mockImplementation(mockAppRouter);
+    jest.spyOn(require('../WebViewBridge'), 'routerInvokeBin').mockImplementation(mockAppRouter);
 
     const recipient = bytes(32, 0x44);
     const res = await sendOnlineTransfer({ to: encodeBase32Crockford(recipient), amount: 1n, tokenId: 'ERA', memo: '' });
     expect(res.accepted).toBe(true);
 
-    // Verify appRouterInvokeBin was called with 'wallet.send'
+    // Verify routerInvokeBin was called with 'wallet.send'
     expect(mockAppRouter).toHaveBeenCalledWith('wallet.send', expect.any(Uint8Array));
   });
 });
