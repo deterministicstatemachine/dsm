@@ -23,13 +23,13 @@ echo "└───────────────────────�
 echo ""
 
 # ---------------------------------------------------------------------------
-# 1. Clippy
+# 1. Lint
 # ---------------------------------------------------------------------------
-info "Running clippy..."
-if ! cargo clippy --all-targets -- -D warnings -A clippy::disallowed_methods 2>&1; then
-  fail "cargo clippy failed — fix warnings before pushing"
+info "Running make lint..."
+if ! make lint 2>&1; then
+  fail "make lint failed — fix lint issues before pushing"
 fi
-pass "cargo clippy"
+pass "make lint"
 
 # ---------------------------------------------------------------------------
 # 2. Tests
