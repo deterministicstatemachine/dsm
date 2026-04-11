@@ -1,8 +1,16 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /* Jest tests for WebViewBridge event channel and error surfacing */
 // Jest globals (describe, test, expect) are available without import in configured test environment.
-import { addDsmEventListener, getTransportHeadersV3Bin } from '../WebViewBridge';
+import { setBridgeInstance } from '../../bridge/BridgeRegistry';
+import { bridgeGate } from '../BridgeGate';
+import { addDsmEventListener, getPreference, getTransportHeadersV3Bin, setPreference } from '../WebViewBridge';
 import type { DsmEvent } from '../WebViewBridge';
+
+afterEach(() => {
+  setBridgeInstance(undefined);
+  delete (globalThis as any).window?.DsmBridge;
+  jest.restoreAllMocks();
+});
 
 describe('WebViewBridge dsm-event listener', () => {
   test('receives binary payload bytes', (done: (err?: any) => void) => {
@@ -47,5 +55,52 @@ describe('WebViewBridge error surfacing via lastError', () => {
     const res = await getTransportHeadersV3Bin();
     expect(res).toBeInstanceOf(Uint8Array);
     expect(res.length).toBe(0);
+  });
+});
+
+describe('WebViewBridge preference gating', () => {
+  test('getPreference executes through bridgeGate', async () => {
+    const enqueueSpy = jest.spyOn(bridgeGate, 'enqueue');
+    const bridge = {
+      __binary: true,
+      __callBin: async (reqBytes: Uint8Array) => {
+        const pb = require('../../proto/dsm_app_pb');
+        const req = pb.BridgeRpcRequest.fromBinary(reqBytes);
+        expect(req.method).toBe('getPreference');
+        const payload = req.payload?.case === 'bytes' ? req.payload.value?.data : new Uint8Array(0);
+        const pref = pb.PreferencePayload.fromBinary(payload);
+        expect(pref.key).toBe('theme');
+        return (global as any).createDsmBridgeSuccessResponse(new TextEncoder().encode('dark'));
+      },
+    };
+
+    (globalThis as any).window.DsmBridge = bridge;
+    setBridgeInstance(bridge as any);
+
+    await expect(getPreference('theme')).resolves.toBe('dark');
+    expect(enqueueSpy).toHaveBeenCalledTimes(1);
+  });
+
+  test('setPreference executes through bridgeGate', async () => {
+    const enqueueSpy = jest.spyOn(bridgeGate, 'enqueue');
+    const bridge = {
+      __binary: true,
+      __callBin: async (reqBytes: Uint8Array) => {
+        const pb = require('../../proto/dsm_app_pb');
+        const req = pb.BridgeRpcRequest.fromBinary(reqBytes);
+        expect(req.method).toBe('setPreference');
+        const payload = req.payload?.case === 'bytes' ? req.payload.value?.data : new Uint8Array(0);
+        const pref = pb.PreferencePayload.fromBinary(payload);
+        expect(pref.key).toBe('theme');
+        expect(pref.value).toBe('dark');
+        return (global as any).createDsmBridgeSuccessResponse(new Uint8Array(0));
+      },
+    };
+
+    (globalThis as any).window.DsmBridge = bridge;
+    setBridgeInstance(bridge as any);
+
+    await setPreference('theme', 'dark');
+    expect(enqueueSpy).toHaveBeenCalledTimes(1);
   });
 });

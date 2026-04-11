@@ -654,17 +654,19 @@ export async function addSecondaryDeviceBin(genesisHash: Uint8Array, deviceEntro
  * @param key The preference key
  */
 export async function getPreference(key: string): Promise<string | null> {
-  try {
-    const req = new PreferencePayload({
-      key: String(key),
-    });
-    const res = await callBin('getPreference', req.toBinary());
-    if (!res || res.length === 0) return null;
-    return new TextDecoder().decode(res);
-  } catch (e) {
-    log.warn('getPreference failed', e);
-    return null;
-  }
+  return bridgeGate.enqueue(async () => {
+    try {
+      const req = new PreferencePayload({
+        key: String(key),
+      });
+      const res = await callBin('getPreference', req.toBinary());
+      if (!res || res.length === 0) return null;
+      return new TextDecoder().decode(res);
+    } catch (e) {
+      log.warn('getPreference failed', e);
+      return null;
+    }
+  });
 }
 
 /**
@@ -673,15 +675,17 @@ export async function getPreference(key: string): Promise<string | null> {
  * @param value The value to store
  */
 export async function setPreference(key: string, value: string): Promise<void> {
-  try {
-    const req = new PreferencePayload({
-      key: String(key),
-      value: String(value ?? ''),
-    });
-    await callBin('setPreference', req.toBinary());
-  } catch (e) {
-    log.warn('setPreference failed', e);
-  }
+  await bridgeGate.enqueue(async () => {
+    try {
+      const req = new PreferencePayload({
+        key: String(key),
+        value: String(value ?? ''),
+      });
+      await callBin('setPreference', req.toBinary());
+    } catch (e) {
+      log.warn('setPreference failed', e);
+    }
+  });
 }
 
 export interface ArchitectureInfo {
