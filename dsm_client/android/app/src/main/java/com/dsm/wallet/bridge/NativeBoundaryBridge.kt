@@ -47,6 +47,18 @@ internal object NativeBoundaryBridge {
                     // no-op
                 }
             }
+            IngressRequest.OperationCase.MARK_GENESIS_SECURING -> {
+                // Rust already flipped securing_in_progress inside dispatchIngress above.
+                // Republish session.state so any subscriber relying on the old snapshot
+                // (useNativeSessionBridge in the WebView) observes the new phase BEFORE
+                // the caller fires the next lifecycle envelope. UI-thread FIFO preserves
+                // ordering vs. the subsequent BleEventRelay dispatch on the caller side.
+                val phaseName = request.markGenesisSecuring.phase.name
+                MainActivity.getActiveInstance()?.runOnUiThread {
+                    MainActivity.getActiveInstance()
+                        ?.publishCurrentSessionState("genesisSecuring:$phaseName")
+                }
+            }
             else -> {
                 // no-op
             }

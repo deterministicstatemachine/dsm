@@ -10,6 +10,8 @@ import com.dsm.wallet.security.AntiCloneGate
 import com.dsm.wallet.security.SiliconFingerprint
 import dsm.types.proto.DeviceBindingCaptureResult
 import dsm.types.proto.Envelope
+import dsm.types.proto.IngressRequest
+import dsm.types.proto.MarkGenesisSecuringOp
 import java.util.concurrent.atomic.AtomicBoolean
 
 internal object BridgeIdentityHandler {
@@ -29,6 +31,29 @@ internal object BridgeIdentityHandler {
         val genesisHashBytes: ByteArray,
         val entropyBytes: ByteArray,
     )
+
+    /**
+     * Build + dispatch a MarkGenesisSecuring ingress request. This is the cross-platform
+     * seam — the same op is reachable from iOS via dsm_dispatch_ingress_request once the
+     * iOS host is wired. Blocks the calling thread on the JNI call so the Rust flag flip
+     * is visible before the next line runs. NativeBoundaryBridge's post-hook schedules
+     * publishCurrentSessionState on the UI thread after the mark lands; subsequent
+     * BleEventRelay.dispatchEnvelope calls share the same UI-thread FIFO, preserving
+     * the "Rust flag set → session.state published → lifecycle envelope fired" ordering
+     * that kills the bounce-to-initialize race.
+     */
+    private fun markGenesisSecuring(phase: MarkGenesisSecuringOp.Phase, logTag: String) {
+        try {
+            val request = IngressRequest.newBuilder()
+                .setMarkGenesisSecuring(
+                    MarkGenesisSecuringOp.newBuilder().setPhase(phase).build()
+                )
+                .build()
+            NativeBoundaryBridge.ingress(request.toByteArray())
+        } catch (t: Throwable) {
+            Log.w(logTag, "markGenesisSecuring($phase) ingress call failed", t)
+        }
+    }
 
     private fun getFramedErrorEnvelopeCode(envelopeBytes: ByteArray): Int {
         if (envelopeBytes.isEmpty()) {
@@ -212,6 +237,14 @@ internal object BridgeIdentityHandler {
         // Run silicon fingerprint enrollment with progress reporting.
         // This is the one-time heavy operation (~15-20s, 21 trials).
         // Subsequent boots use fast mode (no hardware probing).
+        // STRICT ORDER (see docs/plans/2026-04-10-rust-authoritative-securing-phase.md Task 4):
+        // 1. dispatchIngress(MarkGenesisSecuring STARTED) — Rust flips securing_in_progress
+        //    synchronously, then NativeBoundaryBridge post-hook posts a fresh session.state
+        //    publish to the UI thread queue.
+        // 2. createGenesisSecuringDeviceEnvelope dispatch — also hits the UI thread queue
+        //    after the publish because of step 1's post-hook, so useNativeSessionBridge
+        //    observes securing_device BEFORE the bar renders.
+        markGenesisSecuring(MarkGenesisSecuringOp.Phase.PHASE_STARTED, logTag)
         UnifiedNativeApi.createGenesisSecuringDeviceEnvelope().let { if (it.isNotEmpty()) BleEventRelay.dispatchEnvelope(it) }
         Log.i(logTag, "installGenesisEnvelope: starting silicon fingerprint enrollment...")
 
