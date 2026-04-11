@@ -60,8 +60,11 @@ mod tests {
             event_counter: 0,
         };
         let mut buf = Vec::new();
-        resp.encode(&mut buf).unwrap();
-        let decoded = pb::DiscoverLocalResponse::decode(buf.as_slice()).unwrap();
+        assert!(resp.encode(&mut buf).is_ok());
+        let decoded = match pb::DiscoverLocalResponse::decode(buf.as_slice()) {
+            Ok(decoded) => decoded,
+            Err(err) => panic!("discover response should decode: {err}"),
+        };
         assert_eq!(decoded.discovered_nodes.len(), 2);
         assert_eq!(decoded.discovery_method, "gossip");
         assert_eq!(decoded.event_counter, 0);
@@ -75,8 +78,11 @@ mod tests {
             event_counter: 0,
         };
         let mut buf = Vec::new();
-        resp.encode(&mut buf).unwrap();
-        let decoded = pb::DiscoverLocalResponse::decode(buf.as_slice()).unwrap();
+        assert!(resp.encode(&mut buf).is_ok());
+        let decoded = match pb::DiscoverLocalResponse::decode(buf.as_slice()) {
+            Ok(decoded) => decoded,
+            Err(err) => panic!("empty discover response should decode: {err}"),
+        };
         assert!(decoded.discovered_nodes.is_empty());
     }
 
@@ -93,8 +99,11 @@ mod tests {
             event_counter: 7,
         };
         let mut buf = Vec::new();
-        resp.encode(&mut buf).unwrap();
-        let decoded = pb::DiscoverLocalResponse::decode(buf.as_slice()).unwrap();
+        assert!(resp.encode(&mut buf).is_ok());
+        let decoded = match pb::DiscoverLocalResponse::decode(buf.as_slice()) {
+            Ok(decoded) => decoded,
+            Err(err) => panic!("ordered discover response should decode: {err}"),
+        };
         assert_eq!(decoded.discovered_nodes, nodes);
         assert_eq!(decoded.event_counter, 7);
     }
