@@ -72,6 +72,12 @@ pub struct SessionManager {
     pub wallet_refresh_hint: u64,
     pub hardware: HardwareFacts,
     pub lock_state_initialized: bool,
+    /// Set true while DBRW silicon-fingerprint enrollment + sdkBootstrapStrict
+    /// are running. Cleared by mark_securing_complete or mark_securing_aborted.
+    /// compute_phase exposes this as the `securing_device` phase, beating
+    /// `needs_genesis` so external `publishSessionState` calls during the
+    /// 100-500ms securing window cannot bounce the UI back to INITIALIZE.
+    pub securing_in_progress: bool,
 }
 
 impl Default for SessionManager {
@@ -85,6 +91,7 @@ impl Default for SessionManager {
             wallet_refresh_hint: 0,
             hardware: HardwareFacts::default(),
             lock_state_initialized: false,
+            securing_in_progress: false,
         }
     }
 }
@@ -187,6 +194,26 @@ impl SessionManager {
         );
     }
 
+    /// Mark the start of the DBRW silicon-fingerprint enrollment + sdkBootstrapStrict
+    /// window. `compute_phase` will report `securing_device` until cleared.
+    pub fn mark_securing_started(&mut self) {
+        self.securing_in_progress = true;
+        log::info!("SessionManager: mark_securing_started");
+    }
+
+    /// Mark successful completion of the securing window.
+    pub fn mark_securing_complete(&mut self) {
+        self.securing_in_progress = false;
+        log::info!("SessionManager: mark_securing_complete");
+    }
+
+    /// Mark the securing window as aborted (failure path). Same flag effect as
+    /// `mark_securing_complete`; the wipe/recovery happens in Kotlin.
+    pub fn mark_securing_aborted(&mut self) {
+        self.securing_in_progress = false;
+        log::warn!("SessionManager: mark_securing_aborted");
+    }
+
     /// Compute the current session phase by reading from authoritative Rust sources.
     /// Called on every snapshot — never caches `sdk_ready` or `has_identity`.
     fn compute_phase(&self) -> &'static str {
@@ -195,6 +222,9 @@ impl SessionManager {
         }
         if !SDK_READY.load(Ordering::SeqCst) {
             return "runtime_loading";
+        }
+        if self.securing_in_progress {
+            return "securing_device";
         }
         if !AppState::get_has_identity() {
             return "needs_genesis";
@@ -398,6 +428,77 @@ mod tests {
     }
 
     #[test]
+    fn securing_in_progress_takes_precedence_over_needs_genesis() {
+        let _g = setup_test_env();
+        SDK_READY.store(true, Ordering::SeqCst);
+        // has_identity is false by default — normally computes needs_genesis.
+
+        let mut mgr = SessionManager::default();
+        let snap_before = mgr.compute_snapshot();
+        assert_eq!(
+            snap_before.phase, "needs_genesis",
+            "precondition: without the securing flag, phase must be needs_genesis"
+        );
+
+        mgr.mark_securing_started();
+        assert!(mgr.securing_in_progress);
+        let snap_during = mgr.compute_snapshot();
+        assert_eq!(
+            snap_during.phase, "securing_device",
+            "with securing_in_progress=true, phase must beat needs_genesis"
+        );
+
+        mgr.mark_securing_complete();
+        assert!(!mgr.securing_in_progress);
+        let snap_after = mgr.compute_snapshot();
+        assert_eq!(
+            snap_after.phase, "needs_genesis",
+            "after mark_securing_complete, phase falls back to needs_genesis"
+        );
+    }
+
+    #[test]
+    fn securing_in_progress_yields_to_fatal_error() {
+        let _g = setup_test_env();
+        SDK_READY.store(true, Ordering::SeqCst);
+
+        let mut mgr = SessionManager {
+            fatal_error: Some("boot failure".to_string()),
+            ..SessionManager::default()
+        };
+        mgr.mark_securing_started();
+
+        let snap = mgr.compute_snapshot();
+        assert_eq!(
+            snap.phase, "error",
+            "fatal_error must take priority over securing_device"
+        );
+        assert_eq!(snap.fatal_error, "boot failure");
+    }
+
+    #[test]
+    fn securing_aborted_clears_flag() {
+        let _g = setup_test_env();
+        SDK_READY.store(true, Ordering::SeqCst);
+
+        let mut mgr = SessionManager::default();
+        mgr.mark_securing_started();
+        assert!(mgr.securing_in_progress);
+        assert_eq!(mgr.compute_snapshot().phase, "securing_device");
+
+        mgr.mark_securing_aborted();
+        assert!(
+            !mgr.securing_in_progress,
+            "mark_securing_aborted must clear the flag"
+        );
+        assert_eq!(
+            mgr.compute_snapshot().phase,
+            "needs_genesis",
+            "after abort, phase falls back to needs_genesis"
+        );
+    }
+
+    #[test]
     fn fatal_error_overrides_phase() {
         let _g = setup_test_env();
         SDK_READY.store(true, Ordering::SeqCst);
@@ -412,6 +513,7 @@ mod tests {
 
     #[test]
     fn auto_lock_on_background() {
+        let _g = setup_test_env();
         let mut mgr = SessionManager {
             lock_enabled: true,
             lock_on_pause: true,
@@ -428,6 +530,7 @@ mod tests {
 
     #[test]
     fn no_auto_lock_when_policy_disabled() {
+        let _g = setup_test_env();
         let mut mgr = SessionManager {
             lock_enabled: true,
             lock_on_pause: false,
@@ -444,6 +547,7 @@ mod tests {
 
     #[test]
     fn no_auto_lock_while_qr_scanner_active() {
+        let _g = setup_test_env();
         let mut mgr = SessionManager {
             lock_enabled: true,
             lock_on_pause: true,
