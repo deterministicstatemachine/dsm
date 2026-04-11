@@ -38,8 +38,6 @@ export default function App() {
 
   const themes = useMemo(() => getAvailableThemes(), []);
   const { handleGenerateGenesis } = useGenesisFlow({
-    appState: runtime.appState,
-    setAppState: appRuntimeStore.setAppState,
     setError: appRuntimeStore.setError,
     setSecuringProgress: appRuntimeStore.setSecuringProgress,
   });

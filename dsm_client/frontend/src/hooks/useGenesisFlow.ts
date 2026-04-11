@@ -2,46 +2,42 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useCallback, useEffect, useRef } from 'react';
-import type { AppState } from '../types/app';
 import logger from '../utils/logger';
 import { decodeFramedEnvelopeV3 } from '../dsm/decoding';
 import { addDsmEventListener } from '../dsm/WebViewBridge';
 
 type Args = {
-  appState: AppState;
-  setAppState: (s: AppState) => void;
-  setError: (s: string | null) => void;
   setSecuringProgress: (p: number) => void;
+  setError: (s: string | null) => void;
 };
 
-export function useGenesisFlow({ appState, setAppState, setError, setSecuringProgress }: Args) {
+/**
+ * Genesis flow hook — UI-ONLY.
+ *
+ * Rust SessionManager owns the `securing_device` phase via the
+ * MarkGenesisSecuringOp ingress markers ({STARTED, COMPLETE, ABORTED}).
+ * After those markers fire, Kotlin's NativeBoundaryBridge post-hook
+ * triggers publishCurrentSessionState which propagates the phase via
+ * session.state → useNativeSessionBridge → appRuntimeStore.setAppState.
+ *
+ * This hook MUST NOT write appState directly — doing so reintroduces
+ * the multi-writer race that caused bounce-to-initialize.
+ *
+ * Responsibilities of this hook:
+ *  - Listen for genesis lifecycle DOM events purely to update the bar (%).
+ *  - Surface error messages from the genesis call into UI state.
+ *  - Trigger the genesis call when the user taps INITIALIZE.
+ */
+export function useGenesisFlow({ setSecuringProgress, setError }: Args) {
   const genesisInFlight = useRef(false);
-  const interruptedMessage = 'Device securing was interrupted. Do not leave the screen until finished. Initialization was wiped and must be started again so DBRW is not corrupted.';
 
-  // Abort DBRW salt initialisation if the user navigates away during securing.
-  // If the securing is interrupted the device state is corrupt — wipe and restart.
-  useEffect(() => {
-    if (appState !== 'securing_device') return;
-    const onVisibilityChange = () => {
-      if (document.visibilityState === 'hidden') {
-        logger.warn('FRONTEND: User left screen during DBRW securing - aborting and wiping');
-        genesisInFlight.current = false;
-        setSecuringProgress(0);
-        setError(interruptedMessage);
-        setAppState('needs_genesis');
-      }
-    };
-    document.addEventListener('visibilitychange', onVisibilityChange);
-    return () => document.removeEventListener('visibilitychange', onVisibilityChange);
-  }, [appState, interruptedMessage, setAppState, setError, setSecuringProgress]);
-
-  // Listen for silicon fingerprint enrollment progress events from Kotlin
+  // Progress events update only the bar percentage. Phase transitions are
+  // driven by Rust via session.state — see useNativeSessionBridge.
   useEffect(() => {
     const unsub = addDsmEventListener((evt) => {
       if (evt.topic === 'genesis.securing-device') {
         logger.info('FRONTEND: Silicon fingerprint enrollment started');
         setSecuringProgress(0);
-        setAppState('securing_device');
       } else if (evt.topic === 'genesis.securing-device-progress') {
         const pct = evt.payload.length > 0 ? (evt.payload[0] & 0xFF) : 0;
         logger.info(`FRONTEND: Silicon fingerprint progress: ${pct}%`);
@@ -50,15 +46,12 @@ export function useGenesisFlow({ appState, setAppState, setError, setSecuringPro
         logger.info('FRONTEND: Silicon fingerprint enrollment complete');
         setSecuringProgress(100);
       } else if (evt.topic === 'genesis.securing-device-aborted') {
-        logger.warn('FRONTEND: Device securing aborted after the screen was left');
-        genesisInFlight.current = false;
+        logger.warn('FRONTEND: Device securing aborted - phase transition handled by Rust');
         setSecuringProgress(0);
-        setError(interruptedMessage);
-        setAppState('needs_genesis');
       }
     });
     return unsub;
-  }, [interruptedMessage, setAppState, setError, setSecuringProgress]);
+  }, [setSecuringProgress]);
 
   const handleGenerateGenesis = useCallback(async () => {
     if (genesisInFlight.current) {
@@ -101,21 +94,18 @@ export function useGenesisFlow({ appState, setAppState, setError, setSecuringPro
       if (!gc) throw new Error(`Invalid GenesisCreated envelope - got case: ${payload?.case}`);
 
       logger.info('FRONTEND: Genesis completed successfully');
-      // Native session state event will transition appState to wallet_ready
+      // Phase transitions to wallet_ready via session.state event from Rust.
     } catch (err) {
       logger.error('FRONTEND: Genesis generation failed', err);
       const message = err instanceof Error ? err.message : 'Genesis generation failed';
       setError(message);
-      if (message.includes('Do not leave the screen until finished')) {
-        setSecuringProgress(0);
-        setAppState('needs_genesis');
-      } else {
-        setAppState('error');
-      }
+      // Phase transition to needs_genesis or error is handled by Rust via the
+      // catch path of installGenesisEnvelope (which calls markGenesisSecuring(ABORTED)
+      // through the ingress seam). Do NOT setAppState here.
     } finally {
       genesisInFlight.current = false;
     }
-  }, [setAppState, setError, setSecuringProgress]);
+  }, [setError]);
 
   return { handleGenerateGenesis };
 }
