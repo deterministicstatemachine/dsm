@@ -359,6 +359,15 @@ internal object BridgeIdentityHandler {
             return
         }
         genesisLifecycleInvalidated.set(true)
+
+        // STRICT ORDER (see docs/plans/2026-04-10-rust-authoritative-securing-phase.md Task 6):
+        // dispatchIngress(ABORTED) flips Rust securing_in_progress AND post-hook publishes
+        // a fresh session.state BEFORE the wipe + aborted/error envelope dispatches. Since
+        // we are about to clear has_identity, compute_phase will return needs_genesis, so
+        // the UI observes needs_genesis in the UI-thread FIFO queue first — never catches
+        // a stale securing_device once the flow has decided to die.
+        markGenesisSecuring(MarkGenesisSecuringOp.Phase.PHASE_ABORTED, logTag)
+
         clearGenesisArtifacts(
             prefs = prefs,
             sdkContextInitialized = sdkContextInitialized,
@@ -587,6 +596,12 @@ internal object BridgeIdentityHandler {
                 .build()
         } catch (t: Throwable) {
             Log.e(logTag, "captureDeviceBindingForGenesisEnvelope failed", t)
+            // STRICT ORDER (see docs/plans/2026-04-10-rust-authoritative-securing-phase.md Task 6):
+            // Flip the Rust securing_in_progress flag off at the outermost abort seam
+            // (the nested silicon-FP catch at the top of installGenesisEnvelope rethrows
+            // here). The post-hook publish lands in the UI-thread FIFO queue before the
+            // error envelope dispatch on the next line, so the UI sees the fresh phase first.
+            markGenesisSecuring(MarkGenesisSecuringOp.Phase.PHASE_ABORTED, logTag)
             UnifiedNativeApi.createGenesisErrorEnvelope().let { if (it.isNotEmpty()) BleEventRelay.dispatchEnvelope(it) }
             if (genesisLifecycleInvalidated.get()) {
                 clearGenesisArtifacts(
