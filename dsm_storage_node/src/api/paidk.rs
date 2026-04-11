@@ -214,9 +214,12 @@ mod tests {
             ..Default::default()
         };
         let mut buf = Vec::with_capacity(receipt.encoded_len());
-        receipt.encode(&mut buf).unwrap();
+        assert!(receipt.encode(&mut buf).is_ok());
 
-        let decoded = StoragePaymentReceiptV3::decode(buf.as_slice()).unwrap();
+        let decoded = match StoragePaymentReceiptV3::decode(buf.as_slice()) {
+            Ok(decoded) => decoded,
+            Err(err) => panic!("storage payment receipt should decode: {err}"),
+        };
         assert_eq!(decoded.device_id, vec![0xAA; 32]);
         assert_eq!(decoded.operator_node_id, vec![0xBB; 32]);
         assert_eq!(decoded.amount, 5000);
