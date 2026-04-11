@@ -122,6 +122,12 @@ fn sanitize_generated_prost(out_dir: &std::path::Path) {
     }
 }
 
+// `compile_cdbrw_entropy_health` used to build `cdbrw_entropy_health.c` into
+// `libdsm_sdk.so` via the `cc` crate. The C sources were removed with the
+// Protocol 6.2 single-path collapse — histogram / entropy / autocorrelation /
+// LZ78 / manufacturing-gate math now lives entirely in `security::cdbrw_ffi`
+// as pure Rust. No build-time C step is needed.
+
 fn main() {
     // Safety check: prevent release builds with test-only flags
     if std::env::var("PROFILE").as_deref() == Ok("release") {

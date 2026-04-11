@@ -2,32 +2,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { getBridgeInstance } from '../bridge/BridgeRegistry';
-import logger from '../utils/logger';
 import type { AndroidBridgeV3 } from './bridgeTypes';
 import {
   BridgeRpcRequest,
   BridgeRpcResponse,
   BytesPayload,
-  DrainEventsOp,
   EmptyPayload,
   EnvelopeOp,
   IngressRequest,
   IngressResponse,
   RouterInvokeOp,
   RouterQueryOp,
-  SdkEvent,
-  SdkEventBatch,
-  SdkEventKind,
   StartupRequest,
   StartupResponse,
 } from '../proto/dsm_app_pb';
-
-const EVENT_DRAIN_INTERVAL_MS = 250;
-const EVENT_DRAIN_BATCH_SIZE = 32;
-
-let eventPumpStarted = false;
-let eventPumpDisabled = false;
-let drainInFlight = false;
 
 function mustBridge(): AndroidBridgeV3 {
   const bridge = getBridgeInstance();
@@ -119,19 +107,6 @@ function unwrapIngressResponse(responseBytes: Uint8Array): Uint8Array {
   throw new Error('ingress boundary returned no result');
 }
 
-function isBridgePending(): boolean {
-  const bridge = getBridgeInstance();
-  if (!bridge) return true;
-  if (typeof bridge.isAvailable === 'function') {
-    try {
-      return !bridge.isAvailable();
-    } catch {
-      return false;
-    }
-  }
-  return false;
-}
-
 export async function startupBoundary(request: StartupRequest | Uint8Array): Promise<Uint8Array> {
   return callBoundaryMethod('nativeBoundaryStartup', encodeStartupRequest(request));
 }
@@ -179,113 +154,4 @@ export function buildEnvelopeIngressRequest(envelopeBytes: Uint8Array): IngressR
       value: new EnvelopeOp({ envelopeBytes: new Uint8Array(envelopeBytes) }),
     },
   });
-}
-
-export function buildDrainEventsIngressRequest(maxEvents = EVENT_DRAIN_BATCH_SIZE): IngressRequest {
-  return new IngressRequest({
-    operation: {
-      case: 'drainEvents',
-      value: new DrainEventsOp({ maxEvents }),
-    },
-  });
-}
-
-export function decodeSdkEventToLegacyTopic(eventBytes: Uint8Array): { topic: string; payload: Uint8Array } | null {
-  const event = SdkEvent.fromBinary(eventBytes);
-  switch (event.kind) {
-    case SdkEventKind.SESSION_STATE:
-      return { topic: 'session.state', payload: event.payload };
-    case SdkEventKind.BILATERAL_EVENT:
-      return { topic: 'bilateral.event', payload: event.payload };
-    case SdkEventKind.BLE_ENVELOPE:
-      return { topic: 'ble.envelope.bin', payload: event.payload };
-    case SdkEventKind.INBOX_UPDATED:
-      return { topic: 'inbox.updated', payload: event.payload };
-    case SdkEventKind.WALLET_REFRESH:
-      return { topic: 'dsm-wallet-refresh', payload: event.payload };
-    case SdkEventKind.IDENTITY_READY:
-      return { topic: 'dsm-identity-ready', payload: event.payload };
-    case SdkEventKind.ENV_CONFIG_ERROR:
-      return { topic: 'dsm-env-config-error', payload: event.payload };
-    case SdkEventKind.BIOMETRIC_RESULT:
-      return { topic: 'dsm-biometric-result', payload: event.payload };
-    case SdkEventKind.QR_SCAN_RESULT:
-      return { topic: 'qr_scan_result', payload: event.payload };
-    case SdkEventKind.BLUETOOTH_PERMISSIONS:
-      return { topic: 'bluetooth-permissions', payload: event.payload };
-    case SdkEventKind.DETERMINISTIC_SAFETY:
-      return { topic: 'dsm.deterministicSafety', payload: event.payload };
-    case SdkEventKind.CONTACT_BLE_UPDATED:
-      return { topic: 'dsm-contact-ble-updated', payload: event.payload };
-    case SdkEventKind.NFC_RECOVERY_CAPSULE:
-      return { topic: 'nfc-recovery-capsule', payload: event.payload };
-    case SdkEventKind.NFC_BACKUP_WRITTEN:
-      return { topic: 'nfc.backup_written', payload: event.payload };
-    case SdkEventKind.BRIDGE_READY:
-      return { topic: 'dsm-bridge-ready', payload: event.payload };
-    case SdkEventKind.CANONICAL_ENVELOPE:
-      return { topic: 'canonical.envelope.bin', payload: event.payload };
-    default:
-      return null;
-  }
-}
-
-function dispatchSdkEvent(eventBytes: Uint8Array): void {
-  if (typeof window === 'undefined') return;
-  window.dispatchEvent(new CustomEvent('dsm-sdk-event-bin', { detail: { payload: new Uint8Array(eventBytes) } }));
-}
-
-export function isBoundaryUnavailableError(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  return (
-    error.message.includes('Unknown binary RPC method: nativeBoundaryIngress') ||
-    error.message.includes('Unknown binary RPC method: nativeBoundaryStartup') ||
-    error.message.includes('unhandled __callBin method') ||
-    error.message.includes('does not expose the native boundary transport')
-  );
-}
-
-function isBoundaryPendingError(error: unknown): boolean {
-  return error instanceof Error && error.message.includes('DSM binary bridge not ready');
-}
-
-async function drainSdkEventsOnce(): Promise<void> {
-  if (eventPumpDisabled || drainInFlight) return;
-  if (!getBridgeInstance() || isBridgePending()) return;
-  drainInFlight = true;
-  try {
-    let hasMore = true;
-    while (hasMore) {
-      const batchBytes = await ingressBoundaryOk(buildDrainEventsIngressRequest());
-      const batch = SdkEventBatch.fromBinary(batchBytes);
-      for (const event of batch.events) {
-        dispatchSdkEvent(event.toBinary());
-      }
-      hasMore = Boolean(batch.hasMore);
-    }
-  } catch (error) {
-    if (isBoundaryUnavailableError(error)) {
-      eventPumpDisabled = true;
-      return;
-    }
-    if (isBoundaryPendingError(error)) {
-      return;
-    }
-    logger.debug('[NativeBoundaryBridge] drainSdkEventsOnce failed', error);
-  } finally {
-    drainInFlight = false;
-  }
-}
-
-export function startSdkEventPump(): void {
-  if (eventPumpStarted || typeof window === 'undefined') return;
-  eventPumpStarted = true;
-  const kick = () => { void drainSdkEventsOnce(); };
-  if (!isBridgePending()) {
-    kick();
-  }
-  window.addEventListener('dsm-bridge-ready', kick);
-  window.setInterval(() => {
-    kick();
-  }, EVENT_DRAIN_INTERVAL_MS);
 }

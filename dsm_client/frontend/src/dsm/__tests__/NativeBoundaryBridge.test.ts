@@ -1,7 +1,6 @@
 import { setBridgeInstance } from '../../bridge/BridgeRegistry';
 import { routerQueryBin } from '../WebViewBridge';
-import { decodeSdkEventToLegacyTopic } from '../NativeBoundaryBridge';
-import { IngressRequest, IngressResponse, SdkEvent, SdkEventKind } from '../../proto/dsm_app_pb';
+import { IngressRequest, IngressResponse } from '../../proto/dsm_app_pb';
 
 describe('NativeBoundaryBridge', () => {
   beforeEach(() => {
@@ -33,30 +32,5 @@ describe('NativeBoundaryBridge', () => {
     expect(seenRequest?.operation.case).toBe('routerQuery');
     expect(seenRequest?.operation.value.method).toBe('wallet.balance');
     expect(seenRequest?.operation.value.args).toEqual(new Uint8Array([1, 2, 3]));
-  });
-
-  test('typed sdk events map to legacy topic names only in the web adapter', () => {
-    const bytes = new SdkEvent({
-      kind: SdkEventKind.WALLET_REFRESH,
-      payload: new Uint8Array([0xaa]),
-    }).toBinary();
-
-    expect(decodeSdkEventToLegacyTopic(bytes)).toEqual({
-      topic: 'dsm-wallet-refresh',
-      payload: new Uint8Array([0xaa]),
-    });
-  });
-
-  test('canonical envelope sdk events map to canonical.envelope.bin', () => {
-    const payload = new Uint8Array([0x03, 0x08, 0x01]);
-    const bytes = new SdkEvent({
-      kind: SdkEventKind.CANONICAL_ENVELOPE,
-      payload,
-    }).toBinary();
-
-    expect(decodeSdkEventToLegacyTopic(bytes)).toEqual({
-      topic: 'canonical.envelope.bin',
-      payload,
-    });
   });
 });

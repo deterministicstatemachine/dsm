@@ -8,7 +8,6 @@
 
 import * as pb from '../proto/dsm_app_pb';
 import { decodeFramedEnvelopeV3 } from './decoding';
-import { decodeSdkEventToLegacyTopic } from './NativeBoundaryBridge';
 import { decodeNativeHostEventToLegacyTopic } from './NativeHostBridge';
 import { dispatchNativeQrScannerActive } from './qrScannerState';
 import { bytesToBase32CrockfordPrefix, encodeBase32Crockford } from '../utils/textId';
@@ -275,20 +274,6 @@ export function initializeEventBridge(): void {
   // triggers a full balance+history refresh (~50 calls/sec).
   let bleWalletRefreshCounter = 0;
   const BLE_WALLET_REFRESH_EVERY = 8; // emit 1 in 8 BLE-triggered refreshes
-
-  window.addEventListener('dsm-sdk-event-bin', (ev: Event) => {
-    try {
-      const detail = (ev as CustomEvent<{ payload?: unknown }>).detail;
-      const raw = detail?.payload;
-      const bytes = raw instanceof Uint8Array ? raw : raw instanceof ArrayBuffer ? new Uint8Array(raw) : null;
-      if (!bytes) return;
-      const mapped = decodeSdkEventToLegacyTopic(bytes);
-      if (!mapped) return;
-      window.dispatchEvent(new CustomEvent('dsm-event-bin', { detail: mapped }));
-    } catch (err) {
-      try { logger.warn('[EventBridge] Malformed dsm-sdk-event-bin', err); } catch {}
-    }
-  });
 
   window.addEventListener('dsm-native-host-event-bin', (ev: Event) => {
     try {

@@ -7,7 +7,8 @@ import com.google.protobuf.ByteString
 import com.dsm.native.DsmNativeException
 import com.dsm.wallet.security.AccessLevel
 import com.dsm.wallet.security.AntiCloneGate
-import com.dsm.wallet.security.SiliconFingerprint
+import com.dsm.wallet.security.AntiCloneGateException
+import com.dsm.wallet.security.HardwareAnchorResult
 import dsm.types.proto.Envelope
 import dsm.types.proto.BootstrapFinalizeResponse
 import dsm.types.proto.BootstrapMeasurementReport
@@ -25,6 +26,15 @@ internal object BridgeIdentityHandler {
     private const val KEY_FRONTEND_DEVICE_ID = "device_id"
     private const val KEY_FRONTEND_GENESIS_HASH = "genesis_hash"
     private const val KEY_GENESIS_CREATED = "genesis_created"
+    /**
+     * Base32-Crockford encoded 32-byte C-DBRW reference anchor (`AC_D`),
+     * returned by [`AntiCloneGate.enroll`] and cached for subsequent boots
+     * so `bootstrapFromPrefs` can reuse the same `cdbrw_hw_entropy` input
+     * without triggering a fresh K-trial enrollment on every app start.
+     * Cleared alongside the rest of the genesis state on
+     * [`clearGenesisArtifacts`].
+     */
+    private const val KEY_CDBRW_ANCHOR = "cdbrw_reference_anchor"
 
     private val genesisLifecycleInFlight = AtomicBoolean(false)
     private val genesisLifecycleInvalidated = AtomicBoolean(false)
@@ -133,6 +143,7 @@ internal object BridgeIdentityHandler {
             .remove(keyGenesisHash)
             .remove(keyGenesisEnvelope)
             .remove(keyDbrwSalt)
+            .remove(KEY_CDBRW_ANCHOR)
             .remove(KEY_HAS_IDENTITY)
             .remove(KEY_FRONTEND_DEVICE_ID)
             .remove(KEY_FRONTEND_GENESIS_HASH)
@@ -208,34 +219,122 @@ internal object BridgeIdentityHandler {
         logTag: String,
         keyDbrwSalt: String,
     ): BootstrapMeasurements {
-        val siliconFp = SiliconFingerprint()
-        if (!siliconFp.isEnrolled(context)) {
-            siliconFp.enroll(context) { completed, total ->
-                val pct = ((completed * 100) / total).coerceIn(0, 100)
+        // Genesis install path: the `cdbrw_hw_entropy` that K_DBRW is derived
+        // from comes from a fresh K-trial enrollment — the Rust writer
+        // persists the reference snapshot to `dsm_silicon_fp_v4.bin` and
+        // hands us back the 32-byte `AC_D` anchor. We cache it in prefs so
+        // `bootstrapFromPrefs` can replay the same anchor on subsequent
+        // boots without another full enrollment cycle.
+        val hwResult = AntiCloneGate.enroll(context) { completed, total ->
+            val pct = ((completed * 100) / total).coerceIn(0, 100)
+            try {
                 sendBootstrapMeasurementReport(
                     BootstrapMeasurementReport.newBuilder()
                         .setPhase(BootstrapMeasurementReport.Phase.BOOTSTRAP_PHASE_PROGRESS)
                         .setProgressPercent(pct)
                         .build()
                 )
-            }
-        } else {
-            Log.i(logTag, "collectBootstrapMeasurements: reusing existing silicon enrollment")
+            } catch (_: Throwable) { /* non-fatal; progress UI is best-effort */ }
         }
-
-        val hwResult = AntiCloneGate.getStableHwAnchorWithTrust(context)
-        val hwEntropy = hwResult.anchor ?: ByteArray(0)
-        val envEntropy = AntiCloneGate.getEnvironmentFingerprint(context)
+        val hwEntropy = hwResult.anchor ?: throw IllegalStateException(
+            "collectBootstrapMeasurements: cdbrw.enroll returned no anchor"
+        )
+        val envEntropy = AntiCloneGate.buildEnvironmentBytes()
         val dbrwSalt = ByteArray(32)
         java.security.SecureRandom().nextBytes(dbrwSalt)
-        prefs.edit().putString(keyDbrwSalt, BridgeEncoding.base32CrockfordEncode(dbrwSalt)).apply()
-        Log.i(logTag, "collectBootstrapMeasurements: persisted DBRW salt")
+        prefs.edit()
+            .putString(keyDbrwSalt, BridgeEncoding.base32CrockfordEncode(dbrwSalt))
+            .putString(KEY_CDBRW_ANCHOR, BridgeEncoding.base32CrockfordEncode(hwEntropy))
+            .apply()
+        Log.i(
+            logTag,
+            "collectBootstrapMeasurements: persisted DBRW salt and cached reference anchor " +
+                "(access=${hwResult.accessLevel})"
+        )
         return BootstrapMeasurements(
             trustLevel = mapTrustLevel(hwResult.accessLevel),
             hwEntropy = hwEntropy,
             envEntropy = envEntropy,
             dbrwSalt = dbrwSalt,
         )
+    }
+
+    /**
+     * Resume path (subsequent boots after genesis): surface a fresh trust
+     * verdict from the Rust access gate WITHOUT running another full K-trial
+     * enrollment. On the happy path the reference anchor was cached in
+     * [`KEY_CDBRW_ANCHOR`] after the initial `collectBootstrapMeasurements`,
+     * and we only run a single orbit probe via [`AntiCloneGate.measureTrust`]
+     * to refresh the trust snapshot.
+     *
+     * If the anchor cache is missing (e.g. prefs were wiped but the bin file
+     * survived, or the app is upgrading from the old Kotlin enrollment path)
+     * we fall back to a fresh enrollment — expensive but correct, and the
+     * anchor is re-cached so the next boot takes the fast path again.
+     */
+    private fun resumeCdbrwTrust(
+        context: Context,
+        prefs: SharedPreferences,
+        logTag: String,
+        deviceIdBytes: ByteArray,
+        genesisHashBytes: ByteArray,
+    ): HardwareAnchorResult {
+        val cachedAnchorB32 = prefs.getString(KEY_CDBRW_ANCHOR, null)
+        val cachedAnchor: ByteArray? = if (!cachedAnchorB32.isNullOrEmpty()) {
+            try {
+                val decoded = BridgeEncoding.base32CrockfordDecode(cachedAnchorB32)
+                if (decoded.size == 32) decoded else null
+            } catch (_: Throwable) {
+                null
+            }
+        } else {
+            null
+        }
+
+        return if (cachedAnchor != null) {
+            Log.i(logTag, "resumeCdbrwTrust: using cached reference anchor, running single-probe trust check")
+            try {
+                AntiCloneGate.measureTrust(context, cachedAnchor)
+            } catch (e: AntiCloneGateException) {
+                Log.e(logTag, "resumeCdbrwTrust: measure_trust failed, falling back to fresh enrollment", e)
+                reenrollAndCache(context, prefs, logTag, deviceIdBytes, genesisHashBytes)
+            }
+        } else {
+            Log.w(
+                logTag,
+                "resumeCdbrwTrust: no cached anchor in prefs, running fresh K-trial enrollment",
+            )
+            reenrollAndCache(context, prefs, logTag, deviceIdBytes, genesisHashBytes)
+        }
+    }
+
+    private fun reenrollAndCache(
+        context: Context,
+        prefs: SharedPreferences,
+        logTag: String,
+        deviceIdBytes: ByteArray,
+        genesisHashBytes: ByteArray,
+    ): HardwareAnchorResult {
+        val result = AntiCloneGate.enroll(context) { completed, total ->
+            val pct = ((completed * 100) / total).coerceIn(0, 100)
+            try {
+                sendBootstrapMeasurementReport(
+                    BootstrapMeasurementReport.newBuilder()
+                        .setPhase(BootstrapMeasurementReport.Phase.BOOTSTRAP_PHASE_PROGRESS)
+                        .setDeviceId(ByteString.copyFrom(deviceIdBytes))
+                        .setGenesisHash(ByteString.copyFrom(genesisHashBytes))
+                        .setProgressPercent(pct)
+                        .build()
+                )
+            } catch (_: Throwable) { /* non-fatal */ }
+        }
+        val anchor = result.anchor
+            ?: throw IllegalStateException("reenrollAndCache: cdbrw.enroll returned no anchor")
+        prefs.edit()
+            .putString(KEY_CDBRW_ANCHOR, BridgeEncoding.base32CrockfordEncode(anchor))
+            .apply()
+        Log.i(logTag, "reenrollAndCache: re-cached reference anchor (access=${result.accessLevel})")
+        return result
     }
 
     private fun loadOrCreateDbrwSalt(
@@ -441,24 +540,17 @@ internal object BridgeIdentityHandler {
                         )
                     } catch (_: Throwable) { /* non-fatal; progress screen is best-effort */ }
 
-                    val hwAnchorResult = AntiCloneGate.getStableHwAnchorWithTrust(
+                    val hwAnchorResult = resumeCdbrwTrust(
                         context = context,
-                        onDeriveProgress = { completed, total ->
-                            val pct = ((completed * 100) / total).coerceIn(0, 100)
-                            try {
-                                sendBootstrapMeasurementReport(
-                                    BootstrapMeasurementReport.newBuilder()
-                                        .setPhase(BootstrapMeasurementReport.Phase.BOOTSTRAP_PHASE_PROGRESS)
-                                        .setDeviceId(ByteString.copyFrom(deviceIdBytes))
-                                        .setGenesisHash(ByteString.copyFrom(genesisHashBytes))
-                                        .setProgressPercent(pct)
-                                        .build()
-                                )
-                            } catch (_: Throwable) { /* non-fatal */ }
-                        },
+                        prefs = prefs,
+                        logTag = logTag,
+                        deviceIdBytes = deviceIdBytes,
+                        genesisHashBytes = genesisHashBytes,
                     )
-                    val hwEntropy = hwAnchorResult.anchor ?: ByteArray(0)
-                    val envEntropy = AntiCloneGate.getEnvironmentFingerprint(context)
+                    val hwEntropy = hwAnchorResult.anchor ?: throw IllegalStateException(
+                        "bootstrapFromPrefs: cdbrw anchor unavailable after resume"
+                    )
+                    val envEntropy = AntiCloneGate.buildEnvironmentBytes()
                     val dbrwSalt = loadOrCreateDbrwSalt(
                         prefs = prefs,
                         keyDbrwSalt = keyDbrwSalt,

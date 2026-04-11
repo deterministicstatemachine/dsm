@@ -1,32 +1,32 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Legacy Android event shim.
+//! Android WebView event shim.
 //!
-//! Older Rust producers still emit topic-parameterized events. The public
-//! native boundary is now typed `SdkEvent` bytes drained through ingress, so
-//! this module maps those legacy topics into `SdkEventKind` values and queues
-//! them on the shared event bus.
+//! Rust producers deliver protobuf bytes directly to the existing Android
+//! push bridge (`BleEventRelay`) instead of detouring through the deprecated
+//! SDK event queue and ingress drain path.
 
 use dsm::types::error::DsmError;
+use jni::objects::JValue;
 
-use crate::generated as pb;
-
-fn map_legacy_topic(topic: &str) -> Option<i32> {
-    match topic {
-        "bilateral.event" => Some(pb::SdkEventKind::BilateralEvent as i32),
-        "inbox.updated" => Some(pb::SdkEventKind::InboxUpdated as i32),
-        "dsm-wallet-refresh" => Some(pb::SdkEventKind::WalletRefresh as i32),
-        _ => None,
-    }
-}
-
-/// Queue a binary event for delivery through the shared ingress event drain.
 pub fn post_event_to_webview(topic: &str, payload: &[u8]) -> Result<(), DsmError> {
-    let Some(kind) = map_legacy_topic(topic) else {
-        let message = format!("unsupported legacy sdk event topic: {topic}");
-        log::warn!("{message}");
-        return Err(DsmError::invalid_operation(message));
-    };
-
-    crate::event::push_sdk_event(kind, payload.to_vec());
-    Ok(())
+    crate::jni::jni_common::with_env(|env| {
+        let mut env = unsafe {
+            jni::JNIEnv::from_raw(env.get_raw() as *mut _).map_err(|e| e.to_string())?
+        };
+        let class = crate::jni::jni_common::find_class_with_app_loader(
+            &mut env,
+            "com/dsm/wallet/bridge/BleEventRelay",
+        )?;
+        let j_topic = env.new_string(topic).map_err(|e| e.to_string())?;
+        let j_payload = env.byte_array_from_slice(payload).map_err(|e| e.to_string())?;
+        env.call_static_method(
+            class,
+            "dispatchEvent",
+            "(Ljava/lang/String;[B)V",
+            &[JValue::Object(&j_topic), JValue::Object(&j_payload.into())],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    })
+    .map_err(DsmError::invalid_operation)
 }

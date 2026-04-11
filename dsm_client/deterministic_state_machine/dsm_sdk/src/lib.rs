@@ -54,7 +54,6 @@
 //! | [`security`] | DBRW clone-detection validation at the SDK boundary |
 //! | [`storage`] | SQLite-backed client database for contacts, chain tips, bilateral state |
 //! | [`network`] | Multi-node storage endpoint registry and env-config loader |
-//! | [`event`] | Protobuf-encoded broadcast event stream for UI subscriptions |
 //! | [`recovery`] | Capsule, tombstone, and rollup recovery flows |
 //! | [`vault`] | DLV (Deterministic Limbo Vault) SDK operations |
 //!
@@ -119,7 +118,6 @@ mod binding_key;
 pub mod ingress;
 pub mod crypto_performance;
 pub mod envelope;
-pub mod event;
 pub mod handlers;
 pub mod init;
 pub mod logging;

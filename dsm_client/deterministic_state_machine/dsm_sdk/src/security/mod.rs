@@ -4,6 +4,10 @@
 //! All sensitive data is encrypted at rest while preserving full offline transaction
 //! creation, validation, and queuing functionality.
 
+pub mod cdbrw_access_gate;
+pub mod cdbrw_enrollment_writer;
+pub mod cdbrw_ffi;
+pub mod cdbrw_responder;
 pub mod cdbrw_verifier;
 pub mod identity;
 pub mod offline_security;

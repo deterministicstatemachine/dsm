@@ -56,8 +56,21 @@ fn encode_framed_envelope(payload: pb::envelope::Payload) -> Result<Vec<u8>, pb:
 }
 
 fn push_canonical_envelope_event(payload: pb::envelope::Payload) -> Result<(), pb::Error> {
-    let framed = encode_framed_envelope(payload)?;
-    crate::event::push_sdk_event(pb::SdkEventKind::CanonicalEnvelope as i32, framed);
+    #[cfg(all(target_os = "android", feature = "jni"))]
+    {
+        let framed = encode_framed_envelope(payload)?;
+        crate::jni::event_dispatch::post_event_to_webview("canonical.envelope.bin", &framed)
+            .map_err(|e| {
+                ingress_error(
+                    ERROR_CODE_PROCESSING_FAILED,
+                    format!("ingress: canonical envelope dispatch failed: {e}"),
+                )
+            })?;
+    }
+    #[cfg(not(all(target_os = "android", feature = "jni")))]
+    {
+        let _ = payload;
+    }
     Ok(())
 }
 
@@ -497,18 +510,6 @@ fn update_hardware_facts_core(facts: pb::SessionHardwareFactsProto) -> Result<Ve
     })
 }
 
-fn drain_events_core(max_events: u32) -> Result<Vec<u8>, pb::Error> {
-    let batch = crate::event::drain_events(max_events as usize);
-    let mut out = Vec::new();
-    batch.encode(&mut out).map_err(|e| {
-        ingress_error(
-            ERROR_CODE_PROCESSING_FAILED,
-            format!("ingress: sdk event batch encode failed: {e}"),
-        )
-    })?;
-    Ok(out)
-}
-
 fn startup_ok() -> Vec<u8> {
     STARTUP_OK_BYTES.to_vec()
 }
@@ -713,7 +714,10 @@ pub fn dispatch_ingress(request: IngressRequest) -> IngressResponse {
                 "ingress: hardware facts missing",
             )),
         },
-        Some(ingress_request::Operation::DrainEvents(op)) => drain_events_core(op.max_events),
+        Some(_) => Err(ingress_error(
+            ERROR_CODE_INVALID_INPUT,
+            "ingress: unsupported operation",
+        )),
         None => Err(ingress_error(
             ERROR_CODE_INVALID_INPUT,
             "ingress: empty IngressRequest (no operation set)",
@@ -845,12 +849,6 @@ endpoint = "http://127.0.0.1:8080"
     fn setup_test_env() -> std::sync::MutexGuard<'static, ()> {
         let guard = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         std::env::set_var("DSM_SDK_TEST_MODE", "1");
-        loop {
-            let batch = crate::event::drain_events(256);
-            if batch.events.is_empty() && !batch.has_more {
-                break;
-            }
-        }
         let storage_base = crate::storage_utils::get_storage_base_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("./.dsm_testdata"));
         let _ = crate::storage_utils::set_storage_base_dir(storage_base);
@@ -1043,36 +1041,6 @@ endpoint = "http://127.0.0.1:8080"
         let error = expect_startup_error(response);
         assert_eq!(error.code, ERROR_CODE_INVALID_INPUT);
         assert!(error.message.contains("empty StartupRequest"));
-    }
-
-    #[test]
-    fn drain_events_returns_typed_sdk_event_batch() {
-        let _guard = setup_test_env();
-        crate::event::push_sdk_event(pb::SdkEventKind::WalletRefresh as i32, Vec::new());
-        crate::event::push_sdk_event(
-            pb::SdkEventKind::InboxUpdated as i32,
-            pb::StorageSyncResponse {
-                success: true,
-                pulled: 4,
-                processed: 2,
-                pushed: 0,
-                errors: Vec::new(),
-            }
-            .encode_to_vec(),
-        );
-
-        let response = dispatch_ingress(IngressRequest {
-            operation: Some(ingress_request::Operation::DrainEvents(pb::DrainEventsOp {
-                max_events: 8,
-            })),
-        });
-        let ok_bytes = expect_ok_bytes(response);
-        let batch = pb::SdkEventBatch::decode(ok_bytes.as_slice()).expect("decode event batch");
-
-        assert_eq!(batch.events.len(), 2);
-        assert_eq!(batch.events[0].kind, pb::SdkEventKind::WalletRefresh as i32);
-        assert_eq!(batch.events[1].kind, pb::SdkEventKind::InboxUpdated as i32);
-        assert!(!batch.has_more);
     }
 
     #[test]

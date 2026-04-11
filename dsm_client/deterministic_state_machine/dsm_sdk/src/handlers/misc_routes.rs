@@ -1,8 +1,19 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Miscellaneous route handlers for AppRouterImpl.
 //!
-//! Handles `debug.dump_state`, `debug.trigger_genesis` (query),
-//! `dbrw.status` (query), and `ble.command` (invoke).
+//! Handles `debug.*` query routes, the `dbrw.status` + `cdbrw.*` query
+//! surface (C-DBRW Protocol 6.2 Algorithm 3 and the enrollment writer),
+//! and the `ble.command` invoke route.
+//!
+//! ## C-DBRW single path
+//!
+//! Every C-DBRW operation — probe, respond, verify, enroll, measure trust —
+//! flows through this module. Kotlin is transport-only: it supplies raw
+//! orbit timings via protobuf args and never sees keys, histograms, or
+//! ciphertexts. There is no reverse JNI call from Rust to Kotlin in this
+//! file. `dbrw.status` and `cdbrw.measure_trust` read the live verdict from
+//! [`crate::security::cdbrw_access_gate::latest_trust`]; Kotlin never holds
+//! a binary runtime snapshot — that legacy path is gone.
 
 use dsm::types::proto as generated;
 use prost::Message;
@@ -11,9 +22,16 @@ use std::io::{Cursor, Read};
 use std::path::Path;
 
 use crate::bridge::{AppInvoke, AppQuery, AppResult};
-use crate::security::cdbrw_verifier::read_verifier_public_key_if_present;
+use crate::security::cdbrw_access_gate::{latest_trust, TrustSnapshot};
+use crate::security::cdbrw_enrollment_writer::{enroll_device, EnrollError, EnrollInputs};
+use crate::security::cdbrw_responder::{
+    measure_trust, respond_to_challenge, RespondError, RespondInputs,
+};
+use crate::security::cdbrw_verifier::{
+    read_verifier_public_key_if_present, verify_challenge_response, CdbrwVerificationRequest,
+};
 use super::app_router_impl::AppRouterImpl;
-use super::response_helpers::{pack_envelope_ok, pack_bytes_ok, err};
+use super::response_helpers::{err, pack_bytes_ok, pack_envelope_ok};
 
 const CDBRW_ENROLLMENT_FILE: &str = "dsm_silicon_fp_v4.bin";
 const PREFIX_BYTES: usize = 10;
@@ -27,74 +45,48 @@ struct DbrwEnrollmentSnapshot {
     histogram_bins: u32,
     rotation_bits: u32,
     epsilon_intra: f32,
-    mean_histogram_len: u32,
+    mean_histogram: Vec<f32>,
     reference_anchor: Vec<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
-struct DbrwRuntimeSnapshot {
-    runtime_metrics_present: bool,
-    runtime_access_level: String,
-    runtime_trust_score: f32,
-    runtime_health_check_ran: bool,
-    runtime_health_check_passed: bool,
-    runtime_h_hat: f32,
-    runtime_rho_hat: f32,
-    runtime_l_hat: f32,
-    runtime_match_score: f32,
-    runtime_w1_distance: f32,
-    runtime_w1_threshold: f32,
-    runtime_anchor_prefix: Vec<u8>,
-    runtime_error: String,
+impl DbrwEnrollmentSnapshot {
+    fn mean_histogram_len(&self) -> u32 {
+        self.mean_histogram.len() as u32
+    }
 }
-
-const CDBRW_RUNTIME_SNAPSHOT_VERSION: u32 = 1;
-const CDBRW_RUNTIME_FLAG_RUNTIME_AVAILABLE: u32 = 1 << 0;
-const CDBRW_RUNTIME_FLAG_HEALTH_RAN: u32 = 1 << 3;
-const CDBRW_RUNTIME_FLAG_HEALTH_PASSED: u32 = 1 << 4;
-
-/// C-DBRW spec §4.5.5: h_min = 0.5 bits/sample (Normative Requirement)
-const H_MIN: f32 = 0.5;
-/// C-DBRW spec §4.5.7: Ĥ threshold = h_min - ε, with ε = 0.05
-const H_HAT_MIN: f32 = 0.45;
-/// C-DBRW spec §4.5.7: |ρ̂| ≤ 0.3 (Definition 4.15 condition ii)
-const RHO_HAT_MAX: f32 = 0.3;
-/// C-DBRW spec §4.5.7: L̂ threshold = h_min - ε
-const L_HAT_MIN: f32 = 0.45;
-/// C-DBRW spec Remark 4.6: conservative floor for adapted mixing
-const H0_ADAPTED_FLOOR: f32 = 0.25;
 
 fn take_prefix(bytes: &[u8]) -> Vec<u8> {
     bytes.iter().copied().take(PREFIX_BYTES).collect()
 }
 
-/// Compute C-DBRW resonant health tier from raw entropy metrics.
-///
-/// Implements the tri-layer assessment from C-DBRW spec §7:
-///   - **PASS**: All 3 conditions of Definition 4.15 are met.
-///   - **RESONANT**: ρ exceeds raw threshold but effective entropy rate h₀_eff ≥ h_min.
-///     Per Theorem 8.1(ii), thermal drift *strengthens* the fingerprint.
-///   - **ADAPTED**: h₀_eff below h_min but ≥ adapted floor; longer orbits compensate (Remark 4.6).
-///   - **FAIL**: Fundamental entropy collapse (Ĥ or L̂ below threshold).
-fn compute_resonant_health(h_hat: f32, rho_hat: f32, l_hat: f32) -> (&'static str, f32, u32) {
-    let h0_eff = h_hat * (1.0 - rho_hat.abs());
-    let base_pass = h_hat >= H_HAT_MIN && rho_hat.abs() <= RHO_HAT_MAX && l_hat >= L_HAT_MIN;
-    let entropy_ok = h_hat >= H_HAT_MIN && l_hat >= L_HAT_MIN;
+/// Empty proto trust snapshot used when the access gate has never been
+/// updated (e.g. fresh process, no enrollment). Callers rely on the
+/// `access_level == CDBRW_ACCESS_UNSPECIFIED` sentinel to distinguish
+/// "never run" from an intentional "Blocked" verdict.
+fn empty_trust_proto() -> generated::CdbrwTrustSnapshot {
+    generated::CdbrwTrustSnapshot {
+        access_level: generated::CdbrwAccessLevel::CdbrwAccessUnspecified as i32,
+        resonant_status: generated::CdbrwResonantStatus::CdbrwResonantUnspecified as i32,
+        h_hat: 0.0,
+        rho_hat: 0.0,
+        l_hat: 0.0,
+        h0_eff: 0.0,
+        trust_score: 0.0,
+        iter: 0,
+        recommended_n: 0,
+        w1_distance: 0.0,
+        w1_threshold: 0.0,
+        note: String::new(),
+    }
+}
 
-    let (status, recommended_n) = if base_pass {
-        ("PASS", 4096u32)
-    } else if entropy_ok && h0_eff >= H_MIN {
-        // Theorem 8.1(ii): thermal coupling strengthens fingerprint
-        ("RESONANT", 4096)
-    } else if entropy_ok && h0_eff >= H0_ADAPTED_FLOOR {
-        // Remark 4.6: autocorrelated mixing needs N ≥ 16384 for strong convergence
-        let n = if h0_eff >= 0.4 { 8192u32 } else { 16384 };
-        ("ADAPTED", n)
-    } else {
-        ("FAIL", 16384)
-    };
-
-    (status, h0_eff, recommended_n)
+/// Convert an optional [`TrustSnapshot`] into its proto form. `None` becomes
+/// the empty sentinel so downstream consumers see a consistent shape.
+fn trust_proto(snapshot: Option<TrustSnapshot>, note: &str) -> generated::CdbrwTrustSnapshot {
+    match snapshot {
+        Some(s) => s.to_proto(note),
+        None => empty_trust_proto(),
+    }
 }
 
 fn read_u32_be(cursor: &mut Cursor<&[u8]>, field: &str) -> Result<u32, String> {
@@ -111,20 +103,6 @@ fn read_f32_be(cursor: &mut Cursor<&[u8]>, field: &str) -> Result<f32, String> {
         .read_exact(&mut buf)
         .map_err(|e| format!("read {field}: {e}"))?;
     Ok(f32::from_bits(u32::from_be_bytes(buf)))
-}
-
-fn read_len_prefixed_bytes(cursor: &mut Cursor<&[u8]>, field: &str) -> Result<Vec<u8>, String> {
-    let len = read_u32_be(cursor, field)? as usize;
-    let mut bytes = vec![0u8; len];
-    cursor
-        .read_exact(&mut bytes)
-        .map_err(|e| format!("read {field}: {e}"))?;
-    Ok(bytes)
-}
-
-fn read_len_prefixed_string(cursor: &mut Cursor<&[u8]>, field: &str) -> Result<String, String> {
-    let bytes = read_len_prefixed_bytes(cursor, field)?;
-    String::from_utf8(bytes).map_err(|e| format!("decode {field}: {e}"))
 }
 
 fn load_cdbrw_enrollment(base_dir: &Path) -> Result<Option<DbrwEnrollmentSnapshot>, String> {
@@ -153,6 +131,23 @@ fn load_cdbrw_enrollment(base_dir: &Path) -> Result<Option<DbrwEnrollmentSnapsho
         .read_exact(&mut scratch)
         .map_err(|e| format!("read mean_histogram: {e}"))?;
 
+    // Decode the stored histogram back into f32 so the in-memory snapshot
+    // can feed the measure_trust / respond paths. The on-disk format uses
+    // BIG-ENDIAN f32 (written via Java DataOutputStream.writeFloat which
+    // defaults to BE) — this is deliberately distinct from the LE form
+    // embedded in the anchor preimage.
+    let mut mean_histogram = Vec::with_capacity(mean_histogram_len as usize);
+    for i in 0..mean_histogram_len as usize {
+        let start = i * 4;
+        let bytes = [
+            scratch[start],
+            scratch[start + 1],
+            scratch[start + 2],
+            scratch[start + 3],
+        ];
+        mean_histogram.push(f32::from_bits(u32::from_be_bytes(bytes)));
+    }
+
     let anchor_len = read_u32_be(&mut cursor, "reference_anchor_len")?;
     let mut reference_anchor = vec![0u8; anchor_len as usize];
     cursor
@@ -167,80 +162,20 @@ fn load_cdbrw_enrollment(base_dir: &Path) -> Result<Option<DbrwEnrollmentSnapsho
         histogram_bins,
         rotation_bits,
         epsilon_intra,
-        mean_histogram_len,
+        mean_histogram,
         reference_anchor,
     }))
 }
 
-fn parse_android_cdbrw_runtime_snapshot(bytes: &[u8]) -> Result<DbrwRuntimeSnapshot, String> {
-    let mut cursor = Cursor::new(bytes);
-    let version = read_u32_be(&mut cursor, "runtime_version")?;
-    if version != CDBRW_RUNTIME_SNAPSHOT_VERSION {
-        return Err(format!("unsupported runtime snapshot version: {version}"));
+/// Convert a length-32 slice into a fixed-size array. Returns an error with
+/// the given field name if the slice is the wrong size.
+fn slice_to_array32(bytes: &[u8], field: &str) -> Result<[u8; 32], String> {
+    if bytes.len() != 32 {
+        return Err(format!("{field} must be 32 bytes (got {})", bytes.len()));
     }
-
-    let flags = read_u32_be(&mut cursor, "runtime_flags")?;
-    let runtime_trust_score = read_f32_be(&mut cursor, "runtime_trust_score")?;
-    let runtime_match_score = read_f32_be(&mut cursor, "runtime_match_score")?;
-    let runtime_w1_distance = read_f32_be(&mut cursor, "runtime_w1_distance")?;
-    let runtime_w1_threshold = read_f32_be(&mut cursor, "runtime_w1_threshold")?;
-    let runtime_h_hat = read_f32_be(&mut cursor, "runtime_h_hat")?;
-    let runtime_rho_hat = read_f32_be(&mut cursor, "runtime_rho_hat")?;
-    let runtime_l_hat = read_f32_be(&mut cursor, "runtime_l_hat")?;
-    let runtime_anchor_prefix = read_len_prefixed_bytes(&mut cursor, "runtime_anchor_prefix")?;
-    let runtime_access_level = read_len_prefixed_string(&mut cursor, "runtime_access_level")?;
-    let runtime_error = read_len_prefixed_string(&mut cursor, "runtime_error")?;
-
-    Ok(DbrwRuntimeSnapshot {
-        runtime_metrics_present: (flags & CDBRW_RUNTIME_FLAG_RUNTIME_AVAILABLE) != 0,
-        runtime_access_level,
-        runtime_trust_score,
-        runtime_health_check_ran: (flags & CDBRW_RUNTIME_FLAG_HEALTH_RAN) != 0,
-        runtime_health_check_passed: (flags & CDBRW_RUNTIME_FLAG_HEALTH_PASSED) != 0,
-        runtime_h_hat,
-        runtime_rho_hat,
-        runtime_l_hat,
-        runtime_match_score,
-        runtime_w1_distance,
-        runtime_w1_threshold,
-        runtime_anchor_prefix,
-        runtime_error,
-    })
-}
-
-#[cfg(target_os = "android")]
-fn current_cdbrw_binding_key() -> Option<Vec<u8>> {
-    crate::jni::cdbrw::get_cdbrw_binding_key()
-}
-
-#[cfg(not(target_os = "android"))]
-fn current_cdbrw_binding_key() -> Option<Vec<u8>> {
-    None
-}
-
-#[cfg(target_os = "android")]
-fn current_android_cdbrw_runtime_snapshot() -> Result<Option<DbrwRuntimeSnapshot>, String> {
-    crate::jni::jni_common::with_env(|env| {
-        let mut env = unsafe { jni::JNIEnv::from_raw(env.get_raw() as *mut _) }
-            .map_err(|e| format!("clone JNIEnv failed: {e}"))?;
-        let class = crate::jni::jni_common::find_class_with_app_loader(
-            &mut env,
-            "com/dsm/wallet/bridge/Unified",
-        )?;
-        let value = env
-            .call_static_method(class, "getCdbrwRuntimeSnapshot", "()[B", &[])
-            .map_err(|e| format!("getCdbrwRuntimeSnapshot failed: {e}"))?;
-        let bytes = crate::jni::jni_common::jvalue_bytearray_to_vec(&env, value)?;
-        if bytes.is_empty() {
-            return Ok(None);
-        }
-        parse_android_cdbrw_runtime_snapshot(&bytes).map(Some)
-    })
-}
-
-#[cfg(not(target_os = "android"))]
-fn current_android_cdbrw_runtime_snapshot() -> Result<Option<DbrwRuntimeSnapshot>, String> {
-    Ok(None)
+    let mut out = [0u8; 32];
+    out.copy_from_slice(bytes);
+    Ok(out)
 }
 
 impl AppRouterImpl {
@@ -342,39 +277,29 @@ impl AppRouterImpl {
         }
     }
 
-    /// Dispatch handler for `dbrw.status` query routes.
+    /// Dispatch handler for `dbrw.status` and `cdbrw.*` query routes.
+    ///
+    /// All C-DBRW operations flow through this single entry point. The router
+    /// layer already decoded the ArgPack; we re-decode the inner protobuf,
+    /// dispatch to the Rust-side implementation, and wrap the result back into
+    /// an envelope payload.
     pub(crate) async fn handle_dbrw_query(&self, q: AppQuery) -> AppResult {
+        dispatch_dbrw_query(q).await
+    }
+}
+
+pub(crate) async fn dispatch_dbrw_query(q: AppQuery) -> AppResult {
         match q.path.as_str() {
+            // -------- dbrw.status --------
             "dbrw.status" => {
                 let storage_base_dir = crate::storage_utils::get_storage_base_dir();
-                let binding_key = current_cdbrw_binding_key();
+                let binding_key = crate::binding_key::get_binding_key();
                 let verifier_public_key = read_verifier_public_key_if_present()
                     .ok()
                     .flatten()
                     .unwrap_or_default();
 
-                // Only run the heavy runtime snapshot (9 derive trials + health
-                // capture) when the caller explicitly requests it via params=b"live".
-                // Default (empty params) returns stored enrollment data only — instant.
-                let wants_live = !q.params.is_empty() && q.params == b"live";
-
-                let mut status_note = if wants_live {
-                    "Running live runtime health check…".to_string()
-                } else {
-                    "Stored enrollment data only. Use live param for runtime health check."
-                        .to_string()
-                };
-                let runtime_snapshot = if wants_live {
-                    match current_android_cdbrw_runtime_snapshot() {
-                        Ok(snapshot) => snapshot,
-                        Err(e) => {
-                            status_note = format!("Runtime snapshot failed: {e}");
-                            None
-                        }
-                    }
-                } else {
-                    None
-                };
+                let mut status_note = String::new();
 
                 let enrollment = match storage_base_dir.as_ref() {
                     Some(base_dir) => match load_cdbrw_enrollment(base_dir) {
@@ -392,52 +317,15 @@ impl AppRouterImpl {
                     }
                 };
 
-                if let Some(runtime) = runtime_snapshot.as_ref() {
-                    if runtime.runtime_metrics_present {
-                        status_note = if runtime.runtime_error.is_empty() {
-                            "Live Android runtime metrics included in this snapshot.".to_string()
-                        } else {
-                            format!(
-                                "Live Android runtime metrics included with warnings: {}",
-                                runtime.runtime_error
-                            )
-                        };
-                    }
+                if status_note.is_empty() {
+                    status_note = if enrollment.is_some() {
+                        "Enrollment loaded from disk.".to_string()
+                    } else {
+                        "Device not yet enrolled.".to_string()
+                    };
                 }
 
-                // Derive resonant health tier from raw entropy metrics (C-DBRW spec §4.5.4, §7, §8.1)
-                let rt_h_hat = runtime_snapshot
-                    .as_ref()
-                    .map(|v| v.runtime_h_hat)
-                    .unwrap_or(0.0);
-                let rt_rho_hat = runtime_snapshot
-                    .as_ref()
-                    .map(|v| v.runtime_rho_hat)
-                    .unwrap_or(0.0);
-                let rt_l_hat = runtime_snapshot
-                    .as_ref()
-                    .map(|v| v.runtime_l_hat)
-                    .unwrap_or(0.0);
-                let health_ran = runtime_snapshot
-                    .as_ref()
-                    .map(|v| v.runtime_health_check_ran)
-                    .unwrap_or(false);
-
-                let (resonant_status, h0_eff, recommended_n) = if health_ran {
-                    compute_resonant_health(rt_h_hat, rt_rho_hat, rt_l_hat)
-                } else {
-                    ("NOT_RUN", 0.0f32, 4096u32)
-                };
-
-                let runtime_access_level = runtime_snapshot
-                    .as_ref()
-                    .map(|v| v.runtime_access_level.clone())
-                    .unwrap_or_else(|| match resonant_status {
-                        "PASS" | "RESONANT" => "FULL_ACCESS".to_string(),
-                        "ADAPTED" => "PIN_REQUIRED".to_string(),
-                        "FAIL" => "READ_ONLY".to_string(),
-                        _ => String::new(),
-                    });
+                let trust = trust_proto(latest_trust(), "dbrw.status");
 
                 let response = generated::DbrwStatusResponse {
                     enrolled: enrollment.is_some(),
@@ -453,7 +341,7 @@ impl AppRouterImpl {
                     epsilon_intra: enrollment.as_ref().map(|v| v.epsilon_intra).unwrap_or(0.0),
                     mean_histogram_len: enrollment
                         .as_ref()
-                        .map(|v| v.mean_histogram_len)
+                        .map(|v| v.mean_histogram_len())
                         .unwrap_or(0),
                     reference_anchor_prefix: enrollment
                         .as_ref()
@@ -466,55 +354,262 @@ impl AppRouterImpl {
                         .map(|v| v.display().to_string())
                         .unwrap_or_default(),
                     status_note,
-                    runtime_metrics_present: runtime_snapshot
-                        .as_ref()
-                        .map(|v| v.runtime_metrics_present)
-                        .unwrap_or(false),
-                    runtime_access_level,
-                    runtime_trust_score: runtime_snapshot
-                        .as_ref()
-                        .map(|v| v.runtime_trust_score)
-                        .unwrap_or(0.0),
-                    runtime_health_check_ran: health_ran,
-                    runtime_health_check_passed: runtime_snapshot
-                        .as_ref()
-                        .map(|v| v.runtime_health_check_passed)
-                        .unwrap_or(false),
-                    runtime_h_hat: rt_h_hat,
-                    runtime_rho_hat: rt_rho_hat,
-                    runtime_l_hat: rt_l_hat,
-                    runtime_match_score: runtime_snapshot
-                        .as_ref()
-                        .map(|v| v.runtime_match_score)
-                        .unwrap_or(0.0),
-                    runtime_w1_distance: runtime_snapshot
-                        .as_ref()
-                        .map(|v| v.runtime_w1_distance)
-                        .unwrap_or(0.0),
-                    runtime_w1_threshold: runtime_snapshot
-                        .as_ref()
-                        .map(|v| v.runtime_w1_threshold)
-                        .unwrap_or(0.0),
-                    runtime_anchor_prefix: runtime_snapshot
-                        .as_ref()
-                        .map(|v| v.runtime_anchor_prefix.clone())
-                        .unwrap_or_default(),
-                    runtime_error: runtime_snapshot
-                        .as_ref()
-                        .map(|v| v.runtime_error.clone())
-                        .unwrap_or_default(),
-                    // Derived resonant health metrics (C-DBRW spec §4.5.4, §7, §8.1)
-                    runtime_h0_eff: h0_eff,
-                    runtime_recommended_n: recommended_n,
-                    runtime_resonant_status: resonant_status.to_string(),
-                    ..Default::default()
+                    trust: Some(trust),
                 };
 
                 pack_envelope_ok(generated::envelope::Payload::DbrwStatusResponse(response))
             }
+
+            // -------- cdbrw.measure_trust --------
+            "cdbrw.measure_trust" => {
+                let req = match generated::CdbrwMeasureTrustRequest::decode(&*q.params) {
+                    Ok(v) => v,
+                    Err(e) => return err(format!("decode CdbrwMeasureTrustRequest failed: {e}")),
+                };
+                let orbit = match req.orbit.as_ref() {
+                    Some(v) => v,
+                    None => return err("cdbrw.measure_trust: missing orbit".into()),
+                };
+
+                let (enrolled_mean_owned, epsilon_intra) =
+                    match crate::storage_utils::get_storage_base_dir()
+                        .as_ref()
+                        .and_then(|dir| load_cdbrw_enrollment(dir).ok().flatten())
+                    {
+                        Some(snapshot) => (Some(snapshot.mean_histogram.clone()), snapshot.epsilon_intra),
+                        None => (None, 0.0f32),
+                    };
+
+                let snapshot = measure_trust(
+                    &orbit.timings,
+                    enrolled_mean_owned.as_deref(),
+                    epsilon_intra,
+                    req.histogram_bins as usize,
+                );
+
+                pack_envelope_ok(generated::envelope::Payload::CdbrwTrustSnapshot(
+                    snapshot.to_proto("cdbrw.measure_trust"),
+                ))
+            }
+
+            // -------- cdbrw.respond --------
+            "cdbrw.respond" => {
+                let req = match generated::CdbrwRespondRequest::decode(&*q.params) {
+                    Ok(v) => v,
+                    Err(e) => return err(format!("decode CdbrwRespondRequest failed: {e}")),
+                };
+
+                let orbit = match req.orbit.as_ref() {
+                    Some(v) => v,
+                    None => return err("cdbrw.respond: missing orbit".into()),
+                };
+
+                let challenge = match slice_to_array32(&req.challenge, "challenge") {
+                    Ok(v) => v,
+                    Err(e) => return err(e),
+                };
+                let chain_tip = match slice_to_array32(&req.chain_tip, "chain_tip") {
+                    Ok(v) => v,
+                    Err(e) => return err(e),
+                };
+                let commitment_preimage =
+                    match slice_to_array32(&req.commitment_preimage, "commitment_preimage") {
+                        Ok(v) => v,
+                        Err(e) => return err(e),
+                    };
+                let device_id = match slice_to_array32(&req.device_id, "device_id") {
+                    Ok(v) => v,
+                    Err(e) => return err(e),
+                };
+
+                let binding_key_vec = match crate::binding_key::get_binding_key() {
+                    Some(k) => k,
+                    None => {
+                        return err(
+                            "cdbrw.respond: binding key not set (bootstrap incomplete)".into(),
+                        )
+                    }
+                };
+                let binding_key = match slice_to_array32(&binding_key_vec, "binding_key") {
+                    Ok(v) => v,
+                    Err(e) => return err(e),
+                };
+
+                let (enrolled_mean_owned, epsilon_intra) =
+                    match crate::storage_utils::get_storage_base_dir()
+                        .as_ref()
+                        .and_then(|dir| load_cdbrw_enrollment(dir).ok().flatten())
+                    {
+                        Some(snapshot) => (Some(snapshot.mean_histogram.clone()), snapshot.epsilon_intra),
+                        None => (None, 0.0f32),
+                    };
+
+                let inputs = RespondInputs {
+                    orbit_timings: &orbit.timings,
+                    enrolled_mean: enrolled_mean_owned.as_deref(),
+                    epsilon_intra,
+                    verifier_public_key: &req.verifier_public_key,
+                    challenge: &challenge,
+                    chain_tip: &chain_tip,
+                    commitment_preimage: &commitment_preimage,
+                    device_id: &device_id,
+                    binding_key: &binding_key,
+                    histogram_bins: req.histogram_bins as usize,
+                };
+
+                match respond_to_challenge(&inputs) {
+                    Ok(out) => {
+                        let resp = generated::CdbrwRespondResponse {
+                            ciphertext: out.ciphertext,
+                            gamma: out.gamma.to_vec(),
+                            signature: out.signature,
+                            ephemeral_public_key: out.ephemeral_public_key,
+                            trust: Some(out.trust.to_proto("cdbrw.respond")),
+                        };
+                        pack_envelope_ok(generated::envelope::Payload::CdbrwRespondResponse(resp))
+                    }
+                    Err(RespondError::EntropyHealthFailed(h)) => err(format!(
+                        "cdbrw.respond: entropy health FAIL (H={:.4} |rho|={:.4} L={:.4})",
+                        h.h_hat,
+                        h.rho_hat.abs(),
+                        h.l_hat
+                    )),
+                    Err(e) => err(format!("cdbrw.respond: {e}")),
+                }
+            }
+
+            // -------- cdbrw.verify --------
+            "cdbrw.verify" => {
+                let req = match generated::CdbrwVerifyRequest::decode(&*q.params) {
+                    Ok(v) => v,
+                    Err(e) => return err(format!("decode CdbrwVerifyRequest failed: {e}")),
+                };
+
+                let challenge = match slice_to_array32(&req.challenge, "challenge") {
+                    Ok(v) => v,
+                    Err(e) => return err(e),
+                };
+                let gamma = match slice_to_array32(&req.gamma, "gamma") {
+                    Ok(v) => v,
+                    Err(e) => return err(e),
+                };
+                let chain_tip = match slice_to_array32(&req.chain_tip, "chain_tip") {
+                    Ok(v) => v,
+                    Err(e) => return err(e),
+                };
+                let commitment_preimage =
+                    match slice_to_array32(&req.commitment_preimage, "commitment_preimage") {
+                        Ok(v) => v,
+                        Err(e) => return err(e),
+                    };
+                let enrollment_anchor =
+                    match slice_to_array32(&req.enrollment_anchor, "enrollment_anchor") {
+                        Ok(v) => v,
+                        Err(e) => return err(e),
+                    };
+
+                let binding_key_vec = match crate::binding_key::get_binding_key() {
+                    Some(k) => k,
+                    None => {
+                        return err(
+                            "cdbrw.verify: binding key not set (bootstrap incomplete)".into(),
+                        )
+                    }
+                };
+                let binding_key = match slice_to_array32(&binding_key_vec, "binding_key") {
+                    Ok(v) => v,
+                    Err(e) => return err(e),
+                };
+
+                let verification_request = CdbrwVerificationRequest {
+                    binding_key: &binding_key,
+                    challenge: &challenge,
+                    gamma: &gamma,
+                    ciphertext: &req.ciphertext,
+                    signature: &req.signature,
+                    supplied_ephemeral_public_key: &req.ephemeral_public_key,
+                    chain_tip: &chain_tip,
+                    commitment_preimage: &commitment_preimage,
+                    enrollment_anchor: &enrollment_anchor,
+                    epsilon_intra: req.epsilon_intra,
+                    epsilon_inter: req.epsilon_inter,
+                };
+
+                match verify_challenge_response(&verification_request) {
+                    Ok(outcome) => {
+                        let resp = generated::CdbrwVerifyResponse {
+                            accepted: outcome.accepted,
+                            reason: outcome.reason.to_string(),
+                            gamma_distance: outcome.gamma_distance,
+                            threshold: outcome.threshold,
+                        };
+                        pack_envelope_ok(generated::envelope::Payload::CdbrwVerifyResponse(resp))
+                    }
+                    Err(e) => err(format!("cdbrw.verify: {e}")),
+                }
+            }
+
+            // -------- cdbrw.enroll --------
+            "cdbrw.enroll" => {
+                let req = match generated::CdbrwEnrollRequest::decode(&*q.params) {
+                    Ok(v) => v,
+                    Err(e) => return err(format!("decode CdbrwEnrollRequest failed: {e}")),
+                };
+
+                // Convert trials from repeated CdbrwOrbitTrial to Vec<Vec<i64>>.
+                // Empty trials get caught by the writer's validation.
+                let trials: Vec<Vec<i64>> =
+                    req.trials.into_iter().map(|t| t.timings).collect();
+
+                let inputs = EnrollInputs {
+                    env_bytes: &req.env_bytes,
+                    trials: &trials,
+                    arena_bytes: req.arena_bytes,
+                    probes: req.probes,
+                    steps_per_probe: req.steps_per_probe,
+                    histogram_bins: req.histogram_bins,
+                    rotation_bits: req.rotation_bits,
+                };
+
+                let base_dir = match crate::storage_utils::get_storage_base_dir() {
+                    Some(d) => d,
+                    None => {
+                        return err(
+                            "cdbrw.enroll: storage base directory not initialized".into(),
+                        )
+                    }
+                };
+
+                match enroll_device(&base_dir, &inputs) {
+                    Ok(out) => {
+                        let resp = generated::CdbrwEnrollResponse {
+                            revision: out.revision,
+                            epsilon_intra: out.epsilon_intra,
+                            mean_histogram_len: out.mean_histogram_len,
+                            reference_anchor_prefix: out.reference_anchor_prefix,
+                            trust: Some(out.trust.to_proto("cdbrw.enroll")),
+                            reference_anchor: out.reference_anchor.to_vec(),
+                        };
+                        pack_envelope_ok(generated::envelope::Payload::CdbrwEnrollResponse(resp))
+                    }
+                    Err(EnrollError::InsufficientTrials { got }) => err(format!(
+                        "cdbrw.enroll: insufficient trials (got {got}, need >= 16)"
+                    )),
+                    Err(EnrollError::EmptyTrial { index }) => {
+                        err(format!("cdbrw.enroll: trial {index} has no timings"))
+                    }
+                    Err(EnrollError::InvalidHistogramBins { bins }) => err(format!(
+                        "cdbrw.enroll: invalid histogram_bins={bins} (expected 256/512/1024)"
+                    )),
+                    Err(EnrollError::Io(msg)) => err(format!("cdbrw.enroll: io error: {msg}")),
+                }
+            }
+
             other => err(format!("unknown dbrw query: {other}")),
         }
     }
+
+impl AppRouterImpl {
 
     /// Dispatch handler for `ble.command` invoke route.
     pub(crate) async fn handle_ble_invoke(&self, i: AppInvoke) -> AppResult {
@@ -563,38 +658,6 @@ mod tests {
     }
 
     #[test]
-    fn compute_resonant_health_classifies_pass() {
-        let (status, h0_eff, recommended_n) = compute_resonant_health(0.60, 0.10, 0.55);
-        assert_eq!(status, "PASS");
-        assert!((h0_eff - 0.54).abs() < 1e-6);
-        assert_eq!(recommended_n, 4096);
-    }
-
-    #[test]
-    fn compute_resonant_health_classifies_resonant() {
-        let (status, h0_eff, recommended_n) = compute_resonant_health(0.80, 0.35, 0.60);
-        assert_eq!(status, "RESONANT");
-        assert!((h0_eff - 0.52).abs() < 1e-6);
-        assert_eq!(recommended_n, 4096);
-    }
-
-    #[test]
-    fn compute_resonant_health_classifies_adapted() {
-        let (status, h0_eff, recommended_n) = compute_resonant_health(0.58, 0.40, 0.55);
-        assert_eq!(status, "ADAPTED");
-        assert!((h0_eff - 0.348).abs() < 1e-6);
-        assert_eq!(recommended_n, 16384);
-    }
-
-    #[test]
-    fn compute_resonant_health_classifies_fail() {
-        let (status, h0_eff, recommended_n) = compute_resonant_health(0.30, 0.10, 0.20);
-        assert_eq!(status, "FAIL");
-        assert!((h0_eff - 0.27).abs() < 1e-6);
-        assert_eq!(recommended_n, 16384);
-    }
-
-    #[test]
     fn load_cdbrw_enrollment_reads_expected_binary_layout() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join(CDBRW_ENROLLMENT_FILE);
@@ -629,7 +692,36 @@ mod tests {
         assert_eq!(enrollment.histogram_bins, 256);
         assert_eq!(enrollment.rotation_bits, 7);
         assert!((enrollment.epsilon_intra - 0.125f32).abs() < f32::EPSILON);
-        assert_eq!(enrollment.mean_histogram_len, 2);
+        assert_eq!(enrollment.mean_histogram_len(), 2);
+        assert!((enrollment.mean_histogram[0] - 0.25f32).abs() < f32::EPSILON);
+        assert!((enrollment.mean_histogram[1] - 0.75f32).abs() < f32::EPSILON);
         assert_eq!(enrollment.reference_anchor, anchor);
+    }
+
+    #[test]
+    fn slice_to_array32_accepts_exact_length() {
+        let data = [7u8; 32];
+        let arr = slice_to_array32(&data, "test").expect("conversion");
+        assert_eq!(arr, data);
+    }
+
+    #[test]
+    fn slice_to_array32_rejects_wrong_length() {
+        assert!(slice_to_array32(&[0u8; 31], "test").is_err());
+        assert!(slice_to_array32(&[0u8; 33], "test").is_err());
+    }
+
+    #[test]
+    fn empty_trust_proto_is_unspecified() {
+        let p = empty_trust_proto();
+        assert_eq!(
+            p.access_level,
+            generated::CdbrwAccessLevel::CdbrwAccessUnspecified as i32
+        );
+        assert_eq!(
+            p.resonant_status,
+            generated::CdbrwResonantStatus::CdbrwResonantUnspecified as i32
+        );
+        assert_eq!(p.iter, 0);
     }
 }

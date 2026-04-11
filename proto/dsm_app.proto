@@ -1919,6 +1919,12 @@ message Envelope {
     GenesisLifecycleEvent             genesis_lifecycle                = 100;
     BootstrapMeasurementReport        bootstrap_measurement_report     = 101;
     BootstrapFinalizeResponse         bootstrap_finalize_response      = 102;
+
+    // C-DBRW Protocol 6.2 (ZK challenge/response)
+    CdbrwTrustSnapshot                cdbrw_trust_snapshot             = 103;
+    CdbrwRespondResponse              cdbrw_respond_response           = 104;
+    CdbrwVerifyResponse               cdbrw_verify_response            = 105;
+    CdbrwEnrollResponse               cdbrw_enroll_response            = 106;
   }
 }
 
@@ -2238,13 +2244,17 @@ message StorageStatusResponse {
 }
 
 // ========================= C-DBRW Status =========================
+//
+// Snapshot of the Rust-side C-DBRW state for the Dev screen. Field 37
+// (`trust`) carries the live verdict published by `cdbrw_access_gate` —
+// frontend/UI consume this to drive the fail-closed gate. Runtime metrics
+// previously fetched via reverse JNI (Rust → Kotlin `getCdbrwRuntimeSnapshot`)
+// are gone; Kotlin is transport-only now and never computes trust state.
 message DbrwStatusResponse {
   bool enrolled = 1;
   bool binding_key_present = 2;
   bool verifier_keypair_present = 3;
   bool storage_base_dir_set = 4;
-  bool observe_only = 5 [deprecated = true]; // Legacy beta field; use runtime_access_level/runtime_resonant_status.
-  string access_mode = 6 [deprecated = true]; // Legacy beta field; use runtime_access_level/runtime_resonant_status.
   uint32 enrollment_revision = 7;
   uint32 arena_bytes = 8;
   uint32 probes = 9;
@@ -2259,25 +2269,136 @@ message DbrwStatusResponse {
   uint32 verifier_public_key_len = 18;
   string storage_base_dir = 19;
   string status_note = 20;
-  bool runtime_metrics_present = 21;
-  string runtime_access_level = 22;
-  float runtime_trust_score = 23;
-  bool runtime_health_check_ran = 24;
-  bool runtime_health_check_passed = 25;
-  float runtime_h_hat = 26;
-  float runtime_rho_hat = 27;
-  float runtime_l_hat = 28;
-  float runtime_match_score = 29;
-  float runtime_w1_distance = 30;
-  float runtime_w1_threshold = 31;
-  bytes runtime_anchor_prefix = 32 [(dsm_max_len)=16];
-  string runtime_error = 33;
+  // Live trust snapshot from the Rust access gate. Empty when the gate has
+  // never been updated (i.e. device not yet enrolled or no probe run).
+  CdbrwTrustSnapshot trust = 37;
+}
 
-  // Derived C-DBRW resonant health metrics (§4.5.4, §4.6, §8.1 of C-DBRW spec)
-  // Computed in SDK from raw hHat/rhoHat/lHat — not in the Android binary snapshot.
-  float runtime_h0_eff = 34; // Effective entropy rate: hHat * (1 - |rhoHat|) per Prop 4.23
-  uint32 runtime_recommended_n = 35; // Recommended orbit length for current entropy rate
-  string runtime_resonant_status = 36; // PASS | RESONANT | ADAPTED | FAIL per tri-layer §7
+// ===================== C-DBRW Protocol 6.2 (Algorithm 3) =====================
+// Frontend/bridge shuttles raw orbit timings + environment bytes to Rust; the
+// SDK runs the entropy health test, histogram build, Wasserstein-1 drift check,
+// BLAKE3 γ commitment, deterministic Kyber-1024 encaps, ephemeral HKDF step key,
+// and SPHINCS+ Cat-5 signing. Verification runs the inverse path.
+//
+// Single-path rule: these messages travel as opaque router_query / router_invoke
+// args (sub-routes cdbrw.respond / cdbrw.verify / cdbrw.measure_trust /
+// cdbrw.enroll). Responses wrap the result in Envelope v3 payload slots 103-106.
+
+// Fail-closed access ordering (ordinal comparison in Rust).
+enum CdbrwAccessLevel {
+  CDBRW_ACCESS_UNSPECIFIED = 0;
+  CDBRW_ACCESS_BLOCKED     = 1; // hardware anchor missing or fatal health fail
+  CDBRW_ACCESS_READ_ONLY   = 2; // degraded — view only, no writes
+  CDBRW_ACCESS_PIN_REQUIRED= 3; // drift or ADAPTED — step-up auth
+  CDBRW_ACCESS_FULL_ACCESS = 4; // PASS or RESONANT with clean drift
+}
+
+// Tri-layer resonant classification per C-DBRW §7.
+enum CdbrwResonantStatus {
+  CDBRW_RESONANT_UNSPECIFIED = 0;
+  CDBRW_RESONANT_PASS        = 1; // Ĥ ≥ 0.45, |ρ̂| ≤ 0.3, L̂ ≥ 0.45
+  CDBRW_RESONANT_RESONANT    = 2; // h0_eff in [0.30, 0.45) — longer orbit OK
+  CDBRW_RESONANT_ADAPTED     = 3; // degraded entropy — step-up required
+  CDBRW_RESONANT_FAIL        = 4; // below minimum — reject
+}
+
+// One PUF orbit trial (ARX interrogation walk timings).
+message CdbrwOrbitTrial {
+  repeated int64 timings = 1 [(dsm_max_len)=16384]; // per-step ARX timing samples
+}
+
+// cdbrw.measure_trust args — compute resonant health and current access verdict
+// without running a full ZK response. Frontend polls this to surface UI state.
+message CdbrwMeasureTrustRequest {
+  bytes env_bytes       = 1 [(dsm_max_len)=1024]; // environment fingerprint blob
+  CdbrwOrbitTrial orbit = 2;                      // single N=HEALTH_N probe
+  uint32 histogram_bins = 3;                      // must match enrollment bins
+}
+
+// cdbrw.respond args — device side of Algorithm 3.
+// K_DBRW lives in Rust (set via bootstrap); Kotlin never touches signing keys.
+message CdbrwRespondRequest {
+  bytes env_bytes           = 1 [(dsm_max_len)=1024];
+  CdbrwOrbitTrial orbit     = 2;                      // live orbit after challenge
+  bytes challenge           = 3 [(dsm_fixed_len)=32]; // V1 verifier nonce
+  bytes chain_tip           = 4 [(dsm_fixed_len)=32]; // adjacency anchor
+  bytes commitment_preimage = 5 [(dsm_fixed_len)=32]; // 32-byte C_pre per Alg. 3
+  bytes device_id           = 6 [(dsm_fixed_len)=32];
+  bytes verifier_public_key = 7 [(dsm_max_len)=2048]; // Kyber-1024 pk
+  uint32 histogram_bins     = 8;
+}
+
+// cdbrw.verify args — pure Rust verifier path. No Kotlin orchestration.
+message CdbrwVerifyRequest {
+  bytes challenge             = 1 [(dsm_fixed_len)=32];
+  bytes gamma                 = 2 [(dsm_fixed_len)=32]; // BLAKE3 commitment
+  bytes ciphertext            = 3 [(dsm_max_len)=4096]; // Kyber ct
+  bytes signature             = 4 [(dsm_max_len)=16384]; // SPHINCS+ Cat-5
+  bytes ephemeral_public_key  = 5 [(dsm_max_len)=4096]; // HKDF-derived ephk
+  bytes chain_tip             = 6 [(dsm_fixed_len)=32];
+  bytes commitment_preimage   = 7 [(dsm_fixed_len)=32];
+  bytes enrollment_anchor     = 8 [(dsm_fixed_len)=32];
+  float epsilon_intra         = 9;
+  float epsilon_inter         = 10;
+}
+
+// cdbrw.enroll args — K-trial enrollment (Path A Rust writer).
+// Replaces the Kotlin EnrollmentStore.write() path. The SDK derives the
+// reference histogram, ε_intra, and attractor commitment AC_D, and persists
+// the `dsm_silicon_fp_v4.bin` binary compatible with load_cdbrw_enrollment.
+message CdbrwEnrollRequest {
+  bytes env_bytes                 = 1 [(dsm_max_len)=1024];
+  repeated CdbrwOrbitTrial trials = 2 [(dsm_max_len)=64]; // K ≥ 16 per §6.1
+  uint32 arena_bytes              = 3;
+  uint32 probes                   = 4;
+  uint32 steps_per_probe          = 5;
+  uint32 histogram_bins           = 6;
+  uint32 rotation_bits            = 7;
+}
+
+// Shared trust state returned with every C-DBRW op. Frontend/UI reads this
+// to drive the access gate; the ordinal AccessLevel is the only thing that
+// matters for authorization decisions — metrics are diagnostic.
+message CdbrwTrustSnapshot {
+  CdbrwAccessLevel access_level       = 1;
+  CdbrwResonantStatus resonant_status = 2;
+  float h_hat         = 3; // Shannon entropy
+  float rho_hat       = 4; // lag-1 autocorrelation
+  float l_hat         = 5; // LZ78 normalized compressibility
+  float h0_eff        = 6; // h_hat * (1 - |rho_hat|)
+  float trust_score   = 7; // [0.0, 1.0] — adapted×0.75, failed×0
+  uint64 iter         = 8; // TRUST_ITER monotonic counter (clockless)
+  uint32 recommended_n= 9; // orbit length for current h0_eff
+  float w1_distance   = 10; // Wasserstein-1 drift vs reference histogram
+  float w1_threshold  = 11;
+  string note         = 12; // diagnostic reason (never leaks secrets)
+}
+
+// cdbrw.respond response — full Algorithm 3 output plus trust snapshot.
+message CdbrwRespondResponse {
+  bytes ciphertext            = 1 [(dsm_max_len)=4096];
+  bytes gamma                 = 2 [(dsm_fixed_len)=32];
+  bytes signature             = 3 [(dsm_max_len)=16384];
+  bytes ephemeral_public_key  = 4 [(dsm_max_len)=4096];
+  CdbrwTrustSnapshot trust    = 5;
+}
+
+// cdbrw.verify response — pass/fail with diagnostic distance.
+message CdbrwVerifyResponse {
+  bool accepted          = 1;
+  string reason          = 2; // "ok" | "gamma_distance_exceeds_tau" | ...
+  float gamma_distance   = 3; // sqrt(Σ(γᵢ - anchor_iᵢ)²)/256
+  float threshold        = 4; // (ε_intra + ε_inter) / 2
+}
+
+// cdbrw.enroll response — binary reference snapshot summary (no keys).
+message CdbrwEnrollResponse {
+  uint32 revision              = 1;
+  float epsilon_intra          = 2;
+  uint32 mean_histogram_len    = 3;
+  bytes reference_anchor_prefix= 4 [(dsm_max_len)=16];  // first 10 bytes of AC_D (display hint)
+  CdbrwTrustSnapshot trust     = 5;
+  bytes reference_anchor       = 6 [(dsm_fixed_len)=32]; // full 32-byte AC_D for bootstrap handoff
 }
 
 // ========================= Storage Node Stats =========================

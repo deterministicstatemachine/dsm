@@ -26,6 +26,7 @@ use prost::Message;
 
 use dsm::crypto::blake3::dsm_domain_hasher;
 use crate::bridge::{AppInvoke, AppQuery, AppResult, AppRouter};
+use crate::security::cdbrw_access_gate::{require_access_level, AccessLevel};
 
 // IMPORTANT: use the DSM crate's protobuf module everywhere in this file.
 use dsm::types::proto as generated;
@@ -2416,6 +2417,34 @@ impl AppRouter for AppRouterImpl {
             q.path,
             q.params.len()
         );
+
+        // ------------------- C-DBRW access gate -------------------
+        // Fail-closed verdict lookup. Only routes that read the wallet or
+        // touch contacts consult the gate — lifecycle, bootstrap, C-DBRW
+        // itself, and diagnostics stay callable on a fresh/degraded device.
+        // Min level = ReadOnly: caller must have at least a published verdict
+        // with resonant_status != Fail.
+        let gated_read = matches!(
+            q.path.as_str(),
+            "balance.get"
+                | "balance.list"
+                | "wallet.history"
+                | "contacts.list"
+                | "contacts.handle_contact_qr_v3"
+                | "inbox.pull"
+                | "bilateral.pending_list"
+        );
+        if gated_read {
+            if let Err(msg) = require_access_level(AccessLevel::ReadOnly) {
+                log::warn!(
+                    "[APP_ROUTER] {} rejected by C-DBRW gate: {}",
+                    q.path,
+                    msg
+                );
+                return err(msg);
+            }
+        }
+
         match q.path.as_str() {
             // State/sys routes
             "state.export" | "state.info" | "sys.tick" => self.handle_state_query(q).await,
@@ -2454,8 +2483,12 @@ impl AppRouter for AppRouterImpl {
             "debug.dump_state" | "debug.trigger_genesis" => self.handle_debug_query(q).await,
             // Session routes
             "session.status" => self.handle_session_query(q).await,
-            // C-DBRW routes
-            "dbrw.status" => self.handle_dbrw_query(q).await,
+            // C-DBRW routes (Protocol 6.2 Algorithm 3 + enrollment + measure + status)
+            "dbrw.status"
+            | "cdbrw.measure_trust"
+            | "cdbrw.respond"
+            | "cdbrw.verify"
+            | "cdbrw.enroll" => self.handle_dbrw_query(q).await,
             // Recovery routes
             p if p.starts_with("recovery.") => self.handle_recovery_query(q).await,
             // Bitcoin query routes
@@ -2470,6 +2503,33 @@ impl AppRouter for AppRouterImpl {
     // ====================== INVOKE ======================
     async fn invoke(&self, i: AppInvoke) -> AppResult {
         self.ensure_bitcoin_tap_restored().await;
+
+        // ------------------- C-DBRW access gate -------------------
+        // Write-path operations require at least PinRequired. Lifecycle +
+        // transport + BLE + recovery paths remain callable on a degraded
+        // device so the user can self-heal or recover keys.
+        let gated_write = matches!(
+            i.method.as_str(),
+            "wallet.send"
+                | "wallet.sendSmart"
+                | "wallet.sendOffline"
+                | "message.send"
+                | "bilateral.reconcile"
+                | "token.create"
+                | "tokens.publishPolicy"
+                | "contacts.addManual"
+        );
+        if gated_write {
+            if let Err(msg) = require_access_level(AccessLevel::PinRequired) {
+                log::warn!(
+                    "[APP_ROUTER] {} rejected by C-DBRW gate: {}",
+                    i.method,
+                    msg
+                );
+                return err(msg);
+            }
+        }
+
         match i.method.as_str() {
             // Wallet invoke routes
             "wallet.send" | "wallet.sendSmart" | "wallet.sendOffline" => {
