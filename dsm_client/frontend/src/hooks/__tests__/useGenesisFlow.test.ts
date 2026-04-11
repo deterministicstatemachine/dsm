@@ -63,14 +63,12 @@ afterEach(() => {
 
 function makeHookArgs() {
   return {
-    appState: 'needs_genesis' as any,
-    setAppState: jest.fn(),
     setError: jest.fn(),
     setSecuringProgress: jest.fn(),
   };
 }
 
-describe('useGenesisFlow', () => {
+describe('useGenesisFlow (UI-only)', () => {
   it('returns handleGenerateGenesis callback', () => {
     const args = makeHookArgs();
     const { result } = renderHook(() => useGenesisFlow(args));
@@ -131,7 +129,7 @@ describe('useGenesisFlow', () => {
     await act(async () => { await firstPromise!; });
   });
 
-  it('handles error envelope case', async () => {
+  it('error envelope case surfaces message via setError (no phase writes)', async () => {
     const args = makeHookArgs();
     mockCreateGenesisViaRouter.mockResolvedValue(new Uint8Array(64).fill(1));
     mockedDecode.mockReturnValue({
@@ -145,10 +143,12 @@ describe('useGenesisFlow', () => {
     });
 
     expect(args.setError).toHaveBeenCalledWith('Genesis creation failed: Entropy invalid');
-    expect(args.setAppState).toHaveBeenCalledWith('error');
+    // Phase transitions are owned by Rust now — the hook must not touch appState.
+    // The new Args type doesn't expose setAppState, so we can't assert "not called";
+    // we instead assert the surface: only setError + setSecuringProgress are used.
   });
 
-  it('handles empty/too-small envelope', async () => {
+  it('empty/too-small envelope surfaces message via setError', async () => {
     const args = makeHookArgs();
     mockCreateGenesisViaRouter.mockResolvedValue(new Uint8Array(5));
 
@@ -159,10 +159,9 @@ describe('useGenesisFlow', () => {
     });
 
     expect(args.setError).toHaveBeenCalledWith('Genesis envelope is empty or too small');
-    expect(args.setAppState).toHaveBeenCalledWith('error');
   });
 
-  it('handles invalid envelope case', async () => {
+  it('invalid envelope case surfaces message via setError', async () => {
     const args = makeHookArgs();
     mockCreateGenesisViaRouter.mockResolvedValue(new Uint8Array(64).fill(1));
     mockedDecode.mockReturnValue({
@@ -176,37 +175,9 @@ describe('useGenesisFlow', () => {
     });
 
     expect(args.setError).toHaveBeenCalledWith(expect.stringContaining('Invalid GenesisCreated envelope'));
-    expect(args.setAppState).toHaveBeenCalledWith('error');
   });
 
-  it('aborts on visibility change during securing_device', () => {
-    const args = { ...makeHookArgs(), appState: 'securing_device' as any };
-    renderHook(() => useGenesisFlow(args));
-
-    // Simulate tab hidden
-    Object.defineProperty(document, 'visibilityState', { value: 'hidden', writable: true });
-    document.dispatchEvent(new Event('visibilitychange'));
-
-    expect(args.setError).toHaveBeenCalledWith(expect.stringContaining('Do not leave the screen'));
-    expect(args.setAppState).toHaveBeenCalledWith('needs_genesis');
-    expect(args.setSecuringProgress).toHaveBeenCalledWith(0);
-
-    // Restore
-    Object.defineProperty(document, 'visibilityState', { value: 'visible', writable: true });
-  });
-
-  it('does not listen for visibility change when not securing_device', () => {
-    const args = makeHookArgs();
-    renderHook(() => useGenesisFlow(args));
-
-    Object.defineProperty(document, 'visibilityState', { value: 'hidden', writable: true });
-    document.dispatchEvent(new Event('visibilitychange'));
-
-    expect(args.setError).not.toHaveBeenCalled();
-    Object.defineProperty(document, 'visibilityState', { value: 'visible', writable: true });
-  });
-
-  it('responds to genesis.securing-device DSM event', () => {
+  it('genesis.securing-device event only resets progress (no phase write)', () => {
     const args = makeHookArgs();
     renderHook(() => useGenesisFlow(args));
 
@@ -215,10 +186,12 @@ describe('useGenesisFlow', () => {
     });
 
     expect(args.setSecuringProgress).toHaveBeenCalledWith(0);
-    expect(args.setAppState).toHaveBeenCalledWith('securing_device');
+    // Phase transition is driven by Rust via session.state. The hook must NOT
+    // emit a setError for the 'securing-device' lifecycle event.
+    expect(args.setError).not.toHaveBeenCalled();
   });
 
-  it('responds to genesis.securing-device-progress DSM event', () => {
+  it('genesis.securing-device-progress event updates progress bar', () => {
     const args = makeHookArgs();
     renderHook(() => useGenesisFlow(args));
 
@@ -227,9 +200,10 @@ describe('useGenesisFlow', () => {
     });
 
     expect(args.setSecuringProgress).toHaveBeenCalledWith(75);
+    expect(args.setError).not.toHaveBeenCalled();
   });
 
-  it('responds to genesis.securing-device-complete DSM event', () => {
+  it('genesis.securing-device-complete event sets progress to 100', () => {
     const args = makeHookArgs();
     renderHook(() => useGenesisFlow(args));
 
@@ -238,9 +212,14 @@ describe('useGenesisFlow', () => {
     });
 
     expect(args.setSecuringProgress).toHaveBeenCalledWith(100);
+    expect(args.setError).not.toHaveBeenCalled();
   });
 
-  it('responds to genesis.securing-device-aborted DSM event', () => {
+  it('genesis.securing-device-aborted event only resets progress, does not call setError', () => {
+    // REGRESSION GUARD: pre-Task-7 the hook called setError + setAppState on
+    // this event. Now Rust owns the phase transition via markGenesisSecuring
+    // (ABORTED) which triggers a publishCurrentSessionState on the Kotlin side.
+    // The TS hook must stay out of the phase transition path.
     const args = makeHookArgs();
     renderHook(() => useGenesisFlow(args));
 
@@ -249,8 +228,24 @@ describe('useGenesisFlow', () => {
     });
 
     expect(args.setSecuringProgress).toHaveBeenCalledWith(0);
-    expect(args.setError).toHaveBeenCalledWith(expect.stringContaining('Do not leave the screen'));
-    expect(args.setAppState).toHaveBeenCalledWith('needs_genesis');
+    expect(args.setError).not.toHaveBeenCalled();
+  });
+
+  it('does not register a visibilitychange listener (Rust owns abort on backgrounding)', () => {
+    // REGRESSION GUARD: the pre-Task-7 hook attached a document-level
+    // visibilitychange listener that unilaterally flipped appState.
+    // NativeBoundaryBridge + handleHostPauseDuringGenesis now own this path
+    // via the ABORTED ingress marker. The TS hook must not touch document.
+    const addSpy = jest.spyOn(document, 'addEventListener');
+    const args = makeHookArgs();
+    renderHook(() => useGenesisFlow(args));
+
+    const visibilityCalls = addSpy.mock.calls.filter(
+      (call) => call[0] === 'visibilitychange',
+    );
+    expect(visibilityCalls).toHaveLength(0);
+
+    addSpy.mockRestore();
   });
 
   it('cleans up DSM event listeners on unmount', () => {
@@ -260,21 +255,5 @@ describe('useGenesisFlow', () => {
     expect(dsmEventListeners.length).toBeGreaterThan(0);
     unmount();
     expect(dsmEventListeners.length).toBe(0);
-  });
-
-  it('error with "Do not leave the screen" resets to needs_genesis', async () => {
-    const args = makeHookArgs();
-    mockCreateGenesisViaRouter.mockRejectedValue(
-      new Error('Do not leave the screen until finished')
-    );
-
-    const { result } = renderHook(() => useGenesisFlow(args));
-
-    await act(async () => {
-      await result.current.handleGenerateGenesis();
-    });
-
-    expect(args.setSecuringProgress).toHaveBeenCalledWith(0);
-    expect(args.setAppState).toHaveBeenCalledWith('needs_genesis');
   });
 });
