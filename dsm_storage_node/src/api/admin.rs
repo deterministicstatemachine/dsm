@@ -232,12 +232,12 @@ mod tests {
 
     #[test]
     fn from_hex_digits() {
-        assert_eq!(from_hex(b'0').unwrap(), 0);
-        assert_eq!(from_hex(b'9').unwrap(), 9);
-        assert_eq!(from_hex(b'a').unwrap(), 10);
-        assert_eq!(from_hex(b'f').unwrap(), 15);
-        assert_eq!(from_hex(b'A').unwrap(), 10);
-        assert_eq!(from_hex(b'F').unwrap(), 15);
+        assert_eq!(from_hex(b'0'), Ok(0));
+        assert_eq!(from_hex(b'9'), Ok(9));
+        assert_eq!(from_hex(b'a'), Ok(10));
+        assert_eq!(from_hex(b'f'), Ok(15));
+        assert_eq!(from_hex(b'A'), Ok(10));
+        assert_eq!(from_hex(b'F'), Ok(15));
     }
 
     #[test]
@@ -249,18 +249,21 @@ mod tests {
 
     #[test]
     fn decode_percent_plain() {
-        assert_eq!(decode_percent("hello").unwrap(), "hello");
+        assert_eq!(decode_percent("hello"), Ok("hello".to_string()));
     }
 
     #[test]
     fn decode_percent_encoded_chars() {
-        assert_eq!(decode_percent("hello%20world").unwrap(), "hello world");
-        assert_eq!(decode_percent("%41%42%43").unwrap(), "ABC");
+        assert_eq!(
+            decode_percent("hello%20world"),
+            Ok("hello world".to_string())
+        );
+        assert_eq!(decode_percent("%41%42%43"), Ok("ABC".to_string()));
     }
 
     #[test]
     fn decode_percent_plus_is_space() {
-        assert_eq!(decode_percent("a+b").unwrap(), "a b");
+        assert_eq!(decode_percent("a+b"), Ok("a b".to_string()));
     }
 
     #[test]
@@ -276,14 +279,18 @@ mod tests {
 
     #[test]
     fn parse_cleanup_query_valid() {
-        let p = parse_cleanup_query(Some("before_iter=42")).unwrap();
-        assert_eq!(p.before_iter, 42);
+        match parse_cleanup_query(Some("before_iter=42")) {
+            Ok(p) => assert_eq!(p.before_iter, 42),
+            Err(err) => panic!("expected valid cleanup query, got {err:?}"),
+        }
     }
 
     #[test]
     fn parse_cleanup_query_with_extra_params() {
-        let p = parse_cleanup_query(Some("foo=bar&before_iter=100&baz=1")).unwrap();
-        assert_eq!(p.before_iter, 100);
+        match parse_cleanup_query(Some("foo=bar&before_iter=100&baz=1")) {
+            Ok(p) => assert_eq!(p.before_iter, 100),
+            Err(err) => panic!("expected valid cleanup query with extras, got {err:?}"),
+        }
     }
 
     #[test]
@@ -336,7 +343,9 @@ mod tests {
 
     #[test]
     fn parse_cleanup_query_percent_encoded_value() {
-        let p = parse_cleanup_query(Some("before_iter=%33%37")).unwrap();
-        assert_eq!(p.before_iter, 37);
+        match parse_cleanup_query(Some("before_iter=%33%37")) {
+            Ok(p) => assert_eq!(p.before_iter, 37),
+            Err(err) => panic!("expected valid percent-encoded cleanup query, got {err:?}"),
+        }
     }
 }

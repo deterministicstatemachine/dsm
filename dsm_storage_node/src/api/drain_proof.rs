@@ -191,8 +191,11 @@ mod tests {
             bytecommit_digests: vec![vec![0u8; 32], vec![1u8; 32]],
         };
         let mut buf = Vec::new();
-        proof.encode(&mut buf).unwrap();
-        let decoded = pb::DrainProofV3::decode(buf.as_slice()).unwrap();
+        assert!(proof.encode(&mut buf).is_ok());
+        let decoded = match pb::DrainProofV3::decode(buf.as_slice()) {
+            Ok(decoded) => decoded,
+            Err(err) => panic!("drain proof should decode: {err}"),
+        };
         assert_eq!(decoded.node_id, vec![0xAA; 32]);
         assert_eq!(decoded.cycle_indices, vec![10, 11]);
         assert_eq!(decoded.bytecommit_digests.len(), 2);
@@ -233,8 +236,11 @@ mod tests {
             consecutive_empty: 2,
         };
         let mut buf = Vec::new();
-        result.encode(&mut buf).unwrap();
-        let decoded = pb::DrainVerifyV3::decode(buf.as_slice()).unwrap();
+        assert!(result.encode(&mut buf).is_ok());
+        let decoded = match pb::DrainVerifyV3::decode(buf.as_slice()) {
+            Ok(decoded) => decoded,
+            Err(err) => panic!("drain verify result should decode: {err}"),
+        };
         assert!(decoded.verified);
         assert_eq!(decoded.consecutive_empty, 2);
         assert_eq!(decoded.node_id, vec![0xCC; 32]);

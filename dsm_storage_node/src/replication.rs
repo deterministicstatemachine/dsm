@@ -468,9 +468,24 @@ pub fn default_production_config() -> ReplicationConfig {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
     use dsm::types::proto as pb;
+
+    fn must<T, E: std::fmt::Debug>(result: Result<T, E>) -> T {
+        match result {
+            Ok(value) => value,
+            Err(err) => panic!("unexpected error: {err:?}"),
+        }
+    }
+
+    fn must_some<T>(value: Option<T>, context: &str) -> T {
+        match value {
+            Some(value) => value,
+            None => panic!("{context}"),
+        }
+    }
 
     fn test_config() -> ReplicationConfig {
         ReplicationConfig {
@@ -483,8 +498,11 @@ mod tests {
     }
 
     fn make_manager(node_id: &str, addr: &str) -> ReplicationManager {
-        ReplicationManager::new_for_tests(test_config(), node_id.to_string(), addr.to_string())
-            .unwrap()
+        must(ReplicationManager::new_for_tests(
+            test_config(),
+            node_id.to_string(),
+            addr.to_string(),
+        ))
     }
 
     #[test]
@@ -533,7 +551,7 @@ mod tests {
     fn get_alive_nodes_excludes_dead_and_suspected() {
         let mgr = make_manager("node-local", "http://127.0.0.1:8080");
         {
-            let mut states = mgr.node_states.write().unwrap();
+            let mut states = must(mgr.node_states.write());
             states.insert(
                 "node-dead".to_string(),
                 pb::StorageNodeInfoV1 {
@@ -573,7 +591,7 @@ mod tests {
     async fn get_replication_targets_deterministic() {
         let mgr = make_manager("node-a", "http://127.0.0.1:8080");
         {
-            let mut states = mgr.node_states.write().unwrap();
+            let mut states = must(mgr.node_states.write());
             for i in 0..5 {
                 let id = format!("node-{}", (b'b' + i) as char);
                 states.insert(
@@ -600,8 +618,9 @@ mod tests {
     async fn get_replication_targets_empty_when_no_nodes() {
         let mgr = make_manager("node-a", "http://127.0.0.1:8080");
         {
-            let mut states = mgr.node_states.write().unwrap();
-            states.get_mut("node-a").unwrap().status = pb::StorageNodeStatus::Dead as i32;
+            let mut states = must(mgr.node_states.write());
+            must_some(states.get_mut("node-a"), "node-a should exist").status =
+                pb::StorageNodeStatus::Dead as i32;
         }
         let targets = mgr.get_replication_targets("any-key").await;
         assert!(targets.is_empty());
@@ -611,7 +630,7 @@ mod tests {
     async fn get_replication_targets_different_keys_may_differ() {
         let mgr = make_manager("node-a", "http://127.0.0.1:8080");
         {
-            let mut states = mgr.node_states.write().unwrap();
+            let mut states = must(mgr.node_states.write());
             for i in 0..10 {
                 let id = format!("node-extra-{}", i);
                 states.insert(
@@ -701,8 +720,8 @@ mod tests {
         };
         mgr.process_gossip(gossip2, 100).await;
 
-        let states = mgr.node_states.read().unwrap();
-        let remote = states.get("node-remote").unwrap();
+        let states = must(mgr.node_states.read());
+        let remote = must_some(states.get("node-remote"), "node-remote should exist");
         assert_eq!(remote.status, pb::StorageNodeStatus::Suspected as i32);
     }
 
@@ -710,7 +729,7 @@ mod tests {
     async fn process_gossip_marks_suspected_as_dead() {
         let mgr = make_manager("node-local", "http://127.0.0.1:8080");
         {
-            let mut states = mgr.node_states.write().unwrap();
+            let mut states = must(mgr.node_states.write());
             states.insert(
                 "node-stale".to_string(),
                 pb::StorageNodeInfoV1 {
@@ -733,8 +752,8 @@ mod tests {
         };
         mgr.process_gossip(gossip, 200).await;
 
-        let states = mgr.node_states.read().unwrap();
-        let stale = states.get("node-stale").unwrap();
+        let states = must(mgr.node_states.read());
+        let stale = must_some(states.get("node-stale"), "node-stale should exist");
         assert_eq!(stale.status, pb::StorageNodeStatus::Dead as i32);
     }
 
@@ -742,7 +761,7 @@ mod tests {
     async fn process_gossip_updates_last_seen_tick_to_max() {
         let mgr = make_manager("node-local", "http://127.0.0.1:8080");
         {
-            let mut states = mgr.node_states.write().unwrap();
+            let mut states = must(mgr.node_states.write());
             states.insert(
                 "node-b".to_string(),
                 pb::StorageNodeInfoV1 {
@@ -766,8 +785,8 @@ mod tests {
         };
         mgr.process_gossip(gossip, 30).await;
 
-        let states = mgr.node_states.read().unwrap();
-        let b = states.get("node-b").unwrap();
+        let states = must(mgr.node_states.read());
+        let b = must_some(states.get("node-b"), "node-b should exist");
         assert_eq!(b.last_seen_tick, 50); // should keep max(50, 30)
     }
 }
