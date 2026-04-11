@@ -8,7 +8,7 @@ description = "Storage node for the Deterministic State Machine (DSM)"
 
 [dependencies]
 # Core async runtime
-tokio = { version = "1.32.0", features = ["full"] }
+tokio = { version = "1.51.0", features = ["full"] }
 futures = "0.3.31"
 
 # HTTP server

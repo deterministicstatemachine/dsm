@@ -337,8 +337,10 @@ mod tests {
         let engine = ChaosEngine::new(config);
         let result = engine.run_chaos_test().await;
 
-        assert!(result.is_ok());
-        let metrics = result.unwrap();
+        let metrics = match result {
+            Ok(metrics) => metrics,
+            Err(err) => panic!("chaos test should succeed: {err}"),
+        };
         assert!(metrics.total_operations > 0);
     }
 
@@ -354,8 +356,10 @@ mod tests {
         let engine = LoadEngine::new(config);
         let result = engine.run_load_test().await;
 
-        assert!(result.is_ok());
-        let metrics = result.unwrap();
+        let metrics = match result {
+            Ok(metrics) => metrics,
+            Err(err) => panic!("load test should succeed: {err}"),
+        };
         assert!(metrics.total_operations > 0);
         assert!(metrics.successful_operations > 0);
     }
