@@ -334,8 +334,10 @@ mod tests {
             ("def456".to_string(), 2i16, 1024i64),
         ];
         let out = registry_metadata_plain(&rows);
-        let text = std::str::from_utf8(&out).unwrap();
-        assert_eq!(text, "abc123\t1\t256\ndef456\t2\t1024\n");
+        match std::str::from_utf8(&out) {
+            Ok(text) => assert_eq!(text, "abc123\t1\t256\ndef456\t2\t1024\n"),
+            Err(err) => panic!("registry metadata should be valid UTF-8: {err}"),
+        }
     }
 
     #[test]

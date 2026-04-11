@@ -129,6 +129,7 @@ pub async fn rate_limit_noop(req: Request, next: Next) -> Response {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
 
@@ -200,17 +201,17 @@ mod tests {
     async fn check_rate_limit_exhaustion_returns_429() {
         let limiter = RateLimiter::new();
         for _ in 0..RATE_LIMIT_REQUESTS {
-            limiter.check_rate_limit("192.168.1.1").await.unwrap();
+            assert!(limiter.check_rate_limit("192.168.1.1").await.is_ok());
         }
         let result = limiter.check_rate_limit("192.168.1.1").await;
-        assert_eq!(result.unwrap_err(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(result, Err(StatusCode::TOO_MANY_REQUESTS));
     }
 
     #[tokio::test]
     async fn check_rate_limit_per_key_isolation() {
         let limiter = RateLimiter::new();
         for _ in 0..RATE_LIMIT_REQUESTS {
-            limiter.check_rate_limit("192.168.1.1").await.unwrap();
+            assert!(limiter.check_rate_limit("192.168.1.1").await.is_ok());
         }
         // Different key should still have tokens
         assert!(limiter.check_rate_limit("10.0.0.1").await.is_ok());

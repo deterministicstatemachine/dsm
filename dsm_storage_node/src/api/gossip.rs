@@ -155,8 +155,11 @@ mod tests {
             node_states: vec![],
         };
         let mut buf = Vec::new();
-        msg.encode(&mut buf).unwrap();
-        let decoded = pb::GossipMessageV1::decode(buf.as_slice()).unwrap();
+        assert!(msg.encode(&mut buf).is_ok());
+        let decoded = match pb::GossipMessageV1::decode(buf.as_slice()) {
+            Ok(decoded) => decoded,
+            Err(err) => panic!("gossip message should decode: {err}"),
+        };
         assert_eq!(decoded.sender_node_id, "node-1");
         assert_eq!(decoded.sender_tick, 42);
     }
@@ -168,8 +171,11 @@ mod tests {
             nodes: vec![],
         };
         let mut buf = Vec::new();
-        status.encode(&mut buf).unwrap();
-        let decoded = pb::GossipStatusV1::decode(buf.as_slice()).unwrap();
+        assert!(status.encode(&mut buf).is_ok());
+        let decoded = match pb::GossipStatusV1::decode(buf.as_slice()) {
+            Ok(decoded) => decoded,
+            Err(err) => panic!("gossip status should decode: {err}"),
+        };
         assert_eq!(decoded.alive_nodes_count, 3);
     }
 
