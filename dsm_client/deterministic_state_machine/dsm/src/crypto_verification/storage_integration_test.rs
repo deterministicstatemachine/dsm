@@ -56,7 +56,7 @@ mod tests {
 
         // Test store operations
         store.insert_identity(identity.clone()).await?;
-        let identity_id = identity.id();
+        let identity_id = identity.master_genesis.hash;
         let retrieved = store.get_identity(&identity_id).await;
         assert!(
             retrieved.is_some(),
@@ -113,7 +113,7 @@ mod tests {
 
         // Test store operations
         store.insert_identity(identity.clone()).await?;
-        let identity_id = identity.id();
+        let identity_id = identity.master_genesis.hash;
         let retrieved = store.get_identity(&identity_id).await;
         assert!(
             retrieved.is_some(),

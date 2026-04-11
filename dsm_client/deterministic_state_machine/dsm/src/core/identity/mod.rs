@@ -38,7 +38,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 use crate::types::error::DsmError;
-use crate::core::utility::labeling;
 use crate::types::identifiers::NodeId;
 use crate::types::state_types::State;
 use crate::prelude::*; // common items incl. Uuid, etc.
@@ -321,7 +320,7 @@ pub async fn create_trustless_genesis<
 /// Replaces global store to enforce bilateral isolation (no global state)
 #[derive(Clone)]
 pub struct IdentityStore {
-    pub store: Arc<RwLock<HashMap<String, Identity>>>,
+    pub store: Arc<RwLock<HashMap<[u8; 32], Identity>>>,
 }
 
 impl Default for IdentityStore {
@@ -338,9 +337,9 @@ impl IdentityStore {
         }
     }
 
-    /// Retrieve an identity by its genesis ID
+    /// Retrieve an identity by its exact canonical master genesis hash.
     #[allow(clippy::unused_async)]
-    pub async fn get_identity(&self, genesis_id: &str) -> Option<Identity> {
+    pub async fn get_identity(&self, genesis_id: &[u8; 32]) -> Option<Identity> {
         if let Ok(store) = self.store.read() {
             store.get(genesis_id).cloned()
         } else {
@@ -348,11 +347,11 @@ impl IdentityStore {
         }
     }
 
-    /// Insert or update an identity in the store
+    /// Insert or update an identity in the store.
     #[allow(clippy::unused_async)]
     pub async fn insert_identity(&self, identity: Identity) -> Result<(), IdentityError> {
         if let Ok(mut store) = self.store.write() {
-            store.insert(labeling::identity_to_string(&identity), identity);
+            store.insert(identity.master_genesis.hash, identity);
             Ok(())
         } else {
             Err(IdentityError::StorageError(
@@ -361,9 +360,9 @@ impl IdentityStore {
         }
     }
 
-    /// Check if an identity has been invalidated
+    /// Check if an identity has been invalidated.
     #[allow(clippy::unused_async)]
-    pub async fn is_invalidated(&self, genesis_id: &str) -> Result<bool, IdentityError> {
+    pub async fn is_invalidated(&self, genesis_id: &[u8; 32]) -> Result<bool, IdentityError> {
         if let Ok(store) = self.store.read() {
             let identity = store
                 .get(genesis_id)
@@ -376,9 +375,9 @@ impl IdentityStore {
         }
     }
 
-    /// Add a new device to an existing identity
+    /// Add a new device to an existing identity.
     #[allow(clippy::unused_async)]
-    pub async fn add_device(&self, genesis_id: &str) -> Result<DeviceIdentity, IdentityError> {
+    pub async fn add_device(&self, genesis_id: &[u8; 32]) -> Result<DeviceIdentity, IdentityError> {
         if let Ok(mut store) = self.store.write() {
             let identity = store
                 .get_mut(genesis_id)
@@ -510,7 +509,7 @@ impl IdentityStore {
         };
 
         if let Ok(mut store) = self.store.write() {
-            store.insert(labeling::identity_to_string(&identity), identity.clone());
+            store.insert(identity.master_genesis.hash, identity.clone());
         }
 
         Ok(identity)
@@ -697,10 +696,22 @@ pub struct Identity {
     pub invalidated: bool,
 }
 
+fn canonical_identity_id(genesis_hash: &[u8; 32]) -> String {
+    let mut hi = [0u8; 16];
+    hi.copy_from_slice(&genesis_hash[..16]);
+    let mut lo = [0u8; 16];
+    lo.copy_from_slice(&genesis_hash[16..]);
+    format!(
+        "genesis:{}:{}",
+        u128::from_be_bytes(hi),
+        u128::from_be_bytes(lo)
+    )
+}
+
 impl Identity {
-    /// Get the string representation of the identity ID
+    /// Get the canonical string representation of the exact master genesis hash.
     pub fn id(&self) -> String {
-        labeling::identity_to_string(self)
+        canonical_identity_id(&self.master_genesis.hash)
     }
 
     /// Construct an Identity from a provided genesis, with default fields initialized.
