@@ -4,7 +4,9 @@
 
 **Goal:** Eliminate the silent "bounce-to-initialize" race during device setup by making Rust the sole authority for the `securing_device` phase, removing all frontend `setAppState` writers in the genesis flow.
 
-**Architecture:** Add `securing_in_progress: bool` to Rust `SessionManager`, give `compute_phase()` an explicit `securing_device` arm that wins over `needs_genesis`, and expose three JNI markers (`markGenesisSecuringStarted/Complete/Aborted`) that flip the flag and return a fresh snapshot. Kotlin's `BridgeIdentityHandler` calls the markers around silicon-FP enrollment with strict ordering: **mark Rust → publish session state → fire lifecycle envelope**. Frontend `useGenesisFlow` becomes UI-only — it no longer writes `appState` for the securing phase. After this change, `useNativeSessionBridge` is the only writer to `appState`, and Rust is the only source of phase truth.
+**Architecture:** Add `securing_in_progress: bool` to Rust `SessionManager`, give `compute_phase()` an explicit `securing_device` arm that wins over `needs_genesis`, and expose the three mark operations through the **cross-platform `IngressRequest` oneof** (new `MarkGenesisSecuringOp` with `Phase { STARTED, COMPLETE, ABORTED }`). Kotlin's `BridgeIdentityHandler` calls `NativeBoundaryBridge.ingress(...)` with the MarkGenesisSecuring op around silicon-FP enrollment. `NativeBoundaryBridge.runBestEffortPostIngressHooks` auto-publishes fresh session state for the new op (mirroring the `session.lock`/`session.unlock` pattern). Strict ordering: **mark Rust via ingress → post-hook publishes session state → caller fires lifecycle envelope** (UI-thread FIFO preserves order between the scheduled publish and the subsequent envelope dispatch). Frontend `useGenesisFlow` becomes UI-only — it no longer writes `appState` for the securing phase. After this change, `useNativeSessionBridge` is the only writer to `appState`, and Rust is the only source of phase truth.
+
+**Why ingress, not Android-only JNI exports:** per `rules.instructions.md` "Cross-Platform Ingress (Anti-Fragmentation)", new protocol operations MUST be added as `IngressRequest.operation` oneof variants so Android and iOS stay in lockstep. Adding three new `Java_com_dsm_wallet_bridge_UnifiedNativeApi_markGenesisSecuring*` JNI exports would be a regression signal (iOS cannot reach them). One proto variant, one Rust match arm, and both platforms get it for free.
 
 **Tech Stack:** Rust (`dsm_sdk`, JNI), Kotlin (Android bridge layer), TypeScript (React hooks, `useSyncExternalStore`), `cargo ndk`, Gradle.
 
@@ -29,14 +31,20 @@
 ## Pre-flight context
 
 **Critical files (verified line numbers as of 2026-04-10):**
-- `dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/session_manager.rs:65-90` — `SessionManager` struct + `Default`
-- `dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/session_manager.rs:192-206` — `compute_phase()`
-- `dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/session_manager.rs:308-312` — `get_session_snapshot_bytes()`
-- `dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/session_manager.rs:344-398` — existing test module + helpers
-- `dsm_client/deterministic_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.rs:5932-5951` — `getSessionSnapshot` JNI export (no-arg pattern)
-- `dsm_client/deterministic_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.rs:6043-6062` — `clearSessionFatalError` JNI export (no-arg, returns snapshot bytes — closest precedent)
-- `dsm_client/android/app/src/main/java/com/dsm/wallet/bridge/UnifiedNativeApi.kt:177-184` — existing `createGenesis*Envelope` externs
-- `dsm_client/android/app/src/main/java/com/dsm/wallet/bridge/UnifiedNativeApi.kt:194-195` — existing `getSessionSnapshot/updateSessionHardwareFacts` externs
+
+**Rust SDK (already partially complete via Task 1 commit `962952e`):**
+- `dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/session_manager.rs` — `SessionManager` struct (`securing_in_progress` field already added), `Default`, `mark_securing_{started,complete,aborted}` methods (already added), `compute_phase()` with securing arm (already added). Module-level helpers `mark_securing_*_and_snapshot()` must be added in Task 3.
+- `dsm_client/deterministic_state_machine/dsm_sdk/src/ingress.rs` — `dispatch_ingress` match on `ingress_request::Operation::*`. New `MarkGenesisSecuring` arm lives here in Task 3. `mark_genesis_securing_core(phase)` helper function lives here too.
+
+**Proto schema + codegen:**
+- `proto/dsm_app.proto:2541-2595` — Operation messages (`RouterQueryOp`, `EnvelopeOp`, `HardwareFactsOp`, `DrainEventsOp`, `IngressRequest`). New `MarkGenesisSecuringOp` message inserted around line 2554 (after `DrainEventsOp`). `IngressRequest.operation` oneof gains tag 6.
+- Generated Rust stubs: `dsm_client/deterministic_state_machine/dsm_sdk/src/generated/**` (built by `prost-build` during cargo build when `DSM_PROTO_ROOT` is set).
+- Generated Kotlin/Java stubs: `dsm_client/android/app/src/main/proto/**` → compiled by `Gradle protobuf plugin` into `dsm.types.proto.IngressRequest` + nested operation classes.
+- Generated TypeScript stubs: `dsm_client/frontend/src/proto/**` (via `pnpm --filter dsm-wallet run proto:gen`).
+
+**Android bridge (Kotlin is transport-only — no JNI export changes):**
+- `dsm_client/android/app/src/main/java/com/dsm/wallet/bridge/NativeBoundaryBridge.kt:15-54` — `ingress()` entry point + `runBestEffortPostIngressHooks`. Task 4 extends the post-hook with a `MARK_GENESIS_SECURING` case that publishes session state (same pattern as `session.lock`/`session.unlock`).
+- `dsm_client/android/app/src/main/java/com/dsm/wallet/bridge/UnifiedNativeApi.kt:53` — `dispatchIngress(requestBytes): ByteArray` — **unchanged**. No new externs added.
 - `dsm_client/android/app/src/main/java/com/dsm/wallet/bridge/BridgeIdentityHandler.kt:215` — `createGenesisSecuringDeviceEnvelope` (start of bar)
 - `dsm_client/android/app/src/main/java/com/dsm/wallet/bridge/BridgeIdentityHandler.kt:229` — `createGenesisSecuringCompleteEnvelope` (bar 100%)
 - `dsm_client/android/app/src/main/java/com/dsm/wallet/bridge/BridgeIdentityHandler.kt:254-260` — `sdkBootstrapStrict` (`has_identity` becomes true here, eventually)
@@ -46,6 +54,8 @@
 - `dsm_client/android/app/src/main/java/com/dsm/wallet/ui/MainActivity.kt:161` — `getActiveInstance()`
 - `dsm_client/android/app/src/main/java/com/dsm/wallet/ui/MainActivity.kt:427-454` — `publishSessionState()`
 - `dsm_client/android/app/src/main/java/com/dsm/wallet/ui/MainActivity.kt:456-458` — `publishCurrentSessionState(reason)` (public)
+
+**Frontend (UI-only):**
 - `dsm_client/frontend/src/hooks/useGenesisFlow.ts:23-36` — visibilitychange listener (REMOVE)
 - `dsm_client/frontend/src/hooks/useGenesisFlow.ts:39-61` — DSM event listener (KEEP only progress branch)
 - `dsm_client/frontend/src/hooks/useGenesisFlow.ts:63-118` — `handleGenerateGenesis` (REMOVE setAppState calls)
@@ -68,7 +78,9 @@ cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 \
 
 ---
 
-## Task 1: Add `securing_in_progress` field + setters to `SessionManager`
+## Task 1: Add `securing_in_progress` field + setters to `SessionManager` ✅ DONE (commit `962952e`)
+
+> **Status:** complete. The struct field, `Default` init, three setters, `compute_phase()` arm, and three unit tests (`securing_in_progress_takes_precedence_over_needs_genesis`, `securing_in_progress_yields_to_fatal_error`, `securing_aborted_clears_flag`) all landed in commit `962952e` and have been code-reviewed. Three pre-existing broken tests (`auto_lock_on_background`, `no_auto_lock_when_policy_disabled`, `no_auto_lock_while_qr_scanner_active`) were fixed in the same commit by adding missing `let _g = setup_test_env();` guards. All 15 `session_manager::tests` pass. The original Task 1 specification below is preserved for historical reference.
 
 **Files:**
 - Modify: `dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/session_manager.rs:65-90` (struct + Default)
@@ -234,18 +246,150 @@ Refs: docs/plans/2026-04-10-rust-authoritative-securing-phase.md Task 1"
 
 ---
 
-## Task 2: Add three JNI markers in `unified_protobuf_bridge.rs`
+## Task 2: Add `MarkGenesisSecuringOp` to `IngressRequest` proto + regenerate bindings
+
+> **Architectural rationale:** per `.github/instructions/rules.instructions.md` "Cross-Platform Ingress (Anti-Fragmentation)", new protocol operations MUST be expressed as `IngressRequest.operation` oneof variants. This keeps Android and iOS on the same seam. The three mark actions (STARTED, COMPLETE, ABORTED) collapse into one proto op with a `Phase` enum.
 
 **Files:**
-- Modify: `dsm_client/deterministic_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.rs` (after line 6062, next to `clearSessionFatalError`)
-- Modify: `dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/session_manager.rs` (add three module-level helpers next to `clear_fatal_error_and_snapshot`)
+- Modify: `proto/dsm_app.proto:2541-2595` — add `MarkGenesisSecuringOp` message and extend `IngressRequest.operation` oneof with tag 6.
+- Regenerate: Rust (`dsm_client/deterministic_state_machine/dsm_sdk/src/generated/**` via cargo build), Kotlin (`dsm_client/android/app/src/main/proto/**` via Gradle protobuf plugin), TypeScript (`dsm_client/frontend/src/proto/**` via `pnpm proto:gen`).
+
+**Step 1: Add the proto message and extend the oneof**
+
+In `proto/dsm_app.proto`, after the `DrainEventsOp` message (currently lines 2552-2554) and BEFORE the `enum SdkEventKind` (line 2556), insert:
+
+```proto
+// Mark the genesis/device-securing phase in the Rust SessionManager. Used by
+// the Android bridge (and future iOS host) to flip the securing_in_progress
+// flag around DBRW silicon-fingerprint enrollment. All three phases funnel
+// through the same op so callers only need to switch a phase value — no new
+// per-platform JNI/FFI exports. See
+// .github/instructions/rules.instructions.md "Cross-Platform Ingress".
+message MarkGenesisSecuringOp {
+  enum Phase {
+    PHASE_UNSPECIFIED = 0;
+    PHASE_STARTED     = 1;
+    PHASE_COMPLETE    = 2;
+    PHASE_ABORTED     = 3;
+  }
+  Phase phase = 1;
+}
+```
+
+Then modify the `IngressRequest.operation` oneof (currently lines 2588-2596) to add tag 6:
+
+```proto
+// Canonical platform-agnostic ingress request.
+message IngressRequest {
+  oneof operation {
+    RouterQueryOp         router_query          = 1;
+    RouterInvokeOp        router_invoke         = 2;
+    EnvelopeOp            envelope              = 3;
+    HardwareFactsOp       hardware_facts        = 4;
+    DrainEventsOp         drain_events          = 5;
+    MarkGenesisSecuringOp mark_genesis_securing = 6;
+  }
+}
+```
+
+**Important — proto invariants:** no `timestamp` or wall-clock fields (CI guardrail), no `dsm_max_len` on enum fields (enums are fixed width), no renumbering existing tags (forward compat).
+
+**Step 2: Regenerate bindings**
+
+The repo has three codegen paths. Run them in order:
+
+```bash
+# 1. Rust: prost-build runs during cargo build, needs DSM_PROTO_ROOT pointing at proto/
+DSM_PROTO_ROOT=/Users/cryptskii/Desktop/claude_workspace/dsm/proto \
+  cargo check -p dsm_sdk --features=jni,bluetooth \
+    --manifest-path dsm_client/deterministic_state_machine/Cargo.toml
+
+# 2. Android Kotlin/Java stubs: the Gradle protobuf plugin regenerates on next build.
+#    The source-of-truth .proto file lives under dsm_client/android/app/src/main/proto/
+#    and may be a COPY of proto/dsm_app.proto — check and sync if needed:
+diff proto/dsm_app.proto dsm_client/android/app/src/main/proto/dsm_app.proto 2>&1 || true
+# If they differ, copy the canonical proto into the Android tree:
+cp proto/dsm_app.proto dsm_client/android/app/src/main/proto/dsm_app.proto
+
+# 3. TypeScript: pnpm proto:gen (the exact filter may differ — check package.json)
+cd dsm_client/frontend && pnpm proto:gen 2>&1 || \
+  (cd ../.. && pnpm --filter dsm-wallet run proto:gen)
+```
+
+Expected: all three regenerations succeed. If the TypeScript proto:gen script path is different, use `rg "proto:gen" dsm_client/frontend/package.json dsm_client/package.json` to find it.
+
+**Step 3: Verify the new symbols are in the generated Rust code**
+
+```bash
+rg -n "MarkGenesisSecuringOp|mark_genesis_securing" \
+  dsm_client/deterministic_state_machine/dsm_sdk/src/generated/ 2>&1
+```
+Expected: matches for `struct MarkGenesisSecuringOp`, `mod mark_genesis_securing_op`, `enum Phase`, and the new `MarkGenesisSecuring` variant in `ingress_request::Operation`.
+
+**Step 4: Verify the Kotlin stubs**
+
+```bash
+cd dsm_client/android && ./gradlew :app:generateDebugProto
+rg -n "MarkGenesisSecuringOp|MARK_GENESIS_SECURING" \
+  dsm_client/android/app/build/generated/source/proto/ 2>&1 | head -n 20
+```
+Expected: `class MarkGenesisSecuringOp`, enum `Phase`, and `IngressRequest.OperationCase.MARK_GENESIS_SECURING` appear in the generated Java.
+
+**Step 5: Verify the TypeScript stubs**
+
+```bash
+rg -n "MarkGenesisSecuringOp|mark_genesis_securing|markGenesisSecuring" \
+  dsm_client/frontend/src/proto/ 2>&1 | head -n 20
+```
+Expected: matches. (These stubs aren't strictly needed for this plan because the frontend doesn't call this op directly, but keeping all three languages in sync is required by the project's regeneration rules.)
+
+**Step 6: Diff-check that no other generated file drifted**
+
+```bash
+git diff --stat proto/ \
+  dsm_client/deterministic_state_machine/dsm_sdk/src/generated/ \
+  dsm_client/android/app/src/main/proto/ \
+  dsm_client/frontend/src/proto/
+```
+Expected: only files touching MarkGenesisSecuring/IngressRequest should be diff'd.
+
+**Step 7: Commit**
+
+```bash
+git add proto/dsm_app.proto \
+        dsm_client/android/app/src/main/proto/dsm_app.proto \
+        dsm_client/deterministic_state_machine/dsm_sdk/src/generated/ \
+        dsm_client/frontend/src/proto/
+git commit -m "proto: add MarkGenesisSecuringOp to IngressRequest (tag 6)
+
+Introduces a cross-platform mark op so the three securing phases
+(STARTED/COMPLETE/ABORTED) route through the existing ingress.rs seam
+instead of Android-only JNI exports. Keeps iOS in lockstep and satisfies
+the 'Cross-Platform Ingress (Anti-Fragmentation)' rule.
+
+New message: MarkGenesisSecuringOp { Phase phase = 1; }
+New oneof variant: IngressRequest.operation.mark_genesis_securing = 6;
+
+Refs: docs/plans/2026-04-10-rust-authoritative-securing-phase.md Task 2"
+```
+
+---
+
+## Task 3: Add `session_manager` helpers + `ingress.rs` match arm + TDD tests
+
+**Files:**
+- Modify: `dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/session_manager.rs` — add three module-level helpers next to `clear_fatal_error_and_snapshot` (already exists).
+- Modify: `dsm_client/deterministic_state_machine/dsm_sdk/src/ingress.rs` — add `mark_genesis_securing_core(phase)` function + a new match arm in `dispatch_ingress` for `Operation::MarkGenesisSecuring`. Add TDD tests in the existing `#[cfg(test)]` module.
 
 **Step 1: Add module-level helpers in `session_manager.rs`**
 
-After `clear_fatal_error_and_snapshot` (~line 342), add:
+Locate `clear_fatal_error_and_snapshot` (around line 342). Directly below it, add:
 
 ```rust
 /// Mark device-securing started and return updated snapshot bytes.
+/// Called from `ingress::dispatch_ingress` when a MarkGenesisSecuringOp
+/// with phase STARTED arrives. Returns the envelope-wrapped SessionStateResponse
+/// bytes so the caller can relay them to the UI if desired.
 pub fn mark_securing_started_and_snapshot() -> Vec<u8> {
     let mut mgr = SESSION_MANAGER.lock().unwrap_or_else(|p| p.into_inner());
     mgr.sync_lock_config_from_app_state();
@@ -270,7 +414,9 @@ pub fn mark_securing_aborted_and_snapshot() -> Vec<u8> {
 }
 ```
 
-**Step 2: Write the failing JNI smoke test**
+> **Verify `envelope_wrap_snapshot` exists.** Check that `session_manager.rs` already exports a helper of that name (it's used by `clear_fatal_error_and_snapshot` and `update_hardware_and_snapshot`). If the real name is different (e.g. `wrap_snapshot_as_envelope_bytes`), use that — the three new helpers should follow the exact pattern of `clear_fatal_error_and_snapshot` so there is no drift.
+
+**Step 2: Add a `session_manager::tests` unit test for the helpers**
 
 In the existing `tests` module of `session_manager.rs`, add:
 
@@ -289,255 +435,339 @@ fn marker_helpers_round_trip_through_compute_phase() {
 
     let started = mark_securing_started_and_snapshot();
     assert!(!started.is_empty());
+    {
+        let mgr = SESSION_MANAGER.lock().unwrap_or_else(|p| p.into_inner());
+        assert!(mgr.securing_in_progress, "STARTED must set the flag");
+    }
 
     let complete = mark_securing_complete_and_snapshot();
     assert!(!complete.is_empty());
+    {
+        let mgr = SESSION_MANAGER.lock().unwrap_or_else(|p| p.into_inner());
+        assert!(!mgr.securing_in_progress, "COMPLETE must clear the flag");
+    }
 
+    // Re-start then abort — flag must end up cleared.
+    let _ = mark_securing_started_and_snapshot();
     let aborted = mark_securing_aborted_and_snapshot();
     assert!(!aborted.is_empty());
-
-    // After these calls the manager flag is back to false
     let mgr = SESSION_MANAGER.lock().unwrap_or_else(|p| p.into_inner());
-    assert!(!mgr.securing_in_progress);
+    assert!(!mgr.securing_in_progress, "ABORTED must clear the flag");
 }
 ```
 
-**Step 3: Run test to verify it fails**
+**Step 3: Add the `mark_genesis_securing_core` function and ingress match arm**
 
-```bash
-cd dsm_client/deterministic_state_machine && \
-  cargo test -p dsm_sdk --features=jni,bluetooth \
-    sdk::session_manager::tests::marker_helpers_round_trip
-```
-Expected: FAIL with `cannot find function 'mark_securing_started_and_snapshot'`.
-
-**Step 4: Re-run after Step 1 helpers are in place**
-
-```bash
-cd dsm_client/deterministic_state_machine && \
-  cargo test -p dsm_sdk --features=jni,bluetooth \
-    sdk::session_manager::tests::marker_helpers_round_trip
-```
-Expected: PASS.
-
-**Step 5: Add the three JNI exports**
-
-In `unified_protobuf_bridge.rs`, **after** `clearSessionFatalError` (insert after line 6062, before the `// ========================= NFC Ring Backup JNI Exports =========================` divider on line 6064). Pattern follows `clearSessionFatalError` (no args, returns snapshot bytes):
+In `ingress.rs`, add the core function near the other `*_core` helpers (around line 147, next to `drain_events_core`):
 
 ```rust
-/// Mark device-securing started and return updated session snapshot bytes.
-/// Called by Kotlin BridgeIdentityHandler immediately before silicon-FP enrollment
-/// begins. Strict ordering: this call must complete before publishSessionState
-/// fires its session.state event so any concurrent caller sees `securing_device`.
-#[no_mangle]
-pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_markGenesisSecuringStarted(
-    env: jni::sys::JNIEnv,
-    _clazz: jni::sys::jclass,
-) -> jni::sys::jbyteArray {
-    crate::jni::bridge_utils::jni_catch_unwind_jbytearray(
-        "markGenesisSecuringStarted",
-        std::panic::AssertUnwindSafe(|| {
-            let env = match unsafe { env_from(env) } {
-                Some(e) => e,
-                None => return std::ptr::null_mut(),
-            };
-            let snapshot_bytes = crate::sdk::session_manager::mark_securing_started_and_snapshot();
-            env.byte_array_from_slice(&snapshot_bytes)
-                .map(|a| a.into_raw())
-                .unwrap_or_else(|_| empty_byte_array_or_empty(&env).into_raw())
-        }),
-    )
-}
-
-/// Mark device-securing complete and return updated session snapshot bytes.
-/// Called by Kotlin BridgeIdentityHandler immediately after sdkContextInitialized
-/// is set true and BEFORE the createGenesisOkEnvelope dispatch.
-#[no_mangle]
-pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_markGenesisSecuringComplete(
-    env: jni::sys::JNIEnv,
-    _clazz: jni::sys::jclass,
-) -> jni::sys::jbyteArray {
-    crate::jni::bridge_utils::jni_catch_unwind_jbytearray(
-        "markGenesisSecuringComplete",
-        std::panic::AssertUnwindSafe(|| {
-            let env = match unsafe { env_from(env) } {
-                Some(e) => e,
-                None => return std::ptr::null_mut(),
-            };
-            let snapshot_bytes = crate::sdk::session_manager::mark_securing_complete_and_snapshot();
-            env.byte_array_from_slice(&snapshot_bytes)
-                .map(|a| a.into_raw())
-                .unwrap_or_else(|_| empty_byte_array_or_empty(&env).into_raw())
-        }),
-    )
-}
-
-/// Mark device-securing aborted and return updated session snapshot bytes.
-/// Called by Kotlin BridgeIdentityHandler from handleHostPauseDuringGenesis
-/// and from the catch path inside installGenesisEnvelope, BEFORE the wipe.
-#[no_mangle]
-pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_markGenesisSecuringAborted(
-    env: jni::sys::JNIEnv,
-    _clazz: jni::sys::jclass,
-) -> jni::sys::jbyteArray {
-    crate::jni::bridge_utils::jni_catch_unwind_jbytearray(
-        "markGenesisSecuringAborted",
-        std::panic::AssertUnwindSafe(|| {
-            let env = match unsafe { env_from(env) } {
-                Some(e) => e,
-                None => return std::ptr::null_mut(),
-            };
-            let snapshot_bytes = crate::sdk::session_manager::mark_securing_aborted_and_snapshot();
-            env.byte_array_from_slice(&snapshot_bytes)
-                .map(|a| a.into_raw())
-                .unwrap_or_else(|_| empty_byte_array_or_empty(&env).into_raw())
-        }),
-    )
+fn mark_genesis_securing_core(phase: i32) -> Result<Vec<u8>, pb::Error> {
+    // Phase enum values mirror pb::mark_genesis_securing_op::Phase:
+    //   PHASE_UNSPECIFIED = 0
+    //   PHASE_STARTED     = 1
+    //   PHASE_COMPLETE    = 2
+    //   PHASE_ABORTED     = 3
+    use pb::mark_genesis_securing_op::Phase as P;
+    let enum_phase = P::try_from(phase).unwrap_or(P::Unspecified);
+    let bytes = match enum_phase {
+        P::Started => crate::sdk::session_manager::mark_securing_started_and_snapshot(),
+        P::Complete => crate::sdk::session_manager::mark_securing_complete_and_snapshot(),
+        P::Aborted => crate::sdk::session_manager::mark_securing_aborted_and_snapshot(),
+        P::Unspecified => {
+            return Err(ingress_error(
+                ERROR_CODE_INVALID_INPUT,
+                "ingress: mark_genesis_securing phase is unspecified",
+            ));
+        }
+    };
+    Ok(bytes)
 }
 ```
 
-**Step 6: Compile-only check**
+> **Note on `try_from`:** prost's `Enumeration` derive implements `TryFrom<i32>`. The exact module path depends on how `MarkGenesisSecuringOp` lands in the generated code — it's typically `pb::mark_genesis_securing_op::Phase`. If the generated path is different (check `dsm_client/deterministic_state_machine/dsm_sdk/src/generated/dsm_app.rs`), use that path instead. Do not use hard-coded integer comparisons — they silently break on schema evolution.
+
+Then extend `dispatch_ingress` (around line 361) to add the new match arm immediately before the `None` branch:
+
+```rust
+        Some(ingress_request::Operation::DrainEvents(op)) => drain_events_core(op.max_events),
+        Some(ingress_request::Operation::MarkGenesisSecuring(op)) => {
+            mark_genesis_securing_core(op.phase)
+        }
+        None => Err(ingress_error(
+            ERROR_CODE_INVALID_INPUT,
+            "ingress: empty IngressRequest (no operation set)",
+        )),
+```
+
+**Step 4: Add `ingress::tests` integration tests**
+
+In the existing `#[cfg(test)]` module of `ingress.rs` (starts around line 540), add:
+
+```rust
+#[test]
+fn dispatch_ingress_mark_genesis_securing_started_sets_flag() {
+    let _g = crate::sdk::session_manager::test_env::setup_test_env();
+    crate::sdk::session_manager::SDK_READY.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let response = dispatch_ingress(IngressRequest {
+        operation: Some(ingress_request::Operation::MarkGenesisSecuring(
+            pb::MarkGenesisSecuringOp {
+                phase: pb::mark_genesis_securing_op::Phase::Started as i32,
+            },
+        )),
+    });
+    match response.result {
+        Some(ingress_response::Result::OkBytes(bytes)) => assert!(!bytes.is_empty()),
+        other => panic!("expected OkBytes, got {:?}", other),
+    }
+
+    let mgr = crate::sdk::session_manager::SESSION_MANAGER
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    assert!(
+        mgr.securing_in_progress,
+        "dispatch_ingress(STARTED) must flip securing_in_progress"
+    );
+}
+
+#[test]
+fn dispatch_ingress_mark_genesis_securing_complete_clears_flag() {
+    let _g = crate::sdk::session_manager::test_env::setup_test_env();
+    crate::sdk::session_manager::SDK_READY.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    // Precondition: flag is set
+    {
+        let mut mgr = crate::sdk::session_manager::SESSION_MANAGER
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        mgr.mark_securing_started();
+    }
+
+    let response = dispatch_ingress(IngressRequest {
+        operation: Some(ingress_request::Operation::MarkGenesisSecuring(
+            pb::MarkGenesisSecuringOp {
+                phase: pb::mark_genesis_securing_op::Phase::Complete as i32,
+            },
+        )),
+    });
+    assert!(matches!(
+        response.result,
+        Some(ingress_response::Result::OkBytes(_))
+    ));
+
+    let mgr = crate::sdk::session_manager::SESSION_MANAGER
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    assert!(!mgr.securing_in_progress);
+}
+
+#[test]
+fn dispatch_ingress_mark_genesis_securing_unspecified_errors() {
+    let _g = crate::sdk::session_manager::test_env::setup_test_env();
+
+    let response = dispatch_ingress(IngressRequest {
+        operation: Some(ingress_request::Operation::MarkGenesisSecuring(
+            pb::MarkGenesisSecuringOp {
+                phase: pb::mark_genesis_securing_op::Phase::Unspecified as i32,
+            },
+        )),
+    });
+    match response.result {
+        Some(ingress_response::Result::Error(err)) => {
+            assert_eq!(err.code, ERROR_CODE_INVALID_INPUT);
+        }
+        other => panic!("expected Error, got {:?}", other),
+    }
+}
+```
+
+> **Test-env helper path:** the existing ingress tests reference `crate::sdk::session_manager::test_env::setup_test_env` only if that module exists. If the helper is private to `session_manager.rs` (it is, per commit `962952e`), expose it as `pub(crate)` — or mirror the setup locally (`let _ = TEST_LOCK.lock();`). Prefer `pub(crate)` so the ingress tests share the real guard.
+
+**Step 5: Run the tests — FAIL first, then PASS**
+
+```bash
+# Fail (helpers and ingress arm missing)
+cd dsm_client/deterministic_state_machine && \
+  DSM_PROTO_ROOT=/Users/cryptskii/Desktop/claude_workspace/dsm/proto \
+  cargo test -p dsm_sdk --features=jni,bluetooth \
+    sdk::session_manager::tests::marker_helpers_round_trip \
+    ingress::tests::dispatch_ingress_mark_genesis_securing -- --nocapture
+```
+Apply Steps 1 + 3 and re-run. Expected: all four tests PASS.
+
+**Step 6: Full test sweep**
 
 ```bash
 cd dsm_client/deterministic_state_machine && \
-  cargo check -p dsm_sdk --features=jni,bluetooth
+  DSM_PROTO_ROOT=/Users/cryptskii/Desktop/claude_workspace/dsm/proto \
+  cargo test -p dsm_sdk --features=jni,bluetooth sdk::session_manager ingress
 ```
-Expected: clean compile, no warnings.
+Expected: all existing session_manager + ingress tests still green, plus the new ones.
 
 **Step 7: Commit**
 
 ```bash
 git add dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/session_manager.rs \
-        dsm_client/deterministic_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.rs
-git commit -m "feat(jni): expose mark_securing_{started,complete,aborted} markers
+        dsm_client/deterministic_state_machine/dsm_sdk/src/ingress.rs
+git commit -m "feat(sdk): route MarkGenesisSecuringOp through ingress.rs
 
-Three no-arg JNI exports return updated session snapshot bytes after
-flipping the SessionManager.securing_in_progress flag. Each follows the
-clearSessionFatalError pattern: jni_catch_unwind, lock manager, mutate,
-return [0x03][Envelope(SessionStateResponse)] for Kotlin to relay.
+Adds three helper functions (mark_securing_{started,complete,aborted}_and_snapshot)
+in session_manager.rs and a match arm in dispatch_ingress that routes the
+new MarkGenesisSecuringOp.phase enum to the right helper. This keeps the
+single-entry-point ingress contract for both Android JNI and iOS FFI —
+no new per-platform exports needed.
 
-Refs: docs/plans/2026-04-10-rust-authoritative-securing-phase.md Task 2"
-```
-
----
-
-## Task 3: Declare new externs in Kotlin `UnifiedNativeApi.kt`
-
-**Files:**
-- Modify: `dsm_client/android/app/src/main/java/com/dsm/wallet/bridge/UnifiedNativeApi.kt:184` (insert after `createGenesisSecuringAbortedEnvelope`)
-
-**Step 1: Add the three external declarations**
-
-After line 184 (`createGenesisSecuringAbortedEnvelope`), insert:
-
-```kotlin
-/**
- * Mark device-securing started in Rust SessionManager. Returns updated session
- * snapshot bytes ([0x03][Envelope(SessionStateResponse)]). Call this BEFORE
- * dispatching createGenesisSecuringDeviceEnvelope so the next publishSessionState
- * sees `securing_device` phase.
- */
-@Keep @JvmStatic external fun markGenesisSecuringStarted(): ByteArray
-
-/**
- * Mark device-securing complete in Rust SessionManager. Returns updated session
- * snapshot bytes. Call this AFTER sdkContextInitialized.set(true) and BEFORE
- * createGenesisOkEnvelope so phase transitions through securing → wallet_ready
- * cleanly.
- */
-@Keep @JvmStatic external fun markGenesisSecuringComplete(): ByteArray
-
-/**
- * Mark device-securing aborted in Rust SessionManager. Returns updated session
- * snapshot bytes. Call this from handleHostPauseDuringGenesis and from the
- * catch path of installGenesisEnvelope BEFORE wiping prefs.
- */
-@Keep @JvmStatic external fun markGenesisSecuringAborted(): ByteArray
-```
-
-**Step 2: Verify Gradle compile**
-
-```bash
-cd dsm_client/android && \
-  ./gradlew :app:compileDebugKotlin
-```
-Expected: SUCCESS. (The native side will be missing until Task 9 NDK rebuild — Kotlin only checks the JNI signatures at link time, not compile time.)
-
-**Step 3: Commit**
-
-```bash
-git add dsm_client/android/app/src/main/java/com/dsm/wallet/bridge/UnifiedNativeApi.kt
-git commit -m "feat(android): declare markGenesisSecuring* JNI externs
-
-Adds three external fun declarations matching the new Rust JNI exports.
-Returns ByteArray snapshot bytes for caller to relay or inspect.
+Four new tests: one session_manager unit test round-tripping the three
+helpers through compute_phase, and three ingress integration tests
+exercising STARTED, COMPLETE, and UNSPECIFIED (error path).
 
 Refs: docs/plans/2026-04-10-rust-authoritative-securing-phase.md Task 3"
 ```
 
 ---
 
-## Task 4: Wire `markGenesisSecuringStarted` in `installGenesisEnvelope`
+## Task 4: Wire `markGenesisSecuring(STARTED)` via ingress in `installGenesisEnvelope`
 
 **Files:**
-- Modify: `dsm_client/android/app/src/main/java/com/dsm/wallet/bridge/BridgeIdentityHandler.kt:215` (insert lines BEFORE the existing `createGenesisSecuringDeviceEnvelope` dispatch)
+- Modify: `dsm_client/android/app/src/main/java/com/dsm/wallet/bridge/NativeBoundaryBridge.kt:29-53` — extend the post-hook `when (request.operationCase)` with a `MARK_GENESIS_SECURING` case that runs `publishCurrentSessionState` on the UI thread (mirroring the `session.lock`/`session.unlock` pattern already there).
+- Modify: `dsm_client/android/app/src/main/java/com/dsm/wallet/bridge/BridgeIdentityHandler.kt` — add a private helper `markGenesisSecuring(phase)` that builds + dispatches an `IngressRequest`, then call it at line ~215 just before `createGenesisSecuringDeviceEnvelope`.
 
-**Step 1: Read the surrounding context (already done — lines 200-230)**
+**Step 1: Extend the `NativeBoundaryBridge` post-hook**
 
-The current sequence at line 215 is:
+Open `NativeBoundaryBridge.kt`. Inside `runBestEffortPostIngressHooks`, the existing `when (request.operationCase)` already handles `ROUTER_INVOKE` and `ENVELOPE`. Add a new branch for `MARK_GENESIS_SECURING` so every mark op automatically republishes session state:
+
 ```kotlin
-UnifiedNativeApi.createGenesisSecuringDeviceEnvelope().let {
-    if (it.isNotEmpty()) BleEventRelay.dispatchEnvelope(it)
+when (request.operationCase) {
+    IngressRequest.OperationCase.ROUTER_INVOKE -> {
+        try {
+            UnifiedNativeApi.maybeRefreshNfcCapsule()
+        } catch (_: Throwable) {
+            // no-op
+        }
+        val method = request.routerInvoke.method
+        if (method == "session.lock" || method == "session.unlock") {
+            MainActivity.getActiveInstance()?.runOnUiThread {
+                MainActivity.getActiveInstance()?.publishCurrentSessionState(method)
+            }
+        }
+    }
+    IngressRequest.OperationCase.ENVELOPE -> {
+        try {
+            UnifiedNativeApi.maybeRefreshNfcCapsule()
+        } catch (_: Throwable) {
+            // no-op
+        }
+    }
+    IngressRequest.OperationCase.MARK_GENESIS_SECURING -> {
+        // Rust already flipped securing_in_progress inside dispatchIngress above.
+        // Republish session.state so any subscriber relying on the old snapshot
+        // (useNativeSessionBridge in the WebView) observes the new phase BEFORE
+        // the caller fires the next lifecycle envelope. UI-thread FIFO preserves
+        // ordering vs. the subsequent BleEventRelay dispatch on the caller side.
+        val phaseName = request.markGenesisSecuring.phase.name
+        MainActivity.getActiveInstance()?.runOnUiThread {
+            MainActivity.getActiveInstance()
+                ?.publishCurrentSessionState("genesisSecuring:$phaseName")
+        }
+    }
+    else -> {
+        // no-op
+    }
 }
 ```
 
-**Step 2: Apply the marker call with strict ordering**
+**Step 2: Add the `markGenesisSecuring` helper inside `BridgeIdentityHandler.kt`**
 
-Replace lines 215-216 with the strict-order block:
+Near the top of the class body (alongside other private helpers), add:
 
 ```kotlin
-// STRICT ORDER: mark Rust → publish session.state → fire lifecycle envelope.
-// This three-step sequence prevents the bounce-to-initialize race.
-// 1. Rust SessionManager.securing_in_progress = true (synchronous JNI call).
-UnifiedNativeApi.markGenesisSecuringStarted()
-// 2. Force a fresh session.state event so any concurrent battery/BLE/walletRefresh
-//    callers can no longer race a stale snapshot through publishSessionState.
-com.dsm.wallet.ui.MainActivity.getActiveInstance()
-    ?.publishCurrentSessionState("genesisSecuringStarted")
-// 3. Fire the lifecycle envelope (frontend useGenesisFlow listens for progress UI).
+/**
+ * Build + dispatch a MarkGenesisSecuring ingress request. This is the cross-platform
+ * seam — the same op is reachable from iOS via dsm_dispatch_ingress_request once the
+ * iOS host is wired. Blocks the calling thread on the JNI call so the Rust flag flip
+ * is visible before the next line runs. NativeBoundaryBridge's post-hook schedules
+ * publishCurrentSessionState on the UI thread after the mark lands; subsequent
+ * BleEventRelay.dispatchEnvelope calls share the same UI-thread FIFO, preserving
+ * the "Rust flag set → session.state published → lifecycle envelope fired" ordering
+ * that kills the bounce-to-initialize race.
+ */
+private fun markGenesisSecuring(phase: MarkGenesisSecuringOp.Phase) {
+    try {
+        val request = IngressRequest.newBuilder()
+            .setMarkGenesisSecuring(
+                MarkGenesisSecuringOp.newBuilder().setPhase(phase).build()
+            )
+            .build()
+        NativeBoundaryBridge.ingress(request.toByteArray())
+    } catch (t: Throwable) {
+        Log.w(logTag, "markGenesisSecuring($phase) ingress call failed", t)
+    }
+}
+```
+
+Add the two new imports near the top of `BridgeIdentityHandler.kt`:
+
+```kotlin
+import dsm.types.proto.IngressRequest
+import dsm.types.proto.MarkGenesisSecuringOp
+```
+
+**Step 3: Call the helper at the start-of-bar site (line ~215)**
+
+The current sequence around line 215 is:
+
+```kotlin
 UnifiedNativeApi.createGenesisSecuringDeviceEnvelope().let {
     if (it.isNotEmpty()) BleEventRelay.dispatchEnvelope(it)
 }
 Log.i(logTag, "installGenesisEnvelope: starting silicon fingerprint enrollment...")
 ```
 
-**Note:** there is an existing `Log.i(logTag, "installGenesisEnvelope: starting silicon fingerprint enrollment...")` on line 216 — keep only one of them. The block above includes the log; remove the duplicate.
+Replace with:
 
-**Step 3: Compile check**
+```kotlin
+// STRICT ORDER (see Task 4 doc):
+// 1. dispatchIngress(MarkGenesisSecuring STARTED) — Rust flips securing_in_progress
+//    synchronously, then NativeBoundaryBridge post-hook posts a fresh session.state
+//    publish to the UI thread queue.
+// 2. createGenesisSecuringDeviceEnvelope dispatch — also hits the UI thread queue
+//    after the publish because of step 1's post-hook, so useNativeSessionBridge
+//    observes securing_device BEFORE the bar renders.
+markGenesisSecuring(MarkGenesisSecuringOp.Phase.PHASE_STARTED)
+UnifiedNativeApi.createGenesisSecuringDeviceEnvelope().let {
+    if (it.isNotEmpty()) BleEventRelay.dispatchEnvelope(it)
+}
+Log.i(logTag, "installGenesisEnvelope: starting silicon fingerprint enrollment...")
+```
+
+**Step 4: Compile check**
 
 ```bash
 cd dsm_client/android && \
   ./gradlew :app:compileDebugKotlin
 ```
-Expected: SUCCESS. `MainActivity.getActiveInstance()` is already public (line 161), `publishCurrentSessionState` is already public (line 456).
+Expected: SUCCESS. If `IngressRequest.OperationCase.MARK_GENESIS_SECURING` is not yet present, Task 2's proto codegen step was incomplete — rerun `./gradlew :app:generateDebugProto` and re-check.
 
-**Step 4: Commit**
+**Step 5: Commit**
 
 ```bash
-git add dsm_client/android/app/src/main/java/com/dsm/wallet/bridge/BridgeIdentityHandler.kt
-git commit -m "feat(android): mark Rust securing started before bar dispatch
+git add dsm_client/android/app/src/main/java/com/dsm/wallet/bridge/NativeBoundaryBridge.kt \
+        dsm_client/android/app/src/main/java/com/dsm/wallet/bridge/BridgeIdentityHandler.kt
+git commit -m "feat(android): mark Rust securing STARTED via ingress before bar
 
-Three-step strict order: markGenesisSecuringStarted (Rust flag flip,
-synchronous JNI), publishCurrentSessionState (forces fresh session.state
-to all subscribers), createGenesisSecuringDeviceEnvelope (UI bar event).
-This window is the source of the bounce-to-initialize race.
+Routes the mark call through NativeBoundaryBridge.ingress so it shares
+the cross-platform IngressRequest seam instead of an Android-only JNI
+export. Extends the post-hook to auto-publish session.state for the
+MARK_GENESIS_SECURING operation case — the same pattern used for
+session.lock/unlock. UI-thread FIFO preserves strict ordering between
+the published session.state and the subsequent bar envelope dispatch.
 
 Refs: docs/plans/2026-04-10-rust-authoritative-securing-phase.md Task 4"
 ```
 
 ---
 
-## Task 5: Wire `markGenesisSecuringComplete` after `sdkContextInitialized.set(true)`
+## Task 5: Wire `markGenesisSecuring(COMPLETE)` via ingress after `sdkContextInitialized.set(true)`
 
 **Files:**
 - Modify: `dsm_client/android/app/src/main/java/com/dsm/wallet/bridge/BridgeIdentityHandler.kt:301-302`
@@ -555,16 +785,13 @@ Replace with:
 ```kotlin
 sdkContextInitialized.set(true)
 
-// STRICT ORDER: mark Rust → publish session.state → fire lifecycle envelope.
-// At this point has_identity is true (sdkBootstrapStrict succeeded above), so
-// after clearing securing_in_progress, compute_phase will return wallet_ready.
-// 1. Rust SessionManager.securing_in_progress = false.
-UnifiedNativeApi.markGenesisSecuringComplete()
-// 2. Force a fresh session.state event so the frontend transitions
-//    securing_device → wallet_ready synchronously, before any other caller.
-com.dsm.wallet.ui.MainActivity.getActiveInstance()
-    ?.publishCurrentSessionState("genesisSecuringComplete")
-// 3. Fire the OK lifecycle envelope.
+// STRICT ORDER (see Task 4 doc): dispatchIngress(COMPLETE) flips Rust flag back
+// off AND triggers the post-hook publish. At this point has_identity is true
+// (sdkBootstrapStrict succeeded above), so compute_phase returns wallet_ready.
+// The subsequent OK lifecycle envelope sits behind the publish in the UI-thread
+// queue, so useNativeSessionBridge observes wallet_ready first — not a
+// transient needs_genesis.
+markGenesisSecuring(MarkGenesisSecuringOp.Phase.PHASE_COMPLETE)
 UnifiedNativeApi.createGenesisOkEnvelope().let {
     if (it.isNotEmpty()) BleEventRelay.dispatchEnvelope(it)
 }
@@ -582,19 +809,19 @@ Expected: SUCCESS.
 
 ```bash
 git add dsm_client/android/app/src/main/java/com/dsm/wallet/bridge/BridgeIdentityHandler.kt
-git commit -m "feat(android): mark Rust securing complete before OK envelope
+git commit -m "feat(android): mark Rust securing COMPLETE via ingress before OK
 
-After sdkContextInitialized.set(true), mark Rust complete and force a
-session.state publish so the frontend's useNativeSessionBridge transitions
-securing_device → wallet_ready in a single observable step. The OK
-lifecycle envelope still fires for any UI components that listen for it.
+After sdkContextInitialized.set(true), dispatch the MarkGenesisSecuring
+COMPLETE op through the ingress seam. Post-hook publishes fresh
+session.state with wallet_ready (has_identity is already true here)
+before the OK lifecycle envelope reaches the WebView via UI-thread FIFO.
 
 Refs: docs/plans/2026-04-10-rust-authoritative-securing-phase.md Task 5"
 ```
 
 ---
 
-## Task 6: Wire `markGenesisSecuringAborted` in pause + catch paths
+## Task 6: Wire `markGenesisSecuring(ABORTED)` via ingress in pause + catch paths
 
 **Files:**
 - Modify: `dsm_client/android/app/src/main/java/com/dsm/wallet/bridge/BridgeIdentityHandler.kt:308-333` (handleHostPauseDuringGenesis)
@@ -618,7 +845,7 @@ UnifiedNativeApi.createGenesisSecuringAbortedEnvelope().let { ... }
 UnifiedNativeApi.createGenesisErrorEnvelope().let { ... }
 ```
 
-Insert the marker BEFORE the wipe and BEFORE the lifecycle envelopes, and force a session-state publish:
+Insert the marker BEFORE the wipe and BEFORE the lifecycle envelopes:
 
 ```kotlin
 if (!genesisLifecycleInFlight.get()) {
@@ -626,12 +853,11 @@ if (!genesisLifecycleInFlight.get()) {
 }
 genesisLifecycleInvalidated.set(true)
 
-// STRICT ORDER: mark Rust → publish session.state → wipe artifacts → fire envelopes.
-// Marking Rust first ensures no concurrent publishSessionState observer can see
-// "securing_device" after this function decided the flow is dead.
-UnifiedNativeApi.markGenesisSecuringAborted()
-com.dsm.wallet.ui.MainActivity.getActiveInstance()
-    ?.publishCurrentSessionState("genesisSecuringAborted")
+// STRICT ORDER: dispatchIngress(ABORTED) flips Rust flag AND post-hook publishes
+// a fresh session.state. The subsequent wipe + envelope dispatches arrive after
+// that publish on the UI thread queue, so no observer can see securing_device
+// once the flow has decided to die.
+markGenesisSecuring(MarkGenesisSecuringOp.Phase.PHASE_ABORTED)
 
 clearGenesisArtifacts(
     prefs = prefs,
@@ -651,18 +877,16 @@ UnifiedNativeApi.createGenesisErrorEnvelope().let {
 Log.w(logTag, "handleHostPauseDuringGenesis: app left during DBRW securing; wiped partial state")
 ```
 
-**Note:** the wipe-on-onPause invariant is preserved exactly. We only added the marker call before the wipe.
+**Note:** the wipe-on-onPause invariant is preserved exactly. We only added the marker call before the wipe. Because `markGenesisSecuring()` goes through `NativeBoundaryBridge.ingress` → post-hook → `runOnUiThread { publishCurrentSessionState }`, the session.state publish is scheduled on the UI thread BEFORE the wipe and envelope dispatches, so the order is consistent with Tasks 4 and 5.
 
 **Step 3: Apply the marker call to the catch path of `installGenesisEnvelope`**
 
-In the catch block found in Step 1 (also in `captureDeviceBindingForGenesisEnvelope` if it has its own catch — confirm with `grep`), insert the marker before the existing wipe / aborted envelope dispatch. Use the same three-step strict order. The exact line depends on what Step 1 reveals; insert immediately at the start of the catch block:
+In the catch block found in Step 1 (also in `captureDeviceBindingForGenesisEnvelope` if it has its own catch — confirm with `grep`), insert the marker before the existing wipe / aborted envelope dispatch:
 
 ```kotlin
 } catch (e: Exception) {
     Log.e(logTag, "installGenesisEnvelope: aborting due to exception", e)
-    UnifiedNativeApi.markGenesisSecuringAborted()
-    com.dsm.wallet.ui.MainActivity.getActiveInstance()
-        ?.publishCurrentSessionState("genesisSecuringFailed")
+    markGenesisSecuring(MarkGenesisSecuringOp.Phase.PHASE_ABORTED)
     // ...existing wipe + envelope dispatch path...
     throw e
 }
@@ -682,14 +906,14 @@ Expected: SUCCESS.
 
 ```bash
 git add dsm_client/android/app/src/main/java/com/dsm/wallet/bridge/BridgeIdentityHandler.kt
-git commit -m "feat(android): mark Rust securing aborted on pause + catch
+git commit -m "feat(android): mark Rust securing ABORTED via ingress on pause + catch
 
 Both abort paths (handleHostPauseDuringGenesis and the catch block of
-installGenesisEnvelope/captureDeviceBindingForGenesisEnvelope) now call
-markGenesisSecuringAborted before wiping partial state. The wipe-on-onPause
-security invariant is preserved unchanged; we only added the Rust flag
-clear ahead of it so the frontend phase falls back to needs_genesis
-synchronously.
+installGenesisEnvelope/captureDeviceBindingForGenesisEnvelope) now
+dispatch MarkGenesisSecuring ABORTED through the ingress seam before
+wiping partial state. The wipe-on-onPause security invariant is preserved
+unchanged; we only added the Rust flag clear ahead of it so the frontend
+phase falls back to needs_genesis synchronously via the post-hook publish.
 
 Refs: docs/plans/2026-04-10-rust-authoritative-securing-phase.md Task 6"
 ```
@@ -946,17 +1170,17 @@ cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 \
 ```
 Expected: SUCCESS, three `.so` files emitted to `app/src/main/jniLibs/{arm64-v8a,armeabi-v7a,x86_64}/`.
 
-**Step 3: Verify symbol count grew by 3**
+**Step 3: Verify symbol count is UNCHANGED**
 
 ```bash
 nm -gU dsm_client/android/app/src/main/jniLibs/arm64-v8a/libdsm_sdk.so | grep -c Java_
 ```
-Expected: ≥ 90 (was 87, now +3 markers). The new symbols should be visible:
+Expected: ≥ 82 (unchanged from pre-plan baseline). This plan adds ZERO new JNI exports — the mark ops flow through the existing `Java_com_dsm_wallet_bridge_UnifiedNativeApi_dispatchIngress` entry point. If the symbol count grows, someone added an Android-only export in violation of the cross-platform ingress rule — stop and investigate.
 
 ```bash
 nm -gU dsm_client/android/app/src/main/jniLibs/arm64-v8a/libdsm_sdk.so | grep markGenesisSecuring
 ```
-Expected: three lines, one each for `markGenesisSecuringStarted`, `markGenesisSecuringComplete`, `markGenesisSecuringAborted`.
+Expected: ZERO results. The mark functions are internal Rust code inside `ingress.rs`; they are not exported across the JNI boundary.
 
 **Step 4: Mirror to repo-level jniLibs (per CLAUDE.md memory)**
 
@@ -1076,17 +1300,24 @@ Otherwise, no commit.
 
 Before declaring done:
 
-- [ ] Rust `compute_phase` returns `securing_device` when the flag is set, with priority above `needs_genesis`.
-- [ ] Three `mark_securing_*` setters exist and round-trip through `compute_snapshot`.
-- [ ] Three new JNI symbols (`Java_..._markGenesisSecuringStarted/Complete/Aborted`) appear in `nm -gU libdsm_sdk.so`.
-- [ ] `BridgeIdentityHandler.installGenesisEnvelope` calls `markGenesisSecuringStarted` immediately before the bar dispatch and `markGenesisSecuringComplete` immediately after `sdkContextInitialized.set(true)`, both with `publishCurrentSessionState` in between Rust and the lifecycle envelope.
-- [ ] `BridgeIdentityHandler.handleHostPauseDuringGenesis` calls `markGenesisSecuringAborted` before the wipe (wipe-on-onPause invariant unchanged).
-- [ ] The catch block(s) of `installGenesisEnvelope` / `captureDeviceBindingForGenesisEnvelope` call `markGenesisSecuringAborted` before any other abort handling.
-- [ ] Frontend `useGenesisFlow` no longer imports `AppState`, no longer calls `setAppState`, no longer registers a `visibilitychange` listener. It exports a hook that takes only `setSecuringProgress` and `setError`.
-- [ ] Manual smoke test on Galaxy A54: 10 consecutive INITIALIZE → wallet_ready transitions, no bounce to INITIALIZE.
-- [ ] Stress test (USB unplug, battery state, screen-saver) during the bar does not bounce.
-- [ ] All four guardrail scans exit 0.
-- [ ] `pnpm test:canonical && cargo test -p dsm_sdk && ./gradlew :app:test` all green.
+- [x] Rust `compute_phase` returns `securing_device` when the flag is set, with priority above `needs_genesis`. *(Task 1, commit `962952e`)*
+- [x] Three `mark_securing_*` setters exist on `SessionManager`. *(Task 1, commit `962952e`)*
+- [ ] `MarkGenesisSecuringOp` message exists in `proto/dsm_app.proto` with enum `Phase { UNSPECIFIED, STARTED, COMPLETE, ABORTED }` and is wired into `IngressRequest.operation` as tag 6. *(Task 2)*
+- [ ] Generated Rust, Kotlin/Java, and TypeScript stubs all contain the new types. *(Task 2)*
+- [ ] Three `mark_securing_*_and_snapshot()` module-level helpers exist in `session_manager.rs`. *(Task 3)*
+- [ ] `ingress::dispatch_ingress` has a `MarkGenesisSecuring` match arm that calls `mark_genesis_securing_core(phase)`, and the core function maps the enum to the right helper. *(Task 3)*
+- [ ] Four new Rust tests pass: `marker_helpers_round_trip_through_compute_phase`, `dispatch_ingress_mark_genesis_securing_started_sets_flag`, `dispatch_ingress_mark_genesis_securing_complete_clears_flag`, `dispatch_ingress_mark_genesis_securing_unspecified_errors`. *(Task 3)*
+- [ ] `NativeBoundaryBridge.runBestEffortPostIngressHooks` handles `IngressRequest.OperationCase.MARK_GENESIS_SECURING` by publishing fresh session state on the UI thread. *(Task 4)*
+- [ ] `BridgeIdentityHandler` has a private `markGenesisSecuring(phase)` helper that builds an `IngressRequest` and dispatches via `NativeBoundaryBridge.ingress`. *(Task 4)*
+- [ ] `BridgeIdentityHandler.installGenesisEnvelope` calls `markGenesisSecuring(STARTED)` immediately before `createGenesisSecuringDeviceEnvelope` and `markGenesisSecuring(COMPLETE)` immediately after `sdkContextInitialized.set(true)`. *(Tasks 4 + 5)*
+- [ ] `BridgeIdentityHandler.handleHostPauseDuringGenesis` calls `markGenesisSecuring(ABORTED)` before the wipe (wipe-on-onPause invariant unchanged). *(Task 6)*
+- [ ] The catch block(s) of `installGenesisEnvelope` / `captureDeviceBindingForGenesisEnvelope` call `markGenesisSecuring(ABORTED)` before any other abort handling. *(Task 6)*
+- [ ] `nm -gU libdsm_sdk.so | grep markGenesisSecuring` returns ZERO hits. The JNI symbol count is UNCHANGED from baseline — no new per-platform exports added. *(Task 9)*
+- [ ] Frontend `useGenesisFlow` no longer imports `AppState`, no longer calls `setAppState`, no longer registers a `visibilitychange` listener. It exports a hook that takes only `setSecuringProgress` and `setError`. *(Task 7)*
+- [ ] Manual smoke test on Galaxy A54: 10 consecutive INITIALIZE → wallet_ready transitions, no bounce to INITIALIZE. *(Task 10)*
+- [ ] Stress test (USB unplug, battery state, screen-saver) during the bar does not bounce. *(Task 10)*
+- [ ] All four guardrail scans exit 0. *(Task 11)*
+- [ ] `pnpm test:canonical && cargo test -p dsm_sdk && ./gradlew :app:test` all green. *(Task 11)*
 
 ## Out of scope (deferred)
 
