@@ -393,8 +393,11 @@ mod tests {
             parent_digest: vec![0; 32],
         };
         let mut buf = Vec::new();
-        commit.encode(&mut buf).unwrap();
-        let decoded = ByteCommitV3::decode(buf.as_slice()).unwrap();
+        assert!(commit.encode(&mut buf).is_ok());
+        let decoded = match ByteCommitV3::decode(buf.as_slice()) {
+            Ok(decoded) => decoded,
+            Err(err) => panic!("bytecommit should decode: {err}"),
+        };
         assert_eq!(decoded, commit);
     }
 

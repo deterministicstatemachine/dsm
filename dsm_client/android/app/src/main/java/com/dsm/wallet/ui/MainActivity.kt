@@ -834,7 +834,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                     .setNegativeButton("Learn More") { _, _ ->
                         // Open architecture guide
                         val intent = Intent(Intent.ACTION_VIEW, 
-                            Uri.parse("https://github.com/DSM-Deterministic-State-Machine/deterministic-state-machine/blob/main/docs/ARCHITECTURE.md"))
+                            Uri.parse("https://github.com/deterministicstatemachine/dsm/blob/main/docs/book/04-architecture.md"))
                         startActivity(intent)
                         finishAffinity()
                     }

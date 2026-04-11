@@ -158,35 +158,51 @@ mod tests {
 
     #[test]
     fn parse_query_empty_or_none() {
-        let q = parse_query(None).unwrap();
-        assert!(q.prefix.is_none());
-        assert!(q.limit.is_none());
-        assert!(q.cursor.is_none());
+        match parse_query(None) {
+            Ok(q) => {
+                assert!(q.prefix.is_none());
+                assert!(q.limit.is_none());
+                assert!(q.cursor.is_none());
+            }
+            Err(err) => panic!("expected empty query to parse, got {err:?}"),
+        }
 
-        let q = parse_query(Some("")).unwrap();
-        assert!(q.prefix.is_none());
+        match parse_query(Some("")) {
+            Ok(q) => assert!(q.prefix.is_none()),
+            Err(err) => panic!("expected blank query to parse, got {err:?}"),
+        }
     }
 
     #[test]
     fn parse_query_all_params() {
-        let q = parse_query(Some("prefix=abc&limit=50&cursor=xyz")).unwrap();
-        assert_eq!(q.prefix.as_deref(), Some("abc"));
-        assert_eq!(q.limit, Some(50));
-        assert_eq!(q.cursor.as_deref(), Some("xyz"));
+        match parse_query(Some("prefix=abc&limit=50&cursor=xyz")) {
+            Ok(q) => {
+                assert_eq!(q.prefix.as_deref(), Some("abc"));
+                assert_eq!(q.limit, Some(50));
+                assert_eq!(q.cursor.as_deref(), Some("xyz"));
+            }
+            Err(err) => panic!("expected full query to parse, got {err:?}"),
+        }
     }
 
     #[test]
     fn parse_query_prefix_only() {
-        let q = parse_query(Some("prefix=foo")).unwrap();
-        assert_eq!(q.prefix.as_deref(), Some("foo"));
-        assert!(q.limit.is_none());
-        assert!(q.cursor.is_none());
+        match parse_query(Some("prefix=foo")) {
+            Ok(q) => {
+                assert_eq!(q.prefix.as_deref(), Some("foo"));
+                assert!(q.limit.is_none());
+                assert!(q.cursor.is_none());
+            }
+            Err(err) => panic!("expected prefix-only query to parse, got {err:?}"),
+        }
     }
 
     #[test]
     fn parse_query_unknown_keys_ignored() {
-        let q = parse_query(Some("prefix=bar&unknown=val")).unwrap();
-        assert_eq!(q.prefix.as_deref(), Some("bar"));
+        match parse_query(Some("prefix=bar&unknown=val")) {
+            Ok(q) => assert_eq!(q.prefix.as_deref(), Some("bar")),
+            Err(err) => panic!("expected query with unknown keys to parse, got {err:?}"),
+        }
     }
 
     #[test]
@@ -197,8 +213,10 @@ mod tests {
 
     #[test]
     fn parse_query_percent_encoded_prefix() {
-        let q = parse_query(Some("prefix=hello%20world")).unwrap();
-        assert_eq!(q.prefix.as_deref(), Some("hello world"));
+        match parse_query(Some("prefix=hello%20world")) {
+            Ok(q) => assert_eq!(q.prefix.as_deref(), Some("hello world")),
+            Err(err) => panic!("expected percent-encoded query to parse, got {err:?}"),
+        }
     }
 
     #[test]
@@ -231,10 +249,10 @@ mod tests {
 
     #[test]
     fn decode_percent_mixed() {
-        assert_eq!(decode_percent("hello").unwrap(), "hello");
-        assert_eq!(decode_percent("a%2Fb").unwrap(), "a/b");
-        assert_eq!(decode_percent("a+b").unwrap(), "a b");
-        assert_eq!(decode_percent("%48%49").unwrap(), "HI");
+        assert_eq!(decode_percent("hello"), Ok("hello".to_string()));
+        assert_eq!(decode_percent("a%2Fb"), Ok("a/b".to_string()));
+        assert_eq!(decode_percent("a+b"), Ok("a b".to_string()));
+        assert_eq!(decode_percent("%48%49"), Ok("HI".to_string()));
     }
 
     #[test]
