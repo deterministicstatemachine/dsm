@@ -332,6 +332,14 @@ internal object BridgeIdentityHandler {
         )
 
         sdkContextInitialized.set(true)
+
+        // STRICT ORDER (see docs/plans/2026-04-10-rust-authoritative-securing-phase.md Task 5):
+        // dispatchIngress(COMPLETE) flips Rust securing_in_progress back off AND triggers
+        // the post-hook publish. At this point has_identity is true (sdkBootstrapStrict
+        // succeeded above), so compute_phase returns wallet_ready. The subsequent OK
+        // lifecycle envelope sits behind the publish in the UI-thread queue, so
+        // useNativeSessionBridge observes wallet_ready first — not a transient needs_genesis.
+        markGenesisSecuring(MarkGenesisSecuringOp.Phase.PHASE_COMPLETE, logTag)
         UnifiedNativeApi.createGenesisOkEnvelope().let { if (it.isNotEmpty()) BleEventRelay.dispatchEnvelope(it) }
 
         Log.i(logTag, "installGenesisEnvelope: atomic post-genesis initialization completed successfully")
