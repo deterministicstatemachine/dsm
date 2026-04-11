@@ -9,7 +9,7 @@ resolver = "2"
 version = "0.1.0-beta.1"
 authors = ["DSM Development Team"]
 edition = "2021"
-repository = "https://github.com/DSM-Deterministic-State-Machine/deterministic-state-machine"
+repository = "https://github.com/deterministicstatemachine/dsm"
 license = "MIT OR Apache-2.0"
 
 [profile.release]
