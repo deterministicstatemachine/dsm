@@ -223,8 +223,7 @@ mod tests {
     fn parse_devid_extracts_value() {
         let b32 = dsm_sdk::util::text_id::encode_base32_crockford(&[0x42u8; 32]);
         let raw = format!("devid={b32}");
-        let result = parse_devid(Some(&raw)).unwrap();
-        assert_eq!(result, vec![0x42u8; 32]);
+        assert_eq!(parse_devid(Some(&raw)), Ok(vec![0x42u8; 32]));
     }
 
     #[test]
@@ -237,24 +236,23 @@ mod tests {
     fn parse_devid_with_multiple_params() {
         let b32 = dsm_sdk::util::text_id::encode_base32_crockford(&[0x33u8; 32]);
         let raw = format!("foo=bar&devid={b32}&baz=qux");
-        let result = parse_devid(Some(&raw)).unwrap();
-        assert_eq!(result, vec![0x33u8; 32]);
+        assert_eq!(parse_devid(Some(&raw)), Ok(vec![0x33u8; 32]));
     }
 
     #[test]
     fn decode_percent_passthrough() {
-        assert_eq!(decode_percent("hello").unwrap(), "hello");
+        assert_eq!(decode_percent("hello"), Ok("hello".to_string()));
     }
 
     #[test]
     fn decode_percent_hex_sequences() {
-        assert_eq!(decode_percent("a%20b").unwrap(), "a b");
-        assert_eq!(decode_percent("%41%42%43").unwrap(), "ABC");
+        assert_eq!(decode_percent("a%20b"), Ok("a b".to_string()));
+        assert_eq!(decode_percent("%41%42%43"), Ok("ABC".to_string()));
     }
 
     #[test]
     fn decode_percent_plus_becomes_space() {
-        assert_eq!(decode_percent("a+b").unwrap(), "a b");
+        assert_eq!(decode_percent("a+b"), Ok("a b".to_string()));
     }
 
     #[test]
@@ -265,12 +263,12 @@ mod tests {
 
     #[test]
     fn from_hex_digits() {
-        assert_eq!(from_hex(b'0').unwrap(), 0);
-        assert_eq!(from_hex(b'9').unwrap(), 9);
-        assert_eq!(from_hex(b'a').unwrap(), 10);
-        assert_eq!(from_hex(b'f').unwrap(), 15);
-        assert_eq!(from_hex(b'A').unwrap(), 10);
-        assert_eq!(from_hex(b'F').unwrap(), 15);
+        assert_eq!(from_hex(b'0'), Ok(0));
+        assert_eq!(from_hex(b'9'), Ok(9));
+        assert_eq!(from_hex(b'a'), Ok(10));
+        assert_eq!(from_hex(b'f'), Ok(15));
+        assert_eq!(from_hex(b'A'), Ok(10));
+        assert_eq!(from_hex(b'F'), Ok(15));
     }
 
     #[test]

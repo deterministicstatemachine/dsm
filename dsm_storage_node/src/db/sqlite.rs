@@ -1427,7 +1427,10 @@ mod tests {
             ),
         ];
         let enc = encode_headers_deterministic(&headers);
-        let dec = decode_headers_deterministic(&enc).expect("decode");
+        let dec = match decode_headers_deterministic(&enc) {
+            Ok(decoded) => decoded,
+            Err(err) => panic!("header decode should succeed: {err:?}"),
+        };
 
         assert_eq!(dec[0].0, "content-type");
         assert_eq!(dec[1].0, "x-test");
