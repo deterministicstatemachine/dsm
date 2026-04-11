@@ -578,15 +578,10 @@ object Unified {
         return UnifiedNativeDiagnostics.runNativeBridgeSelfTest()
     }
 
-    /**
-     * Collect a live Android-side C-DBRW runtime snapshot for the Rust `dbrw.status` route.
-     *
-     * The returned bytes use the fixed binary layout defined in `UnifiedCdbrwBridge`.
-     * Empty means runtime metrics are currently unavailable (for example, no active activity).
-     */
-    @Keep @JvmStatic fun getCdbrwRuntimeSnapshot(): ByteArray {
-        return UnifiedCdbrwBridge.collectRuntimeSnapshot()
-    }
+    // getCdbrwRuntimeSnapshot() was removed with the Protocol 6.2 collapse.
+    // Kotlin no longer computes trust/entropy/Wasserstein on its own — the
+    // `cdbrw.measure_trust` router query publishes a live CdbrwTrustSnapshot
+    // with the same data, and frontend/UI consume that directly.
 
     // ---------- BLE pairing orchestration (Rust-driven loop) ----------
 

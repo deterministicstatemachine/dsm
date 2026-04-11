@@ -7,7 +7,7 @@ import androidx.annotation.Keep
 // DSM APP INTEGRATION BOUNDARY -- JNI Symbol Table
 // ============================================================================
 //
-// This file declares all 87+ JNI symbols implemented in the Rust SDK shared
+// This file declares every JNI symbol implemented in the Rust SDK shared
 // library (libdsm_sdk.so). Each method maps 1:1 to a Rust function named
 // Java_com_dsm_wallet_bridge_UnifiedNativeApi_<method>.
 //
@@ -17,8 +17,10 @@ import androidx.annotation.Keep
 //   Rust export in dsm_sdk/src/jni/unified_protobuf_bridge.rs.
 //
 // VERIFICATION:
-//   nm -gU libdsm_sdk.so | grep -c Java_   -> expect 87+
-//   If count drops after a Rust rebuild, a symbol was accidentally removed.
+//   nm -gU libdsm_sdk.so | grep -c Java_   -> must match `external fun` count
+//   nm -gU libdsm_sdk.so | grep -c cdbrw    -> must be 0 (router-only now)
+//   If either check fails after a Rust rebuild, a symbol was accidentally
+//   added or removed without updating the Kotlin side.
 //
 // ALL METHODS:
 //   - Accept/return ByteArray (protobuf bytes) or primitive types.
@@ -63,43 +65,11 @@ internal object UnifiedNativeApi {
     @Keep @JvmStatic external fun ensureAppRouterInstalled(): Boolean
     @Keep @JvmStatic external fun getAppRouterStatus(): Int
     @Keep @JvmStatic external fun computeB0xAddress(genesis: ByteArray, deviceId: ByteArray, tip: ByteArray): String
-    @Keep @JvmStatic external fun cdbrwDomainHash(tag: ByteArray, data: ByteArray): ByteArray?
-    @Keep @JvmStatic external fun cdbrwEncapsDeterministic(
-        publicKey: ByteArray,
-        chainTip: ByteArray,
-        commitmentPreimage: ByteArray,
-        deviceId: ByteArray,
-        kDbrw: ByteArray
-    ): Array<ByteArray>?
-    @Keep @JvmStatic external fun cdbrwEnsureVerifierPublicKey(): ByteArray?
-    @Keep @JvmStatic external fun cdbrwSignResponse(
-        chainTip: ByteArray,
-        commitmentPreimage: ByteArray,
-        kStep: ByteArray,
-        kDbrw: ByteArray,
-        gamma: ByteArray,
-        ciphertext: ByteArray,
-        challenge: ByteArray
-    ): Array<ByteArray>?
-    @Keep @JvmStatic external fun cdbrwVerifyChallengeResponse(
-        challenge: ByteArray,
-        gamma: ByteArray,
-        ciphertext: ByteArray,
-        signature: ByteArray,
-        ephemeralPublicKey: ByteArray,
-        chainTip: ByteArray,
-        commitmentPreimage: ByteArray,
-        enrollmentAnchor: ByteArray,
-        epsilonIntra: Float,
-        epsilonInter: Float
-    ): ByteArray?
-    @Keep @JvmStatic external fun cdbrwVerifyResponseSignature(
-        ephemeralPublicKey: ByteArray,
-        gamma: ByteArray,
-        ciphertext: ByteArray,
-        challenge: ByteArray,
-        signature: ByteArray
-    ): Boolean
+    // C-DBRW JNI surface removed: Kotlin is transport-only. All C-DBRW state —
+    // enrollment (Algorithm 6.1), challenge/response (Algorithm 3), entropy
+    // health, signing, verifier key mgmt — is now reached exclusively through
+    // `NativeBoundaryBridge.routerQuery("cdbrw.*", ...)`. Do not re-add any
+    // `external fun cdbrw*` declarations here; they break the single-path rule.
     @Keep @JvmStatic external fun bleNotifyConnectionState(address: String, connected: Boolean)
     @Keep @JvmStatic external fun hasContactForDeviceId(deviceId: ByteArray): Boolean
     @Keep @JvmStatic external fun isBleAddressPaired(address: String): Boolean

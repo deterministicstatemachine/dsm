@@ -46,88 +46,14 @@ target_link_libraries(
 )
 
 # ------------------------------------------------------------------
-# C-DBRW Entropy Health JNI: 3-condition health test + manufacturing gate
+# C-DBRW native surface (entropy health, moments, BLAKE3 static lib)
+# was removed when Protocol 6.2 collapsed into the single-path router.
+# All histogram math, Wasserstein distance, entropy health, and anchor
+# commitment live in Rust (`dsm_sdk/src/security/cdbrw_*`). The only
+# native library the Kotlin side still loads is `libsiliconfp.so`,
+# which provides the raw NDK orbit-density probe consumed by
+# `SiliconFingerprintNative.captureOrbitDensity`.
 # ------------------------------------------------------------------
-add_library(
-    dsm_entropy_health_jni
-    SHARED
-    cdbrw_entropy_health_jni.cpp
-    cdbrw_entropy_health.c
-)
 
-target_include_directories(dsm_entropy_health_jni PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}
-)
-
-target_compile_features(dsm_entropy_health_jni PRIVATE cxx_std_17)
-
-target_compile_options(dsm_entropy_health_jni PRIVATE
-    -O2
-    -fno-exceptions
-    -fno-rtti
-    -Wall
-    -Wextra
-    -Werror
-)
-
-target_link_libraries(
-    dsm_entropy_health_jni
-    ${log-lib}
-    m
-)
-
-# ------------------------------------------------------------------
-# BLAKE3: Static library for C-DBRW moments hashing
-# ------------------------------------------------------------------
-add_library(
-    blake3_static
-    STATIC
-    blake3/blake3.c
-)
-
-target_include_directories(blake3_static PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/blake3
-)
-
-target_compile_options(blake3_static PRIVATE
-    -O2
-    -DBLAKE3_NO_SSE2
-    -DBLAKE3_NO_SSE41
-    -DBLAKE3_NO_AVX2
-    -DBLAKE3_NO_AVX512
-)
-
-# ------------------------------------------------------------------
-# C-DBRW Moments JNI: Attractor envelope test (Def. 6.3)
-# ------------------------------------------------------------------
-add_library(
-    dsm_moments_jni
-    SHARED
-    cdbrw_moments_jni.cpp
-    cdbrw_moments.c
-)
-
-target_include_directories(dsm_moments_jni PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}
-)
-
-target_compile_features(dsm_moments_jni PRIVATE cxx_std_17)
-
-target_compile_options(dsm_moments_jni PRIVATE
-    -O2
-    -fno-exceptions
-    -fno-rtti
-    -Wall
-    -Wextra
-    -Werror
-)
-
-target_link_libraries(
-    dsm_moments_jni
-    blake3_static
-    ${log-lib}
-    m
-)
-
-# No C++ wrapper needed - Rust library exports JNI functions directly
-# Unified JNI surface only; no legacy DsmNative usage.
+# No C++ wrapper needed — Rust library exports JNI functions directly
+# through `libdsm_sdk.so`. Unified JNI surface only.

@@ -115,7 +115,6 @@ const securingWarningStyle: React.CSSProperties = {
   letterSpacing: '0.08em',
   lineHeight: 1.4,
   textTransform: 'uppercase',
-  animation: 'dsmSecuringBlink 1.8s steps(1, end) infinite',
 };
 
 const securingPrimaryWarningLineStyle: React.CSSProperties = {
@@ -143,14 +142,6 @@ const securingStatusTextStyle: React.CSSProperties = {
   width: '100%',
   textAlign: 'center',
 };
-
-const securingBlinkKeyframes = `
-  @keyframes dsmSecuringBlink {
-    0%, 44% { opacity: 1; }
-    45%, 78% { opacity: 0; }
-    79%, 100% { opacity: 1; }
-  }
-`;
 
 export default function AppContent({
   appState,
@@ -184,7 +175,7 @@ export default function AppContent({
     case 'loading':
       return (
         <div className="dsm-content">
-          <LoadingSpinner message="Wallet" size="large" eraTokenSrc={eraTokenSrc} />
+            <LoadingSpinner message="Wallet" size="large" eraTokenSrc={dsmLogoSrc} />
           <StatusText
             lines={[
               'INITIALIZING DSM',
@@ -199,7 +190,7 @@ export default function AppContent({
     case 'runtime_loading':
       return (
         <div className="dsm-content">
-          <LoadingSpinner message="Starting Runtime" size="large" eraTokenSrc={eraTokenSrc} />
+            <LoadingSpinner message="Starting Runtime" size="large" eraTokenSrc={dsmLogoSrc} />
           <StatusText
             lines={[
               'STARTING RUNTIME',
@@ -241,11 +232,10 @@ export default function AppContent({
     case 'securing_device':
       return (
         <div className="dsm-content dsm-content--securing" style={securingContentStyle}>
-          <style>{securingBlinkKeyframes}</style>
-          <LoadingSpinner message="Securing Device" size="large" eraTokenSrc={eraTokenSrc} />
+          <LoadingSpinner message="Securing Device" size="large" eraTokenSrc={dsmLogoSrc} />
           <div className="dsm-securing-alerts" aria-live="assertive" style={securingAlertStackStyle}>
             <div
-              className="dsm-securing-warning dsm-securing-warning--blink"
+              className="dsm-securing-warning"
               style={securingWarningStyle}
             >
               <span style={securingPrimaryWarningLineStyle}>THIS ONLY HAPPENS ONCE</span>

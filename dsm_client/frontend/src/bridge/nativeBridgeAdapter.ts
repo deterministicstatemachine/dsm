@@ -3,7 +3,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { initializeEventBridge } from '../dsm/EventBridge';
-import { startSdkEventPump } from '../dsm/NativeBoundaryBridge';
 import { DSM_WALLET_REFRESH_EVENT } from '../dsm/events';
 import { bridgeEvents } from './bridgeEvents';
 
@@ -14,7 +13,6 @@ export function initializeNativeBridgeAdapter(): void {
   installed = true;
 
   initializeEventBridge();
-  startSdkEventPump();
 
   if (typeof document !== 'undefined') {
     document.addEventListener('dsm-identity-ready', () => {
