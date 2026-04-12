@@ -70,8 +70,9 @@ mod tests {
         );
 
         // Verify that anchor Base32 Crockford representation roundtrips
-        let base32_str = anchor.to_base32();
-        let from_base32 = PolicyAnchor::from_base32(&base32_str).expect("Failed to parse base32");
+        let base32_str = anchor.to_display_base32();
+        let from_base32 =
+            PolicyAnchor::from_policy_uri(&base32_str).expect("Failed to parse base32");
         assert_eq!(anchor, from_base32, "Anchor should match after base32 roundtrip");
     }
 

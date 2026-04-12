@@ -43,19 +43,30 @@ impl PolicyAnchor {
         PolicyAnchor(bytes)
     }
 
-    /// Encode the anchor to Base32 Crockford for human-readable representation
-    pub fn to_base32(&self) -> String {
-        // Use base32 crate which supports Crockford encoding
+    /// Encode the anchor to a display/URI-safe Base32 Crockford string.
+    ///
+    /// This helper is for UI, filenames, and URI presentation only. It is not
+    /// part of any canonical commit or acceptance path.
+    pub fn to_display_base32(&self) -> String {
         base32::encode(base32::Alphabet::Crockford, &self.0)
     }
 
-    /// Decode a Base32 Crockford string to a PolicyAnchor
-    pub fn from_base32(s: &str) -> Result<Self, DsmError> {
-        let bytes = base32::decode(base32::Alphabet::Crockford, s)
-            .ok_or_else(|| DsmError::invalid_parameter("Invalid base32 Crockford string"))?;
+    /// Build the canonical display URI form for this anchor.
+    pub fn to_policy_uri(&self) -> String {
+        format!("dsm:policy:{}", self.to_display_base32())
+    }
+
+    /// Decode a display/URI Base32 Crockford string into a `PolicyAnchor`.
+    ///
+    /// This accepts either the raw Crockford text or the prefixed
+    /// `dsm:policy:<base32>` presentation form.
+    pub fn from_policy_uri(value: &str) -> Result<Self, DsmError> {
+        let base32_value = value.strip_prefix("dsm:policy:").unwrap_or(value);
+        let bytes = base32::decode(base32::Alphabet::Crockford, base32_value)
+            .ok_or_else(|| DsmError::invalid_parameter("Invalid policy anchor display string"))?;
         if bytes.len() != 32 {
             return Err(DsmError::invalid_parameter(
-                "Base32 string must decode to exactly 32 bytes",
+                "Policy anchor display string must decode to exactly 32 bytes",
             ));
         }
         let mut arr = [0u8; 32];
@@ -713,24 +724,24 @@ mod tests {
     }
 
     #[test]
-    fn anchor_base32_roundtrip() {
+    fn anchor_display_base32_roundtrip() {
         let raw = [0x42u8; 32];
         let anchor = PolicyAnchor::from_bytes(raw);
-        let encoded = anchor.to_base32();
-        let decoded = PolicyAnchor::from_base32(&encoded).unwrap();
+        let encoded = anchor.to_display_base32();
+        let decoded = PolicyAnchor::from_policy_uri(&encoded).unwrap();
         assert_eq!(anchor.0, decoded.0);
     }
 
     #[test]
-    fn anchor_from_base32_invalid_string() {
-        let result = PolicyAnchor::from_base32("!!invalid!!");
+    fn anchor_from_policy_uri_invalid_string() {
+        let result = PolicyAnchor::from_policy_uri("!!invalid!!");
         assert!(result.is_err());
     }
 
     #[test]
-    fn anchor_from_base32_wrong_length() {
+    fn anchor_from_policy_uri_wrong_length() {
         let short = base32::encode(base32::Alphabet::Crockford, &[1, 2, 3]);
-        let result = PolicyAnchor::from_base32(&short);
+        let result = PolicyAnchor::from_policy_uri(&short);
         assert!(result.is_err());
     }
 
