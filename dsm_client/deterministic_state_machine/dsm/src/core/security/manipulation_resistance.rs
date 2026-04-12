@@ -290,10 +290,14 @@ impl ManipulationResistance {
             } => {
                 let amount_value = amount.value();
 
-                // Convert binary token_id to string key for balance lookup
-                let token_key = std::str::from_utf8(token_id).unwrap_or("");
+                let token_key = match std::str::from_utf8(token_id) {
+                    Ok(key) if !key.is_empty() => key,
+                    _ => return Ok(false),
+                };
 
-                // Check balance for the specific token being transferred
+                // Check balance for the specific token being transferred.
+                // Malformed token IDs must be rejected rather than collapsing
+                // onto an empty-string balance key.
                 let current_balance = current
                     .token_balances
                     .get(token_key)
@@ -725,6 +729,44 @@ mod tests {
 
         let result = ManipulationResistance::verify_balance_conservation(&current, &next).unwrap();
         assert!(!result);
+    }
+
+    #[test]
+    fn balance_conservation_rejects_malformed_transfer_token_id() {
+        let mut current = make_state(5);
+        current
+            .token_balances
+            .insert("".into(), Balance::from_state(100, [0; 32], 5));
+
+        let mut next = make_state(6);
+        next.operation = make_transfer_op(40, b"alice", &[0xFF, 0xFE, 0xFD]);
+        next.token_balances
+            .insert("".into(), Balance::from_state(60, [0; 32], 6));
+
+        let result = ManipulationResistance::verify_balance_conservation(&current, &next).unwrap();
+        assert!(
+            !result,
+            "non-UTF8 token ids must be rejected instead of collapsing to the empty key"
+        );
+    }
+
+    #[test]
+    fn balance_conservation_rejects_empty_transfer_token_id() {
+        let mut current = make_state(5);
+        current
+            .token_balances
+            .insert("".into(), Balance::from_state(100, [0; 32], 5));
+
+        let mut next = make_state(6);
+        next.operation = make_transfer_op(40, b"alice", b"");
+        next.token_balances
+            .insert("".into(), Balance::from_state(60, [0; 32], 6));
+
+        let result = ManipulationResistance::verify_balance_conservation(&current, &next).unwrap();
+        assert!(
+            !result,
+            "empty token ids must be rejected instead of aliasing the empty balance slot"
+        );
     }
 
     // ── verify_signatures (state gap) ───────────────────────────────
