@@ -267,13 +267,19 @@ export async function listLocalDlvs(): Promise<DlvIndexEntry[]> {
 
 /**
  * Check whether a DLV anchor is replicated on storage nodes.
- * Returns false when no vault ID is provided; full per-node presence query
- * is not yet exposed via a single-vault route.
+ * No single-vault presence route exists yet — returns false (honest).
+ * The Nodes tab shows real per-node health; per-vault replication
+ * query requires a dedicated storage route to be implemented.
  */
-export function checkDlvPresence(anchorHex: string): Promise<boolean> {
-  return Promise.resolve(!!anchorHex);
+export function checkDlvPresence(_anchorHex: string): Promise<boolean> {
+  return Promise.resolve(false);
 }
 
+/**
+ * Create a local backup file.
+ * Not yet implemented — NFC ring backup is the primary backup mechanism.
+ * See NFC Recovery screen for functional backup/restore.
+ */
 export function createBackup(): Promise<string> {
-  return Promise.resolve('/storage/emulated/0/Download/dsm_backup.nfc');
+  return Promise.reject(new Error('Local file backup not implemented. Use NFC ring backup.'));
 }

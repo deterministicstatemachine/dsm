@@ -470,10 +470,8 @@ impl AppRouterImpl {
             }
 
             // -------- nfc.ring.read --------
-            // Authorizes Kotlin to launch NfcRecoveryActivity (enableReaderMode).
+            // Authorizes inline NFC reading.
             // No capsule validation — we are reading from the ring, not writing.
-            // Kotlin must call this route first, check for an error response,
-            // and only launch NfcRecoveryActivity on success.
             "nfc.ring.read" => {
                 let resp = generated::AppStateResponse {
                     key: "nfc.ring.read".to_string(),
@@ -484,10 +482,8 @@ impl AppRouterImpl {
 
             // -------- nfc.ring.write --------
             // Validates NFC backup state (Rust is the authoritative source).
-            // Returns a proper FramedEnvelopeV3 so Kotlin knows whether to launch
-            // NfcWriteActivity. Kotlin must call this route first via shared ingress,
-            // check for an error response, and only
-            // launch the NFC activity on success.
+            // Returns a proper FramedEnvelopeV3 so Kotlin knows whether to proceed
+            // with inline NFC writing.
             "nfc.ring.write" => {
                 // Check NFC backup is enabled.
                 if !crate::sdk::recovery_sdk::RecoverySDK::is_nfc_backup_enabled() {
@@ -505,7 +501,7 @@ impl AppRouterImpl {
                     );
                 }
 
-                // Authorization granted — Kotlin will launch NfcWriteActivity.
+                // Authorization granted — Kotlin will proceed with inline NFC writing.
                 let resp = generated::AppStateResponse {
                     key: "nfc.ring.write".to_string(),
                     value: Some("authorized=true".to_string()),

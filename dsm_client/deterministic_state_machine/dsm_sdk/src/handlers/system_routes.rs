@@ -52,6 +52,40 @@ pub(crate) fn handle_system_genesis_query(q: AppQuery) -> AppResult {
         )
         .to_vec();
 
+        // ---- Persist genesis record to SQLite so local_genesis_hash() succeeds ----
+        // Without this, storage.sync fails with "no genesis record found" and
+        // bilateral transfers are impossible.
+        let genesis_id_b32 = crate::util::text_id::encode_base32_crockford(&genesis_hash);
+        let device_id_b32 = crate::util::text_id::encode_base32_crockford(&device_id);
+        let genesis_record = crate::storage::client_db::GenesisRecord {
+            genesis_id: genesis_id_b32.clone(),
+            device_id: device_id_b32.clone(),
+            mpc_proof: res.session_id.clone(),
+            dbrw_binding: crate::util::text_id::encode_base32_crockford(&entropy),
+            merkle_root: crate::util::text_id::encode_base32_crockford(&[0u8; 32]),
+            participant_count: res.threshold as u32,
+            progress_marker: "genesis".to_string(),
+            publication_hash: genesis_id_b32,
+            storage_nodes: res.participating_nodes.clone(),
+            entropy_hash: crate::util::text_id::encode_base32_crockford(
+                dsm::crypto::blake3::domain_hash("DSM/genesis-entropy", &entropy).as_bytes(),
+            ),
+            protocol_version: "v3".to_string(),
+            hash_chain_proof: None,
+            smt_proof: None,
+            verification_step: None,
+        };
+
+        match crate::storage::client_db::store_genesis_record_with_verification(&genesis_record) {
+            Ok(_) => log::info!("system.genesis: genesis record stored successfully"),
+            Err(e) => log::warn!("system.genesis: failed to store genesis record: {}", e),
+        }
+
+        match crate::storage::client_db::ensure_wallet_state_for_device(&device_id_b32) {
+            Ok(_) => log::info!("system.genesis: wallet_state ensured for device={}", &device_id_b32[..8]),
+            Err(e) => log::warn!("system.genesis: failed to ensure wallet_state: {}", e),
+        }
+
         let resp = generated::GenesisCreated {
             device_id: device_id.clone(),
             genesis_hash: Some(generated::Hash32 {
@@ -62,9 +96,9 @@ pub(crate) fn handle_system_genesis_query(q: AppQuery) -> AppResult {
                 v: smt_root.clone(),
             }),
             device_entropy: entropy.clone(),
-            session_id: String::new(),
+            session_id: res.session_id,
             threshold: 3,
-            storage_nodes: vec![],
+            storage_nodes: res.participating_nodes,
             network_id: req.network_id.clone(),
             locale: req.locale.clone(),
         };

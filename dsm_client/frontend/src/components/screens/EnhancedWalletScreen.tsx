@@ -6,7 +6,7 @@ import OverviewTab from './wallet/OverviewTab';
 import SendTab from './wallet/SendTab';
 import HistoryTab from './wallet/HistoryTab';
 import InboxOverlay from './wallet/InboxOverlay';
-import BitcoinTapTab from './BitcoinTapTab';
+import BitcoinTapTab from './bitcoin/BitcoinTapTab';
 import { ensureBleAdvertisingIfContacts } from '../../contexts/ContactsContext';
 import { stopBleAdvertisingViaRouter } from '../../dsm/WebViewBridge';
 import { bridgeEvents } from '../../bridge/bridgeEvents';

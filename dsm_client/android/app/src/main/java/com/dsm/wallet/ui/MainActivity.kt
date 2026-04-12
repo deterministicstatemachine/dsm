@@ -15,7 +15,12 @@ import android.nfc.NdefRecord
 import android.nfc.NfcAdapter
 import android.nfc.Tag
 import android.nfc.tech.Ndef
+import android.nfc.tech.NdefFormatable
+import android.nfc.tech.NfcA
 import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.os.BatteryManager
 import android.os.IBinder
 import android.os.Bundle
@@ -110,8 +115,9 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
     @Volatile private var isAppForeground = true
     @Volatile private var batteryCharging = false
     @Volatile private var batteryLevelPercent = 100
-    // NFC inline reader state (ring reads happen on MainActivity, not a separate Activity)
+    // NFC inline state (reads AND writes happen on MainActivity, not separate Activities)
     @Volatile private var nfcReaderActive = false
+    @Volatile private var nfcWriteMode = false
     private var nfcAdapter: NfcAdapter? = null
     // Bluetooth enable prompt launcher
     lateinit var btEnableLauncher: ActivityResultLauncher<Intent>
@@ -151,6 +157,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         private const val EVENT_DISPATCH_TAG = "DsmEventDispatch"
         private const val STATE_QR_SCANNER_ACTIVE = "qr_scanner_active"
         private const val STATE_QR_SCANNER_RESUME_PENDING = "qr_scanner_resume_pending"
+        private const val NTAG216_MIN_USABLE_BYTES = 500
 
         // Weak reference to the currently active activity instance to avoid memory leaks.
         @Volatile
@@ -240,18 +247,18 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
      * Enable NFC reader mode on this activity so the ring can be read inline
      * without leaving the WebView. Called from the native host bridge NFC control path.
      */
-    fun startNfcReader() {
+    fun startNfcReader(): Boolean {
+        val adapter = nfcAdapter ?: NfcAdapter.getDefaultAdapter(this)
+        nfcAdapter = adapter
+        if (adapter == null || !adapter.isEnabled) {
+            Log.w(tag, "startNfcReader: NFC not available or disabled")
+            return false
+        }
+        if (nfcReaderActive) {
+            Log.d(tag, "startNfcReader: already active")
+            return true
+        }
         runOnUiThread {
-            val adapter = nfcAdapter ?: NfcAdapter.getDefaultAdapter(this)
-            nfcAdapter = adapter
-            if (adapter == null || !adapter.isEnabled) {
-                Log.w(tag, "startNfcReader: NFC not available or disabled")
-                return@runOnUiThread
-            }
-            if (nfcReaderActive) {
-                Log.d(tag, "startNfcReader: already active")
-                return@runOnUiThread
-            }
             nfcReaderActive = true
             adapter.enableReaderMode(
                 this,
@@ -261,6 +268,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
             )
             Log.i(tag, "startNfcReader: reader mode enabled")
         }
+        return true
     }
 
     /**
@@ -271,23 +279,56 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         runOnUiThread {
             if (!nfcReaderActive) return@runOnUiThread
             nfcReaderActive = false
-            try {
-                nfcAdapter?.disableReaderMode(this)
-            } catch (t: Throwable) {
-                Log.w(tag, "stopNfcReader: disableReaderMode failed", t)
-            }
-            Log.i(tag, "stopNfcReader: reader mode disabled")
+            nfcWriteMode = false
+            // Restore silent suppression instead of fully disabling — this prevents
+            // Android's system NFC popup from appearing while the app is in foreground.
+            enableNfcSuppression()
+            Log.i(tag, "stopNfcReader: reader mode stopped, suppression restored")
         }
     }
 
     /**
+     * Enable NFC writer mode. The next onTagDiscovered call will write the
+     * pending recovery capsule instead of reading. The user stays in the WebView
+     * the entire time — no separate Activity, no gray screen.
+     */
+    fun startNfcWriter(): Boolean {
+        val adapter = nfcAdapter ?: NfcAdapter.getDefaultAdapter(this)
+        nfcAdapter = adapter
+        if (adapter == null || !adapter.isEnabled) {
+            Log.w(tag, "startNfcWriter: NFC not available or disabled")
+            return false
+        }
+        runOnUiThread {
+            nfcWriteMode = true
+            nfcReaderActive = true
+            adapter.enableReaderMode(
+                this,
+                this,
+                NfcAdapter.FLAG_READER_NFC_A or NfcAdapter.FLAG_READER_SKIP_NDEF_CHECK,
+                null
+            )
+            Log.i(tag, "startNfcWriter: write mode enabled, waiting for tag")
+        }
+        return true
+    }
+
+    /**
      * NfcAdapter.ReaderCallback — called on a binder thread when a tag is discovered.
-     * Reads the NDEF capsule record and dispatches it through BleEventRelay → WebView.
+     * Routes to read or write path depending on nfcWriteMode.
      * The user never leaves the WebView.
      */
     override fun onTagDiscovered(tag: Tag) {
         if (!nfcReaderActive) return
 
+        if (nfcWriteMode) {
+            handleNfcWrite(tag)
+        } else {
+            handleNfcRead(tag)
+        }
+    }
+
+    private fun handleNfcRead(tag: Tag) {
         bridgeExecutor.execute {
             try {
                 val ndef = Ndef.get(tag)
@@ -321,17 +362,184 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                 }
                 Log.i(this.tag, "onTagDiscovered: dispatched recovery capsule (${payload.size} bytes)")
 
-                // Auto-stop reader after successful read
+                // Auto-stop reader after successful read, restore suppression
                 runOnUiThread {
                     nfcReaderActive = false
-                    try {
-                        nfcAdapter?.disableReaderMode(this)
-                    } catch (_: Throwable) {}
+                    enableNfcSuppression()
                 }
             } catch (e: Exception) {
                 Log.w(this.tag, "onTagDiscovered: NFC read failed: ${e.message}")
             }
         }
+    }
+
+    /**
+     * Inline NFC write — replaces the old NfcWriteActivity.
+     * Runs on bridgeExecutor (off UI thread). Vibrates on success.
+     */
+    private fun handleNfcWrite(tag: Tag) {
+        bridgeExecutor.execute {
+            try {
+                val capsuleBytes = com.dsm.wallet.bridge.UnifiedNativeApi.getPendingRecoveryCapsule()
+                if (capsuleBytes.isEmpty()) {
+                    Log.w(this.tag, "handleNfcWrite: no pending capsule available")
+                    runOnUiThread {
+                        nfcReaderActive = false
+                        nfcWriteMode = false
+                        enableNfcSuppression()
+                    }
+                    return@execute
+                }
+
+                Log.i(this.tag, "handleNfcWrite: preparing to write ${capsuleBytes.size} bytes capsule")
+                val ndefBytes = com.dsm.wallet.bridge.UnifiedNativeApi.prepareNfcWritePayload(capsuleBytes)
+                val ndefMessage = NdefMessage(ndefBytes)
+
+                val preparedTag = prepareNfcTag(tag)
+                if (preparedTag == null) {
+                    Log.w(this.tag, "handleNfcWrite: tag preparation failed")
+                    runOnUiThread {
+                        nfcReaderActive = false
+                        nfcWriteMode = false
+                        enableNfcSuppression()
+                    }
+                    return@execute
+                }
+
+                writeNdefToTag(preparedTag, ndefMessage)
+                com.dsm.wallet.bridge.UnifiedNativeApi.clearPendingRecoveryCapsule()
+
+                runOnUiThread {
+                    nfcReaderActive = false
+                    nfcWriteMode = false
+                    vibrateNfcCommit()
+                    enableNfcSuppression()
+                }
+
+                com.dsm.wallet.bridge.UnifiedNativeApi.createNfcBackupWrittenEnvelope()
+                    .takeIf { it.isNotEmpty() }
+                    ?.let { BleEventRelay.dispatchEnvelope(it) }
+
+                Log.i(this.tag, "handleNfcWrite: committed ${ndefBytes.size} bytes")
+
+            } catch (e: IOException) {
+                Log.d(this.tag, "handleNfcWrite: write failed (tag moved?): ${e.message}")
+            } catch (e: Exception) {
+                Log.d(this.tag, "handleNfcWrite: failed: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * Prepare a tag for NDEF writing. Auto-formats factory-blank NTAG216 tags.
+     */
+    private fun prepareNfcTag(tag: Tag): Tag? {
+        var ndef = Ndef.get(tag)
+
+        if (ndef == null) {
+            val formatable = NdefFormatable.get(tag) ?: return null
+            try {
+                formatable.connect()
+                formatable.format(NdefMessage(arrayOf(NdefRecord(
+                    NdefRecord.TNF_EMPTY, ByteArray(0), ByteArray(0), ByteArray(0)
+                ))))
+                formatable.close()
+                Log.i(this.tag, "prepareNfcTag: auto-formatted blank tag")
+            } catch (e: Exception) {
+                Log.w(this.tag, "prepareNfcTag: auto-format failed: ${e.message}")
+                try { formatable.close() } catch (_: Exception) {}
+                return null
+            }
+            ndef = Ndef.get(tag) ?: return null
+        }
+
+        try {
+            ndef.connect()
+            val maxSize = ndef.maxSize
+            ndef.close()
+
+            if (maxSize < NTAG216_MIN_USABLE_BYTES) {
+                Log.w(this.tag, "prepareNfcTag: capacity too small: $maxSize bytes")
+                if (maxSize < 200) {
+                    try {
+                        fixNfcCapabilityContainer(tag)
+                    } catch (e: Exception) {
+                        Log.w(this.tag, "prepareNfcTag: CC fix failed: ${e.message}")
+                        return null
+                    }
+                } else {
+                    return null
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(this.tag, "prepareNfcTag: capacity check failed: ${e.message}")
+            return null
+        }
+
+        return tag
+    }
+
+    private fun writeNdefToTag(tag: Tag, message: NdefMessage) {
+        val ndef = Ndef.get(tag) ?: throw IOException("Tag lost NDEF handle after prep")
+        ndef.connect()
+        try {
+            if (!ndef.isWritable) throw IOException("Tag is read-only")
+            val messageSize = message.toByteArray().size
+            if (ndef.maxSize < messageSize) {
+                throw IOException("Tag too small: need $messageSize, have ${ndef.maxSize}")
+            }
+            ndef.writeNdefMessage(message)
+        } finally {
+            ndef.close()
+        }
+    }
+
+    /**
+     * Fix CC bytes on page 3 for NTAG216 (E1 10 6D 00 = 888 bytes).
+     * Factory-blank tags sometimes get formatted with NTAG213 CC (144 bytes).
+     */
+    private fun fixNfcCapabilityContainer(tag: Tag) {
+        val nfcA = NfcA.get(tag) ?: throw IOException("NfcA not available")
+        nfcA.connect()
+        try {
+            val writeCmd = byteArrayOf(
+                0xA2.toByte(), 0x03,
+                0xE1.toByte(), 0x10, 0x6D, 0x00
+            )
+            nfcA.transceive(writeCmd)
+            Log.i(this.tag, "fixNfcCapabilityContainer: CC written (NTAG216)")
+        } finally {
+            nfcA.close()
+        }
+    }
+
+    /** Single haptic pulse — the NFC write commit event. */
+    private fun vibrateNfcCommit() {
+        val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val mgr = getSystemService(VIBRATOR_MANAGER_SERVICE) as VibratorManager
+            mgr.defaultVibrator
+        } else {
+            @Suppress("DEPRECATION")
+            getSystemService(VIBRATOR_SERVICE) as Vibrator
+        }
+        vibrator.vibrate(VibrationEffect.createOneShot(50, VibrationEffect.DEFAULT_AMPLITUDE))
+    }
+
+    /**
+     * Enable silent NFC reader mode that swallows tags without triggering
+     * Android's system NFC popup. Active whenever the app is in the foreground
+     * but not actively reading/writing a ring.
+     */
+    private fun enableNfcSuppression() {
+        val adapter = nfcAdapter ?: NfcAdapter.getDefaultAdapter(this)
+        nfcAdapter = adapter
+        if (adapter == null || !adapter.isEnabled) return
+        adapter.enableReaderMode(
+            this,
+            { /* silent no-op — tag swallowed */ },
+            NfcAdapter.FLAG_READER_NFC_A or NfcAdapter.FLAG_READER_NO_PLATFORM_SOUNDS,
+            null
+        )
     }
 
     private fun extractCapsuleRecord(messages: List<NdefMessage>): NdefRecord? {
@@ -1067,17 +1275,22 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         } else {
             Log.d(tag, "onResume: skipping BLE restart (no identity yet, pre-genesis)")
         }
+
+        // Suppress Android's system NFC popup while the app is in foreground.
+        // When not actively reading/writing, tags are silently swallowed.
+        if (!nfcReaderActive) {
+            enableNfcSuppression()
+        }
     }
 
     override fun onPause() {
         super.onPause()
         isAppForeground = false
 
-        // Stop NFC reader mode so the ring never triggers when the app is backgrounded.
-        if (nfcReaderActive) {
-            nfcReaderActive = false
-            try { nfcAdapter?.disableReaderMode(this) } catch (_: Throwable) {}
-        }
+        // Fully disable NFC (active reader + suppression) when backgrounded.
+        nfcReaderActive = false
+        nfcWriteMode = false
+        try { nfcAdapter?.disableReaderMode(this) } catch (_: Throwable) {}
 
         // Rust receives app_foreground=false via publishSessionState and decides lock policy
         publishSessionState("pause")

@@ -147,9 +147,8 @@ async fn test_thread_safety_crypto_operations() {
 
     // Use deterministic key generation for tests to avoid OS RNG issues
     let test_entropy = b"test-thread-safety-entropy-seed";
-    let keypair = dsm::crypto::SignatureKeyPair::generate_from_entropy_with_params(
+    let keypair = dsm::crypto::SignatureKeyPair::generate_from_entropy(
         test_entropy,
-        dsm::crypto::signatures::ParameterSet::SPX256f,
     )
         .expect("Deterministic key generation should succeed");
     println!("🔑 Keypair generated successfully");

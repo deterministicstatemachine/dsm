@@ -994,6 +994,32 @@ pub(super) fn settings_set(conn: &Connection, key: &str, value: &str) -> Result<
     Ok(())
 }
 
+// =========================== public settings accessors ===========================
+
+/// Get a setting value by key. Public wrapper for use from handlers.
+pub fn get_setting(key: &str) -> Result<Option<String>> {
+    let arc = get_connection()?;
+    let conn = arc.lock().map_err(|e| anyhow!("DB lock poisoned: {e}"))?;
+    settings_get(&conn, key)
+}
+
+/// Set a setting value by key. Public wrapper for use from handlers.
+pub fn set_setting(key: &str, value: &str) -> Result<()> {
+    let arc = get_connection()?;
+    let conn = arc.lock().map_err(|e| anyhow!("DB lock poisoned: {e}"))?;
+    settings_set(&conn, key, value)
+}
+
+/// Count total processed transactions (inbox items applied).
+pub fn get_transaction_count() -> Result<u64> {
+    let arc = get_connection()?;
+    let conn = arc.lock().map_err(|e| anyhow!("DB lock poisoned: {e}"))?;
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM transactions", [], |row| row.get(0))
+        .unwrap_or(0);
+    Ok(count as u64)
+}
+
 // =========================== tests ===========================
 
 #[cfg(test)]

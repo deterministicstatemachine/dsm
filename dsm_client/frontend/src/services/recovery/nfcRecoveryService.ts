@@ -299,8 +299,5 @@ export async function writeToNfcRing(): Promise<void> {
   if (env.payload.case === 'error') {
     throw new Error(env.payload.value.message || 'NFC write failed');
   }
-  const writeResult = await writeNfcTagPayloadHost();
-  if (!writeResult.launched) {
-    throw new Error('NFC write launcher did not start');
-  }
+  await writeNfcTagPayloadHost();
 }

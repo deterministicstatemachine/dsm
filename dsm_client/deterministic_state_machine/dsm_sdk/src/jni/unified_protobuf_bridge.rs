@@ -1173,7 +1173,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getGenesisHas
     )
 }
 
-/// Returns the local signing public key as raw bytes (64 bytes for SPHINCS+ SPX256s) when available.
+/// Returns the local signing public key as raw bytes (64 bytes for SPHINCS+) when available.
 ///
 /// Kotlin expects this exact symbol for `Unified.getSigningPublicKeyBin()`.
 /// If identity has not been created yet, returns an empty byte array.
@@ -5691,9 +5691,8 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getPendingRec
 /// Input: raw encrypted capsule bytes.
 /// Output: NDEF message bytes ready for `Ndef.writeNdefMessage()`.
 ///
-/// The NDEF record uses MIME type `application/vnd.dsm.recovery` so that
-/// Android's NFC dispatch can route it to NfcRecoveryActivity on read.
-/// Rust decides the record structure; Kotlin writes raw bytes to the tag.
+/// The NDEF record uses MIME type `application/vnd.dsm.recovery` for proper
+/// identification during reading.
 #[no_mangle]
 pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_prepareNfcWritePayload(
     env: jni::sys::JNIEnv,
@@ -5772,40 +5771,6 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_clearPendingR
 }
 
 /// Derive a 4-byte NFC hardware password from device identity.
-/// Used by Kotlin to set write-protection on NTAG216 rings.
-/// Anyone can read the tag, but only this device's app can overwrite it.
-/// Password = first 4 bytes of BLAKE3("DSM/nfc-tag-pwd\0" || device_id).
-#[no_mangle]
-pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getNfcRingPassword(
-    env: jni::sys::JNIEnv,
-    _clazz: jni::sys::jclass,
-) -> jni::sys::jbyteArray {
-    crate::jni::bridge_utils::jni_catch_unwind_jbytearray(
-        "getNfcRingPassword",
-        std::panic::AssertUnwindSafe(|| {
-            let env = match unsafe { env_from(env) } {
-                Some(e) => e,
-                None => return std::ptr::null_mut(),
-            };
-
-            let device_id = match crate::sdk::app_state::AppState::get_device_id() {
-                Some(id) if id.len() == 32 => id,
-                _ => {
-                    log::warn!("getNfcRingPassword: device_id not available");
-                    return empty_byte_array_or_empty(&env).into_raw();
-                }
-            };
-
-            let hash = dsm::crypto::blake3::domain_hash("DSM/nfc-tag-pwd", &device_id);
-            let pwd = &hash.as_bytes()[..4];
-
-            env.byte_array_from_slice(pwd)
-                .map(|a| a.into_raw())
-                .unwrap_or_else(|_| empty_byte_array_or_empty(&env).into_raw())
-        }),
-    )
-}
-
 /// Silently refresh the pending NFC capsule if backup is enabled and a key is cached.
 /// Called by Kotlin after every state-mutating operation (processEnvelopeV3, shared ingress invoke).
 /// Rust decides whether to actually create a capsule. No-op if backup disabled or no key.

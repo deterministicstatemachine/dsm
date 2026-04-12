@@ -1339,10 +1339,7 @@ impl IdentitySDK {
                     entropy.extend_from_slice(&gh_raw);
                     entropy.extend_from_slice(&did_raw);
                     entropy.extend_from_slice(&dbrw);
-                    let kp = SignatureKeyPair::generate_from_entropy_with_params(
-                        &entropy,
-                        dsm::crypto::signatures::ParameterSet::SPX256f,
-                    )
+                    let kp = SignatureKeyPair::generate_from_entropy(&entropy)
                     .map_err(|e| {
                         DsmError::InvalidState(format!("signing key re-derivation failed: {e}"))
                     })?;

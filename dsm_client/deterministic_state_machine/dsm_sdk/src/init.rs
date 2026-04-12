@@ -459,6 +459,8 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
             log::info!("[SDK Init Validation] Emergency backfill successful — R_G now available");
         }
 
+
+
         let contact_manager =
             DsmContactManager::new(dev_fixed, vec![dsm::types::identifiers::NodeId::new("n")]);
 
@@ -488,10 +490,7 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
         key_entropy.extend_from_slice(&gen_fixed);
         key_entropy.extend_from_slice(&dev_fixed);
         key_entropy.extend_from_slice(&dbrw_fixed);
-        let keypair = SignatureKeyPair::generate_from_entropy_with_params(
-            &key_entropy,
-            dsm::crypto::signatures::ParameterSet::SPX256f,
-        )
+        let keypair = SignatureKeyPair::generate_from_entropy(&key_entropy)
             .map_err(|e| format!("deterministic keypair derivation failed: {e}"))?;
         log::info!(
             "[SDK Init] Derived signing keypair, pubkey_len={}",

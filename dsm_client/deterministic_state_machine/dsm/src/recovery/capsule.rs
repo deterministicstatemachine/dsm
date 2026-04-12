@@ -114,9 +114,12 @@ impl EncryptedCapsule {
     /// Deserialize encrypted capsule from bytes.
     pub fn from_bytes(data: &[u8]) -> Result<Self, DsmError> {
         if data.starts_with(RECOVERY_CAPSULE_MAGIC) {
-            return decode_v3_encrypted_capsule(data);
+            decode_v3_encrypted_capsule(data)
+        } else {
+            Err(DsmError::invalid_operation(
+                "Unsupported recovery capsule format - only v3 capsules are supported",
+            ))
         }
-        decode_legacy_encrypted_capsule(data)
     }
 }
 
@@ -383,27 +386,6 @@ fn decode_v3_encrypted_capsule(data: &[u8]) -> Result<EncryptedCapsule, DsmError
     })
 }
 
-fn decode_legacy_encrypted_capsule(data: &[u8]) -> Result<EncryptedCapsule, DsmError> {
-    let mut p = data;
-    let nonce = read_bytes(&mut p, 12)?;
-    let salt = read_len_bytes(&mut p)?;
-    let tag = read_bytes(&mut p, 16)?;
-    let ciphertext = read_len_bytes(&mut p)?;
-    let metadata = decode_metadata(&mut p)?;
-    if !p.is_empty() {
-        return Err(DsmError::invalid_operation(
-            "capsule decode: trailing bytes in legacy envelope",
-        ));
-    }
-    Ok(EncryptedCapsule {
-        ciphertext,
-        tag,
-        nonce,
-        salt,
-        metadata,
-    })
-}
-
 fn decode_capsule_bytes(data: &[u8]) -> Result<RecoveryCapsule, DsmError> {
     let mut p = data;
     let smt_root = read_len_bytes(&mut p)?;
@@ -432,15 +414,6 @@ fn decode_capsule_bytes(data: &[u8]) -> Result<RecoveryCapsule, DsmError> {
         challenge,
         metadata,
     })
-}
-
-fn read_bytes(p: &mut &[u8], n: usize) -> Result<Vec<u8>, DsmError> {
-    if p.len() < n {
-        return Err(DsmError::invalid_operation("capsule decode: short read"));
-    }
-    let v = p[..n].to_vec();
-    *p = &p[n..];
-    Ok(v)
 }
 
 fn read_u32(p: &mut &[u8]) -> Result<u32, DsmError> {

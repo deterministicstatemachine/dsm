@@ -538,11 +538,11 @@ mod tests {
 
         assert_eq!(
             g.signing_key.public_key.len(),
-            sphincs::public_key_bytes(SphincsVariant::SPX256s)
+            sphincs::public_key_bytes(SphincsVariant::SPX256f)
         );
         assert_eq!(
             g.signing_key.secret_key.len(),
-            sphincs::secret_key_bytes(SphincsVariant::SPX256s)
+            sphincs::secret_key_bytes(SphincsVariant::SPX256f)
         );
         assert_eq!(g.kyber_keypair.public_key.len(), kyber::public_key_bytes());
         assert_eq!(g.kyber_keypair.secret_key.len(), kyber::secret_key_bytes());

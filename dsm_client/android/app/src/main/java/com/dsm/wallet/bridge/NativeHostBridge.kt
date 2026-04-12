@@ -2,7 +2,6 @@ package com.dsm.wallet.bridge
 
 import android.Manifest
 import android.content.Context
-import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.util.Log
@@ -167,7 +166,10 @@ internal object NativeHostBridge {
             NativeHostRequestKind.NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_NFC_READER_START -> {
                 val act = MainActivity.getActiveInstance()
                     ?: return errorResponse(503, "NFC unavailable: no active activity")
-                act.startNfcReader()
+                val started = act.startNfcReader()
+                if (!started) {
+                    return errorResponse(503, "NFC unavailable: NFC not enabled on device")
+                }
                 okBytes(
                     NfcTagReadResult.newBuilder()
                         .setReaderStarted(true)
@@ -258,7 +260,10 @@ internal object NativeHostBridge {
                 }
                 val act = MainActivity.getActiveInstance()
                     ?: return errorResponse(503, "nfc.tag.read_payload: no active activity")
-                act.startNfcReader()
+                val started = act.startNfcReader()
+                if (!started) {
+                    return errorResponse(503, "nfc.tag.read_payload: NFC not enabled on device")
+                }
                 okBytes(
                     NfcTagReadResult.newBuilder()
                         .setReaderStarted(true)
@@ -275,9 +280,10 @@ internal object NativeHostBridge {
                 }
                 val act = MainActivity.getActiveInstance()
                     ?: return errorResponse(503, "nfc.tag.write_payload: no active activity")
-                act.runOnUiThread {
-                    val intent = Intent(act, com.dsm.wallet.recovery.NfcWriteActivity::class.java)
-                    act.startActivity(intent)
+                // Write inline — no separate Activity. The user stays in the WebView.
+                val launched = act.startNfcWriter()
+                if (!launched) {
+                    return errorResponse(503, "nfc.tag.write_payload: NFC not enabled on device")
                 }
                 okBytes(
                     NfcTagWriteResult.newBuilder()

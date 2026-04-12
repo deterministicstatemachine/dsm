@@ -139,11 +139,27 @@ impl AppRouterImpl {
                     }
                 }
 
-                let total_nodes = self._config.storage_endpoints.len() as u32;
-                let mut connected_nodes = 0u32;
+                let endpoints = self._config.storage_endpoints.clone();
+                let total_nodes = endpoints.len() as u32;
 
-                if total_nodes > 0 {
-                    connected_nodes = total_nodes;
+                // Real connectivity check — probe /api/v2/health on each node concurrently
+                let client = crate::sdk::storage_node_sdk::build_ca_aware_client();
+                let mut connected_nodes = 0u32;
+                let mut handles = Vec::new();
+                for ep in &endpoints {
+                    let c = client.clone();
+                    let url = format!("{ep}/api/v2/health");
+                    handles.push(tokio::spawn(async move {
+                        matches!(tokio::time::timeout(
+                            std::time::Duration::from_secs(5),
+                            c.get(&url).send(),
+                        ).await, Ok(Ok(resp)) if resp.status().is_success())
+                    }));
+                }
+                for handle in handles {
+                    if let Ok(true) = handle.await {
+                        connected_nodes += 1;
+                    }
                 }
 
                 // Get DB size
@@ -158,14 +174,30 @@ impl AppRouterImpl {
                     Err(_) => "Unknown".to_string(),
                 };
 
-                let last_sync_iter = 0u64;
+                // Real sync counter from transaction history
+                let last_sync_iter = crate::storage::client_db::get_transaction_count()
+                    .unwrap_or(0);
+
+                // Real backup status from NFC recovery SDK
+                let backup_status = {
+                    let rs = crate::sdk::recovery_sdk::RecoverySDK::get_recovery_status();
+                    if !rs.enabled {
+                        "Not configured".to_string()
+                    } else if rs.pending_capsule {
+                        format!("Armed (capsule #{})", rs.last_capsule_index)
+                    } else if rs.capsule_count > 0 {
+                        format!("Written (#{}, {} total)", rs.last_capsule_index, rs.capsule_count)
+                    } else {
+                        "Enabled (no capsule)".to_string()
+                    }
+                };
 
                 let resp = generated::StorageStatusResponse {
                     total_nodes,
                     connected_nodes,
                     last_sync_iter,
                     data_size,
-                    backup_status: "Idle".to_string(),
+                    backup_status,
                 };
                 // NEW: Return as Envelope.storageStatusResponse (field 47)
                 pack_envelope_ok(generated::envelope::Payload::StorageStatusResponse(resp))
@@ -2012,13 +2044,14 @@ fn prom_u64(prom: &std::collections::HashMap<String, f64>, key: &str) -> u64 {
 /// Derive human-readable name and region from a storage node endpoint URL.
 /// Uses the hardcoded production IP→region mapping.
 fn name_and_region_from_endpoint(endpoint: &str) -> (String, String) {
+    // GCP 6-node production cluster (must match dsm_env_config.toml)
     let ip_region_map: &[(&str, &str, &str)] = &[
-        ("13.218.83.69", "dsm-node-1", "us-east-1"),
-        ("44.223.31.184", "dsm-node-2", "us-east-1"),
-        ("54.74.145.172", "dsm-node-3", "eu-west-1"),
-        ("3.249.79.215", "dsm-node-4", "eu-west-1"),
-        ("18.141.56.252", "dsm-node-5", "ap-southeast-1"),
-        ("13.215.175.231", "dsm-node-6", "ap-southeast-1"),
+        ("34.73.141.32", "us-east1-a", "us-east1"),
+        ("35.243.157.151", "us-east1-b", "us-east1"),
+        ("35.205.9.157", "europe-west1-a", "europe-west1"),
+        ("34.53.251.120", "europe-west1-b", "europe-west1"),
+        ("34.21.157.56", "asia-southeast1-a", "asia-southeast1"),
+        ("34.87.93.29", "asia-southeast1-b", "asia-southeast1"),
     ];
     for &(ip, name, region) in ip_region_map {
         if endpoint.contains(ip) {

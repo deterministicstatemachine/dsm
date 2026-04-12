@@ -138,7 +138,7 @@ Every feature maps to an authoritative spec and code modules across all layers.
 - **Source:** `docs/book/15-security-model.md`
 - **Core:** `recovery/`
 - **SDK:** `sdk/recovery_sdk.rs`
-- **Android:** `NfcRecoveryActivity.kt`
+- **Android:** `MainActivity.kt` (inline NFC handling)
 
 ### PBI Bootstrap
 

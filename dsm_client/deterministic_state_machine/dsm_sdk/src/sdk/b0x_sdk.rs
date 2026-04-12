@@ -1971,7 +1971,7 @@ impl B0xSDK {
             && params.sender_signing_public_key.len() != 64
         {
             return Err(DsmError::internal(
-                "sender_signing_public_key must be exactly 64 bytes (SPHINCS+ SPX256s public key)",
+                "sender_signing_public_key must be exactly 64 bytes (SPHINCS+ public key)",
                 None::<std::io::Error>,
             ));
         }

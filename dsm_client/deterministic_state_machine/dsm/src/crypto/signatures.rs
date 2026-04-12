@@ -4,7 +4,7 @@
 //!
 //! - Protobuf-only (no JSON/base64 transports in this layer).
 //! - Clockless (no wall-clock markers; ordering is not time-based).
-//! - Default parameter set: SPX256s (robust, future-proof).
+//! - Default parameter set: SPX256f (fast variant, canonical for all DSM operations).
 //!
 //! Public API surface (stable):
 //!     - struct SignatureKeyPair { public_key, secret_key, params }
@@ -21,10 +21,10 @@ pub use crate::crypto::sphincs::SphincsVariant as ParameterSet;
 use crate::types::error::DsmError;
 use zeroize::Zeroize;
 
-/// SPX256s: 256-bit post-quantum security (29,792 byte signatures).
-/// BLE bilateral transfers compress the envelope before chunking to reduce
-/// the chunk count from 168 to ~50-60 for acceptable transfer times.
-const DEFAULT_PARAMS: ParameterSet = ParameterSet::SPX256s;
+/// SPX256f: 256-bit post-quantum security, fast variant (49,856 byte signatures).
+/// Must match init.rs keypair derivation (SPX256f) and sphincs.rs default wrappers.
+/// BLE bilateral transfers compress the envelope before chunking.
+const DEFAULT_PARAMS: ParameterSet = ParameterSet::SPX256f;
 
 /// Signature bytes alias
 pub type Signature = Vec<u8>;

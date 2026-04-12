@@ -18,7 +18,6 @@ use dsm::{
     bitcoin::script::sha256_hash_lock, // SHA256 for HTLC hash locks
     crypto::{
         kyber::generate_kyber_keypair,
-        signatures::ParameterSet,
         SignatureKeyPair,
     },
     types::{
@@ -94,7 +93,7 @@ fn canonical_test_signing_keys() -> (Vec<u8>, Vec<u8>) {
     entropy.extend_from_slice(&TEST_GENESIS_HASH);
     entropy.extend_from_slice(&TEST_DEVICE_ID);
     entropy.extend_from_slice(&TEST_BINDING_KEY);
-    let keypair = SignatureKeyPair::generate_from_entropy_with_params(&entropy, ParameterSet::SPX256f)
+    let keypair = SignatureKeyPair::generate_from_entropy(&entropy)
         .expect("canonical test signing key derivation failed");
     (keypair.public_key().to_vec(), keypair.secret_key().to_vec())
 }

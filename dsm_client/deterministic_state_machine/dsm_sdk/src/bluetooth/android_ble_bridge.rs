@@ -707,9 +707,8 @@ mod tests {
             device_id,
             vec![dsm::types::identifiers::NodeId::new("n")],
         );
-        let keypair = dsm::crypto::SignatureKeyPair::generate_from_entropy_with_params(
+        let keypair = dsm::crypto::SignatureKeyPair::generate_from_entropy(
             &[device_id.as_slice(), genesis_hash.as_slice()].concat(),
-            dsm::crypto::signatures::ParameterSet::SPX256f,
         )
         .expect("keypair generation failed in test helper");
         let bilateral_tx_manager = Arc::new(RwLock::new(

@@ -95,6 +95,50 @@ impl CoreBootstrapAdapter {
 
             log::info!("Persisted identity: Genesis → DeviceID → SMT → HashChains");
 
+            // ---- Persist genesis record to SQLite ----
+            // Without this, local_genesis_hash() returns error, storage.sync fails,
+            // and bilateral transfers are blocked.
+            {
+                let genesis_id_b32 =
+                    crate::util::text_id::encode_base32_crockford(&genesis_bytes);
+                let device_id_b32 =
+                    crate::util::text_id::encode_base32_crockford(&device_id_bytes);
+                let genesis_record = crate::storage::client_db::GenesisRecord {
+                    genesis_id: genesis_id_b32.clone(),
+                    device_id: device_id_b32.clone(),
+                    mpc_proof: String::new(),
+                    dbrw_binding: crate::util::text_id::encode_base32_crockford(&entropy),
+                    merkle_root: crate::util::text_id::encode_base32_crockford(&[0u8; 32]),
+                    participant_count: threshold as u32,
+                    progress_marker: "genesis".to_string(),
+                    publication_hash: genesis_id_b32,
+                    storage_nodes: storage_endpoints.clone(),
+                    entropy_hash: crate::util::text_id::encode_base32_crockford(
+                        dsm::crypto::blake3::domain_hash("DSM/genesis-entropy", &entropy)
+                            .as_bytes(),
+                    ),
+                    protocol_version: "v3".to_string(),
+                    hash_chain_proof: None,
+                    smt_proof: None,
+                    verification_step: None,
+                };
+                match crate::storage::client_db::store_genesis_record_with_verification(
+                    &genesis_record,
+                ) {
+                    Ok(_) => log::info!("bootstrap: genesis record stored successfully"),
+                    Err(e) => log::warn!("bootstrap: failed to store genesis record: {}", e),
+                }
+                match crate::storage::client_db::ensure_wallet_state_for_device(&device_id_b32) {
+                    Ok(_) => log::info!(
+                        "bootstrap: wallet_state ensured for device={}",
+                        &device_id_b32[..8]
+                    ),
+                    Err(e) => {
+                        log::warn!("bootstrap: failed to ensure wallet_state: {}", e)
+                    }
+                }
+            }
+
             let init_result = crate::get_sdk_context().initialize(
                 device_id_bytes.to_vec(),
                 genesis_bytes.to_vec(),

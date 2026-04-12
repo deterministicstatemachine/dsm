@@ -115,6 +115,7 @@ const securingWarningStyle: React.CSSProperties = {
   letterSpacing: '0.08em',
   lineHeight: 1.4,
   textTransform: 'uppercase',
+  animation: 'dsmSecuringBlink 1.8s steps(1, end) infinite',
 };
 
 const securingPrimaryWarningLineStyle: React.CSSProperties = {
@@ -142,6 +143,14 @@ const securingStatusTextStyle: React.CSSProperties = {
   width: '100%',
   textAlign: 'center',
 };
+
+const securingBlinkKeyframes = `
+  @keyframes dsmSecuringBlink {
+    0%, 44% { opacity: 1; }
+    45%, 78% { opacity: 0; }
+    79%, 100% { opacity: 1; }
+  }
+`;
 
 export default function AppContent({
   appState,
@@ -175,7 +184,7 @@ export default function AppContent({
     case 'loading':
       return (
         <div className="dsm-content">
-            <LoadingSpinner message="Wallet" size="large" eraTokenSrc={dsmLogoSrc} />
+            <LoadingSpinner message="Wallet" size="large" eraTokenSrc={eraTokenSrc} />
           <StatusText
             lines={[
               'INITIALIZING DSM',
@@ -190,7 +199,7 @@ export default function AppContent({
     case 'runtime_loading':
       return (
         <div className="dsm-content">
-            <LoadingSpinner message="Starting Runtime" size="large" eraTokenSrc={dsmLogoSrc} />
+            <LoadingSpinner message="Starting Runtime" size="large" eraTokenSrc={eraTokenSrc} />
           <StatusText
             lines={[
               'STARTING RUNTIME',
@@ -232,10 +241,11 @@ export default function AppContent({
     case 'securing_device':
       return (
         <div className="dsm-content dsm-content--securing" style={securingContentStyle}>
-          <LoadingSpinner message="Securing Device" size="large" eraTokenSrc={dsmLogoSrc} />
+          <style>{securingBlinkKeyframes}</style>
+          <LoadingSpinner message="Securing Device" size="large" eraTokenSrc={eraTokenSrc} />
           <div className="dsm-securing-alerts" aria-live="assertive" style={securingAlertStackStyle}>
             <div
-              className="dsm-securing-warning"
+              className="dsm-securing-warning dsm-securing-warning--blink"
               style={securingWarningStyle}
             >
               <span style={securingPrimaryWarningLineStyle}>THIS ONLY HAPPENS ONCE</span>
@@ -282,7 +292,16 @@ export default function AppContent({
               items={menuItems}
               currentMenuIndex={currentMenuIndex}
               setCurrentMenuIndex={setCurrentMenuIndex}
-              options={{ itemClassName: 'home-brick' }}
+              options={{
+                itemClassName: 'home-brick',
+                actions: {
+                  WALLET: () => navigate('wallet'),
+                  TOKENS: () => navigate('accounts'),
+                  CONTACTS: () => navigate('contacts'),
+                  STORAGE: () => navigate('storage'),
+                  SETTINGS: () => navigate('settings'),
+                },
+              }}
             />
             <StatusText lines={buildHomeStatusLines({ appState, soundEnabled, error })} />
             {showLockPrompt ? (

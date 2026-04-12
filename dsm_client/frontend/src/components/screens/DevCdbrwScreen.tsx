@@ -41,7 +41,7 @@ function buildCdbrwReport(status: DbrwStatus, logBytes: Uint8Array): string {
     `steps_per_probe=${status.stepsPerProbe}`,
     `histogram_bins=${status.histogramBins}`,
     `rotation_bits=${status.rotationBits}`,
-    `epsilon_intra=${status.epsilonIntra.toFixed(6)}`,
+    `epsilon_intra=${(status.epsilonIntra ?? 0).toFixed(6)}`,
     `mean_histogram_len=${status.meanHistogramLen}`,
     `reference_anchor_prefix=${formatPrefix(status.referenceAnchorPrefix)}`,
     `binding_key_prefix=${formatPrefix(status.bindingKeyPrefix)}`,
@@ -51,18 +51,18 @@ function buildCdbrwReport(status: DbrwStatus, logBytes: Uint8Array): string {
     `status_note=${status.statusNote || 'No additional note.'}`,
     `runtime_metrics_present=${status.runtimeMetricsPresent ? 'yes' : 'no'}`,
     `runtime_access_level=${status.runtimeAccessLevel || 'N/A'}`,
-    `runtime_trust_score=${status.runtimeTrustScore.toFixed(6)}`,
+    `runtime_trust_score=${(status.runtimeTrustScore ?? 0).toFixed(6)}`,
     `runtime_health_check_ran=${status.runtimeHealthCheckRan ? 'yes' : 'no'}`,
     `runtime_health_check_passed=${status.runtimeHealthCheckPassed ? 'yes' : 'no'}`,
-    `runtime_h_hat=${status.runtimeHHat.toFixed(6)}`,
-    `runtime_rho_hat=${status.runtimeRhoHat.toFixed(6)}`,
-    `runtime_l_hat=${status.runtimeLHat.toFixed(6)}`,
-    `runtime_match_score=${status.runtimeMatchScore.toFixed(6)}`,
-    `runtime_w1_distance=${status.runtimeW1Distance.toFixed(6)}`,
-    `runtime_w1_threshold=${status.runtimeW1Threshold.toFixed(6)}`,
+    `runtime_h_hat=${(status.runtimeHHat ?? 0).toFixed(6)}`,
+    `runtime_rho_hat=${(status.runtimeRhoHat ?? 0).toFixed(6)}`,
+    `runtime_l_hat=${(status.runtimeLHat ?? 0).toFixed(6)}`,
+    `runtime_match_score=${(status.runtimeMatchScore ?? 0).toFixed(6)}`,
+    `runtime_w1_distance=${(status.runtimeW1Distance ?? 0).toFixed(6)}`,
+    `runtime_w1_threshold=${(status.runtimeW1Threshold ?? 0).toFixed(6)}`,
     `runtime_anchor_prefix=${formatPrefix(status.runtimeAnchorPrefix)}`,
     `runtime_error=${status.runtimeError || 'N/A'}`,
-    `runtime_h0_eff=${status.runtimeH0Eff.toFixed(6)}`,
+    `runtime_h0_eff=${(status.runtimeH0Eff ?? 0).toFixed(6)}`,
     `runtime_recommended_n=${status.runtimeRecommendedN}`,
     `runtime_resonant_status=${status.runtimeResonantStatus || 'N/A'}`,
     '',
@@ -143,11 +143,14 @@ export default function DevCdbrwScreen(): JSX.Element {
 
   useEffect(() => {
     if (activeTab === 'report' && !reportText && !reportLoading && (healthStatus || status)) {
-      void loadReport(healthStatus || status).catch((e) => {
+      const snapshot = healthStatus || status;
+      void loadReport(snapshot).catch((e) => {
         setError(e instanceof Error ? e.message : String(e));
       });
     }
-  }, [activeTab, reportLoading, reportText, healthStatus, status]);
+  // Only trigger when switching to report tab, not on every status update
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
 
   const tabList = ['overview', 'enrollment', 'health', 'keys', 'report'] as const;
   const navActions = useMemo(() => tabList.map((tab) => () => setActiveTab(tab)), []);
@@ -273,7 +276,7 @@ export default function DevCdbrwScreen(): JSX.Element {
             <div className="snd-card">
               <div className="snd-stat-grid-2">
                 <div className="snd-stat-cell">
-                  <div className="snd-stat-val">{status?.enrolled ? 'YES' : 'NO'}</div>
+                  <div className="snd-stat-val-sm">{status?.enrolled ? 'YES' : 'NO'}</div>
                   <div className="snd-stat-label">Enrolled</div>
                 </div>
                 <div className="snd-stat-cell">
@@ -302,7 +305,7 @@ export default function DevCdbrwScreen(): JSX.Element {
               </div>
               <div className="snd-info-row">
                 <span className="snd-info-label">Access</span>
-                <span className="snd-info-val">{hs?.runtimeAccessLevel || 'N/A'}</span>
+                <span className="snd-info-val">{hs?.runtimeAccessLevel || status?.runtimeAccessLevel || 'Not checked'}</span>
               </div>
               <div className="snd-info-row">
                 <span className="snd-info-label">Storage Dir</span>
@@ -310,7 +313,7 @@ export default function DevCdbrwScreen(): JSX.Element {
               </div>
               <div className="snd-info-row">
                 <span className="snd-info-label">Trust</span>
-                <span className="snd-info-val">{hs ? hs.runtimeTrustScore.toFixed(3) : 'Run health check'}</span>
+                <span className="snd-info-val">{hs ? (hs.runtimeTrustScore ?? 0).toFixed(3) : 'Run health check'}</span>
               </div>
               <div className="snd-info-row">
                 <span className="snd-info-label">Note</span>
@@ -360,7 +363,7 @@ export default function DevCdbrwScreen(): JSX.Element {
             <div className="snd-card">
               <div className="snd-info-row">
                 <span className="snd-info-label">Epsilon Intra</span>
-                <span className="snd-info-val">{status ? status.epsilonIntra.toFixed(6) : '0.000000'}</span>
+                <span className="snd-info-val">{status ? (status.epsilonIntra ?? 0).toFixed(6) : '0.000000'}</span>
               </div>
               <div className="snd-info-row">
                 <span className="snd-info-label">Mean Hist Len</span>
@@ -411,19 +414,19 @@ export default function DevCdbrwScreen(): JSX.Element {
                 <div className="snd-card">
                   <div className="snd-info-row">
                     <span className="snd-info-label">H hat</span>
-                    <span className="snd-info-val">{hs.runtimeHHat.toFixed(6)}</span>
+                    <span className="snd-info-val">{(hs.runtimeHHat ?? 0).toFixed(6)}</span>
                   </div>
                   <div className="snd-info-row">
                     <span className="snd-info-label">rho hat</span>
-                    <span className="snd-info-val">{hs.runtimeRhoHat.toFixed(6)}</span>
+                    <span className="snd-info-val">{(hs.runtimeRhoHat ?? 0).toFixed(6)}</span>
                   </div>
                   <div className="snd-info-row">
                     <span className="snd-info-label">L hat</span>
-                    <span className="snd-info-val">{hs.runtimeLHat.toFixed(6)}</span>
+                    <span className="snd-info-val">{(hs.runtimeLHat ?? 0).toFixed(6)}</span>
                   </div>
                   <div className="snd-info-row">
                     <span className="snd-info-label">h0 eff</span>
-                    <span className="snd-info-val">{hs.runtimeH0Eff.toFixed(6)}</span>
+                    <span className="snd-info-val">{(hs.runtimeH0Eff ?? 0).toFixed(6)}</span>
                   </div>
                   <div className="snd-info-row">
                     <span className="snd-info-label">Recommended N</span>
@@ -434,19 +437,19 @@ export default function DevCdbrwScreen(): JSX.Element {
                 <div className="snd-card">
                   <div className="snd-info-row">
                     <span className="snd-info-label">W1 Drift</span>
-                    <span className="snd-info-val">{hs.runtimeW1Distance.toFixed(6)}</span>
+                    <span className="snd-info-val">{(hs.runtimeW1Distance ?? 0).toFixed(6)}</span>
                   </div>
                   <div className="snd-info-row">
                     <span className="snd-info-label">W1 Threshold</span>
-                    <span className="snd-info-val">{hs.runtimeW1Threshold.toFixed(6)}</span>
+                    <span className="snd-info-val">{(hs.runtimeW1Threshold ?? 0).toFixed(6)}</span>
                   </div>
                   <div className="snd-info-row">
                     <span className="snd-info-label">Match Score</span>
-                    <span className="snd-info-val">{hs.runtimeMatchScore.toFixed(6)}</span>
+                    <span className="snd-info-val">{(hs.runtimeMatchScore ?? 0).toFixed(6)}</span>
                   </div>
                   <div className="snd-info-row">
                     <span className="snd-info-label">Trust</span>
-                    <span className="snd-info-val">{hs.runtimeTrustScore.toFixed(6)}</span>
+                    <span className="snd-info-val">{(hs.runtimeTrustScore ?? 0).toFixed(6)}</span>
                   </div>
                 </div>
 
@@ -468,7 +471,7 @@ export default function DevCdbrwScreen(): JSX.Element {
                   )}
                   {hs.runtimeHealthCheckRan && hs.runtimeResonantStatus === 'ADAPTED' && (
                     <div className="snd-info-note cdbrw-health-note-adapted">
-                      Effective entropy rate {hs.runtimeH0Eff.toFixed(3)} below 0.5. Recommend orbit length N {'>'}= {hs.runtimeRecommendedN} per C-DBRW Remark 4.6.
+                      Effective entropy rate {(hs.runtimeH0Eff ?? 0).toFixed(3)} below 0.5. Recommend orbit length N {'>'}= {hs.runtimeRecommendedN} per C-DBRW Remark 4.6.
                     </div>
                   )}
                   {hs.runtimeHealthCheckRan && hs.runtimeResonantStatus === 'FAIL' && (
@@ -488,32 +491,46 @@ export default function DevCdbrwScreen(): JSX.Element {
         )}
 
         {activeTab === 'keys' && (
-          <div className="snd-card">
-            <div className="snd-info-row">
-              <span className="snd-info-label">Reference Anchor</span>
-              <span className="snd-info-val snd-info-val--mono">{formatPrefix(status?.referenceAnchorPrefix ?? new Uint8Array(0))}</span>
+          <>
+            <div className="snd-card">
+              <div className="snd-stat-label" style={{ padding: '6px 10px 2px', opacity: 0.5 }}>ENROLLMENT KEYS</div>
+              <div className="snd-info-row">
+                <span className="snd-info-label">Reference Anchor</span>
+                <span className="snd-info-val snd-info-val--mono">{formatPrefix(status?.referenceAnchorPrefix ?? new Uint8Array(0))}</span>
+              </div>
+              <div className="snd-info-row">
+                <span className="snd-info-label">Binding Key</span>
+                <span className="snd-info-val snd-info-val--mono">{formatPrefix(status?.bindingKeyPrefix ?? new Uint8Array(0))}</span>
+              </div>
+              <div className="snd-info-row">
+                <span className="snd-info-label">Verifier PK</span>
+                <span className="snd-info-val snd-info-val--mono">{formatPrefix(status?.verifierPublicKeyPrefix ?? new Uint8Array(0))}</span>
+              </div>
+              <div className="snd-info-row">
+                <span className="snd-info-label">PK Length</span>
+                <span className="snd-info-val">{status?.verifierPublicKeyLen ?? 0} bytes</span>
+              </div>
             </div>
-            <div className="snd-info-row">
-              <span className="snd-info-label">Binding Key</span>
-              <span className="snd-info-val snd-info-val--mono">{formatPrefix(status?.bindingKeyPrefix ?? new Uint8Array(0))}</span>
+            <div className="snd-card">
+              <div className="snd-stat-label" style={{ padding: '6px 10px 2px', opacity: 0.5 }}>RUNTIME (requires live check)</div>
+              {hs ? (
+                <>
+                  <div className="snd-info-row">
+                    <span className="snd-info-label">Runtime Anchor</span>
+                    <span className="snd-info-val snd-info-val--mono">{formatPrefix(hs.runtimeAnchorPrefix ?? new Uint8Array(0))}</span>
+                  </div>
+                  <div className="snd-info-row">
+                    <span className="snd-info-label">Runtime Error</span>
+                    <span className="snd-info-val snd-info-val--mono">{hs.runtimeError || 'None'}</span>
+                  </div>
+                </>
+              ) : (
+                <div className="snd-info-note" style={{ textAlign: 'center', padding: '12px 10px' }}>
+                  Run a live health check from the Health tab to populate runtime keys.
+                </div>
+              )}
             </div>
-            <div className="snd-info-row">
-              <span className="snd-info-label">Verifier PK</span>
-              <span className="snd-info-val snd-info-val--mono">{formatPrefix(status?.verifierPublicKeyPrefix ?? new Uint8Array(0))}</span>
-            </div>
-            <div className="snd-info-row">
-              <span className="snd-info-label">PK Length</span>
-              <span className="snd-info-val">{status?.verifierPublicKeyLen ?? 0} bytes</span>
-            </div>
-            <div className="snd-info-row">
-              <span className="snd-info-label">Runtime Anchor</span>
-              <span className="snd-info-val snd-info-val--mono">{formatPrefix(hs?.runtimeAnchorPrefix ?? new Uint8Array(0))}</span>
-            </div>
-            <div className="snd-info-row">
-              <span className="snd-info-label">Runtime Error</span>
-              <span className="snd-info-val snd-info-val--mono">{hs?.runtimeError || 'N/A'}</span>
-            </div>
-          </div>
+          </>
         )}
 
         {activeTab === 'report' && (
