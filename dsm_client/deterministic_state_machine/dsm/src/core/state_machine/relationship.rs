@@ -908,21 +908,31 @@ impl RelationshipManager {
         }
     }
 
+    fn canonical_party_id(entity_id: &[u8; 32]) -> String {
+        let mut hi = [0u8; 16];
+        hi.copy_from_slice(&entity_id[..16]);
+        let mut lo = [0u8; 16];
+        lo.copy_from_slice(&entity_id[16..]);
+        format!("ID:{}:{}", u128::from_be_bytes(hi), u128::from_be_bytes(lo))
+    }
+
     /// Derive a canonical relationship key using entity and counterparty IDs.
-    /// For `Hashed`, renders as "H:<u128_low>:<u128_high>" (decimal; no hex/base64).
+    /// All live strategies use exact binary-bound decimal renderings; no Base32 or
+    /// other text encodings appear on the key-derivation path.
     pub fn get_relationship_key(&self, entity_id: &[u8; 32], counterparty_id: &[u8; 32]) -> String {
+        let entity_key = Self::canonical_party_id(entity_id);
+        let counterparty_key = Self::canonical_party_id(counterparty_id);
+
         match self.key_derivation_strategy {
             KeyDerivationStrategy::Canonical => {
-                let entity_str = base32::encode(base32::Alphabet::Crockford, entity_id);
-                let counterparty_str = base32::encode(base32::Alphabet::Crockford, counterparty_id);
-                let mut ids = [entity_str, counterparty_str];
-                ids.sort();
-                format!("{}:{}", ids[0], ids[1])
+                if entity_id <= counterparty_id {
+                    format!("REL:{entity_key}|{counterparty_key}")
+                } else {
+                    format!("REL:{counterparty_key}|{entity_key}")
+                }
             }
             KeyDerivationStrategy::EntityCentric => {
-                let entity_str = base32::encode(base32::Alphabet::Crockford, entity_id);
-                let counterparty_str = base32::encode(base32::Alphabet::Crockford, counterparty_id);
-                format!("{entity_str}:{counterparty_str}")
+                format!("RELCTX:{entity_key}|{counterparty_key}")
             }
             KeyDerivationStrategy::Hashed => {
                 let mut h = dsm_domain_hasher("DSM/RELKEY/v2");
@@ -1403,10 +1413,11 @@ mod tests {
             .unwrap();
         assert!(exists);
 
-        // Canonical keys are symmetric in order
+        // Canonical keys are symmetric in order and remain binary-bound rather than Base32 text.
         let canonical_key = manager.get_relationship_key(&entity_id, &counterparty_id);
         let canonical_key2 = manager.get_relationship_key(&counterparty_id, &entity_id);
         assert_eq!(canonical_key, canonical_key2);
+        assert!(canonical_key.starts_with("REL:ID:"));
 
         // Hashed key (no hex) returns a decimal-tagged string, stable and non-empty
         let hashed_manager = RelationshipManager::new(KeyDerivationStrategy::Hashed);

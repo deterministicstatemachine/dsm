@@ -872,17 +872,24 @@ pub fn create_next_state(
             }
             let is_local_recipient = to_device_id.len() == 32
                 && to_device_id.as_slice() == current_state.device_info.device_id.as_slice();
-            if is_local_recipient && matches!(mode, TransactionMode::Unilateral) {
-                log::warn!(
-                    "Transfer signature verified upstream for incoming unilateral transfer; skipping local key check"
-                );
+            let verification_key = if is_local_recipient
+                && matches!(mode, TransactionMode::Unilateral)
+            {
+                current_state
+                    .relationship_context
+                    .as_ref()
+                    .filter(|ctx| !ctx.counterparty_public_key.is_empty())
+                    .map(|ctx| ctx.counterparty_public_key.as_slice())
+                    .ok_or_else(|| {
+                        DsmError::invalid_operation(
+                            "Incoming unilateral transfer missing counterparty public key for local signature verification",
+                        )
+                    })?
             } else {
-                verify_operation_signature(
-                    &operation,
-                    &current_state.device_info.public_key,
-                    "Transfer",
-                )?;
-            }
+                current_state.device_info.public_key.as_slice()
+            };
+
+            verify_operation_signature(&operation, verification_key, "Transfer")?;
         }
 
         // ── Device-key signed operations ──────────────────────────
@@ -1833,10 +1840,17 @@ mod tests {
     #[test]
     fn test_create_next_state_incoming_transfer_adds_balance() {
         // Whitepaper §8: balance delta is applied atomically inside create_next_state.
-        // When this device is the recipient (to_device_id == local device_id),
-        // apply_token_balance_delta credits using the device's public_key (not device_id),
-        // because all balance reads derive keys from public_key.
-        let current_state = create_test_state(1);
+        // Incoming unilateral transfers must still verify locally using the
+        // counterparty public key stored in the relationship context.
+        let (sender_pk, sender_sk) = generate_sphincs_keypair().expect("sender keypair");
+        let mut current_state = create_test_state(1);
+        current_state.relationship_context =
+            Some(crate::types::state_types::RelationshipContext::new(
+                current_state.device_info.device_id,
+                [0x44; 32],
+                sender_pk.clone(),
+            ));
+
         let policy_commit =
             crate::core::token::builtin_policy_commit_for_token("ERA").expect("ERA policy commit");
         let recipient_key = crate::core::token::derive_canonical_balance_key(
@@ -1844,6 +1858,23 @@ mod tests {
             &current_state.device_info.public_key,
             "ERA",
         );
+
+        let signature = {
+            let unsigned = Operation::Transfer {
+                amount: Balance::from_state(10, current_state.hash, 0),
+                token_id: b"ERA".to_vec(),
+                to_device_id: TEST_DEVICE_ID.to_vec(),
+                nonce: vec![1, 2, 3],
+                pre_commit: None,
+                recipient: TEST_DEVICE_ID.to_vec(),
+                message: "incoming".to_string(),
+                mode: TransactionMode::Unilateral,
+                verification: OpVerificationType::Standard,
+                to: TEST_DEVICE_ID.to_vec(),
+                signature: Vec::new(),
+            };
+            sphincs_sign(&sender_sk, &unsigned.to_bytes()).expect("sign incoming transfer")
+        };
 
         let operation = Operation::Transfer {
             amount: Balance::from_state(10, current_state.hash, 0),
@@ -1855,8 +1886,8 @@ mod tests {
             message: "incoming".to_string(),
             mode: TransactionMode::Unilateral,
             verification: OpVerificationType::Standard,
-            to: b"recipient".to_vec(),
-            signature: vec![1u8],
+            to: TEST_DEVICE_ID.to_vec(),
+            signature,
         };
 
         let entropy = vec![1, 2, 3, 4];
@@ -1874,6 +1905,57 @@ mod tests {
             .get(&recipient_key)
             .unwrap_or_else(|| panic!("recipient balance key should exist after credit"));
         assert_eq!(bal.value(), 10, "receiver should be credited 10 ERA");
+    }
+
+    #[test]
+    fn test_create_next_state_incoming_transfer_requires_counterparty_key() {
+        let (_sender_pk, sender_sk) = generate_sphincs_keypair().expect("sender keypair");
+        let current_state = create_test_state(1);
+
+        let signature = {
+            let unsigned = Operation::Transfer {
+                amount: Balance::from_state(10, current_state.hash, 0),
+                token_id: b"ERA".to_vec(),
+                to_device_id: TEST_DEVICE_ID.to_vec(),
+                nonce: vec![9, 8, 7],
+                pre_commit: None,
+                recipient: TEST_DEVICE_ID.to_vec(),
+                message: "incoming without relationship context".to_string(),
+                mode: TransactionMode::Unilateral,
+                verification: OpVerificationType::Standard,
+                to: TEST_DEVICE_ID.to_vec(),
+                signature: Vec::new(),
+            };
+            sphincs_sign(&sender_sk, &unsigned.to_bytes()).expect("sign incoming transfer")
+        };
+
+        let operation = Operation::Transfer {
+            amount: Balance::from_state(10, current_state.hash, 0),
+            token_id: b"ERA".to_vec(),
+            to_device_id: TEST_DEVICE_ID.to_vec(),
+            nonce: vec![9, 8, 7],
+            pre_commit: None,
+            recipient: TEST_DEVICE_ID.to_vec(),
+            message: "incoming without relationship context".to_string(),
+            mode: TransactionMode::Unilateral,
+            verification: OpVerificationType::Standard,
+            to: TEST_DEVICE_ID.to_vec(),
+            signature,
+        };
+
+        let err = create_next_state(
+            &current_state,
+            operation,
+            &[1, 2, 3, 4],
+            &super::VerificationType::Standard,
+            false,
+        )
+        .expect_err("incoming unilateral transfer without a counterparty key must fail closed");
+
+        assert!(
+            err.to_string().contains("counterparty public key"),
+            "error should explain the missing local verification key: {err}"
+        );
     }
 
     #[test]
