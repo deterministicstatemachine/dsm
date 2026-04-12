@@ -134,7 +134,7 @@ bip39 = "2.0.0"
 once_cell = "1.19.0"
 log = "0.4.20"
 env_logger = "0.10.0"
-uuid = { version = "1.9", features = ["v4", "v7", "std"] }
+uuid = { version = "1.23", features = ["v4", "v7", "std"] }
 erased-serde = "0.4.1"
 bytes = "1.5.0"
 tokio-util = { version = "0.7.10", features = ["codec"] }
