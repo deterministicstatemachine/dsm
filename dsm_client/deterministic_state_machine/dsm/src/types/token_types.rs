@@ -360,7 +360,8 @@ impl Default for TokenAmount {
 pub struct Balance {
     /// Token value
     value: u64,
-    /// Locked portion of balance that cannot be spent
+    /// Lock bookkeeping for specific flows; this is tracked separately and is
+    /// not subtracted by `available()`.
     locked: u64,
     /// Last update tick
     last_updated_tick: u64,
@@ -435,7 +436,11 @@ impl Balance {
         }
     }
 
-    /// Get the available balance (total minus locked)
+    /// Returns the full token amount currently recorded for this balance.
+    ///
+    /// Per the DSM balance invariant, locked amounts are **not** subtracted here;
+    /// token-affecting operations are enforced atomically through DSM state
+    /// transitions rather than via a second subtractive display view.
     pub fn available(&self) -> u64 {
         self.value
     }
@@ -1203,6 +1208,15 @@ mod tests {
 
         b.unlock(10).unwrap();
         assert_eq!(b.locked(), 20);
+    }
+
+    #[test]
+    fn balance_available_returns_full_value_even_when_locked() {
+        let mut b = Balance::from_state(100, [0; 32], 1);
+        b.lock(30).unwrap();
+
+        assert_eq!(b.available(), 100);
+        assert_eq!(b.locked(), 30);
     }
 
     #[test]
