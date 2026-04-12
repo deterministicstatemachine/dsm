@@ -39,7 +39,7 @@ const GOLDEN_SUCCESSOR_TIP: &str = "83BWY3QWZ349189XV1GPE2K2EX2REYNSXG445K7SPGSR
 const GOLDEN_EMPTY_ROOT_32: &str = "E1JERDTXVWR09YMPW1FVGV12GBTB0RNT36P0TNQCWQD4JK4JDG90";
 const GOLDEN_DEFAULT_NODE_0: &str = "NVM9HGMZVHS8FR2CMTBEX8S5QHNQX03WM91QSSGAZ471189S2120";
 const GOLDEN_DEFAULT_NODE_1: &str = "SVRH8ZTRABJ1G040KNKY042R9E3HC8E5ZNBWWF17Q0E6BA06HJPG";
-const GOLDEN_DEVTREE_SINGLE: &str = "32D73DT2ME8YNVD6DFB2DSKZN1R5YYN87ARBBCGZJATC63D24JV0";
+const GOLDEN_DEVTREE_SINGLE: &str = "KEMX0ARYD2BVJZQSAB4YPK1EDQYT5089ME3XQEYCAT2R9YKXWT20";
 const GOLDEN_INITIAL_TIP: &str = "KKF8ZAT6H6X292YFK5VBM5SCKYB8AR912HD0RN8VNEQVGBCQECR0";
 
 // Beta release (2026-03-29): inclusion proof + smt_replace golden vectors.
@@ -163,15 +163,15 @@ fn golden_tag_initial_chain_tip() {
 #[test]
 fn golden_tag_bytes_exact() {
     assert_eq!(
-        TAG_SMT_NODE, "DSM/smt-node\0",
+        TAG_SMT_NODE, "DSM/smt-node",
         "TAG_SMT_NODE string literal changed"
     );
     assert_eq!(
-        TAG_SMT_LEAF, "DSM/smt-leaf\0",
+        TAG_SMT_LEAF, "DSM/smt-leaf",
         "TAG_SMT_LEAF string literal changed"
     );
     assert_eq!(
-        TAG_RECEIPT_COMMIT, "DSM/receipt-commit\0",
+        TAG_RECEIPT_COMMIT, "DSM/receipt-commit",
         "TAG_RECEIPT_COMMIT string literal changed"
     );
 }

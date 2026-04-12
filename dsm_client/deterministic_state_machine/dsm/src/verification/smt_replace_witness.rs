@@ -7,13 +7,6 @@
 
 use crate::types::error::DsmError;
 
-/// Domain tag for computing the canonical relationship key.
-pub const TAG_SMT_KEY: &[u8] = b"DSM/smt-key\0";
-/// Domain tag for hashing an SMT leaf.
-pub const TAG_SMT_LEAF: &[u8] = b"DSM/smt-leaf\0";
-/// Domain tag for hashing an SMT internal node.
-pub const TAG_SMT_NODE: &[u8] = b"DSM/smt-node\0";
-
 /// Hard cap for witness path length (DoS resistance).
 pub const MAX_SMT_WITNESS_PATH_LEN: usize = 256;
 

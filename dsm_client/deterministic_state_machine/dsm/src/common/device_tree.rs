@@ -1,6 +1,7 @@
-//! Standard Merkle Device Tree utilities (non-sparse) used for π_dev proofs.
+//! Standard Merkle Device Tree utilities (non-sparse) used for `π_dev` proofs.
 //! Leaves are 32-byte DevID values, sorted lexicographically big-endian.
-//! Internal nodes are BLAKE3 hashes with domain tag TAG_DEV_MERKLE.
+//! Internal nodes and leaves use the whitepaper-aligned `DSM/merkle-node` and
+//! `DSM/merkle-leaf` domain tags.
 //! An explicit empty-root tag is used for the empty tree.
 
 use super::domain_tags::{TAG_DEV_EMPTY, TAG_DEV_LEAF, TAG_DEV_MERKLE};
@@ -8,7 +9,7 @@ use crate::crypto::blake3::dsm_domain_hasher;
 
 /// Compute the device tree internal node hash H(L || R) with domain separation.
 pub fn hash_node(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
-    let mut hasher = dsm_domain_hasher(TAG_DEV_MERKLE.trim_end_matches('\0'));
+    let mut hasher = dsm_domain_hasher(TAG_DEV_MERKLE);
     hasher.update(left);
     hasher.update(right);
     let mut out = [0u8; 32];
@@ -18,7 +19,7 @@ pub fn hash_node(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
 
 /// Compute the leaf hash for a DevID value (32 bytes), domain separated.
 pub fn hash_leaf(dev_id: &[u8; 32]) -> [u8; 32] {
-    let mut hasher = dsm_domain_hasher(TAG_DEV_LEAF.trim_end_matches('\0'));
+    let mut hasher = dsm_domain_hasher(TAG_DEV_LEAF);
     hasher.update(dev_id);
     let mut out = [0u8; 32];
     out.copy_from_slice(hasher.finalize().as_bytes());
@@ -27,7 +28,7 @@ pub fn hash_leaf(dev_id: &[u8; 32]) -> [u8; 32] {
 
 /// Return the canonical empty root hash for the Device Tree.
 pub fn empty_root() -> [u8; 32] {
-    let hasher = dsm_domain_hasher(TAG_DEV_EMPTY.trim_end_matches('\0'));
+    let hasher = dsm_domain_hasher(TAG_DEV_EMPTY);
     *hasher.finalize().as_bytes()
 }
 
@@ -378,5 +379,31 @@ mod tests {
             // 4 leaves → 2 levels → 2 siblings
             assert_eq!(proof.siblings.len(), 2);
         }
+    }
+
+    #[test]
+    fn test_device_tree_root_matches_whitepaper_tags() {
+        let dev_a = [1u8; 32];
+        let dev_b = [2u8; 32];
+        let tree = DeviceTree::new(vec![dev_a, dev_b]);
+
+        let mut left = dsm_domain_hasher("DSM/merkle-leaf");
+        left.update(&dev_a);
+        let left = *left.finalize().as_bytes();
+
+        let mut right = dsm_domain_hasher("DSM/merkle-leaf");
+        right.update(&dev_b);
+        let right = *right.finalize().as_bytes();
+
+        let mut node = dsm_domain_hasher("DSM/merkle-node");
+        node.update(&left);
+        node.update(&right);
+        let expected_root = *node.finalize().as_bytes();
+
+        assert_eq!(
+            tree.root(),
+            expected_root,
+            "Device Tree roots must use the whitepaper merkle tags"
+        );
     }
 }

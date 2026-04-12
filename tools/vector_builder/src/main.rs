@@ -26,6 +26,7 @@ fn main() -> Result<()> {
         repo_root.join("dsm_client/deterministic_state_machine/dsm/tests/vectors/v1"),
         repo_root.join("dsm_client/deterministic_state_machine/dsm_sdk/tests/vectors/v1"),
         repo_root.join("dsm_client/android/app/src/androidTest/assets/vectors/v1"),
+        repo_root.join("dsm_client/frontend/public/vectors/v1"),
     ];
 
     for (case_id, expected) in CASES {

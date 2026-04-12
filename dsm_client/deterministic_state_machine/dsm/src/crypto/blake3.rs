@@ -206,27 +206,30 @@ pub fn new_hasher() -> Hasher {
 
 /// Create a domain-separated BLAKE3 hasher.
 ///
-/// Returns a `Hasher` pre-loaded with the domain tag (including NUL terminator).
-/// Callers chain `.update()` calls then `.finalize()`.
+/// Returns a `Hasher` pre-loaded with the canonical DSM domain tag followed by
+/// exactly one NUL terminator. Callers chain `.update()` calls then `.finalize()`.
 ///
-/// The `tag` must follow the `"DSM/<domain>"` convention. The NUL terminator is
-/// appended automatically.
+/// The preferred convention is to pass tags without a trailing NUL
+/// (for example `"DSM/receipt-commit"`). For defensive compatibility, any
+/// accidental trailing NUL is stripped before hashing so callers cannot silently
+/// produce a double-NUL domain.
 ///
 /// # Panics
-/// Debug-asserts that `tag` starts with `"DSM/"`.
+/// Debug-asserts that the canonicalized tag starts with `"DSM/"`.
 pub fn dsm_domain_hasher(tag: &str) -> Hasher {
+    let canonical_tag = tag.trim_end_matches('\0');
     debug_assert!(
-        tag.starts_with("DSM/") || tag.starts_with("DJTE."),
-        "domain tag must start with \"DSM/\" or \"DJTE.\", got: {tag}"
+        canonical_tag.starts_with("DSM/") || canonical_tag.starts_with("DJTE."),
+        "domain tag must start with \"DSM/\" or \"DJTE.\", got: {canonical_tag}"
     );
     let mut h = Hasher::new();
-    h.update(tag.as_bytes());
+    h.update(canonical_tag.as_bytes());
     h.update(&[0u8]);
     h
 }
 
-/// Domain-separated hash function as specified in whitepaper
-/// H(tag || data) where tag includes null terminator
+/// Domain-separated hash function as specified in the whitepaper:
+/// `H(tag || "\\0" || data)`.
 pub fn domain_hash(tag: &str, data: &[u8]) -> Hash {
     let mut hasher = dsm_domain_hasher(tag);
     hasher.update(data);
@@ -245,6 +248,17 @@ mod tests_domain_hash {
         let h1 = domain_hash("DSM/ab", b"Cxyz");
         let h2 = domain_hash("DSM/abC", b"xyz");
         assert_ne!(h1.as_bytes(), h2.as_bytes());
+    }
+
+    #[test]
+    fn domain_hash_tolerates_optional_trailing_nul() {
+        let h1 = domain_hash("DSM/test-tag", b"payload");
+        let h2 = domain_hash("DSM/test-tag\0", b"payload");
+        assert_eq!(
+            h1.as_bytes(),
+            h2.as_bytes(),
+            "a trailing NUL in the caller tag must not change the digest"
+        );
     }
 }
 

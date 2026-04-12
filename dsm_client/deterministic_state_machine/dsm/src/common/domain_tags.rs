@@ -1,18 +1,20 @@
 //! Centralized domain tag constants for BLAKE3 domain-separated hashing.
 
-pub const TAG_RECEIPT_COMMIT: &str = "DSM/receipt-commit\0";
-pub const TAG_SMT_NODE: &str = "DSM/smt-node\0";
-pub const TAG_SMT_LEAF: &str = "DSM/smt-leaf\0";
-pub const TAG_DBRW: &str = "DSM/dbrw\0";
-// Device Tree (standard Merkle)
-pub const TAG_DEV_MERKLE: &str = "DSM/dev-merkle\0";
-pub const TAG_DEV_LEAF: &str = "DSM/dev-leaf\0";
-pub const TAG_DEV_EMPTY: &str = "DSM/dev-empty\0";
+pub const TAG_RECEIPT_COMMIT: &str = "DSM/receipt-commit";
+pub const TAG_SMT_NODE: &str = "DSM/smt-node";
+pub const TAG_SMT_LEAF: &str = "DSM/smt-leaf";
+pub const TAG_DBRW: &str = "DSM/dbrw";
+// Device Tree (standard Merkle) — whitepaper-aligned merkle domains.
+pub const TAG_DEV_MERKLE: &str = "DSM/merkle-node";
+pub const TAG_DEV_LEAF: &str = "DSM/merkle-leaf";
+pub const TAG_DEV_EMPTY: &str = "DSM/dev-empty";
 
-/// Helper to build a tagged preimage by prefixing the ASCII tag and NUL.
+/// Helper to build a tagged preimage by prefixing the ASCII tag and a single NUL.
 pub fn tagged_bytes(tag: &str, body: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(tag.len() + body.len());
-    out.extend_from_slice(tag.as_bytes());
+    let canonical_tag = tag.trim_end_matches('\0');
+    let mut out = Vec::with_capacity(canonical_tag.len() + 1 + body.len());
+    out.extend_from_slice(canonical_tag.as_bytes());
+    out.push(0u8);
     out.extend_from_slice(body);
     out
 }
@@ -23,7 +25,7 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn all_tags_are_nul_terminated() {
+    fn exported_tags_are_not_nul_terminated() {
         let tags = [
             TAG_RECEIPT_COMMIT,
             TAG_SMT_NODE,
@@ -34,8 +36,11 @@ mod tests {
             TAG_DEV_EMPTY,
         ];
         for tag in &tags {
-            assert!(tag.ends_with('\0'), "Tag {tag:?} must be NUL-terminated");
-            assert!(tag.len() > 1, "Tag must contain more than just NUL");
+            assert!(
+                !tag.ends_with('\0'),
+                "exported tag {tag:?} must not carry a baked-in NUL"
+            );
+            assert!(tag.len() > 1, "tag must contain more than just the prefix");
         }
     }
 
@@ -71,8 +76,8 @@ mod tests {
     }
 
     #[test]
-    fn tagged_bytes_concatenates_tag_and_body() {
-        let result = tagged_bytes("DSM/test\0", b"hello");
+    fn tagged_bytes_appends_single_nul_before_body() {
+        let result = tagged_bytes("DSM/test", b"hello");
         assert_eq!(&result[..9], b"DSM/test\0");
         assert_eq!(&result[9..], b"hello");
         assert_eq!(result.len(), 9 + 5);
@@ -81,7 +86,7 @@ mod tests {
     #[test]
     fn tagged_bytes_with_empty_body() {
         let result = tagged_bytes(TAG_DBRW, b"");
-        assert_eq!(result, TAG_DBRW.as_bytes());
+        assert_eq!(result, b"DSM/dbrw\0");
     }
 
     #[test]
