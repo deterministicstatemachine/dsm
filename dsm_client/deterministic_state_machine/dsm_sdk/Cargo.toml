@@ -19,7 +19,9 @@ doctest = false
 
 [features]
 default = []
-strict = []
+# `strict` feature was removed — C-DBRW enforcement is now always on. The
+# responder and the bootstrap ingress path both fail-closed on ReadOnly
+# verdicts without any feature gate.
 demos = []
 dev-discovery = ["mdns"]
 jni = ["dep:jni"]

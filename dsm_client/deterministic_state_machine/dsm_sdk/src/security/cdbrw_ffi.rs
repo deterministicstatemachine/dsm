@@ -28,8 +28,9 @@ pub mod thresholds {
     pub const L_HAT_MIN: f32 = 0.45;
     /// Minimum device variance for manufacturing gate.
     pub const SIGMA_DEV_MIN: f32 = 0.04;
-    /// Default orbit length for health-test probe.
-    pub const HEALTH_N: usize = 2048;
+    /// Production orbit length for health-test probe (C-DBRW §4.5.7).
+    /// Matches `AntiCloneGate.PROBES` on the Kotlin side.
+    pub const HEALTH_N: usize = 16384;
 }
 
 /// Result of the 3-condition entropy health test.
@@ -160,6 +161,29 @@ pub fn lz78_compressibility(samples: &[i64]) -> f32 {
     l_hat.clamp(0.0, 1.0)
 }
 
+/// Compute the subsampling stride for autocorrelation decorrelation.
+///
+/// Mobile silicon PUF measurements exhibit thermal coupling between
+/// consecutive probes — lag-1 rho ≈ 0.8-0.9 is typical on Galaxy A-series
+/// hardware. Subsampling at stride K means the lag-1 autocorrelation of the
+/// decimated sequence measures correlation at lag K in the original, where
+/// thermal coupling has decayed. The decimated sequence must still have ≥ 64
+/// samples for a stable rho estimate.
+fn decorrelation_stride(n: usize) -> usize {
+    if n >= 16384 {
+        // 16384 / 64 = 256 decimated samples — above the 64-sample floor.
+        // Galaxy A54 shows rho ≈ 0.65 at stride 16, indicating a slow
+        // thermal tail. Stride 64 pushes past the decorrelation horizon.
+        64
+    } else if n >= 8192 {
+        32
+    } else if n >= 4096 {
+        16
+    } else {
+        1
+    }
+}
+
 /// Full 3-condition health test over raw orbit timings.
 ///
 /// `bins` must be at least 2 and should match the enrollment histogram bin
@@ -202,7 +226,17 @@ pub fn health_test(samples: &[i64], bins: usize) -> HealthResult {
     }
 
     let h_hat = shannon_entropy(&hist);
-    let rho_hat = lag1_autocorrelation(samples);
+    // Subsample before computing autocorrelation so adjacent entries in the
+    // decimated sequence are `stride` probes apart in real time, decorrelating
+    // thermal coupling between consecutive PUF measurements. h_hat and l_hat
+    // use the full sample set because more data improves their estimates.
+    let stride = decorrelation_stride(samples.len());
+    let rho_hat = if stride > 1 {
+        let decimated: Vec<i64> = samples.iter().step_by(stride).copied().collect();
+        lag1_autocorrelation(&decimated)
+    } else {
+        lag1_autocorrelation(samples)
+    };
     let l_hat = lz78_compressibility(samples);
 
     let passed = h_hat >= thresholds::H_HAT_MIN

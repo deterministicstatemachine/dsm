@@ -169,6 +169,11 @@ fn finalize_bootstrap_core(
     let device_id = report.device_id.clone();
     let genesis_hash = report.genesis_hash.clone();
 
+    // Strict enforcement — no feature gate, no default-allow fallback.
+    // A ReadOnly trust level from the bootstrap measurement means the device
+    // failed the C-DBRW entropy health test and MUST NOT be allowed to proceed
+    // through genesis creation. The caller surface returns a BootstrapResultReadOnly
+    // envelope and the genesis lifecycle emits an error event for telemetry.
     match report.trust_level {
         x if x
             == pb::bootstrap_measurement_report::TrustLevel::BootstrapTrustLevelReadOnly as i32 =>
@@ -649,6 +654,17 @@ fn install_identity_context_core(
 
     prime_identity_app_state(&device_id, &genesis_hash);
 
+    // Self-heal: republish DeviceTreeEntry to the registry if it is below
+    // quorum on the network. Genesis creation used to swallow publish
+    // failures silently, which left some users with locally-valid identities
+    // that were invisible to `contacts.addManual`. Running the idempotent
+    // verify+republish on every bootstrap guarantees eventual consistency
+    // without requiring the user to regenerate their identity.
+    //
+    // Non-fatal: network errors here never block startup. If the device is
+    // offline we'll retry on the next bootstrap.
+    ensure_device_tree_registered(device_id.clone(), genesis_hash.clone());
+
     let entropy = crate::derive_production_entropy(&device_id, &genesis_hash, &binding_key);
     crate::initialize_sdk_context(device_id, genesis_hash, entropy).map_err(|e| {
         ingress_error(
@@ -656,6 +672,53 @@ fn install_identity_context_core(
             format!("startup: initialize_sdk_context failed: {e}"),
         )
     })
+}
+
+/// Best-effort self-heal for the DeviceTreeEntry registry entry.
+///
+/// Runs the `ensure_device_in_tree` flow on a background task using the
+/// shared tokio runtime so the bootstrap path is never blocked on network
+/// I/O. The task logs its own success/failure; there is no caller-visible
+/// error surface because registry publication is strictly best-effort at
+/// the ingress boundary — any failure here will retry on the next bootstrap.
+fn ensure_device_tree_registered(device_id: Vec<u8>, genesis_hash: Vec<u8>) {
+    let rt = crate::runtime::get_runtime();
+    rt.spawn(async move {
+        let cfg = match crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config().await {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                log::warn!(
+                    "self-heal registry: env config unavailable, skipping republish: {e}"
+                );
+                return;
+            }
+        };
+
+        let sdk = match crate::sdk::storage_node_sdk::StorageNodeSDK::new(cfg).await {
+            Ok(sdk) => sdk,
+            Err(e) => {
+                log::warn!(
+                    "self-heal registry: storage SDK init failed, skipping republish: {e}"
+                );
+                return;
+            }
+        };
+
+        match sdk.ensure_device_in_tree(&device_id, &genesis_hash).await {
+            Ok(n) => {
+                log::info!(
+                    "self-heal registry: DeviceTreeEntry healthy on {} storage nodes",
+                    n
+                );
+            }
+            Err(e) => {
+                log::error!(
+                    "self-heal registry: failed to ensure DeviceTreeEntry visibility: {e}. \
+                     Contact discovery will remain broken until network recovers."
+                );
+            }
+        }
+    });
 }
 
 fn initialize_identity_context_core(

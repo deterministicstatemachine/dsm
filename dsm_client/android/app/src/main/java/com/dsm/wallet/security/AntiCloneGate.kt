@@ -72,7 +72,7 @@ object AntiCloneGate {
      */
     private const val ARENA_BYTES: Int = 8 * 1024 * 1024
     private const val WARMUP_ROUNDS: Int = 2
-    private const val PROBES: Int = 4096
+    private const val PROBES: Int = 16384
     private const val STEPS_PER_PROBE: Int = 4096
     private const val ENROLL_TRIALS: Int = 21
     private const val HISTOGRAM_BINS: Int = 256

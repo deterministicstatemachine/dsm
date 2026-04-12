@@ -24,9 +24,11 @@
 use async_trait::async_trait;
 use prost::Message;
 
-use dsm::crypto::blake3::dsm_domain_hasher;
 use crate::bridge::{AppInvoke, AppQuery, AppResult, AppRouter};
 use crate::security::cdbrw_access_gate::{require_access_level, AccessLevel};
+use crate::util::registry_addr::{
+    build_root_device_tree_evidence, registry_content_addr_b64url, REGISTRY_QUORUM_THRESHOLD,
+};
 
 // IMPORTANT: use the DSM crate's protobuf module everywhere in this file.
 use dsm::types::proto as generated;
@@ -2668,9 +2670,9 @@ async fn verify_device_tree_evidence_quorum(
 
     let node_urls = storage_cfg.node_urls;
 
-    if node_urls.len() < 3 {
+    if node_urls.len() < REGISTRY_QUORUM_THRESHOLD {
         return Err(format!(
-            "Insufficient network nodes configured (need >=3, got {})",
+            "Insufficient network nodes configured (need >={REGISTRY_QUORUM_THRESHOLD}, got {})",
             node_urls.len()
         ));
     }
@@ -2688,14 +2690,14 @@ async fn verify_device_tree_evidence_quorum(
                 continue;
             }
             verified.push(dsm::types::identifiers::NodeId::new(trimmed.to_string()));
-            if verified.len() >= 3 {
+            if verified.len() >= REGISTRY_QUORUM_THRESHOLD {
                 break;
             }
         }
 
-        if verified.len() < 3 {
+        if verified.len() < REGISTRY_QUORUM_THRESHOLD {
             return Err(format!(
-                "Insufficient network nodes (need >=3, got {})",
+                "Insufficient network nodes (need >={REGISTRY_QUORUM_THRESHOLD}, got {})",
                 verified.len()
             ));
         }
@@ -2703,11 +2705,7 @@ async fn verify_device_tree_evidence_quorum(
         return Ok(verified);
     }
 
-    let mut evidence = Vec::with_capacity(32 + 32 + 32 + 4);
-    evidence.extend_from_slice(&device_id);
-    evidence.extend_from_slice(&genesis_hash);
-    evidence.extend_from_slice(&[0u8; 32]);
-    evidence.extend_from_slice(&[0u8; 4]);
+    let evidence = build_root_device_tree_evidence(&device_id, &genesis_hash);
 
     let addr = registry_content_addr_b64url(&evidence);
     let client = crate::sdk::storage_node_sdk::build_ca_aware_client();
@@ -2729,7 +2727,7 @@ async fn verify_device_tree_evidence_quorum(
         )
         .await;
 
-        if verified.len() >= 3 {
+        if verified.len() >= REGISTRY_QUORUM_THRESHOLD {
             return Ok(verified);
         }
 
@@ -2738,7 +2736,7 @@ async fn verify_device_tree_evidence_quorum(
         if attempt + 1 < max_attempts {
             let delay = registry_retry_delay(&storage_cfg.retry_config, attempt);
             log::warn!(
-                "contacts.addManual: registry quorum not yet visible (attempt {}/{}, verified={}, checked={}, http={}, fetch_failures={}, read_failures={}, mismatches={}); retrying in {}ms",
+                "contacts.addManual: registry quorum not yet visible (attempt {}/{}, verified={}, checked={}, non_success_http={}, fetch_failures={}, read_failures={}, mismatches={}); retrying in {}ms",
                 attempt + 1,
                 max_attempts,
                 last_stats.verified_nodes,
@@ -2788,7 +2786,8 @@ fn format_registry_quorum_failure(
     attempts: u32,
 ) -> String {
     format!(
-        "Insufficient verified network nodes (need >=3, got {} after {} attempts; configured={}, checked={}, http={}, fetch_failures={}, read_failures={}, mismatches={})",
+        "Insufficient verified network nodes (need >={}, got {} after {} attempts; configured={}, checked={}, non_success_http={}, fetch_failures={}, read_failures={}, mismatches={})",
+        REGISTRY_QUORUM_THRESHOLD,
         stats.verified_nodes,
         attempts,
         stats.configured_nodes,
@@ -2873,7 +2872,7 @@ async fn verify_device_tree_evidence_quorum_once(
             stats.mismatched_payloads += 1;
         }
 
-        if verified.len() >= 3 {
+        if verified.len() >= REGISTRY_QUORUM_THRESHOLD {
             break;
         }
     }
@@ -2882,52 +2881,9 @@ async fn verify_device_tree_evidence_quorum_once(
     (verified, stats)
 }
 
-#[inline]
-fn registry_content_addr_b64url(body: &[u8]) -> String {
-    let mut hasher = dsm_domain_hasher("DSM/registry");
-    hasher.update(body);
-    let out = hasher.finalize();
-    b64_url_no_pad(out.as_bytes())
-}
-
-#[inline]
-fn b64_url_no_pad(input: &[u8]) -> String {
-    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let n = input.len();
-    let mut out = String::with_capacity(n.div_ceil(3) * 4);
-
-    let mut i = 0;
-    while i + 3 <= n {
-        let a = input[i];
-        let b = input[i + 1];
-        let c = input[i + 2];
-
-        out.push(T[(a >> 2) as usize] as char);
-        out.push(T[(((a & 0x03) << 4) | (b >> 4)) as usize] as char);
-        out.push(T[(((b & 0x0f) << 2) | (c >> 6)) as usize] as char);
-        out.push(T[(c & 0x3f) as usize] as char);
-
-        i += 3;
-    }
-
-    match n - i {
-        1 => {
-            let a = input[i];
-            out.push(T[(a >> 2) as usize] as char);
-            out.push(T[((a & 0x03) << 4) as usize] as char);
-        }
-        2 => {
-            let a = input[i];
-            let b = input[i + 1];
-            out.push(T[(a >> 2) as usize] as char);
-            out.push(T[(((a & 0x03) << 4) | (b >> 4)) as usize] as char);
-            out.push(T[((b & 0x0f) << 2) as usize] as char);
-        }
-        _ => {}
-    }
-
-    out
-}
+// registry_content_addr_b64url and b64_url_no_pad moved to
+// `crate::util::registry_addr` so the write path (storage_node_sdk) and the
+// read path (this file) share one source of truth. See that module for docs.
 
 #[cfg(test)]
 mod tests {

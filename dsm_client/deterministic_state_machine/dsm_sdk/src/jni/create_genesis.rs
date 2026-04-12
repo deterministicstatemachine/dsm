@@ -194,17 +194,32 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_createGenesis<'a>(
                 };
 
                 // --- Publish genesis to storage nodes ---
+                //
+                // Publish failures do NOT abort genesis creation: the local
+                // keys/state are still valid and we want the user to end up
+                // with a persisted identity they can recover. The self-heal
+                // path in the bootstrap ingress path retries on every
+                // subsequent app start via `storage_node_sdk::ensure_device_in_tree`.
                 let publish_result = sdk.publish_genesis_to_nodes(gc.clone()).await;
                 match &publish_result {
                     Ok(resp) => {
                         log::info!("Genesis published to storage nodes: {:?}", resp);
                     }
                     Err(e) => {
-                        log::warn!("Failed to publish genesis to storage nodes: {}", e);
+                        log::error!(
+                            "Failed to publish genesis to storage nodes: {}. \
+                             Identity will be healed on next successful bootstrap.",
+                            e
+                        );
                     }
                 }
 
                 // --- Register device in device tree ---
+                //
+                // `register_device_in_tree` enforces quorum (>=3 nodes) and
+                // returns Err when fewer succeed. We deliberately don't fail
+                // genesis creation on error — the bootstrap self-heal will
+                // re-attempt on the next app start when the network recovers.
                 let register_result = sdk
                     .register_device_in_tree(&genesis_device_id, &genesis_hash_bytes)
                     .await;
@@ -213,7 +228,11 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_createGenesis<'a>(
                         log::info!("Device registered in tree: {:?}", resp);
                     }
                     Err(e) => {
-                        log::warn!("Failed to register device in tree: {}", e);
+                        log::error!(
+                            "Failed to register device in tree: {}. \
+                             Identity will be healed on next successful bootstrap.",
+                            e
+                        );
                     }
                 }
 
