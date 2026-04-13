@@ -125,6 +125,11 @@ pub struct BilateralBleSession {
     /// ensuring the actual post-finalize tip matches the pre-computed
     /// `shared_chain_tip_new` sent in the BilateralConfirmRequest.
     pub pre_finalize_entropy: Option<[u8; 32]>,
+    /// Stitched receipt bytes built during `send_bilateral_confirm` (sender-only).
+    /// Cached here so `mark_sender_committed_with_post_state_hash` can persist
+    /// the same verifiable receipt instead of building a degraded one after the
+    /// Per-Device SMT has already been mutated.
+    pub stitched_receipt_bytes: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -495,6 +500,7 @@ impl SessionStore {
             sender_ble_address: record.sender_ble_address.clone(),
             created_at_wall: Instant::now(),
             pre_finalize_entropy: None,
+            stitched_receipt_bytes: None,
         })
     }
 }
@@ -517,6 +523,7 @@ mod tests {
             expires_at_ticks: u64::MAX,
             sender_ble_address: None,
             created_at_wall: Instant::now(),
+            stitched_receipt_bytes: None,
             pre_finalize_entropy: None,
         }
     }
