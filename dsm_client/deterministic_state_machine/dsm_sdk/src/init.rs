@@ -617,11 +617,14 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
             });
         });
 
-        // Let contact sync complete asynchronously — it is not required for SDK
-        // readiness and BluetoothManager is thread-safe (Arc<RwLock>).  Blocking
-        // here delays the entire init pipeline and pushes the UI-thread callback
-        // later, extending perceived unresponsiveness on slower devices.
-        drop(handle);
+        // Block until contact sync completes. Without this, the BilateralBleHandler's
+        // in-memory ContactManager is empty when the first BLE prepare arrives, causing
+        // "Sender not found in verified contacts" rejections. The sync is fast (single
+        // SQLite query + HashMap inserts) — typically <50ms even with dozens of contacts.
+        match handle.join() {
+            Ok(_) => log::info!("[SDK Init] Contact sync thread completed"),
+            Err(_) => log::warn!("[SDK Init] Contact sync thread panicked"),
+        }
     }
 
     Ok(())

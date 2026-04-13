@@ -480,6 +480,7 @@ impl BilateralBleHandler {
             sender_ble_address: record.sender_ble_address.clone(),
             created_at_wall: Instant::now(),
             pre_finalize_entropy: None,
+            stitched_receipt_bytes: None,
         })
     }
 
@@ -1173,6 +1174,7 @@ impl BilateralBleHandler {
             sender_ble_address: None, // Sender side - no counterparty BLE address yet
             created_at_wall: Instant::now(),
             pre_finalize_entropy: None,
+            stitched_receipt_bytes: None,
         };
 
         {
@@ -2035,6 +2037,7 @@ impl BilateralBleHandler {
             sender_ble_address: sender_ble_address.clone(),
             created_at_wall: Instant::now(),
             pre_finalize_entropy: None,
+            stitched_receipt_bytes: None,
         };
 
         {
@@ -2837,10 +2840,18 @@ impl BilateralBleHandler {
         // mark_sender_committed_with_post_state_hash after delivery is confirmed.
         // The confirm envelope is persisted to pending_confirm_delivery for
         // crash-safe re-delivery if BLE drops.
+        //
+        // Cache the stitched receipt bytes built above (with real pre/post SMT
+        // roots and proofs) so the sender's settlement can persist them verbatim.
+        // Without this, settlement builds a degraded receipt from the already-
+        // mutated SMT (parent_root == child_root, empty parent proof), which
+        // fails §4.3 verification and renders the sender's history "Invalid".
+        let sender_receipt_cache = confirm_request.stitched_receipt.clone();
         {
             let mut sessions = self.sessions.sessions.lock().await;
             if let Some(s) = sessions.get_mut(&commitment_hash) {
                 s.phase = BilateralPhase::ConfirmPending;
+                s.stitched_receipt_bytes = Some(sender_receipt_cache);
             }
         }
         let mut confirm_pending_session = session.clone();
@@ -3657,7 +3668,7 @@ impl BilateralBleHandler {
         info!("Marking session committed and finalizing sender transaction");
 
         // Get session info before locking manager
-        let (counterparty_device_id, counterparty_sig, session_operation, pre_entropy) = {
+        let (counterparty_device_id, counterparty_sig, session_operation, pre_entropy, cached_receipt) = {
             let sessions = self.sessions.sessions.lock().await;
             let sess = match sessions.get(commitment_hash) {
                 Some(s) => s,
@@ -3680,6 +3691,7 @@ impl BilateralBleHandler {
                 sig,
                 sess.operation.clone(),
                 sess.pre_finalize_entropy,
+                sess.stitched_receipt_bytes.clone(),
             )
         };
 
@@ -3800,14 +3812,28 @@ impl BilateralBleHandler {
 
                 // --- DELEGATE SETTLEMENT (post-delivery, normal path) ---
                 log::info!("[BILATERAL] Entering settlement block after tip sync");
-                let receipt_bytes: Option<Vec<u8>> = {
+                // Use the proper receipt built in send_bilateral_confirm (with real
+                // pre/post SMT roots and proofs). The session caches those bytes so
+                // we don't have to rebuild from the already-mutated SMT — which
+                // would produce parent_root == child_root and an empty parent proof,
+                // causing §4.3 verification to fail on the sender's history.
+                let receipt_bytes: Option<Vec<u8>> = if cached_receipt.is_some() {
+                    cached_receipt
+                } else {
+                    // Fallback: session had no cached receipt (e.g. restored from
+                    // storage after a crash). Build a best-effort receipt from the
+                    // current SMT state — it may not pass full verification, but
+                    // at least records the transaction.
+                    log::warn!(
+                        "[BILATERAL] No cached receipt in session — building recovery receipt from current SMT"
+                    );
                     let smt_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
                         &self.device_id,
                         &counterparty_device_id,
                     );
-                    let smt = self.per_device_smt.read().await;
-                    let current_root = *smt.root();
-                    let child_bytes = smt
+                    let smt_guard = self.per_device_smt.read().await;
+                    let current_root = *smt_guard.root();
+                    let child_bytes = smt_guard
                         .get_inclusion_proof(&smt_key, 256)
                         .ok()
                         .as_ref()
@@ -3820,7 +3846,7 @@ impl BilateralBleHandler {
                         result.local_state.hash().unwrap_or([0u8; 32]),
                         current_root,
                         current_root,
-                        Vec::new(), // Recovery: parent proof unavailable
+                        Vec::new(),
                         child_bytes,
                         Some(local_device_tree_commitment(&self.device_id)),
                     )
@@ -4319,6 +4345,7 @@ impl BilateralBleHandler {
             sender_ble_address: None, // Sender side doesn't need this
             created_at_wall: Instant::now(),
             pre_finalize_entropy: None,
+            stitched_receipt_bytes: None,
         };
 
         // Insert into active sessions
@@ -4632,6 +4659,7 @@ mod tests {
                 sender_ble_address: None,
                 created_at_wall: Instant::now() - Duration::from_secs(121),
                 pre_finalize_entropy: None,
+                stitched_receipt_bytes: None,
             })
             .await;
 
@@ -4733,6 +4761,7 @@ mod tests {
                 sender_ble_address: Some("AA:BB:CC:DD:EE:FF".to_string()),
                 created_at_wall: Instant::now(),
                 pre_finalize_entropy: None,
+                stitched_receipt_bytes: None,
             })
             .await;
 

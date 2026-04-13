@@ -1347,6 +1347,17 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
 
     override fun onStart() {
         super.onStart()
+        // Start as a foreground service FIRST so it survives onStop() unbind.
+        // Without this, BIND_AUTO_CREATE alone creates a bound-only service that
+        // is destroyed when unbindService() is called in onStop(), killing BLE
+        // advertising, GATT server, and all peer connections mid-transfer.
+        if (hasIdentityViaRust()) {
+            try {
+                BleBackgroundService.start(this)
+            } catch (t: Throwable) {
+                Log.w(tag, "onStart: startForegroundService failed", t)
+            }
+        }
         val intent = Intent(this, BleBackgroundService::class.java)
         try {
             bindService(intent, bleServiceConnection, Context.BIND_AUTO_CREATE)
@@ -1693,6 +1704,16 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                         }
 
                         if (capturedDeviceId.size == 32 && capturedGenesis.size == 32) {
+                            // Start BLE as a foreground service so it survives activity
+                            // lifecycle transitions. Must happen on the UI thread (context
+                            // requirement) BEFORE the background GATT init thread.
+                            try {
+                                BleBackgroundService.start(this@MainActivity)
+                                Log.i(tag, "initDsmAndSignalReady: BLE foreground service started")
+                            } catch (t: Throwable) {
+                                Log.w(tag, "initDsmAndSignalReady: BLE foreground service start failed", t)
+                            }
+
                             // GATT server init + identity write are synchronous Bluetooth
                             // framework calls (100-500ms). Run on a background thread to
                             // avoid blocking the UI thread on slower chipsets (MediaTek).
