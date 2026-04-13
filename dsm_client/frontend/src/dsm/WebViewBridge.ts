@@ -593,6 +593,10 @@ export async function bilateralOfflineSendBin(envelopeBytes: Uint8Array, bleAddr
   return bridgeGate.enqueue(() => sendBleTransportChunksHost(envelopeBytes, bleAddress));
 }
 
+export async function captureCdbrwOrbitTimings(): Promise<Uint8Array> {
+  return callBin('captureCdbrwOrbitTimings', new Uint8Array(0));
+}
+
 export async function getTransportHeadersV3Bin(): Promise<Uint8Array> {
   return queryTransportHeadersV3();
 }

@@ -1018,14 +1018,17 @@ impl AppRouterImpl {
 
         // §4.3#1 Defensive: Sender self-verifies signature after signing.
         // Catches silent signing failures before propagating to receiver.
+        // MUST use signing_authority public key — the same keypair that produced
+        // the signature — NOT core_sdk state which may hold a different key.
         {
-            let sender_pk = self
-                .core_sdk
-                .get_current_state()
-                .map(|s| s.device_info.public_key.clone())
-                .unwrap_or_else(|_| {
-                    crate::sdk::app_state::AppState::get_public_key().unwrap_or_default()
-                });
+            let sender_pk = match crate::sdk::signing_authority::current_public_key() {
+                Ok(pk) => pk,
+                Err(e) => {
+                    return err(format!(
+                        "wallet.send: cannot retrieve signing authority public key for self-verify: {e}"
+                    ));
+                }
+            };
             match dsm::crypto::sphincs::sphincs_verify(
                 &sender_pk,
                 &signing_bytes,
@@ -1459,17 +1462,24 @@ impl AppRouterImpl {
             );
             let sender_chain_tip_b32 =
                 crate::util::text_id::encode_base32_crockford(&chain_tip_arr);
-            // Use the wallet's SPHINCS+ public key (from the state machine, which was
-            // updated by initialize_device_keys) — NOT the genesis public key from AppState.
-            // The transaction was signed with the wallet's key, so verification must use
-            // the same key.
-            let sender_signing_public_key = self
-                .core_sdk
-                .get_current_state()
-                .map(|s| s.device_info.public_key.clone())
-                .unwrap_or_else(|_| {
-                    crate::sdk::app_state::AppState::get_public_key().unwrap_or_default()
-                });
+            // Use the signing authority's public key — derived from the same
+            // (genesis_hash, device_id, binding_key) triple that produced the
+            // secret key used for signing.  This is the ONLY correct source.
+            let sender_signing_public_key =
+                match crate::sdk::signing_authority::current_public_key() {
+                    Ok(pk) => pk,
+                    Err(e) => {
+                        let rollback_error = self
+                            .rollback_failed_online_transfer(&rollback_request)
+                            .await
+                            .err()
+                            .map(|e| format!("; rollback failed: {e}"))
+                            .unwrap_or_default();
+                        return err(format!(
+                            "wallet.send: cannot retrieve signing authority public key: {e}{rollback_error}"
+                        ));
+                    }
+                };
 
             // Recipient genesis hash comes from the primed contact record that also
             // defines the canonical relationship tip used for routing.
@@ -1810,7 +1820,14 @@ impl AppRouterImpl {
         );
         let sender_chain_tip_b32 = crate::util::text_id::encode_base32_crockford(&chain_tip_arr);
         let sender_signing_public_key =
-            crate::sdk::app_state::AppState::get_public_key().unwrap_or_default();
+            match crate::sdk::signing_authority::current_public_key() {
+                Ok(pk) => pk,
+                Err(e) => {
+                    return err(format!(
+                        "message.send: cannot retrieve signing authority public key: {e}"
+                    ));
+                }
+            };
 
         let recipient_genesis_raw: [u8; 32] =
             match crate::storage::client_db::get_contact_by_device_id(&to_device_id) {

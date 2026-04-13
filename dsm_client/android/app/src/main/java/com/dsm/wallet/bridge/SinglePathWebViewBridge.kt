@@ -592,6 +592,36 @@ class SinglePathWebViewBridge(private val context: Context) {
                     }
                 }
 
+                "captureCdbrwOrbitTimings" -> {
+                    try {
+                        val envBytes = com.dsm.wallet.security.AntiCloneGate.buildEnvironmentBytes()
+                        val timings = com.dsm.wallet.security.SiliconFingerprintNative.captureOrbitDensity(
+                            envBytes,
+                            1024 * 1024, // 1MB arena
+                            9, // 9 probes
+                            1000, // 1000 steps per probe
+                            1, // 1 warmup round
+                            7 // rotation bits
+                        )
+                        if (timings == null) {
+                            Log.w(TAG, "captureCdbrwOrbitTimings: silicon PUF returned null")
+                            return ByteArray(0)
+                        }
+                        // Convert LongArray to ByteArray (little-endian i64)
+                        val result = ByteArray(timings.size * 8)
+                        for (i in timings.indices) {
+                            val value = timings[i]
+                            for (j in 0..7) {
+                                result[i * 8 + j] = (value shr (j * 8)).toByte()
+                            }
+                        }
+                        result
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "captureCdbrwOrbitTimings failed", t)
+                        ByteArray(0)
+                    }
+                }
+
                 else -> throw IllegalArgumentException("Unknown binary RPC method: $method")
             }
         }

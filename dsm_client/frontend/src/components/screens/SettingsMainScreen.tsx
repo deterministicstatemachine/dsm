@@ -10,6 +10,7 @@ import {
   type NfcBackupStatus,
 } from '../../services/recovery/nfcRecoveryService';
 import { getNfcBackupUiModel } from '../../services/recovery/nfcBackupUi';
+import { getDbrwStatus, type DbrwStatus } from '../../dsm/dbrw';
 import './SettingsScreen.css';
 
 type PrefValue = string | null;
@@ -57,12 +58,26 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
   // --- Compact NFC status (full management is on NfcRecoveryScreen) ---
   const [nfcStatus, setNfcStatus] = useState<NfcBackupStatus>(emptyNfcStatus);
 
+  // --- Compact C-DBRW status (full management is on DevCdbrwScreen) ---
+  const [cdbrwStatus, setCdbrwStatus] = useState<DbrwStatus | null>(null);
+  const [cdbrwLoading, setCdbrwLoading] = useState<boolean>(false);
+
   useEffect(() => {
     void (async () => {
       try {
         setNfcStatus(await getNfcBackupStatus());
       } catch {
         /* tolerate — tables may not exist yet */
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        setCdbrwStatus(await getDbrwStatus(false));
+      } catch {
+        /* tolerate — C-DBRW may not be enrolled yet */
       }
     })();
   }, []);
@@ -230,6 +245,19 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
       setStatus('Beta feedback form opened');
     } catch {
       setStatus('Unable to open beta feedback form');
+    }
+  }, []);
+
+  const runCdbrwHealthCheck = useCallback(async () => {
+    setCdbrwLoading(true);
+    try {
+      const status = await getDbrwStatus(true);
+      setCdbrwStatus(status);
+      setStatus('C-DBRW health check completed');
+    } catch (e) {
+      setStatus(`C-DBRW health check failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setCdbrwLoading(false);
     }
   }, []);
 
@@ -437,6 +465,67 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
             style={{ fontSize: '9px' }}
           >
             INSPECT OR RECOVER
+          </button>
+        </div>
+      </section>
+
+      {/* C-DBRW Health Check — compact status with live check button */}
+      <section
+        aria-labelledby="cdbrw-section-title"
+        className="settings-shell__panel"
+      >
+        <div
+          id="cdbrw-section-title"
+          style={{
+            fontSize: '10px',
+            fontWeight: 'bold',
+            marginBottom: '6px',
+            letterSpacing: '1px',
+          }}
+        >
+          C-DBRW HEALTH
+        </div>
+        <div style={{ marginBottom: 8 }}>
+          <div
+            style={{
+              fontSize: '9px',
+              fontWeight: 'bold',
+              color: 'var(--text-dark)',
+              marginBottom: 4,
+            }}
+          >
+            {cdbrwStatus?.enrolled ? 'ENROLLED' : 'NOT ENROLLED'}
+            {cdbrwStatus?.runtimeMetricsPresent ? ` / ${cdbrwStatus.runtimeHealthCheckPassed ? 'HEALTHY' : 'UNHEALTHY'}` : ''}
+          </div>
+          <div
+            style={{
+              fontSize: '8px',
+              color: 'var(--text-dark)',
+              lineHeight: '1.4',
+              opacity: 0.82,
+            }}
+          >
+            {cdbrwStatus?.runtimeMetricsPresent 
+              ? `Trust: ${(cdbrwStatus.runtimeTrustScore * 100).toFixed(1)}% | H₀: ${cdbrwStatus.runtimeH0Eff.toFixed(4)}`
+              : 'Device binding security status. Run live check for entropy metrics.'
+            }
+          </div>
+        </div>
+        <div className="settings-shell__button-row">
+          <button
+            className="settings-shell__button"
+            onClick={runCdbrwHealthCheck}
+            disabled={cdbrwLoading}
+            style={{ fontSize: '9px', opacity: cdbrwLoading ? 0.5 : 1 }}
+          >
+            {cdbrwLoading ? 'CHECKING...' : 'RUN HEALTH CHECK'}
+          </button>
+          <button
+            className="settings-shell__button"
+            onClick={() => onNavigate?.('dev_cdbrw')}
+            style={{ fontSize: '9px' }}
+          >
+            MANAGE C-DBRW
           </button>
         </div>
       </section>

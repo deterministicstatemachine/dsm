@@ -590,15 +590,27 @@ fn initialize_sdk_core() -> Result<Vec<u8>, pb::Error> {
     }
 }
 
-fn seed_public_key_for_app_state(device_id: &[u8]) -> Vec<u8> {
-    let mut hasher = dsm::crypto::blake3::dsm_domain_hasher("DSM/device-key");
-    hasher.update(device_id);
-    let seed = hasher.finalize();
-    seed.as_bytes()[0..32].to_vec()
-}
-
 fn prime_identity_app_state(device_id: &[u8], genesis_hash: &[u8]) {
-    let public_key = seed_public_key_for_app_state(device_id);
+    // Derive the REAL SPHINCS+ public key from the canonical entropy triple.
+    // The binding key MUST already be installed (via install_canonical_binding_key)
+    // before this function is called. If it isn't, that's a bug — panic.
+    let bk = crate::binding_key::get_binding_key()
+        .expect("prime_identity_app_state: binding key MUST be installed before this call");
+    assert_eq!(device_id.len(), 32, "device_id must be 32 bytes");
+    assert_eq!(genesis_hash.len(), 32, "genesis_hash must be 32 bytes");
+    assert_eq!(bk.len(), 32, "binding_key must be 32 bytes");
+
+    let mut entropy = Vec::with_capacity(96);
+    entropy.extend_from_slice(genesis_hash);
+    entropy.extend_from_slice(device_id);
+    entropy.extend_from_slice(&bk);
+    let kp = dsm::crypto::SignatureKeyPair::generate_from_entropy(&entropy)
+        .expect("prime_identity_app_state: canonical SPHINCS+ key derivation must not fail");
+    log::info!(
+        "prime_identity_app_state: derived canonical SPHINCS+ public key (len={})",
+        kp.public_key().len()
+    );
+
     let smt_root = dsm::merkle::sparse_merkle_tree::empty_root(
         dsm::merkle::sparse_merkle_tree::DEFAULT_SMT_HEIGHT,
     )
@@ -606,7 +618,7 @@ fn prime_identity_app_state(device_id: &[u8], genesis_hash: &[u8]) {
 
     crate::sdk::app_state::AppState::set_identity_info(
         device_id.to_vec(),
-        public_key,
+        kp.public_key().to_vec(),
         genesis_hash.to_vec(),
         smt_root,
     );
