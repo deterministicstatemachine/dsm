@@ -82,7 +82,10 @@ pub(crate) fn handle_system_genesis_query(q: AppQuery) -> AppResult {
         }
 
         match crate::storage::client_db::ensure_wallet_state_for_device(&device_id_b32) {
-            Ok(_) => log::info!("system.genesis: wallet_state ensured for device={}", &device_id_b32[..8]),
+            Ok(_) => log::info!(
+                "system.genesis: wallet_state ensured for device={}",
+                &device_id_b32[..8]
+            ),
             Err(e) => log::warn!("system.genesis: failed to ensure wallet_state: {}", e),
         }
 

@@ -853,17 +853,15 @@ fn trace_dlv_manager_inventory_consistency(
             public_params: vec![0xB2; 16],
         };
 
-        let draft_a = match manager
-            .prepare_vault(
-                &creator_kp.public_key,
-                condition.clone(),
-                b"trace vault alpha",
-                "text/plain",
-                None,
-                &encryption_pk,
-                &reference_state,
-            )
-        {
+        let draft_a = match manager.prepare_vault(
+            &creator_kp.public_key,
+            condition.clone(),
+            b"trace vault alpha",
+            "text/plain",
+            None,
+            &encryption_pk,
+            &reference_state,
+        ) {
             Ok(result) => result,
             Err(e) => return vec![format!("prepare_vault alpha failed: {e}")],
         };
@@ -882,17 +880,15 @@ fn trace_dlv_manager_inventory_consistency(
             Err(e) => return vec![format!("finalize_vault alpha failed: {e}")],
         };
 
-        let draft_b = match manager
-            .prepare_vault(
-                &creator_kp.public_key,
-                condition,
-                b"trace vault beta",
-                "text/plain",
-                None,
-                &encryption_pk,
-                &reference_state,
-            )
-        {
+        let draft_b = match manager.prepare_vault(
+            &creator_kp.public_key,
+            condition,
+            b"trace vault beta",
+            "text/plain",
+            None,
+            &encryption_pk,
+            &reference_state,
+        ) {
             Ok(result) => result,
             Err(e) => return vec![format!("prepare_vault beta failed: {e}")],
         };

@@ -1870,12 +1870,13 @@ mod tests {
         let device_id = vec![0x43; 32];
         let genesis_hash = vec![0x53; 32];
         let binding_key = vec![0x63; 32];
-        let (public_key, _secret_key) = crate::sdk::signing_authority::derive_signing_keys_for_testing(
-            &device_id,
-            &genesis_hash,
-            &binding_key,
-        )
-        .expect("derive canonical signing keypair");
+        let (public_key, _secret_key) =
+            crate::sdk::signing_authority::derive_signing_keys_for_testing(
+                &device_id,
+                &genesis_hash,
+                &binding_key,
+            )
+            .expect("derive canonical signing keypair");
         crate::sdk::signing_authority::set_binding_key_for_testing(binding_key);
         crate::sdk::app_state::AppState::set_identity_info(
             device_id.clone(),
@@ -1883,14 +1884,13 @@ mod tests {
             genesis_hash,
             vec![0u8; 32],
         );
-        let device = DeviceInfo::new(
-            device_id.try_into().expect("device id"),
-            public_key.clone(),
-        );
+        let device = DeviceInfo::new(device_id.try_into().expect("device id"), public_key.clone());
         let sdk = CoreSDK::new_with_device(device.clone()).expect("init sdk");
         sdk.initialize_with_genesis_state()
             .expect("initialize genesis state");
-        let current = sdk.get_current_state().expect("current state after genesis");
+        let current = sdk
+            .get_current_state()
+            .expect("current state after genesis");
         assert_eq!(current.device_info.public_key, device.public_key);
 
         let op = sdk
@@ -1951,12 +1951,13 @@ mod tests {
         let device_id = vec![0x47; 32];
         let genesis_hash = vec![0x57; 32];
         let binding_key = vec![0x67; 32];
-        let (public_key, _secret_key) = crate::sdk::signing_authority::derive_signing_keys_for_testing(
-            &device_id,
-            &genesis_hash,
-            &binding_key,
-        )
-        .expect("derive canonical signing keypair");
+        let (public_key, _secret_key) =
+            crate::sdk::signing_authority::derive_signing_keys_for_testing(
+                &device_id,
+                &genesis_hash,
+                &binding_key,
+            )
+            .expect("derive canonical signing keypair");
         crate::sdk::signing_authority::set_binding_key_for_testing(binding_key);
         crate::sdk::app_state::AppState::set_identity_info(
             device_id.clone(),
@@ -1964,14 +1965,13 @@ mod tests {
             genesis_hash,
             vec![0u8; 32],
         );
-        let device = DeviceInfo::new(
-            device_id.try_into().expect("device id"),
-            public_key.clone(),
-        );
+        let device = DeviceInfo::new(device_id.try_into().expect("device id"), public_key.clone());
         let sdk = CoreSDK::new_with_device(device.clone()).expect("init sdk");
         sdk.initialize_with_genesis_state()
             .expect("initialize genesis state");
-        let current = sdk.get_current_state().expect("current state after genesis");
+        let current = sdk
+            .get_current_state()
+            .expect("current state after genesis");
         assert_eq!(current.device_info.public_key, device.public_key);
         let prior = sdk.get_current_state().expect("prior state");
 

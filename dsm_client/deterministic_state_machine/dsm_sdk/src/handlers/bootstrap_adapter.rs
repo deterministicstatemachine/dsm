@@ -99,10 +99,8 @@ impl CoreBootstrapAdapter {
             // Without this, local_genesis_hash() returns error, storage.sync fails,
             // and bilateral transfers are blocked.
             {
-                let genesis_id_b32 =
-                    crate::util::text_id::encode_base32_crockford(&genesis_bytes);
-                let device_id_b32 =
-                    crate::util::text_id::encode_base32_crockford(&device_id_bytes);
+                let genesis_id_b32 = crate::util::text_id::encode_base32_crockford(&genesis_bytes);
+                let device_id_b32 = crate::util::text_id::encode_base32_crockford(&device_id_bytes);
                 let genesis_record = crate::storage::client_db::GenesisRecord {
                     genesis_id: genesis_id_b32.clone(),
                     device_id: device_id_b32.clone(),

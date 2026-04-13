@@ -12,8 +12,8 @@ use prost::Message;
 
 use crate::generated as pb;
 use crate::generated::{
-    ingress_request, ingress_response, startup_request, startup_response, Envelope,
-    IngressRequest, IngressResponse, StartupRequest, StartupResponse,
+    ingress_request, ingress_response, startup_request, startup_response, Envelope, IngressRequest,
+    IngressResponse, StartupRequest, StartupResponse,
 };
 
 pub(crate) const ERROR_CODE_INVALID_INPUT: u32 = 1;
@@ -121,10 +121,12 @@ fn startup_initialize_identity_context(
     }
 }
 
-fn finalize_bootstrap_core(
-    report: pb::BootstrapMeasurementReport,
-) -> Result<Envelope, pb::Error> {
-    log::info!("FINALIZE_BOOTSTRAP: ENTRY phase={} trust={}", report.phase, report.trust_level);
+fn finalize_bootstrap_core(report: pb::BootstrapMeasurementReport) -> Result<Envelope, pb::Error> {
+    log::info!(
+        "FINALIZE_BOOTSTRAP: ENTRY phase={} trust={}",
+        report.phase,
+        report.trust_level
+    );
     // Scope guard: keep BOOTSTRAP_SECURING=true until this function exits, then clear it
     // unconditionally. This preserves phase=securing_device throughout the whole finalize
     // (including startup_initialize_identity_context which writes the identity), so any
@@ -139,7 +141,8 @@ fn finalize_bootstrap_core(
                 .store(false, std::sync::atomic::Ordering::SeqCst);
             log::info!(
                 "FINALIZE_BOOTSTRAP: POST_DROP BOOTSTRAP_SECURING={} SDK_READY={} has_id={}",
-                crate::sdk::session_manager::BOOTSTRAP_SECURING.load(std::sync::atomic::Ordering::SeqCst),
+                crate::sdk::session_manager::BOOTSTRAP_SECURING
+                    .load(std::sync::atomic::Ordering::SeqCst),
                 crate::sdk::session_manager::SDK_READY.load(std::sync::atomic::Ordering::SeqCst),
                 crate::sdk::app_state::AppState::get_has_identity()
             );
@@ -204,7 +207,8 @@ fn finalize_bootstrap_core(
             ));
         }
         x if x
-            == pb::bootstrap_measurement_report::TrustLevel::BootstrapTrustLevelUnspecified as i32 =>
+            == pb::bootstrap_measurement_report::TrustLevel::BootstrapTrustLevelUnspecified
+                as i32 =>
         {
             push_genesis_lifecycle_event(
                 pb::genesis_lifecycle_event::Kind::GenesisKindError as i32,
@@ -278,10 +282,7 @@ fn finalize_bootstrap_core(
         pb::genesis_lifecycle_event::Kind::GenesisKindSecuringComplete as i32,
         0,
     )?;
-    push_genesis_lifecycle_event(
-        pb::genesis_lifecycle_event::Kind::GenesisKindOk as i32,
-        0,
-    )?;
+    push_genesis_lifecycle_event(pb::genesis_lifecycle_event::Kind::GenesisKindOk as i32, 0)?;
 
     let ready_message = if report.trust_level
         == pb::bootstrap_measurement_report::TrustLevel::BootstrapTrustLevelPinRequired as i32
@@ -303,12 +304,11 @@ fn handle_bootstrap_measurement_report_core(
     report: pb::BootstrapMeasurementReport,
 ) -> Result<Envelope, pb::Error> {
     match report.phase {
-        x if x
-            == pb::bootstrap_measurement_report::Phase::BootstrapPhaseStarted as i32 =>
-        {
+        x if x == pb::bootstrap_measurement_report::Phase::BootstrapPhaseStarted as i32 => {
             // Mark that C-DBRW securing is in progress — session manager returns
             // "securing_device" phase until finalization completes.
-            crate::sdk::session_manager::BOOTSTRAP_SECURING.store(true, std::sync::atomic::Ordering::SeqCst);
+            crate::sdk::session_manager::BOOTSTRAP_SECURING
+                .store(true, std::sync::atomic::Ordering::SeqCst);
             push_genesis_lifecycle_event(
                 pb::genesis_lifecycle_event::Kind::GenesisKindStarted as i32,
                 0,
@@ -324,9 +324,7 @@ fn handle_bootstrap_measurement_report_core(
                 "bootstrap measurement started",
             ))
         }
-        x if x
-            == pb::bootstrap_measurement_report::Phase::BootstrapPhaseProgress as i32 =>
-        {
+        x if x == pb::bootstrap_measurement_report::Phase::BootstrapPhaseProgress as i32 => {
             push_genesis_lifecycle_event(
                 pb::genesis_lifecycle_event::Kind::GenesisKindSecuringProgress as i32,
                 report.progress_percent,
@@ -339,14 +337,12 @@ fn handle_bootstrap_measurement_report_core(
             ))
         }
         x if x == pb::bootstrap_measurement_report::Phase::BootstrapPhaseFinalize as i32
-            || x
-                == pb::bootstrap_measurement_report::Phase::BootstrapPhaseResumeFinalize as i32 =>
+            || x == pb::bootstrap_measurement_report::Phase::BootstrapPhaseResumeFinalize
+                as i32 =>
         {
             finalize_bootstrap_core(report)
         }
-        x if x
-            == pb::bootstrap_measurement_report::Phase::BootstrapPhaseAborted as i32 =>
-        {
+        x if x == pb::bootstrap_measurement_report::Phase::BootstrapPhaseAborted as i32 => {
             push_genesis_lifecycle_event(
                 pb::genesis_lifecycle_event::Kind::GenesisKindSecuringAborted as i32,
                 0,
@@ -633,7 +629,10 @@ fn install_identity_context_core(
     if device_id.len() != 32 {
         return Err(ingress_error(
             ERROR_CODE_INVALID_INPUT,
-            format!("startup: device_id must be 32 bytes, got {}", device_id.len()),
+            format!(
+                "startup: device_id must be 32 bytes, got {}",
+                device_id.len()
+            ),
         ));
     }
     if genesis_hash.len() != 32 {
@@ -699,9 +698,7 @@ fn ensure_device_tree_registered(device_id: Vec<u8>, genesis_hash: Vec<u8>) {
         let cfg = match crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config().await {
             Ok(cfg) => cfg,
             Err(e) => {
-                log::warn!(
-                    "self-heal registry: env config unavailable, skipping republish: {e}"
-                );
+                log::warn!("self-heal registry: env config unavailable, skipping republish: {e}");
                 return;
             }
         };
@@ -709,9 +706,7 @@ fn ensure_device_tree_registered(device_id: Vec<u8>, genesis_hash: Vec<u8>) {
         let sdk = match crate::sdk::storage_node_sdk::StorageNodeSDK::new(cfg).await {
             Ok(sdk) => sdk,
             Err(e) => {
-                log::warn!(
-                    "self-heal registry: storage SDK init failed, skipping republish: {e}"
-                );
+                log::warn!("self-heal registry: storage SDK init failed, skipping republish: {e}");
                 return;
             }
         };
@@ -934,9 +929,11 @@ endpoint = "http://127.0.0.1:8080"
         unsafe { crate::bridge::reset_bridge_handlers_for_tests() };
         let config_path = ensure_test_env_config();
         let _ = dispatch_startup(StartupRequest {
-            operation: Some(startup_request::Operation::ConfigureEnv(pb::ConfigureEnvOp {
-                config_path_utf8: config_path,
-            })),
+            operation: Some(startup_request::Operation::ConfigureEnv(
+                pb::ConfigureEnvOp {
+                    config_path_utf8: config_path,
+                },
+            )),
         });
         guard
     }
@@ -1127,13 +1124,17 @@ endpoint = "http://127.0.0.1:8080"
             .to_string();
         let request = StartupRequest {
             operation: Some(startup_request::Operation::SetStorageBaseDir(
-                pb::SetStorageBaseDirOp {
-                    path_utf8,
-                },
+                pb::SetStorageBaseDirOp { path_utf8 },
             )),
         };
-        assert_eq!(expect_startup_ok(dispatch_startup(request.clone())), STARTUP_OK_BYTES);
-        assert_eq!(expect_startup_ok(dispatch_startup(request)), STARTUP_OK_BYTES);
+        assert_eq!(
+            expect_startup_ok(dispatch_startup(request.clone())),
+            STARTUP_OK_BYTES
+        );
+        assert_eq!(
+            expect_startup_ok(dispatch_startup(request)),
+            STARTUP_OK_BYTES
+        );
     }
 
     #[test]

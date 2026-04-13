@@ -289,328 +289,324 @@ impl AppRouterImpl {
 }
 
 pub(crate) async fn dispatch_dbrw_query(q: AppQuery) -> AppResult {
-        match q.path.as_str() {
-            // -------- dbrw.status --------
-            "dbrw.status" => {
-                let storage_base_dir = crate::storage_utils::get_storage_base_dir();
-                let binding_key = crate::binding_key::get_binding_key();
-                let verifier_public_key = read_verifier_public_key_if_present()
-                    .ok()
-                    .flatten()
-                    .unwrap_or_default();
+    match q.path.as_str() {
+        // -------- dbrw.status --------
+        "dbrw.status" => {
+            let storage_base_dir = crate::storage_utils::get_storage_base_dir();
+            let binding_key = crate::binding_key::get_binding_key();
+            let verifier_public_key = read_verifier_public_key_if_present()
+                .ok()
+                .flatten()
+                .unwrap_or_default();
 
-                let mut status_note = String::new();
+            let mut status_note = String::new();
 
-                let enrollment = match storage_base_dir.as_ref() {
-                    Some(base_dir) => match load_cdbrw_enrollment(base_dir) {
-                        Ok(enrollment) => enrollment,
-                        Err(e) => {
-                            status_note = format!("Enrollment parse failed: {e}");
-                            None
-                        }
-                    },
-                    None => {
-                        status_note =
-                            "Storage base directory is not initialized; enrollment snapshot unavailable."
-                                .to_string();
+            let enrollment = match storage_base_dir.as_ref() {
+                Some(base_dir) => match load_cdbrw_enrollment(base_dir) {
+                    Ok(enrollment) => enrollment,
+                    Err(e) => {
+                        status_note = format!("Enrollment parse failed: {e}");
                         None
                     }
-                };
-
-                if status_note.is_empty() {
-                    status_note = if enrollment.is_some() {
-                        "Enrollment loaded from disk.".to_string()
-                    } else {
-                        "Device not yet enrolled.".to_string()
-                    };
+                },
+                None => {
+                    status_note =
+                            "Storage base directory is not initialized; enrollment snapshot unavailable."
+                                .to_string();
+                    None
                 }
+            };
 
-                let trust = trust_proto(latest_trust(), "dbrw.status");
-
-                let response = generated::DbrwStatusResponse {
-                    enrolled: enrollment.is_some(),
-                    binding_key_present: binding_key.is_some(),
-                    verifier_keypair_present: !verifier_public_key.is_empty(),
-                    storage_base_dir_set: storage_base_dir.is_some(),
-                    enrollment_revision: enrollment.as_ref().map(|v| v.revision).unwrap_or(0),
-                    arena_bytes: enrollment.as_ref().map(|v| v.arena_bytes).unwrap_or(0),
-                    probes: enrollment.as_ref().map(|v| v.probes).unwrap_or(0),
-                    steps_per_probe: enrollment.as_ref().map(|v| v.steps_per_probe).unwrap_or(0),
-                    histogram_bins: enrollment.as_ref().map(|v| v.histogram_bins).unwrap_or(0),
-                    rotation_bits: enrollment.as_ref().map(|v| v.rotation_bits).unwrap_or(0),
-                    epsilon_intra: enrollment.as_ref().map(|v| v.epsilon_intra).unwrap_or(0.0),
-                    mean_histogram_len: enrollment
-                        .as_ref()
-                        .map(|v| v.mean_histogram_len())
-                        .unwrap_or(0),
-                    reference_anchor_prefix: enrollment
-                        .as_ref()
-                        .map(|v| take_prefix(&v.reference_anchor))
-                        .unwrap_or_default(),
-                    binding_key_prefix: binding_key.as_deref().map(take_prefix).unwrap_or_default(),
-                    verifier_public_key_prefix: take_prefix(&verifier_public_key),
-                    verifier_public_key_len: verifier_public_key.len() as u32,
-                    storage_base_dir: storage_base_dir
-                        .map(|v| v.display().to_string())
-                        .unwrap_or_default(),
-                    status_note,
-                    trust: Some(trust),
+            if status_note.is_empty() {
+                status_note = if enrollment.is_some() {
+                    "Enrollment loaded from disk.".to_string()
+                } else {
+                    "Device not yet enrolled.".to_string()
                 };
-
-                pack_envelope_ok(generated::envelope::Payload::DbrwStatusResponse(response))
             }
 
-            // -------- cdbrw.measure_trust --------
-            "cdbrw.measure_trust" => {
-                let req = match generated::CdbrwMeasureTrustRequest::decode(&*q.params) {
-                    Ok(v) => v,
-                    Err(e) => return err(format!("decode CdbrwMeasureTrustRequest failed: {e}")),
-                };
-                let orbit = match req.orbit.as_ref() {
-                    Some(v) => v,
-                    None => return err("cdbrw.measure_trust: missing orbit".into()),
-                };
+            let trust = trust_proto(latest_trust(), "dbrw.status");
 
-                let (enrolled_mean_owned, epsilon_intra) =
-                    match crate::storage_utils::get_storage_base_dir()
-                        .as_ref()
-                        .and_then(|dir| load_cdbrw_enrollment(dir).ok().flatten())
-                    {
-                        Some(snapshot) => (Some(snapshot.mean_histogram.clone()), snapshot.epsilon_intra),
-                        None => (None, 0.0f32),
-                    };
+            let response = generated::DbrwStatusResponse {
+                enrolled: enrollment.is_some(),
+                binding_key_present: binding_key.is_some(),
+                verifier_keypair_present: !verifier_public_key.is_empty(),
+                storage_base_dir_set: storage_base_dir.is_some(),
+                enrollment_revision: enrollment.as_ref().map(|v| v.revision).unwrap_or(0),
+                arena_bytes: enrollment.as_ref().map(|v| v.arena_bytes).unwrap_or(0),
+                probes: enrollment.as_ref().map(|v| v.probes).unwrap_or(0),
+                steps_per_probe: enrollment.as_ref().map(|v| v.steps_per_probe).unwrap_or(0),
+                histogram_bins: enrollment.as_ref().map(|v| v.histogram_bins).unwrap_or(0),
+                rotation_bits: enrollment.as_ref().map(|v| v.rotation_bits).unwrap_or(0),
+                epsilon_intra: enrollment.as_ref().map(|v| v.epsilon_intra).unwrap_or(0.0),
+                mean_histogram_len: enrollment
+                    .as_ref()
+                    .map(|v| v.mean_histogram_len())
+                    .unwrap_or(0),
+                reference_anchor_prefix: enrollment
+                    .as_ref()
+                    .map(|v| take_prefix(&v.reference_anchor))
+                    .unwrap_or_default(),
+                binding_key_prefix: binding_key.as_deref().map(take_prefix).unwrap_or_default(),
+                verifier_public_key_prefix: take_prefix(&verifier_public_key),
+                verifier_public_key_len: verifier_public_key.len() as u32,
+                storage_base_dir: storage_base_dir
+                    .map(|v| v.display().to_string())
+                    .unwrap_or_default(),
+                status_note,
+                trust: Some(trust),
+            };
 
-                let snapshot = measure_trust(
-                    &orbit.timings,
-                    enrolled_mean_owned.as_deref(),
-                    epsilon_intra,
-                    req.histogram_bins as usize,
-                );
-
-                pack_envelope_ok(generated::envelope::Payload::CdbrwTrustSnapshot(
-                    snapshot.to_proto("cdbrw.measure_trust"),
-                ))
-            }
-
-            // -------- cdbrw.respond --------
-            "cdbrw.respond" => {
-                let req = match generated::CdbrwRespondRequest::decode(&*q.params) {
-                    Ok(v) => v,
-                    Err(e) => return err(format!("decode CdbrwRespondRequest failed: {e}")),
-                };
-
-                let orbit = match req.orbit.as_ref() {
-                    Some(v) => v,
-                    None => return err("cdbrw.respond: missing orbit".into()),
-                };
-
-                let challenge = match slice_to_array32(&req.challenge, "challenge") {
-                    Ok(v) => v,
-                    Err(e) => return err(e),
-                };
-                let chain_tip = match slice_to_array32(&req.chain_tip, "chain_tip") {
-                    Ok(v) => v,
-                    Err(e) => return err(e),
-                };
-                let commitment_preimage =
-                    match slice_to_array32(&req.commitment_preimage, "commitment_preimage") {
-                        Ok(v) => v,
-                        Err(e) => return err(e),
-                    };
-                let device_id = match slice_to_array32(&req.device_id, "device_id") {
-                    Ok(v) => v,
-                    Err(e) => return err(e),
-                };
-
-                let binding_key_vec = match crate::binding_key::get_binding_key() {
-                    Some(k) => k,
-                    None => {
-                        return err(
-                            "cdbrw.respond: binding key not set (bootstrap incomplete)".into(),
-                        )
-                    }
-                };
-                let binding_key = match slice_to_array32(&binding_key_vec, "binding_key") {
-                    Ok(v) => v,
-                    Err(e) => return err(e),
-                };
-
-                let (enrolled_mean_owned, epsilon_intra) =
-                    match crate::storage_utils::get_storage_base_dir()
-                        .as_ref()
-                        .and_then(|dir| load_cdbrw_enrollment(dir).ok().flatten())
-                    {
-                        Some(snapshot) => (Some(snapshot.mean_histogram.clone()), snapshot.epsilon_intra),
-                        None => (None, 0.0f32),
-                    };
-
-                let inputs = RespondInputs {
-                    orbit_timings: &orbit.timings,
-                    enrolled_mean: enrolled_mean_owned.as_deref(),
-                    epsilon_intra,
-                    verifier_public_key: &req.verifier_public_key,
-                    challenge: &challenge,
-                    chain_tip: &chain_tip,
-                    commitment_preimage: &commitment_preimage,
-                    device_id: &device_id,
-                    binding_key: &binding_key,
-                    histogram_bins: req.histogram_bins as usize,
-                };
-
-                match respond_to_challenge(&inputs) {
-                    Ok(out) => {
-                        let resp = generated::CdbrwRespondResponse {
-                            ciphertext: out.ciphertext,
-                            gamma: out.gamma.to_vec(),
-                            signature: out.signature,
-                            ephemeral_public_key: out.ephemeral_public_key,
-                            trust: Some(out.trust.to_proto("cdbrw.respond")),
-                        };
-                        pack_envelope_ok(generated::envelope::Payload::CdbrwRespondResponse(resp))
-                    }
-                    Err(RespondError::EntropyHealthFailed(h)) => err(format!(
-                        "cdbrw.respond: entropy health FAIL (H={:.4} |rho|={:.4} L={:.4})",
-                        h.h_hat,
-                        h.rho_hat.abs(),
-                        h.l_hat
-                    )),
-                    Err(e) => err(format!("cdbrw.respond: {e}")),
-                }
-            }
-
-            // -------- cdbrw.verify --------
-            "cdbrw.verify" => {
-                let req = match generated::CdbrwVerifyRequest::decode(&*q.params) {
-                    Ok(v) => v,
-                    Err(e) => return err(format!("decode CdbrwVerifyRequest failed: {e}")),
-                };
-
-                let challenge = match slice_to_array32(&req.challenge, "challenge") {
-                    Ok(v) => v,
-                    Err(e) => return err(e),
-                };
-                let gamma = match slice_to_array32(&req.gamma, "gamma") {
-                    Ok(v) => v,
-                    Err(e) => return err(e),
-                };
-                let chain_tip = match slice_to_array32(&req.chain_tip, "chain_tip") {
-                    Ok(v) => v,
-                    Err(e) => return err(e),
-                };
-                let commitment_preimage =
-                    match slice_to_array32(&req.commitment_preimage, "commitment_preimage") {
-                        Ok(v) => v,
-                        Err(e) => return err(e),
-                    };
-                let enrollment_anchor =
-                    match slice_to_array32(&req.enrollment_anchor, "enrollment_anchor") {
-                        Ok(v) => v,
-                        Err(e) => return err(e),
-                    };
-
-                let binding_key_vec = match crate::binding_key::get_binding_key() {
-                    Some(k) => k,
-                    None => {
-                        return err(
-                            "cdbrw.verify: binding key not set (bootstrap incomplete)".into(),
-                        )
-                    }
-                };
-                let binding_key = match slice_to_array32(&binding_key_vec, "binding_key") {
-                    Ok(v) => v,
-                    Err(e) => return err(e),
-                };
-
-                let verification_request = CdbrwVerificationRequest {
-                    binding_key: &binding_key,
-                    challenge: &challenge,
-                    gamma: &gamma,
-                    ciphertext: &req.ciphertext,
-                    signature: &req.signature,
-                    supplied_ephemeral_public_key: &req.ephemeral_public_key,
-                    chain_tip: &chain_tip,
-                    commitment_preimage: &commitment_preimage,
-                    enrollment_anchor: &enrollment_anchor,
-                    epsilon_intra: req.epsilon_intra,
-                    epsilon_inter: req.epsilon_inter,
-                };
-
-                match verify_challenge_response(&verification_request) {
-                    Ok(outcome) => {
-                        let resp = generated::CdbrwVerifyResponse {
-                            accepted: outcome.accepted,
-                            reason: outcome.reason.to_string(),
-                            gamma_distance: outcome.gamma_distance,
-                            threshold: outcome.threshold,
-                        };
-                        pack_envelope_ok(generated::envelope::Payload::CdbrwVerifyResponse(resp))
-                    }
-                    Err(e) => err(format!("cdbrw.verify: {e}")),
-                }
-            }
-
-            // -------- cdbrw.enroll --------
-            "cdbrw.enroll" => {
-                let req = match generated::CdbrwEnrollRequest::decode(&*q.params) {
-                    Ok(v) => v,
-                    Err(e) => return err(format!("decode CdbrwEnrollRequest failed: {e}")),
-                };
-
-                // Convert trials from repeated CdbrwOrbitTrial to Vec<Vec<i64>>.
-                // Empty trials get caught by the writer's validation.
-                let trials: Vec<Vec<i64>> =
-                    req.trials.into_iter().map(|t| t.timings).collect();
-
-                let inputs = EnrollInputs {
-                    env_bytes: &req.env_bytes,
-                    trials: &trials,
-                    arena_bytes: req.arena_bytes,
-                    probes: req.probes,
-                    steps_per_probe: req.steps_per_probe,
-                    histogram_bins: req.histogram_bins,
-                    rotation_bits: req.rotation_bits,
-                };
-
-                let base_dir = match crate::storage_utils::get_storage_base_dir() {
-                    Some(d) => d,
-                    None => {
-                        return err(
-                            "cdbrw.enroll: storage base directory not initialized".into(),
-                        )
-                    }
-                };
-
-                match enroll_device(&base_dir, &inputs) {
-                    Ok(out) => {
-                        let resp = generated::CdbrwEnrollResponse {
-                            revision: out.revision,
-                            epsilon_intra: out.epsilon_intra,
-                            mean_histogram_len: out.mean_histogram_len,
-                            reference_anchor_prefix: out.reference_anchor_prefix,
-                            trust: Some(out.trust.to_proto("cdbrw.enroll")),
-                            reference_anchor: out.reference_anchor.to_vec(),
-                        };
-                        pack_envelope_ok(generated::envelope::Payload::CdbrwEnrollResponse(resp))
-                    }
-                    Err(EnrollError::InsufficientTrials { got }) => err(format!(
-                        "cdbrw.enroll: insufficient trials (got {got}, need >= 16)"
-                    )),
-                    Err(EnrollError::EmptyTrial { index }) => {
-                        err(format!("cdbrw.enroll: trial {index} has no timings"))
-                    }
-                    Err(EnrollError::InvalidHistogramBins { bins }) => err(format!(
-                        "cdbrw.enroll: invalid histogram_bins={bins} (expected 256/512/1024)"
-                    )),
-                    Err(EnrollError::Io(msg)) => err(format!("cdbrw.enroll: io error: {msg}")),
-                }
-            }
-
-            other => err(format!("unknown dbrw query: {other}")),
+            pack_envelope_ok(generated::envelope::Payload::DbrwStatusResponse(response))
         }
+
+        // -------- cdbrw.measure_trust --------
+        "cdbrw.measure_trust" => {
+            let req = match generated::CdbrwMeasureTrustRequest::decode(&*q.params) {
+                Ok(v) => v,
+                Err(e) => return err(format!("decode CdbrwMeasureTrustRequest failed: {e}")),
+            };
+            let orbit = match req.orbit.as_ref() {
+                Some(v) => v,
+                None => return err("cdbrw.measure_trust: missing orbit".into()),
+            };
+
+            let (enrolled_mean_owned, epsilon_intra) =
+                match crate::storage_utils::get_storage_base_dir()
+                    .as_ref()
+                    .and_then(|dir| load_cdbrw_enrollment(dir).ok().flatten())
+                {
+                    Some(snapshot) => (
+                        Some(snapshot.mean_histogram.clone()),
+                        snapshot.epsilon_intra,
+                    ),
+                    None => (None, 0.0f32),
+                };
+
+            let snapshot = measure_trust(
+                &orbit.timings,
+                enrolled_mean_owned.as_deref(),
+                epsilon_intra,
+                req.histogram_bins as usize,
+            );
+
+            pack_envelope_ok(generated::envelope::Payload::CdbrwTrustSnapshot(
+                snapshot.to_proto("cdbrw.measure_trust"),
+            ))
+        }
+
+        // -------- cdbrw.respond --------
+        "cdbrw.respond" => {
+            let req = match generated::CdbrwRespondRequest::decode(&*q.params) {
+                Ok(v) => v,
+                Err(e) => return err(format!("decode CdbrwRespondRequest failed: {e}")),
+            };
+
+            let orbit = match req.orbit.as_ref() {
+                Some(v) => v,
+                None => return err("cdbrw.respond: missing orbit".into()),
+            };
+
+            let challenge = match slice_to_array32(&req.challenge, "challenge") {
+                Ok(v) => v,
+                Err(e) => return err(e),
+            };
+            let chain_tip = match slice_to_array32(&req.chain_tip, "chain_tip") {
+                Ok(v) => v,
+                Err(e) => return err(e),
+            };
+            let commitment_preimage =
+                match slice_to_array32(&req.commitment_preimage, "commitment_preimage") {
+                    Ok(v) => v,
+                    Err(e) => return err(e),
+                };
+            let device_id = match slice_to_array32(&req.device_id, "device_id") {
+                Ok(v) => v,
+                Err(e) => return err(e),
+            };
+
+            let binding_key_vec = match crate::binding_key::get_binding_key() {
+                Some(k) => k,
+                None => {
+                    return err("cdbrw.respond: binding key not set (bootstrap incomplete)".into())
+                }
+            };
+            let binding_key = match slice_to_array32(&binding_key_vec, "binding_key") {
+                Ok(v) => v,
+                Err(e) => return err(e),
+            };
+
+            let (enrolled_mean_owned, epsilon_intra) =
+                match crate::storage_utils::get_storage_base_dir()
+                    .as_ref()
+                    .and_then(|dir| load_cdbrw_enrollment(dir).ok().flatten())
+                {
+                    Some(snapshot) => (
+                        Some(snapshot.mean_histogram.clone()),
+                        snapshot.epsilon_intra,
+                    ),
+                    None => (None, 0.0f32),
+                };
+
+            let inputs = RespondInputs {
+                orbit_timings: &orbit.timings,
+                enrolled_mean: enrolled_mean_owned.as_deref(),
+                epsilon_intra,
+                verifier_public_key: &req.verifier_public_key,
+                challenge: &challenge,
+                chain_tip: &chain_tip,
+                commitment_preimage: &commitment_preimage,
+                device_id: &device_id,
+                binding_key: &binding_key,
+                histogram_bins: req.histogram_bins as usize,
+            };
+
+            match respond_to_challenge(&inputs) {
+                Ok(out) => {
+                    let resp = generated::CdbrwRespondResponse {
+                        ciphertext: out.ciphertext,
+                        gamma: out.gamma.to_vec(),
+                        signature: out.signature,
+                        ephemeral_public_key: out.ephemeral_public_key,
+                        trust: Some(out.trust.to_proto("cdbrw.respond")),
+                    };
+                    pack_envelope_ok(generated::envelope::Payload::CdbrwRespondResponse(resp))
+                }
+                Err(RespondError::EntropyHealthFailed(h)) => err(format!(
+                    "cdbrw.respond: entropy health FAIL (H={:.4} |rho|={:.4} L={:.4})",
+                    h.h_hat,
+                    h.rho_hat.abs(),
+                    h.l_hat
+                )),
+                Err(e) => err(format!("cdbrw.respond: {e}")),
+            }
+        }
+
+        // -------- cdbrw.verify --------
+        "cdbrw.verify" => {
+            let req = match generated::CdbrwVerifyRequest::decode(&*q.params) {
+                Ok(v) => v,
+                Err(e) => return err(format!("decode CdbrwVerifyRequest failed: {e}")),
+            };
+
+            let challenge = match slice_to_array32(&req.challenge, "challenge") {
+                Ok(v) => v,
+                Err(e) => return err(e),
+            };
+            let gamma = match slice_to_array32(&req.gamma, "gamma") {
+                Ok(v) => v,
+                Err(e) => return err(e),
+            };
+            let chain_tip = match slice_to_array32(&req.chain_tip, "chain_tip") {
+                Ok(v) => v,
+                Err(e) => return err(e),
+            };
+            let commitment_preimage =
+                match slice_to_array32(&req.commitment_preimage, "commitment_preimage") {
+                    Ok(v) => v,
+                    Err(e) => return err(e),
+                };
+            let enrollment_anchor =
+                match slice_to_array32(&req.enrollment_anchor, "enrollment_anchor") {
+                    Ok(v) => v,
+                    Err(e) => return err(e),
+                };
+
+            let binding_key_vec = match crate::binding_key::get_binding_key() {
+                Some(k) => k,
+                None => {
+                    return err("cdbrw.verify: binding key not set (bootstrap incomplete)".into())
+                }
+            };
+            let binding_key = match slice_to_array32(&binding_key_vec, "binding_key") {
+                Ok(v) => v,
+                Err(e) => return err(e),
+            };
+
+            let verification_request = CdbrwVerificationRequest {
+                binding_key: &binding_key,
+                challenge: &challenge,
+                gamma: &gamma,
+                ciphertext: &req.ciphertext,
+                signature: &req.signature,
+                supplied_ephemeral_public_key: &req.ephemeral_public_key,
+                chain_tip: &chain_tip,
+                commitment_preimage: &commitment_preimage,
+                enrollment_anchor: &enrollment_anchor,
+                epsilon_intra: req.epsilon_intra,
+                epsilon_inter: req.epsilon_inter,
+            };
+
+            match verify_challenge_response(&verification_request) {
+                Ok(outcome) => {
+                    let resp = generated::CdbrwVerifyResponse {
+                        accepted: outcome.accepted,
+                        reason: outcome.reason.to_string(),
+                        gamma_distance: outcome.gamma_distance,
+                        threshold: outcome.threshold,
+                    };
+                    pack_envelope_ok(generated::envelope::Payload::CdbrwVerifyResponse(resp))
+                }
+                Err(e) => err(format!("cdbrw.verify: {e}")),
+            }
+        }
+
+        // -------- cdbrw.enroll --------
+        "cdbrw.enroll" => {
+            let req = match generated::CdbrwEnrollRequest::decode(&*q.params) {
+                Ok(v) => v,
+                Err(e) => return err(format!("decode CdbrwEnrollRequest failed: {e}")),
+            };
+
+            // Convert trials from repeated CdbrwOrbitTrial to Vec<Vec<i64>>.
+            // Empty trials get caught by the writer's validation.
+            let trials: Vec<Vec<i64>> = req.trials.into_iter().map(|t| t.timings).collect();
+
+            let inputs = EnrollInputs {
+                env_bytes: &req.env_bytes,
+                trials: &trials,
+                arena_bytes: req.arena_bytes,
+                probes: req.probes,
+                steps_per_probe: req.steps_per_probe,
+                histogram_bins: req.histogram_bins,
+                rotation_bits: req.rotation_bits,
+            };
+
+            let base_dir = match crate::storage_utils::get_storage_base_dir() {
+                Some(d) => d,
+                None => return err("cdbrw.enroll: storage base directory not initialized".into()),
+            };
+
+            match enroll_device(&base_dir, &inputs) {
+                Ok(out) => {
+                    let resp = generated::CdbrwEnrollResponse {
+                        revision: out.revision,
+                        epsilon_intra: out.epsilon_intra,
+                        mean_histogram_len: out.mean_histogram_len,
+                        reference_anchor_prefix: out.reference_anchor_prefix,
+                        trust: Some(out.trust.to_proto("cdbrw.enroll")),
+                        reference_anchor: out.reference_anchor.to_vec(),
+                    };
+                    pack_envelope_ok(generated::envelope::Payload::CdbrwEnrollResponse(resp))
+                }
+                Err(EnrollError::InsufficientTrials { got }) => err(format!(
+                    "cdbrw.enroll: insufficient trials (got {got}, need >= 16)"
+                )),
+                Err(EnrollError::EmptyTrial { index }) => {
+                    err(format!("cdbrw.enroll: trial {index} has no timings"))
+                }
+                Err(EnrollError::InvalidHistogramBins { bins }) => err(format!(
+                    "cdbrw.enroll: invalid histogram_bins={bins} (expected 256/512/1024)"
+                )),
+                Err(EnrollError::Io(msg)) => err(format!("cdbrw.enroll: io error: {msg}")),
+            }
+        }
+
+        other => err(format!("unknown dbrw query: {other}")),
     }
+}
 
 impl AppRouterImpl {
-
     /// Dispatch handler for `ble.command` invoke route.
     pub(crate) async fn handle_ble_invoke(&self, i: AppInvoke) -> AppResult {
         match i.method.as_str() {

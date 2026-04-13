@@ -36,8 +36,7 @@ fn derive_signing_keypair_from(
     entropy.extend_from_slice(device_id);
     entropy.extend_from_slice(binding_key);
 
-    SignatureKeyPair::generate_from_entropy(&entropy)
-    .map_err(|e| {
+    SignatureKeyPair::generate_from_entropy(&entropy).map_err(|e| {
         DsmError::crypto(
             format!("canonical signing key derivation failed: {e}"),
             None::<std::io::Error>,

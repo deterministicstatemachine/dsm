@@ -509,9 +509,7 @@ pub fn respond_to_challenge(inputs: &RespondInputs<'_>) -> Result<RespondOutputs
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::security::cdbrw_access_gate::{
-        clear_trust_for_test, gate_test_mutex, latest_trust,
-    };
+    use crate::security::cdbrw_access_gate::{clear_trust_for_test, gate_test_mutex, latest_trust};
 
     fn with_clean_state<F: FnOnce()>(f: F) {
         let guard = match gate_test_mutex().lock() {

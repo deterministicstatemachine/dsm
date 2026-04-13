@@ -68,7 +68,8 @@ impl DLVManager {
         let vault_id = vault.id.clone();
 
         // Serialize the fulfillment condition via proto for the operation
-        let fm_proto: crate::types::proto::FulfillmentMechanism = (&vault.fulfillment_condition).into();
+        let fm_proto: crate::types::proto::FulfillmentMechanism =
+            (&vault.fulfillment_condition).into();
         let fulfillment_bytes = fm_proto.encode_to_vec();
 
         // Build the unsigned DlvCreate operation

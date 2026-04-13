@@ -3668,7 +3668,13 @@ impl BilateralBleHandler {
         info!("Marking session committed and finalizing sender transaction");
 
         // Get session info before locking manager
-        let (counterparty_device_id, counterparty_sig, session_operation, pre_entropy, cached_receipt) = {
+        let (
+            counterparty_device_id,
+            counterparty_sig,
+            session_operation,
+            pre_entropy,
+            cached_receipt,
+        ) = {
             let sessions = self.sessions.sessions.lock().await;
             let sess = match sessions.get(commitment_hash) {
                 Some(s) => s,
@@ -4562,10 +4568,8 @@ mod tests {
         let genesis_hash = [32u8; 32];
         let counterparty_device_id = [33u8; 32];
         let counterparty_genesis = [34u8; 32];
-        let keypair = SignatureKeyPair::generate_from_entropy(
-            b"stale-local-pending-cleanup",
-        )
-        .expect("keypair");
+        let keypair = SignatureKeyPair::generate_from_entropy(b"stale-local-pending-cleanup")
+            .expect("keypair");
 
         let contact_manager = DsmContactManager::new(device_id, vec![NodeId::new("test")]);
         let bilateral_manager = Arc::new(RwLock::new(BilateralTransactionManager::new(
@@ -4683,10 +4687,8 @@ mod tests {
         let genesis_hash = [42u8; 32];
         let counterparty_device_id = [43u8; 32];
         let counterparty_genesis = [44u8; 32];
-        let keypair = SignatureKeyPair::generate_from_entropy(
-            b"fail-accepted-session",
-        )
-        .expect("keypair");
+        let keypair =
+            SignatureKeyPair::generate_from_entropy(b"fail-accepted-session").expect("keypair");
 
         let contact_manager = DsmContactManager::new(device_id, vec![NodeId::new("test")]);
         let bilateral_manager = Arc::new(RwLock::new(BilateralTransactionManager::new(
@@ -4795,10 +4797,8 @@ mod tests {
     #[ignore]
     async fn test_alias_mapping_persists_and_restores() {
         // Setup similar to register_sender_session test
-        let keypair = SignatureKeyPair::generate_from_entropy(
-            b"alias-restore-test",
-        )
-        .expect("keypair");
+        let keypair =
+            SignatureKeyPair::generate_from_entropy(b"alias-restore-test").expect("keypair");
         let device_id = [11u8; 32];
         let counterparty_device_id = [13u8; 32];
         let genesis_hash = [12u8; 32];
@@ -4967,10 +4967,8 @@ mod tests {
     #[ignore]
     async fn test_mark_sender_committed_resolves_alias() {
         // Setup similar to register_sender_session test
-        let keypair = SignatureKeyPair::generate_from_entropy(
-            b"mark-sender-committed-test",
-        )
-        .expect("keypair");
+        let keypair = SignatureKeyPair::generate_from_entropy(b"mark-sender-committed-test")
+            .expect("keypair");
         let device_id = [21u8; 32];
         let counterparty_device_id = [23u8; 32];
         let genesis_hash = [22u8; 32];

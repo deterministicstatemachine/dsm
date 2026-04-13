@@ -46,7 +46,9 @@ fn host_binding_slot() -> &'static std::sync::Mutex<Option<Vec<u8>>> {
 
 #[cfg(not(target_os = "android"))]
 pub fn set_cdbrw_binding_key(key: Vec<u8>) {
-    let mut guard = host_binding_slot().lock().unwrap_or_else(|p| p.into_inner());
+    let mut guard = host_binding_slot()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     *guard = Some(key);
 }
 
@@ -60,6 +62,8 @@ pub fn get_cdbrw_binding_key() -> Option<Vec<u8>> {
 
 #[cfg(all(not(target_os = "android"), test))]
 pub fn clear_cdbrw_binding_key_for_testing() {
-    let mut guard = host_binding_slot().lock().unwrap_or_else(|p| p.into_inner());
+    let mut guard = host_binding_slot()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     *guard = None;
 }

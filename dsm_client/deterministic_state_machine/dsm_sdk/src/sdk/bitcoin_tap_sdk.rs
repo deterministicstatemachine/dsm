@@ -1402,17 +1402,15 @@ impl BitcoinTapSdk {
         // Content encodes the dBTC mint amount (= BTC sats, 1:1)
         let content = Self::encode_dbtc_content(btc_amount_sats);
         let creator_keypair = crate::sdk::signing_authority::derive_current_signing_keypair()?;
-        let draft = self
-            .dlv_manager
-            .prepare_vault(
-                creator_keypair.public_key(),
-                condition,
-                &content,
-                "application/dsm-dbtc-mint",
-                Some(kem_public_key.to_vec()),
-                kem_public_key,
-                reference_state,
-            )?;
+        let draft = self.dlv_manager.prepare_vault(
+            creator_keypair.public_key(),
+            condition,
+            &content,
+            "application/dsm-dbtc-mint",
+            Some(kem_public_key.to_vec()),
+            kem_public_key,
+            reference_state,
+        )?;
         let creator_signature = dsm::crypto::sphincs::sphincs_sign(
             creator_keypair.secret_key(),
             &draft.parameters_hash,
@@ -1646,17 +1644,15 @@ impl BitcoinTapSdk {
 
         let successor_content = Self::encode_dbtc_content(remainder_sats);
         let creator_keypair = crate::sdk::signing_authority::derive_current_signing_keypair()?;
-        let draft = self
-            .dlv_manager
-            .prepare_vault(
-                creator_keypair.public_key(),
-                successor_condition,
-                &successor_content,
-                "application/dsm-dbtc-successor",
-                Some(kem_public_key.to_vec()),
-                kem_public_key,
-                reference_state,
-            )?;
+        let draft = self.dlv_manager.prepare_vault(
+            creator_keypair.public_key(),
+            successor_condition,
+            &successor_content,
+            "application/dsm-dbtc-successor",
+            Some(kem_public_key.to_vec()),
+            kem_public_key,
+            reference_state,
+        )?;
         let creator_signature = dsm::crypto::sphincs::sphincs_sign(
             creator_keypair.secret_key(),
             &draft.parameters_hash,

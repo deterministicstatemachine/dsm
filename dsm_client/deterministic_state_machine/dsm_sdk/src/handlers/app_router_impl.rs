@@ -1465,21 +1465,21 @@ impl AppRouterImpl {
             // Use the signing authority's public key — derived from the same
             // (genesis_hash, device_id, binding_key) triple that produced the
             // secret key used for signing.  This is the ONLY correct source.
-            let sender_signing_public_key =
-                match crate::sdk::signing_authority::current_public_key() {
-                    Ok(pk) => pk,
-                    Err(e) => {
-                        let rollback_error = self
-                            .rollback_failed_online_transfer(&rollback_request)
-                            .await
-                            .err()
-                            .map(|e| format!("; rollback failed: {e}"))
-                            .unwrap_or_default();
-                        return err(format!(
+            let sender_signing_public_key = match crate::sdk::signing_authority::current_public_key(
+            ) {
+                Ok(pk) => pk,
+                Err(e) => {
+                    let rollback_error = self
+                        .rollback_failed_online_transfer(&rollback_request)
+                        .await
+                        .err()
+                        .map(|e| format!("; rollback failed: {e}"))
+                        .unwrap_or_default();
+                    return err(format!(
                             "wallet.send: cannot retrieve signing authority public key: {e}{rollback_error}"
                         ));
-                    }
-                };
+                }
+            };
 
             // Recipient genesis hash comes from the primed contact record that also
             // defines the canonical relationship tip used for routing.
@@ -1819,15 +1819,14 @@ impl AppRouterImpl {
                 .unwrap_or_else(|_| vec![0u8; 32]),
         );
         let sender_chain_tip_b32 = crate::util::text_id::encode_base32_crockford(&chain_tip_arr);
-        let sender_signing_public_key =
-            match crate::sdk::signing_authority::current_public_key() {
-                Ok(pk) => pk,
-                Err(e) => {
-                    return err(format!(
-                        "message.send: cannot retrieve signing authority public key: {e}"
-                    ));
-                }
-            };
+        let sender_signing_public_key = match crate::sdk::signing_authority::current_public_key() {
+            Ok(pk) => pk,
+            Err(e) => {
+                return err(format!(
+                    "message.send: cannot retrieve signing authority public key: {e}"
+                ));
+            }
+        };
 
         let recipient_genesis_raw: [u8; 32] =
             match crate::storage::client_db::get_contact_by_device_id(&to_device_id) {
@@ -2455,11 +2454,7 @@ impl AppRouter for AppRouterImpl {
         );
         if gated_read {
             if let Err(msg) = require_access_level(AccessLevel::ReadOnly) {
-                log::warn!(
-                    "[APP_ROUTER] {} rejected by C-DBRW gate: {}",
-                    q.path,
-                    msg
-                );
+                log::warn!("[APP_ROUTER] {} rejected by C-DBRW gate: {}", q.path, msg);
                 return err(msg);
             }
         }
@@ -2540,11 +2535,7 @@ impl AppRouter for AppRouterImpl {
         );
         if gated_write {
             if let Err(msg) = require_access_level(AccessLevel::PinRequired) {
-                log::warn!(
-                    "[APP_ROUTER] {} rejected by C-DBRW gate: {}",
-                    i.method,
-                    msg
-                );
+                log::warn!("[APP_ROUTER] {} rejected by C-DBRW gate: {}", i.method, msg);
                 return err(msg);
             }
         }
@@ -2680,7 +2671,8 @@ async fn verify_device_tree_evidence_quorum(
     device_id: [u8; 32],
     genesis_hash: [u8; 32],
 ) -> Result<Vec<dsm::types::identifiers::NodeId>, String> {
-    let storage_cfg = match crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config().await {
+    let storage_cfg = match crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config().await
+    {
         Ok(cfg) => cfg,
         Err(e) => return Err(format!("Failed to load network nodes: {e}")),
     };
@@ -2798,10 +2790,7 @@ fn registry_retry_delay(
     Duration::from_ticks(scaled_ticks).min(retry_config.max_delay)
 }
 
-fn format_registry_quorum_failure(
-    stats: &RegistryQuorumAttemptStats,
-    attempts: u32,
-) -> String {
+fn format_registry_quorum_failure(stats: &RegistryQuorumAttemptStats, attempts: u32) -> String {
     format!(
         "Insufficient verified network nodes (need >={}, got {} after {} attempts; configured={}, checked={}, non_success_http={}, fetch_failures={}, read_failures={}, mismatches={})",
         REGISTRY_QUORUM_THRESHOLD,
@@ -2907,9 +2896,9 @@ mod tests {
     use super::{
         collect_rotated_inbox_addresses, collect_tagged_inbox_addresses,
         compute_initial_relationship_chain_tip, ensure_inbox_recipient_targets_local,
-        format_registry_quorum_failure, registry_retry_delay,
-        relationship_tip_for_contact_restore, select_quorum_device_identity, AppRouterImpl,
-        QuorumDeviceIdentity, RegistryQuorumAttemptStats, RouteFreshness,
+        format_registry_quorum_failure, registry_retry_delay, relationship_tip_for_contact_restore,
+        select_quorum_device_identity, AppRouterImpl, QuorumDeviceIdentity,
+        RegistryQuorumAttemptStats, RouteFreshness,
     };
     use crate::storage::client_db::ContactRecord;
     use dsm::utils::time::Duration;
@@ -3017,12 +3006,13 @@ mod tests {
         let device_id = vec![0x21u8; 32];
         let genesis_hash = vec![0x31u8; 32];
         let binding_key = vec![0x41u8; 32];
-        let (public_key, _secret_key) = crate::sdk::signing_authority::derive_signing_keys_for_testing(
-            &device_id,
-            &genesis_hash,
-            &binding_key,
-        )
-        .expect("derive canonical signing keypair");
+        let (public_key, _secret_key) =
+            crate::sdk::signing_authority::derive_signing_keys_for_testing(
+                &device_id,
+                &genesis_hash,
+                &binding_key,
+            )
+            .expect("derive canonical signing keypair");
         crate::sdk::signing_authority::set_binding_key_for_testing(binding_key);
         let smt_root = dsm::merkle::sparse_merkle_tree::empty_root(
             dsm::merkle::sparse_merkle_tree::DEFAULT_SMT_HEIGHT,

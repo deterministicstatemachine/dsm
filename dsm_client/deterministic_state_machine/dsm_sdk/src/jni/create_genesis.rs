@@ -324,10 +324,8 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_createGenesis<'a>(
                         let mut key_entropy_ble = Vec::with_capacity(64);
                         key_entropy_ble.extend_from_slice(&genesis_hash_bytes);
                         key_entropy_ble.extend_from_slice(&genesis_device_id);
-                        let keypair = SignatureKeyPair::generate_from_entropy(
-                            &key_entropy_ble,
-                        )
-                        .map_err(|e| format!("keypair generation failed: {e}"))?;
+                        let keypair = SignatureKeyPair::generate_from_entropy(&key_entropy_ble)
+                            .map_err(|e| format!("keypair generation failed: {e}"))?;
                         log::info!(
                             "createGenesis: BLE keypair derived from genesis_hash||device_id, pubkey_len={}",
                             keypair.public_key.len()

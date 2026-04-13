@@ -113,12 +113,12 @@ pub mod prelude;
 #[cfg(all(target_os = "android", feature = "jni"))]
 pub mod jni;
 
-pub mod bridge;
 mod binding_key;
-pub mod ingress;
+pub mod bridge;
 pub mod crypto_performance;
 pub mod envelope;
 pub mod handlers;
+pub mod ingress;
 pub mod init;
 pub mod logging;
 pub mod network;
@@ -167,8 +167,8 @@ pub mod platform;
 #[cfg(target_os = "ios")]
 pub use platform::ios::transport::{
     dsm_configure_env, dsm_dispatch_ingress_request, dsm_dispatch_startup_request,
-    dsm_free_envelope_bytes, dsm_init_dsm_sdk, dsm_initialize_sdk,
-    dsm_initialize_sdk_context, dsm_process_envelope_protobuf, dsm_set_storage_base_dir,
+    dsm_free_envelope_bytes, dsm_init_dsm_sdk, dsm_initialize_sdk, dsm_initialize_sdk_context,
+    dsm_process_envelope_protobuf, dsm_set_storage_base_dir,
 };
 
 pub mod runtime;

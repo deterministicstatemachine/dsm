@@ -459,8 +459,6 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
             log::info!("[SDK Init Validation] Emergency backfill successful — R_G now available");
         }
 
-
-
         let contact_manager =
             DsmContactManager::new(dev_fixed, vec![dsm::types::identifiers::NodeId::new("n")]);
 

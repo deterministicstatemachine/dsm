@@ -1587,10 +1587,10 @@ impl WalletSDK {
         let binding_key = vec![0x33; 32];
         let (signing_public_key, _signing_secret_key) =
             crate::sdk::signing_authority::derive_signing_keys_for_testing(
-            &device_id,
-            &genesis_hash,
-            &binding_key,
-        )?;
+                &device_id,
+                &genesis_hash,
+                &binding_key,
+            )?;
 
         crate::sdk::signing_authority::set_binding_key_for_testing(binding_key);
         crate::sdk::app_state::AppState::set_identity_info(

@@ -221,7 +221,12 @@ impl SessionManager {
 
         log::info!(
             "COMPUTE_PHASE: fatal={} securing={} sdk_ready={} has_id={} locked={} -> phase={}",
-            fatal, securing, sdk_ready, has_id, locked, phase
+            fatal,
+            securing,
+            sdk_ready,
+            has_id,
+            locked,
+            phase
         );
         phase
     }

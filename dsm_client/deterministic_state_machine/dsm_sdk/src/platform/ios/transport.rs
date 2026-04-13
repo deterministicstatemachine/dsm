@@ -13,8 +13,8 @@ use prost::Message;
 
 use crate::generated::{
     ingress_request, ingress_response, startup_request, startup_response, ConfigureEnvOp, Envelope,
-    IngressRequest, IngressResponse, InitializeIdentityContextOp, InitializeSdkOp, SetStorageBaseDirOp,
-    StartupRequest, StartupResponse,
+    IngressRequest, IngressResponse, InitializeIdentityContextOp, InitializeSdkOp,
+    SetStorageBaseDirOp, StartupRequest, StartupResponse,
 };
 use crate::util::deterministic_time;
 
@@ -245,7 +245,10 @@ fn startup_ok(operation_name: &str, response: StartupResponse) -> bool {
     match response.result {
         Some(startup_response::Result::OkBytes(_)) => true,
         Some(startup_response::Result::Error(error_pb)) => {
-            error!("iOS transport: {} failed: {}", operation_name, error_pb.message);
+            error!(
+                "iOS transport: {} failed: {}",
+                operation_name, error_pb.message
+            );
             false
         }
         None => {

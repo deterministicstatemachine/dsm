@@ -117,9 +117,7 @@ impl ResonantStatus {
             ResonantStatus::Resonant => generated::CdbrwResonantStatus::CdbrwResonantResonant,
             ResonantStatus::Adapted => generated::CdbrwResonantStatus::CdbrwResonantAdapted,
             ResonantStatus::Fail => generated::CdbrwResonantStatus::CdbrwResonantFail,
-            ResonantStatus::Unspecified => {
-                generated::CdbrwResonantStatus::CdbrwResonantUnspecified
-            }
+            ResonantStatus::Unspecified => generated::CdbrwResonantStatus::CdbrwResonantUnspecified,
         }
     }
 
@@ -417,10 +415,7 @@ mod tests {
     #[test]
     fn require_above_minimum_passes() {
         with_clean_state(|| {
-            store_trust(snapshot_with(
-                AccessLevel::FullAccess,
-                ResonantStatus::Pass,
-            ));
+            store_trust(snapshot_with(AccessLevel::FullAccess, ResonantStatus::Pass));
             let result = require_access_level(AccessLevel::ReadOnly);
             assert!(result.is_ok(), "FullAccess must satisfy ReadOnly");
         });
@@ -440,10 +435,7 @@ mod tests {
     fn store_overwrites_previous() {
         with_clean_state(|| {
             store_trust(snapshot_with(AccessLevel::ReadOnly, ResonantStatus::Fail));
-            store_trust(snapshot_with(
-                AccessLevel::FullAccess,
-                ResonantStatus::Pass,
-            ));
+            store_trust(snapshot_with(AccessLevel::FullAccess, ResonantStatus::Pass));
             assert_eq!(
                 latest_trust().map(|s| s.access_level),
                 Some(AccessLevel::FullAccess)

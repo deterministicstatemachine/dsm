@@ -284,9 +284,7 @@ fn ensure_bootstrap() {
 
     // C-DBRW check: only enforce after genesis. Pre-genesis the binding key does not
     // exist yet — that is expected. Post-genesis a missing key indicates an attack.
-    if SDK_READY.load(Ordering::SeqCst)
-        && crate::sdk::app_state::AppState::get_has_identity()
-    {
+    if SDK_READY.load(Ordering::SeqCst) && crate::sdk::app_state::AppState::get_has_identity() {
         let dbrw_ok = crate::fetch_dbrw_binding_key()
             .map(|k| k.len() == 32)
             .unwrap_or(false);
@@ -939,7 +937,10 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_initDsmSdk(
                     crate::network::get_env_config_path().unwrap_or("none")
                 ),
                 Err(error) => {
-                    log::error!("initDsmSdk: failed to configure env path: {}", error.message);
+                    log::error!(
+                        "initDsmSdk: failed to configure env path: {}",
+                        error.message
+                    );
                     return;
                 }
             }
@@ -949,7 +950,10 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_initDsmSdk(
             )) {
                 Ok(_) => log::info!("initDsmSdk: shared startup initialization succeeded"),
                 Err(error) => {
-                    log::error!("initDsmSdk: shared startup initialization failed: {}", error.message);
+                    log::error!(
+                        "initDsmSdk: shared startup initialization failed: {}",
+                        error.message
+                    );
                 }
             }
         }),
@@ -1317,10 +1321,7 @@ fn process_envelope_v3_impl(
         if let Some(pb::envelope::Payload::BleEvent(ref ble)) = env.payload {
             if let Some(pb::ble_event::Ev::IdentityObserved(ref obs)) = ble.ev {
                 return handle_ble_identity_observed_from_envelope(obs).map_err(|message| {
-                    IngressShimError::new(
-                        helpers::JniErrorCode::ProcessingFailed as u32,
-                        message,
-                    )
+                    IngressShimError::new(helpers::JniErrorCode::ProcessingFailed as u32, message)
                 });
             }
             // Other BleEvent variants: return empty ack (not an error)

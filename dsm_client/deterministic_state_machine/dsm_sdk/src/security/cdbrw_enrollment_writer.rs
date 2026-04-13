@@ -486,7 +486,9 @@ mod tests {
         let mut state = seed;
         (0..n)
             .map(|i| {
-                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 let noise = (state >> 16) as i64 & 0xFFFF;
                 (i as i64) * 100 + noise
             })

@@ -877,7 +877,7 @@ impl LimboVault {
         let nonce = domain_hash_bytes("DSM/dlv-nonce", &nonce_seed)[0..12].to_vec();
 
         let mut aad = Vec::new();
-    aad.extend_from_slice(creator_public_key);
+        aad.extend_from_slice(creator_public_key);
         aad.extend_from_slice(vault_id.as_bytes());
         aad.extend_from_slice(&state_number.to_le_bytes());
         aad.extend_from_slice(&ref_hash);
@@ -2525,11 +2525,9 @@ mod tests {
 
     fn make_signed_test_vault() -> (LimboVault, Vec<u8>, State) {
         let (draft, creator_secret_key, reference_state) = make_test_vault_draft();
-        let creator_signature = crate::crypto::sphincs::sphincs_sign(
-            &creator_secret_key,
-            &draft.parameters_hash,
-        )
-        .expect("creator signature");
+        let creator_signature =
+            crate::crypto::sphincs::sphincs_sign(&creator_secret_key, &draft.parameters_hash)
+                .expect("creator signature");
         let vault = draft.finalize(&creator_signature).expect("signed vault");
         (vault, creator_secret_key, reference_state)
     }
@@ -2539,11 +2537,9 @@ mod tests {
         let (draft, creator_secret_key, _reference_state) = make_test_vault_draft();
         assert!(draft.id.starts_with("vault-"));
         assert_eq!(draft.parameters_hash.len(), 32);
-        let creator_signature = crate::crypto::sphincs::sphincs_sign(
-            &creator_secret_key,
-            &draft.parameters_hash,
-        )
-        .expect("creator signature");
+        let creator_signature =
+            crate::crypto::sphincs::sphincs_sign(&creator_secret_key, &draft.parameters_hash)
+                .expect("creator signature");
         let vault = draft.finalize(&creator_signature).expect("finalized vault");
         assert!(vault.verify().expect("vault verification"));
     }
@@ -2591,11 +2587,9 @@ mod tests {
         let (draft, _creator_secret_key, _reference_state) = make_test_vault_draft();
         let (_wrong_public_key, wrong_secret_key) =
             crate::crypto::sphincs::generate_sphincs_keypair().expect("wrong sphincs keypair");
-        let wrong_signature = crate::crypto::sphincs::sphincs_sign(
-            &wrong_secret_key,
-            &draft.parameters_hash,
-        )
-        .expect("wrong creator signature");
+        let wrong_signature =
+            crate::crypto::sphincs::sphincs_sign(&wrong_secret_key, &draft.parameters_hash)
+                .expect("wrong creator signature");
 
         let error = draft
             .finalize(&wrong_signature)
@@ -2613,11 +2607,9 @@ mod tests {
             &reference_state.hash[..],
         ]
         .concat();
-        let expected_signature = crate::crypto::sphincs::sphincs_sign(
-            &creator_secret_key,
-            &invalidation_message,
-        )
-        .expect("invalidation signature");
+        let expected_signature =
+            crate::crypto::sphincs::sphincs_sign(&creator_secret_key, &invalidation_message)
+                .expect("invalidation signature");
 
         vault
             .invalidate("creator-requested", &expected_signature, &reference_state)
@@ -2648,11 +2640,9 @@ mod tests {
             &reference_state.hash[..],
         ]
         .concat();
-        let wrong_signature = crate::crypto::sphincs::sphincs_sign(
-            &wrong_secret_key,
-            &invalidation_message,
-        )
-        .expect("wrong invalidation signature");
+        let wrong_signature =
+            crate::crypto::sphincs::sphincs_sign(&wrong_secret_key, &invalidation_message)
+                .expect("wrong invalidation signature");
 
         let error = vault
             .invalidate("creator-requested", &wrong_signature, &reference_state)

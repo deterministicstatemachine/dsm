@@ -16,10 +16,7 @@ use std::sync::{Arc, Once};
 use bitcoin::hashes::Hash;
 use dsm::{
     bitcoin::script::sha256_hash_lock, // SHA256 for HTLC hash locks
-    crypto::{
-        kyber::generate_kyber_keypair,
-        SignatureKeyPair,
-    },
+    crypto::{kyber::generate_kyber_keypair, SignatureKeyPair},
     types::{
         state_types::State,
         token_types::{TokenOperation, TokenSupply, TokenType},
@@ -543,9 +540,7 @@ async fn refund_after_completed_deposit_rejected() {
 
     // Now try to refund — should be rejected
     let late_state = test_state(200);
-    let result = bridge
-        .close_tap(&initiation.vault_op_id, &late_state)
-        .await;
+    let result = bridge.close_tap(&initiation.vault_op_id, &late_state).await;
 
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();

@@ -175,8 +175,8 @@ impl AppRouterImpl {
                 };
 
                 // Real sync counter from transaction history
-                let last_sync_iter = crate::storage::client_db::get_transaction_count()
-                    .unwrap_or(0);
+                let last_sync_iter =
+                    crate::storage::client_db::get_transaction_count().unwrap_or(0);
 
                 // Real backup status from NFC recovery SDK
                 let backup_status = {
@@ -186,7 +186,10 @@ impl AppRouterImpl {
                     } else if rs.pending_capsule {
                         format!("Armed (capsule #{})", rs.last_capsule_index)
                     } else if rs.capsule_count > 0 {
-                        format!("Written (#{}, {} total)", rs.last_capsule_index, rs.capsule_count)
+                        format!(
+                            "Written (#{}, {} total)",
+                            rs.last_capsule_index, rs.capsule_count
+                        )
                     } else {
                         "Enabled (no capsule)".to_string()
                     }

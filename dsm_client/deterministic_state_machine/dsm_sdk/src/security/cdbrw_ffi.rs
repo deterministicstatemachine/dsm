@@ -332,9 +332,14 @@ mod tests {
 
     #[test]
     fn lag1_autocorrelation_alternating_is_negative() {
-        let samples: Vec<i64> = (0..128).map(|i| if i % 2 == 0 { 100 } else { -100 }).collect();
+        let samples: Vec<i64> = (0..128)
+            .map(|i| if i % 2 == 0 { 100 } else { -100 })
+            .collect();
         let rho = lag1_autocorrelation(&samples);
-        assert!(rho < -0.9, "alternating samples should have rho ~ -1, got {rho}");
+        assert!(
+            rho < -0.9,
+            "alternating samples should have rho ~ -1, got {rho}"
+        );
     }
 
     #[test]

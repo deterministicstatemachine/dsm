@@ -216,17 +216,15 @@ impl DlvSdk {
         // Convert high-level condition to concrete mechanism
         let mech = self.convert_condition_to_mechanism(&config.condition, reference_state)?;
 
-        let draft = self
-            .manager
-            .prepare_vault(
-                creator_keypair.public_key(),
-                mech,
-                &config.content,
-                &config.content_type,
-                intended_recipient,
-                &encryption_key,
-                reference_state,
-            )?;
+        let draft = self.manager.prepare_vault(
+            creator_keypair.public_key(),
+            mech,
+            &config.content,
+            &config.content_type,
+            intended_recipient,
+            &encryption_key,
+            reference_state,
+        )?;
         let creator_signature = dsm::crypto::sphincs::sphincs_sign(
             creator_keypair.secret_key(),
             &draft.parameters_hash,

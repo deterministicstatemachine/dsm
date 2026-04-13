@@ -256,7 +256,7 @@ async fn test_disconnect_fails_late_phase_sessions() {
             sender_ble_address: Some("BB:BB:BB:BB:BB:BB".to_string()),
             created_at_wall: Instant::now(),
             pre_finalize_entropy: None,
-        stitched_receipt_bytes: None,
+            stitched_receipt_bytes: None,
         })
         .await;
 
@@ -277,7 +277,7 @@ async fn test_disconnect_fails_late_phase_sessions() {
             sender_ble_address: Some("BB:BB:BB:BB:BB:BB".to_string()),
             created_at_wall: Instant::now(),
             pre_finalize_entropy: None,
-        stitched_receipt_bytes: None,
+            stitched_receipt_bytes: None,
         })
         .await;
 
@@ -360,7 +360,7 @@ async fn test_disconnect_then_retry_succeeds() {
             sender_ble_address: Some("BB:BB:BB:BB:BB:BB".to_string()),
             created_at_wall: Instant::now(),
             pre_finalize_entropy: None,
-        stitched_receipt_bytes: None,
+            stitched_receipt_bytes: None,
         })
         .await;
     let failed1 = handler_a
@@ -605,7 +605,7 @@ async fn test_disconnect_fails_pending_user_action_sessions() {
             sender_ble_address: Some("AA:AA:AA:AA:AA:AA".to_string()),
             created_at_wall: Instant::now(),
             pre_finalize_entropy: None,
-        stitched_receipt_bytes: None,
+            stitched_receipt_bytes: None,
         })
         .await;
 
@@ -656,7 +656,7 @@ async fn test_disconnect_fails_prepared_phase_sessions() {
             sender_ble_address: Some("BB:BB:BB:BB:BB:BB".to_string()),
             created_at_wall: Instant::now(),
             pre_finalize_entropy: None,
-        stitched_receipt_bytes: None,
+            stitched_receipt_bytes: None,
         })
         .await;
 
@@ -707,7 +707,7 @@ async fn test_stale_session_superseded_on_prepare() {
             sender_ble_address: None,
             created_at_wall: Instant::now() - Duration::from_secs(130),
             pre_finalize_entropy: None,
-        stitched_receipt_bytes: None,
+            stitched_receipt_bytes: None,
         })
         .await;
 
