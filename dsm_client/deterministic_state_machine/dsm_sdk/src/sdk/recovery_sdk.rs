@@ -425,11 +425,29 @@ impl RecoverySDK {
         // If there's already a pending (unconsumed) capsule, reuse its index —
         // we only care about the newest state. Index only advances after the ring
         // actually consumes a capsule and clears pending.
+        //
+        // When there's NO pending capsule (ring just consumed it), check whether
+        // the device state actually changed since the last capsule was created.
+        // If the SMT root is identical, reuse the same index — writing to the
+        // ring is not a state change and must not bump the capsule number.
         let next_index = match crate::storage::client_db::recovery::get_pending_recovery_capsule() {
             Ok(Some((idx, _))) => idx,
-            _ => crate::storage::client_db::recovery::get_max_capsule_index()
-                .map_err(|e| DsmError::InvalidState(format!("Failed to read capsule index: {e}")))?
-                .saturating_add(1),
+            _ => {
+                let max_idx = crate::storage::client_db::recovery::get_max_capsule_index()
+                    .map_err(|e| {
+                        DsmError::InvalidState(format!("Failed to read capsule index: {e}"))
+                    })?;
+                if max_idx == 0 {
+                    // No capsules exist yet — start at 1.
+                    1
+                } else {
+                    // Reuse the same index when the SMT root hasn't changed.
+                    match crate::storage::client_db::recovery::get_latest_capsule_metadata() {
+                        Ok(Some(meta)) if meta.smt_root == smt_root => max_idx,
+                        _ => max_idx.saturating_add(1),
+                    }
+                }
+            }
         };
 
         Ok(RecoveryCapsuleState {
