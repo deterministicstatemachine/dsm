@@ -15,8 +15,6 @@ import {
   getNodeHealth,
   addStorageNode,
   removeStorageNode,
-  listLocalDlvs,
-  checkDlvPresence,
   createBackup,
 } from '../storage';
 import { syncWithStorageStrictBridge, routerQueryBin, routerInvokeBin } from '../WebViewBridge';
@@ -322,108 +320,6 @@ describe('storage.ts', () => {
     test('throws on empty response', async () => {
       (routerInvokeBin as jest.Mock).mockResolvedValue(new Uint8Array(0));
       await expect(removeStorageNode('url')).rejects.toThrow(/empty response/);
-    });
-  });
-
-  // ── listLocalDlvs ─────────────────────────────────────────────────
-
-  describe('listLocalDlvs', () => {
-    test('maps vault entries with status and labels', async () => {
-      const env = new pb.Envelope({
-        version: 3,
-        payload: {
-          case: 'bitcoinVaultListResponse',
-          value: new pb.BitcoinVaultListResponse({
-            vaults: [
-              new pb.BitcoinVaultSummary({ vaultId: 'v1', state: 'limbo', amountSats: 100000n, direction: 'btc_to_dbtc' }),
-              new pb.BitcoinVaultSummary({ vaultId: 'v2', state: 'unlocked', amountSats: 200000n, direction: 'dbtc_to_btc' }),
-              new pb.BitcoinVaultSummary({ vaultId: 'v3', state: 'claimed', amountSats: 50000n, direction: '' }),
-            ],
-          }),
-        },
-      });
-      (routerQueryBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
-
-      const dlvs = await listLocalDlvs();
-      expect(dlvs).toHaveLength(3);
-      expect(dlvs[0].status).toBe('LOCKED');
-      expect(dlvs[0].localLabel).toBe('BTC → dBTC');
-      expect(dlvs[0].balance.baseUnits).toBe(100000n);
-      expect(dlvs[0].kind).toBe('dBTC');
-
-      expect(dlvs[1].status).toBe('UNLOCKABLE');
-      expect(dlvs[1].localLabel).toBe('dBTC → BTC');
-
-      expect(dlvs[2].status).toBe('SPENT');
-      expect(dlvs[2].localLabel).toBe('dBTC Vault');
-    });
-
-    test('maps invalidated state to EXPIRED', async () => {
-      const env = new pb.Envelope({
-        version: 3,
-        payload: {
-          case: 'bitcoinVaultListResponse',
-          value: new pb.BitcoinVaultListResponse({
-            vaults: [new pb.BitcoinVaultSummary({ vaultId: 'v4', state: 'invalidated', amountSats: 0n })],
-          }),
-        },
-      });
-      (routerQueryBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
-
-      const dlvs = await listLocalDlvs();
-      expect(dlvs[0].status).toBe('EXPIRED');
-    });
-
-    test('defaults unknown state to LOCKED', async () => {
-      const env = new pb.Envelope({
-        version: 3,
-        payload: {
-          case: 'bitcoinVaultListResponse',
-          value: new pb.BitcoinVaultListResponse({
-            vaults: [new pb.BitcoinVaultSummary({ vaultId: 'v5', state: 'mystery', amountSats: 0n })],
-          }),
-        },
-      });
-      (routerQueryBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
-
-      const dlvs = await listLocalDlvs();
-      expect(dlvs[0].status).toBe('LOCKED');
-    });
-
-    test('returns empty array on empty response', async () => {
-      (routerQueryBin as jest.Mock).mockResolvedValue(new Uint8Array(0));
-      expect(await listLocalDlvs()).toEqual([]);
-    });
-
-    test('returns empty array on error envelope', async () => {
-      const env = new pb.Envelope({
-        version: 3,
-        payload: { case: 'error', value: new pb.Error({ message: 'nope' }) },
-      });
-      (routerQueryBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
-      expect(await listLocalDlvs()).toEqual([]);
-    });
-
-    test('returns empty array on bridge throw', async () => {
-      (routerQueryBin as jest.Mock).mockRejectedValue(new Error('bridge down'));
-      expect(await listLocalDlvs()).toEqual([]);
-    });
-
-    test('returns empty array on decode error', async () => {
-      (routerQueryBin as jest.Mock).mockResolvedValue(new Uint8Array([0xFF, 0x01]));
-      expect(await listLocalDlvs()).toEqual([]);
-    });
-  });
-
-  // ── checkDlvPresence / createBackup ────────────────────────────────
-
-  describe('checkDlvPresence', () => {
-    test('returns true for non-empty anchor', async () => {
-      expect(await checkDlvPresence('abc')).toBe(true);
-    });
-
-    test('returns false for empty anchor', async () => {
-      expect(await checkDlvPresence('')).toBe(false);
     });
   });
 

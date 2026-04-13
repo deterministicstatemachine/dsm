@@ -2,7 +2,7 @@
 import * as pb from '../proto/dsm_app_pb';
 import { syncWithStorageStrictBridge, routerQueryBin, routerInvokeBin } from './WebViewBridge';
 import { decodeFramedEnvelopeV3 } from './decoding';
-import { StorageStatus, DlvIndexEntry } from './types';
+import { StorageStatus } from './types';
 import { bytesToBase32CrockfordPrefix } from '../utils/textId';
 import { emitWalletRefresh } from './events';
 import logger from '../utils/logger';
@@ -198,82 +198,6 @@ export async function removeStorageNode(url: string): Promise<pb.StorageNodeMana
   return env.payload.value;
 }
 
-/**
- * List all local dBTC vaults (DLVs) via the bitcoin.vault.list bridge route.
- * Returns a DlvIndexEntry[] mapped from BitcoinVaultSummary proto messages.
- */
-export async function listLocalDlvs(): Promise<DlvIndexEntry[]> {
-  const arg = new pb.ArgPack({ codec: pb.Codec.PROTO, body: new Uint8Array(0) });
-  let resBytes: Uint8Array | undefined;
-  try {
-    resBytes = await routerQueryBin('bitcoin.vault.list', new Uint8Array(arg.toBinary()));
-  } catch (e) {
-    logger.warn('[DSM:listLocalDlvs] Bridge call failed:', e);
-    return [];
-  }
-
-  if (!resBytes || resBytes.length === 0) {
-    logger.debug('[DSM:listLocalDlvs] Empty response from bridge');
-    return [];
-  }
-
-  let env: pb.Envelope;
-  try {
-    env = decodeFramedEnvelopeV3(resBytes);
-  } catch (e) {
-    logger.error('[DSM:listLocalDlvs] Failed to decode FramedEnvelopeV3:', e);
-    return [];
-  }
-
-  if (env.payload.case === 'error') {
-    logger.warn('[DSM:listLocalDlvs] Bridge returned error:', env.payload.value.message);
-    return [];
-  }
-
-  if (env.payload.case !== 'bitcoinVaultListResponse') {
-    logger.warn('[DSM:listLocalDlvs] Unexpected payload.case:', env.payload.case);
-    return [];
-  }
-
-  const stateMap: Record<string, DlvIndexEntry['status']> = {
-    limbo: 'LOCKED',
-    unlocked: 'UNLOCKABLE',
-    claimed: 'SPENT',
-    invalidated: 'EXPIRED',
-  };
-
-  return env.payload.value.vaults.map((v): DlvIndexEntry => ({
-    vaultId: v.vaultId,
-    cptaAnchorHex: v.vaultId,
-    createdAtTick: 0n,
-    status: stateMap[v.state] ?? 'LOCKED',
-    balance: {
-      tokenId: 'dBTC',
-      baseUnits: BigInt(v.amountSats),
-      decimals: 8,
-      symbol: 'dBTC',
-    },
-    conditions: [],
-    expectedReplication: 0,
-    localLabel:
-      v.direction === 'btc_to_dbtc'
-        ? 'BTC → dBTC'
-        : v.direction === 'dbtc_to_btc'
-          ? 'dBTC → BTC'
-          : 'dBTC Vault',
-    kind: 'dBTC',
-  }));
-}
-
-/**
- * Check whether a DLV anchor is replicated on storage nodes.
- * No single-vault presence route exists yet — returns false (honest).
- * The Nodes tab shows real per-node health; per-vault replication
- * query requires a dedicated storage route to be implemented.
- */
-export function checkDlvPresence(_anchorHex: string): Promise<boolean> {
-  return Promise.resolve(false);
-}
 
 /**
  * Create a local backup file.

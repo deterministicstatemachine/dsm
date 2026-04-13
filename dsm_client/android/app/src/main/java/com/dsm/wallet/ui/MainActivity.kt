@@ -305,7 +305,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
             adapter.enableReaderMode(
                 this,
                 this,
-                NfcAdapter.FLAG_READER_NFC_A or NfcAdapter.FLAG_READER_SKIP_NDEF_CHECK,
+                NfcAdapter.FLAG_READER_NFC_A,
                 null
             )
             Log.i(tag, "startNfcWriter: write mode enabled, waiting for tag")

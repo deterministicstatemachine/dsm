@@ -2,7 +2,6 @@
 // src/components/screens/StorageScreen.tsx
 // Per spec: storage nodes are index-only mirrors. No failover semantics.
 import React, { useEffect, useState, useMemo } from "react";
-import type { DlvIndexEntry } from "../../dsm/index";
 import { NodeHealthPanel, DiagnosticsPanel } from "../storage/StorageNodePanels";
 import { ObjectBrowserPanel } from "../storage/ObjectBrowser";
 import { DisplayOnlyNumber, displayOnlyNumberToNumber } from "../../types/storage";
@@ -10,9 +9,8 @@ import { useDpadNav } from "../../hooks/useDpadNav";
 import {
   storageStore,
   useStorageStore,
-  type DlvPresenceNode,
-  type DlvPresenceSummary,
 } from "../../stores/storageStore";
+import { formatBtc, type VaultSummary } from "../../services/bitcoinTap";
 import "./StorageScreen.css";
 
 type StorageStatus = {
@@ -116,7 +114,6 @@ const StorageScreen: React.FC = () => {
           <DlvTab
             dlvLoading={storage.dlvLoading}
             dlvs={storage.dlvs}
-            presence={storage.presence}
             expandedDlv={expandedDlv}
             setExpandedDlv={setExpandedDlv}
           />
@@ -260,27 +257,52 @@ const OverviewTab: React.FC<{
 };
 
 // ═══════════════════════════════════════════════════════════════════════
-// DLV Tab — inverted panels
+// DLV Tab — real vault data from bitcoin.vault.list
 // ═══════════════════════════════════════════════════════════════════════
+
+const STATE_LABELS: Record<string, string> = {
+  limbo: "Limbo",
+  active: "Active",
+  unlocked: "Unlocked",
+  claimed: "Claimed",
+  invalidated: "Invalidated",
+};
+
+const DIRECTION_LABELS: Record<string, string> = {
+  btc_to_dbtc: "BTC \u2192 dBTC",
+  dbtc_to_btc: "dBTC \u2192 BTC",
+};
+
+function stateLabel(s: string): string {
+  return STATE_LABELS[s] ?? s;
+}
+
+function directionLabel(d: string): string {
+  return DIRECTION_LABELS[d] ?? d;
+}
+
+function shortId(id: string, len = 12): string {
+  if (!id || id.length <= len) return id || "\u2014";
+  return `${id.slice(0, len)}\u2026`;
+}
+
 const DlvTab: React.FC<{
   dlvLoading: boolean;
-  dlvs: DlvIndexEntry[];
-  presence: Record<string, DlvPresenceSummary>;
+  dlvs: VaultSummary[];
   expandedDlv: string | null;
   setExpandedDlv: (v: string | null) => void;
-}> = ({ dlvLoading, dlvs, presence, expandedDlv, setExpandedDlv }) => {
-  if (dlvLoading) return <div className="storage-loading">Scanning active DLVs...</div>;
+}> = ({ dlvLoading, dlvs, expandedDlv, setExpandedDlv }) => {
+  if (dlvLoading) return <div className="storage-loading">Scanning DLVs...</div>;
 
   if (dlvs.length === 0) {
     return <div className="storage-empty">No DLVs found for this device.</div>;
   }
 
-  const active = dlvs.filter((d) => ["LOCKED", "UNLOCKABLE", "LIVE"].includes(d.status)).length;
+  const active = dlvs.filter((d) => d.state === "active" || d.state === "limbo").length;
   const hist = dlvs.length - active;
-  const fullyReplicated = dlvs.filter((d) => {
-    const s = presence[d.cptaAnchorHex];
-    return s && d.expectedReplication > 0 && s.observed >= d.expectedReplication;
-  }).length;
+  const totalLockedSats = dlvs
+    .filter((d) => d.state === "active" || d.state === "limbo")
+    .reduce((sum, d) => sum + d.amountSats, 0n);
 
   return (
     <div className="snd-stack">
@@ -296,10 +318,8 @@ const DlvTab: React.FC<{
             <div className="snd-stat-label">Historical</div>
           </div>
           <div className="snd-stat-cell">
-            <div className="snd-stat-val">
-              {fullyReplicated}/{active}
-            </div>
-            <div className="snd-stat-label">Replicated</div>
+            <div className="snd-stat-val-sm">{formatBtc(totalLockedSats)}</div>
+            <div className="snd-stat-label">Locked dBTC</div>
           </div>
         </div>
       </div>
@@ -307,45 +327,64 @@ const DlvTab: React.FC<{
       {/* Vault list */}
       <div className="snd-card">
         {dlvs.map((d) => {
-          const s = presence[d.cptaAnchorHex];
-          const observed = s?.observed ?? 0;
-          const expected = d.expectedReplication ?? 0;
-          const replicationText = expected > 0 ? `${observed}/${expected}` : `${observed}`;
-          const isSpent = d.status === "SPENT" || d.status === "EXPIRED";
-          const isExp = expandedDlv === d.cptaAnchorHex;
+          const isSpent = d.state === "claimed" || d.state === "invalidated";
+          const isExp = expandedDlv === d.vaultId;
 
           return (
             <div
-              key={d.cptaAnchorHex}
+              key={d.vaultId}
               className={`snd-dlv-item${isSpent ? " snd-dlv-item-spent" : ""}${isExp ? " snd-dlv-item-exp" : ""}`}
-              onClick={() => setExpandedDlv(isExp ? null : d.cptaAnchorHex)}
+              onClick={() => setExpandedDlv(isExp ? null : d.vaultId)}
               style={{ cursor: "pointer" }}
             >
               <div className="snd-dlv-header">
                 <div>
-                  <div className="snd-dlv-name">{d.localLabel || "DLV"}</div>
+                  <div className="snd-dlv-name">{directionLabel(d.direction)}</div>
                   <div className="snd-dlv-kind">
-                    {d.kind} &bull; {shortHex(d.cptaAnchorHex)}
+                    {shortId(d.vaultId)}
                   </div>
                 </div>
-                <div>
-                  <div className="snd-dlv-status">{d.status}</div>
-                  <div className="snd-dlv-repl">storage: {replicationText}</div>
+                <div style={{ textAlign: "right" }}>
+                  <div className="snd-dlv-status">{stateLabel(d.state)}</div>
+                  <div className="snd-dlv-repl">{formatBtc(d.amountSats)} dBTC</div>
                 </div>
               </div>
-              {isExp && s?.nodes?.length ? (
+              {isExp && (
                 <div className="snd-dlv-nodes">
-                  {s.nodes.map((n: DlvPresenceNode, idx: number) => (
-                    <div key={idx} className="snd-dlv-node-row">
-                      <span>{n.node}</span>
-                      <span>
-                        {n.reachable ? "up" : "down"} &bull; desc: {fmtTri(n.hasDescriptor)} &bull;
-                        state: {fmtTri(n.hasState)}
+                  <div className="snd-dlv-node-row">
+                    <span>Vault ID</span>
+                    <span style={{ wordBreak: "break-all", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 9 }}>
+                      {d.vaultId}
+                    </span>
+                  </div>
+                  <div className="snd-dlv-node-row">
+                    <span>State</span>
+                    <span>{stateLabel(d.state)}</span>
+                  </div>
+                  <div className="snd-dlv-node-row">
+                    <span>Amount</span>
+                    <span>{formatBtc(d.amountSats)} dBTC</span>
+                  </div>
+                  <div className="snd-dlv-node-row">
+                    <span>Direction</span>
+                    <span>{directionLabel(d.direction)}</span>
+                  </div>
+                  {d.htlcAddress && (
+                    <div className="snd-dlv-node-row">
+                      <span>HTLC</span>
+                      <span style={{ wordBreak: "break-all", fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 9 }}>
+                        {d.htlcAddress}
                       </span>
                     </div>
-                  ))}
+                  )}
+                  {d.entryHeader.length > 0 && (
+                    <div className="snd-dlv-node-row">
+                      <span>Entry Header</span>
+                      <span>{d.entryHeader.length} bytes</span>
+                    </div>
+                  )}
                 </div>
-              ) : null}
+              )}
             </div>
           );
         })}
@@ -353,15 +392,3 @@ const DlvTab: React.FC<{
     </div>
   );
 };
-
-function shortHex(h: string, len = 10): string {
-  const s = (h || "").toLowerCase();
-  if (s.length <= len) return s;
-  return `${s.slice(0, Math.max(4, Math.floor(len / 2)))}\u2026${s.slice(-Math.max(4, Math.floor(len / 2)))}`;
-}
-
-function fmtTri(v: boolean | "unknown"): string {
-  if (v === true) return "yes";
-  if (v === false) return "no";
-  return "\u2014";
-}
