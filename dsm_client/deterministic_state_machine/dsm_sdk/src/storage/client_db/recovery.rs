@@ -324,6 +324,29 @@ pub fn get_recovery_pref(key: &str) -> Result<Option<Vec<u8>>> {
     Ok(result)
 }
 
+/// Store an encrypted recovery key blob (device-bound encryption).
+pub fn store_encrypted_recovery_key(blob: &[u8]) -> Result<()> {
+    set_recovery_pref("encrypted_recovery_key", blob)
+}
+
+/// Load the encrypted recovery key blob.
+pub fn load_encrypted_recovery_key() -> Result<Option<Vec<u8>>> {
+    get_recovery_pref("encrypted_recovery_key")
+}
+
+/// Delete the persisted encrypted recovery key.
+pub fn delete_encrypted_recovery_key() -> Result<()> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|_| anyhow!("Database lock poisoned"))?;
+    conn.execute(
+        "DELETE FROM recovery_prefs WHERE key = ?1",
+        params!["encrypted_recovery_key"],
+    )?;
+    Ok(())
+}
+
 /// Check if NFC backup is enabled.
 pub fn is_nfc_backup_enabled() -> bool {
     get_recovery_pref("nfc_backup_enabled")

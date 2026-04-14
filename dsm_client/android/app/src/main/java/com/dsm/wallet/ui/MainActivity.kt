@@ -117,8 +117,14 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
     @Volatile private var batteryCharging = false
     @Volatile private var batteryLevelPercent = 100
     // NFC inline state (reads AND writes happen on MainActivity, not separate Activities)
-    @Volatile private var nfcReaderActive = false
-    @Volatile private var nfcWriteMode = false
+    private enum class NfcHostMode {
+        DISABLED,
+        SUPPRESSED,
+        READ,
+        WRITE,
+    }
+
+    @Volatile private var nfcHostMode = NfcHostMode.DISABLED
     private var nfcAdapter: NfcAdapter? = null
     // Bluetooth enable prompt launcher
     lateinit var btEnableLauncher: ActivityResultLauncher<Intent>
@@ -176,13 +182,13 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
          * Payload is raw protobuf bytes (no base32/json/hex).
          */
         @JvmStatic
-        fun dispatchDsmEventToWebView(topic: String, payload: ByteArray) {
+        fun dispatchDsmEventToWebView(topic: String, payload: ByteArray): Boolean {
             val inst = getActiveInstance()
             if (inst == null) {
                 Log.w(EVENT_DISPATCH_TAG, "dispatchDsmEventToWebView: no active MainActivity (topic=$topic)")
-                return
+                return false
             }
-            inst.dispatchDsmEventOnUi(topic, payload)
+            return inst.dispatchDsmEventOnUiBlocking(topic, payload)
         }
 
         /**
@@ -244,6 +250,71 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         dispatchDsmEventOnUi(safeName, detail.toByteArray(Charsets.UTF_8))
     }
 
+    private fun scheduleNfcModeTransition(targetMode: NfcHostMode) {
+        nfcHostMode = targetMode
+        runOnUiThread {
+            if (nfcHostMode != targetMode) return@runOnUiThread
+            applyNfcMode(targetMode)
+        }
+    }
+
+    private fun applyNfcMode(targetMode: NfcHostMode) {
+        val adapter = nfcAdapter ?: NfcAdapter.getDefaultAdapter(this)
+        nfcAdapter = adapter
+
+        if (targetMode == NfcHostMode.DISABLED) {
+            try { adapter?.disableReaderMode(this) } catch (_: Throwable) {}
+            nfcHostMode = NfcHostMode.DISABLED
+            return
+        }
+
+        if (adapter == null || !adapter.isEnabled) {
+            nfcHostMode = NfcHostMode.DISABLED
+            return
+        }
+
+        try { adapter.disableReaderMode(this) } catch (_: Throwable) {}
+
+        when (targetMode) {
+            NfcHostMode.SUPPRESSED -> {
+                adapter.enableReaderMode(
+                    this,
+                    { /* silent no-op — tag swallowed */ },
+                    NfcAdapter.FLAG_READER_NFC_A or NfcAdapter.FLAG_READER_NO_PLATFORM_SOUNDS,
+                    null
+                )
+            }
+            NfcHostMode.READ -> {
+                adapter.enableReaderMode(
+                    this,
+                    this,
+                    NfcAdapter.FLAG_READER_NFC_A
+                        or NfcAdapter.FLAG_READER_NFC_B
+                        or NfcAdapter.FLAG_READER_NFC_V,
+                    android.os.Bundle().apply {
+                        putInt(NfcAdapter.EXTRA_READER_PRESENCE_CHECK_DELAY, 250)
+                    }
+                )
+            }
+            NfcHostMode.WRITE -> {
+                adapter.enableReaderMode(
+                    this,
+                    this,
+                    NfcAdapter.FLAG_READER_NFC_A
+                        or NfcAdapter.FLAG_READER_NFC_V,
+                    android.os.Bundle().apply {
+                        putInt(NfcAdapter.EXTRA_READER_PRESENCE_CHECK_DELAY, 250)
+                    }
+                )
+            }
+            NfcHostMode.DISABLED -> {
+                // Handled by the early return above.
+            }
+        }
+
+        nfcHostMode = targetMode
+    }
+
     /**
      * Enable NFC reader mode on this activity so the ring can be read inline
      * without leaving the WebView. Called from the native host bridge NFC control path.
@@ -255,20 +326,12 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
             Log.w(tag, "startNfcReader: NFC not available or disabled")
             return false
         }
-        if (nfcReaderActive) {
+        if (nfcHostMode == NfcHostMode.READ) {
             Log.d(tag, "startNfcReader: already active")
             return true
         }
-        runOnUiThread {
-            nfcReaderActive = true
-            adapter.enableReaderMode(
-                this,
-                this,
-                NfcAdapter.FLAG_READER_NFC_A or NfcAdapter.FLAG_READER_NFC_B,
-                null
-            )
-            Log.i(tag, "startNfcReader: reader mode enabled")
-        }
+        scheduleNfcModeTransition(NfcHostMode.READ)
+        Log.i(tag, "startNfcReader: reader mode enabled")
         return true
     }
 
@@ -277,15 +340,11 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
      * "WAITING FOR RING" screen, or when a read completes.
      */
     fun stopNfcReader() {
-        runOnUiThread {
-            if (!nfcReaderActive) return@runOnUiThread
-            nfcReaderActive = false
-            nfcWriteMode = false
-            // Restore silent suppression instead of fully disabling — this prevents
-            // Android's system NFC popup from appearing while the app is in foreground.
-            enableNfcSuppression()
-            Log.i(tag, "stopNfcReader: reader mode stopped, suppression restored")
-        }
+        if (nfcHostMode != NfcHostMode.READ && nfcHostMode != NfcHostMode.WRITE) return
+        // Restore silent suppression instead of fully disabling — this prevents
+        // Android's system NFC popup from appearing while the app is in foreground.
+        scheduleNfcModeTransition(NfcHostMode.SUPPRESSED)
+        Log.i(tag, "stopNfcReader: reader mode stopped, suppression restored")
     }
 
     /**
@@ -300,32 +359,26 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
             Log.w(tag, "startNfcWriter: NFC not available or disabled")
             return false
         }
-        runOnUiThread {
-            nfcWriteMode = true
-            nfcReaderActive = true
-            adapter.enableReaderMode(
-                this,
-                this,
-                NfcAdapter.FLAG_READER_NFC_A,
-                null
-            )
-            Log.i(tag, "startNfcWriter: write mode enabled, waiting for tag")
+        if (nfcHostMode == NfcHostMode.WRITE) {
+            Log.d(tag, "startNfcWriter: already active")
+            return true
         }
+        scheduleNfcModeTransition(NfcHostMode.WRITE)
+        Log.i(tag, "startNfcWriter: write mode enabled, waiting for tag")
         return true
     }
 
     /**
      * NfcAdapter.ReaderCallback — called on a binder thread when a tag is discovered.
-     * Routes to read or write path depending on nfcWriteMode.
+     * Routes to read or write path depending on the current NFC host mode.
      * The user never leaves the WebView.
      */
     override fun onTagDiscovered(tag: Tag) {
-        if (!nfcReaderActive) return
-
-        if (nfcWriteMode) {
-            handleNfcWrite(tag)
-        } else {
-            handleNfcRead(tag)
+        Log.d(this.tag, "onTagDiscovered: mode=$nfcHostMode tagId=${tag.id?.joinToString("") { "%02x".format(it) }}")
+        when (nfcHostMode) {
+            NfcHostMode.WRITE -> handleNfcWrite(tag)
+            NfcHostMode.READ -> handleNfcRead(tag)
+            else -> return
         }
     }
 
@@ -364,10 +417,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                 Log.i(this.tag, "onTagDiscovered: dispatched recovery capsule (${payload.size} bytes)")
 
                 // Auto-stop reader after successful read, restore suppression
-                runOnUiThread {
-                    nfcReaderActive = false
-                    enableNfcSuppression()
-                }
+                scheduleNfcModeTransition(NfcHostMode.SUPPRESSED)
             } catch (e: Exception) {
                 Log.w(this.tag, "onTagDiscovered: NFC read failed: ${e.message}")
             }
@@ -384,11 +434,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                 val capsuleBytes = com.dsm.wallet.bridge.UnifiedNativeApi.getPendingRecoveryCapsule()
                 if (capsuleBytes.isEmpty()) {
                     Log.w(this.tag, "handleNfcWrite: no pending capsule available")
-                    runOnUiThread {
-                        nfcReaderActive = false
-                        nfcWriteMode = false
-                        enableNfcSuppression()
-                    }
+                    scheduleNfcModeTransition(NfcHostMode.SUPPRESSED)
                     return@execute
                 }
 
@@ -399,11 +445,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                 val preparedTag = prepareNfcTag(tag)
                 if (preparedTag == null) {
                     Log.w(this.tag, "handleNfcWrite: tag preparation failed")
-                    runOnUiThread {
-                        nfcReaderActive = false
-                        nfcWriteMode = false
-                        enableNfcSuppression()
-                    }
+                    scheduleNfcModeTransition(NfcHostMode.SUPPRESSED)
                     return@execute
                 }
 
@@ -417,17 +459,19 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                 } catch (_: Throwable) { /* best-effort */ }
 
                 runOnUiThread {
-                    nfcReaderActive = false
-                    nfcWriteMode = false
                     vibrateNfcCommit()
-                    enableNfcSuppression()
+                    scheduleNfcModeTransition(NfcHostMode.SUPPRESSED)
                 }
 
-                com.dsm.wallet.bridge.UnifiedNativeApi.createNfcBackupWrittenEnvelope()
-                    .takeIf { it.isNotEmpty() }
-                    ?.let { BleEventRelay.dispatchEnvelope(it) }
-
                 Log.i(this.tag, "handleNfcWrite: committed ${ndefBytes.size} bytes")
+
+                try {
+                    com.dsm.wallet.bridge.UnifiedNativeApi.createNfcBackupWrittenEnvelope()
+                        .takeIf { it.isNotEmpty() }
+                        ?.let { BleEventRelay.dispatchEnvelope(it) }
+                } catch (t: Throwable) {
+                    Log.w(this.tag, "handleNfcWrite: committed write but failed to dispatch completion envelope: ${t.message}")
+                }
 
             } catch (e: IOException) {
                 Log.d(this.tag, "handleNfcWrite: write failed (tag moved?): ${e.message}")
@@ -444,7 +488,11 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         var ndef = Ndef.get(tag)
 
         if (ndef == null) {
-            val formatable = NdefFormatable.get(tag) ?: return null
+            val formatable = NdefFormatable.get(tag)
+            if (formatable == null) {
+                Log.w(this.tag, "prepareNfcTag: tag exposes neither NDEF nor NdefFormatable")
+                return null
+            }
             try {
                 formatable.connect()
                 formatable.format(NdefMessage(arrayOf(NdefRecord(
@@ -538,15 +586,8 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
      * but not actively reading/writing a ring.
      */
     private fun enableNfcSuppression() {
-        val adapter = nfcAdapter ?: NfcAdapter.getDefaultAdapter(this)
-        nfcAdapter = adapter
-        if (adapter == null || !adapter.isEnabled) return
-        adapter.enableReaderMode(
-            this,
-            { /* silent no-op — tag swallowed */ },
-            NfcAdapter.FLAG_READER_NFC_A or NfcAdapter.FLAG_READER_NO_PLATFORM_SOUNDS,
-            null
-        )
+        if (nfcHostMode == NfcHostMode.READ || nfcHostMode == NfcHostMode.WRITE) return
+        scheduleNfcModeTransition(NfcHostMode.SUPPRESSED)
     }
 
     private fun extractCapsuleRecord(messages: List<NdefMessage>): NdefRecord? {
@@ -569,34 +610,73 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
     private fun dispatchDsmEventOnUi(topic: String, payload: ByteArray) {
         // Always hop to UI thread for WebView MessagePort dispatch.
         runOnUiThread {
+            dispatchDsmEventOnUiNow(topic, payload)
+        }
+    }
+
+    private fun dispatchDsmEventOnUiBlocking(topic: String, payload: ByteArray): Boolean {
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+            return dispatchDsmEventOnUiNow(topic, payload)
+        }
+
+        val latch = java.util.concurrent.CountDownLatch(1)
+        var delivered = false
+        runOnUiThread {
             try {
-                val shouldRefreshSessionHint = topic == "dsm-wallet-refresh" || topic == "inbox.updated"
-                if (shouldRefreshSessionHint) {
-                    walletRefreshHint += 1L
-                }
-                val port = dsmPort
-                if (port == null) {
-                    Log.w(EVENT_DISPATCH_TAG, "dispatch failed (no MessagePort) topic=$topic")
-                    return@runOnUiThread
-                }
-                if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_ARRAY_BUFFER)) {
-                    Log.w(EVENT_DISPATCH_TAG, "dispatch failed: ArrayBuffer not supported")
-                    return@runOnUiThread
-                }
-
-                // Canonical async event payload: protobuf AppRouterPayload(method_name=topic, args=payload)
-                // This removes previous 0x02 topic frame wrapping.
-                val eventBytes = com.dsm.wallet.bridge.BridgeEnvelopeCodec.encodeAppRouterPayload(topic, payload)
-
-                if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_PORT_POST_MESSAGE)) {
-                    port.postMessage(WebMessageCompat(eventBytes))
-                }
-                if (shouldRefreshSessionHint) {
-                    publishSessionState("walletRefresh")
-                }
-            } catch (e: Throwable) {
-                Log.w(EVENT_DISPATCH_TAG, "dispatch failed (topic=$topic): ${e.message}")
+                delivered = dispatchDsmEventOnUiNow(topic, payload)
+            } finally {
+                latch.countDown()
             }
+        }
+
+        val completed = try {
+            latch.await(750, java.util.concurrent.TimeUnit.MILLISECONDS)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            false
+        }
+
+        if (!completed) {
+            Log.w(EVENT_DISPATCH_TAG, "dispatch timed out waiting for UI thread (topic=$topic)")
+            return false
+        }
+
+        return delivered
+    }
+
+    private fun dispatchDsmEventOnUiNow(topic: String, payload: ByteArray): Boolean {
+        return try {
+            val shouldRefreshSessionHint = topic == "dsm-wallet-refresh" || topic == "inbox.updated"
+            if (shouldRefreshSessionHint) {
+                walletRefreshHint += 1L
+            }
+            val port = dsmPort
+            if (port == null) {
+                Log.w(EVENT_DISPATCH_TAG, "dispatch failed (no MessagePort) topic=$topic")
+                return false
+            }
+            if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_ARRAY_BUFFER)) {
+                Log.w(EVENT_DISPATCH_TAG, "dispatch failed: ArrayBuffer not supported")
+                return false
+            }
+
+            // Canonical async event payload: protobuf AppRouterPayload(method_name=topic, args=payload)
+            // This removes previous 0x02 topic frame wrapping.
+            val eventBytes = com.dsm.wallet.bridge.BridgeEnvelopeCodec.encodeAppRouterPayload(topic, payload)
+
+            if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_PORT_POST_MESSAGE)) {
+                Log.w(EVENT_DISPATCH_TAG, "dispatch failed: MessagePort postMessage not supported")
+                return false
+            }
+
+            port.postMessage(WebMessageCompat(eventBytes))
+            if (shouldRefreshSessionHint) {
+                publishSessionState("walletRefresh")
+            }
+            true
+        } catch (e: Throwable) {
+            Log.w(EVENT_DISPATCH_TAG, "dispatch failed (topic=$topic): ${e.message}")
+            false
         }
     }
 
@@ -1285,7 +1365,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
 
         // Suppress Android's system NFC popup while the app is in foreground.
         // When not actively reading/writing, tags are silently swallowed.
-        if (!nfcReaderActive) {
+        if (nfcHostMode != NfcHostMode.READ && nfcHostMode != NfcHostMode.WRITE) {
             enableNfcSuppression()
         }
     }
@@ -1295,8 +1375,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         isAppForeground = false
 
         // Fully disable NFC (active reader + suppression) when backgrounded.
-        nfcReaderActive = false
-        nfcWriteMode = false
+        nfcHostMode = NfcHostMode.DISABLED
         try { nfcAdapter?.disableReaderMode(this) } catch (_: Throwable) {}
 
         // Rust receives app_foreground=false via publishSessionState and decides lock policy

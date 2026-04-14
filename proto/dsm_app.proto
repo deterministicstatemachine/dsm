@@ -2311,15 +2311,15 @@ message CdbrwOrbitTrial {
 // without running a full ZK response. Frontend polls this to surface UI state.
 message CdbrwMeasureTrustRequest {
   bytes env_bytes       = 1 [(dsm_max_len)=1024]; // environment fingerprint blob
-  CdbrwOrbitTrial orbit = 2;                      // single N=HEALTH_N probe
-  uint32 histogram_bins = 3;                      // must match enrollment bins
+  CdbrwOrbitTrial orbit = 2; // single N=HEALTH_N probe
+  uint32 histogram_bins = 3; // must match enrollment bins
 }
 
 // cdbrw.respond args — device side of Algorithm 3.
 // K_DBRW lives in Rust (set via bootstrap); Kotlin never touches signing keys.
 message CdbrwRespondRequest {
   bytes env_bytes           = 1 [(dsm_max_len)=1024];
-  CdbrwOrbitTrial orbit     = 2;                      // live orbit after challenge
+  CdbrwOrbitTrial orbit     = 2; // live orbit after challenge
   bytes challenge           = 3 [(dsm_fixed_len)=32]; // V1 verifier nonce
   bytes chain_tip           = 4 [(dsm_fixed_len)=32]; // adjacency anchor
   bytes commitment_preimage = 5 [(dsm_fixed_len)=32]; // 32-byte C_pre per Alg. 3
@@ -2396,7 +2396,7 @@ message CdbrwEnrollResponse {
   uint32 revision              = 1;
   float epsilon_intra          = 2;
   uint32 mean_histogram_len    = 3;
-  bytes reference_anchor_prefix= 4 [(dsm_max_len)=16];  // first 10 bytes of AC_D (display hint)
+  bytes reference_anchor_prefix= 4 [(dsm_max_len)=16]; // first 10 bytes of AC_D (display hint)
   CdbrwTrustSnapshot trust     = 5;
   bytes reference_anchor       = 6 [(dsm_fixed_len)=32]; // full 32-byte AC_D for bootstrap handoff
 }
@@ -2797,6 +2797,17 @@ message InitializeIdentityContextOp {
   bytes binding_key  = 3 [(dsm_fixed_len)=32];
 }
 
+// Restore canonical identity context by re-deriving the binding key from
+// persisted deterministic C-DBRW inputs. This is the fast cold-start path
+// after a successful first bootstrap / enrollment.
+message RestoreIdentityContextOp {
+  bytes device_id             = 1 [(dsm_fixed_len)=32];
+  bytes genesis_hash          = 2 [(dsm_fixed_len)=32];
+  bytes cdbrw_hw_entropy      = 3 [(dsm_fixed_len)=32];
+  bytes cdbrw_env_fingerprint = 4 [(dsm_max_len)=1024];
+  bytes cdbrw_salt            = 5 [(dsm_fixed_len)=32];
+}
+
 // Canonical startup/bootstrap request shared by native platforms.
 message StartupRequest {
   oneof operation {
@@ -2804,6 +2815,7 @@ message StartupRequest {
     ConfigureEnvOp             configure_env            = 2;
     InitializeSdkOp            initialize_sdk           = 3;
     InitializeIdentityContextOp initialize_identity_context = 4;
+    RestoreIdentityContextOp   restore_identity_context = 5;
   }
 }
 

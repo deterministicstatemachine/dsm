@@ -17,7 +17,10 @@ import dsm.types.proto.Codec
 import dsm.types.proto.EnvelopeOp
 import dsm.types.proto.IngressRequest
 import dsm.types.proto.IngressResponse
+import dsm.types.proto.RestoreIdentityContextOp
 import dsm.types.proto.RouterQueryOp
+import dsm.types.proto.StartupRequest
+import dsm.types.proto.StartupResponse
 import dsm.types.proto.SystemGenesisRequest
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -127,6 +130,17 @@ internal object BridgeIdentityHandler {
             )
         }
         return envelope.bootstrapFinalizeResponse
+    }
+
+    private fun dispatchStartupOrThrow(request: StartupRequest): ByteArray {
+        val response = StartupResponse.parseFrom(
+            NativeBoundaryBridge.startup(request.toByteArray())
+        )
+        return when (response.resultCase) {
+            StartupResponse.ResultCase.OK_BYTES -> response.okBytes.toByteArray()
+            StartupResponse.ResultCase.ERROR -> throw IllegalStateException(response.error.message)
+            else -> throw IllegalStateException("startup returned no result")
+        }
     }
 
     private fun clearGenesisArtifacts(
@@ -337,29 +351,101 @@ internal object BridgeIdentityHandler {
         return result
     }
 
-    private fun loadOrCreateDbrwSalt(
+    private fun loadPersistedDbrwSalt(
         prefs: SharedPreferences,
         keyDbrwSalt: String,
         logTag: String,
-    ): ByteArray {
+    ): ByteArray? {
         val existing = prefs.getString(keyDbrwSalt, null)
         if (!existing.isNullOrEmpty()) {
             try {
                 val decoded = BridgeEncoding.base32CrockfordDecode(existing)
                 if (decoded.size == 32) {
-                    Log.i(logTag, "loadOrCreateDbrwSalt: loaded persisted DBRW salt")
+                    Log.i(logTag, "loadPersistedDbrwSalt: loaded persisted DBRW salt")
                     return decoded
                 }
             } catch (_: Throwable) {
-                Log.w(logTag, "loadOrCreateDbrwSalt: invalid persisted DBRW salt, regenerating")
+                Log.w(logTag, "loadPersistedDbrwSalt: invalid persisted DBRW salt")
             }
         }
+        Log.w(logTag, "loadPersistedDbrwSalt: persisted DBRW salt missing")
+        return null
+    }
 
-        val fresh = ByteArray(32)
-        java.security.SecureRandom().nextBytes(fresh)
-        prefs.edit().putString(keyDbrwSalt, BridgeEncoding.base32CrockfordEncode(fresh)).apply()
-        Log.i(logTag, "loadOrCreateDbrwSalt: generated and persisted new DBRW salt")
-        return fresh
+    private fun restoreIdentityContextDirect(
+        context: Context,
+        prefs: SharedPreferences,
+        logTag: String,
+        keyDeviceId: String,
+        keyGenesisHash: String,
+        keyDbrwSalt: String,
+    ): Boolean {
+        val deviceIdStr = prefs.getString(keyDeviceId, null)
+        val genesisHashStr = prefs.getString(keyGenesisHash, null)
+        if (deviceIdStr.isNullOrEmpty() || genesisHashStr.isNullOrEmpty()) {
+            Log.i(logTag, "restoreIdentityContextDirect: no persisted identity found")
+            return false
+        }
+
+        val deviceIdBytes = try { BridgeEncoding.base32CrockfordDecode(deviceIdStr) } catch (_: Throwable) { ByteArray(0) }
+        val genesisHashBytes = try { BridgeEncoding.base32CrockfordDecode(genesisHashStr) } catch (_: Throwable) { ByteArray(0) }
+        if (deviceIdBytes.size != 32 || genesisHashBytes.size != 32) {
+            Log.w(logTag, "restoreIdentityContextDirect: persisted identity malformed")
+            return false
+        }
+
+        val cachedAnchorB32 = prefs.getString(KEY_CDBRW_ANCHOR, null)
+        val cachedAnchor = if (!cachedAnchorB32.isNullOrEmpty()) {
+            try {
+                val decoded = BridgeEncoding.base32CrockfordDecode(cachedAnchorB32)
+                if (decoded.size == 32) decoded else null
+            } catch (_: Throwable) {
+                null
+            }
+        } else {
+            null
+        }
+        if (cachedAnchor == null) {
+            Log.i(logTag, "restoreIdentityContextDirect: cached anchor unavailable; falling back")
+            return false
+        }
+
+        val dbrwSalt = loadPersistedDbrwSalt(
+            prefs = prefs,
+            keyDbrwSalt = keyDbrwSalt,
+            logTag = logTag,
+        ) ?: return false
+
+        return try {
+            dispatchStartupOrThrow(
+                StartupRequest.newBuilder()
+                    .setRestoreIdentityContext(
+                        RestoreIdentityContextOp.newBuilder()
+                            .setDeviceId(ByteString.copyFrom(deviceIdBytes))
+                            .setGenesisHash(ByteString.copyFrom(genesisHashBytes))
+                            .setCdbrwHwEntropy(ByteString.copyFrom(cachedAnchor))
+                            .setCdbrwEnvFingerprint(ByteString.copyFrom(AntiCloneGate.buildEnvironmentBytes()))
+                            .setCdbrwSalt(ByteString.copyFrom(dbrwSalt))
+                    )
+                        .build()
+            )
+
+            val trust = resumeCdbrwTrust(
+                context = context,
+                prefs = prefs,
+                logTag = logTag,
+                deviceIdBytes = deviceIdBytes,
+                genesisHashBytes = genesisHashBytes,
+            )
+            Log.i(
+                logTag,
+                "restoreIdentityContextDirect: restored identity context (access=${trust.accessLevel})",
+            )
+            true
+        } catch (t: Throwable) {
+            Log.w(logTag, "restoreIdentityContextDirect failed; falling back to bootstrap", t)
+            false
+        }
     }
 
     private fun requestGenesisEnvelopeViaIngress(
@@ -517,6 +603,18 @@ internal object BridgeIdentityHandler {
             return true
         }
 
+        if (restoreIdentityContextDirect(
+                context = context,
+                prefs = prefs,
+                logTag = logTag,
+                keyDeviceId = keyDeviceId,
+                keyGenesisHash = keyGenesisHash,
+                keyDbrwSalt = keyDbrwSalt,
+            )) {
+            sdkContextInitialized.set(true)
+            return true
+        }
+
         try {
             val deviceIdStr = prefs.getString(keyDeviceId, null)
             val genesisHashStr = prefs.getString(keyGenesisHash, null)
@@ -551,11 +649,11 @@ internal object BridgeIdentityHandler {
                         "bootstrapFromPrefs: cdbrw anchor unavailable after resume"
                     )
                     val envEntropy = AntiCloneGate.buildEnvironmentBytes()
-                    val dbrwSalt = loadOrCreateDbrwSalt(
+                    val dbrwSalt = loadPersistedDbrwSalt(
                         prefs = prefs,
                         keyDbrwSalt = keyDbrwSalt,
                         logTag = logTag,
-                    )
+                    ) ?: return false
                     val finalizeEnvelope = sendBootstrapMeasurementReport(
                         BootstrapMeasurementReport.newBuilder()
                             .setPhase(BootstrapMeasurementReport.Phase.BOOTSTRAP_PHASE_RESUME_FINALIZE)

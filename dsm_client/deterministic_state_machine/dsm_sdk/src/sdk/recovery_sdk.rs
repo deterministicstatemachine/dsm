@@ -18,7 +18,7 @@ use dsm::recovery::capsule::{
 use dsm::types::error::DsmError;
 
 /// In-memory cached recovery key (derived from mnemonic via Argon2id + HKDF-BLAKE3).
-/// Never persisted to disk — cleared on disable or app restart.
+/// Also persisted to SQLite encrypted by a device-bound key so it survives app restarts.
 static RECOVERY_KEY: Mutex<Option<[u8; 32]>> = Mutex::new(None);
 
 /// In-memory cached recovery authority SPHINCS+ keypair (public, secret).
@@ -286,6 +286,12 @@ impl RecoverySDK {
             *guard = Some(key);
         }
 
+        // Persist the key encrypted by a device-bound wrapping key so it
+        // survives app restarts without requiring the mnemonic again.
+        if let Err(e) = Self::persist_recovery_key(&key) {
+            log::warn!("[RECOVERY_SDK] Failed to persist recovery key (non-fatal): {e}");
+        }
+
         // Derive and cache the recovery authority SPHINCS+ keypair.
         let authority_seed = derive_recovery_authority_seed(mnemonic)?;
         let keypair = dsm::crypto::sphincs::generate_keypair_from_seed(
@@ -303,7 +309,7 @@ impl RecoverySDK {
         Ok(())
     }
 
-    /// Clear the cached recovery key and authority keypair from memory.
+    /// Clear the cached recovery key and authority keypair from memory and storage.
     pub fn clear_cached_key() {
         if let Ok(mut guard) = RECOVERY_KEY.lock() {
             if let Some(ref mut k) = *guard {
@@ -318,6 +324,8 @@ impl RecoverySDK {
             }
             *guard = None;
         }
+        // Also wipe the persisted encrypted blob.
+        let _ = crate::storage::client_db::recovery::delete_encrypted_recovery_key();
     }
 
     /// Check if a recovery key is currently cached in memory.
@@ -332,6 +340,109 @@ impl RecoverySDK {
             .lock()
             .ok()
             .and_then(|g| g.clone())
+    }
+
+    /// Derive a device-bound wrapping key from device_id + genesis_hash.
+    /// Used to encrypt the recovery key before persisting to SQLite.
+    fn device_wrapping_key() -> Result<[u8; 32], DsmError> {
+        let device_id = crate::sdk::app_state::AppState::get_device_id()
+            .ok_or_else(|| DsmError::InvalidState("Device ID not available".into()))?;
+        let genesis_hash = crate::sdk::app_state::AppState::get_genesis_hash().unwrap_or_default();
+        let mut hasher = dsm::crypto::blake3::Hasher::new_derive_key("DSM/recovery-persist\0");
+        hasher.update(&device_id);
+        hasher.update(&genesis_hash);
+        Ok(*hasher.finalize().as_bytes())
+    }
+
+    /// Encrypt the recovery key with a device-bound wrapping key and store in SQLite.
+    /// Format: nonce (24 bytes) || ciphertext+tag.
+    fn persist_recovery_key(key: &[u8; 32]) -> Result<(), DsmError> {
+        use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
+        use chacha20poly1305::aead::Aead;
+
+        let wrapping_key = Self::device_wrapping_key()?;
+        let cipher = XChaCha20Poly1305::new_from_slice(&wrapping_key)
+            .map_err(|e| DsmError::InvalidState(format!("wrapping cipher init: {e}")))?;
+
+        // Nonce derived from wrapping key AND plaintext — safe even if the
+        // mnemonic (and therefore key) changes between persist calls.
+        let nonce_hash = {
+            let mut h = dsm::crypto::blake3::Hasher::new_derive_key("DSM/recovery-persist-nonce\0");
+            h.update(&wrapping_key);
+            h.update(key);
+            h.finalize()
+        };
+        let nonce = XNonce::from_slice(&nonce_hash.as_bytes()[..24]);
+
+        let ciphertext = cipher
+            .encrypt(nonce, key.as_ref())
+            .map_err(|e| DsmError::InvalidState(format!("recovery key encryption: {e}")))?;
+
+        // Store nonce || ciphertext so decrypt doesn't need to re-derive from plaintext.
+        let mut blob = Vec::with_capacity(24 + ciphertext.len());
+        blob.extend_from_slice(nonce.as_slice());
+        blob.extend_from_slice(&ciphertext);
+
+        crate::storage::client_db::recovery::store_encrypted_recovery_key(&blob)
+            .map_err(|e| DsmError::InvalidState(format!("persist encrypted key: {e}")))?;
+
+        log::info!(
+            "[RECOVERY_SDK] Recovery key persisted (encrypted, {} bytes)",
+            blob.len()
+        );
+        Ok(())
+    }
+
+    /// Load the persisted encrypted recovery key, decrypt it, and cache in memory.
+    /// Returns Ok(true) if loaded, Ok(false) if no persisted key exists.
+    fn load_persisted_recovery_key() -> Result<bool, DsmError> {
+        use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
+        use chacha20poly1305::aead::Aead;
+
+        let blob = match crate::storage::client_db::recovery::load_encrypted_recovery_key() {
+            Ok(Some(b)) => b,
+            Ok(None) => return Ok(false),
+            Err(e) => {
+                return Err(DsmError::InvalidState(format!(
+                    "load encrypted recovery key: {e}"
+                )))
+            }
+        };
+
+        if blob.len() < 24 {
+            return Err(DsmError::InvalidState(format!(
+                "persisted key blob too short: {} bytes",
+                blob.len()
+            )));
+        }
+
+        let nonce = XNonce::from_slice(&blob[..24]);
+        let ciphertext = &blob[24..];
+
+        let wrapping_key = Self::device_wrapping_key()?;
+        let cipher = XChaCha20Poly1305::new_from_slice(&wrapping_key)
+            .map_err(|e| DsmError::InvalidState(format!("wrapping cipher init: {e}")))?;
+
+        let plaintext = cipher
+            .decrypt(nonce, ciphertext)
+            .map_err(|e| DsmError::InvalidState(format!("recovery key decryption: {e}")))?;
+
+        if plaintext.len() != 32 {
+            return Err(DsmError::InvalidState(format!(
+                "decrypted key wrong length: {} (expected 32)",
+                plaintext.len()
+            )));
+        }
+
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&plaintext);
+        {
+            let mut guard = RECOVERY_KEY
+                .lock()
+                .map_err(|_| DsmError::InvalidState("Recovery key mutex poisoned".into()))?;
+            *guard = Some(key);
+        }
+        Ok(true)
     }
 
     /// Decrypt an encrypted capsule using the in-memory cached recovery key.
@@ -351,22 +462,35 @@ impl RecoverySDK {
         decrypt_capsule_with_key(&encrypted, &key)
     }
 
-    /// Silently refresh the pending NFC capsule if backup is enabled and a key is cached.
+    /// Refresh the pending NFC capsule if backup is enabled and a key is available.
     ///
     /// Called by the transport layer (Kotlin) after every state-mutating operation.
-    /// Rust decides whether to actually create a capsule. If backup is not enabled
-    /// or no key is cached, this is a no-op. If capsule creation fails, it logs
-    /// and moves on — it's not critical.
-    ///
-    /// The capsule overwrites any previous pending capsule. It sits there until
-    /// the NFC ring comes into range, at which point Kotlin writes it, vibrates,
-    /// and clears pending.
+    /// If the in-memory key was lost (app restart), this auto-loads the persisted
+    /// encrypted key from SQLite before creating the capsule.
     pub fn maybe_refresh_nfc_capsule() {
         if !Self::is_nfc_backup_enabled() {
             return;
         }
+
+        // Auto-load persisted key if the in-memory cache was lost (app restart).
         if !Self::has_cached_key() {
-            return;
+            log::info!("[NFC_BACKUP] No cached key — attempting to load persisted key");
+            match Self::load_persisted_recovery_key() {
+                Ok(true) => {
+                    log::info!("[NFC_BACKUP] Persisted key loaded successfully");
+                }
+                Ok(false) => {
+                    log::warn!(
+                        "[NFC_BACKUP] No persisted key found — capsule refresh skipped. \
+                         User must re-enter mnemonic via Settings."
+                    );
+                    return;
+                }
+                Err(e) => {
+                    log::warn!("[NFC_BACKUP] Failed to load persisted key: {e}");
+                    return;
+                }
+            }
         }
 
         match Self::create_capsule_from_current_state_with_cached_key() {

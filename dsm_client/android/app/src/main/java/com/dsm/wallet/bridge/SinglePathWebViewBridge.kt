@@ -641,9 +641,12 @@ class SinglePathWebViewBridge(private val context: Context) {
             try {
                 Log.d(TAG, "postBinary: forwarding topic=$topic payloadBytes=${payload.size}")
                 // MainActivity is responsible for posting via MessagePort (ArrayBuffer)
-                com.dsm.wallet.ui.MainActivity.dispatchDsmEventToWebView(topic, payload)
+                if (!com.dsm.wallet.ui.MainActivity.dispatchDsmEventToWebView(topic, payload)) {
+                    throw IllegalStateException("WebView dispatch unavailable for topic=$topic")
+                }
             } catch (t: Throwable) {
                 Log.w(TAG, "postBinary: unable to dispatch to WebView (topic=$topic, len=${payload.size}): ${t.message}")
+                throw t
             }
         }
         

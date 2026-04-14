@@ -22855,6 +22855,71 @@ export class InitializeIdentityContextOp extends Message<InitializeIdentityConte
 }
 
 /**
+ * Restore canonical identity context by re-deriving the binding key from
+ * persisted deterministic C-DBRW inputs. This is the fast cold-start path
+ * after a successful first bootstrap / enrollment.
+ *
+ * @generated from message dsm.RestoreIdentityContextOp
+ */
+export class RestoreIdentityContextOp extends Message<RestoreIdentityContextOp> {
+  /**
+   * @generated from field: bytes device_id = 1;
+   */
+  deviceId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes genesis_hash = 2;
+   */
+  genesisHash = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes cdbrw_hw_entropy = 3;
+   */
+  cdbrwHwEntropy = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes cdbrw_env_fingerprint = 4;
+   */
+  cdbrwEnvFingerprint = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes cdbrw_salt = 5;
+   */
+  cdbrwSalt = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<RestoreIdentityContextOp>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.RestoreIdentityContextOp";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "genesis_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "cdbrw_hw_entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "cdbrw_env_fingerprint", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "cdbrw_salt", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RestoreIdentityContextOp {
+    return new RestoreIdentityContextOp().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): RestoreIdentityContextOp {
+    return new RestoreIdentityContextOp().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): RestoreIdentityContextOp {
+    return new RestoreIdentityContextOp().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: RestoreIdentityContextOp | PlainMessage<RestoreIdentityContextOp> | undefined, b: RestoreIdentityContextOp | PlainMessage<RestoreIdentityContextOp> | undefined): boolean {
+    return proto3.util.equals(RestoreIdentityContextOp, a, b);
+  }
+}
+
+/**
  * Canonical startup/bootstrap request shared by native platforms.
  *
  * @generated from message dsm.StartupRequest
@@ -22887,6 +22952,12 @@ export class StartupRequest extends Message<StartupRequest> {
      */
     value: InitializeIdentityContextOp;
     case: "initializeIdentityContext";
+  } | {
+    /**
+     * @generated from field: dsm.RestoreIdentityContextOp restore_identity_context = 5;
+     */
+    value: RestoreIdentityContextOp;
+    case: "restoreIdentityContext";
   } | { case: undefined; value?: undefined } = { case: undefined };
 
   constructor(data?: PartialMessage<StartupRequest>) {
@@ -22901,6 +22972,7 @@ export class StartupRequest extends Message<StartupRequest> {
     { no: 2, name: "configure_env", kind: "message", T: ConfigureEnvOp, oneof: "operation" },
     { no: 3, name: "initialize_sdk", kind: "message", T: InitializeSdkOp, oneof: "operation" },
     { no: 4, name: "initialize_identity_context", kind: "message", T: InitializeIdentityContextOp, oneof: "operation" },
+    { no: 5, name: "restore_identity_context", kind: "message", T: RestoreIdentityContextOp, oneof: "operation" },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): StartupRequest {

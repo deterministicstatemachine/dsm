@@ -500,7 +500,10 @@ impl AppRouterImpl {
             // with inline NFC writing.
             "nfc.ring.write" => {
                 // Check NFC backup is enabled.
-                if !crate::sdk::recovery_sdk::RecoverySDK::is_nfc_backup_enabled() {
+                let enabled = crate::sdk::recovery_sdk::RecoverySDK::is_nfc_backup_enabled();
+                log::info!("[NFC_DIAG] nfc.ring.write: enabled={}", enabled);
+                if !enabled {
+                    log::warn!("[NFC_DIAG] nfc.ring.write: REJECTED — not enabled");
                     return err(
                         "NFC backup not enabled. Enable it via Settings > NFC Ring Backup first."
                             .into(),
@@ -508,7 +511,10 @@ impl AppRouterImpl {
                 }
 
                 // Check a latest capsule is available for transport to Kotlin.
-                if crate::sdk::recovery_sdk::RecoverySDK::get_pending_capsule().is_none() {
+                let pending = crate::sdk::recovery_sdk::RecoverySDK::get_pending_capsule();
+                log::info!("[NFC_DIAG] nfc.ring.write: pending={}", pending.is_some());
+                if pending.is_none() {
+                    log::warn!("[NFC_DIAG] nfc.ring.write: REJECTED — no pending capsule");
                     return err(
                         "No recovery capsule is available. Enable backup or rebuild the latest capsule first."
                             .into(),
@@ -516,6 +522,7 @@ impl AppRouterImpl {
                 }
 
                 // Authorization granted — Kotlin will proceed with inline NFC writing.
+                log::info!("[NFC_DIAG] nfc.ring.write: AUTHORIZED");
                 let resp = generated::AppStateResponse {
                     key: "nfc.ring.write".to_string(),
                     value: Some("authorized=true".to_string()),

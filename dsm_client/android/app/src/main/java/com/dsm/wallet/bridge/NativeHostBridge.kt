@@ -273,15 +273,22 @@ internal object NativeHostBridge {
             }
 
             NativeHostRequestKind.NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_WRITE_PAYLOAD -> {
+                Log.i(TAG, "NFC_DIAG: writePayload request received")
                 try {
                     NfcTagWritePayload.parseFrom(request.payload)
                 } catch (e: InvalidProtocolBufferException) {
+                    Log.e(TAG, "NFC_DIAG: writePayload invalid proto: ${e.message}")
                     return errorResponse(400, "nfc.tag.write_payload: invalid payload: ${e.message}")
                 }
                 val act = MainActivity.getActiveInstance()
-                    ?: return errorResponse(503, "nfc.tag.write_payload: no active activity")
+                if (act == null) {
+                    Log.e(TAG, "NFC_DIAG: writePayload no active activity")
+                    return errorResponse(503, "nfc.tag.write_payload: no active activity")
+                }
                 // Write inline — no separate Activity. The user stays in the WebView.
+                Log.i(TAG, "NFC_DIAG: calling startNfcWriter()")
                 val launched = act.startNfcWriter()
+                Log.i(TAG, "NFC_DIAG: startNfcWriter returned=$launched")
                 if (!launched) {
                     return errorResponse(503, "nfc.tag.write_payload: NFC not enabled on device")
                 }

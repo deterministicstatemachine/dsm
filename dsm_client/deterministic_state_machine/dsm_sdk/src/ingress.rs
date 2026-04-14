@@ -621,6 +621,47 @@ fn prime_identity_app_state(device_id: &[u8], genesis_hash: &[u8]) {
     crate::sdk::app_state::AppState::set_has_identity(true);
 }
 
+fn ensure_identity_context_compatible(
+    device_id: &[u8],
+    genesis_hash: &[u8],
+) -> Result<bool, pb::Error> {
+    let has_identity = crate::sdk::app_state::AppState::get_has_identity();
+    let stored_device_id = crate::sdk::app_state::AppState::get_device_id();
+    let stored_genesis_hash = crate::sdk::app_state::AppState::get_genesis_hash();
+
+    if !has_identity && stored_device_id.is_none() && stored_genesis_hash.is_none() {
+        return Ok(false);
+    }
+
+    let Some(current_device_id) = stored_device_id else {
+        return Err(ingress_error(
+            ERROR_CODE_PROCESSING_FAILED,
+            "startup: identity state inconsistent (has identity flag without device_id)",
+        ));
+    };
+    let Some(current_genesis_hash) = stored_genesis_hash else {
+        return Err(ingress_error(
+            ERROR_CODE_PROCESSING_FAILED,
+            "startup: identity state inconsistent (has identity flag without genesis_hash)",
+        ));
+    };
+
+    if current_device_id != device_id {
+        return Err(ingress_error(
+            ERROR_CODE_INVALID_INPUT,
+            "startup: identity context already installed for a different device_id",
+        ));
+    }
+    if current_genesis_hash != genesis_hash {
+        return Err(ingress_error(
+            ERROR_CODE_INVALID_INPUT,
+            "startup: identity context already installed for a different genesis_hash",
+        ));
+    }
+
+    Ok(true)
+}
+
 fn install_identity_context_core(
     device_id: Vec<u8>,
     genesis_hash: Vec<u8>,
@@ -652,6 +693,18 @@ fn install_identity_context_core(
                 binding_key.len()
             ),
         ));
+    }
+
+    if ensure_identity_context_compatible(&device_id, &genesis_hash)? {
+        crate::install_canonical_binding_key(binding_key.clone()).map_err(|e| {
+            ingress_error(
+                ERROR_CODE_INVALID_INPUT,
+                format!("startup: invalid binding key: {e}"),
+            )
+        })?;
+        #[cfg(target_os = "android")]
+        crate::jni::cdbrw::set_cdbrw_binding_key(binding_key.clone());
+        return Ok(());
     }
 
     crate::install_canonical_binding_key(binding_key.clone()).map_err(|e| {
@@ -735,6 +788,34 @@ fn initialize_identity_context_core(
 ) -> Result<Vec<u8>, pb::Error> {
     install_identity_context_core(device_id, genesis_hash, binding_key)?;
     initialize_sdk_core()
+}
+
+fn restore_identity_context_core(
+    device_id: Vec<u8>,
+    genesis_hash: Vec<u8>,
+    cdbrw_hw_entropy: Vec<u8>,
+    cdbrw_env_fingerprint: Vec<u8>,
+    cdbrw_salt: Vec<u8>,
+) -> Result<Vec<u8>, pb::Error> {
+    let context = PlatformContext::bootstrap(RawPlatformInputs {
+        device_id_raw: device_id,
+        genesis_hash_raw: genesis_hash,
+        cdbrw_hw_entropy,
+        cdbrw_env_fingerprint,
+        cdbrw_salt,
+    })
+    .map_err(|e| {
+        ingress_error(
+            ERROR_CODE_INVALID_INPUT,
+            format!("startup: restore_identity_context failed: {e}"),
+        )
+    })?;
+
+    initialize_identity_context_core(
+        context.device_id.to_vec(),
+        context.genesis_hash.to_vec(),
+        context.cdbrw_binding.to_vec(),
+    )
 }
 
 pub fn dispatch_ingress(request: IngressRequest) -> IngressResponse {
@@ -832,6 +913,15 @@ pub fn dispatch_startup(request: StartupRequest) -> StartupResponse {
         Some(startup_request::Operation::InitializeSdk(_)) => initialize_sdk_core(),
         Some(startup_request::Operation::InitializeIdentityContext(op)) => {
             initialize_identity_context_core(op.device_id, op.genesis_hash, op.binding_key)
+        }
+        Some(startup_request::Operation::RestoreIdentityContext(op)) => {
+            restore_identity_context_core(
+                op.device_id,
+                op.genesis_hash,
+                op.cdbrw_hw_entropy,
+                op.cdbrw_env_fingerprint,
+                op.cdbrw_salt,
+            )
         }
         None => Err(ingress_error(
             ERROR_CODE_INVALID_INPUT,
@@ -1219,5 +1309,112 @@ endpoint = "http://127.0.0.1:8080"
         let error = expect_startup_error(response);
         assert_eq!(error.code, ERROR_CODE_INVALID_INPUT);
         assert!(error.message.contains("binding_key must be 32 bytes"));
+    }
+
+    #[test]
+    fn startup_restore_identity_context_derives_binding_key_and_router() {
+        let _guard = setup_test_env();
+        let hw = vec![0x33; 32];
+        let env = vec![0x44; 32];
+        let salt = vec![0x55; 32];
+        let expected_binding =
+            dsm::crypto::cdbrw_binding::derive_cdbrw_binding_key(&hw, &env, &salt)
+                .expect("binding derivation");
+
+        let response = dispatch_startup(StartupRequest {
+            operation: Some(startup_request::Operation::RestoreIdentityContext(
+                pb::RestoreIdentityContextOp {
+                    device_id: vec![0x11; 32],
+                    genesis_hash: vec![0x22; 32],
+                    cdbrw_hw_entropy: hw,
+                    cdbrw_env_fingerprint: env,
+                    cdbrw_salt: salt,
+                },
+            )),
+        });
+
+        match response.result {
+            Some(startup_response::Result::OkBytes(_)) => {}
+            other => panic!("expected OkBytes, got {other:?}"),
+        }
+
+        assert_eq!(
+            crate::fetch_dbrw_binding_key().expect("binding key"),
+            expected_binding.to_vec()
+        );
+        assert!(crate::is_sdk_context_initialized());
+    }
+
+    #[test]
+    fn startup_restore_identity_context_is_idempotent_for_same_identity() {
+        let _guard = setup_test_env();
+
+        let first = dispatch_startup(StartupRequest {
+            operation: Some(startup_request::Operation::RestoreIdentityContext(
+                pb::RestoreIdentityContextOp {
+                    device_id: vec![0x11; 32],
+                    genesis_hash: vec![0x22; 32],
+                    cdbrw_hw_entropy: vec![0x33; 32],
+                    cdbrw_env_fingerprint: vec![0x44; 32],
+                    cdbrw_salt: vec![0x55; 32],
+                },
+            )),
+        });
+        match first.result {
+            Some(startup_response::Result::OkBytes(_)) => {}
+            other => panic!("expected OkBytes, got {other:?}"),
+        }
+
+        let second = dispatch_startup(StartupRequest {
+            operation: Some(startup_request::Operation::RestoreIdentityContext(
+                pb::RestoreIdentityContextOp {
+                    device_id: vec![0x11; 32],
+                    genesis_hash: vec![0x22; 32],
+                    cdbrw_hw_entropy: vec![0x33; 32],
+                    cdbrw_env_fingerprint: vec![0x44; 32],
+                    cdbrw_salt: vec![0x55; 32],
+                },
+            )),
+        });
+        match second.result {
+            Some(startup_response::Result::OkBytes(_)) => {}
+            other => panic!("expected OkBytes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn startup_restore_identity_context_rejects_mismatched_identity() {
+        let _guard = setup_test_env();
+
+        let first = dispatch_startup(StartupRequest {
+            operation: Some(startup_request::Operation::RestoreIdentityContext(
+                pb::RestoreIdentityContextOp {
+                    device_id: vec![0x11; 32],
+                    genesis_hash: vec![0x22; 32],
+                    cdbrw_hw_entropy: vec![0x33; 32],
+                    cdbrw_env_fingerprint: vec![0x44; 32],
+                    cdbrw_salt: vec![0x55; 32],
+                },
+            )),
+        });
+        match first.result {
+            Some(startup_response::Result::OkBytes(_)) => {}
+            other => panic!("expected OkBytes, got {other:?}"),
+        }
+
+        let second = dispatch_startup(StartupRequest {
+            operation: Some(startup_request::Operation::RestoreIdentityContext(
+                pb::RestoreIdentityContextOp {
+                    device_id: vec![0x99; 32],
+                    genesis_hash: vec![0x22; 32],
+                    cdbrw_hw_entropy: vec![0x33; 32],
+                    cdbrw_env_fingerprint: vec![0x44; 32],
+                    cdbrw_salt: vec![0x55; 32],
+                },
+            )),
+        });
+        let error = expect_startup_error(second);
+        assert_eq!(error.code, ERROR_CODE_INVALID_INPUT);
+        assert!(error.message.contains("different device_id"));
     }
 }
