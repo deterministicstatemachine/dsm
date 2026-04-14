@@ -420,6 +420,17 @@ const RecoveryScreen: React.FC<RecoveryScreenProps> = ({ onNavigate }) => {
                   {busy ? 'WORKING...' : staged ? 'ALREADY STAGED' : 'STAGE ON THIS DEVICE'}
                 </button>
               </div>
+              {staged && (
+                <div className="nfc-actions">
+                  <button
+                    className="nfc-btn"
+                    onClick={() => onNavigate?.('recovery_pipeline')}
+                    style={{ fontWeight: 900, letterSpacing: '1px' }}
+                  >
+                    PROCEED TO RECOVERY
+                  </button>
+                </div>
+              )}
               <div className="nfc-actions">
                 <button className="nfc-btn" onClick={reset}>
                   READ AGAIN

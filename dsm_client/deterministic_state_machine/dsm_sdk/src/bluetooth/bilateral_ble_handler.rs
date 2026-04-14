@@ -1015,12 +1015,31 @@ impl BilateralBleHandler {
                 drop(mgr);
             } else {
                 let mgr = self.bilateral_tx_manager.read().await;
-                if !mgr.has_verified_contact(&counterparty_device_id) {
-                    return Err(DsmError::invalid_operation(
-                        "Bilateral transactions require a verified contact. Please add the contact first.",
-                    ));
-                }
+                let has_contact = mgr.has_verified_contact(&counterparty_device_id);
                 drop(mgr);
+                if !has_contact {
+                    log::warn!(
+                        "[BLE_HANDLER] Self-device contact not in BTM — attempting just-in-time sync"
+                    );
+                    let synced = match crate::storage::client_db::get_contact_by_device_id(
+                        &counterparty_device_id,
+                    ) {
+                        Ok(Some(record)) => {
+                            if let Some(verified) = record.to_verified_contact() {
+                                let mut mgr = self.bilateral_tx_manager.write().await;
+                                mgr.add_verified_contact(verified).is_ok()
+                            } else {
+                                false
+                            }
+                        }
+                        _ => false,
+                    };
+                    if !synced {
+                        return Err(DsmError::invalid_operation(
+                            "Bilateral transactions require a verified contact. Please add the contact first.",
+                        ));
+                    }
+                }
                 // Auto-establish relationship if missing (one-time, after QR contact exchange)
                 let mut mgr = self.bilateral_tx_manager.write().await;
                 if mgr.get_relationship(&counterparty_device_id).is_none() {
@@ -1050,12 +1069,50 @@ impl BilateralBleHandler {
             }
         } else {
             let mgr = self.bilateral_tx_manager.read().await;
-            if !mgr.has_verified_contact(&counterparty_device_id) {
-                return Err(DsmError::invalid_operation(
-                    "Bilateral transactions require a verified contact. Please add the contact first.",
-                ));
-            }
+            let has_contact = mgr.has_verified_contact(&counterparty_device_id);
             drop(mgr);
+            if !has_contact {
+                // Just-in-time sync: the in-memory BTM may not have this contact even
+                // though SQLite does (e.g., init-time sync was missed). Try to load and
+                // add it before failing.
+                log::warn!(
+                    "[BLE_HANDLER] Contact not in BTM — attempting just-in-time sync from SQLite"
+                );
+                let synced = match crate::storage::client_db::get_contact_by_device_id(
+                    &counterparty_device_id,
+                ) {
+                    Ok(Some(record)) => {
+                        if let Some(verified) = record.to_verified_contact() {
+                            let mut mgr = self.bilateral_tx_manager.write().await;
+                            match mgr.add_verified_contact(verified) {
+                                Ok(_) => {
+                                    log::warn!(
+                                        "[BLE_HANDLER] ✅ Just-in-time contact sync succeeded"
+                                    );
+                                    true
+                                }
+                                Err(e) => {
+                                    log::error!(
+                                        "[BLE_HANDLER] ❌ Just-in-time contact sync failed: {e}"
+                                    );
+                                    false
+                                }
+                            }
+                        } else {
+                            log::error!(
+                                "[BLE_HANDLER] Contact in SQLite but to_verified_contact() returned None"
+                            );
+                            false
+                        }
+                    }
+                    _ => false,
+                };
+                if !synced {
+                    return Err(DsmError::invalid_operation(
+                        "Bilateral transactions require a verified contact. Please add the contact first.",
+                    ));
+                }
+            }
             // Auto-establish relationship if missing (one-time, after QR contact exchange)
             let mut mgr = self.bilateral_tx_manager.write().await;
             if mgr.get_relationship(&counterparty_device_id).is_none() {
@@ -1620,12 +1677,31 @@ impl BilateralBleHandler {
         // We verify the SENDER (counterparty_device_id) is a known contact
         {
             let mut mgr = self.bilateral_tx_manager.write().await;
-            let is_verified = mgr.has_verified_contact(&counterparty_device_id);
+            let mut is_verified = mgr.has_verified_contact(&counterparty_device_id);
             log::warn!(
                 "[BilateralBleHandler] 🔍 Contact verification: device_id={} is_verified={}",
                 dsm::core::utility::labeling::hash_to_short_id(&counterparty_device_id),
                 is_verified
             );
+            // Fallback: if not in memory, try loading from SQLite (handles boot race)
+            if !is_verified {
+                log::warn!(
+                    "[BilateralBleHandler] 🔄 Contact not in BLE memory — checking SQLite fallback"
+                );
+                if let Ok(Some(record)) =
+                    crate::storage::client_db::get_contact_by_device_id(&counterparty_device_id)
+                {
+                    if let Some(verified_contact) = record.to_verified_contact() {
+                        log::warn!(
+                            "[BilateralBleHandler] ✅ Found contact in SQLite, syncing to BLE handler: alias={}",
+                            verified_contact.alias
+                        );
+                        if mgr.add_verified_contact(verified_contact).is_ok() {
+                            is_verified = true;
+                        }
+                    }
+                }
+            }
             if !is_verified {
                 log::error!(
                     "[BilateralBleHandler] ❌ Sender device_id not found in verified contacts!"
@@ -4261,9 +4337,24 @@ impl BilateralBleHandler {
 
             // Ensure contact exists and relationship is initialized (idempotent)
             if !mgr.has_verified_contact(&counterparty_device_id) {
-                return Err(DsmError::invalid_operation(
-                    "Cannot register sender session without a verified contact",
-                ));
+                // Just-in-time sync from SQLite before failing
+                let synced = match crate::storage::client_db::get_contact_by_device_id(
+                    &counterparty_device_id,
+                ) {
+                    Ok(Some(record)) => record
+                        .to_verified_contact()
+                        .and_then(|v| mgr.add_verified_contact(v).ok())
+                        .is_some(),
+                    _ => false,
+                };
+                if !synced {
+                    return Err(DsmError::invalid_operation(
+                        "Cannot register sender session without a verified contact",
+                    ));
+                }
+                log::warn!(
+                    "[BLE_HANDLER] ✅ Just-in-time contact sync for register_sender_session"
+                );
             }
 
             // create_bilateral_precommitment now STRICTLY requires that the contact

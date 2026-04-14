@@ -16,7 +16,7 @@ import {
 import { getNfcBackupUiModel } from '../../services/recovery/nfcBackupUi';
 import './NfcRecoveryScreen.css';
 
-type SetupMode = 'idle' | 'choose' | 'generate' | 'enable' | 'refresh';
+type SetupMode = 'idle' | 'choose' | 'generate' | 'enable' | 'refresh' | 'writing';
 
 interface NfcRecoveryScreenProps {
   onNavigate?: (screen: string) => void;
@@ -34,6 +34,7 @@ const emptyStatus: NfcBackupStatus = {
   pendingCapsule: false,
   capsuleCount: 0,
   lastCapsuleIndex: 0,
+  autoWriteEnabled: false,
 };
 
 const NfcRecoveryScreen: React.FC<NfcRecoveryScreenProps> = ({ onNavigate }) => {
@@ -180,16 +181,23 @@ const NfcRecoveryScreen: React.FC<NfcRecoveryScreenProps> = ({ onNavigate }) => 
       return;
     }
     if (!status.pendingCapsule) {
+      // No armed capsule — show mnemonic input to rebuild first
       setSetupMode('refresh');
-      setStatusMsg('No capsule is armed right now. Rebuild one with your mnemonic.');
+      setStatusMsg('No capsule armed. Enter your mnemonic to rebuild and write.');
       return;
     }
 
+    // Transition to "ready to write" screen immediately
+    setSetupMode('writing');
+    setStatusMsg('');
     setBusy(true);
     try {
       await writeToNfcRing();
-      setStatusMsg('Touch the ring to the phone. Vibration means the write committed.');
+      // Stay in writing mode — the nfc.backup_written event handler
+      // will set setupMode back to 'idle' once the write commits.
+      setStatusMsg('Waiting for ring contact. Hold the ring to the phone until it vibrates.');
     } catch (error: unknown) {
+      setSetupMode('idle');
       await refresh();
       setStatusMsg(`Write failed: ${formatError(error)}`);
     } finally {
@@ -204,8 +212,8 @@ const NfcRecoveryScreen: React.FC<NfcRecoveryScreenProps> = ({ onNavigate }) => 
   const writeButtonLabel = !status.enabled
     ? 'WRITE LATEST CAPSULE'
     : status.pendingCapsule
-      ? 'WRITE ARMED CAPSULE'
-      : 'REBUILD CAPSULE';
+      ? 'WRITE TO RING'
+      : 'REBUILD & WRITE';
 
   return (
     <div className="nfc-shell" role="main">
@@ -331,6 +339,33 @@ const NfcRecoveryScreen: React.FC<NfcRecoveryScreenProps> = ({ onNavigate }) => 
             <div className="nfc-note">
               Rebuilding arms a fresh capsule in Rust. It does not write to the ring until you press
               the write action.
+            </div>
+          </div>
+        )}
+
+        {/* Writing mode — "ready to write" prompt */}
+        {setupMode === 'writing' && (
+          <div className="nfc-card">
+            <div className="nfc-info-row">
+              <span className="nfc-info-label" style={{ fontSize: '12px' }}>
+                READY TO WRITE
+              </span>
+            </div>
+            <div className="nfc-note" style={{ fontSize: '11px', fontWeight: 700, textAlign: 'center', padding: '16px 10px' }}>
+              HOLD THE RING TO THE BACK OF THE PHONE.
+              <br />
+              <br />
+              A VIBRATION MEANS THE WRITE COMMITTED.
+              <br />
+              DO NOT MOVE THE RING UNTIL THEN.
+            </div>
+            <div className="nfc-actions">
+              <button
+                className="nfc-btn"
+                onClick={() => { setSetupMode('idle'); setStatusMsg('Write cancelled.'); }}
+              >
+                CANCEL
+              </button>
             </div>
           </div>
         )}

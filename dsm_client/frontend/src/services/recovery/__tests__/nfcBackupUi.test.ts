@@ -8,6 +8,7 @@ describe('getNfcBackupUiModel', () => {
       pendingCapsule: true,
       capsuleCount: 2,
       lastCapsuleIndex: 7,
+      autoWriteEnabled: false,
     });
 
     expect(model.state).toBe('armed');
@@ -23,6 +24,7 @@ describe('getNfcBackupUiModel', () => {
       pendingCapsule: false,
       capsuleCount: 2,
       lastCapsuleIndex: 7,
+      autoWriteEnabled: false,
     });
 
     expect(model.state).toBe('waiting');
@@ -37,6 +39,7 @@ describe('getNfcBackupUiModel', () => {
       pendingCapsule: false,
       capsuleCount: 0,
       lastCapsuleIndex: 0,
+      autoWriteEnabled: false,
     });
 
     expect(model.state).toBe('not_set');

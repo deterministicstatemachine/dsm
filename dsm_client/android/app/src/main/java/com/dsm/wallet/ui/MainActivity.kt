@@ -24,6 +24,7 @@ import android.os.VibratorManager
 import android.os.BatteryManager
 import android.os.IBinder
 import android.os.Bundle
+import android.os.Message
 import android.util.Log
 import android.view.Gravity
 import android.view.View
@@ -1805,11 +1806,53 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
 
         installDsmBinaryBridge(wv)
 
+        wv.settings.setSupportMultipleWindows(true)
         wv.webChromeClient = object : WebChromeClient() {
             // Suppress the default blue page-loading progress bar.
             // All loading feedback is handled by the React UI with themed colors.
             override fun onProgressChanged(view: WebView?, newProgress: Int) {
                 // No-op: suppress default WebView progress indicator
+            }
+
+            // Handle window.open() calls — intercept and open in system browser
+            // instead of creating a child WebView that breaks app state.
+            override fun onCreateWindow(
+                view: WebView?,
+                isDialog: Boolean,
+                isUserGesture: Boolean,
+                resultMsg: Message?
+            ): Boolean {
+                try {
+                    // Extract the URL from the hit test result
+                    val hitResult = view?.hitTestResult
+                    val url = hitResult?.extra
+                    if (!url.isNullOrEmpty()) {
+                        Log.i(tag, "window.open intercepted — opening in system browser: $url")
+                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                        startActivity(intent)
+                        return false
+                    }
+                    // Fallback: create a temporary WebView to capture the URL
+                    val tempWebView = WebView(view?.context ?: this@MainActivity)
+                    tempWebView.webViewClient = object : WebViewClient() {
+                        override fun shouldOverrideUrlLoading(v: WebView?, request: WebResourceRequest?): Boolean {
+                            val uri = request?.url
+                            if (uri != null) {
+                                Log.i(tag, "window.open fallback — opening in system browser: ${uri.host}")
+                                val intent = Intent(Intent.ACTION_VIEW, uri)
+                                startActivity(intent)
+                            }
+                            tempWebView.destroy()
+                            return true
+                        }
+                    }
+                    (resultMsg?.obj as? WebView.WebViewTransport)?.webView = tempWebView
+                    resultMsg?.sendToTarget()
+                    return true
+                } catch (t: Throwable) {
+                    Log.w(tag, "onCreateWindow: error", t)
+                }
+                return false
             }
 
             override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
@@ -1881,8 +1924,9 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
 
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                 try {
-                    val uri = request?.url
-                    if (uri != null && uri.scheme == "dsm" && uri.host == "native") {
+                    val uri = request?.url ?: return false
+                    // Handle native DSM deep links
+                    if (uri.scheme == "dsm" && uri.host == "native") {
                         val path = uri.path ?: ""
                         if (path == "/qr/start") {
                             Log.i(tag, "WebView requested native QR scan")
@@ -1891,6 +1935,13 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                             }
                             return true
                         }
+                    }
+                    // External URLs (http/https): open in system browser, keep WebView intact
+                    if (uri.scheme == "http" || uri.scheme == "https") {
+                        Log.i(tag, "Opening external URL in system browser: ${uri.host}")
+                        val intent = Intent(Intent.ACTION_VIEW, uri)
+                        startActivity(intent)
+                        return true
                     }
                 } catch (t: Throwable) {
                     Log.w(tag, "shouldOverrideUrlLoading: error", t)

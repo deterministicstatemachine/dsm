@@ -14,7 +14,7 @@ const overlayBackdropStyle: React.CSSProperties = {
   display: 'flex',
   alignItems: 'stretch',
   justifyContent: 'stretch',
-  zIndex: 220,
+  zIndex: 10000,
   padding: 4,
 };
 

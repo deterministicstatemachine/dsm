@@ -7,17 +7,25 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 use dsm::recovery::{
-    create_recovery_capsule, create_recovery_capsule_with_key, decrypt_recovery_capsule,
-    create_tombstone_receipt, create_succession_receipt, verify_tombstone_receipt,
-    verify_succession_receipt, update_rollup, verify_rollup, init_recovery, EncryptedCapsule,
-    RecoveryCapsule, ReceiptRollup, TombstoneReceipt, SuccessionReceipt,
+    create_recovery_capsule, decrypt_recovery_capsule, create_tombstone_receipt,
+    create_succession_receipt, verify_tombstone_receipt, verify_succession_receipt, update_rollup,
+    verify_rollup, init_recovery, EncryptedCapsule, RecoveryCapsule, ReceiptRollup,
+    TombstoneReceipt, SuccessionReceipt,
 };
-use dsm::recovery::capsule::{decrypt_capsule_with_key, derive_recovery_key};
+use dsm::recovery::capsule::{
+    decrypt_capsule_with_key, derive_recovery_key, derive_recovery_authority_seed,
+};
 use dsm::types::error::DsmError;
 
 /// In-memory cached recovery key (derived from mnemonic via Argon2id + HKDF-BLAKE3).
 /// Never persisted to disk — cleared on disable or app restart.
 static RECOVERY_KEY: Mutex<Option<[u8; 32]>> = Mutex::new(None);
+
+/// In-memory cached recovery authority SPHINCS+ keypair (public, secret).
+/// Derived from the mnemonic via a separate HKDF domain (`DSM/recovery-authority`).
+/// Used to sign tombstone and succession receipts during device recovery.
+/// Never persisted to disk — cleared alongside the encryption key.
+static RECOVERY_AUTHORITY_KEYPAIR: Mutex<Option<(Vec<u8>, Vec<u8>)>> = Mutex::new(None);
 
 /// SDK for DSM recovery operations
 pub struct RecoverySDK;
@@ -27,6 +35,10 @@ struct RecoveryCapsuleState {
     counterparty_tips: HashMap<String, (u64, Vec<u8>)>,
     rollup: ReceiptRollup,
     next_index: u64,
+    /// Device ID of this device (for capsule source binding).
+    source_device_id: Vec<u8>,
+    /// Genesis hash of this device (for capsule genesis binding).
+    genesis_hash: Vec<u8>,
 }
 
 impl RecoverySDK {
@@ -258,23 +270,51 @@ impl RecoverySDK {
     }
 
     /// Derive recovery key from mnemonic and cache it in memory.
+    ///
     /// Key derivation: S_mn = Argon2id("DSM/recovery-ring\0", mnemonic)
     ///                 K_R  = BLAKE3 derive-key("DSM/recovery-aead\0", S_mn)
+    ///                 K_A  = BLAKE3 derive-key("DSM/recovery-authority\0", S_mn)
+    ///                 (pk, sk) = SPHINCS+.generate_from_seed(K_A)
+    ///
+    /// Both the encryption key and the authority keypair are cached in memory.
     pub fn derive_and_cache_key(mnemonic: &str) -> Result<(), DsmError> {
         let key = derive_recovery_key(mnemonic)?;
-        let mut guard = RECOVERY_KEY
-            .lock()
-            .map_err(|_| DsmError::InvalidState("Recovery key mutex poisoned".into()))?;
-        *guard = Some(key);
+        {
+            let mut guard = RECOVERY_KEY
+                .lock()
+                .map_err(|_| DsmError::InvalidState("Recovery key mutex poisoned".into()))?;
+            *guard = Some(key);
+        }
+
+        // Derive and cache the recovery authority SPHINCS+ keypair.
+        let authority_seed = derive_recovery_authority_seed(mnemonic)?;
+        let keypair = dsm::crypto::sphincs::generate_keypair_from_seed(
+            dsm::crypto::sphincs::SphincsVariant::SPX256f,
+            &authority_seed,
+        )
+        .map_err(|e| DsmError::InvalidState(format!("Recovery authority keygen failed: {e}")))?;
+        {
+            let mut guard = RECOVERY_AUTHORITY_KEYPAIR.lock().map_err(|_| {
+                DsmError::InvalidState("Recovery authority keypair mutex poisoned".into())
+            })?;
+            *guard = Some((keypair.public_key.clone(), keypair.secret_key.clone()));
+        }
+        log::info!("[RECOVERY_SDK] Cached recovery encryption key and authority keypair");
         Ok(())
     }
 
-    /// Clear the cached recovery key from memory (for disable or app shutdown).
+    /// Clear the cached recovery key and authority keypair from memory.
     pub fn clear_cached_key() {
         if let Ok(mut guard) = RECOVERY_KEY.lock() {
             if let Some(ref mut k) = *guard {
-                // Zeroize before dropping
                 k.iter_mut().for_each(|b| *b = 0);
+            }
+            *guard = None;
+        }
+        if let Ok(mut guard) = RECOVERY_AUTHORITY_KEYPAIR.lock() {
+            if let Some((ref mut pk, ref mut sk)) = *guard {
+                pk.iter_mut().for_each(|b| *b = 0);
+                sk.iter_mut().for_each(|b| *b = 0);
             }
             *guard = None;
         }
@@ -283,6 +323,15 @@ impl RecoverySDK {
     /// Check if a recovery key is currently cached in memory.
     pub fn has_cached_key() -> bool {
         RECOVERY_KEY.lock().map(|g| g.is_some()).unwrap_or(false)
+    }
+
+    /// Get the cached recovery authority keypair (public_key, secret_key).
+    /// Returns `None` if no mnemonic has been cached yet.
+    pub fn get_cached_authority_keypair() -> Option<(Vec<u8>, Vec<u8>)> {
+        RECOVERY_AUTHORITY_KEYPAIR
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
     }
 
     /// Decrypt an encrypted capsule using the in-memory cached recovery key.
@@ -375,14 +424,18 @@ impl RecoverySDK {
             counterparty_tips,
             rollup,
             next_index,
+            source_device_id,
+            genesis_hash,
         } = Self::build_capsule_state()?;
         let tip_count = counterparty_tips.len();
-        let encrypted = create_recovery_capsule_with_key(
+        let encrypted = dsm::recovery::create_recovery_capsule_with_binding(
             &smt_root,
             counterparty_tips,
             &rollup,
             key,
             next_index,
+            &source_device_id,
+            &genesis_hash,
         )?;
         let capsule_bytes = encrypted.to_bytes();
         Self::persist_capsule(next_index, &smt_root, &capsule_bytes, tip_count)?;
@@ -450,11 +503,16 @@ impl RecoverySDK {
             }
         };
 
+        let genesis_hash_bytes =
+            crate::sdk::app_state::AppState::get_genesis_hash().unwrap_or_default();
+
         Ok(RecoveryCapsuleState {
             smt_root,
             counterparty_tips,
             rollup,
             next_index,
+            source_device_id: device_id_bytes,
+            genesis_hash: genesis_hash_bytes,
         })
     }
 

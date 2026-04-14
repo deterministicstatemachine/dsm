@@ -18,6 +18,7 @@ export type NfcBackupStatus = {
   pendingCapsule: boolean;
   capsuleCount: number;
   lastCapsuleIndex: number;
+  autoWriteEnabled: boolean;
 };
 
 export type CapsulePreview = {
@@ -189,6 +190,7 @@ export async function getNfcBackupStatus(): Promise<NfcBackupStatus> {
     pendingCapsule: pairs.pending === 'true',
     capsuleCount: parseInt(pairs.capsule_count ?? '0', 10),
     lastCapsuleIndex: parseInt(pairs.last_capsule_index ?? '0', 10),
+    autoWriteEnabled: pairs.auto_write === 'true',
   };
 }
 
@@ -300,4 +302,99 @@ export async function writeToNfcRing(): Promise<void> {
     throw new Error(env.payload.value.message || 'NFC write failed');
   }
   await writeNfcTagPayloadHost();
+}
+
+export async function setAutoWriteEnabled(enabled: boolean): Promise<void> {
+  const res = await routerInvokeBin('recovery.setAutoWrite', packStringArg(enabled ? 'true' : 'false'));
+  extractAppStateValue(res);
+}
+
+// ── Recovery Pipeline Functions ──────────────────────────────────────────────
+
+export type PipelineResult = {
+  phase: string;
+  tombstoneHash: string;
+  pushed: number;
+  failed: number;
+  total: number;
+};
+
+export type AckStatus = {
+  newAcks: number;
+  synced: number;
+  total: number;
+  allSynced: boolean;
+};
+
+export type SyncProgress = {
+  synced: number;
+  total: number;
+  pending: string[];
+};
+
+export type ResumeResult = {
+  success: boolean;
+  resumed: number;
+};
+
+export async function getRecoveryPhase(): Promise<string> {
+  const res = await routerQueryBin('recovery.phase');
+  return extractAppStateValue(res) || 'none';
+}
+
+export async function executePipeline(): Promise<PipelineResult> {
+  const res = await routerInvokeBin('recovery.executePipeline', new Uint8Array(0));
+  const pairs = parseKeyValuePairs(extractAppStateValue(res));
+  return {
+    phase: pairs.phase ?? 'unknown',
+    tombstoneHash: pairs.tombstone_hash ?? '',
+    pushed: parseInt(pairs.pushed ?? '0', 10),
+    failed: parseInt(pairs.failed ?? '0', 10),
+    total: parseInt(pairs.total ?? '0', 10),
+  };
+}
+
+export async function pollAcks(): Promise<AckStatus> {
+  const res = await routerInvokeBin('recovery.pollAcks', new Uint8Array(0));
+  const pairs = parseKeyValuePairs(extractAppStateValue(res));
+  return {
+    newAcks: parseInt(pairs.new_acks ?? '0', 10),
+    synced: parseInt(pairs.synced ?? '0', 10),
+    total: parseInt(pairs.total ?? '0', 10),
+    allSynced: pairs.all_synced === 'true',
+  };
+}
+
+export async function getSyncProgress(): Promise<SyncProgress> {
+  const res = await routerQueryBin('recovery.syncStatus');
+  const pairs = parseKeyValuePairs(extractAppStateValue(res));
+  const pending = pairs.pending ? pairs.pending.split(',').filter(Boolean) : [];
+  return {
+    synced: parseInt(pairs.synced ?? '0', 10),
+    total: parseInt(pairs.total ?? '0', 10),
+    pending,
+  };
+}
+
+export async function resumeAll(): Promise<ResumeResult> {
+  const res = await routerInvokeBin('recovery.resumeAll', new Uint8Array(0));
+  const pairs = parseKeyValuePairs(extractAppStateValue(res));
+  return {
+    success: pairs.success === 'true',
+    resumed: parseInt(pairs.resumed ?? '0', 10),
+  };
+}
+
+export type TombstoneCheck = {
+  found: boolean;
+  tombstonedDevice: string;
+};
+
+export async function checkForTombstones(): Promise<TombstoneCheck> {
+  const res = await routerInvokeBin('recovery.checkTombstones', new Uint8Array(0));
+  const pairs = parseKeyValuePairs(extractAppStateValue(res));
+  return {
+    found: pairs.found === 'true',
+    tombstonedDevice: pairs.tombstoned_device ?? '',
+  };
 }

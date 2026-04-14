@@ -868,6 +868,46 @@ impl AppRouterImpl {
                             }
                         }
                     };
+                    // Just-in-time contact sync: if the BTM doesn't have this contact
+                    // but SQLite does, load it now. This covers cases where the init-time
+                    // sync was missed (e.g., race between contacts.add and BLE init).
+                    if !transport_adapter
+                        .bilateral_handler()
+                        .has_verified_contact(&counterparty_device_id)
+                        .await
+                    {
+                        log::warn!(
+                            "[wallet.sendOffline] Contact not in BTM — attempting just-in-time sync from SQLite"
+                        );
+                        if let Ok(Some(record)) =
+                            crate::storage::client_db::get_contact_by_device_id(
+                                &counterparty_device_id,
+                            )
+                        {
+                            if let Some(verified) = record.to_verified_contact() {
+                                match transport_adapter
+                                    .bilateral_handler()
+                                    .add_verified_contact(verified)
+                                    .await
+                                {
+                                    Ok(_) => log::warn!(
+                                        "[wallet.sendOffline] ✅ Just-in-time contact sync succeeded"
+                                    ),
+                                    Err(e) => log::error!(
+                                        "[wallet.sendOffline] ❌ Just-in-time contact sync failed: {e}"
+                                    ),
+                                }
+                            } else {
+                                log::error!(
+                                    "[wallet.sendOffline] Contact in SQLite but to_verified_contact() returned None (bad field lengths)"
+                                );
+                            }
+                        } else {
+                            log::error!(
+                                "[wallet.sendOffline] Contact not found in SQLite either — user must add contact first"
+                            );
+                        }
+                    }
                     let (prepare_envelope, commitment_hash) = match transport_adapter
                         .create_prepare_message_with_commitment(
                             counterparty_device_id,
