@@ -21,4 +21,5 @@ export type ScreenType =
   | 'vault'
   | 'lock_setup'
   | 'recovery'
-  | 'nfc_recovery';
+  | 'nfc_recovery'
+  | 'recovery_pipeline';

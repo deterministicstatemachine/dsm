@@ -355,6 +355,20 @@ pub fn set_nfc_backup_configured(configured: bool) -> Result<()> {
     )
 }
 
+/// Check if NFC auto-write-on-transaction is enabled.
+pub fn is_nfc_auto_write_enabled() -> bool {
+    get_recovery_pref("nfc_auto_write_prompt")
+        .ok()
+        .flatten()
+        .map(|v| v == [1u8])
+        .unwrap_or(false)
+}
+
+/// Set NFC auto-write-on-transaction enabled state.
+pub fn set_nfc_auto_write_enabled(enabled: bool) -> Result<()> {
+    set_recovery_pref("nfc_auto_write_prompt", &[if enabled { 1u8 } else { 0u8 }])
+}
+
 /// Store the exact counterparty count for the latest capsule preview.
 pub fn set_latest_capsule_counterparty_count(count: u64) -> Result<()> {
     set_recovery_pref("latest_capsule_counterparty_count", &count.to_le_bytes())

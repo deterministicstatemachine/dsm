@@ -3,14 +3,12 @@
 import React, { useCallback, useEffect, useRef, useState, memo } from 'react';
 import { dsmClient } from '../../services/dsmClient';
 import { exportStateBackupFile, importStateBackupFile } from '../../services/settings/backupService';
-import { BETA_FEEDBACK_TEMPLATE, buildGitHubIssueUrl } from '../../utils/githubIssue';
-
 import {
   getNfcBackupStatus,
+  setAutoWriteEnabled,
   type NfcBackupStatus,
 } from '../../services/recovery/nfcRecoveryService';
 import { getNfcBackupUiModel } from '../../services/recovery/nfcBackupUi';
-import { getDbrwStatus, type DbrwStatus } from '../../dsm/dbrw';
 import './SettingsScreen.css';
 
 type PrefValue = string | null;
@@ -39,6 +37,7 @@ const emptyNfcStatus: NfcBackupStatus = {
   pendingCapsule: false,
   capsuleCount: 0,
   lastCapsuleIndex: 0,
+  autoWriteEnabled: false,
 };
 
 interface SettingsMainScreenProps {
@@ -58,9 +57,7 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
   // --- Compact NFC status (full management is on NfcRecoveryScreen) ---
   const [nfcStatus, setNfcStatus] = useState<NfcBackupStatus>(emptyNfcStatus);
 
-  // --- Compact C-DBRW status (full management is on DevCdbrwScreen) ---
-  const [cdbrwStatus, setCdbrwStatus] = useState<DbrwStatus | null>(null);
-  const [cdbrwLoading, setCdbrwLoading] = useState<boolean>(false);
+
 
   useEffect(() => {
     void (async () => {
@@ -68,16 +65,6 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
         setNfcStatus(await getNfcBackupStatus());
       } catch {
         /* tolerate — tables may not exist yet */
-      }
-    })();
-  }, []);
-
-  useEffect(() => {
-    void (async () => {
-      try {
-        setCdbrwStatus(await getDbrwStatus(false));
-      } catch {
-        /* tolerate — C-DBRW may not be enrolled yet */
       }
     })();
   }, []);
@@ -225,40 +212,6 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
     if (typeof window === 'undefined') return;
     window.dispatchEvent(new CustomEvent(OPEN_DIAGNOSTICS_EVENT, { detail: { autoGather: true } }));
     setStatus('Diagnostics workspace opened');
-  }, []);
-
-  const openBetaFeedback = useCallback(async () => {
-    try {
-      const url = buildGitHubIssueUrl({
-        template: BETA_FEEDBACK_TEMPLATE,
-        title: 'Beta feedback',
-      });
-      const popup = window.open(url, '_blank', 'noopener');
-      if (!popup && navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(url);
-        setStatus('Feedback link copied to clipboard');
-        return;
-      }
-      if (!popup) {
-        throw new Error('Popup blocked');
-      }
-      setStatus('Beta feedback form opened');
-    } catch {
-      setStatus('Unable to open beta feedback form');
-    }
-  }, []);
-
-  const runCdbrwHealthCheck = useCallback(async () => {
-    setCdbrwLoading(true);
-    try {
-      const status = await getDbrwStatus(true);
-      setCdbrwStatus(status);
-      setStatus('C-DBRW health check completed');
-    } catch (e) {
-      setStatus(`C-DBRW health check failed: ${e instanceof Error ? e.message : String(e)}`);
-    } finally {
-      setCdbrwLoading(false);
-    }
   }, []);
 
   return (
@@ -467,114 +420,20 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
             INSPECT OR RECOVER
           </button>
         </div>
-      </section>
-
-      {/* C-DBRW Health Check — compact status with live check button */}
-      <section
-        aria-labelledby="cdbrw-section-title"
-        className="settings-shell__panel"
-      >
-        <div
-          id="cdbrw-section-title"
-          style={{
-            fontSize: '10px',
-            fontWeight: 'bold',
-            marginBottom: '6px',
-            letterSpacing: '1px',
-          }}
-        >
-          C-DBRW HEALTH
-        </div>
-        <div style={{ marginBottom: 8 }}>
-          <div
-            style={{
-              fontSize: '9px',
-              fontWeight: 'bold',
-              color: 'var(--text-dark)',
-              marginBottom: 4,
+        {nfcStatus.enabled && nfcStatus.configured && (
+          <button
+            className="settings-shell__button"
+            onClick={() => {
+              const next = !nfcStatus.autoWriteEnabled;
+              void setAutoWriteEnabled(next).then(() =>
+                setNfcStatus((prev) => ({ ...prev, autoWriteEnabled: next })),
+              );
             }}
+            style={{ fontSize: '9px', width: '100%', marginTop: 6 }}
           >
-            {cdbrwStatus?.enrolled ? 'ENROLLED' : 'NOT ENROLLED'}
-            {cdbrwStatus?.runtimeMetricsPresent ? ` / ${cdbrwStatus.runtimeHealthCheckPassed ? 'HEALTHY' : 'UNHEALTHY'}` : ''}
-          </div>
-          <div
-            style={{
-              fontSize: '8px',
-              color: 'var(--text-dark)',
-              lineHeight: '1.4',
-              opacity: 0.82,
-            }}
-          >
-            {cdbrwStatus?.runtimeMetricsPresent 
-              ? `Trust: ${(cdbrwStatus.runtimeTrustScore * 100).toFixed(1)}% | H₀: ${cdbrwStatus.runtimeH0Eff.toFixed(4)}`
-              : 'Device binding security status. Run live check for entropy metrics.'
-            }
-          </div>
-        </div>
-        <div className="settings-shell__button-row">
-          <button
-            className="settings-shell__button"
-            onClick={runCdbrwHealthCheck}
-            disabled={cdbrwLoading}
-            style={{ fontSize: '9px', opacity: cdbrwLoading ? 0.5 : 1 }}
-          >
-            {cdbrwLoading ? 'CHECKING...' : 'RUN HEALTH CHECK'}
+            AUTO-BACKUP TO RING: {nfcStatus.autoWriteEnabled ? 'ON' : 'OFF'}
           </button>
-          <button
-            className="settings-shell__button"
-            onClick={() => onNavigate?.('dev_cdbrw')}
-            style={{ fontSize: '9px' }}
-          >
-            MANAGE C-DBRW
-          </button>
-        </div>
-      </section>
-
-      <section
-        aria-labelledby="beta-support-title"
-        className="settings-shell__panel"
-      >
-        <div
-          id="beta-support-title"
-          style={{
-            fontSize: '10px',
-            fontWeight: 'bold',
-            marginBottom: '8px',
-            color: 'var(--text-dark)',
-            letterSpacing: '1px',
-          }}
-        >
-          BETA SUPPORT
-        </div>
-        <div
-          style={{
-            fontSize: '8px',
-            color: 'var(--text-dark)',
-            marginBottom: '12px',
-            lineHeight: '1.4',
-            opacity: 0.8,
-          }}
-        >
-          OPEN THE DIAGNOSTICS WORKSPACE, EXPORT A REPORT, OR SEND GENERAL BETA FEEDBACK.
-        </div>
-        <div className="settings-shell__button-row">
-          <button
-            type="button"
-            className="settings-shell__button"
-            style={{ fontSize: '9px' }}
-            onClick={openDiagnosticsWorkspace}
-          >
-            REPORT ISSUE
-          </button>
-          <button
-            type="button"
-            className="settings-shell__button"
-            style={{ fontSize: '9px' }}
-            onClick={openBetaFeedback}
-          >
-            SEND FEEDBACK
-          </button>
-        </div>
+        )}
       </section>
 
       {/* Developer Options (only when unlocked) */}
@@ -634,6 +493,15 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
               onClick={() => onNavigate?.('dev_detfi_launch')}
             >
               DETFI LAUNCH
+            </button>
+
+            <button
+              type="button"
+              className="settings-shell__button"
+              style={{ fontSize: '9px' }}
+              onClick={openDiagnosticsWorkspace}
+            >
+              REPORT ISSUE / FEEDBACK
             </button>
 
           </div>

@@ -75,6 +75,24 @@ impl RecoveryHandler for RecoveryImpl {
             log::warn!("[RECOVERY] Failed to persist capsule rollup hash: {e}");
         }
 
+        // Persist source device binding for tombstone (v4 capsule extension).
+        if !decrypted.source_device_id.is_empty() {
+            if let Err(e) = crate::storage::client_db::recovery::set_recovery_pref(
+                "capsule_source_device_id",
+                &decrypted.source_device_id,
+            ) {
+                log::warn!("[RECOVERY] Failed to persist capsule source device_id: {e}");
+            }
+        }
+        if !decrypted.genesis_hash.is_empty() {
+            if let Err(e) = crate::storage::client_db::recovery::set_recovery_pref(
+                "capsule_genesis_hash",
+                &decrypted.genesis_hash,
+            ) {
+                log::warn!("[RECOVERY] Failed to persist capsule genesis hash: {e}");
+            }
+        }
+
         // Persist counterparty device IDs for tombstone sync gate initialization.
         // These are needed later by recovery.tombstone to know which contacts must ACK.
         {
@@ -408,4 +426,228 @@ impl RecoveryHandler for RecoveryImpl {
             error: None,
         })
     }
+}
+
+// ============================================================================
+// Pipeline functions — called by `recovery.executePipeline` route.
+// These use cached authority keys and persisted capsule data instead of
+// accepting parameters from the frontend.
+// ============================================================================
+
+/// Run tombstone + succession + propagate using cached recovery authority key
+/// and persisted capsule data. Returns a summary string for the frontend.
+pub fn execute_recovery_pipeline() -> Result<String, String> {
+    // 1. Get cached recovery authority keypair
+    let (_pk, sk) = crate::sdk::recovery_sdk::RecoverySDK::get_cached_authority_keypair()
+        .ok_or_else(|| "No recovery authority key cached — enter mnemonic first".to_string())?;
+
+    // 2. Get old device_id from capsule
+    let old_device_id =
+        crate::storage::client_db::recovery::get_recovery_pref("capsule_source_device_id")
+            .map_err(|e| format!("Failed to read capsule source device_id: {e}"))?
+            .ok_or_else(|| {
+                "No capsule_source_device_id found — stage a capsule first".to_string()
+            })?;
+    if old_device_id.len() != 32 {
+        return Err(format!(
+            "capsule_source_device_id must be 32 bytes, got {}",
+            old_device_id.len()
+        ));
+    }
+
+    // 3. Get capsule SMT root and rollup hash
+    let capsule_smt_root =
+        crate::storage::client_db::recovery::get_recovery_pref("capsule_smt_root")
+            .map_err(|e| format!("Failed to read capsule SMT root: {e}"))?
+            .ok_or_else(|| "No capsule SMT root found — stage a capsule first".to_string())?;
+    let capsule_rollup_hash =
+        crate::storage::client_db::recovery::get_recovery_pref("capsule_rollup_hash")
+            .map_err(|e| format!("Failed to read capsule rollup hash: {e}"))?
+            .ok_or_else(|| "No capsule rollup hash found — stage a capsule first".to_string())?;
+
+    // 4. Get this device's identity (must have genesis)
+    let new_device_id = crate::sdk::app_state::AppState::get_device_id()
+        .ok_or_else(|| "No device identity — run genesis before recovery".to_string())?;
+    if new_device_id.len() != 32 {
+        return Err(format!(
+            "Device ID must be 32 bytes, got {}",
+            new_device_id.len()
+        ));
+    }
+
+    // 5. Store recovery phase
+    let _ =
+        crate::storage::client_db::recovery::set_recovery_pref("recovery_phase", b"tombstoning");
+
+    // 6. Create tombstone receipt
+    let old_device_id_str = crate::util::text_id::encode_base32_crockford(&old_device_id);
+    let tombstone = create_tombstone(
+        &capsule_smt_root,
+        0, // counter — capsule metadata counter
+        &capsule_rollup_hash,
+        &old_device_id_str,
+        &sk,
+    )
+    .map_err(|e| format!("Tombstone creation failed: {e}"))?;
+
+    let tombstone_receipt_bytes = tombstone
+        .to_bytes()
+        .map_err(|e| format!("Failed to serialize tombstone receipt: {e}"))?;
+    let tombstone_hash_hex =
+        crate::util::text_id::encode_base32_crockford(&tombstone.tombstone_hash);
+
+    // Persist tombstone receipt for propagation
+    if let Err(e) =
+        crate::storage::client_db::recovery::store_tombstone_receipt(&tombstone_receipt_bytes)
+    {
+        return Err(format!("Failed to store tombstone receipt: {e}"));
+    }
+    if let Err(e) =
+        crate::storage::client_db::recovery::store_tombstone_hash(&tombstone.tombstone_hash)
+    {
+        return Err(format!("Failed to store tombstone hash: {e}"));
+    }
+
+    log::info!(
+        "[RECOVERY] Tombstone created for device {}",
+        &old_device_id_str[..old_device_id_str.len().min(16)]
+    );
+
+    // 7. Create succession receipt
+    let _ = crate::storage::client_db::recovery::set_recovery_pref("recovery_phase", b"succession");
+
+    let new_device_id_str = crate::util::text_id::encode_base32_crockford(&new_device_id);
+    let succession = create_succession(
+        &tombstone.tombstone_hash,
+        &new_device_id,
+        &new_device_id_str,
+        &sk,
+    )
+    .map_err(|e| format!("Succession creation failed: {e}"))?;
+
+    // Store succession receipt
+    if let Err(e) =
+        crate::storage::client_db::recovery::store_succession_receipt(&succession.signature)
+    {
+        log::warn!("[RECOVERY] Failed to store succession receipt: {e}");
+    }
+
+    // Bind the new device identity with capsule state
+    {
+        let public_key = crate::sdk::app_state::AppState::get_public_key().unwrap_or_default();
+        let genesis_hash = succession.new_device_commitment.clone();
+        let smt_root = capsule_smt_root;
+
+        crate::sdk::app_state::AppState::set_identity_info(
+            new_device_id.clone(),
+            public_key,
+            genesis_hash,
+            smt_root,
+        );
+        crate::sdk::app_state::AppState::set_has_identity(true);
+    }
+
+    log::info!(
+        "[RECOVERY] Succession bound new device {}",
+        &new_device_id_str[..new_device_id_str.len().min(16)]
+    );
+
+    // 8. Initialize sync gate from capsule counterparty IDs
+    let counterparty_ids = crate::storage::client_db::recovery::get_capsule_counterparty_ids()
+        .map_err(|e| format!("Failed to read counterparty IDs: {e}"))?;
+    if let Err(e) =
+        crate::storage::client_db::recovery::init_recovery_sync_status(&counterparty_ids)
+    {
+        log::warn!("[RECOVERY] Failed to init sync gate: {e}");
+    }
+
+    // 9. Propagate tombstone to storage nodes
+    let _ =
+        crate::storage::client_db::recovery::set_recovery_pref("recovery_phase", b"propagating");
+
+    let mut pushed = 0u64;
+    let mut failed = 0u64;
+    let total = counterparty_ids.len() as u64;
+
+    for counterparty_id in &counterparty_ids {
+        let notify_key = {
+            let mut h = dsm::crypto::blake3::dsm_domain_hasher("DSM/tombstone-notify");
+            h.update(counterparty_id);
+            crate::util::text_id::encode_base32_crockford(h.finalize().as_bytes())
+        };
+        match crate::sdk::storage_node_sdk::put_to_storage(&notify_key, &tombstone_receipt_bytes) {
+            Ok(()) => {
+                pushed += 1;
+                log::info!(
+                    "[RECOVERY] Pushed tombstone for counterparty {}",
+                    &crate::util::text_id::encode_base32_crockford(counterparty_id)[..16]
+                );
+            }
+            Err(e) => {
+                failed += 1;
+                log::warn!("[RECOVERY] Failed to push tombstone for counterparty: {e}");
+            }
+        }
+    }
+
+    // 10. Set phase to polling
+    let _ = crate::storage::client_db::recovery::set_recovery_pref("recovery_phase", b"polling");
+
+    Ok(format!(
+        "phase=polling,tombstone_hash={},pushed={},failed={},total={}",
+        tombstone_hash_hex, pushed, failed, total,
+    ))
+}
+
+/// Resume all bilateral relationships from recovered chain tips.
+/// Requires all counterparties to have ACK'd the tombstone (sync gate check).
+pub fn resume_all_contacts() -> Result<String, String> {
+    // Verify sync gate
+    let all_synced = crate::storage::client_db::recovery::all_counterparties_synced()
+        .map_err(|e| format!("Failed to check sync gate: {e}"))?;
+    if !all_synced {
+        let (synced, total) = crate::storage::client_db::recovery::get_sync_progress()
+            .map_err(|e| format!("Failed to read sync progress: {e}"))?;
+        return Err(format!(
+            "Recovery pending: {}/{} contacts synced. All counterparties must acknowledge tombstone first.",
+            synced, total
+        ));
+    }
+
+    let _ = crate::storage::client_db::recovery::set_recovery_pref("recovery_phase", b"resuming");
+
+    // Get recovered chain tips and resume each
+    let tips = crate::storage::client_db::recovery::get_recovered_chain_tips()
+        .map_err(|e| format!("Failed to read recovered chain tips: {e}"))?;
+
+    let mut resumed = 0u64;
+    for tip in &tips {
+        let device_id_b32 = crate::util::text_id::encode_base32_crockford(&tip.device_id);
+
+        match crate::storage::client_db::restore_finalized_bilateral_chain_tip(
+            &tip.device_id,
+            &tip.head_hash,
+        ) {
+            Ok(()) => {
+                resumed += 1;
+                log::info!(
+                    "[RECOVERY] Resumed bilateral chain tip for {}",
+                    &device_id_b32[..device_id_b32.len().min(16)]
+                );
+            }
+            Err(e) => {
+                log::warn!(
+                    "[RECOVERY] Failed to resume chain tip for {}: {e}",
+                    &device_id_b32[..device_id_b32.len().min(16)]
+                );
+            }
+        }
+    }
+
+    // Cleanup
+    let _ = crate::storage::client_db::recovery::clear_recovery_sync_status();
+    let _ = crate::storage::client_db::recovery::clear_recovered_chain_tips();
+    let _ = crate::storage::client_db::recovery::set_recovery_pref("recovery_phase", b"complete");
+
+    Ok(format!("success=true,resumed={}", resumed))
 }

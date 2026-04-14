@@ -20,15 +20,17 @@ impl AppRouterImpl {
             "recovery.status" => {
                 let status = crate::sdk::recovery_sdk::RecoverySDK::get_recovery_status();
 
+                let auto_write = crate::storage::client_db::recovery::is_nfc_auto_write_enabled();
                 let resp = generated::AppStateResponse {
                     key: "recovery.status".to_string(),
                     value: Some(format!(
-                        "enabled={},configured={},pending={},capsule_count={},last_capsule_index={}",
+                        "enabled={},configured={},pending={},capsule_count={},last_capsule_index={},auto_write={}",
                         status.enabled,
                         status.configured,
                         status.pending_capsule,
                         status.capsule_count,
                         status.last_capsule_index,
+                        auto_write,
                     )),
                 };
                 pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
@@ -78,6 +80,18 @@ impl AppRouterImpl {
                     }
                     Err(e) => err(format!("recovery.capsulePreview failed: {e}")),
                 }
+            }
+            "recovery.phase" => {
+                let phase =
+                    crate::storage::client_db::recovery::get_recovery_pref("recovery_phase")
+                        .unwrap_or(None)
+                        .and_then(|bytes| String::from_utf8(bytes).ok())
+                        .unwrap_or_else(|| "none".to_string());
+                let resp = generated::AppStateResponse {
+                    key: "recovery.phase".to_string(),
+                    value: Some(phase),
+                };
+                pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
             }
             _ => err(format!("unknown recovery query path: {}", q.path)),
         }
@@ -789,6 +803,54 @@ impl AppRouterImpl {
                 };
                 pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
             }
+
+            // -------- recovery.setAutoWrite --------
+            // Toggle the auto-write-to-ring pref (persistent toast after transactions).
+            "recovery.setAutoWrite" => {
+                let val = match Self::decode_recovery_string_param(&i.args) {
+                    Ok(v) => v,
+                    Err(e) => return err(format!("recovery.setAutoWrite: {e}")),
+                };
+                let enabled = val.trim() == "true";
+                if let Err(e) =
+                    crate::storage::client_db::recovery::set_nfc_auto_write_enabled(enabled)
+                {
+                    return err(format!("recovery.setAutoWrite failed: {e}"));
+                }
+                let resp = generated::AppStateResponse {
+                    key: "recovery.setAutoWrite".to_string(),
+                    value: Some(format!("auto_write={enabled}")),
+                };
+                pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
+            }
+
+            // -------- recovery.executePipeline --------
+            // Runs tombstone + succession + propagate using cached authority key.
+            // No parameters needed — everything is in cache / recovery_prefs.
+            "recovery.executePipeline" => match super::recovery_impl::execute_recovery_pipeline() {
+                Ok(summary) => {
+                    let resp = generated::AppStateResponse {
+                        key: "recovery.executePipeline".to_string(),
+                        value: Some(summary),
+                    };
+                    pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
+                }
+                Err(e) => err(format!("recovery.executePipeline failed: {e}")),
+            },
+
+            // -------- recovery.resumeAll --------
+            // Resume all bilateral relationships from recovered chain tips.
+            // Gated on all counterparties having ACK'd the tombstone.
+            "recovery.resumeAll" => match super::recovery_impl::resume_all_contacts() {
+                Ok(summary) => {
+                    let resp = generated::AppStateResponse {
+                        key: "recovery.resumeAll".to_string(),
+                        value: Some(summary),
+                    };
+                    pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
+                }
+                Err(e) => err(format!("recovery.resumeAll failed: {e}")),
+            },
 
             _ => err(format!("unknown recovery invoke method: {}", i.method)),
         }

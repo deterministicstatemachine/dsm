@@ -21,6 +21,7 @@ const RECOVERY_CAPSULE_MAGIC: &[u8; 4] = b"RCV3";
 const RECOVERY_CAPSULE_AAD: &[u8] = b"DSM/recovery-capsule-v3\0";
 const RECOVERY_RING_ARGON2_SALT: &[u8] = b"DSM/recovery-ring\0";
 const RECOVERY_AEAD_CONTEXT: &str = "DSM/recovery-aead\0";
+const RECOVERY_AUTHORITY_CONTEXT: &str = "DSM/recovery-authority\0";
 const RECOVERY_NONCE_DOMAIN: &str = "DSM/recovery-nonce";
 const RECOVERY_CHALLENGE_DOMAIN: &str = "DSM/recovery-challenge";
 
@@ -60,6 +61,12 @@ pub struct RecoveryCapsule {
     pub challenge: Vec<u8>,
     /// Capsule metadata.
     pub metadata: CapsuleMetadata,
+    /// Device ID of the device that created this capsule (32 bytes).
+    /// Empty for pre-v4 capsules that don't carry this field.
+    pub source_device_id: Vec<u8>,
+    /// Genesis hash of the Device Tree this capsule belongs to (32 bytes).
+    /// Empty for pre-v4 capsules that don't carry this field.
+    pub genesis_hash: Vec<u8>,
 }
 
 /// Encrypted capsule for NFC storage.
@@ -154,6 +161,11 @@ impl RecoveryCapsule {
         out.extend_from_slice(&self.rollup_hash);
         out.extend_from_slice(&(self.challenge.len() as u32).to_le_bytes());
         out.extend_from_slice(&self.challenge);
+        // v4 extension: source device binding (backward-compatible trailing fields)
+        out.extend_from_slice(&(self.source_device_id.len() as u32).to_le_bytes());
+        out.extend_from_slice(&self.source_device_id);
+        out.extend_from_slice(&(self.genesis_hash.len() as u32).to_le_bytes());
+        out.extend_from_slice(&self.genesis_hash);
         out
     }
 }
@@ -173,6 +185,27 @@ pub fn derive_recovery_key(mnemonic: &str) -> Result<[u8; 32], DsmError> {
     Ok(key)
 }
 
+/// Derive a 32-byte seed for the recovery authority SPHINCS+ keypair.
+///
+/// Uses the same Argon2id intermediate as `derive_recovery_key`, but a distinct
+/// BLAKE3 domain (`DSM/recovery-authority`) so the two keys are cryptographically
+/// independent. The resulting seed is fed to `generate_keypair_from_seed()` to
+/// produce a deterministic SPHINCS+ keypair that acts as the mnemonic-derived
+/// recovery authority — the root of trust for tombstone and succession signing.
+pub fn derive_recovery_authority_seed(mnemonic: &str) -> Result<[u8; 32], DsmError> {
+    let argon2 = Argon2::default();
+    let mut seed = [0u8; 32];
+    argon2
+        .hash_password_into(mnemonic.as_bytes(), RECOVERY_RING_ARGON2_SALT, &mut seed)
+        .map_err(|e| DsmError::crypto(format!("Argon2id failed: {e}"), None::<std::io::Error>))?;
+
+    let mut hasher = blake3::Hasher::new_derive_key(RECOVERY_AUTHORITY_CONTEXT);
+    hasher.update(&seed);
+    let authority_seed = *hasher.finalize().as_bytes();
+    seed.zeroize();
+    Ok(authority_seed)
+}
+
 /// Create encrypted recovery capsule for NFC ring storage using the mnemonic-derived key.
 pub fn create_encrypted_capsule(
     smt_root: &[u8],
@@ -186,12 +219,37 @@ pub fn create_encrypted_capsule(
 }
 
 /// Create encrypted recovery capsule using a pre-derived recovery key.
+///
+/// `source_device_id` and `genesis_hash` are optional device-binding fields.
+/// When present (non-empty), the capsule is self-contained for recovery —
+/// it knows which Device Tree leaf to tombstone and which genesis it belongs to.
 pub fn create_encrypted_capsule_with_key(
     smt_root: &[u8],
     counterparty_tips: HashMap<String, (u64, Vec<u8>)>,
     rollup: &super::ReceiptRollup,
     key: &[u8; 32],
     counter: u64,
+) -> Result<EncryptedCapsule, DsmError> {
+    create_encrypted_capsule_with_binding(
+        smt_root,
+        counterparty_tips,
+        rollup,
+        key,
+        counter,
+        &[],
+        &[],
+    )
+}
+
+/// Create encrypted recovery capsule with full device-binding metadata.
+pub fn create_encrypted_capsule_with_binding(
+    smt_root: &[u8],
+    counterparty_tips: HashMap<String, (u64, Vec<u8>)>,
+    rollup: &super::ReceiptRollup,
+    key: &[u8; 32],
+    counter: u64,
+    source_device_id: &[u8],
+    genesis_hash: &[u8],
 ) -> Result<EncryptedCapsule, DsmError> {
     if smt_root.len() != 32 {
         return Err(DsmError::invalid_parameter(format!(
@@ -213,6 +271,8 @@ pub fn create_encrypted_capsule_with_key(
         rollup_hash: rollup_hash.clone(),
         challenge: derive_challenge(&rollup_hash, smt_root, counter).to_vec(),
         metadata: metadata.clone(),
+        source_device_id: source_device_id.to_vec(),
+        genesis_hash: genesis_hash.to_vec(),
     };
     encrypt_capsule_with_key(&capsule, key)
 }
@@ -402,6 +462,18 @@ fn decode_capsule_bytes(data: &[u8]) -> Result<RecoveryCapsule, DsmError> {
     }
     let rollup_hash = read_len_bytes(&mut p)?;
     let challenge = read_len_bytes(&mut p)?;
+    // v4 extension: source device binding (backward-compatible optional trailing fields).
+    // If no bytes remain, this is a pre-v4 capsule and both fields default to empty.
+    let source_device_id = if p.len() >= 4 {
+        read_len_bytes(&mut p)?
+    } else {
+        Vec::new()
+    };
+    let genesis_hash = if p.len() >= 4 {
+        read_len_bytes(&mut p)?
+    } else {
+        Vec::new()
+    };
     if !p.is_empty() {
         return Err(DsmError::invalid_operation(
             "capsule decode: trailing plaintext bytes",
@@ -413,6 +485,8 @@ fn decode_capsule_bytes(data: &[u8]) -> Result<RecoveryCapsule, DsmError> {
         rollup_hash,
         challenge,
         metadata,
+        source_device_id,
+        genesis_hash,
     })
 }
 
@@ -519,6 +593,8 @@ mod tests {
                 logical_time: 42,
                 counter: 42,
             },
+            source_device_id: vec![0x44; 32],
+            genesis_hash: vec![0x55; 32],
         };
 
         let bytes = capsule.to_bytes();
@@ -674,6 +750,8 @@ mod tests {
                 logical_time: 5,
                 counter: 5,
             },
+            source_device_id: Vec::new(),
+            genesis_hash: Vec::new(),
         };
 
         assert!(encrypt_capsule_with_key(&capsule, &key).is_err());

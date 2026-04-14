@@ -1,7 +1,7 @@
 import React from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import SettingsMainScreen from '../SettingsMainScreen';
-import { BETA_FEEDBACK_TEMPLATE } from '../../../utils/githubIssue';
+// githubIssue import removed — feedback button now uses diagnostics overlay
 
 const mockGetPreference = jest.fn();
 const mockSetPreference = jest.fn();
@@ -26,27 +26,22 @@ jest.mock('../../../services/settings/backupService', () => ({
 
 jest.mock('../../../services/recovery/nfcRecoveryService', () => ({
   getNfcBackupStatus: (...args: unknown[]) => mockGetNfcBackupStatus(...args),
+  setAutoWriteEnabled: jest.fn().mockResolvedValue(undefined),
 }));
 
 describe('SettingsMainScreen developer unlock', () => {
-  let openSpy: jest.SpyInstance;
-
   beforeEach(() => {
     mockGetPreference.mockReset();
     mockSetPreference.mockReset();
     mockGetNfcBackupStatus.mockReset();
-    openSpy = jest.spyOn(window, 'open').mockImplementation(() => null as any);
     mockGetNfcBackupStatus.mockResolvedValue({
       enabled: false,
       configured: false,
       pendingCapsule: false,
       capsuleCount: 0,
       lastCapsuleIndex: 0,
+      autoWriteEnabled: false,
     });
-  });
-
-  afterEach(() => {
-    openSpy.mockRestore();
   });
 
   it('keeps developer options unlocked across remounts while prefs reload', async () => {
@@ -99,6 +94,7 @@ describe('SettingsMainScreen developer unlock', () => {
       pendingCapsule: false,
       capsuleCount: 4,
       lastCapsuleIndex: 9,
+      autoWriteEnabled: false,
     });
 
     render(<SettingsMainScreen />);
@@ -114,18 +110,29 @@ describe('SettingsMainScreen developer unlock', () => {
     ).toBeInTheDocument();
   });
 
-  it('exposes beta support actions', async () => {
-    mockGetPreference.mockResolvedValueOnce('false');
+  it('dispatches diagnostics event from report-issue button (dev mode)', async () => {
+    // Button is inside DEVELOPER OPTIONS — need dev mode enabled
+    mockGetPreference.mockResolvedValueOnce('true');
 
     render(<SettingsMainScreen />);
 
     await waitFor(() =>
-      expect(screen.getByRole('button', { name: /REPORT ISSUE/i })).toBeInTheDocument(),
+      expect(screen.getByText('DEVELOPER OPTIONS')).toBeInTheDocument(),
     );
 
-    fireEvent.click(screen.getByRole('button', { name: /SEND FEEDBACK/i }));
+    const handler = jest.fn();
+    window.addEventListener('dsm-open-diagnostics', handler);
 
-    await waitFor(() => expect(openSpy).toHaveBeenCalled());
-    expect(String(openSpy.mock.calls[0][0])).toContain(`template=${encodeURIComponent(BETA_FEEDBACK_TEMPLATE)}`);
+    const reportBtn = screen.getByRole('button', { name: /REPORT ISSUE \/ FEEDBACK/i });
+    expect(reportBtn).toBeInTheDocument();
+
+    fireEvent.click(reportBtn);
+
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect((handler.mock.calls[0][0] as CustomEvent).detail).toEqual({
+      autoGather: true,
+    });
+
+    window.removeEventListener('dsm-open-diagnostics', handler);
   });
 });
