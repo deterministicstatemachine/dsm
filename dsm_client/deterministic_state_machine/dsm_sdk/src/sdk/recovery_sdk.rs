@@ -476,13 +476,14 @@ impl RecoverySDK {
         }
 
         // If there's already a pending (unconsumed) capsule, reuse its index —
-        // we only care about the newest state. Index only advances after the ring
-        // actually consumes a capsule and clears pending.
+        // we only care about the newest state. The pending capsule is continuously
+        // overwritten with the latest SMT root until the ring consumes it.
         //
-        // When there's NO pending capsule (ring just consumed it), check whether
-        // the device state actually changed since the last capsule was created.
-        // If the SMT root is identical, reuse the same index — writing to the
-        // ring is not a state change and must not bump the capsule number.
+        // When there's NO pending capsule (ring consumed it via clearPending),
+        // always advance to max_index + 1. We cannot compare SMT roots here
+        // because the consumed capsule was already overwritten with the current
+        // state before being written to the ring — the roots would match and
+        // the index would never advance.
         let next_index = match crate::storage::client_db::recovery::get_pending_recovery_capsule() {
             Ok(Some((idx, _))) => idx,
             _ => {
@@ -494,11 +495,8 @@ impl RecoverySDK {
                     // No capsules exist yet — start at 1.
                     1
                 } else {
-                    // Reuse the same index when the SMT root hasn't changed.
-                    match crate::storage::client_db::recovery::get_latest_capsule_metadata() {
-                        Ok(Some(meta)) if meta.smt_root == smt_root => max_idx,
-                        _ => max_idx.saturating_add(1),
-                    }
+                    // Ring consumed the previous capsule — always advance.
+                    max_idx.saturating_add(1)
                 }
             }
         };

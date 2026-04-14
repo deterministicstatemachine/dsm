@@ -45,6 +45,7 @@ const GlobalToast: React.FC = () => {
         gap: 12,
         padding: '10px 12px',
         border: '2px solid var(--border)',
+        borderRadius: 10,
         background: 'rgba(var(--text-rgb), 0.92)',
         color: 'var(--bg)',
         fontSize: 12,
@@ -52,9 +53,9 @@ const GlobalToast: React.FC = () => {
     >
       <span style={{ lineHeight: 1.3, overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0, flex: 1 }}>{label}</span>
       {persistent ? (
-        <button className="dismiss-feedback" onClick={() => clearToast()} aria-label="Skip" style={{ minWidth: 44, minHeight: 28, flexShrink: 0, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 700, letterSpacing: 1, background: 'transparent', border: '1px solid currentColor', color: 'inherit', padding: '2px 8px' }}>SKIP</button>
+        <button className="dismiss-feedback" onClick={() => clearToast()} aria-label="Skip" style={{ minWidth: 44, minHeight: 28, flexShrink: 0, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 700, letterSpacing: 1, background: 'transparent', border: '1px solid currentColor', borderRadius: 6, color: 'inherit', padding: '2px 8px' }}>SKIP</button>
       ) : (
-        <button className="dismiss-feedback" onClick={() => clearToast()} aria-label="Dismiss" style={{ minWidth: 28, minHeight: 28, flexShrink: 0, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 16, background: 'transparent', border: 'none', color: 'inherit' }}>X</button>
+        <button className="dismiss-feedback" onClick={() => clearToast()} aria-label="Dismiss" style={{ minWidth: 28, minHeight: 28, flexShrink: 0, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 16, background: 'transparent', border: 'none', borderRadius: 6, color: 'inherit' }}>X</button>
       )}
     </div>
   );

@@ -410,6 +410,12 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                 writeNdefToTag(preparedTag, ndefMessage)
                 com.dsm.wallet.bridge.UnifiedNativeApi.clearPendingRecoveryCapsule()
 
+                // Immediately arm the next capsule so the index advances and
+                // the ring backup is ready for the next state change.
+                try {
+                    com.dsm.wallet.bridge.UnifiedNativeApi.maybeRefreshNfcCapsule()
+                } catch (_: Throwable) { /* best-effort */ }
+
                 runOnUiThread {
                     nfcReaderActive = false
                     nfcWriteMode = false

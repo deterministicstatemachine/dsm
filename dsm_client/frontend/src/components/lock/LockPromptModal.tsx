@@ -46,7 +46,7 @@ function LockPromptModal({ onNavigate, onDismiss }: Props) {
         style={{
           background: 'var(--bg, #9bbc0f)',
           border: '2px solid var(--border, #306230)',
-          borderRadius: '6px',
+          borderRadius: '12px',
           padding: '20px 16px',
           width: '260px',
           display: 'flex',

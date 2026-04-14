@@ -99,9 +99,24 @@ export const UXProvider: React.FC<{ defaultHideComplexity?: boolean; children?: 
       if (status.autoWriteEnabled && status.enabled && status.pendingCapsule) {
         notifyToast('ring_backup_prompt', undefined, { persistent: true });
         nfcWriteActiveRef.current = true;
-        void writeToNfcRing().catch((e) => {
-          console.warn('[UXContext] NFC auto-write activation failed:', e);
-        });
+        writeToNfcRing()
+          .then(() => {
+            // NFC writer activated — actual write happens when ring touches phone.
+            // The nfc.backupWritten event handler will dismiss the persistent toast.
+            // Safety: if the event never fires (e.g., user walks away), auto-dismiss
+            // after 30s so the toast doesn't stay stuck forever.
+            setTimeout(() => {
+              if (nfcWriteActiveRef.current) {
+                nfcWriteActiveRef.current = false;
+                notifyToast('warning', 'Ring write timed out. Try again from NFC settings.');
+              }
+            }, 30_000);
+          })
+          .catch((e) => {
+            console.warn('[UXContext] NFC auto-write activation failed:', e);
+            nfcWriteActiveRef.current = false;
+            notifyToast('error', 'NFC write failed. Try again from NFC settings.');
+          });
         return;
       }
     } catch {
@@ -124,7 +139,7 @@ export const UXProvider: React.FC<{ defaultHideComplexity?: boolean; children?: 
   }, [notifyToast]);
 
   // Auto-backup: NFC write succeeded — dismiss persistent toast, show brief success.
-  useBridgeEvent('nfc.backup_written', () => {
+  useBridgeEvent('nfc.backupWritten', () => {
     nfcWriteActiveRef.current = false;
     notifyToast('success', 'RING UPDATED');
   }, [notifyToast]);

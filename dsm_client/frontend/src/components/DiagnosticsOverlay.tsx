@@ -25,7 +25,7 @@ const overlayCardStyle: React.CSSProperties = {
   flexDirection: 'column',
   overflow: 'hidden',
   background: 'var(--stateboy-screen)',
-  borderRadius: 10,
+  borderRadius: 12,
   border: '2px solid var(--border)',
   color: 'var(--text-dark)',
   boxShadow: '0 8px 20px rgba(var(--text-dark-rgb),0.35)',
