@@ -159,9 +159,9 @@ impl DualModeVerifier {
 
             // Verify entity signature
             match crypto::verify_signature(
+                &next_state.device_info.public_key,
                 &state_data,
                 entity_sig,
-                &next_state.device_info.public_key,
             ) {
                 Ok(valid) => {
                     if !valid {
@@ -174,9 +174,9 @@ impl DualModeVerifier {
             // Verify counterparty signature if relationship exists
             if let Some(relationship) = &next_state.relationship_context {
                 match crypto::verify_signature(
+                    &relationship.counterparty_public_key,
                     &state_data,
                     counterparty_sig,
-                    &relationship.counterparty_public_key,
                 ) {
                     Ok(valid) => {
                         if !valid {
@@ -207,7 +207,7 @@ impl DualModeVerifier {
             //     state_data.extend_from_slice(data);
             // }
 
-            crypto::verify_signature(&state_data, signature, &next_state.device_info.public_key)
+            crypto::verify_signature(&next_state.device_info.public_key, &state_data, signature)
         } else {
             Ok(false)
         }
@@ -355,6 +355,7 @@ impl DualModeVerifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::signatures::SignatureKeyPair;
     use crate::types::state_types::{DeviceInfo, State, StateParams, RelationshipContext};
 
     fn make_device_info() -> DeviceInfo {
@@ -382,6 +383,18 @@ mod tests {
         let mut s = State::new(params);
         s.token_balances = prev.token_balances.clone();
         s
+    }
+
+    fn make_signed_state_with_keypair(device_id: [u8; 32]) -> (StateTypesState, SignatureKeyPair) {
+        let keypair = SignatureKeyPair::new().expect("keypair");
+        let mut state = State::new_genesis(
+            [0xAA; 32],
+            DeviceInfo::new(device_id, keypair.public_key.clone()),
+        );
+        state
+            .token_balances
+            .insert("ERA".to_string(), Balance::from_state(1000, [0u8; 32], 0));
+        (state, keypair)
     }
 
     #[test]
@@ -539,5 +552,72 @@ mod tests {
         ));
         let result = DualModeVerifier::verify_recipient_identity(&state).unwrap();
         assert!(!result, "empty counterparty public key should fail");
+    }
+
+    #[test]
+    fn verify_unilateral_accepts_valid_entity_signature() {
+        let (current, entity_keys) = make_signed_state_with_keypair([0x11; 32]);
+        let transfer = Operation::Transfer {
+            to_device_id: vec![0x33; 32],
+            amount: Balance::from_state(10, [0u8; 32], 0),
+            token_id: b"ERA".to_vec(),
+            mode: TransactionMode::Unilateral,
+            nonce: vec![7, 7, 7],
+            verification: crate::types::operations::VerificationType::Standard,
+            pre_commit: None,
+            recipient: vec![0x33; 32],
+            to: vec![0x33; 32],
+            message: "unilateral".to_string(),
+            signature: vec![],
+        };
+        let mut next = make_next_state(&current, transfer.clone(), vec![0xAB; 32]);
+        next.device_info.public_key = entity_keys.public_key.clone();
+        next.relationship_context = Some(RelationshipContext::new(
+            [0x11; 32],
+            [0x33; 32],
+            vec![0x44; 64],
+        ));
+        let state_data = next.hash().unwrap().to_vec();
+        next.entity_sig = Some(entity_keys.sign(&state_data).expect("sign entity state"));
+
+        let result = DualModeVerifier::verify_transition(&current, &next, &transfer).unwrap();
+        assert!(result, "valid unilateral entity signature should verify");
+    }
+
+    #[test]
+    fn verify_bilateral_accepts_valid_entity_and_counterparty_signatures() {
+        let (current, entity_keys) = make_signed_state_with_keypair([0x11; 32]);
+        let counterparty_keys = SignatureKeyPair::new().expect("counterparty keypair");
+
+        let transfer = Operation::Transfer {
+            to_device_id: vec![0x33; 32],
+            amount: Balance::from_state(10, [0u8; 32], 0),
+            token_id: b"ERA".to_vec(),
+            mode: TransactionMode::Bilateral,
+            nonce: vec![8, 8, 8],
+            verification: crate::types::operations::VerificationType::Standard,
+            pre_commit: None,
+            recipient: vec![0x33; 32],
+            to: vec![0x33; 32],
+            message: "bilateral".to_string(),
+            signature: vec![],
+        };
+        let mut next = make_next_state(&current, transfer.clone(), vec![0xBC; 32]);
+        next.device_info.public_key = entity_keys.public_key.clone();
+        next.relationship_context = Some(RelationshipContext::new(
+            [0x11; 32],
+            [0x33; 32],
+            counterparty_keys.public_key.clone(),
+        ));
+        let state_data = next.hash().unwrap().to_vec();
+        next.entity_sig = Some(entity_keys.sign(&state_data).expect("sign entity state"));
+        next.counterparty_sig = Some(
+            counterparty_keys
+                .sign(&state_data)
+                .expect("sign counterparty state"),
+        );
+
+        let result = DualModeVerifier::verify_transition(&current, &next, &transfer).unwrap();
+        assert!(result, "valid bilateral signatures should verify");
     }
 }
