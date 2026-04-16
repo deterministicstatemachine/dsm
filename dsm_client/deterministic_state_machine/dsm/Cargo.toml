@@ -71,7 +71,7 @@ bitcoin = { version = "0.32", default-features = false, features = ["std"] }
 
 # Cryptography - core
 blake3 = "1.5.0"
-hmac = "0.12.1"
+hmac = "0.13.0"
 sha2 = "0.10.8"
 pbkdf2 = "0.12.2"
 rand_chacha = "0.3.1"
@@ -142,7 +142,7 @@ tower = { version = "0.5.3", features = ["util", "timeout", "load-shed", "limit"
 
 [dev-dependencies]
 criterion = { version = "0.5.1", features = ["async_tokio", "html_reports"] }
-mockall = "0.12.1"
+mockall = "0.14.0"
 tempfile = "3.10.0"
 test-log = { version = "0.2.14", features = ["trace"] }
 quickcheck = "1.0.3"

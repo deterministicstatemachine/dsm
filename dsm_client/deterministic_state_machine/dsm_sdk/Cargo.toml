@@ -85,7 +85,7 @@ futures = { version = "0.3.30", default-features = false, features = ["std"] }
 # Error handling
 thiserror = "2.0.18"
 anyhow = "1.0.99"
-toml_edit = "0.22"
+toml_edit = "0.25"
 
 toml = "0.8.20"
 
@@ -97,7 +97,7 @@ bitcoin = { version = "0.32", default-features = false, features = ["std"] }
 blake3 = "1.5.0"
 # AEAD
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc", "std"] }
-hmac = "0.12.1"
+hmac = "0.13.0"
 rand = "0.8.5"
 rand_chacha = "0.3.1"
 getrandom = "0.4.2"
@@ -167,7 +167,7 @@ prost-types = "0.12"
 
 [dev-dependencies]
 criterion = { version = "0.5.1", features = ["async_tokio", "html_reports"] }
-mockall = "0.12.1"
+mockall = "0.14.0"
 tempfile = "3.10.0"
 test-log = { version = "0.2.14", features = ["trace"] }
 proptest = "1.11.0"
