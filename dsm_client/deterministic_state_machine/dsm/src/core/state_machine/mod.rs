@@ -353,6 +353,14 @@ impl StateMachine {
         // Update the current state
         self.set_state(new_state.clone());
 
+        // Bridge: sync DeviceState balances from the legacy State's token_balances.
+        // This keeps the canonical DeviceState consistent when transitions come
+        // through the old path. Once all callers migrate to advance_relationship,
+        // this bridge can be removed.
+        if let Some(ref mut ds) = self.device_state {
+            ds.sync_balances_from_legacy(&new_state.token_balances);
+        }
+
         // Advance the global deterministic tick on successful state transition
         let _ = crate::utils::deterministic_time::tick_raw();
 
