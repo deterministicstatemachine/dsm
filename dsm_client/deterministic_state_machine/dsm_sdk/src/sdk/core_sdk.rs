@@ -460,10 +460,10 @@ impl CoreSDK {
 
     /// Execute a DSM operation on a specific relationship chain (§2.2, §4.2).
     ///
-    /// This is the spec-canonical path: names a relationship, advances that
-    /// chain, replaces the SMT leaf, and updates device-level balances
-    /// atomically. Returns the legacy State for backward compat plus the
-    /// AdvanceOutcome containing SMT proofs.
+    /// Returns `(State, AdvanceOutcome)` where the `State` is a compatibility
+    /// view derived from the AdvanceOutcome's DeviceState + chain state. The
+    /// `State` will be removed once all downstream readers migrate to
+    /// `DeviceState`.
     pub fn execute_on_relationship(
         &self,
         rel_key: [u8; 32],
@@ -480,14 +480,37 @@ impl CoreSDK {
             deltas,
             initial_chain_tip,
         )?;
-        // Archive using the legacy state path
-        if let Some(current) = sm.current_state() {
-            let _ = Self::archive_state_snapshot(current);
-        }
-        let legacy_state = sm.current_state().cloned().ok_or_else(|| {
-            DsmError::state_machine("No state after advance_relationship")
-        })?;
-        Ok((legacy_state, outcome))
+
+        // Build a compatibility State view from the outcome for callers that
+        // still read State fields. This is a derived view, not the source of
+        // truth — DeviceState IS the truth.
+        let compat_state = {
+            let cs = &outcome.new_chain_state;
+            let mut s = State::default();
+            s.hash = cs.compute_chain_tip();
+            s.prev_state_hash = cs.embedded_parent;
+            s.entropy = cs.entropy.clone();
+            s.operation = cs.operation.clone();
+            s.device_info = dsm::types::state_types::DeviceInfo::new(
+                outcome.new_device_state.devid(),
+                outcome.new_device_state.public_key().to_vec(),
+            );
+            // Sync balances from DeviceState → legacy HashMap<String, Balance>
+            for (pc, val) in outcome.new_device_state.balances_snapshot() {
+                let prefix = u128::from_le_bytes({
+                    let mut a = [0u8; 16];
+                    a.copy_from_slice(&pc[..16]);
+                    a
+                });
+                s.token_balances.insert(
+                    format!("{prefix}"),
+                    dsm::types::token_types::Balance::from_state(*val, s.hash),
+                );
+            }
+            s
+        };
+
+        Ok((compat_state, outcome))
     }
 
     /// Get the canonical DeviceState head (§2.2 SMT root).
