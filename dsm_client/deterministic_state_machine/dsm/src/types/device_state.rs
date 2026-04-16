@@ -318,29 +318,6 @@ impl DeviceState {
         &self.balances
     }
 
-    /// Bridge: sync DeviceState balances from the legacy `State.token_balances`
-    /// (keyed by string). This resolves each token's `policy_commit` via
-    /// `resolve_policy_commit` and updates the canonical `[u8; 32]`-keyed map.
-    ///
-    /// This is a migration bridge — once all callers use `advance_relationship`,
-    /// this method should be deleted.
-    pub fn sync_balances_from_legacy(
-        &mut self,
-        legacy_balances: &std::collections::HashMap<String, crate::types::token_types::Balance>,
-    ) {
-        self.balances.clear();
-        for (key, balance) in legacy_balances {
-            // Extract token_id from the legacy key format "prefix|token_id"
-            let token_id = key.rsplit('|').next().unwrap_or(key);
-            let policy_commit =
-                crate::core::token::token_state_manager::resolve_policy_commit(token_id);
-            let cur = self.balances.get(&policy_commit).copied().unwrap_or(0);
-            // Accumulate in case multiple legacy keys map to the same policy_commit
-            self.balances
-                .insert(policy_commit, cur.saturating_add(balance.value()));
-        }
-    }
-
     /// Current chain tip for a relationship, if one exists. Returns
     /// `None` for first-ever transactions on an unseen relationship —
     /// the caller must supply a spec-canonical initial tip.
