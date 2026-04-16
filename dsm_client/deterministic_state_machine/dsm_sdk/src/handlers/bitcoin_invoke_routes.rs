@@ -1823,15 +1823,31 @@ impl AppRouterImpl {
                                 ))
                                     }
                                 };
-                            let unlock_applied_state =
-                                match self.core_sdk.execute_dsm_operation(signed_unlock_op) {
-                                    Ok(s) => s,
-                                    Err(e) => {
-                                        return err(format!(
+                            // DLV unlock via relationship-aware path (§9.5).
+                            // rel_key = k_{device↔vault}
+                            let device_id = match self.core_sdk.get_current_state() {
+                                Ok(s) => s.device_info.device_id,
+                                Err(e) => return err(format!("bitcoin.deposit.complete: no state: {e}")),
+                            };
+                            let vault_id = *dsm::crypto::blake3::domain_hash(
+                                "DSM/vault-device", req.vault_op_id.as_bytes(),
+                            ).as_bytes();
+                            let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
+                                &device_id, &vault_id,
+                            );
+                            let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                                &device_id, &vault_id,
+                            );
+                            let unlock_applied_state = match self.core_sdk.execute_on_relationship(
+                                rel_key, vault_id, signed_unlock_op, &[], Some(init_tip),
+                            ) {
+                                Ok((s, _)) => s,
+                                Err(e) => {
+                                    return err(format!(
                                     "bitcoin.deposit.complete: failed to apply DLV unlock op: {e}"
                                 ))
-                                    }
-                                };
+                                }
+                            };
                             if unlock_applied_state.hash.len() == 32 {
                                 if let Err(e) = crate::get_sdk_context()
                                     .update_chain_tip(unlock_applied_state.hash.to_vec())
@@ -3961,8 +3977,24 @@ impl AppRouterImpl {
                                 Ok(op) => op,
                                 Err(e) => return err(format!("bitcoin.deposit.await_and_complete: failed to sign DLV unlock op: {e}")),
                             };
-                            let unlock_applied_state = match self.core_sdk.execute_dsm_operation(signed_unlock_op) {
-                                Ok(s) => s,
+                            // DLV unlock via relationship path (§9.5)
+                            let device_id = match self.core_sdk.get_current_state() {
+                                Ok(s) => s.device_info.device_id,
+                                Err(e) => return err(format!("await_and_complete: no state: {e}")),
+                            };
+                            let vault_id = *dsm::crypto::blake3::domain_hash(
+                                "DSM/vault-device", vault_op_id.as_bytes(),
+                            ).as_bytes();
+                            let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
+                                &device_id, &vault_id,
+                            );
+                            let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                                &device_id, &vault_id,
+                            );
+                            let unlock_applied_state = match self.core_sdk.execute_on_relationship(
+                                rel_key, vault_id, signed_unlock_op, &[], Some(init_tip),
+                            ) {
+                                Ok((s, _)) => s,
                                 Err(e) => return err(format!("bitcoin.deposit.await_and_complete: failed to apply DLV unlock op: {e}")),
                             };
                             if unlock_applied_state.hash.len() == 32 {

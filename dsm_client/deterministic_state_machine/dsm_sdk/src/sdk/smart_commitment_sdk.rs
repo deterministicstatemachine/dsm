@@ -420,8 +420,30 @@ impl SmartCommitmentSDK {
             signature: Vec::new(),
         };
 
-        // Integrate with CoreSDK transition
-        self.core_sdk.execute_dsm_operation(operation)
+        // Route via relationship-aware path (§2.2)
+        let current = self.core_sdk.get_current_state()?;
+        let sender_id = current.device_info.device_id;
+        let recipient_id = *dsm::crypto::blake3::domain_hash(
+            "DSM/device-id", commitment.recipient.as_bytes(),
+        ).as_bytes();
+        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
+            &sender_id, &recipient_id,
+        );
+        let policy_commit = dsm::core::token::token_state_manager::resolve_policy_commit(
+            &commitment.token_id,
+        );
+        let deltas = [dsm::types::device_state::BalanceDelta {
+            policy_commit,
+            direction: dsm::types::device_state::BalanceDirection::Debit,
+            amount: commitment.amount,
+        }];
+        let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &sender_id, &recipient_id,
+        );
+        let (state, _) = self.core_sdk.execute_on_relationship(
+            rel_key, recipient_id, operation, &deltas, Some(init_tip),
+        )?;
+        Ok(state)
     }
 
     /// Create a commitment-creation Operation in the DSM system.
