@@ -375,13 +375,9 @@ mod tests {
         assert!(!State::validate_state_integrity(&state).unwrap());
     }
 
-    #[test]
-    fn validate_nongenesis_with_zero_prev_hash_is_invalid() {
-        let params = StateParams::new( test_entropy(), Operation::Noop, test_device_info());
-        let mut state = State::new(params);
-        finalize_hash(&mut state);
-        assert!(!State::validate_state_integrity(&state).unwrap());
-    }
+    // validate_nongenesis_with_zero_prev_hash test removed — genesis is now
+    // identified by prev_state_hash == [0u8; 32] (§4.3), not by counter.
+    // A state with zero parent hash IS genesis by definition.
 
     #[test]
     fn validate_nongenesis_with_correct_hash_is_valid() {

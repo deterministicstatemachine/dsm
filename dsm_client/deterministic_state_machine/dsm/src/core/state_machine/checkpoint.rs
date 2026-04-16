@@ -504,7 +504,7 @@ mod tests {
         };
         let dbg = format!("{:?}", cp);
         assert!(dbg.contains("cp_dbg"));
-        assert!(dbg.contains("7"));
+        assert!(dbg.contains("state_hash"));
     }
 
     #[test]
