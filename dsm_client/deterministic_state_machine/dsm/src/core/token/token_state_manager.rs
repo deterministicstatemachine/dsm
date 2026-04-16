@@ -23,7 +23,7 @@ use crate::{
     types::{
         error::DsmError,
         operations::{Operation, Ops},
-        state_types::{SparseIndex, State, StateParams, PreCommitment},
+        state_types::{State, PreCommitment},
         token_types::{Balance, StateContext, Token, TokenStatus},
     },
 };
@@ -148,57 +148,8 @@ impl TokenStateManager {
         }
     }
 
-    /// Create a state transition that atomically applies token balance changes.
-    pub fn create_token_state_transition(
-        &self,
-        current_state: &State,
-        operation: Operation,
-        new_entropy: Vec<u8>,
-        encapsulated_entropy: Option<Vec<u8>>,
-    ) -> Result<State, DsmError> {
-        // Validate operation basic shape if your Operation supports validation.
-        // If validate() doesn't exist in your tree, remove this block.
-        if let Err(e) = operation.validate() {
-            return Err(DsmError::invalid_operation(format!(
-                "Invalid operation for token state transition: {e}"
-            )));
-        }
-
-        let updated_balances = self.apply_token_operation(current_state, &operation)?;
-
-        let prev_state_hash = current_state.hash()?;
-
-        // Per §2.2 sparse indices are implementation optimization only.
-        let sparse_index = SparseIndex::default();
-
-        // Verify forward-commitment rules if present
-        if let Some(pre_commit) = &current_state.forward_commitment {
-            if !self.verify_precommitment_parameters(pre_commit, &operation)? {
-                return Err(DsmError::policy_violation(
-                    "forward commitment".to_string(),
-                    "Operation violates forward commitment parameters".to_string(),
-                    None::<std::io::Error>,
-                ));
-            }
-        }
-
-        let mut params = StateParams::new(new_entropy, operation, current_state.device_info.clone());
-
-        params = params
-            .with_encapsulated_entropy(encapsulated_entropy.unwrap_or_default())
-            .with_prev_state_hash(prev_state_hash)
-            .with_sparse_index(sparse_index);
-
-        let mut new_state = State::new(params);
-
-        // Atomic set of balances (state is the truth)
-        new_state.token_balances = updated_balances;
-
-        new_state.id = String::new();
-        new_state.hash = new_state.compute_hash()?;
-
-        Ok(new_state)
-    }
+    // create_token_state_transition deleted — all transitions now go through
+    // DeviceState::advance via StateMachine::advance_relationship (§2.2, §4.2).
 
     pub fn apply_token_operation(
         &self,
