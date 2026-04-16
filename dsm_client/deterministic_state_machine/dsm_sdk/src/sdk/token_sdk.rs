@@ -984,8 +984,22 @@ impl<I: Send + Sync> TokenSDK<I> {
                     *sig = signature;
                 }
 
-                // Use full DSM operation path to preserve authorization fields
-                let new_state = self.core_sdk.execute_dsm_operation(op)?;
+                // Route via relationship-aware path (§2.2)
+                let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
+                    &sender, recipient,
+                );
+                let pc = dsm::core::token::token_state_manager::resolve_policy_commit(token_id);
+                let deltas = [dsm::types::device_state::BalanceDelta {
+                    policy_commit: pc,
+                    direction: dsm::types::device_state::BalanceDirection::Debit,
+                    amount: *amount,
+                }];
+                let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                    &sender, recipient,
+                );
+                let (new_state, _) = self.core_sdk.execute_on_relationship(
+                    rel_key, *recipient, op, &deltas, Some(init_tip),
+                )?;
                 self.project_balance_cache_from_state(sender, &new_state)?;
 
                 {
@@ -1037,7 +1051,27 @@ impl<I: Send + Sync> TokenSDK<I> {
                     message: "Mint operation via TokenSDK".to_string(),
                 };
 
-                let new_state = self.core_sdk.execute_dsm_operation(op)?;
+                // Mint: relationship is device↔CPTA-authority (self for self-mint)
+                let mint_rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
+                    &current_state.device_info.device_id,
+                    &current_state.device_info.device_id,
+                );
+                let mint_deltas = [dsm::types::device_state::BalanceDelta {
+                    policy_commit,
+                    direction: dsm::types::device_state::BalanceDirection::Credit,
+                    amount: *amount,
+                }];
+                let mint_init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                    &current_state.device_info.device_id,
+                    &current_state.device_info.device_id,
+                );
+                let (new_state, _) = self.core_sdk.execute_on_relationship(
+                    mint_rel_key,
+                    current_state.device_info.device_id,
+                    op,
+                    &mint_deltas,
+                    Some(mint_init_tip),
+                )?;
                 self.project_balance_cache_from_state(
                     current_state.device_info.device_id,
                     &new_state,
@@ -1094,7 +1128,21 @@ impl<I: Send + Sync> TokenSDK<I> {
                     }
                 }
 
-                let new_state = self.core_sdk.execute_dsm_operation(op)?;
+                // Burn: relationship is device↔self (CPTA authority path)
+                let burn_rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
+                    &owner_id, &owner_id,
+                );
+                let burn_deltas = [dsm::types::device_state::BalanceDelta {
+                    policy_commit,
+                    direction: dsm::types::device_state::BalanceDirection::Debit,
+                    amount: *amount,
+                }];
+                let burn_init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                    &owner_id, &owner_id,
+                );
+                let (new_state, _) = self.core_sdk.execute_on_relationship(
+                    burn_rel_key, owner_id, op, &burn_deltas, Some(burn_init_tip),
+                )?;
                 self.project_balance_cache_from_state(owner_id, &new_state)?;
 
                 if token_id == "ERA" {
@@ -2305,7 +2353,25 @@ impl<I: Send + Sync> TokenSDK<I> {
             *sig = signature;
         }
 
-        let new_state = self.core_sdk.execute_dsm_operation(fee_transfer_op)?;
+        // Fee: relationship is device↔system.fee (deterministic system counterparty)
+        let fee_counterparty = *dsm::crypto::blake3::domain_hash(
+            "DSM/system-fee-device", b"system.fee.device_id",
+        ).as_bytes();
+        let fee_rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
+            &current_state.device_info.device_id, &fee_counterparty,
+        );
+        let era_pc = dsm::core::token::token_state_manager::resolve_policy_commit("ERA");
+        let fee_deltas = [dsm::types::device_state::BalanceDelta {
+            policy_commit: era_pc,
+            direction: dsm::types::device_state::BalanceDirection::Debit,
+            amount: fee,
+        }];
+        let fee_init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &current_state.device_info.device_id, &fee_counterparty,
+        );
+        let (new_state, _) = self.core_sdk.execute_on_relationship(
+            fee_rel_key, fee_counterparty, fee_transfer_op, &fee_deltas, Some(fee_init_tip),
+        )?;
         self.project_balance_cache_from_state(current_state.device_info.device_id, &new_state)?;
         Ok(())
     }
