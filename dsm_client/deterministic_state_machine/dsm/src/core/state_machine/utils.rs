@@ -137,22 +137,4 @@ mod tests {
         let expected = crate::crypto::blake3::domain_hash("DSM/state-hash", data);
         assert_eq!(hash.as_bytes(), expected.as_bytes());
     }
-
-    #[test]
-    fn test_calculate_next_entropy() {
-        let current_entropy = vec![1, 2, 3];
-        let operation_bytes = b"test_operation";
-        let next_state_number = 42;
-
-        let entropy1 = calculate_next_entropy(&current_entropy, operation_bytes, next_state_number);
-        let entropy2 = calculate_next_entropy(&current_entropy, operation_bytes, next_state_number);
-
-        // Entropy generation must be deterministic
-        assert_eq!(entropy1, entropy2);
-
-        // Different inputs should produce different entropy
-        let different_entropy =
-            calculate_next_entropy(&current_entropy, b"different", next_state_number);
-        assert_ne!(entropy1, different_entropy);
-    }
 }

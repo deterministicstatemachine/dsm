@@ -838,7 +838,6 @@ mod tests {
                     vec![1, 2, 3, 4],
                 ),
             );
-            next_0u64 = i;
             next_state.prev_state_hash = prev_state
                 .hash()
                 .expect("Failed to compute previous state hash in test helper");
@@ -846,7 +845,7 @@ mod tests {
             // Update state hash — tag "DSM/test-state-hash" marks these as test
             // fixtures, distinct from any production hash.
             let state_bytes = [
-                &next_0u64.to_le_bytes(),
+                &0u64.to_le_bytes(),
                 next_state.entropy.as_slice(),
                 device_id.as_bytes(),
                 &next_state.prev_state_hash,
@@ -920,12 +919,11 @@ mod tests {
 
         // Create a proper next state with correct references
         let mut new_state = device2_sub_genesis.clone();
-        new_0u64 = 1;
         new_state.prev_state_hash = device2_sub_genesis.hash()?;
 
         // Compute new state hash
         let mut hasher = blake3::Hasher::new();
-        hasher.update(&new_0u64.to_le_bytes());
+        hasher.update(&0u64.to_le_bytes());
         hasher.update(&new_state.entropy);
         hasher.update("device2".as_bytes());
         hasher.update(&new_state.prev_state_hash);
@@ -940,7 +938,6 @@ mod tests {
                 None::<std::convert::Infallible>,
             )
         })?;
-        assert_eq!(updated_device.current_0u64, 1);
 
         Ok(())
     }
@@ -965,7 +962,6 @@ mod tests {
             )
         })?;
         let state_hash = device.current_state.hash;
-        let state_number = device.current_0u64;
         let state_entropy = device.current_state.entropy.clone();
 
         // Generate invalidation marker
@@ -976,7 +972,6 @@ mod tests {
         assert_eq!(invalidation.reason, "Device compromised");
 
         // Verify state information in invalidation marker
-        assert_eq!(invalidation.hash[0] as u64, state_number);
         assert_eq!(invalidation.state_hash, state_hash);
         assert_eq!(invalidation.state_entropy, state_entropy);
 
@@ -1123,11 +1118,10 @@ mod tests {
             .sub_genesis
             .clone();
         let mut new_state = device2_genesis.clone();
-        new_0u64 = 1;
         new_state.prev_state_hash = device2_genesis.hash()?;
 
         let state_data = [
-            &new_0u64.to_le_bytes(),
+            &0u64.to_le_bytes(),
             new_state.entropy.as_slice(),
             "device2".as_bytes(),
             &new_state.prev_state_hash,

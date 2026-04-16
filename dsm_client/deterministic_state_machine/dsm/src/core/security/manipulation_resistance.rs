@@ -453,7 +453,6 @@ mod tests {
 
     fn make_state(n: u64) -> State {
         State::new(StateParams::new(
-            n,
             vec![0xAA; 16],
             Operation::Noop,
             dev_info(),

@@ -2049,7 +2049,7 @@ mod tests {
     use super::*;
 
     fn test_balance(value: u64) -> Balance {
-        Balance::from_parts(value, 0, 0, Some([0xAB; 32]))
+        Balance::from_parts(value, 0, Some([0xAB; 32]))
     }
 
     fn roundtrip(op: &Operation) -> Operation {
@@ -3029,7 +3029,7 @@ mod tests {
 
         #[test]
         fn balance_with_state_hash_roundtrips() {
-            let bal = Balance::from_parts(12345, 0, 99, Some([0xFE; 32]));
+            let bal = Balance::from_parts(12345, 0, Some([0xFE; 32]));
             let op = Operation::Mint {
                 amount: bal.clone(),
                 token_id: b"T".to_vec(),
@@ -3047,7 +3047,7 @@ mod tests {
 
         #[test]
         fn balance_without_state_hash_roundtrips() {
-            let bal = Balance::from_parts(0, 0, 0, None);
+            let bal = Balance::from_parts(0, 0, None);
             let op = Operation::Burn {
                 amount: bal,
                 token_id: b"X".to_vec(),
@@ -3059,7 +3059,7 @@ mod tests {
 
         #[test]
         fn balance_with_locked_roundtrips() {
-            let bal = Balance::from_parts(1000, 200, 5, Some([0x01; 32]));
+            let bal = Balance::from_parts(1000, 200, Some([0x01; 32]));
             let op = Operation::Lock {
                 token_id: b"ERA".to_vec(),
                 amount: bal.clone(),

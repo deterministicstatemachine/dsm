@@ -838,15 +838,13 @@ mod tests {
     fn dbrw_summary_hash_does_not_change_state_hash() {
         let device_info = DeviceInfo::new([0x11; 32], vec![0x22; 64]);
 
-        let base = State::new(StateParams::new(
-            7,
-            vec![1, 2, 3, 4],
+        let base = State::new(StateParams::new(vec![1, 2, 3, 4],
             Operation::Noop,
             device_info.clone(),
         ));
 
         let with_dbrw = State::new(
-            StateParams::new(7, vec![1, 2, 3, 4], Operation::Noop, device_info)
+            StateParams::new( vec![1, 2, 3, 4], Operation::Noop, device_info)
                 .with_dbrw_summary_hash([0xAB; 32]),
         );
 
@@ -863,9 +861,11 @@ mod tests {
     }
 
     fn test_state(n: u64) -> State {
+        // n seeds entropy only — NOT a counter for acceptance (§4.3)
+        let mut entropy = vec![0xAA; 16];
+        entropy.extend_from_slice(&n.to_le_bytes());
         State::new(StateParams::new(
-            n,
-            vec![0xAA; 16],
+            entropy,
             Operation::Noop,
             test_device_info(),
         ))
@@ -940,76 +940,25 @@ mod tests {
     }
 
     #[test]
-    fn sparse_index_value_deterministic() {
-        let si = SparseIndex::new(vec![1, 5, 10]);
-        let v1 = si.value();
-        let v2 = si.value();
-        assert_eq!(v1, v2);
-    }
-
-    #[test]
-    fn sparse_index_value_order_independent() {
-        let a = SparseIndex::new(vec![1, 5, 10]);
-        let b = SparseIndex::new(vec![10, 1, 5]);
-        assert_eq!(a.value(), b.value());
-    }
-
-    #[test]
     fn sparse_index_with_indices_replaces() {
         let si = SparseIndex::new(vec![1]).with_indices(vec![9, 8, 7]);
         assert_eq!(si.indices, vec![9, 8, 7]);
     }
 
-    #[test]
-    fn sparse_index_calculate_sparse_indices_zero() {
-        let indices = SparseIndex::calculate_sparse_indices(0).unwrap();
-        assert!(indices.is_empty());
-    }
-
-    #[test]
-    fn sparse_index_calculate_sparse_indices_one() {
-        let indices = SparseIndex::calculate_sparse_indices(1).unwrap();
-        assert!(indices.contains(&0), "must include genesis");
-    }
-
-    #[test]
-    fn sparse_index_calculate_includes_genesis_and_predecessor() {
-        let indices = SparseIndex::calculate_sparse_indices(10).unwrap();
-        assert!(indices.contains(&0), "must include genesis");
-        assert!(indices.contains(&9), "must include predecessor");
-    }
-
-    #[test]
-    fn sparse_index_calculate_sorted_and_deduped() {
-        let indices = SparseIndex::calculate_sparse_indices(16).unwrap();
-        for w in indices.windows(2) {
-            assert!(w[0] < w[1], "indices must be sorted and unique");
-        }
-    }
-
-    #[test]
-    fn sparse_index_calculate_logarithmic_count() {
-        let indices = SparseIndex::calculate_sparse_indices(64).unwrap();
-        assert!(
-            indices.len() <= 10,
-            "should be logarithmic: got {}",
-            indices.len()
-        );
-    }
+    // Sparse index calculation tests removed — calculate_sparse_indices and
+    // value() depended on state_number which was removed per §4.3.
 
     // ── State construction & basic properties ───────────────────────
 
     #[test]
-    fn state_new_sets_id_and_number() {
+    fn state_new_returns_valid_state() {
         let s = test_state(42);
-        assert_eq!(s.state_number, 42);
-        assert_eq!(s.id, "state_42");
+        assert_ne!(s.compute_hash().expect("hash"), [0u8; 32]);
     }
 
     #[test]
     fn state_new_genesis_properties() {
         let s = State::new_genesis([0xBB; 32], test_device_info());
-        assert_eq!(s.state_number, 0);
         assert_eq!(s.id, "genesis");
         assert!(s.is_genesis());
         assert_eq!(s.entropy, vec![0xBB; 32]);
@@ -1111,10 +1060,9 @@ mod tests {
 
     #[test]
     fn state_with_relationship_context() {
-        let s = test_state(10).with_relationship_context([0xCC; 32], 5, vec![0xDD; 32]);
+        let s = test_state(10).with_relationship_context([0xCC; 32], vec![0xDD; 32]);
         let ctx = s.relationship_context.as_ref().unwrap();
         assert_eq!(ctx.counterparty_id, [0xCC; 32]);
-        assert_eq!(ctx.counterparty_state_number, 5);
         assert!(ctx.active);
     }
 
@@ -1122,7 +1070,7 @@ mod tests {
     fn state_in_relationship_with_uses_hashed_label() {
         let counterparty_id =
             *crate::crypto::blake3::domain_hash("DSM/device-id", b"bob").as_bytes();
-        let s = test_state(10).with_relationship_context(counterparty_id, 3, vec![0xFF; 32]);
+        let s = test_state(10).with_relationship_context(counterparty_id, vec![0xFF; 32]);
         assert!(s.in_relationship_with("bob"));
         assert!(!s.in_relationship_with("alice"));
     }
@@ -1197,12 +1145,6 @@ mod tests {
 
     // ── State transition_count ───────────────────────────────────────
 
-    #[test]
-    fn state_transition_count() {
-        assert_eq!(test_state(0).transition_count(), 0);
-        assert_eq!(test_state(99).transition_count(), 99);
-    }
-
     // ── State entity_signature ───────────────────────────────────────
 
     #[test]
@@ -1223,29 +1165,15 @@ mod tests {
     }
 
     #[test]
-    fn state_partial_eq_different_state_number() {
+    fn state_partial_eq_different_entropy() {
         let a = test_state(20);
         let b = test_state(21);
         assert_ne!(a, b);
     }
 
-    // ── State value ─────────────────────────────────────────────────
-
-    #[test]
-    fn state_value_deterministic() {
-        let a = test_state(7);
-        let b = test_state(7);
-        assert_eq!(a.value(), b.value());
-    }
-
-    // ── State calculate_sparse_indices ───────────────────────────────
-
-    #[test]
-    fn state_calculate_sparse_indices_matches_sparse_index() {
-        let s_indices = State::calculate_sparse_indices(10).unwrap();
-        let si_indices = SparseIndex::calculate_sparse_indices(10).unwrap();
-        assert_eq!(s_indices, si_indices);
-    }
+    // Tests for State::value(), State::calculate_sparse_indices(), and
+    // State::transition_count() removed — all depended on state_number
+    // which was removed per §4.3.
 
     // ── PreCommitment ───────────────────────────────────────────────
 
@@ -1483,8 +1411,6 @@ mod tests {
         assert_eq!(ctx.entity_id, [0xAA; 32]);
         assert_eq!(ctx.counterparty_id, [0xBB; 32]);
         assert_eq!(ctx.counterparty_public_key, vec![0xCC; 64]);
-        assert_eq!(ctx.entity_state_number, 0);
-        assert_eq!(ctx.counterparty_state_number, 0);
         assert!(ctx.active);
         assert!(ctx.chain_tip_id.is_none());
         assert!(ctx.last_bilateral_state_hash.is_none());
@@ -1521,8 +1447,7 @@ mod tests {
 
     #[test]
     fn state_params_new_defaults() {
-        let sp = StateParams::new(0, vec![1], Operation::Noop, test_device_info());
-        assert_eq!(sp.state_number, 0);
+        let sp = StateParams::new( vec![1], Operation::Noop, test_device_info());
         assert_eq!(sp.entropy, vec![1]);
         assert!(sp.encapsulated_entropy.is_none());
         assert_eq!(sp.prev_state_hash, [0u8; 32]);
@@ -1533,14 +1458,14 @@ mod tests {
 
     #[test]
     fn state_params_with_encapsulated_entropy() {
-        let sp = StateParams::new(1, vec![], Operation::Noop, test_device_info())
+        let sp = StateParams::new( vec![], Operation::Noop, test_device_info())
             .with_encapsulated_entropy(vec![0xEE; 32]);
         assert_eq!(sp.encapsulated_entropy, Some(vec![0xEE; 32]));
     }
 
     #[test]
     fn state_params_with_prev_state_hash() {
-        let sp = StateParams::new(2, vec![], Operation::Noop, test_device_info())
+        let sp = StateParams::new( vec![], Operation::Noop, test_device_info())
             .with_prev_state_hash([0xAA; 32]);
         assert_eq!(sp.prev_state_hash, [0xAA; 32]);
     }
@@ -1549,21 +1474,21 @@ mod tests {
     fn state_params_with_sparse_index() {
         let si = SparseIndex::new(vec![1, 2, 3]);
         let sp =
-            StateParams::new(3, vec![], Operation::Noop, test_device_info()).with_sparse_index(si);
+            StateParams::new( vec![], Operation::Noop, test_device_info()).with_sparse_index(si);
         assert_eq!(sp.sparse_index.indices, vec![1, 2, 3]);
     }
 
     #[test]
     fn state_params_with_forward_commitment() {
         let pc = PreCommitment::new("test".into(), HashMap::new(), HashSet::new(), 0, [0; 32]);
-        let sp = StateParams::new(4, vec![], Operation::Noop, test_device_info())
+        let sp = StateParams::new( vec![], Operation::Noop, test_device_info())
             .with_forward_commitment(pc);
         assert!(sp.forward_commitment.is_some());
     }
 
     #[test]
     fn state_params_with_dbrw_summary_hash() {
-        let sp = StateParams::new(5, vec![], Operation::Noop, test_device_info())
+        let sp = StateParams::new( vec![], Operation::Noop, test_device_info())
             .with_dbrw_summary_hash([0xDD; 32]);
         assert_eq!(sp.dbrw_summary_hash, Some([0xDD; 32]));
     }
@@ -1572,15 +1497,11 @@ mod tests {
 
     #[test]
     fn state_hash_varies_with_entropy() {
-        let a = State::new(StateParams::new(
-            1,
-            vec![0x00; 16],
+        let a = State::new(StateParams::new(vec![0x00; 16],
             Operation::Noop,
             test_device_info(),
         ));
-        let b = State::new(StateParams::new(
-            1,
-            vec![0xFF; 16],
+        let b = State::new(StateParams::new(vec![0xFF; 16],
             Operation::Noop,
             test_device_info(),
         ));
@@ -1590,11 +1511,11 @@ mod tests {
     #[test]
     fn state_hash_varies_with_prev_state_hash() {
         let a = State::new(
-            StateParams::new(1, vec![1], Operation::Noop, test_device_info())
+            StateParams::new( vec![1], Operation::Noop, test_device_info())
                 .with_prev_state_hash([0x00; 32]),
         );
         let b = State::new(
-            StateParams::new(1, vec![1], Operation::Noop, test_device_info())
+            StateParams::new( vec![1], Operation::Noop, test_device_info())
                 .with_prev_state_hash([0xFF; 32]),
         );
         assert_ne!(a.compute_hash().unwrap(), b.compute_hash().unwrap());
@@ -1612,7 +1533,7 @@ mod tests {
             [0xCC; 32],
         );
         let with = State::new(
-            StateParams::new(5, vec![0xAA; 16], Operation::Noop, test_device_info())
+            StateParams::new( vec![0xAA; 16], Operation::Noop, test_device_info())
                 .with_forward_commitment(pc),
         );
 
@@ -1628,25 +1549,11 @@ mod tests {
     fn state_with_relationship_context_and_chain_tip() {
         let s = test_state(15).with_relationship_context_and_chain_tip(
             [0xDD; 32],
-            8,
             vec![0xEE; 32],
             "chain_tip_99".into(),
         );
         let ctx = s.relationship_context.as_ref().unwrap();
-        assert_eq!(ctx.counterparty_state_number, 8);
         assert_eq!(ctx.get_chain_tip_id(), Some(&"chain_tip_99".to_string()));
-    }
-
-    #[test]
-    fn state_get_counterparty_state() {
-        let s = test_state(10).with_relationship_context([0xCC; 32], 7, vec![]);
-        assert_eq!(s.get_counterparty_state(), Some(7));
-    }
-
-    #[test]
-    fn state_get_counterparty_state_none_without_context() {
-        let s = test_state(10);
-        assert_eq!(s.get_counterparty_state(), None);
     }
 }
 

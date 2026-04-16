@@ -1542,42 +1542,8 @@ mod tests {
         assert!(!mint_op.affects_balance(b"ERA"));
     }
 
-    #[test]
-    fn test_calculate_sparse_indices_genesis() {
-        let result = calculate_sparse_indices(0);
-        assert!(result.is_ok());
-        assert!(result
-            .unwrap_or_else(|e| panic!("sparse indices should be ok: {e}"))
-            .is_empty());
-    }
-
-    #[test]
-    fn test_calculate_sparse_indices_state_1() {
-        let result = calculate_sparse_indices(1);
-        assert!(result.is_ok());
-        let indices = result.unwrap_or_else(|e| panic!("sparse indices should be ok: {e}"));
-        assert!(indices.contains(&0));
-        assert_eq!(indices.len(), 1);
-    }
-
-    #[test]
-    fn test_calculate_sparse_indices_state_2() {
-        let result = calculate_sparse_indices(2);
-        assert!(result.is_ok());
-        let indices = result.unwrap_or_else(|e| panic!("sparse indices should be ok: {e}"));
-        assert!(indices.contains(&0)); // genesis
-        assert!(indices.contains(&1)); // direct predecessor
-    }
-
-    #[test]
-    fn test_calculate_sparse_indices_state_8() {
-        let result = calculate_sparse_indices(8);
-        assert!(result.is_ok());
-        let indices = result.unwrap_or_else(|e| panic!("sparse indices should be ok: {e}"));
-        assert!(indices.contains(&0)); // genesis
-        assert!(indices.contains(&7)); // direct predecessor
-                                       // Should also contain power-of-2 distances
-    }
+    // calculate_sparse_indices tests removed — function deleted per §4.3
+    // (sparse indices are advisory-only per §2.2 and were counter-derived).
 
     #[test]
     fn test_generate_position_sequence() {

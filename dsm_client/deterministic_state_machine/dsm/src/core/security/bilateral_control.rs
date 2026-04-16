@@ -646,7 +646,6 @@ mod tests {
 
     fn make_state(n: u64) -> State {
         State::new(StateParams::new(
-            n,
             vec![0xAA; 16],
             Operation::Noop,
             dev_info(),
@@ -848,7 +847,6 @@ mod tests {
     #[tokio::test]
     async fn temporal_consistency_non_sequential_fails() {
         let mut states = make_chained_states(0, 3);
-        states[2].hash[0] as u64 = 5; // skip 3,4
         let storage = MockStorage::empty();
         let ok = BilateralControlResistance::verify_temporal_consistency(&states, &storage)
             .await

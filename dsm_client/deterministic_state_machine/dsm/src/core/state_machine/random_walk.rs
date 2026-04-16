@@ -18,11 +18,11 @@
 /// // Create states with test data
 /// let mut previous_state = State::default();
 /// previous_state.entropy = vec![1, 2, 3];
-/// previous_state.state_number = 0;
+/// previous_state.hash[0] as u64 = 0;
 ///
 /// let mut new_state = State::default();
 /// new_state.entropy = vec![4, 5, 6];
-/// new_state.state_number = 1;
+/// new_state.hash[0] as u64 = 1;
 ///
 /// // Create a valid operation format: [op_type (1 byte), data...]
 /// let op_bytes = [0u8; 32]; // Using zeroed bytes as test operation data
@@ -524,14 +524,14 @@ pub mod algorithms {
             let operation = b"operation";
 
             // Use the imported function from utils instead of a local one
-            let entropy1 = utils::calculate_next_entropy(current_entropy, operation, 1);
-            let entropy2 = utils::calculate_next_entropy(current_entropy, operation, 1);
+            let entropy1 = utils::calculate_next_entropy(current_entropy, operation, &[0u8; 32]);
+            let entropy2 = utils::calculate_next_entropy(current_entropy, operation, &[0u8; 32]);
 
             // Same inputs should produce the same entropy
             assert_eq!(entropy1, entropy2);
 
             // Different state number should produce different entropy
-            let entropy3 = utils::calculate_next_entropy(current_entropy, operation, 2);
+            let entropy3 = utils::calculate_next_entropy(current_entropy, operation, &[0u8; 32]);
             assert_ne!(entropy1, entropy3);
         }
     }

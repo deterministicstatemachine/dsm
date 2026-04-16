@@ -377,7 +377,7 @@ mod tests {
     ) -> StateTypesState {
         let di = make_device_info();
         let prev_hash = prev.hash().unwrap();
-        let mut params = StateParams::new(prev.hash[0] as u64 + 1, entropy, operation, di);
+        let mut params = StateParams::new(entropy, operation, di);
         params.prev_state_hash = prev_hash;
         let mut s = State::new(params);
         s.token_balances = prev.token_balances.clone();
@@ -389,8 +389,7 @@ mod tests {
         let current = make_genesis();
         let di = make_device_info();
         let prev_hash = current.hash().unwrap();
-        let mut params = StateParams::new(
-            5, // gap in state numbers
+        let mut params = StateParams::new(// gap in state numbers
             vec![0xBB; 32],
             Operation::Noop,
             di,
@@ -423,9 +422,7 @@ mod tests {
         let current = make_genesis();
         let di = make_device_info();
         let prev_hash = current.hash().unwrap();
-        let mut params = StateParams::new(
-            1,
-            current.entropy.clone(), // same entropy as current
+        let mut params = StateParams::new(current.entropy.clone(), // same entropy as current
             Operation::Noop,
             di,
         );
