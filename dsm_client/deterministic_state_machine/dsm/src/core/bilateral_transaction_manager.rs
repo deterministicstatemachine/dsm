@@ -128,6 +128,16 @@ fn initial_relationship_chain_tip(
     bytes32(out.as_bytes())
 }
 
+/// Compute the initial chain tip for a bilateral relationship using device
+/// IDs only (genesis hashes zeroed). Suitable for callers that don't have
+/// genesis hashes available — the output is still deterministic and symmetric.
+pub fn initial_chain_tip_from_device_ids(
+    dev_id_a: &[u8; 32],
+    dev_id_b: &[u8; 32],
+) -> [u8; 32] {
+    initial_relationship_chain_tip(dev_id_a, &[0u8; 32], dev_id_b, &[0u8; 32])
+}
+
 /// §18.1: k_{A↔B} = BLAKE3("DSM/smt-key\0" || min(DevID_A, DevID_B) || max(DevID_A, DevID_B))
 /// Lexicographic ordering ensures identical key regardless of which party computes it.
 pub fn compute_smt_key(dev_id_a: &[u8; 32], dev_id_b: &[u8; 32]) -> [u8; 32] {

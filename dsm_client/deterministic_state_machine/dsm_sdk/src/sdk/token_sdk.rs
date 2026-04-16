@@ -1880,8 +1880,28 @@ impl<I: Send + Sync> TokenSDK<I> {
             *sig = signature;
         }
 
-        // Preserve full authorization fields (signature/proofs) if present
-        let new_state = self.core_sdk.execute_dsm_operation(bilateral_transfer_op)?;
+        // Execute via the relationship-aware path (§2.2, §4.2).
+        // rel_key = k_{A↔B} per §2.2 canonical derivation.
+        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
+            &sender, &recipient,
+        );
+        let policy_commit = dsm::core::token::token_state_manager::resolve_policy_commit(&token_id);
+        let deltas = [dsm::types::device_state::BalanceDelta {
+            policy_commit,
+            direction: dsm::types::device_state::BalanceDirection::Debit,
+            amount,
+        }];
+        // Use initial_chain_tip for first-ever transaction with this counterparty
+        let initial_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &sender, &recipient,
+        );
+        let (new_state, _outcome) = self.core_sdk.execute_on_relationship(
+            rel_key,
+            recipient,
+            bilateral_transfer_op,
+            &deltas,
+            Some(initial_tip),
+        )?;
         self.project_balance_cache_from_state(sender, &new_state)?;
 
         let recipient_id = crate::util::domain_helpers::device_id_hash_bytes(&recipient);
@@ -2457,17 +2477,32 @@ impl<I: Send + Sync> TokenSDK<I> {
             *sig = applied_signature;
         }
 
-        log::debug!("[TOKEN] execute_signed_transfer: calling core_sdk.execute_dsm_operation...");
-        let new_state = self.core_sdk.execute_dsm_operation(op)?;
-        log::debug!("[TOKEN] execute_signed_transfer: execute_dsm_operation OK");
+        // Execute via relationship-aware path (§2.2, §4.2)
+        let recipient_bytes: [u8; 32] =
+            crate::util::domain_helpers::device_id_hash(recipient.as_str());
+        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
+            &sender, &recipient_bytes,
+        );
+        let policy_commit = dsm::core::token::token_state_manager::resolve_policy_commit(&token_id);
+        let deltas = [dsm::types::device_state::BalanceDelta {
+            policy_commit,
+            direction: dsm::types::device_state::BalanceDirection::Debit,
+            amount,
+        }];
+        let initial_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &sender, &recipient_bytes,
+        );
+        log::debug!("[TOKEN] execute_signed_transfer: calling execute_on_relationship...");
+        let (new_state, _outcome) = self.core_sdk.execute_on_relationship(
+            rel_key, recipient_bytes, op, &deltas, Some(initial_tip),
+        )?;
+        log::debug!("[TOKEN] execute_signed_transfer: execute_on_relationship OK");
 
         self.project_balance_cache_from_state(sender, &new_state)?;
         log::debug!("[TOKEN] execute_signed_transfer: local cache projected");
 
         // Record history in local cache
         {
-            let recipient_bytes: [u8; 32] =
-                crate::util::domain_helpers::device_id_hash(recipient.as_str());
             let token_op = TokenOperation::Transfer {
                 token_id: token_id.clone(),
                 recipient: recipient_bytes,
@@ -2509,9 +2544,31 @@ impl<I: Send + Sync> TokenSDK<I> {
         let current_state = self.core_sdk.get_current_state()?;
         let sender = current_state.device_info.device_id;
 
-        log::debug!("[TOKEN] execute_transfer_op: calling core_sdk.execute_dsm_operation...");
-        let new_state = self.core_sdk.execute_dsm_operation(op)?;
-        log::debug!("[TOKEN] execute_transfer_op: execute_dsm_operation OK");
+        // Route through relationship-aware path (§2.2, §4.2)
+        let recipient_devid: [u8; 32] = if recipient_device_id.len() == 32 {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&recipient_device_id);
+            arr
+        } else {
+            crate::util::domain_helpers::device_id_hash_bytes(&recipient_device_id)
+        };
+        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
+            &sender, &recipient_devid,
+        );
+        let policy_commit = dsm::core::token::token_state_manager::resolve_policy_commit(&token_id);
+        let deltas = [dsm::types::device_state::BalanceDelta {
+            policy_commit,
+            direction: dsm::types::device_state::BalanceDirection::Debit,
+            amount: amount_val,
+        }];
+        let initial_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &sender, &recipient_devid,
+        );
+        log::debug!("[TOKEN] execute_transfer_op: calling execute_on_relationship...");
+        let (new_state, _outcome) = self.core_sdk.execute_on_relationship(
+            rel_key, recipient_devid, op, &deltas, Some(initial_tip),
+        )?;
+        log::debug!("[TOKEN] execute_transfer_op: execute_on_relationship OK");
 
         log::debug!("[TOKEN] execute_transfer_op: projecting local cache from canonical state...");
         self.project_balance_cache_from_state(sender, &new_state)?;
