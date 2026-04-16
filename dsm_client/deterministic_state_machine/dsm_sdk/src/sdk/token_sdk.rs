@@ -286,7 +286,7 @@ impl EraToken {
         let mut fee_schedule = HashMap::new();
         fee_schedule.insert(
             "token_creation".to_string(),
-            Balance::from_state(10, [0u8; 32], 0),
+            Balance::from_state(10, [0u8; 32]),
         );
         fee_schedule.insert("token_update".to_string(), Balance::zero());
         fee_schedule.insert("token_transfer".to_string(), Balance::zero());
@@ -295,27 +295,27 @@ impl EraToken {
         fee_schedule.insert("state_transition".to_string(), Balance::zero());
         fee_schedule.insert(
             "smart_commitment".to_string(),
-            Balance::from_state(2, [0u8; 32], 0),
+            Balance::from_state(2, [0u8; 32]),
         );
         fee_schedule.insert(
             "storage_tier_1gb".to_string(),
-            Balance::from_state(5, [0u8; 32], 0),
+            Balance::from_state(5, [0u8; 32]),
         );
         fee_schedule.insert(
             "storage_tier_10gb".to_string(),
-            Balance::from_state(25, [0u8; 32], 0),
+            Balance::from_state(25, [0u8; 32]),
         );
         fee_schedule.insert(
             "storage_tier_100gb".to_string(),
-            Balance::from_state(100, [0u8; 32], 0),
+            Balance::from_state(100, [0u8; 32]),
         );
         fee_schedule.insert(
             "storage_tier_1tb".to_string(),
-            Balance::from_state(500, [0u8; 32], 0),
+            Balance::from_state(500, [0u8; 32]),
         );
         fee_schedule.insert(
             "storage_tier_unlimited".to_string(),
-            Balance::from_state(2000, [0u8; 32], 0),
+            Balance::from_state(2000, [0u8; 32]),
         );
 
         let metadata = TokenMetadata {
@@ -337,7 +337,7 @@ impl EraToken {
             token_id: "ERA".to_string(),
             metadata,
             status: TokenStatus::Active,
-            total_supply: Balance::from_state(total_supply, [0u8; 32], 0),
+            total_supply: Balance::from_state(total_supply, [0u8; 32]),
             circulating_supply: Balance::zero(),
             fee_schedule,
         }
@@ -347,7 +347,7 @@ impl EraToken {
         self.fee_schedule
             .get(operation_type)
             .cloned()
-            .unwrap_or(Balance::from_state(1, [0u8; 32], 0))
+            .unwrap_or(Balance::from_state(1, [0u8; 32]))
     }
 
     pub fn update_fee_schedule(&mut self, new_schedule: HashMap<String, Balance>) {
@@ -402,7 +402,7 @@ impl<I: Send + Sync> TokenSDK<I> {
 
     fn find_token_metadata_state(&self, token_id: &str) -> Result<State, DsmError> {
         let current_state = self.core_sdk.get_current_state()?;
-        let max_state_number = current_state.state_number;
+        let max_state_number = current_state.hash[0] as u64;
 
         for state_number in (0..=max_state_number).rev() {
             if let Ok(state) = self.core_sdk.get_state_by_number(state_number) {
@@ -556,7 +556,7 @@ impl<I: Send + Sync> TokenSDK<I> {
             available: balance.available(),
             locked: balance.locked(),
             source_state_hash: crate::util::text_id::encode_base32_crockford(&state_hash),
-            source_state_number: state.state_number,
+            source_state_number: state.hash[0] as u64,
             updated_at: crate::util::deterministic_time::tick(),
         };
 
@@ -597,7 +597,7 @@ impl<I: Send + Sync> TokenSDK<I> {
                         .and_then(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).ok())
                         .unwrap_or_else(|| state.hash().unwrap_or([0u8; 32]));
                 let mut balance =
-                    Balance::from_state(record.available, state_hash, record.source_state_number);
+                    Balance::from_state(record.available, state_hash);
                 if record.locked > 0 {
                     let _ = balance.lock(record.locked);
                 }
@@ -647,7 +647,7 @@ impl<I: Send + Sync> TokenSDK<I> {
             log::info!(
                 "[TokenSDK] canonical projection refreshed local cache for {} at state #{}",
                 crate::util::text_id::encode_base32_crockford(&device_id),
-                state.state_number,
+                state.hash[0] as u64,
             );
         }
         balances.insert(device_id, projected);
@@ -966,7 +966,7 @@ impl<I: Send + Sync> TokenSDK<I> {
 
                 let mut op = Operation::Transfer {
                     to_device_id: recipient.to_vec(),
-                    amount: Balance::from_state(*amount, state_hash, current_state.state_number),
+                    amount: Balance::from_state(*amount, state_hash),
                     token_id: token_id.as_bytes().to_vec(),
                     mode: TransactionMode::Bilateral,
                     nonce: Vec::new(),
@@ -1029,7 +1029,7 @@ impl<I: Send + Sync> TokenSDK<I> {
                         })?;
 
                 let op = Operation::Mint {
-                    amount: Balance::from_state(*amount, state_hash, current_state.state_number),
+                    amount: Balance::from_state(*amount, state_hash),
                     token_id: token_id.as_bytes().to_vec(),
                     authorized_by,
                     proof_of_authorization: encode_embedded_proof(&signer_pk, &mint_sig)?,
@@ -1044,11 +1044,7 @@ impl<I: Send + Sync> TokenSDK<I> {
 
                 if token_id == "ERA" {
                     let mut era_token = self.era_token.write();
-                    let new_circulation = Balance::from_state(
-                        era_token.circulating_supply.value() + *amount,
-                        new_state.hash,
-                        new_state.state_number,
-                    );
+                    let new_circulation = Balance::from_state(era_token.circulating_supply.value() + *amount, new_state.hash);
                     era_token.circulating_supply = new_circulation;
                 }
 
@@ -1068,7 +1064,7 @@ impl<I: Send + Sync> TokenSDK<I> {
 
                 // 1. Build the op with empty proof (needed for signing preimage)
                 let mut op = Operation::Burn {
-                    amount: Balance::from_state(*amount, state_hash, current_state.state_number),
+                    amount: Balance::from_state(*amount, state_hash),
                     token_id: token_id.as_bytes().to_vec(),
                     proof_of_ownership: Vec::new(),
                     message: "Burn operation via TokenSDK".to_string(),
@@ -1105,7 +1101,7 @@ impl<I: Send + Sync> TokenSDK<I> {
                     let new_circulation = Balance::from_state(
                         era_token.circulating_supply.value().saturating_sub(*amount),
                         new_state.hash,
-                        new_state.state_number,
+                        new_state.hash[0] as u64,
                     );
                     era_token.circulating_supply = new_circulation;
                 }
@@ -1292,7 +1288,7 @@ impl<I: Send + Sync> TokenSDK<I> {
                 let op = Operation::Receive {
                     token_id: token_id.as_bytes().to_vec(),
                     from_device_id: sender.to_vec(),
-                    amount: Balance::from_state(*amount, state_hash, current_state.state_number),
+                    amount: Balance::from_state(*amount, state_hash),
                     recipient: device_id.to_vec(),
                     message,
                     mode: TransactionMode::Bilateral,
@@ -1583,7 +1579,7 @@ impl<I: Send + Sync> TokenSDK<I> {
         }
         let current_state = self.core_sdk.get_current_state()?;
         let state_hash = current_state.hash;
-        let state_number = current_state.state_number;
+        let state_number = current_state.hash[0] as u64;
         let mut balances = self.balances.write();
         let device_balances = balances.entry(device_id).or_default();
         let current = device_balances
@@ -1593,7 +1589,7 @@ impl<I: Send + Sync> TokenSDK<I> {
         if current < amount {
             device_balances.insert(
                 token_id.to_string(),
-                Balance::from_state(amount, state_hash, state_number),
+                Balance::from_state(amount, state_hash),
             );
         }
         Ok(())
@@ -1606,13 +1602,13 @@ impl<I: Send + Sync> TokenSDK<I> {
         let (state_hash, state_number) = self
             .core_sdk
             .get_current_state()
-            .map(|s| (s.hash, s.state_number))
+            .map(|s| (s.hash, s.hash[0] as u64))
             .unwrap_or(([0u8; 32], 0));
         let mut balances = self.balances.write();
         let device_balances = balances.entry(device_id).or_default();
         device_balances.insert(
             token_id.to_string(),
-            Balance::from_state(amount, state_hash, state_number),
+            Balance::from_state(amount, state_hash),
         );
     }
 
@@ -1663,7 +1659,7 @@ impl<I: Send + Sync> TokenSDK<I> {
                         .and_then(|bytes| bytes.try_into().ok())
                         .unwrap_or([0u8; 32]);
                 let mut balance =
-                    Balance::from_state(record.available, source_hash, record.source_state_number);
+                    Balance::from_state(record.available, source_hash);
                 if record.locked > 0 {
                     let _ = balance.lock(record.locked);
                 }
@@ -1873,7 +1869,7 @@ impl<I: Send + Sync> TokenSDK<I> {
             amount: Balance::from_state(
                 amount,
                 state_hash.clone().try_into().unwrap_or([0u8; 32]),
-                current_state.state_number,
+                current_state.hash[0] as u64,
             ),
             recipient: recipient_public_key,
             message: memo.clone().unwrap_or_else(|| {
@@ -1952,7 +1948,7 @@ impl<I: Send + Sync> TokenSDK<I> {
         let transfer_id = format!(
             "bilateral_{}_{}_{}",
             crate::util::text_id::encode_base32_crockford(&self.generate_nonce()[0..8]),
-            current_state.state_number,
+            current_state.hash[0] as u64,
             crate::util::deterministic_time::tick()
         );
 
@@ -1973,7 +1969,7 @@ impl<I: Send + Sync> TokenSDK<I> {
 
         log::info!(
             "Sender state transition complete: #{}",
-            sender_state.state_number
+            sender_state.hash[0] as u64
         );
         log::info!("Bilateral transfer initialized with ID: {transfer_id}");
 
@@ -2031,7 +2027,7 @@ impl<I: Send + Sync> TokenSDK<I> {
 
         log::info!(
             "Recipient state transition complete: #{}",
-            recipient_state.state_number
+            recipient_state.hash[0] as u64
         );
 
         Ok(recipient_state)
@@ -2127,7 +2123,7 @@ impl<I: Send + Sync> TokenSDK<I> {
                         to_device_id: crate::util::text_id::encode_base32_crockford(recipient),
                         amount: *amount,
                         memo: memo.clone(),
-                        state_number: self.core_sdk.get_current_state()?.state_number,
+                        state_number: self.core_sdk.get_current_state()?.hash[0] as u64,
                         tick: *tick,
                     };
                     out.push(rec);
@@ -2146,7 +2142,7 @@ impl<I: Send + Sync> TokenSDK<I> {
                         to_device_id: crate::util::text_id::encode_base32_crockford(&to),
                         amount: *amount,
                         memo: memo.clone(),
-                        state_number: self.core_sdk.get_current_state()?.state_number,
+                        state_number: self.core_sdk.get_current_state()?.hash[0] as u64,
                         tick: *tick,
                     };
                     out.push(rec);
@@ -2286,7 +2282,7 @@ impl<I: Send + Sync> TokenSDK<I> {
             amount: Balance::from_state(
                 fee,
                 state_hash.clone().try_into().unwrap_or([0u8; 32]),
-                current_state.state_number,
+                current_state.hash[0] as u64,
             ),
             token_id: b"ERA".to_vec(),
             mode: TransactionMode::Bilateral,
@@ -2337,7 +2333,7 @@ impl<I: Send + Sync> TokenSDK<I> {
                         return Ok(Balance::from_state(
                             entry.amount,
                             state_hash.clone().try_into().unwrap_or([0u8; 32]),
-                            current_state.state_number,
+                            current_state.hash[0] as u64,
                         ));
                     }
                 } else {
@@ -2453,7 +2449,7 @@ impl<I: Send + Sync> TokenSDK<I> {
 
         let mut op = Operation::Transfer {
             to_device_id: recipient_device_id.clone(),
-            amount: Balance::from_state(amount, state_hash, current_state.state_number),
+            amount: Balance::from_state(amount, state_hash),
             token_id: token_id.as_bytes().to_vec(),
             mode: TransactionMode::Unilateral,
             nonce: Vec::new(),
@@ -2684,7 +2680,7 @@ mod tests {
                 .expect("CoreSDK should initialize for projection test"),
         );
         let sdk: TokenSDK<()> = TokenSDK::new(core_sdk.clone(), device_info.device_id);
-        let canonical_balance = Balance::from_state(100, [7u8; 32], 7);
+        let canonical_balance = Balance::from_state(100, [7u8; 32]);
         let state = build_state(
             device_info.clone(),
             7,
@@ -2702,7 +2698,7 @@ mod tests {
 
         sdk.balances.write().insert(
             device_info.device_id,
-            HashMap::from([("ERA".to_string(), Balance::from_state(1, [1u8; 32], 1))]),
+            HashMap::from([("ERA".to_string(), Balance::from_state(1, [1u8; 32]))]),
         );
 
         sdk.reload_balance_cache_for_self(device_info.device_id)
@@ -2729,12 +2725,12 @@ mod tests {
         sdk.balances.write().insert(
             device_info.device_id,
             HashMap::from([
-                ("ERA".to_string(), Balance::from_state(3, [3u8; 32], 3)),
-                ("dBTC".to_string(), Balance::from_state(9, [3u8; 32], 3)),
+                ("ERA".to_string(), Balance::from_state(3, [3u8; 32])),
+                ("dBTC".to_string(), Balance::from_state(9, [3u8; 32])),
             ]),
         );
 
-        let carried_forward = Balance::from_state(55, [8u8; 32], 8);
+        let carried_forward = Balance::from_state(55, [8u8; 32]);
         let generic_state = build_state(
             device_info.clone(),
             8,
@@ -2914,7 +2910,7 @@ mod tests {
         assert_eq!(decoded.token_id, "ERA");
         assert_eq!(decoded.amount, 100);
         assert_eq!(decoded.memo.as_deref(), Some("test transfer"));
-        assert_eq!(decoded.state_number, 5);
+        assert_eq!(decoded.hash[0] as u64, 5);
         assert_eq!(decoded.tick, 99);
     }
 }

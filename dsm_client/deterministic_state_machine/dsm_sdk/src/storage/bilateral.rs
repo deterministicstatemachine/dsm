@@ -656,7 +656,7 @@ impl BilateralStorageInterface for BilateralStorageSDK {
                 &tip.counterparty_device_id,
                 &tip.chain_tip_id,
                 &tip.last_state_hash,
-                tip.state_number as i64,
+                tip.hash[0] as u64 as i64,
                 tip.last_updated as i64,
                 if tip.is_synchronized { 1 } else { 0 }
             ],
@@ -1197,7 +1197,7 @@ impl BilateralStorageSDK {
                 remote_device_id,
                 &state.chain_tip,
                 &state.chain_tip,
-                state.state_number as i64,
+                state.hash[0] as u64 as i64,
                 now,
                 1,
             ],
@@ -1730,7 +1730,7 @@ mod tests {
         assert_eq!(loaded.counterparty_device_id, tip.counterparty_device_id);
         assert_eq!(loaded.chain_tip_id, tip.chain_tip_id);
         assert_eq!(loaded.last_state_hash, tip.last_state_hash);
-        assert_eq!(loaded.state_number, tip.state_number);
+        assert_eq!(loaded.hash[0] as u64, tip.hash[0] as u64);
         assert!(loaded.is_synchronized);
     }
 
@@ -1768,7 +1768,7 @@ mod tests {
         sdk.save_chain_tip(&tip2).unwrap();
 
         let loaded = sdk.load_chain_tip(&device_id).unwrap().unwrap();
-        assert_eq!(loaded.state_number, 2);
+        assert_eq!(loaded.hash[0] as u64, 2);
         assert!(loaded.is_synchronized);
     }
 

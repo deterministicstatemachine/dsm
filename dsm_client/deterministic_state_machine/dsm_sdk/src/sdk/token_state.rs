@@ -102,15 +102,11 @@ pub fn apply_transfer_debit_credit(
 
     balances.insert(
         sender_key,
-        Balance::from_state(
-            sender_balance.value() - amount,
-            anchor_hash,
-            anchor_state_number,
-        ),
+        Balance::from_state(sender_balance.value() - amount, anchor_hash),
     );
     balances.insert(
         recipient_key,
-        Balance::from_state(recipient_value, anchor_hash, anchor_state_number),
+        Balance::from_state(recipient_value, anchor_hash),
     );
 
     Ok(())
@@ -144,11 +140,7 @@ pub fn apply_transfer_debit(
 
     balances.insert(
         sender_key,
-        Balance::from_state(
-            sender_balance.value() - amount,
-            anchor_hash,
-            anchor_state_number,
-        ),
+        Balance::from_state(sender_balance.value() - amount, anchor_hash),
     );
 
     Ok(())
@@ -181,7 +173,7 @@ pub fn apply_transfer_credit(
 
     balances.insert(
         local_key,
-        Balance::from_state(credited_value, anchor_hash, anchor_state_number),
+        Balance::from_state(credited_value, anchor_hash),
     );
 
     Ok(())
@@ -225,7 +217,7 @@ mod tests {
         let sender_key =
             dsm::core::token::derive_canonical_balance_key(&policy_commit, &sender_pk, "ERA");
         let mut balances = HashMap::new();
-        balances.insert(sender_key.clone(), Balance::from_state(50, [0u8; 32], 0));
+        balances.insert(sender_key.clone(), Balance::from_state(50, [0u8; 32]));
 
         apply_transfer_debit(
             &mut balances,
@@ -251,7 +243,7 @@ mod tests {
         let sender_key =
             dsm::core::token::derive_canonical_balance_key(&policy_commit, &sender_pk, "ERA");
         let mut balances = HashMap::new();
-        balances.insert(sender_key, Balance::from_state(5, [0u8; 32], 0));
+        balances.insert(sender_key, Balance::from_state(5, [0u8; 32]));
 
         let err = apply_transfer_debit(
             &mut balances,

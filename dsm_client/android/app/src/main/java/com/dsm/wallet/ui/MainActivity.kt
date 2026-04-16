@@ -1463,6 +1463,18 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
             bleServiceBound = false
             bleBackgroundService = null
         }
+        if (!isChangingConfigurations && hasIdentityViaRust()) {
+            try {
+                invokeNativeRouterInvoke("inbox.stopPoller")
+            } catch (t: Throwable) {
+                Log.w(tag, "onStop: inbox.stopPoller failed", t)
+            }
+            try {
+                BleBackgroundService.stop(this)
+            } catch (t: Throwable) {
+                Log.w(tag, "onStop: stopForegroundService failed", t)
+            }
+        }
     }
 
     override fun onPostResume() {
@@ -1617,6 +1629,14 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                 lastErr = ioe
                 Log.w(tag, "Attempt $attempt: Failed to materialize $assetName: ${ioe.message}")
             }
+        }
+
+        if (outFile.exists() && outFile.canRead() && outFile.length() > 0L) {
+            Log.w(
+                tag,
+                "Falling back to previously materialized env config at ${outFile.absolutePath} after bundled asset materialization failed: ${lastErr?.message}"
+            )
+            return outFile
         }
 
         Log.e(tag, "Materialize env config failed after $maxAttempts attempts: ${lastErr?.message}")

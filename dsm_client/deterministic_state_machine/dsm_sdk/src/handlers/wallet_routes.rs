@@ -617,17 +617,7 @@ impl AppRouterImpl {
                 }
 
                 // Ensure built-in tokens always appear (even at zero balance).
-                for builtin in &["ERA", "dBTC"] {
-                    if !items.iter().any(|i| i.token_id == *builtin) {
-                        items.push(generated::BalanceGetResponse {
-                            token_id: builtin.to_string(),
-                            available: 0,
-                            locked: 0,
-                            ..Default::default()
-                        });
-                    }
-                }
-
+                // Uses case-insensitive matching + metadata enrichment.
                 ensure_default_visible_balances(&mut items);
 
                 // Deterministic order by token_id

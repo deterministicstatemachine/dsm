@@ -91,7 +91,7 @@ fn compute_initial_chain_tip(
 fn make_transfer_op(recipient: &[u8; 32], amount: u64) -> (Operation, Vec<u8>) {
     let op = Operation::Transfer {
         to_device_id: recipient.to_vec(),
-        amount: Balance::from_state(amount, [0u8; 32], 0),
+        amount: Balance::from_state(amount, [0u8; 32]),
         token_id: b"ERA".to_vec(),
         mode: TransactionMode::Bilateral,
         nonce: vec![0u8; 16],
@@ -651,11 +651,11 @@ fn balance_conservation_arithmetic() {
         );
 
         // Verify via Balance type.
-        let sender_bal = Balance::from_state(sender_initial, [0u8; 32], 0);
+        let sender_bal = Balance::from_state(sender_initial, [0u8; 32]);
         assert_eq!(sender_bal.value(), sender_initial);
 
-        let remaining_bal = Balance::from_state(sender_remaining, [0u8; 32], 1);
-        let gained_bal = Balance::from_state(receiver_gained, [0u8; 32], 1);
+        let remaining_bal = Balance::from_state(sender_remaining, [0u8; 32]);
+        let gained_bal = Balance::from_state(receiver_gained, [0u8; 32]);
         assert_eq!(
             remaining_bal.value() + gained_bal.value(),
             sender_bal.value(),

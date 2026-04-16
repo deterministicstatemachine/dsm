@@ -111,7 +111,7 @@ fn execute_transfer(
 ) -> TransferResult {
     let op = Operation::Transfer {
         to_device_id: receiver.device_id.to_vec(),
-        amount: Balance::from_state(amount, [0u8; 32], 0),
+        amount: Balance::from_state(amount, [0u8; 32]),
         token_id: b"ERA".to_vec(),
         mode: TransactionMode::Bilateral,
         nonce: vec![0u8; 16],
@@ -437,7 +437,7 @@ async fn smoke_10_roundtrip_transfers() {
     for i in 0..10u64 {
         let op = Operation::Transfer {
             to_device_id: b.device_id.to_vec(),
-            amount: Balance::from_state(10, [0u8; 32], 0),
+            amount: Balance::from_state(10, [0u8; 32]),
             token_id: b"ERA".to_vec(),
             mode: TransactionMode::Bilateral,
             nonce: vec![0u8; 16],
@@ -582,7 +582,7 @@ async fn smoke_tripwire_witness_roundtrip() {
     // Compute h_1
     let op = Operation::Transfer {
         to_device_id: b.device_id.to_vec(),
-        amount: Balance::from_state(100, [0u8; 32], 0),
+        amount: Balance::from_state(100, [0u8; 32]),
         token_id: b"ERA".to_vec(),
         mode: TransactionMode::Bilateral,
         nonce: vec![0u8; 16],
@@ -646,7 +646,7 @@ async fn smoke_chain_tip_agreement_independent_devices() {
     // Compute h_1 on both independently
     let op = Operation::Transfer {
         to_device_id: b1.device_id.to_vec(),
-        amount: Balance::from_state(42, [0u8; 32], 0),
+        amount: Balance::from_state(42, [0u8; 32]),
         token_id: b"ERA".to_vec(),
         mode: TransactionMode::Bilateral,
         nonce: vec![0u8; 16],
@@ -719,7 +719,7 @@ async fn smoke_receipt_canonical_determinism() {
     // Precompute common transfer data
     let op = Operation::Transfer {
         to_device_id: b.device_id.to_vec(),
-        amount: Balance::from_state(100, [0u8; 32], 0),
+        amount: Balance::from_state(100, [0u8; 32]),
         token_id: b"ERA".to_vec(),
         mode: TransactionMode::Bilateral,
         nonce: vec![0u8; 16],
@@ -817,7 +817,7 @@ async fn smoke_first_transaction_zero_leaf_edge() {
     // Compute h_1
     let op = Operation::Transfer {
         to_device_id: b.device_id.to_vec(),
-        amount: Balance::from_state(10, [0u8; 32], 0),
+        amount: Balance::from_state(10, [0u8; 32]),
         token_id: b"ERA".to_vec(),
         mode: TransactionMode::Bilateral,
         nonce: vec![0u8; 16],

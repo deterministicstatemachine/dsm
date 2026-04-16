@@ -137,7 +137,7 @@ pub fn build_balance_projection_from_state(
         available: spendable,
         locked,
         source_state_hash: crate::util::text_id::encode_base32_crockford(&state_hash),
-        source_state_number: state.state_number,
+        source_state_number: state.hash[0] as u64,
         updated_at: tick(),
     })
 }

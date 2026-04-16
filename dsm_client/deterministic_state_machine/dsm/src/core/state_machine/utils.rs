@@ -48,17 +48,18 @@ pub fn verify_state_hash(state: &State) -> Result<bool, DsmError> {
 
 /// Calculate the next entropy based on current entropy, operation, and state number
 ///
-/// This implements the deterministic entropy evolution function from whitepaper Section 6:
-/// e(n+1) = H(e(n) || op(n+1) || (n+1))
+/// Implements the deterministic entropy evolution from whitepaper §11 eq. 14:
+/// `e_{n+1} = H("DSM/next-entropy" || e_n || op || H(S_n))`. Per §4.3 no
+/// counter participates — adjacency comes from the parent hash.
 pub fn calculate_next_entropy(
     current_entropy: &[u8],
     operation_bytes: &[u8],
-    next_state_number: u64,
+    parent_hash: &[u8; 32],
 ) -> [u8; 32] {
     let mut hasher = crate::crypto::blake3::dsm_domain_hasher("DSM/next-entropy");
     hasher.update(current_entropy);
     hasher.update(operation_bytes);
-    hasher.update(&next_state_number.to_le_bytes());
+    hasher.update(parent_hash);
 
     *hasher.finalize().as_bytes()
 }
@@ -77,7 +78,7 @@ pub fn create_test_transition() -> crate::core::state_machine::transition::State
     let (_pk, sk) = generate_sphincs_keypair().expect("keypair");
     let mut op = Operation::Transfer {
         to_device_id: b"recipient".to_vec(),
-        amount: Balance::from_state(10, [0u8; 32], 0),
+        amount: Balance::from_state(10, [0u8; 32]),
         recipient: b"recipient".to_vec(),
         token_id: b"token1".to_vec(),
         to: b"recipient".to_vec(),

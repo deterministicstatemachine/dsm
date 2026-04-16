@@ -338,14 +338,15 @@ pub mod algorithms {
         // Extract operation data from the new state
         let operation = new_state.operation.to_bytes();
 
-        // Generate the expected seed based on previous state and operation
+        // Generate the expected seed based on previous state and operation.
+        // Per §11 eq. 14 entropy is derived from adjacency inputs — prev
+        // entropy, op, and the parent hash — not a counter.
+        let previous_state_hash = previous_state.hash()?;
         let next_entropy = crate::core::state_machine::utils::calculate_next_entropy(
             &previous_state.entropy,
             &operation,
-            previous_state.state_number + 1,
+            &previous_state_hash,
         );
-
-        let previous_state_hash = previous_state.hash()?;
         let hash_array: [u8; 32] = previous_state_hash.as_slice().try_into().map_err(
             |e: std::array::TryFromSliceError| {
                 DsmError::internal("Failed to convert hash to array".to_string(), Some(e))

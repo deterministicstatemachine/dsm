@@ -51,7 +51,7 @@ async fn main() {
     let balance_anchor = dsm::crypto::blake3::domain_hash("DSM/balance-anchor", &[]);
     let op = dsm::types::operations::Operation::Transfer {
         to_device_id: to_device_id.clone(),
-        amount: dsm::types::token_types::Balance::from_state(1u64, *balance_anchor.as_bytes(), 0),
+        amount: dsm::types::token_types::Balance::from_state(1u64, *balance_anchor.as_bytes()),
         token_id: b"ERA".to_vec(),
         mode: dsm::types::operations::TransactionMode::Unilateral,
         nonce: vec![0u8; 32],

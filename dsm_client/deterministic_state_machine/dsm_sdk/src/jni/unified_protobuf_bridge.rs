@@ -2351,11 +2351,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bilateralOffl
                                 );
                                 let hint_op = dsm::types::operations::Operation::Transfer {
                                     to_device_id: cid_arr.to_vec(),
-                                    amount: dsm::types::token_types::Balance::from_state(
-                                        transfer_amount,
-                                        *balance_anchor.as_bytes(),
-                                        0,
-                                    ),
+                                    amount: dsm::types::token_types::Balance::from_state(transfer_amount, *balance_anchor.as_bytes()),
                                     token_id: token_id.as_bytes().to_vec(),
                                     mode: dsm::types::operations::TransactionMode::Bilateral,
                                     nonce: vec![],

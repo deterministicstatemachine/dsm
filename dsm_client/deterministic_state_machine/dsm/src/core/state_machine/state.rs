@@ -23,14 +23,14 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     acc == 0
 }
 
-/// Represents a cryptographic state in the DSM system
+/// Represents a cryptographic state in the DSM system.
+///
+/// Per §4.3 no counter is included — state identity comes from
+/// `prev_state_hash` adjacency (§2.1 eq. 1) and per-transition entropy.
 #[derive(Debug, Clone)]
 pub struct State {
     /// State identifier
     pub id: String,
-
-    /// State number in sequence
-    pub state_number: u64,
 
     /// State hash (raw bytes)
     pub hash: [u8; 32],
@@ -74,7 +74,6 @@ impl State {
     pub fn new(params: StateParams) -> Self {
         Self {
             id: String::new(),
-            state_number: params.state_number,
             hash: [0u8; 32],
             prev_state_hash: params.prev_state_hash,
             entropy: params.entropy,
@@ -95,7 +94,6 @@ impl State {
     pub fn new_genesis(entropy: [u8; 32], device_info: DeviceInfo) -> Self {
         Self {
             id: String::new(),
-            state_number: 0,
             hash: [0u8; 32],
             prev_state_hash: [0u8; 32],
             entropy: entropy.to_vec(),
@@ -111,12 +109,10 @@ impl State {
         }
     }
 
-    /// Compute state hash (BLAKE3-only, domain-separated, bytes-first)
+    /// Compute state hash (BLAKE3-only, domain-separated, bytes-first).
+    /// Per §4.3 no counter participates in the canonical hash.
     pub fn compute_hash(&self) -> Result<Vec<u8>, DsmError> {
-        // Canonical, deterministic encoding of fields included in the hash
-        // NOTE: Keep the exact field set aligned with previous semantics.
         let mut h = dsm_domain_hasher("DSM/state-hash");
-        h.update(&self.state_number.to_le_bytes());
         h.update(&self.prev_state_hash);
         h.update(&self.entropy);
 
@@ -136,42 +132,18 @@ impl State {
         self.compute_hash()
     }
 
-    /// Calculate sparse indices for a state
+    /// Validate state integrity using BLAKE3-only verification.
     ///
-    /// Delegates to [`SparseIndex::calculate_sparse_indices`] (whitepaper §3.2). The
-    /// previous implementation used `checkpoint.next_power_of_two() / 2`, which is **0**
-    /// when `checkpoint == 1`, so the loop never terminated.
-    pub fn calculate_sparse_indices(state_number: u64) -> Result<Vec<u64>, DsmError> {
-        if state_number == 0 {
-            return Err(DsmError::invalid_parameter(
-                "Genesis state (state_number == 0) should not have sparse indices",
-            ));
-        }
-        SparseIndex::calculate_sparse_indices(state_number)
-    }
-
-    /// Validate state integrity using BLAKE3-only verification
-    ///
-    /// Verifies the cryptographic integrity of a state according to whitepaper Section 14
+    /// Per §4.3 no counter is checked — genesis is identified purely by
+    /// `prev_state_hash == [0u8; 32]`.
     pub fn validate_state_integrity(state: &State) -> Result<bool, DsmError> {
-        // For genesis states, validation is different
-        if state.state_number == 0 {
-            // Genesis states should have empty prev_state_hash
-            if state.prev_state_hash != [0u8; 32] {
-                return Ok(false);
-            }
-
-            // Verify hash integrity
+        // Genesis: zero parent hash → hash-only check
+        if state.prev_state_hash == [0u8; 32] {
             let computed_hash = state.compute_hash()?;
             return Ok(ct_eq(&computed_hash, &state.hash));
         }
 
-        // Non-genesis states must have a non-empty prev_state_hash
-        if state.prev_state_hash == [0u8; 32] {
-            return Ok(false);
-        }
-
-        // Verify hash integrity
+        // Non-genesis: verify hash integrity
         let computed_hash = state.compute_hash()?;
         if !ct_eq(&computed_hash, &state.hash) {
             return Ok(false);
@@ -193,13 +165,9 @@ impl State {
         Ok(true)
     }
 
-    /// Verify hash chain integrity between two consecutive states
+    /// Verify hash chain integrity between two consecutive states.
+    /// Per §4.3 no counter comparison — only hash-adjacency and self-integrity.
     pub fn verify_hash_chain(prev_state: &State, next_state: &State) -> Result<bool, DsmError> {
-        // Verify state numbers are sequential
-        if next_state.state_number != prev_state.state_number + 1 {
-            return Ok(false);
-        }
-
         // Verify both states individually
         if !Self::validate_state_integrity(prev_state)?
             || !Self::validate_state_integrity(next_state)?
@@ -207,7 +175,7 @@ impl State {
             return Ok(false);
         }
 
-        // Verify hash chain linkage
+        // Verify hash chain linkage (§2.1 eq. 1)
         let prev_hash = prev_state.compute_hash()?;
         Ok(ct_eq(&prev_hash, &next_state.prev_state_hash))
     }
@@ -272,15 +240,8 @@ mod tests {
     // ---- State::new ----
 
     #[test]
-    fn new_state_has_correct_state_number() {
-        let params = StateParams::new(42, test_entropy(), Operation::Noop, test_device_info());
-        let state = State::new(params);
-        assert_eq!(state.state_number, 42);
-    }
-
-    #[test]
     fn new_state_has_zero_hash() {
-        let params = StateParams::new(1, test_entropy(), Operation::Noop, test_device_info());
+        let params = StateParams::new( test_entropy(), Operation::Noop, test_device_info());
         let state = State::new(params);
         assert_eq!(state.hash, [0u8; 32]);
     }
@@ -288,7 +249,7 @@ mod tests {
     #[test]
     fn new_state_preserves_entropy() {
         let entropy = test_entropy();
-        let params = StateParams::new(1, entropy.clone(), Operation::Noop, test_device_info());
+        let params = StateParams::new( entropy.clone(), Operation::Noop, test_device_info());
         let state = State::new(params);
         assert_eq!(state.entropy, entropy);
     }
@@ -296,7 +257,7 @@ mod tests {
     #[test]
     fn new_state_preserves_prev_hash() {
         let prev_hash = [0xAA; 32];
-        let params = StateParams::new(1, test_entropy(), Operation::Noop, test_device_info())
+        let params = StateParams::new( test_entropy(), Operation::Noop, test_device_info())
             .with_prev_state_hash(prev_hash);
         let state = State::new(params);
         assert_eq!(state.prev_state_hash, prev_hash);
@@ -304,18 +265,12 @@ mod tests {
 
     #[test]
     fn new_state_preserves_operation() {
-        let params = StateParams::new(1, test_entropy(), Operation::Genesis, test_device_info());
+        let params = StateParams::new( test_entropy(), Operation::Genesis, test_device_info());
         let state = State::new(params);
         assert!(matches!(state.operation, Operation::Genesis));
     }
 
     // ---- State::new_genesis ----
-
-    #[test]
-    fn genesis_state_has_state_number_zero() {
-        let state = State::new_genesis(test_entropy_array(), test_device_info());
-        assert_eq!(state.state_number, 0);
-    }
 
     #[test]
     fn genesis_state_has_zero_prev_hash() {
@@ -347,13 +302,11 @@ mod tests {
     #[test]
     fn compute_hash_is_deterministic() {
         let s1 = State::new(StateParams::new(
-            1,
             test_entropy(),
             Operation::Noop,
             test_device_info(),
         ));
         let s2 = State::new(StateParams::new(
-            1,
             test_entropy(),
             Operation::Noop,
             test_device_info(),
@@ -370,13 +323,11 @@ mod tests {
     #[test]
     fn compute_hash_different_entropy_yields_different_hash() {
         let s1 = State::new(StateParams::new(
-            1,
             vec![1, 2, 3],
             Operation::Noop,
             test_device_info(),
         ));
         let s2 = State::new(StateParams::new(
-            1,
             vec![4, 5, 6],
             Operation::Noop,
             test_device_info(),
@@ -384,22 +335,8 @@ mod tests {
         assert_ne!(s1.compute_hash().unwrap(), s2.compute_hash().unwrap());
     }
 
-    #[test]
-    fn compute_hash_different_state_number_yields_different_hash() {
-        let s1 = State::new(StateParams::new(
-            1,
-            test_entropy(),
-            Operation::Noop,
-            test_device_info(),
-        ));
-        let s2 = State::new(StateParams::new(
-            2,
-            test_entropy(),
-            Operation::Noop,
-            test_device_info(),
-        ));
-        assert_ne!(s1.compute_hash().unwrap(), s2.compute_hash().unwrap());
-    }
+    // Counter-based hash-distinction tests were removed per §4.3 — state
+    // identity now comes from `prev_state_hash` + entropy, not a counter.
 
     // ---- State::hash ----
 
@@ -418,60 +355,8 @@ mod tests {
         assert_eq!(result, computed);
     }
 
-    // ---- State::calculate_sparse_indices ----
-
-    #[test]
-    fn sparse_indices_state_zero_returns_error() {
-        assert!(State::calculate_sparse_indices(0).is_err());
-    }
-
-    #[test]
-    fn sparse_indices_state_one_returns_vec_with_zero() {
-        let indices = State::calculate_sparse_indices(1).unwrap();
-        assert_eq!(indices, vec![0]);
-    }
-
-    #[test]
-    fn sparse_indices_state_two_contains_zero_and_one() {
-        let indices = State::calculate_sparse_indices(2).unwrap();
-        assert!(indices.contains(&0));
-        assert!(indices.contains(&1));
-    }
-
-    #[test]
-    fn sparse_indices_large_state_has_logarithmic_count() {
-        let indices = State::calculate_sparse_indices(1024).unwrap();
-        assert!(
-            indices.len() <= 20,
-            "expected logarithmic count, got {}",
-            indices.len()
-        );
-        assert!(indices.len() >= 2);
-    }
-
-    #[test]
-    fn sparse_indices_always_include_genesis() {
-        for n in [1u64, 2, 5, 10, 100, 1000] {
-            let indices = State::calculate_sparse_indices(n).unwrap();
-            assert!(indices.contains(&0), "state {n} missing genesis");
-        }
-    }
-
-    #[test]
-    fn sparse_indices_always_include_predecessor() {
-        for n in [1u64, 2, 5, 10, 100, 1000] {
-            let indices = State::calculate_sparse_indices(n).unwrap();
-            assert!(indices.contains(&(n - 1)), "state {n} missing predecessor");
-        }
-    }
-
-    #[test]
-    fn sparse_indices_are_sorted_and_deduped() {
-        let indices = State::calculate_sparse_indices(100).unwrap();
-        for w in indices.windows(2) {
-            assert!(w[0] < w[1], "not sorted/deduped: {indices:?}");
-        }
-    }
+    // Sparse index tests removed — sparse indexing is advisory-only per §2.2
+    // and no longer lives on the core State type.
 
     // ---- State::validate_state_integrity ----
 
@@ -492,7 +377,7 @@ mod tests {
 
     #[test]
     fn validate_nongenesis_with_zero_prev_hash_is_invalid() {
-        let params = StateParams::new(1, test_entropy(), Operation::Noop, test_device_info());
+        let params = StateParams::new( test_entropy(), Operation::Noop, test_device_info());
         let mut state = State::new(params);
         finalize_hash(&mut state);
         assert!(!State::validate_state_integrity(&state).unwrap());
@@ -501,7 +386,7 @@ mod tests {
     #[test]
     fn validate_nongenesis_with_correct_hash_is_valid() {
         let prev_hash = [0xBB; 32];
-        let params = StateParams::new(1, test_entropy(), Operation::Noop, test_device_info())
+        let params = StateParams::new( test_entropy(), Operation::Noop, test_device_info())
             .with_prev_state_hash(prev_hash);
         let mut state = State::new(params);
         finalize_hash(&mut state);
@@ -511,7 +396,7 @@ mod tests {
     #[test]
     fn validate_state_with_mismatched_hash_is_invalid() {
         let prev_hash = [0xBB; 32];
-        let params = StateParams::new(1, test_entropy(), Operation::Noop, test_device_info())
+        let params = StateParams::new( test_entropy(), Operation::Noop, test_device_info())
             .with_prev_state_hash(prev_hash);
         let mut state = State::new(params);
         state.hash = [0xCC; 32];
@@ -528,7 +413,7 @@ mod tests {
         let mut prev_hash = [0u8; 32];
         prev_hash.copy_from_slice(&genesis.compute_hash().unwrap());
 
-        let params = StateParams::new(1, vec![99; 16], Operation::Noop, test_device_info())
+        let params = StateParams::new( vec![99; 16], Operation::Noop, test_device_info())
             .with_prev_state_hash(prev_hash);
         let mut next = State::new(params);
         finalize_hash(&mut next);
@@ -537,28 +422,12 @@ mod tests {
     }
 
     #[test]
-    fn verify_hash_chain_nonsequential_state_numbers_is_invalid() {
-        let mut genesis = State::new_genesis(test_entropy_array(), test_device_info());
-        finalize_hash(&mut genesis);
-
-        let mut prev_hash = [0u8; 32];
-        prev_hash.copy_from_slice(&genesis.compute_hash().unwrap());
-
-        let params = StateParams::new(5, vec![99; 16], Operation::Noop, test_device_info())
-            .with_prev_state_hash(prev_hash);
-        let mut next = State::new(params);
-        finalize_hash(&mut next);
-
-        assert!(!State::verify_hash_chain(&genesis, &next).unwrap());
-    }
-
-    #[test]
     fn verify_hash_chain_broken_linkage_is_invalid() {
         let mut genesis = State::new_genesis(test_entropy_array(), test_device_info());
         finalize_hash(&mut genesis);
 
         let wrong_prev = [0xDD; 32];
-        let params = StateParams::new(1, vec![99; 16], Operation::Noop, test_device_info())
+        let params = StateParams::new( vec![99; 16], Operation::Noop, test_device_info())
             .with_prev_state_hash(wrong_prev);
         let mut next = State::new(params);
         finalize_hash(&mut next);

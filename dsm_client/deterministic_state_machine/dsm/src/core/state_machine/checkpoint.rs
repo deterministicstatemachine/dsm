@@ -18,16 +18,16 @@ use crate::types::error::DsmError;
 use crate::utils::deterministic_time as dt;
 
 /// Checkpoint represents a validated state at a specific point
-/// in the state hash chain that has been posted to decentralized storage
+/// in the state hash chain that has been posted to decentralized storage.
+///
+/// Per §4.3 no counter participates in identity — the checkpoint is
+/// identified by its 32-byte `state_hash` (§2.1 adjacency).
 #[derive(Debug, Clone)]
 pub struct Checkpoint {
     /// Unique identifier for this checkpoint
     pub id: String,
 
-    /// State number this checkpoint represents
-    pub state_number: u64,
-
-    /// Hash of the state
+    /// Hash of the state (checkpoint identity)
     pub state_hash: [u8; 32],
 
     /// Genesis hash of the identity
@@ -73,13 +73,6 @@ impl Checkpoint {
             return Err(DsmError::invalid_operation("Genesis hash too short"));
         }
 
-        let id = format!(
-            "checkpoint_{state_number}_{tick}_{device_id}",
-            state_number = state.state_number,
-            tick = tick,
-            device_id = device_id
-        );
-
         // Convert state hash to fixed size array
         let mut state_hash = [0u8; 32];
 
@@ -95,10 +88,15 @@ impl Checkpoint {
             return Err(DsmError::invalid_operation("State hash too short"));
         }
 
+        // Identifier uses the state hash (content-addressed, §2.1), not a counter.
+        let id = format!(
+            "checkpoint_{:x}{:x}_{tick}_{device_id}",
+            state_hash[0], state_hash[1]
+        );
+
         // Create the unsigned checkpoint
         let mut checkpoint = Self {
             id,
-            state_number: state.state_number,
             state_hash,
             genesis_hash,
             tick,
@@ -144,10 +142,7 @@ impl Checkpoint {
     fn get_signing_data(&self) -> Vec<u8> {
         let mut data = Vec::new();
 
-        // Add state number (8 bytes)
-        data.extend_from_slice(&self.state_number.to_be_bytes());
-
-        // Add state hash (32 bytes)
+        // Add state hash (32 bytes) — content-addressed identity.
         data.extend_from_slice(&self.state_hash);
 
         // Add genesis hash (32 bytes)
@@ -198,8 +193,8 @@ impl Checkpoint {
             return Ok(false);
         }
 
-        // Compare state hash and state number
-        Ok(self.state_hash == state_hash_array && self.state_number == state.state_number)
+        // Compare state hash (the content-addressed identity)
+        Ok(self.state_hash == state_hash_array)
     }
 }
 
@@ -268,13 +263,12 @@ mod tests {
         DeviceInfo::new([0x11; 32], vec![0x22; 64])
     }
 
-    fn make_dsm_state(n: u64) -> DsmState {
-        let mut s = DsmState::new(StateParams::new(
-            n,
-            vec![0xAA; 16],
-            Operation::Noop,
-            dev_info(),
-        ));
+    /// Build a test DsmState. `seed` is just a distinguishing label for the
+    /// entropy; it plays no role in acceptance predicates.
+    fn make_dsm_state(seed: u64) -> DsmState {
+        let mut entropy = vec![0xAAu8; 16];
+        entropy.extend_from_slice(&seed.to_le_bytes());
+        let mut s = DsmState::new(StateParams::new(entropy, Operation::Noop, dev_info()));
         let hash_vec = s.compute_hash().unwrap();
         s.hash.copy_from_slice(&hash_vec[..32]);
         s
@@ -285,9 +279,7 @@ mod tests {
     #[test]
     fn signing_data_deterministic() {
         let cp = Checkpoint {
-            id: "cp_1".into(),
-            state_number: 42,
-            state_hash: [0xAA; 32],
+            id: "cp_1".into(),            state_hash: [0xAA; 32],
             genesis_hash: [0xBB; 32],
             tick: 100,
             device_id: "device_a".into(),
@@ -303,28 +295,9 @@ mod tests {
     }
 
     #[test]
-    fn signing_data_includes_state_number() {
-        let cp = Checkpoint {
-            id: "cp".into(),
-            state_number: 0x0102030405060708,
-            state_hash: [0; 32],
-            genesis_hash: [0; 32],
-            tick: 0,
-            device_id: "".into(),
-            signature: vec![],
-            merkle_proof: None,
-            is_invalidation: false,
-            invalidation_reason: None,
-        };
-        let data = cp.get_signing_data();
-        assert_eq!(&data[0..8], &0x0102030405060708u64.to_be_bytes());
-    }
-
-    #[test]
     fn signing_data_includes_state_hash() {
         let cp = Checkpoint {
             id: "cp".into(),
-            state_number: 0,
             state_hash: [0xCC; 32],
             genesis_hash: [0; 32],
             tick: 0,
@@ -335,14 +308,13 @@ mod tests {
             invalidation_reason: None,
         };
         let data = cp.get_signing_data();
-        assert_eq!(&data[8..40], &[0xCC; 32]);
+        assert_eq!(&data[0..32], &[0xCC; 32]);
     }
 
     #[test]
     fn signing_data_includes_genesis_hash() {
         let cp = Checkpoint {
             id: "cp".into(),
-            state_number: 0,
             state_hash: [0; 32],
             genesis_hash: [0xDD; 32],
             tick: 0,
@@ -353,15 +325,13 @@ mod tests {
             invalidation_reason: None,
         };
         let data = cp.get_signing_data();
-        assert_eq!(&data[40..72], &[0xDD; 32]);
+        assert_eq!(&data[32..64], &[0xDD; 32]);
     }
 
     #[test]
     fn signing_data_includes_invalidation_flag() {
         let cp_normal = Checkpoint {
-            id: "cp".into(),
-            state_number: 0,
-            state_hash: [0; 32],
+            id: "cp".into(),            state_hash: [0; 32],
             genesis_hash: [0; 32],
             tick: 0,
             device_id: "".into(),
@@ -371,9 +341,7 @@ mod tests {
             invalidation_reason: None,
         };
         let cp_invalid = Checkpoint {
-            id: "cp".into(),
-            state_number: 0,
-            state_hash: [0; 32],
+            id: "cp".into(),            state_hash: [0; 32],
             genesis_hash: [0; 32],
             tick: 0,
             device_id: "".into(),
@@ -392,9 +360,7 @@ mod tests {
     #[test]
     fn add_merkle_proof() {
         let mut cp = Checkpoint {
-            id: "cp".into(),
-            state_number: 0,
-            state_hash: [0; 32],
+            id: "cp".into(),            state_hash: [0; 32],
             genesis_hash: [0; 32],
             tick: 0,
             device_id: "".into(),
@@ -418,9 +384,7 @@ mod tests {
         state_hash.copy_from_slice(&h[0..32]);
 
         let cp = Checkpoint {
-            id: "cp".into(),
-            state_number: 10,
-            state_hash,
+            id: "cp".into(),            state_hash,
             genesis_hash: [0; 32],
             tick: 0,
             device_id: "".into(),
@@ -433,35 +397,11 @@ mod tests {
     }
 
     #[test]
-    fn verify_state_wrong_number() {
-        let state = make_dsm_state(10);
-        let mut state_hash = [0u8; 32];
-        let h = state.hash().unwrap();
-        state_hash.copy_from_slice(&h[0..32]);
-
-        let cp = Checkpoint {
-            id: "cp".into(),
-            state_number: 99, // wrong
-            state_hash,
-            genesis_hash: [0; 32],
-            tick: 0,
-            device_id: "".into(),
-            signature: vec![],
-            merkle_proof: None,
-            is_invalidation: false,
-            invalidation_reason: None,
-        };
-        assert!(!cp.verify_state(&state).unwrap());
-    }
-
-    #[test]
     fn verify_state_wrong_hash() {
         let state = make_dsm_state(10);
 
         let cp = Checkpoint {
-            id: "cp".into(),
-            state_number: 10,
-            state_hash: [0xFF; 32], // wrong
+            id: "cp".into(),            state_hash: [0xFF; 32], // wrong
             genesis_hash: [0; 32],
             tick: 0,
             device_id: "".into(),
@@ -483,9 +423,7 @@ mod tests {
         state_hash.copy_from_slice(&hash_vec[..32]);
 
         let cp = Checkpoint {
-            id: "cp_5".into(),
-            state_number: 5,
-            state_hash,
+            id: "cp_5".into(),            state_hash,
             genesis_hash: [0; 32],
             tick: 1,
             device_id: "test_device".into(),
@@ -495,7 +433,6 @@ mod tests {
             invalidation_reason: None,
         };
 
-        assert_eq!(cp.state_number, 5);
         assert_eq!(cp.device_id, "test_device");
         assert!(!cp.is_invalidation);
         assert!(cp.invalidation_reason.is_none());
@@ -505,9 +442,7 @@ mod tests {
     #[test]
     fn checkpoint_invalidation_fields() {
         let cp = Checkpoint {
-            id: "cp_inv".into(),
-            state_number: 3,
-            state_hash: [0; 32],
+            id: "cp_inv".into(),            state_hash: [0; 32],
             genesis_hash: [0; 32],
             tick: 1,
             device_id: "dev".into(),
@@ -539,9 +474,7 @@ mod tests {
     #[test]
     fn checkpoint_clone() {
         let cp = Checkpoint {
-            id: "cp_1".into(),
-            state_number: 1,
-            state_hash: [0x01; 32],
+            id: "cp_1".into(),            state_hash: [0x01; 32],
             genesis_hash: [0x02; 32],
             tick: 42,
             device_id: "dev".into(),
@@ -560,9 +493,7 @@ mod tests {
     #[test]
     fn checkpoint_debug_trait() {
         let cp = Checkpoint {
-            id: "cp_dbg".into(),
-            state_number: 7,
-            state_hash: [0xFF; 32],
+            id: "cp_dbg".into(),            state_hash: [0xFF; 32],
             genesis_hash: [0; 32],
             tick: 0,
             device_id: "d".into(),
@@ -579,9 +510,7 @@ mod tests {
     #[test]
     fn signing_data_varies_with_device_id() {
         let cp_a = Checkpoint {
-            id: "cp".into(),
-            state_number: 0,
-            state_hash: [0; 32],
+            id: "cp".into(),            state_hash: [0; 32],
             genesis_hash: [0; 32],
             tick: 0,
             device_id: "dev_a".into(),
@@ -591,9 +520,7 @@ mod tests {
             invalidation_reason: None,
         };
         let cp_b = Checkpoint {
-            id: "cp".into(),
-            state_number: 0,
-            state_hash: [0; 32],
+            id: "cp".into(),            state_hash: [0; 32],
             genesis_hash: [0; 32],
             tick: 0,
             device_id: "dev_b".into(),
@@ -608,9 +535,7 @@ mod tests {
     #[test]
     fn signing_data_varies_with_tick() {
         let make = |tick: u64| Checkpoint {
-            id: "cp".into(),
-            state_number: 0,
-            state_hash: [0; 32],
+            id: "cp".into(),            state_hash: [0; 32],
             genesis_hash: [0; 32],
             tick,
             device_id: "dev".into(),

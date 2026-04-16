@@ -62,7 +62,7 @@ impl HashChainSDK {
 
     /// Initialize with a genesis state (state_number must be 0).
     pub fn initialize_with_genesis(&self, mut genesis_state: State) -> Result<(), DsmError> {
-        if genesis_state.state_number != 0 {
+        if genesis_state.hash[0] as u64 != 0 {
             return Err(DsmError::invalid_operation(
                 "Cannot initialize hash chain with non-genesis state",
             ));
@@ -95,7 +95,7 @@ impl HashChainSDK {
             let mut sm = self.state_machine.write();
             if sm
                 .current_state()
-                .map(|s| s.state_number < state.state_number)
+                .map(|s| s.hash[0] as u64 < state.hash[0] as u64)
                 .unwrap_or(true)
             {
                 sm.set_state(state);
@@ -914,7 +914,7 @@ mod tests {
         sdk.add_data(b"payload").unwrap();
 
         let state = sdk.current_state().unwrap();
-        assert_eq!(state.state_number, 1);
+        assert_eq!(state.hash[0] as u64, 1);
         assert_ne!(state.hash, [0u8; 32]);
         assert_eq!(sdk.get_state_by_number(1).unwrap().hash, state.hash);
     }
@@ -977,7 +977,7 @@ mod tests {
         let sdk = HashChainSDK::new();
         sdk.initialize_with_genesis(make_genesis_state()).unwrap();
         let state = sdk.current_state().unwrap();
-        assert_eq!(state.state_number, 0);
+        assert_eq!(state.hash[0] as u64, 0);
     }
 
     #[test]
@@ -1142,7 +1142,7 @@ mod tests {
 
         for i in 0..5 {
             let state = sdk.get_state_by_number(i + 1).unwrap();
-            assert_eq!(state.state_number, i + 1);
+            assert_eq!(state.hash[0] as u64, i + 1);
         }
     }
 

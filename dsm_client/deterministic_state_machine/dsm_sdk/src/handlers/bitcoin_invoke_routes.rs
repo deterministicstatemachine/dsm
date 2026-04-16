@@ -139,7 +139,7 @@ fn sync_dbtc_projection_from_state(
             available: spendable,
             locked: locked_sats,
             source_state_hash: crate::util::text_id::encode_base32_crockford(&state_hash),
-            source_state_number: state.state_number,
+            source_state_number: state.hash[0] as u64,
             updated_at: crate::util::deterministic_time::tick(),
         },
     )
@@ -150,7 +150,7 @@ fn sync_dbtc_projection_from_state(
         spendable,
         locked_sats,
         projected.available(),
-        state.state_number,
+        state.hash[0] as u64,
     );
     Ok(())
 }
@@ -586,7 +586,7 @@ impl AppRouterImpl {
             current_state.clone()
         };
 
-        let state_number_bytes = sigma_state.state_number.to_le_bytes();
+        let state_number_bytes = sigma_state.hash[0] as u64.to_le_bytes();
         let (protocol_transition_bytes, protocol_transition_commitment) =
             build_protocol_transition_commitment(
                 route.as_bytes(),
@@ -1957,7 +1957,7 @@ impl AppRouterImpl {
                             );
                             metadata.insert(
                                 "source_state_number".to_string(),
-                                applied_state.state_number.to_le_bytes().to_vec(),
+                                applied_state.hash[0] as u64.to_le_bytes().to_vec(),
                             );
                             let rec = crate::storage::client_db::TransactionRecord {
                                 tx_id: format!("deposit_{}", completion.vault_op_id),
@@ -1967,7 +1967,7 @@ impl AppRouterImpl {
                                 amount,
                                 tx_type: tx_type_str.to_string(),
                                 status: "completed".to_string(),
-                                chain_height: applied_state.state_number,
+                                chain_height: applied_state.hash[0] as u64,
                                 step_index: 0,
                                 commitment_hash: Some(prep.protocol_transition_commitment.to_vec()),
                                 proof_data: None,
@@ -4106,7 +4106,7 @@ impl AppRouterImpl {
                                 );
                                 metadata.insert(
                                     "source_state_number".to_string(),
-                                    applied_state.state_number.to_le_bytes().to_vec(),
+                                    applied_state.hash[0] as u64.to_le_bytes().to_vec(),
                                 );
                                 let rec = crate::storage::client_db::TransactionRecord {
                                     tx_id: format!("deposit_{}", completion.vault_op_id),
@@ -4116,7 +4116,7 @@ impl AppRouterImpl {
                                     amount,
                                     tx_type: tx_type_str.to_string(),
                                     status: "completed".to_string(),
-                                    chain_height: applied_state.state_number,
+                                    chain_height: applied_state.hash[0] as u64,
                                     step_index: 0,
                                     commitment_hash: Some(
                                         prep.protocol_transition_commitment.to_vec(),
@@ -5036,7 +5036,7 @@ mod tests {
             available: amount_sats,
             locked: 0,
             source_state_hash: crate::util::text_id::encode_base32_crockford(&state_hash),
-            source_state_number: state.state_number,
+            source_state_number: state.hash[0] as u64,
             updated_at: crate::util::deterministic_time::tick(),
         })
         .expect("seed dBTC projection");

@@ -1504,7 +1504,7 @@ mod tests {
         let (_pk, sk) = crate::crypto::sphincs::generate_sphincs_keypair().expect("keypair");
         let mut op = Operation::Transfer {
             to_device_id: b"recipient".to_vec(),
-            amount: Balance::from_state(100, [0u8; 32], 0),
+            amount: Balance::from_state(100, [0u8; 32]),
             recipient: b"abcd".to_vec(),
             token_id: b"token123".to_vec(),
             to: b"abcd".to_vec(),

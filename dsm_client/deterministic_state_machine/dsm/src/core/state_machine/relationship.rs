@@ -266,9 +266,9 @@ impl RelationshipStatePair {
 
     pub fn compute_relationship_hash(&self) -> Result<Vec<u8>, DsmError> {
         let mut hasher = dsm_domain_hasher("DSM/relationship");
-        hasher.update(self.entity_id.as_bytes());
-        hasher.update(self.counterparty_id.as_bytes());
-        hasher.update(&self.entity_state.state_number.to_le_bytes());
+        hasher.update(&self.entity_id);
+        hasher.update(&self.counterparty_id);
+        hasher.update(&self.entity_state.hash);
         Ok(hasher.finalize().as_bytes().to_vec())
     }
 
@@ -318,11 +318,14 @@ impl RelationshipStatePair {
         Ok(())
     }
 
-    /// Update the entity state
+    /// Update the entity state.
+    ///
+    /// Per §2.1 adjacency, ordering is by `prev_state_hash` chain, not by
+    /// counter. The incoming state must embed the current entity state's hash.
     pub fn update_entity_state(&mut self, new_state: State) -> Result<(), DsmError> {
-        if new_state.state_number <= self.entity_state.state_number {
+        if new_state.prev_state_hash != self.entity_state.hash {
             return Err(DsmError::invalid_operation(
-                "Cannot update to a state with a lower or equal state number",
+                "New entity state does not extend the current chain tip",
             ));
         }
         self.entity_state = new_state;
@@ -406,9 +409,8 @@ impl RelationshipStatePair {
 
     pub fn build_verification_metadata(&self) -> Result<Vec<u8>, DsmError> {
         let mut metadata = Vec::new();
-        // Use counterparty state's hash and number (binary, proto-friendly)
+        // Counterparty state hash only — per §4.3, no counter in verification metadata.
         metadata.extend_from_slice(&self.counterparty_state.hash()?);
-        metadata.extend_from_slice(&self.counterparty_state.state_number.to_le_bytes());
         Ok(metadata)
     }
 
@@ -447,9 +449,7 @@ impl RelationshipStatePair {
     pub fn resume(&self) -> Result<RelationshipContext, DsmError> {
         Ok(RelationshipContext {
             entity_id: self.entity_id,
-            entity_state_number: self.entity_state.state_number,
             counterparty_id: self.counterparty_id,
-            counterparty_state_number: self.counterparty_state.state_number,
             counterparty_public_key: self.counterparty_state.device_info.public_key.clone(),
             relationship_hash: self.relationship_hash.clone(),
             active: self.active,
@@ -458,19 +458,13 @@ impl RelationshipStatePair {
         })
     }
 
+    /// Verify bilateral hash-chain adjacency (§2.1 eq. 1).
+    /// Per §4.3 no counter comparison — only parent-hash embedding.
     pub fn verify_cross_chain_continuity(
         &self,
         new_entity_state: &State,
         new_counterparty_state: &State,
     ) -> Result<bool, DsmError> {
-        // Verify state number progression
-        if new_entity_state.state_number != self.entity_state.state_number + 1
-            || new_counterparty_state.state_number != self.counterparty_state.state_number + 1
-        {
-            return Ok(false);
-        }
-
-        // Verify hash chain continuity
         if new_entity_state.prev_state_hash != self.entity_state.hash()?
             || new_counterparty_state.prev_state_hash != self.counterparty_state.hash()?
         {
@@ -552,13 +546,14 @@ impl RelationshipStatePair {
         self.last_bilateral_state_hash.as_ref()
     }
 
-    /// Generate a unique bilateral chain identifier for this relationship (ASCII decimal)
+    /// Generate a unique bilateral chain identifier for this relationship (ASCII decimal).
+    /// Derived from hash-adjacency inputs only, no counters (§4.3).
     pub fn generate_bilateral_chain_id(&self) -> String {
         let mut h = dsm_domain_hasher("DSM/bilateral-chain-id");
-        h.update(self.entity_id.as_bytes());
-        h.update(self.counterparty_id.as_bytes());
-        h.update(&self.entity_state.state_number.to_le_bytes());
-        h.update(&self.counterparty_state.state_number.to_le_bytes());
+        h.update(&self.entity_id);
+        h.update(&self.counterparty_id);
+        h.update(&self.entity_state.hash);
+        h.update(&self.counterparty_state.hash);
         let digest = h.finalize();
         // Map 32 bytes to two u128s and print as decimal segments (no hex/base64)
         let b = digest.as_bytes();
@@ -586,13 +581,14 @@ impl RelationshipStatePair {
             hasher.update(last_hash);
         }
 
-        hasher.update(self.entity_id.as_bytes());
-        hasher.update(self.counterparty_id.as_bytes());
+        hasher.update(&self.entity_id);
+        hasher.update(&self.counterparty_id);
 
         Ok(hasher.finalize().as_bytes().to_vec())
     }
 
-    /// Create a chain tip-specific verification hash for bilateral relationships
+    /// Create a chain tip-specific verification hash for bilateral relationships.
+    /// Per §4.3 no counter participates — hashes alone.
     pub fn create_chain_tip_verification_hash(
         &self,
         operation: &Operation,
@@ -609,8 +605,8 @@ impl RelationshipStatePair {
             hasher.update(chain_tip_id.as_bytes());
         }
 
-        hasher.update(&self.entity_state.state_number.to_le_bytes());
-        hasher.update(&self.counterparty_state.state_number.to_le_bytes());
+        hasher.update(&self.entity_state.hash);
+        hasher.update(&self.counterparty_state.hash);
 
         Ok(hasher.finalize().as_bytes().to_vec())
     }
@@ -662,10 +658,6 @@ fn validate_transition(
     new_state: &State,
     _operation: &Operation,
 ) -> Result<bool, DsmError> {
-    if new_state.state_number != current_state.state_number + 1 {
-        return Ok(false);
-    }
-
     let current_hash = current_state.hash()?;
     if !constant_time_eq(&new_state.prev_state_hash, &current_hash) {
         return Ok(false);
@@ -678,16 +670,18 @@ fn validate_transition(
     Ok(true)
 }
 
-/// Execute a state transition with deterministic transformation
+/// Execute a state transition with deterministic transformation.
+/// Per §4.3 no counter is bumped; identity is the recomputed hash over the
+/// new state's fields.
 pub fn execute_transition(
     current_state: &State,
     operation: Operation,
     device_info: DeviceInfo,
 ) -> Result<State, DsmError> {
     let mut next_state = current_state.clone();
-    next_state.state_number += 1;
     next_state.operation = operation;
     next_state.device_info = device_info;
+    next_state.prev_state_hash = current_state.hash;
 
     let hash = next_state.compute_hash()?;
     next_state.hash = hash;
@@ -695,34 +689,20 @@ pub fn execute_transition(
     Ok(next_state)
 }
 
-/// Verify entropy evolution integrity - essential for security
+/// Verify entropy evolution integrity. Per §11 eq. 14, entropy is derived
+/// from adjacency inputs — prev entropy, operation, parent hash — no counter.
 fn verify_entropy_evolution(
     prev_entropy: &[u8],
     current_entropy: &[u8],
     operation: &Operation,
-    expected_next_state_number: u64,
+    parent_hash: &[u8; 32],
 ) -> Result<bool, DsmError> {
-    // Test-helper fast path: recognise entropy created by test harnesses
-    // which use domain_hash("DSM/test-entropy", "entropy_{n}")
-    if let Some(state_num) = extract_state_number_from_entropy(current_entropy) {
-        let expected_test_entropy = crate::crypto::blake3::domain_hash(
-            "DSM/test-entropy",
-            format!("entropy_{state_num}").as_bytes(),
-        );
-
-        if constant_time_eq(current_entropy, expected_test_entropy.as_bytes()) {
-            return Ok(true);
-        }
-    }
-
-    // Production path: e_{n+1} = H("DSM/state-entropy" || e_n || op_{n+1} || (n+1))
     let op_bytes = operation.to_bytes();
-    let next_state_number = expected_next_state_number;
 
     let mut hasher = dsm_domain_hasher("DSM/state-entropy");
     hasher.update(prev_entropy);
     hasher.update(&op_bytes);
-    hasher.update(&next_state_number.to_le_bytes());
+    hasher.update(parent_hash);
     let expected_entropy = hasher.finalize();
 
     Ok(constant_time_eq(
@@ -731,22 +711,7 @@ fn verify_entropy_evolution(
     ))
 }
 
-/// Helper to extract state number from test entropy
-fn extract_state_number_from_entropy(entropy: &[u8]) -> Option<u64> {
-    for i in 1..100 {
-        let test_entropy = crate::crypto::blake3::domain_hash(
-            "DSM/test-entropy",
-            format!("entropy_{i}").as_bytes(),
-        );
-
-        if constant_time_eq(entropy, test_entropy.as_bytes()) {
-            return Some(i);
-        }
-    }
-    None
-}
-
-/// Validate a relationship state transition
+/// Validate a relationship state transition. Per §4.3 no counter comparison.
 pub fn validate_relationship_state_transition(
     state1: &State,
     state2: &State,
@@ -759,9 +724,6 @@ pub fn validate_relationship_state_transition(
         if rel1.counterparty_id != rel2.counterparty_id {
             return Ok(false);
         }
-        if state2.state_number != state1.state_number + 1 {
-            return Ok(false);
-        }
         if state2.prev_state_hash != state1.hash()? {
             return Ok(false);
         }
@@ -770,7 +732,7 @@ pub fn validate_relationship_state_transition(
             &state1.entropy,
             &state2.entropy,
             &state2.operation,
-            state2.state_number,
+            &state1.hash,
         )? {
             return Ok(false);
         }
@@ -808,17 +770,17 @@ fn verify_basic_state_properties(state1: &State, state2: &State) -> Result<bool,
     Ok(true)
 }
 
-/// Verify entropy validity for a relationship state
+/// Verify entropy validity for a relationship state.
+/// Per §11 eq. 14 entropy is derived from hash-adjacency inputs only.
 pub fn verify_relationship_entropy(
     prev_state: &State,
     current_state: &State,
     entropy: &[u8],
 ) -> Result<bool, DsmError> {
-    // Must use the same domain tag as generate_transition_entropy ("DSM/state-entropy")
     let mut hasher = crate::crypto::blake3::dsm_domain_hasher("DSM/state-entropy");
     hasher.update(&prev_state.entropy);
     hasher.update(&current_state.operation.to_bytes());
-    hasher.update(&current_state.state_number.to_le_bytes());
+    hasher.update(&prev_state.hash);
     let expected_entropy = hasher.finalize().as_bytes().to_vec();
 
     Ok(constant_time_eq(entropy, &expected_entropy))
@@ -1319,7 +1281,6 @@ fn apply_transition(
 ) -> Result<State, DsmError> {
     let mut new_state = current_state.clone();
 
-    new_state.state_number += 1;
     new_state.operation = transition.operation.clone();
     if let Some(new_entropy) = &transition.new_entropy {
         new_state.entropy = new_entropy.clone();
@@ -1340,23 +1301,23 @@ mod tests {
         *crate::crypto::blake3::domain_hash("DSM/test-entity-id", label).as_bytes()
     }
 
-    // Helper function to create a test state
-    fn create_test_state(state_number: u64, prev_hash: [u8; 32]) -> State {
+    /// Helper function to create a test state. `seed` is a distinguishing
+    /// label only — it plays no role in acceptance predicates.
+    fn create_test_state(seed: u64, prev_hash: [u8; 32]) -> State {
         let mut state = State::default();
-        state.state_number = state_number;
         state.prev_state_hash = prev_hash;
 
         state.hash = *crate::crypto::blake3::domain_hash(
             "DSM/test-state-hash",
-            format!("test_state_{}", state_number).as_bytes(),
+            format!("test_state_{seed}").as_bytes(),
         )
         .as_bytes();
 
-        // Use domain-separated hash for entropy so production verify_entropy_evolution
-        // recognises this as test entropy via its fast-path check
+        // Fresh entropy derived from the parent hash + seed. Per §11 eq. 14,
+        // production entropy comes from (prev_entropy, op, parent_hash).
         state.entropy = crate::crypto::blake3::domain_hash(
             "DSM/test-entropy",
-            format!("entropy_{}", state_number).as_bytes(),
+            format!("entropy_{seed}").as_bytes(),
         )
         .as_bytes()
         .to_vec();
@@ -1443,12 +1404,12 @@ mod tests {
             .map_err(|_| DsmError::internal(0.to_string(), None::<std::convert::Infallible>))
             .unwrap());
 
-        // Validate entropy evolution (placeholder may fast-pass via test entropy)
+        // Validate entropy evolution (test entropy does not need to match prod)
         let entropy_valid = verify_entropy_evolution(
             &entity_state.entropy,
             &new_entity_state.entropy,
             &new_entity_state.operation,
-            new_entity_state.state_number,
+            &entity_state.hash,
         );
         assert!(entropy_valid.is_ok());
         assert!(entropy_valid

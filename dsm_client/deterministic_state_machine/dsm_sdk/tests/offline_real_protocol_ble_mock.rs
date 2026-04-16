@@ -383,7 +383,7 @@ async fn offline_real_protocol_ble_mock_roundtrip() {
     );
 
     // Transfer operation (real protocol op)
-    let amount = Balance::from_state(10, [1u8; 32], 0);
+    let amount = Balance::from_state(10, [1u8; 32]);
     let transfer_op = Operation::Transfer {
         to_device_id: bob_dev_id.to_vec(),
         amount,
@@ -775,7 +775,7 @@ async fn offline_real_protocol_ble_mock_multi_relationship_multi_tx() {
 
     let op_ab_1 = Operation::Transfer {
         to_device_id: bob_dev_id.to_vec(),
-        amount: Balance::from_state(10, [1u8; 32], 0),
+        amount: Balance::from_state(10, [1u8; 32]),
         token_id: b"ERA".to_vec(),
         mode: TransactionMode::Bilateral,
         nonce: vec![0u8; 8],
@@ -788,7 +788,7 @@ async fn offline_real_protocol_ble_mock_multi_relationship_multi_tx() {
     };
     let op_ab_2 = Operation::Transfer {
         to_device_id: bob_dev_id.to_vec(),
-        amount: Balance::from_state(20, [2u8; 32], 0),
+        amount: Balance::from_state(20, [2u8; 32]),
         token_id: b"ERA".to_vec(),
         mode: TransactionMode::Bilateral,
         nonce: vec![1u8; 8],
@@ -801,7 +801,7 @@ async fn offline_real_protocol_ble_mock_multi_relationship_multi_tx() {
     };
     let op_ac_1 = Operation::Transfer {
         to_device_id: carol_dev_id.to_vec(),
-        amount: Balance::from_state(30, [3u8; 32], 0),
+        amount: Balance::from_state(30, [3u8; 32]),
         token_id: b"ERA".to_vec(),
         mode: TransactionMode::Bilateral,
         nonce: vec![2u8; 8],
@@ -814,7 +814,7 @@ async fn offline_real_protocol_ble_mock_multi_relationship_multi_tx() {
     };
     let op_ac_2 = Operation::Transfer {
         to_device_id: carol_dev_id.to_vec(),
-        amount: Balance::from_state(40, [4u8; 32], 0),
+        amount: Balance::from_state(40, [4u8; 32]),
         token_id: b"ERA".to_vec(),
         mode: TransactionMode::Bilateral,
         nonce: vec![3u8; 8],
