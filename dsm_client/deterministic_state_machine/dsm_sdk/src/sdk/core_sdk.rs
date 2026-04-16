@@ -472,6 +472,43 @@ impl CoreSDK {
         Ok(next_state)
     }
 
+    /// Execute a DSM operation on a specific relationship chain (§2.2, §4.2).
+    ///
+    /// This is the spec-canonical path: names a relationship, advances that
+    /// chain, replaces the SMT leaf, and updates device-level balances
+    /// atomically. Returns the legacy State for backward compat plus the
+    /// AdvanceOutcome containing SMT proofs.
+    pub fn execute_on_relationship(
+        &self,
+        rel_key: [u8; 32],
+        counterparty_devid: [u8; 32],
+        operation: dsm::types::operations::Operation,
+        deltas: &[dsm::types::device_state::BalanceDelta],
+        initial_chain_tip: Option<[u8; 32]>,
+    ) -> Result<(State, dsm::types::device_state::AdvanceOutcome), DsmError> {
+        let mut sm = self.state_machine.lock();
+        let outcome = sm.advance_relationship(
+            rel_key,
+            counterparty_devid,
+            operation,
+            deltas,
+            initial_chain_tip,
+        )?;
+        // Archive using the legacy state path
+        if let Some(current) = sm.current_state() {
+            let _ = Self::archive_state_snapshot(current);
+        }
+        let legacy_state = sm.current_state().cloned().ok_or_else(|| {
+            DsmError::state_machine("No state after advance_relationship")
+        })?;
+        Ok((legacy_state, outcome))
+    }
+
+    /// Get the canonical DeviceState head (§2.2 SMT root).
+    pub fn device_head(&self) -> Option<dsm::types::device_state::DeviceState> {
+        self.state_machine.lock().device_head().cloned()
+    }
+
     pub fn register_token_manager(
         &self,
         _manager: Box<dyn TokenManagerTrait>,
