@@ -272,11 +272,37 @@ impl CoreSDK {
         })
     }
 
-    /// Current tip state (fail-closed if none)
+    /// Current tip state (fail-closed if none).
+    ///
+    /// Returns a compatibility `State` view derived from the canonical
+    /// `DeviceState`. Prefer `device_head()` for new code.
     pub fn get_current_state(&self) -> Result<State, DsmError> {
-        self.state_machine
-            .lock()
-            .current_state()
+        let sm = self.state_machine.lock();
+        // Try DeviceState first (canonical), fall back to legacy current_state
+        if let Some(ds) = sm.device_head() {
+            let mut s = State::default();
+            s.device_info = dsm::types::state_types::DeviceInfo::new(
+                ds.devid(),
+                ds.public_key().to_vec(),
+            );
+            // Use the SMT root as the "hash" — it's the canonical device identity
+            s.hash = ds.root();
+            // Sync balances from DeviceState
+            for (pc, val) in ds.balances_snapshot() {
+                let prefix = u128::from_le_bytes({
+                    let mut a = [0u8; 16];
+                    a.copy_from_slice(&pc[..16]);
+                    a
+                });
+                s.token_balances.insert(
+                    format!("{prefix}"),
+                    dsm::types::token_types::Balance::from_state(*val, s.hash),
+                );
+            }
+            return Ok(s);
+        }
+        // Fallback for pre-genesis state
+        sm.current_state()
             .cloned()
             .ok_or_else(|| DsmError::state_machine("No current state available"))
     }
