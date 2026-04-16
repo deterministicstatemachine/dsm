@@ -303,7 +303,6 @@ impl CoreSDK {
         }
         // Fallback for pre-genesis state
         sm.current_state()
-            .cloned()
             .ok_or_else(|| DsmError::state_machine("No current state available"))
     }
 
@@ -332,7 +331,7 @@ impl CoreSDK {
     ///  - `"{device_b32}.{token}"` dot-format entries are removed (pipe-format is authoritative)
     pub fn migrate_token_balance_keys(&self) {
         let mut sm = self.state_machine.lock();
-        let state = match sm.current_state().cloned() {
+        let state = match sm.current_state() {
             Some(s) => s,
             None => return,
         };

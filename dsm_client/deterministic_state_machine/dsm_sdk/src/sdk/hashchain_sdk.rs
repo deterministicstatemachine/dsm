@@ -239,7 +239,7 @@ impl HashChainSDK {
     /// Latest state snapshot.
     pub fn current_state(&self) -> Option<State> {
         let sm = self.state_machine.read();
-        sm.current_state().cloned()
+        sm.current_state()
     }
 
     /// Current SMT root (authoritative for this SDK instance).
