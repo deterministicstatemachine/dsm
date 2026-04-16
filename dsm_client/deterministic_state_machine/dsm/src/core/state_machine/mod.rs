@@ -52,11 +52,12 @@ type PrecommitmentGenFn = fn(&State, &Operation, &Hash) -> Result<(Hash, Vec<Pos
 /// `advance_relationship` which routes through `DeviceState::advance()`.
 #[derive(Clone, Debug)]
 pub struct StateMachine {
-    /// Legacy current state (will be removed once all callers migrate)
-    current_state: Option<State>,
     /// Canonical device state per §2.2: SMT root + device-level balances +
     /// per-relationship chain tips. This IS the device head.
     device_state: Option<crate::types::device_state::DeviceState>,
+    /// Legacy current state — kept only for genesis bootstrap and
+    /// generate_precommitment fallback. Will be fully removed.
+    current_state: Option<State>,
     /// Device ID for this state machine instance
     device_id: [u8; 32],
     /// Relationship manager for bilateral state isolation
@@ -267,22 +268,36 @@ impl StateMachine {
     // execute_transition and apply_operation deleted — all transitions now go
     // through advance_relationship which uses DeviceState::advance (§2.2, §4.2).
 
-    /// Execute a state transition in the context of a relationship
+    /// Execute a state transition in the context of a relationship.
+    /// Uses DeviceState for entropy derivation, falls back to legacy.
     pub fn execute_relationship_transition(
         &mut self,
         entity_id: &str,
         counterparty_id: &str,
         operation: Operation,
     ) -> Result<RelationshipStatePair, DsmError> {
-        // Generate entropy for new state
-        let new_entropy = generate_transition_entropy(
-            self.current_state.as_ref().ok_or_else(|| {
-                DsmError::state_machine("No current state exists for relationship transition")
-            })?,
-            &operation,
-        )?;
+        // Derive entropy from DeviceState root or legacy current_state
+        let (prior_entropy, prior_hash) = if let Some(ds) = &self.device_state {
+            let root = ds.root();
+            let entropy = {
+                let mut h = dsm_domain_hasher("DSM/precommit-entropy");
+                h.update(&root);
+                h.finalize().as_bytes().to_vec()
+            };
+            (entropy, root)
+        } else if let Some(cs) = &self.current_state {
+            (cs.entropy.clone(), cs.hash)
+        } else {
+            return Err(DsmError::state_machine("No state for relationship transition"));
+        };
 
-        // Execute the transition using the relationship manager
+        let op_data = operation.to_bytes();
+        let mut hasher = dsm_domain_hasher("DSM/state-entropy");
+        hasher.update(&prior_entropy);
+        hasher.update(&op_data);
+        hasher.update(&prior_hash);
+        let new_entropy = *hasher.finalize().as_bytes();
+
         self.relationship_manager.execute_relationship_transition(
             &domain_hash("DSM/entity-id", entity_id.as_bytes()).into(),
             &domain_hash("DSM/entity-id", counterparty_id.as_bytes()).into(),
@@ -292,60 +307,75 @@ impl StateMachine {
     }
 
     /// Verify a state using hash-chain validation (§2.1 adjacency only).
+    ///
+    /// Checks that `state.prev_state_hash` embeds the current device head's
+    /// hash. Uses DeviceState's SMT root as the canonical identity.
     pub fn verify_state(&self, state: &State) -> Result<bool, DsmError> {
-        if let Some(current_state) = &self.current_state {
-            // Verify hash chain adjacency: the new state embeds the current state's hash.
-            let prev_hash = current_state.hash()?;
-            if state.prev_state_hash != prev_hash {
-                return Ok(false);
-            }
-
-            // Verify transition integrity using the operation from the state
-            verify_transition_integrity(current_state, state, &state.operation)
+        // Get the current head hash. DeviceState root is canonical ONLY when
+        // relationships have been advanced (non-empty SMT). For legacy states
+        // created via set_state(), fall back to current_state.hash().
+        let head_hash = if let Some(cs) = &self.current_state {
+            cs.hash()?
+        } else if let Some(ds) = &self.device_state {
+            ds.root()
         } else {
-            Err(crate::types::error::DsmError::state_machine(
-                "No current state exists for verification",
-            ))
+            return Err(DsmError::state_machine("No current state exists for verification"));
+        };
+
+        if state.prev_state_hash != head_hash {
+            return Ok(false);
         }
+
+        // Self-hash integrity
+        let computed = state.compute_hash()?;
+        Ok(computed == state.hash)
     }
 
-    /// Generate a pre-commitment for the next state transition
+    /// Generate a pre-commitment for the next state transition.
+    ///
+    /// Uses the DeviceState's SMT root as the seed input for the random
+    /// walk, falling back to legacy current_state if DeviceState isn't ready.
     pub fn generate_precommitment(
         &self,
         operation: &Operation,
     ) -> Result<(Hash, Vec<Position>), DsmError> {
-        if let Some(current_state) = &self.current_state {
-            let operation_bytes = operation.to_bytes();
-
-            // Create entropy via hash-adjacency inputs (§11 eq. 14): parent entropy,
-            // operation, and parent hash. Per §4.3 no counter participates.
-            let mut hasher = dsm_domain_hasher("DSM/state-entropy");
-            hasher.update(&current_state.entropy);
-            hasher.update(&operation_bytes);
-            hasher.update(&current_state.hash);
-            let next_entropy = hasher.finalize();
-
-            // Generate seed for random walk according to whitepaper equation (21)
-            let current_hash = domain_hash("DSM/chain-hash", &current_state.hash);
-
-            let seed = random_walk::algorithms::generate_seed(
-                &current_hash,
-                &operation_bytes,
-                Some(next_entropy.as_bytes()),
-            );
-
-            // Generate positions for verification according to whitepaper equation (22)
-            let positions = random_walk::algorithms::generate_positions(
-                &seed,
-                None::<random_walk::algorithms::RandomWalkConfig>,
-            )?;
-
-            Ok((seed, positions))
+        // Get entropy + hash from DeviceState or legacy
+        let (prior_entropy, prior_hash) = if let Some(ds) = &self.device_state {
+            // Use SMT root as the "hash" and a derived entropy
+            let root = ds.root();
+            let entropy = {
+                let mut h = dsm_domain_hasher("DSM/precommit-entropy");
+                h.update(&root);
+                h.finalize().as_bytes().to_vec()
+            };
+            (entropy, root)
+        } else if let Some(cs) = &self.current_state {
+            (cs.entropy.clone(), cs.hash)
         } else {
-            Err(DsmError::state_machine(
-                "No current state exists for pre-commitment",
-            ))
-        }
+            return Err(DsmError::state_machine("No current state exists for pre-commitment"));
+        };
+
+        let operation_bytes = operation.to_bytes();
+
+        let mut hasher = dsm_domain_hasher("DSM/state-entropy");
+        hasher.update(&prior_entropy);
+        hasher.update(&operation_bytes);
+        hasher.update(&prior_hash);
+        let next_entropy = hasher.finalize();
+
+        let current_hash = domain_hash("DSM/chain-hash", &prior_hash);
+        let seed = random_walk::algorithms::generate_seed(
+            &current_hash,
+            &operation_bytes,
+            Some(next_entropy.as_bytes()),
+        );
+
+        let positions = random_walk::algorithms::generate_positions(
+            &seed,
+            None::<random_walk::algorithms::RandomWalkConfig>,
+        )?;
+
+        Ok((seed, positions))
     }
 
     /// Verify a pre-commitment
