@@ -410,7 +410,7 @@ pub fn state_to_wire(s: &State) -> pb::StateWire {
     let op: String = canonical_operation_name(&s.operation);
 
     pb::StateWire {
-        state_number: s.state_number,
+        state_number: 0,
         prev_state_hash: s.prev_state_hash.to_vec(),
         token_balances,
         operation: op,

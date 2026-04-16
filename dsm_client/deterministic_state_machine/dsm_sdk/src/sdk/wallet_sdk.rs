@@ -143,7 +143,7 @@ impl ChainTipInfo {
     pub fn update(&mut self, new_tip_id: Vec<u8>, new_state_hash: Vec<u8>, new_state_number: u64) {
         self.chain_tip_id = new_tip_id;
         self.last_state_hash = new_state_hash;
-        self.hash[0] as u64 = new_state_number;
+        self.state_number = new_state_number;
         self.last_updated = dt::tick();
         self.is_synchronized = true;
     }
@@ -186,7 +186,7 @@ impl fmt::Debug for WalletTransaction {
             .field("memo", &self.memo)
             .field("tick", &self.tick)
             .field("status", &self.status)
-            .field("state_number", &self.hash[0] as u64)
+            .field("state_number", &self.state_number)
             .field("chain_tip_id", &self.chain_tip_id)
             .field("fee", &self.fee)
             .field("metadata", &self.metadata)
@@ -799,7 +799,7 @@ impl WalletSDK {
 
         let mut tx_copy = transaction.clone();
         tx_copy.status = TransactionStatus::Confirmed;
-        tx_copy.hash[0] as u64 = Some(new_state.hash[0] as u64);
+
         self.transactions.write().push(tx_copy.clone());
 
         // §16.6: Relationship chain tip h_{n+1} is the caller's responsibility.
@@ -1297,7 +1297,7 @@ impl WalletSDK {
             protocol_chain_tip_id,      // protocol actor child tip
         );
         tx.status = TransactionStatus::Confirmed;
-        tx.hash[0] as u64 = Some(new_state.hash[0] as u64);
+
         tx.metadata
             .insert("source".to_string(), "faucet".to_string());
         tx.metadata.insert(

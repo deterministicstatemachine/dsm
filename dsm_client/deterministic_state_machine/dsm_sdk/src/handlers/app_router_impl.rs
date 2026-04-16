@@ -963,7 +963,7 @@ impl AppRouterImpl {
             hasher.update(&to_device_id);
             hasher.finalize().as_bytes().to_vec()
         };
-        let balance_tick = {
+        let _balance_tick = {
             let mut tick_bytes = [0u8; 8];
             tick_bytes.copy_from_slice(&nonce[..8]);
             u64::from_le_bytes(tick_bytes)

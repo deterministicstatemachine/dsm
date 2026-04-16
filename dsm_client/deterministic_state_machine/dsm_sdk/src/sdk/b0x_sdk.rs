@@ -2416,7 +2416,7 @@ impl B0xSDK {
                                     );
                                 }
 
-                                let balance_tick = if transfer_req.nonce.len() >= 8 {
+                                let _balance_tick = if transfer_req.nonce.len() >= 8 {
                                     let mut tick_bytes = [0u8; 8];
                                     tick_bytes.copy_from_slice(&transfer_req.nonce[..8]);
                                     u64::from_le_bytes(tick_bytes)

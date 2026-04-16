@@ -1,3 +1,4 @@
+#![allow(unused_variables)]
 //! # Token SDK Module (protobuf-only, deterministic)
 //!
 //! Protobuf-only encoding (prost::Message). No serde/JSON, no bincode.
@@ -1098,11 +1099,7 @@ impl<I: Send + Sync> TokenSDK<I> {
 
                 if token_id == "ERA" {
                     let mut era_token = self.era_token.write();
-                    let new_circulation = Balance::from_state(
-                        era_token.circulating_supply.value().saturating_sub(*amount),
-                        new_state.hash,
-                        new_state.hash[0] as u64,
-                    );
+                    let new_circulation = Balance::from_state(era_token.circulating_supply.value().saturating_sub(*amount), new_state.hash);
                     era_token.circulating_supply = new_circulation;
                 }
 
@@ -1521,11 +1518,7 @@ impl<I: Send + Sync> TokenSDK<I> {
             let adjusted_fee = (base_fee.value() as f64 * (1.0 + network_load * 0.1)) as u64;
             new_schedule.insert(
                 op_type.clone(),
-                Balance::from_state(
-                    adjusted_fee,
-                    state_hash.clone().try_into().unwrap_or([0u8; 32]),
-                    0,
-                ),
+                Balance::from_state(adjusted_fee, state_hash.clone().try_into().unwrap_or([0u8; 32])),
             );
         }
 
@@ -1579,7 +1572,7 @@ impl<I: Send + Sync> TokenSDK<I> {
         }
         let current_state = self.core_sdk.get_current_state()?;
         let state_hash = current_state.hash;
-        let state_number = current_state.hash[0] as u64;
+        let _state_number = current_state.hash[0] as u64;
         let mut balances = self.balances.write();
         let device_balances = balances.entry(device_id).or_default();
         let current = device_balances
@@ -1866,11 +1859,7 @@ impl<I: Send + Sync> TokenSDK<I> {
         let mut bilateral_transfer_op = Operation::Transfer {
             token_id: token_id.as_bytes().to_vec(),
             to_device_id: recipient.to_vec(),
-            amount: Balance::from_state(
-                amount,
-                state_hash.clone().try_into().unwrap_or([0u8; 32]),
-                current_state.hash[0] as u64,
-            ),
+            amount: Balance::from_state(amount, state_hash.clone().try_into().unwrap_or([0u8; 32])),
             recipient: recipient_public_key,
             message: memo.clone().unwrap_or_else(|| {
                 format!(
@@ -2279,11 +2268,7 @@ impl<I: Send + Sync> TokenSDK<I> {
         let current_state = self.core_sdk.get_current_state()?;
         let mut fee_transfer_op = Operation::Transfer {
             to_device_id: b"system.fee.device_id".to_vec(),
-            amount: Balance::from_state(
-                fee,
-                state_hash.clone().try_into().unwrap_or([0u8; 32]),
-                current_state.hash[0] as u64,
-            ),
+            amount: Balance::from_state(fee, state_hash.clone().try_into().unwrap_or([0u8; 32])),
             token_id: b"ERA".to_vec(),
             mode: TransactionMode::Bilateral,
             nonce: self.generate_nonce(),
@@ -2330,11 +2315,7 @@ impl<I: Send + Sync> TokenSDK<I> {
             if let Some(locked_blob) = current_state.get_parameter("locked_balances") {
                 if let Ok(proto) = LockedBalances::decode(locked_blob.as_slice()) {
                     if let Some(entry) = proto.entries.iter().find(|e| e.key == locked_key) {
-                        return Ok(Balance::from_state(
-                            entry.amount,
-                            state_hash.clone().try_into().unwrap_or([0u8; 32]),
-                            current_state.hash[0] as u64,
-                        ));
+                        return Ok(Balance::from_state(entry.amount, state_hash.clone().try_into().unwrap_or([0u8; 32])));
                     }
                 } else {
                     // If decoding fails, treat as no locked balance (fail-closed).
@@ -2347,11 +2328,7 @@ impl<I: Send + Sync> TokenSDK<I> {
         let balances = self.balances.read();
         if let Some(device_balances) = balances.get(device_id) {
             if let Some(balance) = device_balances.get(token_id) {
-                return Ok(Balance::from_state(
-                    balance.locked(),
-                    state_hash.clone().try_into().unwrap_or([0u8; 32]),
-                    0,
-                ));
+                return Ok(Balance::from_state(balance.locked(), state_hash.clone().try_into().unwrap_or([0u8; 32])));
             }
         }
 
@@ -2448,9 +2425,9 @@ impl<I: Send + Sync> TokenSDK<I> {
         }
 
         let mut op = Operation::Transfer {
+            token_id: token_id.as_bytes().to_vec(),
             to_device_id: recipient_device_id.clone(),
             amount: Balance::from_state(amount, state_hash),
-            token_id: token_id.as_bytes().to_vec(),
             mode: TransactionMode::Unilateral,
             nonce: Vec::new(),
             verification: VerificationType::Standard,

@@ -84,14 +84,8 @@ type StateHash = Vec<u8>;
 /// communication with state isolation.
 #[derive(Debug, Clone)]
 pub struct ExtendedRelationshipContext {
-    /// Current state number of the entity in this relationship
-    pub entity_state_number: u64,
-
     /// Identifier of the counterparty in this relationship
     pub counterparty_id: String,
-
-    /// Current state number of the counterparty in this relationship
-    pub 
 
     /// Public key of the counterparty for verification
     pub counterparty_public_key: Vec<u8>,
@@ -1028,8 +1022,7 @@ impl IdentitySDK {
         })?;
 
         let context = ExtendedRelationshipContext {
-            entity_state_number: current_state.hash[0] as u64,
-            counterparty_id: counterparty_id.to_string(),
+                        counterparty_id: counterparty_id.to_string(),
              // Initial state
             counterparty_public_key,
             current_state_hash: current_state.hash.to_vec(),

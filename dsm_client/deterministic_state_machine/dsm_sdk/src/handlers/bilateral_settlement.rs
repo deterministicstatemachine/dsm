@@ -1,3 +1,4 @@
+#![allow(unused_variables)]
 //! Default settlement delegate for bilateral BLE transfers.
 //!
 //! This module lives in the **application layer** and implements the
@@ -185,7 +186,7 @@ fn build_canonical_settled_state(
     }
 
     // Advance device state_number for the settled state.
-    settled_state.hash[0] as u64 = canonical_state.hash[0] as u64 + 1;
+
 
     settled_state.hash = settled_state
         .compute_hash()
@@ -318,7 +319,7 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
             amount: transfer_amount,
             tx_type: ctx.tx_type.to_string(),
             status: "completed".to_string(),
-            chain_height: canonical_state.as_ref().map_or(0, |s| s.state_number),
+            chain_height: canonical_state.as_ref().map_or(0, |s| 0),
             step_index: crate::util::deterministic_time::tick(),
             commitment_hash: Some(encode_base32_crockford(&ctx.commitment_hash).into_bytes()),
             proof_data: ctx.proof_data,

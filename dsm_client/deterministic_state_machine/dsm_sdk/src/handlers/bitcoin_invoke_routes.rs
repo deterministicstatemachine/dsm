@@ -586,7 +586,7 @@ impl AppRouterImpl {
             current_state.clone()
         };
 
-        let state_number_bytes = sigma_state.hash[0] as u64.to_le_bytes();
+        let state_number_bytes = (sigma_state.hash[0] as u64).to_le_bytes();
         let (protocol_transition_bytes, protocol_transition_commitment) =
             build_protocol_transition_commitment(
                 route.as_bytes(),
@@ -1957,7 +1957,7 @@ impl AppRouterImpl {
                             );
                             metadata.insert(
                                 "source_state_number".to_string(),
-                                applied_state.hash[0] as u64.to_le_bytes().to_vec(),
+                                (applied_state.hash[0] as u64).to_le_bytes().to_vec(),
                             );
                             let rec = crate::storage::client_db::TransactionRecord {
                                 tx_id: format!("deposit_{}", completion.vault_op_id),
@@ -4106,7 +4106,7 @@ impl AppRouterImpl {
                                 );
                                 metadata.insert(
                                     "source_state_number".to_string(),
-                                    applied_state.hash[0] as u64.to_le_bytes().to_vec(),
+                                    (applied_state.hash[0] as u64).to_le_bytes().to_vec(),
                                 );
                                 let rec = crate::storage::client_db::TransactionRecord {
                                     tx_id: format!("deposit_{}", completion.vault_op_id),

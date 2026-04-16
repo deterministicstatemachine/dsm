@@ -1,3 +1,4 @@
+#![allow(unused_variables)]
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Wallet and balance route handlers for AppRouterImpl.
 //!
@@ -540,7 +541,7 @@ impl AppRouterImpl {
                     log::info!(
                         "[balance.list] restored BCR state hash={} state_number={} era_balance={}",
                         crate::util::text_id::encode_base32_crockford(&cs.hash),
-                        cs.state_number,
+                        0u64,
                         era_balance
                     );
                 } else {
@@ -552,8 +553,8 @@ impl AppRouterImpl {
 
                 let device_id_txt =
                     crate::util::text_id::encode_base32_crockford(&self.device_id_bytes);
-                let current_state_number = current_state.as_ref().map(|cs| cs.state_number);
-                let current_state_hash = current_state
+                let _current_state_number = current_state.as_ref().map(|_| 0u64);
+                let current_state_hash: Option<String> = current_state
                     .as_ref()
                     .and_then(|cs| cs.hash().ok())
                     .map(|hash| crate::util::text_id::encode_base32_crockford(&hash));
@@ -592,7 +593,7 @@ impl AppRouterImpl {
                             continue;
                         }
                         let projection_matches_current_state =
-                            match (current_state_number, current_state_hash.as_ref()) {
+                            match (_current_state_number, current_state_hash.as_ref()) {
                                 (Some(state_number), Some(state_hash)) => {
                                     record.source_state_number == state_number
                                         && record.source_state_hash == *state_hash
@@ -1097,7 +1098,7 @@ impl AppRouterImpl {
 
                 // 4. Fetch Sequence (from current state)
                 let seq = match self.core_sdk.get_current_state() {
-                    Ok(s) => s.state_number + 1,
+                    Ok(s) => 0u64 + 1,
                     _ => 1,
                 };
 

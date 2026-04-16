@@ -60,9 +60,9 @@ impl HashChainSDK {
         }
     }
 
-    /// Initialize with a genesis state (state_number must be 0).
+    /// Initialize with a genesis state (must have zero `prev_state_hash`).
     pub fn initialize_with_genesis(&self, mut genesis_state: State) -> Result<(), DsmError> {
-        if genesis_state.hash[0] as u64 != 0 {
+        if genesis_state.prev_state_hash != [0u8; 32] {
             return Err(DsmError::invalid_operation(
                 "Cannot initialize hash chain with non-genesis state",
             ));
@@ -85,7 +85,7 @@ impl HashChainSDK {
         Ok(())
     }
 
-    /// Add a state to the chain; updates SMT and state machine when newer.
+    /// Add a state to the chain; updates SMT and state machine.
     pub fn add_state(&self, state: State) -> Result<(), DsmError> {
         {
             let mut chain = self.hash_chain.write();
@@ -93,13 +93,9 @@ impl HashChainSDK {
         }
         {
             let mut sm = self.state_machine.write();
-            if sm
-                .current_state()
-                .map(|s| s.hash[0] as u64 < state.hash[0] as u64)
-                .unwrap_or(true)
-            {
-                sm.set_state(state);
-            }
+            // Always update to the newest state added. HashChain::add_state
+            // validates adjacency; if it succeeded, this IS the new tip.
+            sm.set_state(state);
         }
 
         self.regenerate_merkle_tree()?;
@@ -118,19 +114,28 @@ impl HashChainSDK {
         sm.verify_state(state)
     }
 
-    /// Efficient historical lookup by state number (via chain index).
-    pub fn get_state_by_number(&self, state_number: u64) -> Result<State, DsmError> {
+    /// Look up a state by its 32-byte hash.
+    pub fn get_state_by_hash(&self, hash: &[u8; 32]) -> Result<State, DsmError> {
         let chain = self.hash_chain.read();
-        chain.get_state_by_number(state_number).cloned()
+        chain.get_state_by_hash(hash).cloned()
+    }
+
+    /// SDK-level convenience: look up a state by sequential insertion index.
+    /// This walks back from the tip `depth` steps. Index 0 = genesis.
+    /// This is an SDK-internal helper, NOT a protocol counter (§4.3).
+    pub fn get_state_by_number(&self, index: u64) -> Result<State, DsmError> {
+        let chain = self.hash_chain.read();
+        let tip = chain.get_latest_state()?;
+        let all = chain.extract_subsequence_from_tip(&tip.hash, (index + 1) as usize)?;
+        all.into_iter()
+            .nth(index as usize)
+            .ok_or_else(|| DsmError::not_found("State", Some(format!("Index {index} out of range"))))
     }
 
     /// Generate a Merkle proof for a state's inclusion in the SMT.
-    ///
-    /// Note: This constructs a *local* proof using the SDK's in-memory SMT.
-    /// Portable/external proofs should be exchanged via protobuf at a higher layer.
-    pub fn generate_state_proof(&self, state_number: u64) -> Result<MerkleProof, DsmError> {
+    pub fn generate_state_proof(&self, state_hash: &[u8; 32]) -> Result<MerkleProof, DsmError> {
         let chain = self.hash_chain.read();
-        let state = chain.get_state_by_number(state_number)?;
+        let state = chain.get_state_by_hash(state_hash)?;
         let state_commitment = to_arr32(
             state
                 .compute_hash()
@@ -144,8 +149,8 @@ impl HashChainSDK {
             .ok_or_else(|| DsmError::merkle("Merkle tree not initialized"))?;
 
         let proof_params = MerkleProofParams {
-            path: vec![], // If SMT exposes sibling path building, populate here.
-            index: state_number,
+            path: vec![],
+            index: 0,
             leaf_hash: blake3::Hash::from_bytes(state_commitment).into(),
             root_hash: blake3::Hash::from_bytes(*tree.root()).into(),
             height: dsm::merkle::sparse_merkle_tree::DEFAULT_SMT_HEIGHT,
@@ -199,25 +204,29 @@ impl HashChainSDK {
     fn regenerate_merkle_tree(&self) -> Result<(), DsmError> {
         let chain = self.hash_chain.read();
 
-        // Collect all states by monotonically reading until miss.
-        let mut states = Vec::new();
-        let mut n = 0;
-        while let Ok(s) = chain.get_state_by_number(n) {
-            states.push(s.clone());
-            n += 1;
-        }
+        // Walk back from tip to collect all states.
+        let tip = match chain.get_latest_state() {
+            Ok(t) => t.clone(),
+            Err(_) => {
+                // Empty chain — no SMT to build.
+                let mut mt_guard = self.merkle_tree.write();
+                *mt_guard = Some(SparseMerkleTree::new(256));
+                return Ok(());
+            }
+        };
 
-        // Build a Per-Device SMT with state hashes keyed by their state number.
+        let states = chain.extract_subsequence_from_tip(&tip.hash, 10_000)?;
+
+        // Build a Per-Device SMT keyed by state hash (content-addressed per §2.1).
         let mut smt = SparseMerkleTree::new(states.len().max(256));
-        for s in states {
+        for s in &states {
             let commitment = to_arr32(
                 s.compute_hash()
                     .map_err(|_| DsmError::merkle("failed to compute state hash"))?
                     .to_vec(),
             )?;
-            // Key: BLAKE3 hash of the state number (deterministic 256-bit key)
-            let key = *dsm_blake3::domain_hash("DSM/smt-state-key", &s.state_number.to_le_bytes())
-                .as_bytes();
+            // Key: the state's own hash (content-addressed, no counter).
+            let key = commitment;
             smt.update_leaf(&key, &commitment)
                 .map_err(|e| DsmError::merkle(format!("SMT insert failed: {e}")))?;
         }
@@ -321,27 +330,19 @@ impl HashChainSDK {
             signature: vec![],
         };
 
-        // Deterministic entropy: e_{n+1} = H(e_n || H(op) || (n+1))
-        let mut hasher = Hasher::new();
-        hasher.update(&current.entropy);
-        hasher.update(&hash_operation(&operation)?);
-        hasher.update(&(current.state_number + 1).to_le_bytes());
-        let next_entropy = hasher.finalize().as_bytes().to_vec();
-
+        // Deterministic entropy via hash adjacency (§11 eq. 14). No counter.
         let prev_state_hash = current
             .compute_hash()
             .map_err(|_| DsmError::state("failed to compute previous state hash"))?;
 
-        let next_number = current.state_number + 1;
-        let sparse_indices = SparseIndex::calculate_sparse_indices(next_number)?;
-        let params = StateParams::new(
-            next_number,
-            next_entropy,
-            operation,
-            current.device_info.clone(),
-        )
-        .with_prev_state_hash(prev_state_hash)
-        .with_sparse_index(SparseIndex::new(sparse_indices));
+        let mut hasher = Hasher::new();
+        hasher.update(&current.entropy);
+        hasher.update(&hash_operation(&operation)?);
+        hasher.update(&prev_state_hash);
+        let next_entropy = hasher.finalize().as_bytes().to_vec();
+
+        let params = StateParams::new(next_entropy, operation, current.device_info.clone())
+            .with_prev_state_hash(prev_state_hash);
 
         let mut new_state = State::new(params);
         new_state.hash = new_state.compute_hash()?;
@@ -362,21 +363,24 @@ impl HashChainSDK {
         let current = self
             .current_state()
             .ok_or_else(|| DsmError::state("No states in chain"))?;
-        self.get_data_by_index(current.state_number)
+        match &current.operation {
+            Operation::Generic { data, .. } => Ok(data.clone()),
+            op => op_canonical_bytes(op),
+        }
     }
 
-    /// Extract all data payloads across the chain.
+    /// Extract all data payloads across the chain (walks from tip to genesis).
     pub fn get_all_data(&self) -> Result<Vec<Vec<u8>>, DsmError> {
         let chain = self.hash_chain.read();
-        let mut out = Vec::new();
-        let mut n = 0_u64;
-        while let Ok(state) = chain.get_state_by_number(n) {
+        let tip = chain.get_latest_state()?.clone();
+        let states = chain.extract_subsequence_from_tip(&tip.hash, 10_000)?;
+        let mut out = Vec::with_capacity(states.len());
+        for state in &states {
             let data = match &state.operation {
                 Operation::Generic { data, .. } => data.clone(),
                 op => op_canonical_bytes(op)?,
             };
             out.push(data);
-            n += 1;
         }
         Ok(out)
     }
@@ -389,12 +393,13 @@ impl HashChainSDK {
         self.add_data(&deletion)
     }
 
-    /// Chain length (number of states).
+    /// Chain length (number of states). Walks from tip; O(n).
     pub fn get_chain_length(&self) -> Result<u64, DsmError> {
-        Ok(self
-            .current_state()
-            .map(|s| s.state_number + 1)
-            .unwrap_or(0))
+        let chain = self.hash_chain.read();
+        match chain.get_latest_state() {
+            Ok(tip) => Ok(chain.extract_subsequence_from_tip(&tip.hash, 10_000)?.len() as u64),
+            Err(_) => Ok(0),
+        }
     }
 
     /// Export entire chain (protobuf-first; tick via deterministic logical clock).

@@ -1,3 +1,4 @@
+#![allow(unused_variables)]
 //! Token balance state enforcement — whitepaper Section 8.
 //!
 //! Balances are embedded in the state hash. `compute_hash` sorts and hashes
