@@ -118,22 +118,18 @@ impl DualModeVerifier {
         current_state: &StateTypesState,
         next_state: &StateTypesState,
     ) -> Result<bool, DsmError> {
-        // 1. Verify state number monotonically increases
-        if next_state.hash[0] as u64 != current_state.hash[0] as u64 + 1 {
-            return Ok(false);
-        }
-
-        // 2. Verify hash chain continuity
+        // §4.3: no state_number — adjacency is the only chain-integrity rule.
+        // 1. Verify hash chain continuity (§2.1 eq. 1)
         if next_state.prev_state_hash != current_state.hash()? {
             return Ok(false);
         }
 
-        // 3. Verify token conservation
+        // 2. Verify token conservation
         if !Self::verify_token_conservation(current_state, next_state)? {
             return Ok(false);
         }
 
-        // 4. Verify entropy evolution using the consolidated implementation
+        // 3. Verify entropy evolution per §11 eq. 14
         if !Self::verify_entropy_evolution(current_state, next_state)? {
             return Ok(false);
         }
@@ -297,12 +293,14 @@ impl DualModeVerifier {
         current_state: &StateTypesState,
         next_state: &StateTypesState,
     ) -> Result<bool, DsmError> {
-        // Verify entropy evolution - entropy must change with each state transition
-        if next_state.entropy == current_state.entropy {
-            return Ok(false);
-        }
-
-        Ok(true)
+        // §11 eq. 14: e_{n+1} = H("DSM/state-entropy" || e_n || op || H(S_n))
+        let op_bytes = next_state.operation.to_bytes();
+        let mut hasher = crate::crypto::blake3::dsm_domain_hasher("DSM/state-entropy");
+        hasher.update(&current_state.entropy);
+        hasher.update(&op_bytes);
+        hasher.update(&current_state.hash);
+        let expected = hasher.finalize();
+        Ok(next_state.entropy.as_slice() == expected.as_bytes())
     }
 
     #[allow(dead_code)]
@@ -367,30 +365,45 @@ mod tests {
         state
             .token_balances
             .insert("ERA".to_string(), Balance::from_state(1000, [0u8; 32]));
+        // Cache the computed hash so subsequent reads of `state.hash` are valid.
+        state.hash = state.compute_hash().unwrap();
         state
     }
 
     fn make_next_state(
         prev: &StateTypesState,
         operation: Operation,
-        entropy: Vec<u8>,
+        _entropy_seed: Vec<u8>,
     ) -> StateTypesState {
         let di = make_device_info();
         let prev_hash = prev.hash().unwrap();
+
+        // Derive entropy per §11 eq.14: H(prev_entropy || op || parent_hash)
+        let op_bytes = operation.to_bytes();
+        let mut hasher = crate::crypto::blake3::dsm_domain_hasher("DSM/state-entropy");
+        hasher.update(&prev.entropy);
+        hasher.update(&op_bytes);
+        hasher.update(&prev_hash);
+        let entropy = hasher.finalize().as_bytes().to_vec();
+
         let mut params = StateParams::new(entropy, operation, di);
         params.prev_state_hash = prev_hash;
         let mut s = State::new(params);
         s.token_balances = prev.token_balances.clone();
+        s.hash = s.compute_hash().unwrap();
         s
     }
 
     #[test]
-    fn verify_transition_rejects_non_sequential_state_number() {
+    fn verify_transition_rejects_arbitrary_entropy() {
+        // §11 eq. 14 — entropy MUST be H(prev_entropy || op || parent_hash).
+        // A transition with arbitrary entropy must fail invariant verification
+        // (the entropy-evolution check catches forgery).
         let current = make_genesis();
         let di = make_device_info();
         let prev_hash = current.hash().unwrap();
-        let mut params = StateParams::new(// gap in state numbers
-            vec![0xBB; 32],
+        let mut params = StateParams::new(
+            vec![0xBB; 32], // arbitrary entropy — does NOT follow §11 eq. 14
             Operation::Noop,
             di,
         );
@@ -400,7 +413,7 @@ mod tests {
 
         let result =
             DualModeVerifier::verify_transition(&current, &next, &Operation::Noop).unwrap();
-        assert!(!result, "should reject non-sequential state numbers");
+        assert!(!result, "must reject transition with non-canonical entropy");
     }
 
     #[test]
@@ -448,10 +461,7 @@ mod tests {
         assert!(!result, "should reject when token disappears");
     }
 
-    #[test]
-    
-    #[ignore = "TODO: entropy derivation uses parent_hash now (§11 eq.14)"]
-    fn verify_basic_transition_succeeds_for_valid_pair() {
+    #[test]    fn verify_basic_transition_succeeds_for_valid_pair() {
         let current = make_genesis();
         let next = make_next_state(&current, Operation::Noop, vec![0xEE; 32]);
 
@@ -511,10 +521,7 @@ mod tests {
         assert!(DualModeVerifier::verify_transition_batch(&[genesis]).unwrap());
     }
 
-    #[test]
-    
-    #[ignore = "TODO: entropy derivation uses parent_hash now (§11 eq.14)"]
-    fn verify_batch_valid_chain() {
+    #[test]    fn verify_batch_valid_chain() {
         let s0 = make_genesis();
         let s1 = make_next_state(&s0, Operation::Noop, vec![0x11; 32]);
         let s2 = make_next_state(&s1, Operation::Noop, vec![0x22; 32]);

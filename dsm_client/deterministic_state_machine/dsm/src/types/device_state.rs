@@ -65,6 +65,12 @@ pub struct DeviceState {
     /// Canonical source of truth is [`SparseMerkleTree`]; this map is a
     /// fast-path for building successors without archive fetches.
     tips: BTreeMap<[u8; 32], RelChainTip>,
+
+    /// Legacy compat anchor: if a State was bootstrapped via `set_state`,
+    /// its hash is stored here so that `verify_state` and similar legacy
+    /// checks have a head_hash to compare against. Strictly compat path —
+    /// new code reads `root()` (the SMT root, §2.2 canonical).
+    legacy_anchor: Option<[u8; 32]>,
 }
 
 impl fmt::Debug for DeviceState {
@@ -284,12 +290,26 @@ impl DeviceState {
             smt: SparseMerkleTree::new(max_relationships),
             balances: BTreeMap::new(),
             tips: BTreeMap::new(),
+            legacy_anchor: None,
         }
     }
 
     /// Current device head `r_A` — the Per-Device SMT root (§2.2).
     pub fn root(&self) -> [u8; 32] {
         *self.smt.root()
+    }
+
+    /// Stash a legacy `State.hash` as a verification anchor. Callers that
+    /// hold a legacy State and want `legacy_anchor()` to return its hash
+    /// (for hash-adjacency verification) use this. Strictly compat path —
+    /// not part of the §2.2 SMT.
+    pub fn bootstrap_legacy_root(&mut self, legacy_root: [u8; 32]) {
+        self.legacy_anchor = Some(legacy_root);
+    }
+
+    /// Returns the legacy anchor if set (compat path).
+    pub fn legacy_anchor(&self) -> Option<[u8; 32]> {
+        self.legacy_anchor
     }
 
     /// Device genesis digest.
@@ -468,6 +488,7 @@ impl DeviceState {
             smt: new_smt,
             balances: new_balances,
             tips: new_tips,
+            legacy_anchor: self.legacy_anchor,
         };
 
         Ok(AdvanceOutcome {

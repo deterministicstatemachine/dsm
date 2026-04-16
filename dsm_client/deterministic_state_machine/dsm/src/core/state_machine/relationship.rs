@@ -1379,8 +1379,6 @@ mod tests {
     }
 
     #[test]
-    
-    #[ignore = "TODO: entropy derivation uses parent_hash now (§11 eq.14)"]
     fn test_relationship_state() {
         let entity_state = create_test_state(1, [0; 32]);
         let counterparty_state = create_test_state(1, [0; 32]);
@@ -1396,8 +1394,16 @@ mod tests {
         .unwrap();
 
         // Validate state transition
-        let new_entity_state = create_test_state(2, entity_state.hash().unwrap());
+        let mut new_entity_state = create_test_state(2, entity_state.hash().unwrap());
         let new_counterparty_state = create_test_state(2, counterparty_state.hash().unwrap());
+
+        // Construct entropy per §11 eq.14: H(prev_entropy || op || parent_hash)
+        let op_bytes = new_entity_state.operation.to_bytes();
+        let mut hasher = dsm_domain_hasher("DSM/state-entropy");
+        hasher.update(&entity_state.entropy);
+        hasher.update(&op_bytes);
+        hasher.update(&entity_state.hash);
+        new_entity_state.entropy = hasher.finalize().as_bytes().to_vec();
 
         let continuity_valid =
             relationship.verify_cross_chain_continuity(&new_entity_state, &new_counterparty_state);
@@ -1406,17 +1412,15 @@ mod tests {
             .map_err(|_| DsmError::internal(0.to_string(), None::<std::convert::Infallible>))
             .unwrap());
 
-        // Validate entropy evolution (test entropy does not need to match prod)
+        // Validate entropy evolution (now derived per §11 eq.14)
         let entropy_valid = verify_entropy_evolution(
             &entity_state.entropy,
             &new_entity_state.entropy,
             &new_entity_state.operation,
             &entity_state.hash,
-        );
-        assert!(entropy_valid.is_ok());
-        assert!(entropy_valid
-            .map_err(|_| DsmError::internal(0.to_string(), None::<std::convert::Infallible>))
-            .unwrap());
+        )
+        .unwrap();
+        assert!(entropy_valid, "entropy must follow §11 eq.14");
 
         // Chain id must be reproducible and non-empty (no hex)
         let cid = relationship.generate_bilateral_chain_id();

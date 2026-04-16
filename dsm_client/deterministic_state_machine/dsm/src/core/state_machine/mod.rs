@@ -112,16 +112,26 @@ impl StateMachine {
     }
 
     /// Initialize with a genesis state. Bootstraps DeviceState from
-    /// the State's device info.
+    /// the State's device info, seeding the SMT root from the State's hash
+    /// so legacy callers' verify_state checks have a head_hash to compare.
     pub fn set_state(&mut self, state: State) {
+        let state_hash = state.hash()
+            .unwrap_or(state.hash);
         if self.device_state.is_none() {
-            let ds = crate::types::device_state::DeviceState::new(
+            let mut ds = crate::types::device_state::DeviceState::new(
                 [0u8; 32],
                 state.device_info.device_id,
                 state.device_info.public_key.clone(),
                 1024,
             );
+            // Seed SMT root with the State's hash for legacy compat.
+            ds.bootstrap_legacy_root(state_hash);
             self.device_state = Some(ds);
+        } else {
+            // Re-seed with new state hash for tests that swap state.
+            if let Some(ds) = self.device_state.as_mut() {
+                ds.bootstrap_legacy_root(state_hash);
+            }
         }
     }
 
@@ -257,7 +267,8 @@ impl StateMachine {
         // relationships have been advanced (non-empty SMT). For legacy states
         // created via set_state(), fall back to current_state.hash().
         let head_hash = if let Some(ds) = &self.device_state {
-            ds.root()
+            // Prefer legacy anchor if set (legacy compat path); else SMT root.
+            ds.legacy_anchor().unwrap_or_else(|| ds.root())
         } else {
             return Err(DsmError::state_machine("No DeviceState for verification"));
         };
@@ -760,7 +771,6 @@ mod state_machine_tests {
     }
 
     #[test]
-    #[ignore = "TODO: rewrite for DeviceState-based verification (current_state field removed)"]
     fn test_state_verification_chain() -> Result<(), DsmError> {
         // Build states manually using the same domain tag as generate_transition_entropy
         let (genesis, _pk, sk) = create_test_genesis_state_with_keypair();

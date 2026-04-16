@@ -238,7 +238,11 @@ impl BilateralControlResistance {
 
     // -------------------- Temporal consistency --------------------
 
-    /// Verify temporal consistency attestations (whitepaper Section 29.5).
+    /// Verify temporal consistency via §2.1 hash adjacency.
+    ///
+    /// Per §4.3 there is no state_number/counter — chain integrity is
+    /// proven exclusively by `next.prev_state_hash == prev.hash`. Each
+    /// state's self-hash must also match its preimage.
     #[allow(clippy::unused_async)]
     pub async fn verify_temporal_consistency(
         states: &[State],
@@ -247,14 +251,12 @@ impl BilateralControlResistance {
         for win in states.windows(2) {
             let prev = &win[0];
             let next = &win[1];
-
-            if next.hash[0] as u64 != prev.hash[0] as u64 + 1 {
-                return Ok(false);
-            }
+            // §2.1 eq.1 — hash adjacency
             if next.prev_state_hash != prev.hash {
                 return Ok(false);
             }
-            if next.hash[0] as u64 <= prev.hash[0] as u64 {
+            // Self-hash integrity
+            if next.compute_hash()? != next.hash {
                 return Ok(false);
             }
         }
@@ -272,16 +274,16 @@ impl BilateralControlResistance {
     ) -> Result<Vec<Alert>, DsmError> {
         let mut alerts = Vec::new();
 
-        // Many consecutive states suggests automated/high-frequency behavior.
+        // Many states in a single batch suggests automated/high-frequency behavior.
+        // (Counterless model §4.3: no state_number to gate "consecutive" by; the
+        // hash-adjacency check below covers chain integrity. Bulk detection here
+        // is purely a count-based heuristic.)
         if states.len() > 10
-            && states
-                .windows(2)
-                .all(|w| w[1].hash[0] as u64 == w[0].hash[0] as u64 + 1)
+            && states.windows(2).all(|w| w[1].prev_state_hash == w[0].hash)
         {
             alerts.push(Alert {
                 alert_type: "RapidTransactions".to_string(),
-                description: "Unusually long run of consecutive state transitions detected"
-                    .to_string(),
+                description: "Unusually long run of state transitions detected".to_string(),
                 severity: AlertSeverity::Medium,
             });
         }
@@ -553,35 +555,35 @@ impl BilateralControlResistance {
 
     // -------------------- Temporal manipulation detection --------------------
 
+    /// Detect chain-integrity manipulation in a sequence of states.
+    ///
+    /// In the counterless model (§4.3) there is no state_number to check
+    /// monotonicity against. The legitimate manipulation signals are:
+    /// 1. **Duplicate hashes** — replay or fork attempt.
+    /// 2. **Broken hash adjacency** — `next.prev_state_hash != prev.hash`.
+    /// 3. **Hash-preimage mismatch** — a state's `.hash` doesn't match its
+    ///    own canonical preimage (forged or corrupted).
     fn detect_temporal_manipulation(states: &[State]) -> Result<bool, DsmError> {
         if states.len() < 2 {
             return Ok(false);
         }
 
-        // Non-monotonic state numbers
-        for win in states.windows(2) {
-            if win[1].hash[0] as u64 <= win[0].hash[0] as u64 {
+        // Duplicate state hashes anywhere in the sequence
+        let mut seen = std::collections::HashSet::with_capacity(states.len());
+        for s in states {
+            if !seen.insert(s.hash) {
                 return Ok(true);
             }
         }
 
-        // Highly regular intervals across a long sequence (automation signature).
-        if states.len() >= 8 {
-            let mut gaps: Vec<u64> = Vec::with_capacity(states.len() - 1);
-            for win in states.windows(2) {
-                gaps.push((win[1].hash[0] as u64).saturating_sub(win[0].hash[0] as u64));
-            }
-
-            let first = gaps[0];
-            if first != 0 && gaps.iter().all(|&g| g == first) {
+        // Adjacency + self-hash integrity
+        for win in states.windows(2) {
+            let prev = &win[0];
+            let next = &win[1];
+            if next.prev_state_hash != prev.hash {
                 return Ok(true);
             }
-        }
-
-        // Suspiciously large jumps.
-        for win in states.windows(2) {
-            let gap = (win[1].hash[0] as u64).saturating_sub(win[0].hash[0] as u64);
-            if gap > 100 {
+            if next.compute_hash()? != next.hash {
                 return Ok(true);
             }
         }
@@ -816,7 +818,6 @@ mod tests {
     // ── verify_temporal_consistency ──────────────────────────────────
 
     #[tokio::test]
-    #[ignore = "TODO: rewrite for counterless model (§4.3 refactor)"]
     async fn temporal_consistency_valid_chain() {
         let states = make_chained_states(0, 5);
         let storage = MockStorage::empty();
@@ -846,13 +847,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn temporal_consistency_non_sequential_fails() {
+    async fn temporal_consistency_forged_self_hash_fails() {
+        // make_chained_states builds a valid hash-adjacent sequence — that
+        // alone is now considered consistent (no state_number to check).
+        // Tamper with one state's self-hash to violate the integrity check.
         let mut states = make_chained_states(0, 3);
+        states[1].hash[0] ^= 0xAA; // forge — no longer matches preimage
+        // Re-stitch the chain so adjacency is preserved (we want to isolate
+        // the self-hash failure, not the adjacency check).
+        states[2].prev_state_hash = states[1].hash;
+        states[2].hash = states[2].compute_hash().unwrap();
         let storage = MockStorage::empty();
         let ok = BilateralControlResistance::verify_temporal_consistency(&states, &storage)
             .await
             .unwrap();
-        assert!(!ok);
+        assert!(!ok, "forged self-hash must fail consistency");
     }
 
     #[tokio::test]
@@ -875,58 +884,53 @@ mod tests {
     }
 
     #[test]
-    fn temporal_manipulation_non_monotonic() {
-        let mut s1 = make_state(5, [0u8; 32]);
-        s1.hash = s1.compute_hash().unwrap();
-        let mut s2 = make_state(3, [0u8; 32]);
+    fn temporal_manipulation_broken_adjacency_flagged() {
+        // Two states where the second doesn't reference the first.
+        let s1 = make_state(0, [0u8; 32]);
+        let mut s2 = make_state(1, [0xFF; 32]); // wrong prev
         s2.hash = s2.compute_hash().unwrap();
-        assert!(BilateralControlResistance::detect_temporal_manipulation(&[s1, s2]).unwrap());
-    }
-
-    #[test]
-    fn temporal_manipulation_equal_state_numbers() {
-        let mut s1 = make_state(5, [0u8; 32]);
-        s1.hash = s1.compute_hash().unwrap();
-        let mut s2 = make_state(5, [0u8; 32]);
-        s2.hash = s2.compute_hash().unwrap();
-        assert!(BilateralControlResistance::detect_temporal_manipulation(&[s1, s2]).unwrap());
-    }
-
-    #[test]
-    fn temporal_manipulation_regular_intervals_long_sequence() {
-        let mut states = Vec::new();
-        for i in 0..10 {
-            let mut s = make_state(i * 3, [0u8; 32]);
-            s.hash = s.compute_hash().unwrap();
-            states.push(s);
-        }
         assert!(
-            BilateralControlResistance::detect_temporal_manipulation(&states).unwrap(),
-            "8+ states with identical gaps is suspicious"
+            BilateralControlResistance::detect_temporal_manipulation(&[s1, s2]).unwrap(),
+            "broken hash adjacency must flag as manipulation"
         );
     }
 
     #[test]
-    fn temporal_manipulation_large_jump() {
-        let mut s1 = make_state(1, [0u8; 32]);
-        s1.hash = s1.compute_hash().unwrap();
-        let mut s2 = make_state(200, [0u8; 32]);
-        s2.hash = s2.compute_hash().unwrap();
-        assert!(BilateralControlResistance::detect_temporal_manipulation(&[s1, s2]).unwrap());
+    fn temporal_manipulation_duplicate_hashes_flagged() {
+        // Same state appearing twice — replay attempt.
+        let s1 = make_state(7, [0u8; 32]);
+        let s2 = s1.clone();
+        assert!(
+            BilateralControlResistance::detect_temporal_manipulation(&[s1, s2]).unwrap(),
+            "duplicate state hashes must flag as manipulation (replay)"
+        );
     }
 
     #[test]
-    #[ignore = "TODO: rewrite for counterless model (§4.3 refactor)"]
+    fn temporal_manipulation_forged_hash_flagged() {
+        // State whose self-hash doesn't match its preimage.
+        let mut s1 = make_state(0, [0u8; 32]);
+        let mut s2 = make_state(1, s1.hash);
+        s2.hash = s2.compute_hash().unwrap();
+        // Forge: tamper with hash without recomputing
+        s1.hash[0] ^= 0xAA;
+        s2.prev_state_hash = s1.hash;
+        s2.hash = s2.compute_hash().unwrap();
+        // Now corrupt s2.hash post-compute to forge
+        s2.hash[31] ^= 0xBB;
+        assert!(
+            BilateralControlResistance::detect_temporal_manipulation(&[s1, s2]).unwrap(),
+            "forged self-hash must flag as manipulation"
+        );
+    }
+
+    #[test]
     fn temporal_manipulation_valid_short_sequence() {
-        let mut states = Vec::new();
-        for i in 0..5 {
-            let mut s = make_state(i, [0u8; 32]);
-            s.hash = s.compute_hash().unwrap();
-            states.push(s);
-        }
+        // Build a valid hash-adjacent chain — should not flag manipulation.
+        let states = make_chained_states(0, 5);
         assert!(
             !BilateralControlResistance::detect_temporal_manipulation(&states).unwrap(),
-            "short consecutive sequence should not flag (below 8-state threshold for regularity)"
+            "valid hash-adjacent chain should not flag manipulation"
         );
     }
 
@@ -1007,7 +1011,6 @@ mod tests {
     // ── detect_suspicious_patterns (integration) ────────────────────
 
     #[tokio::test]
-    #[ignore = "TODO: rewrite for counterless model (§4.3 refactor)"]
     async fn suspicious_patterns_clean_short_sequence() {
         let states = make_chained_states(0, 3);
         let storage = MockStorage::empty();
@@ -1021,7 +1024,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "TODO: rewrite for counterless model (§4.3 refactor)"]
     async fn suspicious_patterns_rapid_transactions() {
         let states = make_chained_states(0, 12);
         let storage = MockStorage::empty();

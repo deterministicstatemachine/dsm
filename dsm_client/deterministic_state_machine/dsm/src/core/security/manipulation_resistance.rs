@@ -211,14 +211,12 @@ impl ManipulationResistance {
         Ok(true)
     }
 
-    /// Verify state transition follows valid rules
+    /// Verify state transition follows valid rules.
+    ///
+    /// Per §4.3 there is no state_number to check monotonicity against.
+    /// Adjacency is the canonical chain-integrity check (§2.1 eq. 1).
     fn verify_state_transition_rules(current: &State, next: &State) -> Result<bool, DsmError> {
-        // Verify state number increments
-        if next.hash[0] as u64 != current.hash[0] as u64 + 1 {
-            return Ok(false);
-        }
-
-        // Verify hash chain continuity
+        // Verify hash chain continuity (§2.1 eq. 1)
         if next.prev_state_hash != current.hash()? {
             return Ok(false);
         }
@@ -613,17 +611,19 @@ mod tests {
     // ── verify_state_transition_rules ───────────────────────────────
 
     #[test]
-    fn transition_rules_wrong_increment() {
+    fn transition_rules_broken_adjacency_fails() {
+        // Per §4.3 there's no state_number — the rule is hash adjacency.
+        // A `next` whose prev_state_hash doesn't match `current.hash` must fail.
         let mut current = make_state(5);
         current.hash = current.compute_hash().unwrap();
 
-        let mut next = make_state(7); // should be 6
-        next.prev_state_hash = current.hash;
+        let mut next = make_state(6);
+        next.prev_state_hash = [0xFF; 32]; // wrong prev — broken adjacency
         next.hash = next.compute_hash().unwrap();
 
         let result =
             ManipulationResistance::verify_state_transition_rules(&current, &next).unwrap();
-        assert!(!result);
+        assert!(!result, "broken hash adjacency must fail");
     }
 
     #[test]
@@ -641,8 +641,6 @@ mod tests {
     }
 
     #[test]
-    
-    #[ignore = "TODO: rewrite for counterless model (§4.3 refactor)"]
     fn transition_rules_balance_conservation() {
         let mut current = make_state(5);
         current
@@ -731,18 +729,22 @@ mod tests {
     // ── verify_signatures (state gap) ───────────────────────────────
 
     #[test]
-    
-    #[ignore = "TODO: rewrite for counterless model (§4.3 refactor)"]
-    fn verify_signatures_excessive_gap_fails() {
+    fn verify_signatures_invalid_entity_sig_fails() {
+        // In the counterless model, verify_signatures checks the actual
+        // cryptographic signatures on a transition, not state-number gaps.
+        // An entity_sig that doesn't verify against the device's public key
+        // must fail the check.
         let mut current = make_state(5);
         current.hash = current.compute_hash().unwrap();
 
-        let mut next = make_state(200);
+        let mut next = make_state(6);
         next.prev_state_hash = current.hash;
+        // Garbage signature that can't verify
+        next.entity_sig = Some(vec![0xAA; 64]);
         next.hash = next.compute_hash().unwrap();
 
         let result = ManipulationResistance::verify_signatures(&current, &next).unwrap();
-        assert!(!result, "gap of 195 > MAX_STATE_GAP=100 should fail");
+        assert!(!result, "garbage entity_sig must fail verification");
     }
 
     #[test]
