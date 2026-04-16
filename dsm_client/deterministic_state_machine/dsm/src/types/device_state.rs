@@ -313,6 +313,11 @@ impl DeviceState {
         self.balances.get(policy_commit).copied().unwrap_or(0)
     }
 
+    /// Snapshot of all device-level balances (read-only view).
+    pub fn balances_snapshot(&self) -> &BTreeMap<[u8; 32], u64> {
+        &self.balances
+    }
+
     /// Current chain tip for a relationship, if one exists. Returns
     /// `None` for first-ever transactions on an unseen relationship —
     /// the caller must supply a spec-canonical initial tip.

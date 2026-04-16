@@ -44,15 +44,19 @@ pub use utils::{constant_time_eq, verify_state_hash}; // Export utility function
 /// Type definition for precommitment generation function
 type PrecommitmentGenFn = fn(&State, &Operation, &Hash) -> Result<(Hash, Vec<Position>), DsmError>;
 
-/// Core state machine that handles transitions and verification
+/// Core state machine that handles transitions and verification.
 ///
-/// This state machine implementation uses the enhanced verification function
-/// `verify_transition_integrity` from the transition module which provides
-/// comprehensive state transition validation.
+/// Holds both the legacy `current_state: Option<State>` (for backward compat
+/// during migration) and the spec-canonical `device_state: Option<DeviceState>`
+/// which is the Per-Device SMT head (§2.2). New code should use
+/// `advance_relationship` which routes through `DeviceState::advance()`.
 #[derive(Clone, Debug)]
 pub struct StateMachine {
-    /// Current state
+    /// Legacy current state (will be removed once all callers migrate)
     current_state: Option<State>,
+    /// Canonical device state per §2.2: SMT root + device-level balances +
+    /// per-relationship chain tips. This IS the device head.
+    device_state: Option<crate::types::device_state::DeviceState>,
     /// Device ID for this state machine instance
     device_id: [u8; 32],
     /// Relationship manager for bilateral state isolation
@@ -99,6 +103,7 @@ impl StateMachine {
     ) -> Self {
         StateMachine {
             current_state: None,
+            device_state: None,
             device_id,
             relationship_manager: RelationshipManager::new(strategy),
             apply_transition_fn: apply_transition,
@@ -140,14 +145,111 @@ impl StateMachine {
         }
     }
 
-    /// Get the current state
+    /// Get the current state (legacy path — prefer `device_head()` for new code).
     pub fn current_state(&self) -> Option<&State> {
         self.current_state.as_ref()
     }
 
-    /// Set the current state
+    /// Get the canonical device state (§2.2 SMT head).
+    pub fn device_head(&self) -> Option<&crate::types::device_state::DeviceState> {
+        self.device_state.as_ref()
+    }
+
+    /// Set the current state (legacy path). Also initializes DeviceState if
+    /// not yet present — bootstraps the SMT from genesis.
     pub fn set_state(&mut self, state: State) {
+        // If DeviceState doesn't exist yet and this looks like genesis,
+        // bootstrap it from the State's device info.
+        if self.device_state.is_none() {
+            let ds = crate::types::device_state::DeviceState::new(
+                [0u8; 32], // genesis placeholder — proper genesis set in initialize_with_genesis
+                state.device_info.device_id,
+                state.device_info.public_key.clone(),
+                1024, // max relationships
+            );
+            self.device_state = Some(ds);
+        }
         self.current_state = Some(state);
+    }
+
+    /// Advance a specific relationship chain on the device.
+    ///
+    /// This is the spec-canonical transition path (§2.2, §4.2): names a
+    /// relationship, extends that chain by one state, replaces the SMT leaf,
+    /// updates device-level balances atomically, and returns the outcome.
+    ///
+    /// The caller must provide:
+    /// - `rel_key`: 32-byte relationship key `k_{A↔B}` per §2.2
+    /// - `counterparty_devid`: the other party's DevID
+    /// - `operation`: the op being performed
+    /// - `deltas`: balance mutations per §8 eq. 10
+    /// - `initial_chain_tip`: only for first-ever transactions on this relationship
+    pub fn advance_relationship(
+        &mut self,
+        rel_key: [u8; 32],
+        counterparty_devid: [u8; 32],
+        operation: Operation,
+        deltas: &[crate::types::device_state::BalanceDelta],
+        initial_chain_tip: Option<[u8; 32]>,
+    ) -> Result<crate::types::device_state::AdvanceOutcome, DsmError> {
+        let ds = self.device_state.as_ref().ok_or_else(|| {
+            DsmError::state_machine("DeviceState not initialized — call set_state with genesis first")
+        })?;
+
+        // Generate entropy from hash-adjacency inputs (§11 eq. 14)
+        let entropy = generate_transition_entropy(
+            self.current_state.as_ref().ok_or_else(|| {
+                DsmError::state_machine("No current state for entropy derivation")
+            })?,
+            &operation,
+        )?;
+
+        let outcome = ds.advance(
+            rel_key,
+            counterparty_devid,
+            operation,
+            entropy.to_vec(),
+            None, // encapsulated_entropy — caller can set if needed
+            deltas,
+            initial_chain_tip,
+            None, // dbrw_summary_hash
+        )?;
+
+        // Commit: install the new device state as the head
+        self.device_state = Some(outcome.new_device_state.clone());
+
+        // Also update the legacy current_state for backward compat.
+        // Build a legacy State from the chain state so old callers can
+        // read token_balances, device_info, etc.
+        if let Some(ref cs) = self.current_state {
+            let mut legacy = cs.clone();
+            legacy.prev_state_hash = cs.hash().unwrap_or(cs.hash);
+            legacy.entropy = outcome.new_chain_state.entropy.clone();
+            legacy.operation = outcome.new_chain_state.operation.clone();
+            legacy.hash = outcome.new_chain_state.compute_chain_tip();
+            // Sync token_balances from DeviceState (policy_commit keyed → string keyed for compat)
+            // This is lossy but keeps old callers working during migration.
+            legacy.token_balances.clear();
+            for (policy_commit, value) in outcome.new_device_state.balances_snapshot() {
+                // Encode policy_commit as decimal groups (no hex per project convention)
+                let prefix = u128::from_le_bytes({
+                    let mut a = [0u8; 16];
+                    a.copy_from_slice(&policy_commit[..16]);
+                    a
+                });
+                let key = format!("{prefix}");
+                legacy.token_balances.insert(
+                    key,
+                    crate::types::token_types::Balance::from_state(
+                        *value,
+                        outcome.new_chain_state.compute_chain_tip(),
+                    ),
+                );
+            }
+            self.current_state = Some(legacy);
+        }
+
+        Ok(outcome)
     }
 
     /// Initialize the state machine with a genesis state
