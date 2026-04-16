@@ -1059,6 +1059,31 @@ fn apply_token_balance_delta(
     current_state: &State,
     operation: &Operation,
 ) -> Result<(), DsmError> {
+    let decode_dlv_lock = |token_id: &Option<Vec<u8>>,
+                           locked_amount: &Option<Balance>,
+                           op_name: &str|
+     -> Result<Option<(String, Balance)>, DsmError> {
+        match (token_id.as_ref(), locked_amount.as_ref()) {
+            (None, None) => Ok(None),
+            (Some(_), None) | (None, Some(_)) => Err(DsmError::invalid_operation(format!(
+                "{op_name} requires both token_id and locked_amount when settling locked tokens"
+            ))),
+            (Some(token_id), Some(locked_amount)) => {
+                let token_id_str = std::str::from_utf8(token_id).map_err(|_| {
+                    DsmError::invalid_operation(format!(
+                        "{op_name} token_id must be valid UTF-8 bytes"
+                    ))
+                })?;
+                if token_id_str.is_empty() {
+                    return Err(DsmError::invalid_operation(format!(
+                        "{op_name} token_id must not be empty"
+                    )));
+                }
+                Ok(Some((token_id_str.to_string(), locked_amount.clone())))
+            }
+        }
+    };
+
     match operation {
         Operation::Transfer {
             token_id,
@@ -1069,9 +1094,9 @@ fn apply_token_balance_delta(
         } => {
             let token_id_str = String::from_utf8_lossy(token_id).to_string();
             // §8 Atomicity: all token ops MUST apply balance deltas in the
-            // same state transition. resolve_policy_commit handles both
-            // builtins (ERA/dBTC) and CPTA-anchored custom tokens.
-            let policy_commit = crate::core::token::resolve_policy_commit(&token_id_str);
+            // same state transition. `resolve_policy_commit` must now fail
+            // closed when no canonical CPTA anchor exists.
+            let policy_commit = crate::core::token::resolve_policy_commit(&token_id_str)?;
             let is_recipient = to_device_id.len() == 32
                 && to_device_id.as_slice() == current_state.device_info.device_id.as_slice();
 
@@ -1172,7 +1197,7 @@ fn apply_token_balance_delta(
             token_id, amount, ..
         } => {
             let token_id_str = String::from_utf8_lossy(token_id).to_string();
-            let policy_commit = crate::core::token::resolve_policy_commit(&token_id_str);
+            let policy_commit = crate::core::token::resolve_policy_commit(&token_id_str)?;
             let owner_key = crate::core::token::derive_canonical_balance_key(
                 &policy_commit,
                 &current_state.device_info.public_key,
@@ -1204,7 +1229,7 @@ fn apply_token_balance_delta(
             token_id, amount, ..
         } => {
             let token_id_str = String::from_utf8_lossy(token_id).to_string();
-            let policy_commit = crate::core::token::resolve_policy_commit(&token_id_str);
+            let policy_commit = crate::core::token::resolve_policy_commit(&token_id_str)?;
             let owner_key = crate::core::token::derive_canonical_balance_key(
                 &policy_commit,
                 &current_state.device_info.public_key,
@@ -1234,6 +1259,129 @@ fn apply_token_balance_delta(
                     current_state.state_number,
                 ),
             );
+        }
+        Operation::DlvCreate {
+            token_id,
+            locked_amount,
+            creator_public_key,
+            ..
+        } => {
+            if let Some((token_id_str, amount)) =
+                decode_dlv_lock(token_id, locked_amount, "DlvCreate")?
+            {
+                if amount.value() > 0 {
+                    let policy_commit = crate::core::token::resolve_policy_commit(&token_id_str)?;
+                    let creator_key = crate::core::token::derive_canonical_balance_key(
+                        &policy_commit,
+                        creator_public_key.as_slice(),
+                        &token_id_str,
+                    );
+                    let creator_balance = next_state
+                        .token_balances
+                        .get(&creator_key)
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            Balance::from_state(0, current_state.hash, current_state.state_number)
+                        });
+                    if creator_balance.value() < amount.value() {
+                        return Err(DsmError::insufficient_balance(
+                            token_id_str,
+                            creator_balance.value(),
+                            amount.value(),
+                        ));
+                    }
+                    next_state.token_balances.insert(
+                        creator_key,
+                        Balance::from_state(
+                            creator_balance.value() - amount.value(),
+                            current_state.hash,
+                            current_state.state_number,
+                        ),
+                    );
+                }
+            }
+        }
+        Operation::DlvInvalidate {
+            creator_public_key,
+            token_id,
+            locked_amount,
+            ..
+        } => {
+            if let Some((token_id_str, amount)) =
+                decode_dlv_lock(token_id, locked_amount, "DlvInvalidate")?
+            {
+                if amount.value() > 0 {
+                    let policy_commit = crate::core::token::resolve_policy_commit(&token_id_str)?;
+                    let creator_key = crate::core::token::derive_canonical_balance_key(
+                        &policy_commit,
+                        creator_public_key.as_slice(),
+                        &token_id_str,
+                    );
+                    let creator_balance = next_state
+                        .token_balances
+                        .get(&creator_key)
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            Balance::from_state(0, current_state.hash, current_state.state_number)
+                        });
+                    let restored_value = creator_balance
+                        .value()
+                        .checked_add(amount.value())
+                        .ok_or_else(|| {
+                            DsmError::invalid_operation(
+                                "Balance overflow on DLV invalidation restore",
+                            )
+                        })?;
+                    next_state.token_balances.insert(
+                        creator_key,
+                        Balance::from_state(
+                            restored_value,
+                            current_state.hash,
+                            current_state.state_number,
+                        ),
+                    );
+                }
+            }
+        }
+        Operation::DlvClaim {
+            claimant_public_key,
+            token_id,
+            locked_amount,
+            ..
+        } => {
+            if let Some((token_id_str, amount)) =
+                decode_dlv_lock(token_id, locked_amount, "DlvClaim")?
+            {
+                if amount.value() > 0 {
+                    let policy_commit = crate::core::token::resolve_policy_commit(&token_id_str)?;
+                    let claimant_key = crate::core::token::derive_canonical_balance_key(
+                        &policy_commit,
+                        claimant_public_key.as_slice(),
+                        &token_id_str,
+                    );
+                    let claimant_balance = next_state
+                        .token_balances
+                        .get(&claimant_key)
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            Balance::from_state(0, current_state.hash, current_state.state_number)
+                        });
+                    let released_value = claimant_balance
+                        .value()
+                        .checked_add(amount.value())
+                        .ok_or_else(|| {
+                            DsmError::invalid_operation("Balance overflow on DLV claim release")
+                        })?;
+                    next_state.token_balances.insert(
+                        claimant_key,
+                        Balance::from_state(
+                            released_value,
+                            current_state.hash,
+                            current_state.state_number,
+                        ),
+                    );
+                }
+            }
         }
         _ => {}
     }
@@ -1874,6 +2022,41 @@ mod tests {
             .get(&recipient_key)
             .unwrap_or_else(|| panic!("recipient balance key should exist after credit"));
         assert_eq!(bal.value(), 10, "receiver should be credited 10 ERA");
+    }
+
+    #[test]
+    fn test_apply_token_balance_delta_dlv_invalidate_returns_locked_tokens() {
+        let current_state = create_test_state(1);
+        let mut next_state = current_state.clone();
+        let era_pc = crate::core::token::builtin_policy_commit_for_token("ERA").expect("ERA");
+        let creator_key = crate::core::token::derive_canonical_balance_key(
+            &era_pc,
+            &current_state.device_info.public_key,
+            "ERA",
+        );
+
+        let op = Operation::DlvInvalidate {
+            vault_id: vec![0x10; 32],
+            reason: "timeout".into(),
+            creator_public_key: current_state.device_info.public_key.clone(),
+            token_id: Some(b"ERA".to_vec()),
+            locked_amount: Some(Balance::from_state(
+                15,
+                current_state.hash,
+                current_state.state_number,
+            )),
+            signature: vec![0x01; 8],
+            mode: TransactionMode::Unilateral,
+        };
+
+        apply_token_balance_delta(&mut next_state, &current_state, &op)
+            .expect("DLV invalidate balance delta should apply");
+
+        let bal = next_state
+            .token_balances
+            .get(&creator_key)
+            .unwrap_or_else(|| panic!("creator balance key should be credited"));
+        assert_eq!(bal.value(), 15);
     }
 
     #[test]
