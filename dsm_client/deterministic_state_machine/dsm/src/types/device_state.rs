@@ -331,6 +331,22 @@ impl DeviceState {
         self.tips.get(rel_key).and_then(|t| t.state.as_ref())
     }
 
+    /// Device ID as a 32-byte array. Convenience for callers migrating from
+    /// `State.device_info.device_id`.
+    pub fn device_id(&self) -> [u8; 32] {
+        self.devid
+    }
+
+    /// All relationship keys currently in the SMT.
+    pub fn relationship_keys(&self) -> Vec<[u8; 32]> {
+        self.tips.keys().copied().collect()
+    }
+
+    /// Number of active relationships in the SMT.
+    pub fn relationship_count(&self) -> usize {
+        self.tips.len()
+    }
+
     /// Attempt to build an advance by one transition on `rel_key`.
     ///
     /// Takes the current state by reference and returns an

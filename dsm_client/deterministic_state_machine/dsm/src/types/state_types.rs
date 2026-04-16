@@ -305,13 +305,13 @@ impl DeviceInfo {
     }
 }
 
-/// Represents the core state structure as defined in the whitepaper.
-/// Each state forms a node in the straight hash chain, containing all
-/// necessary data to cryptographically bind it to its predecessor.
+/// **DEPRECATED**: Legacy compatibility view. All instances are now derived
+/// from [`DeviceState`](crate::types::device_state::DeviceState).
 ///
-/// Per §4.3, no counter/height/timestamp participates in acceptance predicates.
-/// State identity comes from `prev_state_hash` (hash adjacency, §2.1 eq. 1) and
-/// fresh per-transition entropy (§11 eq. 14).
+/// Use `DeviceState` for the canonical device head, and
+/// `RelationshipChainState` for per-chain state. This struct exists only
+/// to support callers that haven't migrated yet. It will be deleted once
+/// all readers use the canonical types directly.
 #[derive(Clone, Debug, Default)]
 #[allow(dead_code)]
 pub struct State {
