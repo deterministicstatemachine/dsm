@@ -543,6 +543,21 @@ impl CoreSDK {
         self.state_machine.lock().device_head().cloned()
     }
 
+    /// Read device-level balance for a token by its 32-byte CPTA policy_commit.
+    /// This reads from DeviceState directly (no string-key projection).
+    pub fn get_device_balance(&self, policy_commit: &[u8; 32]) -> u64 {
+        self.state_machine
+            .lock()
+            .device_head()
+            .map(|ds| ds.balance(policy_commit))
+            .unwrap_or(0)
+    }
+
+    /// Read the device's SMT root (canonical head identity per §2.2).
+    pub fn device_smt_root(&self) -> Option<[u8; 32]> {
+        self.state_machine.lock().device_head().map(|ds| ds.root())
+    }
+
     pub fn register_token_manager(
         &self,
         _manager: Box<dyn TokenManagerTrait>,
