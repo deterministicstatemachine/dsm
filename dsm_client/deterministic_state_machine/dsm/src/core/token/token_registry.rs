@@ -363,7 +363,7 @@ mod tests {
             owner,
             data.to_vec(),
             vec![],
-            Balance::from_state(100, [0; 32], 1),
+            Balance::from_state(100, [0; 32]),
             [0xAA; 32],
         )
     }

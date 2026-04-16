@@ -50,7 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // 3. Demonstrate direct state-linked balance creation
-    let balance_direct = Balance::from_state(500, state_hash, 0);
+    let balance_direct = Balance::from_state(500, state_hash);
     println!(
         "✓ Created balance directly from state: {} (explicit state hash)",
         balance_direct.value()

@@ -230,7 +230,7 @@ async fn verify_frontend_event_guarantees() {
     // --- Execute Transfer ---
     let transfer_op = Operation::Transfer {
         to_device_id: bob_dev_id.to_vec(),
-        amount: Balance::from_state(100, [1u8; 32], 0),
+        amount: Balance::from_state(100, [1u8; 32]),
         token_id: b"ERA".to_vec(),
         mode: TransactionMode::Bilateral,
         nonce: vec![0u8; 8],

@@ -74,7 +74,7 @@ impl DLVManager {
 
         // Build the unsigned DlvCreate operation
         let locked_balance = locked_amount.map(|amt| {
-            Balance::from_state(amt, vault.reference_state_hash, vault.created_at_state)
+            Balance::from_state(amt, vault.reference_state_hash)
         });
 
         let operation = Operation::DlvCreate {

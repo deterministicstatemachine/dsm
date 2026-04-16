@@ -161,12 +161,7 @@ impl StateMachine {
     /// * `Err(DsmError)` - If initialization failed
     pub fn initialize_with_genesis(&mut self) -> Result<(), DsmError> {
         if let Some(genesis_state) = &self.current_state {
-            // Validate that this is actually a genesis state
-            if genesis_state.state_number != 0 {
-                return Err(DsmError::state_machine(
-                    "Current state is not a genesis state",
-                ));
-            }
+            // Genesis is identified by zero parent hash (§2.5).
 
             // Validate the genesis state structure
             if genesis_state.prev_state_hash != [0u8; 32] {
@@ -242,13 +237,7 @@ impl StateMachine {
             new_state.hash = computed_hash;
         }
 
-        // Validate new state before applying
-        if new_state.state_number != current_state.state_number + 1 {
-            return Err(DsmError::invalid_operation(
-                "New state number must be sequential",
-            ));
-        }
-
+        // Validate new state before applying (§2.1 hash adjacency).
         if new_state.prev_state_hash != current_state.hash()? {
             return Err(DsmError::invalid_operation(
                 "New state hash chain is broken",
@@ -256,8 +245,8 @@ impl StateMachine {
         }
 
         // Log the transition before updating state
-        let old_state_num = current_state.state_number;
-        let new_state_num = new_state.state_number;
+        let old_hash = current_state.hash;
+        let new_hash = new_state.hash;
 
         // Update the current state
         self.set_state(new_state.clone());
@@ -266,9 +255,9 @@ impl StateMachine {
         let _ = crate::utils::deterministic_time::tick_raw();
 
         tracing::info!(
-            "State transition executed: {} -> {}",
-            old_state_num,
-            new_state_num
+            "State transition executed: {:02x?} -> {:02x?}",
+            &old_hash[..4],
+            &new_hash[..4]
         );
 
         Ok(new_state)
@@ -323,21 +312,16 @@ impl StateMachine {
         )
     }
 
-    /// Verify a state using hash-chain validation
+    /// Verify a state using hash-chain validation (§2.1 adjacency only).
     pub fn verify_state(&self, state: &State) -> Result<bool, DsmError> {
         if let Some(current_state) = &self.current_state {
-            // First verify state number is sequential
-            if state.state_number != current_state.state_number + 1 {
-                return Ok(false);
-            }
-
-            // Then verify hash chain integrity
+            // Verify hash chain adjacency: the new state embeds the current state's hash.
             let prev_hash = current_state.hash()?;
             if state.prev_state_hash != prev_hash {
                 return Ok(false);
             }
 
-            // Finally verify transition integrity using the operation from the state
+            // Verify transition integrity using the operation from the state
             verify_transition_integrity(current_state, state, &state.operation)
         } else {
             Err(crate::types::error::DsmError::state_machine(
@@ -354,15 +338,12 @@ impl StateMachine {
         if let Some(current_state) = &self.current_state {
             let operation_bytes = operation.to_bytes();
 
-            let next_state_number = current_state.state_number + 1;
-            let next_state_bytes = next_state_number.to_le_bytes();
-
-            // Create entropy according to whitepaper equation (20) — must use the
-            // same domain tag as generate_transition_entropy ("DSM/state-entropy")
+            // Create entropy via hash-adjacency inputs (§11 eq. 14): parent entropy,
+            // operation, and parent hash. Per §4.3 no counter participates.
             let mut hasher = dsm_domain_hasher("DSM/state-entropy");
             hasher.update(&current_state.entropy);
             hasher.update(&operation_bytes);
-            hasher.update(&next_state_bytes);
+            hasher.update(&current_state.hash);
             let next_entropy = hasher.finalize();
 
             // Generate seed for random walk according to whitepaper equation (21)
@@ -471,24 +452,21 @@ impl Default for StateMachine {
     }
 }
 
-/// Generate deterministic entropy for a transition
+/// Generate deterministic entropy for a transition.
 ///
-/// This function implements the entropy evolution function from the whitepaper,
-/// ensuring deterministic derivation of future state entropy from current state and operation.
+/// Per §11 eq. 14, entropy is derived from adjacency inputs: the parent entropy,
+/// the operation, and the parent state hash. Per §4.3 no counter participates.
 pub fn generate_transition_entropy(
     current_state: &State,
     operation: &Operation,
 ) -> Result<[u8; 32], DsmError> {
-    // Canonical operation bytes (no Serde)
     let op_data = operation.to_bytes();
 
-    let next_state_number = current_state.state_number + 1;
-
-    // Generate entropy according to en+1 = H(en || opn+1 || (n+1))
+    // Generate entropy: e_{n+1} = H("DSM/state-entropy" || e_n || op || H(S_n))
     let mut hasher = dsm_domain_hasher("DSM/state-entropy");
     hasher.update(&current_state.entropy);
     hasher.update(&op_data);
-    hasher.update(&next_state_number.to_le_bytes());
+    hasher.update(&current_state.hash);
 
     Ok(*hasher.finalize().as_bytes())
 }
@@ -516,19 +494,15 @@ pub fn verify_transition_integrity(
     verify_standard_transition(curr_state, next_operation)
 }
 
-/// Verify basic transition properties that apply to all state types
+/// Verify basic transition properties that apply to all state types.
+/// Per §4.3 no counter is checked — only hash adjacency and entropy evolution.
 fn verify_basic_transition(state1: &State, state2: &State) -> Result<bool, DsmError> {
-    // Verify state number increment
-    if state2.state_number != state1.state_number + 1 {
-        return Ok(false);
-    }
-
-    // Verify hash chain continuity
+    // Verify hash chain continuity (§2.1 eq. 1)
     if state2.prev_state_hash != state1.hash()? {
         return Ok(false);
     }
 
-    // Verify entropy evolution
+    // Verify entropy evolution (§11 eq. 14)
     if !verify_entropy_evolution(state1, state2)? {
         return Ok(false);
     }
@@ -556,14 +530,15 @@ fn verify_entropy_evolution(state1: &State, state2: &State) -> Result<bool, DsmE
         return verify_relationship_entropy(state1, state2, &state2.entropy);
     }
 
-    // For standard states, verify standard entropy evolution
-    // Must use the same domain tag as generate_transition_entropy ("DSM/state-entropy")
+    // For standard states, verify standard entropy evolution.
+    // Per §11 eq. 14 and generate_transition_entropy, entropy is derived from
+    // (prev_entropy, op, parent_hash) — hash adjacency inputs, no counter.
     let op_bytes = state2.operation.to_bytes();
 
     let mut hasher = crate::crypto::blake3::dsm_domain_hasher("DSM/state-entropy");
     hasher.update(&state1.entropy);
     hasher.update(&op_bytes);
-    hasher.update(&state2.state_number.to_le_bytes());
+    hasher.update(&state1.hash);
     let expected_entropy = hasher.finalize().as_bytes().to_vec();
 
     Ok(crate::core::state_machine::utils::constant_time_eq(
@@ -604,19 +579,21 @@ fn verify_state_chain(states: &[State]) -> Result<bool, DsmError> {
         let prev_state = &states[i - 1];
         let curr_state = &states[i];
 
-        // First verify hash chain continuity
+        // First verify hash chain continuity (§2.1 adjacency)
         if curr_state.prev_state_hash != prev_state.hash()? {
             return Err(DsmError::invalid_operation(format!(
-                "Hash chain broken between states {} and {}",
-                prev_state.state_number, curr_state.state_number
+                "Hash chain broken between states {:02x?} and {:02x?}",
+                &prev_state.hash[..4],
+                &curr_state.hash[..4]
             )));
         }
 
         // Then verify the transition integrity using the operation
         if !verify_transition_integrity(prev_state, curr_state, &curr_state.operation)? {
             return Err(DsmError::invalid_operation(format!(
-                "Invalid state transition between states {} and {}",
-                prev_state.state_number, curr_state.state_number
+                "Invalid state transition between states {:02x?} and {:02x?}",
+                &prev_state.hash[..4],
+                &curr_state.hash[..4]
             )));
         }
     }
@@ -668,7 +645,7 @@ mod state_machine_tests {
         );
         state
             .token_balances
-            .insert(era_key, Balance::from_state(1000, state.hash, 0));
+            .insert(era_key, Balance::from_state(1000, state.hash));
 
         (state, pk, sk)
     }
@@ -682,7 +659,7 @@ mod state_machine_tests {
         let mut op = Operation::Transfer {
             token_id: b"ERA".to_vec(),
             to_device_id: vec![9u8; 32],
-            amount: Balance::from_state(10, current_state.hash, 0),
+            amount: Balance::from_state(10, current_state.hash),
             mode: TransactionMode::Unilateral,
             nonce,
             verification: VerificationType::Standard,
@@ -720,14 +697,13 @@ mod state_machine_tests {
                 &format!("Test transfer {i}"),
             );
 
-            // Generate entropy using the same domain tag as generate_transition_entropy
+            // Generate entropy via hash adjacency (§11 eq. 14). No counter.
             let op_bytes = op.to_bytes();
-            let next_state_number = current_state.state_number + 1;
             let new_entropy = {
                 let mut hasher = crate::crypto::blake3::dsm_domain_hasher("DSM/state-entropy");
                 hasher.update(&current_state.entropy);
                 hasher.update(&op_bytes);
-                hasher.update(&next_state_number.to_le_bytes());
+                hasher.update(&current_state.hash);
                 *hasher.finalize().as_bytes()
             };
 
@@ -778,7 +754,7 @@ mod state_machine_tests {
         state_machine.set_state(genesis_state);
 
         let next_state = state_machine.execute_transition(op)?;
-        assert_eq!(next_state.state_number, 1);
+        assert_ne!(next_state.hash, [0u8; 32]);
 
         Ok(())
     }
@@ -803,30 +779,15 @@ mod state_machine_tests {
         );
 
         let new_state = machine.execute_transition(op)?;
-        // Verify the new state has been created correctly
-        assert_eq!(new_state.state_number, 1);
-        assert!(
-            machine
-                .current_state()
-                .ok_or_else(|| DsmError::internal(
-                    "No current state".to_string(),
-                    None::<std::convert::Infallible>
-                ))?
-                .state_number
-                == 1
-        );
-
-        // Verify the current state number
+        // Verify the new state references the previous state (§2.1 adjacency)
+        assert_eq!(new_state.prev_state_hash, initial_state_clone.hash()?);
         assert_eq!(
             machine
                 .current_state()
                 .ok_or_else(|| DsmError::state_machine("No current state"))?
-                .state_number,
-            1
+                .hash,
+            new_state.hash
         );
-
-        // Verify it references the previous state
-        assert_eq!(new_state.prev_state_hash, initial_state_clone.hash()?);
 
         Ok(())
     }
@@ -882,7 +843,7 @@ mod state_machine_tests {
             let mut hasher = crate::crypto::blake3::dsm_domain_hasher("DSM/state-entropy");
             hasher.update(&genesis.entropy);
             hasher.update(&op1_bytes);
-            hasher.update(&(genesis.state_number + 1).to_le_bytes());
+            hasher.update(&genesis.hash);
             *hasher.finalize().as_bytes()
         };
 
@@ -897,7 +858,7 @@ mod state_machine_tests {
             let mut hasher = crate::crypto::blake3::dsm_domain_hasher("DSM/state-entropy");
             hasher.update(&state1.entropy);
             hasher.update(&op2_bytes);
-            hasher.update(&(state1.state_number + 1).to_le_bytes());
+            hasher.update(&state1.hash);
             *hasher.finalize().as_bytes()
         };
 
@@ -906,7 +867,6 @@ mod state_machine_tests {
 
         // Create a test next state for verification
         let mut next_state = state2.clone();
-        next_state.state_number += 1;
         next_state.prev_state_hash = state2.hash()?;
 
         // Verify state2 from state1 using our refactored verification

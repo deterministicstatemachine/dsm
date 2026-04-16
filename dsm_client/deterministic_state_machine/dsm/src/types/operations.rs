@@ -1122,11 +1122,7 @@ impl Operation {
                 a.copy_from_slice(take(&mut cur, 8)?);
                 u64::from_le_bytes(a)
             };
-            let last_updated = {
-                let mut a = [0u8; 8];
-                a.copy_from_slice(take(&mut cur, 8)?);
-                u64::from_le_bytes(a)
-            };
+            // Per §4.3 no counter is part of canonical Balance encoding.
             let state_hash = if !cur.is_empty() {
                 if cur.len() != 32 {
                     return Err(DsmError::SerializationError(
@@ -1139,7 +1135,7 @@ impl Operation {
             } else {
                 None
             };
-            Ok(Balance::from_parts(value, locked, last_updated, state_hash))
+            Ok(Balance::from_parts(value, locked, state_hash))
         }
         #[allow(dead_code)]
         fn dec_option_bytes(inp: &mut &[u8]) -> Result<Option<Vec<u8>>, DsmError> {

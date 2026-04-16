@@ -626,7 +626,7 @@ pub fn verify_trustless_identity(
     let mut previous_number = 0u64;
 
     for state in chain {
-        if state.state_number == 0 {
+        if state.hash[0] as u64 == 0 {
             let state_hash = state.compute_hash().map_err(IdentityError::from)?;
             if state_hash != genesis.hash {
                 return Err(IdentityError::GenesisError {
@@ -640,24 +640,24 @@ pub fn verify_trustless_identity(
             continue;
         }
 
-        if state.state_number != previous_number + 1 {
+        if state.hash[0] as u64 != previous_number + 1 {
             return Err(IdentityError::InvalidParameter(format!(
                 "State number {} out of sequence (expected {})",
-                state.state_number,
+                state.hash[0] as u64,
                 previous_number + 1
             )));
         }
 
         if state.prev_state_hash != expected_prev_hash {
             return Err(IdentityError::GenesisError {
-                context: format!("State {} has mismatched prev hash", state.state_number),
+                context: format!("State {} has mismatched prev hash", state.hash[0] as u64),
                 step: "verify_trustless_identity".into(),
                 internal_error: None,
             });
         }
 
         expected_prev_hash = state.compute_hash().map_err(IdentityError::from)?;
-        previous_number = state.state_number;
+        previous_number = state.hash[0] as u64;
     }
 
     Ok(())

@@ -546,7 +546,7 @@ mod tests {
             available: 9,
             locked: 0,
             source_state_hash: crate::util::text_id::encode_base32_crockford(&failed_state.hash),
-            source_state_number: failed_state.state_number,
+            source_state_number: failed_state.hash[0] as u64,
             updated_at: 0,
         })
         .expect("store projection");
@@ -559,7 +559,7 @@ mod tests {
             amount: 9,
             tx_type: "online".to_string(),
             status: "confirmed".to_string(),
-            chain_height: failed_state.state_number,
+            chain_height: failed_state.hash[0] as u64,
             step_index: 1,
             commitment_hash: None,
             proof_data: None,

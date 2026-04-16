@@ -336,49 +336,10 @@ impl Operation {
 /// The essence of the sparse indexing scheme is to allow efficient O(log n) state lookups
 /// while maintaining cryptographic integrity of the hash chain. By including references to
 /// states at power-of-2 distances, we can traverse a state chain of length n in O(log n) time.
-pub fn calculate_sparse_indices(state_number: u64) -> Result<Vec<u64>, DsmError> {
-    // Implementation for state 0 (genesis) should return empty set
-    if state_number == 0 {
-        return Ok(Vec::new());
-    }
-
-    // Start with basic algorithm from whitepaper Section 3.2
-    let mut indices = Vec::new();
-    let mut power = 0;
-
-    // For each bit position in the state number, calculate index
-    while (1 << power) <= state_number {
-        // If the bit at position 'power' is set, calculate the index
-        if (state_number & (1 << power)) != 0 {
-            let idx = state_number - (1 << power);
-            indices.push(idx);
-        }
-        power += 1;
-    }
-
-    // CRITICAL: Ensure essential references are included
-    if !indices.contains(&0) {
-        indices.push(0);
-    }
-    if state_number > 1 && !indices.contains(&(state_number - 1)) {
-        indices.push(state_number - 1);
-    }
-
-    // Ensure indices are sorted for efficient binary search
-    indices.sort();
-
-    // Validate critical references
-    debug_assert!(
-        indices.contains(&0),
-        "Genesis (0) must be included in sparse index"
-    );
-    debug_assert!(
-        state_number <= 1 || indices.contains(&(state_number - 1)),
-        "Direct predecessor must be included in sparse index"
-    );
-
-    Ok(indices)
-}
+/// Sparse index computation was a counter-based navigation helper (§2.2 "an
+/// optional sparse index... is an implementation optimization that does not
+/// affect acceptance rules"). Per §4.3 no counter participates in acceptance
+/// predicates. Call sites now use `SparseIndex::default()`.
 
 /// Generate position sequence for state transition
 pub fn generate_position_sequence(
@@ -509,18 +470,17 @@ pub fn create_transition(
     Ok(transition)
 }
 
-/// Verify the integrity of a state transition by checking hash chain and entropy evolution
+/// Verify the integrity of a state transition by checking hash chain and entropy evolution.
+///
+/// Per §4.3, acceptance is hash-adjacency only — no counter comparison. Ordering comes
+/// from `prev_state_hash` embedding the predecessor's digest (§2.1 eq. 1).
 pub fn verify_transition_integrity(
     previous_state: &State,
     current_state: &State,
     operation: &Operation,
 ) -> Result<bool, DsmError> {
-    // Validate state number increment (monotonicity property)
-    if current_state.state_number != previous_state.state_number + 1 {
-        return Ok(false);
-    }
-
-    // Validate hash chain continuity (immutability property)
+    // Validate hash chain continuity (immutability property).
+    // This is the §2.1 adjacency check: current_state embeds previous_state.hash().
     let previous_hash = previous_state.hash()?;
     if current_state.prev_state_hash != previous_hash {
         return Ok(false);
@@ -532,23 +492,17 @@ pub fn verify_transition_integrity(
         return Ok(false);
     }
 
-    // Verify sparse index contains required entries
-    let indices = &current_state.sparse_index.indices;
+    // Sparse index is advisory only per §2.2; no structural check.
 
-    if current_state.state_number > 0 && !indices.contains(&0) {
-        return Ok(false);
-    }
-    if current_state.state_number > 1 && !indices.contains(&(previous_state.state_number)) {
-        return Ok(false);
-    }
-
-    // Verify entropy evolution — must use the same domain tag as generate_transition_entropy()
+    // Verify entropy evolution — must use the same domain tag as generate_transition_entropy().
+    // Per §11 eq. 14, entropy is derived from adjacency inputs (parent hash + op),
+    // not from a counter.
     let serialized_op = operation.to_bytes();
     {
         let mut hasher = dsm_domain_hasher("DSM/state-entropy");
         hasher.update(&previous_state.entropy);
         hasher.update(&serialized_op);
-        hasher.update(&current_state.state_number.to_le_bytes());
+        hasher.update(&current_state.prev_state_hash);
         let expected_entropy = hasher.finalize().as_bytes().to_vec();
 
         if current_state.entropy != expected_entropy {
@@ -765,21 +719,19 @@ pub fn apply_transition(
     }
 }
 
-/// Verify bilateral transition relationship consistency
+/// Verify bilateral transition relationship consistency.
+///
+/// Per §4.3, ordering is by hash adjacency — no counter compared. The
+/// per-relationship chain tip is verified separately via SMT inclusion proof
+/// in the stitched receipt (§4.2).
 pub fn verify_bilateral_transition(
     current_state: &State,
     next_state: &State,
 ) -> Result<bool, DsmError> {
-    // For bilateral operations, verify relationship state consistency
     if let Some(current_rel) = &current_state.relationship_context {
         if let Some(next_rel) = &next_state.relationship_context {
             // Verify counterparty IDs match
             if current_rel.counterparty_id != next_rel.counterparty_id {
-                return Ok(false);
-            }
-
-            // Verify state numbers are consistent (should advance)
-            if next_rel.counterparty_state_number <= current_rel.counterparty_state_number {
                 return Ok(false);
             }
         } else {
@@ -1017,21 +969,19 @@ pub fn create_next_state(
     let operation_for_balance = operation.clone();
 
     let mut next_state = current_state.clone();
-    next_state.state_number += 1;
     next_state.operation = operation;
 
     // Set entropy directly from provided entropy
     next_state.entropy = new_entropy.to_vec();
 
-    // Update state ID to canonical format
-    next_state.id = format!("state_{}", next_state.state_number);
+    // State identity is by hash adjacency (§2.1 eq. 1). No counter-derived id.
+    next_state.id = String::new();
 
-    // Update the previous state hash
+    // Update the previous state hash — this is the §2.1 parent embedding.
     next_state.prev_state_hash = current_state.hash()?;
 
-    // Calculate and update sparse index
-    let sparse_indices = calculate_sparse_indices(next_state.state_number)?;
-    next_state.sparse_index = crate::types::state_types::SparseIndex::new(sparse_indices);
+    // Sparse index is advisory only per §2.2 and must not affect acceptance.
+    next_state.sparse_index = crate::types::state_types::SparseIndex::default();
 
     // Apply token balance delta for Transfer/Mint/Burn operations on device-canonical
     // transitions only. Bilateral relationship-chain transitions skip this — the bilateral
@@ -1085,7 +1035,7 @@ fn apply_token_balance_delta(
                 .get(&sender_key)
                 .cloned()
                 .unwrap_or_else(|| {
-                    Balance::from_state(0, current_state.hash, current_state.state_number)
+                    Balance::from_state(0, current_state.hash)
                 });
 
             if is_recipient {
@@ -1103,7 +1053,7 @@ fn apply_token_balance_delta(
                     .get(&local_credit_key)
                     .cloned()
                     .unwrap_or_else(|| {
-                        Balance::from_state(0, current_state.hash, current_state.state_number)
+                        Balance::from_state(0, current_state.hash)
                     });
                 let new_recipient_value = local_balance
                     .value()
@@ -1113,11 +1063,7 @@ fn apply_token_balance_delta(
                     })?;
                 next_state.token_balances.insert(
                     local_credit_key,
-                    Balance::from_state(
-                        new_recipient_value,
-                        current_state.hash,
-                        current_state.state_number,
-                    ),
+                    Balance::from_state(new_recipient_value, current_state.hash),
                 );
             } else {
                 if sender_balance.value() < amount.value() {
@@ -1128,11 +1074,7 @@ fn apply_token_balance_delta(
                     ));
                 }
 
-                let new_sender_balance = Balance::from_state(
-                    sender_balance.value() - amount.value(),
-                    current_state.hash,
-                    current_state.state_number,
-                );
+                let new_sender_balance = Balance::from_state(sender_balance.value() - amount.value(), current_state.hash);
 
                 next_state
                     .token_balances
@@ -1149,7 +1091,7 @@ fn apply_token_balance_delta(
                         .get(&recipient_key)
                         .cloned()
                         .unwrap_or_else(|| {
-                            Balance::from_state(0, current_state.hash, current_state.state_number)
+                            Balance::from_state(0, current_state.hash)
                         });
                     let new_recipient_value = recipient_balance
                         .value()
@@ -1157,11 +1099,7 @@ fn apply_token_balance_delta(
                         .ok_or_else(|| {
                             DsmError::invalid_operation("Balance overflow on transfer credit")
                         })?;
-                    let new_recipient_balance = Balance::from_state(
-                        new_recipient_value,
-                        current_state.hash,
-                        current_state.state_number,
-                    );
+                    let new_recipient_balance = Balance::from_state(new_recipient_value, current_state.hash);
                     next_state
                         .token_balances
                         .insert(recipient_key, new_recipient_balance);
@@ -1184,7 +1122,7 @@ fn apply_token_balance_delta(
                 .get(&owner_key)
                 .cloned()
                 .unwrap_or_else(|| {
-                    Balance::from_state(0, current_state.hash, current_state.state_number)
+                    Balance::from_state(0, current_state.hash)
                 });
             let new_mint_value = current_balance
                 .value()
@@ -1193,11 +1131,7 @@ fn apply_token_balance_delta(
 
             next_state.token_balances.insert(
                 owner_key,
-                Balance::from_state(
-                    new_mint_value,
-                    current_state.hash,
-                    current_state.state_number,
-                ),
+                Balance::from_state(new_mint_value, current_state.hash),
             );
         }
         Operation::Burn {
@@ -1216,7 +1150,7 @@ fn apply_token_balance_delta(
                 .get(&owner_key)
                 .cloned()
                 .unwrap_or_else(|| {
-                    Balance::from_state(0, current_state.hash, current_state.state_number)
+                    Balance::from_state(0, current_state.hash)
                 });
             if owner_balance.value() < amount.value() {
                 return Err(DsmError::insufficient_balance(
@@ -1228,11 +1162,7 @@ fn apply_token_balance_delta(
 
             next_state.token_balances.insert(
                 owner_key,
-                Balance::from_state(
-                    owner_balance.value() - amount.value(),
-                    current_state.hash,
-                    current_state.state_number,
-                ),
+                Balance::from_state(owner_balance.value() - amount.value(), current_state.hash),
             );
         }
         _ => {}
@@ -1270,7 +1200,10 @@ mod tests {
     use crate::crypto::sphincs::{generate_sphincs_keypair, sphincs_sign};
     use std::collections::HashMap;
 
-    fn create_test_state(state_number: u64) -> State {
+    /// Create a test state. The `seed` parameter just seeds the test state's
+    /// hash and content so different test states are distinguishable; it is
+    /// NOT a counter and plays no role in acceptance predicates.
+    fn create_test_state(seed: u64) -> State {
         use crate::types::state_types::DeviceInfo;
 
         let device_info = DeviceInfo {
@@ -1281,17 +1214,17 @@ mod tests {
 
         let mut entropy = [0u8; 32];
         entropy[0..4].copy_from_slice(&[1, 2, 3, 4]);
+        entropy[8..16].copy_from_slice(&seed.to_le_bytes());
         let mut state = State::new_genesis(entropy, device_info);
-        state.state_number = state_number;
-        state.id = format!("state_{}", state_number);
+        state.id = format!("test-state-{seed}");
 
-        if state_number > 0 {
+        if seed > 0 {
             // For non-genesis states, set a proper previous state hash (32 bytes)
             state.prev_state_hash = [1; 32];
         }
 
         // Generate a proper 32-byte hash using blake3
-        let state_data = format!("test_state_{}", state_number);
+        let state_data = format!("test_state_{seed}");
         state.hash = *blake3::hash(state_data.as_bytes()).as_bytes();
 
         state
@@ -1300,13 +1233,13 @@ mod tests {
     /// Canonical balance key for a non-ERA token in test states.
     fn test_balance_key(state: &State, token_id: &[u8]) -> String {
         let token_id_str = String::from_utf8_lossy(token_id);
-        format!("test:{}|{token_id_str}", state.state_number)
+        format!("test:{}|{token_id_str}", state.id)
     }
 
-    fn create_test_state_with_keypair(state_number: u64) -> (State, Vec<u8>, Vec<u8>) {
+    fn create_test_state_with_keypair(seed: u64) -> (State, Vec<u8>, Vec<u8>) {
         let (pk, sk) =
             generate_sphincs_keypair().unwrap_or_else(|e| panic!("keypair generation failed: {e}"));
-        let mut state = create_test_state(state_number);
+        let mut state = create_test_state(seed);
         state.device_info.public_key = pk.clone();
         (state, pk, sk)
     }
@@ -1320,7 +1253,7 @@ mod tests {
         amount: u64,
     ) -> Operation {
         let mut op = Operation::Transfer {
-            amount: Balance::from_state(amount, state_hash, 0),
+            amount: Balance::from_state(amount, state_hash),
             token_id: token_id.as_bytes().to_vec(),
             to_device_id: b"recipient".to_vec(),
             nonce,
@@ -1677,20 +1610,6 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_transition_integrity_invalid_state_number() {
-        let (prev_state, _pk, sk) = create_test_state_with_keypair(1);
-        let mut current_state = create_test_state(3); // Invalid jump
-        current_state.prev_state_hash = prev_state.hash;
-        let operation =
-            signed_transfer_op(&sk, prev_state.hash, vec![37, 38, 39], "signed transfer");
-
-        let result = verify_transition_integrity(&prev_state, &current_state, &operation);
-        assert!(result.is_ok());
-        assert!(!result.unwrap_or_else(|e| panic!("verification should return Ok(false): {e}")));
-        // Should be false
-    }
-
-    #[test]
     fn test_verify_transition_integrity_invalid_hash_chain() {
         let (prev_state, _pk, sk) = create_test_state_with_keypair(1);
         let mut current_state = create_test_state(2);
@@ -1777,7 +1696,7 @@ mod tests {
         });
 
         let transfer_op = Operation::Transfer {
-            amount: Balance::from_state(50, prev_state.hash, 0),
+            amount: Balance::from_state(50, prev_state.hash),
             token_id: b"token1".to_vec(),
             to_device_id: TEST_DEVICE_ID.to_vec(),
             nonce: vec![1, 2, 3],
@@ -1808,7 +1727,7 @@ mod tests {
         );
         current_state
             .token_balances
-            .insert(sender_key, Balance::from_state(1000, current_state.hash, 5));
+            .insert(sender_key, Balance::from_state(1000, current_state.hash));
 
         let operation =
             signed_transfer_op(&sk, current_state.hash, vec![49, 50, 51], "signed transfer");
@@ -1824,10 +1743,8 @@ mod tests {
 
         assert!(result.is_ok());
         let next_state = result.unwrap_or_else(|e| panic!("next state should be ok: {e}"));
-        assert_eq!(next_state.state_number, 6);
         assert_eq!(next_state.operation, operation);
         assert_eq!(next_state.entropy, entropy);
-        assert_eq!(next_state.id, "state_6");
     }
 
     #[test]
@@ -1846,7 +1763,7 @@ mod tests {
         );
 
         let operation = Operation::Transfer {
-            amount: Balance::from_state(10, current_state.hash, 0),
+            amount: Balance::from_state(10, current_state.hash),
             token_id: b"ERA".to_vec(),
             to_device_id: TEST_DEVICE_ID.to_vec(),
             nonce: vec![1, 2, 3],
@@ -1894,11 +1811,11 @@ mod tests {
         );
         current_state.token_balances.insert(
             sender_key.clone(),
-            Balance::from_state(100, current_state.hash, 1),
+            Balance::from_state(100, current_state.hash),
         );
 
         let operation = Operation::Transfer {
-            amount: Balance::from_state(10, current_state.hash, 1),
+            amount: Balance::from_state(10, current_state.hash),
             token_id: b"ERA".to_vec(),
             to_device_id: recipient_device_id.to_vec(),
             nonce: vec![1, 2, 3],
@@ -1910,7 +1827,7 @@ mod tests {
             to: b"recipient".to_vec(),
             signature: {
                 let unsigned = Operation::Transfer {
-                    amount: Balance::from_state(10, current_state.hash, 1),
+                    amount: Balance::from_state(10, current_state.hash),
                     token_id: b"ERA".to_vec(),
                     to_device_id: recipient_device_id.to_vec(),
                     nonce: vec![1, 2, 3],
@@ -1970,78 +1887,10 @@ mod tests {
         ));
     }
 
-    // ===== New Edge Case Tests =====
-
-    #[test]
-    fn test_calculate_sparse_indices_large_state_number() {
-        // Test with a large state number to ensure power-of-2 algorithm scales
-        let result = calculate_sparse_indices(1024);
-        assert!(result.is_ok());
-        let indices = result.unwrap_or_else(|e| panic!("sparse indices should be ok: {e}"));
-
-        // Must contain genesis and direct predecessor
-        assert!(indices.contains(&0), "Must contain genesis");
-        assert!(indices.contains(&1023), "Must contain direct predecessor");
-
-        // 1024 in binary is 10000000000, so only one bit is set
-        // The algorithm will compute 1024 - 1024 = 0
-        // So we should have [0, 1023] after the explicit additions
-        assert_eq!(
-            indices.len(),
-            2,
-            "1024 should have exactly 2 indices: 0 and 1023"
-        );
-
-        // Verify sorted order
-        for i in 1..indices.len() {
-            assert!(indices[i - 1] < indices[i], "Indices must be sorted");
-        }
-    }
-
-    #[test]
-    fn test_calculate_sparse_indices_power_of_two_states() {
-        // State 16 (binary: 10000) should have specific sparse references
-        let result = calculate_sparse_indices(16);
-        assert!(result.is_ok());
-        let indices = result.unwrap_or_else(|e| panic!("sparse indices should be ok: {e}"));
-
-        assert!(indices.contains(&0)); // genesis
-        assert!(indices.contains(&15)); // direct predecessor
-    }
-
-    #[test]
-    fn test_verify_transition_integrity_missing_genesis_reference() {
-        let (prev_state, _pk, sk) = create_test_state_with_keypair(1);
-        let mut current_state = create_test_state(6);
-        current_state.prev_state_hash = prev_state.hash;
-        let operation =
-            signed_transfer_op(&sk, prev_state.hash, vec![52, 53, 54], "signed transfer");
-        // Manually set sparse indices without genesis
-        current_state.sparse_index = crate::types::state_types::SparseIndex::new(vec![5]);
-        let result = verify_transition_integrity(&prev_state, &current_state, &operation);
-
-        assert!(result.is_ok());
-        assert!(!result.unwrap_or_else(|e| panic!("should return false for missing genesis: {e}")));
-    }
-
-    #[test]
-    fn test_verify_transition_integrity_missing_predecessor() {
-        let (prev_state, _pk, sk) = create_test_state_with_keypair(5);
-        let mut current_state = create_test_state(6);
-        current_state.prev_state_hash = prev_state.hash;
-
-        // Manually set sparse indices with genesis but without direct predecessor
-        current_state.sparse_index = crate::types::state_types::SparseIndex::new(vec![0, 2, 4]);
-
-        let operation =
-            signed_transfer_op(&sk, prev_state.hash, vec![55, 56, 57], "signed transfer");
-        let result = verify_transition_integrity(&prev_state, &current_state, &operation);
-
-        assert!(result.is_ok());
-        assert!(
-            !result.unwrap_or_else(|e| panic!("should return false for missing predecessor: {e}"))
-        );
-    }
+    // Counter-based sparse-index tests and "missing genesis/predecessor"
+    // acceptance tests have been removed: sparse indices are advisory-only per
+    // §2.2, and the invalidated-counter predicate in verify_transition_integrity
+    // was removed per §4.3 (no counters in acceptance predicates).
 
     #[test]
     fn test_verify_transition_integrity_invalid_computed_hash() {
@@ -2070,9 +1919,7 @@ mod tests {
         current_with_rel.relationship_context =
             Some(crate::types::state_types::RelationshipContext {
                 entity_id: *blake3::hash(b"entity_device").as_bytes(),
-                entity_state_number: 1,
                 counterparty_id: *blake3::hash(b"counterparty123").as_bytes(),
-                counterparty_state_number: 5,
                 counterparty_public_key: vec![1, 2, 3],
                 relationship_hash: vec![4, 5, 6],
                 active: true,
@@ -2098,9 +1945,7 @@ mod tests {
         current_with_rel.relationship_context =
             Some(crate::types::state_types::RelationshipContext {
                 entity_id: *blake3::hash(b"entity_device").as_bytes(),
-                entity_state_number: 1,
                 counterparty_id: *blake3::hash(b"counterparty_A").as_bytes(),
-                counterparty_state_number: 5,
                 counterparty_public_key: vec![1, 2, 3],
                 relationship_hash: vec![4, 5, 6],
                 active: true,
@@ -2111,9 +1956,7 @@ mod tests {
         let mut next_with_rel = next_state.clone();
         next_with_rel.relationship_context = Some(crate::types::state_types::RelationshipContext {
             entity_id: *blake3::hash(b"entity_device").as_bytes(),
-            entity_state_number: 2,
             counterparty_id: *blake3::hash(b"counterparty_B").as_bytes(), // Different counterparty
-            counterparty_state_number: 6,
             counterparty_public_key: vec![1, 2, 3],
             relationship_hash: vec![4, 5, 6],
             active: true,
@@ -2128,44 +1971,6 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_bilateral_transition_non_advancing_state() {
-        let current_state = create_test_state(1);
-        let next_state = create_test_state(2);
-
-        let mut current_with_rel = current_state.clone();
-        current_with_rel.relationship_context =
-            Some(crate::types::state_types::RelationshipContext {
-                entity_id: *blake3::hash(b"entity_device").as_bytes(),
-                entity_state_number: 1,
-                counterparty_id: *blake3::hash(b"counterparty123").as_bytes(),
-                counterparty_state_number: 10,
-                counterparty_public_key: vec![1, 2, 3],
-                relationship_hash: vec![4, 5, 6],
-                active: true,
-                chain_tip_id: None,
-                last_bilateral_state_hash: None,
-            });
-
-        let mut next_with_rel = next_state.clone();
-        next_with_rel.relationship_context = Some(crate::types::state_types::RelationshipContext {
-            entity_id: *blake3::hash(b"entity_device").as_bytes(),
-            entity_state_number: 2,
-            counterparty_id: *blake3::hash(b"counterparty123").as_bytes(),
-            counterparty_state_number: 9, // State number decreased!
-            counterparty_public_key: vec![1, 2, 3],
-            relationship_hash: vec![4, 5, 6],
-            active: true,
-            chain_tip_id: None,
-            last_bilateral_state_hash: None,
-        });
-
-        let result = verify_bilateral_transition(&current_with_rel, &next_with_rel);
-        assert!(result.is_ok());
-        assert!(!result
-            .unwrap_or_else(|e| panic!("should return false for non-advancing state number: {e}")));
-    }
-
-    #[test]
     fn test_verify_bilateral_transition_success() {
         let current_state = create_test_state(1);
         let next_state = create_test_state(2);
@@ -2174,9 +1979,7 @@ mod tests {
         current_with_rel.relationship_context =
             Some(crate::types::state_types::RelationshipContext {
                 entity_id: *blake3::hash(b"entity_device").as_bytes(),
-                entity_state_number: 1,
                 counterparty_id: *blake3::hash(b"counterparty123").as_bytes(),
-                counterparty_state_number: 5,
                 counterparty_public_key: vec![1, 2, 3],
                 relationship_hash: vec![4, 5, 6],
                 active: true,
@@ -2187,9 +1990,7 @@ mod tests {
         let mut next_with_rel = next_state.clone();
         next_with_rel.relationship_context = Some(crate::types::state_types::RelationshipContext {
             entity_id: *blake3::hash(b"entity_device").as_bytes(),
-            entity_state_number: 2,
             counterparty_id: *blake3::hash(b"counterparty123").as_bytes(),
-            counterparty_state_number: 6, // Advanced correctly
             counterparty_public_key: vec![1, 2, 3],
             relationship_hash: vec![4, 5, 6],
             active: true,
@@ -2357,7 +2158,6 @@ mod tests {
         assert!(result.is_ok());
 
         let next_state = result.unwrap_or_else(|e| panic!("apply_transition should succeed: {e}"));
-        assert_eq!(next_state.state_number, 6);
         assert_eq!(next_state.operation, transfer_op);
     }
 
@@ -2374,7 +2174,7 @@ mod tests {
         let sender_key = crate::core::token::derive_canonical_balance_key(&era_pc, &pk, "ERA");
         current_state
             .token_balances
-            .insert(sender_key, Balance::from_state(1000, current_state.hash, 3));
+            .insert(sender_key, Balance::from_state(1000, current_state.hash));
 
         let entropy = vec![4, 5, 6, 7];
 
@@ -2410,8 +2210,7 @@ mod tests {
         let result = apply_transition(&current_state, &transfer_op, &entropy);
         assert!(result.is_ok());
 
-        let next_state = result.unwrap_or_else(|e| panic!("apply_transition should succeed: {e}"));
-        assert_eq!(next_state.state_number, 4);
+        let _next_state = result.unwrap_or_else(|e| panic!("apply_transition should succeed: {e}"));
     }
 
     #[test]
@@ -2431,12 +2230,12 @@ mod tests {
         let sender_key = crate::core::token::derive_canonical_balance_key(&era_pc, &pk, "ERA");
         current_state
             .token_balances
-            .insert(sender_key, Balance::from_state(100, current_state.hash, 0));
+            .insert(sender_key, Balance::from_state(100, current_state.hash));
 
         let mut op_unsigned = Operation::Transfer {
             token_id: b"ERA".to_vec(),
             to_device_id: vec![9u8; 32],
-            amount: Balance::from_state(10, current_state.hash, 0),
+            amount: Balance::from_state(10, current_state.hash),
             mode: TransactionMode::Unilateral,
             nonce: vec![1u8; 8],
             verification: crate::types::operations::VerificationType::Standard,
@@ -2455,7 +2254,7 @@ mod tests {
         let entropy = vec![1, 2, 3, 4];
         let next = apply_transition(&current_state, &op_unsigned, &entropy)
             .unwrap_or_else(|e| panic!("valid signature should succeed: {e}"));
-        assert_eq!(next.state_number, current_state.state_number + 1);
+        assert_ne!(next.hash, [0u8; 32]);
     }
 
     #[test]
@@ -2475,12 +2274,12 @@ mod tests {
         let sender_key = crate::core::token::derive_canonical_balance_key(&era_pc, &pk, "ERA");
         current_state
             .token_balances
-            .insert(sender_key, Balance::from_state(100, current_state.hash, 0));
+            .insert(sender_key, Balance::from_state(100, current_state.hash));
 
         let op = Operation::Transfer {
             token_id: b"ERA".to_vec(),
             to_device_id: vec![9u8; 32],
-            amount: Balance::from_state(10, current_state.hash, 0),
+            amount: Balance::from_state(10, current_state.hash),
             mode: TransactionMode::Unilateral,
             nonce: vec![1u8; 8],
             verification: crate::types::operations::VerificationType::Standard,

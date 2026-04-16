@@ -208,7 +208,7 @@ pub fn deserialize_operation(bytes: &[u8]) -> Result<Operation> {
             let message = read_string(&mut cursor)?;
 
             // Create Balance from raw u64 amount (empty state hash for deserialized sessions)
-            let balance = dsm::types::token_types::Balance::from_state(amount, [0u8; 32], 0);
+            let balance = dsm::types::token_types::Balance::from_state(amount, [0u8; 32]);
 
             Ok(Operation::Transfer {
                 to_device_id,
@@ -478,7 +478,7 @@ mod tests {
 
     #[test]
     fn serialize_deserialize_transfer_round_trip() {
-        let balance = dsm::types::token_types::Balance::from_state(1000, [0u8; 32], 0);
+        let balance = dsm::types::token_types::Balance::from_state(1000, [0u8; 32]);
         let op = Operation::Transfer {
             to_device_id: vec![0xAAu8; 32],
             amount: balance,

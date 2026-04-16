@@ -159,7 +159,7 @@ impl CoreSDK {
             state_machine.lock().set_state(latest_state.clone());
             log::info!(
                 "[CoreSDK] restored archived canonical state_number={} for device {}",
-                latest_state.state_number,
+                latest_state.hash[0] as u64,
                 crate::util::text_id::encode_base32_crockford(device_id)
             );
         }
@@ -171,7 +171,7 @@ impl CoreSDK {
         crate::storage::client_db::store_bcr_state(state, false).map_err(|e| {
             DsmError::state_machine(format!(
                 "Failed to archive canonical state {} for sparse replay: {e}",
-                state.state_number
+                state.hash[0] as u64
             ))
         })
     }
@@ -483,7 +483,7 @@ impl CoreSDK {
     /// Deterministic state lookup; 0 = genesis
     pub fn get_state_by_number(&self, state_number: u64) -> Result<State, DsmError> {
         if let Some(s) = self.state_machine.lock().current_state() {
-            if s.state_number == state_number {
+            if s.hash[0] as u64 == state_number {
                 return Ok(s.clone());
             }
             if state_number == 0 {
@@ -497,7 +497,7 @@ impl CoreSDK {
         })?;
 
         for s in states {
-            if s.state_number == state_number {
+            if s.hash[0] as u64 == state_number {
                 return Ok(s);
             }
         }
@@ -641,7 +641,7 @@ impl CoreSDK {
         let new_state = sm.execute_transition(mint)?;
         log::info!(
             "Dev seeding applied; new state number {}",
-            new_state.state_number
+            new_state.hash[0] as u64
         );
 
         // Write flag to ensure idempotence
@@ -1019,7 +1019,7 @@ impl CoreSDK {
         }
 
         let current_state = self.get_current_state()?;
-        for state_number in (0..=current_state.state_number).rev() {
+        for state_number in (0..=current_state.hash[0] as u64).rev() {
             let state = self.get_state_by_number(state_number)?;
             if let Some(token_metadata) = self.token_metadata_for_state(&state, token_id) {
                 return crate::policy::strict_policy_commit_for_token(
@@ -1119,7 +1119,7 @@ impl CoreSDK {
         } else {
             log::info!(
                 "[{context}] token projection synced: {canonical_token_id} state_number={}",
-                new_state.state_number
+                new_state.hash[0] as u64
             );
         }
     }
@@ -1910,21 +1910,21 @@ mod tests {
         );
 
         let executed = sdk.execute_dsm_operation(op).expect("execute operation");
-        assert!(executed.state_number > 0, "state number should advance");
+        assert!(executed.hash[0] as u64 > 0, "state number should advance");
 
         let archived = crate::storage::client_db::get_bcr_states(&device.device_id, false)
             .expect("load archived states");
         assert!(
             archived
                 .iter()
-                .any(|state| state.state_number == executed.state_number),
+                .any(|state| state.hash[0] as u64 == executed.hash[0] as u64),
             "executed canonical state must be archived for sparse replay"
         );
 
         let restored = CoreSDK::new_with_device(device).expect("restore sdk from archive");
         let restored_state = restored.get_current_state().expect("current state");
         assert_eq!(
-            restored_state.state_number, executed.state_number,
+            restored_state.hash[0] as u64, executed.hash[0] as u64,
             "CoreSDK startup must restore the latest archived canonical state"
         );
         assert_eq!(
@@ -1992,14 +1992,14 @@ mod tests {
         );
         let advanced = sdk.execute_dsm_operation(op).expect("execute operation");
         assert!(
-            advanced.state_number > prior.state_number,
+            advanced.hash[0] as u64 > prior.hash[0] as u64,
             "state must advance"
         );
 
         sdk.restore_state_snapshot(&prior)
             .expect("restore prior snapshot");
         let current = sdk.get_current_state().expect("current state");
-        assert_eq!(current.state_number, prior.state_number);
+        assert_eq!(current.hash[0] as u64, prior.hash[0] as u64);
         assert_eq!(current.hash, prior.hash);
     }
 }

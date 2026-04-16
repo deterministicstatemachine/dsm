@@ -977,11 +977,7 @@ impl AppRouterImpl {
         let balance_anchor = dsm::crypto::blake3::domain_hash("DSM/balance-anchor", &[]);
         let signing_op = dsm::types::operations::Operation::Transfer {
             to_device_id: to_device_id.to_vec(),
-            amount: dsm::types::token_types::Balance::from_state(
-                transfer_req.amount,
-                *balance_anchor.as_bytes(),
-                balance_tick,
-            ),
+            amount: dsm::types::token_types::Balance::from_state(transfer_req.amount, *balance_anchor.as_bytes()),
             token_id: token_id.as_bytes().to_vec(),
             mode: dsm::types::operations::TransactionMode::Unilateral,
             nonce: nonce.clone(),
@@ -1155,11 +1151,7 @@ impl AppRouterImpl {
         // verification (transition.rs create_next_state) uses identical bytes.
         let signed_op = dsm::types::operations::Operation::Transfer {
             to_device_id: to_device_id.to_vec(),
-            amount: dsm::types::token_types::Balance::from_state(
-                transfer_req.amount,
-                *balance_anchor.as_bytes(),
-                balance_tick,
-            ),
+            amount: dsm::types::token_types::Balance::from_state(transfer_req.amount, *balance_anchor.as_bytes()),
             token_id: token_id.as_bytes().to_vec(),
             mode: dsm::types::operations::TransactionMode::Unilateral,
             nonce: nonce.clone(),
@@ -1437,11 +1429,7 @@ impl AppRouterImpl {
             // Build Operation for b0x submission
             let transfer_op = dsm::types::operations::Operation::Transfer {
                 to_device_id: to_device_id.to_vec(),
-                amount: dsm::types::token_types::Balance::from_state(
-                    transfer_req.amount,
-                    *balance_anchor.as_bytes(),
-                    balance_tick,
-                ),
+                amount: dsm::types::token_types::Balance::from_state(transfer_req.amount, *balance_anchor.as_bytes()),
                 token_id: token_id.as_bytes().to_vec(),
                 mode: dsm::types::operations::TransactionMode::Unilateral,
                 nonce: nonce.to_vec(),

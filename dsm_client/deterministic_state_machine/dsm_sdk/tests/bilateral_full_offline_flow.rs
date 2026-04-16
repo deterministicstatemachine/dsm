@@ -121,7 +121,7 @@ fn seed_device_state_with_era(
         dsm::core::token::derive_canonical_balance_key(&policy_commit, public_key, "ERA");
 
     let mut balances = std::collections::HashMap::new();
-    balances.insert(balance_key, Balance::from_state(era_balance, [0u8; 32], 0));
+    balances.insert(balance_key, Balance::from_state(era_balance, [0u8; 32]));
 
     let mut state = StateBuilder::new()
         .with_id("genesis".to_string())
@@ -311,7 +311,7 @@ async fn bilateral_offline_prepare_accept_commit_finalize_flow() {
     let handler_a = s.handler_a;
     let handler_b = s.handler_b;
 
-    let balance = Balance::from_state(10, [1u8; 32], 0);
+    let balance = Balance::from_state(10, [1u8; 32]);
     let transfer_op = Operation::Transfer {
         to_device_id: s.b_dev.to_vec(),
         amount: balance,
@@ -448,7 +448,7 @@ async fn bilateral_offline_state_consistency_across_peers() {
     let handler_a = s.handler_a;
     let handler_b = s.handler_b;
 
-    let balance = Balance::from_state(5, [2u8; 32], 0);
+    let balance = Balance::from_state(5, [2u8; 32]);
     let transfer_op = Operation::Transfer {
         to_device_id: s.b_dev.to_vec(),
         amount: balance,

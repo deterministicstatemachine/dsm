@@ -1,10 +1,11 @@
 jest.mock('../WebViewBridge', () => ({
   routerQueryBin: jest.fn(),
+  captureCdbrwOrbitTimings: jest.fn(),
 }));
 
 import * as pb from '../../proto/dsm_app_pb';
 import { getDbrwStatus } from '../dbrw';
-import { routerQueryBin } from '../WebViewBridge';
+import { captureCdbrwOrbitTimings, routerQueryBin } from '../WebViewBridge';
 
 function frameEnvelope(envelope: pb.Envelope): Uint8Array {
   const bytes = envelope.toBinary();
@@ -85,18 +86,47 @@ describe('dbrw.ts', () => {
       expect(status.runtimeError).toBe('');
     });
 
-    test('passes "live" params when live=true', async () => {
-      const resp = makeDbrwStatusResponse();
-      const env = new pb.Envelope({
+    test('uses enrolled histogram bins for live trust measurement', async () => {
+      const statusResp = makeDbrwStatusResponse({ histogramBins: 64 });
+      const statusEnv = new pb.Envelope({
         version: 3,
-        payload: { case: 'dbrwStatusResponse', value: resp },
+        payload: { case: 'dbrwStatusResponse', value: statusResp },
       });
-      (routerQueryBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
+      const trustEnv = new pb.Envelope({
+        version: 3,
+        payload: {
+          case: 'cdbrwTrustSnapshot',
+          value: new pb.CdbrwTrustSnapshot({
+            accessLevel: pb.CdbrwAccessLevel.CDBRW_ACCESS_PIN_REQUIRED,
+            resonantStatus: pb.CdbrwResonantStatus.CDBRW_RESONANT_ADAPTED,
+            trustScore: 0.42,
+            hHat: 0.5,
+            rhoHat: 0.1,
+            lHat: 0.2,
+            w1Distance: 0.3,
+            w1Threshold: 0.2,
+            note: 'live trust',
+            h0Eff: 0.45,
+            recommendedN: 16384,
+          }),
+        },
+      });
+      (routerQueryBin as jest.Mock)
+        .mockResolvedValueOnce(frameEnvelope(statusEnv))
+        .mockResolvedValueOnce(frameEnvelope(trustEnv));
+      (captureCdbrwOrbitTimings as jest.Mock).mockResolvedValue(
+        new Uint8Array([1, 0, 0, 0, 0, 0, 0, 0]),
+      );
 
       await getDbrwStatus(true);
-      const [route, params] = (routerQueryBin as jest.Mock).mock.calls[0];
-      expect(route).toBe('dbrw.status');
-      expect(new TextDecoder().decode(params)).toBe('live');
+      expect((routerQueryBin as jest.Mock).mock.calls[0][0]).toBe('dbrw.status');
+      expect((routerQueryBin as jest.Mock).mock.calls[1][0]).toBe('cdbrw.measure_trust');
+
+      const trustReq = pb.CdbrwMeasureTrustRequest.fromBinary(
+        (routerQueryBin as jest.Mock).mock.calls[1][1],
+      );
+      expect(trustReq.histogramBins).toBe(64);
+      expect(trustReq.orbit?.timings.length).toBe(1);
     });
 
     test('passes empty params when live=false', async () => {

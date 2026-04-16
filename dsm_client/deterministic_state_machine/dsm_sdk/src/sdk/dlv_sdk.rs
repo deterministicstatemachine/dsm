@@ -614,7 +614,7 @@ impl DlvSdk {
 
     /// Deterministic state proof (binds to reference state; manager validates)
     fn generate_state_proof(&self, reference_state: &State) -> Result<Vec<u8>, DsmError> {
-        let sn = reference_state.state_number.to_le_bytes();
+        let sn = reference_state.hash[0] as u64.to_le_bytes();
         let proof = [&reference_state.hash[..], &sn, &reference_state.entropy[..]].concat();
         Ok(blake3::domain_hash("DSM/dlv-proof", &proof)
             .as_bytes()

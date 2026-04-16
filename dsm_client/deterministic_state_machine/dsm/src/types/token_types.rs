@@ -18,23 +18,23 @@ thread_local! {
     static CURRENT_STATE_CONTEXT: RefCell<Option<StateContext>> = const { RefCell::new(None) };
 }
 
-/// State context for proper DSM protocol compliance
+/// State context for proper DSM protocol compliance.
+///
+/// Per §4.3 there is no counter — the canonical "current state" is just the
+/// state hash (§2.1 adjacency) and the device binding.
 #[derive(Clone, Debug)]
 pub struct StateContext {
     /// Current canonical state hash as per DSM protocol
     pub state_hash: [u8; 32],
-    /// State number for forward-only verification
-    pub state_number: u64,
     /// Device ID for this state context
     pub device_id: [u8; 32],
 }
 
 impl StateContext {
     /// Create a new state context
-    pub fn new(state_hash: [u8; 32], state_number: u64, device_id: [u8; 32]) -> Self {
+    pub fn new(state_hash: [u8; 32], device_id: [u8; 32]) -> Self {
         Self {
             state_hash,
-            state_number,
             device_id,
         }
     }
@@ -351,56 +351,47 @@ impl Default for TokenAmount {
     }
 }
 
-/// Core token balance type
+/// Core token balance type.
 ///
-/// This implementation uses unsigned integers to represent balances,
-/// enforcing non-negative value invariants in accordance with the
-/// conservation of value principle described in whitepaper Section 10.
+/// Uses unsigned integers to represent balances, enforcing non-negative value
+/// invariants per whitepaper §8 eq. 10 (`B_{n+1} ≥ 0`).
+///
+/// Per §4.3 no counter/height/timestamp participates in canonical encoding.
+/// A balance is just a scalar value plus an optional linkage hash to the
+/// state that produced it (a hash, not a counter).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Balance {
     /// Token value
     value: u64,
     /// Locked portion of balance that cannot be spent
     locked: u64,
-    /// Last update tick
-    last_updated_tick: u64,
     /// Ledger state hash referencing the last update
     state_hash: Option<[u8; 32]>,
 }
 
 impl Balance {
-    /// Create a zero balance for non-state-transition contexts
+    /// Create a zero balance for non-state-transition contexts.
     ///
-    /// This method is intended for use in contexts where a balance is needed
-    /// for structure initialization, testing, or other purposes that don't
-    /// involve actual state transitions in the DSM protocol.
-    ///
-    /// For actual token operations within DSM state transitions, use `from_state()`.
+    /// Used in contexts where a balance is needed for structure initialization,
+    /// testing, or other purposes that don't involve actual state transitions.
+    /// For real token operations inside DSM transitions, use `from_state()`.
     pub fn zero() -> Self {
-        // Always derive a deterministic canonical anchor (no WARN spam)
         let anchor = Self::get_current_canonical_state_hash()
             .unwrap_or_else(Self::derive_default_canonical_state_hash);
-        Self::from_state(0, anchor, 0)
+        Self::from_state(0, anchor)
     }
 
     /// Get the current canonical state hash from the DSM system context
     pub fn get_current_canonical_state_hash() -> Option<[u8; 32]> {
-        // For the `dsm` crate, we use a thread-local state context if available
-        // This allows proper state hash linking without cross-crate dependencies
-
-        // Try to access thread-local state context first (if implemented)
         if let Some(hash) = Self::get_thread_local_state_hash() {
             return Some(hash);
         }
-
-        // No thread-local context: no warnings — tests and non-transition sites
         None
     }
 
     /// Deterministic default when no thread-local state context is present.
     /// Uses device_id from StateContext when available; otherwise a fixed domain-separated salt.
     fn derive_default_canonical_state_hash() -> [u8; 32] {
-        // Prefer a device_id from the last known StateContext (without consuming it)
         let device_tag = StateContext::get_current()
             .map(|c| c.device_id.to_vec())
             .unwrap_or_else(|| {
@@ -420,17 +411,13 @@ impl Balance {
         StateContext::get_current().map(|ctx| ctx.state_hash)
     }
 
-    /// Create a balance from a state transition.
-    ///
-    /// `state_number` is the deterministic tick — the hash chain height at
-    /// which this balance was created.  Both devices in a bilateral exchange
-    /// agree on the same state_number, so `to_le_bytes()` produces identical
-    /// output and the state hash is deterministic.
-    pub fn from_state(value: u64, state_hash: [u8; 32], state_number: u64) -> Self {
+    /// Create a balance bound to a specific state hash (§2.1 hash adjacency).
+    /// The `state_hash` is a 32-byte digest, not a counter — it links this
+    /// balance to the state that produced it.
+    pub fn from_state(value: u64, state_hash: [u8; 32]) -> Self {
         Self {
             value,
             locked: 0,
-            last_updated_tick: state_number,
             state_hash: Some(state_hash),
         }
     }
@@ -546,12 +533,11 @@ impl Balance {
         self
     }
 
-    /// Convert to little-endian bytes for hashing
+    /// Convert to little-endian bytes for hashing. Per §4.3 no counter participates.
     pub fn to_le_bytes(&self) -> Vec<u8> {
-        let mut result = Vec::with_capacity(24); // 8 bytes for each u64, 8 for tick
+        let mut result = Vec::with_capacity(16 + 32);
         result.extend_from_slice(&self.value.to_le_bytes());
         result.extend_from_slice(&self.locked.to_le_bytes());
-        result.extend_from_slice(&self.last_updated_tick.to_le_bytes());
         if let Some(hash) = &self.state_hash {
             result.extend_from_slice(hash);
         }
@@ -559,16 +545,10 @@ impl Balance {
     }
 
     /// Internal helper to reconstruct a Balance from raw parts (used by canonical decoders).
-    pub(crate) fn from_parts(
-        value: u64,
-        locked: u64,
-        last_updated_tick: u64,
-        state_hash: Option<[u8; 32]>,
-    ) -> Self {
+    pub(crate) fn from_parts(value: u64, locked: u64, state_hash: Option<[u8; 32]>) -> Self {
         Self {
             value,
             locked,
-            last_updated_tick,
             state_hash,
         }
     }
@@ -1189,7 +1169,7 @@ mod tests {
 
     #[test]
     fn balance_from_state() {
-        let b = Balance::from_state(1000, [0xAA; 32], 42);
+        let b = Balance::from_state(1000, [0xAA; 32]);
         assert_eq!(b.value(), 1000);
         assert_eq!(b.available(), 1000);
         assert_eq!(b.locked(), 0);
@@ -1197,7 +1177,7 @@ mod tests {
 
     #[test]
     fn balance_lock_and_unlock() {
-        let mut b = Balance::from_state(100, [0; 32], 1);
+        let mut b = Balance::from_state(100, [0; 32]);
         b.lock(30).unwrap();
         assert_eq!(b.locked(), 30);
 
@@ -1207,61 +1187,61 @@ mod tests {
 
     #[test]
     fn balance_lock_zero_fails() {
-        let mut b = Balance::from_state(100, [0; 32], 1);
+        let mut b = Balance::from_state(100, [0; 32]);
         assert!(b.lock(0).is_err());
     }
 
     #[test]
     fn balance_lock_exceeds_available() {
-        let mut b = Balance::from_state(50, [0; 32], 1);
+        let mut b = Balance::from_state(50, [0; 32]);
         assert!(b.lock(51).is_err());
     }
 
     #[test]
     fn balance_unlock_zero_fails() {
-        let mut b = Balance::from_state(100, [0; 32], 1);
+        let mut b = Balance::from_state(100, [0; 32]);
         b.lock(50).unwrap();
         assert!(b.unlock(0).is_err());
     }
 
     #[test]
     fn balance_unlock_exceeds_locked() {
-        let mut b = Balance::from_state(100, [0; 32], 1);
+        let mut b = Balance::from_state(100, [0; 32]);
         b.lock(30).unwrap();
         assert!(b.unlock(31).is_err());
     }
 
     #[test]
     fn balance_update_addition() {
-        let mut b = Balance::from_state(100, [0; 32], 1);
+        let mut b = Balance::from_state(100, [0; 32]);
         b.update(50, true);
         assert_eq!(b.value(), 150);
     }
 
     #[test]
     fn balance_update_subtraction() {
-        let mut b = Balance::from_state(100, [0; 32], 1);
+        let mut b = Balance::from_state(100, [0; 32]);
         b.update(30, false);
         assert_eq!(b.value(), 70);
     }
 
     #[test]
     fn balance_update_sub_saturates() {
-        let mut b = Balance::from_state(10, [0; 32], 1);
+        let mut b = Balance::from_state(10, [0; 32]);
         b.update(100, false);
         assert_eq!(b.value(), 0);
     }
 
     #[test]
     fn balance_update_with_amount_deduction_insufficient() {
-        let mut b = Balance::from_state(10, [0; 32], 1);
+        let mut b = Balance::from_state(10, [0; 32]);
         let result = b.update_with_amount(TokenAmount::new(20), false);
         assert!(result.is_err());
     }
 
     #[test]
     fn balance_update_add_and_sub() {
-        let mut b = Balance::from_state(100, [0; 32], 1);
+        let mut b = Balance::from_state(100, [0; 32]);
         b.update_add(50);
         assert_eq!(b.value(), 150);
         b.update_sub(30).unwrap();
@@ -1270,33 +1250,33 @@ mod tests {
 
     #[test]
     fn balance_update_sub_insufficient() {
-        let mut b = Balance::from_state(10, [0; 32], 1);
+        let mut b = Balance::from_state(10, [0; 32]);
         assert!(b.update_sub(11).is_err());
     }
 
     #[test]
     fn balance_formatted() {
-        let b = Balance::from_state(1_500_000, [0; 32], 1);
+        let b = Balance::from_state(1_500_000, [0; 32]);
         let f = b.formatted(6);
         assert_eq!(f, "1.500000");
     }
 
     #[test]
     fn balance_with_state_hash() {
-        let b = Balance::from_state(100, [0; 32], 1).with_state_hash([0xFF; 32]);
+        let b = Balance::from_state(100, [0; 32]).with_state_hash([0xFF; 32]);
         let bytes = b.to_le_bytes();
         assert!(bytes.len() > 24);
     }
 
     #[test]
     fn balance_to_le_bytes_deterministic() {
-        let b = Balance::from_state(42, [0xAB; 32], 7);
+        let b = Balance::from_state(42, [0xAB; 32]);
         assert_eq!(b.to_le_bytes(), b.to_le_bytes());
     }
 
     #[test]
     fn balance_display() {
-        let b = Balance::from_state(12345, [0; 32], 1);
+        let b = Balance::from_state(12345, [0; 32]);
         assert_eq!(format!("{b}"), "12345");
     }
 
@@ -1307,10 +1287,10 @@ mod tests {
         StateContext::clear_current();
         assert!(StateContext::get_current().is_none());
 
-        StateContext::set_current(StateContext::new([0xAA; 32], 10, [0xBB; 32]));
+        StateContext::set_current(StateContext::new([0xAA; 32], [0xBB; 32]));
         let ctx = StateContext::get_current().unwrap();
         assert_eq!(ctx.state_hash, [0xAA; 32]);
-        assert_eq!(ctx.state_number, 10);
+        assert_eq!(ctx.device_id, [0xBB; 32]);
 
         StateContext::clear_current();
         assert!(StateContext::get_current().is_none());
@@ -1404,7 +1384,7 @@ mod tests {
 
     #[test]
     fn token_new_and_accessors() {
-        let balance = Balance::from_state(100, [0; 32], 1);
+        let balance = Balance::from_state(100, [0; 32]);
         let t = Token::new("alice", vec![1, 2, 3], vec![4, 5], balance, [0xCC; 32]);
 
         assert!(t.id().contains("alice"));
@@ -1419,7 +1399,7 @@ mod tests {
 
     #[test]
     fn token_set_status_revoked() {
-        let balance = Balance::from_state(100, [0; 32], 1);
+        let balance = Balance::from_state(100, [0; 32]);
         let mut t = Token::new("bob", vec![1], vec![], balance, [0; 32]);
         t.set_status(TokenStatus::Revoked);
         assert!(!t.is_valid());
@@ -1428,7 +1408,7 @@ mod tests {
 
     #[test]
     fn token_set_owner() {
-        let balance = Balance::from_state(100, [0; 32], 1);
+        let balance = Balance::from_state(100, [0; 32]);
         let mut t = Token::new("bob", vec![1], vec![], balance, [0; 32]);
         t.set_owner("charlie");
         assert_eq!(t.owner_id(), "charlie");
@@ -1436,7 +1416,7 @@ mod tests {
 
     #[test]
     fn token_update_balance() {
-        let balance = Balance::from_state(100, [0; 32], 1);
+        let balance = Balance::from_state(100, [0; 32]);
         let mut t = Token::new("bob", vec![1], vec![], balance, [0; 32]);
         t.update_balance(50, true);
         assert_eq!(t.balance().value(), 150);

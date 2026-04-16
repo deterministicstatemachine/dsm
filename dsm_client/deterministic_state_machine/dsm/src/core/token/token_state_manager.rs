@@ -167,18 +167,9 @@ impl TokenStateManager {
         let updated_balances = self.apply_token_operation(current_state, &operation)?;
 
         let prev_state_hash = current_state.hash()?;
-        let next_state_number = current_state.state_number + 1;
 
-        // Build sparse index deterministically
-        let mut indices = Vec::new();
-        let mut n = next_state_number;
-        while n > 0 {
-            if n & 1 == 1 {
-                indices.push(n);
-            }
-            n >>= 1;
-        }
-        let sparse_index = SparseIndex::new(indices);
+        // Per §2.2 sparse indices are implementation optimization only.
+        let sparse_index = SparseIndex::default();
 
         // Verify forward-commitment rules if present
         if let Some(pre_commit) = &current_state.forward_commitment {
@@ -191,12 +182,7 @@ impl TokenStateManager {
             }
         }
 
-        let mut params = StateParams::new(
-            next_state_number,
-            new_entropy,
-            operation,
-            current_state.device_info.clone(),
-        );
+        let mut params = StateParams::new(new_entropy, operation, current_state.device_info.clone());
 
         params = params
             .with_encapsulated_entropy(encapsulated_entropy.unwrap_or_default())
@@ -208,7 +194,7 @@ impl TokenStateManager {
         // Atomic set of balances (state is the truth)
         new_state.token_balances = updated_balances;
 
-        new_state.id = format!("state_{}", new_state.state_number);
+        new_state.id = String::new();
         new_state.hash = new_state.compute_hash()?;
 
         Ok(new_state)
@@ -220,11 +206,7 @@ impl TokenStateManager {
         operation: &Operation,
     ) -> Result<HashMap<String, Balance>, DsmError> {
         // Establish canonical state context
-        let ctx = StateContext::new(
-            current_state.hash,
-            current_state.state_number,
-            current_state.device_info.device_id,
-        );
+        let ctx = StateContext::new(current_state.hash, current_state.device_info.device_id);
         StateContext::set_current(ctx);
 
         struct ContextGuard;
@@ -252,7 +234,7 @@ impl TokenStateManager {
                 let recipient_key = self.make_balance_key(recipient.as_slice(), &token_id_str)?;
 
                 let sender_balance = new_balances.get(&sender_key).cloned().unwrap_or_else(|| {
-                    Balance::from_state(0, current_state.hash, current_state.state_number)
+                    Balance::from_state(0, current_state.hash)
                 });
 
                 if sender_balance.value() < amount.value() {
@@ -266,7 +248,6 @@ impl TokenStateManager {
                 let new_sender_balance = Balance::from_state(
                     sender_balance.value().saturating_sub(amount.value()),
                     current_state.hash,
-                    current_state.state_number,
                 );
 
                 let recipient_balance =
@@ -274,7 +255,7 @@ impl TokenStateManager {
                         .get(&recipient_key)
                         .cloned()
                         .unwrap_or_else(|| {
-                            Balance::from_state(0, current_state.hash, current_state.state_number)
+                            Balance::from_state(0, current_state.hash)
                         });
 
                 let new_recipient_value = recipient_balance
@@ -283,11 +264,7 @@ impl TokenStateManager {
                     .ok_or_else(|| {
                         DsmError::invalid_operation("Balance overflow on transfer credit")
                     })?;
-                let new_recipient_balance = Balance::from_state(
-                    new_recipient_value,
-                    current_state.hash,
-                    current_state.state_number,
-                );
+                let new_recipient_balance = Balance::from_state(new_recipient_value, current_state.hash);
 
                 new_balances.insert(sender_key, new_sender_balance);
                 new_balances.insert(recipient_key, new_recipient_balance);
@@ -316,7 +293,7 @@ impl TokenStateManager {
                 let owner_key = self.make_balance_key(owner_pk, &token_id_str)?;
 
                 let current_balance = new_balances.get(&owner_key).cloned().unwrap_or_else(|| {
-                    Balance::from_state(0, current_state.hash, current_state.state_number)
+                    Balance::from_state(0, current_state.hash)
                 });
 
                 let new_mint_value = current_balance
@@ -325,11 +302,7 @@ impl TokenStateManager {
                     .ok_or_else(|| DsmError::invalid_operation("Balance overflow on mint"))?;
                 new_balances.insert(
                     owner_key,
-                    Balance::from_state(
-                        new_mint_value,
-                        current_state.hash,
-                        current_state.state_number,
-                    ),
+                    Balance::from_state(new_mint_value, current_state.hash),
                 );
             }
 
@@ -351,7 +324,7 @@ impl TokenStateManager {
                 let owner_key = self.make_balance_key(owner_pk, &token_id_str)?;
 
                 let owner_balance = new_balances.get(&owner_key).cloned().unwrap_or_else(|| {
-                    Balance::from_state(0, current_state.hash, current_state.state_number)
+                    Balance::from_state(0, current_state.hash)
                 });
 
                 if owner_balance.value() < amount.value() {
@@ -367,7 +340,6 @@ impl TokenStateManager {
                     Balance::from_state(
                         owner_balance.value().saturating_sub(amount.value()),
                         current_state.hash,
-                        current_state.state_number,
                     ),
                 );
             }
@@ -392,11 +364,7 @@ impl TokenStateManager {
 
                         let creator_balance =
                             new_balances.get(&creator_key).cloned().unwrap_or_else(|| {
-                                Balance::from_state(
-                                    0,
-                                    current_state.hash,
-                                    current_state.state_number,
-                                )
+                                Balance::from_state(0, current_state.hash)
                             });
 
                         if creator_balance.value() < amount.value() {
@@ -413,7 +381,6 @@ impl TokenStateManager {
                             Balance::from_state(
                                 creator_balance.value().saturating_sub(amount.value()),
                                 current_state.hash,
-                                current_state.state_number,
                             ),
                         );
                     }
@@ -636,7 +603,8 @@ impl TokenStateManager {
         }
 
         if let Some(ctx) = StateContext::get_current() {
-            context.insert("tick".to_string(), ctx.state_number.to_le_bytes().to_vec());
+            // Bind policy context to the current state hash (§2.1 adjacency), not a counter.
+            context.insert("state_hash".to_string(), ctx.state_hash.to_vec());
         }
 
         let op_type = match operation {
@@ -845,7 +813,7 @@ impl TokenStateManager {
         }
 
         if let Some(ctx) = StateContext::get_current() {
-            Ok(Balance::from_state(0, ctx.state_hash, ctx.state_number))
+            Ok(Balance::from_state(0, ctx.state_hash))
         } else {
             Ok(Balance::zero())
         }

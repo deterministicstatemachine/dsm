@@ -110,6 +110,31 @@ fn build_canonical_settled_state(
     // delta applied — only the BTM relationship state does. We must apply the delta here.
     let mut settled_state = canonical_state.clone();
 
+    // The canonical state may lack balances for tokens that were settled on a
+    // parallel BCR fork (e.g. dBTC received via bilateral while ERA faucet ops
+    // continued from genesis). Seed missing token balances from the persisted
+    // balance projection so that debit/credit can find the correct prior value.
+    let local_txt = encode_base32_crockford(&ctx.local_device_id);
+    let balance_key = dsm::core::token::derive_canonical_balance_key(
+        &policy_commit,
+        &canonical_state.device_info.public_key,
+        token_for_policy,
+    );
+    if !settled_state.token_balances.contains_key(&balance_key) {
+        if let Ok(Some(proj)) =
+            crate::storage::client_db::get_balance_projection(&local_txt, token_for_policy)
+        {
+            log::info!(
+                "[BILATERAL][settle] seeding missing {token_for_policy} balance from projection: available={} (balance_key not in canonical state fork)",
+                proj.available,
+            );
+            settled_state.token_balances.insert(
+                balance_key,
+                dsm::types::token_types::Balance::from_state(proj.available, canonical_state.hash),
+            );
+        }
+    }
+
     if ctx.is_sender {
         let token_id = if transfer.token_id.is_empty() {
             "ERA"
@@ -128,7 +153,7 @@ fn build_canonical_settled_state(
                 token_id,
                 transfer.amount,
                 canonical_state.hash,
-                canonical_state.state_number,
+                canonical_state.hash[0] as u64,
             )?;
         } else {
             token_state::apply_transfer_debit(
@@ -138,7 +163,7 @@ fn build_canonical_settled_state(
                 token_id,
                 transfer.amount,
                 canonical_state.hash,
-                canonical_state.state_number,
+                canonical_state.hash[0] as u64,
             )?;
         }
     } else {
@@ -155,19 +180,18 @@ fn build_canonical_settled_state(
             token_id,
             transfer.amount,
             canonical_state.hash,
-            canonical_state.state_number,
+            canonical_state.hash[0] as u64,
         )?;
     }
 
     // Advance device state_number for the settled state.
-    settled_state.state_number = canonical_state.state_number + 1;
+    settled_state.hash[0] as u64 = canonical_state.hash[0] as u64 + 1;
 
     settled_state.hash = settled_state
         .compute_hash()
         .map_err(|e| format!("settlement hash recompute failed: {e}"))?;
 
     // Sync balance projection so balance.list reflects the updated balance.
-    let local_txt = encode_base32_crockford(&ctx.local_device_id);
     let locked = crate::storage::client_db::get_locked_balance(&local_txt, token_for_policy)
         .map_err(|e| format!("read locked balance failed: {e}"))?;
     let projection = crate::storage::client_db::build_balance_projection_from_state(
@@ -270,7 +294,7 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
                 log::info!(
                     "[BILATERAL][settle] canonical_state=Some hash={} state_number={} era_balance={}",
                     encode_base32_crockford(&state.hash),
-                    state.state_number,
+                    state.hash[0] as u64,
                     era_balance
                 );
             }
@@ -398,7 +422,7 @@ mod tests {
     fn parse_transfer_fields_returns_canonical_dbtc() {
         let op = Operation::Transfer {
             to_device_id: vec![0x11; 32],
-            amount: Balance::from_state(5, [0u8; 32], 0),
+            amount: Balance::from_state(5, [0u8; 32]),
             token_id: b"DBTC".to_vec(),
             mode: TransactionMode::Bilateral,
             nonce: vec![],
@@ -420,7 +444,7 @@ mod tests {
         let recipient_owner = vec![0x42; 64];
         let op = Operation::Transfer {
             to_device_id: vec![0x11; 32],
-            amount: Balance::from_state(7, [0u8; 32], 0),
+            amount: Balance::from_state(7, [0u8; 32]),
             token_id: b"ERA".to_vec(),
             mode: TransactionMode::Bilateral,
             nonce: vec![],

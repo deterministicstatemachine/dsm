@@ -91,7 +91,7 @@ pub struct ExtendedRelationshipContext {
     pub counterparty_id: String,
 
     /// Current state number of the counterparty in this relationship
-    pub counterparty_state_number: u64,
+    pub 
 
     /// Public key of the counterparty for verification
     pub counterparty_public_key: Vec<u8>,
@@ -806,7 +806,7 @@ impl IdentitySDK {
         let mut entropy_hasher = dsm_domain_hasher("DSM/identity-entropy-derive");
         entropy_hasher.update(&current_state.entropy);
         entropy_hasher.update(&operation_bytes);
-        entropy_hasher.update(&(current_state.state_number + 1).to_le_bytes());
+        entropy_hasher.update(&(current_state.hash[0] as u64 + 1).to_le_bytes());
         let next_entropy = entropy_hasher.finalize();
 
         // Create parameters for pre-commitment
@@ -1028,9 +1028,9 @@ impl IdentitySDK {
         })?;
 
         let context = ExtendedRelationshipContext {
-            entity_state_number: current_state.state_number,
+            entity_state_number: current_state.hash[0] as u64,
             counterparty_id: counterparty_id.to_string(),
-            counterparty_state_number: 0, // Initial state
+             // Initial state
             counterparty_public_key,
             current_state_hash: current_state.hash.to_vec(),
             state_sequence: vec![current_state.hash.to_vec()],

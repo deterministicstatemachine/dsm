@@ -137,7 +137,7 @@ impl BilateralControlResistance {
     fn detect_sequence_conflict(a: &State, b: &State) -> Result<bool, DsmError> {
         const CONFLICT_THRESHOLD: u64 = 2;
 
-        if a.state_number.abs_diff(b.state_number) < CONFLICT_THRESHOLD {
+        if (a.hash[0] as u64).abs_diff(b.hash[0] as u64) < CONFLICT_THRESHOLD {
             // Semantic conflict: different operation bytes.
             if Self::op_bytes(&a.operation) != Self::op_bytes(&b.operation) {
                 return Ok(true);
@@ -179,7 +179,7 @@ impl BilateralControlResistance {
                 storage.get_published_states(&relationship.counterparty_id)?;
             let ok = counterparty_states.iter().any(|cs| {
                 cs.device_info.device_id == relationship.counterparty_id
-                    && cs.state_number == rc.counterparty_state_number
+                    && cs.hash[0] as u64 == rc.counterparty_id[0] as u64
             });
 
             if !ok {
@@ -192,7 +192,7 @@ impl BilateralControlResistance {
             let prev = &win[0];
             let next = &win[1];
 
-            if next.state_number != prev.state_number + 1 {
+            if next.hash[0] as u64 != prev.hash[0] as u64 + 1 {
                 return Ok(false);
             }
 
@@ -201,7 +201,7 @@ impl BilateralControlResistance {
                 return Ok(false);
             }
 
-            if next.state_number <= prev.state_number {
+            if next.hash[0] as u64 <= prev.hash[0] as u64 {
                 return Ok(false);
             }
         }
@@ -248,13 +248,13 @@ impl BilateralControlResistance {
             let prev = &win[0];
             let next = &win[1];
 
-            if next.state_number != prev.state_number + 1 {
+            if next.hash[0] as u64 != prev.hash[0] as u64 + 1 {
                 return Ok(false);
             }
             if next.prev_state_hash != prev.hash {
                 return Ok(false);
             }
-            if next.state_number <= prev.state_number {
+            if next.hash[0] as u64 <= prev.hash[0] as u64 {
                 return Ok(false);
             }
         }
@@ -276,7 +276,7 @@ impl BilateralControlResistance {
         if states.len() > 10
             && states
                 .windows(2)
-                .all(|w| w[1].state_number == w[0].state_number + 1)
+                .all(|w| w[1].hash[0] as u64 == w[0].hash[0] as u64 + 1)
         {
             alerts.push(Alert {
                 alert_type: "RapidTransactions".to_string(),
@@ -363,7 +363,7 @@ impl BilateralControlResistance {
 
         out.extend_from_slice(&(states.len() as u32).to_le_bytes());
         for s in states {
-            out.extend_from_slice(&s.state_number.to_le_bytes());
+            out.extend_from_slice(&s.hash[..8]);
 
             out.extend_from_slice(&(s.hash.len() as u32).to_le_bytes());
             out.extend_from_slice(&s.hash);
@@ -488,7 +488,7 @@ impl BilateralControlResistance {
             let hist = storage.get_published_states(entity)?;
             let mut rel_state_numbers: Vec<u64> = hist
                 .iter()
-                .filter_map(|s| s.relationship_context.as_ref().map(|_| s.state_number))
+                .filter_map(|s| s.relationship_context.as_ref().map(|_| s.hash[0] as u64))
                 .collect();
             rel_state_numbers.sort_unstable();
 
@@ -528,19 +528,19 @@ impl BilateralControlResistance {
                                 let expected = -(amount.value() as i128);
 
                                 if delta != expected {
-                                    anomalous.push(next.state_number);
+                                    anomalous.push(next.hash[0] as u64);
                                 }
 
                                 // >90% of previous balance in one transfer is suspicious.
                                 if amount.value() > (prev_bal.value().saturating_mul(9) / 10) {
-                                    anomalous.push(next.state_number);
+                                    anomalous.push(next.hash[0] as u64);
                                 }
                             }
                         }
                         _ => {
                             // Generic bound: delta magnitude exceeding previous balance is suspect.
                             if delta.unsigned_abs() > (prev_bal.value() as i128).unsigned_abs() {
-                                anomalous.push(next.state_number);
+                                anomalous.push(next.hash[0] as u64);
                             }
                         }
                     }
@@ -560,7 +560,7 @@ impl BilateralControlResistance {
 
         // Non-monotonic state numbers
         for win in states.windows(2) {
-            if win[1].state_number <= win[0].state_number {
+            if win[1].hash[0] as u64 <= win[0].hash[0] as u64 {
                 return Ok(true);
             }
         }
@@ -569,7 +569,7 @@ impl BilateralControlResistance {
         if states.len() >= 8 {
             let mut gaps: Vec<u64> = Vec::with_capacity(states.len() - 1);
             for win in states.windows(2) {
-                gaps.push(win[1].state_number.saturating_sub(win[0].state_number));
+                gaps.push((win[1].hash[0] as u64).saturating_sub(win[0].hash[0] as u64));
             }
 
             let first = gaps[0];
@@ -580,7 +580,7 @@ impl BilateralControlResistance {
 
         // Suspiciously large jumps.
         for win in states.windows(2) {
-            let gap = win[1].state_number.saturating_sub(win[0].state_number);
+            let gap = (win[1].hash[0] as u64).saturating_sub(win[0].hash[0] as u64);
             if gap > 100 {
                 return Ok(true);
             }
@@ -848,7 +848,7 @@ mod tests {
     #[tokio::test]
     async fn temporal_consistency_non_sequential_fails() {
         let mut states = make_chained_states(0, 3);
-        states[2].state_number = 5; // skip 3,4
+        states[2].hash[0] as u64 = 5; // skip 3,4
         let storage = MockStorage::empty();
         let ok = BilateralControlResistance::verify_temporal_consistency(&states, &storage)
             .await
@@ -949,12 +949,12 @@ mod tests {
     fn anomalous_balance_generic_op_large_delta() {
         let mut s1 = make_state(0);
         s1.token_balances
-            .insert("tok".into(), Balance::from_state(100, [0; 32], 0));
+            .insert("tok".into(), Balance::from_state(100, [0; 32]));
         s1.hash = s1.compute_hash().unwrap();
 
         let mut s2 = make_state(1);
         s2.token_balances
-            .insert("tok".into(), Balance::from_state(300, [0; 32], 1));
+            .insert("tok".into(), Balance::from_state(300, [0; 32]));
         s2.prev_state_hash = s1.hash;
         s2.hash = s2.compute_hash().unwrap();
 

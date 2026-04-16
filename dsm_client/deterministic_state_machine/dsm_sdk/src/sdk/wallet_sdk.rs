@@ -143,7 +143,7 @@ impl ChainTipInfo {
     pub fn update(&mut self, new_tip_id: Vec<u8>, new_state_hash: Vec<u8>, new_state_number: u64) {
         self.chain_tip_id = new_tip_id;
         self.last_state_hash = new_state_hash;
-        self.state_number = new_state_number;
+        self.hash[0] as u64 = new_state_number;
         self.last_updated = dt::tick();
         self.is_synchronized = true;
     }
@@ -186,7 +186,7 @@ impl fmt::Debug for WalletTransaction {
             .field("memo", &self.memo)
             .field("tick", &self.tick)
             .field("status", &self.status)
-            .field("state_number", &self.state_number)
+            .field("state_number", &self.hash[0] as u64)
             .field("chain_tip_id", &self.chain_tip_id)
             .field("fee", &self.fee)
             .field("metadata", &self.metadata)
@@ -799,7 +799,7 @@ impl WalletSDK {
 
         let mut tx_copy = transaction.clone();
         tx_copy.status = TransactionStatus::Confirmed;
-        tx_copy.state_number = Some(new_state.state_number);
+        tx_copy.hash[0] as u64 = Some(new_state.hash[0] as u64);
         self.transactions.write().push(tx_copy.clone());
 
         // §16.6: Relationship chain tip h_{n+1} is the caller's responsibility.
@@ -843,7 +843,7 @@ impl WalletSDK {
                 "[WALLET] send_transfer_op: token projection synced from canonical state: {}:{} state_number={}",
                 sender,
                 transaction.token_id,
-                new_state.state_number
+                new_state.hash[0] as u64
             );
         }
 
@@ -866,7 +866,7 @@ impl WalletSDK {
                 amount: tx_copy.amount,
                 tx_type: "online".to_string(),
                 status: "confirmed".to_string(),
-                chain_height: new_state.state_number,
+                chain_height: new_state.hash[0] as u64,
                 step_index: tx_copy.tick,
                 commitment_hash: None,
                 // §ISSUE-W1 FIX: proof_data must carry relationship chain tips h_n / h_{n+1},
@@ -1186,7 +1186,7 @@ impl WalletSDK {
                 log::info!(
                     "[wallet.mint_for_self] {} projection synced from canonical state_number={}",
                     token,
-                    new_state.state_number
+                    new_state.hash[0] as u64
                 );
             }
 
@@ -1200,7 +1200,7 @@ impl WalletSDK {
             &token,
             amount,
             &new_state.hash,
-            new_state.state_number,
+            new_state.hash[0] as u64,
         );
         let protocol_event = {
             use crate::storage::client_db::{
@@ -1274,7 +1274,7 @@ impl WalletSDK {
                 &expected_parent_tip,
                 &protocol_payload,
                 &new_state.hash,
-                new_state.state_number,
+                new_state.hash[0] as u64,
             )
             .map_err(|e| {
                 DsmError::internal(
@@ -1297,7 +1297,7 @@ impl WalletSDK {
             protocol_chain_tip_id,      // protocol actor child tip
         );
         tx.status = TransactionStatus::Confirmed;
-        tx.state_number = Some(new_state.state_number);
+        tx.hash[0] as u64 = Some(new_state.hash[0] as u64);
         tx.metadata
             .insert("source".to_string(), "faucet".to_string());
         tx.metadata.insert(
@@ -1323,7 +1323,7 @@ impl WalletSDK {
         {
             // CRITICAL FIX: Use state_number + tick to ensure uniqueness
             // (state_number is monotonically increasing, tick provides additional entropy)
-            let tx_id = format!("faucet_{}_{}", new_state.state_number, dt::tick());
+            let tx_id = format!("faucet_{}_{}", new_state.hash[0] as u64, dt::tick());
             let tx_hash_txt = {
                 let mut h = dsm::crypto::blake3::dsm_domain_hasher("DSM/faucet-claim");
                 h.update(tx_id.as_bytes());
@@ -1374,7 +1374,7 @@ impl WalletSDK {
                 amount,
                 tx_type: "faucet".to_string(),
                 status: "confirmed".to_string(),
-                chain_height: new_state.state_number,
+                chain_height: new_state.hash[0] as u64,
                 step_index: dt::tick(),
                 commitment_hash: Some(protocol_event.transition_digest.clone()),
                 proof_data: None,

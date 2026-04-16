@@ -115,7 +115,7 @@ fn seed_device_state(
     let mut balances = std::collections::HashMap::new();
     balances.insert(
         balance_key,
-        Balance::from_state(balance_amount, [0u8; 32], 0),
+        Balance::from_state(balance_amount, [0u8; 32]),
     );
 
     let mut state = StateBuilder::new()
@@ -566,7 +566,7 @@ async fn execute_bilateral_transfer(
     amount: u64,
     token_id: &[u8],
 ) -> [u8; 32] {
-    let balance = Balance::from_state(amount, [1u8; 32], 0);
+    let balance = Balance::from_state(amount, [1u8; 32]);
     let transfer_op = Operation::Transfer {
         to_device_id: receiver_dev.to_vec(),
         amount: balance,
@@ -754,7 +754,7 @@ async fn sender_restart_recovers_persisted_confirm_and_realigns_chain_tips() {
 
     let transfer_op = Operation::Transfer {
         to_device_id: s.b_dev.to_vec(),
-        amount: Balance::from_state(7, [1u8; 32], 0),
+        amount: Balance::from_state(7, [1u8; 32]),
         token_id: b"ERA".to_vec(),
         mode: dsm::types::operations::TransactionMode::Bilateral,
         nonce: vec![9u8; 8],

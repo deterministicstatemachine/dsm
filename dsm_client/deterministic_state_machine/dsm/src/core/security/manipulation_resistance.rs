@@ -53,8 +53,8 @@ impl ManipulationResistance {
                 }
 
                 // Verify state numbers are correctly sequenced (both should be current + 1)
-                if state_a.state_number != current_state.state_number + 1
-                    || state_b.state_number != current_state.state_number + 1
+                if state_a.hash[0] as u64 != current_state.hash[0] as u64 + 1
+                    || state_b.hash[0] as u64 != current_state.hash[0] as u64 + 1
                 {
                     return Ok(false);
                 }
@@ -184,7 +184,7 @@ impl ManipulationResistance {
 
             // Enforce commitment binding semantics:
             // - State number must be >= min_state_number
-            if state.state_number < prev_commitment.min_state_number {
+            if 0u64 < prev_commitment.min_state_number {
                 return Ok(false);
             }
 
@@ -214,7 +214,7 @@ impl ManipulationResistance {
     /// Verify state transition follows valid rules
     fn verify_state_transition_rules(current: &State, next: &State) -> Result<bool, DsmError> {
         // Verify state number increments
-        if next.state_number != current.state_number + 1 {
+        if next.hash[0] as u64 != current.hash[0] as u64 + 1 {
             return Ok(false);
         }
 
@@ -274,7 +274,7 @@ impl ManipulationResistance {
         // Serialize operation for deterministic hashing
         // Use canonical bytes for operation
         hasher.update(&next.operation.to_bytes());
-        hasher.update(&next.state_number.to_le_bytes());
+        hasher.update(&next.hash[..8]);
 
         let expected_entropy = hasher.finalize().as_bytes().to_vec();
 
@@ -369,7 +369,7 @@ impl ManipulationResistance {
         signature_data.extend_from_slice(&next.prev_state_hash);
         // Canonical operation bytes
         signature_data.extend_from_slice(&next.operation.to_bytes());
-        signature_data.extend_from_slice(&next.state_number.to_le_bytes());
+        signature_data.extend_from_slice(&next.hash[..8]);
         signature_data.extend_from_slice(&next.entropy);
 
         let data_hash = crate::crypto::blake3::domain_hash("DSM/sig-data", &signature_data);
@@ -406,7 +406,7 @@ impl ManipulationResistance {
         }
 
         // Verify signature temporal validity (using state numbers as proxy for time)
-        let state_gap = next.state_number.saturating_sub(current.state_number);
+        let state_gap = (next.hash[0] as u64).saturating_sub(current.hash[0] as u64);
 
         // Reject signatures with excessive state number gaps (proxy for temporal distance)
         const MAX_STATE_GAP: u64 = 100; // Maximum allowed gap between states
@@ -463,7 +463,7 @@ mod tests {
     fn make_transfer_op(amount: u64, recipient: &[u8], token_id: &[u8]) -> Operation {
         Operation::Transfer {
             to_device_id: recipient.to_vec(),
-            amount: Balance::from_state(amount, [0; 32], 0),
+            amount: Balance::from_state(amount, [0; 32]),
             token_id: token_id.to_vec(),
             mode: TransactionMode::Unilateral,
             nonce: vec![0x01; 16],
@@ -510,7 +510,7 @@ mod tests {
         let mut current = make_state(5);
         current
             .token_balances
-            .insert("tok".into(), Balance::from_state(100, [0; 32], 5));
+            .insert("tok".into(), Balance::from_state(100, [0; 32]));
         current.hash = current.compute_hash().unwrap();
 
         let mut proposed = make_state(6);
@@ -527,7 +527,7 @@ mod tests {
         let mut current = make_state(5);
         current
             .token_balances
-            .insert("tok".into(), Balance::from_state(100, [0; 32], 5));
+            .insert("tok".into(), Balance::from_state(100, [0; 32]));
         current.hash = current.compute_hash().unwrap();
 
         let mut proposed_a = make_state(6);
@@ -554,7 +554,7 @@ mod tests {
         let mut current = make_state(5);
         current
             .token_balances
-            .insert("tok".into(), Balance::from_state(100, [0; 32], 5));
+            .insert("tok".into(), Balance::from_state(100, [0; 32]));
         current.hash = current.compute_hash().unwrap();
 
         let mut proposed_a = make_state(6);
@@ -646,12 +646,12 @@ mod tests {
         let mut current = make_state(5);
         current
             .token_balances
-            .insert("tok".into(), Balance::from_state(100, [0; 32], 5));
+            .insert("tok".into(), Balance::from_state(100, [0; 32]));
         current.hash = current.compute_hash().unwrap();
 
         let mut next = make_state(6);
         next.token_balances
-            .insert("tok".into(), Balance::from_state(100, [0; 32], 6));
+            .insert("tok".into(), Balance::from_state(100, [0; 32]));
         next.prev_state_hash = current.hash;
 
         let result =
@@ -664,12 +664,12 @@ mod tests {
         let mut current = make_state(5);
         current
             .token_balances
-            .insert("tok".into(), Balance::from_state(100, [0; 32], 5));
+            .insert("tok".into(), Balance::from_state(100, [0; 32]));
         current.hash = current.compute_hash().unwrap();
 
         let mut next = make_state(6);
         next.token_balances
-            .insert("tok".into(), Balance::from_state(200, [0; 32], 6));
+            .insert("tok".into(), Balance::from_state(200, [0; 32]));
         next.prev_state_hash = current.hash;
 
         let result =
@@ -684,7 +684,7 @@ mod tests {
         let mut current = make_state(5);
         current
             .token_balances
-            .insert("tok".into(), Balance::from_state(50, [0; 32], 5));
+            .insert("tok".into(), Balance::from_state(50, [0; 32]));
 
         let mut next = make_state(6);
         next.operation = Operation::AddRelationship {
@@ -697,7 +697,7 @@ mod tests {
             message: "test".into(),
         };
         next.token_balances
-            .insert("tok".into(), Balance::from_state(50, [0; 32], 6));
+            .insert("tok".into(), Balance::from_state(50, [0; 32]));
 
         let result = ManipulationResistance::verify_balance_conservation(&current, &next).unwrap();
         assert!(result);
@@ -708,7 +708,7 @@ mod tests {
         let mut current = make_state(5);
         current
             .token_balances
-            .insert("tok".into(), Balance::from_state(50, [0; 32], 5));
+            .insert("tok".into(), Balance::from_state(50, [0; 32]));
 
         let mut next = make_state(6);
         next.operation = Operation::AddRelationship {
@@ -721,7 +721,7 @@ mod tests {
             message: "test".into(),
         };
         next.token_balances
-            .insert("tok".into(), Balance::from_state(999, [0; 32], 6));
+            .insert("tok".into(), Balance::from_state(999, [0; 32]));
 
         let result = ManipulationResistance::verify_balance_conservation(&current, &next).unwrap();
         assert!(!result);

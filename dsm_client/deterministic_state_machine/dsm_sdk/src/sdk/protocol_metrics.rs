@@ -952,12 +952,12 @@ impl ProtocolMetricsManager {
             let curr_state = &states[i];
 
             // Verify state number continuity
-            if curr_state.state_number != prev_state.state_number + 1 {
+            if curr_state.hash[0] as u64 != prev_state.hash[0] as u64 + 1 {
                 verified = false;
                 error_message = format!(
                     "State number discontinuity: {prev_num} -> {curr_num}",
-                    prev_num = prev_state.state_number,
-                    curr_num = curr_state.state_number
+                    prev_num = prev_state.hash[0] as u64,
+                    curr_num = curr_state.hash[0] as u64
                 );
                 break;
             }
@@ -968,8 +968,8 @@ impl ProtocolMetricsManager {
                 verified = false;
                 error_message = format!(
                     "Hash chain broken between states {prev_num} and {curr_num}",
-                    prev_num = prev_state.state_number,
-                    curr_num = curr_state.state_number
+                    prev_num = prev_state.hash[0] as u64,
+                    curr_num = curr_state.hash[0] as u64
                 );
                 break;
             }

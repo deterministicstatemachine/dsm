@@ -64,10 +64,12 @@ pub struct MerkleProofParams {
 ///
 /// Collects all required and optional inputs for constructing a new state node
 /// in the hash chain. Uses the builder-style `with_*` methods for optional fields.
+///
+/// Per whitepaper §4.3, no counter/height/timestamp participates in acceptance
+/// predicates. State identity comes from hash adjacency (`prev_state_hash`) and
+/// per-transition entropy (§11 eq. 14), not a monotonic counter.
 #[derive(Clone, Debug)]
 pub struct StateParams {
-    /// Monotonically increasing sequence number for this state.
-    pub state_number: u64,
     /// Entropy value evolved deterministically across state transitions.
     pub entropy: Vec<u8>,
     /// ML-KEM-768 encapsulated entropy for post-quantum key exchange.
@@ -119,13 +121,11 @@ pub struct StateParams {
 impl StateParams {
     /// Create a new state parameters object
     pub fn new(
-        state_number: u64,
         entropy: Vec<u8>,
         operation: Operation,
         device_info: DeviceInfo,
     ) -> Self {
         Self {
-            state_number,
             entropy,
             encapsulated_entropy: None,
             prev_state_hash: [0u8; 32],
@@ -308,16 +308,17 @@ impl DeviceInfo {
 /// Represents the core state structure as defined in the whitepaper.
 /// Each state forms a node in the straight hash chain, containing all
 /// necessary data to cryptographically bind it to its predecessor.
+///
+/// Per §4.3, no counter/height/timestamp participates in acceptance predicates.
+/// State identity comes from `prev_state_hash` (hash adjacency, §2.1 eq. 1) and
+/// fresh per-transition entropy (§11 eq. 14).
 #[derive(Clone, Debug, Default)]
 #[allow(dead_code)]
 pub struct State {
-    /// Unique identifier for this state, typically using the format "state_{state_number}"
+    /// Unique identifier for this state (opaque label; not in hash).
     pub id: String,
 
-    /// State sequence number, monotonically increasing as per whitepaper Section 6.1
-    pub state_number: u64,
-
-    /// Current entropy value, evolved deterministically as per whitepaper Section 6
+    /// Current entropy value, evolved deterministically as per whitepaper §11.
     pub entropy: Vec<u8>,
 
     /// Cryptographic hash of this state
@@ -427,8 +428,7 @@ impl State {
     pub fn new(params: StateParams) -> Self {
         let public_key = params.device_info.public_key.clone();
         Self {
-            id: format!("state_{}", params.state_number),
-            state_number: params.state_number,
+            id: String::new(),
             entropy: params.entropy,
             hash: [0u8; 32], // Will be computed after construction
             prev_state_hash: params.prev_state_hash,
@@ -455,7 +455,7 @@ impl State {
         }
     }
 
-    /// Create a new genesis state (state_number = 0)
+    /// Create a new genesis state.
     ///
     /// # Arguments
     /// * `initial_entropy` - Initial entropy for the genesis state
@@ -477,7 +477,6 @@ impl State {
 
         Self {
             id: "genesis".to_string(),
-            state_number: 0,
             entropy: initial_entropy.to_vec(),
             hash: [0u8; 32],
             prev_state_hash: [0u8; 32],
@@ -506,19 +505,18 @@ impl State {
 
     /// Attach a bilateral relationship context to this state.
     ///
-    /// Binds this state to a counterparty for bilateral state tracking,
-    /// recording both parties' identifiers, state numbers, and public keys.
+    /// Binds this state to a counterparty for bilateral state tracking by
+    /// recording both parties' identifiers and public keys. Per §4.3, no
+    /// counter is involved in bilateral acceptance — ordering comes from
+    /// per-relationship chain tip adjacency.
     pub fn with_relationship_context(
         mut self,
         counterparty_id: [u8; 32],
-        counterparty_state_number: u64,
         counterparty_public_key: Vec<u8>,
     ) -> Self {
         self.relationship_context = Some(RelationshipContext {
             entity_id: self.device_info.device_id,
-            entity_state_number: self.state_number,
             counterparty_id,
-            counterparty_state_number,
             counterparty_public_key,
             relationship_hash: Vec::new(),
             active: true,
@@ -532,7 +530,6 @@ impl State {
     pub fn with_relationship_context_and_chain_tip(
         mut self,
         counterparty_id: [u8; 32],
-        counterparty_state_number: u64,
         counterparty_public_key: Vec<u8>,
         chain_tip_id: String,
     ) -> Self {
@@ -542,11 +539,6 @@ impl State {
             counterparty_public_key,
             chain_tip_id,
         ));
-        // Update state numbers in the context
-        if let Some(ref mut ctx) = self.relationship_context {
-            ctx.entity_state_number = self.state_number;
-            ctx.counterparty_state_number = counterparty_state_number;
-        }
         self
     }
 
@@ -559,13 +551,6 @@ impl State {
                     == *domain_hash("DSM/device-id", counterparty_id.as_bytes()).as_bytes()
             })
             .unwrap_or(false)
-    }
-
-    /// Return the counterparty's state number if a relationship context exists.
-    pub fn get_counterparty_state(&self) -> Option<u64> {
-        self.relationship_context
-            .as_ref()
-            .map(|ctx| ctx.counterparty_state_number)
     }
 
     /// Returns `true` if this state is a genesis state (has the `Recovered` flag).
@@ -606,12 +591,16 @@ impl State {
         self.compute_hash()
     }
 
-    /// Compute the hash of this state
+    /// Compute the canonical hash of this state per §4.2.1.
+    ///
+    /// Per §4.3, no counter/height/timestamp is included. Ordering is by hash
+    /// adjacency via `prev_state_hash` (§2.1 eq. 1). Per-transition entropy
+    /// (§11 eq. 14) makes state identity unique even when field values
+    /// round-trip.
     pub fn compute_hash(&self) -> Result<[u8; 32], DsmError> {
         let mut hasher = dsm_domain_hasher("DSM/state-hash");
 
-        // Core state properties in deterministic order
-        hasher.update(&self.state_number.to_le_bytes());
+        // Core state properties in deterministic order. No counter.
         hasher.update(&self.prev_state_hash);
         hasher.update(&self.entropy);
 
@@ -671,10 +660,10 @@ impl State {
         self.counterparty_sig.as_ref()
     }
 
-    /// Compute the pre-finalization hash that excludes token balances
+    /// Compute the pre-finalization hash that excludes token balances.
+    /// Per §4.3, no counter is included.
     pub fn pre_finalization_hash(&self) -> Result<Vec<u8>, DsmError> {
         let mut hasher = dsm_domain_hasher("DSM/pre-finalization");
-        hasher.update(&self.state_number.to_le_bytes());
         hasher.update(&self.entropy);
         hasher.update(&self.prev_state_hash);
         hasher.update(&self.operation.to_bytes());
@@ -710,113 +699,6 @@ impl State {
         Ok(domain_hash("DSM/balance-commit", &balance_data)
             .as_bytes()
             .to_vec())
-    }
-
-    /// Get the value of this sparse index
-    ///
-    /// # Returns
-    /// * `u64` - Deterministic value derived from the indices
-    pub fn value(&self) -> u64 {
-        // Hash all indices together to get a deterministic value
-        let mut hasher = dsm_domain_hasher("DSM/sparse-idx");
-        let mut sorted_indices: Vec<usize> = self
-            .sparse_index
-            .indices
-            .iter()
-            .map(|&x| x as usize)
-            .collect();
-        sorted_indices.sort(); // Sort indices for deterministic ordering
-        hasher.update(&self.state_number.to_le_bytes());
-
-        // Sort for deterministic ordering
-
-        for idx in sorted_indices {
-            hasher.update(&idx.to_le_bytes());
-        }
-
-        hasher.finalize().as_bytes()[0..8]
-            .try_into()
-            .map(u64::from_le_bytes)
-            .unwrap_or(0)
-    }
-
-    /// Validate sparse index integrity
-    ///
-    /// This ensures that sparse indices correctly map to the state numbers
-    /// as described in whitepaper Section 3.2.
-    ///
-    /// # Arguments
-    /// * `state_number` - The state number this sparse index should be valid for
-    ///
-    /// # Returns
-    /// * `Result<bool, DsmError>` - True if the sparse index is valid for the state number
-    pub fn validate_for_state_number(
-        &self,
-        state_number: u64,
-    ) -> Result<bool, crate::types::error::DsmError> {
-        let expected_indices = Self::calculate_sparse_indices(state_number)?;
-        Ok(expected_indices == self.sparse_index.indices)
-    }
-
-    /// Calculate sparse indices for a given state number as described in whitepaper Section 3.2
-    ///
-    /// This implementation follows the mathematical model from whitepaper Section 3.2,
-    /// creating a logarithmic set of reference points for efficient state traversal.
-    /// Critical references (genesis and direct predecessor) are guaranteed to be included
-    /// for consistent hash chain verification.
-    ///
-    /// # Arguments
-    /// * `state_number` - State number to calculate indices for
-    ///
-    /// # Returns
-    /// * `Result<Vec<u64>, DsmError>` - Calculated indices
-    pub fn calculate_sparse_indices(state_number: u64) -> Result<Vec<u64>, DsmError> {
-        // First, calculate basic sparse indices using powers of 2 algorithm
-        let mut indices = Self::calculate_basic_sparse_indices(state_number)?;
-
-        // Critical reference guarantee: Always include genesis state (0)
-        if state_number > 0 && !indices.contains(&0) {
-            indices.push(0);
-        }
-
-        // Critical reference guarantee: Always include direct predecessor
-        if state_number > 0 && !indices.contains(&state_number.saturating_sub(1)) {
-            indices.push(state_number.saturating_sub(1));
-        }
-
-        // Ensure deterministic ordering for verification consistency
-        indices.sort_unstable();
-        indices.dedup();
-
-        Ok(indices)
-    }
-
-    /// Calculate basic sparse indices using powers of 2 distance algorithm
-    ///
-    /// This implements the power-of-2 checkpoint mechanism described in whitepaper Section 3.2,
-    /// providing logarithmic-complexity state traversal.
-    ///
-    /// # Arguments
-    /// * `state_number` - State number to calculate indices for
-    ///
-    /// # Returns
-    /// * `Result<Vec<u64>, DsmError>` - Calculated basic indices
-    fn calculate_basic_sparse_indices(state_number: u64) -> Result<Vec<u64>, DsmError> {
-        if state_number == 0 {
-            return Ok(Vec::new());
-        }
-
-        let mut indices = Vec::new();
-        let mut power = 0;
-
-        // Generate power-of-2 distance references
-        while (1 << power) <= state_number {
-            let idx = state_number - (1 << power);
-            indices.push(idx);
-            power += 1;
-        }
-
-        Ok(indices)
     }
 
     /// Set the forward commitment for this state
@@ -868,21 +750,23 @@ impl State {
         self.operation.to_bytes()
     }
 
-    /// Convert state to bytes for hashing and transmission
+    /// Convert state to bytes for hashing and transmission.
+    ///
+    /// Per §4.3, no counter participates in canonical encoding. Ordering is
+    /// via `prev_state_hash` (§2.1 eq. 1).
     ///
     /// # Returns
     /// * `Result<Vec<u8>, DsmError>` - Serialized state bytes
     pub fn to_bytes(&self) -> Result<Vec<u8>, DsmError> {
         // Canonical deterministic encoding for State (transport-agnostic; not protobuf)
-        use crate::types::serialization::{put_bytes, put_str, put_u32, put_u64, put_u8};
+        use crate::types::serialization::{put_bytes, put_str, put_u32, put_u8};
 
         let mut out = Vec::new();
 
         // Version tag for future evolution
         put_u8(&mut out, 1);
 
-        // Core fields
-        put_u64(&mut out, self.state_number);
+        // Core fields. No counter.
         put_bytes(&mut out, &self.prev_state_hash);
         put_bytes(&mut out, &self.entropy);
 
@@ -933,10 +817,6 @@ impl State {
         Ok(out)
     }
 
-    /// Return the number of state transitions that have occurred (equal to `state_number`).
-    pub fn transition_count(&self) -> u64 {
-        self.state_number
-    }
 }
 
 impl CanonicalEncode for State {
@@ -2600,19 +2480,16 @@ impl IdentityAnchor {
 
 /// Context for bilateral relationship state tracking.
 ///
-/// Records both parties' identifiers, state numbers, and the current
-/// chain tip for a bilateral relationship, enabling cryptographic
-/// verification of relationship continuity across state transitions.
+/// Records both parties' identifiers and the current chain tip for a
+/// bilateral relationship, enabling cryptographic verification of
+/// relationship continuity across state transitions. Per §4.3, no state
+/// counters are tracked — ordering is by chain-tip hash adjacency.
 #[derive(Clone, Debug)]
 pub struct RelationshipContext {
     /// Device identifier of the local entity (32 bytes).
     pub entity_id: [u8; 32],
-    /// Current state number of the local entity.
-    pub entity_state_number: u64,
     /// Device identifier of the counterparty (32 bytes).
     pub counterparty_id: [u8; 32],
-    /// Current state number of the counterparty.
-    pub counterparty_state_number: u64,
     /// SPHINCS+ public key of the counterparty.
     pub counterparty_public_key: Vec<u8>,
     /// BLAKE3 hash binding the relationship.
@@ -2634,9 +2511,7 @@ impl RelationshipContext {
     ) -> Self {
         Self {
             entity_id,
-            entity_state_number: 0,
             counterparty_id,
-            counterparty_state_number: 0,
             counterparty_public_key,
             relationship_hash: Vec::new(),
             active: true,
@@ -2654,9 +2529,7 @@ impl RelationshipContext {
     ) -> Self {
         Self {
             entity_id,
-            entity_state_number: 0,
             counterparty_id,
-            counterparty_state_number: 0,
             counterparty_public_key,
             relationship_hash: Vec::new(),
             active: true,

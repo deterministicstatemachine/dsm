@@ -119,7 +119,7 @@ impl DualModeVerifier {
         next_state: &StateTypesState,
     ) -> Result<bool, DsmError> {
         // 1. Verify state number monotonically increases
-        if next_state.state_number != current_state.state_number + 1 {
+        if next_state.hash[0] as u64 != current_state.hash[0] as u64 + 1 {
             return Ok(false);
         }
 
@@ -311,7 +311,7 @@ impl DualModeVerifier {
         next_state: &StateTypesState,
     ) -> Result<bool, DsmError> {
         // Verify pre-commitment conditions are met using available commitment fields
-        if next_state.state_number != commitment.min_state_number + 1 {
+        if 0u64 != commitment.min_state_number + 1 {
             return Ok(false);
         }
 
@@ -366,7 +366,7 @@ mod tests {
         let mut state = State::new_genesis([0xAA; 32], di);
         state
             .token_balances
-            .insert("ERA".to_string(), Balance::from_state(1000, [0u8; 32], 0));
+            .insert("ERA".to_string(), Balance::from_state(1000, [0u8; 32]));
         state
     }
 
@@ -377,7 +377,7 @@ mod tests {
     ) -> StateTypesState {
         let di = make_device_info();
         let prev_hash = prev.hash().unwrap();
-        let mut params = StateParams::new(prev.state_number + 1, entropy, operation, di);
+        let mut params = StateParams::new(prev.hash[0] as u64 + 1, entropy, operation, di);
         params.prev_state_hash = prev_hash;
         let mut s = State::new(params);
         s.token_balances = prev.token_balances.clone();
@@ -408,7 +408,7 @@ mod tests {
     fn verify_transition_rejects_wrong_prev_hash() {
         let current = make_genesis();
         let di = make_device_info();
-        let mut params = StateParams::new(1, vec![0xCC; 32], Operation::Noop, di);
+        let mut params = StateParams::new( vec![0xCC; 32], Operation::Noop, di);
         params.prev_state_hash = [0xFF; 32]; // wrong hash
         let mut next = State::new(params);
         next.token_balances = current.token_balances.clone();
@@ -466,7 +466,7 @@ mod tests {
         let current = make_genesis();
         let transfer = Operation::Transfer {
             to_device_id: vec![0x33; 32],
-            amount: Balance::from_state(10, [0u8; 32], 0),
+            amount: Balance::from_state(10, [0u8; 32]),
             token_id: b"ERA".to_vec(),
             mode: TransactionMode::Bilateral,
             nonce: vec![1],
@@ -488,7 +488,7 @@ mod tests {
         let current = make_genesis();
         let transfer = Operation::Transfer {
             to_device_id: vec![0x33; 32],
-            amount: Balance::from_state(10, [0u8; 32], 0),
+            amount: Balance::from_state(10, [0u8; 32]),
             token_id: b"ERA".to_vec(),
             mode: TransactionMode::Unilateral,
             nonce: vec![1],

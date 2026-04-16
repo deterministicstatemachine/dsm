@@ -848,7 +848,7 @@ impl LimboVault {
         encryption_public_key: &[u8],        // Kyber public key for content encryption (required)
         reference_state: &State,
     ) -> Result<LimboVaultDraft, DsmError> {
-        let state_number = reference_state.state_number;
+        let state_number = reference_state.hash[0] as u64;
         let ref_hash = resolved_reference_state_hash(reference_state)?;
 
         // Fix #2: Encode fulfillment condition early so its domain-hash can be bound
@@ -1560,7 +1560,7 @@ impl LimboVault {
         let final_hash = &hashes[hashes.len() - 1];
         let refh = reference_state.hash()?;
         let match_ref = secure_eq(final_hash, &refh);
-        let reach_ref = reference_state.state_number >= nums[nums.len() - 1];
+        let reach_ref = reference_state.hash[0] as u64 >= nums[nums.len() - 1];
 
         Ok(match_ref || reach_ref)
     }
@@ -1605,7 +1605,7 @@ impl LimboVault {
         }
 
         self.state = VaultState::Unlocked {
-            unlocked_state_number: reference_state.state_number,
+            unlocked_state_number: reference_state.hash[0] as u64,
             fulfillment_proof: Box::new(proof),
         };
         Ok(true)
@@ -1649,7 +1649,7 @@ impl LimboVault {
         }
 
         self.state = VaultState::Active {
-            activated_state_number: reference_state.state_number,
+            activated_state_number: reference_state.hash[0] as u64,
         };
         Ok(true)
     }
@@ -1687,7 +1687,7 @@ impl LimboVault {
         let mut claim_data = Vec::new();
         claim_data.extend_from_slice(self.id.as_bytes());
         claim_data.extend_from_slice(&self.parameters_hash);
-        claim_data.extend_from_slice(&reference_state.state_number.to_le_bytes());
+        claim_data.extend_from_slice(&reference_state.hash[..8]);
         claim_data.extend_from_slice(domain_hash("DSM/dlv-claim", &proof.to_bytes()).as_bytes());
         let claim_proof = domain_hash_bytes("DSM/dlv-claim", &claim_data).to_vec();
 
@@ -1701,7 +1701,7 @@ impl LimboVault {
 
         if is_dbtc_vault {
             self.state = VaultState::Claimed {
-                claimed_state_number: reference_state.state_number,
+                claimed_state_number: reference_state.hash[0] as u64,
                 claimant: claimant_secret_key.to_vec(),
                 claim_proof: claim_proof.clone(),
             };
@@ -1760,7 +1760,7 @@ impl LimboVault {
 
         // Transition to Claimed
         self.state = VaultState::Claimed {
-            claimed_state_number: reference_state.state_number,
+            claimed_state_number: reference_state.hash[0] as u64,
             claimant: claimant_secret_key.to_vec(), // record who claimed (key identity bytes)
             claim_proof: claim_proof.clone(),
         };
@@ -1813,7 +1813,7 @@ impl LimboVault {
         }
 
         self.state = VaultState::Invalidated {
-            invalidated_state_number: reference_state.state_number,
+            invalidated_state_number: reference_state.hash[0] as u64,
             reason: reason.to_string(),
             creator_signature: creator_signature.to_vec(),
         };
@@ -2621,7 +2621,7 @@ mod tests {
                 ref reason,
                 ref creator_signature,
             } => {
-                assert_eq!(invalidated_state_number, reference_state.state_number);
+                assert_eq!(invalidated_state_number, reference_state.hash[0] as u64);
                 assert_eq!(reason, "creator-requested");
                 assert_eq!(creator_signature, &expected_signature);
             }

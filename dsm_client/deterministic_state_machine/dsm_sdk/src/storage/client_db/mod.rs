@@ -377,9 +377,11 @@ fn create_schema(conn: &Connection) -> Result<()> {
             created_at  INTEGER NOT NULL
         );
 
+        -- Per §4.3 no state counter. Archive ordering uses sqlite's implicit
+        -- rowid (insertion order) combined with the explicit `prev_state_hash`
+        -- linkage for replay walking.
         CREATE TABLE IF NOT EXISTS bcr_states(
             device_id       BLOB NOT NULL,
-            state_number    INTEGER NOT NULL,
             state_hash      BLOB NOT NULL,
             prev_state_hash BLOB NOT NULL,
             state_bytes     BLOB NOT NULL,
@@ -387,9 +389,6 @@ fn create_schema(conn: &Connection) -> Result<()> {
             created_at      INTEGER NOT NULL,
             PRIMARY KEY (device_id, state_hash)
         );
-
-        CREATE INDEX IF NOT EXISTS idx_bcr_states_device_number
-            ON bcr_states(device_id, state_number);
 
         CREATE INDEX IF NOT EXISTS idx_bcr_states_device_published
             ON bcr_states(device_id, published);

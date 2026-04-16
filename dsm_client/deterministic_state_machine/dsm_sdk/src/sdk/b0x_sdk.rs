@@ -2452,11 +2452,7 @@ impl B0xSDK {
 
                                 let transfer_op = Operation::Transfer {
                                     to_device_id: transfer_req.to_device_id.clone(),
-                                    amount: dsm::types::token_types::Balance::from_state(
-                                        transfer_req.amount,
-                                        *balance_anchor.as_bytes(),
-                                        balance_tick,
-                                    ),
+                                    amount: dsm::types::token_types::Balance::from_state(transfer_req.amount, *balance_anchor.as_bytes()),
                                     token_id: if transfer_req.token_id.is_empty() {
                                         b"ERA".to_vec()
                                     } else {

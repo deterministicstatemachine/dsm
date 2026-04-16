@@ -36,7 +36,7 @@ fn dev(id: u8) -> [u8; 32] {
 fn make_transfer_op(to: [u8; 32], nonce: u8) -> Operation {
     Operation::Transfer {
         to_device_id: to.to_vec(),
-        amount: Balance::from_state(1, [1u8; 32], 0),
+        amount: Balance::from_state(1, [1u8; 32]),
         token_id: b"ERA".to_vec(),
         mode: TransactionMode::Bilateral,
         nonce: vec![nonce],
@@ -68,7 +68,7 @@ fn seed_bcr_genesis_with_era(device_id: [u8; 32], public_key: &[u8], era_balance
         dsm::core::token::derive_canonical_balance_key(&policy_commit, public_key, "ERA");
 
     let mut balances = std::collections::HashMap::new();
-    balances.insert(balance_key, Balance::from_state(era_balance, [0u8; 32], 0));
+    balances.insert(balance_key, Balance::from_state(era_balance, [0u8; 32]));
 
     let mut state = StateBuilder::new()
         .with_id("genesis".to_string())

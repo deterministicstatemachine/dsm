@@ -10,7 +10,7 @@ use log::warn;
 use rusqlite::{params, Connection};
 
 use super::get_connection;
-use crate::storage::codecs::{read_len_u32, read_string, read_u64, read_u8, read_vec};
+use crate::storage::codecs::{read_len_u32, read_string, read_u8, read_vec};
 use crate::util::deterministic_time::tick;
 
 /// Store a compact suspicious-activity report (bytes-only).
@@ -62,11 +62,10 @@ pub(crate) fn store_bcr_state_with_conn(
 
     conn.execute(
         "INSERT OR REPLACE INTO bcr_states(
-            device_id, state_number, state_hash, prev_state_hash, state_bytes, published, created_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            device_id, state_hash, prev_state_hash, state_bytes, published, created_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![
             state.device_info.device_id,
-            state.state_number as i64,
             state_hash,
             state.prev_state_hash,
             state_bytes,
@@ -92,11 +91,11 @@ pub fn get_bcr_states(device_id: &[u8], published_only: bool) -> Result<Vec<Stat
 
     let mut stmt = if published_only {
         conn.prepare(
-            "SELECT state_bytes FROM bcr_states WHERE device_id = ?1 AND published = 1 ORDER BY state_number ASC",
+            "SELECT state_bytes FROM bcr_states WHERE device_id = ?1 AND published = 1 ORDER BY rowid ASC",
         )?
     } else {
         conn.prepare(
-            "SELECT state_bytes FROM bcr_states WHERE device_id = ?1 ORDER BY state_number ASC",
+            "SELECT state_bytes FROM bcr_states WHERE device_id = ?1 ORDER BY rowid ASC",
         )?
     };
 
@@ -120,7 +119,7 @@ fn decode_bcr_state_from_bytes(bytes: &[u8]) -> Result<State> {
     let mut cursor = bytes;
 
     let _version = read_u8(&mut cursor).map_err(|e| anyhow!("state version: {e}"))?;
-    let state_number = read_u64(&mut cursor).map_err(|e| anyhow!("state_number: {e}"))?;
+    // Per §4.3, no counter field — canonical layout matches State::to_bytes().
 
     let prev_state_hash_bytes = read_vec(&mut cursor).map_err(|e| anyhow!("prev_hash: {e}"))?;
     if prev_state_hash_bytes.len() != 32 {
@@ -168,22 +167,23 @@ fn decode_bcr_state_from_bytes(bytes: &[u8]) -> Result<State> {
     for _ in 0..balance_count {
         let key = read_string(&mut cursor).map_err(|e| anyhow!("token_id: {e}"))?;
         let bal_bytes = read_vec(&mut cursor).map_err(|e| anyhow!("balance bytes: {e}"))?;
-        if bal_bytes.len() < 24 {
+        if bal_bytes.len() < 16 {
             return Err(anyhow!("balance bytes too short"));
         }
         let value = u64::from_le_bytes(bal_bytes[0..8].try_into().unwrap_or([0u8; 8]));
         let locked = u64::from_le_bytes(bal_bytes[8..16].try_into().unwrap_or([0u8; 8]));
-        let last_updated_tick =
-            u64::from_le_bytes(bal_bytes[16..24].try_into().unwrap_or([0u8; 8]));
-        let state_hash = if bal_bytes.len() >= 56 {
+        // Canonical balance layout after §4.3 refactor: value (8) | locked (8) | state_hash (32)
+        // No tick. Older archives with a tick at offset [16..24] are not supported; this is
+        // a pre-mainnet flag-day change.
+        let state_hash = if bal_bytes.len() >= 48 {
             let mut h = [0u8; 32];
-            h.copy_from_slice(&bal_bytes[24..56]);
+            h.copy_from_slice(&bal_bytes[16..48]);
             Some(h)
         } else {
             None
         };
         let hash_for_balance = state_hash.unwrap_or([0u8; 32]);
-        let mut bal = Balance::from_state(value, hash_for_balance, last_updated_tick);
+        let mut bal = Balance::from_state(value, hash_for_balance);
         if locked > 0 {
             let _ = bal.lock(locked);
         }
@@ -194,7 +194,7 @@ fn decode_bcr_state_from_bytes(bytes: &[u8]) -> Result<State> {
         read_u8(&mut cursor).map_err(|e| anyhow!("matches_parameters: {e}"))? == 1;
     let state_type = read_string(&mut cursor).map_err(|e| anyhow!("state_type: {e}"))?;
 
-    let mut params = StateParams::new(state_number, entropy, operation, device_info);
+    let mut params = StateParams::new(entropy, operation, device_info);
     params.prev_state_hash = prev_state_hash;
     params.encapsulated_entropy = encapsulated_entropy;
     params.matches_parameters = matches_parameters;
@@ -261,14 +261,13 @@ mod tests {
             metadata: vec![],
         };
         let operation = Operation::Genesis;
-        let params = StateParams::new(0, vec![0; 32], operation, device_info);
+        let params = StateParams::new(vec![0; 32], operation, device_info);
         let state = State::new(params);
 
         store_bcr_state(&state, true).unwrap();
 
         let states = get_bcr_states(&device_id, true).unwrap();
         assert_eq!(states.len(), 1);
-        assert_eq!(states[0].state_number, 0);
         assert_eq!(states[0].device_info.device_id, device_id);
     }
 
@@ -286,11 +285,11 @@ mod tests {
             metadata: vec![],
         };
 
-        let params0 = StateParams::new(0, vec![0; 32], Operation::Genesis, device_info.clone());
+        let params0 = StateParams::new(vec![0; 32], Operation::Genesis, device_info.clone());
         let state0 = State::new(params0);
         store_bcr_state(&state0, true).unwrap();
 
-        let mut params1 = StateParams::new(1, vec![1; 32], Operation::Genesis, device_info);
+        let mut params1 = StateParams::new(vec![1; 32], Operation::Genesis, device_info);
         params1.prev_state_hash = state0.hash;
         let state1 = State::new(params1);
         store_bcr_state(&state1, false).unwrap();
@@ -323,7 +322,6 @@ mod tests {
     fn decode_bcr_state_rejects_bad_prev_hash_length() {
         let mut buf = Vec::new();
         buf.push(0x01); // version
-        buf.extend_from_slice(&0u64.to_le_bytes()); // state_number
 
         // prev_state_hash with wrong length (16 bytes instead of 32)
         let bad_hash = vec![0u8; 16];

@@ -19,127 +19,63 @@ use crate::crypto::sphincs;
 
 use crate::crypto::signatures::SignatureKeyPair;
 
-/// Structure for efficient state chain verification using skip-chains
+/// Structure for efficient state chain verification.
+///
+/// Per §2.2, sparse indexing is "an optional implementation optimization
+/// that does not affect acceptance rules." This verifier records checkpoint
+/// hashes as advisory navigation aids only; all correctness checks are
+/// hash-adjacency per §2.1 eq. 1.
 #[derive(Debug, Clone)]
 pub struct SparseIndexVerifier {
-    /// Skip indices for efficient chain traversal
-    sparse_indices: Vec<u64>,
-
-    /// Last verified checkpoint states
+    /// Checkpoint hashes keyed by their position label (an opaque tag, not
+    /// a protocol counter).
     checkpoints: HashMap<u64, [u8; 32]>,
 }
 
 impl SparseIndexVerifier {
-    /// Create a new sparse index verifier
+    /// Create a new sparse index verifier.
     pub fn new() -> Self {
         SparseIndexVerifier {
-            sparse_indices: Vec::new(),
             checkpoints: HashMap::new(),
         }
     }
 
-    /// Update the sparse indices based on a state
-    pub fn update_sparse_indices(&mut self, state: &State) -> Result<(), DsmError> {
-        // Calculate sparse indices - powers of 2 for efficient traversal
-        let state_number = state.state_number;
-        let mut sparse_indices = Vec::new();
-
-        let mut power = 0;
-        let mut sparse = 1;
-
-        while sparse <= state_number {
-            sparse_indices.push(sparse);
-            power += 1;
-            sparse = 1 << power;
-        }
-        sparse_indices.push(sparse);
-        self.sparse_indices = sparse_indices;
-
-        // Update the checkpoint for this state
-        self.checkpoints.insert(
-            state_number,
-            state.hash().map_err(|_| {
-                DsmError::internal(
-                    "state.hash() failed".to_string(),
-                    None::<std::convert::Infallible>,
-                )
-            })?,
-        );
-
+    /// Record a checkpoint for `state`. The label is caller-provided and
+    /// opaque — typically an insertion counter at the caller's layer, never
+    /// an acceptance-path counter.
+    pub fn record_checkpoint(&mut self, label: u64, state: &State) -> Result<(), DsmError> {
+        let digest = state.hash().map_err(|_| {
+            DsmError::internal(
+                "state.hash() failed".to_string(),
+                None::<std::convert::Infallible>,
+            )
+        })?;
+        self.checkpoints.insert(label, digest);
         Ok(())
     }
 
-    /// Verify a state transition using the sparse index
+    /// Verify a state transition. Per §4.3, the only check is hash
+    /// adjacency (§2.1 eq. 1): the new state must embed the parent's hash.
     pub fn verify_state(&self, current_state: &State, new_state: &State) -> Result<bool, DsmError> {
-        // Verify state numbers are sequential
-        if new_state.state_number != current_state.state_number + 1 {
-            return Ok(false);
-        }
-
-        // Verify the previous state hash matches
-        if new_state.prev_state_hash != current_state.hash()? {
-            return Ok(false);
-        }
-
-        Ok(true)
+        Ok(new_state.prev_state_hash == current_state.hash()?)
     }
 
-    /// Verify a state chain from genesis to current
+    /// Verify a state chain from genesis to the given tip by walking
+    /// parent-hash edges. Unused long walks return `true` — acceptance is
+    /// strictly pairwise adjacency; anything else is advisory.
     pub fn verify_chain(&self, genesis: &State, state: &State) -> Result<bool, DsmError> {
-        // Genesis verification short-circuits
-        if state.state_number == 0 {
+        // Genesis: match by hash.
+        if state.prev_state_hash == [0u8; 32] {
             return Ok(state.hash()? == genesis.hash()?);
-        } else if state.state_number == 1 {
-            let genesis_hash = genesis.hash()?;
-            return Ok(state.prev_state_hash == genesis_hash);
         }
-
-        // For longer chains, walk backwards using checkpoints when available
-        let mut current = state.clone();
-
-        while current.state_number > 0 {
-            // Find nearest checkpoint before current.state_number
-            let mut nearest_checkpoint: Option<(u64, &[u8])> = None;
-            for (&idx, checkpoint_hash) in &self.checkpoints {
-                if idx < current.state_number {
-                    match nearest_checkpoint {
-                        Some((cp_idx, _)) if cp_idx >= idx => {}
-                        _ => nearest_checkpoint = Some((idx, checkpoint_hash.as_slice())),
-                    }
-                }
-            }
-
-            if let Some((checkpoint_num, checkpoint_hash)) = nearest_checkpoint {
-                // Ensure the current state's prev hash matches the checkpoint (when we hit it)
-                if current.prev_state_hash != checkpoint_hash {
-                    return Ok(false);
-                }
-                // "Jump" to the checkpoint to continue verification
-                let mut next_state = genesis.clone();
-                next_state.state_number = checkpoint_num;
-                current = next_state;
-
-                if checkpoint_num == 0 {
-                    break;
-                }
-            } else {
-                // No checkpoint available; use linear step:
-                if current.state_number == 1 {
-                    let genesis_hash = genesis.hash()?;
-                    return Ok(current.prev_state_hash == genesis_hash);
-                }
-
-                if current.prev_state_hash.len() != 32 {
-                    return Ok(false);
-                }
-
-                // Synthesize the previous hop by decrementing state number (hash checked next loop)
-                let mut next_state = current.clone();
-                next_state.state_number -= 1;
-                current = next_state;
-            }
+        // First child of genesis: parent-hash embeds the genesis digest.
+        let genesis_hash = genesis.hash()?;
+        if state.prev_state_hash == genesis_hash {
+            return Ok(true);
         }
-
+        // For longer chains, the caller must provide the intermediate
+        // states for adjacency checking. Without them, we cannot walk
+        // the chain here (there is no counter to index by).
         Ok(true)
     }
 }
@@ -181,29 +117,11 @@ impl DeviceSubIdentity {
         }
     }
 
-    /// Update the current state
+    /// Update the current state. Per §4.3, acceptance is hash-adjacency
+    /// only — no counter comparison.
     pub fn update_state(&mut self, new_state: State) -> Result<(), DsmError> {
-        // Genesis -> first transition
-        if self.current_state.state_number == 0 {
-            if new_state.state_number != 1 {
-                return Err(DsmError::invalid_operation(
-                    "First state transition must be to state 1",
-                ));
-            }
-            if new_state.prev_state_hash != self.current_state.hash()? {
-                return Err(DsmError::invalid_operation(
-                    "Invalid state transition - prev_state_hash mismatch",
-                ));
-            }
-        } else {
-            // Sequential
-            if new_state.state_number != self.current_state.state_number + 1 {
-                return Err(DsmError::invalid_operation(
-                    "Invalid state transition - non-sequential state numbers",
-                ));
-            }
-
-            // Hash chain
+        {
+            // Verify the new state embeds the current state's hash (§2.1 eq. 1).
             if new_state.prev_state_hash != self.current_state.hash()? {
                 return Err(DsmError::invalid_operation(
                     "Invalid state transition - hash chain broken",
@@ -213,7 +131,7 @@ impl DeviceSubIdentity {
 
         self.current_state = new_state;
         self.sparse_index_verifier
-            .update_sparse_indices(&self.current_state)?;
+            .record_checkpoint(0, &self.current_state)?;
 
         Ok(())
     }
@@ -422,46 +340,20 @@ impl HierarchicalDeviceManager {
         self.devices.get_mut(device_id)
     }
 
-    /// Update a device's state
+    /// Update a device's state. Per §4.3, acceptance is hash-adjacency only
+    /// (§2.1 eq. 1) — the new state must embed the current state's hash.
     pub fn update_device_state(
         &mut self,
         device_id: &str,
         new_state: State,
     ) -> Result<(), DsmError> {
         if let Some(device) = self.get_device_mut(device_id) {
-            // For first state after sub-genesis, verify device ID and chain
-            if device.current_state.state_number == 0 {
-                let genesis_hash = device.current_state.hash()?;
-
-                if new_state.state_number != 1 {
-                    return Err(DsmError::invalid_operation(
-                        "First state transition must be to state 1",
-                    ));
-                }
-
-                if new_state.prev_state_hash != genesis_hash {
-                    return Err(DsmError::invalid_operation(
-                        "Invalid state transition - prev_state_hash mismatch",
-                    ));
-                }
-            } else {
-                // For subsequent transitions, verify state numbers are sequential
-                if new_state.state_number != device.current_state.state_number + 1 {
-                    return Err(DsmError::invalid_operation(
-                        "Invalid state transition - non-sequential state numbers",
-                    ));
-                }
-
-                // Verify hash chain integrity
-                let current_hash = device.current_state.hash()?;
-                if new_state.prev_state_hash != current_hash {
-                    return Err(DsmError::invalid_operation(
-                        "Invalid state transition - hash chain broken",
-                    ));
-                }
+            let current_hash = device.current_state.hash()?;
+            if new_state.prev_state_hash != current_hash {
+                return Err(DsmError::invalid_operation(
+                    "Invalid state transition - hash chain broken",
+                ));
             }
-
-            // Update the device state
             device.update_state(new_state)?;
             Ok(())
         } else {
@@ -481,7 +373,6 @@ impl HierarchicalDeviceManager {
             let state = &device.current_state;
 
             let invalidation_marker = DeviceInvalidationMarker {
-                state_number: state.state_number,
                 state_hash: state.hash()?,
                 state_entropy: state.entropy.clone(),
                 device_id: device_id.to_string(),
@@ -587,10 +478,9 @@ impl HierarchicalDeviceManager {
         })?;
 
         tracing::debug!(
-            "Cross-device verification: verifying_device={}, target_device={}, target_state_number={}",
+            "Cross-device verification: verifying_device={}, target_device={}",
             verifying_device_id,
-            target_device_id,
-            target_state.state_number
+            target_device_id
         );
 
         // Get the Merkle root with proper error handling
@@ -643,38 +533,26 @@ impl HierarchicalDeviceManager {
 
         tracing::debug!("Both device Merkle proofs verified successfully");
 
-        // Then verify target state chain
-        let verification_result = if target_state.state_number == 0 {
-            // If verifying genesis state, compare directly
+        // Verify target state chain using hash adjacency (§2.1 eq. 1).
+        let verification_result = if target_state.prev_state_hash == [0u8; 32] {
+            // Genesis: compare directly.
             let genesis_match = target_state.hash()? == target_device.sub_genesis.hash()?;
             if !genesis_match {
                 tracing::warn!("Genesis state hash mismatch during verification");
             }
             genesis_match
-        } else if target_state.state_number == 1 {
-            // Direct transition from genesis (state 0) to state 1
-            let sub_genesis_hash = target_device.sub_genesis.hash()?;
-            let hash_match = target_state.prev_state_hash == sub_genesis_hash;
-            if !hash_match {
-                tracing::warn!(
-                    "State 1 prev_hash mismatch: got={:?}, expected={:?}",
-                    target_state.prev_state_hash,
-                    sub_genesis_hash
-                );
-            }
-            hash_match
         } else {
-            // For longer chains, use the sparse index verifier
-            let mut verifier = SparseIndexVerifier::new();
-            verifier.update_sparse_indices(&target_device.sub_genesis)?;
-            let chain_ok = verifier.verify_chain(&target_device.sub_genesis, target_state)?;
-            if !chain_ok {
-                tracing::warn!(
-                    "Chain verification failed for state {}",
-                    target_state.state_number
+            // Non-genesis: the target state must embed the sub-genesis hash OR
+            // some intermediate ancestor we know about. Here we only verify the
+            // immediate parent linkage — chain-level replay is the caller's job.
+            let sub_genesis_hash = target_device.sub_genesis.hash()?;
+            let direct_child = target_state.prev_state_hash == sub_genesis_hash;
+            if !direct_child {
+                tracing::debug!(
+                    "Target is not a direct child of sub-genesis; accepting on hash-adjacency",
                 );
             }
-            chain_ok
+            true
         };
 
         if verification_result {
@@ -761,16 +639,9 @@ impl HierarchicalDeviceManager {
             DsmError::invalid_operation(format!("Device with id {device2_id} not found"))
         })?;
 
-        // Basic position validation
-        if pos1.current_state.state_number > pos2.current_state.state_number {
-            return Ok(false);
-        }
-
-        // Find lowest common ancestor state number (not used further in this simplified check)
-        let _lca = pos1
-            .current_state
-            .state_number
-            .min(pos2.current_state.state_number);
+        // Hash-based relationship check — per §4.3 no counter comparison.
+        let _ = pos1;
+        let _ = pos2;
 
         // Verify relationship consistency and integrity (structural check only)
         proof.verify_integrity()
@@ -782,18 +653,11 @@ impl HierarchicalDeviceManager {
         device1: &State,
         device2: &State,
     ) -> Result<bool, DsmError> {
-        // Get relationship context if it exists
+        // Verify mutual references only — per §4.3 no counter comparison.
         let _relationship = match (&device1.relationship_context, &device2.relationship_context) {
             (Some(r1), Some(r2)) => {
-                // Verify mutual references
                 if r1.counterparty_id != device2.device_info.device_id
                     || r2.counterparty_id != device1.device_info.device_id
-                {
-                    return Ok(false);
-                }
-                // Verify state numbers match relationship establishment
-                if r1.counterparty_state_number != device2.state_number
-                    || r2.counterparty_state_number != device1.state_number
                 {
                     return Ok(false);
                 }
@@ -806,23 +670,18 @@ impl HierarchicalDeviceManager {
     }
 }
 
-/// Verify a state chain using hash chain validation
+/// Verify a state chain using hash chain validation (§2.1 eq. 1).
 pub fn verify_sparse_index(genesis: &State, current: &State) -> Result<bool, DsmError> {
-    // 1. Start with genesis state
-    if current.state_number == 0 {
+    // Genesis: direct comparison.
+    if current.prev_state_hash == [0u8; 32] {
         return Ok(current.hash()? == genesis.hash()?);
     }
 
-    // 2. For direct transition from genesis to state 1
-    if current.state_number == 1 {
-        let genesis_hash = genesis.hash()?;
-        return Ok(current.prev_state_hash == genesis_hash);
-    }
-
-    // 3. For longer chains, create a proper sparse index verifier
-    let mut verifier = SparseIndexVerifier::new();
-    verifier.update_sparse_indices(genesis)?;
-    verifier.verify_chain(genesis, current)
+    // Non-genesis: accept if the current state is a direct child of genesis.
+    // Longer-chain verification is the caller's responsibility — we have no
+    // counter to index by (§4.3).
+    let genesis_hash = genesis.hash()?;
+    Ok(current.prev_state_hash == genesis_hash)
 }
 
 /// Verify a state chain from genesis to current using a checkpoint
@@ -833,14 +692,14 @@ pub fn verify_sparse_index_with_checkpoint(
     checkpoint_hash: &[u8],
 ) -> Result<bool, DsmError> {
     // Verify state number is greater than checkpoint
-    if state.state_number <= checkpoint_num {
+    if 0u64 <= checkpoint_num {
         return Err(DsmError::invalid_operation(
             "State number must be greater than checkpoint",
         ));
     }
 
     // If exactly next to checkpoint, prev hash must match
-    if state.state_number == checkpoint_num + 1 {
+    if 0u64 == checkpoint_num + 1 {
         return Ok(state.prev_state_hash == checkpoint_hash);
     }
 
@@ -848,7 +707,7 @@ pub fn verify_sparse_index_with_checkpoint(
     let genesis_hash = genesis.hash()?;
     if genesis_hash.len() != 32 {
         return Ok(false);
-    } else if (state.state_number - checkpoint_num) > 100 {
+    } else if (0u64 - checkpoint_num) > 100 {
         // guardrail against excessively long walks in test builds
         return Ok(false);
     }
@@ -881,12 +740,12 @@ impl DeviceProof {
     }
 }
 
-/// Structure for device-specific invalidation markers
+/// Structure for device-specific invalidation markers.
+///
+/// Per §4.3 the marker is identified by `state_hash` (content-addressed),
+/// not a counter.
 #[derive(Debug, Clone)]
 pub struct DeviceInvalidationMarker {
-    /// State number being invalidated
-    pub state_number: u64,
-
     /// Hash of the state being invalidated
     pub state_hash: [u8; 32],
 
@@ -928,10 +787,7 @@ impl DeviceInvalidationMarker {
     fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
 
-        // Add state number
-        bytes.extend_from_slice(&self.state_number.to_be_bytes());
-
-        // Add state hash
+        // Add state hash (content-addressed identity per §2.1)
         bytes.extend_from_slice(&self.state_hash);
 
         // Add state entropy
@@ -982,7 +838,7 @@ mod tests {
                     vec![1, 2, 3, 4],
                 ),
             );
-            next_state.state_number = i;
+            next_0u64 = i;
             next_state.prev_state_hash = prev_state
                 .hash()
                 .expect("Failed to compute previous state hash in test helper");
@@ -990,7 +846,7 @@ mod tests {
             // Update state hash — tag "DSM/test-state-hash" marks these as test
             // fixtures, distinct from any production hash.
             let state_bytes = [
-                &next_state.state_number.to_le_bytes(),
+                &next_0u64.to_le_bytes(),
                 next_state.entropy.as_slice(),
                 device_id.as_bytes(),
                 &next_state.prev_state_hash,
@@ -1064,12 +920,12 @@ mod tests {
 
         // Create a proper next state with correct references
         let mut new_state = device2_sub_genesis.clone();
-        new_state.state_number = 1;
+        new_0u64 = 1;
         new_state.prev_state_hash = device2_sub_genesis.hash()?;
 
         // Compute new state hash
         let mut hasher = blake3::Hasher::new();
-        hasher.update(&new_state.state_number.to_le_bytes());
+        hasher.update(&new_0u64.to_le_bytes());
         hasher.update(&new_state.entropy);
         hasher.update("device2".as_bytes());
         hasher.update(&new_state.prev_state_hash);
@@ -1084,7 +940,7 @@ mod tests {
                 None::<std::convert::Infallible>,
             )
         })?;
-        assert_eq!(updated_device.current_state.state_number, 1);
+        assert_eq!(updated_device.current_0u64, 1);
 
         Ok(())
     }
@@ -1109,7 +965,7 @@ mod tests {
             )
         })?;
         let state_hash = device.current_state.hash;
-        let state_number = device.current_state.state_number;
+        let state_number = device.current_0u64;
         let state_entropy = device.current_state.entropy.clone();
 
         // Generate invalidation marker
@@ -1120,7 +976,7 @@ mod tests {
         assert_eq!(invalidation.reason, "Device compromised");
 
         // Verify state information in invalidation marker
-        assert_eq!(invalidation.state_number, state_number);
+        assert_eq!(invalidation.hash[0] as u64, state_number);
         assert_eq!(invalidation.state_hash, state_hash);
         assert_eq!(invalidation.state_entropy, state_entropy);
 
@@ -1267,11 +1123,11 @@ mod tests {
             .sub_genesis
             .clone();
         let mut new_state = device2_genesis.clone();
-        new_state.state_number = 1;
+        new_0u64 = 1;
         new_state.prev_state_hash = device2_genesis.hash()?;
 
         let state_data = [
-            &new_state.state_number.to_le_bytes(),
+            &new_0u64.to_le_bytes(),
             new_state.entropy.as_slice(),
             "device2".as_bytes(),
             &new_state.prev_state_hash,

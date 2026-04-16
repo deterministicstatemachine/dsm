@@ -1444,7 +1444,7 @@ impl BitcoinTapSdk {
             htlc_address: Some(htlc_address.clone()),
             external_commitment: Some(external_commitment),
             refund_iterations,
-            created_at_state: reference_state.state_number,
+            created_at_state: reference_state.hash[0] as u64,
             entry_header: None,
             parent_vault_id: None,
             successor_depth: 0,
@@ -1694,7 +1694,7 @@ impl BitcoinTapSdk {
             htlc_address: Some(successor_htlc_address.clone()),
             external_commitment: Some(external_commitment),
             refund_iterations,
-            created_at_state: reference_state.state_number,
+            created_at_state: reference_state.hash[0] as u64,
             entry_header: None,
             parent_vault_id: Some(source_vault_id.to_string()),
             successor_depth: next_depth,
@@ -1995,7 +1995,7 @@ impl BitcoinTapSdk {
 
         // Check iteration-based timeout (budget exhaustion)
         let elapsed = reference_state
-            .state_number
+            .hash[0] as u64
             .saturating_sub(created_at_state);
         if elapsed < refund_iterations {
             return Err(DsmError::invalid_operation(format!(
@@ -4603,7 +4603,7 @@ impl BitcoinTapSdk {
         evidence.extend_from_slice(vault_id.as_bytes());
         evidence.extend_from_slice(direction.as_bytes());
         evidence.extend_from_slice(&amount_sats.to_le_bytes());
-        evidence.extend_from_slice(&reference_state.state_number.to_le_bytes());
+        evidence.extend_from_slice(&reference_state.hash[0] as u64.to_le_bytes());
         let evidence_hash = external_evidence_hash(&evidence);
 
         create_external_commitment(hash_lock, &source_id, &evidence_hash)

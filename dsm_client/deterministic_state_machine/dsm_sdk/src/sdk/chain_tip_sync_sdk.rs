@@ -203,7 +203,7 @@ impl<T: UniversalTransport + 'static> ChainTipSyncSDK<T> {
 
         let mut tips = self.chain_tips.write().await;
         if let Some(existing) = tips.get(bilateral_chain_id) {
-            if new_state.state_number <= existing.state_number {
+            if new_state.hash[0] as u64 <= existing.hash[0] as u64 {
                 return Err(DsmError::InvalidOperation(
                     "State number must increase (forward-only)".into(),
                 ));
@@ -220,7 +220,7 @@ impl<T: UniversalTransport + 'static> ChainTipSyncSDK<T> {
 
         let tip = ChainTip {
             tip_hash: tip_hash.clone(),
-            state_number: new_state.state_number,
+            state_number: new_state.hash[0] as u64,
             tick: ts,
             device_id: device_id.clone(),
             counterparty_id: counterparty_id.clone(),
@@ -236,7 +236,7 @@ impl<T: UniversalTransport + 'static> ChainTipSyncSDK<T> {
         info!(
             "updated tip for {} → #{} ({})",
             bilateral_chain_id,
-            new_state.state_number,
+            new_state.hash[0] as u64,
             encode_id_text(&tip_hash)
         );
 
@@ -335,7 +335,7 @@ impl<T: UniversalTransport + 'static> ChainTipSyncSDK<T> {
         }
 
         let wire = generated::StateWire {
-            state_number: state.state_number,
+            state_number: state.hash[0] as u64,
             prev_state_hash: state.prev_state_hash.to_vec(),
             token_balances: entries,
             operation: state
@@ -627,7 +627,7 @@ impl<T: UniversalTransport + 'static> ChainTipSyncSDK<T> {
             bilateral_chain_id: bilateral_chain_id.to_string(),
             prev_state_hash: state.prev_state_hash.to_vec(),
             new_state_hash: self.compute_state_hash(state).await?,
-            state_number: state.state_number,
+            state_number: state.hash[0] as u64,
             operation: "state_transition".into(),
             balance_delta: self.extract_balance_delta(state),
             tick: dt::tick(),
@@ -766,7 +766,7 @@ mod tests {
             .max_batch_size(8)
             .build();
         let mut state = State::default();
-        state.state_number = 1;
+        state.hash[0] as u64 = 1;
         let id = "alice:bob";
         sdk.update_chain_tip(id, &state).await.unwrap();
         let tip = sdk.get_chain_tip(id).await.unwrap();

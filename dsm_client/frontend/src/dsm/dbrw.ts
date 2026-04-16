@@ -151,7 +151,10 @@ async function captureOrbitTimings(): Promise<Uint8Array> {
 /**
  * Measure trust with captured orbit timings.
  */
-async function measureTrustWithOrbit(orbitBytes: Uint8Array): Promise<CdbrwTrustSnapshot> {
+async function measureTrustWithOrbit(
+  orbitBytes: Uint8Array,
+  histogramBins: number,
+): Promise<CdbrwTrustSnapshot> {
   // Convert byte array to bigint[] (little-endian i64). Proto field is int64.
   const timings: bigint[] = [];
   for (let i = 0; i + 7 < orbitBytes.length; i += 8) {
@@ -165,7 +168,7 @@ async function measureTrustWithOrbit(orbitBytes: Uint8Array): Promise<CdbrwTrust
   const orbit = new CdbrwOrbitTrial({ timings });
   const reqProto = new CdbrwMeasureTrustRequest({
     orbit,
-    histogramBins: 256,
+    histogramBins,
   });
 
   const resBytes = await routerQueryBin('cdbrw.measure_trust', reqProto.toBinary());
@@ -215,7 +218,7 @@ export async function getDbrwStatus(live = false): Promise<DbrwStatus> {
 
   // For live checks, capture orbit timings and measure trust on-device.
   const trust: CdbrwTrustSnapshot | undefined = live
-    ? await measureTrustWithOrbit(await captureOrbitTimings())
+    ? await measureTrustWithOrbit(await captureOrbitTimings(), resp.histogramBins)
     : resp.trust;
 
   return {

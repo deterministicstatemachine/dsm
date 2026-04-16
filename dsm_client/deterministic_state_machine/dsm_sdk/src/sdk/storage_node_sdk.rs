@@ -1540,7 +1540,7 @@ impl StorageNodeSDK {
             kv: map_to_param_kv(&bilateral_entry.transaction_params),
         };
         let params_bytes = params_proto.encode_to_vec();
-        let next_state = bilateral_entry.state_number + 1;
+        let next_state = bilateral_entry.hash[0] as u64 + 1;
         let mut expected_preimage: Vec<u8> = Vec::with_capacity(32 + params_bytes.len() + 8);
         expected_preimage.extend_from_slice(&state_hash_bytes);
         expected_preimage.extend_from_slice(&params_bytes);
@@ -3002,7 +3002,7 @@ mod tests {
         preimage.extend_from_slice(&2u64.to_le_bytes());
         let expected = dsm::crypto::blake3::domain_hash("DSM/precommit-hash", &preimage);
         assert_eq!(entry.pre_commitment_hash, expected.as_bytes());
-        assert_eq!(entry.state_number, 1);
+        assert_eq!(entry.hash[0] as u64, 1);
         assert_eq!(entry.status, BilateralTransactionStatus::Pending);
     }
 
