@@ -760,17 +760,15 @@ impl ProtocolMetricsManager {
         &self,
         prev_state: &State,
         next_state: &State,
-        operation: &Operation,
+        _operation: &Operation,
     ) -> Result<bool, DsmError> {
         // Start timer for verification
         self.start_timer("state_verification");
 
-        // Verify state transition
-        let result = self.state_machine.apply_operation(
-            prev_state.clone(),
-            operation.clone(),
-            next_state.entropy.clone(),
-        );
+        // Verify state transition via hash adjacency (§2.1 eq. 1).
+        // The canonical check: next_state embeds prev_state's hash.
+        let adjacency_ok = next_state.prev_state_hash == prev_state.hash()?;
+        let hash_ok = next_state.compute_hash()? == next_state.hash;
 
         // Update metrics
         if let Ok(mut metrics) = self.current_metrics.lock() {
@@ -778,9 +776,8 @@ impl ProtocolMetricsManager {
         }
 
         // Record verification result
-        let verified = if let Ok(computed_next_state) = result {
-            // Compare computed next state with provided next state
-            let state_hash_verified = computed_next_state.hash()? == next_state.hash()?;
+        let verified = if adjacency_ok && hash_ok {
+            let state_hash_verified = true;
 
             // Update metrics
             if let Ok(mut metrics) = self.current_metrics.lock() {
@@ -797,12 +794,12 @@ impl ProtocolMetricsManager {
 
             state_hash_verified
         } else {
-            // Update verification on error
+            // Hash adjacency or self-hash check failed
             if let Ok(mut verification) = self.verification.lock() {
                 verification.add_component_result("state_transition", false);
                 verification.add_error(
                     "state_transition",
-                    &format!("Error applying operation: {result:?}"),
+                    "State hash adjacency or self-hash check failed",
                 );
             }
 

@@ -449,28 +449,14 @@ impl CoreSDK {
 
         dsm_op = self.sign_operation_sphincs(dsm_op)?;
 
-        self.state_machine.lock().execute_transition(dsm_op)
+        // Route through relationship path with self-loop for generic ops
+        let dev_id = self.get_current_state()?.device_info.device_id;
+        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&dev_id, &dev_id);
+        let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(&dev_id, &dev_id);
+        let (state, _) = self.execute_on_relationship(rel_key, dev_id, dsm_op, &[], Some(init_tip))?;
+        Ok(state)
     }
 
-    /// Execute a full DSM Operation (preserving signatures and proofs)
-    /// This bypasses the simplified CoreSDK::Operation wrapper to ensure
-    /// authorization material reaches the state machine intact.
-    /// Execute a DSM operation through the state machine and archive the result.
-    ///
-    /// Returns the post-transition state with correct balances and hash.
-    /// Callers are responsible for calling `sync_token_projection_from_state`
-    /// (or `sync_token_projection_best_effort`) after this returns, since the
-    /// projection sync requires token_id and policy_commit which are
-    /// caller-specific context.
-    pub fn execute_dsm_operation(
-        &self,
-        dsm_operation: dsm::types::operations::Operation,
-    ) -> Result<State, DsmError> {
-        let mut sm = self.state_machine.lock();
-        let next_state = sm.execute_transition(dsm_operation.clone())?;
-        Self::archive_state_snapshot(&next_state)?;
-        Ok(next_state)
-    }
 
     /// Execute a DSM operation on a specific relationship chain (§2.2, §4.2).
     ///
@@ -673,12 +659,22 @@ impl CoreSDK {
             message: "dev seed".to_string(),
         };
 
-        // Execute transition in core state machine
+        // Execute mint via relationship path (self-loop for authority mint)
+        let dev_id = self.device_info.device_id;
+        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&dev_id, &dev_id);
+        let era_pc = dsm::core::token::token_state_manager::resolve_policy_commit("ERA");
+        let deltas = [dsm::types::device_state::BalanceDelta {
+            policy_commit: era_pc,
+            direction: dsm::types::device_state::BalanceDirection::Credit,
+            amount: 1_000_000,
+        }];
+        let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(&dev_id, &dev_id);
         let mut sm = self.state_machine.lock();
-        let new_state = sm.execute_transition(mint)?;
+        let outcome = sm.advance_relationship(rel_key, dev_id, mint, &deltas, Some(init_tip))?;
+        let new_hash = outcome.new_chain_state.compute_chain_tip();
         log::info!(
-            "Dev seeding applied; new state number {}",
-            new_state.hash[0] as u64
+            "Dev seeding applied; new chain tip {:02x?}",
+            &new_hash[..4]
         );
 
         // Write flag to ensure idempotence

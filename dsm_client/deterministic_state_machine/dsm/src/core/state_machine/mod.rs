@@ -196,13 +196,25 @@ impl StateMachine {
             DsmError::state_machine("DeviceState not initialized — call set_state with genesis first")
         })?;
 
-        // Generate entropy from hash-adjacency inputs (§11 eq. 14)
-        let entropy = generate_transition_entropy(
-            self.current_state.as_ref().ok_or_else(|| {
-                DsmError::state_machine("No current state for entropy derivation")
-            })?,
-            &operation,
-        )?;
+        // Generate entropy from hash-adjacency inputs (§11 eq. 14).
+        // Read prior entropy + hash from the DeviceState's tip for this
+        // relationship, or from current_state as fallback.
+        let (prior_entropy, prior_hash) = if let Some(tip_state) = ds.tip_state(&rel_key) {
+            (tip_state.entropy.clone(), tip_state.compute_chain_tip())
+        } else if let Some(cs) = &self.current_state {
+            (cs.entropy.clone(), cs.hash)
+        } else {
+            // Fresh genesis — use zeros
+            (vec![0u8; 32], [0u8; 32])
+        };
+        let entropy = {
+            let op_data = operation.to_bytes();
+            let mut hasher = dsm_domain_hasher("DSM/state-entropy");
+            hasher.update(&prior_entropy);
+            hasher.update(&op_data);
+            hasher.update(&prior_hash);
+            *hasher.finalize().as_bytes()
+        };
 
         let outcome = ds.advance(
             rel_key,
@@ -215,39 +227,8 @@ impl StateMachine {
             None, // dbrw_summary_hash
         )?;
 
-        // Commit: install the new device state as the head
+        // Commit: install the new device state as the head.
         self.device_state = Some(outcome.new_device_state.clone());
-
-        // Also update the legacy current_state for backward compat.
-        // Build a legacy State from the chain state so old callers can
-        // read token_balances, device_info, etc.
-        if let Some(ref cs) = self.current_state {
-            let mut legacy = cs.clone();
-            legacy.prev_state_hash = cs.hash().unwrap_or(cs.hash);
-            legacy.entropy = outcome.new_chain_state.entropy.clone();
-            legacy.operation = outcome.new_chain_state.operation.clone();
-            legacy.hash = outcome.new_chain_state.compute_chain_tip();
-            // Sync token_balances from DeviceState (policy_commit keyed → string keyed for compat)
-            // This is lossy but keeps old callers working during migration.
-            legacy.token_balances.clear();
-            for (policy_commit, value) in outcome.new_device_state.balances_snapshot() {
-                // Encode policy_commit as decimal groups (no hex per project convention)
-                let prefix = u128::from_le_bytes({
-                    let mut a = [0u8; 16];
-                    a.copy_from_slice(&policy_commit[..16]);
-                    a
-                });
-                let key = format!("{prefix}");
-                legacy.token_balances.insert(
-                    key,
-                    crate::types::token_types::Balance::from_state(
-                        *value,
-                        outcome.new_chain_state.compute_chain_tip(),
-                    ),
-                );
-            }
-            self.current_state = Some(legacy);
-        }
 
         Ok(outcome)
     }
@@ -283,120 +264,8 @@ impl StateMachine {
         }
     }
 
-    /// Execute a state transition with comprehensive validation
-    pub fn execute_transition(&mut self, operation: Operation) -> Result<State, DsmError> {
-        // Clone the current state to avoid borrowing issues
-        let current_state = self.current_state.clone().ok_or_else(|| {
-            DsmError::state_machine("No current state exists - initialize with genesis first")
-        })?;
-
-        // Validate operation is allowed for current state
-        if !is_operation_allowed(&operation, &current_state)? {
-            return Err(DsmError::invalid_operation(format!(
-                "Operation {operation:?} not allowed in current state"
-            )));
-        }
-
-        // Generate entropy for new state with validation
-        let new_entropy = generate_transition_entropy(&current_state, &operation)
-            .map_err(|e| DsmError::state_machine(format!("Failed to generate entropy: {e}")))?;
-
-        // Validate entropy generation produced valid output
-        if new_entropy.is_empty() {
-            return Err(DsmError::state_machine("Generated entropy is empty"));
-        }
-
-        // Create a transition with validation
-        let transition = create_transition(&current_state, operation, &new_entropy)
-            .map_err(|e| DsmError::state_machine(format!("Failed to create transition: {e}")))?;
-
-        // --- DBRW summary commitment (non-secret) ---
-        // If the platform has DBRW initialized, bind a deterministic health summary commitment
-        // into the new state's hash preimage.
-        //
-        // If DBRW is unavailable, fail-closed is handled elsewhere; here we simply omit the
-        // commitment (None) and the state hash chain remains compatible.
-        // Default: do not bind DBRW unless a platform boundary installs/maintains the signal.
-        // The SDK should set this on StateParams during transitions where it has DBRW samples.
-        // Core keeps a conservative default (None).
-        let dbrw_summary_hash: Option<[u8; 32]> = None;
-
-        // Apply the transition to create a new state
-        let mut new_state = transition::create_next_state(
-            &current_state,
-            transition.operation,
-            &new_entropy,
-            &transition::VerificationType::Standard,
-            false,
-        )
-        .map_err(|e| DsmError::state_machine(format!("Failed to create next state: {e}")))?;
-
-        // Attach DBRW commitment after structural transition but before final hash-use sites.
-        // create_next_state recomputes the hash already; we must re-hash if we change the commitment.
-        if let Some(h) = dbrw_summary_hash {
-            new_state.dbrw_summary_hash = Some(h);
-            let computed_hash = new_state.compute_hash()?;
-            new_state.hash = computed_hash;
-        }
-
-        // Validate new state before applying (§2.1 hash adjacency).
-        if new_state.prev_state_hash != current_state.hash()? {
-            return Err(DsmError::invalid_operation(
-                "New state hash chain is broken",
-            ));
-        }
-
-        // Log the transition before updating state
-        let old_hash = current_state.hash;
-        let new_hash = new_state.hash;
-
-        // Update the current state
-        self.set_state(new_state.clone());
-
-        // Bridge: sync DeviceState balances from the legacy State's token_balances.
-        // This keeps the canonical DeviceState consistent when transitions come
-        // through the old path. Once all callers migrate to advance_relationship,
-        // this bridge can be removed.
-        if let Some(ref mut ds) = self.device_state {
-            ds.sync_balances_from_legacy(&new_state.token_balances);
-        }
-
-        // Advance the global deterministic tick on successful state transition
-        let _ = crate::utils::deterministic_time::tick_raw();
-
-        tracing::info!(
-            "State transition executed: {:02x?} -> {:02x?}",
-            &old_hash[..4],
-            &new_hash[..4]
-        );
-
-        Ok(new_state)
-    }
-
-    /// Apply an operation to a state to create a new state directly
-    ///
-    /// This method is useful when you want to apply an operation to a state without updating
-    /// the current state of the state machine. It uses the transition module's apply_transition function
-    /// to create a new state from the given state and operation.
-    ///
-    /// # Arguments
-    ///
-    /// * `state` - The state to apply the operation to
-    /// * `operation` - The operation to apply
-    /// * `new_entropy` - The entropy to use for the next state
-    ///
-    /// # Returns
-    ///
-    /// A result containing the new state or an error
-    pub fn apply_operation(
-        &self,
-        state: State,
-        operation: Operation,
-        new_entropy: Vec<u8>,
-    ) -> Result<State, DsmError> {
-        // Apply the transition to create a new state
-        transition::apply_transition(&state, &operation, &new_entropy)
-    }
+    // execute_transition and apply_operation deleted — all transitions now go
+    // through advance_relationship which uses DeviceState::advance (§2.2, §4.2).
 
     /// Execute a state transition in the context of a relationship
     pub fn execute_relationship_transition(
@@ -863,41 +732,37 @@ mod state_machine_tests {
         );
         state_machine.set_state(genesis_state);
 
-        let next_state = state_machine.execute_transition(op)?;
-        assert_ne!(next_state.hash, [0u8; 32]);
+        let dev_id = device_id;
+        let rel_key = crate::core::bilateral_transaction_manager::compute_smt_key(&dev_id, &dev_id);
+        let init_tip = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(&dev_id, &dev_id);
+        let outcome = state_machine.advance_relationship(rel_key, dev_id, op, &[], Some(init_tip))?;
+        assert_ne!(outcome.child_r_a, [0u8; 32]);
 
         Ok(())
     }
 
     #[test]
-    fn test_state_machine_execute_transition() -> Result<(), DsmError> {
-        // Create a state machine
+    fn test_state_machine_advance_relationship() -> Result<(), DsmError> {
         let mut machine = StateMachine::new();
-
-        // Set initial state
         let (initial_state, _pk, sk) = create_test_genesis_state_with_keypair();
-        // Clone the state before consuming it
-        let initial_state_clone = initial_state.clone();
+        let dev_id = initial_state.device_info.device_id;
         machine.set_state(initial_state);
 
-        // Execute a transition
         let op = signed_transfer(
             &sk,
-            machine.current_state().unwrap(),
+            machine.current_state().ok_or_else(|| DsmError::state_machine("no state"))?,
             vec![1u8; 8],
             "Test transfer",
         );
 
-        let new_state = machine.execute_transition(op)?;
-        // Verify the new state references the previous state (§2.1 adjacency)
-        assert_eq!(new_state.prev_state_hash, initial_state_clone.hash()?);
-        assert_eq!(
-            machine
-                .current_state()
-                .ok_or_else(|| DsmError::state_machine("No current state"))?
-                .hash,
-            new_state.hash
-        );
+        let rel_key = crate::core::bilateral_transaction_manager::compute_smt_key(&dev_id, &dev_id);
+        let init_tip = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(&dev_id, &dev_id);
+        let outcome = machine.advance_relationship(rel_key, dev_id, op, &[], Some(init_tip))?;
+
+        // Verify the SMT root advanced
+        assert_ne!(outcome.parent_r_a, outcome.child_r_a);
+        // Verify the device state was updated
+        assert_eq!(machine.device_head().map(|d| d.root()), Some(outcome.child_r_a));
 
         Ok(())
     }
