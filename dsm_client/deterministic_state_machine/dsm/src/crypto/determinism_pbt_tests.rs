@@ -14,7 +14,7 @@ mod tests {
     };
     use crate::crypto::rng::{generate_deterministic_random, mix_entropy};
     use crate::crypto::canonical_lp::{hash_lp1, hash_lp2, hash_lp3};
-    use crate::crypto::blake3::{domain_hash, generate_deterministic_entropy};
+    use crate::crypto::blake3::domain_hash;
     use crate::crypto::signatures::SignatureKeyPair;
     use crate::emissions::uniform_index;
     use proptest::prelude::*;
@@ -127,17 +127,6 @@ mod tests {
             let h1 = domain_hash(&tag, &data);
             let h2 = domain_hash(&tag, &data);
             prop_assert_eq!(h1, h2);
-        }
-
-        #[test]
-        fn pbt_blake3_generate_deterministic_entropy_is_deterministic(
-            current_entropy in proptest::collection::vec(any::<u8>(), 1..=64),
-            operation in proptest::collection::vec(any::<u8>(), 1..=64),
-            next_state_number in 0u64..=u64::MAX
-        ) {
-            let e1 = generate_deterministic_entropy(&current_entropy, &operation, next_state_number);
-            let e2 = generate_deterministic_entropy(&current_entropy, &operation, next_state_number);
-            prop_assert_eq!(e1, e2);
         }
 
         #[test]

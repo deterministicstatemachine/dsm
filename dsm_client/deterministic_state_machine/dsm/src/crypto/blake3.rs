@@ -31,15 +31,12 @@
 //! - [`token_domain_hash`] -- one-shot hierarchical token hash.
 //! - [`token_domain_hash_bytes`] -- one-shot hierarchical token hash returning bytes.
 //! - [`hash_blake3`] -- plain (non-domain-separated) BLAKE3 hash.
-//! - [`generate_deterministic_entropy`] -- entropy evolution for state transitions.
+//! - (entropy evolution moved to `core::state_machine::utils::calculate_next_entropy`).
 //! - [`create_random_walk_seed`] -- seed derivation for hash chain verification.
 //!
 //! # Thread Safety
 //!
-//! A thread-local [`Hasher`] cache is provided for high-throughput concurrent
-//! scenarios. The [`generate_deterministic_entropy_concurrent`] function uses
-//! the same domain tag and produces identical output to the non-concurrent
-//! variant for identical inputs.
+//! All hashers are stack-allocated and free of shared mutable state.
 
 // Re-export Blake3 types for use throughout the DSM crypto module
 pub use blake3::{hash, Hash, Hasher};
@@ -107,59 +104,16 @@ fn base64_encode_for_test(input: &[u8]) -> String {
 /// This is used to implement the entropy evolution described in the whitepaper section 6:
 /// en+1 = H(en || opn+1 || (n+1))
 ///
-/// # Arguments
-/// * `current_entropy` - Current state entropy
-/// * `operation` - Operation for the transition
-/// * `next_state_number` - Next state number
+/// (deleted per §4.3)
 ///
-/// # Returns
-/// * `Hash` - The deterministic entropy
-pub fn generate_deterministic_entropy(
-    current_entropy: &[u8],
-    operation: &[u8],
-    next_state_number: u64,
-) -> Hash {
-    let mut hasher = dsm_domain_hasher("DSM/state-entropy");
+/// `generate_deterministic_entropy(prev_entropy, op, state_number)` was
+/// removed because state_number no longer participates in entropy
+/// derivation. Use `crate::core::state_machine::utils::calculate_next_entropy`
+/// which implements §11 eq.14:
+/// `e_{n+1} = H("DSM/state-entropy" || e_n || op || prev_hash)`.
 
-    hasher.update(current_entropy);
-    hasher.update(operation);
-    hasher.update(&next_state_number.to_le_bytes());
-
-    hasher.finalize()
-}
-
-// Thread-local hasher cache for improved performance in concurrent environments
-// This prevents repeated allocation/deallocation of hashers in high-throughput scenarios
-thread_local! {
-    static HASHER_CACHE: std::cell::RefCell<Hasher> = std::cell::RefCell::new(Hasher::new());
-}
-
-/// High-performance variant of generate_deterministic_entropy for concurrent benchmarks
-/// Uses thread-local storage to avoid repeated hasher allocation
-///
-/// IMPORTANT: This function must produce exactly the same results as the non-concurrent version
-/// to ensure consistent behavior between transition creation and verification paths.
-/// DETERMINISM GUARANTEE:
-/// While this function uses thread-local storage for performance optimization,
-/// it maintains deterministic behavior by:
-/// 1. Always resetting the hasher before use
-/// 2. Processing data in the exact same order as the non-concurrent version
-/// 3. Using the same cryptographic operations
-///
-/// The thread-local storage is purely a performance optimization that avoids
-/// repeated hasher allocation in high-throughput scenarios. The output is
-/// guaranteed to be identical to generate_deterministic_entropy() for the
-/// same inputs.
-pub fn generate_deterministic_entropy_concurrent(
-    current_entropy: &[u8],
-    operation: &[u8],
-    next_state_number: u64,
-) -> Hash {
-    // Must match generate_deterministic_entropy exactly — use non-cached path
-    // to include the domain tag. The thread-local cache cannot be pre-seeded
-    // with the domain prefix because reset() clears it.
-    generate_deterministic_entropy(current_entropy, operation, next_state_number)
-}
+// generate_deterministic_entropy_concurrent removed — same reason as
+// generate_deterministic_entropy above (state_number eliminated per §4.3).
 
 /// Create a seed for hash chain verification.
 ///
@@ -433,26 +387,6 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_deterministic_entropy() {
-        let entropy = b"initial entropy";
-        let operation = b"test operation";
-        let state_number = 1;
-
-        let result1 = generate_deterministic_entropy(entropy, operation, state_number);
-        let result2 = generate_deterministic_entropy(entropy, operation, state_number);
-
-        // Same input should produce the same result
-        assert_eq!(result1, result2);
-
-        // Different inputs should produce different results
-        let result3 = generate_deterministic_entropy(entropy, b"different operation", state_number);
-        assert_ne!(result1, result3);
-
-        let result4 = generate_deterministic_entropy(entropy, operation, 2);
-        assert_ne!(result1, result4);
-    }
-
-    #[test]
     fn test_create_random_walk_seed() {
         let state_hash = b"state hash";
         let operation = b"operation";
@@ -538,39 +472,4 @@ mod tests {
         assert_eq!(v.len(), 32);
     }
 
-    #[test]
-    fn deterministic_entropy_concurrent_matches_non_concurrent() {
-        let entropy = b"entropy";
-        let op = b"operation";
-        let n = 42u64;
-        let a = generate_deterministic_entropy(entropy, op, n);
-        let b = generate_deterministic_entropy_concurrent(entropy, op, n);
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn deterministic_entropy_concurrent_thread_safety() {
-        // Run the concurrent function from multiple threads and ensure determinism
-        let entropy = b"entropy".to_vec();
-        let op = b"operation".to_vec();
-        let n = 7u64;
-
-        let mut handles = Vec::new();
-        for _ in 0..8 {
-            let e = entropy.clone();
-            let o = op.clone();
-            let handle =
-                thread::spawn(move || generate_deterministic_entropy_concurrent(&e, &o, n));
-            handles.push(handle);
-        }
-
-        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
-        for w in results.windows(2) {
-            assert_eq!(w[0], w[1]);
-        }
-
-        // Different input must produce different outputs
-        let diff = generate_deterministic_entropy_concurrent(&entropy, &op, n + 1);
-        assert_ne!(results[0], diff);
-    }
 }
