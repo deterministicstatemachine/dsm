@@ -42,14 +42,11 @@ pub use transition::{create_transition, generate_position_sequence, StateTransit
 pub use utils::{constant_time_eq, verify_state_hash}; // Export utility functions and remove hash_blake3 export
 
 /// Type definition for precommitment generation function
-type PrecommitmentGenFn = fn(&State, &Operation, &Hash) -> Result<(Hash, Vec<Position>), DsmError>;
-
-/// Core state machine that handles transitions and verification.
+/// Core state machine — Per-Device SMT head (§2.2).
 ///
-/// Holds both the legacy `current_state: Option<State>` (for backward compat
-/// during migration) and the spec-canonical `device_state: Option<DeviceState>`
-/// which is the Per-Device SMT head (§2.2). New code should use
-/// `advance_relationship` which routes through `DeviceState::advance()`.
+/// All transitions route through `advance_relationship` which uses
+/// `DeviceState::advance()`. The `current_state` field is a vestigial
+/// fallback for genesis bootstrap; `device_state` IS the canonical head.
 #[derive(Clone, Debug)]
 pub struct StateMachine {
     /// Canonical device state per §2.2: SMT root + device-level balances +
@@ -63,27 +60,6 @@ pub struct StateMachine {
     /// Relationship manager for bilateral state isolation
     #[allow(dead_code)]
     relationship_manager: RelationshipManager,
-    /// Apply transition function type
-    #[allow(dead_code)]
-    apply_transition_fn: fn(&State, &Operation, &[u8]) -> Result<State, DsmError>,
-    /// Verify transition function
-    #[allow(dead_code)]
-    verify_transition: fn(&State, &State, &Operation) -> Result<bool, DsmError>,
-    /// Generate transition entropy function
-    #[allow(dead_code)]
-    generate_entropy: fn(&State, &Operation) -> Result<[u8; 32], DsmError>,
-    /// Verify state chain function
-    #[allow(dead_code)]
-    verify_chain: fn(&[State]) -> Result<bool, DsmError>,
-    /// Hash function
-    #[allow(dead_code)]
-    hash_function: fn(&[u8]) -> blake3::Hash,
-    /// Generate precommitment function
-    #[allow(dead_code)]
-    generate_precommitment: PrecommitmentGenFn,
-    /// Verify precommitment function
-    #[allow(dead_code)]
-    verify_precommitment: fn(&State, &Operation, &[Position]) -> Result<bool, DsmError>,
 }
 
 impl StateMachine {
@@ -103,46 +79,10 @@ impl StateMachine {
         device_id: [u8; 32],
     ) -> Self {
         StateMachine {
-            current_state: None,
             device_state: None,
+            current_state: None,
             device_id,
             relationship_manager: RelationshipManager::new(strategy),
-            apply_transition_fn: apply_transition,
-            verify_transition: verify_transition_integrity,
-            generate_entropy: generate_transition_entropy,
-            verify_chain: verify_state_chain,
-            hash_function: internal_hash_blake3,
-            generate_precommitment: |state, operation, hash| {
-                // Generate entropy for operation
-                let entropy = generate_transition_entropy(state, operation)?;
-
-                // Generate seed for random walk using canonical op bytes (no Serde)
-                let op_bytes = operation.to_bytes();
-
-                let seed = random_walk::algorithms::generate_seed(hash, &op_bytes, Some(&entropy));
-
-                // Generate positions from seed
-                let positions = random_walk::algorithms::generate_positions(
-                    &seed,
-                    None::<random_walk::algorithms::RandomWalkConfig>,
-                )?;
-
-                Ok((seed, positions))
-            },
-            verify_precommitment: |state, operation, positions| {
-                // Create temporary state machine for verification
-                let mut temp_machine = StateMachine::new();
-                temp_machine.set_state(state.clone());
-
-                // Re-generate positions
-                let (_, generated_positions) = temp_machine.generate_precommitment(operation)?;
-
-                // Verify positions match
-                Ok(random_walk::algorithms::verify_positions(
-                    &generated_positions,
-                    positions,
-                ))
-            },
         }
     }
 
