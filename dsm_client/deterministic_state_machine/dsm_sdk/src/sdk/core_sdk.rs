@@ -1184,11 +1184,51 @@ impl CoreSDK {
             ));
         }
 
-        // First, execute the operation through the state machine for validation and state transition
-        let new_state = self.execute_dsm_operation(op.clone()).map_err(|e| {
+        // Execute via relationship-aware path. For incoming transfers (this is a
+        // recipient-side apply), the rel_key is k_{sender↔local_device}.
+        let local_device_id_bytes_pre = crate::sdk::app_state::AppState::get_device_id()
+            .ok_or_else(|| DsmError::state_machine("missing local device_id (AppState)"))?;
+        let sender_id_bytes_pre = crate::util::text_id::decode_base32_crockford(sender_device_id)
+            .ok_or_else(|| DsmError::invalid_operation("sender_device_id not valid base32"))?;
+
+        let (rel_key, counterparty, deltas) = {
+            let mut local_arr = [0u8; 32];
+            if local_device_id_bytes_pre.len() == 32 {
+                local_arr.copy_from_slice(&local_device_id_bytes_pre);
+            }
+            let mut sender_arr = [0u8; 32];
+            if sender_id_bytes_pre.len() == 32 {
+                sender_arr.copy_from_slice(&sender_id_bytes_pre);
+            }
+            let rk = dsm::core::bilateral_transaction_manager::compute_smt_key(&local_arr, &sender_arr);
+            // For incoming transfers, we're the recipient → Credit
+            let d: Vec<dsm::types::device_state::BalanceDelta> = match &op {
+                dsm::types::operations::Operation::Transfer { token_id, amount, .. } => {
+                    let tid = String::from_utf8_lossy(token_id);
+                    let pc = dsm::core::token::token_state_manager::resolve_policy_commit(&tid);
+                    vec![dsm::types::device_state::BalanceDelta {
+                        policy_commit: pc,
+                        direction: dsm::types::device_state::BalanceDirection::Credit,
+                        amount: amount.value(),
+                    }]
+                }
+                _ => vec![],
+            };
+            (rk, sender_arr, d)
+        };
+        let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &{
+                let mut a = [0u8; 32];
+                if local_device_id_bytes_pre.len() == 32 { a.copy_from_slice(&local_device_id_bytes_pre); }
+                a
+            },
+            &counterparty,
+        );
+        let (new_state, _) = self.execute_on_relationship(
+            rel_key, counterparty, op.clone(), &deltas, Some(init_tip),
+        ).map_err(|e| {
             DsmError::invalid_operation(format!(
-                "apply_operation_with_replay_protection: state machine execution failed: {}",
-                e
+                "apply_operation_with_replay_protection: state machine execution failed: {e}"
             ))
         })?;
 
@@ -1946,8 +1986,13 @@ mod tests {
             "canonical CoreSDK test signature must self-verify"
         );
 
-        let executed = sdk.execute_dsm_operation(op).expect("execute operation");
-        assert!(executed.hash[0] as u64 > 0, "state number should advance");
+        // Route through relationship path with self-loop for generic ops
+        let dev_id = device.device_id;
+        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&dev_id, &dev_id);
+        let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(&dev_id, &dev_id);
+        let (executed, _) = sdk.execute_on_relationship(rel_key, dev_id, op, &[], Some(init_tip))
+            .expect("execute operation");
+        assert_ne!(executed.hash, [0u8; 32], "state hash should be non-zero");
 
         let archived = crate::storage::client_db::get_bcr_states(&device.device_id, false)
             .expect("load archived states");
@@ -2027,9 +2072,13 @@ mod tests {
                 .expect("direct signature verify"),
             "canonical CoreSDK test signature must self-verify"
         );
-        let advanced = sdk.execute_dsm_operation(op).expect("execute operation");
-        assert!(
-            advanced.hash[0] as u64 > prior.hash[0] as u64,
+        let dev_id2 = device.device_id;
+        let rel_key2 = dsm::core::bilateral_transaction_manager::compute_smt_key(&dev_id2, &dev_id2);
+        let init_tip2 = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(&dev_id2, &dev_id2);
+        let (advanced, _) = sdk.execute_on_relationship(rel_key2, dev_id2, op, &[], Some(init_tip2))
+            .expect("execute operation");
+        assert_ne!(
+            advanced.hash, prior.hash,
             "state must advance"
         );
 
