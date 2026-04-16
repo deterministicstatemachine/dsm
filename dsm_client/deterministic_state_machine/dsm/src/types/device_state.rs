@@ -500,3 +500,217 @@ impl DeviceState {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::operations::{Operation, TransactionMode};
+
+    fn devid(b: u8) -> [u8; 32] { [b; 32] }
+    fn pubkey() -> Vec<u8> { vec![0xAA; 64] }
+    fn pc(b: u8) -> [u8; 32] { [b; 32] }
+
+    fn fresh_device(b: u8) -> DeviceState {
+        DeviceState::new([0u8; 32], devid(b), pubkey(), 1024)
+    }
+
+    fn op() -> Operation {
+        Operation::Generic {
+            operation_type: b"test".to_vec(),
+            data: vec![],
+            message: "t".to_string(),
+            signature: vec![],
+        }
+    }
+
+    fn entropy(seed: u8) -> Vec<u8> {
+        let mut h = crate::crypto::blake3::dsm_domain_hasher("DSM/test-entropy");
+        h.update(&[seed]);
+        h.finalize().as_bytes().to_vec()
+    }
+
+    /// Phase 6 test: balance witness reflects device-level total at commit time.
+    /// Two relationships, each debiting from the same device-level token balance.
+    /// Each chain's `balance_witness` must show the device total at the moment
+    /// of that advance (per §8 — "Each state binds B^T_{n+1}").
+    #[test]
+    fn balance_witness_reflects_device_total_across_relationships() {
+        let mut dev = fresh_device(0xAA);
+        // Seed the device with 100 of token T.
+        let token = pc(0xCC);
+        dev.balances.insert(token, 100);
+
+        let bob = devid(0xBB);
+        let charlie = devid(0xDD);
+        let rk_bob = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &bob);
+        let rk_chrl = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &charlie);
+        let init_bob = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(&dev.devid, &bob);
+        let init_chrl = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(&dev.devid, &charlie);
+
+        // Advance (A↔Bob): debit 30 → device total now 70
+        let out_bob = dev.advance(
+            rk_bob, bob, op(), entropy(1), None,
+            &[BalanceDelta { policy_commit: token, direction: BalanceDirection::Debit, amount: 30 }],
+            Some(init_bob), None,
+        ).expect("advance Bob");
+        assert_eq!(out_bob.new_chain_state.balance_witness.get(&token).copied(), Some(70),
+            "after debit 30 from 100, witness on (A↔Bob) chain must = 70");
+
+        // Apply outcome to device, then advance (A↔Charlie) from updated device state.
+        let dev_after_bob = out_bob.new_device_state;
+        let out_chrl = dev_after_bob.advance(
+            rk_chrl, charlie, op(), entropy(2), None,
+            &[BalanceDelta { policy_commit: token, direction: BalanceDirection::Debit, amount: 50 }],
+            Some(init_chrl), None,
+        ).expect("advance Charlie");
+        assert_eq!(out_chrl.new_chain_state.balance_witness.get(&token).copied(), Some(20),
+            "after debit 50 from 70, witness on (A↔Charlie) chain must = 20");
+
+        // Device-level balance is the canonical source of truth.
+        assert_eq!(out_chrl.new_device_state.balance(&token), 20);
+    }
+
+    /// Phase 6 test: stale-snapshot CAS detection.
+    /// Two advances built from the SAME parent `r_A` produce different child
+    /// `r'_A` values (different relationships → different SMT leaves replaced).
+    /// In the CAS layer above this, only the first to install wins; the second
+    /// sees its `parent_r_a` no longer matches the current head.
+    #[test]
+    fn concurrent_advances_from_same_root_produce_different_children() {
+        let mut dev = fresh_device(0xAA);
+        let token = pc(0xCC);
+        dev.balances.insert(token, 100);
+
+        let bob = devid(0xBB);
+        let charlie = devid(0xDD);
+        let rk_bob = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &bob);
+        let rk_chrl = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &charlie);
+        let init_bob = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(&dev.devid, &bob);
+        let init_chrl = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(&dev.devid, &charlie);
+
+        let parent_root = dev.root();
+
+        // Two advances from the same parent root, on different relationships.
+        let a = dev.advance(rk_bob, bob, op(), entropy(1), None,
+            &[BalanceDelta { policy_commit: token, direction: BalanceDirection::Debit, amount: 10 }],
+            Some(init_bob), None).expect("advance A");
+        let b = dev.advance(rk_chrl, charlie, op(), entropy(2), None,
+            &[BalanceDelta { policy_commit: token, direction: BalanceDirection::Debit, amount: 20 }],
+            Some(init_chrl), None).expect("advance B");
+
+        // Both built from the same parent.
+        assert_eq!(a.parent_r_a, parent_root);
+        assert_eq!(b.parent_r_a, parent_root);
+
+        // But produce different children — first-commit-wins at the CAS layer
+        // means the second outcome is stale.
+        assert_ne!(a.child_r_a, b.child_r_a,
+            "different SMT leaf replacements must yield different child roots");
+
+        // Balances on the two outcomes also diverge.
+        assert_eq!(a.new_device_state.balance(&token), 90);
+        assert_eq!(b.new_device_state.balance(&token), 80);
+    }
+
+    /// Phase 6 test: same-relationship double advance from same SMT root.
+    /// This is the per-relationship Tripwire scenario (§6.1, Theorem 2):
+    /// two attempts to consume the same chain tip `h_n` on the same relationship.
+    /// Both advances individually succeed (DeviceState::advance is pure), but
+    /// they produce DIFFERENT `h_{n+1}` because entropy/op differ — yet both
+    /// embed the same `embedded_parent`. Verifiers seeing both must reject one.
+    #[test]
+    fn tripwire_same_relationship_same_parent_different_children() {
+        let mut dev = fresh_device(0xAA);
+        let token = pc(0xCC);
+        dev.balances.insert(token, 100);
+
+        let bob = devid(0xBB);
+        let rk = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &bob);
+        let init = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(&dev.devid, &bob);
+
+        let a = dev.advance(rk, bob, op(), entropy(1), None,
+            &[BalanceDelta { policy_commit: token, direction: BalanceDirection::Debit, amount: 10 }],
+            Some(init), None).expect("advance A");
+        let b = dev.advance(rk, bob, op(), entropy(2), None,
+            &[BalanceDelta { policy_commit: token, direction: BalanceDirection::Debit, amount: 20 }],
+            Some(init), None).expect("advance B");
+
+        // Both consume the SAME embedded_parent (the initial tip).
+        assert_eq!(a.new_chain_state.embedded_parent, init);
+        assert_eq!(b.new_chain_state.embedded_parent, init);
+
+        // But produce DIFFERENT successor chain tips (different entropy/op).
+        let h_a = a.new_chain_state.compute_chain_tip();
+        let h_b = b.new_chain_state.compute_chain_tip();
+        assert_ne!(h_a, h_b,
+            "Tripwire: two children of same h_n must be cryptographically distinguishable");
+
+        // A verifier seeing both signed receipts would detect the fork:
+        // both claim to extend the same h_n, only one can be accepted.
+    }
+
+    /// Phase 6 test: balance underflow rejected.
+    #[test]
+    fn advance_rejects_balance_underflow() {
+        let mut dev = fresh_device(0xAA);
+        let token = pc(0xCC);
+        dev.balances.insert(token, 5);
+
+        let bob = devid(0xBB);
+        let rk = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &bob);
+        let init = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(&dev.devid, &bob);
+
+        let r = dev.advance(rk, bob, op(), entropy(1), None,
+            &[BalanceDelta { policy_commit: token, direction: BalanceDirection::Debit, amount: 10 }],
+            Some(init), None);
+        assert!(r.is_err(), "debit > balance must fail with insufficient funds");
+    }
+
+    /// Phase 6 test: balance overflow rejected.
+    #[test]
+    fn advance_rejects_balance_overflow() {
+        let mut dev = fresh_device(0xAA);
+        let token = pc(0xCC);
+        dev.balances.insert(token, u64::MAX);
+
+        let bob = devid(0xBB);
+        let rk = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &bob);
+        let init = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(&dev.devid, &bob);
+
+        let r = dev.advance(rk, bob, op(), entropy(1), None,
+            &[BalanceDelta { policy_commit: token, direction: BalanceDirection::Credit, amount: 1 }],
+            Some(init), None);
+        assert!(r.is_err(), "u64::MAX + 1 must overflow");
+    }
+
+    /// Phase 6 test: balance conservation across cross-relationship sequence.
+    /// Property: sum of all deltas across a sequence of valid advances equals
+    /// the net change in the device-level balance scalar.
+    #[test]
+    fn balance_conservation_across_sequence() {
+        let _ = TransactionMode::Bilateral; // import keep-alive
+        let mut dev = fresh_device(0xAA);
+        let token = pc(0xCC);
+        dev.balances.insert(token, 1000);
+
+        let parties: Vec<[u8; 32]> = (0u8..5).map(|i| devid(0xB0 + i)).collect();
+        let mut net_delta: i64 = 0;
+        for (i, party) in parties.iter().enumerate() {
+            let amt = (i + 1) as u64 * 7;
+            let dir = if i % 2 == 0 { BalanceDirection::Debit } else { BalanceDirection::Credit };
+            let signed = if matches!(dir, BalanceDirection::Debit) { -(amt as i64) } else { amt as i64 };
+            net_delta += signed;
+
+            let rk = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, party);
+            let init = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(&dev.devid, party);
+            let out = dev.advance(rk, *party, op(), entropy(i as u8), None,
+                &[BalanceDelta { policy_commit: token, direction: dir, amount: amt }],
+                Some(init), None).expect("advance");
+            dev = out.new_device_state;
+        }
+
+        let expected = (1000_i64 + net_delta) as u64;
+        assert_eq!(dev.balance(&token), expected,
+            "net balance change must equal sum of signed deltas");
+    }
+}
