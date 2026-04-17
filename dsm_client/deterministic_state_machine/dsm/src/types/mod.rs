@@ -4,7 +4,7 @@
 //!
 //! - [`error`] — [`error::DsmError`] comprehensive error type with deterministic safety classifications
 //! - [`device_state`] — [`device_state::DeviceState`] canonical Per-Device SMT head (§2.2 / §4 / §8)
-//! - [`state_types`] — Legacy [`State`] compatibility view (slated for deletion)
+//! - [`state_types`] — Legacy `State` compatibility view (slated for deletion)
 //! - [`token_types`] — [`Token`], [`TokenStatus`], supply parameters, and state context
 //! - [`identifiers`] — Type-safe wrappers: [`NodeId`], [`VaultId`], [`SessionId`], [`TransactionId`], etc.
 //! - [`operations`] — Operation trait hierarchy: [`Ops`], [`TokenOps`], [`IdOps`], [`SmartCommitOps`]
@@ -47,5 +47,8 @@ pub use policy_types::{PolicyAnchor, PolicyFile, TokenPolicy};
 pub use receipt_types::{
     ParentConsumptionTracker, ReceiptAcceptance, ReceiptVerificationContext, StitchedReceiptV2,
 };
-pub use state_types::State;
+// `pub use state_types::State` removed: no consumer imports via this short
+// path. All remaining consumers spell out `types::state_types::State`.
+// The State struct is being decomposed into DeviceState + RelationshipChainState
+// per §2.2; the shorter re-export was unnecessary scaffolding.
 pub use token_types::{Token, TokenStatus};
