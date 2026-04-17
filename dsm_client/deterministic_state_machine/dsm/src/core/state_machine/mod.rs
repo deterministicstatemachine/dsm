@@ -34,7 +34,7 @@ pub use random_walk::algorithms::{
 pub use hashchain::HashChain;
 pub use relationship::{RelationshipManager, RelationshipStatePair};
 pub use transition::{create_transition, generate_position_sequence, StateTransition};
-pub use utils::{constant_time_eq, verify_state_hash}; // Export utility functions and remove hash_blake3 export
+pub use utils::constant_time_eq;
 
 /// Type definition for precommitment generation function
 /// Core state machine — Per-Device SMT head (§2.2).

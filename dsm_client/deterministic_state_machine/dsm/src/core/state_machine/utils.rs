@@ -3,8 +3,6 @@
 //! This module contains common utility functions used across the state machine
 //! implementation, ensuring consistent behavior and reducing duplication.
 
-use crate::types::error::DsmError;
-use crate::types::state_types::State;
 use blake3;
 
 /// Perform constant-time equality comparison to prevent timing attacks
@@ -32,19 +30,8 @@ pub fn hash_blake3(data: &[u8]) -> blake3::Hash {
     crate::crypto::blake3::domain_hash("DSM/state-hash", data)
 }
 
-/// Verify a state's hash integrity with constant-time comparison
-///
-/// This implements the cryptographic validation described in whitepaper Section 3.1.
-pub fn verify_state_hash(state: &State) -> Result<bool, DsmError> {
-    let computed_hash = state.hash()?;
-
-    // Use constant-time comparison to prevent timing side-channel attacks
-    if computed_hash.len() != state.hash.len() {
-        return Ok(false);
-    }
-
-    Ok(constant_time_eq(&computed_hash, &state.hash))
-}
+// verify_state_hash(&State) deleted: only caller was relationship.rs::validate_transition
+// (also dead). HashChain has its own verify_state_hash impl for chain-internal use.
 
 /// Calculate the next entropy based on current entropy, operation, and state number
 ///
@@ -64,54 +51,7 @@ pub fn calculate_next_entropy(
     *hasher.finalize().as_bytes()
 }
 
-// Add a utility function for creating test transitions
-
-/// Create a test transition for testing purposes
-#[cfg(test)]
-pub fn create_test_transition() -> crate::core::state_machine::transition::StateTransition {
-    use crate::core::state_machine::transition::StateTransition;
-    use crate::crypto::sphincs::{generate_sphincs_keypair, sphincs_sign};
-    use crate::types::operations::{Operation, TransactionMode, VerificationType};
-    use crate::types::token_types::Balance;
-    use std::collections::HashMap;
-
-    let (_pk, sk) = generate_sphincs_keypair().expect("keypair");
-    let mut op = Operation::Transfer {
-        to_device_id: b"recipient".to_vec(),
-        amount: Balance::from_state(10, [0u8; 32]),
-        recipient: b"recipient".to_vec(),
-        token_id: b"token1".to_vec(),
-        to: b"recipient".to_vec(),
-        message: "Test transfer".to_string(),
-        mode: TransactionMode::Bilateral,
-        nonce: vec![1, 2, 3, 4],
-        verification: VerificationType::Standard,
-        pre_commit: None,
-        signature: Vec::new(),
-    };
-
-    let sig = sphincs_sign(&sk, &op.to_bytes()).expect("sign transfer");
-    if let Operation::Transfer { signature, .. } = &mut op {
-        *signature = sig.clone();
-    }
-
-    StateTransition {
-        operation: op,
-        new_entropy: Some(vec![4, 5, 6]),
-        encapsulated_entropy: None,
-        device_id: blake3::hash(b"test_device").into(),
-        tick: 1_234_567_890,
-        flags: vec![], // Protocol: no flags set for test state; production code must set as needed
-        position_sequence: None,
-        token_balances: Some(HashMap::new()),
-        forward_commitment: None,
-        proof_of_authorization: sig.clone(),
-        prev_state_hash: Some([0; 32]),
-        entity_signature: None,       // Default empty signature for tests
-        counterparty_signature: None, // Default empty signature for tests
-        signature: sig,
-    }
-}
+// create_test_transition() deleted: zero callers (no other tests imported it).
 
 #[cfg(test)]
 mod tests {

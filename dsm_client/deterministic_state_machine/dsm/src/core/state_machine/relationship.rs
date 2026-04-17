@@ -15,11 +15,11 @@ use base32;
 use zerocopy::IntoBytes;
 
 use crate::{
-    core::state_machine::utils::{constant_time_eq, verify_state_hash},
+    core::state_machine::utils::constant_time_eq,
     types::{
         error::DsmError,
         operations::Operation,
-        state_types::{DeviceInfo, PreCommitment, RelationshipContext, State},
+        state_types::{PreCommitment, RelationshipContext, State},
     },
 };
 
@@ -483,43 +483,10 @@ impl RelationshipStatePair {
     }
 }
 
-/// Core functions implementing deterministic state transitions
-#[allow(dead_code)]
-fn validate_transition(
-    current_state: &State,
-    new_state: &State,
-    _operation: &Operation,
-) -> Result<bool, DsmError> {
-    let current_hash = current_state.hash()?;
-    if !constant_time_eq(&new_state.prev_state_hash, &current_hash) {
-        return Ok(false);
-    }
-
-    if !verify_state_hash(new_state)? {
-        return Ok(false);
-    }
-
-    Ok(true)
-}
-
-/// Execute a state transition with deterministic transformation.
-/// Per §4.3 no counter is bumped; identity is the recomputed hash over the
-/// new state's fields.
-pub fn execute_transition(
-    current_state: &State,
-    operation: Operation,
-    device_info: DeviceInfo,
-) -> Result<State, DsmError> {
-    let mut next_state = current_state.clone();
-    next_state.operation = operation;
-    next_state.device_info = device_info;
-    next_state.prev_state_hash = current_state.hash;
-
-    let hash = next_state.compute_hash()?;
-    next_state.hash = hash;
-
-    Ok(next_state)
-}
+// validate_transition + execute_transition deleted: both took &State and had
+// zero callers (validate_transition was #[allow(dead_code)], execute_transition
+// was a free function shadowed by BilateralStateManager::execute_transition).
+// Per-relationship advance now flows through DeviceState::advance (§2.2, §4.2).
 
 /// Verify entropy evolution integrity. Per §11 eq. 14, entropy is derived
 /// from adjacency inputs — prev entropy, operation, parent hash — no counter.
