@@ -3,7 +3,8 @@
 //! This module organizes all data types used throughout the DSM protocol:
 //!
 //! - [`error`] — [`error::DsmError`] comprehensive error type with deterministic safety classifications
-//! - [`state_types`] — [`State`] struct (the central protocol data type) and related parameters
+//! - [`device_state`] — [`device_state::DeviceState`] canonical Per-Device SMT head (§2.2 / §4 / §8)
+//! - [`state_types`] — Legacy [`State`] compatibility view (slated for deletion)
 //! - [`token_types`] — [`Token`], [`TokenStatus`], supply parameters, and state context
 //! - [`identifiers`] — Type-safe wrappers: [`NodeId`], [`VaultId`], [`SessionId`], [`TransactionId`], etc.
 //! - [`operations`] — Operation trait hierarchy: [`Ops`], [`TokenOps`], [`IdOps`], [`SmartCommitOps`]
@@ -13,7 +14,6 @@
 //! - [`receipt_types`] — Stitched receipts and verification contexts
 //! - [`contact_types`] — Verified contact information
 //! - [`general`] — Shared types: [`Commitment`], [`KeyPair`], [`SecurityLevel`]
-//! - [`state_builder`] — Fluent builder for constructing [`State`] instances
 //! - [`crypto_error`] — Cryptographic operation errors
 //! - [`serialization`] — Protobuf serialization helpers
 //! - [`proto`] — Generated protobuf types (from `dsm_app.proto`)

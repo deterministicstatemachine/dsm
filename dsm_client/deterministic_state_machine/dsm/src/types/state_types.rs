@@ -1075,8 +1075,8 @@ mod tests {
         let s = test_state(5);
         let op = Operation::Noop;
         let entropy = vec![0xFF; 16];
-        let h1 = PreCommitment::generate_hash(&s, &op, &entropy).unwrap();
-        let h2 = PreCommitment::generate_hash(&s, &op, &entropy).unwrap();
+        let h1 = PreCommitment::generate_hash(&s.hash, &op, &entropy).unwrap();
+        let h2 = PreCommitment::generate_hash(&s.hash, &op, &entropy).unwrap();
         assert_eq!(h1, h2);
         assert_ne!(h1, [0u8; 32]);
     }
@@ -1855,14 +1855,14 @@ pub struct PreCommitment {
 }
 
 impl PreCommitment {
-    /// Generate hash for this pre-commitment
+    /// Generate hash for this pre-commitment.
     ///
-    /// # Arguments
-    /// * `state` - Current state
-    /// * `operation` - Operation to be performed
-    /// * `next_entropy` - Entropy for next state
+    /// Takes the parent chain-tip hash directly (`[u8; 32]`) — the prior
+    /// signature accepted `&State` purely to read `state.hash()?`. This is
+    /// per-chain semantic (the hash of the predecessor state on the chain
+    /// being committed against), not device-level.
     pub fn generate_hash(
-        state: &State,
+        state_hash: &[u8; 32],
         operation: &Operation,
         next_entropy: &[u8],
     ) -> Result<[u8; 32], DsmError> {
@@ -1871,7 +1871,7 @@ impl PreCommitment {
         // Canon 2: centralized, deterministic internal canonical bytes.
         // NOTE: This is an internal commit/hashing path; do not introduce Serde/bincode.
         let mut w = CanonicalBytesWriter::with_capacity(32 + 4 + 256 + 4 + next_entropy.len());
-        w.push_len_prefixed(&state.hash()?);
+        w.push_len_prefixed(state_hash);
 
         let op_bytes = operation.to_bytes();
         w.push_len_prefixed(&op_bytes);

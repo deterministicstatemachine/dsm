@@ -17,7 +17,6 @@ use crate::crypto::canonical_lp;
 use crate::crypto::sphincs;
 use crate::types::error::DsmError;
 use crate::types::operations::Operation;
-use crate::types::state_types::State;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{fence, Ordering};
@@ -196,11 +195,10 @@ impl PreCommitment {
     /// - domain separated
     /// - length prefixed for all fields
     pub fn generate_hash(
-        state: &State,
+        state_hash: &[u8; 32],
         operation: &Operation,
         next_entropy: &[u8],
     ) -> Result<[u8; 32], DsmError> {
-        let state_hash = state.hash()?;
         let op_bytes = operation.to_bytes();
 
         if op_bytes.len() > MAX_OP_BYTES_LEN {
@@ -218,7 +216,7 @@ impl PreCommitment {
 
         Ok(canonical_lp::hash_lp3(
             DOM_PRECOMMIT_ROOT,
-            &state_hash,
+            state_hash,
             &op_bytes,
             next_entropy,
         ))
@@ -556,48 +554,11 @@ impl PreCommitment {
         self.forward_commitment.as_ref()
     }
 
-    /// Shallow verification against a state:
-    /// - verifies internal commitment_hash correctness
-    /// - verifies selected fork integrity if set
-    ///
-    /// Note: Full transition verification requires operation + next_entropy and should use
-    /// `verify_transition_root(...)` below.
-    pub fn verify(&self, state: &State) -> Result<bool, DsmError> {
-        let _state_hash = state.hash()?; // kept to preserve callsite expectations (and future tightening).
-
-        let expected_commitment_hash =
-            canonical_lp::hash_lp1(DOM_PRECOMMIT_COMMITMENT_HASH, &self.hash);
-        if self.commitment_hash.as_slice() != expected_commitment_hash.as_slice() {
-            return Ok(false);
-        }
-
-        if let Some(fork_id) = &self.selected_fork_id {
-            let fork = match self.forks.iter().find(|f| &f.fork_id == fork_id) {
-                Some(f) => f,
-                None => return Ok(false),
-            };
-            if !fork.is_selected {
-                return Ok(false);
-            }
-            if !self.verify_fork_selection(fork)? {
-                return Ok(false);
-            }
-        }
-
-        Ok(true)
-    }
-
-    /// Full root verification for a transition.
-    /// Recomputes the root hash exactly as `generate_hash(...)` would.
-    pub fn verify_transition_root(
-        &self,
-        state: &State,
-        operation: &Operation,
-        next_entropy: &[u8],
-    ) -> Result<bool, DsmError> {
-        let expected = Self::generate_hash(state, operation, next_entropy)?;
-        Ok(expected.as_slice() == self.hash.as_slice())
-    }
+    // PreCommitment::verify(&State) and verify_transition_root(&State, ...)
+    // deleted: zero callers. Both took `&State` purely to read state.hash() —
+    // verify dropped the result entirely (assigned to `_state_hash` with a
+    // comment "kept to preserve callsite expectations"), and verify_transition_root
+    // forwarded to generate_hash which now takes `&[u8; 32]` directly.
 
     pub fn from_forward_linked_commitment(flc: &ForwardLinkedCommitment) -> Result<Self, DsmError> {
         let mut signatures = HashMap::new();
