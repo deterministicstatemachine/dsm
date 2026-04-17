@@ -87,24 +87,29 @@ impl StateMachine {
     /// callers during migration; prefer `device_head()` for new code.
     pub fn current_state(&self) -> Option<State> {
         let ds = self.device_state.as_ref()?;
-        let mut s = State::default();
-        s.device_info = crate::types::state_types::DeviceInfo::new(
+        let device_info = crate::types::state_types::DeviceInfo::new(
             ds.devid(),
             ds.public_key().to_vec(),
         );
-        s.hash = ds.root();
+        let hash = ds.root();
+        let mut token_balances = std::collections::HashMap::new();
         for (pc, val) in ds.balances_snapshot() {
             let prefix = u128::from_le_bytes({
                 let mut a = [0u8; 16];
                 a.copy_from_slice(&pc[..16]);
                 a
             });
-            s.token_balances.insert(
+            token_balances.insert(
                 format!("{prefix}"),
-                crate::types::token_types::Balance::from_state(*val, s.hash),
+                crate::types::token_types::Balance::from_state(*val, hash),
             );
         }
-        Some(s)
+        Some(State {
+            device_info,
+            hash,
+            token_balances,
+            ..State::default()
+        })
     }
 
     /// Initialize with a genesis state. Bootstraps DeviceState from

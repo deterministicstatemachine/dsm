@@ -84,10 +84,6 @@ pub struct StateParams {
     pub device_info: DeviceInfo,
     /// Optional forward commitment binding this state to a future transition.
     pub forward_commitment: Option<PreCommitment>,
-    /// Whether the state matches externally supplied parameters.
-    pub matches_parameters: bool,
-    /// Advisory state type label (e.g., "standard", "benchmark").
-    pub state_type: String,
     /// Auxiliary integer values for position verification.
     pub value: Vec<i32>,
     /// Auxiliary commitment integers.
@@ -133,8 +129,6 @@ impl StateParams {
             operation,
             device_info,
             forward_commitment: None,
-            matches_parameters: false,
-            state_type: "standard".to_string(),
             value: Vec::new(),
             commitment: Vec::new(),
             dbrw_summary_hash: None,
@@ -346,9 +340,6 @@ pub struct State {
     /// Maps token identifiers to balances, format: "owner_id:token_id" -> Balance
     pub token_balances: HashMap<String, Balance>,
 
-    /// Matches parameters in the state transition
-    pub matches_parameters: bool,
-
     /// Relationship context for tracking state relationships
     pub relationship_context: Option<RelationshipContext>,
 
@@ -363,13 +354,10 @@ pub struct State {
     pub(crate) position_sequence: Option<PositionSequence>,
     pub(crate) positions: Vec<Vec<i32>>,
     pub(crate) public_key: Vec<u8>,
-    hashchain_head: Option<Vec<u8>>,
-    external_data: HashMap<String, Vec<u8>>,
     pub(crate) entity_sig: Option<Vec<u8>>,
     pub(crate) counterparty_sig: Option<Vec<u8>>,
     pub(crate) value: Vec<i32>,
     pub(crate) commitment: Vec<i32>,
-    pub(crate) state_type: String,
 }
 
 impl State {
@@ -414,10 +402,8 @@ pub enum StateFlag {
 }
 
 impl State {
-    /// Set the external data for this state
-    pub fn set_external_data(&mut self, external_data: HashMap<String, Vec<u8>>) {
-        self.external_data = external_data;
-    }
+    // set_external_data deleted: external_data field removed (zero callers).
+
     /// Create a new state using the parameter object pattern
     ///
     /// # Arguments
@@ -444,14 +430,10 @@ impl State {
             positions: Vec::new(),
             position_sequence: None,
             public_key,
-            matches_parameters: params.matches_parameters,
-            hashchain_head: None,
-            external_data: HashMap::new(),
             value: params.value,
             commitment: params.commitment,
             entity_sig: None,
             counterparty_sig: None,
-            state_type: params.state_type,
         }
     }
 
@@ -492,14 +474,10 @@ impl State {
             positions: Vec::new(),
             position_sequence: None,
             public_key,
-            matches_parameters: false,
-            hashchain_head: None,
-            external_data: HashMap::new(),
             value: Vec::new(),
             commitment: Vec::new(),
             entity_sig: None,
             counterparty_sig: None,
-            state_type: String::from("standard"),
         }
     }
 
@@ -573,11 +551,7 @@ impl State {
         self.flags.insert(flag);
     }
 
-    /// Add metadata to the state's external data
-    pub fn add_metadata(&mut self, key: &str, value: Vec<u8>) -> Result<(), DsmError> {
-        self.external_data.insert(key.to_string(), value);
-        Ok(())
-    }
+    // add_metadata deleted: external_data field removed (zero callers).
 
     /// Calculate the hash of this state, as specified in whitepaper Section 3.1
     ///
@@ -706,43 +680,11 @@ impl State {
         self.forward_commitment = commitment;
     }
 
-    /// Get the forward commitment from this state
-    pub fn get_forward_commitment(&self) -> Option<&PreCommitment> {
-        self.forward_commitment.as_ref()
-    }
-
-    /// Get a parameter value from the state
-    pub fn get_parameter(&self, key: &str) -> Option<&Vec<u8>> {
-        // Extract parameter from external data
-        if let Some(value) = self.external_data.get(key) {
-            return Some(value);
-        }
-
-        // If parameter is not found in external data, check operation-specific fields
-        match &self.operation {
-            Operation::Transfer { .. } if key == "token_id" => {
-                // If token_id is already in external_data, return it
-                if let Some(value) = self.external_data.get("token_id") {
-                    return Some(value);
-                }
-
-                // For immutable access, we can't store the token_bytes in external_data
-                // A mutable method would be needed for that functionality
-                // Just return None since we can't store the computed value
-                None
-            }
-            Operation::AddRelationship { .. } if key == "relationship_type" => {
-                if let Some(value) = self.external_data.get("relationship_type") {
-                    Some(value)
-                } else {
-                    // Return None since we can't create a reference to a temporary value
-                    // The caller would need to use a mutable method to store this value
-                    None
-                }
-            }
-            _ => None,
-        }
-    }
+    // get_forward_commitment deleted: zero external callers.
+    // get_parameter deleted: read from now-deleted external_data field.
+    // The single SDK caller (token_sdk locked_balances) always returned
+    // None because external_data was never populated outside the deleted
+    // add_metadata. The caller's fallback path handles the None case.
 
     /// Get the serialized operation bytes
     pub fn get_operation_bytes(&self) -> Vec<u8> {
@@ -808,11 +750,9 @@ impl State {
             put_bytes(&mut out, &vb);
         }
 
-        // matches_parameters flag
-        put_u8(&mut out, if self.matches_parameters { 1 } else { 0 });
-
-        // state_type (advisory; not in canonical hash)
-        put_str(&mut out, &self.state_type);
+        // matches_parameters and state_type fields removed — they were
+        // advisory-only and never participated in any acceptance predicate.
+        // The canonical wire format shrinks by `1 + 4 + state_type.len()` bytes.
 
         Ok(out)
     }
@@ -1042,19 +982,8 @@ mod tests {
     }
 
     // ── State metadata & parameters ─────────────────────────────────
-
-    #[test]
-    fn state_add_metadata_and_get_parameter() {
-        let mut s = test_state(5);
-        s.add_metadata("my_key", vec![1, 2, 3]).unwrap();
-        assert_eq!(s.get_parameter("my_key"), Some(&vec![1, 2, 3]));
-    }
-
-    #[test]
-    fn state_get_parameter_missing_returns_none() {
-        let s = test_state(5);
-        assert_eq!(s.get_parameter("nonexistent"), None);
-    }
+    // (state_add_metadata_and_get_parameter tests removed: external_data
+    //  field deleted along with add_metadata/get_parameter accessors.)
 
     // ── State relationship context ──────────────────────────────────
 
@@ -1123,7 +1052,7 @@ mod tests {
     #[test]
     fn state_forward_commitment_roundtrip() {
         let mut s = test_state(11);
-        assert!(s.get_forward_commitment().is_none());
+        assert!(s.forward_commitment.is_none());
 
         let pc = PreCommitment::new(
             "transfer".into(),
@@ -1133,14 +1062,14 @@ mod tests {
             [0xAA; 32],
         );
         s.set_forward_commitment(Some(pc));
-        assert!(s.get_forward_commitment().is_some());
+        assert!(s.forward_commitment.is_some());
         assert_eq!(
-            s.get_forward_commitment().unwrap().operation_type,
+            s.forward_commitment.as_ref().unwrap().operation_type,
             "transfer"
         );
 
         s.set_forward_commitment(None);
-        assert!(s.get_forward_commitment().is_none());
+        assert!(s.forward_commitment.is_none());
     }
 
     // ── State transition_count ───────────────────────────────────────
@@ -1452,8 +1381,6 @@ mod tests {
         assert!(sp.encapsulated_entropy.is_none());
         assert_eq!(sp.prev_state_hash, [0u8; 32]);
         assert!(sp.forward_commitment.is_none());
-        assert!(!sp.matches_parameters);
-        assert_eq!(sp.state_type, "standard");
     }
 
     #[test]

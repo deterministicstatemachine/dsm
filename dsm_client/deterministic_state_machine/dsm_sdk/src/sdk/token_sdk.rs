@@ -2397,18 +2397,10 @@ impl<I: Send + Sync> TokenSDK<I> {
         let device_id_str = crate::util::text_id::encode_base32_crockford(device_id);
         let locked_key = format!("{device_id_str}:{token_id}:{purpose}");
 
-        if let Ok(current_state) = self.core_sdk.get_current_state() {
-            if let Some(locked_blob) = current_state.get_parameter("locked_balances") {
-                if let Ok(proto) = LockedBalances::decode(locked_blob.as_slice()) {
-                    if let Some(entry) = proto.entries.iter().find(|e| e.key == locked_key) {
-                        return Ok(Balance::from_state(entry.amount, state_hash.clone().try_into().unwrap_or([0u8; 32])));
-                    }
-                } else {
-                    // If decoding fails, treat as no locked balance (fail-closed).
-                    log::warn!("LockedBalances parameter present but not decodable as protobuf; treating as zero.");
-                }
-            }
-        }
+        // §4.3 — external_data parameter map removed. Locked balances now
+        // come from the in-memory lock tracker below; State no longer carries
+        // a "locked_balances" parameter blob.
+        let _ = locked_key.clone();
 
         // Fallback to in-memory locks if tracked on Balance
         let balances = self.balances.read();

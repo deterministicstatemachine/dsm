@@ -190,15 +190,11 @@ fn decode_bcr_state_from_bytes(bytes: &[u8]) -> Result<State> {
         token_balances.insert(key, bal);
     }
 
-    let matches_parameters =
-        read_u8(&mut cursor).map_err(|e| anyhow!("matches_parameters: {e}"))? == 1;
-    let state_type = read_string(&mut cursor).map_err(|e| anyhow!("state_type: {e}"))?;
+    // matches_parameters and state_type fields removed (§4.3 cleanup).
 
     let mut params = StateParams::new(entropy, operation, device_info);
     params.prev_state_hash = prev_state_hash;
     params.encapsulated_entropy = encapsulated_entropy;
-    params.matches_parameters = matches_parameters;
-    params.state_type = state_type;
     params.sparse_index = SparseIndex::default();
 
     let mut state = State::new(params);

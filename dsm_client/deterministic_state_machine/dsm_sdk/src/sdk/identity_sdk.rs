@@ -632,10 +632,11 @@ impl IdentitySDK {
         // Create the state using the cryptographically secure entropy
         let mut state = State::new_genesis(entropy, device_info);
 
-        // Add metadata if provided
-        if let Some(meta) = metadata {
-            state.add_metadata("metadata", meta)?;
-        }
+        // §4.3 — State.external_data parameter map removed. Metadata
+        // attached to identity creation is no longer carried on the
+        // canonical State; if needed, callers should attach it to a
+        // separate identity-metadata sidecar.
+        let _ = metadata;
 
         // The state hash should incorporate the genesis hash for cryptographic integrity
         let mut combined_hash_data = Vec::new();
@@ -718,12 +719,12 @@ impl IdentitySDK {
         // Create a new sub-genesis state
         let mut state = State::new_genesis(device_entropy, device_info);
 
-        // Link to master genesis through metadata
-        let master_link_key = "master_genesis_hash";
-
-        // Store master genesis hash in metadata
-        let metadata = master_genesis.hash.to_vec();
-        state.add_metadata(master_link_key, metadata)?;
+        // §4.3 — State.external_data removed. Master-genesis linkage now
+        // travels via prev_state_hash (§2.1 hash adjacency); the dedicated
+        // "master_genesis_hash" metadata key is no longer needed because the
+        // device-state genesis is rooted at the master genesis hash via the
+        // prev_state_hash chain rather than a side-channel parameter map.
+        let _ = master_genesis;
 
         // Calculate hash
         let hash = state.compute_hash()?;

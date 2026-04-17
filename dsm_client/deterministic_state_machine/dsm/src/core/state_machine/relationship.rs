@@ -1304,25 +1304,25 @@ mod tests {
     /// Helper function to create a test state. `seed` is a distinguishing
     /// label only — it plays no role in acceptance predicates.
     fn create_test_state(seed: u64, prev_hash: [u8; 32]) -> State {
-        let mut state = State::default();
-        state.prev_state_hash = prev_hash;
-
-        state.hash = *crate::crypto::blake3::domain_hash(
+        let hash = *crate::crypto::blake3::domain_hash(
             "DSM/test-state-hash",
             format!("test_state_{seed}").as_bytes(),
         )
         .as_bytes();
-
-        // Fresh entropy derived from the parent hash + seed. Per §11 eq. 14,
-        // production entropy comes from (prev_entropy, op, parent_hash).
-        state.entropy = crate::crypto::blake3::domain_hash(
+        // Per §11 eq. 14, production entropy comes from (prev_entropy, op, parent_hash);
+        // for the test fixture we synthesize a distinguishable seed.
+        let entropy = crate::crypto::blake3::domain_hash(
             "DSM/test-entropy",
             format!("entropy_{seed}").as_bytes(),
         )
         .as_bytes()
         .to_vec();
-
-        state
+        State {
+            prev_state_hash: prev_hash,
+            hash,
+            entropy,
+            ..State::default()
+        }
     }
 
     #[test]
