@@ -65,7 +65,7 @@ fn make_genesis(seed: &[u8; 32], pk: &[u8]) -> (State, StateMachine) {
     }
     state.token_balances.insert(
         "ERA".into(),
-        Balance::from_state(1_000_000, state.hash, state.state_number),
+        Balance::from_state(1_000_000, state.hash),
     );
     let mut machine = StateMachine::new();
     machine.set_state(state.clone());
@@ -181,7 +181,7 @@ fn benchmark_with_signing(
         let mut op = Operation::Transfer {
             token_id: "ERA".into(),
             to_device_id: vec![0xDD; 32],
-            amount: Balance::from_state(1, state.hash, state.state_number),
+            amount: Balance::from_state(1, state.hash),
             mode: TransactionMode::Unilateral,
             nonce,
             verification: VerificationType::Standard,
@@ -198,7 +198,7 @@ fn benchmark_with_signing(
         }
 
         // Execute transition
-        match machine.execute_transition(op) {
+        match crate::compat_shim::machine_execute_transition(&mut machine, op) {
             Ok(new_state) => {
                 state = new_state;
             }
@@ -262,7 +262,7 @@ fn benchmark_without_signing(seed: &[u8; 32], pk: &[u8], iterations: u64) -> Thr
         }
 
         let iter_start = Instant::now();
-        match machine.execute_transition(op) {
+        match crate::compat_shim::machine_execute_transition(&mut machine, op) {
             Ok(_) => {}
             Err(e) => {
                 eprintln!("    WARNING: transition {i} failed: {e}");
