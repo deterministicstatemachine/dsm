@@ -22,20 +22,16 @@
 //!
 //! ```rust
 //! use dsm_sdk::identity_sdk::IdentitySDK;
-//! use dsm_sdk::hashchain_sdk::HashChainSDK;
 //! use dsm::types::state_types::DeviceInfo;
-//! use std::sync::Arc;
 //!
 //!
-//! // Create identity SDK with hash chain
-//! let hash_chain_sdk = Arc::new(HashChainSDK::new());
-//! let identity_sdk = IdentitySDK::new("user123".into(), hash_chain_sdk);
+//! // Create identity SDK
+//! let identity_sdk = IdentitySDK::new("user123".into());
 //!
 //! // Create a device and genesis state
 //! let device_info = DeviceInfo::new("device1", vec![1,2,3,4]);
 //! ```
 use crate::types::error::DsmError;
-use crate::sdk::hashchain_sdk::HashChainSDK;
 use dsm::crypto::blake3::dsm_domain_hasher;
 #[cfg(feature = "storage")]
 use crate::sdk::storage_node_sdk::StorageNodeSDK;
@@ -74,31 +70,10 @@ use dsm::types::state_types::{State, DeviceInfo};
 use dsm::types::operations::{Operation, TransactionMode};
 use dsm::core::identity::genesis::create_genesis_via_blind_mpc;
 
-// Type alias for state hash (matches State.hash type)
-type StateHash = Vec<u8>;
-
-/// Bilateral relationship context for secure peer interactions
-///
-/// This structure manages the cryptographic context between two entities
-/// as defined in section 7 of the DSM whitepaper, enabling secure bilateral
-/// communication with state isolation.
-#[derive(Debug, Clone)]
-pub struct ExtendedRelationshipContext {
-    /// Identifier of the counterparty in this relationship
-    pub counterparty_id: String,
-
-    /// Public key of the counterparty for verification
-    pub counterparty_public_key: Vec<u8>,
-
-    /// Hash of the current relationship state
-    pub current_state_hash: StateHash,
-
-    /// Sequence of state hashes in this relationship
-    pub state_sequence: Vec<StateHash>,
-
-    /// Additional metadata for the relationship
-    pub metadata: HashMap<String, Vec<u8>>,
-}
+// ExtendedRelationshipContext struct deleted: only used by
+// IdentitySDK::create_relationship_context + get_relationship_context, both
+// dead (zero external callers). Relationship context per §7 now lives in
+// dsm::types::state_types::RelationshipContext on DeviceState chain states.
 
 /// Identity management SDK for the DSM system
 ///
@@ -114,12 +89,6 @@ pub struct IdentitySDK {
     /// Registry of device-specific genesis states
     pub device_genesis_states: Arc<RwLock<HashMap<[u8; 32], State>>>,
 
-    /// Reference to the hash chain tracking states
-    pub hash_chain_sdk: Arc<HashChainSDK>,
-
-    /// Registry of bilateral relationship contexts
-    relationship_contexts: Arc<RwLock<HashMap<String, ExtendedRelationshipContext>>>,
-
     /// Cryptographic key pair for this identity
     signing_keypair: Arc<RwLock<Option<SignatureKeyPair>>>,
 
@@ -131,13 +100,12 @@ pub struct IdentitySDK {
 impl IdentitySDK {
     /// Create a new IdentitySDK instance
     ///
-    /// Initializes a new identity with the specified ID and hash chain,
-    /// and generates cryptographic keys for this identity.
+    /// Initializes a new identity with the specified ID and generates
+    /// cryptographic keys.
     ///
     /// # Arguments
     ///
     /// * `identity_id` - The unique identifier for this identity
-    /// * `hash_chain_sdk` - An Arc-wrapped HashChainSDK for state tracking
     ///
     /// # Returns
     ///
@@ -147,18 +115,13 @@ impl IdentitySDK {
     ///
     /// ```
     /// use dsm_sdk::identity_sdk::IdentitySDK;
-    /// use dsm_sdk::hashchain_sdk::HashChainSDK;
-    /// use std::sync::Arc;
     ///
-    /// let hash_chain_sdk = Arc::new(HashChainSDK::new());
-    /// let identity_sdk = IdentitySDK::new("user123".into(), hash_chain_sdk);
+    /// let identity_sdk = IdentitySDK::new("user123".into());
     /// ```
-    pub fn new(identity_id: String, hash_chain_sdk: Arc<HashChainSDK>) -> Self {
+    pub fn new(identity_id: String) -> Self {
         let sdk = Self {
             identity_id,
             device_genesis_states: Arc::new(RwLock::new(HashMap::new())),
-            hash_chain_sdk,
-            relationship_contexts: Arc::new(RwLock::new(HashMap::new())),
             signing_keypair: Arc::new(RwLock::new(None)),
             #[cfg(feature = "storage")]
             storage_sdk: Arc::new(RwLock::new(None)),
@@ -263,11 +226,9 @@ impl IdentitySDK {
     ///
     /// ```
     /// use dsm_sdk::identity_sdk::IdentitySDK;
-    /// use dsm_sdk::hashchain_sdk::HashChainSDK;
     /// use std::sync::Arc;
     ///
-    /// let hash_chain_sdk = Arc::new(HashChainSDK::new());
-    /// let identity_sdk = IdentitySDK::new("user123".into(), hash_chain_sdk);
+    /// let identity_sdk = IdentitySDK::new("user123".into());
     ///
     /// let data = b"Data to sign";
     /// let signature = identity_sdk.sign_data(data).map_err(|_e| DsmError::internal(e.to_string(), None))?;
@@ -309,11 +270,9 @@ impl IdentitySDK {
     ///
     /// ```
     /// use dsm_sdk::identity_sdk::IdentitySDK;
-    /// use dsm_sdk::hashchain_sdk::HashChainSDK;
     /// use std::sync::Arc;
     ///
-    /// let hash_chain_sdk = Arc::new(HashChainSDK::new());
-    /// let identity_sdk = IdentitySDK::new("user123".into(), hash_chain_sdk);
+    /// let identity_sdk = IdentitySDK::new("user123".into());
     ///
     /// let data = b"Data to sign";
     /// let signature = identity_sdk.sign_data(data).map_err(|_e| DsmError::internal(e.to_string(), None))?;
@@ -504,12 +463,10 @@ impl IdentitySDK {
     ///
     /// ```
     /// use dsm_sdk::identity_sdk::IdentitySDK;
-    /// use dsm_sdk::hashchain_sdk::HashChainSDK;
     /// use dsm::types::state_types::DeviceInfo;
     /// use std::sync::Arc;
     ///
-    /// let hash_chain_sdk = Arc::new(HashChainSDK::new());
-    /// let identity_sdk = IdentitySDK::new("user123".into(), hash_chain_sdk);
+    /// let identity_sdk = IdentitySDK::new("user123".into());
     ///
     /// let device_info = DeviceInfo::new("device1", vec![1, 2, 3, 4]);
     /// let participant_inputs = vec![vec![5, 6, 7, 8]];
@@ -680,12 +637,10 @@ impl IdentitySDK {
     ///
     /// ```
     /// use dsm_sdk::identity_sdk::IdentitySDK;
-    /// use dsm_sdk::hashchain_sdk::HashChainSDK;
     /// use dsm::types::state_types::DeviceInfo;
     /// use std::sync::Arc;
     ///
-    /// let hash_chain_sdk = Arc::new(HashChainSDK::new());
-    /// let identity_sdk = IdentitySDK::new("user123".into(), hash_chain_sdk);
+    /// let identity_sdk = IdentitySDK::new("user123".into());
     ///
     /// // First create master genesis
     /// let master_device = DeviceInfo::new("master", vec![1, 2, 3, 4]);
@@ -742,329 +697,20 @@ impl IdentitySDK {
         Ok(state)
     }
 
-    /// Create a pre-commitment for a future operation
-    ///
-    /// Creates a cryptographic commitment to a future operation without
-    /// revealing the operation details, as described in section 8 of the
-    /// DSM whitepaper.
-    ///
-    /// # Arguments
-    ///
-    /// * `operation` - The operation to create a pre-commitment for
-    /// * `counterparty_id` - Optional ID of the counterparty in a bilateral operation
-    /// * `fixed_params` - Optional fixed parameters for the commitment
-    /// * `variable_params` - Optional variable parameters for the commitment
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(Vec<u8>)` - The pre-commitment if successful
-    /// * `Err(DsmError)` - If pre-commitment creation failed
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use dsm_sdk::identity_sdk::IdentitySDK;
-    /// use dsm_sdk::hashchain_sdk::HashChainSDK;
-    /// use dsm::types::operations::Operation;
-    /// use std::sync::Arc;
-    ///
-    /// // Create a pre-commitment for a future operation
-    /// fn create_commitment(sdk: &IdentitySDK, operation: &Operation) {
-    ///     let pre_commitment = sdk.create_pre_commitment(
-    ///         operation,
-    ///         Some("counterparty123".into()),
-    ///         Some(vec![1, 2, 3]),
-    ///         Some(vec![4, 5, 6])
-    ///     ).map_err(|_e| DsmError::internal(e.to_string(), None))?;
-    ///     
-    ///     // The pre-commitment can be shared and later verified
-    ///     // when the operation is executed
-    /// }
-    /// ```
-    pub fn create_pre_commitment(
-        &self,
-        operation: &Operation,
-        counterparty_id: Option<String>,
-        fixed_params: Option<Vec<u8>>,
-        variable_params: Option<Vec<u8>>,
-    ) -> Result<Vec<u8>, DsmError> {
-        // Get current state
-        let current_state = self
-            .hash_chain_sdk
-            .current_state()
-            .ok_or_else(|| DsmError::state("No current state available for pre-commitment"))?;
-
-        // Build deterministic, serde-free canonical bytes for the operation
-        let operation_bytes = Self::operation_canonical_bytes(operation);
-
-        // Calculate next entropy based on the deterministic formula en+1 = H(en || opn+1 || n+1)
-        let mut entropy_hasher = dsm_domain_hasher("DSM/identity-entropy-derive");
-        entropy_hasher.update(&current_state.entropy);
-        entropy_hasher.update(&operation_bytes);
-        entropy_hasher.update(&(current_state.hash[0] as u64 + 1).to_le_bytes());
-        let next_entropy = entropy_hasher.finalize();
-
-        // Create parameters for pre-commitment
-        let mut params = Vec::new();
-        if let Some(counter_id) = counterparty_id {
-            params.extend_from_slice(counter_id.as_bytes());
-        }
-        if let Some(fixed) = fixed_params {
-            params.extend_from_slice(&fixed);
-        }
-        if let Some(variable) = variable_params {
-            params.extend_from_slice(&variable);
-        }
-
-        // Create the pre-commitment as Cpre = H(H(Sn) || opn+1 || en+1 || params)
-        let mut pre_commitment_hasher = dsm_domain_hasher("DSM/identity-precommit");
-        pre_commitment_hasher.update(&current_state.hash);
-        pre_commitment_hasher.update(&operation_bytes);
-        pre_commitment_hasher.update(next_entropy.as_bytes());
-        pre_commitment_hasher.update(&params);
-
-        let pre_commitment = pre_commitment_hasher.finalize().as_bytes().to_vec();
-
-        Ok(pre_commitment)
-    }
-
-    /// Deterministic, serde-free canonical name for an operation (stable ASCII).
-    fn canonical_operation_name(op: &Operation) -> &'static str {
-        match op {
-            Operation::Create { .. } => "CREATE",
-            Operation::AddRelationship { .. } => "ADD_REL",
-            Operation::RemoveRelationship { .. } => "REMOVE_REL",
-            Operation::Invalidate { .. } => "INVALIDATE",
-            Operation::Recovery { .. } => "RECOVERY",
-            _ => "CUSTOM",
-        }
-    }
-
-    /// Append len-prefixed bytes (LE u32) to the buffer for determinism.
-    fn extend_len_prefixed(buf: &mut Vec<u8>, bytes: &[u8]) {
-        let len = bytes.len() as u32;
-        buf.extend_from_slice(&len.to_le_bytes());
-        buf.extend_from_slice(bytes);
-    }
-
-    /// Build canonical bytes for an Operation without Serde/bincode (stable ordering).
-    fn operation_canonical_bytes(op: &Operation) -> Vec<u8> {
-        let mut out = Vec::new();
-        let tag = Self::canonical_operation_name(op);
-        Self::extend_len_prefixed(&mut out, tag.as_bytes());
-
-        match op {
-            Operation::Create {
-                message,
-                identity_data,
-                public_key,
-                metadata,
-                commitment,
-                proof,
-                ..
-            } => {
-                Self::extend_len_prefixed(&mut out, message.as_bytes());
-                Self::extend_len_prefixed(&mut out, identity_data);
-                Self::extend_len_prefixed(&mut out, public_key);
-                Self::extend_len_prefixed(&mut out, metadata);
-                Self::extend_len_prefixed(&mut out, commitment);
-                Self::extend_len_prefixed(&mut out, proof);
-            }
-            Operation::AddRelationship {
-                message,
-                from_id,
-                to_id,
-                relationship_type,
-                metadata,
-                proof,
-                ..
-            } => {
-                Self::extend_len_prefixed(&mut out, message.as_bytes());
-                Self::extend_len_prefixed(&mut out, from_id);
-                Self::extend_len_prefixed(&mut out, to_id);
-                Self::extend_len_prefixed(&mut out, relationship_type);
-                Self::extend_len_prefixed(&mut out, metadata);
-                Self::extend_len_prefixed(&mut out, proof);
-            }
-            Operation::RemoveRelationship {
-                message,
-                from_id,
-                to_id,
-                relationship_type,
-                proof,
-                ..
-            } => {
-                Self::extend_len_prefixed(&mut out, message.as_bytes());
-                Self::extend_len_prefixed(&mut out, from_id);
-                Self::extend_len_prefixed(&mut out, to_id);
-                Self::extend_len_prefixed(&mut out, relationship_type);
-                Self::extend_len_prefixed(&mut out, proof);
-            }
-            Operation::Invalidate { reason, proof, .. } => {
-                Self::extend_len_prefixed(&mut out, reason.as_bytes());
-                Self::extend_len_prefixed(&mut out, proof);
-            }
-            Operation::Recovery {
-                message,
-                invalidation_data,
-                new_state_data,
-                new_state_number,
-                new_state_hash,
-                new_state_entropy,
-                compromise_proof,
-                authority_sigs,
-                state_entropy,
-                state_number,
-                state_hash,
-            } => {
-                Self::extend_len_prefixed(&mut out, message.as_bytes());
-                Self::extend_len_prefixed(&mut out, invalidation_data);
-                Self::extend_len_prefixed(&mut out, new_state_data);
-                out.extend_from_slice(&new_state_number.to_le_bytes());
-                Self::extend_len_prefixed(&mut out, new_state_hash);
-                Self::extend_len_prefixed(&mut out, new_state_entropy);
-                Self::extend_len_prefixed(&mut out, compromise_proof);
-                for sig in authority_sigs {
-                    Self::extend_len_prefixed(&mut out, sig);
-                }
-                Self::extend_len_prefixed(&mut out, state_entropy);
-                out.extend_from_slice(&state_number.to_le_bytes());
-                Self::extend_len_prefixed(&mut out, state_hash);
-            }
-            _ => {
-                // For unknown/custom variants, the tag alone provides stable differentiation.
-            }
-        }
-
-        out
-    }
-
-    /// Verify a signature against data
-    ///
-    /// Verifies that a signature is valid for the provided data using
-    /// the identity's public key.
-    ///
-    /// # Arguments
-    ///
-    /// * `data` - The data that was signed
-    /// * `signature` - The signature to verify
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(bool)` - True if the signature is valid, false otherwise
-    /// * `Err(DsmError)` - If verification failed
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use dsm_sdk::identity_sdk::IdentitySDK;
-    /// use dsm_sdk::hashchain_sdk::HashChainSDK;
-    /// use std::sync::Arc;
-    ///
-    /// let hash_chain_sdk = Arc::new(HashChainSDK::new());
-    /// let identity_sdk = IdentitySDK::new("user123".into(), hash_chain_sdk);
-    ///
-    /// let data = b"Data to sign";
-    /// let signature = identity_sdk.sign_data(data).map_err(|_e| DsmError::internal(e.to_string(), None))?;
-    /// let is_valid = identity_sdk.verify_signature(data, &signature).map_err(|_e| DsmError::internal(e.to_string(), None))?;
-    /// assert!(is_valid);
-    /// ```
-    pub fn verify_pre_commitment(
-        &self,
-        pre_commitment: &[u8],
-        operation: &Operation,
-    ) -> Result<bool, DsmError> {
-        // Regenerate the pre-commitment using the same logic
-        let regenerated = self.create_pre_commitment(operation, None, None, None)?;
-
-        // Compare using constant-time equality to prevent timing attacks
-        Ok(constant_time_eq(pre_commitment, &regenerated))
-    }
-
-    /// Create a relationship context with another identity
-    ///
-    /// Establishes a bilateral relationship context with another identity,
-    /// enabling secure state transitions in the context of that relationship
-    /// as described in section 7 of the DSM whitepaper.
-    ///
-    /// # Arguments
-    ///
-    /// * `counterparty_id` - The ID of the counterparty identity
-    /// * `counterparty_public_key` - The public key of the counterparty
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(())` - If relationship creation was successful
-    /// * `Err(DsmError)` - If relationship creation failed
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use dsm_sdk::identity_sdk::IdentitySDK;
-    /// use dsm_sdk::hashchain_sdk::HashChainSDK;
-    /// use std::sync::Arc;
-    ///
-    /// let hash_chain_sdk = Arc::new(HashChainSDK::new());
-    /// let identity_sdk = IdentitySDK::new("user123".into(), hash_chain_sdk);
-    ///
-    /// // Create relationship with another identity
-    /// identity_sdk.create_relationship_context(
-    ///     "user456",
-    ///     vec![1, 2, 3, 4]  // Public key
-    /// ).map_err(|_e| DsmError::internal(e.to_string(), None))?;
-    /// ```
-    pub fn create_relationship_context(
-        &self,
-        counterparty_id: &str,
-        counterparty_public_key: Vec<u8>,
-    ) -> Result<(), DsmError> {
-        let current_state = self.hash_chain_sdk.current_state().ok_or_else(|| {
-            DsmError::state("No current state available for relationship creation")
-        })?;
-
-        let context = ExtendedRelationshipContext {
-                        counterparty_id: counterparty_id.to_string(),
-             // Initial state
-            counterparty_public_key,
-            current_state_hash: current_state.hash.to_vec(),
-            state_sequence: vec![current_state.hash.to_vec()],
-            metadata: HashMap::new(),
-        };
-
-        // Store the relationship context
-        {
-            let mut contexts = self
-                .relationship_contexts
-                .write()
-                .map_err(|_| DsmError::lock_error())?;
-            contexts.insert(counterparty_id.to_string(), context);
-        }
-
-        Ok(())
-    }
-
-    /// Get a relationship context by counterparty ID
-    ///
-    /// Retrieves the bilateral relationship context for a specific counterparty.
-    ///
-    /// # Arguments
-    ///
-    /// * `counterparty_id` - The ID of the counterparty
-    ///
-    /// # Returns
-    ///
-    /// * `Some(ExtendedRelationshipContext)` - The relationship context if found
-    /// * `None` - If no relationship exists with the counterparty
-    pub fn get_relationship_context(
-        &self,
-        counterparty_id: &str,
-    ) -> Option<ExtendedRelationshipContext> {
-        if let Ok(contexts) = self.relationship_contexts.read() {
-            contexts.get(counterparty_id).cloned()
-        } else {
-            None
-        }
-    }
+    // Dead IdentitySDK methods removed (Apr 2026 State residue sweep):
+    //   - create_pre_commitment / verify_pre_commitment: pre-commitment hashing
+    //     that read hash_chain_sdk.current_state(). Zero external callers; pre-
+    //     commitment logic now lives in commitments::precommit::PreCommitment
+    //     which takes a canonical parent-hash directly.
+    //   - create_relationship_context / get_relationship_context: relationship
+    //     registry that read hash_chain_sdk.current_state(). Zero external
+    //     callers; §7 relationship context now lives on DeviceState chain tips
+    //     (state_types::RelationshipContext embedded in RelationshipChainState).
+    //   - canonical_operation_name / extend_len_prefixed / operation_canonical_bytes:
+    //     serde-free serializers used only by create_pre_commitment.
+    // Deletion also enabled dropping the hash_chain_sdk field (replaced by the
+    // DeviceState/RelationshipChainState flow) and the ExtendedRelationshipContext
+    // struct + relationship_contexts map.
 
     /// Invalidate a state in the chain
     ///
@@ -1404,9 +1050,7 @@ impl IdentitySDK {
 mod tests {
     use super::IdentitySDK;
     // use super::GENESIS_PUBLISH_TEST_DUMMY_TOKEN;
-    use crate::sdk::hashchain_sdk::HashChainSDK;
     // use crate::sdk::storage_node_sdk::StorageNodeSDK;
-    use std::sync::Arc;
     use dsm::types::state_types::DeviceInfo;
 
     #[tokio::test]
@@ -1419,8 +1063,7 @@ mod tests {
 
         // This test requires storage nodes running on localhost:8080
 
-        let hash_chain_sdk = Arc::new(HashChainSDK::new());
-        let identity_sdk = IdentitySDK::new("test_user_genesis".into(), hash_chain_sdk);
+        let identity_sdk = IdentitySDK::new("test_user_genesis".into());
 
         // Configure storage SDK
         // IMPORTANT: use a canonical-looking 32-byte base32 device_id string.

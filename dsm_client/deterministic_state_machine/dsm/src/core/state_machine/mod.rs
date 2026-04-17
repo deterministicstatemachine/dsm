@@ -10,7 +10,10 @@
 //! as described in the whitepaper.
 
 pub mod bilateral;
-pub mod hashchain;
+// hashchain module deleted: HashChain was a per-device full-state-history
+// HashMap superseded by (a) DeviceState's per-relationship SMT (§2.2) for
+// current-tip tracking and (b) the BCR archive (bcr_states SQL table) for
+// authoritative history. HashChainSDK was the only consumer, also deleted.
 pub mod random_walk;
 pub mod relationship;
 pub mod transition;
@@ -31,7 +34,6 @@ pub use random_walk::algorithms::{
     verify_random_walk_coordinates, Position, RandomWalkConfig,
 };
 
-pub use hashchain::HashChain;
 pub use relationship::{RelationshipManager, RelationshipStatePair};
 pub use transition::{create_transition, generate_position_sequence, StateTransition};
 pub use utils::constant_time_eq;
