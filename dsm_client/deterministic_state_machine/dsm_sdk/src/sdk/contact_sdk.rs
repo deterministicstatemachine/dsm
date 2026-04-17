@@ -15,11 +15,9 @@ use prost::Message;
 use tokio::sync::RwLock;
 
 use dsm::core::contact_manager::{ContactError, DsmContactManager};
-use dsm::core::state_machine::transition::StateTransition;
 use dsm::types::error::DsmError;
 use dsm::types::identifiers::NodeId;
 use dsm::types::operations::{Operation, TransactionMode};
-use dsm::types::state_types::State;
 
 // Use the SAME proto namespace as the rest of the app to avoid type mismatches.
 use dsm::types::proto as pb;
@@ -1097,23 +1095,10 @@ impl ContactManager {
 
 // ------------------------ Optional state update hook ------------------------
 
-impl ContactManager {
-    pub fn update_contact_from_transition(
-        &mut self,
-        transition: &StateTransition,
-        state: &State,
-    ) -> Result<(), DsmError> {
-        match &transition.operation {
-            Operation::AddRelationship { .. } | Operation::RemoveRelationship { .. } => {
-                let _ = state; // no-op for now; reserved for future chain-tip syncing
-                Ok(())
-            }
-            _ => Err(DsmError::invalid_operation(
-                "Unsupported operation type for contact update",
-            )),
-        }
-    }
-}
+// update_contact_from_transition deleted: zero production callers, and
+// the body explicitly dropped the &State parameter (`let _ = state`,
+// "reserved for future chain-tip syncing"). Classic dead-parameter
+// residue. Chain-tip sync now flows through ChainTipStore + DeviceState.
 
 #[cfg(test)]
 mod tests {
@@ -1302,42 +1287,8 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ── update_contact_from_transition ────────────────────────────────
-
-    fn stub_transition(op: Operation) -> StateTransition {
-        StateTransition::new(op, None, None, &[0u8; 32])
-    }
-
-    #[test]
-    fn update_contact_from_transition_accepts_add_relationship() {
-        let mut cm = test_manager();
-        let transition = stub_transition(Operation::AddRelationship {
-            from_id: [0x01; 32],
-            to_id: [0x02; 32],
-            relationship_type: b"friend".to_vec(),
-            metadata: vec![],
-            proof: vec![],
-            mode: TransactionMode::Unilateral,
-            message: "test".into(),
-        });
-        let state = State::default();
-        assert!(cm
-            .update_contact_from_transition(&transition, &state)
-            .is_ok());
-    }
-
-    #[test]
-    fn update_contact_from_transition_rejects_unsupported_ops() {
-        let mut cm = test_manager();
-        let transition = stub_transition(Operation::Generic {
-            operation_type: b"test".to_vec(),
-            data: vec![],
-            message: "test".into(),
-            signature: vec![],
-        });
-        let state = State::default();
-        assert!(cm
-            .update_contact_from_transition(&transition, &state)
-            .is_err());
-    }
+    // update_contact_from_transition tests removed: function deleted as
+    // it had zero production callers and explicitly dropped its &State
+    // parameter. The "accepts AddRelationship" / "rejects Generic" pattern
+    // is no longer meaningful since the function is gone.
 }
