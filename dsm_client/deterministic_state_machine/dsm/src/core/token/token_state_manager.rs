@@ -15,15 +15,14 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use crate::common::helpers::secure_eq;
 use crate::crypto::sphincs;
 use crate::core::token::policy::TokenPolicySystem;
 
 use crate::{
     types::{
         error::DsmError,
-        operations::{Operation, Ops},
-        state_types::{State, PreCommitment},
+        operations::Operation,
+        state_types::State,
         token_types::{Balance, StateContext, Token, TokenStatus},
     },
 };
@@ -630,82 +629,8 @@ impl TokenStateManager {
         Ok(())
     }
 
-    fn verify_precommitment_parameters(
-        &self,
-        pre_commit: &PreCommitment,
-        operation: &Operation,
-    ) -> Result<bool, DsmError> {
-        let matches_type = match operation {
-            Operation::Transfer { .. } => pre_commit.operation_type == "transfer",
-            Operation::Mint { .. } => pre_commit.operation_type == "mint",
-            Operation::Burn { .. } => pre_commit.operation_type == "burn",
-            Operation::LockToken { .. } => pre_commit.operation_type == "lock",
-            Operation::UnlockToken { .. } => pre_commit.operation_type == "unlock",
-            _ => false,
-        };
-
-        if !matches_type {
-            return Ok(false);
-        }
-
-        let matches_fixed = match operation {
-            Operation::Transfer {
-                token_id,
-                recipient,
-                ..
-            } => {
-                let token_ok = if let Some(exp) = pre_commit.fixed_parameters.get("token_id") {
-                    secure_eq(token_id.as_slice(), exp)
-                } else {
-                    true
-                };
-
-                let recip_ok = if let Some(exp) = pre_commit.fixed_parameters.get("recipient") {
-                    secure_eq(recipient.as_slice(), exp)
-                } else {
-                    true
-                };
-
-                token_ok && recip_ok
-            }
-            Operation::Mint { token_id, .. } | Operation::Burn { token_id, .. } => {
-                if let Some(exp) = pre_commit.fixed_parameters.get("token_id") {
-                    secure_eq(token_id.as_slice(), exp)
-                } else {
-                    true
-                }
-            }
-            _ => true,
-        };
-
-        if !matches_fixed {
-            return Ok(false);
-        }
-
-        let variable_ok = match operation {
-            Operation::Transfer { amount, .. }
-            | Operation::Mint { amount, .. }
-            | Operation::Burn { amount, .. } => {
-                if pre_commit.variable_parameters.contains("amount") {
-                    true
-                } else if let Some(exp) = pre_commit.fixed_parameters.get("amount") {
-                    if exp.len() == 8 {
-                        let mut arr = [0u8; 8];
-                        arr.copy_from_slice(&exp[..8]);
-                        let expected = u64::from_le_bytes(arr);
-                        amount.value() == expected
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                }
-            }
-            _ => true,
-        };
-
-        Ok(matches_type && matches_fixed && variable_ok)
-    }
+    // verify_precommitment_parameters deleted — only caller was the
+    // deleted create_token_state_transition.
 
     fn update_balance_cache(
         &self,

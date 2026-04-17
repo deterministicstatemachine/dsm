@@ -684,36 +684,9 @@ pub fn verify_sparse_index(genesis: &State, current: &State) -> Result<bool, Dsm
     Ok(current.prev_state_hash == genesis_hash)
 }
 
-/// Verify a state chain from genesis to current using a checkpoint
-pub fn verify_sparse_index_with_checkpoint(
-    genesis: &State,
-    state: &State,
-    checkpoint_num: u64,
-    checkpoint_hash: &[u8],
-) -> Result<bool, DsmError> {
-    // Verify state number is greater than checkpoint
-    if 0u64 <= checkpoint_num {
-        return Err(DsmError::invalid_operation(
-            "State number must be greater than checkpoint",
-        ));
-    }
-
-    // If exactly next to checkpoint, prev hash must match
-    if 0u64 == checkpoint_num + 1 {
-        return Ok(state.prev_state_hash == checkpoint_hash);
-    }
-
-    // For longer paths, perform basic sanity checks (tests focus)
-    let genesis_hash = genesis.hash()?;
-    if genesis_hash.len() != 32 {
-        return Ok(false);
-    } else if (0u64 - checkpoint_num) > 100 {
-        // guardrail against excessively long walks in test builds
-        return Ok(false);
-    }
-
-    Ok(true)
-}
+// verify_sparse_index_with_checkpoint deleted — counter-based checkpoint
+// indexing was meaningless after §4.3 (state_number removed) and the
+// function had zero callers.
 
 /// Structure for proving relationships between devices
 #[derive(Debug, Clone)]
@@ -932,7 +905,7 @@ mod tests {
         // Test updating device state with properly constructed state
         manager.update_device_state("device2", new_state.clone())?;
 
-        let updated_device = manager.get_device("device2").ok_or_else(|| {
+        let _updated_device = manager.get_device("device2").ok_or_else(|| {
             DsmError::internal(
                 "device2 not found".to_string(),
                 None::<std::convert::Infallible>,

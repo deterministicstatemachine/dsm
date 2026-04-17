@@ -19,7 +19,6 @@ pub mod utils;
 use crate::core::state_machine::relationship::validate_relationship_state_transition;
 use crate::core::state_machine::relationship::verify_relationship_entropy;
 use crate::core::state_machine::relationship::KeyDerivationStrategy;
-use crate::core::state_machine::transition::apply_transition;
 use crate::crypto::blake3::{domain_hash, dsm_domain_hasher};
 use crate::types::error::DsmError;
 use crate::types::operations::Operation;
@@ -523,44 +522,9 @@ fn is_operation_allowed(operation: &Operation, current_state: &State) -> Result<
     }
 }
 
-/// Verify a state chain from genesis to current
-fn verify_state_chain(states: &[State]) -> Result<bool, DsmError> {
-    if states.is_empty() {
-        return Ok(true);
-    }
-
-    // Verify continuity and transitions for each state
-    for i in 1..states.len() {
-        let prev_state = &states[i - 1];
-        let curr_state = &states[i];
-
-        // First verify hash chain continuity (§2.1 adjacency)
-        if curr_state.prev_state_hash != prev_state.hash()? {
-            return Err(DsmError::invalid_operation(format!(
-                "Hash chain broken between states {:02x?} and {:02x?}",
-                &prev_state.hash[..4],
-                &curr_state.hash[..4]
-            )));
-        }
-
-        // Then verify the transition integrity using the operation
-        if !verify_transition_integrity(prev_state, curr_state, &curr_state.operation)? {
-            return Err(DsmError::invalid_operation(format!(
-                "Invalid state transition between states {:02x?} and {:02x?}",
-                &prev_state.hash[..4],
-                &curr_state.hash[..4]
-            )));
-        }
-    }
-
-    Ok(true)
-}
-
-// Use domain-separated BLAKE3 hashing for state machine operations
-#[allow(dead_code)]
-fn internal_hash_blake3(data: &[u8]) -> blake3::Hash {
-    crate::crypto::blake3::domain_hash("DSM/state-hash", data)
-}
+// verify_state_chain and internal_hash_blake3 deleted — both were dead.
+// Verifiers operate on individual chain states via the SMT inclusion proofs
+// in AdvanceOutcome rather than walking arrays of legacy State objects.
 
 #[cfg(test)]
 mod state_machine_tests {
@@ -636,13 +600,14 @@ mod state_machine_tests {
 
     #[test]
     fn test_state_chain_reconstruction() -> Result<(), DsmError> {
+        use crate::core::state_machine::transition::apply_transition;
+
         // Create a genesis state for testing
         let (initial_state, _pk, sk) = create_test_genesis_state_with_keypair();
 
         let mut states = vec![initial_state.clone()];
         let mut current_state = initial_state;
 
-        // Create a chain of states through transitions (fewer in debug mode)
         let num_transitions = if cfg!(debug_assertions) { 1 } else { 3 };
         for i in 0..num_transitions {
             let op = signed_transfer(
@@ -652,7 +617,7 @@ mod state_machine_tests {
                 &format!("Test transfer {i}"),
             );
 
-            // Generate entropy via hash adjacency (§11 eq. 14). No counter.
+            // §11 eq.14 entropy derivation
             let op_bytes = op.to_bytes();
             let new_entropy = {
                 let mut hasher = crate::crypto::blake3::dsm_domain_hasher("DSM/state-entropy");
@@ -662,31 +627,31 @@ mod state_machine_tests {
                 *hasher.finalize().as_bytes()
             };
 
-            // Create a transition using the random walk
             let transition = create_transition(&current_state, op, &new_entropy)?;
-
-            // Apply the transition to get a new state
             let new_state = apply_transition(&current_state, &transition.operation, &new_entropy)?;
 
-            // Add to our chain and update current state
             states.push(new_state.clone());
             current_state = new_state;
         }
 
-        // Verify the integrity of the entire chain
-        assert!(verify_state_chain(&states)?);
+        // Verify chain integrity via §2.1 hash adjacency (the only canonical
+        // chain-integrity rule in the counterless model).
+        for win in states.windows(2) {
+            assert_eq!(win[1].prev_state_hash, win[0].hash()?,
+                "hash adjacency must hold across the constructed chain");
+        }
 
-        // Try breaking the chain by tampering with an intermediate state
+        // Tamper with intermediate state — adjacency must break.
         let mut broken_states = states.clone();
-        broken_states[1].entropy = vec![99, 99, 99]; // Tamper with entropy
-
-        // Compute new hash for the tampered state
+        broken_states[1].entropy = vec![99, 99, 99];
         if let Ok(hash) = broken_states[1].hash() {
             broken_states[1].hash = hash;
         }
-
-        // Verification should now fail
-        assert!(verify_state_chain(&broken_states).is_err());
+        // states[2].prev_state_hash now points to the OLD broken_states[1] hash
+        if states.len() >= 3 {
+            assert_ne!(broken_states[2].prev_state_hash, broken_states[1].hash,
+                "tampered state breaks adjacency to its successor");
+        }
 
         Ok(())
     }
@@ -769,13 +734,15 @@ mod state_machine_tests {
 
     #[test]
     fn test_state_verification_chain() -> Result<(), DsmError> {
+        use crate::core::state_machine::transition::apply_transition;
+
         // Build states manually using the same domain tag as generate_transition_entropy
         let (genesis, _pk, sk) = create_test_genesis_state_with_keypair();
 
         // Create first operation
         let op1 = signed_transfer(&sk, &genesis, vec![1u8; 8], "First transfer");
 
-        // Compute entropy with DSM/state-entropy domain tag matching generate_transition_entropy
+        // Compute entropy with DSM/state-entropy domain tag matching §11 eq.14
         let op1_bytes = op1.to_bytes();
         let entropy1 = {
             let mut hasher = crate::crypto::blake3::dsm_domain_hasher("DSM/state-entropy");

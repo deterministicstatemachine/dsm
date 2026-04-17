@@ -1096,9 +1096,10 @@ impl AppRouterImpl {
                         Err(e) => return err(format!("Invalid amount: {}", e)),
                     };
 
-                // 4. Fetch Sequence (from current state)
+                // 4. Per §4.3 there's no state_number sequence; use deterministic
+                // tick as a per-request monotonic identifier (not in any hash).
                 let seq = match self.core_sdk.get_current_state() {
-                    Ok(s) => 0u64 + 1,
+                    Ok(_s) => crate::util::deterministic_time::tick(),
                     _ => 1,
                 };
 

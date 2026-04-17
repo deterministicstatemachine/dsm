@@ -121,7 +121,9 @@ fn build_canonical_settled_state(
         &canonical_state.device_info.public_key,
         token_for_policy,
     );
-    if !settled_state.token_balances.contains_key(&balance_key) {
+    if let std::collections::hash_map::Entry::Vacant(entry) =
+        settled_state.token_balances.entry(balance_key)
+    {
         if let Ok(Some(proj)) =
             crate::storage::client_db::get_balance_projection(&local_txt, token_for_policy)
         {
@@ -129,10 +131,10 @@ fn build_canonical_settled_state(
                 "[BILATERAL][settle] seeding missing {token_for_policy} balance from projection: available={} (balance_key not in canonical state fork)",
                 proj.available,
             );
-            settled_state.token_balances.insert(
-                balance_key,
-                dsm::types::token_types::Balance::from_state(proj.available, canonical_state.hash),
-            );
+            entry.insert(dsm::types::token_types::Balance::from_state(
+                proj.available,
+                canonical_state.hash,
+            ));
         }
     }
 

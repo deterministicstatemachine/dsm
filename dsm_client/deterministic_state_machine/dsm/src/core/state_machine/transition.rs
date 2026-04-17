@@ -340,7 +340,7 @@ impl Operation {
 /// optional sparse index... is an implementation optimization that does not
 /// affect acceptance rules"). Per §4.3 no counter participates in acceptance
 /// predicates. Call sites now use `SparseIndex::default()`.
-
+///
 /// Generate position sequence for state transition
 pub fn generate_position_sequence(
     current_state: &State,

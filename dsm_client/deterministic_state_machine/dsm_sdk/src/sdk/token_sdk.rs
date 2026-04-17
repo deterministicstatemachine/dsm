@@ -2753,17 +2753,16 @@ mod tests {
 
     fn build_state(
         device_info: DeviceInfo,
-        state_number: u64,
+        seed: u64,
         balances: &[(&str, Balance)],
         operation: Operation,
     ) -> State {
         let mut state = State::new(StateParams::new(
-            state_number,
-            vec![state_number as u8; 32],
+            vec![seed as u8; 32],
             operation,
             device_info,
         ));
-        state.hash = [state_number as u8; 32];
+        state.hash = [seed as u8; 32];
         for (token_id, balance) in balances {
             state
                 .token_balances
@@ -3010,7 +3009,7 @@ mod tests {
         assert_eq!(decoded.token_id, "ERA");
         assert_eq!(decoded.amount, 100);
         assert_eq!(decoded.memo.as_deref(), Some("test transfer"));
-        assert_eq!(decoded.hash[0] as u64, 5);
+        assert_eq!(decoded.state_number, 5);
         assert_eq!(decoded.tick, 99);
     }
 }

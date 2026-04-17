@@ -99,21 +99,13 @@ fn base64_encode_for_test(input: &[u8]) -> String {
     result
 }
 
-/// Generate a deterministic entropy for state transition.
-///
-/// This is used to implement the entropy evolution described in the whitepaper section 6:
-/// en+1 = H(en || opn+1 || (n+1))
-///
-/// (deleted per §4.3)
-///
-/// `generate_deterministic_entropy(prev_entropy, op, state_number)` was
-/// removed because state_number no longer participates in entropy
-/// derivation. Use `crate::core::state_machine::utils::calculate_next_entropy`
-/// which implements §11 eq.14:
-/// `e_{n+1} = H("DSM/state-entropy" || e_n || op || prev_hash)`.
-
-// generate_deterministic_entropy_concurrent removed — same reason as
-// generate_deterministic_entropy above (state_number eliminated per §4.3).
+// `generate_deterministic_entropy(prev_entropy, op, state_number)` was
+// removed per §4.3 (state_number no longer participates in entropy
+// derivation). Use `crate::core::state_machine::utils::calculate_next_entropy`
+// which implements §11 eq.14:
+//   e_{n+1} = H("DSM/state-entropy" || e_n || op || prev_hash)
+//
+// `generate_deterministic_entropy_concurrent` was removed for the same reason.
 
 /// Create a seed for hash chain verification.
 ///
@@ -369,7 +361,6 @@ mod tests_token_domain {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::thread;
 
     #[test]
     fn test_hash_blake3() {

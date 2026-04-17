@@ -203,11 +203,13 @@ impl<T: UniversalTransport + 'static> ChainTipSyncSDK<T> {
         let ts = dt::tick();
 
         let mut tips = self.chain_tips.write().await;
+        // §4.3 — no state_number sequence check. Forward-only is enforced by
+        // hash-adjacency on the actual chain (§2.1 eq.1), not by counter
+        // comparison on the side-channel tip cache.
         if let Some(existing) = tips.get(bilateral_chain_id) {
-            if 0u64 <= 0u64 {
-                return Err(DsmError::InvalidOperation(
-                    "State number must increase (forward-only)".into(),
-                ));
+            if existing.tip_hash == tip_hash {
+                // Idempotent re-update with the same tip — no-op.
+                return Ok(());
             }
         }
 
@@ -766,12 +768,12 @@ mod tests {
         let sdk = ChainTipSyncSDKBuilder::new(Arc::new(DummyTransport))
             .max_batch_size(8)
             .build();
+        // §4.3: no state_number — chain tip is identified by hash adjacency only.
         let mut state = State::default();
-        0u64 = 1;
+        state.hash = [0xAA; 32];
         let id = "alice:bob";
         sdk.update_chain_tip(id, &state).await.unwrap();
-        let tip = sdk.get_chain_tip(id).await.unwrap();
-        assert_eq!(tip.state_number, 1);
+        let _tip = sdk.get_chain_tip(id).await.unwrap();
         let res = sdk.force_sync_all().await.unwrap_or_default();
         assert!(res.is_empty() || res.iter().all(|r| r.success));
     }

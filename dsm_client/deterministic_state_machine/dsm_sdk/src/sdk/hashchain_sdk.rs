@@ -852,7 +852,6 @@ mod tests {
         use dsm::types::state_types::DeviceInfo;
 
         let params = StateParams::new(
-            0,
             vec![0xAA; 32],
             Operation::Generic {
                 operation_type: b"genesis".to_vec(),
@@ -877,14 +876,14 @@ mod tests {
 
         assert_eq!(sdk.get_chain_length().unwrap(), 1);
         assert!(sdk.current_state().is_some());
-        assert_eq!(sdk.current_state().unwrap().state_number, 0);
+        // §4.3 — no state_number; genesis identified by zero prev_state_hash.
+        assert_eq!(sdk.current_state().unwrap().prev_state_hash, [0u8; 32]);
     }
 
     #[test]
     fn initialize_rejects_non_genesis() {
         let sdk = HashChainSDK::new();
         let params = StateParams::new(
-            5, // non-zero
             vec![0xAA; 32],
             Operation::Generic {
                 operation_type: b"test".to_vec(),
@@ -893,7 +892,8 @@ mod tests {
                 signature: vec![],
             },
             dsm::types::state_types::DeviceInfo::default(),
-        );
+        )
+        .with_prev_state_hash([0xCD; 32]);
         let state = State::new(params);
         assert!(sdk.initialize_with_genesis(state).is_err());
     }
@@ -1010,7 +1010,9 @@ mod tests {
         let sdk = HashChainSDK::new();
         sdk.initialize_with_genesis(make_genesis_state()).unwrap();
 
-        let proof = sdk.generate_state_proof(0).unwrap();
+        // generate_state_proof now keys by state hash, not by counter (§4.3).
+        let cur = sdk.current_state().expect("genesis present");
+        let proof = sdk.generate_state_proof(&cur.hash).unwrap();
         let dbg = format!("{:?}", proof);
         assert!(dbg.contains("MerkleProof"));
     }
@@ -1019,7 +1021,8 @@ mod tests {
     fn generate_state_proof_nonexistent() {
         let sdk = HashChainSDK::new();
         sdk.initialize_with_genesis(make_genesis_state()).unwrap();
-        assert!(sdk.generate_state_proof(999).is_err());
+        // Hash that doesn't exist in the chain.
+        assert!(sdk.generate_state_proof(&[0xFF; 32]).is_err());
     }
 
     // ── Export / Import roundtrip ──

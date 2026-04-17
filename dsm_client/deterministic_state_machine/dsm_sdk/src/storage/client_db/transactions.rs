@@ -531,7 +531,6 @@ mod tests {
         let device = [0x41u8; 32];
         let device_b32 = crate::util::text_id::encode_base32_crockford(&device);
         let failed_state = State::new(StateParams::new(
-            1,
             vec![0xAA],
             Operation::Noop,
             DeviceInfo::new(device, vec![0x22; 64]),
