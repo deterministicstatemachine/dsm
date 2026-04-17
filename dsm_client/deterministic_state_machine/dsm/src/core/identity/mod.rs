@@ -30,7 +30,10 @@ const _: () = assert!(
 
 pub mod genesis;
 pub mod genesis_mpc;
-pub mod hierarchical_device_management;
+// hierarchical_device_management deleted: 1180-line module with zero external
+// callers. Its own doc comment noted "DO NOT use this Merkle implementation for
+// π_dev" — it's legacy superseded by crate::common::device_tree (§5 Device Tree)
+// and the SMT-based DeviceState (§2.2).
 // JNI bridge moved to dsm_sdk - see dsm_sdk/src/jni/unified_protobuf_bridge.rs
 
 use crate::types::state_types::MerkleProof;
