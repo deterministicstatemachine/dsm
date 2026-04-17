@@ -76,7 +76,11 @@ pub mod storage_node_sdk;
 // If blockchain transport functionality is required, implement a protobuf-based transport
 // that communicates using generated proto messages and prost encoding.
 // pub mod blockchain_transport;  // removed by purge
-pub mod chain_tip_sync_sdk;
+// pub mod chain_tip_sync_sdk;  // deleted: 787-line module with zero external
+// consumers. ChainTipSyncSDK was never instantiated outside its own tests; its
+// internal UniversalTransport trait had no implementors beyond the tests' DummyTransport.
+// Per-relationship chain-tip anchoring is now handled inline in
+// bilateral_transaction_manager + contacts store.
 
 // Smart contract and commitment functionality
 pub mod bitcoin_key_store;
@@ -132,9 +136,7 @@ pub use dlv_receipt_sdk::DlvReceiptSdk;
 pub use recovery_sdk::RecoverySDK;
 pub use token_sdk::TokenSDK;
 pub use token_mpc_sdk::TokenMpcSDK;
-pub use chain_tip_sync_sdk::{
-    ChainTipSyncSDK, ChainTipSyncSDKBuilder, ChainTip, TransactionBatch, SyncResult, SyncMetrics,
-};
+// chain_tip_sync_sdk re-exports removed alongside the module deletion above.
 // blockchain_transport removed as part of protobuf-only purge.
 // If chain integration is required, implement a protobuf-native transport and reintroduce here.
 pub use runtime_config::RuntimeConfig;
