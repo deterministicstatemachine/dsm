@@ -17,8 +17,6 @@
 //!   enforcement (`B_{n+1} = B_n + Delta, B >= 0`), and policy validation via CPTA anchors.
 //! - **Contact management** ([`contact_manager`]): Counterparty identity storage and
 //!   lookup by device ID.
-//! - **Security policies** ([`security`]): Access control, rate limiting, and protocol
-//!   compliance enforcement.
 //! - **Verification** ([`verification`]): Proof primitives for SMT inclusion proofs and
 //!   device tree verification.
 //! - **Chain tip store** ([`chain_tip_store`]): Per-relationship chain tip tracking for
@@ -33,7 +31,16 @@ pub mod contact_manager;
 pub mod debug_helpers;
 pub mod error;
 pub mod identity;
-pub mod security;
+// security module deleted: bilateral_control (BilateralControlResistance +
+// DecentralizedStorage trait + heuristic pattern detectors) was a §29 attack-
+// probability / suspicious-pattern detector built around &[State] walks. Under
+// §2.2 SMT-Replace + §4.3 counterless acceptance the heuristics (sequence-
+// number proximity, state-count rate, etc.) no longer map to the canonical
+// model. Security guarantees now come from:
+//   - §6.1 Tripwire: no double-consume of a chain tip
+//   - §12 DBRW anti-cloning: physical single-writer invariant
+//   - bilateral pair signing on every advance (§11)
+//   - §8 balance-witness equality check inside DeviceState::advance
 pub mod state_machine;
 pub mod token;
 pub mod utility;

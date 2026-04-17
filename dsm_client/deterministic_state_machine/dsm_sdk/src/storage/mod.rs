@@ -8,7 +8,9 @@
 // • Hash chain and SMT proof integration
 // • No in-memory alternate paths per DSM protocol compliance
 // • Bilateral storage interface for offline capability
-pub mod bcr_storage;
+// pub mod bcr_storage — deleted alongside core::security (heuristic detection
+// layer removed). The bcr_states SQLite table and its codec in client_db::bcr
+// stay as a durable state archive.
 pub mod bilateral;
 pub mod client_db;
 pub mod codecs;
@@ -29,4 +31,3 @@ pub use bilateral::{
     BilateralKey,
 };
 
-pub use bcr_storage::BcrStorage;

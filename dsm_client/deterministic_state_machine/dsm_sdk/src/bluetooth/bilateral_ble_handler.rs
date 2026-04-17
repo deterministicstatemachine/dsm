@@ -33,13 +33,13 @@ fn bytes_to_base32(bytes: &[u8]) -> String {
 use dsm::core::bilateral_transaction_manager::{
     BilateralTransactionManager, BilateralTransactionResult,
 };
-use dsm::core::security::{BilateralControlResistance, DecentralizedStorage};
+// core::security module deleted (heuristic attack detectors obsolete under §2.2/§4.3).
 use dsm::types::error::DsmError;
 use dsm::types::operations::Operation;
 use dsm::types::state_types::State;
 
 use crate::generated;
-use crate::storage::bcr_storage::BcrStorage;
+// BcrStorage removed with the security module delete.
 use crate::storage::client_db::{
     store_bilateral_session, get_all_bilateral_sessions, delete_bilateral_session,
     BilateralSessionRecord,
@@ -259,33 +259,16 @@ impl BilateralBleHandler {
         }
     }
 
-    async fn record_bcr_state_and_scan(&self, state: &State, published: bool) {
+    /// Persist a State snapshot to the BCR archive. (Suspicious-pattern
+    /// detection that used to run alongside this persistence was removed with
+    /// the deletion of core::security::BilateralControlResistance — its
+    /// state_number-proximity and sequence-count heuristics don't map to the
+    /// §2.2/§4.3 counterless model. The bcr_states row is retained as a
+    /// durable archive that BLE recovery reads back as a canonical_state
+    /// fallback.)
+    async fn record_bcr_state(&self, state: &State, published: bool) {
         if let Err(e) = crate::storage::client_db::store_bcr_state(state, published) {
             warn!("[BLE_HANDLER] Failed to persist BCR state: {}", e);
-            return;
-        }
-
-        let storage = BcrStorage::new();
-        let states = match storage.get_historical_states(&state.device_info.device_id) {
-            Ok(s) => s,
-            Err(e) => {
-                warn!("[BLE_HANDLER] Failed to load BCR states: {}", e);
-                return;
-            }
-        };
-
-        match BilateralControlResistance::detect_suspicious_patterns(&states, &storage).await {
-            Ok(alerts) if !alerts.is_empty() => {
-                warn!(
-                    "[BLE_HANDLER] BCR alerts detected for device {}: {}",
-                    bytes_to_base32(&state.device_info.device_id[..8]),
-                    alerts.len()
-                );
-            }
-            Ok(_) => {}
-            Err(e) => {
-                warn!("[BLE_HANDLER] BCR detection failed: {}", e);
-            }
         }
     }
     /// Reject an incoming prepare (or any active session) identified by the origin commitment hash.
@@ -681,7 +664,7 @@ impl BilateralBleHandler {
         };
 
         if let Some(state) = settlement_outcome.canonical_state.as_ref() {
-            self.record_bcr_state_and_scan(state, true).await;
+            self.record_bcr_state(state, true).await;
 
             if let Some(router) = crate::bridge::app_router() {
                 router.push_device_state(state);
@@ -3456,7 +3439,7 @@ impl BilateralBleHandler {
             .canonical_state
             .as_ref()
             .unwrap_or(&tx_result.local_state);
-        self.record_bcr_state_and_scan(state_to_record, true).await;
+        self.record_bcr_state(state_to_record, true).await;
 
         if let Some(router) = crate::bridge::app_router() {
             router.push_device_state(state_to_record);
@@ -3994,7 +3977,7 @@ impl BilateralBleHandler {
                 };
 
                 if let Some(state_to_record) = settlement_outcome.canonical_state.as_ref() {
-                    self.record_bcr_state_and_scan(state_to_record, true).await;
+                    self.record_bcr_state(state_to_record, true).await;
 
                     if let Some(router) = crate::bridge::app_router() {
                         router.push_device_state(state_to_record);
