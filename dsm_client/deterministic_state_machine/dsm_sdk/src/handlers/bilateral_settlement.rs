@@ -156,7 +156,6 @@ fn build_canonical_settled_state(
                 token_id,
                 transfer.amount,
                 canonical_state.hash,
-                canonical_state.hash[0] as u64,
             )?;
         } else {
             token_state::apply_transfer_debit(
@@ -166,7 +165,6 @@ fn build_canonical_settled_state(
                 token_id,
                 transfer.amount,
                 canonical_state.hash,
-                canonical_state.hash[0] as u64,
             )?;
         }
     } else {
@@ -183,7 +181,6 @@ fn build_canonical_settled_state(
             token_id,
             transfer.amount,
             canonical_state.hash,
-            canonical_state.hash[0] as u64,
         )?;
     }
 

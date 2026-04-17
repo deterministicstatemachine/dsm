@@ -72,7 +72,6 @@ pub fn apply_transfer_debit_credit(
     token_id: &str,
     amount: u64,
     anchor_hash: [u8; 32],
-    anchor_state_number: u64,
 ) -> Result<(), String> {
     let sender_key =
         dsm::core::token::derive_canonical_balance_key(policy_commit, sender_pk, token_id);
@@ -122,7 +121,6 @@ pub fn apply_transfer_debit(
     token_id: &str,
     amount: u64,
     anchor_hash: [u8; 32],
-    anchor_state_number: u64,
 ) -> Result<(), String> {
     let sender_key =
         dsm::core::token::derive_canonical_balance_key(policy_commit, sender_pk, token_id);
@@ -159,7 +157,6 @@ pub fn apply_transfer_credit(
     token_id: &str,
     amount: u64,
     anchor_hash: [u8; 32],
-    anchor_state_number: u64,
 ) -> Result<(), String> {
     let local_key =
         dsm::core::token::derive_canonical_balance_key(policy_commit, local_pk, token_id);
@@ -227,7 +224,6 @@ mod tests {
             "ERA",
             20,
             [0x55; 32],
-            7,
         )
         .expect("debit should succeed");
 
@@ -253,7 +249,6 @@ mod tests {
             "ERA",
             20,
             [0x55; 32],
-            7,
         )
         .expect_err("insufficient balance must fail");
 
