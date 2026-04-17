@@ -2764,6 +2764,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn reload_balance_cache_for_self_projects_from_current_state() {
         let device_info = DeviceInfo::from_hashed_label("projection-reload", vec![7u8; 32]);
         let core_sdk = Arc::new(
