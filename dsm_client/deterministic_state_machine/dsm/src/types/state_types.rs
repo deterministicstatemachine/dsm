@@ -84,10 +84,6 @@ pub struct StateParams {
     pub device_info: DeviceInfo,
     /// Optional forward commitment binding this state to a future transition.
     pub forward_commitment: Option<PreCommitment>,
-    /// Auxiliary integer values for position verification.
-    pub value: Vec<i32>,
-    /// Auxiliary commitment integers.
-    pub commitment: Vec<i32>,
     /// Optional deterministic commitment to DBRW health summary for this transition.
     ///
     /// This MUST NOT be the raw DBRW binding key or any secret. It is intended to be a
@@ -129,8 +125,6 @@ impl StateParams {
             operation,
             device_info,
             forward_commitment: None,
-            value: Vec::new(),
-            commitment: Vec::new(),
             dbrw_summary_hash: None,
             previous_hash: [0u8; 32],
             none_field: None,
@@ -356,8 +350,6 @@ pub struct State {
     pub(crate) public_key: Vec<u8>,
     pub(crate) entity_sig: Option<Vec<u8>>,
     pub(crate) counterparty_sig: Option<Vec<u8>>,
-    pub(crate) value: Vec<i32>,
-    pub(crate) commitment: Vec<i32>,
 }
 
 impl State {
@@ -430,8 +422,6 @@ impl State {
             positions: Vec::new(),
             position_sequence: None,
             public_key,
-            value: params.value,
-            commitment: params.commitment,
             entity_sig: None,
             counterparty_sig: None,
         }
@@ -474,8 +464,6 @@ impl State {
             positions: Vec::new(),
             position_sequence: None,
             public_key,
-            value: Vec::new(),
-            commitment: Vec::new(),
             entity_sig: None,
             counterparty_sig: None,
         }
