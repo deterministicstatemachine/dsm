@@ -30,14 +30,8 @@
 //! * `contact_sdk`: Manages peer relationships and communications
 //! * `wallet_sdk`: Key management and secure storage capabilities
 //!
-//! ### Utilities and Metrics
-//!
-//! * `protocol_metrics`: Performance monitoring and system diagnostics
-
-pub use protocol_metrics::ProtocolMetricsManager;
 pub mod bootstrap;
 pub mod kv;
-pub mod protocol_metrics;
 pub mod runtime_config;
 pub mod sdk_context;
 
