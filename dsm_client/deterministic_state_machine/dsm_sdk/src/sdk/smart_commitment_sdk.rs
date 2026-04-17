@@ -18,7 +18,9 @@ use dsm::commitments::smart_commitment::{
 };
 use dsm::types::error::DsmError;
 use dsm::types::operations::{Operation, TransactionMode, VerificationType};
-use dsm::types::state_types::State;
+// State import removed: SmartCommitment API now takes &[u8; 32] + &[u8] instead
+// of &State, and the dead execute_smart_commitment helper that returned State
+// has been deleted.
 use dsm::types::token_types::Balance;
 
 /// Device identifier alias (kept for compatibility with previous code).
@@ -397,54 +399,18 @@ impl SmartCommitmentSDK {
 
         SmartCommitment::new(
             &commitment_id,
-            &current_state,
+            &current_state.hash,
+            &current_state.entropy,
             DsmCommitmentCondition::default(),
             operation,
         )
     }
 
-    /// (Optional) Example of executing a commitment locally.
-    #[allow(dead_code)]
-    fn execute_smart_commitment(&self, commitment: &SmartCommitmentSdk) -> Result<State, DsmError> {
-        let operation = Operation::Transfer {
-            to_device_id: commitment.recipient.clone().into_bytes(),
-            amount: Balance::from_state(commitment.amount, [0u8; 32]),
-            recipient: commitment.recipient.clone().into_bytes(),
-            token_id: commitment.token_id.clone().into_bytes(),
-            to: commitment.recipient.clone().into_bytes(),
-            message: "Smart commitment transfer".to_string(),
-            mode: TransactionMode::Bilateral,
-            nonce: Vec::new(),
-            verification: VerificationType::Standard,
-            pre_commit: None,
-            signature: Vec::new(),
-        };
-
-        // Route via relationship-aware path (§2.2)
-        let current = self.core_sdk.get_current_state()?;
-        let sender_id = current.device_info.device_id;
-        let recipient_id = *dsm::crypto::blake3::domain_hash(
-            "DSM/device-id", commitment.recipient.as_bytes(),
-        ).as_bytes();
-        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
-            &sender_id, &recipient_id,
-        );
-        let policy_commit = dsm::core::token::token_state_manager::resolve_policy_commit(
-            &commitment.token_id,
-        );
-        let deltas = [dsm::types::device_state::BalanceDelta {
-            policy_commit,
-            direction: dsm::types::device_state::BalanceDirection::Debit,
-            amount: commitment.amount,
-        }];
-        let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-            &sender_id, &recipient_id,
-        );
-        let (state, _) = self.core_sdk.execute_on_relationship(
-            rel_key, recipient_id, operation, &deltas, Some(init_tip),
-        )?;
-        Ok(state)
-    }
+    // execute_smart_commitment(&self, ...) -> Result<State, DsmError> deleted:
+    // #[allow(dead_code)] helper with zero callers. It was an "example of
+    // executing a commitment locally" that returned a full State from
+    // execute_on_relationship. Callers that want the same flow should call
+    // core_sdk.execute_on_relationship directly with the desired operation.
 
     /// Create a commitment-creation Operation in the DSM system.
     pub fn create_commitment_operation(&self) -> Result<Operation, DsmError> {
@@ -852,7 +818,8 @@ mod tests {
         let mut sdk = SmartCommitmentSDK::new(core);
         assert!(sdk.executed_commitments.is_empty());
 
-        let state = State::default();
+        let origin_hash = [0u8; 32];
+        let origin_entropy = vec![0u8; 32];
         let op = Operation::Generic {
             operation_type: b"test".to_vec(),
             data: vec![],
@@ -861,7 +828,8 @@ mod tests {
         };
         let sc = dsm::commitments::smart_commitment::SmartCommitment::new(
             "test_commit",
-            &state,
+            &origin_hash,
+            &origin_entropy,
             DsmCommitmentCondition::default(),
             op,
         )

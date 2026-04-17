@@ -25,7 +25,8 @@ fn test_precommitment_integrity() {
     // Create a precommitment
     let _precommitment = SmartCommitment::new(
         "test_precommitment",
-        &state,
+        &state.hash,
+        &state.entropy,
         // Replace the prior "always true" condition with a deterministic, clockless predicate.
         CommitmentCondition::ValueThreshold {
             parameter_name: "balance".into(),
@@ -55,7 +56,8 @@ fn test_smart_commitment_evaluation() {
     // Create a smart commitment
     let commitment = SmartCommitment::new(
         "test_commitment",
-        &state,
+        &state.hash,
+        &state.entropy,
         condition,
         Operation::Generic {
             operation_type: b"conditional_action".to_vec(),
@@ -75,8 +77,8 @@ fn test_smart_commitment_evaluation() {
     // and satisfies the threshold predicate.
     assert!(commitment.evaluate(&context));
 
-    // Verify the commitment against the state
-    assert!(commitment.verify_against_state(&state).unwrap());
+    // Verify the commitment against the origin entropy.
+    assert!(commitment.verify_against_origin(&state.entropy).unwrap());
 }
 
 #[test]
@@ -101,7 +103,8 @@ fn test_compound_commitment() {
 
     // Create compound AND commitment
     let and_commitment = SmartCommitment::new_compound(
-        &state,
+        &state.hash,
+        &state.entropy,
         vec![1, 2, 3, 4], // recipient
         1000,             // amount
         vec![sig_condition.clone(), value_condition.clone()],
@@ -111,7 +114,8 @@ fn test_compound_commitment() {
 
     // Create compound OR commitment
     let or_commitment = SmartCommitment::new_compound_or(
-        &state,
+        &state.hash,
+        &state.entropy,
         vec![1, 2, 3, 4], // recipient
         1000,             // amount
         vec![sig_condition, value_condition],

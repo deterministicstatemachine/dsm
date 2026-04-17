@@ -21,7 +21,6 @@ use crate::{
     types::{
         error::DsmError,
         operations::{Operation, TransactionMode, VerificationType},
-        state_types::State,
         token_types::Balance,
     },
 };
@@ -209,22 +208,17 @@ impl SmartCommitment {
         *h.finalize().as_bytes()
     }
 
-    /// Create a new smart commitment bound to `origin_state`
+    /// Create a new smart commitment bound to the origin state's (hash, entropy)
+    /// pair. Per §4.3 the origin is identified by its content hash; entropy feeds
+    /// the deterministic verification-position seed (§11 eq. 14 derivation path).
     pub fn new(
         id: &str,
-        origin_state: &State,
+        origin_hash: &[u8; 32],
+        origin_entropy: &[u8],
         conditions: CommitmentCondition,
         operation: Operation,
     ) -> Result<Self, DsmError> {
-        let origin_hash_vec = origin_state.hash;
-        let mut origin_state_hash = [0u8; 32];
-        if origin_hash_vec.len() == 32 {
-            origin_state_hash.copy_from_slice(&origin_hash_vec);
-        } else {
-            return Err(DsmError::invalid_operation(
-                "Origin state hash must be 32 bytes",
-            ));
-        }
+        let origin_state_hash = *origin_hash;
 
         let (recipient, amount) = Self::extract_recipient_and_amount(&operation)?;
 
@@ -262,7 +256,7 @@ impl SmartCommitment {
             planned_step: None,
         };
 
-        c.generate_verification_positions(origin_state)?;
+        c.generate_verification_positions(origin_entropy)?;
         Ok(c)
     }
 
@@ -297,8 +291,8 @@ impl SmartCommitment {
     }
 
     /// Stricter verify wrapper (adds sanity for distant locks)
-    pub fn verify_fixed(&self, state: &State) -> Result<bool, DsmError> {
-        if !self.verify(state)? {
+    pub fn verify_fixed(&self, origin_hash: &[u8; 32], origin_entropy: &[u8]) -> Result<bool, DsmError> {
+        if !self.verify(origin_hash, origin_entropy)? {
             return Ok(false);
         }
         Ok(true)
@@ -313,11 +307,11 @@ impl SmartCommitment {
     /// Deterministic positions using origin entropy + commitment_hash
     pub fn generate_verification_positions_fixed(
         &mut self,
-        origin_state: &State,
+        origin_entropy: &[u8],
     ) -> Result<(), DsmError> {
         let seed = generate_seed(
             &crate::crypto::blake3::domain_hash("DSM/smart-commit", &self.commitment_hash),
-            &origin_state.entropy,
+            origin_entropy,
             None,
         );
         self.verification_positions = generate_positions(
@@ -331,20 +325,14 @@ impl SmartCommitment {
     /// - `condition` is the statement to be oracle-signed for executability.
     /// - `oracle_pubkey` is the required key (also used for signature verification in is_executable()).
     pub fn new_conditional(
-        state: &State,
+        origin_hash: &[u8; 32],
+        origin_entropy: &[u8],
         recipient: Vec<u8>,
         amount: u64,
         condition: String,
         oracle_pubkey: Vec<u8>,
     ) -> Result<Self, DsmError> {
-        let mut origin_state_hash = [0u8; 32];
-        if state.hash.len() == 32 {
-            origin_state_hash.copy_from_slice(&state.hash);
-        } else {
-            return Err(DsmError::invalid_operation(
-                "Origin state hash must be 32 bytes",
-            ));
-        }
+        let origin_state_hash = *origin_hash;
 
         let op = Operation::Transfer {
             to_device_id: Vec::new(),
@@ -395,26 +383,20 @@ impl SmartCommitment {
             signatures: Vec::new(),
             planned_step: None,
         };
-        c.generate_verification_positions(state)?;
+        c.generate_verification_positions(origin_entropy)?;
         Ok(c)
     }
 
     /// New compound (AND) commitment
     pub fn new_compound(
-        state: &State,
+        origin_hash: &[u8; 32],
+        origin_entropy: &[u8],
         recipient: Vec<u8>,
         amount: u64,
         conditions: Vec<CommitmentCondition>,
         name: &str,
     ) -> Result<Self, DsmError> {
-        let mut origin_state_hash = [0u8; 32];
-        if state.hash.len() == 32 {
-            origin_state_hash.copy_from_slice(&state.hash);
-        } else {
-            return Err(DsmError::invalid_operation(
-                "Origin state hash must be 32 bytes",
-            ));
-        }
+        let origin_state_hash = *origin_hash;
 
         if conditions.is_empty() {
             return Err(DsmError::invalid_operation(
@@ -468,26 +450,20 @@ impl SmartCommitment {
             signatures: Vec::new(),
             planned_step: None,
         };
-        s.generate_verification_positions(state)?;
+        s.generate_verification_positions(origin_entropy)?;
         Ok(s)
     }
 
     /// New compound (OR) commitment
     pub fn new_compound_or(
-        state: &State,
+        origin_hash: &[u8; 32],
+        origin_entropy: &[u8],
         recipient: Vec<u8>,
         amount: u64,
         conditions: Vec<CommitmentCondition>,
         name: &str,
     ) -> Result<Self, DsmError> {
-        let mut origin_state_hash = [0u8; 32];
-        if state.hash.len() == 32 {
-            origin_state_hash.copy_from_slice(&state.hash);
-        } else {
-            return Err(DsmError::invalid_operation(
-                "Origin state hash must be 32 bytes",
-            ));
-        }
+        let origin_state_hash = *origin_hash;
 
         if conditions.is_empty() {
             return Err(DsmError::invalid_operation(
@@ -541,7 +517,7 @@ impl SmartCommitment {
             signatures: Vec::new(),
             planned_step: None,
         };
-        s.generate_verification_positions(state)?;
+        s.generate_verification_positions(origin_entropy)?;
         Ok(s)
     }
 
@@ -563,11 +539,11 @@ impl SmartCommitment {
     /// Generate deterministic random-walk positions from (commitment_hash, origin entropy)
     pub fn generate_verification_positions(
         &mut self,
-        origin_state: &State,
+        origin_entropy: &[u8],
     ) -> Result<(), DsmError> {
         let seed = generate_seed(
             &crate::crypto::blake3::domain_hash("DSM/smart-commit", &self.commitment_hash),
-            &origin_state.entropy,
+            origin_entropy,
             None,
         );
         self.verification_positions = generate_positions(
@@ -626,10 +602,11 @@ impl SmartCommitment {
         eval_condition(&self.conditions, ctx)
     }
 
-    /// Verify binding to origin state + content (correct)
-    pub fn verify(&self, state: &State) -> Result<bool, DsmError> {
+    /// Verify binding to origin state + content. Per §4.3 the origin is
+    /// identified by its content hash; no counter is consulted.
+    pub fn verify(&self, origin_hash: &[u8; 32], origin_entropy: &[u8]) -> Result<bool, DsmError> {
         // Must bind to the origin state hash
-        if state.hash != self.origin_state_hash {
+        if *origin_hash != self.origin_state_hash {
             return Ok(false);
         }
 
@@ -646,15 +623,15 @@ impl SmartCommitment {
             return Ok(false);
         }
 
-        // Positions must verify against origin state
-        self.verify_against_state(state)
+        // Positions must verify against origin entropy
+        self.verify_against_origin(origin_entropy)
     }
 
-    /// Verify commitment seed/positions against the given origin state
-    pub fn verify_against_state(&self, origin_state: &State) -> Result<bool, DsmError> {
+    /// Verify commitment seed/positions against the given origin entropy.
+    pub fn verify_against_origin(&self, origin_entropy: &[u8]) -> Result<bool, DsmError> {
         let seed = generate_seed(
             &crate::crypto::blake3::domain_hash("DSM/smart-commit", &self.commitment_hash),
-            &origin_state.entropy,
+            origin_entropy,
             None,
         );
         let expected_positions = generate_positions(
@@ -1342,8 +1319,20 @@ fn dec_str(d: &mut &[u8]) -> Result<String, ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::state_types::DeviceInfo;
     use crate::crypto::sphincs::{generate_sphincs_keypair, sphincs_sign};
+
+    /// Test fixture: deterministic (hash, entropy) pair standing in for a real
+    /// origin state. Tests only exercise the commitment API's hash+entropy
+    /// binding contract, so we pass bytes directly without constructing a
+    /// full State.
+    fn test_origin() -> ([u8; 32], Vec<u8>) {
+        let hash = [0x11u8; 32];
+        let entropy = vec![
+            1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0,
+        ];
+        (hash, entropy)
+    }
 
     fn signed_update(identity_id: &str, data: Vec<u8>, message: &str) -> Operation {
         let (_pk, sk) = generate_sphincs_keypair().expect("keypair");
@@ -1363,14 +1352,7 @@ mod tests {
 
     #[test]
     fn test_threshold_commitment() -> Result<(), DsmError> {
-        let device_id = blake3::hash(b"test").into();
-        let origin = State::new_genesis(
-            [
-                1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                0, 0, 0, 0,
-            ],
-            DeviceInfo::new(device_id, vec![5]),
-        );
+        let (origin_hash, origin_entropy) = test_origin();
         let op = signed_update(
             "threshold_payment",
             vec![20, 21, 22],
@@ -1378,7 +1360,8 @@ mod tests {
         );
         let c = SmartCommitment::new(
             "test_threshold",
-            &origin,
+            &origin_hash,
+            &origin_entropy,
             CommitmentCondition::ValueThreshold {
                 parameter_name: "amount".into(),
                 threshold: 100,
@@ -1399,18 +1382,12 @@ mod tests {
 
     #[test]
     fn test_registry() -> Result<(), DsmError> {
-        let device_id = blake3::hash(b"test").into();
-        let origin = State::new_genesis(
-            [
-                1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                0, 0, 0, 0,
-            ],
-            DeviceInfo::new(device_id, vec![5]),
-        );
+        let (origin_hash, origin_entropy) = test_origin();
         let op = signed_update("test_registry", vec![50, 51, 52], "Test registry");
         let c = SmartCommitment::new(
             "test_registry",
-            &origin,
+            &origin_hash,
+            &origin_entropy,
             CommitmentCondition::ValueThreshold {
                 parameter_name: "x".into(),
                 threshold: 1,
@@ -1432,18 +1409,12 @@ mod tests {
 
     #[test]
     fn test_encryption_decryption_roundtrip() -> Result<(), DsmError> {
-        let device_id = blake3::hash(b"test").into();
-        let state = State::new_genesis(
-            [
-                1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                0, 0, 0, 0,
-            ],
-            DeviceInfo::new(device_id, vec![5]),
-        );
+        let (origin_hash, origin_entropy) = test_origin();
         let recipient = vec![1, 2, 3, 4];
         let amount = 100u64;
         let c = SmartCommitment::new_conditional(
-            &state,
+            &origin_hash,
+            &origin_entropy,
             recipient.clone(),
             amount,
             "ok".to_string(),
@@ -1459,14 +1430,7 @@ mod tests {
 
     #[test]
     fn test_compound_commitment() -> Result<(), DsmError> {
-        let device_id = blake3::hash(b"test").into();
-        let origin = State::new_genesis(
-            [
-                1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                0, 0, 0, 0,
-            ],
-            DeviceInfo::new(device_id, vec![5]),
-        );
+        let (origin_hash, origin_entropy) = test_origin();
         let v = CommitmentCondition::ValueThreshold {
             parameter_name: "amount".into(),
             threshold: 500,
@@ -1476,7 +1440,8 @@ mod tests {
         let amount = 1000u64;
 
         let and_c = SmartCommitment::new_compound(
-            &origin,
+            &origin_hash,
+            &origin_entropy,
             recipient.clone(),
             amount,
             vec![v.clone()],
@@ -1487,7 +1452,8 @@ mod tests {
         assert!(and_c.evaluate(&ctx));
 
         let or_c = SmartCommitment::new_compound_or(
-            &origin,
+            &origin_hash,
+            &origin_entropy,
             recipient.clone(),
             amount,
             vec![v],
