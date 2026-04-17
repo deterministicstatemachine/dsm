@@ -54,7 +54,7 @@ fn make_genesis(seed: &[u8; 32], pk: &[u8], initial_balance: u64) -> (State, Sta
     }
     state.token_balances.insert(
         "ERA".into(),
-        Balance::from_state(initial_balance, state.hash, state.state_number),
+        Balance::from_state(initial_balance, state.hash),
     );
 
     let mut machine = StateMachine::new();
@@ -66,7 +66,7 @@ fn signed_transfer(sk: &[u8], state: &State, nonce: Vec<u8>, amount: u64) -> Ope
     let mut op = Operation::Transfer {
         token_id: "ERA".into(),
         to_device_id: vec![0xCC; 32],
-        amount: Balance::from_state(amount, state.hash, state.state_number),
+        amount: Balance::from_state(amount, state.hash),
         mode: TransactionMode::Unilateral,
         nonce,
         verification: VerificationType::Standard,
@@ -138,8 +138,8 @@ fn attack_double_spend(seed: &[u8; 32], pk: &[u8], sk: &[u8]) -> AdversarialAtta
     let mut machine_b = StateMachine::new();
     machine_b.set_state(genesis);
 
-    let result_a = machine_a.execute_transition(op_a);
-    let result_b = machine_b.execute_transition(op_b);
+    let result_a = crate::compat_shim::machine_execute_transition(&mut machine_a, op_a);
+    let result_b = crate::compat_shim::machine_execute_transition(&mut machine_b, op_b);
 
     let (passed, actual) = match (&result_a, &result_b) {
         (Ok(sa), Ok(sb)) => {
@@ -222,10 +222,10 @@ fn attack_replay(seed: &[u8; 32], pk: &[u8], sk: &[u8]) -> AdversarialAttackResu
     // Execute Transfer A at state 0 -> state 1
     let op = signed_transfer(sk, &genesis, vec![0x01; 8], 10);
     let op_clone = op.clone();
-    let state1 = machine.execute_transition(op).expect("first transition");
+    let state1 = crate::compat_shim::machine_execute_transition(&mut machine, op).expect("first transition");
 
     // Replay the SAME operation at state 1
-    let state2_result = machine.execute_transition(op_clone);
+    let state2_result = crate::compat_shim::machine_execute_transition(&mut machine, op_clone);
 
     let (passed, actual) = match state2_result {
         Ok(state2) => {
@@ -305,13 +305,13 @@ fn attack_state_number_manipulation(
 
     // Execute one valid transition to get state 1
     let op = signed_transfer(sk, &genesis, vec![0x01; 8], 10);
-    let state1 = machine.execute_transition(op).expect("transition");
+    let state1 = crate::compat_shim::machine_execute_transition(&mut machine, op).expect("transition");
 
-    // Manually construct a tampered state with wrong state_number
+    // §4.3 — no state_number to manipulate. Equivalent attack in the
+    // counterless model: forge the self-hash without recomputing it.
     let mut tampered = state1.clone();
-    tampered.state_number = 5; // Should be 1, not 5
+    tampered.hash[0] ^= 0xAA; // self-hash no longer matches preimage
 
-    // Verify transition integrity should reject this
     let op_dummy = Operation::Generic {
         operation_type: "test".into(),
         data: vec![0u8],
@@ -327,8 +327,8 @@ fn attack_state_number_manipulation(
     };
 
     AdversarialAttackResult {
-        attack_name: "state_number_manipulation".into(),
-        description: "Non-sequential state_number must be rejected by verify_transition_integrity"
+        attack_name: "self_hash_forgery".into(),
+        description: "Forged self-hash must be rejected by verify_transition_integrity"
             .into(),
         expected_result: "rejected (Ok(false) or Err)".into(),
         actual_result: format!("{result:?}"),
@@ -345,7 +345,7 @@ fn attack_hash_chain_break(seed: &[u8; 32], pk: &[u8], sk: &[u8]) -> Adversarial
 
     // Execute one valid transition
     let op = signed_transfer(sk, &genesis, vec![0x02; 8], 10);
-    let state1 = machine.execute_transition(op).expect("transition");
+    let state1 = crate::compat_shim::machine_execute_transition(&mut machine, op).expect("transition");
 
     // Tamper with prev_state_hash
     let mut tampered = state1;

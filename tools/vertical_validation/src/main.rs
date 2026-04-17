@@ -31,6 +31,7 @@
 mod adversarial_bilateral;
 mod benchmark;
 mod bilateral_throughput;
+mod compat_shim;
 mod crypto_kat;
 mod implementation_traces;
 mod lean_checker;

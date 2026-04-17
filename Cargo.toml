@@ -6,11 +6,8 @@ members = [
     "dsm_storage_node",
     "tools/vector_runner",
     "tools/vector_builder",
-    # tools/vertical_validation temporarily excluded — needs migration to
-    # the new DeviceState/AdvanceOutcome API after §4.3 (state_number removal,
-    # execute_transition deletion). Tracking in TODO.
+    "tools/vertical_validation",
 ]
-exclude = ["tools/vertical_validation"]
 
 [workspace.package]
 license = "MIT OR Apache-2.0"

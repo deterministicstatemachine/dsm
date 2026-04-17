@@ -60,6 +60,9 @@ pub struct ImplementationTraceSuiteResult {
 }
 
 struct TokenTraceHarness {
+    // Manager is no longer the canonical transition driver (§4.3 shim path)
+    // but it still owns the token policy registration used by the harness.
+    #[allow(dead_code)]
     manager: TokenStateManager,
     state: State,
     recipient: Vec<u8>,
@@ -211,7 +214,7 @@ fn trace_state_machine_transfer_chain(
     let sender_key = builtin_balance_key(pk, "ERA");
     state.token_balances.insert(
         sender_key,
-        Balance::from_state(100, state.hash, state.state_number),
+        Balance::from_state(100, state.hash),
     );
 
     let mut machine = StateMachine::new();
@@ -224,12 +227,12 @@ fn trace_state_machine_transfer_chain(
         let prev_hash = state.hash().expect("current hash");
         let expected_entropy = compute_next_entropy(&state, &op);
 
-        match machine.execute_transition(op) {
+        match crate::compat_shim::machine_execute_transition(&mut machine, op) {
             Ok(new_state) => {
                 if new_state.prev_state_hash != prev_hash {
                     failures.push(format!("step {idx}: prev_state_hash mismatch"));
                 }
-                if new_state.state_number != state.state_number + 1 {
+                if crate::compat_shim::state_number(&new_state) != crate::compat_shim::state_number(&state) + 1 {
                     failures.push(format!("step {idx}: state_number did not increment"));
                 }
                 if new_state.entropy != expected_entropy {
@@ -241,7 +244,7 @@ fn trace_state_machine_transfer_chain(
         }
     }
 
-    if machine.current_state().map(|s| s.state_number) != Some(steps.len() as u64) {
+    if machine.current_state().map(|s| crate::compat_shim::state_number(&s)) != Some(steps.len() as u64) {
         failures.push("machine tip did not end at expected state_number".into());
     }
 
@@ -266,7 +269,7 @@ fn trace_state_machine_signature_rejection(
     let sender_key = builtin_balance_key(pk, "ERA");
     state.token_balances.insert(
         sender_key,
-        Balance::from_state(100, state.hash, state.state_number),
+        Balance::from_state(100, state.hash),
     );
 
     let original_hash = state.hash().expect("original hash");
@@ -278,13 +281,13 @@ fn trace_state_machine_signature_rejection(
         signature[0] ^= 0xFF;
     }
 
-    if machine.execute_transition(op).is_ok() {
+    if crate::compat_shim::machine_execute_transition(&mut machine, op).is_ok() {
         failures.push("tampered signature was accepted by execute_transition".into());
     }
 
     match machine.current_state() {
         Some(current) => {
-            if current.state_number != state.state_number {
+            if crate::compat_shim::state_number(&current) != crate::compat_shim::state_number(&state) {
                 failures.push("state machine advanced after rejected signature".into());
             }
             if current.hash != original_hash {
@@ -315,7 +318,7 @@ fn trace_state_machine_fork_divergence(
     let sender_key = builtin_balance_key(pk, "ERA");
     state.token_balances.insert(
         sender_key,
-        Balance::from_state(100, state.hash, state.state_number),
+        Balance::from_state(100, state.hash),
     );
     let prev_hash = state.hash().expect("fork parent hash");
 
@@ -328,8 +331,8 @@ fn trace_state_machine_fork_divergence(
     let op_b = build_signed_transfer(sk, &state, vec![2; 8], 2, b"ERA".to_vec(), vec![0xD2; 32]);
 
     match (
-        machine_a.execute_transition(op_a),
-        machine_b.execute_transition(op_b),
+        crate::compat_shim::machine_execute_transition(&mut machine_a, op_a),
+        crate::compat_shim::machine_execute_transition(&mut machine_b, op_b),
     ) {
         (Ok(state_a), Ok(state_b)) => {
             if state_a.prev_state_hash != prev_hash || state_b.prev_state_hash != prev_hash {
@@ -998,7 +1001,7 @@ fn trace_token_manager_balance_replay(
         );
         let new_entropy = compute_next_entropy(&harness.state, &op);
 
-        match harness.manager.create_token_state_transition(
+        match crate::compat_shim::manager_create_token_state_transition(
             &harness.state,
             op.clone(),
             new_entropy,
@@ -1233,10 +1236,10 @@ fn trace_token_manager_overspend_rejection(
     );
     let new_entropy = compute_next_entropy(&harness.state, &op);
 
-    if harness
-        .manager
-        .create_token_state_transition(&harness.state, op, new_entropy, None)
-        .is_ok()
+    if crate::compat_shim::manager_create_token_state_transition(
+        &harness.state, op, new_entropy, None,
+    )
+    .is_ok()
     {
         failures.push("overspend was accepted by token transition code".into());
     }
@@ -1661,7 +1664,7 @@ fn build_signed_transfer(
     let mut op = Operation::Transfer {
         token_id,
         to_device_id: recipient.clone(),
-        amount: Balance::from_state(amount, current_state.hash, current_state.state_number),
+        amount: Balance::from_state(amount, current_state.hash),
         mode: TransactionMode::Unilateral,
         nonce,
         verification: VerificationType::Standard,
@@ -1690,7 +1693,7 @@ fn build_signed_bilateral_transfer(
     let mut op = Operation::Transfer {
         token_id: b"ERA".to_vec(),
         to_device_id: remote_device_id.to_vec(),
-        amount: Balance::from_state(1, [0u8; 32], 0),
+        amount: Balance::from_state(1, [0u8; 32]),
         mode: TransactionMode::Bilateral,
         nonce: vec![nonce; 8],
         verification: VerificationType::Standard,
@@ -2035,7 +2038,7 @@ fn build_signed_receipt(
 
 fn compute_next_entropy(current_state: &State, operation: &Operation) -> Vec<u8> {
     let op_bytes = operation.to_bytes();
-    let next_state_number = current_state.state_number + 1;
+    let next_state_number = crate::compat_shim::state_number(&current_state) + 1;
     let mut hasher = dsm_domain_hasher("DSM/state-entropy");
     hasher.update(&current_state.entropy);
     hasher.update(&op_bytes);
@@ -2092,11 +2095,11 @@ fn build_token_harness(seed_bytes: &[u8; 32], pk: &[u8]) -> TokenTraceHarness {
 
     state.token_balances.insert(
         sender_key.clone(),
-        Balance::from_state(TRACE_INITIAL_BALANCE, state.hash, state.state_number),
+        Balance::from_state(TRACE_INITIAL_BALANCE, state.hash),
     );
     state.token_balances.insert(
         recipient_key.clone(),
-        Balance::from_state(0, state.hash, state.state_number),
+        Balance::from_state(0, state.hash),
     );
 
     TokenTraceHarness {

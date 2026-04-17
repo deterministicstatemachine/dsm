@@ -58,6 +58,9 @@ const PROPERTY_TEST_TOKEN_ID: &str = "VVTEST";
 const PROPERTY_TEST_INITIAL_BALANCE: u64 = 10_000;
 
 struct TokenPropertyHarness {
+    // Manager is no longer the canonical transition driver (§4.3 shim path)
+    // but it still owns the token policy registration used by the harness.
+    #[allow(dead_code)]
     manager: TokenStateManager,
     state: State,
     recipient: Vec<u8>,
@@ -93,7 +96,7 @@ fn build_signed_token_transfer(
     let mut op = Operation::Transfer {
         token_id,
         to_device_id: recipient.clone(),
-        amount: Balance::from_state(amount, current_state.hash, current_state.state_number),
+        amount: Balance::from_state(amount, current_state.hash),
         mode: TransactionMode::Unilateral,
         nonce,
         verification: VerificationType::Standard,
@@ -126,7 +129,7 @@ fn create_test_state(seed_bytes: &[u8; 32], pk: &[u8]) -> State {
 
 fn compute_next_entropy(current_state: &State, operation: &Operation) -> Vec<u8> {
     let op_bytes = operation.to_bytes();
-    let next_state_number = current_state.state_number + 1;
+    let next_state_number = crate::compat_shim::state_number(&current_state) + 1;
     let mut hasher = dsm_domain_hasher("DSM/state-entropy");
     hasher.update(&current_state.entropy);
     hasher.update(&op_bytes);
@@ -152,15 +155,11 @@ fn build_policy_backed_token_harness(seed_bytes: &[u8; 32], pk: &[u8]) -> TokenP
 
     state.token_balances.insert(
         sender_key.clone(),
-        Balance::from_state(
-            PROPERTY_TEST_INITIAL_BALANCE,
-            state.hash,
-            state.state_number,
-        ),
+        Balance::from_state(PROPERTY_TEST_INITIAL_BALANCE, state.hash),
     );
     state.token_balances.insert(
         recipient_key.clone(),
-        Balance::from_state(0, state.hash, state.state_number),
+        Balance::from_state(0, state.hash),
     );
 
     TokenPropertyHarness {
@@ -277,7 +276,7 @@ fn test_hash_chain_continuity(
     let mut state = create_test_state(seed_bytes, pk);
     state.token_balances.insert(
         "ERA".into(),
-        Balance::from_state(10_000, state.hash, state.state_number),
+        Balance::from_state(10_000, state.hash),
     );
 
     let mut machine = StateMachine::new();
@@ -288,7 +287,7 @@ fn test_hash_chain_continuity(
         let op = build_signed_transfer(sk, &state, nonce, 1);
 
         let prev_hash = state.hash;
-        match machine.execute_transition(op) {
+        match crate::compat_shim::machine_execute_transition(&mut machine, op) {
             Ok(new_state) => {
                 if new_state.prev_state_hash != prev_hash {
                     failures.push(format!("iter {i}: prev_state_hash mismatch"));
@@ -328,7 +327,7 @@ fn test_state_number_monotonicity(
     let mut state = create_test_state(seed_bytes, pk);
     state.token_balances.insert(
         "ERA".into(),
-        Balance::from_state(10_000, state.hash, state.state_number),
+        Balance::from_state(10_000, state.hash),
     );
 
     let mut machine = StateMachine::new();
@@ -338,14 +337,14 @@ fn test_state_number_monotonicity(
         let nonce: Vec<u8> = (0..8).map(|_| rng.gen()).collect();
         let op = build_signed_transfer(sk, &state, nonce, 1);
 
-        let prev_num = state.state_number;
-        match machine.execute_transition(op) {
+        let prev_num = crate::compat_shim::state_number(&state);
+        match crate::compat_shim::machine_execute_transition(&mut machine, op) {
             Ok(new_state) => {
-                if new_state.state_number != prev_num + 1 {
+                if crate::compat_shim::state_number(&new_state) != prev_num + 1 {
                     failures.push(format!(
                         "iter {i}: expected state_number={} got={}",
                         prev_num + 1,
-                        new_state.state_number
+                        crate::compat_shim::state_number(&new_state)
                     ));
                 }
                 state = new_state;
@@ -388,7 +387,7 @@ fn test_entropy_determinism(
     let mut state = create_test_state(seed_bytes, pk);
     state.token_balances.insert(
         "ERA".into(),
-        Balance::from_state(10_000, state.hash, state.state_number),
+        Balance::from_state(10_000, state.hash),
     );
 
     let mut machine = StateMachine::new();
@@ -401,7 +400,7 @@ fn test_entropy_determinism(
         // Manually compute expected entropy: H(current_entropy || op_bytes || next_state_number)
         let expected_entropy = compute_next_entropy(&state, &op);
 
-        match machine.execute_transition(op) {
+        match crate::compat_shim::machine_execute_transition(&mut machine, op) {
             Ok(new_state) => {
                 if new_state.entropy != expected_entropy {
                     failures.push(format!("iter {i}: entropy mismatch vs whitepaper formula"));
@@ -461,7 +460,7 @@ fn test_token_conservation(
         let expected_prev_hash = harness.state.hash().expect("current hash");
         let new_entropy = compute_next_entropy(&harness.state, &op);
 
-        match harness.manager.create_token_state_transition(
+        match crate::compat_shim::manager_create_token_state_transition(
             &harness.state,
             op.clone(),
             new_entropy,
@@ -495,7 +494,7 @@ fn test_token_conservation(
                 if recipient_after < recipient_before {
                     failures.push(format!("iter {i}: recipient balance decreased on transfer"));
                 }
-                if new_state.state_number != harness.state.state_number + 1 {
+                if crate::compat_shim::state_number(&new_state) != crate::compat_shim::state_number(&harness.state) + 1 {
                     failures.push(format!(
                         "iter {i}: token transition state_number did not increment"
                     ));
@@ -556,10 +555,9 @@ fn test_non_negative_balances(
         );
         let new_entropy = compute_next_entropy(&harness.state, &op);
 
-        match harness
-            .manager
-            .create_token_state_transition(&harness.state, op, new_entropy, None)
-        {
+        match crate::compat_shim::manager_create_token_state_transition(
+            &harness.state, op, new_entropy, None,
+        ) {
             Ok(_) => {
                 failures.push(format!(
                     "iter {i}: overspend was accepted by real token code"
@@ -604,7 +602,7 @@ fn test_fork_exclusion(
     let mut state = create_test_state(seed_bytes, pk);
     state.token_balances.insert(
         "ERA".into(),
-        Balance::from_state(10_000, state.hash, state.state_number),
+        Balance::from_state(10_000, state.hash),
     );
 
     for i in 0..iterations {
@@ -621,8 +619,8 @@ fn test_fork_exclusion(
         machine_b.set_state(state.clone());
 
         match (
-            machine_a.execute_transition(op_a),
-            machine_b.execute_transition(op_b),
+            crate::compat_shim::machine_execute_transition(&mut machine_a, op_a),
+            crate::compat_shim::machine_execute_transition(&mut machine_b, op_b),
         ) {
             (Ok(state_a), Ok(state_b)) => {
                 if state_a.hash == state_b.hash {

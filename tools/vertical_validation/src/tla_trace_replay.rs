@@ -617,7 +617,8 @@ impl DsmImplementationHarness {
         let recipient = self.device(&to)?.device_id.to_vec();
         let counterparty_id = self.device(&to)?.device_id;
         let counterparty_pk = self.device(&to)?.identity_pk.clone();
-        let counterparty_state_number = self.device(&to)?.state.state_number;
+        let counterparty_state_number =
+            crate::compat_shim::state_number(&self.device(&to)?.state);
 
         let sender = self
             .devices
@@ -630,15 +631,17 @@ impl DsmImplementationHarness {
             &payload,
             recipient,
         )?;
-        let new_state = sender
-            .state_machine
-            .execute_transition(operation)
-            .map_err(|e| anyhow!("StateMachine::execute_transition failed on net_send: {e}"))?;
+        let new_state = crate::compat_shim::machine_execute_transition(
+            &mut sender.state_machine,
+            operation,
+        )
+        .map_err(|e| anyhow!("StateMachine::execute_transition failed on net_send: {e}"))?;
         sender.state = new_state.clone();
 
+        // §4.3 — counterparty_state_number is no longer part of the relationship context.
+        let _ = counterparty_state_number;
         let pending_state = new_state.clone().with_relationship_context_and_chain_tip(
             counterparty_id,
-            counterparty_state_number,
             counterparty_pk,
             chain_tip_id(parent_tip),
         );
@@ -1401,7 +1404,7 @@ fn create_direct_trace_state(
         .map_err(|e| anyhow!("failed to hash direct replay genesis state: {e}"))?;
     state.token_balances.insert(
         "ERA".into(),
-        Balance::from_state(TRACE_INITIAL_BALANCE, state.hash, state.state_number),
+        Balance::from_state(TRACE_INITIAL_BALANCE, state.hash),
     );
     Ok(state)
 }
@@ -1439,7 +1442,7 @@ fn build_direct_signed_transfer(
     let mut operation = Operation::Transfer {
         token_id: TRACE_TOKEN_ID.to_vec(),
         to_device_id: recipient.clone(),
-        amount: Balance::from_state(1, current_state.hash, current_state.state_number),
+        amount: Balance::from_state(1, current_state.hash),
         mode: TransactionMode::Unilateral,
         nonce,
         verification: VerificationType::Standard,
