@@ -10,15 +10,12 @@
 //! as described in the whitepaper.
 
 pub mod bilateral;
-pub mod checkpoint;
 pub mod hashchain;
 pub mod random_walk;
 pub mod relationship;
-pub mod state;
 pub mod transition;
 pub mod utils;
 
-pub use crate::core::state_machine::checkpoint::Checkpoint;
 use crate::core::state_machine::relationship::validate_relationship_state_transition;
 use crate::core::state_machine::relationship::verify_relationship_entropy;
 use crate::core::state_machine::relationship::KeyDerivationStrategy;

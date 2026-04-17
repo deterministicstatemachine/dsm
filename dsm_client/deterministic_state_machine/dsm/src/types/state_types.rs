@@ -1594,70 +1594,12 @@ impl SparseIndex {
         self
     }
 
-    /// Calculate sparse indices for a given state number as described in whitepaper Section 3.2
-    ///
-    /// This implementation follows the mathematical model from whitepaper Section 3.2,
-    /// creating a logarithmic set of reference points for efficient state traversal.
-    /// Critical references (genesis and direct predecessor) are guaranteed to be included
-    /// for consistent hash chain verification.
-    ///
-    /// # Arguments
-    /// * `state_number` - State number to calculate indices for
-    ///
-    /// # Returns
-    /// * `Result<Vec<u64>, crate::types::error::DsmError>` - Calculated indices
-    pub fn calculate_sparse_indices(
-        state_number: u64,
-    ) -> Result<Vec<u64>, crate::types::error::DsmError> {
-        // First, calculate basic sparse indices using powers of 2 algorithm
-        let mut indices = Self::calculate_basic_sparse_indices(state_number)?;
-
-        // Critical reference guarantee: Always include genesis state (0)
-        if state_number > 0 && !indices.contains(&0) {
-            indices.push(0);
-        }
-
-        // Critical reference guarantee: Always include direct predecessor
-        if state_number > 0 && !indices.contains(&state_number.saturating_sub(1)) {
-            indices.push(state_number.saturating_sub(1));
-        }
-
-        // Ensure deterministic ordering for verification consistency
-        indices.sort_unstable();
-        indices.dedup();
-
-        Ok(indices)
-    }
-
-    /// Calculate basic sparse indices using powers of 2 distance algorithm
-    ///
-    /// This implements the power-of-2 checkpoint mechanism described in whitepaper Section 3.2,
-    /// providing logarithmic-complexity state traversal.
-    ///
-    /// # Arguments
-    /// * `state_number` - State number to calculate indices for
-    ///
-    /// # Returns
-    /// * `Result<Vec<u64>, crate::types::error::DsmError>` - Calculated basic indices
-    fn calculate_basic_sparse_indices(
-        state_number: u64,
-    ) -> Result<Vec<u64>, crate::types::error::DsmError> {
-        if state_number == 0 {
-            return Ok(Vec::new());
-        }
-
-        let mut indices = Vec::new();
-        let mut power: u32 = 0;
-
-        // Generate power-of-2 distance references
-        while (1 << power) <= state_number {
-            let idx = state_number.saturating_sub(1 << power);
-            indices.push(idx);
-            power = power.saturating_add(1);
-        }
-
-        Ok(indices)
-    }
+    // calculate_sparse_indices and calculate_basic_sparse_indices deleted
+    // per §4.3: state_number-based checkpoint indexing has no role in the
+    // counterless model. Per-Device SMT keys are 32-byte relationship keys
+    // (k_{A↔B}), not integer counters. SparseIndex remains as an opaque
+    // Vec<u64> for legacy serialized states only — never used in
+    // acceptance predicates.
 }
 
 impl Default for SparseIndex {

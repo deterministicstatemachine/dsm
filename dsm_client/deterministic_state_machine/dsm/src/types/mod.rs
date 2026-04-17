@@ -33,7 +33,6 @@ pub mod policy_types;
 pub mod proto; // generated OUT_DIR include (dsm.rs)
 pub mod receipt_types; // Canonical receipt structures
 pub mod serialization;
-pub mod state_builder;
 pub mod state_types;
 pub mod token_types;
 pub mod ui_error;
@@ -48,6 +47,5 @@ pub use policy_types::{PolicyAnchor, PolicyFile, TokenPolicy};
 pub use receipt_types::{
     ParentConsumptionTracker, ReceiptAcceptance, ReceiptVerificationContext, StitchedReceiptV2,
 };
-pub use state_builder::StateBuilder;
 pub use state_types::State;
 pub use token_types::{Token, TokenStatus};
