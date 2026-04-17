@@ -216,6 +216,7 @@ fn trace_state_machine_transfer_chain(
         sender_key,
         Balance::from_state(100, state.hash),
     );
+    refresh_state_hash(&mut state);
 
     let mut machine = StateMachine::new();
     machine.set_state(state.clone());
@@ -232,8 +233,8 @@ fn trace_state_machine_transfer_chain(
                 if new_state.prev_state_hash != prev_hash {
                     failures.push(format!("step {idx}: prev_state_hash mismatch"));
                 }
-                if crate::compat_shim::state_number(&new_state) != crate::compat_shim::state_number(&state) + 1 {
-                    failures.push(format!("step {idx}: state_number did not increment"));
+                if new_state.hash == prev_hash {
+                    failures.push(format!("step {idx}: state hash did not advance"));
                 }
                 if new_state.entropy != expected_entropy {
                     failures.push(format!("step {idx}: entropy diverged from formula"));
@@ -244,8 +245,8 @@ fn trace_state_machine_transfer_chain(
         }
     }
 
-    if machine.current_state().map(|s| crate::compat_shim::state_number(&s)) != Some(steps.len() as u64) {
-        failures.push("machine tip did not end at expected state_number".into());
+    if machine.current_state().map(|s| s.hash) != Some(state.hash) {
+        failures.push("machine tip did not end at expected chain head".into());
     }
 
     ImplementationTraceResult {
@@ -271,6 +272,7 @@ fn trace_state_machine_signature_rejection(
         sender_key,
         Balance::from_state(100, state.hash),
     );
+    refresh_state_hash(&mut state);
 
     let original_hash = state.hash().expect("original hash");
     let mut machine = StateMachine::new();
@@ -320,6 +322,7 @@ fn trace_state_machine_fork_divergence(
         sender_key,
         Balance::from_state(100, state.hash),
     );
+    refresh_state_hash(&mut state);
     let prev_hash = state.hash().expect("fork parent hash");
 
     let mut machine_a = StateMachine::new();
@@ -991,12 +994,13 @@ fn trace_token_manager_balance_replay(
     for (idx, amount) in transfers.iter().enumerate() {
         let sender_before = balance_for_key(&harness.state, &harness.sender_key);
         let recipient_before = balance_for_key(&harness.state, &harness.recipient_key);
-        let op = build_signed_transfer(
+        let op = build_signed_transfer_to_owner(
             sk,
             &harness.state,
             vec![(idx as u8) + 3; 8],
             *amount,
             TRACE_TOKEN_ID.as_bytes().to_vec(),
+            vec![0xEE; 32],
             harness.recipient.clone(),
         );
         let new_entropy = compute_next_entropy(&harness.state, &op);
@@ -1684,6 +1688,38 @@ fn build_signed_transfer(
     op
 }
 
+fn build_signed_transfer_to_owner(
+    sk: &[u8],
+    current_state: &State,
+    nonce: Vec<u8>,
+    amount: u64,
+    token_id: Vec<u8>,
+    to_device_id: Vec<u8>,
+    recipient: Vec<u8>,
+) -> Operation {
+    let mut op = Operation::Transfer {
+        token_id,
+        to_device_id,
+        amount: Balance::from_state(amount, current_state.hash),
+        mode: TransactionMode::Unilateral,
+        nonce,
+        verification: VerificationType::Standard,
+        pre_commit: None,
+        recipient,
+        to: b"trace-recipient".to_vec(),
+        message: "implementation trace".into(),
+        signature: Vec::new(),
+    };
+
+    let signable = op.with_cleared_signature();
+    let sig = sphincs_sign(sk, &signable.to_bytes()).expect("SPHINCS+ sign");
+    if let Operation::Transfer { signature, .. } = &mut op {
+        *signature = sig;
+    }
+
+    op
+}
+
 fn build_signed_bilateral_transfer(
     kp: &SignatureKeyPair,
     remote_device_id: [u8; 32],
@@ -1994,6 +2030,13 @@ fn create_test_state(seed_bytes: &[u8; 32], pk: &[u8]) -> State {
     }
     state
 }
+
+fn refresh_state_hash(state: &mut State) {
+    if let Ok(hash) = state.hash() {
+        state.hash = hash;
+    }
+}
+
 fn builtin_balance_key(owner_pk: &[u8], token_id: &str) -> String {
     let policy_commit = dsm::core::token::builtin_policy_commit_for_token(token_id)
         .expect("builtin policy commit missing for implementation trace token");
@@ -2038,11 +2081,10 @@ fn build_signed_receipt(
 
 fn compute_next_entropy(current_state: &State, operation: &Operation) -> Vec<u8> {
     let op_bytes = operation.to_bytes();
-    let next_state_number = crate::compat_shim::state_number(&current_state) + 1;
     let mut hasher = dsm_domain_hasher("DSM/state-entropy");
     hasher.update(&current_state.entropy);
     hasher.update(&op_bytes);
-    hasher.update(&next_state_number.to_le_bytes());
+    hasher.update(&current_state.hash);
     hasher.finalize().as_bytes().to_vec()
 }
 
@@ -2086,12 +2128,14 @@ fn build_token_harness(seed_bytes: &[u8; 32], pk: &[u8]) -> TokenTraceHarness {
 
     let mut state = create_test_state(seed_bytes, pk);
     let recipient = vec![0xDD; 32];
-    let sender_key = manager
-        .make_balance_key(pk, TRACE_TOKEN_ID)
-        .expect("sender balance key");
-    let recipient_key = manager
-        .make_balance_key(&recipient, TRACE_TOKEN_ID)
-        .expect("recipient balance key");
+    let policy_commit = dsm::core::token::resolve_policy_commit(TRACE_TOKEN_ID);
+    let sender_key =
+        dsm::core::token::derive_canonical_balance_key(&policy_commit, pk, TRACE_TOKEN_ID);
+    let recipient_key = dsm::core::token::derive_canonical_balance_key(
+        &policy_commit,
+        &recipient,
+        TRACE_TOKEN_ID,
+    );
 
     state.token_balances.insert(
         sender_key.clone(),
@@ -2101,6 +2145,7 @@ fn build_token_harness(seed_bytes: &[u8; 32], pk: &[u8]) -> TokenTraceHarness {
         recipient_key.clone(),
         Balance::from_state(0, state.hash),
     );
+    refresh_state_hash(&mut state);
 
     TokenTraceHarness {
         manager,

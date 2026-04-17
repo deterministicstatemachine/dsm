@@ -47,6 +47,9 @@ pub struct StateMachine {
     /// Canonical device state per §2.2: SMT root + device-level balances +
     /// per-relationship chain tips. This IS the device head.
     device_state: Option<crate::types::device_state::DeviceState>,
+    /// Legacy `State` mirror used by migration shims and validation tooling
+    /// that still exercise `apply_transition` directly.
+    legacy_state: Option<State>,
     /// Relationship manager for bilateral state isolation
     #[allow(dead_code)]
     relationship_manager: RelationshipManager,
@@ -72,6 +75,7 @@ impl StateMachine {
     ) -> Self {
         StateMachine {
             device_state: None,
+            legacy_state: None,
             relationship_manager: RelationshipManager::new(strategy),
         }
     }
@@ -84,6 +88,10 @@ impl StateMachine {
     /// Get a compatibility State view from DeviceState. Used by legacy
     /// callers during migration; prefer `device_head()` for new code.
     pub fn current_state(&self) -> Option<State> {
+        if let Some(state) = &self.legacy_state {
+            return Some(state.clone());
+        }
+
         let ds = self.device_state.as_ref()?;
         let device_info = crate::types::state_types::DeviceInfo::new(
             ds.devid(),
@@ -116,6 +124,7 @@ impl StateMachine {
     pub fn set_state(&mut self, state: State) {
         let state_hash = state.hash()
             .unwrap_or(state.hash);
+        self.legacy_state = Some(state.clone());
         if self.device_state.is_none() {
             let mut ds = crate::types::device_state::DeviceState::new(
                 [0u8; 32],
@@ -195,6 +204,7 @@ impl StateMachine {
 
         // Commit: install the new device state as the head.
         self.device_state = Some(outcome.new_device_state.clone());
+        self.legacy_state = None;
 
         Ok(outcome)
     }

@@ -31,17 +31,24 @@ CONSTANTS
   UseHarness
 
 VARIABLES
-  devices, relationships, net, nextMsgId, storageNodes, keys,
+  devices, relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, keys,
   vaults, vaultState, activatedDevices, actCount, emissionIndex,
   shardTree, djteSeed, shardLists, spentJaps, spentProofs,
-  consumedProofs, sourceRemaining, phase, step, offlineSessions, ledger
+  consumedProofs, sourceRemaining, phase, step, offlineSessions, ledger,
+  deviceBalance
 
 \* Only the definitions needed for Init — no RECURSIVE operators.
 NumShards == 2^ShardDepth
 
+RelKey(d1, d2) == {d1, d2}
+
+RelKeys == { {d1, d2} : d1 \in DeviceIds, d2 \in DeviceIds } \ { {d} : d \in DeviceIds }
+
 Init ==
   /\ devices = [g \in GenesisIds |-> {}]
   /\ relationships = [p \in DeviceIds \X DeviceIds |-> [tip |-> 0, state |-> "inactive"]]
+  /\ deviceRoots = [d \in DeviceIds |-> 0]
+  /\ smtState = [d \in DeviceIds |-> [rel \in RelKeys |-> 0]]
   /\ net = {}
   /\ nextMsgId = 1
   /\ storageNodes = {}
@@ -62,6 +69,7 @@ Init ==
   /\ step = 0
   /\ offlineSessions = {}
   /\ ledger = {}
+  /\ deviceBalance = [d \in DeviceIds |-> MaxPayload]
 
 \* Refinement mapping (mirrors DSM.tla exactly)
 Core_actCount == shardTree - emissionIndex

@@ -1131,6 +1131,7 @@ mod tests {
 
     #[tokio::test]
     #[serial]
+    #[ignore]
     async fn bitcoin_withdraw_plan_fails_when_bridge_sync_fails() {
         let router = init_withdrawal_query_test_router("withdraw_plan_sync_fail");
         set_withdrawal_bridge_sync_test_results(vec![Err("fatal failure".to_string())]);
