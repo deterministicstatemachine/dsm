@@ -139,11 +139,8 @@ impl StateParams {
         }
     }
 
-    /// Set DBRW summary commitment hash for this transition.
-    pub fn with_dbrw_summary_hash(mut self, h: [u8; 32]) -> Self {
-        self.dbrw_summary_hash = Some(h);
-        self
-    }
+    // with_dbrw_summary_hash deleted: zero callers. The DBRW summary hash
+    // travels through DeviceState::advance directly (not StateParams).
 
     /// Set encapsulated entropy
     pub fn with_encapsulated_entropy(mut self, encapsulated_entropy: Vec<u8>) -> Self {
@@ -475,23 +472,6 @@ impl State {
     /// recording both parties' identifiers and public keys. Per §4.3, no
     /// counter is involved in bilateral acceptance — ordering comes from
     /// per-relationship chain tip adjacency.
-    pub fn with_relationship_context(
-        mut self,
-        counterparty_id: [u8; 32],
-        counterparty_public_key: Vec<u8>,
-    ) -> Self {
-        self.relationship_context = Some(RelationshipContext {
-            entity_id: self.device_info.device_id,
-            counterparty_id,
-            counterparty_public_key,
-            relationship_hash: Vec::new(),
-            active: true,
-            chain_tip_id: None,
-            last_bilateral_state_hash: None,
-        });
-        self
-    }
-
     /// Create state with relationship context and chain tip information
     pub fn with_relationship_context_and_chain_tip(
         mut self,
@@ -508,21 +488,8 @@ impl State {
         self
     }
 
-    /// Check whether this state is in a bilateral relationship with the given counterparty.
-    pub fn in_relationship_with(&self, counterparty_id: &str) -> bool {
-        self.relationship_context
-            .as_ref()
-            .map(|ctx| {
-                ctx.counterparty_id
-                    == *domain_hash("DSM/device-id", counterparty_id.as_bytes()).as_bytes()
-            })
-            .unwrap_or(false)
-    }
-
-    /// Returns `true` if this state is a genesis state (has the `Recovered` flag).
-    pub fn is_genesis(&self) -> bool {
-        self.flags.contains(&StateFlag::Recovered)
-    }
+    // with_relationship_context, in_relationship_with, is_genesis deleted
+    // (zero external callers). Direct field access is the canonical path.
 
     /// Returns `true` if this state has a pending forward commitment (compromised flag).
     pub fn has_pending_commitment(&self) -> bool {
@@ -747,10 +714,9 @@ mod tests {
             device_info.clone(),
         ));
 
-        let with_dbrw = State::new(
-            StateParams::new( vec![1, 2, 3, 4], Operation::Noop, device_info)
-                .with_dbrw_summary_hash([0xAB; 32]),
-        );
+        let mut params = StateParams::new(vec![1, 2, 3, 4], Operation::Noop, device_info);
+        params.dbrw_summary_hash = Some([0xAB; 32]);
+        let with_dbrw = State::new(params);
 
         let base_hash = base.compute_hash().expect("base hash");
         let dbrw_hash = with_dbrw.compute_hash().expect("dbrw hash");
@@ -864,7 +830,8 @@ mod tests {
     fn state_new_genesis_properties() {
         let s = State::new_genesis([0xBB; 32], test_device_info());
         assert_eq!(s.id, "genesis");
-        assert!(s.is_genesis());
+        // is_genesis() removed; check the Recovered flag directly.
+        assert!(s.flags.contains(&StateFlag::Recovered));
         assert_eq!(s.entropy, vec![0xBB; 32]);
     }
 
@@ -917,9 +884,10 @@ mod tests {
     use super::StateFlag;
 
     #[test]
-    fn state_is_genesis_false_by_default() {
+    fn state_recovered_flag_false_by_default() {
         let s = test_state(1);
-        assert!(!s.is_genesis());
+        // is_genesis() removed; non-genesis states do not have the Recovered flag.
+        assert!(!s.flags.contains(&StateFlag::Recovered));
     }
 
     #[test]
@@ -950,29 +918,9 @@ mod tests {
     //  field deleted along with add_metadata/get_parameter accessors.)
 
     // ── State relationship context ──────────────────────────────────
-
-    #[test]
-    fn state_with_relationship_context() {
-        let s = test_state(10).with_relationship_context([0xCC; 32], vec![0xDD; 32]);
-        let ctx = s.relationship_context.as_ref().unwrap();
-        assert_eq!(ctx.counterparty_id, [0xCC; 32]);
-        assert!(ctx.active);
-    }
-
-    #[test]
-    fn state_in_relationship_with_uses_hashed_label() {
-        let counterparty_id =
-            *crate::crypto::blake3::domain_hash("DSM/device-id", b"bob").as_bytes();
-        let s = test_state(10).with_relationship_context(counterparty_id, vec![0xFF; 32]);
-        assert!(s.in_relationship_with("bob"));
-        assert!(!s.in_relationship_with("alice"));
-    }
-
-    #[test]
-    fn state_in_relationship_with_no_context() {
-        let s = test_state(10);
-        assert!(!s.in_relationship_with("anyone"));
-    }
+    // (with_relationship_context / in_relationship_with tests removed:
+    //  accessors deleted; relationship binding now travels exclusively
+    //  via DeviceState.tips, not via a side-channel field on State.)
 
     // ── State hashing variants ──────────────────────────────────────
 
@@ -1376,9 +1324,9 @@ mod tests {
     }
 
     #[test]
-    fn state_params_with_dbrw_summary_hash() {
-        let sp = StateParams::new( vec![], Operation::Noop, test_device_info())
-            .with_dbrw_summary_hash([0xDD; 32]);
+    fn state_params_dbrw_summary_hash_direct() {
+        let mut sp = StateParams::new(vec![], Operation::Noop, test_device_info());
+        sp.dbrw_summary_hash = Some([0xDD; 32]);
         assert_eq!(sp.dbrw_summary_hash, Some([0xDD; 32]));
     }
 
