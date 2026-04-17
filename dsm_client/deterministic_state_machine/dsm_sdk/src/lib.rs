@@ -115,7 +115,9 @@ pub mod jni;
 
 mod binding_key;
 pub mod bridge;
-pub mod crypto_performance;
+// crypto_performance module deleted: orphan benchmark helpers that only
+// referenced HashChainSDK + IdentitySDK, with no consumers outside the
+// orphaned performance_demo.rs file (also deleted).
 pub mod envelope;
 pub mod handlers;
 pub mod ingress;
@@ -133,10 +135,8 @@ pub mod wire;
 pub mod storage;
 // BLE backend registry (simple trait + OnceCell) for platform integration
 pub mod ble;
-#[cfg(test)]
-mod comprehensive_validation;
-#[cfg(test)]
-mod crypto_performance_tests;
+// comprehensive_validation + crypto_performance_tests modules deleted:
+// orphaned HashChainSDK/IdentitySDK demos with no consumers.
 #[cfg(test)]
 mod device_id_tests;
 #[cfg(test)]

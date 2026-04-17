@@ -10,7 +10,7 @@
 //! ### Core Foundational Modules
 //!
 //! * `core_sdk`: Central integration point for all DSM functionality
-//! * `hashchain_sdk`: Manages state transitions and evolution in the DSM system
+//! * `hashchain_sdk` removed: superseded by DeviceState (§2.2) for current tip + BCR archive for history
 //! * `identity_sdk`: Handles cryptographic identity creation and management
 //! * `token_sdk`: Provides token operations and policy enforcement
 //! * `token_mpc_sdk`: Implements secure token creation using MPC and manages bilateral transfers
@@ -48,7 +48,7 @@ pub mod core_sdk;
 pub mod counterparty_genesis_helpers;
 pub mod dlv_sdk;
 pub mod external_commitment_sdk;
-pub mod hashchain_sdk;
+// pub mod hashchain_sdk; — deleted (superseded by DeviceState + BCR archive)
 pub mod identity_sdk;
 pub mod inbox_poller;
 pub mod policy_cache;
@@ -117,7 +117,7 @@ pub use bluetooth_transport::{
     BluetoothMode, BluetoothTransport, BleBridgeEvent, BilateralBluetoothMessage,
 };
 pub use core_sdk::CoreSDK;
-pub use hashchain_sdk::HashChainSDK;
+// pub use hashchain_sdk::HashChainSDK; — module deleted
 pub use identity_sdk::IdentitySDK;
 pub use wallet_sdk::WalletSDK;
 pub use storage_node_sdk::StorageNodeSDK;

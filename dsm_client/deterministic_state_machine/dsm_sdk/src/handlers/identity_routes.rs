@@ -1,12 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Identity route handlers.
 
-use std::sync::Arc;
-
 use dsm::types::proto as generated;
 
 use crate::bridge::{AppQuery, AppResult};
-use crate::sdk::hashchain_sdk::HashChainSDK;
 use crate::sdk::identity_sdk::IdentitySDK;
 use super::app_router_impl::AppRouterImpl;
 use super::response_helpers::{pack_envelope_ok, pack_bytes_ok, err};
@@ -40,8 +37,7 @@ impl AppRouterImpl {
 
             // -------- identity.pairing_qr (protobuf ContactQrV3) --------
             "identity.pairing_qr" => {
-                let hash_chain_sdk = Arc::new(HashChainSDK::new());
-                let identity = IdentitySDK::new("local".into(), hash_chain_sdk);
+                let identity = IdentitySDK::new("local".into());
                 match identity.generate_pairing_qr().await {
                     Ok(qr) => {
                         // Convert from generated::ContactQrV3 to dsm::types::proto::ContactQrV3
@@ -63,8 +59,7 @@ impl AppRouterImpl {
 
             // -------- identity.pairing_compact (string: deviceId@genesisBase32) --------
             "identity.pairing_compact" => {
-                let hash_chain_sdk = Arc::new(HashChainSDK::new());
-                let identity = IdentitySDK::new("local".into(), hash_chain_sdk);
+                let identity = IdentitySDK::new("local".into());
                 match identity.pairing_qr_compact().await {
                     Ok(s) => {
                         let resp = generated::AppStateResponse {
