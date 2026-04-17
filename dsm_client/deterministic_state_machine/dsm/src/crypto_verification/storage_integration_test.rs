@@ -50,8 +50,6 @@ mod tests {
                     kyber_keypair: KyberKey::new().expect("Failed to create kyber key"),
                     contributions: vec![],
                 },
-                current_state: None,
-                sparse_indices: std::collections::HashMap::new(),
             });
 
         // Test store operations
@@ -107,8 +105,6 @@ mod tests {
                     kyber_keypair: KyberKey::new().expect("Failed to create kyber key"),
                     contributions: vec![],
                 },
-                current_state: None,
-                sparse_indices: std::collections::HashMap::new(),
             });
 
         // Test store operations

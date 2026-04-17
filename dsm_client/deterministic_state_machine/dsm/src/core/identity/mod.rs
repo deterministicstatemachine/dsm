@@ -43,7 +43,6 @@ use std::sync::{Arc, RwLock};
 use crate::types::error::DsmError;
 use crate::core::utility::labeling;
 use crate::types::identifiers::NodeId;
-use crate::types::state_types::State;
 use crate::prelude::*; // common items incl. Uuid, etc.
 use crate::crypto::blake3::{dsm_domain_hasher, domain_hash};
 use blake3;
@@ -407,8 +406,6 @@ impl IdentityStore {
                 Ok(g) => DeviceIdentity {
                     device_id: device_id_bytes,
                     sub_genesis: g,
-                    current_state: None,
-                    sparse_indices: HashMap::new(),
                 },
                 Err(e) => {
                     return Err(IdentityError::DeviceError(format!(
@@ -506,8 +503,6 @@ impl IdentityStore {
             devices: vec![DeviceIdentity {
                 device_id: device_id_bytes,
                 sub_genesis: device_identity,
-                current_state: None,
-                sparse_indices: HashMap::new(),
             }],
             invalidated: false,
         };
@@ -618,28 +613,21 @@ impl From<IdentityError> for crate::types::error::DsmError {
 // the per-relationship SMT in DeviceState, not through array walks of
 // monolithic State.
 
-/// Identity provider interface
-pub trait IdentityProvider {
-    /// Create a new identity
-    fn create_identity(&self, device_id: &str, entropy: &[u8]) -> Result<Identity, DsmError>;
+// IdentityProvider trait deleted: zero implementers anywhere. Each method
+// took &State (validate_identity, generate_invalidation, verify_invalidation)
+// and the create_identity/state-shape contract is obsolete in the §2.2 model.
 
-    /// Validate an identity
-    fn validate_identity(&self, state: &State) -> Result<bool, DsmError>;
-
-    /// Generate an invalidation marker
-    fn generate_invalidation(&self, state: &State, reason: &str) -> Result<Vec<u8>, DsmError>;
-
-    /// Verify an invalidation marker
-    fn verify_invalidation(&self, state: &State, invalidation: &[u8]) -> Result<bool, DsmError>;
-}
-
-/// DeviceIdentity holds device-specific derived genesis and current state
+/// DeviceIdentity holds device-specific derived genesis.
+///
+/// `current_state` and `sparse_indices` fields removed: the former was only
+/// touched by `Identity::apply_transition` / `get_current_state` (both deleted,
+/// zero callers) and the latter was never read after construction. Per §2.2,
+/// canonical per-device state lives in `DeviceState` (SMT root + balances +
+/// per-relationship tips), not in this identity-management struct.
 #[derive(Debug, Clone)]
 pub struct DeviceIdentity {
     pub device_id: [u8; 32],
     pub sub_genesis: GenesisState,
-    pub current_state: Option<State>,
-    pub sparse_indices: HashMap<u64, Vec<u8>>,
 }
 
 /// Identity root object
@@ -677,55 +665,12 @@ impl Identity {
             invalidated: false,
         })
     }
-    /// Apply a state transition to create a new state
-    pub async fn apply_transition(
-        &mut self,
-        transition: crate::core::state_machine::transition::StateTransition,
-    ) -> Result<State, DsmError> {
-        // Get current state
-        let current_state = self.get_current_state().await?;
-
-        // Apply the transition using the state machine
-        let new_state = crate::core::state_machine::transition::apply_transition(
-            &current_state,
-            &transition.operation,
-            &transition.new_entropy.unwrap_or_default(),
-        )?;
-
-        // Per-Device SMT update belongs at the bilateral relationship level, not here.
-        // The Per-Device SMT uses 256-bit relationship keys and lives in
-        // merkle::sparse_merkle_tree::SparseMerkleTree.
-
-        if let Some(device) = self.devices.first_mut() {
-            device.current_state = Some(new_state.clone());
-        }
-
-        Ok(new_state)
-    }
-
-    /// Get the current state of this identity
-    #[allow(clippy::unused_async)]
-    pub async fn get_current_state(&self) -> Result<State, DsmError> {
-        if let Some(device) = self.devices.first() {
-            if let Some(current_state) = &device.current_state {
-                Ok(current_state.clone())
-            } else {
-                // Create a basic genesis state if no current state exists
-                let device_info = crate::types::state_types::DeviceInfo::new(
-                    device.device_id,
-                    self.master_genesis.signing_key.public_key.clone(),
-                );
-                Ok(State::new_genesis(
-                    self.master_genesis.initial_entropy,
-                    device_info,
-                ))
-            }
-        } else {
-            Err(DsmError::InvalidState(
-                "No devices available for this identity".to_string(),
-            ))
-        }
-    }
+    // Identity::apply_transition + Identity::get_current_state deleted: zero
+    // external callers. Both took/returned monolithic State and routed through
+    // the legacy state_machine::transition::apply_transition path. The §2.2
+    // canonical transition path is StateMachine::advance_relationship which
+    // operates on DeviceState (SMT root + per-relationship tips), not on the
+    // Identity struct's first device's current_state field.
 
     /// Sign data using this identity's signing key (binary in/out, no encodings)
     #[allow(clippy::unused_async)]
