@@ -93,7 +93,6 @@ pub mod verification;
 
 use crate::core::identity;
 use crate::types::error::DsmError;
-use crate::types::state_types::State;
 
 pub use crate::core::identity::TrustlessGenesisArtifacts;
 
@@ -160,10 +159,6 @@ pub async fn create_trustless_genesis<
         .map_err(DsmError::from)
 }
 
-/// Verify that a sequence of states maintains a valid hash chain from the supplied genesis.
-pub fn verify_trustless_identity(
-    genesis: &identity::GenesisState,
-    chain: &[State],
-) -> Result<(), DsmError> {
-    identity::verify_trustless_identity(genesis, chain).map_err(DsmError::from)
-}
+// verify_trustless_identity wrapper deleted: zero external callers, and
+// the underlying impl was deleted (it relied on state_number reads
+// reconstructed from `state.hash[0] as u64` after §4.3 — meaningless).
