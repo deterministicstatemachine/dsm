@@ -28,8 +28,7 @@ use blake3::Hash;
 
 pub use random_walk::algorithms::{
     generate_positions, generate_random_walk_coordinates, generate_seed, verify_positions,
-    verify_random_walk_coordinates, verify_state_transition as verify_state_transition_random_walk,
-    Position, RandomWalkConfig,
+    verify_random_walk_coordinates, Position, RandomWalkConfig,
 };
 
 pub use hashchain::HashChain;

@@ -7,34 +7,10 @@
 //! revealing the data itself (whitepaper Sections 13-14).
 /// Provides functionality for generating random walk coordinates and verifying them.
 ///
-/// # Example
-/// ```text
-/// use dsm::core::state_machine::random_walk::algorithms::{verify_state_transition, Position, generate_positions};
-/// use dsm::core::state_machine::random_walk::Coordinate;
-/// use dsm::types::state_types::State;
-/// use dsm::types::operations::Operation;
-/// use dsm::crypto::blake3::domain_hash;
-///
-/// // Create states with test data
-/// let mut previous_state = State::default();
-/// previous_state.entropy = vec![1, 2, 3];
-/// previous_state.hash[0] as u64 = 0;
-///
-/// let mut new_state = State::default();
-/// new_state.entropy = vec![4, 5, 6];
-/// new_state.hash[0] as u64 = 1;
-///
-/// // Create a valid operation format: [op_type (1 byte), data...]
-/// let op_bytes = [0u8; 32]; // Using zeroed bytes as test operation data
-/// new_state.operation = Operation::from_bytes(&op_bytes).unwrap();
-///
-/// // Generate valid positions for the transition
-/// let seed = domain_hash("DSM/walk-seed", b"test_seed");
-/// let positions = generate_positions(&seed, None).unwrap();
-///
-/// let result = verify_state_transition(&previous_state, &new_state, &positions);
-/// assert!(result.is_ok());
-/// ```
+/// (Doc example removed: it referenced the deleted verify_state_transition
+/// helper and used `state.hash[0] as u64` reads that broke after §4.3
+/// state_number deletion. The canonical primitives — generate_seed and
+/// generate_positions — remain and are demonstrated by the unit tests.)
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Coordinate(pub Vec<i32>);
@@ -297,69 +273,12 @@ pub mod algorithms {
         generate_positions(&seed, config)
     }
 
-    /// Generate a secure seed for multi-party verification
-    ///
-    /// # Arguments
-    ///
-    /// * `state` - Current state
-    /// * `operation` - Operation data
-    /// * `participants` - Participant identifiers
-    ///
-    /// # Returns
-    ///
-    /// * `Hash` - The generated secure seed
-    pub fn generate_secure_multi_party_seed(
-        state: &crate::types::state_types::State,
-        operation: &[u8],
-        participants: &[&[u8]],
-    ) -> Result<Hash, DsmError> {
-        let mut hasher = dsm_domain_hasher("DSM/walk-mpc-seed");
-
-        // Add state hash
-        hasher.update(&state.hash()?);
-
-        // Add operation
-        hasher.update(operation);
-
-        // Add all participants
-        for participant in participants {
-            hasher.update(participant);
-        }
-
-        // Return the seed
-        Ok(Hash::from(*hasher.finalize().as_bytes()))
-    }
-
-    pub fn verify_state_transition(
-        previous_state: &crate::types::state_types::State,
-        new_state: &crate::types::state_types::State,
-        positions: &[Position],
-    ) -> Result<bool, DsmError> {
-        // Extract operation data from the new state
-        let operation = new_state.operation.to_bytes();
-
-        // Generate the expected seed based on previous state and operation.
-        // Per §11 eq. 14 entropy is derived from adjacency inputs — prev
-        // entropy, op, and the parent hash — not a counter.
-        let previous_state_hash = previous_state.hash()?;
-        let next_entropy = crate::core::state_machine::utils::calculate_next_entropy(
-            &previous_state.entropy,
-            &operation,
-            &previous_state_hash,
-        );
-        let hash_array: [u8; 32] = previous_state_hash.as_slice().try_into().map_err(
-            |e: std::array::TryFromSliceError| {
-                DsmError::internal("Failed to convert hash to array".to_string(), Some(e))
-            },
-        )?;
-        let expected_seed = generate_seed(&Hash::from(hash_array), &operation, Some(&next_entropy));
-
-        // Generate expected positions
-        let expected_positions = generate_positions(&expected_seed, None::<RandomWalkConfig>)?;
-
-        // Verify positions match
-        Ok(verify_positions(positions, &expected_positions))
-    }
+    // generate_secure_multi_party_seed and verify_state_transition deleted:
+    // zero callers (only the mod.rs re-export and a doc-comment example).
+    // Both took &State purely to read .hash()?, .operation, .entropy — the
+    // canonical replacement for state-transition verification is the SMT
+    // inclusion proofs in AdvanceOutcome (DeviceState::advance), not a
+    // standalone helper that walks two State snapshots.
 
     #[cfg(test)]
     mod tests {
