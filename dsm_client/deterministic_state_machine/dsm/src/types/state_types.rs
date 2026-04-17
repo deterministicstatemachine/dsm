@@ -524,20 +524,14 @@ impl State {
         self.flags.contains(&StateFlag::Recovered)
     }
 
-    /// Returns `true` if this state has been invalidated.
-    pub fn is_invalidated(&self) -> bool {
-        self.flags.contains(&StateFlag::Invalidated)
-    }
-
     /// Returns `true` if this state has a pending forward commitment (compromised flag).
     pub fn has_pending_commitment(&self) -> bool {
         self.flags.contains(&StateFlag::Compromised)
     }
 
-    /// Add a lifecycle flag to this state.
-    pub fn add_flag(&mut self, flag: StateFlag) {
-        self.flags.insert(flag);
-    }
+    // is_invalidated, is_recovered, is_compromised, add_flag deleted —
+    // zero external callers. The `flags` field stays for is_genesis()
+    // and the Recovery operation gating in is_operation_allowed().
 
     // add_metadata deleted: external_data field removed (zero callers).
 
@@ -602,25 +596,10 @@ impl State {
         Ok(*hasher.finalize().as_bytes())
     }
 
-    /// Set the entity signature
-    pub fn set_entity_signature(&mut self, signature: Option<Vec<u8>>) {
-        self.entity_sig = signature;
-    }
-
-    /// Set the counterparty signature
-    pub fn set_counterparty_signature(&mut self, signature: Option<Vec<u8>>) {
-        self.counterparty_sig = signature;
-    }
-
-    /// Get the entity signature
-    pub fn entity_signature(&self) -> Option<&Vec<u8>> {
-        self.entity_sig.as_ref()
-    }
-
-    /// Get the counterparty signature
-    pub fn counterparty_signature(&self) -> Option<&Vec<u8>> {
-        self.counterparty_sig.as_ref()
-    }
+    // set_entity_signature / set_counterparty_signature / entity_signature /
+    // counterparty_signature accessors deleted — zero external callers.
+    // Direct field access via state.entity_sig / state.counterparty_sig is
+    // the canonical path.
 
     /// Compute the pre-finalization hash that excludes token balances.
     /// Per §4.3, no counter is included.
@@ -663,12 +642,9 @@ impl State {
             .to_vec())
     }
 
-    /// Set the forward commitment for this state
-    pub fn set_forward_commitment(&mut self, commitment: Option<PreCommitment>) {
-        self.forward_commitment = commitment;
-    }
-
-    // get_forward_commitment deleted: zero external callers.
+    // set_forward_commitment / get_forward_commitment / clear_forward_commitment
+    // deleted: zero external callers. Direct field access (forward_commitment is
+    // pub(crate)) is the canonical path for the few internal writers.
     // get_parameter deleted: read from now-deleted external_data field.
     // The single SDK caller (token_sdk locked_balances) always returned
     // None because external_data was never populated outside the deleted
@@ -947,17 +923,17 @@ mod tests {
     }
 
     #[test]
-    fn state_add_flag_invalidated() {
+    fn state_flag_set_directly() {
         let mut s = test_state(2);
-        assert!(!s.is_invalidated());
-        s.add_flag(StateFlag::Invalidated);
-        assert!(s.is_invalidated());
+        // flags can be set via direct field access (it's pub).
+        s.flags.insert(StateFlag::Invalidated);
+        assert!(s.flags.contains(&StateFlag::Invalidated));
     }
 
     #[test]
-    fn state_add_flag_custom() {
+    fn state_custom_flag() {
         let mut s = test_state(3);
-        s.add_flag(StateFlag::Custom("test_flag".into()));
+        s.flags.insert(StateFlag::Custom("test_flag".into()));
         assert!(s.flags.contains(&StateFlag::Custom("test_flag".into())));
     }
 
@@ -965,7 +941,7 @@ mod tests {
     fn state_has_pending_commitment_flag() {
         let mut s = test_state(4);
         assert!(!s.has_pending_commitment());
-        s.add_flag(StateFlag::Compromised);
+        s.flags.insert(StateFlag::Compromised);
         assert!(s.has_pending_commitment());
     }
 
@@ -1049,27 +1025,25 @@ mod tests {
             5,
             [0xAA; 32],
         );
-        s.set_forward_commitment(Some(pc));
+        s.forward_commitment = Some(pc);
         assert!(s.forward_commitment.is_some());
         assert_eq!(
             s.forward_commitment.as_ref().unwrap().operation_type,
             "transfer"
         );
 
-        s.set_forward_commitment(None);
+        s.forward_commitment = None;
         assert!(s.forward_commitment.is_none());
     }
-
-    // ── State transition_count ───────────────────────────────────────
 
     // ── State entity_signature ───────────────────────────────────────
 
     #[test]
     fn state_entity_signature_roundtrip() {
         let mut s = test_state(12);
-        assert!(s.entity_signature().is_none());
-        s.set_entity_signature(Some(vec![0xEE; 64]));
-        assert_eq!(s.entity_signature(), Some(&vec![0xEE; 64]));
+        assert!(s.entity_sig.is_none());
+        s.entity_sig = Some(vec![0xEE; 64]);
+        assert_eq!(s.entity_sig.as_ref(), Some(&vec![0xEE; 64]));
     }
 
     // ── State PartialEq (hash-based) ────────────────────────────────
