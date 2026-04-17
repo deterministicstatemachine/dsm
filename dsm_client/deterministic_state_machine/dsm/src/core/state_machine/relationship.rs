@@ -205,7 +205,6 @@ pub struct RelationshipStatePair {
     pub counterparty_id: [u8; 32],
     pub entity_state: State,
     pub counterparty_state: State,
-    pub verification_metadata: HashMap<String, Vec<u8>>,
     pub relationship_hash: Vec<u8>,
     pub active: bool,
     /// Chain tip ID for this bilateral relationship
@@ -226,7 +225,6 @@ impl RelationshipStatePair {
             counterparty_id,
             entity_state,
             counterparty_state,
-            verification_metadata: HashMap::new(),
             relationship_hash: Vec::new(),
             active: true,
             chain_tip_id: None,
