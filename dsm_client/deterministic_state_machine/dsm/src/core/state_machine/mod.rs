@@ -48,8 +48,6 @@ pub struct StateMachine {
     /// Canonical device state per §2.2: SMT root + device-level balances +
     /// per-relationship chain tips. This IS the device head.
     device_state: Option<crate::types::device_state::DeviceState>,
-    /// Device ID for this state machine instance
-    device_id: [u8; 32],
     /// Relationship manager for bilateral state isolation
     #[allow(dead_code)]
     relationship_manager: RelationshipManager,
@@ -66,14 +64,15 @@ impl StateMachine {
         Self::new_with_strategy_and_device_id(strategy, [0u8; 32])
     }
 
-    /// Create a new state machine with a specific key derivation strategy and device ID
+    /// Create a new state machine with a specific key derivation strategy and device ID.
+    /// `_device_id` is now derived from the bootstrap State; this argument is
+    /// retained for API compatibility and ignored.
     pub fn new_with_strategy_and_device_id(
         strategy: KeyDerivationStrategy,
-        device_id: [u8; 32],
+        _device_id: [u8; 32],
     ) -> Self {
         StateMachine {
             device_state: None,
-            device_id,
             relationship_manager: RelationshipManager::new(strategy),
         }
     }
@@ -220,44 +219,9 @@ impl StateMachine {
         }
     }
 
-    // execute_transition and apply_operation deleted — all transitions now go
-    // through advance_relationship which uses DeviceState::advance (§2.2, §4.2).
-
-    /// Execute a state transition in the context of a relationship.
-    /// Uses DeviceState for entropy derivation, falls back to legacy.
-    pub fn execute_relationship_transition(
-        &mut self,
-        entity_id: &str,
-        counterparty_id: &str,
-        operation: Operation,
-    ) -> Result<RelationshipStatePair, DsmError> {
-        // Derive entropy from DeviceState root or legacy current_state
-        let (prior_entropy, prior_hash) = if let Some(ds) = &self.device_state {
-            let root = ds.root();
-            let entropy = {
-                let mut h = dsm_domain_hasher("DSM/precommit-entropy");
-                h.update(&root);
-                h.finalize().as_bytes().to_vec()
-            };
-            (entropy, root)
-        } else {
-            return Err(DsmError::state_machine("No state for relationship transition"));
-        };
-
-        let op_data = operation.to_bytes();
-        let mut hasher = dsm_domain_hasher("DSM/state-entropy");
-        hasher.update(&prior_entropy);
-        hasher.update(&op_data);
-        hasher.update(&prior_hash);
-        let new_entropy = *hasher.finalize().as_bytes();
-
-        self.relationship_manager.execute_relationship_transition(
-            &domain_hash("DSM/entity-id", entity_id.as_bytes()).into(),
-            &domain_hash("DSM/entity-id", counterparty_id.as_bytes()).into(),
-            operation,
-            new_entropy,
-        )
-    }
+    // execute_transition / apply_operation / execute_relationship_transition
+    // all deleted — every transition now goes through advance_relationship
+    // which uses DeviceState::advance (§2.2, §4.2).
 
     /// Verify a state using hash-chain validation (§2.1 adjacency only).
     ///
@@ -341,68 +305,11 @@ impl StateMachine {
         ))
     }
 
-    pub fn create_base_operation(&self) -> Result<Operation, DsmError> {
-        Ok(Operation::Create {
-            message: "Create base state".to_string(),
-            identity_data: Vec::new(),
-            public_key: Vec::new(),
-            metadata: Vec::new(),
-            commitment: Vec::new(),
-            proof: Vec::new(),
-            mode: crate::types::operations::TransactionMode::Unilateral,
-        })
-    }
-
-    pub fn update_base_operation(&self) -> Result<Operation, DsmError> {
-        Ok(Operation::Update {
-            message: "Update base state".to_string(),
-            identity_id: Vec::new(),
-            updated_data: Vec::new(),
-            proof: Vec::new(),
-            forward_link: None,
-        })
-    }
-
-    pub fn add_relationship_operation(&self, counterparty_id: &str) -> Result<Operation, DsmError> {
-        let counterparty_id_hash = domain_hash("DSM/entity-id", counterparty_id.as_bytes());
-        Ok(Operation::AddRelationship {
-            message: format!("Add relationship with {counterparty_id}"),
-            from_id: self.device_id,
-            to_id: counterparty_id_hash.into(),
-            relationship_type: Vec::new(),
-            metadata: Vec::new(),
-            proof: Vec::new(),
-            mode: crate::types::operations::TransactionMode::Unilateral,
-        })
-    }
-
-    pub fn remove_relationship_operation(
-        &self,
-        counterparty_id: &str,
-    ) -> Result<Operation, DsmError> {
-        let counterparty_id_hash = domain_hash("DSM/entity-id", counterparty_id.as_bytes());
-        Ok(Operation::RemoveRelationship {
-            message: format!("Remove relationship with {counterparty_id}"),
-            from_id: self.device_id,
-            to_id: counterparty_id_hash.into(),
-            relationship_type: Vec::new(),
-            proof: Vec::new(),
-            mode: crate::types::operations::TransactionMode::Unilateral,
-        })
-    }
-
-    pub fn generic_operation(
-        &self,
-        operation_type: &str,
-        data: Vec<u8>,
-    ) -> Result<Operation, DsmError> {
-        Ok(Operation::Generic {
-            operation_type: operation_type.as_bytes().to_vec(),
-            data,
-            message: format!("Generic operation: {operation_type}"),
-            signature: vec![],
-        })
-    }
+    // create_base_operation, update_base_operation, add_relationship_operation,
+    // remove_relationship_operation, generic_operation deleted: zero callers.
+    // Operation builders for these variants live in their own modules / SDK
+    // call sites; the StateMachine no longer mints operations on behalf of
+    // callers.
 }
 
 impl Default for StateMachine {
