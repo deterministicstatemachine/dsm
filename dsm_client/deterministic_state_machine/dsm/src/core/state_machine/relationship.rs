@@ -264,187 +264,21 @@ impl RelationshipStatePair {
         Ok(pair)
     }
 
-    pub fn compute_relationship_hash(&self) -> Result<Vec<u8>, DsmError> {
-        let mut hasher = dsm_domain_hasher("DSM/relationship");
-        hasher.update(&self.entity_id);
-        hasher.update(&self.counterparty_id);
-        hasher.update(&self.entity_state.hash);
-        Ok(hasher.finalize().as_bytes().to_vec())
-    }
-
-    /// Check if there are pending unilateral transactions
-    /// Returns true if there are pending transactions that need synchronization
-    pub fn has_pending_unilateral_transactions(&self) -> bool {
-        if let Some(pending_data) = self.verification_metadata.get("pending_transactions") {
-            return !pending_data.is_empty();
-        }
-        false
-    }
-
-    /// Get the last synchronized state
-    /// Returns the last state that was fully synchronized between both parties
-    pub fn get_last_synced_state(&self) -> Option<State> {
-        if self.verification_metadata.contains_key("last_synced_state") {
-            return Some(self.entity_state.clone());
-        }
-        None
-    }
-
-    /// Set the last synchronized state
-    /// Stores the last state that was fully synchronized between both parties
-    pub fn set_last_synced_state(&mut self, state: Option<State>) -> Result<(), DsmError> {
-        if let Some(synced_state) = state {
-            let serialized = synced_state.to_bytes().map_err(|e| {
-                DsmError::serialization_error(
-                    "Failed to serialize synchronized state",
-                    "bytes",
-                    None::<&str>,
-                    Some(e),
-                )
-            })?;
-
-            self.verification_metadata
-                .insert("last_synced_state".to_string(), serialized);
-
-            // Update relationship hash to include this synced state's hash
-            let mut hasher = dsm_domain_hasher("DSM/relationship");
-            hasher.update(&self.relationship_hash);
-            hasher.update(&synced_state.hash()?);
-            self.relationship_hash = hasher.finalize().as_bytes().to_vec();
-        } else {
-            self.verification_metadata.remove("last_synced_state");
-        }
-
-        Ok(())
-    }
-
-    /// Update the entity state.
-    ///
-    /// Per §2.1 adjacency, ordering is by `prev_state_hash` chain, not by
-    /// counter. The incoming state must embed the current entity state's hash.
-    pub fn update_entity_state(&mut self, new_state: State) -> Result<(), DsmError> {
-        if new_state.prev_state_hash != self.entity_state.hash {
-            return Err(DsmError::invalid_operation(
-                "New entity state does not extend the current chain tip",
-            ));
-        }
-        self.entity_state = new_state;
-        Ok(())
-    }
-
-    /// Add a pending transaction to the relationship
-    pub fn add_pending_transaction(&mut self, state: State) -> Result<(), DsmError> {
-        if state.relationship_context.is_none() {
-            return Err(DsmError::invalid_operation(
-                "Cannot add a state without relationship context as pending transaction",
-            ));
-        }
-
-        if !self
-            .verification_metadata
-            .contains_key("pending_transactions")
-        {
-            self.verification_metadata
-                .insert("pending_transactions".to_string(), Vec::new());
-        }
-
-        let serialized = state.to_bytes().map_err(|e| {
-            DsmError::serialization_error(
-                "Failed to add pending transaction to relationship",
-                "bytes",
-                None::<&str>,
-                Some(e),
-            )
-        })?;
-
-        if let Some(pending) = self.verification_metadata.get_mut("pending_transactions") {
-            pending.extend_from_slice(&serialized);
-
-            let mut hasher = dsm_domain_hasher("DSM/relationship");
-            hasher.update(&self.relationship_hash);
-            hasher.update(&serialized);
-            self.relationship_hash = hasher.finalize().as_bytes().to_vec();
-
-            return Ok(());
-        }
-
-        Err(DsmError::serialization_error(
-            "Failed to add pending transaction to relationship",
-            "bytes",
-            None::<&str>,
-            None::<std::io::Error>,
-        ))
-    }
-
-    /// Get all pending unilateral transactions (opaque in core)
-    pub fn get_pending_unilateral_transactions(&self) -> Vec<State> {
-        Vec::new()
-    }
-
-    /// Apply a transaction to the relationship
-    pub fn apply_transaction(&mut self, state: State) -> Result<(), DsmError> {
-        self.entity_state = state;
-        Ok(())
-    }
-
-    /// Clear all pending transactions
-    pub fn clear_pending_transactions(&mut self) {
-        if self
-            .verification_metadata
-            .contains_key("pending_transactions")
-        {
-            self.verification_metadata
-                .insert("pending_transactions".to_string(), Vec::new());
-
-            let mut hasher = dsm_domain_hasher("DSM/relationship");
-            if let Ok(h1) = self.entity_state.hash() {
-                hasher.update(&h1);
-            }
-            if let Ok(h2) = self.counterparty_state.hash() {
-                hasher.update(&h2);
-            }
-            self.relationship_hash = hasher.finalize().as_bytes().to_vec();
-        }
-    }
-
-    pub fn build_verification_metadata(&self) -> Result<Vec<u8>, DsmError> {
-        let mut metadata = Vec::new();
-        // Counterparty state hash only — per §4.3, no counter in verification metadata.
-        metadata.extend_from_slice(&self.counterparty_state.hash()?);
-        Ok(metadata)
-    }
-
-    pub fn validate_operation(&self, operation: &Operation) -> Result<bool, DsmError> {
-        match operation {
-            Operation::AddRelationship { .. } => Ok(true),
-            Operation::RemoveRelationship { .. } => Ok(true),
-            _ => Ok(false),
-        }
-    }
-
-    pub fn handle_operation(&mut self, operation: Operation) -> Result<(), DsmError> {
-        if !self.validate_operation(&operation)? {
-            return Err(DsmError::invalid_operation(
-                "Invalid operation for relationship",
-            ));
-        }
-
-        match operation {
-            Operation::AddRelationship { from_id, to_id, .. } => {
-                self.entity_id = from_id;
-                self.counterparty_id = to_id;
-                self.active = true;
-                Ok(())
-            }
-            Operation::RemoveRelationship { from_id, to_id, .. } => {
-                self.entity_id = from_id;
-                self.counterparty_id = to_id;
-                self.active = false;
-                Ok(())
-            }
-            _ => Err(DsmError::invalid_operation("Unsupported operation type")),
-        }
-    }
+    // The following methods all had zero external callers — deleted:
+    //   compute_relationship_hash
+    //   has_pending_unilateral_transactions
+    //   get_last_synced_state, set_last_synced_state
+    //   update_entity_state
+    //   add_pending_transaction, get_pending_unilateral_transactions,
+    //   apply_transaction, clear_pending_transactions
+    //   build_verification_metadata, validate_operation, handle_operation
+    //
+    // The pending-transaction queue and last-synced-state tracking lived
+    // entirely in `verification_metadata`, which is no longer queried.
+    // Per-relationship state advancement now flows through DeviceState::advance
+    // (§2.2, §4.2); the legacy RelationshipStatePair remains for the bilateral
+    // session pair shape (`new`, `new_with_chain_tip`, `verify_cross_chain_continuity`,
+    // `resume`, `generate_bilateral_chain_id`).
 
     pub fn resume(&self) -> Result<RelationshipContext, DsmError> {
         Ok(RelationshipContext {

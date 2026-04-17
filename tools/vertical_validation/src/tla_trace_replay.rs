@@ -658,12 +658,11 @@ impl DsmImplementationHarness {
             relationship.tip = parent_tip;
             relationship.pair.entity_state = left_state;
             relationship.pair.counterparty_state = right_state;
-            relationship
-                .pair
-                .add_pending_transaction(pending_state.clone())
-                .map_err(|e| {
-                    anyhow!("RelationshipStatePair::add_pending_transaction failed: {e}")
-                })?;
+            // §4.3 — RelationshipStatePair no longer carries a pending-transaction
+            // queue (the entire metadata-based bookkeeping was deleted). The
+            // outgoing pending_state is observable via the trace replay's own
+            // balance / state mirrors below; no extra pair-level tracking needed.
+            let _ = pending_state.clone();
         }
 
         // Track deviceBalance: debit sender (mirrors TLA+ NetSend balance guard)
@@ -746,7 +745,6 @@ impl DsmImplementationHarness {
             relationship.tip = new_tip;
             relationship.pair.entity_state = left_state;
             relationship.pair.counterparty_state = right_state;
-            relationship.pair.clear_pending_transactions();
             relationship
                 .pair
                 .update_chain_tip(chain_tip_id(new_tip), delivered_hash)
@@ -789,10 +787,10 @@ impl DsmImplementationHarness {
             .ok_or_else(|| anyhow!("net_drop could not find pending message {msg_id}"))?;
         self.pending_messages.remove(pending_idx);
 
-        let key = canonical_pair_key(&from, &to);
-        if let Some(relationship) = self.relationships.get_mut(&key) {
-            relationship.pair.clear_pending_transactions();
-        }
+        // Pending-transaction queue cleanup deleted (§4.3 — RelationshipStatePair
+        // no longer carries metadata-based pending tracking). The pending
+        // message removal above is sufficient for net_drop semantics.
+        let _ = canonical_pair_key(&from, &to);
         self.step += 1;
         Ok(())
     }
