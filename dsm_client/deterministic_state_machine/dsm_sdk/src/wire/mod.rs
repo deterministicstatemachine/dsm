@@ -7,8 +7,6 @@ use std::convert::TryFrom;
 
 use crate::types::error::DsmError;
 use crate::types::operations::Operation;
-use crate::types::token_types::Balance;
-use crate::types::state_types::State;
 use prost::Message;
 
 // Provide the prost-generated types locally
@@ -386,40 +384,15 @@ impl From<pb::Error> for TransportError {
     }
 }
 
-/* -------------------------- Domain ↔ Wire (State) ------------------------- */
+// state_to_wire(&State) → pb::StateWire deleted: zero Rust callers.
+// The pb::StateWire proto type is still generated and consumed by the
+// frontend JS, but the Rust-side conversion was dead — the function had
+// `state_number: 0` hardcoded after §4.3, and the only legitimate use of
+// the wire format is from the JS layer building it directly from received
+// bytes.
 
-/// Convert domain `State` → canonical wire `StateWire` used in preimages/hashes.
-/// Important: sort token balances by token_id *before* building the repeated field.
-pub fn state_to_wire(s: &State) -> pb::StateWire {
-    // Collect and sort by token_id for determinism
-    let mut entries: Vec<(&String, &Balance)> = s.token_balances.iter().collect();
-    entries.sort_by_key(|(a, _)| *a);
-
-    let token_balances = entries
-        .into_iter()
-        .map(|(token_id, amt)| pb::TokenBalanceEntry {
-            token_id: token_id.clone(),
-            amount: Some(pb::U128 {
-                // Balance is a plain u128 (type alias); use its value directly
-                le: (*amt).to_le_bytes().to_vec(),
-            }),
-        })
-        .collect();
-
-    // Operation string should be a stable canonical verb for hashing.
-    let op: String = canonical_operation_name(&s.operation);
-
-    pb::StateWire {
-        state_number: 0,
-        prev_state_hash: s.prev_state_hash.to_vec(),
-        token_balances,
-        operation: op,
-        // device_id as bytes here (protobuf defines `bytes`).
-        device_id: s.device_info.device_id.to_vec(),
-    }
-}
-
-/// Minimal canonical verb for your Operation variants (no serde; stable strings).
+/// Minimal canonical verb for Operation variants (no serde; stable strings).
+/// Used by `make_state_transition_proto` below.
 fn canonical_operation_name(op: &Operation) -> String {
     use Operation::*;
     match op {
