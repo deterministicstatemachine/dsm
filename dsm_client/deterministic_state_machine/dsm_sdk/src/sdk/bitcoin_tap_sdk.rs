@@ -729,7 +729,7 @@ impl BitcoinTapSdk {
             let proto_bytes = proto.encode_to_vec();
             let state_str = match &vault.state {
                 dsm::vault::VaultState::Limbo => "limbo",
-                dsm::vault::VaultState::Active { .. } => "active",
+                dsm::vault::VaultState::Active => "active",
                 dsm::vault::VaultState::Unlocked { .. } => "unlocked",
                 dsm::vault::VaultState::Claimed { .. } => "claimed",
                 dsm::vault::VaultState::Invalidated { .. } => "invalidated",
@@ -785,7 +785,7 @@ impl BitcoinTapSdk {
             let proto_bytes = proto.encode_to_vec();
             let state_str = match &vault.state {
                 dsm::vault::VaultState::Limbo => "limbo",
-                dsm::vault::VaultState::Active { .. } => "active",
+                dsm::vault::VaultState::Active => "active",
                 dsm::vault::VaultState::Unlocked { .. } => "unlocked",
                 dsm::vault::VaultState::Claimed { .. } => "claimed",
                 dsm::vault::VaultState::Invalidated { .. } => "invalidated",
@@ -1075,9 +1075,7 @@ impl BitcoinTapSdk {
             // Apply persisted vault state to the in-memory vault cache.
             let mut vault = vault;
             if db_state == "active" {
-                vault.state = dsm::vault::VaultState::Active {
-                    activated_state_number: 0,
-                };
+                vault.state = dsm::vault::VaultState::Active;
             }
 
             self.dlv_manager.add_vault(vault).await?;
@@ -1162,9 +1160,7 @@ impl BitcoinTapSdk {
 
                 let mut v =
                     dsm::vault::LimboVault::new_minimal(proto.id, fulfillment_condition, ref_hash);
-                v.state = dsm::vault::VaultState::Active {
-                    activated_state_number: 0,
-                };
+                v.state = dsm::vault::VaultState::Active;
                 log::info!(
                     "[bitcoin_tap] Using minimal vault construction for remote vault {vault_id}"
                 );
@@ -1409,7 +1405,7 @@ impl BitcoinTapSdk {
             "application/dsm-dbtc-mint",
             Some(kem_public_key.to_vec()),
             kem_public_key,
-            reference_state,
+            &reference_state.hash,
         )?;
         let creator_signature = dsm::crypto::sphincs::sphincs_sign(
             creator_keypair.secret_key(),
@@ -1651,7 +1647,7 @@ impl BitcoinTapSdk {
             "application/dsm-dbtc-successor",
             Some(kem_public_key.to_vec()),
             kem_public_key,
-            reference_state,
+            &reference_state.hash,
         )?;
         let creator_signature = dsm::crypto::sphincs::sphincs_sign(
             creator_keypair.secret_key(),
@@ -1895,7 +1891,7 @@ impl BitcoinTapSdk {
 
         let activated = self
             .dlv_manager
-            .activate_vault(&vault_id, proof, requester_key, reference_state)
+            .activate_vault(&vault_id, proof, requester_key, &reference_state.hash)
             .await?;
         if !activated {
             return Err(DsmError::invalid_operation(
@@ -2029,7 +2025,7 @@ impl BitcoinTapSdk {
                 &vault_id,
                 "deposit_timeout_refund",
                 &creator_signature,
-                reference_state,
+                &reference_state.hash,
             )
             .await?;
 
@@ -5208,9 +5204,7 @@ mod tests {
             },
             [0x99; 32],
         );
-        stale_vault.state = VaultState::Active {
-            activated_state_number: 1,
-        };
+        stale_vault.state = VaultState::Active;
         dlv.add_vault(stale_vault)
             .await
             .unwrap_or_else(|e| panic!("add stale vault failed: {e}"));

@@ -792,7 +792,7 @@ impl AppRouterImpl {
                         vault_id: vid.clone(),
                         state: match &vault.state {
                             dsm::vault::VaultState::Limbo => "limbo",
-                            dsm::vault::VaultState::Active { .. } => "active",
+                            dsm::vault::VaultState::Active => "active",
                             dsm::vault::VaultState::Unlocked { .. } => "unlocked",
                             dsm::vault::VaultState::Claimed { .. } => "claimed",
                             dsm::vault::VaultState::Invalidated { .. } => "invalidated",
@@ -855,7 +855,7 @@ impl AppRouterImpl {
                     vault_id: req.vault_id,
                     state: match &vault.state {
                         dsm::vault::VaultState::Limbo => "limbo",
-                        dsm::vault::VaultState::Active { .. } => "active",
+                        dsm::vault::VaultState::Active => "active",
                         dsm::vault::VaultState::Unlocked { .. } => "unlocked",
                         dsm::vault::VaultState::Claimed { .. } => "claimed",
                         dsm::vault::VaultState::Invalidated { .. } => "invalidated",
