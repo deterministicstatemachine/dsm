@@ -866,7 +866,7 @@ fn trace_dlv_manager_inventory_consistency(
             "text/plain",
             None,
             &encryption_pk,
-            &reference_state,
+            &reference_state.hash,
         ) {
             Ok(result) => result,
             Err(e) => return vec![format!("prepare_vault alpha failed: {e}")],
@@ -893,7 +893,7 @@ fn trace_dlv_manager_inventory_consistency(
             "text/plain",
             None,
             &encryption_pk,
-            &reference_state,
+            &reference_state.hash,
         ) {
             Ok(result) => result,
             Err(e) => return vec![format!("prepare_vault beta failed: {e}")],
