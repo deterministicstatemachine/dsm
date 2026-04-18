@@ -17,7 +17,7 @@ use zerocopy::IntoBytes;
 use crate::types::{
     error::DsmError,
     operations::Operation,
-    state_types::{RelationshipContext, State},
+    state_types::State,
 };
 
 #[derive(Debug, Clone)]
@@ -241,17 +241,10 @@ impl RelationshipStatePair {
     // session pair shape (`new`, `new_with_chain_tip`, `verify_cross_chain_continuity`,
     // `resume`, `generate_bilateral_chain_id`).
 
-    pub fn resume(&self) -> Result<RelationshipContext, DsmError> {
-        Ok(RelationshipContext {
-            entity_id: self.entity_id,
-            counterparty_id: self.counterparty_id,
-            counterparty_public_key: self.counterparty_state.device_info.public_key.clone(),
-            relationship_hash: self.relationship_hash.clone(),
-            active: self.active,
-            chain_tip_id: self.chain_tip_id.clone(),
-            last_bilateral_state_hash: self.last_bilateral_state_hash.clone(),
-        })
-    }
+    // resume() deleted: only caller was the now-deleted
+    // RelationshipManager::resume_relationship. RelationshipContext
+    // resumption now flows through the bilateral session restore path in
+    // sdk::storage::client_db (contacts table + bilateral_chain_tip).
 
     // verify_cross_chain_continuity deleted: zero callers anywhere outside
     // its own self-test (test_relationship_state, also deleted). The §4.2
@@ -502,30 +495,10 @@ impl RelationshipManager {
         Ok(())
     }
 
-    /// Resume a relationship from last known state pair with thread-safe access
-    pub fn resume_relationship(
-        &self,
-        entity_id: &[u8; 32],
-        counterparty_id: &[u8; 32],
-    ) -> Result<RelationshipContext, DsmError> {
-        let key = self.get_relationship_key(entity_id, counterparty_id);
-        let store = self.relationship_store.lock().map_err(|_| {
-            DsmError::invalid_operation("Failed to acquire lock on relationship store")
-        })?;
-
-        if let Some(pair) = store.get(&key) {
-            pair.resume()
-        } else {
-            Err(DsmError::not_found(
-                "Relationship",
-                Some(format!(
-                    "No relationship found between {} and {}",
-                    base32::encode(base32::Alphabet::Crockford, entity_id),
-                    base32::encode(base32::Alphabet::Crockford, counterparty_id)
-                )),
-            ))
-        }
-    }
+    // resume_relationship deleted: zero callers anywhere. RelationshipContext
+    // resumption now flows through the bilateral session restore path in
+    // sdk::storage::client_db (contacts table + bilateral_chain_tip), not
+    // through this in-memory RelationshipManager store.
 
     // update_relationship deleted: zero callers anywhere. The function
     // recomputed cross-chain continuity via verify_cross_chain_continuity
