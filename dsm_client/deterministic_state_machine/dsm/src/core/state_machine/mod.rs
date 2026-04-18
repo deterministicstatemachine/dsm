@@ -231,29 +231,11 @@ impl StateMachine {
     // all deleted — every transition now goes through advance_relationship
     // which uses DeviceState::advance (§2.2, §4.2).
 
-    /// Verify a state using hash-chain validation (§2.1 adjacency only).
-    ///
-    /// Checks that `state.prev_state_hash` embeds the current device head's
-    /// hash. Uses DeviceState's SMT root as the canonical identity.
-    pub fn verify_state(&self, state: &State) -> Result<bool, DsmError> {
-        // Get the current head hash. DeviceState root is canonical ONLY when
-        // relationships have been advanced (non-empty SMT). For legacy states
-        // created via set_state(), fall back to current_state.hash().
-        let head_hash = if let Some(ds) = &self.device_state {
-            // Prefer legacy anchor if set (legacy compat path); else SMT root.
-            ds.legacy_anchor().unwrap_or_else(|| ds.root())
-        } else {
-            return Err(DsmError::state_machine("No DeviceState for verification"));
-        };
-
-        if state.prev_state_hash != head_hash {
-            return Ok(false);
-        }
-
-        // Self-hash integrity
-        let computed = state.compute_hash()?;
-        Ok(computed == state.hash)
-    }
+    // verify_state(&State) deleted: only callers were its own internal tests
+    // (in this module's #[cfg(test)] block). The canonical hash-adjacency
+    // verifier is transition::verify_transition_integrity which the same
+    // tests already exercise. External code reads DeviceState::root()
+    // directly per §2.2 for the canonical head hash.
 
     // generate_precommitment / verify_precommitment removed: only called by
     // their own in-module test. The §11 pre-commitment story now flows
@@ -508,27 +490,21 @@ mod state_machine_tests {
 
         // Verify state2 from state1 using transition::verify_transition_integrity
         // (the canonical hash-adjacency verifier; the mod.rs free-function
-        // wrapper has been removed).
+        // wrapper and StateMachine::verify_state(&State) shim have both been removed).
         assert!(crate::core::state_machine::transition::verify_transition_integrity(
             &state1,
             &state2,
             &state2.operation,
         )?);
 
-        // Now also test the state machine's verify_state method
-        // First reset to state1
-        let mut test_machine = StateMachine::new();
-        test_machine.set_state(state1.clone());
-
-        // Verify state2 from state1 using the state machine
-        assert!(test_machine.verify_state(&state2)?);
-
-        // Create invalid state with wrong previous hash
+        // Tampered child must fail integrity verification.
         let mut invalid_state = state2.clone();
         invalid_state.prev_state_hash = [0; 32]; // Wrong hash
-
-        // Verification should fail
-        assert!(!test_machine.verify_state(&invalid_state)?);
+        assert!(!crate::core::state_machine::transition::verify_transition_integrity(
+            &state1,
+            &invalid_state,
+            &invalid_state.operation,
+        )?);
 
         Ok(())
     }
