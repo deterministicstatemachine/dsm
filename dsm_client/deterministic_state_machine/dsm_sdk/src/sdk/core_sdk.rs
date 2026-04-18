@@ -566,32 +566,13 @@ impl CoreSDK {
         Ok(())
     }
 
-    /// Deterministic state lookup; 0 = genesis
-    pub fn get_state_by_number(&self, state_number: u64) -> Result<State, DsmError> {
-        if let Some(s) = self.state_machine.lock().current_state() {
-            if s.hash[0] as u64 == state_number {
-                return Ok(s.clone());
-            }
-            if state_number == 0 {
-                return Err(DsmError::state_machine("No genesis state available"));
-            }
-        }
-
-        let device_id = self.device_info.device_id;
-        let states = crate::storage::client_db::get_bcr_states(&device_id, false).map_err(|e| {
-            DsmError::state_machine(format!("Failed to load archived states for lookup: {e}"))
-        })?;
-
-        for s in states {
-            if s.hash[0] as u64 == state_number {
-                return Ok(s);
-            }
-        }
-
-        Err(DsmError::state_machine(format!(
-            "State {state_number} not found"
-        )))
-    }
+    // get_state_by_number(state_number: u64) deleted: per §4.3 there is no
+    // state_number, and the function compared the requested number against
+    // `state.hash[0] as u64` (a value in [0,255]) — a degenerate match that
+    // returned arbitrary archived states rather than the requested one. All
+    // 5 prior callers migrated to either a full BCR scan
+    // (resolve_policy_commit_strict, find_token_metadata_state) or to
+    // local_genesis_hash() (token_mpc_sdk x3).
 
     /// Deterministic signer (no clocks, no external randomness)
     pub async fn sign_raw(&self, data: &[u8]) -> Result<Vec<u8>, DsmError> {
@@ -1114,9 +1095,17 @@ impl CoreSDK {
             return Ok(commit);
         }
 
-        let current_state = self.get_current_state()?;
-        for state_number in (0..=current_state.hash[0] as u64).rev() {
-            let state = self.get_state_by_number(state_number)?;
+        // Per §4.3 there is no `state_number`. Scan all archived BCR states
+        // (newest-first) for one carrying token metadata for this token_id.
+        // Replaces a broken `(0..=current.hash[0] as u64).rev()` walk that
+        // depended on `get_state_by_number` matching by `hash[0]`.
+        let device_id = self.device_info.device_id;
+        let states = crate::storage::client_db::get_bcr_states(&device_id, false).map_err(|e| {
+            DsmError::state(format!(
+                "Failed to load BCR states for policy commit lookup: {e}"
+            ))
+        })?;
+        for state in states.into_iter().rev() {
             if let Some(token_metadata) = self.token_metadata_for_state(&state, token_id) {
                 return crate::policy::strict_policy_commit_for_token(
                     token_id,

@@ -402,46 +402,55 @@ impl<I: Send + Sync> TokenSDK<I> {
     }
 
     fn find_token_metadata_state(&self, token_id: &str) -> Result<State, DsmError> {
-        let current_state = self.core_sdk.get_current_state()?;
-        let max_state_number = current_state.hash[0] as u64;
-
-        for state_number in (0..=max_state_number).rev() {
-            if let Ok(state) = self.core_sdk.get_state_by_number(state_number) {
-                match &state.operation {
-                    Operation::Create { metadata, .. } => {
-                        if !metadata.is_empty() {
-                            if let Ok(proto) = TokenMetadataProto::decode(metadata.as_slice()) {
-                                if proto.token_id == token_id || proto.symbol == token_id {
-                                    return Ok(state.clone());
-                                }
+        // Per §4.3 there is no `state_number`. Scan all archived BCR states
+        // (newest-first) for a Create or Generic op carrying token metadata
+        // for this token_id. Replaces the previous broken
+        // `(0..=current_state.hash[0] as u64).rev()` walk that depended on
+        // `core_sdk::get_state_by_number(state_number)` matching by the
+        // first byte of the state hash — which only ever found a token if
+        // its hash[0] happened to fall in [0, current.hash[0]].
+        let device_id = self.device_id;
+        let states = crate::storage::client_db::get_bcr_states(&device_id, false).map_err(|e| {
+            DsmError::storage(
+                format!("Failed to load BCR states for token metadata lookup: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
+        for state in states.into_iter().rev() {
+            match &state.operation {
+                Operation::Create { metadata, .. } => {
+                    if !metadata.is_empty() {
+                        if let Ok(proto) = TokenMetadataProto::decode(metadata.as_slice()) {
+                            if proto.token_id == token_id || proto.symbol == token_id {
+                                return Ok(state);
                             }
                         }
                     }
-                    Operation::Generic {
-                        operation_type,
-                        data,
-                        ..
-                    } => {
-                        if operation_type.as_slice() == b"token_create"
-                            || operation_type.as_slice() == b"token_registry_update"
-                        {
-                            if let Ok(registry_update) = decode_registry_update(data) {
-                                if registry_update.contains_key(token_id) {
-                                    return Ok(state.clone());
-                                }
-                            } else if let Ok(single) = TokenMetadataProto::decode(data.as_slice()) {
-                                if single.token_id == token_id || single.symbol == token_id {
-                                    return Ok(state.clone());
-                                }
-                            }
-                        }
-                    }
-                    _ => continue,
                 }
+                Operation::Generic {
+                    operation_type,
+                    data,
+                    ..
+                } => {
+                    if operation_type.as_slice() == b"token_create"
+                        || operation_type.as_slice() == b"token_registry_update"
+                    {
+                        if let Ok(registry_update) = decode_registry_update(data) {
+                            if registry_update.contains_key(token_id) {
+                                return Ok(state);
+                            }
+                        } else if let Ok(single) = TokenMetadataProto::decode(data.as_slice()) {
+                            if single.token_id == token_id || single.symbol == token_id {
+                                return Ok(state);
+                            }
+                        }
+                    }
+                }
+                _ => continue,
             }
         }
 
-        Err(DsmError::state("Token metadata not found in the chain"))
+        Err(DsmError::state("Token metadata not found in archived states"))
     }
 
     fn metadata_for_token_from_state(

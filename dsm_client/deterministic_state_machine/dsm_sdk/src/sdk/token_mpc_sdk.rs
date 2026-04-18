@@ -434,14 +434,21 @@ impl TokenMpcSDK {
         session_id: &str,
         params: &TokenCreationParams,
     ) -> Result<(), DsmError> {
-        let storage_nodes = self.storage_nodes.read();
-
-        // Get creator's genesis if available
+        // Get creator's genesis if available. Replaces a broken
+        // `get_state_by_number(0)` call that depended on `hash[0] == 0`
+        // matching (per §4.3 there is no state_number index). Fetch BEFORE
+        // acquiring the storage_nodes lock since `local_genesis_hash` is
+        // async and we cannot hold the parking_lot guard across .await.
         let creator_genesis_id = self
             .core_sdk
-            .get_state_by_number(0)
-            .map(|genesis| crate::util::text_id::encode_base32_crockford(&genesis.hash[..16]))
-            .unwrap_or_else(|_| "unknown".to_string());
+            .local_genesis_hash()
+            .await
+            .ok()
+            .filter(|h| h.len() >= 16)
+            .map(|h| crate::util::text_id::encode_base32_crockford(&h[..16]))
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let storage_nodes = self.storage_nodes.read();
 
         for node_url in storage_nodes.iter() {
             #[cfg(debug_assertions)]
@@ -554,10 +561,14 @@ impl TokenMpcSDK {
         &self,
         session: &mut TokenMpcSession,
     ) -> Result<bool, DsmError> {
-        // Get creator's genesis state - required for anchoring tokens
-        let creator_genesis = self
+        // Get creator's genesis hash from the persistent genesis_records source.
+        // Replaces a broken `core_sdk.get_state_by_number(0)` call that depended
+        // on `hash[0] == 0` matching (which finds an arbitrary archived state,
+        // not necessarily genesis).
+        let creator_genesis_hash = self
             .core_sdk
-            .get_state_by_number(0)
+            .local_genesis_hash()
+            .await
             .map_err(|_| DsmError::state("Creator's Genesis not found"))?;
 
         // Generate token data for MPC
@@ -598,7 +609,7 @@ impl TokenMpcSDK {
 
         // Add creator's genesis hash to token data to anchor it
         let mut anchored_token_data = Vec::new();
-        anchored_token_data.extend_from_slice(&creator_genesis.hash);
+        anchored_token_data.extend_from_slice(&creator_genesis_hash);
         anchored_token_data.extend_from_slice(&token_data);
 
         // Prepare policy anchor
@@ -671,7 +682,7 @@ impl TokenMpcSDK {
 
         // Create token metadata with creator genesis reference
         let token_metadata =
-            self.create_token_metadata(&session.params, &token_genesis, &creator_genesis.hash)?;
+            self.create_token_metadata(&session.params, &token_genesis, &creator_genesis_hash)?;
 
         // Update session
         session.token_genesis = Some(token_genesis);
@@ -1132,10 +1143,12 @@ impl TokenMpcSDK {
         &self,
         params: TokenCreationParams,
     ) -> Result<String, DsmError> {
-        // Verify that creator genesis exists
-        let _creator_genesis = self
+        // Verify that creator genesis exists. Replaces a broken
+        // `get_state_by_number(0)` call (per §4.3 there is no state_number).
+        let _creator_genesis_hash = self
             .core_sdk
-            .get_state_by_number(0)
+            .local_genesis_hash()
+            .await
             .map_err(|_| DsmError::state("Creator's Genesis not found"))?;
 
         // Ensure valid threshold
