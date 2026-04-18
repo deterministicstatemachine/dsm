@@ -719,28 +719,14 @@ pub fn apply_transition(
     }
 }
 
-/// Verify bilateral transition relationship consistency.
-///
-/// Per §4.3, ordering is by hash adjacency — no counter compared. The
-/// per-relationship chain tip is verified separately via SMT inclusion proof
-/// in the stitched receipt (§4.2).
-pub fn verify_bilateral_transition(
-    current_state: &State,
-    next_state: &State,
-) -> Result<bool, DsmError> {
-    if let Some(current_rel) = &current_state.relationship_context {
-        if let Some(next_rel) = &next_state.relationship_context {
-            // Verify counterparty IDs match
-            if current_rel.counterparty_id != next_rel.counterparty_id {
-                return Ok(false);
-            }
-        } else {
-            return Ok(false); // Missing relationship context in next state
-        }
-    }
-
-    Ok(true)
-}
+// verify_bilateral_transition deleted: zero external callers (only its own
+// 3 in-module self-tests). The function did a trivial counterparty_id match
+// between current/next State.relationship_context and offered no extra
+// guarantee beyond what §4.2 stitched-receipt SMT verification already
+// provides for the per-relationship chain tip. Per-relationship integrity
+// is now handled by transition::verify_transition_integrity (hash adjacency)
+// plus SMT inclusion proofs in the receipt — no need for a separate
+// "bilateral counterparty match" predicate at the transition layer.
 
 /// Verify a SPHINCS+ signature on an operation.
 ///
@@ -1875,100 +1861,12 @@ mod tests {
         assert!(!result.unwrap_or_else(|e| panic!("should return false for invalid hash: {e}")));
     }
 
-    #[test]
-    fn test_verify_bilateral_transition_missing_relationship_context() {
-        let current_state = create_test_state(1);
-        let mut next_state = create_test_state(2);
-
-        // Create relationship context for current but not next
-        let mut current_with_rel = current_state.clone();
-        current_with_rel.relationship_context =
-            Some(crate::types::state_types::RelationshipContext {
-                entity_id: *blake3::hash(b"entity_device").as_bytes(),
-                counterparty_id: *blake3::hash(b"counterparty123").as_bytes(),
-                counterparty_public_key: vec![1, 2, 3],
-                relationship_hash: vec![4, 5, 6],
-                active: true,
-                chain_tip_id: None,
-                last_bilateral_state_hash: None,
-            });
-
-        next_state.relationship_context = None;
-
-        let result = verify_bilateral_transition(&current_with_rel, &next_state);
-        assert!(result.is_ok());
-        assert!(!result.unwrap_or_else(|e| panic!(
-            "should return false for missing relationship context: {e}"
-        )));
-    }
-
-    #[test]
-    fn test_verify_bilateral_transition_counterparty_mismatch() {
-        let current_state = create_test_state(1);
-        let next_state = create_test_state(2);
-
-        let mut current_with_rel = current_state.clone();
-        current_with_rel.relationship_context =
-            Some(crate::types::state_types::RelationshipContext {
-                entity_id: *blake3::hash(b"entity_device").as_bytes(),
-                counterparty_id: *blake3::hash(b"counterparty_A").as_bytes(),
-                counterparty_public_key: vec![1, 2, 3],
-                relationship_hash: vec![4, 5, 6],
-                active: true,
-                chain_tip_id: None,
-                last_bilateral_state_hash: None,
-            });
-
-        let mut next_with_rel = next_state.clone();
-        next_with_rel.relationship_context = Some(crate::types::state_types::RelationshipContext {
-            entity_id: *blake3::hash(b"entity_device").as_bytes(),
-            counterparty_id: *blake3::hash(b"counterparty_B").as_bytes(), // Different counterparty
-            counterparty_public_key: vec![1, 2, 3],
-            relationship_hash: vec![4, 5, 6],
-            active: true,
-            chain_tip_id: None,
-            last_bilateral_state_hash: None,
-        });
-
-        let result = verify_bilateral_transition(&current_with_rel, &next_with_rel);
-        assert!(result.is_ok());
-        assert!(!result
-            .unwrap_or_else(|e| panic!("should return false for counterparty mismatch: {e}")));
-    }
-
-    #[test]
-    fn test_verify_bilateral_transition_success() {
-        let current_state = create_test_state(1);
-        let next_state = create_test_state(2);
-
-        let mut current_with_rel = current_state.clone();
-        current_with_rel.relationship_context =
-            Some(crate::types::state_types::RelationshipContext {
-                entity_id: *blake3::hash(b"entity_device").as_bytes(),
-                counterparty_id: *blake3::hash(b"counterparty123").as_bytes(),
-                counterparty_public_key: vec![1, 2, 3],
-                relationship_hash: vec![4, 5, 6],
-                active: true,
-                chain_tip_id: None,
-                last_bilateral_state_hash: None,
-            });
-
-        let mut next_with_rel = next_state.clone();
-        next_with_rel.relationship_context = Some(crate::types::state_types::RelationshipContext {
-            entity_id: *blake3::hash(b"entity_device").as_bytes(),
-            counterparty_id: *blake3::hash(b"counterparty123").as_bytes(),
-            counterparty_public_key: vec![1, 2, 3],
-            relationship_hash: vec![4, 5, 6],
-            active: true,
-            chain_tip_id: None,
-            last_bilateral_state_hash: None,
-        });
-
-        let result = verify_bilateral_transition(&current_with_rel, &next_with_rel);
-        assert!(result.is_ok());
-        assert!(result
-            .unwrap_or_else(|e| panic!("should return true for valid bilateral transition: {e}")));
-    }
+    // test_verify_bilateral_transition_* deleted along with the
+    // verify_bilateral_transition function above (zero external callers,
+    // only these 3 self-tests). Relationship-context counterparty match is
+    // not a transition-layer predicate per §4.2 / §4.3; per-relationship
+    // chain integrity flows through SMT inclusion proofs in stitched
+    // receipts.
 
     #[test]
     fn test_verify_token_balance_consistency_burn_operation() {
