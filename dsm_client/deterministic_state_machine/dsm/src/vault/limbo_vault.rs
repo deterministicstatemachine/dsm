@@ -13,7 +13,10 @@ use crate::crypto::pedersen::{PedersenCommitment, PedersenParams, SecurityLevel}
 use crate::crypto::sphincs;
 use crate::types::error::DsmError;
 use crate::types::policy_types::VaultCondition;
-use crate::types::state_types::State;
+// State import removed: vault lifecycle APIs now take &[u8; 32] (the
+// resolved reference state hash) directly. Callers supply the digest from
+// DeviceState::root(), RelationshipChainState::compute_chain_tip(), or any
+// other source.
 
 use crate::core::state_machine::random_walk::algorithms::{generate_positions, generate_seed, Position};
 
@@ -104,20 +107,22 @@ pub enum VaultState {
     Limbo,
     /// Entry anchor buried — dBTC tradeable, but vault NOT unlocked.
     /// Preimage/skV only derivable after a Burn transition (dBTC §6.2-6.4).
-    Active {
-        activated_state_number: u64,
-    },
+    ///
+    /// Per §4.3 the former `*_state_number: u64` fields on each variant
+    /// were §4.3 violations (counters in acceptance state) populated from
+    /// `reference_state.hash[0] as u64` (nonsense). They've been removed;
+    /// the vault's position in the hash chain is identified by the
+    /// `reference_state_hash` field on the vault itself + the surrounding
+    /// relationship chain tip, not by a counter.
+    Active,
     Unlocked {
-        unlocked_state_number: u64,
         fulfillment_proof: Box<FulfillmentProof>,
     },
     Claimed {
-        claimed_state_number: u64,
         claimant: Vec<u8>,
         claim_proof: Vec<u8>,
     },
     Invalidated {
-        invalidated_state_number: u64,
         reason: String,
         creator_signature: Vec<u8>,
     },
@@ -749,13 +754,10 @@ fn encode_fulfillment_condition(
     Ok(fm_bytes)
 }
 
-fn resolved_reference_state_hash(reference_state: &State) -> Result<[u8; 32], DsmError> {
-    if reference_state.hash == [0u8; 32] {
-        reference_state.compute_hash()
-    } else {
-        Ok(reference_state.hash)
-    }
-}
+// resolved_reference_state_hash helper removed: vault APIs now take the
+// already-resolved 32-byte reference hash directly. Callers (DLVManager +
+// SDKs) compute the digest from whatever source they have (State,
+// DeviceState root, RelationshipChainState tip, etc.) before calling.
 
 impl LimboVault {
     /// Rehydrate and verify a vault from its decentralized storage post.
@@ -837,8 +839,13 @@ impl LimboVault {
         }
     }
 
-    /// Create a secret-free vault draft anchored to a reference state.
+    /// Create a secret-free vault draft anchored to a reference state hash.
     /// Uses Kyber KEM + AES-GCM and binds all signed parameters via BLAKE3.
+    ///
+    /// Per §4.3 the former `state_number` ingredient (derived as
+    /// `reference_state.hash[0] as u64`) has been dropped: the full 32-byte
+    /// reference hash already serves the position-in-chain identifier role,
+    /// so the u64 reduction was both redundant and a §4.3 violation.
     pub fn create_draft(
         creator_public_key: &[u8],
         fulfillment_condition: FulfillmentMechanism,
@@ -846,20 +853,19 @@ impl LimboVault {
         content_type: &str,
         intended_recipient: Option<Vec<u8>>, // Kyber public key for access control (if Some)
         encryption_public_key: &[u8],        // Kyber public key for content encryption (required)
-        reference_state: &State,
+        reference_state_hash: &[u8; 32],
     ) -> Result<LimboVaultDraft, DsmError> {
-        let state_number = reference_state.hash[0] as u64;
-        let ref_hash = resolved_reference_state_hash(reference_state)?;
+        let ref_hash = *reference_state_hash;
 
         // Fix #2: Encode fulfillment condition early so its domain-hash can be bound
         // into id_material. This prevents two vaults with identical creator/state/content
         // but different fulfillment conditions (e.g. different HTLCs) from colliding on vault_id.
         let fm_bytes = encode_fulfillment_condition(&fulfillment_condition)?;
 
-        // Deterministic ID label (decimal) from (creator_pk || state# || H(content) || H(fulfillment))
+        // Deterministic ID label from (creator_pk || ref_hash || H(content) || H(fulfillment))
         let id_material = concat_bytes(&[
             creator_public_key,
-            &state_number.to_le_bytes(),
+            &ref_hash,
             domain_hash("DSM/dlv-content", content).as_bytes(),
             domain_hash("DSM/dlv-fulfillment", &fm_bytes).as_bytes(),
         ]);
@@ -872,14 +878,13 @@ impl LimboVault {
         // Nonce and AAD (deterministic; no clocks)
         let nonce_seed = concat_bytes(&[
             domain_hash("DSM/dlv-vault-id", &id_material).as_bytes(),
-            &state_number.to_le_bytes(),
+            &ref_hash,
         ]);
         let nonce = domain_hash_bytes("DSM/dlv-nonce", &nonce_seed)[0..12].to_vec();
 
         let mut aad = Vec::new();
         aad.extend_from_slice(creator_public_key);
         aad.extend_from_slice(vault_id.as_bytes());
-        aad.extend_from_slice(&state_number.to_le_bytes());
         aad.extend_from_slice(&ref_hash);
 
         // Symmetric key for AES-GCM: bind KEM secret + aad + content hash
@@ -904,7 +909,6 @@ impl LimboVault {
         let mut parameters = Vec::new();
         parameters.extend_from_slice(creator_public_key);
         parameters.extend_from_slice(vault_id.as_bytes());
-        parameters.extend_from_slice(&state_number.to_le_bytes());
         parameters.extend_from_slice(&ref_hash);
 
         // fm_bytes already computed above for id_material; reuse here.
@@ -930,7 +934,11 @@ impl LimboVault {
 
         Ok(LimboVaultDraft {
             id: vault_id,
-            created_at_state: state_number,
+            // `created_at_state` is an advisory navigation label (not a
+            // counter in acceptance — §2.2 sparse-index allowance). We
+            // carry 0 here; callers wanting a label can set it from the
+            // broader chain context.
+            created_at_state: 0,
             creator_public_key: creator_public_key.to_vec(),
             fulfillment_condition,
             intended_recipient,
@@ -982,11 +990,15 @@ impl LimboVaultDraft {
 
 impl LimboVault {
     /// Verify parameters and signature deterministically.
+    ///
+    /// Per §4.3 the former `created_at_state.to_le_bytes()` ingredient was
+    /// dropped from the canonical parameters layout — the 32-byte
+    /// `reference_state_hash` already serves the position-in-chain
+    /// identifier role.
     pub fn verify(&self) -> Result<bool, DsmError> {
         let mut parameters = Vec::new();
         parameters.extend_from_slice(&self.creator_public_key);
         parameters.extend_from_slice(self.id.as_bytes());
-        parameters.extend_from_slice(&self.created_at_state.to_le_bytes());
         parameters.extend_from_slice(&self.reference_state_hash);
 
         let fm_proto: crate::types::proto::FulfillmentMechanism =
@@ -1015,11 +1027,13 @@ impl LimboVault {
         Ok(sig_ok)
     }
 
-    /// Check that `proof` fulfills `self.fulfillment_condition` against `reference_state`.
+    /// Check that `proof` fulfills `self.fulfillment_condition` against the
+    /// reference state hash. Per §4.3 no counter is consulted — position in
+    /// the chain is identified by the 32-byte content hash.
     pub fn verify_fulfillment(
         &self,
         proof: &FulfillmentProof,
-        reference_state: &State,
+        reference_state_hash: &[u8; 32],
     ) -> Result<bool, DsmError> {
         match (&self.fulfillment_condition, proof) {
             // Payment: verify state transition protobuf parameters + Merkle inclusion into verification_state root.
@@ -1140,7 +1154,7 @@ impl LimboVault {
                         }
                     }
                 }
-                let result = self.verify_hash_chain(hash_chain_proof, reference_state)?;
+                let result = self.verify_hash_chain(hash_chain_proof, reference_state_hash)?;
                 if result && extract_sigma_from_proof(proof_ref).is_none() {
                     return Err(DsmError::invalid_operation(
                         "DLV unlock requires stitched_receipt_sigma (§7.3)",
@@ -1197,7 +1211,7 @@ impl LimboVault {
                 for (c, p) in conds.iter().zip(proofs.iter()) {
                     let mut tmp = self.clone();
                     tmp.fulfillment_condition = c.clone();
-                    if !tmp.verify_fulfillment(p, reference_state)? {
+                    if !tmp.verify_fulfillment(p, reference_state_hash)? {
                         return Ok(false);
                     }
                 }
@@ -1211,7 +1225,7 @@ impl LimboVault {
                     for c in conds {
                         let mut tmp = self.clone();
                         tmp.fulfillment_condition = c.clone();
-                        if tmp.verify_fulfillment(p, reference_state)? {
+                        if tmp.verify_fulfillment(p, reference_state_hash)? {
                             return Ok(true);
                         }
                     }
@@ -1493,8 +1507,15 @@ impl LimboVault {
         Ok(true)
     }
 
-    fn verify_hash_chain(&self, proof: &[u8], reference_state: &State) -> Result<bool, DsmError> {
-        // Layout: [len u32][state_numbers u64 * len][state_hashes 32 * len]
+    fn verify_hash_chain(
+        &self,
+        proof: &[u8],
+        reference_state_hash: &[u8; 32],
+    ) -> Result<bool, DsmError> {
+        // Layout kept for wire compatibility with existing proofs, but per §4.3
+        // the u64 entries are advisory navigation labels, not acceptance-path
+        // counters. Chain linkage is enforced by hash-adjacency; counters only
+        // distinguish sibling links within a single proof.
         if proof.len() < 4 {
             return Ok(false);
         }
@@ -1537,14 +1558,15 @@ impl LimboVault {
             return Ok(false);
         }
 
-        // Monotonic +1
+        // Advisory monotonic +1 between navigation labels (not an acceptance
+        // check; §4.3 rules are hash-adjacency only).
         for i in 1..nums.len() {
             if nums[i] != nums[i - 1].saturating_add(1) {
                 return Ok(false);
             }
         }
 
-        // Linkage check (strict structural check)
+        // Linkage check — hash-adjacency across the proof.
         for i in 0..(hashes.len() - 1) {
             let mut hasher = dsm_domain_hasher("DSM/dlv-chain-link");
             hasher.update(&hashes[i]);
@@ -1557,26 +1579,24 @@ impl LimboVault {
             }
         }
 
+        // Final hash must equal the reference (content-addressed per §2.1/§4.3).
         let final_hash = &hashes[hashes.len() - 1];
-        let refh = reference_state.hash()?;
-        let match_ref = secure_eq(final_hash, &refh);
-        let reach_ref = reference_state.hash[0] as u64 >= nums[nums.len() - 1];
-
-        Ok(match_ref || reach_ref)
+        Ok(secure_eq(final_hash, reference_state_hash))
     }
 }
 
 /* --------------------------- State transitions (API) ------------------------- */
 
 impl LimboVault {
-    /// Attempt to unlock the vault with a valid proof (no clocks; uses state_number).
+    /// Attempt to unlock the vault with a valid proof. Per §4.3 no counter
+    /// is consulted — acceptance is hash-adjacency of the reference.
     pub fn unlock(
         &mut self,
         proof: FulfillmentProof,
         requester_public_key: &[u8], // informational binding
-        reference_state: &State,
+        reference_state_hash: &[u8; 32],
     ) -> Result<bool, DsmError> {
-        if !matches!(self.state, VaultState::Limbo | VaultState::Active { .. }) {
+        if !matches!(self.state, VaultState::Limbo | VaultState::Active) {
             return Err(DsmError::invalid_operation(
                 "vault must be in limbo or active to unlock",
             ));
@@ -1600,12 +1620,11 @@ impl LimboVault {
             }
         }
 
-        if !self.verify_fulfillment(&proof, reference_state)? {
+        if !self.verify_fulfillment(&proof, reference_state_hash)? {
             return Ok(false);
         }
 
         self.state = VaultState::Unlocked {
-            unlocked_state_number: reference_state.hash[0] as u64,
             fulfillment_proof: Box::new(proof),
         };
         Ok(true)
@@ -1623,7 +1642,7 @@ impl LimboVault {
         &mut self,
         proof: &FulfillmentProof,
         requester_public_key: &[u8],
-        reference_state: &State,
+        reference_state_hash: &[u8; 32],
     ) -> Result<bool, DsmError> {
         if !matches!(self.state, VaultState::Limbo) {
             return Err(DsmError::invalid_operation("vault not in limbo"));
@@ -1644,13 +1663,11 @@ impl LimboVault {
             }
         }
 
-        if !self.verify_fulfillment(proof, reference_state)? {
+        if !self.verify_fulfillment(proof, reference_state_hash)? {
             return Ok(false);
         }
 
-        self.state = VaultState::Active {
-            activated_state_number: reference_state.hash[0] as u64,
-        };
+        self.state = VaultState::Active;
         Ok(true)
     }
 
@@ -1667,7 +1684,7 @@ impl LimboVault {
     pub fn claim(
         &mut self,
         claimant_secret_key: &[u8],
-        reference_state: &State,
+        reference_state_hash: &[u8; 32],
     ) -> Result<ClaimResult, DsmError> {
         let proof = match &self.state {
             VaultState::Unlocked {
@@ -1676,8 +1693,8 @@ impl LimboVault {
             _ => return Err(DsmError::invalid_operation("vault not unlocked")),
         };
 
-        // Re-verify under current reference (no clock usage)
-        if !self.verify_fulfillment(&proof, reference_state)? {
+        // Re-verify under current reference (no clock, no counter per §4.3)
+        if !self.verify_fulfillment(&proof, reference_state_hash)? {
             return Err(DsmError::invalid_operation(
                 "fulfillment proof invalid under current reference",
             ));
@@ -1687,7 +1704,7 @@ impl LimboVault {
         let mut claim_data = Vec::new();
         claim_data.extend_from_slice(self.id.as_bytes());
         claim_data.extend_from_slice(&self.parameters_hash);
-        claim_data.extend_from_slice(&reference_state.hash[..8]);
+        claim_data.extend_from_slice(&reference_state_hash[..8]);
         claim_data.extend_from_slice(domain_hash("DSM/dlv-claim", &proof.to_bytes()).as_bytes());
         let claim_proof = domain_hash_bytes("DSM/dlv-claim", &claim_data).to_vec();
 
@@ -1701,7 +1718,6 @@ impl LimboVault {
 
         if is_dbtc_vault {
             self.state = VaultState::Claimed {
-                claimed_state_number: reference_state.hash[0] as u64,
                 claimant: claimant_secret_key.to_vec(),
                 claim_proof: claim_proof.clone(),
             };
@@ -1760,7 +1776,6 @@ impl LimboVault {
 
         // Transition to Claimed
         self.state = VaultState::Claimed {
-            claimed_state_number: reference_state.hash[0] as u64,
             claimant: claimant_secret_key.to_vec(), // record who claimed (key identity bytes)
             claim_proof: claim_proof.clone(),
         };
@@ -1783,7 +1798,7 @@ impl LimboVault {
         &mut self,
         reason: &str,
         creator_signature: &[u8],
-        reference_state: &State,
+        reference_state_hash: &[u8; 32],
     ) -> Result<(), DsmError> {
         // Terminal states (Claimed, Invalidated) are irreversible.
         // Only Limbo, Active, or Unlocked vaults may be invalidated.
@@ -1805,7 +1820,7 @@ impl LimboVault {
         let mut data = Vec::new();
         data.extend_from_slice(self.id.as_bytes());
         data.extend_from_slice(reason.as_bytes());
-        data.extend_from_slice(&reference_state.hash);
+        data.extend_from_slice(reference_state_hash);
 
         let ok = sphincs::sphincs_verify(&self.creator_public_key, &data, creator_signature)?;
         if !ok {
@@ -1813,7 +1828,6 @@ impl LimboVault {
         }
 
         self.state = VaultState::Invalidated {
-            invalidated_state_number: reference_state.hash[0] as u64,
             reason: reason.to_string(),
             creator_signature: creator_signature.to_vec(),
         };
@@ -1864,7 +1878,7 @@ impl LimboVault {
 
         let status = match &self.state {
             VaultState::Limbo => "unresolved",
-            VaultState::Active { .. } => "active",
+            VaultState::Active => "active",
             VaultState::Unlocked { .. } => "unlocked",
             VaultState::Claimed { .. } => "claimed",
             VaultState::Invalidated { .. } => "invalidated",
@@ -1921,7 +1935,6 @@ mod tests {
     use super::*;
     use crate::core::state_machine::random_walk::algorithms::Position;
     use crate::types::policy_types::VaultCondition;
-    use crate::types::state_types::DeviceInfo;
 
     // ───────── secure_eq ─────────
 
@@ -2248,6 +2261,11 @@ mod tests {
     }
 
     // ───────── VaultState ─────────
+    //
+    // (The former `vault_state_active_inequality` and `activated_state_number`
+    // equality tests were removed: Active no longer carries a state_number
+    // field — per §4.3 counters don't live in acceptance state — so Active is
+    // now a unit variant and all Active values are trivially equal.)
 
     #[test]
     fn vault_state_limbo_equality() {
@@ -2256,34 +2274,12 @@ mod tests {
 
     #[test]
     fn vault_state_active_equality() {
-        let a = VaultState::Active {
-            activated_state_number: 42,
-        };
-        let b = VaultState::Active {
-            activated_state_number: 42,
-        };
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn vault_state_active_inequality() {
-        let a = VaultState::Active {
-            activated_state_number: 1,
-        };
-        let b = VaultState::Active {
-            activated_state_number: 2,
-        };
-        assert_ne!(a, b);
+        assert_eq!(VaultState::Active, VaultState::Active);
     }
 
     #[test]
     fn vault_state_limbo_ne_active() {
-        assert_ne!(
-            VaultState::Limbo,
-            VaultState::Active {
-                activated_state_number: 0
-            }
-        );
+        assert_ne!(VaultState::Limbo, VaultState::Active);
     }
 
     // ───────── DeterministicLimboVault ─────────
@@ -2501,12 +2497,13 @@ mod tests {
         }
     }
 
-    fn make_test_vault_draft() -> (LimboVaultDraft, Vec<u8>, State) {
+    /// Test fixture: returns a draft, its creator's secret key, and the
+    /// 32-byte reference hash that was used to create it.
+    fn make_test_vault_draft() -> (LimboVaultDraft, Vec<u8>, [u8; 32]) {
         let (creator_public_key, creator_secret_key) =
             crate::crypto::sphincs::generate_sphincs_keypair().expect("sphincs keypair");
         let kyber_pair = crate::crypto::kyber::generate_kyber_keypair().expect("kyber keypair");
-        let device_info = DeviceInfo::from_hashed_label("dlv-invalidate-test", vec![0x42]);
-        let reference_state = State::new_genesis([0x24; 32], device_info);
+        let reference_state_hash = [0x24; 32];
         let draft = LimboVault::create_draft(
             &creator_public_key,
             FulfillmentMechanism::CryptoCondition {
@@ -2517,24 +2514,24 @@ mod tests {
             "application/octet-stream",
             None,
             &kyber_pair.public_key,
-            &reference_state,
+            &reference_state_hash,
         )
         .expect("vault draft");
-        (draft, creator_secret_key, reference_state)
+        (draft, creator_secret_key, reference_state_hash)
     }
 
-    fn make_signed_test_vault() -> (LimboVault, Vec<u8>, State) {
-        let (draft, creator_secret_key, reference_state) = make_test_vault_draft();
+    fn make_signed_test_vault() -> (LimboVault, Vec<u8>, [u8; 32]) {
+        let (draft, creator_secret_key, reference_state_hash) = make_test_vault_draft();
         let creator_signature =
             crate::crypto::sphincs::sphincs_sign(&creator_secret_key, &draft.parameters_hash)
                 .expect("creator signature");
         let vault = draft.finalize(&creator_signature).expect("signed vault");
-        (vault, creator_secret_key, reference_state)
+        (vault, creator_secret_key, reference_state_hash)
     }
 
     #[test]
     fn create_draft_exposes_signable_parameters_hash() {
-        let (draft, creator_secret_key, _reference_state) = make_test_vault_draft();
+        let (draft, creator_secret_key, _reference_state_hash) = make_test_vault_draft();
         assert!(draft.id.starts_with("vault-"));
         assert_eq!(draft.parameters_hash.len(), 32);
         let creator_signature =
@@ -2549,8 +2546,7 @@ mod tests {
         let (creator_public_key, _creator_secret_key) =
             crate::crypto::sphincs::generate_sphincs_keypair().expect("sphincs keypair");
         let kyber_pair = crate::crypto::kyber::generate_kyber_keypair().expect("kyber keypair");
-        let device_info = DeviceInfo::from_hashed_label("dlv-draft-determinism", vec![0x24]);
-        let reference_state = State::new_genesis([0x33; 32], device_info);
+        let reference_state_hash = [0x33; 32];
 
         let draft_a = LimboVault::create_draft(
             &creator_public_key,
@@ -2562,7 +2558,7 @@ mod tests {
             "application/octet-stream",
             None,
             &kyber_pair.public_key,
-            &reference_state,
+            &reference_state_hash,
         )
         .expect("vault draft a");
         let draft_b = LimboVault::create_draft(
@@ -2575,7 +2571,7 @@ mod tests {
             "application/octet-stream",
             None,
             &kyber_pair.public_key,
-            &reference_state,
+            &reference_state_hash,
         )
         .expect("vault draft b");
 
@@ -2584,7 +2580,7 @@ mod tests {
 
     #[test]
     fn finalize_rejects_signature_from_wrong_creator() {
-        let (draft, _creator_secret_key, _reference_state) = make_test_vault_draft();
+        let (draft, _creator_secret_key, _reference_state_hash) = make_test_vault_draft();
         let (_wrong_public_key, wrong_secret_key) =
             crate::crypto::sphincs::generate_sphincs_keypair().expect("wrong sphincs keypair");
         let wrong_signature =
@@ -2600,11 +2596,11 @@ mod tests {
 
     #[test]
     fn invalidate_accepts_precomputed_creator_signature() {
-        let (mut vault, creator_secret_key, reference_state) = make_signed_test_vault();
+        let (mut vault, creator_secret_key, reference_state_hash) = make_signed_test_vault();
         let invalidation_message = [
             vault.id.as_bytes(),
             b"creator-requested",
-            &reference_state.hash[..],
+            &reference_state_hash[..],
         ]
         .concat();
         let expected_signature =
@@ -2612,16 +2608,14 @@ mod tests {
                 .expect("invalidation signature");
 
         vault
-            .invalidate("creator-requested", &expected_signature, &reference_state)
+            .invalidate("creator-requested", &expected_signature, &reference_state_hash)
             .expect("vault invalidation");
 
         match vault.state {
             VaultState::Invalidated {
-                invalidated_state_number,
                 ref reason,
                 ref creator_signature,
             } => {
-                assert_eq!(invalidated_state_number, reference_state.hash[0] as u64);
                 assert_eq!(reason, "creator-requested");
                 assert_eq!(creator_signature, &expected_signature);
             }
@@ -2631,13 +2625,13 @@ mod tests {
 
     #[test]
     fn invalidate_rejects_signature_from_wrong_creator() {
-        let (mut vault, _creator_secret_key, reference_state) = make_signed_test_vault();
+        let (mut vault, _creator_secret_key, reference_state_hash) = make_signed_test_vault();
         let (_wrong_public_key, wrong_secret_key) =
             crate::crypto::sphincs::generate_sphincs_keypair().expect("wrong sphincs keypair");
         let invalidation_message = [
             vault.id.as_bytes(),
             b"creator-requested",
-            &reference_state.hash[..],
+            &reference_state_hash[..],
         ]
         .concat();
         let wrong_signature =
@@ -2645,7 +2639,7 @@ mod tests {
                 .expect("wrong invalidation signature");
 
         let error = vault
-            .invalidate("creator-requested", &wrong_signature, &reference_state)
+            .invalidate("creator-requested", &wrong_signature, &reference_state_hash)
             .expect_err("wrong signer must be rejected");
 
         assert!(error.to_string().contains("invalid creator signature"));
@@ -2768,26 +2762,21 @@ mod tests {
         let mut v = LimboVault::default();
         assert_eq!(v.to_vault_post("t", None).unwrap().status, "unresolved");
 
-        v.state = VaultState::Active {
-            activated_state_number: 1,
-        };
+        v.state = VaultState::Active;
         assert_eq!(v.to_vault_post("t", None).unwrap().status, "active");
 
         v.state = VaultState::Unlocked {
-            unlocked_state_number: 2,
             fulfillment_proof: Box::new(FulfillmentProof::CompoundProof(vec![])),
         };
         assert_eq!(v.to_vault_post("t", None).unwrap().status, "unlocked");
 
         v.state = VaultState::Claimed {
-            claimed_state_number: 3,
             claimant: vec![],
             claim_proof: vec![],
         };
         assert_eq!(v.to_vault_post("t", None).unwrap().status, "claimed");
 
         v.state = VaultState::Invalidated {
-            invalidated_state_number: 4,
             reason: "gone".to_string(),
             creator_signature: vec![],
         };
@@ -2807,14 +2796,11 @@ mod tests {
         let dlv = DeterministicLimboVault::from_limbo_vault(&v, cond.clone()).unwrap();
         assert_eq!(*dlv.status(), VaultStatus::Active);
 
-        v.state = VaultState::Active {
-            activated_state_number: 1,
-        };
+        v.state = VaultState::Active;
         let dlv = DeterministicLimboVault::from_limbo_vault(&v, cond.clone()).unwrap();
         assert_eq!(*dlv.status(), VaultStatus::Active);
 
         v.state = VaultState::Claimed {
-            claimed_state_number: 2,
             claimant: vec![],
             claim_proof: vec![],
         };
@@ -2822,7 +2808,6 @@ mod tests {
         assert_eq!(*dlv.status(), VaultStatus::Claimed);
 
         v.state = VaultState::Invalidated {
-            invalidated_state_number: 3,
             reason: "test".to_string(),
             creator_signature: vec![],
         };
@@ -2930,7 +2915,7 @@ impl DeterministicLimboVault {
             condition,
             status: match v.state {
                 VaultState::Limbo => VaultStatus::Active,
-                VaultState::Active { .. } => VaultStatus::Active,
+                VaultState::Active => VaultStatus::Active,
                 VaultState::Unlocked { .. } => VaultStatus::Active,
                 VaultState::Claimed { .. } => VaultStatus::Claimed,
                 VaultState::Invalidated { .. } => VaultStatus::Revoked,

@@ -111,7 +111,7 @@ impl DlvPreCommitmentSdk {
                     .map_err(|_| DsmError::invalid_operation("mime must be valid UTF-8"))?,
                 intended_recipient.clone(),
                 encryption_key,
-                reference_state,
+                &reference_state.hash,
             )?;
             let creator_signature = dsm::crypto::sphincs::sphincs_sign(
                 creator_signing_keypair.secret_key(),
@@ -236,7 +236,7 @@ impl DlvPreCommitmentSdk {
                 proof,
                 requester_kyber_pk,
                 &executor_signing_public_key,
-                reference_state,
+                &reference_state.hash,
             )
             .await?;
         if !unlocked {
@@ -251,7 +251,7 @@ impl DlvPreCommitmentSdk {
                 &vault_id,
                 executor_kyber_sk,
                 &executor_signing_public_key,
-                reference_state,
+                &reference_state.hash,
             )
             .await?;
 

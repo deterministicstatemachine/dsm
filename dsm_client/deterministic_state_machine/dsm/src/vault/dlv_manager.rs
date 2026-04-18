@@ -10,7 +10,7 @@
 use super::{FulfillmentMechanism, FulfillmentProof, LimboVault, LimboVaultDraft, VaultState};
 use crate::types::operations::{Operation, TransactionMode};
 use crate::types::token_types::Balance;
-use crate::types::{error::DsmError, state_types::State};
+use crate::types::error::DsmError;
 use prost::Message; // for encode_to_vec()
 use std::{collections::HashMap, sync::Arc};
 
@@ -38,7 +38,7 @@ impl DLVManager {
         content_type: &str,
         intended_recipient: Option<Vec<u8>>,
         encryption_public_key: &[u8],
-        reference_state: &State,
+        reference_state_hash: &[u8; 32],
     ) -> Result<LimboVaultDraft, DsmError> {
         LimboVault::create_draft(
             creator_public_key,
@@ -47,7 +47,7 @@ impl DLVManager {
             content_type,
             intended_recipient.clone(),
             encryption_public_key,
-            reference_state,
+            reference_state_hash,
         )
     }
 
@@ -148,13 +148,13 @@ impl DLVManager {
         proof: FulfillmentProof,
         requester: &[u8],
         signing_public_key: &[u8],
-        reference_state: &State,
+        reference_state_hash: &[u8; 32],
     ) -> Result<(bool, Operation), DsmError> {
         let vault_lock = self.get_vault(vault_id).await?;
         let mut vault = vault_lock.lock().await;
 
         let proof_bytes = proof.to_bytes();
-        let unlocked = vault.unlock(proof, requester, reference_state)?;
+        let unlocked = vault.unlock(proof, requester, reference_state_hash)?;
 
         let operation = Operation::DlvUnlock {
             vault_id: vault_id.as_bytes().to_vec(),
@@ -178,11 +178,11 @@ impl DLVManager {
         vault_id: &str,
         proof: FulfillmentProof,
         requester: &[u8],
-        reference_state: &State,
+        reference_state_hash: &[u8; 32],
     ) -> Result<bool, DsmError> {
         let vault_lock = self.get_vault(vault_id).await?;
         let mut vault = vault_lock.lock().await;
-        vault.activate(&proof, requester, reference_state)
+        vault.activate(&proof, requester, reference_state_hash)
     }
 
     /// Claim vault content and return it with an unsigned `Operation::DlvClaim`.
@@ -198,11 +198,11 @@ impl DLVManager {
         vault_id: &str,
         claimant_kyber_sk: &[u8],
         claimant_signing_pk: &[u8],
-        reference_state: &State,
+        reference_state_hash: &[u8; 32],
     ) -> Result<(Vec<u8>, Operation), DsmError> {
         let vault_lock = self.get_vault(vault_id).await?;
         let mut vault = vault_lock.lock().await;
-        let result = vault.claim(claimant_kyber_sk, reference_state)?;
+        let result = vault.claim(claimant_kyber_sk, reference_state_hash)?;
 
         let operation = Operation::DlvClaim {
             vault_id: vault_id.as_bytes().to_vec(),
@@ -224,7 +224,7 @@ impl DLVManager {
         vault_id: &str,
         reason: &str,
         creator_signature: &[u8],
-        reference_state: &State,
+        reference_state_hash: &[u8; 32],
     ) -> Result<Operation, DsmError> {
         let vault_lock = self.get_vault(vault_id).await?;
         let mut vault = vault_lock.lock().await;
@@ -232,7 +232,7 @@ impl DLVManager {
         // Get the creator_public_key before invalidation mutates the vault state
         let creator_pk = vault.creator_public_key.clone();
 
-        vault.invalidate(reason, creator_signature, reference_state)?;
+        vault.invalidate(reason, creator_signature, reference_state_hash)?;
 
         let operation = Operation::DlvInvalidate {
             vault_id: vault_id.as_bytes().to_vec(),
@@ -384,24 +384,14 @@ mod tests {
         mgr.add_vault(dummy_vault("limbo_2", VS::Limbo))
             .await
             .unwrap();
-        mgr.add_vault(dummy_vault(
-            "active_1",
-            VS::Active {
-                activated_state_number: 10,
-            },
-        ))
-        .await
-        .unwrap();
+        mgr.add_vault(dummy_vault("active_1", VS::Active))
+            .await
+            .unwrap();
 
         let limbo = mgr.get_vaults_by_status(VS::Limbo).await.unwrap();
         assert_eq!(limbo.len(), 2);
 
-        let active = mgr
-            .get_vaults_by_status(VS::Active {
-                activated_state_number: 10,
-            })
-            .await
-            .unwrap();
+        let active = mgr.get_vaults_by_status(VS::Active).await.unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0], "active_1");
     }
@@ -412,26 +402,14 @@ mod tests {
     async fn add_vault_overwrites_same_id() {
         let mgr = DLVManager::new();
         mgr.add_vault(dummy_vault("dup", VS::Limbo)).await.unwrap();
-        mgr.add_vault(dummy_vault(
-            "dup",
-            VS::Active {
-                activated_state_number: 5,
-            },
-        ))
-        .await
-        .unwrap();
+        mgr.add_vault(dummy_vault("dup", VS::Active)).await.unwrap();
 
         let ids = mgr.list_vaults().await.unwrap();
         assert_eq!(ids.len(), 1);
 
         let lock = mgr.get_vault("dup").await.unwrap();
         let v = lock.lock().await;
-        assert_eq!(
-            v.state,
-            VS::Active {
-                activated_state_number: 5
-            }
-        );
+        assert_eq!(v.state, VS::Active);
     }
 
     // ── concurrent access safety ────────────────────────────────────

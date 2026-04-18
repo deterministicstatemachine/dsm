@@ -223,7 +223,7 @@ impl DlvSdk {
             &config.content_type,
             intended_recipient,
             &encryption_key,
-            reference_state,
+            &reference_state.hash,
         )?;
         let creator_signature = dsm::crypto::sphincs::sphincs_sign(
             creator_keypair.secret_key(),
@@ -436,7 +436,7 @@ impl DlvSdk {
                 proof,
                 &options.requester_public_key,
                 &signing_public_key,
-                reference_state,
+                &reference_state.hash,
             )
             .await?;
         Ok(unlocked)
@@ -453,7 +453,7 @@ impl DlvSdk {
         let (_, kyber_sk) = self.get_encryption_keys(claimant_identity).await?;
         let (content, _op) = self
             .manager
-            .claim_vault_content(vault_id, &kyber_sk, &claimant_pk, reference_state)
+            .claim_vault_content(vault_id, &kyber_sk, &claimant_pk, &reference_state.hash)
             .await?;
         Ok(content)
     }
@@ -479,7 +479,7 @@ impl DlvSdk {
         .map_err(|e| DsmError::crypto("sphincs_sign", Some(e)))?;
         let _op = self
             .manager
-            .invalidate_vault(vault_id, reason, &creator_signature, reference_state)
+            .invalidate_vault(vault_id, reason, &creator_signature, &reference_state.hash)
             .await?;
         Ok(())
     }
@@ -545,7 +545,7 @@ impl DlvSdk {
             if let Ok(info) = self.get_vault_info(&id).await {
                 match info.state {
                     VaultState::Limbo => stats.limbo_vaults += 1,
-                    VaultState::Active { .. } => stats.unlocked_vaults += 1,
+                    VaultState::Active => stats.unlocked_vaults += 1,
                     VaultState::Unlocked { .. } => stats.unlocked_vaults += 1,
                     VaultState::Claimed { .. } => stats.claimed_vaults += 1,
                     VaultState::Invalidated { .. } => stats.invalidated_vaults += 1,
