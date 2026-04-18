@@ -614,12 +614,12 @@ async fn run_formal_report(
     std::fs::write(&full_output_path, &markdown)?;
 
     eprintln!("\n=== REPORT WRITTEN ===\n");
-    eprintln!("  Path: {}", full_output_path.display());
+    eprintln!("  Path: {output_path}");
     eprintln!("  Body BLAKE3: {}...", &blake3_hex[..16]);
     eprintln!("\n  To sign: git add {output_path} && git commit -S && git push\n");
 
     // Also print path to stdout for scripting
-    println!("{}", full_output_path.display());
+    println!("{output_path}");
 
     Ok(())
 }

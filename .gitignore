@@ -225,7 +225,9 @@ tools/ios_ingress_smoke/
 /.github/instructions
 
 # Claude Agents
-.agents/
-.agents/
+.agents/*
+!.agents/plugins/
+.agents/plugins/*
+!.agents/plugins/marketplace.json
 ble_dump.txt
 Agent-Refinement-System-Final.md

@@ -11,6 +11,7 @@
 //! rule 2). Hex encoding appears only in display strings (rule 3).
 
 use serde::Serialize;
+use std::path::Path;
 
 use crate::adversarial_bilateral::AdversarialSuiteResult;
 use crate::benchmark::ScalingBenchmarkResult;
@@ -22,6 +23,30 @@ use crate::proof_runner::{ProofResult, ProofSpec};
 use crate::property_tests::PropertyTestSuiteResult;
 use crate::tla_runner::{TlaSpec, TlcResult};
 use crate::tla_trace_replay::{TlaImplementationReplayResult, TlaTraceReplayResult};
+
+fn display_report_path(path: &Path) -> String {
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Ok(relative) = path.strip_prefix(&cwd) {
+            return relative.display().to_string();
+        }
+    }
+
+    let components: Vec<_> = path.components().collect();
+    if let Some(index) = components
+        .iter()
+        .position(|component| component.as_os_str() == "tla")
+    {
+        return components[index..]
+            .iter()
+            .collect::<std::path::PathBuf>()
+            .display()
+            .to_string();
+    }
+
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "<path redacted>".into())
+}
 
 /// Metadata for the formal report: scaling cache info.
 #[derive(Debug, Clone, Serialize)]
@@ -270,7 +295,7 @@ impl VerticalValidationReport {
                 if let Some(replay) = &r.literal_trace_replay {
                     out.push_str(&format!(
                         "    TLC TRACE: {} ({} steps)\n",
-                        replay.trace_path.display(),
+                        display_report_path(&replay.trace_path),
                         replay.steps
                     ));
                     for failure in &replay.failures {
@@ -280,7 +305,7 @@ impl VerticalValidationReport {
                 if let Some(replay) = &r.implementation_trace_replay {
                     out.push_str(&format!(
                         "    DIRECT TRACE: {} ({} steps)\n",
-                        replay.trace_path.display(),
+                        display_report_path(&replay.trace_path),
                         replay.steps
                     ));
                     for failure in &replay.failures {

@@ -33,7 +33,7 @@ pub mod error;
 pub mod identity;
 // security module deleted: bilateral_control (BilateralControlResistance +
 // DecentralizedStorage trait + heuristic pattern detectors) was a §29 attack-
-// probability / suspicious-pattern detector built around &[State] walks. Under
+// probability suspicious-pattern detector built around &[State] walks. Under
 // §2.2 SMT-Replace + §4.3 counterless acceptance the heuristics (sequence-
 // number proximity, state-count rate, etc.) no longer map to the canonical
 // model. Security guarantees now come from:

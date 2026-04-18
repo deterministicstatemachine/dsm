@@ -53,11 +53,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Also rerun if proto under workspace root changes
     println!("cargo:rerun-if-changed={}", proto_file.display());
-    println!("cargo:warning=Proto file: {}", proto_file.display());
-    println!("cargo:warning=Proto root: {}", proto_root.display());
-    println!(
-        "cargo:warning=Vendored protoc include: {}",
-        vendored_include.display()
-    );
     Ok(())
 }
