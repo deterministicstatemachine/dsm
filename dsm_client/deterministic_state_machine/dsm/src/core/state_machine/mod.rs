@@ -19,7 +19,6 @@ pub mod relationship;
 pub mod transition;
 pub mod utils;
 
-use crate::core::state_machine::relationship::KeyDerivationStrategy;
 use crate::crypto::blake3::dsm_domain_hasher;
 use crate::types::error::DsmError;
 use crate::types::operations::Operation;
@@ -31,7 +30,7 @@ pub use random_walk::algorithms::{
     verify_random_walk_coordinates, Position, RandomWalkConfig,
 };
 
-pub use relationship::{RelationshipManager, RelationshipStatePair};
+pub use relationship::RelationshipStatePair;
 pub use transition::{create_transition, generate_position_sequence, StateTransition};
 pub use utils::constant_time_eq;
 
@@ -49,33 +48,20 @@ pub struct StateMachine {
     /// Legacy `State` mirror used by migration shims and validation tooling
     /// that still exercise `apply_transition` directly.
     legacy_state: Option<State>,
-    /// Relationship manager for bilateral state isolation
-    #[allow(dead_code)]
-    relationship_manager: RelationshipManager,
 }
 
 impl StateMachine {
+    // new_with_strategy + new_with_strategy_and_device_id deleted: zero
+    // external callers, and the `relationship_manager: RelationshipManager`
+    // field they populated was `#[allow(dead_code)]` — never read after
+    // construction. Bilateral relationship state isolation now lives on
+    // `BilateralStateManager` (which has its own KeyDerivationStrategy).
+
     /// Create a new state machine instance
     pub fn new() -> Self {
-        Self::new_with_strategy(KeyDerivationStrategy::Canonical)
-    }
-
-    /// Create a new state machine with a specific key derivation strategy
-    pub fn new_with_strategy(strategy: KeyDerivationStrategy) -> Self {
-        Self::new_with_strategy_and_device_id(strategy, [0u8; 32])
-    }
-
-    /// Create a new state machine with a specific key derivation strategy and device ID.
-    /// `_device_id` is now derived from the bootstrap State; this argument is
-    /// retained for API compatibility and ignored.
-    pub fn new_with_strategy_and_device_id(
-        strategy: KeyDerivationStrategy,
-        _device_id: [u8; 32],
-    ) -> Self {
         StateMachine {
             device_state: None,
             legacy_state: None,
-            relationship_manager: RelationshipManager::new(strategy),
         }
     }
 
@@ -410,10 +396,7 @@ mod state_machine_tests {
             "first post-genesis transfer",
         );
 
-        let mut state_machine = StateMachine::new_with_strategy_and_device_id(
-            KeyDerivationStrategy::Canonical,
-            device_id,
-        );
+        let mut state_machine = StateMachine::new();
         state_machine.set_state(genesis_state);
 
         let dev_id = device_id;
