@@ -1906,7 +1906,13 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_advance_system_chain_tip_rejects_duplicate_source_state_number() {
+    fn test_advance_system_chain_tip_accepts_duplicate_source_state_number_per_section_4_3() {
+        // Per §4.3 there is no `state_number`. The prior test asserted that a
+        // duplicate `source_state_number` was rejected — that check was a
+        // residual counter check that bricked beta-tester faucet claims when
+        // `state.hash[0]` happened to fall (e.g. 2 ≤ 17). Acceptance now
+        // depends only on structural parent-tip continuity (verified below
+        // by the second advance succeeding from `first.child_tip`).
         unsafe {
             std::env::set_var("DSM_SDK_TEST_MODE", "1");
         }
@@ -1935,7 +1941,8 @@ mod tests {
         )
         .expect("advance first event");
 
-        let err = advance_system_chain_tip(
+        // Duplicate source_state_number must NOT block the advance under §4.3.
+        let second = advance_system_chain_tip(
             "era-source-dlv",
             SystemPeerType::Dlv,
             &first.child_tip,
@@ -1943,8 +1950,9 @@ mod tests {
             &[0x72u8; 32],
             9,
         )
-        .expect_err("duplicate source state number must fail");
-        assert!(err.to_string().contains("must advance monotonically"));
+        .expect("duplicate source_state_number must succeed (§4.3, no counter)");
+        assert_eq!(second.parent_tip, first.child_tip);
+        assert_eq!(second.source_state_number, 9);
     }
 
     #[test]
