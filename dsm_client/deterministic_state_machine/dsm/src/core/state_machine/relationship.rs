@@ -416,68 +416,14 @@ impl RelationshipStatePair {
         Ok(hasher.finalize().as_bytes().to_vec())
     }
 
-    /// Create a chain tip-specific verification hash for bilateral relationships.
-    /// Per §4.3 no counter participates — hashes alone.
-    pub fn create_chain_tip_verification_hash(
-        &self,
-        operation: &Operation,
-    ) -> Result<Vec<u8>, DsmError> {
-        let mut hasher = dsm_domain_hasher("DSM/bilateral-verify");
-
-        hasher.update(&self.relationship_hash);
-
-        let operation_bytes = operation.to_bytes();
-        hasher.update(&operation_bytes);
-
-        if let Some(chain_tip_id) = &self.chain_tip_id {
-            hasher.update(b"chain_tip:");
-            hasher.update(chain_tip_id.as_bytes());
-        }
-
-        hasher.update(&self.entity_state.hash);
-        hasher.update(&self.counterparty_state.hash);
-
-        Ok(hasher.finalize().as_bytes().to_vec())
-    }
-
-    /// Verify bilateral chain continuity including chain tip progression
-    pub fn verify_bilateral_chain_continuity_with_tip(
-        &self,
-        new_entity_state: &State,
-        new_counterparty_state: &State,
-        expected_chain_tip_id: Option<&str>,
-    ) -> Result<bool, DsmError> {
-        if !self.verify_cross_chain_continuity(new_entity_state, new_counterparty_state)? {
-            return Ok(false);
-        }
-
-        if let Some(expected_tip) = expected_chain_tip_id {
-            if let Some(current_tip) = &self.chain_tip_id {
-                if current_tip != expected_tip {
-                    return Ok(false);
-                }
-            } else {
-                return Ok(false);
-            }
-        }
-
-        let mut test_hasher = dsm_domain_hasher("DSM/bilateral-state");
-        test_hasher.update(&new_entity_state.hash()?);
-        test_hasher.update(&new_counterparty_state.hash()?);
-
-        if let Some(chain_tip_id) = &self.chain_tip_id {
-            test_hasher.update(chain_tip_id.as_bytes());
-        }
-
-        let new_bilateral_hash = test_hasher.finalize().as_bytes().to_vec();
-        if let Some(current_bilateral_hash) = &self.last_bilateral_state_hash {
-            if new_bilateral_hash == *current_bilateral_hash {
-                return Ok(false); // No progression detected
-            }
-        }
-
-        Ok(true)
-    }
+    // create_chain_tip_verification_hash + verify_bilateral_chain_continuity_with_tip
+    // deleted: zero callers anywhere in dsm, dsm_sdk, dsm_storage_node, or tools.
+    // Both were RelationshipStatePair methods that hashed (relationship_hash,
+    // operation, chain_tip_id, entity_state.hash, counterparty_state.hash) for
+    // an old bilateral verify path. The §4.2 stitched receipt + per-relationship
+    // SMT inclusion proofs supersede this — chain-tip integrity is verified
+    // structurally via SmtInclusionProof, not via an ad-hoc hash digest of
+    // RelationshipStatePair fields.
 }
 
 // validate_transition + execute_transition deleted: both took &State and had
