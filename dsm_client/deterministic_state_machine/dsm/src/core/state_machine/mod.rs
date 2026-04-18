@@ -84,14 +84,30 @@ impl StateMachine {
         );
         let hash = ds.root();
         let mut token_balances = std::collections::HashMap::new();
+        // Project DeviceState.balances (keyed by 32-byte policy_commit) into the
+        // legacy State.token_balances format (keyed by the canonical
+        // `{prefix}|{token_id}` string produced by `derive_canonical_balance_key`)
+        // so that balance.list and other legacy readers can find balances by
+        // their `{token_id}` suffix (e.g. "ERA", "dBTC"). For non-builtin
+        // tokens whose ticker can't be resolved from policy_commit alone, fall
+        // back to a hex-like `{prefix}|?` placeholder that at least keeps the
+        // pipe format consistent.
+        let public_key = ds.public_key();
         for (pc, val) in ds.balances_snapshot() {
-            let prefix = u128::from_le_bytes({
-                let mut a = [0u8; 16];
-                a.copy_from_slice(&pc[..16]);
-                a
-            });
+            let token_id = crate::core::token::builtin_token_id_for_policy_commit(pc)
+                .unwrap_or("");
+            let key = if token_id.is_empty() {
+                let prefix = u128::from_le_bytes({
+                    let mut a = [0u8; 16];
+                    a.copy_from_slice(&pc[..16]);
+                    a
+                });
+                format!("{prefix}|?")
+            } else {
+                crate::core::token::derive_canonical_balance_key(pc, public_key, token_id)
+            };
             token_balances.insert(
-                format!("{prefix}"),
+                key,
                 crate::types::token_types::Balance::from_state(*val, hash),
             );
         }

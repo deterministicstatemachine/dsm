@@ -283,15 +283,26 @@ impl CoreSDK {
             );
             // Use the SMT root as the "hash" — it's the canonical device identity
             s.hash = ds.root();
-            // Sync balances from DeviceState
+            // Sync balances from DeviceState (keyed by 32-byte policy_commit)
+            // into State.token_balances (keyed by canonical
+            // `{prefix}|{token_id}` string per derive_canonical_balance_key)
+            // so balance.list et al can find them by token_id suffix.
+            let public_key = ds.public_key();
             for (pc, val) in ds.balances_snapshot() {
-                let prefix = u128::from_le_bytes({
-                    let mut a = [0u8; 16];
-                    a.copy_from_slice(&pc[..16]);
-                    a
-                });
+                let token_id = dsm::core::token::builtin_token_id_for_policy_commit(pc)
+                    .unwrap_or("");
+                let key = if token_id.is_empty() {
+                    let prefix = u128::from_le_bytes({
+                        let mut a = [0u8; 16];
+                        a.copy_from_slice(&pc[..16]);
+                        a
+                    });
+                    format!("{prefix}|?")
+                } else {
+                    dsm::core::token::derive_canonical_balance_key(pc, public_key, token_id)
+                };
                 s.token_balances.insert(
-                    format!("{prefix}"),
+                    key,
                     dsm::types::token_types::Balance::from_state(*val, s.hash),
                 );
             }
@@ -517,14 +528,25 @@ impl CoreSDK {
                 outcome.new_device_state.public_key().to_vec(),
             );
             // Sync balances from DeviceState → legacy HashMap<String, Balance>
+            // using the canonical `{prefix}|{token_id}` key format from
+            // derive_canonical_balance_key so balance.list can locate balances
+            // by their {token_id} suffix (e.g. "ERA", "dBTC").
+            let public_key = outcome.new_device_state.public_key();
             for (pc, val) in outcome.new_device_state.balances_snapshot() {
-                let prefix = u128::from_le_bytes({
-                    let mut a = [0u8; 16];
-                    a.copy_from_slice(&pc[..16]);
-                    a
-                });
+                let token_id = dsm::core::token::builtin_token_id_for_policy_commit(pc)
+                    .unwrap_or("");
+                let key = if token_id.is_empty() {
+                    let prefix = u128::from_le_bytes({
+                        let mut a = [0u8; 16];
+                        a.copy_from_slice(&pc[..16]);
+                        a
+                    });
+                    format!("{prefix}|?")
+                } else {
+                    dsm::core::token::derive_canonical_balance_key(pc, public_key, token_id)
+                };
                 s.token_balances.insert(
-                    format!("{prefix}"),
+                    key,
                     dsm::types::token_types::Balance::from_state(*val, s.hash),
                 );
             }
