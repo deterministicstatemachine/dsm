@@ -287,20 +287,11 @@ impl RelationshipStatePair {
         })
     }
 
-    /// Verify bilateral hash-chain adjacency (§2.1 eq. 1).
-    /// Per §4.3 no counter comparison — only parent-hash embedding.
-    pub fn verify_cross_chain_continuity(
-        &self,
-        new_entity_state: &State,
-        new_counterparty_state: &State,
-    ) -> Result<bool, DsmError> {
-        if new_entity_state.prev_state_hash != self.entity_state.hash()?
-            || new_counterparty_state.prev_state_hash != self.counterparty_state.hash()?
-        {
-            return Ok(false);
-        }
-        Ok(true)
-    }
+    // verify_cross_chain_continuity deleted: zero callers anywhere outside
+    // its own self-test (test_relationship_state, also deleted). The §4.2
+    // stitched receipt + per-relationship SMT inclusion proofs handle
+    // bilateral hash-chain adjacency structurally; this RelationshipStatePair
+    // method was an obsolete pre-SMT bilateral-pair walker.
 
     pub fn validate_against_forward_commitment(
         &self,
@@ -375,26 +366,10 @@ impl RelationshipStatePair {
         self.last_bilateral_state_hash.as_ref()
     }
 
-    /// Generate a unique bilateral chain identifier for this relationship (ASCII decimal).
-    /// Derived from hash-adjacency inputs only, no counters (§4.3).
-    pub fn generate_bilateral_chain_id(&self) -> String {
-        let mut h = dsm_domain_hasher("DSM/bilateral-chain-id");
-        h.update(&self.entity_id);
-        h.update(&self.counterparty_id);
-        h.update(&self.entity_state.hash);
-        h.update(&self.counterparty_state.hash);
-        let digest = h.finalize();
-        // Map 32 bytes to two u128s and print as decimal segments (no hex/base64)
-        let b = digest.as_bytes();
-        let (l, r) = b.split_at(16);
-        let mut arr_l = [0u8; 16];
-        arr_l.copy_from_slice(l);
-        let a = u128::from_le_bytes(arr_l);
-        let mut arr_r = [0u8; 16];
-        arr_r.copy_from_slice(r);
-        let c = u128::from_le_bytes(arr_r);
-        format!("bilateral_chain_{}:{}", a, c)
-    }
+    // generate_bilateral_chain_id deleted: zero callers outside the deleted
+    // test_relationship_state self-test. Bilateral chain identification now
+    // flows through the 32-byte rel_key derived in
+    // bilateral_transaction_manager::compute_smt_key (§2.2 canonical).
 
     /// Compute bilateral relationship hash including chain tip ID
     pub fn compute_bilateral_hash_with_chain_tip(&self) -> Result<Vec<u8>, DsmError> {
@@ -617,46 +592,12 @@ impl RelationshipManager {
         }
     }
 
-    /// Update a relationship with new states, maintaining bilateral consistency
-    pub fn update_relationship(
-        &self,
-        entity_id: &[u8; 32],
-        counterparty_id: &[u8; 32],
-        new_entity_state: State,
-        new_counterparty_state: State,
-    ) -> Result<(), DsmError> {
-        let key = self.get_relationship_key(entity_id, counterparty_id);
-
-        let mut store = self.relationship_store.lock().map_err(|_| {
-            DsmError::invalid_operation("Failed to acquire lock on relationship store")
-        })?;
-
-        if let Some(pair) = store.get(&key) {
-            if !pair.verify_cross_chain_continuity(&new_entity_state, &new_counterparty_state)? {
-                return Err(DsmError::invalid_operation(
-                    "Cross-chain continuity violation detected",
-                ));
-            }
-            let updated_pair = RelationshipStatePair::new(
-                *entity_id,
-                *counterparty_id,
-                new_entity_state,
-                new_counterparty_state,
-            )?;
-
-            store.insert(key, updated_pair);
-            Ok(())
-        } else {
-            Err(DsmError::not_found(
-                "Relationship",
-                Some(format!(
-                    "No relationship found between {} and {}",
-                    base32::encode(base32::Alphabet::Crockford, entity_id),
-                    base32::encode(base32::Alphabet::Crockford, counterparty_id)
-                )),
-            ))
-        }
-    }
+    // update_relationship deleted: zero callers anywhere. The function
+    // recomputed cross-chain continuity via verify_cross_chain_continuity
+    // and reinserted a fresh RelationshipStatePair, but bilateral state
+    // updates now flow through BilateralStateManager::execute_transition
+    // (which maintains the per-relationship chain via SMT) rather than
+    // through this RelationshipManager::store/update API.
 
     /// Create a relationship with chain tip tracking
     pub fn create_relationship_with_chain_tip(
@@ -1036,56 +977,9 @@ mod tests {
         assert!(!hashed_key_a.is_empty());
     }
 
-    #[test]
-    fn test_relationship_state() {
-        let entity_state = create_test_state(1, [0; 32]);
-        let counterparty_state = create_test_state(1, [0; 32]);
-
-        let entity_id = test_entity_id(b"entity1");
-        let counterparty_id = test_entity_id(b"entity2");
-        let relationship = RelationshipStatePair::new(
-            entity_id,
-            counterparty_id,
-            entity_state.clone(),
-            counterparty_state.clone(),
-        )
-        .unwrap();
-
-        // Validate state transition
-        let mut new_entity_state = create_test_state(2, entity_state.hash().unwrap());
-        let new_counterparty_state = create_test_state(2, counterparty_state.hash().unwrap());
-
-        // Construct entropy per §11 eq.14: H(prev_entropy || op || parent_hash)
-        let op_bytes = new_entity_state.operation.to_bytes();
-        let mut hasher = dsm_domain_hasher("DSM/state-entropy");
-        hasher.update(&entity_state.entropy);
-        hasher.update(&op_bytes);
-        hasher.update(&entity_state.hash);
-        new_entity_state.entropy = hasher.finalize().as_bytes().to_vec();
-
-        let continuity_valid =
-            relationship.verify_cross_chain_continuity(&new_entity_state, &new_counterparty_state);
-        assert!(continuity_valid.is_ok());
-        assert!(continuity_valid
-            .map_err(|_| DsmError::internal(0.to_string(), None::<std::convert::Infallible>))
-            .unwrap());
-
-        // Validate entropy evolution (now derived per §11 eq.14) inline since
-        // the verify_entropy_evolution helper was removed alongside the dead
-        // validate_relationship_state_transition path.
-        let mut expected_hasher = dsm_domain_hasher("DSM/state-entropy");
-        expected_hasher.update(&entity_state.entropy);
-        expected_hasher.update(&new_entity_state.operation.to_bytes());
-        expected_hasher.update(&entity_state.hash);
-        let expected_entropy = expected_hasher.finalize();
-        assert_eq!(
-            new_entity_state.entropy.as_slice(),
-            expected_entropy.as_bytes(),
-            "entropy must follow §11 eq.14",
-        );
-
-        // Chain id must be reproducible and non-empty (no hex)
-        let cid = relationship.generate_bilateral_chain_id();
-        assert!(cid.starts_with("bilateral_chain_"));
-    }
+    // test_relationship_state deleted: exercised the now-deleted
+    // verify_cross_chain_continuity + generate_bilateral_chain_id +
+    // update_relationship surfaces. The only piece worth keeping was the
+    // entropy-evolution assertion (§11 eq.14), which is now covered by
+    // transition::verify_transition_integrity tests in transition.rs.
 }
