@@ -19,15 +19,12 @@ pub mod relationship;
 pub mod transition;
 pub mod utils;
 
-use crate::core::state_machine::relationship::validate_relationship_state_transition;
-use crate::core::state_machine::relationship::verify_relationship_entropy;
 use crate::core::state_machine::relationship::KeyDerivationStrategy;
-use crate::crypto::blake3::{domain_hash, dsm_domain_hasher};
+use crate::crypto::blake3::dsm_domain_hasher;
 use crate::types::error::DsmError;
 use crate::types::operations::Operation;
 use crate::types::state_types::State;
 pub use bilateral::BilateralStateManager;
-use blake3::Hash;
 
 pub use random_walk::algorithms::{
     generate_positions, generate_random_walk_coordinates, generate_seed, verify_positions,
@@ -258,63 +255,11 @@ impl StateMachine {
         Ok(computed == state.hash)
     }
 
-    /// Generate a pre-commitment for the next state transition.
-    ///
-    /// Uses the DeviceState's SMT root as the seed input for the random
-    /// walk, falling back to legacy current_state if DeviceState isn't ready.
-    pub fn generate_precommitment(
-        &self,
-        operation: &Operation,
-    ) -> Result<(Hash, Vec<Position>), DsmError> {
-        // Get entropy + hash from DeviceState or legacy
-        let (prior_entropy, prior_hash) = if let Some(ds) = &self.device_state {
-            // Use SMT root as the "hash" and a derived entropy
-            let root = ds.root();
-            let entropy = {
-                let mut h = dsm_domain_hasher("DSM/precommit-entropy");
-                h.update(&root);
-                h.finalize().as_bytes().to_vec()
-            };
-            (entropy, root)
-        } else {
-            return Err(DsmError::state_machine("No current state exists for pre-commitment"));
-        };
-
-        let operation_bytes = operation.to_bytes();
-
-        let mut hasher = dsm_domain_hasher("DSM/state-entropy");
-        hasher.update(&prior_entropy);
-        hasher.update(&operation_bytes);
-        hasher.update(&prior_hash);
-        let next_entropy = hasher.finalize();
-
-        let current_hash = domain_hash("DSM/chain-hash", &prior_hash);
-        let seed = random_walk::algorithms::generate_seed(
-            &current_hash,
-            &operation_bytes,
-            Some(next_entropy.as_bytes()),
-        );
-
-        let positions = random_walk::algorithms::generate_positions(
-            &seed,
-            None::<random_walk::algorithms::RandomWalkConfig>,
-        )?;
-
-        Ok((seed, positions))
-    }
-
-    /// Verify a pre-commitment
-    pub fn verify_precommitment(
-        &self,
-        operation: &Operation,
-        expected_positions: &[Position],
-    ) -> Result<bool, DsmError> {
-        let (_, positions) = self.generate_precommitment(operation)?;
-        Ok(random_walk::algorithms::verify_positions(
-            &positions,
-            expected_positions,
-        ))
-    }
+    // generate_precommitment / verify_precommitment removed: only called by
+    // their own in-module test. The §11 pre-commitment story now flows
+    // through commitments::precommit::PreCommitment which takes a canonical
+    // 32-byte parent hash directly. This shim was a vestigial random-walk
+    // wrapper that re-derived seeds from DeviceState's SMT root.
 
     // create_base_operation, update_base_operation, add_relationship_operation,
     // remove_relationship_operation, generic_operation deleted: zero callers.
@@ -329,125 +274,18 @@ impl Default for StateMachine {
     }
 }
 
-/// Generate deterministic entropy for a transition.
-///
-/// Per §11 eq. 14, entropy is derived from adjacency inputs: the parent entropy,
-/// the operation, and the parent state hash. Per §4.3 no counter participates.
-pub fn generate_transition_entropy(
-    current_state: &State,
-    operation: &Operation,
-) -> Result<[u8; 32], DsmError> {
-    let op_data = operation.to_bytes();
-
-    // Generate entropy: e_{n+1} = H("DSM/state-entropy" || e_n || op || H(S_n))
-    let mut hasher = dsm_domain_hasher("DSM/state-entropy");
-    hasher.update(&current_state.entropy);
-    hasher.update(&op_data);
-    hasher.update(&current_state.hash);
-
-    Ok(*hasher.finalize().as_bytes())
-}
-
-/// Verify a state transition meets all requirements
-pub fn verify_transition_integrity(
-    prev_state: &State,
-    curr_state: &State,
-    next_operation: &Operation,
-) -> Result<bool, DsmError> {
-    // Verify basic state transition properties
-    if !verify_basic_transition(prev_state, curr_state)? {
-        return Ok(false);
-    }
-
-    // For relationship states, verify relationship transition
-    if curr_state.relationship_context.is_some() {
-        // Create temporary next state for verification
-        let mut next_state = curr_state.clone();
-        next_state.operation = next_operation.clone();
-        return validate_relationship_state_transition(curr_state, &next_state);
-    }
-
-    // For non-relationship states, verify standard transition
-    verify_standard_transition(curr_state, next_operation)
-}
-
-/// Verify basic transition properties that apply to all state types.
-/// Per §4.3 no counter is checked — only hash adjacency and entropy evolution.
-fn verify_basic_transition(state1: &State, state2: &State) -> Result<bool, DsmError> {
-    // Verify hash chain continuity (§2.1 eq. 1)
-    if state2.prev_state_hash != state1.hash()? {
-        return Ok(false);
-    }
-
-    // Verify entropy evolution (§11 eq. 14)
-    if !verify_entropy_evolution(state1, state2)? {
-        return Ok(false);
-    }
-
-    Ok(true)
-}
-
-/// Verify a standard (non-relationship) state transition
-fn verify_standard_transition(
-    curr_state: &State,
-    next_operation: &Operation,
-) -> Result<bool, DsmError> {
-    // Verify state operation allowed
-    if !is_operation_allowed(next_operation, curr_state)? {
-        return Ok(false);
-    }
-
-    Ok(true)
-}
-
-/// Verify entropy evolution between states
-fn verify_entropy_evolution(state1: &State, state2: &State) -> Result<bool, DsmError> {
-    // For relationship states, use relationship entropy verification
-    if state1.relationship_context.is_some() {
-        return verify_relationship_entropy(state1, state2, &state2.entropy);
-    }
-
-    // For standard states, verify standard entropy evolution.
-    // Per §11 eq. 14 and generate_transition_entropy, entropy is derived from
-    // (prev_entropy, op, parent_hash) — hash adjacency inputs, no counter.
-    let op_bytes = state2.operation.to_bytes();
-
-    let mut hasher = crate::crypto::blake3::dsm_domain_hasher("DSM/state-entropy");
-    hasher.update(&state1.entropy);
-    hasher.update(&op_bytes);
-    hasher.update(&state1.hash);
-    let expected_entropy = hasher.finalize().as_bytes().to_vec();
-
-    Ok(crate::core::state_machine::utils::constant_time_eq(
-        &state2.entropy,
-        &expected_entropy,
-    ))
-}
-
-/// Check if an operation is allowed for the current state
-fn is_operation_allowed(operation: &Operation, current_state: &State) -> Result<bool, DsmError> {
-    match operation {
-        Operation::Genesis => {
-            // Genesis is materialized via State::new_genesis()/SDK bootstrap, not as a
-            // transition from an already-present current state.
-            Ok(false)
-        }
-        Operation::Recovery { .. } => {
-            // Recovery only allowed if state is marked as compromised
-            Ok(current_state
-                .flags
-                .contains(&crate::types::state_types::StateFlag::Compromised))
-        }
-        // Any non-genesis operation is allowed once a current state exists.
-        // The first post-genesis transition runs from the materialized genesis
-        // baseline, which is state #0 in the live chain.
-        _ => Ok(true),
-    }
-}
-
-// verify_state_chain and internal_hash_blake3 deleted — both were dead.
-// Verifiers operate on individual chain states via the SMT inclusion proofs
-// in AdvanceOutcome rather than walking arrays of legacy State objects.
+// generate_transition_entropy + verify_transition_integrity (and their
+// helpers verify_basic_transition / verify_standard_transition /
+// verify_entropy_evolution / is_operation_allowed) removed: zero external
+// callers. The mod-level free functions were a legacy &[State]-walking
+// verification path; the live verification now flows through
+// transition::verify_transition_integrity (which operates on individual
+// states via §2.1 hash adjacency) and StateMachine::verify_state (which
+// uses DeviceState's SMT root as the canonical identity).
+//
+// Likewise, validate_relationship_state_transition and
+// verify_relationship_entropy in relationship.rs (only called from these
+// deleted helpers) become dead and are removed alongside.
 
 #[cfg(test)]
 mod state_machine_tests {
@@ -627,33 +465,8 @@ mod state_machine_tests {
         Ok(())
     }
 
-    #[test]
-    fn test_precommitment_generation_and_verification() -> Result<(), DsmError> {
-        // Create a state machine
-        let mut machine = StateMachine::new();
-
-        // Set initial state
-        let (initial_state, _pk, sk) = create_test_genesis_state_with_keypair();
-        machine.set_state(initial_state);
-
-        let cur = machine.current_state().expect("has state");
-        let op = signed_transfer(&sk, &cur, vec![1u8; 8], "Test transfer");
-
-        // Generate precommitment
-        let (_, positions) = machine.generate_precommitment(&op)?;
-
-        // Verify precommitment
-        assert!(machine.verify_precommitment(&op, &positions)?);
-
-        // Modify operation slightly
-        let cur2 = machine.current_state().expect("has state");
-        let modified_op = signed_transfer(&sk, &cur2, vec![2u8; 8], "Test transfer modified");
-
-        // Verification should fail
-        assert!(!machine.verify_precommitment(&modified_op, &positions)?);
-
-        Ok(())
-    }
+    // test_precommitment_generation_and_verification removed alongside the
+    // deleted StateMachine::generate_precommitment / verify_precommitment.
 
     #[test]
     fn test_state_verification_chain() -> Result<(), DsmError> {
@@ -693,15 +506,13 @@ mod state_machine_tests {
         let transition2 = create_transition(&state1, op2, &entropy2)?;
         let state2 = apply_transition(&state1, &transition2.operation, &entropy2)?;
 
-        // Create a test next state for verification
-        let mut next_state = state2.clone();
-        next_state.prev_state_hash = state2.hash()?;
-
-        // Verify state2 from state1 using our refactored verification
-        assert!(verify_transition_integrity(
+        // Verify state2 from state1 using transition::verify_transition_integrity
+        // (the canonical hash-adjacency verifier; the mod.rs free-function
+        // wrapper has been removed).
+        assert!(crate::core::state_machine::transition::verify_transition_integrity(
             &state1,
             &state2,
-            &next_state.operation
+            &state2.operation,
         )?);
 
         // Now also test the state machine's verify_state method

@@ -14,13 +14,10 @@ use crate::crypto::blake3::dsm_domain_hasher;
 use base32;
 use zerocopy::IntoBytes;
 
-use crate::{
-    core::state_machine::utils::constant_time_eq,
-    types::{
-        error::DsmError,
-        operations::Operation,
-        state_types::{PreCommitment, RelationshipContext, State},
-    },
+use crate::types::{
+    error::DsmError,
+    operations::Operation,
+    state_types::{RelationshipContext, State},
 };
 
 #[derive(Debug, Clone)]
@@ -488,102 +485,18 @@ impl RelationshipStatePair {
 // was a free function shadowed by BilateralStateManager::execute_transition).
 // Per-relationship advance now flows through DeviceState::advance (§2.2, §4.2).
 
-/// Verify entropy evolution integrity. Per §11 eq. 14, entropy is derived
-/// from adjacency inputs — prev entropy, operation, parent hash — no counter.
-fn verify_entropy_evolution(
-    prev_entropy: &[u8],
-    current_entropy: &[u8],
-    operation: &Operation,
-    parent_hash: &[u8; 32],
-) -> Result<bool, DsmError> {
-    let op_bytes = operation.to_bytes();
+// verify_entropy_evolution removed: only caller was the deleted
+// validate_relationship_state_transition. §11 eq. 14 entropy verification
+// now lives inline in transition::verify_transition_integrity, which derives
+// expected entropy from (prev_entropy, op, prev_hash) using the same domain
+// tag and compares constant-time.
 
-    let mut hasher = dsm_domain_hasher("DSM/state-entropy");
-    hasher.update(prev_entropy);
-    hasher.update(&op_bytes);
-    hasher.update(parent_hash);
-    let expected_entropy = hasher.finalize();
-
-    Ok(constant_time_eq(
-        current_entropy,
-        expected_entropy.as_bytes(),
-    ))
-}
-
-/// Validate a relationship state transition. Per §4.3 no counter comparison.
-pub fn validate_relationship_state_transition(
-    state1: &State,
-    state2: &State,
-) -> Result<bool, DsmError> {
-    if !verify_basic_state_properties(state1, state2)? {
-        return Ok(false);
-    }
-
-    if let (Some(rel1), Some(rel2)) = (&state1.relationship_context, &state2.relationship_context) {
-        if rel1.counterparty_id != rel2.counterparty_id {
-            return Ok(false);
-        }
-        if state2.prev_state_hash != state1.hash()? {
-            return Ok(false);
-        }
-        // Verify entropy evolution
-        if !verify_entropy_evolution(
-            &state1.entropy,
-            &state2.entropy,
-            &state2.operation,
-            &state1.hash,
-        )? {
-            return Ok(false);
-        }
-        return Ok(true);
-    }
-
-    Ok(false)
-}
-
-/// Verify an operation complies with a forward commitment
-#[allow(dead_code)]
-fn verify_commitment_compliance(
-    operation: &Operation,
-    commitment: &PreCommitment,
-) -> Result<bool, DsmError> {
-    match operation {
-        Operation::AddRelationship { to_id, .. } => {
-            if to_id != &commitment.counterparty_id {
-                return Ok(false);
-            }
-            Ok(true)
-        }
-        _ => Ok(false),
-    }
-}
-
-/// Verify basic state properties for a relationship
-fn verify_basic_state_properties(state1: &State, state2: &State) -> Result<bool, DsmError> {
-    if state1.hash == [0u8; 32] || state2.hash == [0u8; 32] {
-        return Ok(false);
-    }
-    if state2.prev_state_hash != state1.hash()? {
-        return Ok(false);
-    }
-    Ok(true)
-}
-
-/// Verify entropy validity for a relationship state.
-/// Per §11 eq. 14 entropy is derived from hash-adjacency inputs only.
-pub fn verify_relationship_entropy(
-    prev_state: &State,
-    current_state: &State,
-    entropy: &[u8],
-) -> Result<bool, DsmError> {
-    let mut hasher = crate::crypto::blake3::dsm_domain_hasher("DSM/state-entropy");
-    hasher.update(&prev_state.entropy);
-    hasher.update(&current_state.operation.to_bytes());
-    hasher.update(&prev_state.hash);
-    let expected_entropy = hasher.finalize().as_bytes().to_vec();
-
-    Ok(constant_time_eq(entropy, &expected_entropy))
-}
+// validate_relationship_state_transition + verify_relationship_entropy +
+// verify_basic_state_properties + verify_commitment_compliance removed:
+// only the deleted state_machine::verify_basic_transition / verify_entropy_evolution
+// chain (mod.rs) called these. The §2.1/§11 verification now flows through
+// transition::verify_transition_integrity which operates on the canonical
+// chain state directly via SMT inclusion proofs (§4.2).
 
 /// Represents a canonical relationship key derivation strategy
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1211,15 +1124,19 @@ mod tests {
             .map_err(|_| DsmError::internal(0.to_string(), None::<std::convert::Infallible>))
             .unwrap());
 
-        // Validate entropy evolution (now derived per §11 eq.14)
-        let entropy_valid = verify_entropy_evolution(
-            &entity_state.entropy,
-            &new_entity_state.entropy,
-            &new_entity_state.operation,
-            &entity_state.hash,
-        )
-        .unwrap();
-        assert!(entropy_valid, "entropy must follow §11 eq.14");
+        // Validate entropy evolution (now derived per §11 eq.14) inline since
+        // the verify_entropy_evolution helper was removed alongside the dead
+        // validate_relationship_state_transition path.
+        let mut expected_hasher = dsm_domain_hasher("DSM/state-entropy");
+        expected_hasher.update(&entity_state.entropy);
+        expected_hasher.update(&new_entity_state.operation.to_bytes());
+        expected_hasher.update(&entity_state.hash);
+        let expected_entropy = expected_hasher.finalize();
+        assert_eq!(
+            new_entity_state.entropy.as_slice(),
+            expected_entropy.as_bytes(),
+            "entropy must follow §11 eq.14",
+        );
 
         // Chain id must be reproducible and non-empty (no hex)
         let cid = relationship.generate_bilateral_chain_id();
