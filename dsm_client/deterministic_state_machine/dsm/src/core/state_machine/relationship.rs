@@ -135,44 +135,10 @@ impl ForwardLinkedCommitment {
         Ok(commitment)
     }
 
-    pub fn verify_operation_adherence(&self, operation: &Operation) -> Result<bool, DsmError> {
-        // Example check: look in fixed_parameters for "operation_type"
-        if let Some(expected_op) = self.fixed_parameters.get("operation_type") {
-            let actual_op = match *operation {
-                Operation::Genesis => b"genesis_",
-                Operation::Generic { .. } => b"generic_",
-                Operation::Transfer { .. } => b"transfer",
-                Operation::Mint { .. } => b"mint____",
-                Operation::Burn { .. } => b"burn____",
-                Operation::Create { .. } => b"create__",
-                Operation::Update { .. } => b"update__",
-                Operation::AddRelationship { .. } => b"add_rel_",
-                Operation::CreateRelationship { .. } => b"crt_rel_",
-                Operation::RemoveRelationship { .. } => b"rem_rel_",
-                Operation::Recovery { .. } => b"recovery",
-                Operation::Delete { .. } => b"delete__",
-                Operation::Link { .. } => b"link____",
-                Operation::Unlink { .. } => b"unlink__",
-                Operation::Invalidate { .. } => b"invalid_",
-                Operation::LockToken { .. } => b"lock____",
-                Operation::UnlockToken { .. } => b"unlock__",
-                Operation::Receive { .. } => b"receive_",
-                Operation::Lock { .. } => b"lock____",
-                Operation::Unlock { .. } => b"unlock__",
-                Operation::CreateToken { .. } => b"crt_tok_",
-                Operation::Noop => b"noop____",
-                Operation::DlvCreate { .. } => b"dlv_crt_",
-                Operation::DlvUnlock { .. } => b"dlv_ulk_",
-                Operation::DlvClaim { .. } => b"dlv_clm_",
-                Operation::DlvInvalidate { .. } => b"dlv_inv_",
-            };
-
-            if actual_op != expected_op.as_slice() {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
+    // verify_operation_adherence deleted: zero callers anywhere. Operation
+    // type adherence is now enforced at the SDK call-site by matching
+    // Operation variants directly, not via the parameter-bag string compare
+    // this method did.
 }
 
 /// Embedded commitment used within states
@@ -361,35 +327,12 @@ impl RelationshipStatePair {
         self.chain_tip_id.as_ref()
     }
 
-    /// Get the last bilateral state hash
-    pub fn get_last_bilateral_state_hash(&self) -> Option<&Vec<u8>> {
-        self.last_bilateral_state_hash.as_ref()
-    }
-
-    // generate_bilateral_chain_id deleted: zero callers outside the deleted
-    // test_relationship_state self-test. Bilateral chain identification now
-    // flows through the 32-byte rel_key derived in
-    // bilateral_transaction_manager::compute_smt_key (§2.2 canonical).
-
-    /// Compute bilateral relationship hash including chain tip ID
-    pub fn compute_bilateral_hash_with_chain_tip(&self) -> Result<Vec<u8>, DsmError> {
-        let mut hasher = dsm_domain_hasher("DSM/bilateral-hash");
-
-        hasher.update(&self.entity_state.hash()?);
-        hasher.update(&self.counterparty_state.hash()?);
-
-        if let Some(chain_tip_id) = &self.chain_tip_id {
-            hasher.update(chain_tip_id.as_bytes());
-        }
-        if let Some(last_hash) = &self.last_bilateral_state_hash {
-            hasher.update(last_hash);
-        }
-
-        hasher.update(&self.entity_id);
-        hasher.update(&self.counterparty_id);
-
-        Ok(hasher.finalize().as_bytes().to_vec())
-    }
+    // get_last_bilateral_state_hash + compute_bilateral_hash_with_chain_tip +
+    // generate_bilateral_chain_id deleted: zero callers anywhere outside
+    // their own self-tests. Bilateral chain identification now flows
+    // through the 32-byte rel_key derived in
+    // bilateral_transaction_manager::compute_smt_key (§2.2 canonical),
+    // and §4.2 stitched receipts handle chain-tip integrity structurally.
 
     // create_chain_tip_verification_hash + verify_bilateral_chain_continuity_with_tip
     // deleted: zero callers anywhere in dsm, dsm_sdk, dsm_storage_node, or tools.
@@ -430,20 +373,12 @@ pub enum KeyDerivationStrategy {
     Hashed,
 }
 
-/// Cryptographically verifiable proof of relationship existence
-#[derive(Debug, Clone)]
-pub struct RelationshipProof {
-    /// Entity identifier
-    pub entity_id: [u8; 32],
-    /// Counterparty identifier
-    pub counterparty_id: [u8; 32],
-    /// Hash of entity's state
-    pub entity_state_hash: [u8; 32],
-    /// Hash of counterparty's state
-    pub counterparty_state_hash: [u8; 32],
-    /// Cryptographic binding of relationship
-    pub relationship_hash: Vec<u8>,
-}
+// RelationshipProof struct deleted: only used by the now-deleted
+// RelationshipManager::export_relationship_proof + verify_relationship_proof
+// methods. Cryptographic relationship proof is now expressed via the
+// stitched-receipt SmtInclusionProof (§4.2) carried in ReceiptCommit, not
+// via a per-pair (entity_state_hash, counterparty_state_hash, relationship_hash)
+// triple.
 
 /// Custom error for relationship manager operations
 #[derive(Debug)]
@@ -599,84 +534,11 @@ impl RelationshipManager {
     // (which maintains the per-relationship chain via SMT) rather than
     // through this RelationshipManager::store/update API.
 
-    /// Create a relationship with chain tip tracking
-    pub fn create_relationship_with_chain_tip(
-        &self,
-        entity_id: &[u8; 32],
-        counterparty_id: &[u8; 32],
-        entity_state: State,
-        counterparty_state: State,
-        chain_tip_id: String,
-    ) -> Result<(), DsmError> {
-        let key = self.get_relationship_key(entity_id, counterparty_id);
-        let pair = RelationshipStatePair::new_with_chain_tip(
-            *entity_id,
-            *counterparty_id,
-            entity_state,
-            counterparty_state,
-            chain_tip_id,
-        )?;
-
-        let mut store = self.relationship_store.lock().map_err(|_| {
-            DsmError::invalid_operation("Failed to acquire lock on relationship store")
-        })?;
-
-        store.insert(key, pair);
-        Ok(())
-    }
-
-    /// Update chain tip for an existing relationship
-    pub fn update_relationship_chain_tip(
-        &self,
-        entity_id: &[u8; 32],
-        counterparty_id: &[u8; 32],
-        new_chain_tip_id: String,
-        new_state_hash: Vec<u8>,
-    ) -> Result<(), DsmError> {
-        let key = self.get_relationship_key(entity_id, counterparty_id);
-        let mut store = self.relationship_store.lock().map_err(|_| {
-            DsmError::invalid_operation("Failed to acquire lock on relationship store")
-        })?;
-
-        if let Some(pair) = store.get_mut(&key) {
-            pair.update_chain_tip(new_chain_tip_id, new_state_hash)?;
-            Ok(())
-        } else {
-            Err(DsmError::not_found(
-                "Relationship",
-                Some(format!(
-                    "No relationship found between {} and {}",
-                    base32::encode(base32::Alphabet::Crockford, entity_id),
-                    base32::encode(base32::Alphabet::Crockford, counterparty_id)
-                )),
-            ))
-        }
-    }
-
-    /// Get chain tip ID for a relationship
-    pub fn get_relationship_chain_tip_id(
-        &self,
-        entity_id: &[u8; 32],
-        counterparty_id: &[u8; 32],
-    ) -> Result<Option<String>, DsmError> {
-        let key = self.get_relationship_key(entity_id, counterparty_id);
-        let store = self.relationship_store.lock().map_err(|_| {
-            DsmError::invalid_operation("Failed to acquire lock on relationship store")
-        })?;
-
-        if let Some(pair) = store.get(&key) {
-            Ok(pair.get_chain_tip_id().cloned())
-        } else {
-            Err(DsmError::not_found(
-                "Relationship",
-                Some(format!(
-                    "No relationship found between {} and {}",
-                    base32::encode(base32::Alphabet::Crockford, entity_id),
-                    base32::encode(base32::Alphabet::Crockford, counterparty_id)
-                )),
-            ))
-        }
-    }
+    // create_relationship_with_chain_tip + update_relationship_chain_tip +
+    // get_relationship_chain_tip_id deleted: zero callers anywhere. Chain
+    // tip tracking lives on the Per-Device SMT (DeviceState.smt) keyed by
+    // 32-byte rel_key per §2.2; the prior `chain_tip_id: String` per-pair
+    // mechanism is obsolete.
 
     /// Execute a state transition within a relationship context
     pub fn execute_relationship_transition(
@@ -744,93 +606,11 @@ impl RelationshipManager {
         Ok(store.contains_key(&key))
     }
 
-    /// Export relationship proof for verification by third parties
-    pub fn export_relationship_proof(
-        &self,
-        entity_id: &[u8; 32],
-        counterparty_id: &[u8; 32],
-    ) -> Result<RelationshipProof, DsmError> {
-        let key = self.get_relationship_key(entity_id, counterparty_id);
-        let store = self.relationship_store.lock().map_err(|_| {
-            DsmError::invalid_operation("Failed to acquire lock on relationship store")
-        })?;
-
-        if let Some(pair) = store.get(&key) {
-            Ok(RelationshipProof {
-                entity_id: pair.entity_id,
-                counterparty_id: pair.counterparty_id,
-                entity_state_hash: pair.entity_state.hash()?,
-                counterparty_state_hash: pair.counterparty_state.hash()?,
-                relationship_hash: pair.relationship_hash.clone(),
-            })
-        } else {
-            Err(DsmError::not_found(
-                "Relationship",
-                Some(format!(
-                    "No relationship found between {} and {}",
-                    base32::encode(base32::Alphabet::Crockford, entity_id),
-                    base32::encode(base32::Alphabet::Crockford, counterparty_id)
-                )),
-            ))
-        }
-    }
-
-    /// Verify a relationship proof against local records
-    pub fn verify_relationship_proof(&self, proof: &RelationshipProof) -> Result<bool, DsmError> {
-        let key = self.get_relationship_key(&proof.entity_id, &proof.counterparty_id);
-        let store = self.relationship_store.lock().map_err(|_| {
-            DsmError::invalid_operation("Failed to acquire lock on relationship store")
-        })?;
-
-        if let Some(pair) = store.get(&key) {
-            let entity_hash = pair.entity_state.hash()?;
-            if entity_hash != proof.entity_state_hash {
-                return Ok(false);
-            }
-
-            let counterparty_hash = pair.counterparty_state.hash()?;
-            if counterparty_hash != proof.counterparty_state_hash {
-                return Ok(false);
-            }
-
-            if pair.relationship_hash != proof.relationship_hash {
-                return Ok(false);
-            }
-
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
-    /// List all entity IDs with active relationships
-    pub fn list_entities(&self) -> Result<HashSet<[u8; 32]>, DsmError> {
-        let store = self.relationship_store.lock().map_err(|_| {
-            DsmError::invalid_operation("Failed to acquire lock on relationship store")
-        })?;
-        let mut entities = HashSet::new();
-        for pair in store.values() {
-            entities.insert(pair.entity_id);
-            entities.insert(pair.counterparty_id);
-        }
-        Ok(entities)
-    }
-
-    /// Find all counterparties for a given entity
-    pub fn find_counterparties(&self, entity_id: &[u8; 32]) -> Result<Vec<[u8; 32]>, DsmError> {
-        let store = self.relationship_store.lock().map_err(|_| {
-            DsmError::invalid_operation("Failed to acquire lock on relationship store")
-        })?;
-        let mut counterparties = Vec::new();
-        for pair in store.values() {
-            if pair.entity_id == *entity_id {
-                counterparties.push(pair.counterparty_id);
-            } else if pair.counterparty_id == *entity_id {
-                counterparties.push(pair.entity_id);
-            }
-        }
-        Ok(counterparties)
-    }
+    // export_relationship_proof + verify_relationship_proof + list_entities +
+    // find_counterparties deleted: zero callers anywhere. Proof export now
+    // flows through ReceiptCommit (§4.2) with embedded SmtInclusionProof;
+    // entity/counterparty enumeration lives on the contacts table in
+    // sdk::storage::client_db.
 
     /// Get the latest state for an entity in a specific relationship
     pub fn get_entity_state(
