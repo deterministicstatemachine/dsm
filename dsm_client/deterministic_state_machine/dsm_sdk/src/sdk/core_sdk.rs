@@ -16,7 +16,6 @@ use std::sync::atomic::AtomicU64;
 
 use dsm::core::identity::genesis::create_genesis_via_blind_mpc;
 use dsm::core::state_machine::StateMachine;
-use dsm::core::state_machine::relationship::KeyDerivationStrategy;
 use dsm::core::token::policy::TokenPolicySystem;
 use dsm::types::error::DsmError;
 use dsm::types::operations::Operation as DsmOperation;
@@ -195,10 +194,7 @@ impl CoreSDK {
         // Preload standard token policies (ERA) synchronously
         policy_system.preload_standard_policies_blocking()?;
 
-        let state_machine = Mutex::new(StateMachine::new_with_strategy_and_device_id(
-            KeyDerivationStrategy::Canonical,
-            device_info.device_id,
-        ));
+        let state_machine = Mutex::new(StateMachine::new());
 
         Self::restore_latest_archived_state(&state_machine, &device_info.device_id)?;
 
