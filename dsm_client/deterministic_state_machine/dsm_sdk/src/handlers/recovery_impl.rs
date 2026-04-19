@@ -216,9 +216,7 @@ impl RecoveryHandler for RecoveryImpl {
 
         // Build the response — store the full serialised receipt so counterparties
         // can reconstruct it for validation (not just the raw signature bytes).
-        let tombstone_receipt_bytes = tombstone
-            .to_bytes()
-            .map_err(|e| format!("Failed to serialize tombstone receipt: {}", e))?;
+        let tombstone_receipt_bytes = tombstone.to_bytes();
 
         // Build the response
         let response = gp::RecoveryTombstoneResponse {
@@ -490,9 +488,7 @@ pub fn execute_recovery_pipeline() -> Result<String, String> {
     )
     .map_err(|e| format!("Tombstone creation failed: {e}"))?;
 
-    let tombstone_receipt_bytes = tombstone
-        .to_bytes()
-        .map_err(|e| format!("Failed to serialize tombstone receipt: {e}"))?;
+    let tombstone_receipt_bytes = tombstone.to_bytes();
     let tombstone_hash_hex =
         crate::util::text_id::encode_base32_crockford(&tombstone.tombstone_hash);
 

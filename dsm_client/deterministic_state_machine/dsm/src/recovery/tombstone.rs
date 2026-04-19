@@ -10,8 +10,8 @@
 use crate::crypto::blake3::dsm_domain_hasher;
 use crate::crypto::sphincs::{sphincs_sign, sphincs_verify};
 use crate::types::error::DsmError;
+use crate::types::proto::{Message as _, TombstoneReceiptProto};
 use crate::utils::deterministic_time as dt;
-use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static TOMBSTONE_SYSTEM_INITIALIZED: AtomicBool = AtomicBool::new(false);
@@ -25,7 +25,7 @@ pub fn init_tombstone_subsystem() {
 }
 
 /// Tombstone receipt - invalidates old device binding
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TombstoneReceipt {
     /// Device ID being invalidated
     pub device_id: String,
@@ -44,7 +44,7 @@ pub struct TombstoneReceipt {
 }
 
 /// Succession receipt - binds new device
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct SuccessionReceipt {
     /// Device ID for new device
     pub device_id: String,
@@ -61,7 +61,7 @@ pub struct SuccessionReceipt {
 }
 
 /// Recovery receipt enum
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum RecoveryReceipt {
     Tombstone(TombstoneReceipt),
     Succession(SuccessionReceipt),
@@ -84,28 +84,46 @@ impl TombstoneReceipt {
         sphincs_verify(public_key, &self.tombstone_hash, &self.signature)
     }
 
-    /// Serialize the full receipt to bytes.
-    pub fn to_bytes(&self) -> Result<Vec<u8>, DsmError> {
-        bincode::serialize(self).map_err(|e| {
-            DsmError::serialization_error(
-                format!("TombstoneReceipt::to_bytes: {e}"),
-                "TombstoneReceipt",
-                None::<String>,
-                None::<std::io::Error>,
-            )
-        })
+    /// Serialize the full receipt to protobuf bytes (canonical wire codec).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        self.to_proto().encode_to_vec()
     }
 
-    /// Deserialize a receipt from bytes.
+    /// Deserialize a receipt from protobuf bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, DsmError> {
-        bincode::deserialize(bytes).map_err(|e| {
+        let proto = TombstoneReceiptProto::decode(bytes).map_err(|e| {
             DsmError::serialization_error(
                 format!("TombstoneReceipt::from_bytes: {e}"),
                 "TombstoneReceipt",
                 None::<String>,
-                None::<std::io::Error>,
+                Some(e),
             )
-        })
+        })?;
+        Ok(Self::from_proto(proto))
+    }
+
+    fn to_proto(&self) -> TombstoneReceiptProto {
+        TombstoneReceiptProto {
+            device_id: self.device_id.clone(),
+            old_smt_root: self.old_smt_root.clone(),
+            old_counter: self.old_counter,
+            old_rollup_hash: self.old_rollup_hash.clone(),
+            tick: self.tick,
+            signature: self.signature.clone(),
+            tombstone_hash: self.tombstone_hash.clone(),
+        }
+    }
+
+    fn from_proto(p: TombstoneReceiptProto) -> Self {
+        Self {
+            device_id: p.device_id,
+            old_smt_root: p.old_smt_root,
+            old_counter: p.old_counter,
+            old_rollup_hash: p.old_rollup_hash,
+            tick: p.tick,
+            signature: p.signature,
+            tombstone_hash: p.tombstone_hash,
+        }
     }
 }
 
@@ -238,6 +256,31 @@ mod tests {
         let tombstone = create_tombstone(&old_smt_root, old_counter, &old_rollup, device_id, &sk)?;
         assert!(verify_tombstone(&tombstone, &pk)?);
         assert_eq!(tombstone.device_id, device_id);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_tombstone_protobuf_roundtrip() -> Result<(), DsmError> {
+        init_tombstone_subsystem();
+
+        let old_smt_root = vec![7; 32];
+        let old_rollup = vec![9; 32];
+        let device_id = "device_round_trip";
+        let (pk, sk) = crate::crypto::sphincs::generate_sphincs_keypair()?;
+
+        let original = create_tombstone(&old_smt_root, 123, &old_rollup, device_id, &sk)?;
+        let bytes = original.to_bytes();
+        let decoded = TombstoneReceipt::from_bytes(&bytes)?;
+
+        assert_eq!(decoded.device_id, original.device_id);
+        assert_eq!(decoded.old_smt_root, original.old_smt_root);
+        assert_eq!(decoded.old_counter, original.old_counter);
+        assert_eq!(decoded.old_rollup_hash, original.old_rollup_hash);
+        assert_eq!(decoded.tick, original.tick);
+        assert_eq!(decoded.signature, original.signature);
+        assert_eq!(decoded.tombstone_hash, original.tombstone_hash);
+        assert!(verify_tombstone(&decoded, &pk)?);
 
         Ok(())
     }
