@@ -358,6 +358,54 @@ impl DeviceState {
         self.legacy_anchor
     }
 
+    /// Apply balance deltas in-place without advancing the SMT or producing a
+    /// receipt.
+    ///
+    /// **Use with care.** This is the band-aid hook for advance paths that
+    /// bypass [`DeviceState::advance`] (notably the BLE bilateral path, which
+    /// mutates the shared `per_device_smt` directly via
+    /// `BilateralTransactionManager::finalize_offline_transfer_with_entropy`
+    /// rather than going through `CoreSDK::execute_on_relationship`). Without
+    /// this hook the canonical device-head balances stay un-debited on the
+    /// sender after a BLE transfer, and `bilateral_settlement::settle()` writes
+    /// the un-debited value to the SQLite balance projection (the bug that
+    /// surfaced as "BLE send credited receiver but did not debit sender").
+    ///
+    /// The long-term fix is to route every advance through
+    /// `execute_on_relationship` so the SMT root and balances always move
+    /// together; until then this method exists to keep balances coherent
+    /// across both advance paths.
+    ///
+    /// All deltas are applied or none — on underflow / overflow the balances
+    /// are left untouched and an `Err` is returned.
+    pub fn apply_balance_deltas(&mut self, deltas: &[BalanceDelta]) -> Result<(), DsmError> {
+        // Stage into a working copy so a failure mid-loop leaves self
+        // untouched (matches `advance`'s atomicity contract).
+        let mut working = self.balances.clone();
+        for d in deltas {
+            let cur = working.get(&d.policy_commit).copied().unwrap_or(0);
+            let next = match d.direction {
+                BalanceDirection::Credit => cur.checked_add(d.amount).ok_or_else(|| {
+                    DsmError::invalid_operation(
+                        "apply_balance_deltas: balance overflow on credit",
+                    )
+                })?,
+                BalanceDirection::Debit => cur.checked_sub(d.amount).ok_or_else(|| {
+                    DsmError::invalid_operation(
+                        "apply_balance_deltas: balance underflow on debit (insufficient funds)",
+                    )
+                })?,
+            };
+            if next == 0 {
+                working.remove(&d.policy_commit);
+            } else {
+                working.insert(d.policy_commit, next);
+            }
+        }
+        self.balances = working;
+        Ok(())
+    }
+
     /// Device genesis digest.
     pub fn genesis_digest(&self) -> [u8; 32] {
         self.genesis
@@ -929,5 +977,188 @@ mod tests {
             expected,
             "net balance change must equal sum of signed deltas"
         );
+    }
+
+    // ---- apply_balance_deltas ----
+    //
+    // Band-aid mutator used by `bilateral_settlement::settle()` to keep
+    // canonical device-head balances coherent on the BLE path (which bypasses
+    // `DeviceState::advance` and `execute_on_relationship`). Each test below
+    // also verifies the SMT root is unchanged — this mutator must never
+    // touch the SMT, only the balance map.
+
+    #[test]
+    fn apply_balance_deltas_credit_only() {
+        let mut dev = fresh_device(0xAA);
+        let token = pc(0xCC);
+        dev.balances.insert(token, 100);
+        let root_before = dev.root();
+
+        dev.apply_balance_deltas(&[BalanceDelta {
+            policy_commit: token,
+            direction: BalanceDirection::Credit,
+            amount: 25,
+        }])
+        .expect("credit");
+
+        assert_eq!(dev.balance(&token), 125);
+        assert_eq!(dev.root(), root_before, "SMT root must not move");
+    }
+
+    #[test]
+    fn apply_balance_deltas_debit_only() {
+        let mut dev = fresh_device(0xAA);
+        let token = pc(0xCC);
+        dev.balances.insert(token, 100);
+        let root_before = dev.root();
+
+        dev.apply_balance_deltas(&[BalanceDelta {
+            policy_commit: token,
+            direction: BalanceDirection::Debit,
+            amount: 30,
+        }])
+        .expect("debit");
+
+        assert_eq!(dev.balance(&token), 70);
+        assert_eq!(dev.root(), root_before, "SMT root must not move");
+    }
+
+    #[test]
+    fn apply_balance_deltas_mixed_multiple_tokens() {
+        let mut dev = fresh_device(0xAA);
+        let t1 = pc(0xC1);
+        let t2 = pc(0xC2);
+        dev.balances.insert(t1, 100);
+        dev.balances.insert(t2, 50);
+        let root_before = dev.root();
+
+        dev.apply_balance_deltas(&[
+            BalanceDelta {
+                policy_commit: t1,
+                direction: BalanceDirection::Debit,
+                amount: 40,
+            },
+            BalanceDelta {
+                policy_commit: t2,
+                direction: BalanceDirection::Credit,
+                amount: 10,
+            },
+        ])
+        .expect("mixed");
+
+        assert_eq!(dev.balance(&t1), 60);
+        assert_eq!(dev.balance(&t2), 60);
+        assert_eq!(dev.root(), root_before, "SMT root must not move");
+    }
+
+    /// Underflow on the second delta must NOT commit the first.
+    #[test]
+    fn apply_balance_deltas_underflow_atomic_no_partial_mutation() {
+        let mut dev = fresh_device(0xAA);
+        let t1 = pc(0xC1);
+        let t2 = pc(0xC2);
+        dev.balances.insert(t1, 100);
+        dev.balances.insert(t2, 5);
+        let root_before = dev.root();
+
+        let r = dev.apply_balance_deltas(&[
+            BalanceDelta {
+                policy_commit: t1,
+                direction: BalanceDirection::Credit,
+                amount: 1,
+            },
+            BalanceDelta {
+                policy_commit: t2,
+                direction: BalanceDirection::Debit,
+                amount: 10, // underflow: 5 - 10
+            },
+        ]);
+        assert!(r.is_err(), "underflow must reject");
+
+        // Crucial: first delta (t1 + 1 → 101) must NOT have been committed.
+        assert_eq!(dev.balance(&t1), 100, "no partial mutation on failure");
+        assert_eq!(dev.balance(&t2), 5, "no partial mutation on failure");
+        assert_eq!(dev.root(), root_before);
+    }
+
+    /// Overflow on the second delta must NOT commit the first.
+    #[test]
+    fn apply_balance_deltas_overflow_atomic_no_partial_mutation() {
+        let mut dev = fresh_device(0xAA);
+        let t1 = pc(0xC1);
+        let t2 = pc(0xC2);
+        dev.balances.insert(t1, 100);
+        dev.balances.insert(t2, u64::MAX);
+
+        let r = dev.apply_balance_deltas(&[
+            BalanceDelta {
+                policy_commit: t1,
+                direction: BalanceDirection::Debit,
+                amount: 1,
+            },
+            BalanceDelta {
+                policy_commit: t2,
+                direction: BalanceDirection::Credit,
+                amount: 1, // overflow: u64::MAX + 1
+            },
+        ]);
+        assert!(r.is_err(), "overflow must reject");
+
+        assert_eq!(dev.balance(&t1), 100, "no partial mutation on failure");
+        assert_eq!(dev.balance(&t2), u64::MAX, "no partial mutation on failure");
+    }
+
+    /// Debiting balance to exactly zero must remove the entry from the
+    /// `BTreeMap` so `compute_hash` / canonical bytes don't carry a phantom
+    /// zero leaf.
+    #[test]
+    fn apply_balance_deltas_zero_balance_removed_from_map() {
+        let mut dev = fresh_device(0xAA);
+        let token = pc(0xCC);
+        dev.balances.insert(token, 25);
+
+        dev.apply_balance_deltas(&[BalanceDelta {
+            policy_commit: token,
+            direction: BalanceDirection::Debit,
+            amount: 25,
+        }])
+        .expect("debit to zero");
+
+        assert_eq!(dev.balance(&token), 0);
+        assert!(
+            !dev.balances.contains_key(&token),
+            "zero balance must be removed from the BTreeMap, not kept as 0"
+        );
+    }
+
+    /// Crediting an unknown policy_commit creates the entry from 0.
+    #[test]
+    fn apply_balance_deltas_credit_unknown_policy_creates_entry() {
+        let mut dev = fresh_device(0xAA);
+        let token = pc(0xEE); // not in balances yet
+        assert!(!dev.balances.contains_key(&token));
+
+        dev.apply_balance_deltas(&[BalanceDelta {
+            policy_commit: token,
+            direction: BalanceDirection::Credit,
+            amount: 7,
+        }])
+        .expect("credit creates");
+
+        assert_eq!(dev.balance(&token), 7);
+    }
+
+    /// Empty delta slice is a no-op.
+    #[test]
+    fn apply_balance_deltas_empty_is_noop() {
+        let mut dev = fresh_device(0xAA);
+        let token = pc(0xCC);
+        dev.balances.insert(token, 42);
+        let root_before = dev.root();
+
+        dev.apply_balance_deltas(&[]).expect("noop");
+
+        assert_eq!(dev.balance(&token), 42);
+        assert_eq!(dev.root(), root_before);
     }
 }

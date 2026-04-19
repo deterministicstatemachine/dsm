@@ -2432,6 +2432,13 @@ impl AppRouter for AppRouterImpl {
         self.core_sdk.device_head()
     }
 
+    fn apply_device_balance_deltas(
+        &self,
+        deltas: &[dsm::types::device_state::BalanceDelta],
+    ) -> Result<(), dsm::types::error::DsmError> {
+        self.core_sdk.apply_device_balance_deltas(deltas)
+    }
+
     // ====================== QUERY ======================
     async fn query(&self, q: AppQuery) -> AppResult {
         self.ensure_bitcoin_tap_restored().await;

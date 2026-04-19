@@ -635,6 +635,35 @@ impl CoreSDK {
         self.state_machine.lock().device_head().cloned()
     }
 
+    /// Apply balance deltas directly to the canonical DeviceState head.
+    ///
+    /// Band-aid for advance paths that bypass `execute_on_relationship`
+    /// (notably the BLE bilateral path). After mutating balances, persists
+    /// the updated head to `bcr_device_heads` so reader paths see the new
+    /// totals across restarts.
+    ///
+    /// See `dsm::types::device_state::DeviceState::apply_balance_deltas`
+    /// for the long-form design rationale.
+    pub fn apply_device_balance_deltas(
+        &self,
+        deltas: &[dsm::types::device_state::BalanceDelta],
+    ) -> Result<(), DsmError> {
+        let new_head = {
+            let mut sm = self.state_machine.lock();
+            sm.apply_balance_deltas(deltas)?;
+            sm.device_head().cloned()
+        };
+        if let Some(head) = new_head {
+            if let Err(e) = crate::storage::client_db::update_bcr_device_head(&head) {
+                log::warn!(
+                    "[CoreSDK] apply_device_balance_deltas: BCR head cache write failed: {}",
+                    e
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Read device-level balance for a token by its 32-byte CPTA policy_commit.
     /// This reads from DeviceState directly (no string-key projection).
     pub fn get_device_balance(&self, policy_commit: &[u8; 32]) -> u64 {

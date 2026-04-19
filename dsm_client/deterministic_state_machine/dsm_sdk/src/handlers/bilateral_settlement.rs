@@ -10,19 +10,21 @@
 //! # Whitepaper alignment (post-§2.2 / §4.2 / §8 refactor)
 //!
 //! The canonical device head lives in [`dsm::types::device_state::DeviceState`].
-//! For the **sender**, balances are already debited at the
+//! The BLE bilateral path does NOT route through
 //! [`execute_on_relationship`](crate::sdk::core_sdk::CoreSDK::execute_on_relationship)
-//! chokepoint inside the BLE flow — settlement only mirrors the new device-head
-//! balance into the SQLite display projection (`balance_projections`) and
-//! persists transaction history.
+//! — `BilateralTransactionManager::finalize_offline_transfer_with_entropy`
+//! mutates the shared `per_device_smt` and SQLite `contacts.chain_tip`
+//! directly without touching the canonical `DeviceState.balances` map. To
+//! keep balances coherent across the two parallel advance paths, this
+//! delegate applies the sender debit / receiver credit to the canonical
+//! device head via [`crate::bridge::AppRouter::apply_device_balance_deltas`]
+//! BEFORE building the SQLite display projection. The projection then
+//! mirrors the now-correct head balance.
 //!
-//! For the **receiver**, the device head's `execute_on_relationship` does not
-//! run today (the receiver only mutates its `BilateralTransactionManager` chain
-//! tip and the SQLite projection). Settlement therefore computes the displayed
-//! credit as `head.balance(policy_commit) + amount` and writes that to the
-//! projection so the UI updates without a refresh round-trip. The receiver's
-//! `DeviceState` will catch up the next time the receiver itself does an
-//! `execute_on_relationship` op.
+//! Once every advance routes through `execute_on_relationship` (per the
+//! Phase 4.x BLE-routing unification in
+//! `~/.claude/plans/rustling-frolicking-swan.md`) this head mutation
+//! becomes redundant and can be removed.
 
 use crate::bluetooth::bilateral_ble_handler::{
     BilateralSettlementContext, BilateralSettlementDelegate, BilateralSettlementOutcome,
@@ -98,12 +100,10 @@ fn resolve_policy_commit(token_id: &str) -> Result<[u8; 32], String> {
 /// Build the post-settlement balance projection from the canonical
 /// [`DeviceState`] head.
 ///
-/// - **Sender**: `execute_on_relationship` already applied the debit to the
-///   device head, so the projection mirrors `head.balance(policy_commit)`
-///   directly.
-/// - **Receiver**: the receiver-side device head is not yet auto-credited
-///   (deferred to a follow-up phase). To keep the UI fresh we compute
-///   `head.balance(policy_commit) + amount` and emit that as the projection.
+/// The caller has already applied the sender debit / receiver credit to the
+/// device head via [`crate::bridge::AppRouter::apply_device_balance_deltas`]
+/// before invoking this function, so the projection mirrors
+/// `head.balance(policy_commit)` directly for both roles.
 ///
 /// Returns `Ok(None)` for transfers that resolve to zero amount or non-transfer
 /// operations — the caller still persists the transaction history record.
@@ -123,17 +123,7 @@ fn build_settlement_projection(
     };
     let policy_commit = resolve_policy_commit(token_for_policy)?;
 
-    let head_balance = head.balance(&policy_commit);
-    let effective_balance = if ctx.is_sender {
-        // Sender: head was debited at the AdvanceOutcome chokepoint; mirror
-        // the head balance directly.
-        head_balance
-    } else {
-        // Receiver: head not yet credited (deferred phase). Reflect the
-        // pending credit so the UI updates immediately. Saturating add to
-        // avoid u64 overflow on adversarial inputs.
-        head_balance.saturating_add(transfer.amount)
-    };
+    let effective_balance = head.balance(&policy_commit);
 
     let local_txt = encode_base32_crockford(&ctx.local_device_id);
     let locked = crate::storage::client_db::get_locked_balance(&local_txt, token_for_policy)
@@ -228,15 +218,62 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
             }
         }
 
-        // Read the canonical DeviceState head from the bridge. Settlement is
-        // a pure read of this head plus a SQLite write of derived display
-        // material; the head itself is updated upstream at
-        // `execute_on_relationship`.
-        let device_head = crate::bridge::app_router()
-            .and_then(|r| r.device_head())
-            .ok_or_else(|| {
-                "bilateral settle: device head unavailable (router not bootstrapped)".to_string()
-            })?;
+        // §8 balance reconciliation across the BLE / canonical-advance gap.
+        //
+        // The BLE bilateral path mutates the relationship-chain SMT via
+        // `BilateralTransactionManager::finalize_offline_transfer_with_entropy`
+        // without invoking `CoreSDK::execute_on_relationship`, so the
+        // canonical `DeviceState.balances` map is still untouched at this
+        // point. Apply the sender debit / receiver credit directly to the
+        // device head via the bridge BEFORE reading the head; the projection
+        // below then mirrors the now-correct head balance for both roles.
+        //
+        // Idempotency: sender duplicates (incl. recovery re-fires) are caught
+        // by the `is_sender_settlement_completed` guard above. Receiver
+        // duplicates are not yet guarded by a head-delta-specific idempotency
+        // marker; tracked as follow-up alongside the BLE-routing unification
+        // (`~/.claude/plans/rustling-frolicking-swan.md`).
+        let router = crate::bridge::app_router().ok_or_else(|| {
+            "bilateral settle: app router unavailable (not bootstrapped)".to_string()
+        })?;
+        if transfer_amount > 0 {
+            let token_for_policy = if token_id_str.is_empty() {
+                "ERA"
+            } else {
+                token_id_str.as_str()
+            };
+            match resolve_policy_commit(token_for_policy) {
+                Ok(policy_commit) => {
+                    let direction = if ctx.is_sender {
+                        dsm::types::device_state::BalanceDirection::Debit
+                    } else {
+                        dsm::types::device_state::BalanceDirection::Credit
+                    };
+                    let deltas = [dsm::types::device_state::BalanceDelta {
+                        policy_commit,
+                        direction,
+                        amount: transfer_amount,
+                    }];
+                    if let Err(e) = router.apply_device_balance_deltas(&deltas) {
+                        return Err(format!(
+                            "device-head balance delta failed (token={}, amount={}, is_sender={}): {e}",
+                            token_for_policy, transfer_amount, ctx.is_sender
+                        ));
+                    }
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "device-head balance delta skipped — policy resolve failed (token={}): {e}",
+                        token_for_policy
+                    ));
+                }
+            }
+        }
+
+        // Read the now-canonical DeviceState head from the bridge.
+        let device_head = router.device_head().ok_or_else(|| {
+            "bilateral settle: device head unavailable (router not bootstrapped)".to_string()
+        })?;
 
         log::info!(
             "[BILATERAL][settle] device_head root={} balances={}",

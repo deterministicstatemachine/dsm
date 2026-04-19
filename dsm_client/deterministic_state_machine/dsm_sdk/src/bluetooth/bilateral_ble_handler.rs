@@ -259,12 +259,19 @@ impl BilateralBleHandler {
     }
 
     // record_bcr_state(...) deleted: per §2.2/§4.3, canonical state is the
-    // per-relationship chain state + Per-Device SMT root. Both are written
-    // upstream at the AdvanceOutcome chokepoint
-    // (CoreSDK::execute_on_relationship → dual_write_advance_outcome). The
-    // BLE handler MUST NOT write a duplicate snapshot from a derived
-    // settlement-time State — the producer chokepoint is the single source
-    // of canonical-state durability.
+    // per-relationship chain state + Per-Device SMT root. The BLE handler
+    // MUST NOT write a duplicate snapshot from a derived settlement-time
+    // State.
+    //
+    // Note: the BLE bilateral path advances the relationship chain via
+    // `BilateralTransactionManager::finalize_offline_transfer_with_entropy`
+    // (which mutates the shared `per_device_smt` and SQLite `contacts.chain_tip`
+    // directly), NOT via `CoreSDK::execute_on_relationship`. Canonical
+    // `DeviceState.balances` is reconciled post-finalize by
+    // `bilateral_settlement::settle()` calling
+    // `AppRouter::apply_device_balance_deltas`. Routing the BLE flow through
+    // the canonical chokepoint is tracked by Phase 4.x of
+    // `~/.claude/plans/rustling-frolicking-swan.md`.
     /// Reject an incoming prepare (or any active session) identified by the origin commitment hash.
     pub async fn reject_incoming_prepare(
         &self,
@@ -624,11 +631,11 @@ impl BilateralBleHandler {
             };
 
         let _settlement_outcome = if let Some(ref delegate) = self.settlement_delegate {
-            // Settlement reads the canonical DeviceState head itself (via the
-            // bridge AppRouter). The head was already updated upstream at the
-            // AdvanceOutcome chokepoint inside `execute_on_relationship`; the
-            // delegate only mirrors the device-head balance into the SQLite
-            // display projection and persists transaction history.
+            // Settlement reads the canonical DeviceState head from the bridge
+            // and writes the SQLite display projection + transaction history.
+            // The recovery path skips the device-head balance delta (the
+            // post-restart restore from the BCR head cache already includes
+            // the post-finalize balances).
             delegate
                 .settle(BilateralSettlementContext {
                     local_device_id: self.device_id,
@@ -3345,13 +3352,12 @@ impl BilateralBleHandler {
 
         let (_confirm_outcome, persistence_error) =
             if let Some(ref delegate) = self.settlement_delegate {
-                // The delegate reads the canonical DeviceState head from the
-                // bridge AppRouter and writes the receiver-side balance
-                // projection from `head.balance(policy_commit) + amount`. No
-                // canonical-state push is needed — the head update on the
-                // receiver lags until the receiver's own next op (documented
-                // gap), and the SQLite projection plus sync_balance_cache()
-                // below keep the UI fresh in the meantime.
+                // The delegate applies the receiver credit to the canonical
+                // DeviceState head via `AppRouter::apply_device_balance_deltas`
+                // and then writes the SQLite balance projection from
+                // `head.balance(policy_commit)`. The BLE flow's BTM finalize
+                // already mutated the relationship-chain SMT but not the
+                // device-head balance; the delegate closes that gap.
                 let ctx = BilateralSettlementContext {
                     local_device_id: self.device_id,
                     counterparty_device_id: session.counterparty_device_id,
@@ -3881,11 +3887,13 @@ impl BilateralBleHandler {
                     self.settlement_delegate.is_some()
                 );
                 let _settlement_outcome = if let Some(ref delegate) = self.settlement_delegate {
-                    // Settlement reads the canonical DeviceState head from the
-                    // bridge AppRouter (already updated at the AdvanceOutcome
-                    // chokepoint inside `execute_on_relationship`) and writes
-                    // the sender-side balance projection from
-                    // `head.balance(policy_commit)` plus transaction history.
+                    // The delegate applies the sender debit to the canonical
+                    // DeviceState head via `AppRouter::apply_device_balance_deltas`
+                    // and then writes the SQLite balance projection from
+                    // `head.balance(policy_commit)`. The BLE flow's BTM
+                    // finalize already mutated the relationship-chain SMT but
+                    // not the device-head balance; the delegate closes that
+                    // gap.
                     let ctx = BilateralSettlementContext {
                         local_device_id: self.device_id,
                         counterparty_device_id,

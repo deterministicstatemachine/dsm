@@ -97,6 +97,28 @@ pub trait AppRouter: Send + Sync {
     fn device_head(&self) -> Option<dsm::types::device_state::DeviceState> {
         None
     }
+
+    /// Apply balance deltas directly to the canonical DeviceState head and
+    /// persist the new head to the BCR head cache.
+    ///
+    /// **Band-aid** for advance paths that bypass `execute_on_relationship`
+    /// (notably the BLE bilateral path, which mutates the shared
+    /// `per_device_smt` via `BilateralTransactionManager` and does not go
+    /// through the canonical `prepare_advance_relationship → commit_advance`
+    /// chokepoint). Without this hook the canonical device-head balances
+    /// stay un-debited on the sender after a BLE transfer, surfaced as the
+    /// "BLE send credited receiver but did not debit sender" bug.
+    ///
+    /// Returns `Err` if the router is not yet attached to an identity, or
+    /// if any delta would underflow / overflow the device-level balance.
+    fn apply_device_balance_deltas(
+        &self,
+        _deltas: &[dsm::types::device_state::BalanceDelta],
+    ) -> Result<(), dsm::types::error::DsmError> {
+        Err(dsm::types::error::DsmError::invalid_operation(
+            "apply_device_balance_deltas not implemented on this router",
+        ))
+    }
 }
 
 /// App router storage. Uses RwLock to allow replacement (MinimalBootstrapRouter → AppRouterImpl).
