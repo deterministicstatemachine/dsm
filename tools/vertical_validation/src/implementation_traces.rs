@@ -212,10 +212,9 @@ fn trace_state_machine_transfer_chain(
 
     let mut state = create_test_state(seed_bytes, pk);
     let sender_key = builtin_balance_key(pk, "ERA");
-    state.token_balances.insert(
-        sender_key,
-        Balance::from_state(100, state.hash),
-    );
+    state
+        .token_balances
+        .insert(sender_key, Balance::from_state(100, state.hash));
     refresh_state_hash(&mut state);
 
     let mut machine = StateMachine::new();
@@ -268,10 +267,9 @@ fn trace_state_machine_signature_rejection(
 
     let mut state = create_test_state(seed_bytes, pk);
     let sender_key = builtin_balance_key(pk, "ERA");
-    state.token_balances.insert(
-        sender_key,
-        Balance::from_state(100, state.hash),
-    );
+    state
+        .token_balances
+        .insert(sender_key, Balance::from_state(100, state.hash));
     refresh_state_hash(&mut state);
 
     let original_hash = state.hash().expect("original hash");
@@ -289,7 +287,9 @@ fn trace_state_machine_signature_rejection(
 
     match machine.current_state() {
         Some(current) => {
-            if crate::compat_shim::state_number(&current) != crate::compat_shim::state_number(&state) {
+            if crate::compat_shim::state_number(&current)
+                != crate::compat_shim::state_number(&state)
+            {
                 failures.push("state machine advanced after rejected signature".into());
             }
             if current.hash != original_hash {
@@ -318,10 +318,9 @@ fn trace_state_machine_fork_divergence(
 
     let mut state = create_test_state(seed_bytes, pk);
     let sender_key = builtin_balance_key(pk, "ERA");
-    state.token_balances.insert(
-        sender_key,
-        Balance::from_state(100, state.hash),
-    );
+    state
+        .token_balances
+        .insert(sender_key, Balance::from_state(100, state.hash));
     refresh_state_hash(&mut state);
     let prev_hash = state.hash().expect("fork parent hash");
 
@@ -1241,7 +1240,10 @@ fn trace_token_manager_overspend_rejection(
     let new_entropy = compute_next_entropy(&harness.state, &op);
 
     if crate::compat_shim::manager_create_token_state_transition(
-        &harness.state, op, new_entropy, None,
+        &harness.state,
+        op,
+        new_entropy,
+        None,
     )
     .is_ok()
     {
@@ -2131,20 +2133,16 @@ fn build_token_harness(seed_bytes: &[u8; 32], pk: &[u8]) -> TokenTraceHarness {
     let policy_commit = dsm::core::token::resolve_policy_commit(TRACE_TOKEN_ID);
     let sender_key =
         dsm::core::token::derive_canonical_balance_key(&policy_commit, pk, TRACE_TOKEN_ID);
-    let recipient_key = dsm::core::token::derive_canonical_balance_key(
-        &policy_commit,
-        &recipient,
-        TRACE_TOKEN_ID,
-    );
+    let recipient_key =
+        dsm::core::token::derive_canonical_balance_key(&policy_commit, &recipient, TRACE_TOKEN_ID);
 
     state.token_balances.insert(
         sender_key.clone(),
         Balance::from_state(TRACE_INITIAL_BALANCE, state.hash),
     );
-    state.token_balances.insert(
-        recipient_key.clone(),
-        Balance::from_state(0, state.hash),
-    );
+    state
+        .token_balances
+        .insert(recipient_key.clone(), Balance::from_state(0, state.hash));
     refresh_state_hash(&mut state);
 
     TokenTraceHarness {

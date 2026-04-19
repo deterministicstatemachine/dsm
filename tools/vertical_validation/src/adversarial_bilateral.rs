@@ -222,7 +222,8 @@ fn attack_replay(seed: &[u8; 32], pk: &[u8], sk: &[u8]) -> AdversarialAttackResu
     // Execute Transfer A at state 0 -> state 1
     let op = signed_transfer(sk, &genesis, vec![0x01; 8], 10);
     let op_clone = op.clone();
-    let state1 = crate::compat_shim::machine_execute_transition(&mut machine, op).expect("first transition");
+    let state1 =
+        crate::compat_shim::machine_execute_transition(&mut machine, op).expect("first transition");
 
     // Replay the SAME operation at state 1
     let state2_result = crate::compat_shim::machine_execute_transition(&mut machine, op_clone);
@@ -305,7 +306,8 @@ fn attack_state_number_manipulation(
 
     // Execute one valid transition to get state 1
     let op = signed_transfer(sk, &genesis, vec![0x01; 8], 10);
-    let state1 = crate::compat_shim::machine_execute_transition(&mut machine, op).expect("transition");
+    let state1 =
+        crate::compat_shim::machine_execute_transition(&mut machine, op).expect("transition");
 
     // §4.3 — no state_number to manipulate. Equivalent attack in the
     // counterless model: forge the self-hash without recomputing it.
@@ -328,8 +330,7 @@ fn attack_state_number_manipulation(
 
     AdversarialAttackResult {
         attack_name: "self_hash_forgery".into(),
-        description: "Forged self-hash must be rejected by verify_transition_integrity"
-            .into(),
+        description: "Forged self-hash must be rejected by verify_transition_integrity".into(),
         expected_result: "rejected (Ok(false) or Err)".into(),
         actual_result: format!("{result:?}"),
         passed,
@@ -345,7 +346,8 @@ fn attack_hash_chain_break(seed: &[u8; 32], pk: &[u8], sk: &[u8]) -> Adversarial
 
     // Execute one valid transition
     let op = signed_transfer(sk, &genesis, vec![0x02; 8], 10);
-    let state1 = crate::compat_shim::machine_execute_transition(&mut machine, op).expect("transition");
+    let state1 =
+        crate::compat_shim::machine_execute_transition(&mut machine, op).expect("transition");
 
     // Tamper with prev_state_hash
     let mut tampered = state1;

@@ -157,10 +157,9 @@ fn build_policy_backed_token_harness(seed_bytes: &[u8; 32], pk: &[u8]) -> TokenP
         sender_key.clone(),
         Balance::from_state(PROPERTY_TEST_INITIAL_BALANCE, state.hash),
     );
-    state.token_balances.insert(
-        recipient_key.clone(),
-        Balance::from_state(0, state.hash),
-    );
+    state
+        .token_balances
+        .insert(recipient_key.clone(), Balance::from_state(0, state.hash));
 
     TokenPropertyHarness {
         manager,
@@ -274,10 +273,9 @@ fn test_hash_chain_continuity(
     let mut rng = ChaCha20Rng::seed_from_u64(seed);
 
     let mut state = create_test_state(seed_bytes, pk);
-    state.token_balances.insert(
-        "ERA".into(),
-        Balance::from_state(10_000, state.hash),
-    );
+    state
+        .token_balances
+        .insert("ERA".into(), Balance::from_state(10_000, state.hash));
 
     let mut machine = StateMachine::new();
     machine.set_state(state.clone());
@@ -325,10 +323,9 @@ fn test_state_number_monotonicity(
     let mut rng = ChaCha20Rng::seed_from_u64(seed);
 
     let mut state = create_test_state(seed_bytes, pk);
-    state.token_balances.insert(
-        "ERA".into(),
-        Balance::from_state(10_000, state.hash),
-    );
+    state
+        .token_balances
+        .insert("ERA".into(), Balance::from_state(10_000, state.hash));
 
     let mut machine = StateMachine::new();
     machine.set_state(state.clone());
@@ -385,10 +382,9 @@ fn test_entropy_determinism(
     // We run a chain and manually recompute the expected entropy at each step,
     // verifying the state machine's output matches.
     let mut state = create_test_state(seed_bytes, pk);
-    state.token_balances.insert(
-        "ERA".into(),
-        Balance::from_state(10_000, state.hash),
-    );
+    state
+        .token_balances
+        .insert("ERA".into(), Balance::from_state(10_000, state.hash));
 
     let mut machine = StateMachine::new();
     machine.set_state(state.clone());
@@ -494,7 +490,9 @@ fn test_token_conservation(
                 if recipient_after < recipient_before {
                     failures.push(format!("iter {i}: recipient balance decreased on transfer"));
                 }
-                if crate::compat_shim::state_number(&new_state) != crate::compat_shim::state_number(&harness.state) + 1 {
+                if crate::compat_shim::state_number(&new_state)
+                    != crate::compat_shim::state_number(&harness.state) + 1
+                {
                     failures.push(format!(
                         "iter {i}: token transition state_number did not increment"
                     ));
@@ -556,7 +554,10 @@ fn test_non_negative_balances(
         let new_entropy = compute_next_entropy(&harness.state, &op);
 
         match crate::compat_shim::manager_create_token_state_transition(
-            &harness.state, op, new_entropy, None,
+            &harness.state,
+            op,
+            new_entropy,
+            None,
         ) {
             Ok(_) => {
                 failures.push(format!(
@@ -600,10 +601,9 @@ fn test_fork_exclusion(
     let mut rng = ChaCha20Rng::seed_from_u64(seed);
 
     let mut state = create_test_state(seed_bytes, pk);
-    state.token_balances.insert(
-        "ERA".into(),
-        Balance::from_state(10_000, state.hash),
-    );
+    state
+        .token_balances
+        .insert("ERA".into(), Balance::from_state(10_000, state.hash));
 
     for i in 0..iterations {
         // Two different operations from the same parent state

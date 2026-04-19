@@ -63,10 +63,9 @@ fn make_genesis(seed: &[u8; 32], pk: &[u8]) -> (State, StateMachine) {
     if let Ok(h) = state.hash() {
         state.hash = h;
     }
-    state.token_balances.insert(
-        "ERA".into(),
-        Balance::from_state(1_000_000, state.hash),
-    );
+    state
+        .token_balances
+        .insert("ERA".into(), Balance::from_state(1_000_000, state.hash));
     let mut machine = StateMachine::new();
     machine.set_state(state.clone());
     (state, machine)

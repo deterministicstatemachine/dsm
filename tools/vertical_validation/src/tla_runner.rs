@@ -118,7 +118,9 @@ impl TlaRunner {
         // Build TLC command following run_tlc.sh pattern. Use DFID for bounded
         // validation so local runs do not depend on TLC's Java RMI FPSet path,
         // which is blocked in sandboxed environments.
-        let config_text = tokio::fs::read_to_string(&config_path).await.unwrap_or_default();
+        let config_text = tokio::fs::read_to_string(&config_path)
+            .await
+            .unwrap_or_default();
         let dfid_depth = std::env::var("DSM_TLC_DFID_DEPTH")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())

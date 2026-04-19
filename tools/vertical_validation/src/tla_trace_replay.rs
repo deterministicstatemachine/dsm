@@ -625,8 +625,7 @@ impl DsmImplementationHarness {
         let recipient = self.device(&to)?.device_id.to_vec();
         let counterparty_id = self.device(&to)?.device_id;
         let counterparty_pk = self.device(&to)?.identity_pk.clone();
-        let counterparty_state_number =
-            crate::compat_shim::state_number(&self.device(&to)?.state);
+        let counterparty_state_number = crate::compat_shim::state_number(&self.device(&to)?.state);
 
         let sender = self
             .devices
@@ -639,11 +638,9 @@ impl DsmImplementationHarness {
             &payload,
             recipient,
         )?;
-        let new_state = crate::compat_shim::machine_execute_transition(
-            &mut sender.state_machine,
-            operation,
-        )
-        .map_err(|e| anyhow!("StateMachine::execute_transition failed on net_send: {e}"))?;
+        let new_state =
+            crate::compat_shim::machine_execute_transition(&mut sender.state_machine, operation)
+                .map_err(|e| anyhow!("StateMachine::execute_transition failed on net_send: {e}"))?;
         sender.state = new_state.clone();
 
         // §4.3 — counterparty_state_number is no longer part of the relationship context.
@@ -1400,9 +1397,10 @@ fn create_direct_trace_state(
     let policy_commit = dsm::core::token::resolve_policy_commit("ERA");
     let balance_key =
         dsm::core::token::derive_canonical_balance_key(&policy_commit, public_key, "ERA");
-    state
-        .token_balances
-        .insert(balance_key, Balance::from_state(TRACE_INITIAL_BALANCE, state.hash));
+    state.token_balances.insert(
+        balance_key,
+        Balance::from_state(TRACE_INITIAL_BALANCE, state.hash),
+    );
     state.hash = state
         .hash()
         .map_err(|e| anyhow!("failed to hash direct replay funded genesis state: {e}"))?;
@@ -1648,10 +1646,7 @@ fn replay_structural_trace(states: &[TlaState], required_vars: &[&str]) -> Vec<S
         let current_keys = pair[0].keys().collect::<BTreeSet<_>>();
         let next_keys = pair[1].keys().collect::<BTreeSet<_>>();
         if current_keys != next_keys {
-            failures.push(format!(
-                "step {} changed the visible variable set",
-                idx + 1
-            ));
+            failures.push(format!("step {} changed the visible variable set", idx + 1));
         }
     }
 
@@ -2395,13 +2390,7 @@ fn update_relationship_smt_leaf(
         rel.clone(),
         TlaValue::Int(new_tip),
     )?;
-    set_nested_map_entry(
-        state,
-        "smtState",
-        d2.clone(),
-        rel,
-        TlaValue::Int(new_tip),
-    )?;
+    set_nested_map_entry(state, "smtState", d2.clone(), rel, TlaValue::Int(new_tip))?;
     increment_map_entry(state, "deviceRoots", d1.clone(), 1)?;
     increment_map_entry(state, "deviceRoots", d2.clone(), 1)
 }
