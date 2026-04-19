@@ -1,16 +1,19 @@
 # format: file|exact_fixed_string|description
 
-# Frontend invoke/query mappings
-dsm_client/frontend/src/dsm/transactions.ts|appRouterInvokeBin('wallet.sendSmart'|frontend online transfer maps to wallet.sendSmart
-dsm_client/frontend/src/dsm/transactions.ts|appRouterInvokeBin('message.send'|frontend online message maps to message.send
-dsm_client/frontend/src/dsm/transactions.ts|appRouterInvokeBin('wallet.sendOffline'|frontend bilateral prepare routes via wallet.sendOffline
-dsm_client/frontend/src/dsm/WebViewBridge.ts|methodName: 'bilateralOfflineSend'|bridge payload methodName for bilateral offline send
-dsm_client/frontend/src/dsm/WebViewBridge.ts|method: 'appRouterInvoke'|bridge rpc invoke method anchor
-dsm_client/frontend/src/dsm/WebViewBridge.ts|method: 'appRouterQuery'|bridge rpc query method anchor
+# Frontend invoke/query mappings (post-16f0763 unified ingress boundary)
+dsm_client/frontend/src/dsm/transactions.ts|routerInvokeBin('wallet.send'|frontend online transfer maps to wallet.send
+dsm_client/frontend/src/dsm/transactions.ts|routerInvokeBin('wallet.sendSmart'|frontend smart online transfer maps to wallet.sendSmart
+dsm_client/frontend/src/dsm/transactions.ts|routerInvokeBin('message.send'|frontend online message maps to message.send
+dsm_client/frontend/src/dsm/transactions.ts|routerInvokeBin('wallet.sendOffline'|frontend bilateral prepare routes via wallet.sendOffline
+dsm_client/frontend/src/dsm/WebViewBridge.ts|buildRouterInvokeIngressRequest|bridge builds routerInvoke via ingress helper
+dsm_client/frontend/src/dsm/WebViewBridge.ts|buildRouterQueryIngressRequest|bridge builds routerQuery via ingress helper
+dsm_client/frontend/src/dsm/NativeBoundaryBridge.ts|case: 'routerInvoke'|ingress routerInvoke payload case exists
+dsm_client/frontend/src/dsm/NativeBoundaryBridge.ts|case: 'routerQuery'|ingress routerQuery payload case exists
+dsm_client/frontend/src/dsm/NativeBoundaryBridge.ts|nativeBoundaryIngress|native boundary ingress dispatch method exists
 
 # JNI framed/native entrypoints
-dsm_client/deterministic_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.rs|Java_com_dsm_wallet_bridge_UnifiedNativeApi_appRouterInvokeFramed|jni invoke framed export exists
-dsm_client/deterministic_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.rs|Java_com_dsm_wallet_bridge_UnifiedNativeApi_appRouterQueryFramed|jni query framed export exists
+dsm_client/deterministic_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.rs|Java_com_dsm_wallet_bridge_UnifiedNativeApi_dispatchIngress|jni dispatchIngress export exists
+dsm_client/deterministic_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.rs|Java_com_dsm_wallet_bridge_UnifiedNativeApi_dispatchStartup|jni dispatchStartup export exists
 dsm_client/deterministic_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.rs|Java_com_dsm_wallet_bridge_UnifiedNativeApi_bilateralOfflineSend|jni bilateral offline export exists
 
 # SDK router method handlers
