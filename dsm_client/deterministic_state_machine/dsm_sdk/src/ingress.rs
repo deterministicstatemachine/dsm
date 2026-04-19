@@ -963,9 +963,18 @@ mod tests {
 
     use async_trait::async_trait;
     use once_cell::sync::Lazy;
+    use serial_test::serial;
 
     use crate::bridge::{install_app_router, AppInvoke, AppQuery, AppResult, AppRouter};
 
+    // Local mutex serializes tests within this module. We additionally apply
+    // `#[serial]` to every test so they cooperate with the global
+    // `serial_test` mutex used by other modules (notably
+    // `handlers::bitcoin_invoke_routes::tests`) which mutate the same global
+    // C-DBRW binding-key slot. Without the global serialization, a parallel
+    // bitcoin test calling `install_test_identity(.., vec![0xD1; 32])` could
+    // overwrite the binding key between this module's `setup_test_env()` (which
+    // clears it) and its `install_identity_context_core(...)` reading it back.
     static TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
     struct TestRouter;
@@ -1057,6 +1066,7 @@ endpoint = "http://127.0.0.1:8080"
     }
 
     #[test]
+    #[serial]
     fn dispatch_ingress_empty_request_returns_invalid_input() {
         let _guard = setup_test_env();
         let response = dispatch_ingress(IngressRequest { operation: None });
@@ -1066,6 +1076,7 @@ endpoint = "http://127.0.0.1:8080"
     }
 
     #[test]
+    #[serial]
     fn dispatch_ingress_bytes_invalid_proto_returns_invalid_input() {
         let _guard = setup_test_env();
         let response_bytes = dispatch_ingress_bytes(&[0xff, 0xfe, 0xfd]);
@@ -1075,6 +1086,7 @@ endpoint = "http://127.0.0.1:8080"
     }
 
     #[test]
+    #[serial]
     fn envelope_request_strips_optional_prefix_and_reframes_success_output() {
         let _guard = setup_test_env();
         let request_env = Envelope {
@@ -1105,6 +1117,7 @@ endpoint = "http://127.0.0.1:8080"
     }
 
     #[test]
+    #[serial]
     fn malformed_envelope_returns_invalid_input() {
         let _guard = setup_test_env();
         let response = dispatch_ingress(IngressRequest {
@@ -1118,6 +1131,7 @@ endpoint = "http://127.0.0.1:8080"
     }
 
     #[test]
+    #[serial]
     fn router_query_success_returns_router_payload() {
         let _guard = setup_test_env();
         install_app_router(Arc::new(TestRouter)).expect("install router");
@@ -1133,6 +1147,7 @@ endpoint = "http://127.0.0.1:8080"
     }
 
     #[test]
+    #[serial]
     fn router_invoke_success_returns_router_payload() {
         let _guard = setup_test_env();
         install_app_router(Arc::new(TestRouter)).expect("install router");
@@ -1150,6 +1165,7 @@ endpoint = "http://127.0.0.1:8080"
     }
 
     #[test]
+    #[serial]
     fn router_absent_maps_to_not_ready() {
         let _guard = setup_test_env();
         let response = dispatch_ingress(IngressRequest {
@@ -1164,6 +1180,7 @@ endpoint = "http://127.0.0.1:8080"
     }
 
     #[test]
+    #[serial]
     fn hardware_facts_success_returns_envelope_wrapped_snapshot() {
         let _guard = setup_test_env();
         let response = dispatch_ingress(IngressRequest {
@@ -1197,6 +1214,7 @@ endpoint = "http://127.0.0.1:8080"
     }
 
     #[test]
+    #[serial]
     fn startup_empty_request_returns_invalid_input() {
         let _guard = setup_test_env();
         let response = dispatch_startup(StartupRequest { operation: None });
@@ -1206,6 +1224,7 @@ endpoint = "http://127.0.0.1:8080"
     }
 
     #[test]
+    #[serial]
     fn startup_set_storage_base_dir_is_idempotent() {
         let _guard = setup_test_env();
         let path_utf8 = crate::storage_utils::get_storage_base_dir()
@@ -1228,6 +1247,7 @@ endpoint = "http://127.0.0.1:8080"
     }
 
     #[test]
+    #[serial]
     fn startup_initialize_sdk_installs_minimal_router() {
         let _guard = setup_test_env();
         let response = dispatch_startup(StartupRequest {
@@ -1249,6 +1269,7 @@ endpoint = "http://127.0.0.1:8080"
     }
 
     #[test]
+    #[serial]
     fn startup_minimal_router_routes_system_genesis_validation() {
         let _guard = setup_test_env();
         let response = dispatch_startup(StartupRequest {
@@ -1283,6 +1304,7 @@ endpoint = "http://127.0.0.1:8080"
     }
 
     #[test]
+    #[serial]
     fn startup_initialize_identity_context_sets_binding_key_and_router() {
         let _guard = setup_test_env();
         install_identity_context_core(vec![0x11; 32], vec![0x22; 32], vec![0x33; 32])
@@ -1295,6 +1317,7 @@ endpoint = "http://127.0.0.1:8080"
     }
 
     #[test]
+    #[serial]
     fn startup_initialize_identity_context_rejects_short_binding_key() {
         let _guard = setup_test_env();
         let response = dispatch_startup(StartupRequest {
@@ -1312,6 +1335,7 @@ endpoint = "http://127.0.0.1:8080"
     }
 
     #[test]
+    #[serial]
     fn startup_restore_identity_context_derives_binding_key_and_router() {
         let _guard = setup_test_env();
         let hw = vec![0x33; 32];
@@ -1346,6 +1370,7 @@ endpoint = "http://127.0.0.1:8080"
     }
 
     #[test]
+    #[serial]
     fn startup_restore_identity_context_is_idempotent_for_same_identity() {
         let _guard = setup_test_env();
 
@@ -1383,6 +1408,7 @@ endpoint = "http://127.0.0.1:8080"
     }
 
     #[test]
+    #[serial]
     fn startup_restore_identity_context_rejects_mismatched_identity() {
         let _guard = setup_test_env();
 

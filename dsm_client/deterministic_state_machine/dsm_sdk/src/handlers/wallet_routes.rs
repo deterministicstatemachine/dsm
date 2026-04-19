@@ -271,9 +271,11 @@ fn encode_offline_transfer_operation_canonical(
     push_u8(&mut out, 3); // Operation::Transfer tag
     push_bytes(&mut out, to_device_id);
 
-    let mut balance_bytes = Vec::with_capacity(24);
+    // §4.3 canonical Balance encoding: value (u64 le) ‖ locked (u64 le).
+    // No counter, no tick. Optional state_hash (32B) is omitted for offline
+    // transfer authoring — the receiver derives it on settlement.
+    let mut balance_bytes = Vec::with_capacity(16);
     balance_bytes.extend_from_slice(&amount.to_le_bytes());
-    balance_bytes.extend_from_slice(&0u64.to_le_bytes());
     balance_bytes.extend_from_slice(&0u64.to_le_bytes());
     push_bytes(&mut out, &balance_bytes);
 

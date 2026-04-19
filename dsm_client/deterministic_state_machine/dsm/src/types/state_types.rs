@@ -112,11 +112,7 @@ pub struct StateParams {
 
 impl StateParams {
     /// Create a new state parameters object
-    pub fn new(
-        entropy: Vec<u8>,
-        operation: Operation,
-        device_info: DeviceInfo,
-    ) -> Self {
+    pub fn new(entropy: Vec<u8>, operation: Operation, device_info: DeviceInfo) -> Self {
         Self {
             entropy,
             encapsulated_entropy: None,
@@ -687,7 +683,6 @@ impl State {
 
         Ok(out)
     }
-
 }
 
 impl CanonicalEncode for State {
@@ -709,7 +704,8 @@ mod tests {
     fn dbrw_summary_hash_does_not_change_state_hash() {
         let device_info = DeviceInfo::new([0x11; 32], vec![0x22; 64]);
 
-        let base = State::new(StateParams::new(vec![1, 2, 3, 4],
+        let base = State::new(StateParams::new(
+            vec![1, 2, 3, 4],
             Operation::Noop,
             device_info.clone(),
         ));
@@ -1286,7 +1282,7 @@ mod tests {
 
     #[test]
     fn state_params_new_defaults() {
-        let sp = StateParams::new( vec![1], Operation::Noop, test_device_info());
+        let sp = StateParams::new(vec![1], Operation::Noop, test_device_info());
         assert_eq!(sp.entropy, vec![1]);
         assert!(sp.encapsulated_entropy.is_none());
         assert_eq!(sp.prev_state_hash, [0u8; 32]);
@@ -1295,14 +1291,14 @@ mod tests {
 
     #[test]
     fn state_params_with_encapsulated_entropy() {
-        let sp = StateParams::new( vec![], Operation::Noop, test_device_info())
+        let sp = StateParams::new(vec![], Operation::Noop, test_device_info())
             .with_encapsulated_entropy(vec![0xEE; 32]);
         assert_eq!(sp.encapsulated_entropy, Some(vec![0xEE; 32]));
     }
 
     #[test]
     fn state_params_with_prev_state_hash() {
-        let sp = StateParams::new( vec![], Operation::Noop, test_device_info())
+        let sp = StateParams::new(vec![], Operation::Noop, test_device_info())
             .with_prev_state_hash([0xAA; 32]);
         assert_eq!(sp.prev_state_hash, [0xAA; 32]);
     }
@@ -1311,14 +1307,14 @@ mod tests {
     fn state_params_with_sparse_index() {
         let si = SparseIndex::new(vec![1, 2, 3]);
         let sp =
-            StateParams::new( vec![], Operation::Noop, test_device_info()).with_sparse_index(si);
+            StateParams::new(vec![], Operation::Noop, test_device_info()).with_sparse_index(si);
         assert_eq!(sp.sparse_index.indices, vec![1, 2, 3]);
     }
 
     #[test]
     fn state_params_with_forward_commitment() {
         let pc = PreCommitment::new("test".into(), HashMap::new(), HashSet::new(), 0, [0; 32]);
-        let sp = StateParams::new( vec![], Operation::Noop, test_device_info())
+        let sp = StateParams::new(vec![], Operation::Noop, test_device_info())
             .with_forward_commitment(pc);
         assert!(sp.forward_commitment.is_some());
     }
@@ -1334,11 +1330,13 @@ mod tests {
 
     #[test]
     fn state_hash_varies_with_entropy() {
-        let a = State::new(StateParams::new(vec![0x00; 16],
+        let a = State::new(StateParams::new(
+            vec![0x00; 16],
             Operation::Noop,
             test_device_info(),
         ));
-        let b = State::new(StateParams::new(vec![0xFF; 16],
+        let b = State::new(StateParams::new(
+            vec![0xFF; 16],
             Operation::Noop,
             test_device_info(),
         ));
@@ -1348,11 +1346,11 @@ mod tests {
     #[test]
     fn state_hash_varies_with_prev_state_hash() {
         let a = State::new(
-            StateParams::new( vec![1], Operation::Noop, test_device_info())
+            StateParams::new(vec![1], Operation::Noop, test_device_info())
                 .with_prev_state_hash([0x00; 32]),
         );
         let b = State::new(
-            StateParams::new( vec![1], Operation::Noop, test_device_info())
+            StateParams::new(vec![1], Operation::Noop, test_device_info())
                 .with_prev_state_hash([0xFF; 32]),
         );
         assert_ne!(a.compute_hash().unwrap(), b.compute_hash().unwrap());
@@ -1370,7 +1368,7 @@ mod tests {
             [0xCC; 32],
         );
         let with = State::new(
-            StateParams::new( vec![0xAA; 16], Operation::Noop, test_device_info())
+            StateParams::new(vec![0xAA; 16], Operation::Noop, test_device_info())
                 .with_forward_commitment(pc),
         );
 

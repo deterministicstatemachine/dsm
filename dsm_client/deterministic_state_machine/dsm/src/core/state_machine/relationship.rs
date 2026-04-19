@@ -14,11 +14,7 @@ use crate::crypto::blake3::dsm_domain_hasher;
 use base32;
 use zerocopy::IntoBytes;
 
-use crate::types::{
-    error::DsmError,
-    operations::Operation,
-    state_types::State,
-};
+use crate::types::{error::DsmError, operations::Operation, state_types::State};
 
 #[derive(Debug, Clone)]
 pub struct StateTransition {

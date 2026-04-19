@@ -116,8 +116,7 @@ impl BilateralStateManager {
     ) -> Result<State, DsmError> {
         let eid = Self::id_from_32(entity_id);
         let cid = Self::id_from_32(counterparty_id);
-        self.relationship_manager
-            .get_relationship_state(&eid, &cid)
+        self.relationship_manager.get_relationship_state(&eid, &cid)
     }
 
     /// Execute a bilateral state transition (bytes-only IDs)

@@ -320,6 +320,12 @@ pub struct FailedOnlineSendRollback<'a> {
     pub token_id: &'a str,
     pub failed_state: &'a State,
     pub previous_state: &'a State,
+    /// Optional pre-send DeviceState head; when provided, the head cache row
+    /// in `bcr_device_heads` is reverted to this snapshot in the same SQLite
+    /// txn that wipes the failed `bcr_chain_states` row. Without it the
+    /// cache stays pointed at the failed advance until the next successful
+    /// op UPSERTs over it.
+    pub previous_head: Option<&'a dsm::types::device_state::DeviceState>,
     pub recipient_device_id: &'a [u8; 32],
     pub amount: u64,
     pub memo: Option<&'a str>,
@@ -1447,6 +1453,7 @@ impl WalletSDK {
             rollback.tx_id,
             &self.device_id_base32(),
             canonical_token_id,
+            rollback.previous_head,
         )
         .map_err(|e| {
             DsmError::internal(

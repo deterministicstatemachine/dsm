@@ -1020,9 +1020,7 @@ fn apply_token_balance_delta(
                 .token_balances
                 .get(&sender_key)
                 .cloned()
-                .unwrap_or_else(|| {
-                    Balance::from_state(0, current_state.hash)
-                });
+                .unwrap_or_else(|| Balance::from_state(0, current_state.hash));
 
             if is_recipient {
                 // Credit the LOCAL device's balance key (derived from public_key).
@@ -1038,9 +1036,7 @@ fn apply_token_balance_delta(
                     .token_balances
                     .get(&local_credit_key)
                     .cloned()
-                    .unwrap_or_else(|| {
-                        Balance::from_state(0, current_state.hash)
-                    });
+                    .unwrap_or_else(|| Balance::from_state(0, current_state.hash));
                 let new_recipient_value = local_balance
                     .value()
                     .checked_add(amount.value())
@@ -1060,7 +1056,10 @@ fn apply_token_balance_delta(
                     ));
                 }
 
-                let new_sender_balance = Balance::from_state(sender_balance.value() - amount.value(), current_state.hash);
+                let new_sender_balance = Balance::from_state(
+                    sender_balance.value() - amount.value(),
+                    current_state.hash,
+                );
 
                 next_state
                     .token_balances
@@ -1076,16 +1075,15 @@ fn apply_token_balance_delta(
                         .token_balances
                         .get(&recipient_key)
                         .cloned()
-                        .unwrap_or_else(|| {
-                            Balance::from_state(0, current_state.hash)
-                        });
+                        .unwrap_or_else(|| Balance::from_state(0, current_state.hash));
                     let new_recipient_value = recipient_balance
                         .value()
                         .checked_add(amount.value())
                         .ok_or_else(|| {
                             DsmError::invalid_operation("Balance overflow on transfer credit")
                         })?;
-                    let new_recipient_balance = Balance::from_state(new_recipient_value, current_state.hash);
+                    let new_recipient_balance =
+                        Balance::from_state(new_recipient_value, current_state.hash);
                     next_state
                         .token_balances
                         .insert(recipient_key, new_recipient_balance);
@@ -1107,9 +1105,7 @@ fn apply_token_balance_delta(
                 .token_balances
                 .get(&owner_key)
                 .cloned()
-                .unwrap_or_else(|| {
-                    Balance::from_state(0, current_state.hash)
-                });
+                .unwrap_or_else(|| Balance::from_state(0, current_state.hash));
             let new_mint_value = current_balance
                 .value()
                 .checked_add(amount.value())
@@ -1135,9 +1131,7 @@ fn apply_token_balance_delta(
                 .token_balances
                 .get(&owner_key)
                 .cloned()
-                .unwrap_or_else(|| {
-                    Balance::from_state(0, current_state.hash)
-                });
+                .unwrap_or_else(|| Balance::from_state(0, current_state.hash));
             if owner_balance.value() < amount.value() {
                 return Err(DsmError::insufficient_balance(
                     token_id_str,

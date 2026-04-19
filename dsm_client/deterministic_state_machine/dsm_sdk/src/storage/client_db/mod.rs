@@ -377,21 +377,43 @@ fn create_schema(conn: &Connection) -> Result<()> {
             created_at  INTEGER NOT NULL
         );
 
-        -- Per §4.3 no state counter. Archive ordering uses sqlite's implicit
-        -- rowid (insertion order) combined with the explicit `prev_state_hash`
-        -- linkage for replay walking.
-        CREATE TABLE IF NOT EXISTS bcr_states(
-            device_id       BLOB NOT NULL,
-            state_hash      BLOB NOT NULL,
-            prev_state_hash BLOB NOT NULL,
-            state_bytes     BLOB NOT NULL,
-            published       INTEGER NOT NULL,
-            created_at      INTEGER NOT NULL,
-            PRIMARY KEY (device_id, state_hash)
+        -- Per-relationship chain state archive (§2.2/§4.2).
+        -- Authoritative per-advance history keyed by chain_tip (h_{n+1}).
+        -- The legacy device-monolith `bcr_states` table is fully removed —
+        -- canonical history lives here, current head lives in
+        -- `bcr_device_heads` below.
+        CREATE TABLE IF NOT EXISTS bcr_chain_states(
+            device_id        BLOB NOT NULL,    -- 32B (DevID_A)
+            rel_key          BLOB NOT NULL,    -- 32B (k_{A↔B} per §2.2)
+            chain_tip        BLOB NOT NULL,    -- 32B (h_{n+1} = compute_chain_tip())
+            embedded_parent  BLOB NOT NULL,    -- 32B (h_n on this chain)
+            state_bytes      BLOB NOT NULL,    -- canonical RelationshipChainState bytes
+            published        INTEGER NOT NULL,
+            created_at       INTEGER NOT NULL,
+            PRIMARY KEY (device_id, chain_tip)
         );
 
-        CREATE INDEX IF NOT EXISTS idx_bcr_states_device_published
-            ON bcr_states(device_id, published);
+        CREATE INDEX IF NOT EXISTS idx_bcr_chain_by_rel
+            ON bcr_chain_states(device_id, rel_key, created_at);
+        CREATE INDEX IF NOT EXISTS idx_bcr_chain_by_time
+            ON bcr_chain_states(device_id, created_at);
+
+        -- Device head cache (§2.2). Non-authoritative latest snapshot of the
+        -- canonical DeviceState (SMT root + balances + tips). UPSERTed on
+        -- every successful advance and at genesis. Authoritative source
+        -- remains the bcr_chain_states log + the in-memory StateMachine.
+        CREATE TABLE IF NOT EXISTS bcr_device_heads(
+            device_id   BLOB PRIMARY KEY,      -- 32B
+            smt_root    BLOB NOT NULL,         -- 32B (r_A — stored for sanity check)
+            head_bytes  BLOB NOT NULL,         -- canonical DeviceState bytes
+            updated_at  INTEGER NOT NULL
+        );
+
+        -- Legacy device-monolith table removed (§4.3): no state counter, no
+        -- monolithic snapshot keyed by hash. Drop any pre-migration rows so
+        -- they cannot be read accidentally during the transition.
+        DROP TABLE IF EXISTS bcr_states;
+        DROP INDEX IF EXISTS idx_bcr_states_device_published;
 
         CREATE TABLE IF NOT EXISTS bilateral_sessions(
             commitment_hash           BLOB PRIMARY KEY,
@@ -442,7 +464,12 @@ fn create_schema(conn: &Connection) -> Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_system_peer_events_created
             ON system_peer_events(peer_key, created_at ASC);
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_system_peer_events_source_state
+        -- §4.3: there is no counter. Two distinct events may legitimately
+        -- carry the same `source_state_number` (it is now derived material,
+        -- e.g. hash[0]). Drop any pre-migration UNIQUE index, then create a
+        -- non-unique companion index for lookup.
+        DROP INDEX IF EXISTS idx_system_peer_events_source_state;
+        CREATE INDEX IF NOT EXISTS idx_system_peer_events_source_state_nonunique
             ON system_peer_events(peer_key, source_state_number);
 
         CREATE TABLE IF NOT EXISTS transactions(

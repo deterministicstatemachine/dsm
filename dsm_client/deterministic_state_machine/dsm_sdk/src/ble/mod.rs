@@ -7,7 +7,6 @@
 //! - If no backend is registered, the router must return a deterministic, explicit error.
 
 use std::sync::Arc;
-#[cfg(any(test, debug_assertions))]
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use once_cell::sync::OnceCell;
@@ -26,9 +25,8 @@ pub trait BleBackend: Send + Sync + 'static {
 static BLE_BACKEND: OnceCell<Arc<dyn BleBackend>> = OnceCell::new();
 
 // Test-only flag: when set, pretend no backend is installed even if registered.
-// Default is false; only tests should toggle this.
-// NOTE: This flag is only available in debug/test builds for safety.
-#[cfg(any(test, debug_assertions))]
+// Default is false; only tests flip it via `force_no_backend_for_tests`.
+// Always present so release-mode integration tests can drive the path.
 static FORCE_NO_BACKEND: AtomicBool = AtomicBool::new(false);
 
 /// Register the platform BLE backend. This is a one-shot installer; subsequent calls are ignored.
@@ -38,7 +36,6 @@ pub fn register_ble_backend<B: BleBackend>(backend: B) {
 
 /// Try to get a reference to the registered backend.
 pub fn get_ble_backend() -> Option<&'static Arc<dyn BleBackend>> {
-    #[cfg(any(test, debug_assertions))]
     if FORCE_NO_BACKEND.load(Ordering::Relaxed) {
         return None;
     }
@@ -47,8 +44,9 @@ pub fn get_ble_backend() -> Option<&'static Arc<dyn BleBackend>> {
 
 /// Test/helper: force the registry to behave as if no backend is installed.
 /// This does not mutate the underlying OnceCell; it only gates access until toggled back.
-/// Only available in test/debug builds.
-#[cfg(any(test, debug_assertions))]
+/// Available in all build configurations because integration tests linking against
+/// the release-mode crate need to call it. The body is a single atomic store —
+/// harmless in production where no caller flips the flag.
 pub fn force_no_backend_for_tests(v: bool) {
     FORCE_NO_BACKEND.store(v, Ordering::Relaxed);
 }

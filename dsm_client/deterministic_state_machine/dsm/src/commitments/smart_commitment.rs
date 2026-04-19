@@ -291,7 +291,11 @@ impl SmartCommitment {
     }
 
     /// Stricter verify wrapper (adds sanity for distant locks)
-    pub fn verify_fixed(&self, origin_hash: &[u8; 32], origin_entropy: &[u8]) -> Result<bool, DsmError> {
+    pub fn verify_fixed(
+        &self,
+        origin_hash: &[u8; 32],
+        origin_entropy: &[u8],
+    ) -> Result<bool, DsmError> {
         if !self.verify(origin_hash, origin_entropy)? {
             return Ok(false);
         }
@@ -1328,8 +1332,8 @@ mod tests {
     fn test_origin() -> ([u8; 32], Vec<u8>) {
         let hash = [0x11u8; 32];
         let entropy = vec![
-            1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0,
+            1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0,
         ];
         (hash, entropy)
     }

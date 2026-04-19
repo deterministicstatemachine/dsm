@@ -5,13 +5,11 @@ use anyhow::Result;
 use log::info;
 use rusqlite::{params, Connection, Row};
 
-use super::bcr::store_bcr_state_with_conn;
 use super::get_connection;
 use super::tokens::{upsert_balance_projection_with_conn, BalanceProjectionRecord};
 use super::types::TransactionRecord;
 use crate::storage::codecs::{meta_from_blob, meta_to_blob};
 use crate::util::deterministic_time::tick;
-use dsm::types::state_types::State;
 
 fn upsert_transaction_row(conn: &Connection, tx: &TransactionRecord, now: u64) -> Result<usize> {
     let affected = conn.execute(
@@ -103,12 +101,20 @@ pub fn apply_sender_settlement_and_store_transaction_atomic(
     Ok(())
 }
 
+/// Atomic sender-side settlement persistence:
+/// - Optional balance projection (display cache; non-authoritative).
+/// - Transaction history row.
+/// - Sender-settlements bookkeeping row.
+///
+/// Canonical state (chain state + device head) is written upstream at the
+/// `AdvanceOutcome` chokepoint (`CoreSDK::execute_on_relationship` →
+/// `dual_write_advance_outcome`). This function MUST NOT touch any
+/// canonical-state table.
 pub fn apply_sender_settlement_bundle_atomic(
     sender_device_id: &str,
     token_id: Option<&str>,
     amount: u64,
     tx: &TransactionRecord,
-    settled_state: Option<&State>,
     projection: Option<&BalanceProjectionRecord>,
 ) -> Result<()> {
     let binding = get_connection()?;
@@ -121,9 +127,6 @@ pub fn apply_sender_settlement_bundle_atomic(
     let txdb = conn.transaction()?;
     let token = token_id.unwrap_or("ERA");
 
-    if let Some(state) = settled_state {
-        store_bcr_state_with_conn(&txdb, state, true, now)?;
-    }
     if let Some(record) = projection {
         upsert_balance_projection_with_conn(&txdb, record)?;
     }
@@ -212,10 +215,15 @@ pub struct ReceiverConfirmBundle<'a> {
     pub token_id: Option<&'a str>,
     pub amount: u64,
     pub tx: &'a TransactionRecord,
-    pub settled_state: Option<&'a State>,
     pub projection: Option<&'a BalanceProjectionRecord>,
 }
 
+/// Atomic receiver-side settlement persistence: contact chain-tip CAS,
+/// optional balance projection (display cache), and transaction history.
+///
+/// Canonical state (chain state + device head) is written upstream at the
+/// `AdvanceOutcome` chokepoint. This function MUST NOT touch any
+/// canonical-state table.
 pub fn apply_receiver_confirm_bundle_atomic(bundle: ReceiverConfirmBundle<'_>) -> Result<()> {
     let binding = get_connection()?;
     let mut conn = binding.lock().unwrap_or_else(|poisoned| {
@@ -245,9 +253,6 @@ pub fn apply_receiver_confirm_bundle_atomic(bundle: ReceiverConfirmBundle<'_>) -
         ],
     )?;
 
-    if let Some(state) = bundle.settled_state {
-        store_bcr_state_with_conn(&txdb, state, true, now)?;
-    }
     if let Some(record) = bundle.projection {
         upsert_balance_projection_with_conn(&txdb, record)?;
     }
@@ -257,7 +262,7 @@ pub fn apply_receiver_confirm_bundle_atomic(bundle: ReceiverConfirmBundle<'_>) -
 
     if affected > 0 {
         info!(
-            "Atomic receiver settlement bundle stored (tip+history+state): device={} token={:?} amount={} tx_id={}",
+            "Atomic receiver settlement bundle stored (tip+history): device={} token={:?} amount={} tx_id={}",
             bundle.receiver_device_id, bundle.token_id, bundle.amount, bundle.tx.tx_id
         );
     }
@@ -333,6 +338,7 @@ pub fn rollback_failed_online_send_atomic(
     tx_id: &str,
     projection_device_id: &str,
     token_id: &str,
+    prev_head: Option<&dsm::types::device_state::DeviceState>,
 ) -> Result<()> {
     let binding = get_connection()?;
     let mut conn = binding.lock().unwrap_or_else(|poisoned| {
@@ -341,8 +347,11 @@ pub fn rollback_failed_online_send_atomic(
     });
 
     let txdb = conn.transaction()?;
-    let removed_bcr = txdb.execute(
-        "DELETE FROM bcr_states WHERE device_id = ?1 AND state_hash = ?2",
+    // Wipe the chain-state row that the failed advance archived. The
+    // `failed_state_hash` is the chain tip — `RelationshipChainState::
+    // compute_chain_tip()` produces it.
+    let removed_chain = txdb.execute(
+        "DELETE FROM bcr_chain_states WHERE device_id = ?1 AND chain_tip = ?2",
         params![device_id.as_slice(), failed_state_hash.as_slice()],
     )?;
     let removed_tx = txdb.execute("DELETE FROM transactions WHERE tx_id = ?1", params![tx_id])?;
@@ -350,14 +359,25 @@ pub fn rollback_failed_online_send_atomic(
         "DELETE FROM balance_projections WHERE device_id = ?1 AND token_id = ?2",
         params![projection_device_id, token_id],
     )?;
+
+    // Revert `bcr_device_heads` to the pre-send head when the caller
+    // provided one. Same SQLite txn so the cache view never observes
+    // the failed advance after rollback completes.
+    let mut head_reverted = false;
+    if let Some(head) = prev_head {
+        crate::storage::client_db::update_bcr_device_head_with_conn(&txdb, head, tick())?;
+        head_reverted = true;
+    }
+
     txdb.commit()?;
 
     info!(
-        "Rolled back failed online send artifacts: tx_id={} removed_bcr={} removed_tx={} removed_projection={} token={}",
+        "Rolled back failed online send artifacts: tx_id={} removed_chain={} removed_tx={} removed_projection={} head_reverted={} token={}",
         tx_id,
-        removed_bcr,
+        removed_chain,
         removed_tx,
         removed_projection,
+        head_reverted,
         token_id,
     );
 
@@ -508,15 +528,16 @@ pub fn get_transaction_history(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::client_db::bcr::{get_bcr_chain_states, store_bcr_chain_state};
     use crate::storage::client_db::tokens::{upsert_balance_projection, BalanceProjectionRecord};
     use crate::storage::client_db::types::TransactionRecord;
     use crate::storage::client_db::{
-        get_balance_projection, get_bcr_states, get_transaction_history, init_database,
-        reset_database_for_tests, store_bcr_state,
+        get_balance_projection, get_transaction_history, init_database, reset_database_for_tests,
     };
+    use dsm::types::device_state::RelationshipChainState;
     use dsm::types::operations::Operation;
-    use dsm::types::state_types::{DeviceInfo, State, StateParams};
     use serial_test::serial;
+    use std::collections::BTreeMap;
     use std::collections::HashMap;
 
     #[test]
@@ -530,12 +551,20 @@ mod tests {
 
         let device = [0x41u8; 32];
         let device_b32 = crate::util::text_id::encode_base32_crockford(&device);
-        let failed_state = State::new(StateParams::new(
-            vec![0xAA],
-            Operation::Noop,
-            DeviceInfo::new(device, vec![0x22; 64]),
-        ));
-        store_bcr_state(&failed_state, false).expect("store failed state");
+        let failed_chain_state = RelationshipChainState {
+            rel_key: [0x51u8; 32],
+            embedded_parent: [0x61u8; 32],
+            counterparty_devid: [0x71u8; 32],
+            operation: Operation::Noop,
+            entropy: vec![0x81; 32],
+            encapsulated_entropy: None,
+            balance_witness: BTreeMap::new(),
+            entity_sig: None,
+            counterparty_sig: None,
+            dbrw_summary_hash: None,
+        };
+        let failed_chain_tip = failed_chain_state.compute_chain_tip();
+        store_bcr_chain_state(&device, &failed_chain_state, false).expect("store failed chain");
 
         upsert_balance_projection(&BalanceProjectionRecord {
             balance_key: format!("{}|{}", device_b32, "ERA"),
@@ -544,21 +573,21 @@ mod tests {
             policy_commit: crate::util::text_id::encode_base32_crockford(&[0x33u8; 32]),
             available: 9,
             locked: 0,
-            source_state_hash: crate::util::text_id::encode_base32_crockford(&failed_state.hash),
-            source_state_number: failed_state.hash[0] as u64,
+            source_state_hash: crate::util::text_id::encode_base32_crockford(&failed_chain_tip),
+            source_state_number: failed_chain_tip[0] as u64,
             updated_at: 0,
         })
         .expect("store projection");
 
         store_transaction(&TransactionRecord {
             tx_id: "tx-rollback".to_string(),
-            tx_hash: crate::util::text_id::encode_base32_crockford(&failed_state.hash),
+            tx_hash: crate::util::text_id::encode_base32_crockford(&failed_chain_tip),
             from_device: device_b32.clone(),
             to_device: "peer".to_string(),
             amount: 9,
             tx_type: "online".to_string(),
             status: "confirmed".to_string(),
-            chain_height: failed_state.hash[0] as u64,
+            chain_height: failed_chain_tip[0] as u64,
             step_index: 1,
             commitment_hash: None,
             proof_data: None,
@@ -569,19 +598,20 @@ mod tests {
 
         rollback_failed_online_send_atomic(
             &device,
-            &failed_state.hash,
+            &failed_chain_tip,
             "tx-rollback",
             &device_b32,
             "ERA",
+            None, // no head reversion in this artifact-removal test
         )
         .expect("rollback artifacts");
 
         assert!(
-            get_bcr_states(&device, false)
-                .expect("load bcr states")
+            get_bcr_chain_states(&device, false)
+                .expect("load bcr chain states")
                 .into_iter()
-                .all(|state| state.hash != failed_state.hash),
-            "failed archived state must be removed"
+                .all(|state| state.compute_chain_tip() != failed_chain_tip),
+            "failed chain-state row must be removed"
         );
         assert!(
             get_balance_projection(&device_b32, "ERA")
@@ -595,6 +625,100 @@ mod tests {
                 .into_iter()
                 .all(|tx| tx.tx_id != "tx-rollback"),
             "failed transaction record must be removed"
+        );
+    }
+
+    /// When the caller supplies a `prev_head`, the rollback also reverts
+    /// `bcr_device_heads` so the head cache no longer reflects the failed
+    /// advance. This must happen in the SAME SQLite txn that wipes the
+    /// failed `bcr_chain_states` row — both gone, both restored, atomically.
+    #[test]
+    #[serial]
+    fn rollback_failed_online_send_atomic_reverts_head_when_prev_supplied() {
+        use crate::storage::client_db::bcr::{load_bcr_device_head, update_bcr_device_head};
+        use dsm::types::device_state::RelChainTip;
+
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        reset_database_for_tests();
+        init_database().expect("init db");
+
+        let device = [0x42u8; 32];
+        let device_b32 = crate::util::text_id::encode_base32_crockford(&device);
+
+        // 1) Establish a baseline pre-send head — empty SMT.
+        let pre_head =
+            dsm::types::device_state::DeviceState::new([0u8; 32], device, vec![0xAA; 32], 64);
+        let pre_root = pre_head.root();
+        update_bcr_device_head(&pre_head).expect("seed pre head");
+
+        // 2) Simulate a failed advance — head with a tip installed via
+        //    `restore()`, producing a different SMT root.
+        let failed_chain_state = RelationshipChainState {
+            rel_key: [0x52u8; 32],
+            embedded_parent: [0x62u8; 32],
+            counterparty_devid: [0x72u8; 32],
+            operation: Operation::Noop,
+            entropy: vec![0x82; 32],
+            encapsulated_entropy: None,
+            balance_witness: BTreeMap::new(),
+            entity_sig: None,
+            counterparty_sig: None,
+            dbrw_summary_hash: None,
+        };
+        let failed_chain_tip = failed_chain_state.compute_chain_tip();
+        let failed_head = dsm::types::device_state::DeviceState::restore(
+            [0u8; 32],
+            device,
+            vec![0xAA; 32],
+            None,
+            BTreeMap::new(),
+            vec![(
+                failed_chain_state.rel_key,
+                RelChainTip {
+                    chain_tip: failed_chain_tip,
+                    counterparty_devid: failed_chain_state.counterparty_devid,
+                    state: Some(failed_chain_state.clone()),
+                },
+            )],
+            64,
+        )
+        .expect("restore failed head");
+        let failed_root = failed_head.root();
+        assert_ne!(
+            pre_root, failed_root,
+            "failed head must have a different SMT root"
+        );
+        update_bcr_device_head(&failed_head).expect("install failed head");
+        store_bcr_chain_state(&device, &failed_chain_state, false).expect("store failed chain");
+
+        // 3) Roll back with prev_head supplied.
+        rollback_failed_online_send_atomic(
+            &device,
+            &failed_chain_tip,
+            "tx-revert-head",
+            &device_b32,
+            "ERA",
+            Some(&pre_head),
+        )
+        .expect("rollback with prev_head");
+
+        // 4) Both the chain row and the head must be reverted.
+        assert!(
+            get_bcr_chain_states(&device, false)
+                .expect("load chain states")
+                .into_iter()
+                .all(|s| s.compute_chain_tip() != failed_chain_tip),
+            "failed chain row must be removed"
+        );
+        let head_after = load_bcr_device_head(&device)
+            .expect("load head after rollback")
+            .expect("head row present");
+        assert_eq!(
+            head_after.root(),
+            pre_root,
+            "head cache must be reverted to pre-send root"
         );
     }
 }

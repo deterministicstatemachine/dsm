@@ -73,9 +73,8 @@ impl DLVManager {
         let fulfillment_bytes = fm_proto.encode_to_vec();
 
         // Build the unsigned DlvCreate operation
-        let locked_balance = locked_amount.map(|amt| {
-            Balance::from_state(amt, vault.reference_state_hash)
-        });
+        let locked_balance =
+            locked_amount.map(|amt| Balance::from_state(amt, vault.reference_state_hash));
 
         let operation = Operation::DlvCreate {
             vault_id: vault_id.as_bytes().to_vec(),

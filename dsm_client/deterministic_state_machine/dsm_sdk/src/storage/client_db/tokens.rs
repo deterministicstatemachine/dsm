@@ -142,6 +142,45 @@ pub fn build_balance_projection_from_state(
     })
 }
 
+/// Build a projection row from the canonical [`DeviceState`] head.
+///
+/// `effective_balance` is the post-settlement device-level balance for
+/// `policy_commit`. For senders this is `head.balance(policy_commit)` because
+/// `execute_on_relationship` has already applied the debit. For receivers
+/// (whose head currently does not auto-credit until their next own op) the
+/// caller passes `head.balance(policy_commit) + amount` so the UI shows the
+/// fresh credit immediately.
+///
+/// `source_state_hash` is the device head root `r_A` (§2.2). The legacy
+/// `source_state_number` field is set to `0` — there are no counters in
+/// canonical state per §4.3, and freshness comparisons fall back to
+/// `updated_at` (deterministic tick) for ordering.
+pub fn build_balance_projection_from_device_head(
+    device_id: &str,
+    token_id: &str,
+    policy_commit: &[u8; 32],
+    head: &dsm::types::device_state::DeviceState,
+    effective_balance: u64,
+    locked: u64,
+) -> Result<BalanceProjectionRecord> {
+    let balance_key =
+        dsm::core::token::derive_canonical_balance_key(policy_commit, head.public_key(), token_id);
+    let head_root = head.root();
+    let spendable = effective_balance.saturating_sub(locked);
+
+    Ok(BalanceProjectionRecord {
+        balance_key,
+        device_id: device_id.to_string(),
+        token_id: token_id.to_string(),
+        policy_commit: crate::util::text_id::encode_base32_crockford(policy_commit),
+        available: spendable,
+        locked,
+        source_state_hash: crate::util::text_id::encode_base32_crockford(&head_root),
+        source_state_number: 0,
+        updated_at: tick(),
+    })
+}
+
 pub fn get_balance_projection(
     device_id: &str,
     token_id: &str,

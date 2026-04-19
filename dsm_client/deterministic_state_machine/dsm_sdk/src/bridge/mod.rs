@@ -80,20 +80,23 @@ pub struct AppResult {
 pub trait AppRouter: Send + Sync {
     async fn query(&self, q: AppQuery) -> AppResult;
     async fn invoke(&self, i: AppInvoke) -> AppResult;
-    /// Reload in-memory balance cache from SQLite after external balance changes (e.g. BLE debit).
+    /// Reload in-memory balance cache from SQLite after external balance
+    /// changes (e.g. BLE bilateral receiver credit landing in the
+    /// `balance_projections` table). The canonical DeviceState head is
+    /// installed by `execute_on_relationship` at the AdvanceOutcome
+    /// chokepoint; settlement-layer state never needs to be pushed back
+    /// into CoreSDK.
     fn sync_balance_cache(&self) {}
-    /// Return the device's canonical tip state (authoritative token balances).
+
+    /// Read-only snapshot of the canonical [`DeviceState`] head (§2.2 `r_A`).
     ///
-    /// Used by bilateral settlement to source B_n before applying the transfer
-    /// delta.  Returns `None` if no canonical state is available yet.
-    fn get_device_current_state(&self) -> Option<dsm::types::state_types::State> {
+    /// Used by settlement delegates to materialise display-layer projections
+    /// from the device head's authoritative balance scalar — never to mutate
+    /// it. Returns `None` when the router does not yet hold an identity
+    /// (pre-genesis bootstrap router).
+    fn device_head(&self) -> Option<dsm::types::device_state::DeviceState> {
         None
     }
-
-    /// Push a settled canonical state into CoreSDK's in-memory state machine.
-    /// Must be called BEFORE sync_balance_cache() after bilateral settlement
-    /// so the in-memory tip is ahead of any stale BCR archive entry.
-    fn push_device_state(&self, _state: &dsm::types::state_types::State) {}
 }
 
 /// App router storage. Uses RwLock to allow replacement (MinimalBootstrapRouter → AppRouterImpl).

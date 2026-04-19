@@ -2608,7 +2608,11 @@ mod tests {
                 .expect("invalidation signature");
 
         vault
-            .invalidate("creator-requested", &expected_signature, &reference_state_hash)
+            .invalidate(
+                "creator-requested",
+                &expected_signature,
+                &reference_state_hash,
+            )
             .expect("vault invalidation");
 
         match vault.state {

@@ -14,7 +14,6 @@ use std::time::Instant;
 
 use dsm::types::error::DsmError;
 use dsm::types::operations::Operation;
-use dsm::types::state_types::State;
 use log::{info, warn};
 use tokio::sync::Mutex;
 
@@ -57,20 +56,19 @@ pub struct BilateralSettlementContext {
     /// New bilateral chain tip required for the receiver-side atomic persistence
     /// boundary.  Set to `[0u8; 32]` on sender paths where it is not needed.
     pub new_chain_tip: [u8; 32],
-    /// Canonical post-protocol state transition, when the caller has one.
-    ///
-    /// The application layer may merge token-balance settlement into this state
-    /// so the archived BCR snapshot reflects the completed wallet settlement.
-    pub canonical_state: Option<State>,
 }
 
 /// Result returned by [`BilateralSettlementDelegate::settle`].
+///
+/// The settlement layer no longer carries a "canonical state" snapshot back to
+/// the transport. The canonical [`DeviceState`](dsm::types::device_state::DeviceState)
+/// head is installed at the [`execute_on_relationship`](crate::sdk::core_sdk::CoreSDK::execute_on_relationship)
+/// chokepoint, so settlement only needs to materialise display projections
+/// (SQLite `balance_projections`) and fire transfer hooks.
 #[derive(Debug, Default)]
 pub struct BilateralSettlementOutcome {
     /// Transfer metadata used by frontend hooks and notifications.
     pub transfer_meta: crate::sdk::transfer_hooks::TransferMeta,
-    /// Canonical state snapshot to archive after settlement, when available.
-    pub canonical_state: Option<State>,
 }
 
 /// Application-layer callback installed on [`BilateralBleHandler`](super::BilateralBleHandler).

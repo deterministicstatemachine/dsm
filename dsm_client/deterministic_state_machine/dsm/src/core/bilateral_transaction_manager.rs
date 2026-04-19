@@ -131,10 +131,7 @@ fn initial_relationship_chain_tip(
 /// Compute the initial chain tip for a bilateral relationship using device
 /// IDs only (genesis hashes zeroed). Suitable for callers that don't have
 /// genesis hashes available — the output is still deterministic and symmetric.
-pub fn initial_chain_tip_from_device_ids(
-    dev_id_a: &[u8; 32],
-    dev_id_b: &[u8; 32],
-) -> [u8; 32] {
+pub fn initial_chain_tip_from_device_ids(dev_id_a: &[u8; 32], dev_id_b: &[u8; 32]) -> [u8; 32] {
     initial_relationship_chain_tip(dev_id_a, &[0u8; 32], dev_id_b, &[0u8; 32])
 }
 

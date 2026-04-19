@@ -84,15 +84,13 @@ pub fn builtin_token_id_for_policy_commit(policy_commit: &[u8; 32]) -> Option<&'
 }
 
 const ERA_POLICY_COMMIT: [u8; 32] = [
-    0xaf, 0x13, 0x49, 0xb9, 0xf5, 0xf9, 0xa1, 0xa6, 0xa0, 0x40, 0x4d, 0xea, 0x36, 0xdc,
-    0xc9, 0x49, 0x9b, 0xcb, 0x25, 0xc9, 0xad, 0xc1, 0x12, 0xb7, 0xcc, 0x9a, 0x93, 0xca,
-    0xe4, 0x1f, 0x32, 0x62,
+    0xaf, 0x13, 0x49, 0xb9, 0xf5, 0xf9, 0xa1, 0xa6, 0xa0, 0x40, 0x4d, 0xea, 0x36, 0xdc, 0xc9, 0x49,
+    0x9b, 0xcb, 0x25, 0xc9, 0xad, 0xc1, 0x12, 0xb7, 0xcc, 0x9a, 0x93, 0xca, 0xe4, 0x1f, 0x32, 0x62,
 ];
 
 const DBTC_POLICY_COMMIT: [u8; 32] = [
-    0x03, 0xa4, 0x2b, 0x67, 0x19, 0x17, 0xaf, 0x84, 0x2f, 0x07, 0x3d, 0x87, 0xcf, 0xa4,
-    0x59, 0xd8, 0x45, 0xb9, 0x68, 0xfd, 0xb1, 0xab, 0xcb, 0x03, 0x31, 0x2d, 0x91, 0x4e,
-    0x35, 0x01, 0x62, 0x22,
+    0x03, 0xa4, 0x2b, 0x67, 0x19, 0x17, 0xaf, 0x84, 0x2f, 0x07, 0x3d, 0x87, 0xcf, 0xa4, 0x59, 0xd8,
+    0x45, 0xb9, 0x68, 0xfd, 0xb1, 0xab, 0xcb, 0x03, 0x31, 0x2d, 0x91, 0x4e, 0x35, 0x01, 0x62, 0x22,
 ];
 
 /// Resolve policy_commit for any token, including non-builtins.
@@ -206,9 +204,10 @@ impl TokenStateManager {
                 let sender_key = self.make_balance_key(sender_pk, &token_id_str)?;
                 let recipient_key = self.make_balance_key(recipient.as_slice(), &token_id_str)?;
 
-                let sender_balance = new_balances.get(&sender_key).cloned().unwrap_or_else(|| {
-                    Balance::from_state(0, current_state.hash)
-                });
+                let sender_balance = new_balances
+                    .get(&sender_key)
+                    .cloned()
+                    .unwrap_or_else(|| Balance::from_state(0, current_state.hash));
 
                 if sender_balance.value() < amount.value() {
                     return Err(DsmError::insufficient_balance(
@@ -223,13 +222,10 @@ impl TokenStateManager {
                     current_state.hash,
                 );
 
-                let recipient_balance =
-                    new_balances
-                        .get(&recipient_key)
-                        .cloned()
-                        .unwrap_or_else(|| {
-                            Balance::from_state(0, current_state.hash)
-                        });
+                let recipient_balance = new_balances
+                    .get(&recipient_key)
+                    .cloned()
+                    .unwrap_or_else(|| Balance::from_state(0, current_state.hash));
 
                 let new_recipient_value = recipient_balance
                     .value()
@@ -237,7 +233,8 @@ impl TokenStateManager {
                     .ok_or_else(|| {
                         DsmError::invalid_operation("Balance overflow on transfer credit")
                     })?;
-                let new_recipient_balance = Balance::from_state(new_recipient_value, current_state.hash);
+                let new_recipient_balance =
+                    Balance::from_state(new_recipient_value, current_state.hash);
 
                 new_balances.insert(sender_key, new_sender_balance);
                 new_balances.insert(recipient_key, new_recipient_balance);
@@ -265,9 +262,10 @@ impl TokenStateManager {
                 let owner_pk = &current_state.device_info.public_key;
                 let owner_key = self.make_balance_key(owner_pk, &token_id_str)?;
 
-                let current_balance = new_balances.get(&owner_key).cloned().unwrap_or_else(|| {
-                    Balance::from_state(0, current_state.hash)
-                });
+                let current_balance = new_balances
+                    .get(&owner_key)
+                    .cloned()
+                    .unwrap_or_else(|| Balance::from_state(0, current_state.hash));
 
                 let new_mint_value = current_balance
                     .value()
@@ -296,9 +294,10 @@ impl TokenStateManager {
                 let owner_pk = &current_state.device_info.public_key;
                 let owner_key = self.make_balance_key(owner_pk, &token_id_str)?;
 
-                let owner_balance = new_balances.get(&owner_key).cloned().unwrap_or_else(|| {
-                    Balance::from_state(0, current_state.hash)
-                });
+                let owner_balance = new_balances
+                    .get(&owner_key)
+                    .cloned()
+                    .unwrap_or_else(|| Balance::from_state(0, current_state.hash));
 
                 if owner_balance.value() < amount.value() {
                     return Err(DsmError::insufficient_balance(
@@ -335,10 +334,10 @@ impl TokenStateManager {
                         let creator_key =
                             self.make_balance_key(creator_public_key.as_slice(), &tid_str)?;
 
-                        let creator_balance =
-                            new_balances.get(&creator_key).cloned().unwrap_or_else(|| {
-                                Balance::from_state(0, current_state.hash)
-                            });
+                        let creator_balance = new_balances
+                            .get(&creator_key)
+                            .cloned()
+                            .unwrap_or_else(|| Balance::from_state(0, current_state.hash));
 
                         if creator_balance.value() < amount.value() {
                             return Err(DsmError::insufficient_balance(

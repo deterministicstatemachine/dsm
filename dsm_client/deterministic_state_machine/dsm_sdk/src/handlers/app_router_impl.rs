@@ -267,6 +267,11 @@ struct OnlineTransferRollback<'a> {
     token_id: &'a str,
     failed_state: &'a dsm::types::state_types::State,
     previous_state: &'a dsm::types::state_types::State,
+    /// Pre-send DeviceState head, captured at the same instant as
+    /// `previous_state`. Used by `rollback_failed_online_send_atomic` to
+    /// revert `bcr_device_heads` in the same SQLite txn that wipes the
+    /// failed advance's `bcr_chain_states` row.
+    previous_head: Option<&'a dsm::types::device_state::DeviceState>,
     tx_id: &'a str,
     recipient_device_id: &'a [u8; 32],
     amount: u64,
@@ -297,6 +302,7 @@ impl AppRouterImpl {
                 token_id: rollback.token_id,
                 failed_state: rollback.failed_state,
                 previous_state: rollback.previous_state,
+                previous_head: rollback.previous_head,
                 recipient_device_id: rollback.recipient_device_id,
                 amount: rollback.amount,
                 memo: rollback.memo,
@@ -977,7 +983,10 @@ impl AppRouterImpl {
         let balance_anchor = dsm::crypto::blake3::domain_hash("DSM/balance-anchor", &[]);
         let signing_op = dsm::types::operations::Operation::Transfer {
             to_device_id: to_device_id.to_vec(),
-            amount: dsm::types::token_types::Balance::from_state(transfer_req.amount, *balance_anchor.as_bytes()),
+            amount: dsm::types::token_types::Balance::from_state(
+                transfer_req.amount,
+                *balance_anchor.as_bytes(),
+            ),
             token_id: token_id.as_bytes().to_vec(),
             mode: dsm::types::operations::TransactionMode::Unilateral,
             nonce: nonce.clone(),
@@ -1151,7 +1160,10 @@ impl AppRouterImpl {
         // verification (transition.rs create_next_state) uses identical bytes.
         let signed_op = dsm::types::operations::Operation::Transfer {
             to_device_id: to_device_id.to_vec(),
-            amount: dsm::types::token_types::Balance::from_state(transfer_req.amount, *balance_anchor.as_bytes()),
+            amount: dsm::types::token_types::Balance::from_state(
+                transfer_req.amount,
+                *balance_anchor.as_bytes(),
+            ),
             token_id: token_id.as_bytes().to_vec(),
             mode: dsm::types::operations::TransactionMode::Unilateral,
             nonce: nonce.clone(),
@@ -1163,6 +1175,12 @@ impl AppRouterImpl {
             signature: canonical_signature.clone(),
         };
 
+        // Capture the canonical pre-send head BEFORE any local advance so the
+        // rollback path can revert `bcr_device_heads` to it (same SQLite txn
+        // as the chain-state delete). `device_head()` returns `None` only
+        // before genesis — never on an active wallet — but we tolerate that
+        // shape and pass `Option<&DeviceState>` straight through.
+        let pre_send_head = self.core_sdk.device_head();
         let pre_send_state = match self.ensure_authoritative_wallet_state("wallet.send") {
             Ok(state) => state,
             Err(e) => {
@@ -1233,6 +1251,7 @@ impl AppRouterImpl {
             token_id: &token_id,
             failed_state: &new_state,
             previous_state: &pre_send_state,
+            previous_head: pre_send_head.as_ref(),
             tx_id: &signed_tx.id,
             recipient_device_id: &to_device_id,
             amount: transfer_req.amount,
@@ -1429,7 +1448,10 @@ impl AppRouterImpl {
             // Build Operation for b0x submission
             let transfer_op = dsm::types::operations::Operation::Transfer {
                 to_device_id: to_device_id.to_vec(),
-                amount: dsm::types::token_types::Balance::from_state(transfer_req.amount, *balance_anchor.as_bytes()),
+                amount: dsm::types::token_types::Balance::from_state(
+                    transfer_req.amount,
+                    *balance_anchor.as_bytes(),
+                ),
                 token_id: token_id.as_bytes().to_vec(),
                 mode: dsm::types::operations::TransactionMode::Unilateral,
                 nonce: nonce.to_vec(),
@@ -2395,24 +2417,19 @@ async fn fetch_quorum_device_identity(
 #[async_trait]
 impl AppRouter for AppRouterImpl {
     fn sync_balance_cache(&self) {
-        // Reload token balance projection from SQLite only.
-        // Do NOT re-load canonical state from BCR archive here — the caller
-        // has already pushed the settled canonical state via push_device_state().
-        // Re-loading from BCR would overwrite the just-pushed settled state
-        // with a potentially stale archive entry.
+        // Reload token balance projection from SQLite. The canonical
+        // DeviceState head is owned by CoreSDK and updated at the
+        // AdvanceOutcome chokepoint inside `execute_on_relationship`; this
+        // method only refreshes the display cache so UI reads pick up
+        // settlement-layer SQL writes (e.g. receiver-side bilateral
+        // credits landing in `balance_projections`).
         if let Err(e) = self.wallet.reload_balance_cache_for_self() {
             log::warn!("[AppRouter] sync_balance_cache failed: {}", e);
         }
     }
 
-    fn get_device_current_state(&self) -> Option<dsm::types::state_types::State> {
-        self.core_sdk.get_current_state().ok()
-    }
-
-    fn push_device_state(&self, state: &dsm::types::state_types::State) {
-        if let Err(e) = self.core_sdk.restore_state_snapshot(state) {
-            log::warn!("[AppRouter] push_device_state failed: {}", e);
-        }
+    fn device_head(&self) -> Option<dsm::types::device_state::DeviceState> {
+        self.core_sdk.device_head()
     }
 
     // ====================== QUERY ======================

@@ -26,6 +26,32 @@ fn init_test_storage() {
         vec![0xCC; 32],
         vec![0xDD; 32],
     );
+    // Install a deterministic 32-byte C-DBRW binding key so the canonical
+    // signing authority can derive a keypair during AppRouter::new().
+    // DBRW enforcement is ON, so without this the router fails to construct.
+    dsm_sdk::set_cdbrw_binding_key_for_testing(vec![0xEE; 32]);
+    // Publish a FullAccess trust snapshot so the C-DBRW access gate allows
+    // sensitive router operations (faucet.claim, balance.list, etc).
+    publish_full_access_for_tests();
+}
+
+fn publish_full_access_for_tests() {
+    use dsm_sdk::security::cdbrw_access_gate::{
+        next_iter, store_trust, AccessLevel, ResonantStatus, TrustSnapshot,
+    };
+    store_trust(TrustSnapshot {
+        access_level: AccessLevel::FullAccess,
+        resonant_status: ResonantStatus::Resonant,
+        h_hat: 1.0,
+        rho_hat: 1.0,
+        l_hat: 1.0,
+        h0_eff: 1.0,
+        trust_score: 1.0,
+        recommended_n: 1,
+        w1_distance: 0.0,
+        w1_threshold: 1.0,
+        iter: next_iter(),
+    });
 }
 
 #[test]

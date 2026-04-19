@@ -106,16 +106,11 @@ fn sanitize_generated_prost(out_dir: &std::path::Path) {
                         e
                     );
                 } else {
-                    println!(
-                        "cargo:warning=Sanitized generated proto file to avoid clippy ICE"
-                    );
+                    println!("cargo:warning=Sanitized generated proto file to avoid clippy ICE");
                 }
             }
         }
-        Err(e) => eprintln!(
-            "warning: failed to read generated proto file dsm.rs: {}",
-            e
-        ),
+        Err(e) => eprintln!("warning: failed to read generated proto file dsm.rs: {}", e),
     }
 }
 

@@ -1827,11 +1827,15 @@ impl AppRouterImpl {
                             // rel_key = k_{device↔vault}
                             let device_id = match self.core_sdk.get_current_state() {
                                 Ok(s) => s.device_info.device_id,
-                                Err(e) => return err(format!("bitcoin.deposit.complete: no state: {e}")),
+                                Err(e) => {
+                                    return err(format!("bitcoin.deposit.complete: no state: {e}"))
+                                }
                             };
                             let vault_id = *dsm::crypto::blake3::domain_hash(
-                                "DSM/vault-device", req.vault_op_id.as_bytes(),
-                            ).as_bytes();
+                                "DSM/vault-device",
+                                req.vault_op_id.as_bytes(),
+                            )
+                            .as_bytes();
                             let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
                                 &device_id, &vault_id,
                             );
@@ -1839,7 +1843,11 @@ impl AppRouterImpl {
                                 &device_id, &vault_id,
                             );
                             let unlock_applied_state = match self.core_sdk.execute_on_relationship(
-                                rel_key, vault_id, signed_unlock_op, &[], Some(init_tip),
+                                rel_key,
+                                vault_id,
+                                signed_unlock_op,
+                                &[],
+                                Some(init_tip),
                             ) {
                                 Ok((s, _)) => s,
                                 Err(e) => {
@@ -3983,8 +3991,10 @@ impl AppRouterImpl {
                                 Err(e) => return err(format!("await_and_complete: no state: {e}")),
                             };
                             let vault_id = *dsm::crypto::blake3::domain_hash(
-                                "DSM/vault-device", vault_op_id.as_bytes(),
-                            ).as_bytes();
+                                "DSM/vault-device",
+                                vault_op_id.as_bytes(),
+                            )
+                            .as_bytes();
                             let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
                                 &device_id, &vault_id,
                             );

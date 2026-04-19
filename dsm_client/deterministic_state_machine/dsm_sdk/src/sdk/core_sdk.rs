@@ -147,18 +147,18 @@ impl CoreSDK {
         state_machine: &Mutex<StateMachine>,
         device_id: &[u8; 32],
     ) -> Result<(), DsmError> {
-        let archived_states =
-            crate::storage::client_db::get_bcr_states(device_id, false).map_err(|e| {
+        if let Some(head) =
+            crate::storage::client_db::load_bcr_device_head(device_id).map_err(|e| {
                 DsmError::state_machine(format!(
-                    "Failed to load archived states during startup restore: {e}"
+                    "Failed to load cached device head during startup restore: {e}"
                 ))
-            })?;
-
-        if let Some(latest_state) = archived_states.last() {
-            state_machine.lock().set_state(latest_state.clone());
+            })?
+        {
+            let root = head.root();
+            state_machine.lock().set_device_head(head);
             log::info!(
-                "[CoreSDK] restored archived canonical state_number={} for device {}",
-                latest_state.hash[0] as u64,
+                "[CoreSDK] restored cached device head root={} for device {}",
+                crate::util::text_id::encode_base32_crockford(&root),
                 crate::util::text_id::encode_base32_crockford(device_id)
             );
         }
@@ -166,12 +166,96 @@ impl CoreSDK {
         Ok(())
     }
 
-    fn archive_state_snapshot(state: &State) -> Result<(), DsmError> {
-        crate::storage::client_db::store_bcr_state(state, false).map_err(|e| {
-            DsmError::state_machine(format!(
-                "Failed to archive canonical state {} for sparse replay: {e}",
-                state.hash[0] as u64
-            ))
+    /// Phase 4.1 — fail-closed dual-write at the AdvanceOutcome chokepoint.
+    ///
+    /// Writes one row to `bcr_chain_states` (authoritative per-advance
+    /// archive) and UPSERTs one row to `bcr_device_heads` (latest head cache)
+    /// in a single SQLite transaction. Both come from the same in-memory
+    /// `AdvanceOutcome` so there is no consistency window.
+    ///
+    /// Called BETWEEN `StateMachine::prepare_advance_relationship` and
+    /// `StateMachine::commit_advance`. If this returns `Err`, the caller
+    /// (`execute_on_relationship`) skips the commit step — the in-memory head
+    /// is unchanged and the operation is observable as never-happened. This
+    /// makes BCR persistence durable before the head is installed.
+    fn dual_write_advance_outcome(
+        outcome: &dsm::types::device_state::AdvanceOutcome,
+    ) -> Result<(), DsmError> {
+        use crate::storage::client_db::{
+            get_connection, store_bcr_chain_state_with_conn, update_bcr_device_head_with_conn,
+        };
+        use crate::util::deterministic_time::tick;
+
+        let devid = outcome.new_device_state.devid();
+        let now = tick();
+
+        let binding = get_connection().map_err(|e| {
+            DsmError::storage(
+                format!("dual-write: get_connection failed: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
+        let mut conn = binding.lock().unwrap_or_else(|poisoned| {
+            log::warn!("[CoreSDK] dual-write: DB lock poisoned, recovering");
+            poisoned.into_inner()
+        });
+
+        let tx = conn.transaction().map_err(|e| {
+            DsmError::storage(
+                format!("dual-write: begin transaction failed: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
+
+        store_bcr_chain_state_with_conn(&tx, &devid, &outcome.new_chain_state, false, now)
+            .map_err(|e| {
+                DsmError::storage(
+                    format!("dual-write: store_bcr_chain_state failed: {e}"),
+                    None::<std::io::Error>,
+                )
+            })?;
+        update_bcr_device_head_with_conn(&tx, &outcome.new_device_state, now).map_err(|e| {
+            DsmError::storage(
+                format!("dual-write: update_bcr_device_head failed: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
+        tx.commit().map_err(|e| {
+            DsmError::storage(
+                format!("dual-write: commit failed: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
+        Ok(())
+    }
+
+    /// Explicit head-cache write for genesis.
+    ///
+    /// Genesis has no `AdvanceOutcome` (no relationships exist yet), but the
+    /// `bcr_device_heads` cache needs a row so restore / reader paths can
+    /// locate the device. The `genesis_hash` argument is the canonical
+    /// `G_A` digest from the genesis state — it populates `DeviceState.genesis`
+    /// (§2.2) and is also used as the legacy SMT-root anchor for the
+    /// initial head so `verify_state` checks against the genesis hash work
+    /// before any relationship advance has fired.
+    fn write_genesis_device_head(&self, genesis_hash: [u8; 32]) -> Result<(), DsmError> {
+        use crate::storage::client_db::update_bcr_device_head;
+        let mut head = self.device_head().unwrap_or_else(|| {
+            dsm::types::device_state::DeviceState::new(
+                genesis_hash,
+                self.device_info.device_id,
+                self.device_info.public_key.clone(),
+                1024,
+            )
+        });
+        if head.legacy_anchor().is_none() {
+            head.bootstrap_legacy_root(genesis_hash);
+        }
+        update_bcr_device_head(&head).map_err(|e| {
+            DsmError::storage(
+                format!("genesis head-cache write failed: {e}"),
+                None::<std::io::Error>,
+            )
         })
     }
 
@@ -273,42 +357,14 @@ impl CoreSDK {
     /// Returns a compatibility `State` view derived from the canonical
     /// `DeviceState`. Prefer `device_head()` for new code.
     pub fn get_current_state(&self) -> Result<State, DsmError> {
+        // Delegate to StateMachine::current_state so callers always see the
+        // single source of truth: an explicit `legacy_state` (set via
+        // `set_state` / `restore_state_snapshot`) wins over the projected
+        // DeviceState view. If no legacy_state is pinned, the StateMachine
+        // synthesizes a compat State from the DeviceState head's SMT root +
+        // balances. Pre-genesis paths return None which we surface as an
+        // explicit error.
         let sm = self.state_machine.lock();
-        // Try DeviceState first (canonical), fall back to legacy current_state
-        if let Some(ds) = sm.device_head() {
-            let mut s = State::default();
-            s.device_info = dsm::types::state_types::DeviceInfo::new(
-                ds.devid(),
-                ds.public_key().to_vec(),
-            );
-            // Use the SMT root as the "hash" — it's the canonical device identity
-            s.hash = ds.root();
-            // Sync balances from DeviceState (keyed by 32-byte policy_commit)
-            // into State.token_balances (keyed by canonical
-            // `{prefix}|{token_id}` string per derive_canonical_balance_key)
-            // so balance.list et al can find them by token_id suffix.
-            let public_key = ds.public_key();
-            for (pc, val) in ds.balances_snapshot() {
-                let token_id = dsm::core::token::builtin_token_id_for_policy_commit(pc)
-                    .unwrap_or("");
-                let key = if token_id.is_empty() {
-                    let prefix = u128::from_le_bytes({
-                        let mut a = [0u8; 16];
-                        a.copy_from_slice(&pc[..16]);
-                        a
-                    });
-                    format!("{prefix}|?")
-                } else {
-                    dsm::core::token::derive_canonical_balance_key(pc, public_key, token_id)
-                };
-                s.token_balances.insert(
-                    key,
-                    dsm::types::token_types::Balance::from_state(*val, s.hash),
-                );
-            }
-            return Ok(s);
-        }
-        // Fallback for pre-genesis state
         sm.current_state()
             .ok_or_else(|| DsmError::state_machine("No current state available"))
     }
@@ -414,14 +470,19 @@ impl CoreSDK {
 
     /// Deterministic in-process genesis (for tests/bootstrap only)
     pub fn initialize_with_genesis_state(&self) -> Result<(), DsmError> {
-        let mut sm = self.state_machine.lock();
         let initial_entropy = [0u8; 32];
         let mut genesis_state = State::new_genesis(initial_entropy, self.device_info.clone());
         // Precompute and embed the hash so tests and callers see a non-empty hash field
         if let Ok(h) = genesis_state.compute_hash() {
             genesis_state.hash = h;
         }
-        sm.set_state(genesis_state);
+        let snapshot = {
+            let mut sm = self.state_machine.lock();
+            let snapshot = genesis_state.clone();
+            sm.set_state(genesis_state);
+            snapshot
+        };
+        self.write_genesis_device_head(snapshot.hash)?;
         Ok(())
     }
 
@@ -484,11 +545,13 @@ impl CoreSDK {
         // Route through relationship path with self-loop for generic ops
         let dev_id = self.get_current_state()?.device_info.device_id;
         let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&dev_id, &dev_id);
-        let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(&dev_id, &dev_id);
-        let (state, _) = self.execute_on_relationship(rel_key, dev_id, dsm_op, &[], Some(init_tip))?;
+        let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &dev_id, &dev_id,
+        );
+        let (state, _) =
+            self.execute_on_relationship(rel_key, dev_id, dsm_op, &[], Some(init_tip))?;
         Ok(state)
     }
-
 
     /// Execute a DSM operation on a specific relationship chain (§2.2, §4.2).
     ///
@@ -505,13 +568,24 @@ impl CoreSDK {
         initial_chain_tip: Option<[u8; 32]>,
     ) -> Result<(State, dsm::types::device_state::AdvanceOutcome), DsmError> {
         let mut sm = self.state_machine.lock();
-        let outcome = sm.advance_relationship(
+
+        // Phase 4.1 fail-closed pattern (§4.3 acceptance, §6.1 single-writer):
+        //   1. PREPARE — derive the AdvanceOutcome (pure; no head mutation).
+        //   2. WRITE  — persist `bcr_chain_states` + `bcr_device_heads` in one
+        //      SQLite transaction. If this fails, the in-memory head is
+        //      unchanged and the operation is observable as never-happened.
+        //   3. COMMIT — install the new head only after persistence succeeded.
+        // The `sm` lock is held across all three steps, so the prepare/write/
+        // commit sequence is atomic with respect to other advances.
+        let outcome = sm.prepare_advance_relationship(
             rel_key,
             counterparty_devid,
             operation,
             deltas,
             initial_chain_tip,
         )?;
+        Self::dual_write_advance_outcome(&outcome)?;
+        sm.commit_advance(&outcome);
 
         // Build a compatibility State view from the outcome for callers that
         // still read State fields. This is a derived view, not the source of
@@ -533,8 +607,8 @@ impl CoreSDK {
             // by their {token_id} suffix (e.g. "ERA", "dBTC").
             let public_key = outcome.new_device_state.public_key();
             for (pc, val) in outcome.new_device_state.balances_snapshot() {
-                let token_id = dsm::core::token::builtin_token_id_for_policy_commit(pc)
-                    .unwrap_or("");
+                let token_id =
+                    dsm::core::token::builtin_token_id_for_policy_commit(pc).unwrap_or("");
                 let key = if token_id.is_empty() {
                     let prefix = u128::from_le_bytes({
                         let mut a = [0u8; 16];
@@ -588,8 +662,8 @@ impl CoreSDK {
     // state_number, and the function compared the requested number against
     // `state.hash[0] as u64` (a value in [0,255]) — a degenerate match that
     // returned arbitrary archived states rather than the requested one. All
-    // 5 prior callers migrated to either a full BCR scan
-    // (resolve_policy_commit_strict, find_token_metadata_state) or to
+    // 5 prior callers migrated to either a chain-state archive scan
+    // (resolve_policy_commit_strict, find_token_metadata_operation) or to
     // local_genesis_hash() (token_mpc_sdk x3).
 
     /// Deterministic signer (no clocks, no external randomness)
@@ -652,18 +726,19 @@ impl CoreSDK {
             crate::util::text_id::encode_base32_crockford(&genesis_state.hash)
         );
 
-        // Install the new genesis as current state and archive it so that
-        // bilateral settlement always has a prior BCR state to reconcile against
-        // (the contact-add handshake anchors the chain tip; the genesis archive
-        // ensures latest_archived_state() is never None).
-        {
+        // Install the new genesis as current state and seed the canonical
+        // device head cache. There is no AdvanceOutcome at genesis, so the
+        // head cache write is the explicit one-shot equivalent — settlement
+        // and reader paths look up the device via `bcr_device_heads`.
+        let genesis_state_hash = {
             let mut sm = self.state_machine.lock();
             let mut s = State::new_genesis(genesis_state.initial_entropy, self.device_info.clone());
             s.hash = genesis_state.hash;
             let snapshot = s.clone();
             sm.set_state(s);
-            Self::archive_state_snapshot(&snapshot)?;
-        }
+            snapshot.hash
+        };
+        self.write_genesis_device_head(genesis_state_hash)?;
 
         // Optional dev-only seeding (idempotent)
         if let Err(e) = self.maybe_dev_seed_after_genesis().await {
@@ -730,14 +805,19 @@ impl CoreSDK {
             direction: dsm::types::device_state::BalanceDirection::Credit,
             amount: 1_000_000,
         }];
-        let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(&dev_id, &dev_id);
-        let mut sm = self.state_machine.lock();
-        let outcome = sm.advance_relationship(rel_key, dev_id, mint, &deltas, Some(init_tip))?;
-        let new_hash = outcome.new_chain_state.compute_chain_tip();
-        log::info!(
-            "Dev seeding applied; new chain tip {:02x?}",
-            &new_hash[..4]
+        let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &dev_id, &dev_id,
         );
+        let mut sm = self.state_machine.lock();
+        // Same fail-closed prepare → write → commit pattern as
+        // `execute_on_relationship`. The dev-seed mint participates in BCR
+        // archival so reader paths see the seeded balance.
+        let outcome =
+            sm.prepare_advance_relationship(rel_key, dev_id, mint, &deltas, Some(init_tip))?;
+        Self::dual_write_advance_outcome(&outcome)?;
+        sm.commit_advance(&outcome);
+        let new_hash = outcome.new_chain_state.compute_chain_tip();
+        log::info!("Dev seeding applied; new chain tip {:02x?}", &new_hash[..4]);
 
         // Write flag to ensure idempotence
         std::fs::write(flag_file, b"seeded=1").map_err(|e| {
@@ -1063,8 +1143,12 @@ impl CoreSDK {
         }
     }
 
-    fn token_metadata_for_state(&self, state: &State, token_id: &str) -> Option<TokenMetadata> {
-        match &state.operation {
+    fn token_metadata_for_operation(
+        &self,
+        op: &dsm::types::operations::Operation,
+        token_id: &str,
+    ) -> Option<TokenMetadata> {
+        match op {
             dsm::types::operations::Operation::Create { metadata, .. } => {
                 let proto = TokenMetadataProto::decode(metadata.as_slice()).ok()?;
                 let token_metadata = Self::token_metadata_from_proto(&proto);
@@ -1113,18 +1197,21 @@ impl CoreSDK {
             return Ok(commit);
         }
 
-        // Per §4.3 there is no `state_number`. Scan all archived BCR states
-        // (newest-first) for one carrying token metadata for this token_id.
-        // Replaces a broken `(0..=current.hash[0] as u64).rev()` walk that
-        // depended on `get_state_by_number` matching by `hash[0]`.
+        // Per §4.3 there is no `state_number`. Walk the per-relationship
+        // chain-state archive newest-first looking for an op that registered
+        // metadata for `token_id`. Chains are keyed by chain tip and ordered
+        // by insertion time — no counter, no derived sparse index.
         let device_id = self.device_info.device_id;
-        let states = crate::storage::client_db::get_bcr_states(&device_id, false).map_err(|e| {
-            DsmError::state(format!(
-                "Failed to load BCR states for policy commit lookup: {e}"
-            ))
-        })?;
+        let states =
+            crate::storage::client_db::get_bcr_chain_states(&device_id, false).map_err(|e| {
+                DsmError::state(format!(
+                    "Failed to load BCR chain states for policy commit lookup: {e}"
+                ))
+            })?;
         for state in states.into_iter().rev() {
-            if let Some(token_metadata) = self.token_metadata_for_state(&state, token_id) {
+            if let Some(token_metadata) =
+                self.token_metadata_for_operation(&state.operation, token_id)
+            {
                 return crate::policy::strict_policy_commit_for_token(
                     token_id,
                     token_metadata.policy_anchor.as_deref(),
@@ -1254,8 +1341,9 @@ impl CoreSDK {
         // recipient-side apply), the rel_key is k_{sender↔local_device}.
         let local_device_id_bytes_pre = crate::sdk::app_state::AppState::get_device_id()
             .ok_or_else(|| DsmError::state_machine("missing local device_id (AppState)"))?;
-        let sender_id_bytes_pre = crate::util::text_id::decode_base32_crockford(sender_device_id)
-            .ok_or_else(|| DsmError::invalid_operation("sender_device_id not valid base32"))?;
+        let sender_id_bytes_pre =
+            crate::util::text_id::decode_base32_crockford(sender_device_id)
+                .ok_or_else(|| DsmError::invalid_operation("sender_device_id not valid base32"))?;
 
         let (rel_key, counterparty, deltas) = {
             let mut local_arr = [0u8; 32];
@@ -1266,10 +1354,13 @@ impl CoreSDK {
             if sender_id_bytes_pre.len() == 32 {
                 sender_arr.copy_from_slice(&sender_id_bytes_pre);
             }
-            let rk = dsm::core::bilateral_transaction_manager::compute_smt_key(&local_arr, &sender_arr);
+            let rk =
+                dsm::core::bilateral_transaction_manager::compute_smt_key(&local_arr, &sender_arr);
             // For incoming transfers, we're the recipient → Credit
             let d: Vec<dsm::types::device_state::BalanceDelta> = match &op {
-                dsm::types::operations::Operation::Transfer { token_id, amount, .. } => {
+                dsm::types::operations::Operation::Transfer {
+                    token_id, amount, ..
+                } => {
                     let tid = String::from_utf8_lossy(token_id);
                     let pc = dsm::core::token::token_state_manager::resolve_policy_commit(&tid);
                     vec![dsm::types::device_state::BalanceDelta {
@@ -1285,18 +1376,20 @@ impl CoreSDK {
         let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
             &{
                 let mut a = [0u8; 32];
-                if local_device_id_bytes_pre.len() == 32 { a.copy_from_slice(&local_device_id_bytes_pre); }
+                if local_device_id_bytes_pre.len() == 32 {
+                    a.copy_from_slice(&local_device_id_bytes_pre);
+                }
                 a
             },
             &counterparty,
         );
-        let (new_state, _) = self.execute_on_relationship(
-            rel_key, counterparty, op.clone(), &deltas, Some(init_tip),
-        ).map_err(|e| {
-            DsmError::invalid_operation(format!(
-                "apply_operation_with_replay_protection: state machine execution failed: {e}"
-            ))
-        })?;
+        let (new_state, _) = self
+            .execute_on_relationship(rel_key, counterparty, op.clone(), &deltas, Some(init_tip))
+            .map_err(|e| {
+                DsmError::invalid_operation(format!(
+                    "apply_operation_with_replay_protection: state machine execution failed: {e}"
+                ))
+            })?;
 
         // Then handle database persistence based on operation type
         match op {
@@ -2055,29 +2148,49 @@ mod tests {
         // Route through relationship path with self-loop for generic ops
         let dev_id = device.device_id;
         let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&dev_id, &dev_id);
-        let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(&dev_id, &dev_id);
-        let (executed, _) = sdk.execute_on_relationship(rel_key, dev_id, op, &[], Some(init_tip))
+        let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &dev_id, &dev_id,
+        );
+        let (executed, outcome) = sdk
+            .execute_on_relationship(rel_key, dev_id, op, &[], Some(init_tip))
             .expect("execute operation");
         assert_ne!(executed.hash, [0u8; 32], "state hash should be non-zero");
 
-        let archived = crate::storage::client_db::get_bcr_states(&device.device_id, false)
-            .expect("load archived states");
+        let rel_archived =
+            crate::storage::client_db::get_bcr_chain_states(&device.device_id, false)
+                .expect("load archived chain states");
         assert!(
-            archived
+            rel_archived
                 .iter()
-                .any(|state| state.hash[0] as u64 == executed.hash[0] as u64),
-            "executed canonical state must be archived for sparse replay"
+                .any(|state| state.compute_chain_tip()
+                    == outcome.new_chain_state.compute_chain_tip()),
+            "execute_on_relationship must archive the per-advance chain state"
+        );
+        let cached_head = crate::storage::client_db::load_bcr_device_head(&device.device_id)
+            .expect("load cached device head")
+            .expect("cached device head present");
+        assert_eq!(
+            cached_head.root(),
+            outcome.new_device_state.root(),
+            "head cache must track latest DeviceState root"
+        );
+        assert_eq!(
+            cached_head.chain_tip(&rel_key),
+            Some(outcome.new_chain_state.compute_chain_tip()),
+            "head cache must carry latest relationship tip"
         );
 
         let restored = CoreSDK::new_with_device(device).expect("restore sdk from archive");
-        let restored_state = restored.get_current_state().expect("current state");
+        let restored_head = restored.device_head().expect("restored device head");
         assert_eq!(
-            restored_state.hash[0] as u64, executed.hash[0] as u64,
-            "CoreSDK startup must restore the latest archived canonical state"
+            restored_head.root(),
+            outcome.new_device_state.root(),
+            "CoreSDK startup must restore the latest cached DeviceState root"
         );
         assert_eq!(
-            restored_state.hash, executed.hash,
-            "restored canonical state hash must match archived state"
+            restored_head.chain_tip(&rel_key),
+            Some(outcome.new_chain_state.compute_chain_tip()),
+            "restored device head must carry the latest relationship tip"
         );
     }
 
@@ -2139,14 +2252,15 @@ mod tests {
             "canonical CoreSDK test signature must self-verify"
         );
         let dev_id2 = device.device_id;
-        let rel_key2 = dsm::core::bilateral_transaction_manager::compute_smt_key(&dev_id2, &dev_id2);
-        let init_tip2 = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(&dev_id2, &dev_id2);
-        let (advanced, _) = sdk.execute_on_relationship(rel_key2, dev_id2, op, &[], Some(init_tip2))
-            .expect("execute operation");
-        assert_ne!(
-            advanced.hash, prior.hash,
-            "state must advance"
+        let rel_key2 =
+            dsm::core::bilateral_transaction_manager::compute_smt_key(&dev_id2, &dev_id2);
+        let init_tip2 = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &dev_id2, &dev_id2,
         );
+        let (advanced, _) = sdk
+            .execute_on_relationship(rel_key2, dev_id2, op, &[], Some(init_tip2))
+            .expect("execute operation");
+        assert_ne!(advanced.hash, prior.hash, "state must advance");
 
         sdk.restore_state_snapshot(&prior)
             .expect("restore prior snapshot");

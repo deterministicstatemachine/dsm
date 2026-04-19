@@ -70,6 +70,12 @@ impl StateMachine {
         self.device_state.as_ref()
     }
 
+    /// Install a canonical DeviceState head directly.
+    pub fn set_device_head(&mut self, head: crate::types::device_state::DeviceState) {
+        self.device_state = Some(head);
+        self.legacy_state = None;
+    }
+
     /// Get a compatibility State view from DeviceState. Used by legacy
     /// callers during migration; prefer `device_head()` for new code.
     pub fn current_state(&self) -> Option<State> {
@@ -78,10 +84,8 @@ impl StateMachine {
         }
 
         let ds = self.device_state.as_ref()?;
-        let device_info = crate::types::state_types::DeviceInfo::new(
-            ds.devid(),
-            ds.public_key().to_vec(),
-        );
+        let device_info =
+            crate::types::state_types::DeviceInfo::new(ds.devid(), ds.public_key().to_vec());
         let hash = ds.root();
         let mut token_balances = std::collections::HashMap::new();
         // Project DeviceState.balances (keyed by 32-byte policy_commit) into the
@@ -94,8 +98,7 @@ impl StateMachine {
         // pipe format consistent.
         let public_key = ds.public_key();
         for (pc, val) in ds.balances_snapshot() {
-            let token_id = crate::core::token::builtin_token_id_for_policy_commit(pc)
-                .unwrap_or("");
+            let token_id = crate::core::token::builtin_token_id_for_policy_commit(pc).unwrap_or("");
             let key = if token_id.is_empty() {
                 let prefix = u128::from_le_bytes({
                     let mut a = [0u8; 16];
@@ -123,8 +126,7 @@ impl StateMachine {
     /// the State's device info, seeding the SMT root from the State's hash
     /// so legacy callers' verify_state checks have a head_hash to compare.
     pub fn set_state(&mut self, state: State) {
-        let state_hash = state.hash()
-            .unwrap_or(state.hash);
+        let state_hash = state.hash().unwrap_or(state.hash);
         self.legacy_state = Some(state.clone());
         if self.device_state.is_none() {
             let mut ds = crate::types::device_state::DeviceState::new(
@@ -144,20 +146,20 @@ impl StateMachine {
         }
     }
 
-    /// Advance a specific relationship chain on the device.
+    /// Compute the next AdvanceOutcome for a relationship without installing it.
     ///
-    /// This is the spec-canonical transition path (§2.2, §4.2): names a
-    /// relationship, extends that chain by one state, replaces the SMT leaf,
-    /// updates device-level balances atomically, and returns the outcome.
+    /// Pure prepare phase of the spec-canonical transition path (§2.2, §4.2):
+    /// builds the entropy from hash-adjacency inputs, extends the chain by
+    /// one state, computes the SMT-replace witness, and produces the outcome.
+    /// The in-memory device head is NOT mutated. Caller must subsequently
+    /// `commit_advance(&outcome)` to install it as the head.
     ///
-    /// The caller must provide:
-    /// - `rel_key`: 32-byte relationship key `k_{A↔B}` per §2.2
-    /// - `counterparty_devid`: the other party's DevID
-    /// - `operation`: the op being performed
-    /// - `deltas`: balance mutations per §8 eq. 10
-    /// - `initial_chain_tip`: only for first-ever transactions on this relationship
-    pub fn advance_relationship(
-        &mut self,
+    /// This split exists so callers can persist the outcome (e.g. BCR dual
+    /// write) BEFORE installing it, enabling true fail-closed atomicity:
+    /// if persistence fails, the in-memory head stays on the prior state
+    /// and the failure is surfaced to the caller.
+    pub fn prepare_advance_relationship(
+        &self,
         rel_key: [u8; 32],
         counterparty_devid: [u8; 32],
         operation: Operation,
@@ -165,16 +167,17 @@ impl StateMachine {
         initial_chain_tip: Option<[u8; 32]>,
     ) -> Result<crate::types::device_state::AdvanceOutcome, DsmError> {
         let ds = self.device_state.as_ref().ok_or_else(|| {
-            DsmError::state_machine("DeviceState not initialized — call set_state with genesis first")
+            DsmError::state_machine(
+                "DeviceState not initialized — call set_state with genesis first",
+            )
         })?;
 
         // Generate entropy from hash-adjacency inputs (§11 eq. 14).
         // Read prior entropy + hash from the DeviceState's tip for this
-        // relationship, or from current_state as fallback.
+        // relationship, or fall back to the SMT root for fresh chains.
         let (prior_entropy, prior_hash) = if let Some(tip_state) = ds.tip_state(&rel_key) {
             (tip_state.entropy.clone(), tip_state.compute_chain_tip())
         } else {
-            // No prior tip — fresh genesis or first relationship. Use SMT root as seed.
             let root = ds.root();
             let entropy = {
                 let mut h = dsm_domain_hasher("DSM/genesis-entropy");
@@ -192,7 +195,7 @@ impl StateMachine {
             *hasher.finalize().as_bytes()
         };
 
-        let outcome = ds.advance(
+        ds.advance(
             rel_key,
             counterparty_devid,
             operation,
@@ -201,12 +204,40 @@ impl StateMachine {
             deltas,
             initial_chain_tip,
             None, // dbrw_summary_hash
-        )?;
+        )
+    }
 
-        // Commit: install the new device state as the head.
+    /// Install a previously prepared AdvanceOutcome as the new device head.
+    ///
+    /// Pairs with `prepare_advance_relationship`. After this returns the
+    /// in-memory head reflects the outcome and `legacy_state` is cleared.
+    pub fn commit_advance(&mut self, outcome: &crate::types::device_state::AdvanceOutcome) {
         self.device_state = Some(outcome.new_device_state.clone());
         self.legacy_state = None;
+    }
 
+    /// Advance a specific relationship chain on the device.
+    ///
+    /// Convenience wrapper that runs `prepare_advance_relationship` followed
+    /// by `commit_advance` with no persistence step in between. Callers that
+    /// need fail-closed persistence should use the prepare/commit primitives
+    /// directly so they can persist between the two phases.
+    pub fn advance_relationship(
+        &mut self,
+        rel_key: [u8; 32],
+        counterparty_devid: [u8; 32],
+        operation: Operation,
+        deltas: &[crate::types::device_state::BalanceDelta],
+        initial_chain_tip: Option<[u8; 32]>,
+    ) -> Result<crate::types::device_state::AdvanceOutcome, DsmError> {
+        let outcome = self.prepare_advance_relationship(
+            rel_key,
+            counterparty_devid,
+            operation,
+            deltas,
+            initial_chain_tip,
+        )?;
+        self.commit_advance(&outcome);
         Ok(outcome)
     }
 
@@ -382,8 +413,11 @@ mod state_machine_tests {
         // Verify chain integrity via §2.1 hash adjacency (the only canonical
         // chain-integrity rule in the counterless model).
         for win in states.windows(2) {
-            assert_eq!(win[1].prev_state_hash, win[0].hash()?,
-                "hash adjacency must hold across the constructed chain");
+            assert_eq!(
+                win[1].prev_state_hash,
+                win[0].hash()?,
+                "hash adjacency must hold across the constructed chain"
+            );
         }
 
         // Tamper with intermediate state — adjacency must break.
@@ -394,8 +428,10 @@ mod state_machine_tests {
         }
         // states[2].prev_state_hash now points to the OLD broken_states[1] hash
         if states.len() >= 3 {
-            assert_ne!(broken_states[2].prev_state_hash, broken_states[1].hash,
-                "tampered state breaks adjacency to its successor");
+            assert_ne!(
+                broken_states[2].prev_state_hash, broken_states[1].hash,
+                "tampered state breaks adjacency to its successor"
+            );
         }
 
         Ok(())
@@ -417,8 +453,12 @@ mod state_machine_tests {
 
         let dev_id = device_id;
         let rel_key = crate::core::bilateral_transaction_manager::compute_smt_key(&dev_id, &dev_id);
-        let init_tip = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(&dev_id, &dev_id);
-        let outcome = state_machine.advance_relationship(rel_key, dev_id, op, &[], Some(init_tip))?;
+        let init_tip =
+            crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                &dev_id, &dev_id,
+            );
+        let outcome =
+            state_machine.advance_relationship(rel_key, dev_id, op, &[], Some(init_tip))?;
         assert_ne!(outcome.child_r_a, [0u8; 32]);
 
         Ok(())
@@ -431,17 +471,25 @@ mod state_machine_tests {
         let dev_id = initial_state.device_info.device_id;
         machine.set_state(initial_state);
 
-        let cur = machine.current_state().ok_or_else(|| DsmError::state_machine("no state"))?;
+        let cur = machine
+            .current_state()
+            .ok_or_else(|| DsmError::state_machine("no state"))?;
         let op = signed_transfer(&sk, &cur, vec![1u8; 8], "Test transfer");
 
         let rel_key = crate::core::bilateral_transaction_manager::compute_smt_key(&dev_id, &dev_id);
-        let init_tip = crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(&dev_id, &dev_id);
+        let init_tip =
+            crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                &dev_id, &dev_id,
+            );
         let outcome = machine.advance_relationship(rel_key, dev_id, op, &[], Some(init_tip))?;
 
         // Verify the SMT root advanced
         assert_ne!(outcome.parent_r_a, outcome.child_r_a);
         // Verify the device state was updated
-        assert_eq!(machine.device_head().map(|d| d.root()), Some(outcome.child_r_a));
+        assert_eq!(
+            machine.device_head().map(|d| d.root()),
+            Some(outcome.child_r_a)
+        );
 
         Ok(())
     }
@@ -490,20 +538,24 @@ mod state_machine_tests {
         // Verify state2 from state1 using transition::verify_transition_integrity
         // (the canonical hash-adjacency verifier; the mod.rs free-function
         // wrapper and StateMachine::verify_state(&State) shim have both been removed).
-        assert!(crate::core::state_machine::transition::verify_transition_integrity(
-            &state1,
-            &state2,
-            &state2.operation,
-        )?);
+        assert!(
+            crate::core::state_machine::transition::verify_transition_integrity(
+                &state1,
+                &state2,
+                &state2.operation,
+            )?
+        );
 
         // Tampered child must fail integrity verification.
         let mut invalid_state = state2.clone();
         invalid_state.prev_state_hash = [0; 32]; // Wrong hash
-        assert!(!crate::core::state_machine::transition::verify_transition_integrity(
-            &state1,
-            &invalid_state,
-            &invalid_state.operation,
-        )?);
+        assert!(
+            !crate::core::state_machine::transition::verify_transition_integrity(
+                &state1,
+                &invalid_state,
+                &invalid_state.operation,
+            )?
+        );
 
         Ok(())
     }

@@ -401,64 +401,68 @@ impl<I: Send + Sync> TokenSDK<I> {
         }
     }
 
-    fn find_token_metadata_state(&self, token_id: &str) -> Result<State, DsmError> {
-        // Per §4.3 there is no `state_number`. Scan all archived BCR states
-        // (newest-first) for a Create or Generic op carrying token metadata
-        // for this token_id. Replaces the previous broken
-        // `(0..=current_state.hash[0] as u64).rev()` walk that depended on
-        // `core_sdk::get_state_by_number(state_number)` matching by the
-        // first byte of the state hash — which only ever found a token if
-        // its hash[0] happened to fall in [0, current.hash[0]].
+    /// Locate the operation that registered metadata for `token_id` by
+    /// scanning the per-relationship chain-state archive in newest-first
+    /// order (§2.2/§4.3 — no counters, no state_number; the archive is
+    /// keyed by chain tip and ordered by insertion time).
+    fn find_token_metadata_operation(&self, token_id: &str) -> Result<Operation, DsmError> {
         let device_id = self.device_id;
-        let states = crate::storage::client_db::get_bcr_states(&device_id, false).map_err(|e| {
-            DsmError::storage(
-                format!("Failed to load BCR states for token metadata lookup: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
+        let states =
+            crate::storage::client_db::get_bcr_chain_states(&device_id, false).map_err(|e| {
+                DsmError::storage(
+                    format!("Failed to load BCR chain states for token metadata lookup: {e}"),
+                    None::<std::io::Error>,
+                )
+            })?;
         for state in states.into_iter().rev() {
-            match &state.operation {
-                Operation::Create { metadata, .. } => {
-                    if !metadata.is_empty() {
-                        if let Ok(proto) = TokenMetadataProto::decode(metadata.as_slice()) {
-                            if proto.token_id == token_id || proto.symbol == token_id {
-                                return Ok(state);
-                            }
-                        }
-                    }
-                }
-                Operation::Generic {
-                    operation_type,
-                    data,
-                    ..
-                } => {
-                    if operation_type.as_slice() == b"token_create"
-                        || operation_type.as_slice() == b"token_registry_update"
-                    {
-                        if let Ok(registry_update) = decode_registry_update(data) {
-                            if registry_update.contains_key(token_id) {
-                                return Ok(state);
-                            }
-                        } else if let Ok(single) = TokenMetadataProto::decode(data.as_slice()) {
-                            if single.token_id == token_id || single.symbol == token_id {
-                                return Ok(state);
-                            }
-                        }
-                    }
-                }
-                _ => continue,
+            if Self::operation_carries_token_metadata(&state.operation, token_id) {
+                return Ok(state.operation);
             }
         }
-
-        Err(DsmError::state("Token metadata not found in archived states"))
+        Err(DsmError::state(format!(
+            "Token metadata for {token_id} not found in archived chain states"
+        )))
     }
 
-    fn metadata_for_token_from_state(
+    fn operation_carries_token_metadata(op: &Operation, token_id: &str) -> bool {
+        match op {
+            Operation::Create { metadata, .. } => {
+                if metadata.is_empty() {
+                    return false;
+                }
+                if let Ok(proto) = TokenMetadataProto::decode(metadata.as_slice()) {
+                    return proto.token_id == token_id || proto.symbol == token_id;
+                }
+                false
+            }
+            Operation::Generic {
+                operation_type,
+                data,
+                ..
+            } => {
+                if operation_type.as_slice() != b"token_create"
+                    && operation_type.as_slice() != b"token_registry_update"
+                {
+                    return false;
+                }
+                if let Ok(registry_update) = decode_registry_update(data) {
+                    return registry_update.contains_key(token_id);
+                }
+                if let Ok(single) = TokenMetadataProto::decode(data.as_slice()) {
+                    return single.token_id == token_id || single.symbol == token_id;
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    fn metadata_for_token_from_operation(
         &self,
-        state: &State,
+        op: &Operation,
         token_id: &str,
     ) -> Option<TokenMetadata> {
-        match &state.operation {
+        match op {
             Operation::Generic { data, .. } => {
                 if let Ok(registry_update) = decode_registry_update(data) {
                     return registry_update.get(token_id).cloned();
@@ -502,12 +506,12 @@ impl<I: Send + Sync> TokenSDK<I> {
             }
         }
 
-        let state = self.find_token_metadata_state(token_id)?;
+        let op = self.find_token_metadata_operation(token_id)?;
         let token_metadata = self
-            .metadata_for_token_from_state(&state, token_id)
+            .metadata_for_token_from_operation(&op, token_id)
             .ok_or_else(|| {
                 DsmError::state(format!(
-                    "Token metadata state for {token_id} did not contain canonical metadata"
+                    "Token metadata operation for {token_id} did not carry canonical metadata"
                 ))
             })?;
 
@@ -606,8 +610,7 @@ impl<I: Send + Sync> TokenSDK<I> {
                     crate::util::text_id::decode_base32_crockford(&record.source_state_hash)
                         .and_then(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).ok())
                         .unwrap_or_else(|| state.hash().unwrap_or([0u8; 32]));
-                let mut balance =
-                    Balance::from_state(record.available, state_hash);
+                let mut balance = Balance::from_state(record.available, state_hash);
                 if record.locked > 0 {
                     let _ = balance.lock(record.locked);
                 }
@@ -696,15 +699,15 @@ impl<I: Send + Sync> TokenSDK<I> {
             return self.cache_token_metadata_strict(token_metadata).map(Some);
         }
 
-        let state = match self.find_token_metadata_state(token_id) {
-            Ok(state) => state,
+        let op = match self.find_token_metadata_operation(token_id) {
+            Ok(op) => op,
             Err(_) => return Ok(None),
         };
         let token_metadata = self
-            .metadata_for_token_from_state(&state, token_id)
+            .metadata_for_token_from_operation(&op, token_id)
             .ok_or_else(|| {
                 DsmError::state(format!(
-                    "Token metadata state for {token_id} did not contain canonical metadata"
+                    "Token metadata operation for {token_id} did not carry canonical metadata"
                 ))
             })?;
 
@@ -994,20 +997,24 @@ impl<I: Send + Sync> TokenSDK<I> {
                 }
 
                 // Route via relationship-aware path (§2.2)
-                let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
-                    &sender, recipient,
-                );
+                let rel_key =
+                    dsm::core::bilateral_transaction_manager::compute_smt_key(&sender, recipient);
                 let pc = dsm::core::token::token_state_manager::resolve_policy_commit(token_id);
                 let deltas = [dsm::types::device_state::BalanceDelta {
                     policy_commit: pc,
                     direction: dsm::types::device_state::BalanceDirection::Debit,
                     amount: *amount,
                 }];
-                let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-                    &sender, recipient,
-                );
+                let init_tip =
+                    dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                        &sender, recipient,
+                    );
                 let (new_state, _) = self.core_sdk.execute_on_relationship(
-                    rel_key, *recipient, op, &deltas, Some(init_tip),
+                    rel_key,
+                    *recipient,
+                    op,
+                    &deltas,
+                    Some(init_tip),
                 )?;
                 self.project_balance_cache_from_state(sender, &new_state)?;
 
@@ -1070,10 +1077,11 @@ impl<I: Send + Sync> TokenSDK<I> {
                     direction: dsm::types::device_state::BalanceDirection::Credit,
                     amount: *amount,
                 }];
-                let mint_init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-                    &current_state.device_info.device_id,
-                    &current_state.device_info.device_id,
-                );
+                let mint_init_tip =
+                    dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                        &current_state.device_info.device_id,
+                        &current_state.device_info.device_id,
+                    );
                 let (new_state, _) = self.core_sdk.execute_on_relationship(
                     mint_rel_key,
                     current_state.device_info.device_id,
@@ -1088,7 +1096,10 @@ impl<I: Send + Sync> TokenSDK<I> {
 
                 if token_id == "ERA" {
                     let mut era_token = self.era_token.write();
-                    let new_circulation = Balance::from_state(era_token.circulating_supply.value() + *amount, new_state.hash);
+                    let new_circulation = Balance::from_state(
+                        era_token.circulating_supply.value() + *amount,
+                        new_state.hash,
+                    );
                     era_token.circulating_supply = new_circulation;
                 }
 
@@ -1138,25 +1149,32 @@ impl<I: Send + Sync> TokenSDK<I> {
                 }
 
                 // Burn: relationship is device↔self (CPTA authority path)
-                let burn_rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
-                    &owner_id, &owner_id,
-                );
+                let burn_rel_key =
+                    dsm::core::bilateral_transaction_manager::compute_smt_key(&owner_id, &owner_id);
                 let burn_deltas = [dsm::types::device_state::BalanceDelta {
                     policy_commit,
                     direction: dsm::types::device_state::BalanceDirection::Debit,
                     amount: *amount,
                 }];
-                let burn_init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-                    &owner_id, &owner_id,
-                );
+                let burn_init_tip =
+                    dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                        &owner_id, &owner_id,
+                    );
                 let (new_state, _) = self.core_sdk.execute_on_relationship(
-                    burn_rel_key, owner_id, op, &burn_deltas, Some(burn_init_tip),
+                    burn_rel_key,
+                    owner_id,
+                    op,
+                    &burn_deltas,
+                    Some(burn_init_tip),
                 )?;
                 self.project_balance_cache_from_state(owner_id, &new_state)?;
 
                 if token_id == "ERA" {
                     let mut era_token = self.era_token.write();
-                    let new_circulation = Balance::from_state(era_token.circulating_supply.value().saturating_sub(*amount), new_state.hash);
+                    let new_circulation = Balance::from_state(
+                        era_token.circulating_supply.value().saturating_sub(*amount),
+                        new_state.hash,
+                    );
                     era_token.circulating_supply = new_circulation;
                 }
 
@@ -1575,7 +1593,10 @@ impl<I: Send + Sync> TokenSDK<I> {
             let adjusted_fee = (base_fee.value() as f64 * (1.0 + network_load * 0.1)) as u64;
             new_schedule.insert(
                 op_type.clone(),
-                Balance::from_state(adjusted_fee, state_hash.clone().try_into().unwrap_or([0u8; 32])),
+                Balance::from_state(
+                    adjusted_fee,
+                    state_hash.clone().try_into().unwrap_or([0u8; 32]),
+                ),
             );
         }
 
@@ -1708,8 +1729,7 @@ impl<I: Send + Sync> TokenSDK<I> {
                     crate::util::text_id::decode_base32_crockford(&record.source_state_hash)
                         .and_then(|bytes| bytes.try_into().ok())
                         .unwrap_or([0u8; 32]);
-                let mut balance =
-                    Balance::from_state(record.available, source_hash);
+                let mut balance = Balance::from_state(record.available, source_hash);
                 if record.locked > 0 {
                     let _ = balance.lock(record.locked);
                 }
@@ -1939,9 +1959,8 @@ impl<I: Send + Sync> TokenSDK<I> {
 
         // Execute via the relationship-aware path (§2.2, §4.2).
         // rel_key = k_{A↔B} per §2.2 canonical derivation.
-        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
-            &sender, &recipient,
-        );
+        let rel_key =
+            dsm::core::bilateral_transaction_manager::compute_smt_key(&sender, &recipient);
         let policy_commit = dsm::core::token::token_state_manager::resolve_policy_commit(&token_id);
         let deltas = [dsm::types::device_state::BalanceDelta {
             policy_commit,
@@ -1949,9 +1968,10 @@ impl<I: Send + Sync> TokenSDK<I> {
             amount,
         }];
         // Use initial_chain_tip for first-ever transaction with this counterparty
-        let initial_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-            &sender, &recipient,
-        );
+        let initial_tip =
+            dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                &sender, &recipient,
+            );
         let (new_state, _outcome) = self.core_sdk.execute_on_relationship(
             rel_key,
             recipient,
@@ -2326,7 +2346,7 @@ impl<I: Send + Sync> TokenSDK<I> {
             }
         }
 
-        match self.find_token_metadata_state(token_id) {
+        match self.find_token_metadata_operation(token_id) {
             Ok(_) => Ok(true),
             Err(_) => Ok(false),
         }
@@ -2363,11 +2383,12 @@ impl<I: Send + Sync> TokenSDK<I> {
         }
 
         // Fee: relationship is device↔system.fee (deterministic system counterparty)
-        let fee_counterparty = *dsm::crypto::blake3::domain_hash(
-            "DSM/system-fee-device", b"system.fee.device_id",
-        ).as_bytes();
+        let fee_counterparty =
+            *dsm::crypto::blake3::domain_hash("DSM/system-fee-device", b"system.fee.device_id")
+                .as_bytes();
         let fee_rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
-            &current_state.device_info.device_id, &fee_counterparty,
+            &current_state.device_info.device_id,
+            &fee_counterparty,
         );
         let era_pc = dsm::core::token::token_state_manager::resolve_policy_commit("ERA");
         let fee_deltas = [dsm::types::device_state::BalanceDelta {
@@ -2375,11 +2396,17 @@ impl<I: Send + Sync> TokenSDK<I> {
             direction: dsm::types::device_state::BalanceDirection::Debit,
             amount: fee,
         }];
-        let fee_init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-            &current_state.device_info.device_id, &fee_counterparty,
-        );
+        let fee_init_tip =
+            dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                &current_state.device_info.device_id,
+                &fee_counterparty,
+            );
         let (new_state, _) = self.core_sdk.execute_on_relationship(
-            fee_rel_key, fee_counterparty, fee_transfer_op, &fee_deltas, Some(fee_init_tip),
+            fee_rel_key,
+            fee_counterparty,
+            fee_transfer_op,
+            &fee_deltas,
+            Some(fee_init_tip),
         )?;
         self.project_balance_cache_from_state(current_state.device_info.device_id, &new_state)?;
         Ok(())
@@ -2415,7 +2442,10 @@ impl<I: Send + Sync> TokenSDK<I> {
         let balances = self.balances.read();
         if let Some(device_balances) = balances.get(device_id) {
             if let Some(balance) = device_balances.get(token_id) {
-                return Ok(Balance::from_state(balance.locked(), state_hash.clone().try_into().unwrap_or([0u8; 32])));
+                return Ok(Balance::from_state(
+                    balance.locked(),
+                    state_hash.clone().try_into().unwrap_or([0u8; 32]),
+                ));
             }
         }
 
@@ -2547,21 +2577,26 @@ impl<I: Send + Sync> TokenSDK<I> {
         // Execute via relationship-aware path (§2.2, §4.2)
         let recipient_bytes: [u8; 32] =
             crate::util::domain_helpers::device_id_hash(recipient.as_str());
-        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
-            &sender, &recipient_bytes,
-        );
+        let rel_key =
+            dsm::core::bilateral_transaction_manager::compute_smt_key(&sender, &recipient_bytes);
         let policy_commit = dsm::core::token::token_state_manager::resolve_policy_commit(&token_id);
         let deltas = [dsm::types::device_state::BalanceDelta {
             policy_commit,
             direction: dsm::types::device_state::BalanceDirection::Debit,
             amount,
         }];
-        let initial_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-            &sender, &recipient_bytes,
-        );
+        let initial_tip =
+            dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                &sender,
+                &recipient_bytes,
+            );
         log::debug!("[TOKEN] execute_signed_transfer: calling execute_on_relationship...");
         let (new_state, _outcome) = self.core_sdk.execute_on_relationship(
-            rel_key, recipient_bytes, op, &deltas, Some(initial_tip),
+            rel_key,
+            recipient_bytes,
+            op,
+            &deltas,
+            Some(initial_tip),
         )?;
         log::debug!("[TOKEN] execute_signed_transfer: execute_on_relationship OK");
 
@@ -2619,21 +2654,26 @@ impl<I: Send + Sync> TokenSDK<I> {
         } else {
             crate::util::domain_helpers::device_id_hash_bytes(&recipient_device_id)
         };
-        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
-            &sender, &recipient_devid,
-        );
+        let rel_key =
+            dsm::core::bilateral_transaction_manager::compute_smt_key(&sender, &recipient_devid);
         let policy_commit = dsm::core::token::token_state_manager::resolve_policy_commit(&token_id);
         let deltas = [dsm::types::device_state::BalanceDelta {
             policy_commit,
             direction: dsm::types::device_state::BalanceDirection::Debit,
             amount: amount_val,
         }];
-        let initial_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-            &sender, &recipient_devid,
-        );
+        let initial_tip =
+            dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                &sender,
+                &recipient_devid,
+            );
         log::debug!("[TOKEN] execute_transfer_op: calling execute_on_relationship...");
         let (new_state, _outcome) = self.core_sdk.execute_on_relationship(
-            rel_key, recipient_devid, op, &deltas, Some(initial_tip),
+            rel_key,
+            recipient_devid,
+            op,
+            &deltas,
+            Some(initial_tip),
         )?;
         log::debug!("[TOKEN] execute_transfer_op: execute_on_relationship OK");
 

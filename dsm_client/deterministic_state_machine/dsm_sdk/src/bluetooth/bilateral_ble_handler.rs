@@ -36,7 +36,6 @@ use dsm::core::bilateral_transaction_manager::{
 // core::security module deleted (heuristic attack detectors obsolete under §2.2/§4.3).
 use dsm::types::error::DsmError;
 use dsm::types::operations::Operation;
-use dsm::types::state_types::State;
 
 use crate::generated;
 // BcrStorage removed with the security module delete.
@@ -259,18 +258,13 @@ impl BilateralBleHandler {
         }
     }
 
-    /// Persist a State snapshot to the BCR archive. (Suspicious-pattern
-    /// detection that used to run alongside this persistence was removed with
-    /// the deletion of core::security::BilateralControlResistance — its
-    /// state_number-proximity and sequence-count heuristics don't map to the
-    /// §2.2/§4.3 counterless model. The bcr_states row is retained as a
-    /// durable archive that BLE recovery reads back as a canonical_state
-    /// fallback.)
-    async fn record_bcr_state(&self, state: &State, published: bool) {
-        if let Err(e) = crate::storage::client_db::store_bcr_state(state, published) {
-            warn!("[BLE_HANDLER] Failed to persist BCR state: {}", e);
-        }
-    }
+    // record_bcr_state(...) deleted: per §2.2/§4.3, canonical state is the
+    // per-relationship chain state + Per-Device SMT root. Both are written
+    // upstream at the AdvanceOutcome chokepoint
+    // (CoreSDK::execute_on_relationship → dual_write_advance_outcome). The
+    // BLE handler MUST NOT write a duplicate snapshot from a derived
+    // settlement-time State — the producer chokepoint is the single source
+    // of canonical-state durability.
     /// Reject an incoming prepare (or any active session) identified by the origin commitment hash.
     pub async fn reject_incoming_prepare(
         &self,
@@ -629,20 +623,12 @@ impl BilateralBleHandler {
                 (None, None)
             };
 
-        let settlement_outcome = if let Some(ref delegate) = self.settlement_delegate {
-            let canonical_state = {
-                let bcr_state = crate::storage::client_db::get_bcr_states(&self.device_id, false)
-                    .ok()
-                    .and_then(|states| states.into_iter().last());
-                let mem_state = crate::bridge::app_router()
-                    .and_then(|router| router.get_device_current_state());
-                bcr_state.or(mem_state).ok_or_else(|| {
-                    DsmError::invalid_operation(
-                        "sender recovery settlement: missing canonical device state",
-                    )
-                })?
-            };
-
+        let _settlement_outcome = if let Some(ref delegate) = self.settlement_delegate {
+            // Settlement reads the canonical DeviceState head itself (via the
+            // bridge AppRouter). The head was already updated upstream at the
+            // AdvanceOutcome chokepoint inside `execute_on_relationship`; the
+            // delegate only mirrors the device-head balance into the SQLite
+            // display projection and persists transaction history.
             delegate
                 .settle(BilateralSettlementContext {
                     local_device_id: self.device_id,
@@ -654,7 +640,6 @@ impl BilateralBleHandler {
                     is_sender: true,
                     tx_type: "bilateral_offline_recovered",
                     new_chain_tip: shared_chain_tip_new,
-                    canonical_state: Some(canonical_state),
                 })
                 .map_err(|e| {
                     DsmError::invalid_operation(format!("sender recovery settlement failed: {e}"))
@@ -663,17 +648,8 @@ impl BilateralBleHandler {
             BilateralSettlementOutcome::default()
         };
 
-        if let Some(state) = settlement_outcome.canonical_state.as_ref() {
-            self.record_bcr_state(state, true).await;
-
-            if let Some(router) = crate::bridge::app_router() {
-                router.push_device_state(state);
-                router.sync_balance_cache();
-            }
-        } else {
-            warn!(
-                "[BILATERAL RECOVERY] Settlement returned missing canonical state — balance may lag until refresh"
-            );
+        if let Some(router) = crate::bridge::app_router() {
+            router.sync_balance_cache();
         }
 
         {
@@ -3367,24 +3343,15 @@ impl BilateralBleHandler {
         // §4.2 Full-persistence atomic boundary: delegate applies chain tip + balance +
         // history in one SQLite transaction.
 
-        let (confirm_outcome, persistence_error) =
+        let (_confirm_outcome, persistence_error) =
             if let Some(ref delegate) = self.settlement_delegate {
-                // Ensure CoreSDK has the latest archived BCR state loaded before
-                // settlement reads canonical state.  Without this, a fresh app
-                // start or race condition can leave get_device_current_state()
-                // returning None, causing the `?` below to bail out of the
-                // entire function — skipping settlement, BCR archive, push, and
-                // sync, which silently drops the receiver's balance and history.
-                if let Some(router) = crate::bridge::app_router() {
-                    router.sync_balance_cache();
-                }
-                let canonical_state = crate::bridge::app_router()
-                    .and_then(|r| r.get_device_current_state())
-                    .ok_or_else(|| {
-                        DsmError::invalid_operation(
-                            "handle_confirm_request: missing canonical device state",
-                        )
-                    })?;
+                // The delegate reads the canonical DeviceState head from the
+                // bridge AppRouter and writes the receiver-side balance
+                // projection from `head.balance(policy_commit) + amount`. No
+                // canonical-state push is needed — the head update on the
+                // receiver lags until the receiver's own next op (documented
+                // gap), and the SQLite projection plus sync_balance_cache()
+                // below keep the UI fresh in the meantime.
                 let ctx = BilateralSettlementContext {
                     local_device_id: self.device_id,
                     counterparty_device_id: session.counterparty_device_id,
@@ -3396,7 +3363,6 @@ impl BilateralBleHandler {
                     is_sender: false,
                     tx_type: "bilateral_offline",
                     new_chain_tip,
-                    canonical_state: Some(canonical_state),
                 };
                 match delegate.settle(ctx) {
                     Ok(outcome) => (outcome, None),
@@ -3435,14 +3401,7 @@ impl BilateralBleHandler {
             }
         }
 
-        let state_to_record = confirm_outcome
-            .canonical_state
-            .as_ref()
-            .unwrap_or(&tx_result.local_state);
-        self.record_bcr_state(state_to_record, true).await;
-
         if let Some(router) = crate::bridge::app_router() {
-            router.push_device_state(state_to_record);
             router.sync_balance_cache();
         }
 
@@ -3921,34 +3880,12 @@ impl BilateralBleHandler {
                     "[BILATERAL] Settlement delegate present: {}",
                     self.settlement_delegate.is_some()
                 );
-                let settlement_outcome = if let Some(ref delegate) = self.settlement_delegate {
-                    // Load canonical state from BCR (persisted, authoritative) first.
-                    // Fall back to in-memory cache only if BCR is empty.
-                    let canonical_state = {
-                        let bcr_state =
-                            crate::storage::client_db::get_bcr_states(&self.device_id, false)
-                                .ok()
-                                .and_then(|states| states.into_iter().last());
-                        let mem_state =
-                            crate::bridge::app_router().and_then(|r| r.get_device_current_state());
-                        match bcr_state.or(mem_state) {
-                            Some(state) => state,
-                            None => {
-                                log::error!(
-                                    "[BILATERAL] No canonical state available (BCR empty, in-memory empty) — cannot settle sender"
-                                );
-                                self.emit_event(&generated::BilateralEventNotification {
-                                    event_type: generated::BilateralEventType::BilateralEventTransferComplete.into(),
-                                    counterparty_device_id: counterparty_device_id.to_vec(),
-                                    commitment_hash: commitment_hash.to_vec(),
-                                    status: "completed".to_string(),
-                                    message: "Transfer completed (balance update pending)".to_string(),
-                                    ..Default::default()
-                                });
-                                return Some(crate::sdk::transfer_hooks::TransferMeta::default());
-                            }
-                        }
-                    };
+                let _settlement_outcome = if let Some(ref delegate) = self.settlement_delegate {
+                    // Settlement reads the canonical DeviceState head from the
+                    // bridge AppRouter (already updated at the AdvanceOutcome
+                    // chokepoint inside `execute_on_relationship`) and writes
+                    // the sender-side balance projection from
+                    // `head.balance(policy_commit)` plus transaction history.
                     let ctx = BilateralSettlementContext {
                         local_device_id: self.device_id,
                         counterparty_device_id,
@@ -3960,7 +3897,6 @@ impl BilateralBleHandler {
                         is_sender: true,
                         tx_type: "bilateral_offline",
                         new_chain_tip: [0u8; 32],
-                        canonical_state: Some(canonical_state),
                     };
                     match delegate.settle(ctx) {
                         Ok(outcome) => outcome,
@@ -3976,17 +3912,8 @@ impl BilateralBleHandler {
                     BilateralSettlementOutcome::default()
                 };
 
-                if let Some(state_to_record) = settlement_outcome.canonical_state.as_ref() {
-                    self.record_bcr_state(state_to_record, true).await;
-
-                    if let Some(router) = crate::bridge::app_router() {
-                        router.push_device_state(state_to_record);
-                        router.sync_balance_cache();
-                    }
-                } else {
-                    warn!(
-                        "[BILATERAL] Settlement returned missing canonical state — balance may not update until next refresh"
-                    );
+                if let Some(router) = crate::bridge::app_router() {
+                    router.sync_balance_cache();
                 }
 
                 // Update session phase and cleanup storage
@@ -4084,15 +4011,6 @@ impl BilateralBleHandler {
 
                 // --- DELEGATE SETTLEMENT (recovery path) ---
                 if let Some(ref delegate) = self.settlement_delegate {
-                    let canonical_state = match crate::bridge::app_router()
-                        .and_then(|r| r.get_device_current_state())
-                    {
-                        Some(state) => state,
-                        None => {
-                            warn!("recovery settlement: missing canonical device state");
-                            return None;
-                        }
-                    };
                     let ctx = BilateralSettlementContext {
                         local_device_id: self.device_id,
                         counterparty_device_id,
@@ -4105,15 +4023,11 @@ impl BilateralBleHandler {
                         is_sender: true,
                         tx_type: "bilateral_offline_recovered",
                         new_chain_tip: [0u8; 32],
-                        canonical_state: Some(canonical_state),
                     };
                     match delegate.settle(ctx) {
-                        Ok(outcome) => {
-                            if let Some(state) = outcome.canonical_state.as_ref() {
-                                if let Some(router) = crate::bridge::app_router() {
-                                    router.push_device_state(state);
-                                    router.sync_balance_cache();
-                                }
+                        Ok(_outcome) => {
+                            if let Some(router) = crate::bridge::app_router() {
+                                router.sync_balance_cache();
                             }
                             info!("[BILATERAL RECOVERY] Transaction stored to history");
                         }

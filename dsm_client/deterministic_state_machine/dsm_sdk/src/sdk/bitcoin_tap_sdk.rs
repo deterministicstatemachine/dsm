@@ -601,24 +601,13 @@ pub struct BitcoinTapSdk {
 }
 
 impl BitcoinTapSdk {
+    /// Read the device's canonical dBTC balance from the cached
+    /// `bcr_device_heads` row (§9 fungibility — keyed by 32B CPTA
+    /// `policy_commit`, no string-key projection, no scan over historical
+    /// states).
     fn canonical_archived_dbtc_balance(device_id: &[u8; 32]) -> Option<u64> {
-        let latest_state = crate::storage::client_db::get_bcr_states(device_id, false)
-            .ok()?
-            .into_iter()
-            .last()?;
-        let balance_key = dsm::core::token::derive_canonical_balance_key(
-            crate::policy::builtins::DBTC_POLICY_COMMIT,
-            &latest_state.device_info.public_key,
-            DBTC_TOKEN_ID,
-        );
-        Some(
-            latest_state
-                .token_balances
-                .get(&balance_key)
-                .cloned()
-                .unwrap_or_else(dsm::types::token_types::Balance::zero)
-                .available(),
-        )
+        let head = crate::storage::client_db::load_bcr_device_head(device_id).ok()??;
+        Some(head.balance(crate::policy::builtins::DBTC_POLICY_COMMIT))
     }
 
     pub fn new(dlv_manager: Arc<DLVManager>) -> Self {
@@ -1990,8 +1979,7 @@ impl BitcoinTapSdk {
         };
 
         // Check iteration-based timeout (budget exhaustion)
-        let elapsed = (reference_state.hash[0] as u64)
-            .saturating_sub(created_at_state);
+        let elapsed = (reference_state.hash[0] as u64).saturating_sub(created_at_state);
         if elapsed < refund_iterations {
             return Err(DsmError::invalid_operation(format!(
                 "Refund not yet available: {elapsed} iterations elapsed, need {refund_iterations}"
