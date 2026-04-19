@@ -29,6 +29,7 @@ assert_pattern() {
 
 FRONT_TX="dsm_client/frontend/src/dsm/transactions.ts"
 FRONT_BRIDGE="dsm_client/frontend/src/dsm/WebViewBridge.ts"
+FRONT_NBB="dsm_client/frontend/src/dsm/NativeBoundaryBridge.ts"
 FRONT_EVENT="dsm_client/frontend/src/dsm/EventBridge.ts"
 FRONT_PORT="dsm_client/frontend/public/index.html"
 JNI_BRIDGE="dsm_client/deterministic_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.rs"
@@ -36,30 +37,34 @@ SDK_ROUTER="dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/app_rout
 
 assert_file "$FRONT_TX"
 assert_file "$FRONT_BRIDGE"
+assert_file "$FRONT_NBB"
 assert_file "$FRONT_EVENT"
 assert_file "$FRONT_PORT"
 assert_file "$JNI_BRIDGE"
 assert_file "$SDK_ROUTER"
 
-# Online transfer path
+# Online transfer path — routes via unified ingress (routerInvokeBin → IngressRequest)
 assert_pattern "$FRONT_TX" "sendOnlineTransfer(" "frontend online transfer entrypoint missing"
-assert_pattern "$FRONT_TX" "appRouterInvokeBin('wallet.sendSmart'" "frontend online transfer must route via wallet.sendSmart"
+assert_pattern "$FRONT_TX" "routerInvokeBin('wallet.send'" "frontend online transfer must route via wallet.send"
+assert_pattern "$FRONT_TX" "routerInvokeBin('wallet.sendSmart'" "frontend smart online transfer must route via wallet.sendSmart"
 assert_pattern "$SDK_ROUTER" "process_online_transfer_logic" "sdk online transfer processing logic missing"
 
 # Offline bilateral prepare path
 assert_pattern "$FRONT_TX" "offlineSend(" "frontend offline send entrypoint missing"
-assert_pattern "$FRONT_TX" "appRouterInvokeBin('wallet.sendOffline'" "frontend offline send must route via wallet.sendOffline"
-assert_pattern "$FRONT_BRIDGE" "methodName: 'bilateralOfflineSend'" "bridge must route bilateral offline send method"
+assert_pattern "$FRONT_TX" "routerInvokeBin('wallet.sendOffline'" "frontend offline send must route via wallet.sendOffline"
 assert_pattern "$JNI_BRIDGE" "Java_com_dsm_wallet_bridge_UnifiedNativeApi_bilateralOfflineSend" "jni bilateral offline entrypoint missing"
 
-# App router framed boundaries
-assert_pattern "$FRONT_BRIDGE" "method: 'appRouterInvoke'" "frontend must construct appRouterInvoke bridge request"
-assert_pattern "$FRONT_BRIDGE" "method: 'appRouterQuery'" "frontend must construct appRouterQuery bridge request"
-assert_pattern "$JNI_BRIDGE" "Java_com_dsm_wallet_bridge_UnifiedNativeApi_appRouterInvokeFramed" "jni invoke framed entrypoint missing"
-assert_pattern "$JNI_BRIDGE" "Java_com_dsm_wallet_bridge_UnifiedNativeApi_appRouterQueryFramed" "jni query framed entrypoint missing"
+# Unified ingress boundary (replaced legacy appRouterInvokeFramed/appRouterQueryFramed post-16f0763)
+assert_pattern "$FRONT_NBB" "case: 'routerInvoke'" "ingress routerInvoke case missing in NativeBoundaryBridge"
+assert_pattern "$FRONT_NBB" "case: 'routerQuery'" "ingress routerQuery case missing in NativeBoundaryBridge"
+assert_pattern "$FRONT_NBB" "nativeBoundaryIngress" "native boundary ingress dispatch method missing"
+assert_pattern "$FRONT_BRIDGE" "buildRouterInvokeIngressRequest" "frontend must build routerInvoke via ingress helper"
+assert_pattern "$FRONT_BRIDGE" "buildRouterQueryIngressRequest" "frontend must build routerQuery via ingress helper"
+assert_pattern "$JNI_BRIDGE" "Java_com_dsm_wallet_bridge_UnifiedNativeApi_dispatchIngress" "jni dispatchIngress entrypoint missing"
+assert_pattern "$JNI_BRIDGE" "Java_com_dsm_wallet_bridge_UnifiedNativeApi_dispatchStartup" "jni dispatchStartup entrypoint missing"
 
 # Async event propagation chain
-assert_pattern "$FRONT_PORT" "dispatchEventPayload(bytes)" "message-port async event dispatcher missing"
+assert_pattern "$FRONT_PORT" "dispatchLegacyTopicEvent(bytes)" "legacy-topic event dispatcher missing"
 assert_pattern "$FRONT_PORT" "'dsm-event-bin'" "message-port dispatcher must emit dsm-event-bin"
 assert_pattern "$FRONT_EVENT" "window.addEventListener('dsm-event-bin'" "event bridge listener missing"
 assert_pattern "$FRONT_EVENT" "topic === 'bilateral.event'" "bilateral event fanout missing"
