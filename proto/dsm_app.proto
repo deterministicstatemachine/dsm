@@ -1985,6 +1985,19 @@ message RecoverySuccessionResponse{ bool success = 1; Hash32 succession_hash = 2
 message RecoveryResumeRequest  { bytes counterparty_device_id = 1 [(dsm_fixed_len)=32]; Hash32 last_head_hash = 2; uint64 last_height = 3; }
 message RecoveryResumeResponse { bool success = 1; Hash32 new_transaction_hash = 2; bytes transaction_receipt = 3 [(dsm_max_len)=4096]; }
 
+// Internal codec for `dsm::recovery::tombstone::TombstoneReceipt` — the
+// SPHINCS+-signed device-invalidation receipt. Replaces prior bincode
+// serialization so recovery state stays on the protobuf-only wire.
+message TombstoneReceiptProto {
+  string device_id       = 1;
+  bytes  old_smt_root    = 2 [(dsm_fixed_len)=32];
+  uint64 old_counter     = 3;
+  bytes  old_rollup_hash = 4 [(dsm_fixed_len)=32];
+  uint64 tick            = 5;
+  bytes  signature       = 6 [(dsm_max_len)=65535]; // SPX256f = 49_856 bytes
+  bytes  tombstone_hash  = 7 [(dsm_fixed_len)=32];
+}
+
 // ==================== Minimal deterministic identity =================
 message ContactQrV3 {
   bytes  device_id       = 1 [(dsm_fixed_len)=32]; // raw 32-byte device identifier
