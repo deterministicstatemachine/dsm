@@ -172,8 +172,8 @@ pub fn build_histogram(samples: &[i64], bins: usize) -> Vec<f32> {
         hist[0] = 1.0;
         return hist;
     }
-    let min_v = *samples.iter().min().expect("samples non-empty");
-    let max_v = *samples.iter().max().expect("samples non-empty");
+    let min_v = samples.iter().copied().min().unwrap_or(0);
+    let max_v = samples.iter().copied().max().unwrap_or(0);
     if max_v <= min_v {
         hist[0] = 1.0;
         return hist;

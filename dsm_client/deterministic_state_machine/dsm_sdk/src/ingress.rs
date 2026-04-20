@@ -590,8 +590,12 @@ fn prime_identity_app_state(device_id: &[u8], genesis_hash: &[u8]) {
     // Derive the REAL SPHINCS+ public key from the canonical entropy triple.
     // The binding key MUST already be installed (via install_canonical_binding_key)
     // before this function is called. If it isn't, that's a bug — panic.
-    let bk = crate::binding_key::get_binding_key()
-        .expect("prime_identity_app_state: binding key MUST be installed before this call");
+    let Some(bk) = crate::binding_key::get_binding_key() else {
+        #[allow(clippy::panic)]
+        {
+            panic!("prime_identity_app_state: binding key MUST be installed before this call");
+        }
+    };
     assert_eq!(device_id.len(), 32, "device_id must be 32 bytes");
     assert_eq!(genesis_hash.len(), 32, "genesis_hash must be 32 bytes");
     assert_eq!(bk.len(), 32, "binding_key must be 32 bytes");
@@ -600,8 +604,17 @@ fn prime_identity_app_state(device_id: &[u8], genesis_hash: &[u8]) {
     entropy.extend_from_slice(genesis_hash);
     entropy.extend_from_slice(device_id);
     entropy.extend_from_slice(&bk);
-    let kp = dsm::crypto::SignatureKeyPair::generate_from_entropy(&entropy)
-        .expect("prime_identity_app_state: canonical SPHINCS+ key derivation must not fail");
+    let kp = match dsm::crypto::SignatureKeyPair::generate_from_entropy(&entropy) {
+        Ok(kp) => kp,
+        Err(e) => {
+            #[allow(clippy::panic)]
+            {
+                panic!(
+                    "prime_identity_app_state: canonical SPHINCS+ key derivation must not fail: {e:?}"
+                );
+            }
+        }
+    };
     log::info!(
         "prime_identity_app_state: derived canonical SPHINCS+ public key (len={})",
         kp.public_key().len()

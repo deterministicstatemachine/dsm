@@ -259,9 +259,12 @@ pub fn encode_device_state(head: &DeviceState) -> Vec<u8> {
     let rel_keys = head.relationship_keys();
     put_len_u32(&mut out, rel_keys.len());
     for rk in &rel_keys {
-        let tip = head
-            .rel_chain_tip(rk)
-            .expect("rel_key listed in keys must have a RelChainTip");
+        let Some(tip) = head.rel_chain_tip(rk) else {
+            #[allow(clippy::panic)]
+            {
+                panic!("rel_key listed in keys must have a RelChainTip");
+            }
+        };
 
         out.extend_from_slice(rk);
         out.extend_from_slice(&tip.chain_tip);
