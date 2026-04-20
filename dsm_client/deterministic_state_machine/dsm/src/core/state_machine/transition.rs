@@ -536,8 +536,24 @@ pub fn verify_transition_integrity(
     Ok(true)
 }
 
+/// Strict UTF-8 decoding for a token_id byte string.
+///
+/// Returns `None` for malformed UTF-8 or empty inputs. Using
+/// `from_utf8_lossy` here would replace malformed bytes with U+FFFD and
+/// cause different malformed token_ids (e.g. `[0xFF]`, `[0xFE]`) to
+/// collide onto the same balance key, enabling cross-token aliasing in
+/// `token_balances`.
+fn canonical_token_id_str(token_id: &[u8]) -> Option<&str> {
+    match std::str::from_utf8(token_id) {
+        Ok(s) if !s.is_empty() => Some(s),
+        _ => None,
+    }
+}
+
 fn token_balance_map_for_verification(state: &State, token_id: &[u8]) -> BTreeMap<String, u64> {
-    let token_id_str = String::from_utf8_lossy(token_id);
+    let Some(token_id_str) = canonical_token_id_str(token_id) else {
+        return BTreeMap::new();
+    };
     let suffix = format!("|{token_id_str}");
     state
         .token_balances
@@ -1003,7 +1019,11 @@ fn apply_token_balance_delta(
             amount,
             ..
         } => {
-            let token_id_str = String::from_utf8_lossy(token_id).to_string();
+            let token_id_str = canonical_token_id_str(token_id)
+                .ok_or_else(|| {
+                    DsmError::invalid_operation("Transfer has malformed or empty token_id")
+                })?
+                .to_string();
             // §8 Atomicity: all token ops MUST apply balance deltas in the
             // same state transition. resolve_policy_commit handles both
             // builtins (ERA/dBTC) and CPTA-anchored custom tokens.
@@ -1093,7 +1113,11 @@ fn apply_token_balance_delta(
         Operation::Mint {
             token_id, amount, ..
         } => {
-            let token_id_str = String::from_utf8_lossy(token_id).to_string();
+            let token_id_str = canonical_token_id_str(token_id)
+                .ok_or_else(|| {
+                    DsmError::invalid_operation("Mint has malformed or empty token_id")
+                })?
+                .to_string();
             let policy_commit = crate::core::token::resolve_policy_commit(&token_id_str);
             let owner_key = crate::core::token::derive_canonical_balance_key(
                 &policy_commit,
@@ -1119,7 +1143,11 @@ fn apply_token_balance_delta(
         Operation::Burn {
             token_id, amount, ..
         } => {
-            let token_id_str = String::from_utf8_lossy(token_id).to_string();
+            let token_id_str = canonical_token_id_str(token_id)
+                .ok_or_else(|| {
+                    DsmError::invalid_operation("Burn has malformed or empty token_id")
+                })?
+                .to_string();
             let policy_commit = crate::core::token::resolve_policy_commit(&token_id_str);
             let owner_key = crate::core::token::derive_canonical_balance_key(
                 &policy_commit,
@@ -1972,6 +2000,83 @@ mod tests {
         assert!(!result.unwrap_or_else(|e| panic!(
             "should return false when token disappears without operation: {e}"
         )));
+    }
+
+    #[test]
+    fn test_canonical_token_id_str_rejects_malformed() {
+        // Valid UTF-8 token IDs.
+        assert_eq!(canonical_token_id_str(b"ERA"), Some("ERA"));
+        assert_eq!(canonical_token_id_str(b"dBTC"), Some("dBTC"));
+
+        // Empty byte string is rejected.
+        assert!(canonical_token_id_str(b"").is_none());
+
+        // Invalid UTF-8 byte sequences are rejected (no silent U+FFFD
+        // replacement). Two different malformed IDs must NOT alias to the
+        // same balance key — both return `None` so no key is derivable.
+        let malformed_a: &[u8] = &[0xFF];
+        let malformed_b: &[u8] = &[0xFE, 0x80];
+        assert!(canonical_token_id_str(malformed_a).is_none());
+        assert!(canonical_token_id_str(malformed_b).is_none());
+    }
+
+    #[test]
+    fn test_token_balance_map_rejects_malformed_token_id() {
+        let mut state = create_test_state(1);
+        // Insert a legitimate balance under a valid key suffix.
+        state
+            .token_balances
+            .insert("test:state|ERA".to_string(), {
+                let mut b = Balance::zero();
+                b.update_add(100);
+                b
+            });
+
+        // Valid token_id produces the expected single entry.
+        let map = token_balance_map_for_verification(&state, b"ERA");
+        assert_eq!(map.len(), 1);
+
+        // Malformed token_id must produce an empty map — callers cannot
+        // derive *any* balance from an undecodable token_id.
+        let malformed_map = token_balance_map_for_verification(&state, &[0xFF]);
+        assert!(malformed_map.is_empty());
+    }
+
+    #[test]
+    fn test_apply_transition_transfer_rejects_malformed_token_id() {
+        let (state, _pk, sk) = create_test_state_with_keypair(7);
+
+        // Build a Transfer with a deliberately invalid UTF-8 token_id.
+        let mut op = Operation::Transfer {
+            amount: Balance::from_state(5, state.hash),
+            token_id: vec![0xFF, 0xFE],
+            to_device_id: b"recipient".to_vec(),
+            nonce: vec![1, 2, 3, 4],
+            pre_commit: None,
+            recipient: b"recipient".to_vec(),
+            message: "malformed token test".to_string(),
+            // Unilateral so apply_token_balance_delta runs (bilateral skips it).
+            mode: TransactionMode::Unilateral,
+            verification: OpVerificationType::Standard,
+            to: b"recipient".to_vec(),
+            signature: Vec::new(),
+        };
+        // Sign the op so we reach the balance-derivation code path.
+        let bytes = op.to_bytes();
+        let sig = sphincs_sign(&sk, &bytes)
+            .unwrap_or_else(|e| panic!("sign transfer failed: {e}"));
+        if let Operation::Transfer { signature, .. } = &mut op {
+            *signature = sig;
+        }
+
+        let err = apply_transition(&state, &op, &[1, 2, 3])
+            .err()
+            .unwrap_or_else(|| panic!("expected malformed token_id rejection"));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("malformed") || msg.contains("token_id"),
+            "unexpected error: {msg}"
+        );
     }
 
     #[test]
