@@ -35,6 +35,19 @@ pub trait PolicyCommitResolver: Send + Sync {
     fn resolve(&self, token_id: &str) -> Result<[u8; 32], DsmError>;
 }
 
+/// Strict UTF-8 decoding for a token_id byte string.
+///
+/// Returns `None` for malformed UTF-8 or empty inputs. Using
+/// `from_utf8_lossy` would silently substitute U+FFFD for invalid bytes and
+/// cause distinct malformed token_ids to collide onto the same balance key,
+/// enabling cross-token aliasing in `token_balances`.
+fn canonical_token_id_str(token_id: &[u8]) -> Option<&str> {
+    match std::str::from_utf8(token_id) {
+        Ok(s) if !s.is_empty() => Some(s),
+        _ => None,
+    }
+}
+
 /// Derive the stable canonical balance key for a token position.
 ///
 /// `balance_key` is the identity of the canonical balance entry. Freshness and
@@ -199,10 +212,12 @@ impl TokenStateManager {
                 recipient,
                 ..
             } => {
-                let token_id_str = String::from_utf8_lossy(token_id);
+                let token_id_str = canonical_token_id_str(token_id).ok_or_else(|| {
+                    DsmError::invalid_operation("Transfer has malformed or empty token_id")
+                })?;
                 let sender_pk = &current_state.device_info.public_key;
-                let sender_key = self.make_balance_key(sender_pk, &token_id_str)?;
-                let recipient_key = self.make_balance_key(recipient.as_slice(), &token_id_str)?;
+                let sender_key = self.make_balance_key(sender_pk, token_id_str)?;
+                let recipient_key = self.make_balance_key(recipient.as_slice(), token_id_str)?;
 
                 let sender_balance = new_balances
                     .get(&sender_key)
@@ -211,7 +226,7 @@ impl TokenStateManager {
 
                 if sender_balance.value() < amount.value() {
                     return Err(DsmError::insufficient_balance(
-                        token_id_str.into_owned(),
+                        token_id_str.to_string(),
                         sender_balance.value(),
                         amount.value(),
                     ));
@@ -247,9 +262,11 @@ impl TokenStateManager {
                 proof_of_authorization,
                 ..
             } => {
-                let token_id_str = String::from_utf8_lossy(token_id);
+                let token_id_str = canonical_token_id_str(token_id).ok_or_else(|| {
+                    DsmError::invalid_operation("Mint has malformed or empty token_id")
+                })?;
                 if !self.verify_mint_authorization(
-                    &token_id_str,
+                    token_id_str,
                     authorized_by,
                     proof_of_authorization,
                 )? {
@@ -260,7 +277,7 @@ impl TokenStateManager {
                 }
 
                 let owner_pk = &current_state.device_info.public_key;
-                let owner_key = self.make_balance_key(owner_pk, &token_id_str)?;
+                let owner_key = self.make_balance_key(owner_pk, token_id_str)?;
 
                 let current_balance = new_balances
                     .get(&owner_key)
@@ -283,8 +300,10 @@ impl TokenStateManager {
                 proof_of_ownership,
                 ..
             } => {
-                let token_id_str = String::from_utf8_lossy(token_id);
-                if !self.verify_token_ownership(&token_id_str, proof_of_ownership)? {
+                let token_id_str = canonical_token_id_str(token_id).ok_or_else(|| {
+                    DsmError::invalid_operation("Burn has malformed or empty token_id")
+                })?;
+                if !self.verify_token_ownership(token_id_str, proof_of_ownership)? {
                     return Err(DsmError::unauthorized(
                         "Invalid burn authorization",
                         None::<std::io::Error>,
@@ -292,7 +311,7 @@ impl TokenStateManager {
                 }
 
                 let owner_pk = &current_state.device_info.public_key;
-                let owner_key = self.make_balance_key(owner_pk, &token_id_str)?;
+                let owner_key = self.make_balance_key(owner_pk, token_id_str)?;
 
                 let owner_balance = new_balances
                     .get(&owner_key)
@@ -301,7 +320,7 @@ impl TokenStateManager {
 
                 if owner_balance.value() < amount.value() {
                     return Err(DsmError::insufficient_balance(
-                        token_id_str.into_owned(),
+                        token_id_str.to_string(),
                         owner_balance.value(),
                         amount.value(),
                     ));
@@ -330,9 +349,13 @@ impl TokenStateManager {
             } => {
                 if let (Some(tid), Some(amount)) = (token_id, locked_amount) {
                     if amount.value() > 0 {
-                        let tid_str = String::from_utf8_lossy(tid);
+                        let tid_str = canonical_token_id_str(tid).ok_or_else(|| {
+                            DsmError::invalid_operation(
+                                "DlvCreate has malformed or empty token_id",
+                            )
+                        })?;
                         let creator_key =
-                            self.make_balance_key(creator_public_key.as_slice(), &tid_str)?;
+                            self.make_balance_key(creator_public_key.as_slice(), tid_str)?;
 
                         let creator_balance = new_balances
                             .get(&creator_key)
@@ -341,7 +364,7 @@ impl TokenStateManager {
 
                         if creator_balance.value() < amount.value() {
                             return Err(DsmError::insufficient_balance(
-                                tid_str.into_owned(),
+                                tid_str.to_string(),
                                 creator_balance.value(),
                                 amount.value(),
                             ));
@@ -588,8 +611,13 @@ impl TokenStateManager {
             _ => "unknown",
         };
 
-        let token_id_str = String::from_utf8_lossy(token_id);
-        let token_id_owned = token_id_str.into_owned();
+        let token_id_owned = canonical_token_id_str(token_id)
+            .ok_or_else(|| {
+                DsmError::invalid_operation(
+                    "Policy verification rejected: malformed or empty token_id",
+                )
+            })?
+            .to_string();
         let result = if tokio::runtime::Handle::try_current().is_ok() {
             let policy_system = policy_system.clone();
             let context_clone = context.clone();
