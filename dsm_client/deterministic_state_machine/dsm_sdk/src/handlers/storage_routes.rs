@@ -661,14 +661,16 @@ impl AppRouterImpl {
                                             }
                                         };
                                         if !valid {
+                                            log::warn!(
+                                                "[storage.sync] inbox.pull: signature verification failed for tx {} — skipping poisoned entry, continuing batch",
+                                                entry.transaction_id
+                                            );
                                             let mut state_guard = batch_state.lock().await;
-                                            let msg = "inbox.pull: signature verification failed"
-                                                .to_string();
-                                            state_guard.errors.push(msg.clone());
-                                            if state_guard.fatal_error.is_none() {
-                                                state_guard.fatal_error = Some(msg);
-                                            }
-                                            break;
+                                            state_guard.errors.push(format!(
+                                                "inbox.pull: signature verification failed for tx {}",
+                                                entry.transaction_id
+                                            ));
+                                            continue;
                                         }
 
                                         // Rehydrate and apply the transfer operation (we already hold Operation in the entry)

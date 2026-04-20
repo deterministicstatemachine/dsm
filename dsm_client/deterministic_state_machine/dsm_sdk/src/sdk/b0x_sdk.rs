@@ -1459,15 +1459,28 @@ impl B0xSDK {
         // Do NOT duplicate that signature into EvidenceOracle.signature for b0x transport,
         // or envelopes can exceed storage-node body limits (HTTP 413).
         // Keep only oracle_key in evidence so receivers can still verify without extra lookups.
-        // Use the wallet's SPHINCS+ public key from the state machine (updated by
-        // initialize_device_keys) — NOT the genesis public key from AppState.
-        let sender_signing_public_key = self
-            .core_sdk
-            .get_current_state()
-            .map(|s| s.device_info.public_key.clone())
-            .unwrap_or_else(|_| {
-                crate::sdk::app_state::AppState::get_public_key().unwrap_or_default()
-            });
+        //
+        // Source of truth: signing_authority derives the pk deterministically from
+        // (genesis_hash, device_id, C-DBRW binding key) — the SAME derivation that
+        // produces the secret key used by `wallet.sign_operation_bytes`. Embedding
+        // this pk guarantees the receiver's sphincs_verify uses the same pk that
+        // produced the signature; using `state.device_info.public_key` or
+        // `AppState::get_public_key()` can drift (stale genesis pk, fallback
+        // 32-byte placeholder, etc.) and silently poison the inbox.
+        let sender_signing_public_key = match crate::sdk::signing_authority::current_public_key() {
+            Ok(pk) => pk,
+            Err(e) => {
+                log::warn!(
+                        "submit_to_b0x: signing_authority pk unavailable ({e}); falling back to core state pk"
+                    );
+                self.core_sdk
+                    .get_current_state()
+                    .map(|s| s.device_info.public_key.clone())
+                    .unwrap_or_else(|_| {
+                        crate::sdk::app_state::AppState::get_public_key().unwrap_or_default()
+                    })
+            }
+        };
 
         let evidence = if !sender_signing_public_key.is_empty() {
             Some(dsm::types::proto::Evidence {
@@ -2654,7 +2667,10 @@ impl B0xSDK {
             .local_chain_tip()
             .await
             .map(|v| text_id::encode_base32_crockford(&v))?;
-        let sender_signing_public_key = core_sdk.get_device_identity().public_key;
+        // Use signing_authority (C-DBRW-derived) to match the key used by
+        // wallet.sign_operation_bytes — see submit_to_b0x for rationale.
+        let sender_signing_public_key = crate::sdk::signing_authority::current_public_key()
+            .unwrap_or_else(|_| core_sdk.get_device_identity().public_key);
 
         let mut sdk = B0xSDK::new(device_id_b32, core_sdk.clone(), storage_endpoints)?;
         let mut pushed = 0usize;
