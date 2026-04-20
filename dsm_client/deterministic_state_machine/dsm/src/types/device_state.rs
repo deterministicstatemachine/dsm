@@ -523,6 +523,13 @@ impl DeviceState {
         // Atomic SMT-replace on a working copy of the SMT. For first-ever
         // advances, seed the leaf with `embedded_parent` (= initial_chain_tip)
         // before the replace so the parent proof is an inclusion proof.
+        //
+        // `parent_r_a` is the CAS-layer view of the device head entering this
+        // advance — the root BEFORE any seeding. Seeding is an internal helper
+        // to build a valid Merkle pre-image for `smt_replace`; it must remain
+        // invisible to the CAS compare-and-swap. The Merkle `pre_root`
+        // (post-seed) lives on `smt_proofs.pre_root` instead.
+        let parent_r_a = *self.smt.root();
         let mut new_smt = self.smt.clone();
         if seed_first_ever {
             new_smt
@@ -533,7 +540,6 @@ impl DeviceState {
                     ))
                 })?;
         }
-        let parent_r_a = *new_smt.root();
         let smt_proofs = new_smt
             .smt_replace(&rel_key, &child_chain_tip)
             .map_err(|e| DsmError::invalid_operation(format!("SMT replace failed: {e}")))?;
