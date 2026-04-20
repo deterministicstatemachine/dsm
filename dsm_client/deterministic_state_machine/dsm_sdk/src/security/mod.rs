@@ -11,7 +11,7 @@ pub mod cdbrw_responder;
 pub mod cdbrw_verifier;
 pub mod identity;
 pub mod offline_security;
-pub mod shared_smt;
+pub mod modal_sync_lock;
 pub mod wal_transaction_queue;
 
 pub use offline_security::{

@@ -285,16 +285,10 @@ impl AppRouterImpl {
     ) -> Result<(), String> {
         let mut rollback_errors = Vec::new();
 
-        if let Some(smt) = crate::security::shared_smt::get_shared_smt() {
-            let mut smt_guard = smt.write().await;
-            if let Err(e) = smt_guard.smt_replace(rollback.smt_key, rollback.parent_chain_tip) {
-                rollback_errors.push(format!("shared SMT rollback failed: {e}"));
-            }
-        } else {
-            rollback_errors.push(
-                "shared SMT unavailable during rollback of failed online transfer".to_string(),
-            );
-        }
+        // Canonical rollback deletes the archived `bcr_chain_states` row +
+        // resets `bcr_device_heads` inside `rollback_failed_online_send_atomic`
+        // (invoked by `WalletSDK::rollback_failed_online_send`).  No shadow
+        // SMT needs rolling back separately.
 
         if let Err(e) = self.wallet.rollback_failed_online_send(
             &crate::sdk::wallet_sdk::FailedOnlineSendRollback {
@@ -311,7 +305,7 @@ impl AppRouterImpl {
             rollback_errors.push(format!("wallet rollback failed: {e}"));
         }
 
-        crate::security::shared_smt::clear_pending_online(rollback.smt_key).await;
+        crate::security::modal_sync_lock::clear_pending_online(rollback.smt_key).await;
 
         if rollback_errors.is_empty() {
             Ok(())
@@ -365,8 +359,6 @@ impl AppRouterImpl {
     }
 
     pub fn new(config: SdkConfig) -> Result<Self, dsm::types::error::DsmError> {
-        crate::security::shared_smt::init_shared_smt(256);
-
         // Prefer canonical device id from AppState (32 bytes persisted at genesis).
         // Fall back to a deterministic hash of config.node_id only if AppState is not yet initialized.
         // Only consult AppState if storage base dir was configured; otherwise, fall back to a stable hash of node_id.
@@ -1196,7 +1188,7 @@ impl AppRouterImpl {
 
         // §5.4 Modal lock: reserve this (A,B) relationship before any local mutation.
         // If another online transition is already pending, fail closed.
-        if !crate::security::shared_smt::set_pending_online(&smt_key).await {
+        if !crate::security::modal_sync_lock::set_pending_online(&smt_key).await {
             return err(
                 "wallet.send: relationship already has a pending online transition; retry after sync"
                     .to_string(),
@@ -1210,7 +1202,7 @@ impl AppRouterImpl {
         ) {
             Ok(true) => {}
             Ok(false) => {
-                crate::security::shared_smt::clear_pending_online(&smt_key).await;
+                crate::security::modal_sync_lock::clear_pending_online(&smt_key).await;
                 let _ =
                     crate::storage::client_db::mark_contact_needs_online_reconcile(&to_device_id);
                 return err(
@@ -1219,7 +1211,7 @@ impl AppRouterImpl {
                 );
             }
             Err(e) => {
-                crate::security::shared_smt::clear_pending_online(&smt_key).await;
+                crate::security::modal_sync_lock::clear_pending_online(&smt_key).await;
                 return err(format!(
                     "wallet.send: failed to validate relationship parent tip: {e}"
                 ));
@@ -1236,15 +1228,20 @@ impl AppRouterImpl {
         // Execute local state update using the pre-built signed Operation directly.
         // This bypasses execute_signed_transfer which would reconstruct a different
         // Operation (empty nonce, different Balance) causing signature verification failure.
-        let new_state = match self.wallet.send_transfer_op(signed_op, &signed_tx) {
-            Ok(state) => state,
-            Err(e) => {
-                crate::security::shared_smt::clear_pending_online(&smt_key).await;
-                let failure_class = self.classify_local_state_update_failure(&e);
-                log::error!("[wallet.send] ❌ send_transfer_op FAILED class={failure_class}: {e}");
-                return err(format!("wallet.send: local state update failed: {e}"));
-            }
-        };
+        // Returns the compat State view plus the AdvanceOutcome whose smt_proofs
+        // / parent_r_a / child_r_a drive the canonical ReceiptCommit build below.
+        let (new_state, advance_outcome) =
+            match self.wallet.send_transfer_op(signed_op, &signed_tx) {
+                Ok(pair) => pair,
+                Err(e) => {
+                    crate::security::modal_sync_lock::clear_pending_online(&smt_key).await;
+                    let failure_class = self.classify_local_state_update_failure(&e);
+                    log::error!(
+                        "[wallet.send] ❌ send_transfer_op FAILED class={failure_class}: {e}"
+                    );
+                    return err(format!("wallet.send: local state update failed: {e}"));
+                }
+            };
         let rollback_request = OnlineTransferRollback {
             smt_key: &smt_key,
             parent_chain_tip: &chain_tip_arr,
@@ -1273,44 +1270,21 @@ impl AppRouterImpl {
             &receipt_sigma,
         );
 
-        // SMT-Replace: update shared Per-Device SMT leaf h_n → h_{n+1}
-        // §4.2: Terminal error on SMT failure — no silent degradation.
-        let Some(smt) = crate::security::shared_smt::get_shared_smt() else {
-            // §4.3#8: SMT not initialized is a terminal error, not silent degradation.
-            // Without Per-Device SMT, we cannot produce verifiable ReceiptCommit.
-            let rollback_error = self
-                .rollback_failed_online_transfer(&rollback_request)
-                .await
-                .err()
-                .map(|e| format!("; rollback failed: {e}"))
-                .unwrap_or_default();
-            return err(format!(
-                "wallet.send: Per-Device SMT not initialized — cannot produce verifiable receipt{rollback_error}"
-            ));
-        };
-
+        // ReceiptCommit built directly from the AdvanceOutcome produced by the
+        // canonical §2.2 Per-Device SMT advance (no shadow SMT replace).
+        // Inclusion proofs verify against the A-side (asymmetric) chain tip
+        // that now sits in DeviceState.smt — symmetric `new_chain_tip` is
+        // still used downstream for contacts.chain_tip + b0x addressing.
         let (receipt_commit_bytes, receipt_canonical_bytes) = {
-            // Atomic SMT-Replace via core (§4.2)
-            let result = {
-                let mut smt_guard = smt.write().await;
-                match smt_guard.smt_replace(&smt_key, &new_chain_tip) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        drop(smt_guard);
-                        let rollback_error = self
-                            .rollback_failed_online_transfer(&rollback_request)
-                            .await
-                            .err()
-                            .map(|rb| format!("; rollback failed: {rb}"))
-                            .unwrap_or_default();
-                        return err(format!(
-                            "wallet.send: SMT-Replace failed (terminal, §4.2): {e}{rollback_error}"
-                        ));
-                    }
-                }
-            };
-            let pre_proof_bytes = result.parent_proof.to_bytes();
-            let post_proof_bytes = result.child_proof.to_bytes();
+            let pre_proof_bytes = advance_outcome.smt_proofs.parent_proof.to_bytes();
+            let post_proof_bytes = advance_outcome.smt_proofs.child_proof.to_bytes();
+            // h_n / h_{n+1} asymmetric (A-side) values stored in T_A.
+            let parent_tip_asymmetric = advance_outcome
+                .smt_proofs
+                .parent_proof
+                .value
+                .unwrap_or([0u8; 32]);
+            let child_tip_asymmetric = advance_outcome.new_chain_state.compute_chain_tip();
 
             // Build ReceiptCommit with real SMT roots and proofs
             // Use local Device Tree root (R_G) for receipt construction
@@ -1319,10 +1293,10 @@ impl AppRouterImpl {
             let rc_canonical = match crate::sdk::receipts::build_bilateral_receipt_with_smt(
                 from_device_id,
                 to_device_id,
-                chain_tip_arr,
-                new_chain_tip,
-                result.pre_root,
-                result.post_root,
+                parent_tip_asymmetric,
+                child_tip_asymmetric,
+                advance_outcome.parent_r_a,
+                advance_outcome.child_r_a,
                 pre_proof_bytes,
                 post_proof_bytes,
                 local_device_tree_commitment,
@@ -1426,10 +1400,10 @@ impl AppRouterImpl {
             };
 
             log::info!(
-                "[wallet.send] §4.2 SMT updated + receipt self-verified + sig_a embedded: smt_key={:?}.. pre_root={:?}.. post_root={:?}.. receipt_len={}",
+                "[wallet.send] §4.2 canonical advance + receipt self-verified + sig_a embedded: smt_key={:?}.. pre_root={:?}.. post_root={:?}.. receipt_len={}",
                 &smt_key[..4],
-                &result.pre_root[..4],
-                &result.post_root[..4],
+                &advance_outcome.parent_r_a[..4],
+                &advance_outcome.child_r_a[..4],
                 rc.len(),
             );
             (rc, rc_canonical)
@@ -1724,7 +1698,7 @@ impl AppRouterImpl {
             // before the canonical tip advances, keeping recipient polling aligned
             // with the sender's actual finalized relationship tip.
         }
-        crate::security::shared_smt::clear_pending_online(&smt_key).await;
+        crate::security::modal_sync_lock::clear_pending_online(&smt_key).await;
 
         // Get new balance for response
         let token_id_ref = if token_id.is_empty() {
@@ -2432,11 +2406,40 @@ impl AppRouter for AppRouterImpl {
         self.core_sdk.device_head()
     }
 
-    fn apply_device_balance_deltas(
+    fn execute_on_relationship_for_bilateral(
         &self,
+        rel_key: [u8; 32],
+        counterparty_devid: [u8; 32],
+        operation: dsm::types::operations::Operation,
         deltas: &[dsm::types::device_state::BalanceDelta],
-    ) -> Result<(), dsm::types::error::DsmError> {
-        self.core_sdk.apply_device_balance_deltas(deltas)
+        initial_chain_tip: Option<[u8; 32]>,
+    ) -> Result<dsm::types::device_state::AdvanceOutcome, dsm::types::error::DsmError> {
+        self.core_sdk
+            .execute_on_relationship(
+                rel_key,
+                counterparty_devid,
+                operation,
+                deltas,
+                initial_chain_tip,
+            )
+            .map(|(_state, outcome)| outcome)
+    }
+
+    fn simulate_advance_for_confirm(
+        &self,
+        rel_key: [u8; 32],
+        counterparty_devid: [u8; 32],
+        operation: dsm::types::operations::Operation,
+        deltas: &[dsm::types::device_state::BalanceDelta],
+        initial_chain_tip: Option<[u8; 32]>,
+    ) -> Result<dsm::types::device_state::AdvanceOutcome, dsm::types::error::DsmError> {
+        self.core_sdk.simulate_advance_for_confirm(
+            rel_key,
+            counterparty_devid,
+            operation,
+            deltas,
+            initial_chain_tip,
+        )
     }
 
     // ====================== QUERY ======================
@@ -3046,7 +3049,6 @@ mod tests {
         };
 
         let _router = AppRouterImpl::new(cfg).expect("router init");
-        assert!(crate::security::shared_smt::get_shared_smt().is_some());
     }
 
     #[test]

@@ -19,6 +19,7 @@ use crate::crypto::canonical_lp;
 use crate::crypto::signatures::SignatureKeyPair;
 use crate::merkle::sparse_merkle_tree::{empty_leaf, SmtReplaceResult, SparseMerkleTree};
 use crate::types::contact_types::{ChainTipSmtProof, DsmVerifiedContact};
+use crate::types::device_state::BalanceDelta;
 use crate::types::error::{DeterministicSafetyClass, DsmError};
 use crate::types::operations::Operation;
 use crate::types::state_types::{PreCommitment, State};
@@ -294,6 +295,38 @@ pub struct BilateralTransactionResult {
     pub relationship_anchor: BilateralRelationshipAnchor,
     pub transaction_hash: [u8; 32],
     pub completed_offline: bool,
+}
+
+/// Prepared bilateral advance — handoff from the tripwire-verified
+/// precommitment path to the canonical Per-Device SMT advance (§2.2).
+///
+/// Constructed by [`BilateralTransactionManager::prepare_bilateral_advance`]
+/// after §6.1 tripwire + §4.3 acceptance prechecks pass. The caller feeds
+/// this into `AppRouter::execute_on_relationship_for_bilateral` to commit
+/// the advance atomically via `CoreSDK::execute_on_relationship`.
+///
+/// Construction does NOT mutate any SMT, any anchor, or the pending
+/// precommitment set — commit happens only inside the router, gated by
+/// §4.3 acceptance again. The caller must call
+/// [`BilateralTransactionManager::consume_pre_commitment`] after the
+/// advance commits successfully.
+#[derive(Clone, Debug)]
+pub struct PreparedBilateralAdvance {
+    /// SMT leaf key `k_{A↔B}` for this relationship.
+    pub rel_key: [u8; 32],
+    /// Counterparty's 32-byte device ID.
+    pub counterparty_devid: [u8; 32],
+    /// Operation to execute on the bilateral chain.
+    pub operation: Operation,
+    /// Sender-side balance deltas supplied by the caller.
+    pub deltas: Vec<BalanceDelta>,
+    /// Parent chain tip `h_n` used for CAS-style linkage during advance.
+    pub parent_tip: [u8; 32],
+    /// Entropy `e` to be fed into the advance; matches the precommitted value.
+    pub entropy: [u8; 32],
+    /// Bilateral precommitment hash, for post-commit cleanup via
+    /// [`BilateralTransactionManager::consume_pre_commitment`].
+    pub pre_commitment_hash: [u8; 32],
 }
 
 #[derive(Debug)]
@@ -672,11 +705,13 @@ impl BilateralTransactionManager {
             labeling::hash_to_short_id(&tip),
             contact_chain_tip.is_some()
         );
-        // §4.2: Seed the Per-Device SMT leaf to h0 so the first replace is
-        // h0 → h1, not empty → h1. The parent proof must show h_n ∈ r_A.
+        // §2.2 canonical SMT (DeviceState.smt) auto-seeds on first advance
+        // via `DeviceState::advance`'s `initial_chain_tip` branch. The `smt`
+        // argument here is a legacy per-handler local SMT that no longer
+        // feeds any acceptance path — seed it for internal consistency only.
         let smt_key = compute_smt_key(&self.local_device_id, remote_device_id);
         smt.update_leaf(&smt_key, &tip)
-            .map_err(|e| DsmError::merkle(format!("Failed to seed SMT leaf for h0: {e}")))?;
+            .map_err(|e| DsmError::merkle(format!("Failed to seed legacy local SMT leaf: {e}")))?;
 
         anchor.chain_tip = tip;
         self.relationships.insert(*remote_device_id, anchor.clone());
@@ -1286,6 +1321,143 @@ impl BilateralTransactionManager {
             transaction_hash: tx_hash,
             completed_offline: true,
         })
+    }
+
+    /// Prepare (but do not commit) a bilateral offline transfer.
+    ///
+    /// Runs the §6.1 tripwire checks and resolves entropy, then returns a
+    /// [`PreparedBilateralAdvance`] handoff that the caller commits via
+    /// `AppRouter::execute_on_relationship_for_bilateral` — which routes
+    /// through the canonical `prepare_advance_relationship → commit_advance`
+    /// chokepoint on the Per-Device SMT (§2.2).
+    ///
+    /// Body:
+    ///   1. Refresh shared chain tip from persistent store.
+    ///   2. §6.1 tripwire: anchor tip must equal `local_chain_tip_at_creation`.
+    ///   3. Tripwire: anchor tip must equal persisted contact tip.
+    ///   4. Entropy resolve (pre-generated wins; fresh otherwise).
+    ///   5. Emit `PreparedBilateralAdvance`.
+    ///
+    /// No SMT mutation. No anchor mutation. No `pending_commitments` removal
+    /// — caller calls [`Self::consume_pre_commitment`] after advance commit.
+    pub async fn prepare_bilateral_advance(
+        &mut self,
+        remote_device_id: &[u8; 32],
+        pre_commitment_hash: &[u8; 32],
+        receiver_acceptance_proof: &[u8],
+        pre_generated_entropy: Option<[u8; 32]>,
+        sender_deltas: Vec<BalanceDelta>,
+    ) -> Result<PreparedBilateralAdvance, DsmError> {
+        info!("prepare_bilateral_advance: tripwire + entropy (no SMT/anchor mutation)");
+
+        let pre = self
+            .pending_commitments
+            .get(pre_commitment_hash)
+            .ok_or_else(|| {
+                DsmError::InvalidOperation("pre-commitment not found or expired".into())
+            })?
+            .clone();
+        if receiver_acceptance_proof.is_empty() {
+            return Err(DsmError::InvalidOperation(
+                "receiver acceptance proof required".into(),
+            ));
+        }
+        let mut anchor = self
+            .relationships
+            .get(remote_device_id)
+            .ok_or_else(|| DsmError::RelationshipNotFound("remote device".into()))?
+            .clone();
+
+        // Refresh shared chain tip from persistent store before tripwire.
+        if let Some(tip) = self.chain_tip_store.get_contact_chain_tip(remote_device_id) {
+            if let Some(anchor_mut) = self.relationships.get_mut(remote_device_id) {
+                anchor_mut.chain_tip = tip;
+            }
+            if let Some(contact_mut) = self.contact_manager.get_contact_mut(remote_device_id) {
+                contact_mut.chain_tip = Some(tip);
+                contact_mut.chain_tip_smt_proof = None;
+            }
+            anchor.chain_tip = tip;
+        }
+
+        // ===== TRIPWIRE ENFORCEMENT (§6.1) =====
+        // Parent tip at precommit creation must equal current anchor tip; else
+        // another transition already consumed the parent hash and finalizing
+        // would violate the Tripwire theorem.
+        if Some(anchor.chain_tip) != pre.local_chain_tip_at_creation {
+            let class = DeterministicSafetyClass::ParentConsumed;
+            log::warn!(
+                "[BTM][TRIPWIRE:precommit-parent-consumed] anchor={} precommit_tip={} class={}",
+                labeling::hash_to_short_id(&anchor.chain_tip),
+                pre.local_chain_tip_at_creation
+                    .map(|t| labeling::hash_to_short_id(&t))
+                    .unwrap_or_else(|| "None".to_string()),
+                class.as_str()
+            );
+            error!(
+                "[BTM] Deterministic safety rejection [{}]: chain_tip={} precommit_tip={}",
+                class.as_str(),
+                labeling::hash_to_short_id(&anchor.chain_tip),
+                pre.local_chain_tip_at_creation
+                    .map(|t| labeling::hash_to_short_id(&t))
+                    .unwrap_or_else(|| "None".to_string())
+            );
+            return Err(DsmError::deterministic_safety(
+                class,
+                "Tripwire: chain tip advanced since precommitment creation (parent hash already consumed)",
+            ));
+        }
+
+        // Tripwire: shared chain tip must match persisted contact tip.
+        if let Some(contact) = self.contact_manager.get_contact(remote_device_id) {
+            if let Some(contact_tip) = contact.chain_tip {
+                if anchor.chain_tip != contact_tip {
+                    log::warn!(
+                        "[BTM][TRIPWIRE:prepare] anchor={} contact={} precommit_tip={} store={}",
+                        labeling::hash_to_short_id(&anchor.chain_tip),
+                        labeling::hash_to_short_id(&contact_tip),
+                        pre.local_chain_tip_at_creation
+                            .map(|t| labeling::hash_to_short_id(&t))
+                            .unwrap_or_else(|| "None".to_string()),
+                        self.chain_tip_store
+                            .get_contact_chain_tip(remote_device_id)
+                            .map(|t| labeling::hash_to_short_id(&t))
+                            .unwrap_or_else(|| "None".to_string()),
+                    );
+                    return Err(DsmError::deterministic_safety(
+                        DeterministicSafetyClass::ParentConsumed,
+                        "Tripwire: relationship chain tip diverged from persisted value",
+                    ));
+                }
+            }
+        } else {
+            return Err(DsmError::RelationshipNotFound(
+                "remote contact missing for prepare_bilateral_advance".into(),
+            ));
+        }
+
+        let entropy = match pre_generated_entropy {
+            Some(e) => e,
+            None => self.bilateral_state_manager.generate_entropy()?,
+        };
+        let rel_key = compute_smt_key(&self.local_device_id, remote_device_id);
+
+        Ok(PreparedBilateralAdvance {
+            rel_key,
+            counterparty_devid: *remote_device_id,
+            operation: pre.operation,
+            deltas: sender_deltas,
+            parent_tip: anchor.chain_tip,
+            entropy,
+            pre_commitment_hash: *pre_commitment_hash,
+        })
+    }
+
+    /// Drop a precommitment from the pending set after its associated
+    /// bilateral advance has committed successfully. Call this after
+    /// `AppRouter::execute_on_relationship_for_bilateral` returns Ok.
+    pub fn consume_pre_commitment(&mut self, pre_commitment_hash: &[u8; 32]) {
+        self.pending_commitments.remove(pre_commitment_hash);
     }
 
     /// Non-mutating preview of the sender's post-finalize SHARED chain tip hash.

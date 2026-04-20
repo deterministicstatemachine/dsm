@@ -179,28 +179,14 @@ impl ContactManager {
                         ble_address: record.ble_address.clone(),
                     };
 
-                    let smt_arc = crate::security::shared_smt::init_shared_smt(256);
-                    let own_device_id = self.device_id;
                     let load_result =
                         self.with_manager_write_sync("load_contacts_from_database", move |mgr| {
                             mgr.add_verified_contact(verified_contact.clone())?;
-                            if let Some(chain_tip) = verified_contact.chain_tip {
-                                let mut smt = smt_arc.blocking_write();
-                                let smt_key =
-                                    dsm::core::bilateral_transaction_manager::compute_smt_key(
-                                        &own_device_id,
-                                        &device_id,
-                                    );
-                                mgr.initialize_contact_chain_tip(
-                                    &device_id, chain_tip, &mut smt, &smt_key,
-                                )
-                                .map_err(|e| {
-                                    DsmError::internal(
-                                        "Failed to initialize contact chain tip",
-                                        Some(e),
-                                    )
-                                })?;
-                            }
+                            // §2.2: no initial SMT seeding. The first canonical
+                            // advance for this relationship populates T_A at
+                            // `k_{A↔B}` via `DeviceState::advance`, with
+                            // `initial_chain_tip_from_device_ids` as the
+                            // seed for `embedded_parent`.
                             Ok(())
                         });
 
@@ -303,26 +289,13 @@ impl ContactManager {
             ble_address: ble_address.clone(),
         };
         {
-            let smt_arc = crate::security::shared_smt::init_shared_smt(256);
-            let mut smt = smt_arc.write().await;
-            let smt_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
-                &self.device_id,
-                &contact_device_id,
-            );
             let mut mgr = self.dsm_manager.write().await;
             mgr.add_verified_contact(verified.clone()).map_err(|e| {
                 ContactError::InvalidContactData(format!("Core add_verified_contact failed: {e}"))
             })?;
-            if let Err(e) = mgr.initialize_contact_chain_tip(
-                &contact_device_id,
-                initial_chain_tip,
-                &mut smt,
-                &smt_key,
-            ) {
-                return Err(ContactError::InvalidChainTip(format!(
-                    "Failed to initialize chain tip SMT proof: {e}"
-                )));
-            }
+            // §2.2: first canonical advance populates T_A at k_{A↔B} via
+            // `DeviceState::advance` (with `initial_chain_tip_from_device_ids`
+            // as the `embedded_parent` seed). No up-front SMT seeding needed.
         }
 
         // ✅ PRODUCTION FIX: Persist to SQLite for durability across restarts
@@ -607,12 +580,6 @@ impl ContactManager {
             ble_address: ble_address.clone(),
         };
         {
-            let smt_arc = crate::security::shared_smt::init_shared_smt(256);
-            let mut smt = smt_arc.write().await;
-            let smt_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
-                &self.device_id,
-                &contact_device_id,
-            );
             let mut mgr = self.dsm_manager.write().await;
             log::info!(
                 "[DSM_SDK] ➕ Adding contact to in-memory HashMap: alias={}",
@@ -621,16 +588,7 @@ impl ContactManager {
             mgr.add_verified_contact(verified.clone()).map_err(|e| {
                 ContactError::InvalidContactData(format!("Core add_verified_contact failed: {e}"))
             })?;
-            if let Err(e) = mgr.initialize_contact_chain_tip(
-                &contact_device_id,
-                initial_chain_tip,
-                &mut smt,
-                &smt_key,
-            ) {
-                return Err(ContactError::InvalidChainTip(format!(
-                    "Failed to initialize chain tip SMT proof: {e}"
-                )));
-            }
+            // §2.2: first canonical advance populates T_A at k_{A↔B}.
             log::info!("[DSM_SDK] ✅ Contact added to HashMap successfully");
         }
 
@@ -830,44 +788,31 @@ impl ContactManager {
         expected_parent_tip: [u8; 32],
         new_chain_tip: [u8; 32],
     ) -> Result<(), ContactError> {
-        // §4.2: SMT-Replace is mandatory for every state transition.
-        let smt_arc = crate::security::shared_smt::get_shared_smt().ok_or(
-            ContactError::InvalidContactData(
-                "Per-Device SMT not initialized — cannot produce valid proof (§4.2)".into(),
-            ),
-        )?;
-        let smt = smt_arc.read().await;
-        let smt_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
-            &self.device_id,
-            &contact_device_id,
-        );
-        let mut mgr = self.dsm_manager.write().await;
-        mgr.update_contact_chain_tip_unilateral(&contact_device_id, new_chain_tip, &smt, &smt_key)?;
-
-        {
-            let request = crate::storage::client_db::bilateral_tip_sync::TipSyncRequest {
-                counterparty_device_id: contact_device_id,
-                expected_parent_tip,
-                target_tip: new_chain_tip,
-                observed_gate: None,
-                clear_gate_on_success: false,
-            };
-            match crate::storage::client_db::bilateral_tip_sync::sync_bilateral_tips_atomically(&request) {
-                Ok(outcome) => match outcome {
-                    crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::Advanced { .. }
-                    | crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::RepairedAtTarget { .. }
-                    | crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::AlreadyAtTarget { .. } => {}
-                    _ => {
-                        return Err(ContactError::InvalidChainTip(
-                            "Finalized unilateral chain tip parent mismatch".to_string(),
-                        ));
-                    }
-                },
-                Err(e) => {
-                    return Err(ContactError::InvalidChainTip(format!(
-                        "Failed to persist finalized unilateral chain tip update: {e}"
-                    )));
+        // §2.2: Canonical advance (DeviceState.smt) already owns SMT state.
+        // This helper only persists the symmetric §16.6 tip to contacts.chain_tip
+        // for future precommit + b0x addressing.
+        let request = crate::storage::client_db::bilateral_tip_sync::TipSyncRequest {
+            counterparty_device_id: contact_device_id,
+            expected_parent_tip,
+            target_tip: new_chain_tip,
+            observed_gate: None,
+            clear_gate_on_success: false,
+        };
+        match crate::storage::client_db::bilateral_tip_sync::sync_bilateral_tips_atomically(&request) {
+            Ok(outcome) => match outcome {
+                crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::Advanced { .. }
+                | crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::RepairedAtTarget { .. }
+                | crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::AlreadyAtTarget { .. } => {}
+                _ => {
+                    return Err(ContactError::InvalidChainTip(
+                        "Finalized unilateral chain tip parent mismatch".to_string(),
+                    ));
                 }
+            },
+            Err(e) => {
+                return Err(ContactError::InvalidChainTip(format!(
+                    "Failed to persist finalized unilateral chain tip update: {e}"
+                )));
             }
         }
 

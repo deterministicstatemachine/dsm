@@ -76,32 +76,6 @@ impl StateMachine {
         self.legacy_state = None;
     }
 
-    /// Apply balance deltas to the canonical device head without producing a
-    /// new SMT root or chain state.
-    ///
-    /// Band-aid for advance paths that bypass `prepare_advance_relationship`
-    /// (notably the BLE bilateral path). See
-    /// [`crate::types::device_state::DeviceState::apply_balance_deltas`] for
-    /// the long-form design rationale.
-    ///
-    /// Errors if no device head has been initialised yet, or if any delta
-    /// would underflow / overflow `B^T`.
-    pub fn apply_balance_deltas(
-        &mut self,
-        deltas: &[crate::types::device_state::BalanceDelta],
-    ) -> Result<(), DsmError> {
-        let ds = self.device_state.as_mut().ok_or_else(|| {
-            DsmError::state_machine(
-                "DeviceState not initialised — cannot apply balance deltas before genesis",
-            )
-        })?;
-        ds.apply_balance_deltas(deltas)?;
-        // Drop the legacy compat State view; balances changed so the cached
-        // projection is stale until a future `current_state()` rebuilds it.
-        self.legacy_state = None;
-        Ok(())
-    }
-
     /// Get a compatibility State view from DeviceState. Used by legacy
     /// callers during migration; prefer `device_head()` for new code.
     pub fn current_state(&self) -> Option<State> {

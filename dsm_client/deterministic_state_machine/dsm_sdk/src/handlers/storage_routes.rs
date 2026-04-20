@@ -697,13 +697,22 @@ impl AppRouterImpl {
                                             ));
                                             continue;
                                         }
-                                        // Early replay drain: if the nonce is already spent the
-                                        // balance was credited on a prior sync. Mark the entry
-                                        // processed so the storage-node ACKs it and stops
-                                        // resending it. This MUST run before the parent-tip
-                                        // gate because the tip has already advanced past the
-                                        // entry's claimed tip — without this the entry would
-                                        // loop forever in the mismatch → continue path.
+                                        // ═══════════════════════════════════════════════════════
+                                        // Strict replay drain (§4.3 + §5.4): when a nonce is already
+                                        // spent the balance was credited on a prior sync. We MAY only
+                                        // ACK the stale entry if four invariants still hold:
+                                        //   1. Sender's receipt re-verifies (same transaction body,
+                                        //      not a forged nonce reuse).
+                                        //   2. `receipt.child_tip == recomputed expected_h_next`.
+                                        //   3. `receipt.sig_a` still verifies under the sender PK.
+                                        //   4. Local `contacts.chain_tip` equals `expected_h_next`,
+                                        //      or can be atomically advanced to it in this cycle.
+                                        // A bare nonce-match ACK is unsafe: it lets the sender advance
+                                        // while the receiver stays at h_n, producing permanent
+                                        // contacts.chain_tip divergence and subsequent b0x routing
+                                        // misses. Failure at any step → no ACK, storage node keeps
+                                        // the entry for retry.
+                                        // ═══════════════════════════════════════════════════════
                                         {
                                             let nonce_bytes: Option<&[u8]> = match &entry
                                                 .transaction
@@ -724,10 +733,115 @@ impl AppRouterImpl {
                                                 if let Ok(true) =
                                                     crate::storage::client_db::is_nonce_spent(nb)
                                                 {
-                                                    log::info!(
-                                                                "[storage.sync] Early replay drain: tx {} nonce already spent — ACK-ing stale entry",
-                                                                entry.transaction_id
-                                                            );
+                                                    let op_bytes_for_tip = signing_bytes.clone();
+                                                    let receipt_sigma = dsm::core::bilateral_transaction_manager::compute_precommit(
+                                                        &chain_tip_arr,
+                                                        &op_bytes_for_tip,
+                                                        &nonce,
+                                                    );
+                                                    let expected_h_next = dsm::core::bilateral_transaction_manager::compute_successor_tip(
+                                                        &chain_tip_arr,
+                                                        &op_bytes_for_tip,
+                                                        &nonce,
+                                                        &receipt_sigma,
+                                                    );
+
+                                                    let sender_device_tree_commitment = crate::storage::client_db::get_contact_device_tree_commitment(&from_device_id);
+                                                    if !crate::sdk::receipts::verify_receipt_bytes(
+                                                        &entry.receipt_commit,
+                                                        sender_device_tree_commitment,
+                                                    ) {
+                                                        log::warn!("[storage.sync] Strict replay drain REJECTED (no ACK) for tx {}: receipt re-verify failed", entry.transaction_id);
+                                                        let mut sg = batch_state.lock().await;
+                                                        sg.errors.push(format!("replay drain receipt re-verify failed for tx {}", entry.transaction_id));
+                                                        continue;
+                                                    }
+
+                                                    let receipt = match dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(&entry.receipt_commit) {
+                                                        Ok(r) => r,
+                                                        Err(e) => {
+                                                            log::warn!("[storage.sync] Strict replay drain REJECTED (no ACK) for tx {}: receipt parse failed: {}", entry.transaction_id, e);
+                                                            let mut sg = batch_state.lock().await;
+                                                            sg.errors.push(format!("replay drain receipt parse failed for tx {}: {}", entry.transaction_id, e));
+                                                            continue;
+                                                        }
+                                                    };
+
+                                                    if receipt.child_tip != expected_h_next {
+                                                        log::warn!("[storage.sync] Strict replay drain REJECTED (no ACK) for tx {}: receipt.child_tip != recomputed h_{{n+1}}", entry.transaction_id);
+                                                        let mut sg = batch_state.lock().await;
+                                                        sg.errors.push(format!("replay drain child_tip mismatch for tx {}", entry.transaction_id));
+                                                        continue;
+                                                    }
+
+                                                    if receipt.sig_a.is_empty() {
+                                                        log::warn!("[storage.sync] Strict replay drain REJECTED (no ACK) for tx {}: sig_a absent", entry.transaction_id);
+                                                        let mut sg = batch_state.lock().await;
+                                                        sg.errors.push(format!("replay drain sig_a absent for tx {}", entry.transaction_id));
+                                                        continue;
+                                                    }
+
+                                                    let commitment = match receipt.compute_commitment() {
+                                                        Ok(c) => c,
+                                                        Err(e) => {
+                                                            log::warn!("[storage.sync] Strict replay drain REJECTED (no ACK) for tx {}: commitment error: {}", entry.transaction_id, e);
+                                                            let mut sg = batch_state.lock().await;
+                                                            sg.errors.push(format!("replay drain commitment error for tx {}: {}", entry.transaction_id, e));
+                                                            continue;
+                                                        }
+                                                    };
+
+                                                    match dsm::crypto::sphincs::sphincs_verify(&pk, &commitment, &receipt.sig_a) {
+                                                        Ok(true) => { /* ok */ }
+                                                        Ok(false) => {
+                                                            log::warn!("[storage.sync] Strict replay drain REJECTED (no ACK) for tx {}: sig_a invalid", entry.transaction_id);
+                                                            let mut sg = batch_state.lock().await;
+                                                            sg.errors.push(format!("replay drain sig_a invalid for tx {}", entry.transaction_id));
+                                                            continue;
+                                                        }
+                                                        Err(e) => {
+                                                            log::warn!("[storage.sync] Strict replay drain REJECTED (no ACK) for tx {}: sig_a verify error: {}", entry.transaction_id, e);
+                                                            let mut sg = batch_state.lock().await;
+                                                            sg.errors.push(format!("replay drain sig_a verify error for tx {}: {}", entry.transaction_id, e));
+                                                            continue;
+                                                        }
+                                                    }
+
+                                                    // Ensure local contacts.chain_tip is at expected_h_next.
+                                                    let tip_converged = match crate::storage::client_db::get_contact_chain_tip_raw(&from_device_id) {
+                                                        Some(t) if t == expected_h_next => true,
+                                                        _ => {
+                                                            let request = crate::storage::client_db::bilateral_tip_sync::TipSyncRequest {
+                                                                counterparty_device_id: from_device_id,
+                                                                expected_parent_tip: chain_tip_arr,
+                                                                target_tip: expected_h_next,
+                                                                observed_gate: None,
+                                                                clear_gate_on_success: false,
+                                                            };
+                                                            matches!(
+                                                                crate::storage::client_db::bilateral_tip_sync::sync_bilateral_tips_atomically(&request),
+                                                                Ok(crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::Advanced { .. })
+                                                                | Ok(crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::RepairedAtTarget { .. })
+                                                                | Ok(crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::AlreadyAtTarget { .. })
+                                                            )
+                                                        }
+                                                    };
+
+                                                    if !tip_converged {
+                                                        log::warn!("[storage.sync] Strict replay drain REJECTED (no ACK) for tx {}: local contacts.chain_tip could not converge to h_{{n+1}}", entry.transaction_id);
+                                                        let mut sg = batch_state.lock().await;
+                                                        sg.errors.push(format!("replay drain tip convergence failed for tx {}", entry.transaction_id));
+                                                        continue;
+                                                    }
+
+                                                    // Canonical §2.2 SMT advance is owned by
+                                                    // `apply_operation_with_replay_protection` →
+                                                    // `execute_on_relationship`. Idempotency for
+                                                    // already-consumed nonces is checked at the
+                                                    // replay layer, not on any shadow SMT.
+
+                                                    log::info!("[storage.sync] Strict replay drain ACK for tx {} (receipt verified, tip converged)", entry.transaction_id);
+                                                    emit_authoritative_wallet_refresh();
                                                     let mut sg = batch_state.lock().await;
                                                     sg.processed_entries.push((
                                                         entry.inbox_key.clone(),
@@ -837,7 +951,7 @@ impl AppRouterImpl {
                                                         &from_device_id,
                                                         &to_device_id_arr,
                                                     );
-                                            if crate::security::shared_smt::is_pending_online(
+                                            if crate::security::modal_sync_lock::is_pending_online(
                                                 &smt_key,
                                             )
                                             .await
@@ -855,505 +969,282 @@ impl AppRouterImpl {
                                                 continue;
                                             }
                                         }
-                                        log::debug!("[storage.sync] Calling apply_operation_with_replay_protection for tx {} amount {}", entry.transaction_id, amount_val);
-                                        let result = core_sdk
-                                            .apply_operation_with_replay_protection(
-                                                op,
-                                                &tx_id,
-                                                entry.seq,
-                                                &entry.sender_device_id,
-                                                &entry.sender_chain_tip,
-                                            );
-                                        match result {
-                                            Ok(()) => {
-                                                // Precompute common variables for TransactionRecord (built after SMT-Replace)
-                                                let to_device_b32 =
-                                                    crate::util::text_id::encode_base32_crockford(
-                                                        &to_device_id,
-                                                    );
-                                                let tx_hash = {
-                                                    let mut h =
-                                                        dsm::crypto::blake3::dsm_domain_hasher(
-                                                            "DSM/tx-record-hash",
-                                                        );
-                                                    h.update(entry.transaction_id.as_bytes());
-                                                    h.update(entry.sender_device_id.as_bytes());
-                                                    crate::util::text_id::encode_base32_crockford(
-                                                        &h.finalize().as_bytes()[..32],
-                                                    )
-                                                };
-                                                let mut meta = std::collections::HashMap::new();
-                                                meta.insert(
-                                                    "token_id".to_string(),
-                                                    token_id.clone(),
-                                                );
-                                                meta.insert(
-                                                    "memo".to_string(),
-                                                    memo.as_bytes().to_vec(),
-                                                );
+                                        // ═══════════════════════════════════════════════════════
+                                        // §4.3 Pre-flight verification — ALL cryptographic checks
+                                        // run BEFORE any state mutation. Failure at any step →
+                                        // `continue` without ACK so the storage node retains the
+                                        // entry. This preserves spec-mandated acceptance order
+                                        // (sigs → inclusion proofs → byte-exact SMT replace →
+                                        // parent-tip) and rules out the gate-continue divergence
+                                        // where balance was credited but contacts.chain_tip
+                                        // stayed at h_n.
+                                        // ═══════════════════════════════════════════════════════
+                                        let op_bytes_for_tip = signing_bytes.clone();
+                                        let receipt_sigma = dsm::core::bilateral_transaction_manager::compute_precommit(
+                                            &chain_tip_arr,
+                                            &op_bytes_for_tip,
+                                            &nonce,
+                                        );
+                                        let expected_h_next = dsm::core::bilateral_transaction_manager::compute_successor_tip(
+                                            &chain_tip_arr,
+                                            &op_bytes_for_tip,
+                                            &nonce,
+                                            &receipt_sigma,
+                                        );
 
-                                                // Stitched receipt data: saved during sig verification, persisted after SMT-Replace
-                                                let mut dual_receipt_data: Option<(
-                                                    [u8; 32],
-                                                    Vec<u8>,
-                                                    Vec<u8>,
-                                                    Vec<u8>,
-                                                )> = None;
-                                                // (commitment, sig_a, sig_b, receipt_commit_bytes)
+                                        // Envelope's claimed next_chain_tip must match recomputation (§4.3#6).
+                                        if let Some(claimed_tip) = crate::util::text_id::decode_base32_crockford(&entry.next_chain_tip).filter(|b| b.len() == 32) {
+                                            let mut claimed_arr = [0u8; 32];
+                                            claimed_arr.copy_from_slice(&claimed_tip);
+                                            if claimed_arr != expected_h_next {
+                                                log::error!("[storage.sync] §4.3#6 envelope next_chain_tip != recomputed h_{{n+1}} for tx {} — rejecting without ACK", entry.transaction_id);
+                                                let mut sg = batch_state.lock().await;
+                                                sg.errors.push(format!("§4.3#6 next_chain_tip mismatch for tx {}", entry.transaction_id));
+                                                continue;
+                                            }
+                                        }
 
-                                                // =============================================================
-                                                // §4.3 Receiver-Side: Full Acceptance Verification + SMT Update
-                                                // Both online and offline paths update the SAME shared SMT.
-                                                //
-                                                // Verification checklist (§4.3):
-                                                //   1. SPHINCS+ signature verification — done above (lines 398-418)
-                                                //   2. π_rel: h_n ∈ r_A AND h_{n+1} ∈ r'_A  — inclusion proof verification
-                                                //   3. π_dev: DevID_A ∈ R_G — verified against stored R_G from contacts table;
-                                                //             None R_G rejects; R_G auto-persisted on first contact admission
-                                                //   4. SMT-Replace recomputation: r'_A byte-exact — via verify_receipt_bytes
-                                                //   5. Parent tip h_n not previously consumed — double-spend check
-                                                //   6. Independent h_{n+1} recomputation from shared inputs
-                                                // =============================================================
-                                                {
-                                                    let smt_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
-                                                                &from_device_id,
-                                                                &to_device_id_arr,
-                                                            );
+                                        // §4.3 items 2+4: full receipt verification (SMT-Replace, device proof, relation proofs).
+                                        let sender_device_tree_commitment = crate::storage::client_db::get_contact_device_tree_commitment(&from_device_id);
+                                        if !crate::sdk::receipts::verify_receipt_bytes(
+                                            &entry.receipt_commit,
+                                            sender_device_tree_commitment,
+                                        ) {
+                                            log::error!("[storage.sync] §4.3#2+4 ReceiptCommit verification FAILED for tx {} — rejecting without ACK", entry.transaction_id);
+                                            let mut sg = batch_state.lock().await;
+                                            sg.errors.push(format!("§4.3#2+4 ReceiptCommit verification failed for tx {}", entry.transaction_id));
+                                            continue;
+                                        }
 
-                                                    // §6 Tripwire gate: reject ALL transactions from bricked contacts.
-                                                    if crate::storage::client_db::is_contact_bricked(
-                                                        &from_device_id,
-                                                    ) {
-                                                        log::error!(
-                                                                    "[storage.sync] §6 Rejecting tx {} from BRICKED contact {}",
-                                                                    entry.transaction_id, entry.sender_device_id
-                                                                );
-                                                        let mut state_guard =
-                                                            batch_state.lock().await;
-                                                        state_guard.errors.push(format!(
-                                                                    "§6 Tripwire: contact {} is permanently bricked",
-                                                                    entry.sender_device_id
-                                                                ));
-                                                        continue;
-                                                    }
+                                        // Parse receipt, verify child_tip matches recomputed h_{n+1} (§4.3),
+                                        // and verify sig_a (§4.2 mandatory sender non-repudiation).
+                                        let receipt = match dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(&entry.receipt_commit) {
+                                            Ok(r) => r,
+                                            Err(e) => {
+                                                log::error!("[storage.sync] §4.3 StitchedReceiptV2 parse FAILED for tx {}: {} — rejecting without ACK", entry.transaction_id, e);
+                                                let mut sg = batch_state.lock().await;
+                                                sg.errors.push(format!("§4.3 receipt parse failed for tx {}: {}", entry.transaction_id, e));
+                                                continue;
+                                            }
+                                        };
 
-                                                    // §4.3 item 5: verify parent tip alignment at apply time.
-                                                    // In online mode, a mismatch can still reflect out-of-order
-                                                    // inbox delivery; treat as reconcile-needed and skip.
-                                                    let stored_tip = crate::storage::client_db::get_contact_chain_tip_raw(
-                                                                &from_device_id,
-                                                            );
-                                                    if let Some(stored) = stored_tip {
-                                                        if stored != [0u8; 32]
-                                                            && stored != chain_tip_arr
-                                                        {
-                                                            log::warn!(
-                                                                        "[storage.sync] Parent-tip mismatch for tx {}: stored={:?}.. claimed={:?}.. recording observed remote tip and marking reconcile",
-                                                                        entry.transaction_id,
-                                                                        &stored[..4],
-                                                                        &chain_tip_arr[..4],
-                                                                    );
-                                                            record_observed_remote_tip_and_refresh(
-                                                                &from_device_id,
-                                                                &chain_tip_arr,
-                                                            );
-                                                            mark_contact_needs_online_reconcile_and_refresh(&from_device_id);
-                                                            let mut state_guard =
-                                                                batch_state.lock().await;
-                                                            state_guard.errors.push(format!(
-                                                                "parent-tip mismatch for tx {}",
-                                                                entry.transaction_id
-                                                            ));
-                                                            continue;
-                                                        }
-                                                    }
+                                        if receipt.child_tip != expected_h_next {
+                                            log::error!("[storage.sync] §4.3 receipt.child_tip != recomputed h_{{n+1}} for tx {} — rejecting without ACK", entry.transaction_id);
+                                            let mut sg = batch_state.lock().await;
+                                            sg.errors.push(format!("§4.3 child_tip mismatch for tx {}", entry.transaction_id));
+                                            continue;
+                                        }
 
-                                                    // §4.3 item 6 + §16.6: Receiver independently recomputes h_{n+1}.
-                                                    // σ = Cpre = BLAKE3("DSM/pre\0" || h_n || op || nonce) — symmetric inputs only,
-                                                    // identical to the sender's computation in compute_precommit.
-                                                    // §ISSUE-R1 FIX: Use signing_bytes (signature field cleared) — NOT
-                                                    // entry.transaction.to_bytes() which includes the SPHINCS+ signature.
-                                                    // signing_bytes was computed above (op_for_sig.signature.clear()) and is
-                                                    // the exact same unsigned preimage the sender passed to compute_precommit.
-                                                    let op_bytes_for_tip = signing_bytes.clone();
-                                                    let receipt_sigma = dsm::core::bilateral_transaction_manager::compute_precommit(
-                                                                &chain_tip_arr,
-                                                                &op_bytes_for_tip,
-                                                                &nonce,
-                                                            );
-                                                    let expected_h_next = dsm::core::bilateral_transaction_manager::compute_successor_tip(
-                                                                &chain_tip_arr,
-                                                                &op_bytes_for_tip,
-                                                                &nonce,
-                                                                &receipt_sigma,
-                                                            );
+                                        if receipt.sig_a.is_empty() {
+                                            log::error!("[storage.sync] §4.2 REJECTING tx {}: receipt.sig_a absent (mandatory)", entry.transaction_id);
+                                            let mut sg = batch_state.lock().await;
+                                            sg.errors.push(format!("§4.2 sig_a absent for tx {}", entry.transaction_id));
+                                            continue;
+                                        }
 
-                                                    // Decode sender's claimed h_{n+1} and verify against our recomputation
-                                                    let next_tip_bytes = crate::util::text_id::decode_base32_crockford(&entry.next_chain_tip)
-                                                                .filter(|b| b.len() == 32);
+                                        let receipt_commitment = match receipt.compute_commitment() {
+                                            Ok(c) => c,
+                                            Err(e) => {
+                                                log::error!("[storage.sync] §4.2 receipt commitment failed for tx {}: {} — rejecting without ACK", entry.transaction_id, e);
+                                                let mut sg = batch_state.lock().await;
+                                                sg.errors.push(format!("§4.2 commitment failed for tx {}: {}", entry.transaction_id, e));
+                                                continue;
+                                            }
+                                        };
 
-                                                    if let Some(ref claimed_tip) = next_tip_bytes {
-                                                        let mut claimed_arr = [0u8; 32];
-                                                        claimed_arr.copy_from_slice(claimed_tip);
-                                                        if claimed_arr != expected_h_next {
-                                                            log::error!(
-                                                                        "[storage.sync] §4.3#6 h_{{n+1}} recomputation mismatch for tx {}: expected={:?}.. claimed={:?}..  REJECTING",
-                                                                        entry.transaction_id,
-                                                                        &expected_h_next[..4],
-                                                                        &claimed_arr[..4],
-                                                                    );
-                                                            let mut state_guard =
-                                                                batch_state.lock().await;
-                                                            state_guard.errors.push(format!(
-                                                                        "§4.3#6 h_{{n+1}} mismatch for tx {} — sender claimed wrong successor tip",
-                                                                        entry.transaction_id
-                                                                    ));
-                                                            continue;
-                                                        }
-                                                        log::info!(
-                                                                    "[storage.sync] §4.3#6 h_{{n+1}} independently verified for tx {}: {:?}..",
-                                                                    entry.transaction_id,
-                                                                    &expected_h_next[..4],
-                                                                );
-                                                    }
-
-                                                    // §4.3 items 2+4: Verify ReceiptCommit with full cryptographic checks
-                                                    // receipt_commit guaranteed non-empty by §S1 pre-apply guard above.
-                                                    {
-                                                        // Full receipt verification: protobuf decode, non-zero fields,
-                                                        // relation proofs parse, SMT roots match recomputed values,
-                                                        // tripwire replace witness, device proof verification.
-                                                        // Look up sender's authenticated device-tree commitment for §2.3 verification.
-                                                        // If it is unavailable, this receipt path rejects relationship-locally;
-                                                        // unrelated bilateral relationships continue unaffected.
-                                                        let sender_device_tree_commitment = crate::storage::client_db::get_contact_device_tree_commitment(&from_device_id);
-                                                        if !crate::sdk::receipts::verify_receipt_bytes(&entry.receipt_commit, sender_device_tree_commitment) {
-                                                                    log::error!(
-                                                                        "[storage.sync] §4.3#2+4 ReceiptCommit full verification FAILED for tx {} — REJECTING",
-                                                                        entry.transaction_id
-                                                                    );
-                                                                    let mut state_guard = batch_state.lock().await;
-                                                                    state_guard.errors.push(format!(
-                                                                        "§4.3#2+4 ReceiptCommit verification failed for tx {}",
-                                                                        entry.transaction_id
-                                                                    ));
-                                                                    continue;
-                                                                }
-                                                        log::info!(
-                                                                    "[storage.sync] §4.3#2+4 ReceiptCommit fully verified for tx {} (proofs, SMT-Replace, tripwire, device proof)",
-                                                                    entry.transaction_id
-                                                                );
-
-                                                        // Also verify child_tip in receipt matches our recomputed h_{n+1}
-                                                        if let Ok(receipt) = dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(&entry.receipt_commit) {
-                                                                    if receipt.child_tip != expected_h_next {
-                                                                        log::error!(
-                                                                            "[storage.sync] §4.3 Receipt child_tip != recomputed h_{{n+1}} for tx {} — REJECTING",
-                                                                            entry.transaction_id
-                                                                        );
-                                                                        let mut state_guard = batch_state.lock().await;
-                                                                        state_guard.errors.push(format!(
-                                                                            "§4.3 Receipt child_tip mismatch for tx {}",
-                                                                            entry.transaction_id
-                                                                        ));
-                                                                        continue;
-                                                                    }
-
-                                                                    // §4.2 Non-repudiation: Verify sender's sig_a. Counter-sign (sig_b) is best-effort.
-                                                                    // Solo-signature model: sig_a verification is mandatory (sender non-repudiation).
-                                                                    // sig_b counter-signing is attempted but failure is non-fatal — hash chain
-                                                                    // adjacency + Tripwire fork-exclusion prevent double-spend without counter-sigs.
-                                                                    if !receipt.sig_a.is_empty() {
-                                                                        match receipt.compute_commitment() {
-                                                                            Ok(commitment) => {
-                                                                                // Verify sender's sig_a against their public key
-                                                                                match dsm::crypto::sphincs::sphincs_verify(&pk, &commitment, &receipt.sig_a) {
-                                                                                    Ok(true) => {
-                                                                                        log::info!(
-                                                                                            "[storage.sync] §4.2 sig_a verified for tx {} (sender non-repudiation OK)",
-                                                                                            entry.transaction_id
-                                                                                        );
-                                                                                        // Best-effort counter-sign: receiver signs same commitment → sig_b
-                                                                                        let sig_b = match core_sdk.sign_bytes_sphincs(&commitment) {
-                                                                                            Ok(sb) => {
-                                                                                                log::info!(
-                                                                                                    "[storage.sync] §4.2 sig_b: receiver counter-signed receipt (sig_len={}) for tx {}",
-                                                                                                    sb.len(), entry.transaction_id
-                                                                                                );
-                                                                                                sb
-                                                                                            }
-                                                                                            Err(e) => {
-                                                                                                // Solo-signature model: counter-signing failure is non-fatal.
-                                                                                                // Receipt is still valid with sig_a alone.
-                                                                                                log::warn!(
-                                                                                                    "[storage.sync] sig_b counter-signing failed for tx {} (non-fatal): {}",
-                                                                                                    entry.transaction_id, e
-                                                                                                );
-                                                                                                vec![]
-                                                                                            }
-                                                                                        };
-                                                                                        // §S3: Save receipt data; persist AFTER SMT-Replace
-                                                                                        // so smt_root_pre/post are populated with real roots.
-                                                                                        dual_receipt_data = Some((
-                                                                                            commitment,
-                                                                                            receipt.sig_a.clone(),
-                                                                                            sig_b,
-                                                                                            entry.receipt_commit.clone(),
-                                                                                        ));
-                                                                                    }
-                                                                                    Ok(false) => {
-                                                                                        log::error!(
-                                                                                            "[storage.sync] §4.2 FATAL: sig_a invalid for tx {} — REJECTING (§4.3 item 1)",
-                                                                                            entry.transaction_id
-                                                                                        );
-                                                                                        let mut state_guard = batch_state.lock().await;
-                                                                                        state_guard.errors.push(format!("§4.2 sig_a invalid for tx {}", entry.transaction_id));
-                                                                                        continue;
-                                                                                    }
-                                                                                    Err(e) => {
-                                                                                        log::error!(
-                                                                                            "[storage.sync] §4.2 FATAL: sig_a error for tx {}: {} — REJECTING",
-                                                                                            entry.transaction_id, e
-                                                                                        );
-                                                                                        let mut state_guard = batch_state.lock().await;
-                                                                                        state_guard.errors.push(format!("§4.2 sig_a error for tx {}: {}", entry.transaction_id, e));
-                                                                                        continue;
-                                                                                    }
-                                                                                }
-                                                                            }
-                                                                            Err(e) => {
-                                                                                log::warn!(
-                                                                                    "[storage.sync] §4.2 receipt commitment computation failed for tx {}: {} (non-fatal)",
-                                                                                    entry.transaction_id, e
-                                                                                );
-                                                                            }
-                                                                        }
-                                                                    }
-                                                                }
-                                                    }
-
-                                                    // §4.3 finalize: Update receiver's Per-Device SMT with verified h_{n+1}
-                                                    // Collect pre/post roots and inclusion proofs for receiver's archival receipt.
-                                                    // Use the independently recomputed tip (not the sender's claimed value).
-                                                    // §4.2: Atomic SMT-Replace via core — hard-fail on error.
-                                                    let smt_result = {
-                                                        let Some(smt) = crate::security::shared_smt::get_shared_smt() else {
-                                                                    log::error!(
-                                                                        "[storage.sync] §4.3 REJECTED: Per-Device SMT not initialized — \
-                                                                         cannot verify or produce inclusion proofs for tx {}",
-                                                                        entry.transaction_id
-                                                                    );
-                                                                    continue;
-                                                                };
-                                                        let mut smt_guard = smt.write().await;
-                                                        match smt_guard
-                                                            .smt_replace(&smt_key, &expected_h_next)
-                                                        {
-                                                            Ok(r) => {
-                                                                log::info!(
-                                                                            "[storage.sync] §4.3 Receiver SMT updated: pre={:?}.. post={:?}.. tx={}",
-                                                                            &r.pre_root[..4], &r.post_root[..4], entry.transaction_id
-                                                                        );
-                                                                r
-                                                            }
-                                                            Err(e) => {
-                                                                log::error!(
-                                                                            "[storage.sync] §4.3 REJECTED: Receiver SMT-Replace failed for tx {}: {} \
-                                                                             — cannot produce valid receipt",
-                                                                            entry.transaction_id, e
-                                                                        );
-                                                                continue;
-                                                            }
-                                                        }
-                                                    };
-                                                    let (
-                                                        recv_smt_pre,
-                                                        recv_smt_post,
-                                                        recv_parent_bytes,
-                                                        recv_child_bytes,
-                                                    ) = (
-                                                        smt_result.pre_root,
-                                                        smt_result.post_root,
-                                                        smt_result.parent_proof.to_bytes(),
-                                                        smt_result.child_proof.to_bytes(),
-                                                    );
-
-                                                    // Advance shared chain tip atomically using the verified h_{n+1}
-                                                    {
-                                                        let request = crate::storage::client_db::bilateral_tip_sync::TipSyncRequest {
-                                                            counterparty_device_id: from_device_id,
-                                                            expected_parent_tip: chain_tip_arr,
-                                                            target_tip: expected_h_next,
-                                                            observed_gate: None,
-                                                            clear_gate_on_success: false,
-                                                        };
-                                                        match crate::storage::client_db::bilateral_tip_sync::sync_bilateral_tips_atomically(&request) {
-                                                                    Ok(outcome) => match outcome {
-                                                                        crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::Advanced { .. }
-                                                                        | crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::RepairedAtTarget { .. }
-                                                                        | crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::AlreadyAtTarget { .. } => {
-                                                                        log::info!(
-                                                                            "[storage.sync] §4.1 Finalized chain tip advanced for relationship with {} tx={}",
-                                                                            &entry.sender_device_id[..8], entry.transaction_id
-                                                                        );
-                                                                    }
-                                                                    _ => {
-                                                                        mark_contact_needs_online_reconcile_and_refresh(&from_device_id);
-                                                                        let mut state_guard = batch_state.lock().await;
-                                                                        state_guard.errors.push(format!(
-                                                                            "ParentConsumed during finalize for tx {}",
-                                                                            entry.transaction_id
-                                                                        ));
-                                                                        continue;
-                                                                    }
-                                                                    },
-                                                                    Err(e) => {
-                                                                        log::warn!(
-                                                                            "[storage.sync] Failed to advance finalized chain tip for sender {}: {}",
-                                                                            entry.sender_device_id, e
-                                                                        );
-                                                                        let mut state_guard = batch_state.lock().await;
-                                                                        state_guard.errors.push(format!(
-                                                                            "finalized chain tip persist failed for tx {}: {}",
-                                                                            entry.transaction_id, e
-                                                                        ));
-                                                                        continue;
-                                                                    }
-                                                                }
-                                                    }
-
-                                                    // §S3: Persist stitched receipt with real SMT roots (post-SMT-Replace)
-                                                    if let Some((
-                                                        commitment,
-                                                        sig_a,
-                                                        sig_b,
-                                                        rc_bytes,
-                                                    )) = dual_receipt_data
-                                                    {
-                                                        let dual = crate::storage::client_db::StitchedReceipt {
-                                                                    tx_hash: commitment,
-                                                                    h_n: chain_tip_arr,
-                                                                    h_n1: expected_h_next,
-                                                                    device_id_a: from_device_id,
-                                                                    device_id_b: to_device_id_arr,
-                                                                    sig_a,
-                                                                    sig_b,
-                                                                    receipt_commit: rc_bytes,
-                                                                    smt_root_pre: Some(recv_smt_pre),
-                                                                    smt_root_post: Some(recv_smt_post),
-                                                                };
-                                                        if let Err(e) = crate::storage::client_db::store_stitched_receipt(&dual) {
-                                                                    log::warn!("[storage.sync] §4.2 Failed to persist dual-signed receipt for tx {}: {}", entry.transaction_id, e);
-                                                                } else {
-                                                                    log::info!("[storage.sync] §4.2 Dual-signed receipt persisted with SMT roots for tx {}", entry.transaction_id);
-                                                                }
-                                                    }
-
-                                                    // Build and persist TransactionRecord with real §4.2-compliant SMT proofs
-                                                    {
-                                                        // Use SENDER's R_G: the receipt proves devid_a (sender) membership.
-                                                        // The sender is a contact of the receiver, so their R_G is in the contacts table.
-                                                        // Using the receiver's own device_id here would return None (self is not in contacts).
-                                                        let recv_device_tree_commitment = crate::storage::client_db::get_contact_device_tree_commitment(&from_device_id);
-                                                        let rebuilt_history_receipt =
-                                                            build_online_receipt_with_smt(
-                                                                &from_device_id,
-                                                                &to_device_id_arr,
-                                                                chain_tip_arr,
-                                                                expected_h_next,
-                                                                recv_smt_pre,
-                                                                recv_smt_post,
-                                                                recv_parent_bytes,
-                                                                recv_child_bytes,
-                                                                recv_device_tree_commitment,
-                                                            );
-                                                        let used_verified_receipt_fallback =
-                                                            rebuilt_history_receipt.is_none()
-                                                                && !entry.receipt_commit.is_empty();
-                                                        let rec = crate::storage::client_db::TransactionRecord {
-                                                                    tx_id: entry.transaction_id.clone(),
-                                                                    tx_hash,
-                                                                    from_device: entry.sender_device_id.clone(),
-                                                                    to_device: to_device_b32.clone(),
-                                                                    amount: amount_val,
-                                                                    tx_type: "online".to_string(),
-                                                                    status: "confirmed".to_string(),
-                                                                    chain_height: entry.seq,
-                                                                    step_index: entry.seq,
-                                                                    commitment_hash: None,
-                                                                    proof_data: select_history_receipt_bytes(
-                                                                        rebuilt_history_receipt,
-                                                                        &entry.receipt_commit,
-                                                                    ),
-                                                                    metadata: meta,
-                                                                    created_at: 0,
-                                                                };
-                                                        if let Err(e) = crate::storage::client_db::store_transaction(&rec) {
-                                                                    log::warn!("[storage.sync] Failed to record incoming tx history: {e}");
-                                                                } else {
-                                                                    if used_verified_receipt_fallback {
-                                                                        log::warn!(
-                                                                            "[storage.sync] Incoming tx {} history used verified sender receipt bytes fallback",
-                                                                            entry.transaction_id
-                                                                        );
-                                                                    }
-                                                                    log::info!("[storage.sync] Recorded incoming tx {} with real SMT proofs (from={}, amount={})", entry.transaction_id, entry.sender_device_id, amount_val);
-                                                                }
-                                                    }
-                                                }
-
-                                                // Balance state is the only authority updated here.
-                                                // Withdrawal discovery happens later against storage-node
-                                                // advertisements and Bitcoin liveness.
-
-                                                // §11.1 Balance already materialized from canonical state by apply_operation_with_replay_protection
-                                                // → atomic_receive_transfer + projection sync for the relevant token lane.
-                                                // Sync in-memory cache so subsequent balance queries reflect the credit.
-                                                if let Some(router) = crate::bridge::app_router() {
-                                                    router.sync_balance_cache();
-                                                }
-                                                let balance_update_success = true;
-
-                                                // Only mark as processed and acknowledge if balance update succeeded
-                                                if balance_update_success {
-                                                    let mut state_guard = batch_state.lock().await;
-                                                    state_guard.processed_entries.push((
-                                                        entry.inbox_key.clone(),
-                                                        entry.transaction_id.clone(),
-                                                    ));
-                                                    state_guard.processed =
-                                                        state_guard.processed.saturating_add(1);
-                                                } else {
-                                                    // Balance update failed - don't acknowledge, so it will be retried
-                                                    log::warn!("[storage.sync] Skipping acknowledgement for tx {} due to balance update failure", entry.transaction_id);
-                                                }
+                                        match dsm::crypto::sphincs::sphincs_verify(&pk, &receipt_commitment, &receipt.sig_a) {
+                                            Ok(true) => {
+                                                log::info!("[storage.sync] §4.2 sig_a verified for tx {}", entry.transaction_id);
+                                            }
+                                            Ok(false) => {
+                                                log::error!("[storage.sync] §4.2 FATAL: sig_a invalid for tx {} — rejecting without ACK", entry.transaction_id);
+                                                let mut sg = batch_state.lock().await;
+                                                sg.errors.push(format!("§4.2 sig_a invalid for tx {}", entry.transaction_id));
+                                                continue;
                                             }
                                             Err(e) => {
-                                                let err_msg = format!("{}", e);
-                                                // Replay (nonce already spent) is a permanent condition —
-                                                // the balance was already credited on a prior sync. Mark
-                                                // the entry processed so storage nodes ACK it and stop
-                                                // resending the same stale entry every sync cycle.
-                                                if err_msg.contains("replay detected")
-                                                    || err_msg.contains("nonce already spent")
-                                                {
-                                                    log::info!("[storage.sync] Replay detected for tx {} — marking processed (balance already credited)", entry.transaction_id);
-                                                    let mut state_guard = batch_state.lock().await;
-                                                    state_guard.processed_entries.push((
-                                                        entry.inbox_key.clone(),
-                                                        entry.transaction_id.clone(),
-                                                    ));
-                                                    state_guard.processed =
-                                                        state_guard.processed.saturating_add(1);
-                                                } else {
-                                                    log::warn!("[storage.sync] apply_operation_with_replay_protection failed: {}", e);
-                                                    let mut state_guard = batch_state.lock().await;
-                                                    state_guard.errors.push(format!(
-                                                        "inbox.pull: apply_operation failed: {}",
-                                                        e
-                                                    ));
-                                                }
+                                                log::error!("[storage.sync] §4.2 sig_a verify error for tx {}: {} — rejecting without ACK", entry.transaction_id, e);
+                                                let mut sg = batch_state.lock().await;
+                                                sg.errors.push(format!("§4.2 sig_a verify error for tx {}: {}", entry.transaction_id, e));
+                                                continue;
                                             }
+                                        }
+
+                                        // Best-effort receiver counter-sign (sig_b). Failure is non-fatal:
+                                        // hash chain adjacency + Tripwire fork-exclusion suffice without sig_b.
+                                        let sig_b = match core_sdk.sign_bytes_sphincs(&receipt_commitment) {
+                                            Ok(sb) => {
+                                                log::info!("[storage.sync] §4.2 sig_b receiver counter-sign produced for tx {}", entry.transaction_id);
+                                                sb
+                                            }
+                                            Err(e) => {
+                                                log::warn!("[storage.sync] §4.2 sig_b counter-sign failed for tx {} (non-fatal): {}", entry.transaction_id, e);
+                                                vec![]
+                                            }
+                                        };
+
+                                        // ═══════════════════════════════════════════════════════
+                                        // Phase 3: atomic commit. Pre-flight passed, now mutate.
+                                        // Order: DeviceState/nonce/bcr (apply_operation) →
+                                        // shared SMT → contacts.chain_tip → receipt/tx → refresh →
+                                        // ACK. Any post-apply step that fails marks the contact
+                                        // needs_online_reconcile and SKIPS ACK so the strict
+                                        // replay drain on the next poll completes convergence.
+                                        // ═══════════════════════════════════════════════════════
+                                        log::debug!("[storage.sync] Pre-flight passed; calling apply_operation_with_replay_protection for tx {} amount {}", entry.transaction_id, amount_val);
+                                        let apply_res = core_sdk.apply_operation_with_replay_protection(
+                                            op,
+                                            &tx_id,
+                                            entry.seq,
+                                            &entry.sender_device_id,
+                                            &entry.sender_chain_tip,
+                                        );
+                                        let advance_outcome = match apply_res {
+                                            Ok(o) => o,
+                                            Err(e) => {
+                                                let err_msg = format!("{}", e);
+                                                if err_msg.contains("replay detected") || err_msg.contains("nonce already spent") {
+                                                    // TOCTOU: concurrent path spent nonce between strict
+                                                    // drain and apply. Do NOT ACK here — the strict drain
+                                                    // on the next poll will verify + converge + ACK.
+                                                    log::info!("[storage.sync] apply_operation observed replay race for tx {} — deferring to next strict drain", entry.transaction_id);
+                                                    let mut sg = batch_state.lock().await;
+                                                    sg.errors.push(format!("apply_operation replay race for tx {}", entry.transaction_id));
+                                                } else {
+                                                    log::warn!("[storage.sync] apply_operation_with_replay_protection failed for tx {}: {}", entry.transaction_id, e);
+                                                    let mut sg = batch_state.lock().await;
+                                                    sg.errors.push(format!("apply_operation failed for tx {}: {}", entry.transaction_id, e));
+                                                }
+                                                continue;
+                                            }
+                                        };
+                                        // Canonical advance already updated DeviceState.smt and the
+                                        // balance map atomically inside `execute_on_relationship`.
+                                        // The AdvanceOutcome carries receiver-side SMT proofs that
+                                        // flow into the §4.2 stitched receipt below.
+
+                                        // Atomic CAS on contacts.chain_tip.
+                                        let tip_request = crate::storage::client_db::bilateral_tip_sync::TipSyncRequest {
+                                            counterparty_device_id: from_device_id,
+                                            expected_parent_tip: chain_tip_arr,
+                                            target_tip: expected_h_next,
+                                            observed_gate: None,
+                                            clear_gate_on_success: false,
+                                        };
+                                        match crate::storage::client_db::bilateral_tip_sync::sync_bilateral_tips_atomically(&tip_request) {
+                                            Ok(crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::Advanced { .. })
+                                            | Ok(crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::RepairedAtTarget { .. })
+                                            | Ok(crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::AlreadyAtTarget { .. }) => {
+                                                log::info!("[storage.sync] §4.1 Canonical chain tip advanced for tx {}", entry.transaction_id);
+                                            }
+                                            Ok(other) => {
+                                                log::error!("[storage.sync] §4.1 Canonical tip advance returned {:?} for tx {} — marking reconcile, no ACK", other, entry.transaction_id);
+                                                mark_contact_needs_online_reconcile_and_refresh(&from_device_id);
+                                                let mut sg = batch_state.lock().await;
+                                                sg.errors.push(format!("tip sync unexpected outcome for tx {}: {:?}", entry.transaction_id, other));
+                                                continue;
+                                            }
+                                            Err(e) => {
+                                                log::error!("[storage.sync] §4.1 Canonical tip advance FAILED for tx {}: {} — marking reconcile, no ACK", entry.transaction_id, e);
+                                                mark_contact_needs_online_reconcile_and_refresh(&from_device_id);
+                                                let mut sg = batch_state.lock().await;
+                                                sg.errors.push(format!("tip sync failed for tx {}: {}", entry.transaction_id, e));
+                                                continue;
+                                            }
+                                        }
+
+                                        // Persist receipt + transaction record. Only synthesize
+                                        // a fresh §4.2 stitched receipt when the SMT actually
+                                        // transitioned — AlreadyAtTarget reuses the archived
+                                        // receipt body per Decision 5.
+                                        let to_device_b32 = crate::util::text_id::encode_base32_crockford(&to_device_id);
+                                        let tx_hash = {
+                                            let mut h = dsm::crypto::blake3::dsm_domain_hasher("DSM/tx-record-hash");
+                                            h.update(entry.transaction_id.as_bytes());
+                                            h.update(entry.sender_device_id.as_bytes());
+                                            crate::util::text_id::encode_base32_crockford(&h.finalize().as_bytes()[..32])
+                                        };
+                                        let mut meta = std::collections::HashMap::new();
+                                        meta.insert("token_id".to_string(), token_id.clone());
+                                        meta.insert("memo".to_string(), memo.as_bytes().to_vec());
+
+                                        // Use canonical AdvanceOutcome proofs for the §4.2 stitched
+                                        // receipt. Replay protection on apply_operation_with_replay_protection
+                                        // already rejects double-apply at the nonce layer, so the outcome
+                                        // here always reflects a real leaf replace.
+                                        let recv_smt_pre = advance_outcome.parent_r_a;
+                                        let recv_smt_post = advance_outcome.child_r_a;
+                                        let recv_parent_bytes =
+                                            advance_outcome.smt_proofs.parent_proof.to_bytes();
+                                        let recv_child_bytes =
+                                            advance_outcome.smt_proofs.child_proof.to_bytes();
+
+                                        let dual = crate::storage::client_db::StitchedReceipt {
+                                            tx_hash: receipt_commitment,
+                                            h_n: chain_tip_arr,
+                                            h_n1: expected_h_next,
+                                            device_id_a: from_device_id,
+                                            device_id_b: to_device_id_arr,
+                                            sig_a: receipt.sig_a.clone(),
+                                            sig_b: sig_b.clone(),
+                                            receipt_commit: entry.receipt_commit.clone(),
+                                            smt_root_pre: Some(recv_smt_pre),
+                                            smt_root_post: Some(recv_smt_post),
+                                        };
+                                        if let Err(e) = crate::storage::client_db::store_stitched_receipt(&dual) {
+                                            log::warn!("[storage.sync] §4.2 store_stitched_receipt failed for tx {}: {} (non-fatal)", entry.transaction_id, e);
+                                        } else {
+                                            log::info!("[storage.sync] §4.2 Dual-signed receipt persisted with SMT roots for tx {}", entry.transaction_id);
+                                        }
+
+                                        let recv_device_tree_commitment =
+                                            crate::storage::client_db::get_contact_device_tree_commitment(&from_device_id);
+                                        let rebuilt = build_online_receipt_with_smt(
+                                            &from_device_id,
+                                            &to_device_id_arr,
+                                            chain_tip_arr,
+                                            expected_h_next,
+                                            recv_smt_pre,
+                                            recv_smt_post,
+                                            recv_parent_bytes,
+                                            recv_child_bytes,
+                                            recv_device_tree_commitment,
+                                        );
+                                        let history_proof_bytes: Option<Vec<u8>> =
+                                            select_history_receipt_bytes(rebuilt, &entry.receipt_commit);
+
+                                        let rec = crate::storage::client_db::TransactionRecord {
+                                            tx_id: entry.transaction_id.clone(),
+                                            tx_hash,
+                                            from_device: entry.sender_device_id.clone(),
+                                            to_device: to_device_b32,
+                                            amount: amount_val,
+                                            tx_type: "online".to_string(),
+                                            status: "confirmed".to_string(),
+                                            chain_height: entry.seq,
+                                            step_index: entry.seq,
+                                            commitment_hash: None,
+                                            proof_data: history_proof_bytes,
+                                            metadata: meta,
+                                            created_at: 0,
+                                        };
+                                        if let Err(e) = crate::storage::client_db::store_transaction(&rec) {
+                                            log::warn!("[storage.sync] store_transaction failed for tx {}: {} (non-fatal)", entry.transaction_id, e);
+                                        } else {
+                                            log::info!("[storage.sync] Recorded incoming tx {} (from={}, amount={})", entry.transaction_id, entry.sender_device_id, amount_val);
+                                        }
+
+                                        // §11.1 balance already materialized by apply_operation.
+                                        // Refresh in-memory caches + notify WebView.
+                                        if let Some(router) = crate::bridge::app_router() {
+                                            router.sync_balance_cache();
+                                        }
+                                        emit_authoritative_wallet_refresh();
+
+                                        {
+                                            let mut sg = batch_state.lock().await;
+                                            sg.processed_entries.push((entry.inbox_key.clone(), entry.transaction_id.clone()));
+                                            sg.processed = sg.processed.saturating_add(1);
                                         }
                                     } else {
                                         log::warn!(

@@ -101,49 +101,83 @@ pub fn apply_sender_settlement_and_store_transaction_atomic(
     Ok(())
 }
 
-/// Atomic sender-side settlement persistence:
-/// - Optional balance projection (display cache; non-authoritative).
-/// - Transaction history row.
-/// - Sender-settlements bookkeeping row.
+pub struct BilateralSenderSettlementBundle<'a> {
+    pub counterparty_device_id: &'a [u8],
+    pub new_chain_tip: &'a [u8],
+    pub sender_device_id: &'a str,
+    pub token_id: Option<&'a str>,
+    pub amount: u64,
+    pub tx: &'a TransactionRecord,
+    pub projection: Option<&'a BalanceProjectionRecord>,
+}
+
+/// Atomic sender-side settlement persistence (§4.2 full-persistence boundary):
+/// - Advance contact `chain_tip` + `local_bilateral_chain_tip` to the new symmetric h_{n+1}.
+/// - Upsert optional balance projection (display cache; non-authoritative).
+/// - Upsert the transaction history row.
+/// - Record the sender-settlements idempotency row.
+///
+/// Single SQLite transaction; fail-closed on any row error. Replaces the
+/// previous two-step pattern of `apply_sender_settlement_bundle_atomic`
+/// followed by a separate `bilateral_tip_sync::sync_bilateral_tips_atomically`
+/// contacts.chain_tip write — those two writes could interleave, leaving a
+/// "tip advanced but no history" window.
 ///
 /// Canonical state (chain state + device head) is written upstream at the
 /// `AdvanceOutcome` chokepoint (`CoreSDK::execute_on_relationship` →
 /// `dual_write_advance_outcome`). This function MUST NOT touch any
 /// canonical-state table.
-pub fn apply_sender_settlement_bundle_atomic(
-    sender_device_id: &str,
-    token_id: Option<&str>,
-    amount: u64,
-    tx: &TransactionRecord,
-    projection: Option<&BalanceProjectionRecord>,
+pub fn apply_bilateral_settlement_bundle_atomic(
+    bundle: BilateralSenderSettlementBundle<'_>,
 ) -> Result<()> {
     let binding = get_connection()?;
     let mut conn = binding.lock().unwrap_or_else(|poisoned| {
-        log::warn!("DB lock poisoned in apply_sender_settlement_bundle_atomic, recovering");
+        log::warn!("DB lock poisoned in apply_bilateral_settlement_bundle_atomic, recovering");
         poisoned.into_inner()
     });
 
     let now = tick();
     let txdb = conn.transaction()?;
-    let token = token_id.unwrap_or("ERA");
+    let token = bundle.token_id.unwrap_or("ERA");
 
-    if let Some(record) = projection {
+    // 1. Advance contact chain_tip to the new symmetric h_{n+1}.
+    txdb.execute(
+        "UPDATE contacts SET
+            previous_chain_tip = chain_tip,
+            chain_tip = ?1,
+            local_bilateral_chain_tip = ?1,
+            needs_online_reconcile = 0,
+            last_seen_online_counter = ?2,
+            status = CASE
+                WHEN status = 'BleCapable' THEN 'BleCapable'
+                ELSE 'OnlineCapable'
+            END
+         WHERE device_id = ?3",
+        params![bundle.new_chain_tip, now as i64, bundle.counterparty_device_id],
+    )?;
+
+    // 2. Balance projection (display cache only).
+    if let Some(record) = bundle.projection {
         upsert_balance_projection_with_conn(&txdb, record)?;
     }
 
-    let affected = upsert_transaction_row(&txdb, tx, now)?;
+    // 3. Transaction history row.
+    let affected = upsert_transaction_row(&txdb, bundle.tx, now)?;
+
+    // 4. Sender-settlements idempotency row.
     txdb.execute(
         "INSERT OR REPLACE INTO bilateral_sender_settlements(
             tx_id, sender_device_id, completed_at
          ) VALUES (?1, ?2, ?3)",
-        params![tx.tx_id, sender_device_id, now as i64],
+        params![bundle.tx.tx_id, bundle.sender_device_id, now as i64],
     )?;
+
     txdb.commit()?;
 
     if affected > 0 {
         info!(
-            "Atomic sender settlement bundle stored: device={} token={} amount={} tx_id={}",
-            sender_device_id, token, amount, tx.tx_id
+            "Atomic bilateral sender bundle stored (tip+projection+history+bookkeeping): device={} token={} amount={} tx_id={}",
+            bundle.sender_device_id, token, bundle.amount, bundle.tx.tx_id
         );
     }
 

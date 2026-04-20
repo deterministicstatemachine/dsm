@@ -786,11 +786,16 @@ impl WalletSDK {
     /// Execute a pre-built, pre-signed Transfer Operation directly through the state machine.
     /// This bypasses the Operation-reconstruction in `execute_signed_transfer` that causes
     /// signature verification mismatch (different nonce/balance fields).
+    ///
+    /// Returns both the compat `State` view and the canonical [`AdvanceOutcome`]
+    /// so `app_router_impl::wallet.send` can build the ReceiptCommit (§4.2)
+    /// directly from `smt_proofs` + `parent_r_a` + `child_r_a` — no separate
+    /// `smt_replace` on any shadow SMT.
     pub fn send_transfer_op(
         &self,
         op: dsm::types::operations::Operation,
         transaction: &WalletTransaction,
-    ) -> Result<State, DsmError> {
+    ) -> Result<(State, dsm::types::device_state::AdvanceOutcome), DsmError> {
         if *self.locked.read() {
             return Err(DsmError::unauthorized(
                 "Wallet is locked",
@@ -800,7 +805,7 @@ impl WalletSDK {
         self.update_activity_sync();
 
         log::debug!("[WALLET] send_transfer_op: calling token_sdk.execute_transfer_op...");
-        let new_state = self.token_sdk.execute_transfer_op(op)?;
+        let (new_state, outcome) = self.token_sdk.execute_transfer_op(op)?;
         log::debug!("[WALLET] send_transfer_op: execute_transfer_op OK");
 
         let mut tx_copy = transaction.clone();
@@ -899,7 +904,7 @@ impl WalletSDK {
             transaction.token_id
         );
 
-        Ok(new_state)
+        Ok((new_state, outcome))
     }
 
     pub fn lock(&self) -> Result<(), DsmError> {

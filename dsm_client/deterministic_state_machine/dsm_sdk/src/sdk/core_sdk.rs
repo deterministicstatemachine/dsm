@@ -635,33 +635,32 @@ impl CoreSDK {
         self.state_machine.lock().device_head().cloned()
     }
 
-    /// Apply balance deltas directly to the canonical DeviceState head.
+    /// Prepare-only view of the canonical [`AdvanceOutcome`] for an advance
+    /// that hasn't committed yet.
     ///
-    /// Band-aid for advance paths that bypass `execute_on_relationship`
-    /// (notably the BLE bilateral path). After mutating balances, persists
-    /// the updated head to `bcr_device_heads` so reader paths see the new
-    /// totals across restarts.
-    ///
-    /// See `dsm::types::device_state::DeviceState::apply_balance_deltas`
-    /// for the long-form design rationale.
-    pub fn apply_device_balance_deltas(
+    /// Used by the BLE sender in `send_bilateral_confirm` to build the
+    /// stitched receipt (§4.2) with the real post-advance SMT roots + proofs
+    /// *before* the sender advances canonical state — the canonical commit
+    /// happens later in `mark_sender_committed_with_post_state_hash` via
+    /// `execute_on_relationship_for_bilateral`, which re-runs prepare and
+    /// then commits. Identical inputs → identical outcome, so the simulated
+    /// receipt is byte-exact with the eventual canonical advance.
+    pub fn simulate_advance_for_confirm(
         &self,
+        rel_key: [u8; 32],
+        counterparty_devid: [u8; 32],
+        operation: dsm::types::operations::Operation,
         deltas: &[dsm::types::device_state::BalanceDelta],
-    ) -> Result<(), DsmError> {
-        let new_head = {
-            let mut sm = self.state_machine.lock();
-            sm.apply_balance_deltas(deltas)?;
-            sm.device_head().cloned()
-        };
-        if let Some(head) = new_head {
-            if let Err(e) = crate::storage::client_db::update_bcr_device_head(&head) {
-                log::warn!(
-                    "[CoreSDK] apply_device_balance_deltas: BCR head cache write failed: {}",
-                    e
-                );
-            }
-        }
-        Ok(())
+        initial_chain_tip: Option<[u8; 32]>,
+    ) -> Result<dsm::types::device_state::AdvanceOutcome, DsmError> {
+        let sm = self.state_machine.lock();
+        sm.prepare_advance_relationship(
+            rel_key,
+            counterparty_devid,
+            operation,
+            deltas,
+            initial_chain_tip,
+        )
     }
 
     /// Read device-level balance for a token by its 32-byte CPTA policy_commit.
@@ -1346,6 +1345,12 @@ impl CoreSDK {
     /// Apply a decoded Operation with replay protection and state machine integration.
     /// This executes the operation through the state machine for validation and state transition,
     /// then persists the results to the database with idempotency checks.
+    ///
+    /// Returns the canonical [`AdvanceOutcome`] from the underlying
+    /// `execute_on_relationship` call so callers (notably the online-receiver
+    /// inbox drain in `storage_routes`) can build the stitched ReceiptCommit
+    /// (§4.2) directly from `smt_proofs` + `parent_r_a` + `child_r_a` — no
+    /// shadow SMT replace needed.
     pub fn apply_operation_with_replay_protection(
         &self,
         op: dsm::types::operations::Operation,
@@ -1353,7 +1358,7 @@ impl CoreSDK {
         _seq: u64,
         sender_device_id: &str,
         sender_chain_tip: &str,
-    ) -> Result<(), DsmError> {
+    ) -> Result<dsm::types::device_state::AdvanceOutcome, DsmError> {
         // Fail-closed on obviously malformed inputs.
         if sender_device_id.is_empty() {
             return Err(DsmError::invalid_operation(
@@ -1412,7 +1417,7 @@ impl CoreSDK {
             },
             &counterparty,
         );
-        let (new_state, _) = self
+        let (new_state, outcome) = self
             .execute_on_relationship(rel_key, counterparty, op.clone(), &deltas, Some(init_tip))
             .map_err(|e| {
                 DsmError::invalid_operation(format!(
@@ -1528,7 +1533,7 @@ impl CoreSDK {
                     amount_val,
                     sender_device_id
                 );
-                Ok(())
+                Ok(outcome.clone())
             }
             dsm::types::operations::Operation::Receive {
                 nonce,
@@ -1643,7 +1648,7 @@ impl CoreSDK {
                     amount_val,
                     sender_device_id
                 );
-                Ok(())
+                Ok(outcome.clone())
             }
             dsm::types::operations::Operation::Create { .. } => {
                 log::info!(
@@ -1651,7 +1656,7 @@ impl CoreSDK {
                     String::from_utf8_lossy(tx_id.as_bytes()),
                     sender_device_id
                 );
-                Ok(())
+                Ok(outcome.clone())
             }
             dsm::types::operations::Operation::AddRelationship {
                 from_id: _,
@@ -1754,7 +1759,7 @@ impl CoreSDK {
                         sender_device_id
                     );
                 }
-                Ok(())
+                Ok(outcome.clone())
             }
             dsm::types::operations::Operation::CreateRelationship {
                 counterparty_id,
@@ -1844,7 +1849,7 @@ impl CoreSDK {
                     String::from_utf8_lossy(&counterparty_id),
                     sender_device_id
                 );
-                Ok(())
+                Ok(outcome.clone())
             }
             dsm::types::operations::Operation::Generic {
                 operation_type,
@@ -1860,7 +1865,7 @@ impl CoreSDK {
                     String::from_utf8_lossy(&operation_type),
                     sender_device_id
                 );
-                Ok(())
+                Ok(outcome.clone())
             }
             // For operations that don't require recipient-side database persistence,
             // we still allow them through since state machine validation passed
@@ -1870,7 +1875,7 @@ impl CoreSDK {
                     String::from_utf8_lossy(tx_id.as_bytes()),
                     sender_device_id
                 );
-                Ok(())
+                Ok(outcome.clone())
             }
             dsm::types::operations::Operation::Burn { .. } => {
                 log::info!(
@@ -1878,7 +1883,7 @@ impl CoreSDK {
                     String::from_utf8_lossy(tx_id.as_bytes()),
                     sender_device_id
                 );
-                Ok(())
+                Ok(outcome.clone())
             }
             dsm::types::operations::Operation::Lock { .. } => {
                 log::info!(
@@ -1886,7 +1891,7 @@ impl CoreSDK {
                     String::from_utf8_lossy(tx_id.as_bytes()),
                     sender_device_id
                 );
-                Ok(())
+                Ok(outcome.clone())
             }
             dsm::types::operations::Operation::Unlock { .. } => {
                 log::info!(
@@ -1894,7 +1899,7 @@ impl CoreSDK {
                     String::from_utf8_lossy(tx_id.as_bytes()),
                     sender_device_id
                 );
-                Ok(())
+                Ok(outcome.clone())
             }
             dsm::types::operations::Operation::LockToken { .. } => {
                 log::info!(
@@ -1902,7 +1907,7 @@ impl CoreSDK {
                     String::from_utf8_lossy(tx_id.as_bytes()),
                     sender_device_id
                 );
-                Ok(())
+                Ok(outcome.clone())
             }
             dsm::types::operations::Operation::UnlockToken { .. } => {
                 log::info!(
@@ -1910,7 +1915,7 @@ impl CoreSDK {
                     String::from_utf8_lossy(tx_id.as_bytes()),
                     sender_device_id
                 );
-                Ok(())
+                Ok(outcome.clone())
             }
             dsm::types::operations::Operation::CreateToken { .. } => {
                 log::info!(
@@ -1918,7 +1923,7 @@ impl CoreSDK {
                     String::from_utf8_lossy(tx_id.as_bytes()),
                     sender_device_id
                 );
-                Ok(())
+                Ok(outcome.clone())
             }
             dsm::types::operations::Operation::Update { .. } => {
                 log::info!(
@@ -1926,7 +1931,7 @@ impl CoreSDK {
                     String::from_utf8_lossy(tx_id.as_bytes()),
                     sender_device_id
                 );
-                Ok(())
+                Ok(outcome.clone())
             }
             dsm::types::operations::Operation::RemoveRelationship { .. } => {
                 log::info!(
@@ -1934,7 +1939,7 @@ impl CoreSDK {
                     String::from_utf8_lossy(tx_id.as_bytes()),
                     sender_device_id
                 );
-                Ok(())
+                Ok(outcome.clone())
             }
             dsm::types::operations::Operation::Recovery { .. } => {
                 log::info!(
@@ -1942,7 +1947,7 @@ impl CoreSDK {
                     String::from_utf8_lossy(tx_id.as_bytes()),
                     sender_device_id
                 );
-                Ok(())
+                Ok(outcome.clone())
             }
             dsm::types::operations::Operation::Delete { .. } => {
                 log::info!(
@@ -1950,7 +1955,7 @@ impl CoreSDK {
                     String::from_utf8_lossy(tx_id.as_bytes()),
                     sender_device_id
                 );
-                Ok(())
+                Ok(outcome.clone())
             }
             dsm::types::operations::Operation::Link { .. } => {
                 log::info!(
@@ -1958,7 +1963,7 @@ impl CoreSDK {
                     String::from_utf8_lossy(tx_id.as_bytes()),
                     sender_device_id
                 );
-                Ok(())
+                Ok(outcome.clone())
             }
             dsm::types::operations::Operation::Unlink { .. } => {
                 log::info!(
@@ -1966,7 +1971,7 @@ impl CoreSDK {
                     String::from_utf8_lossy(tx_id.as_bytes()),
                     sender_device_id
                 );
-                Ok(())
+                Ok(outcome.clone())
             }
             dsm::types::operations::Operation::Invalidate { .. } => {
                 log::info!(
@@ -1974,7 +1979,7 @@ impl CoreSDK {
                     String::from_utf8_lossy(tx_id.as_bytes()),
                     sender_device_id
                 );
-                Ok(())
+                Ok(outcome.clone())
             }
             dsm::types::operations::Operation::Genesis => {
                 log::info!(
@@ -1982,7 +1987,7 @@ impl CoreSDK {
                     String::from_utf8_lossy(tx_id.as_bytes()),
                     sender_device_id
                 );
-                Ok(())
+                Ok(outcome.clone())
             }
             dsm::types::operations::Operation::Noop => {
                 log::info!(
@@ -1990,7 +1995,7 @@ impl CoreSDK {
                     String::from_utf8_lossy(tx_id.as_bytes()),
                     sender_device_id
                 );
-                Ok(())
+                Ok(outcome.clone())
             }
             dsm::types::operations::Operation::DlvCreate { .. } => {
                 log::info!(
@@ -1998,7 +2003,7 @@ impl CoreSDK {
                     String::from_utf8_lossy(tx_id.as_bytes()),
                     sender_device_id
                 );
-                Ok(())
+                Ok(outcome.clone())
             }
             dsm::types::operations::Operation::DlvUnlock { .. } => {
                 log::info!(
@@ -2006,7 +2011,7 @@ impl CoreSDK {
                     String::from_utf8_lossy(tx_id.as_bytes()),
                     sender_device_id
                 );
-                Ok(())
+                Ok(outcome.clone())
             }
             dsm::types::operations::Operation::DlvClaim { .. } => {
                 log::info!(
@@ -2014,7 +2019,7 @@ impl CoreSDK {
                     String::from_utf8_lossy(tx_id.as_bytes()),
                     sender_device_id
                 );
-                Ok(())
+                Ok(outcome.clone())
             }
             dsm::types::operations::Operation::DlvInvalidate { .. } => {
                 log::info!(
@@ -2022,7 +2027,7 @@ impl CoreSDK {
                     String::from_utf8_lossy(tx_id.as_bytes()),
                     sender_device_id
                 );
-                Ok(())
+                Ok(outcome.clone())
             }
         }
     }

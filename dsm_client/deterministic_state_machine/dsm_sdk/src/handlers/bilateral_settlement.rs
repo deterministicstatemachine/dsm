@@ -12,19 +12,14 @@
 //! The canonical device head lives in [`dsm::types::device_state::DeviceState`].
 //! The BLE bilateral path does NOT route through
 //! [`execute_on_relationship`](crate::sdk::core_sdk::CoreSDK::execute_on_relationship)
-//! — `BilateralTransactionManager::finalize_offline_transfer_with_entropy`
-//! mutates the shared `per_device_smt` and SQLite `contacts.chain_tip`
-//! directly without touching the canonical `DeviceState.balances` map. To
-//! keep balances coherent across the two parallel advance paths, this
-//! delegate applies the sender debit / receiver credit to the canonical
-//! device head via [`crate::bridge::AppRouter::apply_device_balance_deltas`]
-//! BEFORE building the SQLite display projection. The projection then
-//! mirrors the now-correct head balance.
-//!
-//! Once every advance routes through `execute_on_relationship` (per the
-//! Phase 4.x BLE-routing unification in
-//! `~/.claude/plans/rustling-frolicking-swan.md`) this head mutation
-//! becomes redundant and can be removed.
+//! All bilateral advances — online sender, online receiver, BLE sender,
+//! BLE receiver — route through the canonical `CoreSDK::execute_on_relationship`
+//! chokepoint (`AppRouter::execute_on_relationship_for_bilateral` for the
+//! BLE paths). That single chokepoint applies balance deltas to the
+//! canonical `DeviceState` head atomically with the SMT leaf update
+//! (§8 balance binding). This delegate therefore only materialises the
+//! SQLite display-layer projection + transaction-history record — it does
+//! NOT mutate `DeviceState.balances` itself.
 
 use crate::bluetooth::bilateral_ble_handler::{
     BilateralSettlementContext, BilateralSettlementDelegate, BilateralSettlementOutcome,
@@ -100,10 +95,10 @@ fn resolve_policy_commit(token_id: &str) -> Result<[u8; 32], String> {
 /// Build the post-settlement balance projection from the canonical
 /// [`DeviceState`] head.
 ///
-/// The caller has already applied the sender debit / receiver credit to the
-/// device head via [`crate::bridge::AppRouter::apply_device_balance_deltas`]
-/// before invoking this function, so the projection mirrors
-/// `head.balance(policy_commit)` directly for both roles.
+/// The canonical advance (`AppRouter::execute_on_relationship_for_bilateral`)
+/// has already applied the sender debit / receiver credit to the device
+/// head atomically with the SMT update, so this function just mirrors
+/// `head.balance(policy_commit)` for both roles.
 ///
 /// Returns `Ok(None)` for transfers that resolve to zero amount or non-transfer
 /// operations — the caller still persists the transaction history record.
@@ -218,57 +213,19 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
             }
         }
 
-        // §8 balance reconciliation across the BLE / canonical-advance gap.
+        // Canonical advance chokepoint is the sole authority for balance
+        // mutation across every path (§8 balance binding):
+        //  - BLE sender  : `AppRouter::execute_on_relationship_for_bilateral`
+        //  - BLE receiver: `AppRouter::execute_on_relationship_for_bilateral`
+        //  - Online sender / receiver: `CoreSDK::execute_on_relationship`
         //
-        // The BLE bilateral path mutates the relationship-chain SMT via
-        // `BilateralTransactionManager::finalize_offline_transfer_with_entropy`
-        // without invoking `CoreSDK::execute_on_relationship`, so the
-        // canonical `DeviceState.balances` map is still untouched at this
-        // point. Apply the sender debit / receiver credit directly to the
-        // device head via the bridge BEFORE reading the head; the projection
-        // below then mirrors the now-correct head balance for both roles.
-        //
-        // Idempotency: sender duplicates (incl. recovery re-fires) are caught
-        // by the `is_sender_settlement_completed` guard above. Receiver
-        // duplicates are not yet guarded by a head-delta-specific idempotency
-        // marker; tracked as follow-up alongside the BLE-routing unification
-        // (`~/.claude/plans/rustling-frolicking-swan.md`).
+        // The settlement delegate only materialises the SQLite display-layer
+        // projection + `tx_history` record. It does NOT mutate
+        // `DeviceState.balances` — doing so here would be either redundant
+        // (canonical head already debited / credited) or a double-apply bug.
         let router = crate::bridge::app_router().ok_or_else(|| {
             "bilateral settle: app router unavailable (not bootstrapped)".to_string()
         })?;
-        if transfer_amount > 0 {
-            let token_for_policy = if token_id_str.is_empty() {
-                "ERA"
-            } else {
-                token_id_str.as_str()
-            };
-            match resolve_policy_commit(token_for_policy) {
-                Ok(policy_commit) => {
-                    let direction = if ctx.is_sender {
-                        dsm::types::device_state::BalanceDirection::Debit
-                    } else {
-                        dsm::types::device_state::BalanceDirection::Credit
-                    };
-                    let deltas = [dsm::types::device_state::BalanceDelta {
-                        policy_commit,
-                        direction,
-                        amount: transfer_amount,
-                    }];
-                    if let Err(e) = router.apply_device_balance_deltas(&deltas) {
-                        return Err(format!(
-                            "device-head balance delta failed (token={}, amount={}, is_sender={}): {e}",
-                            token_for_policy, transfer_amount, ctx.is_sender
-                        ));
-                    }
-                }
-                Err(e) => {
-                    return Err(format!(
-                        "device-head balance delta skipped — policy resolve failed (token={}): {e}",
-                        token_for_policy
-                    ));
-                }
-            }
-        }
 
         // Read the now-canonical DeviceState head from the bridge.
         let device_head = router.device_head().ok_or_else(|| {
@@ -322,22 +279,25 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
 
         if ctx.is_sender {
             if transfer_amount > 0 {
-                let debit_result = crate::storage::client_db::apply_sender_settlement_bundle_atomic(
-                    &local_txt,
-                    token_for_atomic,
-                    transfer_amount,
-                    &tx_record,
-                    projection.as_ref(),
-                );
+                let bundle_result =
+                    crate::storage::client_db::apply_bilateral_settlement_bundle_atomic(
+                        crate::storage::client_db::BilateralSenderSettlementBundle {
+                            counterparty_device_id: &ctx.counterparty_device_id,
+                            new_chain_tip: &ctx.new_chain_tip,
+                            sender_device_id: &local_txt,
+                            token_id: token_for_atomic,
+                            amount: transfer_amount,
+                            tx: &tx_record,
+                            projection: projection.as_ref(),
+                        },
+                    );
 
-                if let Err(e) = &debit_result {
+                if let Err(e) = &bundle_result {
                     error!(
                         "[BilateralSettlement] sender settlement persistence failed: token={} amount={} error={}",
-                        token_id_str,
-                        transfer_amount,
-                        e
+                        token_id_str, transfer_amount, e
                     );
-                    debit_result.map_err(|e| format!("atomic sender settlement failed: {e}"))?;
+                    bundle_result.map_err(|e| format!("atomic sender settlement failed: {e}"))?;
                 }
             } else if let Err(e) = crate::storage::client_db::store_transaction(&tx_record) {
                 warn!("[BilateralSettlement] Failed to store zero-amount sender tx history: {e}");

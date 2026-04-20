@@ -2621,7 +2621,15 @@ impl<I: Send + Sync> TokenSDK<I> {
     /// Execute a pre-built, pre-signed Transfer Operation directly through the state machine.
     /// This avoids the signature-verification mismatch caused by `execute_signed_transfer`
     /// reconstructing a different Operation than the one originally signed.
-    pub fn execute_transfer_op(&self, op: Operation) -> Result<State, DsmError> {
+    ///
+    /// Returns both the compat `State` view and the full [`AdvanceOutcome`] so
+    /// downstream callers (`WalletSDK::send_transfer_op`, `wallet.send` in
+    /// `app_router_impl`) can build the canonical ReceiptCommit (§4.2) from
+    /// `smt_proofs` + `parent_r_a` + `child_r_a` without re-reading any SMT.
+    pub fn execute_transfer_op(
+        &self,
+        op: Operation,
+    ) -> Result<(State, dsm::types::device_state::AdvanceOutcome), DsmError> {
         // Extract fields for balance cache updates before consuming the operation
         let (token_id, amount_val, recipient_device_id, memo) = match &op {
             Operation::Transfer {
@@ -2668,7 +2676,7 @@ impl<I: Send + Sync> TokenSDK<I> {
                 &recipient_devid,
             );
         log::debug!("[TOKEN] execute_transfer_op: calling execute_on_relationship...");
-        let (new_state, _outcome) = self.core_sdk.execute_on_relationship(
+        let (new_state, outcome) = self.core_sdk.execute_on_relationship(
             rel_key,
             recipient_devid,
             op,
@@ -2700,7 +2708,7 @@ impl<I: Send + Sync> TokenSDK<I> {
             history.push((token_op, crate::util::deterministic_time::tick()));
         }
 
-        Ok(new_state)
+        Ok((new_state, outcome))
     }
 }
 

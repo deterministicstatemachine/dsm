@@ -98,25 +98,50 @@ pub trait AppRouter: Send + Sync {
         None
     }
 
-    /// Apply balance deltas directly to the canonical DeviceState head and
-    /// persist the new head to the BCR head cache.
-    ///
-    /// **Band-aid** for advance paths that bypass `execute_on_relationship`
-    /// (notably the BLE bilateral path, which mutates the shared
-    /// `per_device_smt` via `BilateralTransactionManager` and does not go
-    /// through the canonical `prepare_advance_relationship → commit_advance`
-    /// chokepoint). Without this hook the canonical device-head balances
-    /// stay un-debited on the sender after a BLE transfer, surfaced as the
-    /// "BLE send credited receiver but did not debit sender" bug.
-    ///
-    /// Returns `Err` if the router is not yet attached to an identity, or
-    /// if any delta would underflow / overflow the device-level balance.
-    fn apply_device_balance_deltas(
+    /// Pure-prepare view of the canonical AdvanceOutcome — used by the BLE
+    /// sender to build a stitched receipt with the real post-advance SMT
+    /// roots/proofs before the canonical commit lands (canonical commit
+    /// happens later inside `execute_on_relationship_for_bilateral`).
+    /// Returns identical outcome for identical inputs, so the simulated
+    /// receipt is byte-exact with the eventual real advance.
+    fn simulate_advance_for_confirm(
         &self,
+        _rel_key: [u8; 32],
+        _counterparty_devid: [u8; 32],
+        _operation: dsm::types::operations::Operation,
         _deltas: &[dsm::types::device_state::BalanceDelta],
-    ) -> Result<(), dsm::types::error::DsmError> {
+        _initial_chain_tip: Option<[u8; 32]>,
+    ) -> Result<dsm::types::device_state::AdvanceOutcome, dsm::types::error::DsmError> {
         Err(dsm::types::error::DsmError::invalid_operation(
-            "apply_device_balance_deltas not implemented on this router",
+            "simulate_advance_for_confirm not implemented on this router",
+        ))
+    }
+
+    /// Execute a prepared bilateral advance through the canonical
+    /// [`CoreSDK::execute_on_relationship`] chokepoint.
+    ///
+    /// This is the bilateral entry point into the §2.2 single Per-Device SMT
+    /// advance (`prepare_advance_relationship → commit_advance`). It returns
+    /// only the [`AdvanceOutcome`] — settlement and BLE paths do not need the
+    /// compat `State` view. Callers feed in the tripwire-verified operation
+    /// and balance deltas produced by
+    /// `BilateralTransactionManager::finalize_offline_transfer_with_entropy`
+    /// (which no longer mutates any SMT itself), along with the parent chain
+    /// tip for CAS-style linkage.
+    ///
+    /// Returns `Err` if the router is not yet attached to an identity, or if
+    /// the underlying advance fails (§4.3 acceptance, §6.1 tripwire, §8
+    /// balance binding).
+    fn execute_on_relationship_for_bilateral(
+        &self,
+        _rel_key: [u8; 32],
+        _counterparty_devid: [u8; 32],
+        _operation: dsm::types::operations::Operation,
+        _deltas: &[dsm::types::device_state::BalanceDelta],
+        _initial_chain_tip: Option<[u8; 32]>,
+    ) -> Result<dsm::types::device_state::AdvanceOutcome, dsm::types::error::DsmError> {
+        Err(dsm::types::error::DsmError::invalid_operation(
+            "execute_on_relationship_for_bilateral not implemented on this router",
         ))
     }
 }

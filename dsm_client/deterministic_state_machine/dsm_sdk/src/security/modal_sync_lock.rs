@@ -1,47 +1,18 @@
-//! Per-Device SMT singleton — shared between online and offline paths on the same device (§2.2, §4.3).
+//! §5.4 Modal Synchronization Lock: a per-relationship flag that prevents
+//! concurrent online and offline transfers for the same (A, B) pair.
 //!
-//! Both online (`app_router_impl`) and offline (`bilateral_ble_handler`) transfer
-//! paths update the **same** Per-Device SMT. This module provides a process-wide
-//! singleton so that SMT roots and inclusion proofs are consistent regardless of
-//! which transport delivered the state transition.
-//!
-//! Also provides the §5.4 Modal Synchronization Lock: a per-relationship flag
-//! that prevents concurrent online and offline transfers for the same (A,B) pair.
+//! The Per-Device SMT is owned by `DeviceState.smt` inside the canonical
+//! `StateMachine` — there is no shadow SMT and no process-wide singleton.
+//! This module keeps only the modal-sync bookkeeping; all SMT mutation and
+//! inclusion-proof generation happens through `CoreSDK::execute_on_relationship`.
 
 use std::collections::HashSet;
 use std::sync::Arc;
 use once_cell::sync::OnceCell;
 use tokio::sync::RwLock;
 
-use dsm::merkle::sparse_merkle_tree::SparseMerkleTree;
-
-/// Process-wide Per-Device SMT instance.
-static SHARED_SMT: OnceCell<Arc<RwLock<SparseMerkleTree>>> = OnceCell::new();
-
 /// §5.4 Modal lock: set of relationship SMT keys with pending online projections.
 static PENDING_ONLINE: OnceCell<Arc<RwLock<HashSet<[u8; 32]>>>> = OnceCell::new();
-
-// ---------------------------------------------------------------------------
-// Per-Device SMT
-// ---------------------------------------------------------------------------
-
-/// Initialize the shared Per-Device SMT. Called once during SDK bootstrap.
-/// Subsequent calls return the existing instance (idempotent).
-pub fn init_shared_smt(max_leaves: usize) -> Arc<RwLock<SparseMerkleTree>> {
-    SHARED_SMT
-        .get_or_init(|| Arc::new(RwLock::new(SparseMerkleTree::new(max_leaves))))
-        .clone()
-}
-
-/// Get the shared Per-Device SMT instance.  Returns `None` only if
-/// `init_shared_smt()` has never been called.
-pub fn get_shared_smt() -> Option<Arc<RwLock<SparseMerkleTree>>> {
-    SHARED_SMT.get().cloned()
-}
-
-// ---------------------------------------------------------------------------
-// §5.4 Modal Synchronization Lock
-// ---------------------------------------------------------------------------
 
 fn pending_online_set() -> Arc<RwLock<HashSet<[u8; 32]>>> {
     PENDING_ONLINE
@@ -76,26 +47,6 @@ pub async fn is_pending_online(smt_key: &[u8; 32]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn init_shared_smt_returns_instance() {
-        let smt = init_shared_smt(1024);
-        assert!(Arc::strong_count(&smt) >= 1);
-    }
-
-    #[test]
-    fn init_shared_smt_is_idempotent() {
-        let a = init_shared_smt(1024);
-        let b = init_shared_smt(2048);
-        assert!(Arc::ptr_eq(&a, &b), "repeated init must return same Arc");
-    }
-
-    #[test]
-    fn get_shared_smt_after_init() {
-        let _ = init_shared_smt(1024);
-        let fetched = get_shared_smt();
-        assert!(fetched.is_some());
-    }
 
     #[tokio::test]
     async fn pending_online_set_insert_and_check() {

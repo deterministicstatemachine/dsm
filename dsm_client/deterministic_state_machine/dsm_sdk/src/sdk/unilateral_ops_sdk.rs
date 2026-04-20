@@ -110,7 +110,9 @@ impl UnilateralOpsSDK {
         contact_manager: Arc<RwLock<DsmContactManager>>,
         device_id: String,
     ) -> Self {
-        let per_device_smt = crate::security::shared_smt::init_shared_smt(256);
+        let per_device_smt = Arc::new(RwLock::new(
+            dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256),
+        ));
         Self {
             b0x_sdk: Arc::new(RwLock::new(b0x_sdk)),
             contact_manager,
@@ -127,7 +129,9 @@ impl UnilateralOpsSDK {
         device_id: String,
         device_id_bytes: [u8; 32],
     ) -> Self {
-        let per_device_smt = crate::security::shared_smt::init_shared_smt(256);
+        let per_device_smt = Arc::new(RwLock::new(
+            dsm::merkle::sparse_merkle_tree::SparseMerkleTree::new(256),
+        ));
         Self {
             b0x_sdk: Arc::new(RwLock::new(b0x_sdk)),
             contact_manager,
