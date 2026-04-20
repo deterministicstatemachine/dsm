@@ -1114,9 +1114,7 @@ fn apply_token_balance_delta(
             token_id, amount, ..
         } => {
             let token_id_str = canonical_token_id_str(token_id)
-                .ok_or_else(|| {
-                    DsmError::invalid_operation("Mint has malformed or empty token_id")
-                })?
+                .ok_or_else(|| DsmError::invalid_operation("Mint has malformed or empty token_id"))?
                 .to_string();
             let policy_commit = crate::core::token::resolve_policy_commit(&token_id_str);
             let owner_key = crate::core::token::derive_canonical_balance_key(
@@ -1144,9 +1142,7 @@ fn apply_token_balance_delta(
             token_id, amount, ..
         } => {
             let token_id_str = canonical_token_id_str(token_id)
-                .ok_or_else(|| {
-                    DsmError::invalid_operation("Burn has malformed or empty token_id")
-                })?
+                .ok_or_else(|| DsmError::invalid_operation("Burn has malformed or empty token_id"))?
                 .to_string();
             let policy_commit = crate::core::token::resolve_policy_commit(&token_id_str);
             let owner_key = crate::core::token::derive_canonical_balance_key(
@@ -1173,145 +1169,10 @@ fn apply_token_balance_delta(
                 Balance::from_state(owner_balance.value() - amount.value(), current_state.hash),
             );
         }
-        // ── DLV settlement ───────────────────────────────────────────
-        //
-        // DlvCreate locks tokens from the creator's available balance; the
-        // locked portion moves into the vault and is released later by either
-        // DlvClaim (to the claimant) or DlvInvalidate (back to the creator).
-        //
-        // The `token_id` / `locked_amount` fields are anchored on the operation
-        // itself so the signature binds the settlement metadata — closing the
-        // TOCTOU window between DLVManager and the state transition.
-        Operation::DlvCreate {
-            token_id,
-            locked_amount,
-            creator_public_key,
-            ..
-        } => {
-            let Some((token_id_str, policy_commit, amount)) =
-                decode_dlv_lock(token_id, locked_amount, "DlvCreate")?
-            else {
-                return Ok(());
-            };
-            let creator_key = crate::core::token::derive_canonical_balance_key(
-                &policy_commit,
-                creator_public_key,
-                &token_id_str,
-            );
-            let creator_balance = next_state
-                .token_balances
-                .get(&creator_key)
-                .cloned()
-                .unwrap_or_else(|| Balance::from_state(0, current_state.hash));
-            if creator_balance.value() < amount {
-                return Err(DsmError::insufficient_balance(
-                    token_id_str,
-                    creator_balance.value(),
-                    amount,
-                ));
-            }
-            next_state.token_balances.insert(
-                creator_key,
-                Balance::from_state(creator_balance.value() - amount, current_state.hash),
-            );
-        }
-        Operation::DlvClaim {
-            token_id,
-            locked_amount,
-            claimant_public_key,
-            ..
-        } => {
-            let Some((token_id_str, policy_commit, amount)) =
-                decode_dlv_lock(token_id, locked_amount, "DlvClaim")?
-            else {
-                return Ok(());
-            };
-            let claimant_key = crate::core::token::derive_canonical_balance_key(
-                &policy_commit,
-                claimant_public_key,
-                &token_id_str,
-            );
-            let claimant_balance = next_state
-                .token_balances
-                .get(&claimant_key)
-                .cloned()
-                .unwrap_or_else(|| Balance::from_state(0, current_state.hash));
-            let new_value = claimant_balance.value().checked_add(amount).ok_or_else(|| {
-                DsmError::invalid_operation("Balance overflow on DlvClaim credit")
-            })?;
-            next_state.token_balances.insert(
-                claimant_key,
-                Balance::from_state(new_value, current_state.hash),
-            );
-        }
-        Operation::DlvInvalidate {
-            token_id,
-            locked_amount,
-            creator_public_key,
-            ..
-        } => {
-            let Some((token_id_str, policy_commit, amount)) =
-                decode_dlv_lock(token_id, locked_amount, "DlvInvalidate")?
-            else {
-                return Ok(());
-            };
-            let creator_key = crate::core::token::derive_canonical_balance_key(
-                &policy_commit,
-                creator_public_key,
-                &token_id_str,
-            );
-            let creator_balance = next_state
-                .token_balances
-                .get(&creator_key)
-                .cloned()
-                .unwrap_or_else(|| Balance::from_state(0, current_state.hash));
-            let new_value = creator_balance.value().checked_add(amount).ok_or_else(|| {
-                DsmError::invalid_operation("Balance overflow on DlvInvalidate restore")
-            })?;
-            next_state.token_balances.insert(
-                creator_key,
-                Balance::from_state(new_value, current_state.hash),
-            );
-        }
         _ => {}
     }
 
     Ok(())
-}
-
-/// Decode the (optional) token_id + locked_amount anchor on a DLV op.
-///
-/// Returns `Ok(None)` when both fields are absent or the amount is zero, which
-/// the caller treats as a no-op (state-only DLV transition). Returns
-/// `Ok(Some(...))` with the canonical token id string, its policy commit, and
-/// the locked amount when the op carries settlement metadata. Returns `Err`
-/// only when the metadata is malformed or internally inconsistent (e.g. one
-/// field present without the other, invalid UTF-8 in token_id).
-fn decode_dlv_lock(
-    token_id: &Option<Vec<u8>>,
-    locked_amount: &Option<crate::types::token_types::Balance>,
-    op_name: &'static str,
-) -> Result<Option<(String, [u8; 32], u64)>, DsmError> {
-    match (token_id, locked_amount) {
-        (None, None) => Ok(None),
-        (Some(tid), Some(amount)) => {
-            if amount.value() == 0 {
-                return Ok(None);
-            }
-            let tid_str = canonical_token_id_str(tid)
-                .ok_or_else(|| {
-                    DsmError::invalid_operation(format!(
-                        "{op_name} has malformed or empty token_id"
-                    ))
-                })?
-                .to_string();
-            let policy_commit = crate::core::token::resolve_policy_commit(&tid_str);
-            Ok(Some((tid_str, policy_commit, amount.value())))
-        }
-        _ => Err(DsmError::invalid_operation(format!(
-            "{op_name} has inconsistent settlement metadata (token_id/locked_amount must both be set or both absent)"
-        ))),
-    }
 }
 
 /// Convert operations verification type to local verification type
@@ -2159,13 +2020,11 @@ mod tests {
     fn test_token_balance_map_rejects_malformed_token_id() {
         let mut state = create_test_state(1);
         // Insert a legitimate balance under a valid key suffix.
-        state
-            .token_balances
-            .insert("test:state|ERA".to_string(), {
-                let mut b = Balance::zero();
-                b.update_add(100);
-                b
-            });
+        state.token_balances.insert("test:state|ERA".to_string(), {
+            let mut b = Balance::zero();
+            b.update_add(100);
+            b
+        });
 
         // Valid token_id produces the expected single entry.
         let map = token_balance_map_for_verification(&state, b"ERA");
@@ -2198,8 +2057,7 @@ mod tests {
         };
         // Sign the op so we reach the balance-derivation code path.
         let bytes = op.to_bytes();
-        let sig = sphincs_sign(&sk, &bytes)
-            .unwrap_or_else(|e| panic!("sign transfer failed: {e}"));
+        let sig = sphincs_sign(&sk, &bytes).unwrap_or_else(|e| panic!("sign transfer failed: {e}"));
         if let Operation::Transfer { signature, .. } = &mut op {
             *signature = sig;
         }
@@ -2309,151 +2167,6 @@ mod tests {
         assert!(result.is_ok());
 
         let _next_state = result.unwrap_or_else(|e| panic!("apply_transition should succeed: {e}"));
-    }
-
-    // ── DLV settlement (PR #196) ─────────────────────────────────────
-    //
-    // These tests exercise the new DlvClaim / DlvInvalidate balance-delta
-    // arms. The vault machinery itself is tested elsewhere — here we
-    // verify that when a signed op carries (token_id, locked_amount),
-    // apply_token_balance_delta credits the expected balance key.
-
-    #[test]
-    fn test_apply_transition_dlv_claim_credits_claimant() {
-        let (pk, sk) =
-            generate_sphincs_keypair().unwrap_or_else(|e| panic!("keypair generation failed: {e}"));
-
-        let mut current_state = create_test_state(5);
-        current_state.device_info.public_key = pk.clone();
-
-        // Precondition: claimant starts with zero ERA balance.
-        let era_pc = crate::core::token::builtin_policy_commit_for_token("ERA").unwrap();
-        let claimant_key = crate::core::token::derive_canonical_balance_key(&era_pc, &pk, "ERA");
-        assert!(!current_state.token_balances.contains_key(&claimant_key));
-
-        let entropy = vec![7, 8, 9];
-        let mut op = Operation::DlvClaim {
-            vault_id: b"vault_claim_tokens".to_vec(),
-            claim_proof: vec![0x01; 64],
-            claimant_public_key: pk.clone(),
-            token_id: Some(b"ERA".to_vec()),
-            locked_amount: Some(Balance::from_state(250, current_state.hash)),
-            signature: Vec::new(),
-            mode: TransactionMode::Unilateral,
-        };
-        let sig = sphincs_sign(&sk, &op.to_bytes())
-            .unwrap_or_else(|e| panic!("sign DlvClaim failed: {e}"));
-        if let Operation::DlvClaim { signature, .. } = &mut op {
-            *signature = sig;
-        }
-
-        let next_state = apply_transition(&current_state, &op, &entropy)
-            .unwrap_or_else(|e| panic!("apply_transition should succeed: {e}"));
-
-        let credited = next_state
-            .token_balances
-            .get(&claimant_key)
-            .expect("claimant balance credited");
-        assert_eq!(credited.value(), 250);
-    }
-
-    #[test]
-    fn test_apply_transition_dlv_invalidate_restores_creator() {
-        let (pk, sk) =
-            generate_sphincs_keypair().unwrap_or_else(|e| panic!("keypair generation failed: {e}"));
-
-        let mut current_state = create_test_state(5);
-        current_state.device_info.public_key = pk.clone();
-        // Creator has existing balance (what's left after vault lock).
-        let era_pc = crate::core::token::builtin_policy_commit_for_token("ERA").unwrap();
-        let creator_key = crate::core::token::derive_canonical_balance_key(&era_pc, &pk, "ERA");
-        current_state
-            .token_balances
-            .insert(creator_key.clone(), Balance::from_state(100, current_state.hash));
-
-        let entropy = vec![1, 2, 3];
-        let mut op = Operation::DlvInvalidate {
-            vault_id: b"vault_invalidate".to_vec(),
-            reason: "timeout".into(),
-            creator_public_key: pk.clone(),
-            token_id: Some(b"ERA".to_vec()),
-            locked_amount: Some(Balance::from_state(75, current_state.hash)),
-            signature: Vec::new(),
-            mode: TransactionMode::Unilateral,
-        };
-        let sig = sphincs_sign(&sk, &op.to_bytes())
-            .unwrap_or_else(|e| panic!("sign DlvInvalidate failed: {e}"));
-        if let Operation::DlvInvalidate { signature, .. } = &mut op {
-            *signature = sig;
-        }
-
-        let next_state = apply_transition(&current_state, &op, &entropy)
-            .unwrap_or_else(|e| panic!("apply_transition should succeed: {e}"));
-
-        let restored = next_state
-            .token_balances
-            .get(&creator_key)
-            .expect("creator balance restored");
-        assert_eq!(restored.value(), 100 + 75);
-    }
-
-    #[test]
-    fn test_apply_transition_dlv_claim_no_metadata_is_noop() {
-        let (pk, sk) =
-            generate_sphincs_keypair().unwrap_or_else(|e| panic!("keypair generation failed: {e}"));
-
-        let mut current_state = create_test_state(5);
-        current_state.device_info.public_key = pk.clone();
-
-        let entropy = vec![0];
-        let mut op = Operation::DlvClaim {
-            vault_id: b"vault_state_only".to_vec(),
-            claim_proof: vec![0x01; 64],
-            claimant_public_key: pk.clone(),
-            token_id: None,
-            locked_amount: None,
-            signature: Vec::new(),
-            mode: TransactionMode::Unilateral,
-        };
-        let sig = sphincs_sign(&sk, &op.to_bytes())
-            .unwrap_or_else(|e| panic!("sign DlvClaim failed: {e}"));
-        if let Operation::DlvClaim { signature, .. } = &mut op {
-            *signature = sig;
-        }
-
-        let next_state = apply_transition(&current_state, &op, &entropy)
-            .unwrap_or_else(|e| panic!("apply_transition should succeed: {e}"));
-
-        // No token_balances change — vault was state-only.
-        assert_eq!(next_state.token_balances, current_state.token_balances);
-    }
-
-    #[test]
-    fn test_apply_transition_dlv_claim_inconsistent_metadata_rejected() {
-        let (pk, sk) =
-            generate_sphincs_keypair().unwrap_or_else(|e| panic!("keypair generation failed: {e}"));
-
-        let mut current_state = create_test_state(5);
-        current_state.device_info.public_key = pk.clone();
-
-        // Inconsistent: token_id set but locked_amount absent.
-        let mut op = Operation::DlvClaim {
-            vault_id: b"vault_bad".to_vec(),
-            claim_proof: vec![0x01; 64],
-            claimant_public_key: pk.clone(),
-            token_id: Some(b"ERA".to_vec()),
-            locked_amount: None,
-            signature: Vec::new(),
-            mode: TransactionMode::Unilateral,
-        };
-        let sig = sphincs_sign(&sk, &op.to_bytes())
-            .unwrap_or_else(|e| panic!("sign DlvClaim failed: {e}"));
-        if let Operation::DlvClaim { signature, .. } = &mut op {
-            *signature = sig;
-        }
-
-        let result = apply_transition(&current_state, &op, &[0]);
-        assert!(result.is_err(), "inconsistent metadata must be rejected");
     }
 
     #[test]

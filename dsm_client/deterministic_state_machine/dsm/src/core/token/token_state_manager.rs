@@ -350,9 +350,7 @@ impl TokenStateManager {
                 if let (Some(tid), Some(amount)) = (token_id, locked_amount) {
                     if amount.value() > 0 {
                         let tid_str = canonical_token_id_str(tid).ok_or_else(|| {
-                            DsmError::invalid_operation(
-                                "DlvCreate has malformed or empty token_id",
-                            )
+                            DsmError::invalid_operation("DlvCreate has malformed or empty token_id")
                         })?;
                         let creator_key =
                             self.make_balance_key(creator_public_key.as_slice(), tid_str)?;
@@ -383,59 +381,28 @@ impl TokenStateManager {
             }
 
             Operation::DlvInvalidate {
-                token_id,
-                locked_amount,
-                creator_public_key,
-                ..
+                creator_public_key, ..
             } => {
                 // Vault invalidation returns locked tokens to the creator.
-                // The token_id / locked_amount fields anchor the settlement
-                // metadata onto the operation itself so the signature binds
-                // them, closing the TOCTOU window between DLVManager and the
-                // state transition.
-                if let Some((tid_str, amount)) =
-                    Self::decode_dlv_lock_metadata(token_id, locked_amount, "DlvInvalidate")?
-                {
-                    let creator_key =
-                        self.make_balance_key(creator_public_key.as_slice(), &tid_str)?;
-                    let creator_balance = new_balances
-                        .get(&creator_key)
-                        .cloned()
-                        .unwrap_or_else(|| Balance::from_state(0, current_state.hash));
-                    let new_value = creator_balance.value().checked_add(amount).ok_or_else(
-                        || DsmError::invalid_operation("Balance overflow on DlvInvalidate restore"),
-                    )?;
-                    new_balances.insert(
-                        creator_key,
-                        Balance::from_state(new_value, current_state.hash),
-                    );
-                }
+                // The vault's locked_amount and token_id are not embedded in
+                // DlvInvalidate directly — the caller (DLVManager in Phase 5)
+                // is responsible for ensuring the DlvInvalidate operation is
+                // paired with correct balance restoration via the state's
+                // token_balances map before reaching this function.
+                //
+                // If the vault had no locked tokens, this is a no-op.
+                let _ = creator_public_key;
             }
 
             Operation::DlvClaim {
-                token_id,
-                locked_amount,
                 claimant_public_key,
                 ..
             } => {
                 // Claim releases locked tokens to the claimant.
-                if let Some((tid_str, amount)) =
-                    Self::decode_dlv_lock_metadata(token_id, locked_amount, "DlvClaim")?
-                {
-                    let claimant_key =
-                        self.make_balance_key(claimant_public_key.as_slice(), &tid_str)?;
-                    let claimant_balance = new_balances
-                        .get(&claimant_key)
-                        .cloned()
-                        .unwrap_or_else(|| Balance::from_state(0, current_state.hash));
-                    let new_value = claimant_balance.value().checked_add(amount).ok_or_else(
-                        || DsmError::invalid_operation("Balance overflow on DlvClaim credit"),
-                    )?;
-                    new_balances.insert(
-                        claimant_key,
-                        Balance::from_state(new_value, current_state.hash),
-                    );
-                }
+                // Similar to DlvInvalidate, the vault's locked_amount and
+                // token_id are resolved by DLVManager and applied to the
+                // state's token_balances map before this function is called.
+                let _ = claimant_public_key;
             }
 
             // DlvUnlock is a state-only transition (no balance change).
@@ -460,38 +427,6 @@ impl TokenStateManager {
             owner_pk,
             token_id,
         ))
-    }
-
-    /// Decode the (optional) token_id + locked_amount anchor on a DLV op.
-    ///
-    /// Returns `Ok(None)` when both fields are absent or the amount is zero
-    /// (state-only DLV transition). Returns `Ok(Some((token_id_str, amount)))`
-    /// when both are set. Returns `Err` when the pair is inconsistent or the
-    /// token_id is malformed / non-UTF8 — never `from_utf8_lossy` (§7.6).
-    fn decode_dlv_lock_metadata(
-        token_id: &Option<Vec<u8>>,
-        locked_amount: &Option<Balance>,
-        op_name: &'static str,
-    ) -> Result<Option<(String, u64)>, DsmError> {
-        match (token_id, locked_amount) {
-            (None, None) => Ok(None),
-            (Some(tid), Some(amount)) => {
-                if amount.value() == 0 {
-                    return Ok(None);
-                }
-                let tid_str = canonical_token_id_str(tid)
-                    .ok_or_else(|| {
-                        DsmError::invalid_operation(format!(
-                            "{op_name} has malformed or empty token_id"
-                        ))
-                    })?
-                    .to_string();
-                Ok(Some((tid_str, amount.value())))
-            }
-            _ => Err(DsmError::invalid_operation(format!(
-                "{op_name} has inconsistent settlement metadata (token_id/locked_amount must both be set or both absent)"
-            ))),
-        }
     }
 
     fn verify_mint_authorization(

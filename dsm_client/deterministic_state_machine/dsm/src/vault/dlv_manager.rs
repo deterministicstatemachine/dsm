@@ -6,6 +6,26 @@
 //! Each lifecycle method returns an unsigned `Operation` that the SDK layer
 //! must sign with SPHINCS+ before submitting to the state machine.
 //! NOTE: No bincode/serde. `create_vault_post` encodes with `prost`.
+//!
+//! # DLV Settlement Status
+//!
+//! The canonical σ-gated claim path lives in `limbo_vault::claim` per DSM spec
+//! §7.3 (`sk_V = BLAKE3-256("DSM/dlv-unlock\0" ‖ L ‖ C ‖ σ)`). `DlvClaim` and
+//! `DlvInvalidate` operations returned by this manager are unsigned signals —
+//! they do NOT themselves mutate token balances. Balance movement for a DLV
+//! release must be expressed through a separate canonical transfer receipt per
+//! DSM spec §18.4 ("normal stitched receipt with a smart commitment clause").
+//!
+//! TODO(dlv-settlement): wire the full DeTFi §10.3 client verifier (11-step
+//! acceptance: inclusion proofs of vault state in Per-Device SMT, encumbrance
+//! commit + claim availability, route-set membership, intent bounds, ExtCommit
+//! binding, signature verification, claim consumption). Until then, token
+//! balance effects for DLV release must be composed through normal transfer
+//! operations in the same stitched receipt as the DlvClaim/DlvInvalidate
+//! signal. A prior port (PR #196) wired `locked_amount` straight into
+//! `apply_token_balance_delta`; that was reverted because the fork lacks the
+//! upstream per-vault state registry required to cross-validate claims and the
+//! self-attested credit path enabled arbitrary mint.
 
 use super::{FulfillmentMechanism, FulfillmentProof, LimboVault, LimboVaultDraft, VaultState};
 use crate::types::operations::{Operation, TransactionMode};
@@ -14,29 +34,10 @@ use crate::types::error::DsmError;
 use prost::Message; // for encode_to_vec()
 use std::{collections::HashMap, sync::Arc};
 
-/// Per-vault settlement metadata anchored onto DLV operations.
-///
-/// This is the DLVManager's in-memory record of the `(token_id, locked_amount)`
-/// pair that was locked when the vault was finalized. On claim/invalidate the
-/// manager reads this metadata and anchors it onto the returned operation so
-/// the signature binds it — closing the TOCTOU window between DLVManager and
-/// the state transition.
-#[derive(Clone, Debug)]
-struct VaultSettlementMetadata {
-    token_id: Vec<u8>,
-    locked_amount: Balance,
-}
-
 /// Manages Limbo Vaults
 pub struct DLVManager {
     /// Vaults managed by this instance, keyed by vault ID
     vaults: tokio::sync::RwLock<HashMap<String, Arc<tokio::sync::Mutex<LimboVault>>>>,
-    /// Settlement metadata per vault, keyed by vault ID.
-    ///
-    /// Populated on `finalize_vault` / `add_vault` and consumed on
-    /// `claim_vault_content` / `invalidate_vault`. Absent entries indicate
-    /// state-only vaults (no token lock) — the fallback path returns `None`.
-    settlement_metadata: tokio::sync::RwLock<HashMap<String, VaultSettlementMetadata>>,
 }
 
 impl DLVManager {
@@ -44,19 +45,7 @@ impl DLVManager {
     pub fn new() -> Self {
         Self {
             vaults: tokio::sync::RwLock::new(HashMap::new()),
-            settlement_metadata: tokio::sync::RwLock::new(HashMap::new()),
         }
-    }
-
-    /// Remove and return settlement metadata for a vault. Called on terminal
-    /// transitions (claim / invalidate) so metadata does not outlive the vault.
-    /// Returns `None` for state-only vaults with no token lock.
-    async fn take_settlement_metadata(
-        &self,
-        vault_id: &str,
-    ) -> Option<VaultSettlementMetadata> {
-        let mut map = self.settlement_metadata.write().await;
-        map.remove(vault_id)
     }
 
     /// Prepare a secret-free vault draft.
@@ -107,27 +96,13 @@ impl DLVManager {
         let locked_balance =
             locked_amount.map(|amt| Balance::from_state(amt, vault.reference_state_hash));
 
-        let op_token_id = token_id.map(|s| s.as_bytes().to_vec());
-
-        // Capture settlement metadata so later claim/invalidate can anchor the
-        // same (token_id, locked_amount) pair onto their operations.
-        let metadata =
-            if let (Some(tid_bytes), Some(bal)) = (op_token_id.as_ref(), locked_balance.as_ref()) {
-                Some(VaultSettlementMetadata {
-                    token_id: tid_bytes.clone(),
-                    locked_amount: bal.clone(),
-                })
-            } else {
-                None
-            };
-
         let operation = Operation::DlvCreate {
             vault_id: vault_id.as_bytes().to_vec(),
             creator_public_key: vault.creator_public_key.clone(),
             parameters_hash: vault.parameters_hash.clone(),
             fulfillment_condition: fulfillment_bytes,
             intended_recipient: vault.intended_recipient.clone(),
-            token_id: op_token_id,
+            token_id: token_id.map(|s| s.as_bytes().to_vec()),
             locked_amount: locked_balance,
             signature: vec![], // unsigned — caller must sign
             mode: TransactionMode::Unilateral,
@@ -136,12 +111,6 @@ impl DLVManager {
         // Store the vault
         let mut vaults = self.vaults.write().await;
         vaults.insert(vault_id.clone(), Arc::new(tokio::sync::Mutex::new(vault)));
-        drop(vaults);
-
-        if let Some(meta) = metadata {
-            let mut metadata_map = self.settlement_metadata.write().await;
-            metadata_map.insert(vault_id.clone(), meta);
-        }
 
         Ok((vault_id, operation))
     }
@@ -253,22 +222,11 @@ impl DLVManager {
         let vault_lock = self.get_vault(vault_id).await?;
         let mut vault = vault_lock.lock().await;
         let result = vault.claim(claimant_kyber_sk, reference_state_hash)?;
-        drop(vault);
-
-        // Consume settlement metadata (if any). A missing entry means the
-        // vault was state-only — the operation carries None/None.
-        let metadata = self.take_settlement_metadata(vault_id).await;
-        let (token_id, locked_amount) = match metadata {
-            Some(m) => (Some(m.token_id), Some(m.locked_amount)),
-            None => (None, None),
-        };
 
         let operation = Operation::DlvClaim {
             vault_id: vault_id.as_bytes().to_vec(),
             claim_proof: result.claim_proof.clone(),
             claimant_public_key: claimant_signing_pk.to_vec(),
-            token_id,
-            locked_amount,
             signature: vec![], // unsigned — caller must sign
             mode: TransactionMode::Unilateral,
         };
@@ -294,22 +252,11 @@ impl DLVManager {
         let creator_pk = vault.creator_public_key.clone();
 
         vault.invalidate(reason, creator_signature, reference_state_hash)?;
-        drop(vault);
-
-        // Consume settlement metadata (if any) so the restore credit binds to
-        // the signature. Vaults without a token lock carry None/None.
-        let metadata = self.take_settlement_metadata(vault_id).await;
-        let (token_id, locked_amount) = match metadata {
-            Some(m) => (Some(m.token_id), Some(m.locked_amount)),
-            None => (None, None),
-        };
 
         let operation = Operation::DlvInvalidate {
             vault_id: vault_id.as_bytes().to_vec(),
             reason: reason.to_string(),
             creator_public_key: creator_pk,
-            token_id,
-            locked_amount,
             signature: vec![], // unsigned — caller must sign
             mode: TransactionMode::Unilateral,
         };
@@ -505,39 +452,5 @@ mod tests {
 
         let ids = mgr.list_vaults().await.unwrap();
         assert_eq!(ids.len(), 10);
-    }
-
-    // ── settlement metadata tracking ────────────────────────────────
-    //
-    // These tests exercise the DLVManager's in-memory settlement metadata
-    // map directly, without going through the full finalize_vault path
-    // (which requires real Kyber/SPHINCS+ keys and fulfillment proofs).
-    // They verify the TOCTOU-closing property: metadata seeded at
-    // DlvCreate time is consumed (and removed) by the terminal op.
-
-    #[tokio::test]
-    async fn settlement_metadata_round_trip_via_take() {
-        let mgr = DLVManager::new();
-        let meta = VaultSettlementMetadata {
-            token_id: b"ERA".to_vec(),
-            locked_amount: Balance::from_state(42, [0u8; 32]),
-        };
-        {
-            let mut map = mgr.settlement_metadata.write().await;
-            map.insert("v_meta".into(), meta.clone());
-        }
-
-        let out = mgr.take_settlement_metadata("v_meta").await.expect("metadata present");
-        assert_eq!(out.token_id, meta.token_id);
-        assert_eq!(out.locked_amount.value(), 42);
-
-        // Second take returns None — metadata is consumed on terminal op.
-        assert!(mgr.take_settlement_metadata("v_meta").await.is_none());
-    }
-
-    #[tokio::test]
-    async fn settlement_metadata_absent_is_none() {
-        let mgr = DLVManager::new();
-        assert!(mgr.take_settlement_metadata("unknown_vault").await.is_none());
     }
 }
