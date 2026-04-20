@@ -210,6 +210,7 @@ Thumbs.db
 tmp/
 backups/
 .nodes.pids
+desktop-extensions/*/dist/
 
 # ---------------------------------------------------------------------------
 # Stray scratch / one-off files
@@ -232,3 +233,22 @@ tools/ios_ingress_smoke/
 !.agents/plugins/marketplace.json
 ble_dump.txt
 Agent-Refinement-System-Final.md
+
+# ---------------------------------------------------------------------------
+# AI tooling / personal agent configs — local-only, never push to remote
+# ---------------------------------------------------------------------------
+.agents/
+.claude/
+.claude-plugin/
+.clinerules/
+.cursor/
+.windsurf/
+AGENTS.md
+CLAUDE.md
+caveman-compress/
+commands/caveman*.toml
+hooks/caveman-*
+plugins/caveman/
+rules/caveman-*.md
+skills/
+desktop-extensions/
