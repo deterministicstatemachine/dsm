@@ -180,6 +180,8 @@ tla/.tlacache/
 # ---------------------------------------------------------------------------
 rustc-ice-*.txt
 dsm_client/deterministic_state_machine/rustc-ice-*.txt
+cargo_test_out.txt
+cargo_test_*.txt
 
 # ---------------------------------------------------------------------------
 # IDE
