@@ -42,6 +42,36 @@ class GattServerHost(private val context: Context) {
 
     private val txResponseScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    /**
+     * Per-device serialized inbound chunk pipeline.
+     *
+     * GATT server write callbacks fire on a single shared Binder thread that
+     * MUST return quickly so the OS BLE stack can ACK the next ATT write.
+     * Calling `processIncomingBleData` (JNI → Rust reassembly + frame
+     * decode) directly on that thread blocks for ~30 ms per chunk; on a
+     * 200-chunk confirm envelope the OS receive buffer overruns long
+     * before the GATT thread drains and chunks 11+ are silently dropped.
+     *
+     * Decouple by enqueueing the raw bytes onto an unbounded per-device
+     * channel; a single dedicated consumer coroutine drains it FIFO and
+     * does the synchronous Rust call off the GATT thread. Per-device
+     * channels preserve reassembly ordering without serializing across
+     * unrelated peers.
+     */
+    private val inboundChunkPipelines = ConcurrentHashMap<String, Channel<ByteArray>>()
+
+    private fun inboundChannelFor(deviceAddress: String): Channel<ByteArray> {
+        return inboundChunkPipelines.computeIfAbsent(deviceAddress) {
+            val channel = Channel<ByteArray>(Channel.UNLIMITED)
+            txResponseScope.launch {
+                for (data in channel) {
+                    processCompletedTxDataInline(deviceAddress, data)
+                }
+            }
+            channel
+        }
+    }
+
     private val gattServer = AtomicReference<BluetoothGattServer?>(null)
     private val servicesReady = AtomicBoolean(false)
     private val serviceRegistrationInProgress = AtomicBoolean(false)
@@ -932,6 +962,23 @@ class GattServerHost(private val context: Context) {
     }
 
     private fun processCompletedTxData(deviceAddress: String, data: ByteArray) {
+        // Hand off to the per-device serialized inbound pipeline so the
+        // GATT server callback thread returns immediately. Without this
+        // hand-off the Rust JNI call (~30 ms per chunk) blocks the BLE
+        // stack's ATT-callback dispatcher and chunks 11+ of a long
+        // confirm envelope get silently dropped on the receiver side.
+        val channel = inboundChannelFor(deviceAddress)
+        val sent = channel.trySend(data).isSuccess
+        if (!sent) {
+            Log.w(
+                "GattServerHost",
+                "Inbound chunk channel rejected ${data.size} bytes from $deviceAddress; falling back to inline processing"
+            )
+            processCompletedTxDataInline(deviceAddress, data)
+        }
+    }
+
+    private fun processCompletedTxDataInline(deviceAddress: String, data: ByteArray) {
         Log.d("GattServerHost", "Processing completed TX data: ${data.size} bytes from $deviceAddress")
         try {
             // All routing — chunk reassembly, frame-type detection, and bilateral
