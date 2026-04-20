@@ -184,8 +184,8 @@ dsm_client/deterministic_state_machine/rustc-ice-*.txt
 # ---------------------------------------------------------------------------
 # IDE
 # ---------------------------------------------------------------------------
-.vscode/*
-!.vscode/settings.json
+.vscode/
+.codex/
 .idea/
 *.swp
 *.swo
