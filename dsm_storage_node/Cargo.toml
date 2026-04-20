@@ -8,12 +8,12 @@ description = "Storage node for the Deterministic State Machine (DSM)"
 
 [dependencies]
 # Core async runtime
-tokio = { version = "1.32.0", features = ["full"] }
+tokio = { version = "1.51.0", features = ["full"] }
 futures = "0.3.31"
 
 # HTTP server
 axum = { version = "0.8", features = ["macros"] }
-axum-server = { version = "0.7", features = ["tls-rustls"] }              # TLS listener
+axum-server = { version = "0.8", features = ["tls-rustls"] }              # TLS listener
 rustls = { version = "0.23", features = ["ring"] }
 tokio-rustls = "0.26"
 rustls-pemfile = "2"             # load PEM cert/key
@@ -46,10 +46,10 @@ tracing-log = "0.2"
 reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls"] }
 
 # Database (PostgreSQL — default)
-tokio-postgres = { version = "0.7.10", default-features = false, features = ["runtime"], optional = true }
+tokio-postgres = { version = "0.7.17", default-features = false, features = ["runtime"], optional = true }
 deadpool-postgres = { version = "0.14.1", optional = true }
-tokio-postgres-rustls = { version = "0.12", optional = true }
-rustls-native-certs = "0.7"      # use system roots (optional)
+tokio-postgres-rustls = { version = "0.13", optional = true }
+rustls-native-certs = "0.8"      # use system roots (optional)
 webpki-roots = "1.0.6"
 
 # Database (SQLite — local-dev only)
@@ -91,6 +91,6 @@ name = "storage_node"
 path = "src/main.rs"
 
 [dev-dependencies]
-hyper = { version = "0.14", features = ["full"] }
+hyper = { version = "1.8", features = ["full"] }
 prost = "0.13"
 serial_test = "3"

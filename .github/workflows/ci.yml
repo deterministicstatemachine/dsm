@@ -46,11 +46,18 @@ jobs:
       - name: Production safety lints
         run: bash ci/production_safety_checks.sh
 
-      - name: Format check
-        run: cargo fmt --all -- --check
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: dsm_client/frontend/package-lock.json
 
-      - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings -A clippy::disallowed_methods
+      - name: Install frontend lint dependencies
+        working-directory: dsm_client/frontend
+        run: npm ci
+
+      - name: Lint
+        run: make lint
 
       - name: Build
         run: cargo build --locked --workspace --all-features
@@ -196,7 +203,7 @@ jobs:
           node scripts/aggregate_coverage.mjs
 
       - name: Upload Rust coverage to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v6
         with:
           files: coverage/rust.lcov
           flags: rust
@@ -205,7 +212,7 @@ jobs:
           use_oidc: true
 
       - name: Upload frontend coverage to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v6
         with:
           files: dsm_client/frontend/coverage/lcov.info
           flags: frontend
@@ -214,7 +221,7 @@ jobs:
           use_oidc: true
 
       - name: Upload coverage summary artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-summary
           path: |

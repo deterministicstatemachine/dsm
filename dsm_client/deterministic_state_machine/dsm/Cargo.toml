@@ -4,7 +4,7 @@ version = "0.1.0-beta.2"
 edition = "2021"
 authors = ["DSM Development Team"]
 description = "Deterministic State Machine - Pure Core Business Logic (NO JNI)"
-repository = "https://github.com/DSM-Deterministic-State-Machine/deterministic-state-machine"
+repository = "https://github.com/deterministicstatemachine/dsm"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 keywords = ["cryptography", "identity", "state-machine", "quantum", "tokens"]
@@ -43,7 +43,7 @@ num-integer = "0.1.46"
 num-primes = "0.3.0"
 
 # Async runtime
-tokio = { version = "1.36.0", features = ["macros", "rt-multi-thread", "time", "fs", "io-util", "sync"] }
+tokio = { version = "1.51.0", features = ["macros", "rt-multi-thread", "time", "fs", "io-util", "sync"] }
 async-trait = "0.1.77"
 futures = { version = "0.3.30", default-features = false, features = ["std", "executor"] }
 
@@ -71,7 +71,7 @@ bitcoin = { version = "0.32", default-features = false, features = ["std"] }
 
 # Cryptography - core
 blake3 = "1.5.0"
-hmac = "0.12.1"
+hmac = "0.13.0"
 sha2 = "0.10.8"
 pbkdf2 = "0.12.2"
 rand_chacha = "0.3.1"
@@ -125,7 +125,7 @@ arrayref = "0.3.9"
 argon2 = "0.5.3"
 
 rand = "0.8.5"
-uuid = { version = "1.9", features = ["std"] }
+uuid = { version = "1.23", features = ["std"] }
 # serde_cbor removed from code paths (unmaintained); deterministic CBOR is hand-encoded locally
 # Prefer stable crypto crates to reduce duplicate dependency versions across workspace.
 aes-gcm = "0.10.3"
@@ -142,7 +142,7 @@ tower = { version = "0.5.3", features = ["util", "timeout", "load-shed", "limit"
 
 [dev-dependencies]
 criterion = { version = "0.5.1", features = ["async_tokio", "html_reports"] }
-mockall = "0.12.1"
+mockall = "0.14.0"
 tempfile = "3.10.0"
 test-log = { version = "0.2.14", features = ["trace"] }
 quickcheck = "1.0.3"
