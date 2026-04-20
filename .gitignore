@@ -225,6 +225,7 @@ tools/ios_ingress_smoke/
 # Claude IDE
 .claude/
 /.github/instructions
+/.github/copilot-instructions.md
 
 # Claude Agents
 .agents/*
