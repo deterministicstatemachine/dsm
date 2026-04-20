@@ -462,17 +462,24 @@ impl DeviceState {
         initial_chain_tip: Option<[u8; 32]>,
         dbrw_summary_hash: Option<[u8; 32]>,
     ) -> Result<AdvanceOutcome, DsmError> {
-        let parent_r_a = self.root();
-
         // Resolve embedded_parent: prior SMT leaf, or the initial tip for
-        // first-ever advances on this relationship.
-        let embedded_parent = match self.chain_tip(&rel_key) {
-            Some(tip) => tip,
-            None => initial_chain_tip.ok_or_else(|| {
-                DsmError::invalid_operation(
-                    "advance: first-ever transaction requires initial_chain_tip",
-                )
-            })?,
+        // first-ever advances on this relationship. For first-ever advances
+        // we additionally seed the SMT leaf to that initial tip BEFORE the
+        // replace so the parent inclusion proof carries a real value
+        // (matching the historical behaviour of `initialize_contact_chain_tip`
+        // on the retired `SHARED_SMT`). Without the seed, the first-ever
+        // parent proof would be a non-inclusion proof with value=None, which
+        // §4.3 `verify_receipt_bytes` rejects.
+        let (embedded_parent, seed_first_ever) = match self.chain_tip(&rel_key) {
+            Some(tip) => (tip, false),
+            None => {
+                let seed = initial_chain_tip.ok_or_else(|| {
+                    DsmError::invalid_operation(
+                        "advance: first-ever transaction requires initial_chain_tip",
+                    )
+                })?;
+                (seed, true)
+            }
         };
 
         // Apply deltas to a working copy. Failures leave self untouched.
@@ -513,8 +520,18 @@ impl DeviceState {
         // Derive h_{n+1} = H(canonical_bytes(new_chain_state)).
         let child_chain_tip = new_chain_state.compute_chain_tip();
 
-        // Atomic SMT-replace on a working copy of the SMT.
+        // Atomic SMT-replace on a working copy of the SMT. For first-ever
+        // advances, seed the leaf with `embedded_parent` (= initial_chain_tip)
+        // before the replace so the parent proof is an inclusion proof.
         let mut new_smt = self.smt.clone();
+        if seed_first_ever {
+            new_smt.update_leaf(&rel_key, &embedded_parent).map_err(|e| {
+                DsmError::invalid_operation(format!(
+                    "advance: first-ever seed update_leaf failed: {e}"
+                ))
+            })?;
+        }
+        let parent_r_a = *new_smt.root();
         let smt_proofs = new_smt
             .smt_replace(&rel_key, &child_chain_tip)
             .map_err(|e| DsmError::invalid_operation(format!("SMT replace failed: {e}")))?;

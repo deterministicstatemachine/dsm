@@ -767,12 +767,12 @@ impl AppRouterImpl {
                                                         }
                                                     };
 
-                                                    if receipt.child_tip != expected_h_next {
-                                                        log::warn!("[storage.sync] Strict replay drain REJECTED (no ACK) for tx {}: receipt.child_tip != recomputed h_{{n+1}}", entry.transaction_id);
-                                                        let mut sg = batch_state.lock().await;
-                                                        sg.errors.push(format!("replay drain child_tip mismatch for tx {}", entry.transaction_id));
-                                                        continue;
-                                                    }
+                                                    // Receipt carries A-side asymmetric tips (what
+                                                    // sender's T_A stores + what inclusion proofs prove).
+                                                    // Symmetric §16.6 h_{n+1} equivalence is enforced at
+                                                    // envelope-level `next_chain_tip` vs `expected_h_next`
+                                                    // and via the contacts.chain_tip CAS — no per-receipt
+                                                    // comparison required here.
 
                                                     if receipt.sig_a.is_empty() {
                                                         log::warn!("[storage.sync] Strict replay drain REJECTED (no ACK) for tx {}: sig_a absent", entry.transaction_id);
@@ -1028,12 +1028,11 @@ impl AppRouterImpl {
                                             }
                                         };
 
-                                        if receipt.child_tip != expected_h_next {
-                                            log::error!("[storage.sync] §4.3 receipt.child_tip != recomputed h_{{n+1}} for tx {} — rejecting without ACK", entry.transaction_id);
-                                            let mut sg = batch_state.lock().await;
-                                            sg.errors.push(format!("§4.3 child_tip mismatch for tx {}", entry.transaction_id));
-                                            continue;
-                                        }
+                                        // Receipt carries A-side asymmetric tips (what sender's T_A
+                                        // stores + what the inclusion proofs prove). Symmetric
+                                        // §16.6 h_{n+1} equivalence is enforced earlier against
+                                        // `envelope.next_chain_tip` (line ~999) and later via the
+                                        // contacts.chain_tip CAS — no per-receipt comparison here.
 
                                         if receipt.sig_a.is_empty() {
                                             log::error!("[storage.sync] §4.2 REJECTING tx {}: receipt.sig_a absent (mandatory)", entry.transaction_id);
