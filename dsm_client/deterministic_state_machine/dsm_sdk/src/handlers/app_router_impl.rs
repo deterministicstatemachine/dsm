@@ -1230,18 +1230,16 @@ impl AppRouterImpl {
         // Operation (empty nonce, different Balance) causing signature verification failure.
         // Returns the compat State view plus the AdvanceOutcome whose smt_proofs
         // / parent_r_a / child_r_a drive the canonical ReceiptCommit build below.
-        let (new_state, advance_outcome) =
-            match self.wallet.send_transfer_op(signed_op, &signed_tx) {
-                Ok(pair) => pair,
-                Err(e) => {
-                    crate::security::modal_sync_lock::clear_pending_online(&smt_key).await;
-                    let failure_class = self.classify_local_state_update_failure(&e);
-                    log::error!(
-                        "[wallet.send] ❌ send_transfer_op FAILED class={failure_class}: {e}"
-                    );
-                    return err(format!("wallet.send: local state update failed: {e}"));
-                }
-            };
+        let (new_state, advance_outcome) = match self.wallet.send_transfer_op(signed_op, &signed_tx)
+        {
+            Ok(pair) => pair,
+            Err(e) => {
+                crate::security::modal_sync_lock::clear_pending_online(&smt_key).await;
+                let failure_class = self.classify_local_state_update_failure(&e);
+                log::error!("[wallet.send] ❌ send_transfer_op FAILED class={failure_class}: {e}");
+                return err(format!("wallet.send: local state update failed: {e}"));
+            }
+        };
         let rollback_request = OnlineTransferRollback {
             smt_key: &smt_key,
             parent_chain_tip: &chain_tip_arr,

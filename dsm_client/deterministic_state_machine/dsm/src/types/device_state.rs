@@ -525,11 +525,13 @@ impl DeviceState {
         // before the replace so the parent proof is an inclusion proof.
         let mut new_smt = self.smt.clone();
         if seed_first_ever {
-            new_smt.update_leaf(&rel_key, &embedded_parent).map_err(|e| {
-                DsmError::invalid_operation(format!(
-                    "advance: first-ever seed update_leaf failed: {e}"
-                ))
-            })?;
+            new_smt
+                .update_leaf(&rel_key, &embedded_parent)
+                .map_err(|e| {
+                    DsmError::invalid_operation(format!(
+                        "advance: first-ever seed update_leaf failed: {e}"
+                    ))
+                })?;
         }
         let parent_r_a = *new_smt.root();
         let smt_proofs = new_smt
@@ -947,5 +949,4 @@ mod tests {
             "net balance change must equal sum of signed deltas"
         );
     }
-
 }
