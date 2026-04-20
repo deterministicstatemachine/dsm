@@ -153,7 +153,11 @@ pub fn apply_bilateral_settlement_bundle_atomic(
                 ELSE 'OnlineCapable'
             END
          WHERE device_id = ?3",
-        params![bundle.new_chain_tip, now as i64, bundle.counterparty_device_id],
+        params![
+            bundle.new_chain_tip,
+            now as i64,
+            bundle.counterparty_device_id
+        ],
     )?;
 
     // 2. Balance projection (display cache only).

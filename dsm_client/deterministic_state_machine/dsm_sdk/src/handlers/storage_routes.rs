@@ -777,11 +777,16 @@ impl AppRouterImpl {
                                                     if receipt.sig_a.is_empty() {
                                                         log::warn!("[storage.sync] Strict replay drain REJECTED (no ACK) for tx {}: sig_a absent", entry.transaction_id);
                                                         let mut sg = batch_state.lock().await;
-                                                        sg.errors.push(format!("replay drain sig_a absent for tx {}", entry.transaction_id));
+                                                        sg.errors.push(format!(
+                                                            "replay drain sig_a absent for tx {}",
+                                                            entry.transaction_id
+                                                        ));
                                                         continue;
                                                     }
 
-                                                    let commitment = match receipt.compute_commitment() {
+                                                    let commitment = match receipt
+                                                        .compute_commitment()
+                                                    {
                                                         Ok(c) => c,
                                                         Err(e) => {
                                                             log::warn!("[storage.sync] Strict replay drain REJECTED (no ACK) for tx {}: commitment error: {}", entry.transaction_id, e);
@@ -791,7 +796,11 @@ impl AppRouterImpl {
                                                         }
                                                     };
 
-                                                    match dsm::crypto::sphincs::sphincs_verify(&pk, &commitment, &receipt.sig_a) {
+                                                    match dsm::crypto::sphincs::sphincs_verify(
+                                                        &pk,
+                                                        &commitment,
+                                                        &receipt.sig_a,
+                                                    ) {
                                                         Ok(true) => { /* ok */ }
                                                         Ok(false) => {
                                                             log::warn!("[storage.sync] Strict replay drain REJECTED (no ACK) for tx {}: sig_a invalid", entry.transaction_id);
@@ -993,13 +1002,21 @@ impl AppRouterImpl {
                                         );
 
                                         // Envelope's claimed next_chain_tip must match recomputation (§4.3#6).
-                                        if let Some(claimed_tip) = crate::util::text_id::decode_base32_crockford(&entry.next_chain_tip).filter(|b| b.len() == 32) {
+                                        if let Some(claimed_tip) =
+                                            crate::util::text_id::decode_base32_crockford(
+                                                &entry.next_chain_tip,
+                                            )
+                                            .filter(|b| b.len() == 32)
+                                        {
                                             let mut claimed_arr = [0u8; 32];
                                             claimed_arr.copy_from_slice(&claimed_tip);
                                             if claimed_arr != expected_h_next {
                                                 log::error!("[storage.sync] §4.3#6 envelope next_chain_tip != recomputed h_{{n+1}} for tx {} — rejecting without ACK", entry.transaction_id);
                                                 let mut sg = batch_state.lock().await;
-                                                sg.errors.push(format!("§4.3#6 next_chain_tip mismatch for tx {}", entry.transaction_id));
+                                                sg.errors.push(format!(
+                                                    "§4.3#6 next_chain_tip mismatch for tx {}",
+                                                    entry.transaction_id
+                                                ));
                                                 continue;
                                             }
                                         }
@@ -1037,41 +1054,63 @@ impl AppRouterImpl {
                                         if receipt.sig_a.is_empty() {
                                             log::error!("[storage.sync] §4.2 REJECTING tx {}: receipt.sig_a absent (mandatory)", entry.transaction_id);
                                             let mut sg = batch_state.lock().await;
-                                            sg.errors.push(format!("§4.2 sig_a absent for tx {}", entry.transaction_id));
+                                            sg.errors.push(format!(
+                                                "§4.2 sig_a absent for tx {}",
+                                                entry.transaction_id
+                                            ));
                                             continue;
                                         }
 
-                                        let receipt_commitment = match receipt.compute_commitment() {
+                                        let receipt_commitment = match receipt.compute_commitment()
+                                        {
                                             Ok(c) => c,
                                             Err(e) => {
                                                 log::error!("[storage.sync] §4.2 receipt commitment failed for tx {}: {} — rejecting without ACK", entry.transaction_id, e);
                                                 let mut sg = batch_state.lock().await;
-                                                sg.errors.push(format!("§4.2 commitment failed for tx {}: {}", entry.transaction_id, e));
+                                                sg.errors.push(format!(
+                                                    "§4.2 commitment failed for tx {}: {}",
+                                                    entry.transaction_id, e
+                                                ));
                                                 continue;
                                             }
                                         };
 
-                                        match dsm::crypto::sphincs::sphincs_verify(&pk, &receipt_commitment, &receipt.sig_a) {
+                                        match dsm::crypto::sphincs::sphincs_verify(
+                                            &pk,
+                                            &receipt_commitment,
+                                            &receipt.sig_a,
+                                        ) {
                                             Ok(true) => {
-                                                log::info!("[storage.sync] §4.2 sig_a verified for tx {}", entry.transaction_id);
+                                                log::info!(
+                                                    "[storage.sync] §4.2 sig_a verified for tx {}",
+                                                    entry.transaction_id
+                                                );
                                             }
                                             Ok(false) => {
                                                 log::error!("[storage.sync] §4.2 FATAL: sig_a invalid for tx {} — rejecting without ACK", entry.transaction_id);
                                                 let mut sg = batch_state.lock().await;
-                                                sg.errors.push(format!("§4.2 sig_a invalid for tx {}", entry.transaction_id));
+                                                sg.errors.push(format!(
+                                                    "§4.2 sig_a invalid for tx {}",
+                                                    entry.transaction_id
+                                                ));
                                                 continue;
                                             }
                                             Err(e) => {
                                                 log::error!("[storage.sync] §4.2 sig_a verify error for tx {}: {} — rejecting without ACK", entry.transaction_id, e);
                                                 let mut sg = batch_state.lock().await;
-                                                sg.errors.push(format!("§4.2 sig_a verify error for tx {}: {}", entry.transaction_id, e));
+                                                sg.errors.push(format!(
+                                                    "§4.2 sig_a verify error for tx {}: {}",
+                                                    entry.transaction_id, e
+                                                ));
                                                 continue;
                                             }
                                         }
 
                                         // Best-effort receiver counter-sign (sig_b). Failure is non-fatal:
                                         // hash chain adjacency + Tripwire fork-exclusion suffice without sig_b.
-                                        let sig_b = match core_sdk.sign_bytes_sphincs(&receipt_commitment) {
+                                        let sig_b = match core_sdk
+                                            .sign_bytes_sphincs(&receipt_commitment)
+                                        {
                                             Ok(sb) => {
                                                 log::info!("[storage.sync] §4.2 sig_b receiver counter-sign produced for tx {}", entry.transaction_id);
                                                 sb
@@ -1091,28 +1130,37 @@ impl AppRouterImpl {
                                         // replay drain on the next poll completes convergence.
                                         // ═══════════════════════════════════════════════════════
                                         log::debug!("[storage.sync] Pre-flight passed; calling apply_operation_with_replay_protection for tx {} amount {}", entry.transaction_id, amount_val);
-                                        let apply_res = core_sdk.apply_operation_with_replay_protection(
-                                            op,
-                                            &tx_id,
-                                            entry.seq,
-                                            &entry.sender_device_id,
-                                            &entry.sender_chain_tip,
-                                        );
+                                        let apply_res = core_sdk
+                                            .apply_operation_with_replay_protection(
+                                                op,
+                                                &tx_id,
+                                                entry.seq,
+                                                &entry.sender_device_id,
+                                                &entry.sender_chain_tip,
+                                            );
                                         let advance_outcome = match apply_res {
                                             Ok(o) => o,
                                             Err(e) => {
                                                 let err_msg = format!("{}", e);
-                                                if err_msg.contains("replay detected") || err_msg.contains("nonce already spent") {
+                                                if err_msg.contains("replay detected")
+                                                    || err_msg.contains("nonce already spent")
+                                                {
                                                     // TOCTOU: concurrent path spent nonce between strict
                                                     // drain and apply. Do NOT ACK here — the strict drain
                                                     // on the next poll will verify + converge + ACK.
                                                     log::info!("[storage.sync] apply_operation observed replay race for tx {} — deferring to next strict drain", entry.transaction_id);
                                                     let mut sg = batch_state.lock().await;
-                                                    sg.errors.push(format!("apply_operation replay race for tx {}", entry.transaction_id));
+                                                    sg.errors.push(format!(
+                                                        "apply_operation replay race for tx {}",
+                                                        entry.transaction_id
+                                                    ));
                                                 } else {
                                                     log::warn!("[storage.sync] apply_operation_with_replay_protection failed for tx {}: {}", entry.transaction_id, e);
                                                     let mut sg = batch_state.lock().await;
-                                                    sg.errors.push(format!("apply_operation failed for tx {}: {}", entry.transaction_id, e));
+                                                    sg.errors.push(format!(
+                                                        "apply_operation failed for tx {}: {}",
+                                                        entry.transaction_id, e
+                                                    ));
                                                 }
                                                 continue;
                                             }
@@ -1156,12 +1204,19 @@ impl AppRouterImpl {
                                         // a fresh §4.2 stitched receipt when the SMT actually
                                         // transitioned — AlreadyAtTarget reuses the archived
                                         // receipt body per Decision 5.
-                                        let to_device_b32 = crate::util::text_id::encode_base32_crockford(&to_device_id);
+                                        let to_device_b32 =
+                                            crate::util::text_id::encode_base32_crockford(
+                                                &to_device_id,
+                                            );
                                         let tx_hash = {
-                                            let mut h = dsm::crypto::blake3::dsm_domain_hasher("DSM/tx-record-hash");
+                                            let mut h = dsm::crypto::blake3::dsm_domain_hasher(
+                                                "DSM/tx-record-hash",
+                                            );
                                             h.update(entry.transaction_id.as_bytes());
                                             h.update(entry.sender_device_id.as_bytes());
-                                            crate::util::text_id::encode_base32_crockford(&h.finalize().as_bytes()[..32])
+                                            crate::util::text_id::encode_base32_crockford(
+                                                &h.finalize().as_bytes()[..32],
+                                            )
                                         };
                                         let mut meta = std::collections::HashMap::new();
                                         meta.insert("token_id".to_string(), token_id.clone());
@@ -1190,7 +1245,9 @@ impl AppRouterImpl {
                                             smt_root_pre: Some(recv_smt_pre),
                                             smt_root_post: Some(recv_smt_post),
                                         };
-                                        if let Err(e) = crate::storage::client_db::store_stitched_receipt(&dual) {
+                                        if let Err(e) =
+                                            crate::storage::client_db::store_stitched_receipt(&dual)
+                                        {
                                             log::warn!("[storage.sync] §4.2 store_stitched_receipt failed for tx {}: {} (non-fatal)", entry.transaction_id, e);
                                         } else {
                                             log::info!("[storage.sync] §4.2 Dual-signed receipt persisted with SMT roots for tx {}", entry.transaction_id);
@@ -1210,7 +1267,10 @@ impl AppRouterImpl {
                                             recv_device_tree_commitment,
                                         );
                                         let history_proof_bytes: Option<Vec<u8>> =
-                                            select_history_receipt_bytes(rebuilt, &entry.receipt_commit);
+                                            select_history_receipt_bytes(
+                                                rebuilt,
+                                                &entry.receipt_commit,
+                                            );
 
                                         let rec = crate::storage::client_db::TransactionRecord {
                                             tx_id: entry.transaction_id.clone(),
@@ -1227,7 +1287,9 @@ impl AppRouterImpl {
                                             metadata: meta,
                                             created_at: 0,
                                         };
-                                        if let Err(e) = crate::storage::client_db::store_transaction(&rec) {
+                                        if let Err(e) =
+                                            crate::storage::client_db::store_transaction(&rec)
+                                        {
                                             log::warn!("[storage.sync] store_transaction failed for tx {}: {} (non-fatal)", entry.transaction_id, e);
                                         } else {
                                             log::info!("[storage.sync] Recorded incoming tx {} (from={}, amount={})", entry.transaction_id, entry.sender_device_id, amount_val);
@@ -1242,7 +1304,10 @@ impl AppRouterImpl {
 
                                         {
                                             let mut sg = batch_state.lock().await;
-                                            sg.processed_entries.push((entry.inbox_key.clone(), entry.transaction_id.clone()));
+                                            sg.processed_entries.push((
+                                                entry.inbox_key.clone(),
+                                                entry.transaction_id.clone(),
+                                            ));
                                             sg.processed = sg.processed.saturating_add(1);
                                         }
                                     } else {

@@ -2563,6 +2563,47 @@ impl BilateralBleHandler {
                     .map(|k| bytes_to_base32(&k[..8]))
                     .collect::<Vec<_>>()
             );
+
+            // Post-restart recovery: in-memory HashMap is rebuilt from scratch
+            // on app boot. If the sender process restarted between sending
+            // prepare and receiving accept, the session lives in SQLite but
+            // not in memory. Restore it before lookup so the accept envelope
+            // can be processed instead of dropped.
+            if let std::collections::hash_map::Entry::Vacant(slot) = sessions.entry(commitment_hash)
+            {
+                match crate::storage::client_db::get_bilateral_session(&commitment_hash) {
+                    Ok(Some(record)) => match self.session_from_persisted_record(&record) {
+                        Ok(restored) => {
+                            info!(
+                                "[BLE_HANDLER] handle_prepare_response: restored session from SQLite for commitment={}",
+                                bytes_to_base32(&commitment_hash)
+                            );
+                            slot.insert(restored);
+                        }
+                        Err(decode_err) => {
+                            warn!(
+                                "[BLE_HANDLER] handle_prepare_response: SQLite session decode failed for commitment={}: {}",
+                                bytes_to_base32(&commitment_hash),
+                                decode_err
+                            );
+                        }
+                    },
+                    Ok(None) => {
+                        debug!(
+                            "[BLE_HANDLER] handle_prepare_response: no SQLite session for commitment={}",
+                            bytes_to_base32(&commitment_hash)
+                        );
+                    }
+                    Err(lookup_err) => {
+                        warn!(
+                            "[BLE_HANDLER] handle_prepare_response: SQLite session lookup failed for commitment={}: {}",
+                            bytes_to_base32(&commitment_hash),
+                            lookup_err
+                        );
+                    }
+                }
+            }
+
             if let Some(session) = sessions.get_mut(&commitment_hash) {
                 session.counterparty_signature = Some(prepare_response.local_signature.clone());
                 if session.phase == BilateralPhase::Accepted
@@ -2722,25 +2763,24 @@ impl BilateralBleHandler {
         // `mark_sender_committed_with_post_state_hash`. Identical inputs
         // produce an identical outcome there, so the simulated receipt
         // proofs are byte-exact with the eventual advance.
-        let sender_deltas: Vec<dsm::types::device_state::BalanceDelta> =
-            match &session.operation {
-                dsm::types::operations::Operation::Transfer {
-                    amount, token_id, ..
-                } => {
-                    let tid = std::str::from_utf8(token_id).unwrap_or("");
-                    if tid.is_empty() {
-                        Vec::new()
-                    } else {
-                        let pc = dsm::core::token::token_state_manager::resolve_policy_commit(tid);
-                        vec![dsm::types::device_state::BalanceDelta {
-                            policy_commit: pc,
-                            direction: dsm::types::device_state::BalanceDirection::Debit,
-                            amount: amount.value(),
-                        }]
-                    }
+        let sender_deltas: Vec<dsm::types::device_state::BalanceDelta> = match &session.operation {
+            dsm::types::operations::Operation::Transfer {
+                amount, token_id, ..
+            } => {
+                let tid = std::str::from_utf8(token_id).unwrap_or("");
+                if tid.is_empty() {
+                    Vec::new()
+                } else {
+                    let pc = dsm::core::token::token_state_manager::resolve_policy_commit(tid);
+                    vec![dsm::types::device_state::BalanceDelta {
+                        policy_commit: pc,
+                        direction: dsm::types::device_state::BalanceDirection::Debit,
+                        amount: amount.value(),
+                    }]
                 }
-                _ => Vec::new(),
-            };
+            }
+            _ => Vec::new(),
+        };
         let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
             &self.device_id,
             &session.counterparty_device_id,
@@ -3120,7 +3160,7 @@ impl BilateralBleHandler {
 
         // Session lookup — drop guard before acquiring other locks to avoid deadlock
         let session = {
-            let sessions = self.sessions.sessions.lock().await;
+            let mut sessions = self.sessions.sessions.lock().await;
             log::info!(
                 "[BLE_HANDLER][handle_confirm_request] active_sessions keys: {:?}",
                 sessions
@@ -3128,6 +3168,46 @@ impl BilateralBleHandler {
                     .map(|k| bytes_to_base32(&k[..8]))
                     .collect::<Vec<_>>()
             );
+
+            // Post-restart recovery: rebuild session from SQLite when the
+            // receiver process restarted between accepting and receiving
+            // the confirm. Otherwise the in-memory HashMap is empty and
+            // the confirm would be silently dropped.
+            if let std::collections::hash_map::Entry::Vacant(slot) = sessions.entry(commitment_hash)
+            {
+                match crate::storage::client_db::get_bilateral_session(&commitment_hash) {
+                    Ok(Some(record)) => match self.session_from_persisted_record(&record) {
+                        Ok(restored) => {
+                            log::info!(
+                                "[BLE_HANDLER][handle_confirm_request] restored session from SQLite for hash {}",
+                                bytes_to_base32(&commitment_hash[..8])
+                            );
+                            slot.insert(restored);
+                        }
+                        Err(decode_err) => {
+                            log::warn!(
+                                "[BLE_HANDLER][handle_confirm_request] SQLite session decode failed for hash {}: {}",
+                                bytes_to_base32(&commitment_hash[..8]),
+                                decode_err
+                            );
+                        }
+                    },
+                    Ok(None) => {
+                        log::debug!(
+                            "[BLE_HANDLER][handle_confirm_request] no SQLite session for hash {}",
+                            bytes_to_base32(&commitment_hash[..8])
+                        );
+                    }
+                    Err(lookup_err) => {
+                        log::warn!(
+                            "[BLE_HANDLER][handle_confirm_request] SQLite session lookup failed for hash {}: {}",
+                            bytes_to_base32(&commitment_hash[..8]),
+                            lookup_err
+                        );
+                    }
+                }
+            }
+
             if let Some(s) = sessions.get(&commitment_hash) {
                 log::info!(
                     "[BLE_HANDLER][handle_confirm_request] Found session for hash {}",
@@ -3291,8 +3371,7 @@ impl BilateralBleHandler {
             if let Some(pe) = pre_entropy {
                 let op_bytes = session.operation.to_bytes();
                 let expected_sigma = compute_precommit(&h_n, &op_bytes, &pe);
-                let expected_h_next =
-                    compute_successor_tip(&h_n, &op_bytes, &pe, &expected_sigma);
+                let expected_h_next = compute_successor_tip(&h_n, &op_bytes, &pe, &expected_sigma);
                 if expected_h_next != new_chain_tip {
                     return Err(DsmError::invalid_operation(
                         "h_{n+1} mismatch: pre_entropy cannot reproduce shared_chain_tip_new (§4.1)",
@@ -3310,26 +3389,25 @@ impl BilateralBleHandler {
         };
 
         // Derive receiver-side credit deltas from the session operation.
-        let receiver_deltas: Vec<dsm::types::device_state::BalanceDelta> =
-            match &session.operation {
-                Operation::Transfer {
-                    amount, token_id, ..
-                } => {
-                    let tid = std::str::from_utf8(token_id).unwrap_or("");
-                    if tid.is_empty() {
-                        Vec::new()
-                    } else {
-                        let pc =
-                            dsm::core::token::token_state_manager::resolve_policy_commit(tid);
-                        vec![dsm::types::device_state::BalanceDelta {
-                            policy_commit: pc,
-                            direction: dsm::types::device_state::BalanceDirection::Credit,
-                            amount: amount.value(),
-                        }]
-                    }
+        let receiver_deltas: Vec<dsm::types::device_state::BalanceDelta> = match &session.operation
+        {
+            Operation::Transfer {
+                amount, token_id, ..
+            } => {
+                let tid = std::str::from_utf8(token_id).unwrap_or("");
+                if tid.is_empty() {
+                    Vec::new()
+                } else {
+                    let pc = dsm::core::token::token_state_manager::resolve_policy_commit(tid);
+                    vec![dsm::types::device_state::BalanceDelta {
+                        policy_commit: pc,
+                        direction: dsm::types::device_state::BalanceDirection::Credit,
+                        amount: amount.value(),
+                    }]
                 }
-                _ => Vec::new(),
-            };
+            }
+            _ => Vec::new(),
+        };
 
         let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
             &self.device_id,
@@ -3367,11 +3445,7 @@ impl BilateralBleHandler {
         // h_{n+1} asymmetric (A-side; here "A" is the receiver) — what T_receiver now stores.
         let h_next_asymmetric = outcome.new_chain_state.compute_chain_tip();
         // h_n asymmetric (A-side) — previous T_receiver leaf value; zeros if first advance.
-        let parent_tip_asymmetric = outcome
-            .smt_proofs
-            .parent_proof
-            .value
-            .unwrap_or([0u8; 32]);
+        let parent_tip_asymmetric = outcome.smt_proofs.parent_proof.value.unwrap_or([0u8; 32]);
         // Transaction hash for display / events = symmetric successor tip (new_chain_tip).
         let transaction_hash = new_chain_tip;
 
@@ -3385,12 +3459,8 @@ impl BilateralBleHandler {
                 h_next_asymmetric,
                 outcome.parent_r_a,
                 outcome.child_r_a,
-                crate::sdk::receipts::serialize_inclusion_proof(
-                    &outcome.smt_proofs.parent_proof,
-                ),
-                crate::sdk::receipts::serialize_inclusion_proof(
-                    &outcome.smt_proofs.child_proof,
-                ),
+                crate::sdk::receipts::serialize_inclusion_proof(&outcome.smt_proofs.parent_proof),
+                crate::sdk::receipts::serialize_inclusion_proof(&outcome.smt_proofs.child_proof),
                 Some(local_commitment),
             )
         };
@@ -3821,9 +3891,8 @@ impl BilateralBleHandler {
                         if tid.is_empty() {
                             Vec::new()
                         } else {
-                            let pc = dsm::core::token::token_state_manager::resolve_policy_commit(
-                                tid,
-                            );
+                            let pc =
+                                dsm::core::token::token_state_manager::resolve_policy_commit(tid);
                             vec![dsm::types::device_state::BalanceDelta {
                                 policy_commit: pc,
                                 direction: dsm::types::device_state::BalanceDirection::Debit,
@@ -3870,9 +3939,7 @@ impl BilateralBleHandler {
         let router = match crate::bridge::app_router() {
             Some(r) => r,
             None => {
-                error!(
-                    "[BILATERAL] app_router not installed; cannot commit BLE bilateral advance"
-                );
+                error!("[BILATERAL] app_router not installed; cannot commit BLE bilateral advance");
                 self.emit_event(&generated::BilateralEventNotification {
                     event_type: generated::BilateralEventType::BilateralEventFailed.into(),
                     counterparty_device_id: counterparty_device_id.to_vec(),
@@ -3884,8 +3951,7 @@ impl BilateralBleHandler {
                     message: "App router unavailable for BLE bilateral commit".to_string(),
                     sender_ble_address: None,
                     failure_reason: Some(
-                        generated::BilateralFailureReason::FailureReasonProtocolViolation
-                            as i32,
+                        generated::BilateralFailureReason::FailureReasonProtocolViolation as i32,
                     ),
                 });
                 return None;
@@ -3916,8 +3982,7 @@ impl BilateralBleHandler {
                     message: format!("Bilateral advance commit failed: {advance_err}"),
                     sender_ble_address: None,
                     failure_reason: Some(
-                        generated::BilateralFailureReason::FailureReasonProtocolViolation
-                            as i32,
+                        generated::BilateralFailureReason::FailureReasonProtocolViolation as i32,
                     ),
                 });
                 return None;
@@ -3942,11 +4007,7 @@ impl BilateralBleHandler {
         // h_{n+1} asymmetric (A-side) — what T_A now stores at k_{A↔B}.
         let h_next_asymmetric = outcome.new_chain_state.compute_chain_tip();
         // h_n asymmetric (A-side) — previous T_A leaf value; zeros if first advance.
-        let parent_tip_asymmetric = outcome
-            .smt_proofs
-            .parent_proof
-            .value
-            .unwrap_or([0u8; 32]);
+        let parent_tip_asymmetric = outcome.smt_proofs.parent_proof.value.unwrap_or([0u8; 32]);
         // Transaction hash for display / events = symmetric successor tip.
         let transaction_hash = h_next_symmetric;
 
@@ -3989,9 +4050,7 @@ impl BilateralBleHandler {
         let receipt_bytes: Option<Vec<u8>> = if cached_receipt.is_some() {
             cached_receipt
         } else {
-            log::warn!(
-                "[BILATERAL] No cached receipt in session — building from AdvanceOutcome"
-            );
+            log::warn!("[BILATERAL] No cached receipt in session — building from AdvanceOutcome");
             crate::sdk::receipts::build_bilateral_receipt_with_smt(
                 self.device_id,
                 counterparty_device_id,
@@ -3999,12 +4058,8 @@ impl BilateralBleHandler {
                 h_next_asymmetric,
                 outcome.parent_r_a,
                 outcome.child_r_a,
-                crate::sdk::receipts::serialize_inclusion_proof(
-                    &outcome.smt_proofs.parent_proof,
-                ),
-                crate::sdk::receipts::serialize_inclusion_proof(
-                    &outcome.smt_proofs.child_proof,
-                ),
+                crate::sdk::receipts::serialize_inclusion_proof(&outcome.smt_proofs.parent_proof),
+                crate::sdk::receipts::serialize_inclusion_proof(&outcome.smt_proofs.child_proof),
                 Some(local_device_tree_commitment(&self.device_id)),
             )
         };
@@ -4045,8 +4100,7 @@ impl BilateralBleHandler {
                     message: format!("Sender settlement failed after advance commit: {e}"),
                     sender_ble_address: None,
                     failure_reason: Some(
-                        generated::BilateralFailureReason::FailureReasonProtocolViolation
-                            as i32,
+                        generated::BilateralFailureReason::FailureReasonProtocolViolation as i32,
                     ),
                 });
                 return None;
@@ -4143,9 +4197,7 @@ impl BilateralBleHandler {
         event_amount_opt: Option<u64>,
         event_token_id_opt: Option<String>,
     ) -> Option<crate::sdk::transfer_hooks::TransferMeta> {
-        warn!(
-            "[BILATERAL RECOVERY] Proceeding with settlement without canonical advance commit"
-        );
+        warn!("[BILATERAL RECOVERY] Proceeding with settlement without canonical advance commit");
 
         if let Some(post_tip) = post_state_hash {
             info!(
@@ -4184,9 +4236,7 @@ impl BilateralBleHandler {
                     info!("[BILATERAL RECOVERY] Transaction stored to history");
                 }
                 Err(e) => {
-                    warn!(
-                        "[BILATERAL RECOVERY] Sender settlement failed (recovery path): {e}"
-                    );
+                    warn!("[BILATERAL RECOVERY] Sender settlement failed (recovery path): {e}");
                     self.emit_event(&generated::BilateralEventNotification {
                         event_type: generated::BilateralEventType::BilateralEventFailed.into(),
                         counterparty_device_id: counterparty_device_id.to_vec(),
