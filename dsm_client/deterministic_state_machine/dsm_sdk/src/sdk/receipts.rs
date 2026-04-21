@@ -723,7 +723,14 @@ mod tests {
         assert_ne!(s1, s2);
     }
 
+    // #[serial] required: this test mutates the process-global `AppState`
+    // (via `set_identity_info`) and the `DSM_SDK_TEST_MODE` env var. Running
+    // concurrently with other identity/AppState-touching tests (e.g.
+    // `dlv_sdk::tests::*` and `bilateral_ble_handler::tests::test_register_
+    // sender_session_persists_canonical_sender_session`) produces intermittent
+    // CI failures where one test sees the other's identity.
     #[test]
+    #[serial_test::serial]
     fn first_ever_receipt_requires_merkle_pre_root_not_cas_parent_root() {
         unsafe {
             std::env::set_var("DSM_SDK_TEST_MODE", "1");
