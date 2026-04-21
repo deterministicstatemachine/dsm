@@ -742,10 +742,8 @@ mod tests {
         let public_key = vec![0x44u8; 64];
         let initial_tip = [0x45u8; 32];
 
-        let storage_dir = std::env::temp_dir().join(format!(
-            "dsm_receipts_test_{}",
-            std::process::id()
-        ));
+        let storage_dir =
+            std::env::temp_dir().join(format!("dsm_receipts_test_{}", std::process::id()));
         let _ = crate::storage_utils::set_storage_base_dir(storage_dir);
 
         crate::sdk::app_state::AppState::set_identity_info(
@@ -775,8 +773,7 @@ mod tests {
             .expect("first-ever advance should succeed");
 
         assert_ne!(
-            outcome.parent_r_a,
-            outcome.smt_proofs.pre_root,
+            outcome.parent_r_a, outcome.smt_proofs.pre_root,
             "first-ever advance must distinguish CAS parent root from Merkle proof pre_root"
         );
 
