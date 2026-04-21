@@ -882,13 +882,38 @@ impl ContactManager {
         let mut out: Vec<pb::ContactAddResponse> = Vec::with_capacity(contacts.len());
 
         for c in contacts {
+            let persisted = match crate::storage::client_db::get_contact_by_device_id(&c.device_id) {
+                Ok(record) => record,
+                Err(e) => {
+                    log::debug!(
+                        "[DSM_SDK] export_contacts: get_contact_by_device_id error: {}",
+                        e
+                    );
+                    None
+                }
+            };
+            let persisted_chain_tip = persisted
+                .as_ref()
+                .and_then(|record| record.current_chain_tip.as_ref())
+                .and_then(|tip| {
+                    if tip.len() == 32 {
+                        let mut arr = [0u8; 32];
+                        arr.copy_from_slice(tip);
+                        Some(arr)
+                    } else {
+                        None
+                    }
+                });
+
             out.push(pb::ContactAddResponse {
                 alias: c.alias.clone(),
                 device_id: c.device_id.to_vec(),
                 genesis_hash: Some(pb::Hash32 {
                     v: c.genesis_hash.to_vec(),
                 }),
-                chain_tip: c.chain_tip.map(|h| pb::Hash32 { v: h.to_vec() }),
+                chain_tip: persisted_chain_tip
+                    .or(c.chain_tip)
+                    .map(|h| pb::Hash32 { v: h.to_vec() }),
                 chain_tip_smt_proof: None,
                 alias_binding: None,
                 genesis_verified_online: c.genesis_verified_online,
@@ -899,7 +924,11 @@ impl ContactManager {
                     .iter()
                     .map(|n| n.to_string())
                     .collect(),
-                ble_address: c.ble_address.clone().unwrap_or_default(),
+                ble_address: persisted
+                    .as_ref()
+                    .and_then(|record| record.ble_address.clone())
+                    .or_else(|| c.ble_address.clone())
+                    .unwrap_or_default(),
                 signing_public_key: c.public_key.clone(),
                 send_status: Some(
                     crate::handlers::relationship_status::derive_local_send_status_for_device_id(
@@ -1171,6 +1200,71 @@ mod tests {
         // but truly invalid protobuf should either succeed with defaults or error.
         // The important thing is it doesn't panic.
         let _ = result;
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn export_contacts_overlays_persisted_chain_tip() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+
+        let mut manager = test_manager();
+        let contact_device_id = [0xCC; 32];
+        let contact_genesis = [0xDD; 32];
+        let persisted_tip = [0xEE; 32];
+
+        manager
+            .restore_contact_from_storage_sync(dsm::types::contact_types::DsmVerifiedContact {
+                alias: "Persisted Tip".to_string(),
+                device_id: contact_device_id,
+                genesis_hash: contact_genesis,
+                public_key: vec![0xAB; 32],
+                genesis_material: Vec::new(),
+                chain_tip: None,
+                chain_tip_smt_proof: None,
+                genesis_verified_online: true,
+                verified_at_commit_height: 1,
+                added_at_commit_height: 1,
+                last_updated_commit_height: 1,
+                verifying_storage_nodes: Vec::new(),
+                ble_address: None,
+            })
+            .expect("seed in-memory contact");
+
+        crate::storage::client_db::store_contact(&crate::storage::client_db::ContactRecord {
+            contact_id: "persisted-tip-contact".to_string(),
+            device_id: contact_device_id.to_vec(),
+            alias: "Persisted Tip".to_string(),
+            genesis_hash: contact_genesis.to_vec(),
+            public_key: vec![0xAB; 32],
+            current_chain_tip: Some(persisted_tip.to_vec()),
+            added_at: 1,
+            verified: true,
+            verification_proof: None,
+            metadata: HashMap::new(),
+            ble_address: None,
+            status: "BleCapable".to_string(),
+            needs_online_reconcile: false,
+            last_seen_online_counter: 0,
+            last_seen_ble_counter: 0,
+            previous_chain_tip: None,
+        })
+        .expect("seed persisted contact");
+
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let exported = rt
+            .block_on(manager.export_contacts())
+            .expect("export contacts");
+        let exported_tip = exported
+            .contacts
+            .first()
+            .and_then(|contact| contact.chain_tip.as_ref())
+            .map(|hash| hash.v.clone());
+
+        assert_eq!(exported_tip, Some(persisted_tip.to_vec()));
     }
 
     // ── Operation builders (fail-closed) ─────────────────────────────
