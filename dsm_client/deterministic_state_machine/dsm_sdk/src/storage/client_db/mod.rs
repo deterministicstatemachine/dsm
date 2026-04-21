@@ -172,7 +172,17 @@ pub fn is_database_initialized() -> bool {
 /// completely fresh named in-memory SQLite database. This prevents
 /// SQLITE_LOCKED_SHAREDCACHE errors that occur when a concurrent test
 /// still holds an Arc clone to the previous shared-cache connection.
+///
+/// Serializes with `init_database` via `TEST_DB_LIFECYCLE_LOCK` so that
+/// a concurrent `init_database` cannot observe a torn-down connection
+/// handle with a half-incremented generation counter, which would cause
+/// two tests to race on the same named in-memory shared-cache database
+/// and manifest as intermittent assertion failures (e.g. a persisted
+/// row disappearing between write and read).
 pub fn reset_database_for_tests() {
+    #[cfg(test)]
+    let _test_db_lifecycle_guard = TEST_DB_LIFECYCLE_LOCK.lock();
+
     // Drop all user tables before releasing the connection so the shared
     // in-memory DB (`mode=memory&cache=shared`) starts clean for the next
     // test.  Simply clearing the connection handle is not enough because

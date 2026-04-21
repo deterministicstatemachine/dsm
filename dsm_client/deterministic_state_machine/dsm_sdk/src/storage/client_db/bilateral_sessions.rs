@@ -18,9 +18,9 @@ fn get_db_connection() -> Result<std::sync::Arc<std::sync::Mutex<rusqlite::Conne
 /// Store or update a bilateral session
 pub fn store_bilateral_session(session: &BilateralSessionRecord) -> Result<()> {
     // Validate inputs
-    if session.commitment_hash.is_empty() || session.commitment_hash.len() > 32 {
+    if session.commitment_hash.len() != 32 {
         return Err(anyhow!(
-            "Invalid commitment_hash length: {} bytes (must be 1-32)",
+            "Invalid commitment_hash length: {} bytes (must be exactly 32)",
             session.commitment_hash.len()
         ));
     }
@@ -32,6 +32,14 @@ pub fn store_bilateral_session(session: &BilateralSessionRecord) -> Result<()> {
     }
     if session.operation_bytes.is_empty() {
         return Err(anyhow!("Invalid operation_bytes: cannot be empty"));
+    }
+    if let Some(counterparty_genesis_hash) = session.counterparty_genesis_hash.as_ref() {
+        if counterparty_genesis_hash.len() != 32 {
+            return Err(anyhow!(
+                "Invalid counterparty_genesis_hash length: {} bytes (must be exactly 32)",
+                counterparty_genesis_hash.len()
+            ));
+        }
     }
     if ![
         "prepare",
@@ -336,6 +344,14 @@ mod tests {
     }
 
     #[test]
+    fn store_bilateral_session_rejects_short_commitment_hash() {
+        let mut s = make_session("prepare");
+        s.commitment_hash = vec![0; 31];
+        let err = store_bilateral_session(&s).unwrap_err();
+        assert!(err.to_string().contains("commitment_hash"));
+    }
+
+    #[test]
     fn store_bilateral_session_rejects_wrong_counterparty_length() {
         let mut s = make_session("prepare");
         s.counterparty_device_id = vec![0; 16];
@@ -349,6 +365,14 @@ mod tests {
         s.operation_bytes = vec![];
         let err = store_bilateral_session(&s).unwrap_err();
         assert!(err.to_string().contains("operation_bytes"));
+    }
+
+    #[test]
+    fn store_bilateral_session_rejects_wrong_counterparty_genesis_length() {
+        let mut s = make_session("prepare");
+        s.counterparty_genesis_hash = Some(vec![0; 31]);
+        let err = store_bilateral_session(&s).unwrap_err();
+        assert!(err.to_string().contains("counterparty_genesis_hash"));
     }
 
     #[test]

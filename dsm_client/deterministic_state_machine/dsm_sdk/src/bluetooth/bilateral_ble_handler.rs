@@ -463,6 +463,57 @@ impl BilateralBleHandler {
         })
     }
 
+    fn validate_persisted_restore_record(
+        &self,
+        record: &BilateralSessionRecord,
+    ) -> Result<(), DsmError> {
+        if record.commitment_hash.len() != 32 {
+            return Err(DsmError::invalid_operation(format!(
+                "persisted bilateral session commitment_hash must be 32 bytes (got {})",
+                record.commitment_hash.len()
+            )));
+        }
+        if record.counterparty_device_id.len() != 32 {
+            return Err(DsmError::invalid_operation(format!(
+                "persisted bilateral session counterparty_device_id must be 32 bytes (got {})",
+                record.counterparty_device_id.len()
+            )));
+        }
+        if let Some(counterparty_genesis_hash) = record.counterparty_genesis_hash.as_ref() {
+            if counterparty_genesis_hash.len() != 32 {
+                return Err(DsmError::invalid_operation(format!(
+                    "persisted bilateral session counterparty_genesis_hash must be 32 bytes (got {})",
+                    counterparty_genesis_hash.len()
+                )));
+            }
+        }
+        if record.operation_bytes.is_empty() {
+            return Err(DsmError::invalid_operation(
+                "persisted bilateral session operation_bytes cannot be empty",
+            ));
+        }
+        if !matches!(
+            record.phase.as_str(),
+            "prepare"
+                | "accept"
+                | "commit"
+                | "preparing"
+                | "prepared"
+                | "pending_user_action"
+                | "accepted"
+                | "rejected"
+                | "confirm_pending"
+                | "committed"
+                | "failed"
+        ) {
+            return Err(DsmError::invalid_operation(format!(
+                "persisted bilateral session has unsupported phase '{}'",
+                record.phase
+            )));
+        }
+        Ok(())
+    }
+
     async fn recover_sender_commit_from_storage(
         &self,
         commitment_hash: [u8; 32],
@@ -811,6 +862,8 @@ impl BilateralBleHandler {
     /// Interrupted bilateral sessions are not resumed after restart. Any
     /// non-terminal persisted session is marked `failed` so the frontend can
     /// surface retry-required state, but no in-memory session is restored.
+    /// The return value remains a compatibility no-op; callers should inspect
+    /// persisted session state instead of relying on a restoration count.
     pub async fn restore_sessions_from_storage(&self) -> Result<usize, DsmError> {
         info!("[BLE_HANDLER] Restoring bilateral sessions from storage...");
 
@@ -820,8 +873,25 @@ impl BilateralBleHandler {
 
         let mut counterparties: HashSet<[u8; 32]> = HashSet::new();
         let mut failed_count = 0;
+        let mut deleted_malformed_count = 0;
 
         for record in records {
+            if let Err(validation_error) = self.validate_persisted_restore_record(&record) {
+                warn!(
+                    "[BLE_HANDLER] Deleting malformed persisted bilateral session during restore: {}",
+                    validation_error
+                );
+                if let Err(delete_error) = delete_bilateral_session(&record.commitment_hash) {
+                    warn!(
+                        "[BLE_HANDLER] Failed to delete malformed persisted session during restore: {}",
+                        delete_error
+                    );
+                } else {
+                    deleted_malformed_count += 1;
+                }
+                continue;
+            }
+
             if record.counterparty_device_id.len() == 32 {
                 let mut counterparty_device_id = [0u8; 32];
                 counterparty_device_id.copy_from_slice(&record.counterparty_device_id);
@@ -859,6 +929,12 @@ impl BilateralBleHandler {
             info!(
                 "[BLE_HANDLER] Marked {} interrupted bilateral session(s) failed during restore",
                 failed_count
+            );
+        }
+        if deleted_malformed_count > 0 {
+            info!(
+                "[BLE_HANDLER] Deleted {} malformed bilateral session(s) during restore",
+                deleted_malformed_count
             );
         }
 
@@ -4655,6 +4731,33 @@ mod tests {
     use dsm::types::identifiers::NodeId;
     use dsm::types::operations::{TransactionMode, VerificationType};
     use dsm::types::token_types::Balance;
+    use serial_test::serial;
+
+    fn init_test_db() {
+        unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+    }
+
+    fn make_test_handler(
+        device_id: [u8; 32],
+        genesis_hash: [u8; 32],
+        entropy: &[u8],
+    ) -> (
+        Arc<RwLock<BilateralTransactionManager>>,
+        BilateralBleHandler,
+    ) {
+        let keypair = SignatureKeyPair::generate_from_entropy(entropy).expect("keypair");
+        let contact_manager = DsmContactManager::new(device_id, vec![NodeId::new("test")]);
+        let bilateral_manager = Arc::new(RwLock::new(BilateralTransactionManager::new(
+            contact_manager,
+            keypair,
+            device_id,
+            genesis_hash,
+        )));
+        let handler = BilateralBleHandler::new(bilateral_manager.clone(), device_id);
+        (bilateral_manager, handler)
+    }
 
     #[tokio::test]
     async fn test_bilateral_ble_session_lifecycle() {
@@ -5077,130 +5180,102 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
-    async fn test_alias_mapping_persists_and_restores() {
-        // Setup similar to register_sender_session test
-        let keypair =
-            SignatureKeyPair::generate_from_entropy(b"alias-restore-test").expect("keypair");
-        let device_id = [11u8; 32];
+    #[serial]
+    async fn test_restore_sessions_marks_interrupted_failed_and_deletes_malformed_rows() {
+        init_test_db();
+
+        let (_bilateral_manager, handler) =
+            make_test_handler([11u8; 32], [12u8; 32], b"restore-sessions-hardening");
         let counterparty_device_id = [13u8; 32];
-        let genesis_hash = [12u8; 32];
-        let counterparty_genesis = [14u8; 32];
 
-        let contact_manager = DsmContactManager::new(device_id, vec![NodeId::new("test")]);
-        let bilateral_manager = Arc::new(RwLock::new(BilateralTransactionManager::new(
-            contact_manager,
-            keypair,
-            device_id,
-            genesis_hash,
-        )));
-
-        let handler = BilateralBleHandler::new(bilateral_manager.clone(), device_id);
-
-        // Add verified contact with signing public key
-        let contact = dsm::types::contact_types::DsmVerifiedContact {
-            alias: "persist_alias_test".to_string(),
-            device_id: counterparty_device_id,
-            genesis_hash: counterparty_genesis,
-            public_key: vec![7u8; 32],
-            genesis_material: vec![5u8; 32],
-            chain_tip: None,
-            chain_tip_smt_proof: None,
-            genesis_verified_online: true,
-            verified_at_commit_height: 1,
-            added_at_commit_height: 1,
-            last_updated_commit_height: 1,
-            verifying_storage_nodes: vec![],
-            ble_address: None,
+        let valid_inflight = crate::storage::client_db::BilateralSessionRecord {
+            commitment_hash: vec![0xA1; 32],
+            counterparty_device_id: counterparty_device_id.to_vec(),
+            counterparty_genesis_hash: Some(vec![0xB1; 32]),
+            operation_bytes: crate::storage::client_db::serialize_operation(&Operation::Noop),
+            phase: "prepared".to_string(),
+            local_signature: Some(vec![0xC1; 64]),
+            counterparty_signature: None,
+            created_at_step: 10,
+            sender_ble_address: None,
         };
+        crate::storage::client_db::store_bilateral_session(&valid_inflight)
+            .expect("store inflight");
 
-        // Ensure DB is writable and clear any previous sessions (best-effort)
-        let _ = crate::storage::client_db::cleanup_expired_bilateral_sessions(0);
+        let old_terminal = crate::storage::client_db::BilateralSessionRecord {
+            commitment_hash: vec![0xA2; 32],
+            counterparty_device_id: counterparty_device_id.to_vec(),
+            counterparty_genesis_hash: Some(vec![0xB2; 32]),
+            operation_bytes: crate::storage::client_db::serialize_operation(&Operation::Noop),
+            phase: "failed".to_string(),
+            local_signature: None,
+            counterparty_signature: None,
+            created_at_step: 1,
+            sender_ble_address: None,
+        };
+        crate::storage::client_db::store_bilateral_session(&old_terminal).expect("store terminal");
+        let invalid_short_commitment_hash = [0xDE_u8; 31];
 
-        handler
-            .add_verified_contact(contact.clone())
-            .await
-            .expect("add contact");
-
-        // Compute a frontend (origin) op_id different from canonical (use zeros)
-        let frontend_hash = [0u8; 32];
-        let op = Operation::Noop;
-        let op_bytes = op.to_bytes();
-
-        // Register sender session - should create canonical precommitment and alias
-        handler
-            .register_sender_session(frontend_hash, counterparty_device_id, &op_bytes, 1000)
-            .await
-            .expect("register");
-
-        // Debug: inspect DB rows after registration
-        let persisted = crate::storage::client_db::get_all_bilateral_sessions().expect("db list");
-        println!(
-            "[TEST DEBUG] persisted bilateral sessions count after register = {}",
-            persisted.len()
-        );
-        for r in &persisted {
-            println!(
-                "[TEST DEBUG] row: commitment_hash={} phase={} op_bytes_len={}",
-                bytes_to_base32(&r.commitment_hash[..8.min(r.commitment_hash.len())]),
-                r.phase,
-                r.operation_bytes.len()
-            );
-        }
-
-        // For debugging: print manager's ticks now
         {
-            let mgr = bilateral_manager.read().await;
-            println!(
-                "[TEST DEBUG] manager current_ticks after register = {}",
-                mgr.get_current_ticks()
-            );
+            let conn = crate::storage::client_db::get_connection().expect("db connection");
+            let conn = conn.lock().expect("db lock");
+            conn.execute(
+                "INSERT INTO bilateral_sessions(
+                    commitment_hash, counterparty_device_id, counterparty_genesis_hash, operation_bytes, phase,
+                    local_signature, counterparty_signature, created_at_step, sender_ble_address, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                rusqlite::params![
+                    invalid_short_commitment_hash.to_vec(),
+                    counterparty_device_id.to_vec(),
+                    Option::<Vec<u8>>::None,
+                    vec![0x01_u8],
+                    "prepared",
+                    Option::<Vec<u8>>::None,
+                    Option::<Vec<u8>>::None,
+                    11_i64,
+                    Option::<String>::None,
+                    11_i64,
+                ],
+            )
+            .expect("insert malformed row");
         }
 
-        // Create a new handler instance (simulating restart) and restore sessions from storage
-        let new_handler = BilateralBleHandler::new(bilateral_manager.clone(), device_id);
-        {
-            let mgr = bilateral_manager.read().await;
-            println!(
-                "[TEST DEBUG] manager current_ticks at restore = {}",
-                mgr.get_current_ticks()
-            );
-        }
-        let restored = new_handler
+        let restored = handler
             .restore_sessions_from_storage()
             .await
-            .expect("restore");
-        assert!(restored >= 1, "should restore at least one session");
+            .expect("restore sessions");
+        assert_eq!(restored, 0, "restore remains a compatibility no-op count");
 
-        // Alias mapping test ignored: single-hash design no longer uses alias_of/session_aliases.
+        let inflight_after = crate::storage::client_db::get_bilateral_session(&[0xA1; 32])
+            .expect("load inflight")
+            .expect("inflight row exists");
+        assert_eq!(inflight_after.phase, "failed");
+
+        assert!(
+            crate::storage::client_db::get_bilateral_session(&invalid_short_commitment_hash)
+                .expect("load malformed")
+                .is_none(),
+            "malformed row should be deleted during restore"
+        );
+        assert!(
+            crate::storage::client_db::get_bilateral_session(&[0xA2; 32])
+                .expect("load terminal")
+                .is_some(),
+            "existing terminal row should remain untouched"
+        );
     }
 
     #[tokio::test]
-    #[ignore]
-    async fn test_register_sender_session_creates_precommitment_and_alias() {
-        // Setup - Generate proper cryptographic keypair based on test identity
-        let device_id = [1u8; 32];
-        let genesis_hash = [2u8; 32];
-        let key_entropy = [device_id.as_slice(), genesis_hash.as_slice()].concat();
-        let keypair = match SignatureKeyPair::generate_from_entropy(&key_entropy) {
-            Ok(kp) => kp,
-            Err(e) => panic!("keypair generation failed in test: {}", e),
-        };
+    #[serial]
+    async fn test_register_sender_session_persists_canonical_sender_session() {
+        init_test_db();
 
+        let device_id = [1u8; 32];
         let counterparty_device_id = [3u8; 32];
         let counterparty_genesis = [4u8; 32];
+        let (bilateral_manager, handler) =
+            make_test_handler(device_id, [2u8; 32], b"register-sender-session");
 
-        let contact_manager = DsmContactManager::new(device_id, vec![NodeId::new("test")]);
-        let bilateral_manager = Arc::new(RwLock::new(BilateralTransactionManager::new(
-            contact_manager,
-            keypair,
-            device_id,
-            genesis_hash,
-        )));
-
-        let handler = BilateralBleHandler::new(bilateral_manager.clone(), device_id);
-
-        // Add a verified contact with genesis + chain_tip so relationship can be established
         let contact = dsm::types::contact_types::DsmVerifiedContact {
             alias: "test_contact".to_string(),
             device_id: counterparty_device_id,
@@ -5230,125 +5305,32 @@ mod tests {
         // an internal canonical precommitment and map the frontend-provided hash -> canonical
         let frontend_hash = [9u8; 32];
 
-        // Call register_sender_session
-        handler
+        let canonical_hash = handler
             .register_sender_session(frontend_hash, counterparty_device_id, &op_bytes, 1000)
             .await
             .expect("register_sender_session failed");
 
-        // Confirm session exists (either under frontend hash -> resolved via alias, or canonical)
         let sessions = handler.sessions.sessions.lock().await;
         assert!(
-            !sessions.is_empty(),
-            "sessions should contain at least one entry"
+            sessions.contains_key(&canonical_hash),
+            "sessions should contain the canonical sender session"
+        );
+        drop(sessions);
+
+        let persisted = crate::storage::client_db::get_bilateral_session(&canonical_hash)
+            .expect("load persisted")
+            .expect("sender session persisted");
+        assert_eq!(persisted.phase, "prepared");
+        assert_eq!(
+            persisted.counterparty_device_id,
+            counterparty_device_id.to_vec()
         );
 
-        // Alias mapping test ignored: single-hash design no longer uses session_aliases.
-    }
-
-    #[tokio::test]
-    #[ignore]
-    async fn test_mark_sender_committed_resolves_alias() {
-        // Setup similar to register_sender_session test
-        let keypair = SignatureKeyPair::generate_from_entropy(b"mark-sender-committed-test")
-            .expect("keypair");
-        let device_id = [21u8; 32];
-        let counterparty_device_id = [23u8; 32];
-        let genesis_hash = [22u8; 32];
-        let counterparty_genesis = [24u8; 32];
-
-        let contact_manager = DsmContactManager::new(device_id, vec![NodeId::new("test")]);
-        let bilateral_manager = Arc::new(RwLock::new(BilateralTransactionManager::new(
-            contact_manager,
-            keypair,
-            device_id,
-            genesis_hash,
-        )));
-
-        let handler = BilateralBleHandler::new(bilateral_manager.clone(), device_id);
-
-        // Add verified contact with signing public key
-        let contact = dsm::types::contact_types::DsmVerifiedContact {
-            alias: "persist_alias_test2".to_string(),
-            device_id: counterparty_device_id,
-            genesis_hash: counterparty_genesis,
-            public_key: vec![7u8; 32],
-            genesis_material: vec![5u8; 32],
-            chain_tip: Some([6u8; 32]),
-            chain_tip_smt_proof: None,
-            genesis_verified_online: true,
-            verified_at_commit_height: 1,
-            added_at_commit_height: 1,
-            last_updated_commit_height: 1,
-            verifying_storage_nodes: vec![],
-            ble_address: None,
-        };
-
-        // Ensure DB is writable and clear any previous sessions (best-effort)
-        let _ = crate::storage::client_db::cleanup_expired_bilateral_sessions(0);
-
-        handler
-            .add_verified_contact(contact.clone())
-            .await
-            .expect("add contact");
-
-        // Provide a frontend-provided commitment hash different from canonical
-        // Use a unique value to avoid interfering with other tests using all-zero hash
-        let frontend_hash = [77u8; 32];
-        let op = Operation::Noop;
-        let op_bytes = op.to_bytes();
-
-        handler
-            .register_sender_session(frontend_hash, counterparty_device_id, &op_bytes, 1000)
-            .await
-            .expect("register");
-
-        // In single-hash design, frontend hash is canonical.
-        let canonical = frontend_hash;
-
-        // Ensure manager has pending commitment for the canonical hash
-        {
-            let mgr = bilateral_manager.read().await;
-            assert!(
-                mgr.has_pending_commitment(&canonical),
-                "manager should have pending commitment for canonical hash"
-            );
-        }
-
-        // Simulate receiving counterparty signature and session accepted state
-        {
-            let mut sessions = handler.sessions.sessions.lock().await;
-            if let Some(sess) = sessions.get_mut(&canonical) {
-                sess.counterparty_signature = Some(vec![9u8; 64]);
-                sess.phase = BilateralPhase::Accepted;
-            } else {
-                panic!("expected canonical session present");
-            }
-        }
-
-        // Finalize using the frontend-provided origin hash (alias) --- should resolve and finalize
-        let _meta = handler
-            .mark_sender_committed_with_post_state_hash(&frontend_hash, None)
-            .await;
-
-        // Manager should no longer have the pending commitment
-        {
-            let mgr = bilateral_manager.read().await;
-            assert!(
-                !mgr.has_pending_commitment(&canonical),
-                "pending commitment should be removed after finalize"
-            );
-        }
-
-        // Verify session moved to committed
-        {
-            let sessions = handler.sessions.sessions.lock().await;
-            if let Some(sess) = sessions.get(&canonical) {
-                assert_eq!(sess.phase, BilateralPhase::Committed);
-            } else {
-                panic!("expected canonical session entry present after commit");
-            }
-        }
+        let manager = bilateral_manager.read().await;
+        assert!(
+            manager.has_pending_commitment(&canonical_hash),
+            "register_sender_session should create a pending core precommitment"
+        );
     }
 
     // Removed background maintenance test (interval-based) to comply with deterministic, clockless spec.
