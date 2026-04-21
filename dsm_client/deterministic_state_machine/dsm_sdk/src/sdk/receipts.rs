@@ -791,12 +791,12 @@ mod tests {
             outcome.child_r_a,
             parent_proof.clone(),
             child_proof.clone(),
-            device_tree_commitment.clone(),
+            device_tree_commitment,
         )
         .expect("receipt with Merkle pre_root");
         assert!(verify_receipt_bytes(
             &receipt_with_proof_root,
-            device_tree_commitment.clone(),
+            device_tree_commitment,
         ));
 
         let receipt_with_cas_root = build_bilateral_receipt_with_smt(
@@ -808,7 +808,7 @@ mod tests {
             outcome.child_r_a,
             parent_proof,
             child_proof,
-            device_tree_commitment.clone(),
+            device_tree_commitment,
         )
         .expect("receipt with CAS parent root");
         assert!(
