@@ -52,7 +52,7 @@ thiserror = "2.0.18"
 anyhow = "1.0.99"
 
 # CLI
-clap = { version = "4.5.4", features = ["derive"] }
+clap = { version = "4.6.1", features = ["derive"] }
 
 # Serialization (no JSON)
 prost = "0.13"
