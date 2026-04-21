@@ -922,8 +922,11 @@ impl AppRouterImpl {
                     ) {
                         Ok(chunks) => chunks,
                         Err(e) => {
-                            transport_adapter
-                                .cancel_prepared_session_for_counterparty(counterparty_device_id)
+                            let _ = transport_adapter
+                                .fail_session_by_commitment(
+                                    commitment_hash,
+                                    "wallet.sendOffline: failed to frame BLE prepare payload",
+                                )
                                 .await;
                             return err(format!(
                                 "wallet.sendOffline: failed to frame BLE prepare payload: {e}"
@@ -935,8 +938,11 @@ impl AppRouterImpl {
                     let vm = match get_java_vm_borrowed() {
                         Some(vm) => vm,
                         None => {
-                            transport_adapter
-                                .cancel_prepared_session_for_counterparty(counterparty_device_id)
+                            let _ = transport_adapter
+                                .fail_session_by_commitment(
+                                    commitment_hash,
+                                    "wallet.sendOffline: Java VM unavailable for BLE dispatch",
+                                )
                                 .await;
                             return err(
                                 "wallet.sendOffline: Java VM unavailable for BLE dispatch".into()
@@ -962,8 +968,11 @@ impl AppRouterImpl {
                     match ble_send_result {
                         Ok(true) => {}
                         Ok(false) => {
-                            transport_adapter
-                                .cancel_prepared_session_for_counterparty(counterparty_device_id)
+                            let _ = transport_adapter
+                                .fail_session_by_commitment(
+                                    commitment_hash,
+                                    "wallet.sendOffline: BLE bridge rejected the prepared chunks",
+                                )
                                 .await;
                             return err(
                                 "wallet.sendOffline: BLE bridge rejected the prepared chunks"
@@ -971,8 +980,11 @@ impl AppRouterImpl {
                             );
                         }
                         Err(e) => {
-                            transport_adapter
-                                .cancel_prepared_session_for_counterparty(counterparty_device_id)
+                            let _ = transport_adapter
+                                .fail_session_by_commitment(
+                                    commitment_hash,
+                                    "wallet.sendOffline: BLE dispatch failed after prepare authoring",
+                                )
                                 .await;
                             return err(e);
                         }

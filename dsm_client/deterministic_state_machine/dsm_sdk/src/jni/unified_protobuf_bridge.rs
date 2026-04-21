@@ -2436,7 +2436,12 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bilateralOffl
                                     ) {
                                         Ok(chunks) => chunks,
                                         Err(e) => {
-                                            transport_adapter.cancel_prepared_session_for_counterparty(counterparty_id).await;
+                                            let _ = transport_adapter
+                                                .fail_session_by_commitment(
+                                                    commitment_hash,
+                                                    "bilateralOfflineSend: failed to frame BLE prepare payload",
+                                                )
+                                                .await;
                                             results.push(gp::OpResult {
                                                 op_id, accepted: false,
                                                 error: Some(gp::Error { code: 500, message: format!("Failed to frame BLE prepare payload: {e}"), ..Default::default() }),
@@ -2478,7 +2483,12 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bilateralOffl
                                             "[bilateralOfflineSend] BLE send failed for commitment={:02x}{:02x}{:02x}{:02x} — cancelling prepared session",
                                             commitment_hash[0], commitment_hash[1], commitment_hash[2], commitment_hash[3]
                                         );
-                                        transport_adapter.cancel_prepared_session_for_counterparty(counterparty_id).await;
+                                        let _ = transport_adapter
+                                            .fail_session_by_commitment(
+                                                commitment_hash,
+                                                "bilateralOfflineSend: BLE send failed before peer accepted prepare",
+                                            )
+                                            .await;
                                         results.push(gp::OpResult {
                                             op_id, accepted: false,
                                             error: Some(gp::Error {

@@ -2797,7 +2797,13 @@ impl BilateralBleHandler {
             &sender_deltas,
             Some(h_n),
         )?;
-        let pre_root = sim_outcome.parent_r_a;
+        // `parent_r_a` is the CAS-layer device head (pre-seed root). The
+        // Merkle `parent_proof` is built against the post-seed tree, so the
+        // bilateral wire-level "pre_root" claim must be `smt_proofs.pre_root`
+        // (post-seed) for the peer to recompute proof → root successfully.
+        // Using `parent_r_a` here fails §4.3 on first-ever advances where
+        // seeding changes the root.
+        let pre_root = sim_outcome.smt_proofs.pre_root;
         let sender_smt_root = sim_outcome.child_r_a;
         let rel_proof_parent_bytes = sim_outcome.smt_proofs.parent_proof.to_bytes();
         let rel_proof_child_bytes = sim_outcome.smt_proofs.child_proof.to_bytes();
@@ -3457,7 +3463,7 @@ impl BilateralBleHandler {
                 session.counterparty_device_id,
                 parent_tip_asymmetric,
                 h_next_asymmetric,
-                outcome.parent_r_a,
+                outcome.smt_proofs.pre_root,
                 outcome.child_r_a,
                 crate::sdk::receipts::serialize_inclusion_proof(&outcome.smt_proofs.parent_proof),
                 crate::sdk::receipts::serialize_inclusion_proof(&outcome.smt_proofs.child_proof),
@@ -4056,7 +4062,7 @@ impl BilateralBleHandler {
                 counterparty_device_id,
                 parent_tip_asymmetric,
                 h_next_asymmetric,
-                outcome.parent_r_a,
+                outcome.smt_proofs.pre_root,
                 outcome.child_r_a,
                 crate::sdk::receipts::serialize_inclusion_proof(&outcome.smt_proofs.parent_proof),
                 crate::sdk::receipts::serialize_inclusion_proof(&outcome.smt_proofs.child_proof),
@@ -4986,6 +4992,87 @@ mod tests {
                 .await
                 .has_pending_commitment(&local_pending_hash),
             "failed accepted session must remove the receiver-local pending commitment key"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fail_session_by_commitment_preserves_other_inflight_session_for_same_counterparty(
+    ) {
+        let device_id = [51u8; 32];
+        let genesis_hash = [52u8; 32];
+        let counterparty_device_id = [53u8; 32];
+        let keypair =
+            SignatureKeyPair::generate_from_entropy(b"targeted-fail-cleanup").expect("keypair");
+
+        let contact_manager = DsmContactManager::new(device_id, vec![NodeId::new("test")]);
+        let bilateral_manager = Arc::new(RwLock::new(BilateralTransactionManager::new(
+            contact_manager,
+            keypair,
+            device_id,
+            genesis_hash,
+        )));
+        let handler = BilateralBleHandler::new(bilateral_manager, device_id);
+
+        let failed_commitment = [61u8; 32];
+        let surviving_commitment = [62u8; 32];
+
+        handler
+            .test_insert_session(BilateralBleSession {
+                commitment_hash: failed_commitment,
+                local_commitment_hash: None,
+                counterparty_device_id,
+                counterparty_genesis_hash: Some([54u8; 32]),
+                operation: Operation::Noop,
+                phase: BilateralPhase::Prepared,
+                local_signature: Some(vec![1u8; 32]),
+                counterparty_signature: None,
+                created_at_ticks: 1,
+                expires_at_ticks: 2,
+                sender_ble_address: Some("AA:BB:CC:DD:EE:FF".to_string()),
+                created_at_wall: Instant::now(),
+                pre_finalize_entropy: None,
+                stitched_receipt_bytes: None,
+            })
+            .await;
+        handler
+            .test_insert_session(BilateralBleSession {
+                commitment_hash: surviving_commitment,
+                local_commitment_hash: None,
+                counterparty_device_id,
+                counterparty_genesis_hash: Some([54u8; 32]),
+                operation: Operation::Noop,
+                phase: BilateralPhase::Accepted,
+                local_signature: Some(vec![2u8; 32]),
+                counterparty_signature: Some(vec![3u8; 32]),
+                created_at_ticks: 3,
+                expires_at_ticks: 4,
+                sender_ble_address: Some("AA:BB:CC:DD:EE:11".to_string()),
+                created_at_wall: Instant::now(),
+                pre_finalize_entropy: None,
+                stitched_receipt_bytes: None,
+            })
+            .await;
+
+        assert!(
+            handler
+                .fail_session_by_commitment(
+                    failed_commitment,
+                    "precise cleanup should only remove the failed sender prepare"
+                )
+                .await,
+            "targeted prepared session should be failed"
+        );
+        assert!(
+            handler
+                .get_session_status(&failed_commitment)
+                .await
+                .is_none(),
+            "targeted session should be removed from active map"
+        );
+        assert_eq!(
+            handler.get_session_status(&surviving_commitment).await,
+            Some(BilateralPhase::Accepted),
+            "other same-counterparty session must remain untouched"
         );
     }
 
