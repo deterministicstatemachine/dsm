@@ -16,6 +16,26 @@ function frameEnvelope(envelope: pb.Envelope): Uint8Array {
 }
 
 function makeDbrwStatusResponse(overrides: Record<string, unknown> = {}): pb.DbrwStatusResponse {
+  const trustExplicit = 'trust' in overrides;
+  const trustOverride = overrides.trust as pb.CdbrwTrustSnapshot | undefined;
+  const baseOverrides = { ...overrides };
+  delete baseOverrides.trust;
+  const trust = trustExplicit
+    ? trustOverride
+    : new pb.CdbrwTrustSnapshot({
+          accessLevel: pb.CdbrwAccessLevel.CDBRW_ACCESS_FULL_ACCESS,
+          resonantStatus: pb.CdbrwResonantStatus.CDBRW_RESONANT_PASS,
+          trustScore: 0.95,
+          hHat: 0.98,
+          rhoHat: 0.02,
+          lHat: 4.5,
+          h0Eff: 0.96,
+          recommendedN: 1024,
+          w1Distance: 0.01,
+          w1Threshold: 0.05,
+          note: '',
+        })
+      : (trustOverride);
   return new pb.DbrwStatusResponse({
     enrolled: true,
     bindingKeyPresent: true,
@@ -35,23 +55,8 @@ function makeDbrwStatusResponse(overrides: Record<string, unknown> = {}): pb.Dbr
     verifierPublicKeyLen: 1952,
     storageBaseDir: '/data/dbrw',
     statusNote: 'healthy',
-    runtimeMetricsPresent: true,
-    runtimeAccessLevel: 'FULL_ACCESS',
-    runtimeTrustScore: 0.95,
-    runtimeHealthCheckRan: true,
-    runtimeHealthCheckPassed: true,
-    runtimeHHat: 0.98,
-    runtimeRhoHat: 0.02,
-    runtimeLHat: 4.5,
-    runtimeMatchScore: 0.99,
-    runtimeW1Distance: 0.01,
-    runtimeW1Threshold: 0.05,
-    runtimeAnchorPrefix: new Uint8Array(8).fill(0xDD),
-    runtimeError: '',
-    runtimeH0Eff: 0.96,
-    runtimeRecommendedN: 1024,
-    runtimeResonantStatus: 'PASS',
-    ...overrides,
+    trust,
+    ...baseOverrides,
   } as any);
 }
 
@@ -187,8 +192,7 @@ describe('dbrw.ts', () => {
     test('maps unenrolled status correctly', async () => {
       const resp = makeDbrwStatusResponse({
         enrolled: false,
-        runtimeMetricsPresent: false,
-        runtimeResonantStatus: 'FAIL',
+        trust: undefined,
       });
       const env = new pb.Envelope({
         version: 3,
@@ -199,7 +203,7 @@ describe('dbrw.ts', () => {
       const status = await getDbrwStatus();
       expect(status.enrolled).toBe(false);
       expect(status.runtimeMetricsPresent).toBe(false);
-      expect(status.runtimeResonantStatus).toBe('FAIL');
+      expect(status.runtimeResonantStatus).toBe('UNSPECIFIED');
     });
   });
 });

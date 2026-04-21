@@ -3,13 +3,10 @@ import * as dsm from '../index';
 import { emit } from '../EventBridge';
 
 function wrapSuccessEnvelope(data: Uint8Array): Uint8Array {
-  return (global as any).createDsmBridgeSuccessResponse(data);
-}
-
-function withRouterPrefix(data: Uint8Array): Uint8Array {
-  const out = new Uint8Array(8 + data.length);
-  out.set(data, 8);
-  return out;
+  const ingressResp = new pb.IngressResponse({
+    result: { case: 'okBytes', value: data },
+  });
+  return (global as any).createDsmBridgeSuccessResponse(ingressResp.toBinary());
 }
 
 function frameEnvelope(envelope: pb.Envelope): Uint8Array {
@@ -18,6 +15,18 @@ function frameEnvelope(envelope: pb.Envelope): Uint8Array {
   framed[0] = 0x03;
   framed.set(bytes, 1);
   return framed;
+}
+
+function decodeRouterInvoke(reqBytes: Uint8Array): { route: string; args: Uint8Array } {
+  const req = pb.BridgeRpcRequest.fromBinary(reqBytes);
+  if (req.method !== 'nativeBoundaryIngress' || req.payload.case !== 'bytes') {
+    throw new Error(`expected nativeBoundaryIngress/bytes, got ${req.method}/${req.payload.case}`);
+  }
+  const ingressReq = pb.IngressRequest.fromBinary(req.payload.value.data);
+  if (ingressReq.operation.case !== 'routerInvoke') {
+    throw new Error(`expected routerInvoke, got ${ingressReq.operation.case}`);
+  }
+  return { route: ingressReq.operation.value.method, args: ingressReq.operation.value.args };
 }
 
 describe('offline transfer sender/recipient consistency through WebView bridge', () => {
@@ -40,11 +49,10 @@ describe('offline transfer sender/recipient consistency through WebView bridge',
     const commitmentHash = new Uint8Array(32).fill(0x77);
 
     (global as any).window.DsmBridge.__callBin = async (reqBytes: Uint8Array) => {
-      const req = pb.BridgeRpcRequest.fromBinary(reqBytes);
-      expect(req.payload.case).toBe('appRouter');
-      expect(req.payload.value.methodName).toBe('wallet.sendOffline');
+      const { route, args } = decodeRouterInvoke(reqBytes);
+      expect(route).toBe('wallet.sendOffline');
 
-      const argPack = pb.ArgPack.fromBinary(req.payload.value.args);
+      const argPack = pb.ArgPack.fromBinary(args);
       const prepare = pb.BilateralPrepareRequest.fromBinary(argPack.body);
       expect(prepare.counterpartyDeviceId).toEqual(to);
       expect(prepare.transferAmountDisplay).toBe('5');
@@ -61,7 +69,7 @@ describe('offline transfer sender/recipient consistency through WebView bridge',
           }),
         },
       });
-      return wrapSuccessEnvelope(withRouterPrefix(frameEnvelope(env)));
+      return wrapSuccessEnvelope(frameEnvelope(env));
     };
 
     const promise = dsm.offlineSend({ to, amount: 5n, tokenId: 'DBTC', bleAddress, memo: 'hi' } as any);
@@ -82,8 +90,8 @@ describe('offline transfer sender/recipient consistency through WebView bridge',
     const commitmentHash = new Uint8Array(32).fill(0x33);
 
     (global as any).window.DsmBridge.__callBin = async (reqBytes: Uint8Array) => {
-      const req = pb.BridgeRpcRequest.fromBinary(reqBytes);
-      const argPack = pb.ArgPack.fromBinary(req.payload.value.args);
+      const { args } = decodeRouterInvoke(reqBytes);
+      const argPack = pb.ArgPack.fromBinary(args);
       const prepare = pb.BilateralPrepareRequest.fromBinary(argPack.body);
       expect(prepare.tokenIdHint).toBe('dBTC');
 
@@ -96,7 +104,7 @@ describe('offline transfer sender/recipient consistency through WebView bridge',
           }),
         },
       });
-      return wrapSuccessEnvelope(withRouterPrefix(frameEnvelope(env)));
+      return wrapSuccessEnvelope(frameEnvelope(env));
     };
 
     const promise = dsm.offlineSend({ to, amount: 7n, tokenId: 'dBTC', bleAddress, memo: 'ok' } as any);

@@ -158,10 +158,7 @@ if (typeof (global as any).TextEncoder === 'undefined') {
 // This prevents errors when StorageNodeService tries to load preferences
 import * as WebViewBridge from './dsm/WebViewBridge';
 
-// Mock the specific functions that are used during initialization
-const _originalGetPreference = WebViewBridge.getPreference;
-const _originalSetPreference = WebViewBridge.setPreference;
-
-(WebViewBridge as any).getPreference = jest.fn(async () => null);
-(WebViewBridge as any).setPreference = jest.fn(async () => {});
+// Use jest.spyOn so restoreMocks:true can restore originals between tests
+jest.spyOn(WebViewBridge, 'getPreference').mockResolvedValue(null);
+jest.spyOn(WebViewBridge, 'setPreference').mockResolvedValue(undefined);
 

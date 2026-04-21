@@ -24,6 +24,7 @@ const mockAppRuntimeStore = {
   setError: jest.fn(),
   setTheme: jest.fn(),
   setSoundEnabled: jest.fn(),
+  getSnapshot: jest.fn().mockReturnValue({ appState: 'loading' as const, error: null, securingProgress: 0, showLockPrompt: false, soundEnabled: true, theme: 'stateboy' as const }),
 };
 jest.mock('../../runtime/appRuntimeStore', () => ({
   appRuntimeStore: mockAppRuntimeStore,

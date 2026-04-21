@@ -7,8 +7,13 @@ import { addDsmEventListener, getPreference, getTransportHeadersV3Bin, setPrefer
 import type { DsmEvent } from '../WebViewBridge';
 
 afterEach(() => {
+  // Reset bridge to empty object via the setupTests proxy so subsequent
+  // assignments to window.DsmBridge keep going through setBridgeInstance.
+  // Do NOT `delete window.DsmBridge` — that removes the Object.defineProperty
+  // proxy installed in setupTests, after which assignments no longer update
+  // the registry and mustBridge() throws "DSM bridge not available".
+  (globalThis as any).window.DsmBridge = {};
   setBridgeInstance(undefined);
-  delete (globalThis as any).window?.DsmBridge;
   jest.restoreAllMocks();
 });
 
