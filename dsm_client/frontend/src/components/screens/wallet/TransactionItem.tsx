@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Reusable transaction row component for overview and history tabs.
 import React from 'react';
-import { txTypeLabel, txTypeDetail, txTypeNumber, formatTxAmount, b32, shortStr, resolveAlias } from './helpers';
+import { txTypeLabel, txTypeDetail, txTypeNumber, formatTxAmount, b32, resolveAlias } from './helpers';
 import { formatTimeAgo, formatDateTime } from '../../../utils/time';
 import ArrowIcon from '../../icons/ArrowIcon';
 import StitchedReceiptDetails from '../../receipts/StitchedReceiptDetails';
@@ -33,7 +33,12 @@ function TransactionItemInner({ tx, idx, expandedTxId, onToggle, aliasLookup, sh
   const receiptBytes = tx.stitchedReceipt?.length ? tx.stitchedReceipt : undefined;
   const txId = (tx.txId?.length ?? 0) > 0 ? tx.txId : `tx:idx:${idx}`;
   const isExpanded = expandedTxId === txId;
-  const counterparty = recipient || (isOutgoing ? resolveAlias(toB32, aliasLookup) : resolveAlias(fromB32, aliasLookup)) || '\u2014';
+  const counterpartyB32 = isOutgoing ? toB32 : fromB32;
+  const counterparty = counterpartyB32
+    ? resolveAlias(counterpartyB32, aliasLookup)
+    : (recipient || '\u2014');
+  const fromAlias = fromB32 ? aliasLookup.get(fromB32) : undefined;
+  const toAlias = toB32 ? aliasLookup.get(toB32) : undefined;
 
   return (
     <div
@@ -53,9 +58,6 @@ function TransactionItemInner({ tx, idx, expandedTxId, onToggle, aliasLookup, sh
             <span className="recovered-badge" title="Recovered">{'\u27F3'}</span>
           )}
         </div>
-        <div className={`transaction-amount ${isOutgoing ? 'outgoing' : 'incoming'}`}>
-          {isOutgoing ? '-' : '+'}{magnitude} {token}
-        </div>
         <div className={`transaction-status status-${statusStr}`}>
           {statusStr}
         </div>
@@ -63,9 +65,16 @@ function TransactionItemInner({ tx, idx, expandedTxId, onToggle, aliasLookup, sh
           <ArrowIcon direction={isExpanded ? 'up' : 'down'} size={14} color={isExpanded ? 'var(--stateboy-dark)' : 'var(--stateboy-gray)'} />
         </div>
       </div>
+      <div className={`transaction-amount-line ${isOutgoing ? 'outgoing' : 'incoming'}`}>
+        <span className="transaction-amount-value">
+          {isOutgoing ? '-' : '+'}{magnitude}
+        </span>
+        <span className="transaction-amount-token">{token}</span>
+      </div>
       <div className="transaction-details">
         <div className="transaction-recipient">
-          {isOutgoing ? 'To' : 'From'}: {counterparty.length > 20 ? shortStr(counterparty, 10, 8) : counterparty}
+          <span className="transaction-recipient-label">{isOutgoing ? 'To' : 'From'}</span>
+          <span className="transaction-recipient-value">{counterparty}</span>
         </div>
         {createdAt > 0 && (
           <div className="transaction-time">{formatTimeAgo(createdAt)}</div>
@@ -86,22 +95,34 @@ function TransactionItemInner({ tx, idx, expandedTxId, onToggle, aliasLookup, sh
               <span className="detail-value">{memo}</span>
             </div>
           )}
-          {fromB32 && (
+          {fromAlias && (
             <div className="detail-row">
+              <span className="detail-label">From (alias)</span>
+              <span className="detail-value">{fromAlias}</span>
+            </div>
+          )}
+          {fromB32 && (
+            <div className="detail-row detail-row-hash">
               <span className="detail-label">From</span>
-              <span className="detail-value">{shortStr(fromB32, 10, 8)}</span>
+              <span className="detail-value detail-value-hash">{fromB32}</span>
+            </div>
+          )}
+          {toAlias && (
+            <div className="detail-row">
+              <span className="detail-label">To (alias)</span>
+              <span className="detail-value">{toAlias}</span>
             </div>
           )}
           {toB32 && (
-            <div className="detail-row">
+            <div className="detail-row detail-row-hash">
               <span className="detail-label">To</span>
-              <span className="detail-value">{shortStr(toB32, 10, 8)}</span>
+              <span className="detail-value detail-value-hash">{toB32}</span>
             </div>
           )}
           {txHashB32 && (
-            <div className="detail-row">
+            <div className="detail-row detail-row-hash">
               <span className="detail-label">Tx Hash</span>
-              <span className="detail-value tx-id">{shortStr(txHashB32, 12, 8)}</span>
+              <span className="detail-value detail-value-hash">{txHashB32}</span>
             </div>
           )}
           <div className="detail-row">
