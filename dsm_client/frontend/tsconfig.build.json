@@ -3,7 +3,7 @@
   "compilerOptions": {
     "target": "ES2021",
     "module": "ESNext",
-    "moduleResolution": "Node",
+    "moduleResolution": "Bundler",
     "jsx": "react-jsx",
     "outDir": "dist/compiled",
     "declaration": true,
