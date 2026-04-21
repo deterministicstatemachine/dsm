@@ -427,19 +427,19 @@
 }
 
 .transaction-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  /* Tighter padding so collapsed cards — especially low-info ones like
-     faucet — stay compact. Expanded state adds breathing room via
-     .transaction-expanded-details. */
+  /* Simple block stacking — the card has N row-children
+     (.transaction-main, .transaction-amount-line, .transaction-details,
+     optionally .transaction-expanded-details) and each one is already
+     its own flex row. Don't flex the outer container; that creates
+     horizontal-row semantics that fight the intended vertical stack
+     and leaves empty voids on low-info cards (e.g. faucet). */
+  display: block;
   padding: 8px 10px;
   border: 1px solid var(--border);
   border-radius: 6px;
   margin-bottom: 6px;
   background-color: rgba(var(--text-rgb),0.05);
   transition: background-color 0.2s ease;
-  overflow: hidden;
   max-width: 100%;
 }
 
@@ -865,8 +865,6 @@
 .transaction-item.expanded {
   background-color: rgba(var(--text-rgb),0.12);
   border-color: var(--text-dark);
-  flex-direction: column;
-  align-items: stretch;
 }
 
 .transaction-item .transaction-main {
@@ -1421,7 +1419,9 @@
   }
   
   .transaction-item {
-    min-height: 56px;
+    /* No forced min-height: low-info cards (faucet) must be allowed to
+       size to their content; a hardcoded 56px floor was creating a
+       large visual void on cards with just a type + amount row. */
   }
 }
 
