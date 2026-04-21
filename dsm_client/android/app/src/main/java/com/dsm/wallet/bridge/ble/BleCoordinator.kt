@@ -1062,21 +1062,28 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
     }
 
     /**
-     * Find any active client session or subscribed server-client address.
+     * Find the sole ready session when only one peer is reachable.
      * Used by UnifiedBleBridge when the original BLE address has rotated —
      * a scan may have discovered the same DSM peer under a new address.
      */
-    private fun findAnyReadySessionAddress(): String? {
-        // Prefer an active GATT client session (we can write to them)
-        for ((addr, peer) in peers) {
-            if (peer.hasActiveClientSession) {
-                return addr
+    private fun findSingleReadySessionAddress(): String? {
+        val readyAddresses = peers.entries.mapNotNull { (addr, peer) ->
+            if (peer.hasActiveClientSession ||
+                (peer.isServerClient && peer.isSubscribedTo(BleConstants.TX_RESPONSE_UUID))
+            ) {
+                addr
+            } else {
+                null
             }
         }
-        // Fall back to a GATT server client that's subscribed to TX_RESPONSE
-        return peers.entries.firstOrNull {
-            it.value.isServerClient && it.value.isSubscribedTo(BleConstants.TX_RESPONSE_UUID)
-        }?.key
+        return when (readyAddresses.size) {
+            1 -> readyAddresses.first()
+            0 -> null
+            else -> {
+                Log.i("BleCoordinator", "findSingleReadySessionAddress: refusing ambiguous fallback across ${readyAddresses.size} ready peers")
+                null
+            }
+        }
     }
 
     /**
@@ -1085,7 +1092,7 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
      * Resolution order:
      * 1. Direct peers[address] lookup (address is current)
      * 2. addressIndex[address] → PeerIdentity → find peer with matching identity
-     * 3. findAnyReadySessionAddress() fallback (single-peer scenario)
+     * 3. findSingleReadySessionAddress() fallback (single-peer scenario)
      *
      * Returns the PeerSession and its current address, or null if unknown.
      */
@@ -1108,8 +1115,8 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
             }
         }
 
-        // 3. Fallback — any ready session (single-peer scenario)
-        findAnyReadySessionAddress()?.let { freshAddr ->
+        // 3. Fallback — the sole ready session (single-peer scenario)
+        findSingleReadySessionAddress()?.let { freshAddr ->
             if (freshAddr != address) {
                 Log.i("BleCoordinator", "resolveSession: fallback $address → $freshAddr")
             }
@@ -1221,26 +1228,6 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                     }
                 }
 
-                // Check for any server client that appeared during scan
-                for ((addr, peer) in peers) {
-                    if (peer.isServerClient && peer.isSubscribedTo(BleConstants.TX_RESPONSE_UUID)) {
-                        Log.i("BleCoordinator", "connectToDevice: reverse connection detected from $addr during scan")
-                        resolvedAddress = addr
-                        break
-                    }
-                }
-                if (resolvedAddress != null) break
-
-                // Check if scan discovered any new DSM peer (onDeviceDiscovered may
-                // have created a session and initiated connectGatt already)
-                for ((addr, peer) in peers) {
-                    if (addr != address && peer.gattClientSession != null && peer.isConnected) {
-                        Log.i("BleCoordinator", "connectToDevice: scan discovered connected peer at $addr")
-                        resolvedAddress = addr
-                        break
-                    }
-                }
-                if (resolvedAddress != null) break
             }
 
             stopScanning() // safe method

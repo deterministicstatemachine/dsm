@@ -94,6 +94,20 @@ class BleCoordinatorTest {
     }
 
     @Test
+    fun resolveSession_doesNotFallbackWhenMultipleReadyPeersExist() {
+        coordinator.peers["AA:BB:CC:DD:EE:01"] = PeerSession(address = "AA:BB:CC:DD:EE:01").apply {
+            gattClientSession = activeGattClientSession("AA:BB:CC:DD:EE:01")
+            isConnected = true
+        }
+        coordinator.peers["AA:BB:CC:DD:EE:02"] = PeerSession(address = "AA:BB:CC:DD:EE:02").apply {
+            serverDevice = serverDevice("AA:BB:CC:DD:EE:02")
+            subscribedCccds[BleConstants.TX_RESPONSE_UUID] = true
+        }
+
+        assertNull(coordinator.resolveSession("unknown"))
+    }
+
+    @Test
     fun resolveSession_returnsNullWhenNoReachablePeerExists() {
         coordinator.peers["shell"] = PeerSession(address = "shell")
 
@@ -159,4 +173,9 @@ class BleCoordinatorTest {
             BlePermissionsGate(appContext),
         ) { }
     }
+
+    private fun serverDevice(address: String) =
+        appContext.getSystemService(android.bluetooth.BluetoothManager::class.java)
+            ?.adapter
+            ?.getRemoteDevice(address)
 }
