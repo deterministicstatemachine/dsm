@@ -317,6 +317,12 @@ object Unified {
      */
     @Keep @JvmStatic fun processGattIdentityRead(bleAddress: String, rawProtoBytes: ByteArray): ByteArray =
         UnifiedNativeApi.processGattIdentityRead(bleAddress, rawProtoBytes)
+    /**
+     * Observe raw protobuf bytes read from the GATT identity characteristic for an already-paired peer.
+     * Rust re-anchors the peer identity and updates persistence without sending write-back pairing data.
+     */
+    @Keep @JvmStatic fun observeGattIdentityRead(bleAddress: String, rawProtoBytes: ByteArray): ByteArray =
+        UnifiedNativeApi.observeGattIdentityRead(bleAddress, rawProtoBytes)
 
     @Keep @JvmStatic fun createTransactionErrorEnvelope(address: String, code: Int, message: String): ByteArray? =
         UnifiedNativeApi.createTransactionErrorEnvelope(address, code, message)

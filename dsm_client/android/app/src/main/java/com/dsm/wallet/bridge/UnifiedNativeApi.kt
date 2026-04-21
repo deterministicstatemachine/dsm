@@ -98,6 +98,8 @@ internal object UnifiedNativeApi {
     @Keep @JvmStatic external fun identityReadResultExtractPeerDeviceId(responseProto: ByteArray): ByteArray
     /** Extract peer_genesis_hash (32 bytes) from a BleGattIdentityReadResult proto. */
     @Keep @JvmStatic external fun identityReadResultExtractPeerGenesisHash(responseProto: ByteArray): ByteArray
+    /** Observe a paired peer's GATT identity read without emitting pairing write-back data. */
+    @Keep @JvmStatic external fun observeGattIdentityRead(bleAddress: String, rawProtoBytes: ByteArray): ByteArray
     @Keep @JvmStatic external fun sendBleChunks(deviceAddress: String, chunks: Array<ByteArray>): Boolean
     @Keep @JvmStatic external fun acceptBilateralByCommitment(commitmentHashBytes: ByteArray): ByteArray
     @Keep @JvmStatic external fun rejectBilateralByCommitment(commitmentHashBytes: ByteArray, reason: String): ByteArray

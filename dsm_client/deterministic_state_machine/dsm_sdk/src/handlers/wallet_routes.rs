@@ -10,6 +10,7 @@ use prost::Message;
 
 use crate::bridge::{AppInvoke, AppQuery, AppResult};
 use super::app_router_impl::{relationship_tip_for_contact_restore, AppRouterImpl};
+use super::relationship_status::status_message;
 use super::response_helpers::{pack_envelope_ok, err};
 
 #[derive(Debug, Clone)]
@@ -729,6 +730,21 @@ impl AppRouterImpl {
                     return err(
                         "wallet.sendOffline: ble_address unavailable for counterparty".into(),
                     );
+                }
+
+                let send_status = self
+                    .calibrate_local_relationship_send_status(&counterparty_device_id)
+                    .await;
+                if !send_status.send_ready {
+                    let message = status_message(&send_status);
+                    let counterparty_b32 =
+                        crate::util::text_id::encode_base32_crockford(&counterparty_device_id);
+                    log::warn!(
+                        "[wallet.sendOffline] refusing BLE dispatch for {}: {}",
+                        counterparty_b32.get(..8).unwrap_or("?"),
+                        message
+                    );
+                    return err(format!("wallet.sendOffline: {message}"));
                 }
 
                 let operation_bytes = if req.operation_data.is_empty() {

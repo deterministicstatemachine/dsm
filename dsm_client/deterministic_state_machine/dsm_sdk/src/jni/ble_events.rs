@@ -1145,6 +1145,98 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getRelationsh
 /// 4. Returns BleGattIdentityReadResult containing the write-back envelope
 ///
 /// Kotlin MUST NOT parse or split identity bytes — this function does everything.
+fn observe_gatt_identity_inner(
+    env: &mut JNIEnv<'_>,
+    ble_address: &str,
+    raw_proto: &[u8],
+) -> Result<(Vec<u8>, Vec<u8>), String> {
+    let char_value = pb::BleIdentityCharValue::decode(raw_proto)
+        .map_err(|e| format!("proto decode failed: {e}"))?;
+
+    if char_value.genesis_hash.len() != 32 || char_value.device_id.len() != 32 {
+        return Err("invalid identity field lengths".to_string());
+    }
+
+    log::info!(
+        "observeGattIdentityRead: addr={}, genesis={:02x}{:02x}..., device={:02x}{:02x}...",
+        ble_address,
+        char_value.genesis_hash[0],
+        char_value.genesis_hash[1],
+        char_value.device_id[0],
+        char_value.device_id[1]
+    );
+
+    match crate::storage::client_db::has_contact_for_device_id(&char_value.device_id) {
+        Ok(true) => {
+            log::info!(
+                "observeGattIdentityRead: contact EXISTS in SQLite for {:02x}{:02x}...",
+                char_value.device_id[0],
+                char_value.device_id[1]
+            );
+        }
+        Ok(false) => {
+            let rt = crate::runtime::get_runtime();
+            let device_id_poll = char_value.device_id.clone();
+            let found = rt.block_on(async {
+                for _ in 0..30u32 {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    match crate::storage::client_db::has_contact_for_device_id(&device_id_poll) {
+                        Ok(true) => return true,
+                        Ok(false) => continue,
+                        Err(_) => return false,
+                    }
+                }
+                false
+            });
+            if !found {
+                return Err("contact missing in SQLite".to_string());
+            }
+            log::info!(
+                "observeGattIdentityRead: contact appeared in SQLite during retry window for {:02x}{:02x}...",
+                char_value.device_id[0],
+                char_value.device_id[1]
+            );
+        }
+        Err(e) => {
+            return Err(format!("SQLite query error: {e}"));
+        }
+    }
+
+    let obs = pb::BleIdentityObserved {
+        address: ble_address.to_string(),
+        genesis_hash: char_value.genesis_hash.clone(),
+        device_id: char_value.device_id.clone(),
+    };
+    super::unified_protobuf_bridge::handle_ble_identity_observed_from_envelope(&obs)
+        .map_err(|e| format!("identity dispatch failed: {e}"))?;
+
+    #[cfg(target_os = "android")]
+    {
+        use jni::objects::JValue;
+        if let Ok(class) = env.find_class("com/dsm/wallet/bridge/Unified") {
+            let obs_envelope = create_identity_observed_envelope_inner(
+                ble_address.to_string(),
+                char_value.genesis_hash.clone(),
+                char_value.device_id.clone(),
+            );
+            if !obs_envelope.is_empty() {
+                if let Ok(jbytes) = env.byte_array_from_slice(&obs_envelope) {
+                    if let Err(e) = env.call_static_method(
+                        class,
+                        "dispatchToWebView",
+                        "([B)V",
+                        &[JValue::Object(&jbytes.into())],
+                    ) {
+                        log::warn!("observeGattIdentityRead: dispatchToWebView failed: {e}");
+                    }
+                }
+            }
+        }
+    }
+
+    Ok((char_value.device_id, char_value.genesis_hash))
+}
+
 #[no_mangle]
 pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_processGattIdentityRead(
     env: jni::sys::JNIEnv,
@@ -1189,150 +1281,15 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_processGattId
                 }
             };
 
-            // Decode BleIdentityCharValue from GATT bytes
-            let char_value = match pb::BleIdentityCharValue::decode(raw_proto.as_slice()) {
-                Ok(v) => v,
-                Err(e) => {
-                    log::error!("processGattIdentityRead: proto decode failed: {e}");
-                    return emit_identity_read_result(
-                        &mut env,
-                        false,
-                        &[],
-                        &format!("proto decode failed: {e}"),
-                    );
-                }
-            };
-
-            if char_value.genesis_hash.len() != 32 || char_value.device_id.len() != 32 {
-                log::error!(
-                    "processGattIdentityRead: invalid field lengths genesis={} device_id={}",
-                    char_value.genesis_hash.len(),
-                    char_value.device_id.len()
-                );
-                return emit_identity_read_result(
-                    &mut env,
-                    false,
-                    &[],
-                    "invalid identity field lengths",
-                );
-            }
-
-            log::info!(
-                "processGattIdentityRead: addr={}, genesis={:02x}{:02x}..., device={:02x}{:02x}...",
-                ble_address,
-                char_value.genesis_hash[0],
-                char_value.genesis_hash[1],
-                char_value.device_id[0],
-                char_value.device_id[1]
-            );
-
-            // Strict gate: contact must exist in SQLite before dispatching identity and building write-back.
-            match crate::storage::client_db::has_contact_for_device_id(&char_value.device_id) {
-                Ok(true) => {
-                    log::info!(
-                        "processGattIdentityRead: contact EXISTS in SQLite for {:02x}{:02x}...",
-                        char_value.device_id[0],
-                        char_value.device_id[1]
-                    );
-                }
-                Ok(false) => {
-                    // Contact not yet in SQLite — poll up to 15 seconds to handle the
-                    // QR-scan-vs-BLE-connect race (e.g. QR code accepted while BLE
-                    // connection is already in progress). Symmetric with the advertiser's
-                    // send_deferred_pairing_ack retry in processBleIdentityEnvelope.
-                    let rt = crate::runtime::get_runtime();
-                    let device_id_poll = char_value.device_id.clone();
-                    let found = rt.block_on(async {
-                        for _ in 0..30u32 {
-                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                            match crate::storage::client_db::has_contact_for_device_id(
-                                &device_id_poll,
-                            ) {
-                                Ok(true) => return true,
-                                Ok(false) => continue,
-                                Err(_) => return false,
-                            }
-                        }
-                        false
-                    });
-                    if !found {
-                        log::error!(
-                            "processGattIdentityRead: NO contact in SQLite for {:02x}{:02x}... after 15s — hard-fail",
-                            char_value.device_id[0], char_value.device_id[1]
-                        );
-                        return emit_identity_read_result(
-                            &mut env,
-                            false,
-                            &[],
-                            "contact missing in SQLite",
-                        );
+            let (peer_device_id, peer_genesis_hash) =
+                match observe_gatt_identity_inner(&mut env, &ble_address, raw_proto.as_slice()) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        log::error!("processGattIdentityRead: {e}");
+                        return emit_identity_read_result(&mut env, false, &[], &e);
                     }
-                    log::info!(
-                        "processGattIdentityRead: contact appeared in SQLite during retry window for {:02x}{:02x}...",
-                        char_value.device_id[0], char_value.device_id[1]
-                    );
-                    // Fall through to dispatch and write-back below
-                }
-                Err(e) => {
-                    log::error!(
-                "processGattIdentityRead: SQLite query error for {:02x}{:02x}...: {} — hard-fail",
-                char_value.device_id[0], char_value.device_id[1], e
-            );
-                    return emit_identity_read_result(&mut env, false, &[], "SQLite query error");
-                }
-            }
+                };
 
-            // Dispatch identity observed via the existing handler (updates SQLite, notifies orchestrator)
-            let obs = pb::BleIdentityObserved {
-                address: ble_address.clone(),
-                genesis_hash: char_value.genesis_hash.clone(),
-                device_id: char_value.device_id.clone(),
-            };
-            if let Err(e) =
-                super::unified_protobuf_bridge::handle_ble_identity_observed_from_envelope(&obs)
-            {
-                log::error!("processGattIdentityRead: identity dispatch failed: {e}");
-                return emit_identity_read_result(
-                    &mut env,
-                    false,
-                    &[],
-                    &format!("identity dispatch failed: {e}"),
-                );
-            }
-
-            // Dispatch identity_observed to frontend so contact.bleMapped fires
-            #[cfg(target_os = "android")]
-            {
-                use jni::objects::JValue;
-                if let Ok(class) = env.find_class("com/dsm/wallet/bridge/Unified") {
-                    let obs_envelope = create_identity_observed_envelope_inner(
-                        ble_address.clone(),
-                        char_value.genesis_hash.clone(),
-                        char_value.device_id.clone(),
-                    );
-                    if !obs_envelope.is_empty() {
-                        if let Ok(jbytes) = env.byte_array_from_slice(&obs_envelope) {
-                            match env.call_static_method(
-                                class,
-                                "dispatchToWebView",
-                                "([B)V",
-                                &[JValue::Object(&jbytes.into())],
-                            ) {
-                                Ok(_) => log::info!(
-                            "processGattIdentityRead: dispatched identity_observed to WebView"
-                        ),
-                                Err(e) => {
-                                    log::warn!(
-                                        "processGattIdentityRead: dispatchToWebView failed: {e}"
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Build write-back envelope using LOCAL identity (Rust knows our own identity)
             let local_device_id = crate::sdk::app_state::AppState::get_device_id();
             let local_genesis = crate::sdk::app_state::AppState::get_genesis_hash();
 
@@ -1369,8 +1326,74 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_processGattId
                 true,
                 &write_back,
                 "",
-                &char_value.device_id,
-                &char_value.genesis_hash,
+                &peer_device_id,
+                &peer_genesis_hash,
+            )
+        }),
+    )
+}
+
+/// Observe a paired peer's GATT identity without sending write-back pairing data.
+#[no_mangle]
+pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_observeGattIdentityRead(
+    env: jni::sys::JNIEnv,
+    _clazz: jni::sys::jclass,
+    ble_address_jstr: jni::sys::jstring,
+    raw_proto_jbytes: jni::sys::jbyteArray,
+) -> jni::sys::jbyteArray {
+    crate::jni::bridge_utils::jni_catch_unwind_jbytearray(
+        "observeGattIdentityRead",
+        std::panic::AssertUnwindSafe(|| {
+            let mut env = match unsafe { env_from(env) } {
+                Some(e) => e,
+                None => return std::ptr::null_mut(),
+            };
+            let address_jstring = unsafe { jstr_from(ble_address_jstr) };
+
+            let ble_address: String = match env.get_string(&address_jstring) {
+                Ok(s) => s.into(),
+                Err(e) => {
+                    log::error!("observeGattIdentityRead: JNI address extraction failed: {e}");
+                    return emit_identity_read_result(
+                        &mut env,
+                        false,
+                        &[],
+                        "JNI address extraction failed",
+                    );
+                }
+            };
+
+            let raw_proto: Vec<u8> = match env
+                .convert_byte_array(unsafe { jbytes_from(raw_proto_jbytes) })
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    log::error!("observeGattIdentityRead: JNI byte array extraction failed: {e}");
+                    return emit_identity_read_result(
+                        &mut env,
+                        false,
+                        &[],
+                        "JNI byte array extraction failed",
+                    );
+                }
+            };
+
+            let (peer_device_id, peer_genesis_hash) =
+                match observe_gatt_identity_inner(&mut env, &ble_address, raw_proto.as_slice()) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        log::error!("observeGattIdentityRead: {e}");
+                        return emit_identity_read_result(&mut env, false, &[], &e);
+                    }
+                };
+
+            emit_identity_read_result_with_identity(
+                &mut env,
+                true,
+                &[],
+                "",
+                &peer_device_id,
+                &peer_genesis_hash,
             )
         }),
     )

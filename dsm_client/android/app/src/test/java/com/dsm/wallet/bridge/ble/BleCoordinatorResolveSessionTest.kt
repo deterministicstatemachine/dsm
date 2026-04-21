@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.mockito.kotlin.mock
@@ -46,5 +47,27 @@ class BleCoordinatorResolveSessionTest {
         assertNotNull(resolved)
         assertEquals(freshAddress, resolved?.second)
         assertEquals(identity, coordinator.addressIndex[staleAddress])
+    }
+
+    @Test
+    fun resolveSession_refusesSingleReadyPeerGuessWithoutIdentity() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val coordinator = BleCoordinator(
+            context = context,
+            permissionsGate = mock(),
+            advertiser = mock(),
+            gattServer = mock(),
+            scanner = mock(),
+            outbox = mock<BleOutbox>(),
+            diagnostics = BleDiagnostics(),
+        )
+        coordinator.peers["49:63:1E:15:0A:AA"] = PeerSession("49:63:1E:15:0A:AA").apply {
+            isConnected = true
+            gattClientSession = mock()
+        }
+
+        val resolved = coordinator.resolveSession("6B:CA:44:6D:D9:33")
+
+        assertNull(resolved)
     }
 }
