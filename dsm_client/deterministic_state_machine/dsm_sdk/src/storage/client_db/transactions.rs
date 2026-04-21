@@ -146,6 +146,9 @@ pub fn apply_bilateral_settlement_bundle_atomic(
             previous_chain_tip = chain_tip,
             chain_tip = ?1,
             local_bilateral_chain_tip = ?1,
+            observed_remote_chain_tip = NULL,
+            observed_remote_tip_updated_at = NULL,
+            observed_remote_tip_source = NULL,
             needs_online_reconcile = 0,
             last_seen_online_counter = ?2,
             status = CASE
@@ -222,6 +225,9 @@ pub fn apply_receiver_confirm_and_store_transaction_atomic(
             previous_chain_tip = chain_tip,
             chain_tip = ?1,
             local_bilateral_chain_tip = ?1,
+            observed_remote_chain_tip = NULL,
+            observed_remote_tip_updated_at = NULL,
+            observed_remote_tip_source = NULL,
             needs_online_reconcile = 0,
             last_seen_online_counter = ?2,
             status = CASE
@@ -277,6 +283,9 @@ pub fn apply_receiver_confirm_bundle_atomic(bundle: ReceiverConfirmBundle<'_>) -
             previous_chain_tip = chain_tip,
             chain_tip = ?1,
             local_bilateral_chain_tip = ?1,
+            observed_remote_chain_tip = NULL,
+            observed_remote_tip_updated_at = NULL,
+            observed_remote_tip_source = NULL,
             needs_online_reconcile = 0,
             last_seen_online_counter = ?2,
             status = CASE
@@ -757,6 +766,196 @@ mod tests {
             head_after.root(),
             pre_root,
             "head cache must be reverted to pre-send root"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn sender_settlement_clears_stale_live_peer_claim() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        reset_database_for_tests();
+        init_database().expect("init db");
+
+        let counterparty_device_id = [0x51u8; 32];
+        let counterparty_genesis = [0x61u8; 32];
+        let stale_tip = [0x71u8; 32];
+        let observed_tip = [0x81u8; 32];
+        let settled_tip = [0x91u8; 32];
+        let local_device = [0xA1u8; 32];
+        let local_b32 = crate::util::text_id::encode_base32_crockford(&local_device);
+        let counterparty_b32 =
+            crate::util::text_id::encode_base32_crockford(&counterparty_device_id);
+
+        crate::storage::client_db::store_contact(&crate::storage::client_db::ContactRecord {
+            contact_id: "sender-contact".to_string(),
+            device_id: counterparty_device_id.to_vec(),
+            alias: "sender-peer".to_string(),
+            genesis_hash: counterparty_genesis.to_vec(),
+            public_key: vec![0x11; 32],
+            current_chain_tip: Some(stale_tip.to_vec()),
+            added_at: 0,
+            verified: true,
+            verification_proof: None,
+            metadata: HashMap::new(),
+            ble_address: None,
+            status: "BleCapable".to_string(),
+            needs_online_reconcile: true,
+            last_seen_online_counter: 0,
+            last_seen_ble_counter: 0,
+            previous_chain_tip: None,
+        })
+        .expect("store contact");
+        crate::storage::client_db::update_local_bilateral_chain_tip(
+            &counterparty_device_id,
+            &stale_tip,
+        )
+        .expect("seed local tip");
+        crate::storage::client_db::record_observed_remote_chain_tip(
+            &counterparty_device_id,
+            &observed_tip,
+            crate::storage::client_db::ObservedRemoteTipSource::LivePeerClaim,
+        )
+        .expect("record observed tip");
+
+        let tx = TransactionRecord {
+            tx_id: "sender-settlement".to_string(),
+            tx_hash: crate::util::text_id::encode_base32_crockford(&settled_tip),
+            from_device: local_b32.clone(),
+            to_device: counterparty_b32,
+            amount: 7,
+            tx_type: "bilateral_offline".to_string(),
+            status: "completed".to_string(),
+            chain_height: 0,
+            step_index: 0,
+            commitment_hash: None,
+            proof_data: None,
+            metadata: HashMap::new(),
+            created_at: 0,
+        };
+
+        apply_bilateral_settlement_bundle_atomic(BilateralSenderSettlementBundle {
+            counterparty_device_id: &counterparty_device_id,
+            new_chain_tip: &settled_tip,
+            sender_device_id: &local_b32,
+            token_id: None,
+            amount: 7,
+            tx: &tx,
+            projection: None,
+        })
+        .expect("apply sender bundle");
+
+        assert!(
+            crate::storage::client_db::get_observed_remote_tip_record(&counterparty_device_id)
+                .expect("load observed tip")
+                .is_none(),
+            "successful sender settlement should retire stale live-peer claims"
+        );
+
+        let stored = crate::storage::client_db::get_contact_by_device_id(&counterparty_device_id)
+            .expect("load contact")
+            .expect("contact exists");
+        assert_eq!(stored.current_chain_tip, Some(settled_tip.to_vec()));
+        assert!(!stored.needs_online_reconcile);
+        assert_eq!(
+            crate::storage::client_db::get_local_bilateral_chain_tip(&counterparty_device_id),
+            Some(settled_tip)
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn receiver_settlement_clears_stale_live_peer_claim() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        reset_database_for_tests();
+        init_database().expect("init db");
+
+        let counterparty_device_id = [0x52u8; 32];
+        let counterparty_genesis = [0x62u8; 32];
+        let stale_tip = [0x72u8; 32];
+        let observed_tip = [0x82u8; 32];
+        let settled_tip = [0x92u8; 32];
+        let local_device = [0xA2u8; 32];
+        let local_b32 = crate::util::text_id::encode_base32_crockford(&local_device);
+        let counterparty_b32 =
+            crate::util::text_id::encode_base32_crockford(&counterparty_device_id);
+
+        crate::storage::client_db::store_contact(&crate::storage::client_db::ContactRecord {
+            contact_id: "receiver-contact".to_string(),
+            device_id: counterparty_device_id.to_vec(),
+            alias: "receiver-peer".to_string(),
+            genesis_hash: counterparty_genesis.to_vec(),
+            public_key: vec![0x22; 32],
+            current_chain_tip: Some(stale_tip.to_vec()),
+            added_at: 0,
+            verified: true,
+            verification_proof: None,
+            metadata: HashMap::new(),
+            ble_address: None,
+            status: "BleCapable".to_string(),
+            needs_online_reconcile: true,
+            last_seen_online_counter: 0,
+            last_seen_ble_counter: 0,
+            previous_chain_tip: None,
+        })
+        .expect("store contact");
+        crate::storage::client_db::update_local_bilateral_chain_tip(
+            &counterparty_device_id,
+            &stale_tip,
+        )
+        .expect("seed local tip");
+        crate::storage::client_db::record_observed_remote_chain_tip(
+            &counterparty_device_id,
+            &observed_tip,
+            crate::storage::client_db::ObservedRemoteTipSource::LivePeerClaim,
+        )
+        .expect("record observed tip");
+
+        let tx = TransactionRecord {
+            tx_id: "receiver-settlement".to_string(),
+            tx_hash: crate::util::text_id::encode_base32_crockford(&settled_tip),
+            from_device: counterparty_b32,
+            to_device: local_b32.clone(),
+            amount: 9,
+            tx_type: "bilateral_offline".to_string(),
+            status: "completed".to_string(),
+            chain_height: 0,
+            step_index: 0,
+            commitment_hash: None,
+            proof_data: None,
+            metadata: HashMap::new(),
+            created_at: 0,
+        };
+
+        apply_receiver_confirm_bundle_atomic(ReceiverConfirmBundle {
+            counterparty_device_id: &counterparty_device_id,
+            new_chain_tip: &settled_tip,
+            receiver_device_id: &local_b32,
+            token_id: None,
+            amount: 9,
+            tx: &tx,
+            projection: None,
+        })
+        .expect("apply receiver bundle");
+
+        assert!(
+            crate::storage::client_db::get_observed_remote_tip_record(&counterparty_device_id)
+                .expect("load observed tip")
+                .is_none(),
+            "successful receiver settlement should retire stale live-peer claims"
+        );
+
+        let stored = crate::storage::client_db::get_contact_by_device_id(&counterparty_device_id)
+            .expect("load contact")
+            .expect("contact exists");
+        assert_eq!(stored.current_chain_tip, Some(settled_tip.to_vec()));
+        assert!(!stored.needs_online_reconcile);
+        assert_eq!(
+            crate::storage::client_db::get_local_bilateral_chain_tip(&counterparty_device_id),
+            Some(settled_tip)
         );
     }
 }
