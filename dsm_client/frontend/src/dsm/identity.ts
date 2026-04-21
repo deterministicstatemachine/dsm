@@ -87,18 +87,18 @@ export async function getIdentity(): Promise<IdentityInfo | null> {
   for (let attempt = 0; attempt < retryDelays.length; attempt++) {
     if (attempt > 0) {
       // Yield to event loop to allow bridge port delivery / gate drain.
-      // Also listen for the bridge-ready event so we wake up early if it fires.
+      // Also listen for the identity-ready event so we wake up early if it fires.
       const delay = retryDelays[attempt];
       await new Promise<void>(resolve => {
         let settled = false;
         const settle = () => { if (!settled) { settled = true; resolve(); } };
         const onReady = () => { settle(); };
         if (typeof window !== 'undefined') {
-          window.addEventListener('dsm-bridge-ready', onReady, { once: true });
+          window.addEventListener('dsm-identity-ready', onReady, { once: true });
         }
         setTimeout(() => {
           if (typeof window !== 'undefined') {
-            window.removeEventListener('dsm-bridge-ready', onReady);
+            window.removeEventListener('dsm-identity-ready', onReady);
           }
           settle();
         }, delay);
