@@ -324,9 +324,8 @@ describe('storage.ts', () => {
   });
 
   describe('createBackup', () => {
-    test('returns backup path', async () => {
-      const result = await createBackup();
-      expect(result).toContain('dsm_backup');
+    test('rejects with not-implemented (NFC ring is the primary backup mechanism)', async () => {
+      await expect(createBackup()).rejects.toThrow(/not implemented/i);
     });
   });
 });

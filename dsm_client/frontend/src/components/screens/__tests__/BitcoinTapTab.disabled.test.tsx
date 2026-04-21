@@ -205,9 +205,10 @@ describe('BitcoinTapTab withdrawal planner flow', () => {
     fireEvent.change(screen.getByLabelText(/Destination Bitcoin Address/i), { target: { value: 'tb1qwithdrawdest' } });
     fireEvent.click(screen.getByText(/Review Withdrawal/i, { selector: 'button' }));
 
-    await screen.findByText(/Excluded Vaults/i);
-    expect(screen.getByText(/Shortfall from request/i)).toBeInTheDocument();
-    expect(screen.getByText(/vault-busy/i)).toBeInTheDocument();
+    // Excluded-vault detail UI was intentionally removed in 055022f
+    // ("Switch storage to bitcoinTap vault summaries"); blocked vaults are
+    // still surfaced via console diagnostics in WithdrawView.tsx.
+    await screen.findByText(/Shortfall from request/i);
   });
 
   it('executes the reviewed plan after confirmation', async () => {

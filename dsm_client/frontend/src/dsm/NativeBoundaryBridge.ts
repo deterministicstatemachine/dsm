@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { getBridgeInstance } from '../bridge/BridgeRegistry';
+import { bridgeEvents } from '../bridge/bridgeEvents';
 import type { AndroidBridgeV3 } from './bridgeTypes';
+import { encodeBase32Crockford } from '../utils/textId';
 import {
   BridgeRpcRequest,
   BridgeRpcResponse,
@@ -44,13 +46,26 @@ function buildBridgeRequest(method: string, payload: Uint8Array): Uint8Array {
 }
 
 function unwrapBridgeRpcResponse(method: string, responseBytes: Uint8Array): Uint8Array {
-  const response = BridgeRpcResponse.fromBinary(responseBytes);
+  let response: BridgeRpcResponse;
+  try {
+    response = BridgeRpcResponse.fromBinary(responseBytes);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(`Bridge error: failed to decode response for ${method}: ${msg}`);
+  }
   if (response.result.case === 'success') {
     const data = response.result.value?.data;
     return data instanceof Uint8Array ? data : new Uint8Array(0);
   }
   if (response.result.case === 'error') {
-    const message = response.result.value?.message || `bridge error while calling ${method}`;
+    const errVal = response.result.value;
+    const message = errVal?.message || `bridge error while calling ${method}`;
+    const debugBytes = errVal ? errVal.toBinary() : new Uint8Array(0);
+    bridgeEvents.emit('bridge.error', {
+      code: errVal?.errorCode,
+      message,
+      debugB32: encodeBase32Crockford(debugBytes),
+    });
     throw new Error(message);
   }
   throw new Error(`empty bridge response for ${method}`);
