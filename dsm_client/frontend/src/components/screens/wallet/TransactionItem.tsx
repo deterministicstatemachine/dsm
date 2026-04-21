@@ -37,8 +37,6 @@ function TransactionItemInner({ tx, idx, expandedTxId, onToggle, aliasLookup, sh
   const counterparty = counterpartyB32
     ? resolveAlias(counterpartyB32, aliasLookup)
     : (recipient || '\u2014');
-  const fromAlias = fromB32 ? aliasLookup.get(fromB32) : undefined;
-  const toAlias = toB32 ? aliasLookup.get(toB32) : undefined;
 
   return (
     <div
@@ -95,22 +93,10 @@ function TransactionItemInner({ tx, idx, expandedTxId, onToggle, aliasLookup, sh
               <span className="detail-value">{memo}</span>
             </div>
           )}
-          {fromAlias && (
-            <div className="detail-row">
-              <span className="detail-label">From (alias)</span>
-              <span className="detail-value">{fromAlias}</span>
-            </div>
-          )}
           {fromB32 && (
             <div className="detail-row detail-row-hash">
               <span className="detail-label">From</span>
               <span className="detail-value detail-value-hash">{fromB32}</span>
-            </div>
-          )}
-          {toAlias && (
-            <div className="detail-row">
-              <span className="detail-label">To (alias)</span>
-              <span className="detail-value">{toAlias}</span>
             </div>
           )}
           {toB32 && (

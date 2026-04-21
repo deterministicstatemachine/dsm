@@ -429,11 +429,14 @@
 .transaction-item {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 12px;
+  gap: 8px;
+  /* Tighter padding so collapsed cards — especially low-info ones like
+     faucet — stay compact. Expanded state adds breathing room via
+     .transaction-expanded-details. */
+  padding: 8px 10px;
   border: 1px solid var(--border);
   border-radius: 6px;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
   background-color: rgba(var(--text-rgb),0.05);
   transition: background-color 0.2s ease;
   overflow: hidden;
@@ -469,27 +472,30 @@
 }
 
 /* Dedicated amount line: full-width row so large numbers (e.g. BTC with
-   8 decimals) never get truncated by sibling flex items. */
+   8 decimals) never get truncated by sibling flex items. Kept compact so
+   low-info cards (faucet) don't balloon vertically when collapsed. */
 .transaction-amount-line {
   display: flex;
   align-items: baseline;
-  gap: 6px;
+  gap: 4px;
   width: 100%;
-  padding: 2px 0 6px 0;
+  padding: 0;
+  margin: 0;
+  line-height: 1.2;
   font-family: 'Martian Mono', 'Courier New', monospace;
   overflow-wrap: anywhere;
   word-break: break-word;
 }
 
 .transaction-amount-line .transaction-amount-value {
-  font-size: 18px;
+  font-size: 14px;
   font-weight: 600;
   color: var(--text-dark);
   white-space: normal;
 }
 
 .transaction-amount-line .transaction-amount-token {
-  font-size: 13px;
+  font-size: 11px;
   font-weight: 500;
   color: var(--text-disabled);
   letter-spacing: 0.5px;
@@ -551,6 +557,7 @@
 .transaction-status {
   text-align: right;
   flex-shrink: 0;
+  flex-grow: 1;
   white-space: nowrap;
 }
 
@@ -868,7 +875,10 @@
   gap: 8px;
   width: 100%;
   min-width: 0;
-  overflow: hidden;
+  /* No overflow hidden: with the amount moved to its own row below, the
+     type + status + arrow row must have enough slack to spell out the
+     full status word ("completed", not "com"). Wrap instead of clipping. */
+  flex-wrap: wrap;
 }
 
 .transaction-item .expand-indicator {

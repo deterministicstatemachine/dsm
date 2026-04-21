@@ -94,7 +94,7 @@ describe('TransactionItem visual contract', () => {
     }
   });
 
-  test('expanded view shows alias rows when contacts have aliases for from/to', () => {
+  test('expanded view does NOT duplicate alias rows (redundant with collapsed counterparty)', () => {
     const tx = buildTx();
     const aliasLookup = new Map<string, string>([
       [tx.fromDeviceId!, 'Bob'],
@@ -104,9 +104,12 @@ describe('TransactionItem visual contract', () => {
       <TransactionItem tx={tx} idx={0} expandedTxId={tx.txId!} onToggle={() => {}} aliasLookup={aliasLookup} />,
     );
     const text = container.querySelector('.transaction-expanded-details')!.textContent!;
-    expect(text).toContain('From (alias)');
-    expect(text).toContain('Bob');
-    expect(text).toContain('To (alias)');
-    expect(text).toContain('Carol');
+    // The collapsed header already shows the counterparty with its alias;
+    // the expanded drawer should NOT repeat "From (alias)" / "To (alias)" rows.
+    expect(text).not.toContain('From (alias)');
+    expect(text).not.toContain('To (alias)');
+    // Full device-ID hash rows are still present for auditability.
+    expect(text).toContain(tx.fromDeviceId!);
+    expect(text).toContain(tx.toDeviceId!);
   });
 });
