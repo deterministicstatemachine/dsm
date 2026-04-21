@@ -1273,6 +1273,11 @@ impl AppRouterImpl {
         // Inclusion proofs verify against the A-side (asymmetric) chain tip
         // that now sits in DeviceState.smt — symmetric `new_chain_tip` is
         // still used downstream for contacts.chain_tip + b0x addressing.
+        //
+        // `parent_r_a` is the CAS-layer head entering the advance. On a
+        // first-ever relationship advance, the internal seed step changes the
+        // Merkle preimage before `smt_replace`, so the parent proof verifies
+        // against `smt_proofs.pre_root`, not `parent_r_a`.
         let (receipt_commit_bytes, receipt_canonical_bytes) = {
             let pre_proof_bytes = advance_outcome.smt_proofs.parent_proof.to_bytes();
             let post_proof_bytes = advance_outcome.smt_proofs.child_proof.to_bytes();
@@ -1283,6 +1288,7 @@ impl AppRouterImpl {
                 .value
                 .unwrap_or([0u8; 32]);
             let child_tip_asymmetric = advance_outcome.new_chain_state.compute_chain_tip();
+            let parent_root_for_receipt = advance_outcome.smt_proofs.pre_root;
 
             // Build ReceiptCommit with real SMT roots and proofs
             // Use local Device Tree root (R_G) for receipt construction
@@ -1293,7 +1299,7 @@ impl AppRouterImpl {
                 to_device_id,
                 parent_tip_asymmetric,
                 child_tip_asymmetric,
-                advance_outcome.parent_r_a,
+                parent_root_for_receipt,
                 advance_outcome.child_r_a,
                 pre_proof_bytes,
                 post_proof_bytes,
