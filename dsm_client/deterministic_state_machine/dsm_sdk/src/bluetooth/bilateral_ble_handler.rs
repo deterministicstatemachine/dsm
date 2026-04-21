@@ -4664,13 +4664,12 @@ impl BilateralBleHandler {
         }
 
         // Persist session to storage
-        if let Err(e) = self.persist_session(&session, None).await {
-            warn!(
-                "[BLE_HANDLER] register_sender_session: failed to persist session: {}",
-                e
-            );
-            // Don't fail - session is in memory which is sufficient for immediate transfer
-        }
+        self.persist_session(&session, None).await.map_err(|e| {
+            DsmError::storage(
+                format!("failed to persist session: {}", e),
+                Some(e),
+            )
+        })?;
 
         Ok(canonical_hash)
     }
