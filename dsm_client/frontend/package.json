@@ -55,7 +55,7 @@
   "devDependencies": {
     "@babel/core": "7.27.1",
     "@bufbuild/protobuf": "^1.7.2",
-    "@bufbuild/protoc-gen-es": "^1.7.0",
+    "@bufbuild/protoc-gen-es": "^2.11.0",
     "@testing-library/jest-dom": "^6.1.4",
     "@testing-library/react": "^16.1.0",
     "@testing-library/user-event": "^14.5.1",
