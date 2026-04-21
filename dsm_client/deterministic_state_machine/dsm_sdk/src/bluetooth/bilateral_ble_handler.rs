@@ -862,6 +862,8 @@ impl BilateralBleHandler {
     /// Interrupted bilateral sessions are not resumed after restart. Any
     /// non-terminal persisted session is marked `failed` so the frontend can
     /// surface retry-required state, but no in-memory session is restored.
+    /// The return value remains a compatibility no-op; callers should inspect
+    /// persisted session state instead of relying on a restoration count.
     pub async fn restore_sessions_from_storage(&self) -> Result<usize, DsmError> {
         info!("[BLE_HANDLER] Restoring bilateral sessions from storage...");
 
@@ -936,7 +938,7 @@ impl BilateralBleHandler {
             );
         }
 
-        Ok(failed_count + deleted_malformed_count)
+        Ok(0)
     }
 
     // Removed background maintenance loop (tokio::time based). Maintenance is now caller-driven via
@@ -5212,6 +5214,7 @@ mod tests {
             sender_ble_address: None,
         };
         crate::storage::client_db::store_bilateral_session(&old_terminal).expect("store terminal");
+        let invalid_short_commitment_hash = [0xDE_u8; 31];
 
         {
             let conn = crate::storage::client_db::get_connection().expect("db connection");
@@ -5222,7 +5225,7 @@ mod tests {
                     local_signature, counterparty_signature, created_at_step, sender_ble_address, updated_at
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 rusqlite::params![
-                    vec![0xDE_u8; 31],
+                    invalid_short_commitment_hash.to_vec(),
                     counterparty_device_id.to_vec(),
                     Option::<Vec<u8>>::None,
                     vec![0x01_u8],
@@ -5241,10 +5244,7 @@ mod tests {
             .restore_sessions_from_storage()
             .await
             .expect("restore sessions");
-        assert_eq!(
-            restored, 2,
-            "one interrupted row failed, one malformed row deleted"
-        );
+        assert_eq!(restored, 0, "restore remains a compatibility no-op count");
 
         let inflight_after = crate::storage::client_db::get_bilateral_session(&[0xA1; 32])
             .expect("load inflight")
@@ -5252,7 +5252,7 @@ mod tests {
         assert_eq!(inflight_after.phase, "failed");
 
         assert!(
-            crate::storage::client_db::get_bilateral_session(&[0xDE; 31])
+            crate::storage::client_db::get_bilateral_session(&invalid_short_commitment_hash)
                 .expect("load malformed")
                 .is_none(),
             "malformed row should be deleted during restore"
