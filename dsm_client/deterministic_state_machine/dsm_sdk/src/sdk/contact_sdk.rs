@@ -882,7 +882,8 @@ impl ContactManager {
         let mut out: Vec<pb::ContactAddResponse> = Vec::with_capacity(contacts.len());
 
         for c in contacts {
-            let persisted = match crate::storage::client_db::get_contact_by_device_id(&c.device_id) {
+            let persisted = match crate::storage::client_db::get_contact_by_device_id(&c.device_id)
+            {
                 Ok(record) => record,
                 Err(e) => {
                     log::debug!(

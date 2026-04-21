@@ -4664,12 +4664,9 @@ impl BilateralBleHandler {
         }
 
         // Persist session to storage
-        self.persist_session(&session, None).await.map_err(|e| {
-            DsmError::storage(
-                format!("failed to persist session: {}", e),
-                Some(e),
-            )
-        })?;
+        self.persist_session(&session, None)
+            .await
+            .map_err(|e| DsmError::storage(format!("failed to persist session: {}", e), Some(e)))?;
 
         Ok(canonical_hash)
     }
