@@ -1944,12 +1944,6 @@ message InitFailed {
 
 // ============ RECOVERY OPERATIONS (binary IDs) ==============
 
-message ThermalStateProto {
-  string health = 1;
-  int32 status_code = 2;
-  string description = 3;
-  string recommendation = 4;
-}
 message ArchitectureInfoProto {
   string status = 1;
   string device_arch = 2;

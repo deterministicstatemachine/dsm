@@ -16108,61 +16108,6 @@ proto3.util.setEnumType(InitFailed_Reason, "dsm.InitFailed.Reason", [
 ]);
 
 /**
- * @generated from message dsm.ThermalStateProto
- */
-export class ThermalStateProto extends Message<ThermalStateProto> {
-  /**
-   * @generated from field: string health = 1;
-   */
-  health = "";
-
-  /**
-   * @generated from field: int32 status_code = 2;
-   */
-  statusCode = 0;
-
-  /**
-   * @generated from field: string description = 3;
-   */
-  description = "";
-
-  /**
-   * @generated from field: string recommendation = 4;
-   */
-  recommendation = "";
-
-  constructor(data?: PartialMessage<ThermalStateProto>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.ThermalStateProto";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "health", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 2, name: "status_code", kind: "scalar", T: 5 /* ScalarType.INT32 */ },
-    { no: 3, name: "description", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 4, name: "recommendation", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ThermalStateProto {
-    return new ThermalStateProto().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ThermalStateProto {
-    return new ThermalStateProto().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ThermalStateProto {
-    return new ThermalStateProto().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: ThermalStateProto | PlainMessage<ThermalStateProto> | undefined, b: ThermalStateProto | PlainMessage<ThermalStateProto> | undefined): boolean {
-    return proto3.util.equals(ThermalStateProto, a, b);
-  }
-}
-
-/**
  * @generated from message dsm.ArchitectureInfoProto
  */
 export class ArchitectureInfoProto extends Message<ArchitectureInfoProto> {
@@ -16940,6 +16885,85 @@ export class RecoveryResumeResponse extends Message<RecoveryResumeResponse> {
 
   static equals(a: RecoveryResumeResponse | PlainMessage<RecoveryResumeResponse> | undefined, b: RecoveryResumeResponse | PlainMessage<RecoveryResumeResponse> | undefined): boolean {
     return proto3.util.equals(RecoveryResumeResponse, a, b);
+  }
+}
+
+/**
+ * Internal codec for `dsm::recovery::tombstone::TombstoneReceipt` — the
+ * SPHINCS+-signed device-invalidation receipt. Replaces prior bincode
+ * serialization so recovery state stays on the protobuf-only wire.
+ *
+ * @generated from message dsm.TombstoneReceiptProto
+ */
+export class TombstoneReceiptProto extends Message<TombstoneReceiptProto> {
+  /**
+   * @generated from field: string device_id = 1;
+   */
+  deviceId = "";
+
+  /**
+   * @generated from field: bytes old_smt_root = 2;
+   */
+  oldSmtRoot = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 old_counter = 3;
+   */
+  oldCounter = protoInt64.zero;
+
+  /**
+   * @generated from field: bytes old_rollup_hash = 4;
+   */
+  oldRollupHash = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 tick = 5;
+   */
+  tick = protoInt64.zero;
+
+  /**
+   * SPX256f = 49_856 bytes
+   *
+   * @generated from field: bytes signature = 6;
+   */
+  signature = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes tombstone_hash = 7;
+   */
+  tombstoneHash = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<TombstoneReceiptProto>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.TombstoneReceiptProto";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "device_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 2, name: "old_smt_root", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "old_counter", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 4, name: "old_rollup_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "tick", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 6, name: "signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 7, name: "tombstone_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): TombstoneReceiptProto {
+    return new TombstoneReceiptProto().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): TombstoneReceiptProto {
+    return new TombstoneReceiptProto().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): TombstoneReceiptProto {
+    return new TombstoneReceiptProto().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: TombstoneReceiptProto | PlainMessage<TombstoneReceiptProto> | undefined, b: TombstoneReceiptProto | PlainMessage<TombstoneReceiptProto> | undefined): boolean {
+    return proto3.util.equals(TombstoneReceiptProto, a, b);
   }
 }
 
