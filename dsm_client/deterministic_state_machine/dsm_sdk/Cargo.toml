@@ -168,7 +168,7 @@ android_logger = "0.13.3"
 prost-types = "0.12"
 
 [dev-dependencies]
-criterion = { version = "0.5.1", features = ["async_tokio", "html_reports"] }
+criterion = { version = "0.8.2", features = ["async_tokio", "html_reports"] }
 mockall = "0.14.0"
 tempfile = "3.10.0"
 test-log = { version = "0.2.14", features = ["trace"] }
