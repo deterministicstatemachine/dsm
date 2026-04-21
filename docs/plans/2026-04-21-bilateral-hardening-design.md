@@ -1,8 +1,79 @@
 # Bilateral Hardening, Race-Condition Audit & Test Coverage
 
 Date: 2026-04-21
-Status: design approved (checkpointed execution)
+Status: approved with pre-Phase-1 amendments (see "Amendments" section below)
 Author: Claude (Opus 4.7) for Brandon
+
+## Amendments (2026-04-21 pm, per Brandon review)
+
+The initial plan slightly assumed a test-control surface that does not
+yet exist and under-weighted several first-class audit targets. The
+following amendments apply:
+
+1. **Manual-accept is a process flag, not an in-harness convenience.**
+   The harness does **not** rely on the adapter's auto-reply path. It
+   toggles `set_manual_accept_enabled(true)` and drives accept/reject
+   by calling `BilateralBleHandler` directly on the receiver side.
+   Any "adversarial user-decision timing" is simulated by the harness
+   itself (delay between receiving prepare and issuing accept), not by
+   a nonexistent production control point.
+
+2. **Restart / recovery semantics become a first-class audit lane.**
+   `BilateralBleHandler::restore_sessions_from_storage` already exists
+   and auto-recovers accepted sessions that carry the counterparty
+   signature. Phase 2 audit and Phase 3 tests must cover: restore of
+   persisted Prepared; restore of persisted PendingUserAction; restore
+   of persisted Accepted with and without counterparty signature;
+   duplicate replay after restore. Harness must expose a "simulate
+   restart" shim.
+
+3. **Chain-tip lifecycle is elevated above generic perf work.**
+   The documented failure mode — clearing reconcile state incorrectly
+   zeros the sender chain tip and the next BLE prepare fails with
+   TipMismatch — makes tip persistence / reconcile / refresh ordering
+   a top-tier invariant to pin with deterministic tests. Moved above
+   Phase 5 perf work in the audit lane ordering.
+
+4. **Same-counterparty exclusion + shared-SMT online/offline lock is
+   a primary audit target.** The process-wide shared SMT and the modal
+   synchronization lock (prevents concurrent online/offline transfers
+   for the same relationship) get their own audit lane. Tests must
+   verify: same-pair exclusion actually blocks; different-pair
+   concurrency still proceeds; online reconcile flag transitions
+   during a live BLE flow behave correctly.
+
+5. **Event ordering guarantees become a first-class audit lane.**
+   Audit must verify: DB write precedes event emission; no committed
+   event is emitted if canonical settle failed; no duplicate committed
+   event on retry / recovery.
+
+6. **`loom` is demoted.** Most of this surface is async orchestration,
+   protobuf framing, SQLite-backed persistence, and process-global
+   state. `loom` is not the right tool. Replace with:
+   - normal multi-threaded tokio tests for handler/session/settlement
+     races,
+   - `proptest` for protocol invariants,
+   - `loom` only if a small pure synchronization unit (e.g. in-memory
+     session map, frame reassembly bookkeeping) is cleanly extracted
+     in its own crate-private module with no async dependencies.
+
+7. **Harness owns logical ticks, not just RNG.** The BLE runtime uses
+   monotonic activity ticks, and restored sessions carry an in-memory
+   wall-clock placeholder. The harness must own both the logical
+   transport tick stream and the restart-restore timing shim so that
+   no test silently depends on `Instant::now()`.
+
+8. **Phase 5 (perf) is hard-gated.** No perf work unless a failing
+   benchmark is paired with either a correctness regression test or
+   a measured hotspot surfaced by Phase 2. The known candidate is
+   settlement-side duplicate detection / scanning; defer until
+   correctness tests exist.
+
+These amendments rewrite the audit lane ordering below. The phase
+structure (1–6) and checkpoint gates remain unchanged.
+
+---
+
 
 ## Goal
 
@@ -88,13 +159,27 @@ PeerPair {
   `TransportInboundMessage` for peer Y, subject to fault-injection rules.
 - Fault injection:
   - `drop_every_nth(n)` / `drop_matching(predicate)` — simulate packet loss.
-  - `delay_frames(Duration)` / `random_delay(Range)` — latency.
+  - `delay_ticks(n)` — logical-tick-based latency (no wall-clock).
   - `reorder_window(n)` — out-of-order chunk delivery within a window.
   - `disconnect_at(event)` — hang up after a specific frame.
   - `corrupt_at(event)` — flip bits in a specific payload.
   - `partition()` / `heal()` — full network partition.
 - `NetworkTap` — observe every frame on the wire for assertion.
 - MTU clamp: force chunking behavior by capping frame size.
+
+**Control surfaces the harness owns (per amendment #1, #2, #7):**
+- `set_manual_accept_enabled(true)` toggle — harness always drives
+  accept/reject by calling the receiver handler directly, never relies
+  on the adapter's auto-reply path.
+- `TestPeer::simulate_restart()` — persist current sessions, drop the
+  handler, rebuild from storage via `restore_sessions_from_storage`,
+  verify auto-recovery where applicable.
+- `TestPeer::tick()` / `advance_tick(n)` — override the logical
+  transport tick stream. Restored sessions get a test-controlled
+  placeholder instead of `Instant::now()`.
+- Modal SMT exclusion mock — ability to simulate "online path currently
+  holds the lock for pair (A↔B)" and assert BLE path blocks
+  accordingly; conversely, pair (A↔C) proceeds.
 
 ### Why not reuse `offline_real_protocol_ble_mock.rs` directly
 
@@ -116,23 +201,57 @@ Gate: Brandon reviews harness API before Phase 2.
 ### Phase 2 — Race & hazard audit ✋
 
 Walk `bilateral_ble_handler.rs` + `bilateral_session.rs` +
-`bilateral_settlement.rs` with a concurrency lens. Audit targets:
+`bilateral_settlement.rs` + `bilateral_tip_sync.rs` with a concurrency
+lens. Audit lanes, in priority order:
 
-1. Session state transitions under concurrent events (Preparing → Prepared
-   → PendingUserAction → Accepted → Committed).
-2. Concurrent prepare from same peer, different counterparty.
-3. Commit-during-abort, reject-during-commit, expiry-during-handshake.
-4. Chunk reassembly race: reorder, duplicate, drop.
-5. Session GC vs fresh session on same counterparty.
-6. Balance projection vs canonical state write ordering.
-7. Event emission ordering (commit event before DB write, or vice versa).
-8. `is_already_settled` scan + its replacement with O(1) lookup.
-9. Reconciliation flag lifecycle.
-10. `bilateral_tip_sync` updates during active session.
+**Lane A — Chain-tip lifecycle (top priority)**
+- Reconcile state clear vs sender chain tip (known TipMismatch mode)
+- Tip persistence across restart / restore
+- Tip refresh ordering vs in-flight prepare/accept/commit
+- `bilateral_tip_sync` updates during active session
+
+**Lane B — Restart / restore / recovery semantics**
+- Restore of persisted Prepared session
+- Restore of persisted PendingUserAction session
+- Restore of persisted Accepted session *with* counterparty signature
+  (auto-recovery path)
+- Restore of persisted Accepted session *without* counterparty signature
+- Duplicate replay after restore
+- In-memory wall-clock placeholder on restored sessions — ensure no
+  production path depends on it
+
+**Lane C — Same-counterparty exclusion + shared-SMT online/offline**
+- Same pair, same parent tip, concurrent prepares
+- Same pair, stale restored session vs fresh new session
+- Online reconcile flag transitions during BLE flow
+- Shared-SMT modal lock blocks same-relationship concurrency
+- Shared-SMT modal lock permits different-relationship concurrency
+
+**Lane D — Event ordering guarantees**
+- DB write precedes event emission
+- No `committed` event if canonical settle failed
+- No duplicate `committed` event on retry / recovery
+- No out-of-order event delivery across BilateralPhase transitions
+
+**Lane E — Session state transitions under concurrent events**
+- Preparing → Prepared → PendingUserAction → Accepted → Committed
+- Commit-during-abort, reject-during-commit, expiry-during-handshake
+- Session GC vs fresh session on same counterparty
+- Concurrent prepare from same peer to different counterparty
+
+**Lane F — Chunk reassembly & transport hazards**
+- Reorder, duplicate, drop
+- Corrupt chunk vs reassembly checksum
+- MTU variation across chunk counts
+
+**Lane G — Balance projection vs canonical state**
+- Ordering of `balance_projections` write vs canonical state write
+- `is_already_settled` replay guard (correctness before perf)
 
 Deliverable: `docs/audits/2026-04-21-bilateral-findings.md` ranking
-findings by (confidence × severity). Each finding pins file:line and notes
-whether it's a bug, hardening opportunity, or perf issue.
+findings by (confidence × severity) *within* each lane. Each finding
+pins file:line and notes whether it's a bug, hardening opportunity, or
+perf issue.
 
 Gate: Brandon picks which findings to fix, which to defer.
 
@@ -144,8 +263,12 @@ For each picked finding:
 3. Verify the test now passes and no regressions.
 
 Plus: general concurrency test coverage independent of specific findings,
-using tokio multi-threaded runtime and `loom` where appropriate for
-lock-free claims.
+organized by the Lane A–G audit targets, using tokio multi-threaded
+runtime. `loom` is **not** applied to the orchestration/storage/global-
+state surface (wrong tool). It is only applied to a small extracted
+synchronization unit if one is cleanly isolated in its own module with
+no async dependencies (e.g. in-memory session map, frame reassembly
+bookkeeping).
 
 Deliverable: per-finding commits, growing test suite.
 
@@ -171,16 +294,21 @@ Use the already-present `proptest` dep. Properties to verify:
 
 Deliverable: `tests/bilateral_properties.rs` + `tests/bilateral_concurrency.rs`.
 
-### Phase 5 — Performance micro-benches (optional, informed by Phase 2)
+### Phase 5 — Performance micro-benches (hard-gated, optional)
 
-Using `criterion` on hot paths:
+**Gate:** No perf work lands unless a failing `criterion` benchmark is
+paired with (a) a correctness regression test covering the same path,
+or (b) a measured hotspot surfaced by Phase 2 with concrete evidence.
+
+Candidate paths (only if gate passes):
+- Settlement-side duplicate detection / scanning
+  (`is_already_settled` O(500) scan — known smell, correctness first).
 - SMT leaf update on bilateral advance.
 - Chunk reassembly.
-- Settlement read path (known O(500) scan on `is_already_settled`).
 - Proto encode/decode for commit envelope.
 
-Only optimize where the bench shows meaningful improvement. Pre/post
-numbers in the commit message.
+Pre/post numbers in the commit message. No optimization where the bench
+does not show meaningful improvement.
 
 ### Phase 6 — Audit close-out
 

@@ -2,9 +2,22 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Ship a deterministic two-peer BLE test harness that drives the real 3-phase bilateral commit (Prepare → Accept → Commit) end-to-end without Android, with fault injection (drops, reorders, delays, partitions, corruption) and deterministic RNG. Smoke tests prove it works; subsequent phases (audit, proptest, concurrency) ride on top.
+**Status:** approved with pre-Phase-1 amendments (see design doc
+`2026-04-21-bilateral-hardening-design.md` Amendments section).
 
-**Architecture:** The existing `BleTransportDelegate` trait + `BilateralTransportAdapter` + `BleFrameCoordinator` already provide a clean seam. We build a `bilateral_test_harness` module under `dsm_sdk/tests/common/` that wraps those primitives in a `TestPeer` + `FakeNetwork` + `PeerPair` abstraction. We use `BilateralBleHandler::new_with_smt` so each peer gets an isolated SMT (critical — without it, both "peers" in one process corrupt each other's root). We use `#[serial_test::serial]` + `configure_local_identity_for_receipts` to manage the shared `AppState` (known limitation, called out explicitly and revisited in Phase 2/3 if it blocks).
+**Goal:** Ship a deterministic two-peer BLE test harness that drives the real 3-phase bilateral commit (Prepare → Accept → Commit) end-to-end without Android, with fault injection (drops, reorders, delays, partitions, corruption) and the control surfaces required by Phase 2 audit lanes: **manual-accept toggle**, **simulate-restart shim**, **logical-tick stream**, and **modal-exclusion mock**. Smoke tests prove it works; Phase 2 audit and Phase 3 concurrency tests ride on top.
+
+**Architecture:** The existing `BleTransportDelegate` trait + `BilateralTransportAdapter` + `BleFrameCoordinator` already provide a clean seam. We build a `bilateral_test_harness` module under `dsm_sdk/tests/common/` that wraps those primitives in a `TestPeer` + `FakeNetwork` + `PeerPair` abstraction. We use `BilateralBleHandler::new_with_smt` so each peer gets an isolated SMT (critical — without it, both "peers" in one process corrupt each other's root). We use `#[serial_test::serial]` + per-peer `configure_identity_as_local()` to manage the shared `AppState` (known limitation).
+
+**Critical correctness rules (per design doc amendments):**
+- The harness **never** relies on the adapter's auto-reply path for accept.
+  It sets `dsm_sdk::bluetooth::set_manual_accept_enabled(true)` and drives
+  accept/reject by calling the receiver `BilateralBleHandler` directly
+  (`create_prepare_accept_envelope` / `create_prepare_reject_envelope_with_cleanup`).
+- The harness owns the logical transport tick stream. No test body calls
+  `Instant::now()` directly.
+- The harness exposes a `simulate_restart()` shim that persists, drops,
+  and rebuilds a peer's handler via `BilateralBleHandler::restore_sessions_from_storage`.
 
 **Tech Stack:**
 - Rust async (`tokio`)
@@ -567,11 +580,17 @@ fully in-process 3-phase commit drives — no Android, no BLE radio."
 
 ---
 
-## Task 4: Full happy-path 3-phase transfer test
+## Task 4: Full happy-path 3-phase transfer test (manual-accept driven)
 
 **Files:**
 - Modify: `dsm_client/deterministic_state_machine/dsm_sdk/tests/common/harness.rs`
 - Modify: `dsm_client/deterministic_state_machine/dsm_sdk/tests/bilateral_harness_smoke.rs`
+
+**Critical:** The harness **must not** rely on the adapter's auto-reply
+path. It flips `dsm_sdk::bluetooth::set_manual_accept_enabled(true)` and
+the test body drives accept by calling `handler_b.create_prepare_accept_envelope()`
+directly. This matches the amendment in the design doc and the existing
+`offline_real_protocol_ble_mock.rs` pattern.
 
 **Step 1: Write the failing test**
 
@@ -580,6 +599,7 @@ fully in-process 3-phase commit drives — no Android, no BLE radio."
 #[serial]
 async fn full_3phase_commit_happy_path() {
     ensure_db();
+    dsm_sdk::bluetooth::set_manual_accept_enabled(true); // harness owns accept
     let mut pair = PeerPair::spawn("alice", "bob").await;
     pair.establish_relationship().await;
     pair.alice.seed_era_balance(10_000);
@@ -587,30 +607,35 @@ async fn full_3phase_commit_happy_path() {
 
     let op = common::ops::transfer(&pair.alice, &pair.bob, 10, "ERA");
 
-    // Prepare: alice -> bob (bob auto-accepts because manual_accept is off in tests)
+    // 1. Prepare: alice builds, pushes to bob.
     pair.alice.configure_identity_as_local();
     let prepare = pair.alice.adapter
         .create_prepare_message(pair.bob.device_id, op.clone(), 300)
-        .await
-        .expect("prepare");
+        .await.expect("prepare");
     net.send_from_alice(BleFrameType::BilateralPrepare, prepare).await;
     net.deliver_all().await.expect("prepare delivered");
+    // With manual_accept on, bob has NOT auto-replied. No accept chunk queued.
+    assert_eq!(net.pending_chunks(), 0, "no auto-reply with manual_accept on");
 
-    // Accept: fetch pending commitment on Alice; Bob creates accept; push back.
+    // 2. Accept: harness drives bob's accept directly via the handler.
     let commitment = {
         let m = pair.alice.manager.read().await;
-        *m.list_pending_commitments().first().expect("pending")
+        *m.list_pending_commitments().first().expect("pending on alice")
     };
+    pair.bob.configure_identity_as_local();
     let accept = pair.bob.handler
         .create_prepare_accept_envelope(commitment).await
-        .expect("accept");
-    pair.bob.configure_identity_as_local();
+        .expect("bob accept envelope");
     net.send_from_bob(BleFrameType::BilateralPrepareResponse, accept).await;
-    net.deliver_all().await.expect("accept delivered");
 
-    // Confirm + Ack round-trips are driven by the adapter via deliver_all()
-    // (handle_prepare_response → BilateralConfirm → handle_confirm_request
-    // → BilateralCommitResponse → completes both sides).
+    // 3. Deliver: adapter on alice receives accept → produces BilateralConfirm.
+    pair.alice.configure_identity_as_local();
+    net.deliver_all().await.expect("accept+confirm delivered");
+
+    // 4. Confirm lands on bob: harness drives bob's commit-response handler.
+    //    (Adapter on bob does NOT auto-handle BilateralConfirm — it defers
+    //    to handle_confirm_request directly to keep the control surface
+    //    explicit.) The test drives the final ack if needed.
 
     // Both sides finalized
     {
@@ -629,8 +654,9 @@ async fn full_3phase_commit_happy_path() {
 
 **Step 2: Run to verify it fails**
 
-Run: `cargo test -p dsm_sdk --test bilateral_harness_smoke full_3phase_commit_happy_path`
-Expected: FAIL — most likely `configure_identity_as_local` is not defined, or the confirm envelope path fails because AppState isn't set before alice processes the prepare response.
+Run: `cargo test -p dsm_sdk --test bilateral_harness_smoke full_3phase_commit_happy_path -- --nocapture`
+Expected: FAIL (either `configure_identity_as_local` not defined, or
+confirm/ack flow not closed).
 
 **Step 3: Implement `configure_identity_as_local` on `TestPeer`**
 
@@ -652,14 +678,22 @@ impl TestPeer {
 }
 ```
 
-Document the AppState serialization constraint inline near the `TestPeer` definition.
+If the final `BilateralConfirm` → `BilateralCommitResponse` round-trip
+is not closed by `deliver_all` (because the adapter does not route
+`BilateralConfirm` and we want the control surface explicit), extend
+the test body to drive it: pop the confirm envelope from
+`net.tap()`/outbound queue, call
+`handler_b.handle_confirm_request(&confirm_payload)`, push the ack back
+through `net.send_from_bob(BilateralCommitResponse, ack)`, and
+`net.deliver_all()`. The `offline_real_protocol_ble_mock.rs` file shows
+the exact pattern.
+
+Document the AppState serialization constraint inline.
 
 **Step 4: Run to verify it passes**
 
 Run: `cargo test -p dsm_sdk --test bilateral_harness_smoke full_3phase_commit_happy_path -- --nocapture`
 Expected: PASS.
-
-If it fails because `deliver_all()` doesn't know to swap identity between steps: add an `on_before_deliver` callback to `FakeNetwork` OR have the test drive the phases step-wise and call `configure_identity_as_local` between them. Prefer the step-wise variant (matches the existing mock pattern and keeps `FakeNetwork` dumb).
 
 **Step 5: Commit**
 
@@ -669,8 +703,9 @@ git add dsm_client/deterministic_state_machine/dsm_sdk/tests/common/harness.rs \
 git commit -m "test(bilateral): harness drives full 3-phase commit without devices
 
 Happy-path transfer (prepare → accept → confirm → commit response) runs
-entirely in process via FakeNetwork. Both peer chain tips advance. This
-is the baseline all Phase 2+ tests will build on."
+entirely in process via FakeNetwork. Manual-accept toggle is on; test
+body drives each phase via the receiver handler directly. Both peer
+chain tips advance. Baseline for Phase 2 audit and Phase 3 concurrency."
 ```
 
 ---
@@ -1099,7 +1134,226 @@ Transport-only delay model. No wall-clock; protocol invariant preserved."
 
 ---
 
-## Task 12: Document the harness API + AppState constraint
+## Task 12: Manual-accept guard helper (RAII toggle)
+
+**Files:**
+- Modify: `dsm_client/deterministic_state_machine/dsm_sdk/tests/common/harness.rs`
+- Modify: `dsm_client/deterministic_state_machine/dsm_sdk/tests/bilateral_harness_smoke.rs`
+
+**Why:** `set_manual_accept_enabled` is a process-global flag. Tests
+that forget to reset it pollute sibling tests. An RAII guard makes the
+contract visible and crash-safe.
+
+**Step 1: Write the failing test**
+
+```rust
+#[tokio::test]
+#[serial]
+async fn manual_accept_guard_restores_prior_value_on_drop() {
+    // Assume process flag starts false.
+    assert!(!dsm_sdk::bluetooth::manual_accept_enabled());
+    {
+        let _guard = common::harness::ManualAcceptGuard::enabled();
+        assert!(dsm_sdk::bluetooth::manual_accept_enabled());
+    }
+    assert!(!dsm_sdk::bluetooth::manual_accept_enabled(), "guard restored state");
+}
+```
+
+**Step 2: Run to verify it fails**
+
+Expected: FAIL (`ManualAcceptGuard` not defined).
+
+**Step 3: Implement**
+
+```rust
+// tests/common/harness.rs
+pub struct ManualAcceptGuard {
+    prior: bool,
+}
+
+impl ManualAcceptGuard {
+    pub fn enabled() -> Self {
+        let prior = dsm_sdk::bluetooth::manual_accept_enabled();
+        dsm_sdk::bluetooth::set_manual_accept_enabled(true);
+        Self { prior }
+    }
+}
+
+impl Drop for ManualAcceptGuard {
+    fn drop(&mut self) {
+        dsm_sdk::bluetooth::set_manual_accept_enabled(self.prior);
+    }
+}
+```
+
+**Step 4: Run to verify it passes**
+
+Expected: PASS.
+
+**Step 5: Refactor Task 4 to use the guard**
+
+Replace the raw `set_manual_accept_enabled(true)` in Task 4's test body
+with `let _guard = ManualAcceptGuard::enabled();` so the restore is
+automatic even on panic. Re-run Task 4's test to confirm still green.
+
+**Step 6: Commit**
+
+```bash
+git add dsm_client/deterministic_state_machine/dsm_sdk/tests/common/harness.rs \
+        dsm_client/deterministic_state_machine/dsm_sdk/tests/bilateral_harness_smoke.rs
+git commit -m "test(bilateral): ManualAcceptGuard RAII helper for process flag
+
+Prevents test cross-contamination on the manual_accept global. Drop
+restores prior value on panic. Refactors Task 4 to use the guard."
+```
+
+---
+
+## Task 13: simulate_restart() shim via restore_sessions_from_storage
+
+**Files:**
+- Modify: `dsm_client/deterministic_state_machine/dsm_sdk/tests/common/harness.rs`
+- Modify: `dsm_client/deterministic_state_machine/dsm_sdk/tests/bilateral_harness_smoke.rs`
+
+**Why:** Phase 2 Lane B requires restart/restore audit. Harness must
+expose a `simulate_restart()` that drops the in-memory handler state
+and rebuilds it from SQLite via `BilateralBleHandler::restore_sessions_from_storage`.
+
+**Step 1: Write the failing test**
+
+```rust
+#[tokio::test]
+#[serial]
+async fn simulate_restart_reloads_prepared_sessions_from_storage() {
+    ensure_db();
+    let _guard = common::harness::ManualAcceptGuard::enabled();
+    let mut pair = PeerPair::spawn("alice", "bob").await;
+    pair.establish_relationship().await;
+    pair.alice.seed_era_balance(10_000);
+    let mut net = pair.wire_network();
+
+    // Drive prepare only — leave bob in Prepared phase without accepting.
+    pair.alice.configure_identity_as_local();
+    let op = common::ops::transfer(&pair.alice, &pair.bob, 10, "ERA");
+    let prepare = pair.alice.adapter
+        .create_prepare_message(pair.bob.device_id, op, 300)
+        .await.unwrap();
+    net.send_from_alice(BleFrameType::BilateralPrepare, prepare).await;
+    net.deliver_all().await.unwrap();
+
+    // Bob restarts — drop handler, rebuild from storage.
+    pair.bob.simulate_restart().await.expect("restart restores sessions");
+
+    // After restore, bob should still know about the prepared session.
+    let sessions = pair.bob.handler.list_sessions().await;
+    assert!(!sessions.is_empty(), "prepared session restored after restart");
+}
+```
+
+**Step 2: Run to verify it fails**
+
+Expected: FAIL (`simulate_restart` not defined; `list_sessions` may also
+need a public shim — check existing API first).
+
+**Step 3: Implement**
+
+```rust
+// tests/common/harness.rs
+impl TestPeer {
+    /// Simulate a process restart: drop the in-memory handler state and
+    /// rebuild it from storage. Mirrors what production does at boot.
+    ///
+    /// Identity (manager, keypair, device_id, genesis_hash, SMT) is
+    /// preserved because a real restart would reload those from the same
+    /// persisted sources.
+    pub async fn simulate_restart(&mut self) -> Result<usize, dsm::types::error::DsmError> {
+        let new_handler = Arc::new(
+            BilateralBleHandler::new_with_smt(
+                self.manager.clone(),
+                self.device_id,
+                self.smt.clone(),
+            ),
+        );
+        let restored = new_handler.restore_sessions_from_storage().await?;
+        self.handler = new_handler;
+        self.adapter = Arc::new(BilateralTransportAdapter::new(self.handler.clone()));
+        Ok(restored)
+    }
+}
+```
+
+If `list_sessions` is not a public API on `BilateralBleHandler`, add
+a `PeerPair`-local test helper that queries SQLite directly via
+`dsm_sdk::storage::client_db::get_all_bilateral_sessions()` and returns
+the count for the peer's device_id.
+
+**Step 4: Run to verify it passes**
+
+Expected: PASS (or a clear error pointing at an actual production API
+gap, at which point: pause and surface to Brandon).
+
+**Step 5: Commit**
+
+```bash
+git add dsm_client/deterministic_state_machine/dsm_sdk/tests/common/harness.rs \
+        dsm_client/deterministic_state_machine/dsm_sdk/tests/bilateral_harness_smoke.rs
+git commit -m "test(bilateral): TestPeer::simulate_restart via restore_sessions_from_storage
+
+Enables Phase 2 Lane B (restart/restore/recovery audit). Drops in-memory
+handler, rebuilds from SQLite — matches production boot flow."
+```
+
+---
+
+## Task 14: Modal-SMT exclusion mock surface
+
+**Files:**
+- Modify: `dsm_client/deterministic_state_machine/dsm_sdk/tests/common/harness.rs`
+- Create: `dsm_client/deterministic_state_machine/dsm_sdk/tests/bilateral_modal_exclusion_smoke.rs`
+
+**Why:** Phase 2 Lane C requires testing the shared-SMT modal lock —
+same-relationship online/offline exclusion. Harness must let a test
+simulate "the online path is currently holding the modal lock for pair
+(A↔B)" and assert the BLE path behaves accordingly.
+
+This task builds the *surface* to drive such tests. The actual
+exclusion-behavior assertions are Phase 2 work.
+
+**Step 1: Investigate**
+
+Read `dsm_sdk/src/bluetooth/bilateral_ble_handler.rs` and grep for
+`modal_lock`, `modal_synchronization`, or equivalent exclusion primitive
+(earlier grep showed it lives in `bilateral_ble_handler.rs` +
+`tests/mixed_protocol_test.rs`). Identify the existing API:
+
+- Is there a public "acquire for online" / "acquire for BLE" helper?
+- Or is it purely internal via `modal_lock.lock().await` inside the
+  handler?
+
+Depending on what's there, either:
+- (a) Expose a `PeerPair::simulate_online_lock_held(counterparty)` that
+  holds the real lock for the duration of a closure (if the API lets us).
+- (b) Document that modal exclusion is internal and Phase 2 must either
+  exercise it via the real online handler (out of scope for Phase 1) or
+  audit it via direct code inspection. In this case, **defer** Task 14
+  to Phase 2 with a note.
+
+**Step 2: Choose path and commit**
+
+If (a): write the helper + a smoke test proving lock acquisition blocks.
+If (b): commit a short note at `tests/common/README.md` explaining the
+gap and deferring to Phase 2.
+
+```bash
+git add dsm_client/deterministic_state_machine/dsm_sdk/tests/common \
+        dsm_client/deterministic_state_machine/dsm_sdk/tests/bilateral_modal_exclusion_smoke.rs
+git commit -m "test(bilateral): modal-SMT exclusion mock surface — [implemented|deferred with note]"
+```
+
+---
+
+## Task 15: Document the harness API + AppState constraint
 
 **Files:**
 - Create: `dsm_client/deterministic_state_machine/dsm_sdk/tests/common/README.md`
@@ -1129,7 +1383,7 @@ and why each peer needs its own SMT."
 
 ---
 
-## Task 13: Phase 1 exit — run the full suite + announce gate
+## Task 16: Phase 1 exit — run the full suite + announce gate
 
 **Files:** none
 
@@ -1168,8 +1422,19 @@ Do not proceed to Phase 2 (audit) without Brandon's review. Phase 1 exit is:
 
 ## Done means
 
-- 10–12 commits, one per task.
-- `tests/bilateral_harness_smoke.rs` exists with at least: happy-path, drop, reorder, partition+heal, corrupt, tap, delay.
-- `tests/common/` contains `mod.rs`, `harness.rs`, `fake_network.rs`, `ops.rs`, `README.md`.
+- ~13–16 commits, one per task.
+- `tests/bilateral_harness_smoke.rs` exists with at least: happy-path
+  (manual-accept driven), drop, reorder, partition+heal, corrupt, tap,
+  delay, manual-accept-guard, simulate-restart.
+- `tests/common/` contains `mod.rs`, `harness.rs`, `fake_network.rs`,
+  `ops.rs`, `README.md`.
+- `ManualAcceptGuard`, `TestPeer::simulate_restart`, and tick control
+  API are public within the test-common module.
+- Modal-exclusion mock surface either exists (smoke test green) or is
+  explicitly deferred to Phase 2 with a one-paragraph note at
+  `tests/common/README.md`.
+- No `Instant::now()` calls in test bodies; all timing flows through
+  `FakeNetwork`'s logical tick stream.
 - Full SDK + core suites still pass.
-- Phase 1 summary posted. Brandon reviews. Phase 2 gate opens or Phase 1 revises.
+- Phase 1 summary posted. Brandon reviews. Phase 2 gate opens or Phase 1
+  revises.
