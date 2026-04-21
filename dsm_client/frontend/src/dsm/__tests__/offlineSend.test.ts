@@ -3,13 +3,10 @@ import * as pb from '../../proto/dsm_app_pb';
 import { emit } from '../EventBridge';
 
 function wrapSuccessEnvelope(data: Uint8Array): Uint8Array {
-  return (global as any).createDsmBridgeSuccessResponse(data);
-}
-
-function withRouterPrefix(data: Uint8Array): Uint8Array {
-  const out = new Uint8Array(8 + data.length);
-  out.set(data, 8);
-  return out;
+  const ingressResp = new pb.IngressResponse({
+    result: { case: 'okBytes', value: data },
+  });
+  return (global as any).createDsmBridgeSuccessResponse(ingressResp.toBinary());
 }
 
 function frameEnvelope(envelope: pb.Envelope): Uint8Array {
@@ -22,12 +19,19 @@ function frameEnvelope(envelope: pb.Envelope): Uint8Array {
 
 function decodeRouterInvoke(reqBytes: Uint8Array): { route: string; args: Uint8Array } {
   const req = pb.BridgeRpcRequest.fromBinary(reqBytes);
-  if (req.payload.case !== 'appRouter') {
-    throw new Error(`expected appRouter payload, got ${req.payload.case}`);
+  if (req.method !== 'nativeBoundaryIngress') {
+    throw new Error(`expected nativeBoundaryIngress method, got ${req.method}`);
+  }
+  if (req.payload.case !== 'bytes') {
+    throw new Error(`expected bytes payload, got ${req.payload.case}`);
+  }
+  const ingressReq = pb.IngressRequest.fromBinary(req.payload.value.data);
+  if (ingressReq.operation.case !== 'routerInvoke') {
+    throw new Error(`expected routerInvoke operation, got ${ingressReq.operation.case}`);
   }
   return {
-    route: req.payload.value.methodName,
-    args: req.payload.value.args,
+    route: ingressReq.operation.value.method,
+    args: ingressReq.operation.value.args,
   };
 }
 
@@ -41,7 +45,7 @@ function prepareResponseBytes(commitmentHash: Uint8Array): Uint8Array {
       }),
     },
   });
-  return wrapSuccessEnvelope(withRouterPrefix(frameEnvelope(env)));
+  return wrapSuccessEnvelope(frameEnvelope(env));
 }
 
 describe('offlineSend', () => {
@@ -126,7 +130,7 @@ describe('offlineSend', () => {
           value: new pb.BilateralPrepareReject({ reason: 'offline rejected' }),
         },
       });
-      return wrapSuccessEnvelope(withRouterPrefix(frameEnvelope(env)));
+      return wrapSuccessEnvelope(frameEnvelope(env));
     };
 
     await expect(dsm.offlineSend({ to, amount: 1n, tokenId: 'ERA' })).resolves.toEqual(
