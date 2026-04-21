@@ -548,6 +548,8 @@ pub fn compute_protocol_transition_commitment(payload_bytes: &[u8]) -> [u8; 32] 
 mod tests {
     use super::*;
     use dsm::merkle::sparse_merkle_tree::SmtInclusionProof;
+    use dsm::types::device_state::DeviceState;
+    use dsm::types::operations::Operation;
 
     // ── derive_relationship_key ──
 
@@ -719,6 +721,100 @@ mod tests {
         let s1 = derive_stitched_receipt_sigma(&[b"ab", b"cd"]);
         let s2 = derive_stitched_receipt_sigma(&[b"abc", b"d"]);
         assert_ne!(s1, s2);
+    }
+
+    #[test]
+    fn first_ever_receipt_requires_merkle_pre_root_not_cas_parent_root() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+
+        let devid_a = [0x41u8; 32];
+        let devid_b = [0x42u8; 32];
+        let genesis = [0x43u8; 32];
+        let public_key = vec![0x44u8; 64];
+        let initial_tip = [0x45u8; 32];
+
+        let storage_dir = std::env::temp_dir().join(format!(
+            "dsm_receipts_test_{}",
+            std::process::id()
+        ));
+        let _ = crate::storage_utils::set_storage_base_dir(storage_dir);
+
+        crate::sdk::app_state::AppState::set_identity_info(
+            devid_a.to_vec(),
+            public_key.clone(),
+            genesis.to_vec(),
+            [0u8; 32].to_vec(),
+        );
+
+        let device_tree_commitment = Some(DeviceTreeAcceptanceCommitment::from_root(
+            dsm::common::device_tree::DeviceTree::single(devid_a).root(),
+        ));
+
+        let state = DeviceState::new(genesis, devid_a, public_key, 64);
+        let rel_key = dsm::verification::smt_replace_witness::compute_smt_key(&devid_a, &devid_b);
+        let outcome = state
+            .advance(
+                rel_key,
+                devid_b,
+                Operation::Noop,
+                vec![0x46; 32],
+                None,
+                &[],
+                Some(initial_tip),
+                None,
+            )
+            .expect("first-ever advance should succeed");
+
+        assert_ne!(
+            outcome.parent_r_a,
+            outcome.smt_proofs.pre_root,
+            "first-ever advance must distinguish CAS parent root from Merkle proof pre_root"
+        );
+
+        let parent_tip = outcome
+            .smt_proofs
+            .parent_proof
+            .value
+            .expect("first-ever parent proof should carry seeded initial tip");
+        let child_tip = outcome.new_chain_state.compute_chain_tip();
+        let parent_proof = outcome.smt_proofs.parent_proof.to_bytes();
+        let child_proof = outcome.smt_proofs.child_proof.to_bytes();
+
+        let receipt_with_proof_root = build_bilateral_receipt_with_smt(
+            devid_a,
+            devid_b,
+            parent_tip,
+            child_tip,
+            outcome.smt_proofs.pre_root,
+            outcome.child_r_a,
+            parent_proof.clone(),
+            child_proof.clone(),
+            device_tree_commitment.clone(),
+        )
+        .expect("receipt with Merkle pre_root");
+        assert!(verify_receipt_bytes(
+            &receipt_with_proof_root,
+            device_tree_commitment.clone(),
+        ));
+
+        let receipt_with_cas_root = build_bilateral_receipt_with_smt(
+            devid_a,
+            devid_b,
+            parent_tip,
+            child_tip,
+            outcome.parent_r_a,
+            outcome.child_r_a,
+            parent_proof,
+            child_proof,
+            device_tree_commitment.clone(),
+        )
+        .expect("receipt with CAS parent root");
+        assert!(
+            !verify_receipt_bytes(&receipt_with_cas_root, device_tree_commitment),
+            "using parent_r_a should fail receipt verification on first-ever advances"
+        );
     }
 
     // ── encode_protocol_transition_payload ──
