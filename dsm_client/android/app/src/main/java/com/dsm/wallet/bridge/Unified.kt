@@ -484,6 +484,12 @@ object Unified {
     @Keep @JvmStatic fun resolveBleAddressForDeviceIdBin(deviceId: ByteArray): ByteArray =
         UnifiedNativeApi.resolveBleAddressForDeviceIdBin(deviceId)
     /**
+     * Resolve the persisted peer identity for a BLE address.
+     * Returns 64 bytes ordered as [device_id(32)][genesis_hash(32)], or empty if unknown.
+     */
+    @Keep @JvmStatic fun resolvePeerIdentityForBleAddressBin(address: String): ByteArray =
+        UnifiedNativeApi.resolvePeerIdentityForBleAddressBin(address)
+    /**
      * Retrieve 32-byte local chain tip for a remote device (for identity payload composition).
      * @param deviceAddress MAC address or hex device ID
      * @return 32-byte chain tip or empty array if unavailable

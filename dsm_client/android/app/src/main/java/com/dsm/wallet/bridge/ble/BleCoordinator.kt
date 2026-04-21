@@ -4,6 +4,7 @@ import android.bluetooth.BluetoothDevice
 import android.content.Context
 import android.util.Log
 import com.dsm.wallet.bridge.BleOutboxRepository
+import com.dsm.wallet.bridge.UnifiedContactBridge
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
@@ -66,6 +67,9 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
     // identity observation (pairing + reconnect). Enables O(1) resolution
     // of stale addresses to the peer's current address.
     internal val addressIndex = java.util.concurrent.ConcurrentHashMap<String, PeerIdentity>()
+    internal var persistedIdentityLookup: (String) -> PeerIdentity? = { address ->
+        decodePersistedPeerIdentity(UnifiedContactBridge.resolvePeerIdentityForBleAddressBin(address))
+    }
 
     // Internal components
     internal var permissionsGate = BlePermissionsGate(context)
@@ -136,6 +140,16 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
                     com.dsm.wallet.bridge.Unified.initBleCoordinator(context.applicationContext)
                 }
             }
+        }
+
+        internal fun decodePersistedPeerIdentity(bytes: ByteArray): PeerIdentity? {
+            if (bytes.size != 64) {
+                return null
+            }
+            return PeerIdentity(
+                deviceId = bytes.copyOfRange(0, 32),
+                genesisHash = bytes.copyOfRange(32, 64),
+            )
         }
     }
 
@@ -1079,13 +1093,22 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
         }?.key
     }
 
+    private fun hydratePersistedIdentity(address: String): PeerIdentity? {
+        addressIndex[address]?.let { return it }
+        val identity = persistedIdentityLookup(address) ?: return null
+        addressIndex[address] = identity
+        Log.i("BleCoordinator", "hydratePersistedIdentity: $address → ${identity.key.take(16)}...")
+        return identity
+    }
+
     /**
      * Resolve a BLE address (potentially stale) to the current PeerSession.
      *
      * Resolution order:
      * 1. Direct peers[address] lookup (address is current)
-     * 2. addressIndex[address] → PeerIdentity → find peer with matching identity
-     * 3. findAnyReadySessionAddress() fallback (single-peer scenario)
+     * 2. persisted contacts hydrate addressIndex when the app restarted on a stale BLE MAC
+     * 3. addressIndex[address] → PeerIdentity → find peer with matching identity
+     * 4. findAnyReadySessionAddress() fallback (single-peer scenario)
      *
      * Returns the PeerSession and its current address, or null if unknown.
      */
@@ -1098,8 +1121,12 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
             // Entry exists but is a dead shell — fall through to identity lookup
         }
 
-        // 2. Identity-indexed lookup — address is stale but identity is known
-        addressIndex[address]?.let { identity ->
+        // 2. Hydrate from persisted contacts so a stale BLE address from SQLite still
+        // carries enough identity to match a freshly rediscovered rotated RPA.
+        val targetIdentity = addressIndex[address] ?: hydratePersistedIdentity(address)
+
+        // 3. Identity-indexed lookup — address is stale but identity is known
+        targetIdentity?.let { identity ->
             for ((addr, peer) in peers) {
                 if (peer.identity == identity && (peer.hasActiveClientSession || peer.isServerClient)) {
                     Log.i("BleCoordinator", "resolveSession: stale $address → identity → current $addr")
@@ -1108,7 +1135,7 @@ class BleCoordinator private constructor(private val context: Context) : BleScan
             }
         }
 
-        // 3. Fallback — any ready session (single-peer scenario)
+        // 4. Fallback — any ready session (single-peer scenario)
         findAnyReadySessionAddress()?.let { freshAddr ->
             if (freshAddr != address) {
                 Log.i("BleCoordinator", "resolveSession: fallback $address → $freshAddr")
