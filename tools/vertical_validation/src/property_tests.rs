@@ -180,11 +180,8 @@ fn build_policy_backed_token_harness(seed_bytes: &[u8; 32], pk: &[u8]) -> TokenP
     let mut state = create_test_state(seed_bytes, pk);
     let recipient = vec![0xBB; 32];
     let policy_commit = dsm::core::token::resolve_policy_commit(PROPERTY_TEST_TOKEN_ID);
-    let sender_key = dsm::core::token::derive_canonical_balance_key(
-        &policy_commit,
-        pk,
-        PROPERTY_TEST_TOKEN_ID,
-    );
+    let sender_key =
+        dsm::core::token::derive_canonical_balance_key(&policy_commit, pk, PROPERTY_TEST_TOKEN_ID);
     let recipient_key = dsm::core::token::derive_canonical_balance_key(
         &policy_commit,
         &recipient,

@@ -34,6 +34,33 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 _Changes on `master` not yet tagged._
 
+---
+
+## [0.1.0-beta.3] — 2026-04-21
+
+### Added
+- **BLE identity-read recovery path** — Android and JNI now record GATT identity reads and use persisted contact identity data to recover stale BLE address resolution more reliably.
+- **Expanded bilateral hardening coverage** — additional address-resolution tests, session-lifecycle locking, and focused regression tests were added around BLE persistence, receipt handling, and settlement recovery.
+- **More formal verification coverage** — vertical-validation property tests and implementation traces were expanded and kept aligned with the current DeviceState-based execution path.
+
+### Changed
+- **Android beta version alignment** — the release APK now reports `versionCode = 3` and `versionName = 0.1.0-beta.3` to match the tagged beta.3 release train.
+- **Wallet UI readability** — transaction cards now render aliases and amounts more clearly, expanded views stop over-shortening receipt/hash content, and wallet/faucet card sizing was tightened for smaller screens.
+- **Bridge readiness sequencing** — frontend identity loading now waits for `dsm-identity-ready` instead of the earlier bridge-ready event so startup hydration follows the actual protocol boundary.
+- **Core execution path simplification** — more legacy state-machine and relationship-manager residue was removed as bilateral and token paths were consolidated onto canonical DeviceState/SMT-based execution.
+
+### Fixed
+- **Online send receipt verification** — `wallet.send` now uses `smt_proofs.pre_root` when constructing first-advance receipt commitments, fixing false `SMT proofs are invalid` failures on online sends.
+- **Sender-session persistence** — BLE sender session registration now fails closed on persistence errors instead of continuing with a non-canonical in-memory-only session.
+- **Contact chain-tip export** — persisted contact chain tips and BLE addresses are now surfaced correctly to the frontend instead of being dropped behind stale in-memory state.
+- **Settlement stale-tip cleanup** — successful bilateral settlement now clears stale observed remote tip claims so converged relationships do not stay blocked behind old live-peer mismatch warnings.
+- **Frontend startup and test regressions** — stale frontend tests were repaired after the ingress migration and identity readiness now reflects the active startup flow.
+
+### Security
+- **Malformed token identifiers reject earlier** — balance-key derivation now hard-fails on malformed token IDs instead of permitting ambiguous key construction.
+- **ThermalStateProto removed** — obsolete reversed C-DBRW transport/schema residue was deleted to keep the live protocol surface singular.
+- **Guardrail tightening** — CI guardrails, flow assertions, and protobuf enforcement were updated for the unified ingress architecture and current fork constraints.
+
 ### Added
 - `dsm-gen` generator and validation workflow improvements for protocol assets and developer tooling
 - Expanded machine-checked proof coverage with an additional Lean 4 crypto-binding module alongside the existing TLAPS/Lean verification harness
