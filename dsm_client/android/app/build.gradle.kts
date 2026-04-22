@@ -113,6 +113,10 @@ android {
                 storePassword = keystorePassword
                 keyAlias = alias
                 keyPassword = keyEntryPassword ?: keystorePassword
+                enableV1Signing = false
+                enableV2Signing = true
+                enableV3Signing = true
+                enableV4Signing = false
             }
         }
     }
