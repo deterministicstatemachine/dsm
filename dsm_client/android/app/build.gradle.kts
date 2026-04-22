@@ -116,7 +116,7 @@ android {
                 enableV1Signing = false
                 enableV2Signing = true
                 enableV3Signing = true
-                enableV4Signing = false
+                enableV4Signing = true
             }
         }
     }
