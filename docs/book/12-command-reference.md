@@ -26,7 +26,7 @@ Run from the repository root. `make help` lists all targets, `make menu` opens a
 | `make android-libs` | Canonical Android JNI build wrapper: runs `cargo ndk` for all 3 Android ABIs (arm64-v8a, armeabi-v7a, x86_64) and mirrors the resulting `.so` files into both `jniLibs/` trees |
 | `make frontend` | Build React frontend (copies assets into Android) |
 | `make android` | Full debug APK: native libs + frontend + Gradle assemble |
-| `make android-release` | Full release APK |
+| `make android-release` | Full release APK; prompts for keystore path, key alias, keystore password, and optional key password in an interactive shell when signing |
 
 ### Install
 

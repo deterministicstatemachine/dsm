@@ -287,7 +287,7 @@ android: android-sdk-config android-libs frontend ## Build fresh debug APK (nati
 .PHONY: android-release
 android-release: android-sdk-config android-libs frontend ## Build fresh release APK
 	@echo "==> Assembling fresh Android release APK..."
-	cd $(ANDROID_DIR) && ./gradlew clean :app:assembleRelease --no-daemon --console=plain
+	bash scripts/fast_deploy_android_release.sh --build-only
 	@echo "==> APK: $(ANDROID_DIR)/app/build/outputs/apk/release/app-release.apk"
 
 # ---------------------------------------------------------------------------

@@ -3,13 +3,14 @@ set -euo pipefail
 
 # Fast deploy for DSM Android app — RELEASE (signed) variant.
 # Same as fast_deploy_android.sh but builds assembleRelease.
-# Requires DSM_KEYSTORE_PASSWORD env var for signing.
+# Prompts for the keystore path, key alias, and signing passwords when running interactively.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ANDROID_DIR="$ROOT_DIR/dsm_client/android"
 APK="$ANDROID_DIR/app/build/outputs/apk/release/app-release.apk"
 
 SKIP_BUILD=0
+BUILD_ONLY=0
 SKIP_UNINSTALL=1
 START_APP=1
 LOCAL_DEV=0
@@ -20,19 +21,101 @@ Usage: scripts/fast_deploy_android_release.sh [options]
 
 Options:
   --no-build         Skip gradle build step (assumes APK exists)
+  --build-only       Build the signed release APK, then exit without adb install
   --uninstall        Uninstall app before install (clears data)
   --no-start         Don't launch MainActivity
   --local            Local dev mode: push localhost env config override + adb reverse ports
 
 Environment:
-  DSM_KEYSTORE_PASSWORD   Required for signing (unless --no-build)
+  DSM_KEYSTORE_PASSWORD   Optional; if unset, the script prompts on an interactive TTY.
+  DSM_KEYSTORE_PATH       Optional keystore path override; if unset, the script prompts and defaults to $HOME/dsm-release.jks.
+  DSM_KEY_ALIAS           Optional key alias override; if unset, the script prompts and defaults to dsm-release.
+  DSM_KEY_PASSWORD        Optional key-entry password override; defaults to the keystore password.
   SERIALS="id1 id2"       Space-separated adb device serials. If not set, auto-detect.
 USAGE
+}
+
+prompt_keystore_path() {
+  if [[ -n "${DSM_KEYSTORE_PATH:-}" ]]; then
+    return 0
+  fi
+
+  local default_path="$HOME/dsm-release.jks"
+
+  if [[ ! -t 0 ]]; then
+    export DSM_KEYSTORE_PATH="$default_path"
+    return 0
+  fi
+
+  read -r -p "DSM Android keystore path [$default_path]: " DSM_KEYSTORE_PATH
+  DSM_KEYSTORE_PATH="${DSM_KEYSTORE_PATH:-$default_path}"
+  export DSM_KEYSTORE_PATH
+}
+
+prompt_key_alias() {
+  if [[ -n "${DSM_KEY_ALIAS:-}" ]]; then
+    return 0
+  fi
+
+  if [[ ! -t 0 ]]; then
+    export DSM_KEY_ALIAS="dsm-release"
+    return 0
+  fi
+
+  read -r -p "DSM key alias [dsm-release]: " DSM_KEY_ALIAS
+  DSM_KEY_ALIAS="${DSM_KEY_ALIAS:-dsm-release}"
+  export DSM_KEY_ALIAS
+}
+
+prompt_keystore_password() {
+  if [[ -n "${DSM_KEYSTORE_PASSWORD:-}" ]]; then
+    return 0
+  fi
+
+  if [[ ! -t 0 ]]; then
+    echo "[fast_deploy_release] ERROR: no interactive TTY for keystore password prompt." >&2
+    echo "[fast_deploy_release] Run this script from a terminal or set DSM_KEYSTORE_PASSWORD for non-interactive use." >&2
+    exit 1
+  fi
+
+  local keystore_path="${DSM_KEYSTORE_PATH:-$HOME/dsm-release.jks}"
+  local key_alias="${DSM_KEY_ALIAS:-dsm-release}"
+
+  if [[ ! -f "$keystore_path" ]]; then
+    echo "[fast_deploy_release] ERROR: keystore not found at $keystore_path" >&2
+    exit 1
+  fi
+
+  read -r -s -p "DSM keystore password for $key_alias ($keystore_path): " DSM_KEYSTORE_PASSWORD
+  echo
+  if [[ -z "$DSM_KEYSTORE_PASSWORD" ]]; then
+    echo "[fast_deploy_release] ERROR: empty keystore password." >&2
+    exit 1
+  fi
+  export DSM_KEYSTORE_PASSWORD
+}
+
+prompt_key_password() {
+  if [[ -n "${DSM_KEY_PASSWORD:-}" ]]; then
+    return 0
+  fi
+
+  if [[ ! -t 0 ]]; then
+    return 0
+  fi
+
+  read -r -s -p "DSM key password for $DSM_KEY_ALIAS (press Enter to reuse keystore password): " DSM_KEY_PASSWORD
+  echo
+  if [[ -z "$DSM_KEY_PASSWORD" ]]; then
+    DSM_KEY_PASSWORD="$DSM_KEYSTORE_PASSWORD"
+  fi
+  export DSM_KEY_PASSWORD
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --no-build) SKIP_BUILD=1; shift ;;
+    --build-only) BUILD_ONLY=1; shift ;;
     --uninstall) SKIP_UNINSTALL=0; shift ;;
     --no-start) START_APP=0; shift ;;
     --local) LOCAL_DEV=1; shift ;;
@@ -42,10 +125,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ $SKIP_BUILD -eq 0 ]]; then
-  if [[ -z "${DSM_KEYSTORE_PASSWORD:-}" ]]; then
-    echo "[fast_deploy_release] ERROR: DSM_KEYSTORE_PASSWORD not set. Cannot sign APK." >&2
-    exit 1
-  fi
+  prompt_keystore_path
+  prompt_key_alias
+  prompt_keystore_password
+  prompt_key_password
   echo "[fast_deploy_release] Gradle assembleRelease (incremental)…"
   (cd "$ANDROID_DIR" && ./gradlew --stop && ./gradlew :app:assembleRelease --no-daemon --console=plain)
 fi
@@ -53,6 +136,11 @@ fi
 if [[ ! -f "$APK" ]]; then
   echo "[fast_deploy_release] APK not found: $APK" >&2
   exit 1
+fi
+
+if [[ $BUILD_ONLY -eq 1 ]]; then
+  echo "[fast_deploy_release] Build-only mode complete: $APK"
+  exit 0
 fi
 
 if [[ -n "${SERIALS:-}" ]]; then
