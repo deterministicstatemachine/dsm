@@ -1,0 +1,39 @@
+# cargo-audit configuration
+#
+# Advisories are ignored only with a written rationale. Re-audit every release
+# to confirm the reason still holds.
+
+[advisories]
+ignore = [
+    # instant 0.1.13 — unmaintained
+    # Pulled transitively via sled 0.34 -> parking_lot 0.11 -> parking_lot_core 0.8,
+    # and directly by dsm_vertical_validation for operational timing. Not a
+    # vulnerability; upstream migration to a maintained timer crate is queued
+    # with the sled/parking_lot modernization in a future release.
+    "RUSTSEC-2024-0384",
+
+    # rustls-pemfile 2.2.0 — unmaintained
+    # Pulled via dsm_storage_node. rustls recommends migrating to the
+    # rustls-pki-types PEM APIs; planned as part of the storage-node TLS rework.
+    "RUSTSEC-2025-0134",
+
+    # rand 0.8.5 — unsound (2026-04-09)
+    # Advisory covers a narrow case: "rand is unsound with a custom logger
+    # using `rand::rng()`." DSM does not install a custom logger into rand and
+    # does not call `rand::rng()` under logging instrumentation, so the
+    # unsoundness cannot be reached on our code paths. Full migration to
+    # rand 0.10 (which changed the CryptoRng / TryRng bounds) is tracked
+    # separately (see dependabot/cargo/cargo-1b821729d8).
+    "RUSTSEC-2026-0097",
+
+    # fxhash 0.2.1 — unmaintained
+    # Pulled transitively via sled 0.34.7. Queued for replacement alongside
+    # the sled/parking_lot modernization. Upstream suggests rustc-hash as
+    # the drop-in successor.
+    "RUSTSEC-2025-0057",
+
+    # bincode 1.3.3 — unmaintained
+    # Upstream has frozen development but the crate is functionally complete.
+    # DSM bincode usage is bounded and tracked for migration to postcard.
+    "RUSTSEC-2025-0141",
+]

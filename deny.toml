@@ -96,4 +96,14 @@ ignore = [
 
     # Used only in vertical validation tooling for operational timing.
     "RUSTSEC-2024-0384", # instant: unmaintained
+
+    # rand 0.8.5 unsoundness: advisory covers a narrow case (custom logger
+    # calling rand::rng()). DSM does not install a custom logger into rand,
+    # so the unsound path is unreachable. rand 0.10 migration tracked in
+    # dependabot/cargo/cargo-1b821729d8.
+    "RUSTSEC-2026-0097", # rand: unsound (custom-logger case only)
+
+    # Pulled transitively via sled 0.34.7; queued for replacement with
+    # rustc-hash alongside the sled/parking_lot modernization.
+    "RUSTSEC-2025-0057", # fxhash: unmaintained
 ]
