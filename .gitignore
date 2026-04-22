@@ -143,6 +143,11 @@ dsm-*.json
 wip_dump.txt
 
 # ---------------------------------------------------------------------------
+# Release distribution artifacts (signed APKs, bundled SBOM zips for GitHub Releases)
+# ---------------------------------------------------------------------------
+/dist/
+
+# ---------------------------------------------------------------------------
 # Temporary scripts and scratch files — never commit
 # ---------------------------------------------------------------------------
 patch_receipts*.py
