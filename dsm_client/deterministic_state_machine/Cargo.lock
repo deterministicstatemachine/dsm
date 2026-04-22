@@ -1068,7 +1068,7 @@ dependencies = [
  "prost-types 0.12.6",
  "protoc-bin-vendored",
  "quickcheck",
- "rand 0.8.5",
+ "rand 0.9.4",
  "rand_chacha 0.3.1",
  "rocksdb",
  "rstest",
@@ -1145,7 +1145,7 @@ dependencies = [
  "prost-types 0.12.6",
  "protoc-bin-vendored",
  "quickcheck",
- "rand 0.8.5",
+ "rand 0.9.4",
  "rand_chacha 0.3.1",
  "rcgen",
  "reqwest",
@@ -3271,7 +3271,7 @@ checksum = "588f6378e4dd99458b60ec275b4477add41ce4fa9f64dcba6f15adccb19b50d6"
 dependencies = [
  "env_logger 0.8.4",
  "log",
- "rand 0.8.5",
+ "rand 0.8.6",
 ]
 
 [[package]]
@@ -3371,12 +3371,10 @@ dependencies = [
 
 [[package]]
 name = "rand"
-version = "0.8.5"
+version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34af8d1a0e25924bc5b7c43c079c942339d8f0a8b57c39049bef581b46327404"
+checksum = "5ca0ecfa931c29007047d1bc58e623ab12e5590e8c7cc53200d5202b69266d8a"
 dependencies = [
- "libc",
- "rand_chacha 0.3.1",
  "rand_core 0.6.4",
 ]
 
