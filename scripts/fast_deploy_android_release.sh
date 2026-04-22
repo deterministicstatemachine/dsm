@@ -28,7 +28,7 @@ Options:
 
 Environment:
   DSM_KEYSTORE_PASSWORD   Optional; if unset, the script prompts on an interactive TTY.
-  DSM_KEYSTORE_PATH       Optional keystore path override; if unset, the script prompts and defaults to $HOME/dsm-release.jks.
+  DSM_KEYSTORE_PATH       Optional keystore path override; if unset, the script prompts and defaults to $HOME/dsm-release.p12.
   DSM_KEY_ALIAS           Optional key alias override; if unset, the script prompts and defaults to dsm-release.
   DSM_KEY_PASSWORD        Optional key-entry password override; defaults to the keystore password.
   SERIALS="id1 id2"       Space-separated adb device serials. If not set, auto-detect.
@@ -40,7 +40,7 @@ prompt_keystore_path() {
     return 0
   fi
 
-  local default_path="$HOME/dsm-release.jks"
+  local default_path="$HOME/dsm-release.p12"
 
   if [[ ! -t 0 ]]; then
     export DSM_KEYSTORE_PATH="$default_path"
@@ -78,7 +78,7 @@ prompt_keystore_password() {
     exit 1
   fi
 
-  local keystore_path="${DSM_KEYSTORE_PATH:-$HOME/dsm-release.jks}"
+  local keystore_path="${DSM_KEYSTORE_PATH:-$HOME/dsm-release.p12}"
   local key_alias="${DSM_KEY_ALIAS:-dsm-release}"
 
   if [[ ! -f "$keystore_path" ]]; then

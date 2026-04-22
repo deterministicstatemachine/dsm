@@ -98,7 +98,7 @@ android {
 
     signingConfigs {
         create("release") {
-            val defaultStorePath = "${System.getProperty("user.home")}/dsm-release.jks"
+            val defaultStorePath = "${System.getProperty("user.home")}/dsm-release.p12"
             val storePath = gradlePropertyOrEnv("dsmKeystorePath", "DSM_KEYSTORE_PATH")
                 ?: promptForKeystorePath(defaultStorePath)
                 ?: defaultStorePath
