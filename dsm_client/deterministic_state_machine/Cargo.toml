@@ -6,7 +6,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0-beta.2"
+version = "0.1.0-beta.3"
 authors = ["DSM Development Team"]
 edition = "2021"
 repository = "https://github.com/deterministicstatemachine/dsm"
