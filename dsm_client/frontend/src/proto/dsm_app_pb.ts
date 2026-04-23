@@ -7099,68 +7099,159 @@ export class TokenCreateResponse extends Message<TokenCreateResponse> {
 
 /**
  * ------------------------- DLV Lifecycle Objects --------------------------
+ * Device-neutral, content-addressed vault template.
+ * spec_id (implicit) := BLAKE3("DSM/dlv-spec\0" ||
+ *     policy_digest || content_digest || fulfillment_digest || recipient_digest)
+ * where recipient_digest = BLAKE3("DSM/dlv-recipient\0" || intended_recipient) if set
+ * else 32 zero bytes.
  *
- * @generated from message dsm.DlvCreateV3
+ * @generated from message dsm.DlvSpecV1
  */
-export class DlvCreateV3 extends Message<DlvCreateV3> {
+export class DlvSpecV1 extends Message<DlvSpecV1> {
   /**
-   * domain: "DSM/dlv/create\0"
+   * CPTA anchor
    *
-   * @generated from field: bytes device_id = 1;
-   */
-  deviceId = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes policy_digest = 2;
+   * @generated from field: bytes policy_digest = 1;
    */
   policyDigest = new Uint8Array(0);
 
   /**
-   * @generated from field: bytes precommit = 3;
-   */
-  precommit = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes vault_id = 4;
-   */
-  vaultId = new Uint8Array(0);
-
-  /**
-   * optional, empty allowed
+   * H("DSM/dlv-content", content)
    *
-   * @generated from field: bytes parent_digest = 5;
+   * @generated from field: bytes content_digest = 2;
    */
-  parentDigest = new Uint8Array(0);
+  contentDigest = new Uint8Array(0);
 
-  constructor(data?: PartialMessage<DlvCreateV3>) {
+  /**
+   * H("DSM/dlv-fulfillment", fulfillment_bytes)
+   *
+   * @generated from field: bytes fulfillment_digest = 3;
+   */
+  fulfillmentDigest = new Uint8Array(0);
+
+  /**
+   * Kyber pk, optional (empty = self-encrypted)
+   *
+   * @generated from field: bytes intended_recipient = 4;
+   */
+  intendedRecipient = new Uint8Array(0);
+
+  /**
+   * canonical FulfillmentMechanism proto
+   *
+   * @generated from field: bytes fulfillment_bytes = 5;
+   */
+  fulfillmentBytes = new Uint8Array(0);
+
+  /**
+   * plaintext for local; sender-encrypted for posted
+   *
+   * @generated from field: bytes content = 6;
+   */
+  content = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<DlvSpecV1>) {
     super();
     proto3.util.initPartial(data, this);
   }
 
   static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.DlvCreateV3";
+  static readonly typeName = "dsm.DlvSpecV1";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 2, name: "policy_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 3, name: "precommit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 4, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 5, name: "parent_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 1, name: "policy_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "content_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "fulfillment_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "intended_recipient", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "fulfillment_bytes", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "content", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DlvCreateV3 {
-    return new DlvCreateV3().fromBinary(bytes, options);
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DlvSpecV1 {
+    return new DlvSpecV1().fromBinary(bytes, options);
   }
 
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DlvCreateV3 {
-    return new DlvCreateV3().fromJson(jsonValue, options);
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DlvSpecV1 {
+    return new DlvSpecV1().fromJson(jsonValue, options);
   }
 
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DlvCreateV3 {
-    return new DlvCreateV3().fromJsonString(jsonString, options);
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DlvSpecV1 {
+    return new DlvSpecV1().fromJsonString(jsonString, options);
   }
 
-  static equals(a: DlvCreateV3 | PlainMessage<DlvCreateV3> | undefined, b: DlvCreateV3 | PlainMessage<DlvCreateV3> | undefined): boolean {
-    return proto3.util.equals(DlvCreateV3, a, b);
+  static equals(a: DlvSpecV1 | PlainMessage<DlvSpecV1> | undefined, b: DlvSpecV1 | PlainMessage<DlvSpecV1> | undefined): boolean {
+    return proto3.util.equals(DlvSpecV1, a, b);
+  }
+}
+
+/**
+ * Instance creation.  Carries everything Operation::DlvCreate needs.
+ * The creator's chain_tip enters via execute_on_relationship, not this proto.
+ *
+ * @generated from message dsm.DlvInstantiateV1
+ */
+export class DlvInstantiateV1 extends Message<DlvInstantiateV1> {
+  /**
+   * @generated from field: dsm.DlvSpecV1 spec = 1;
+   */
+  spec?: DlvSpecV1;
+
+  /**
+   * SPHINCS+ pk
+   *
+   * @generated from field: bytes creator_public_key = 2;
+   */
+  creatorPublicKey = new Uint8Array(0);
+
+  /**
+   * optional; empty = content-only vault
+   *
+   * @generated from field: bytes token_id = 3;
+   */
+  tokenId = new Uint8Array(0);
+
+  /**
+   * big-endian u128; all-zeros if no lock
+   *
+   * @generated from field: bytes locked_amount_u128 = 4;
+   */
+  lockedAmountU128 = new Uint8Array(0);
+
+  /**
+   * SPHINCS+ over canonical Operation::DlvCreate bytes
+   *
+   * @generated from field: bytes signature = 5;
+   */
+  signature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<DlvInstantiateV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.DlvInstantiateV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "spec", kind: "message", T: DlvSpecV1 },
+    { no: 2, name: "creator_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "token_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "locked_amount_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DlvInstantiateV1 {
+    return new DlvInstantiateV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DlvInstantiateV1 {
+    return new DlvInstantiateV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DlvInstantiateV1 {
+    return new DlvInstantiateV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: DlvInstantiateV1 | PlainMessage<DlvInstantiateV1> | undefined, b: DlvInstantiateV1 | PlainMessage<DlvInstantiateV1> | undefined): boolean {
+    return proto3.util.equals(DlvInstantiateV1, a, b);
   }
 }
 

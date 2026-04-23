@@ -10,9 +10,11 @@ export default function DevDlvScreen(): JSX.Element {
   const [lock, setLock] = useState('');
   const [condition, setCondition] = useState('');
   const [status, setStatus] = useState<string>('');
-  // Example DLV Create (Base32 Crockford of DlvCreateV3 proto bytes)
-  const exampleDlvCreateBase32 =
-    '18G68SBP5NJ6AXK9CDJJTTB40000000000000000000000000000000J41R6YV39CDWJTS39CXJQ6X1DCHJPTVR00000000000000000000006H0E1S6ARVFDNPPJX1DCHJPTVR00000000000000000000000000002483PC5TPRX1DD5J2TS35DNQG000000000000000000000000000000';
+  // Example DLV Create (Base32 Crockford of DlvInstantiateV1 proto bytes).
+  // Commit 8 supplies a real example; for now the example slot is empty so
+  // the UI compiles against the new contract without embedding a stale
+  // legacy blob that would fail to decode.
+  const exampleDlvInstantiateBase32 = '';
   const [contacts, setContacts] = useState<any[]>([]);
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
   const [b0x, setB0x] = useState<string>('');
@@ -102,7 +104,7 @@ export default function DevDlvScreen(): JSX.Element {
     () => void handleLoadContacts(),
     () => void handleComputeB0x(),
     () => void handleCreate(),
-    () => setLock(exampleDlvCreateBase32),
+    () => setLock(exampleDlvInstantiateBase32),
     () => void pasteLockFromClipboard(),
     () => void pasteConditionFromClipboard(),
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -124,12 +126,17 @@ export default function DevDlvScreen(): JSX.Element {
             Paste Base32 (Crockford) encodings of the binary DLV lifecycle protos. No JSON/YAML, no hex/base64. Invalid payloads will fail with a clear error.
           </div>
           <div style={{ display: 'grid', gap: 2, marginLeft: 8 }}>
-            <div><strong>DLV Create (preferred: <code>DlvCreateV3</code>)</strong></div>
-            <div>1) <code>device_id</code>: 32 bytes (your device ID).</div>
-            <div>2) <code>policy_digest</code>: 32-byte policy anchor digest (raw bytes, not hex text).</div>
-            <div>3) <code>precommit</code>: 32-byte pre-commit hash for the vault branch.</div>
-            <div>4) <code>vault_id</code>: 32-byte vault identifier (raw bytes).</div>
-            <div>5) <code>parent_digest</code>: optional 32 bytes; leave empty for genesis branch.</div>
+            <div><strong>DLV Create (<code>DlvInstantiateV1</code>)</strong></div>
+            <div>1) <code>spec.policy_digest</code>: 32-byte CPTA policy anchor.</div>
+            <div>2) <code>spec.content_digest</code>: 32-byte H(&quot;DSM/dlv-content&quot;, content).</div>
+            <div>3) <code>spec.fulfillment_digest</code>: 32-byte H(&quot;DSM/dlv-fulfillment&quot;, fulfillment_bytes).</div>
+            <div>4) <code>spec.intended_recipient</code>: optional Kyber pk (empty = self-encrypted).</div>
+            <div>5) <code>spec.fulfillment_bytes</code>: canonical FulfillmentMechanism proto.</div>
+            <div>6) <code>spec.content</code>: plaintext for local; sender-encrypted for posted.</div>
+            <div>7) <code>creator_public_key</code>: SPHINCS+ pk.</div>
+            <div>8) <code>token_id</code>: optional (empty = content-only vault).</div>
+            <div>9) <code>locked_amount_u128</code>: 16-byte big-endian u128 (all-zeros if no lock).</div>
+            <div>10) <code>signature</code>: SPHINCS+ over canonical Operation::DlvCreate bytes.</div>
             <div>Then serialize the proto (<code>proto/dsm_app.proto</code>) → Base32 Crockford.</div>
             <div>Optional unlock payload: use <code>DlvOpenV3</code> (device_id, vault_id, reveal_material) as Base32 if your flow posts an unlock proof.</div>
           </div>
@@ -160,7 +167,7 @@ export default function DevDlvScreen(): JSX.Element {
       </div>
       <div className="settings-shell__panel">
         <label style={{ fontSize: 10 }}>
-          DLV Create (Base32 Crockford of <code>DlvCreateV3</code> bytes)
+          DLV Create (Base32 Crockford of <code>DlvInstantiateV1</code> bytes)
           <textarea className="settings-input" value={lock} onChange={e => setLock(e.target.value)} rows={4} style={{ width: '100%', padding: 6, fontFamily: 'monospace', fontSize: 10, background: 'var(--bg)', color: 'var(--text-dark)', border: '2px solid var(--border)', borderRadius: '4px', outline: 'none' }} />
         </label>
         <label style={{ fontSize: 10 }}>
@@ -169,15 +176,15 @@ export default function DevDlvScreen(): JSX.Element {
         </label>
         <div className="settings-shell__button-row">
           <button className={`settings-shell__button${fc(2)}`} onClick={() => void handleCreate()} style={{ fontSize: '9px' }}>Create DLV</button>
-          <button className={`settings-shell__button${fc(3)}`} onClick={() => setLock(exampleDlvCreateBase32)} style={{ fontSize: '9px', background: 'var(--bg-secondary)', color: 'var(--text-dark)' }}>Load Example DLV Create</button>
+          <button className={`settings-shell__button${fc(3)}`} onClick={() => setLock(exampleDlvInstantiateBase32)} style={{ fontSize: '9px', background: 'var(--bg-secondary)', color: 'var(--text-dark)' }}>Load Example DLV Create</button>
           <button className={`settings-shell__button${fc(4)}`} onClick={() => void pasteLockFromClipboard()} style={{ fontSize: '9px', background: 'var(--bg-secondary)', color: 'var(--text-dark)' }}>Paste Create from Clipboard</button>
           <button className={`settings-shell__button${fc(5)}`} onClick={() => void pasteConditionFromClipboard()} style={{ fontSize: '9px', background: 'var(--bg-secondary)', color: 'var(--text-dark)' }}>Paste Unlock from Clipboard</button>
         </div>
         <div className="settings-shell__info">
-          <div style={{ fontWeight: 'bold', marginBottom: 4 }}>Example DlvCreateV3 (Base32)</div>
-          <div className="settings-shell__mono">{exampleDlvCreateBase32}</div>
+          <div style={{ fontWeight: 'bold', marginBottom: 4 }}>Example DlvInstantiateV1 (Base32)</div>
+          <div className="settings-shell__mono">{exampleDlvInstantiateBase32 || '(example pending commit 8)'}</div>
           <div style={{ marginTop: 4 }}>
-            Fields: device_id=<code>&quot;dev-device-id&quot;</code> padded to 32 bytes; policy_digest=<code>&quot;policy-digest-demo&quot;</code>; precommit=<code>&quot;precommit-demo&quot;</code>; vault_id=<code>&quot;vault-id-demo&quot;</code>; parent_digest empty.
+            Example blob pending commit 8 — will carry a valid DlvInstantiateV1 with a zero-locked content-only vault for local-mode testing.
           </div>
         </div>
         {(status || dlvStatus) && <div className="settings-shell__status">{status || dlvStatus}</div>}

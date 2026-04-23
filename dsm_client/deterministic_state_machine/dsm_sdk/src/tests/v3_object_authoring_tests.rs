@@ -2,7 +2,7 @@
 
 use prost::Message;
 
-use crate::vault::lifecycle::{author_dlv_create, author_dlv_open};
+use crate::vault::lifecycle::author_dlv_open;
 use crate::wire::{author_contact_accept, author_contact_add, domain_hash_bytes, pb};
 
 #[test]
@@ -18,26 +18,6 @@ fn contact_accept_add_digest_matches_domain_hash() {
     let add_bytes = add.encode_to_vec();
     let expected = domain_hash_bytes("DSM/contact/add\0", &add_bytes);
     assert_eq!(accept.add_digest, expected.to_vec());
-}
-
-#[test]
-fn dlv_create_vault_id_matches_spec() {
-    let device_id = [9u8; 32];
-    let policy_digest = [7u8; 32];
-    let reveal = b"reveal_material_bytes";
-
-    let create = author_dlv_create(&device_id, &policy_digest, reveal);
-
-    let precommit = domain_hash_bytes("DSM/dlv/precommit\0", reveal);
-    assert_eq!(create.precommit, precommit.to_vec());
-
-    let mut v_buf = Vec::with_capacity(32 * 3);
-    v_buf.extend_from_slice(&device_id);
-    v_buf.extend_from_slice(&policy_digest);
-    v_buf.extend_from_slice(&precommit);
-    let expected_vault_id = domain_hash_bytes("DSM/dlv\0", &v_buf);
-
-    assert_eq!(create.vault_id, expected_vault_id.to_vec());
 }
 
 #[test]
