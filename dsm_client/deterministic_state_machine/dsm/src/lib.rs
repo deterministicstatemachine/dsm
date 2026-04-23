@@ -96,6 +96,10 @@ use crate::types::error::DsmError;
 
 pub use crate::core::identity::TrustlessGenesisArtifacts;
 
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+const RUST_VERSION: &str = env!("DSM_RUSTC_VERSION");
+const TARGET: &str = env!("DSM_BUILD_TARGET");
+
 /// Returns the version of the SDK
 ///
 /// Retrieves the current version of the DSM SDK from cargo package metadata.
@@ -104,15 +108,15 @@ pub use crate::core::identity::TrustlessGenesisArtifacts;
 ///
 /// A string containing the version number in semver format (e.g., "0.1.0")
 pub fn version() -> String {
-    std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "unknown".to_string())
+    VERSION.to_string()
 }
 
 /// Build information for debugging and support
 pub fn build_info() -> BuildInfo {
     BuildInfo {
-        version: std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "unknown".to_string()),
-        rust_version: std::env::var("RUSTC_VERSION").unwrap_or_else(|_| "unknown".to_string()),
-        target: std::env::var("TARGET").unwrap_or_else(|_| "unknown".to_string()),
+        version: VERSION.to_string(),
+        rust_version: RUST_VERSION.to_string(),
+        target: TARGET.to_string(),
         features: get_enabled_features(),
     }
 }
@@ -162,3 +166,20 @@ pub async fn create_trustless_genesis<
 // verify_trustless_identity wrapper deleted: zero external callers, and
 // the underlying impl was deleted (it relied on state_number reads
 // reconstructed from `state.hash[0] as u64` after §4.3 — meaningless).
+
+#[cfg(test)]
+mod tests {
+    use super::{build_info, version, VERSION};
+
+    #[test]
+    fn build_info_is_compile_time_stamped() {
+        let info = build_info();
+
+        assert_eq!(version(), VERSION);
+        assert_eq!(info.version, VERSION);
+        assert_ne!(info.rust_version, "unknown");
+        assert!(!info.rust_version.is_empty());
+        assert_ne!(info.target, "unknown");
+        assert!(!info.target.is_empty());
+    }
+}

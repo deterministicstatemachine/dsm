@@ -159,9 +159,9 @@ pub fn new_hasher() -> Hasher {
 /// appended automatically.
 ///
 /// # Panics
-/// Debug-asserts that `tag` starts with `"DSM/"`.
+/// Panics if `tag` does not start with `"DSM/"` or `"DJTE."`.
 pub fn dsm_domain_hasher(tag: &str) -> Hasher {
-    debug_assert!(
+    assert!(
         tag.starts_with("DSM/") || tag.starts_with("DJTE."),
         "domain tag must start with \"DSM/\" or \"DJTE.\", got: {tag}"
     );
@@ -192,6 +192,12 @@ mod tests_domain_hash {
         let h2 = domain_hash("DSM/abC", b"xyz");
         assert_ne!(h1.as_bytes(), h2.as_bytes());
     }
+
+    #[test]
+    #[should_panic(expected = "domain tag must start")]
+    fn domain_hash_rejects_non_dsm_tag() {
+        let _ = domain_hash("not-dsm", b"payload");
+    }
 }
 
 /// Domain-separated hash returning bytes
@@ -220,10 +226,10 @@ pub fn domain_hash_bytes(tag: &str, data: &[u8]) -> [u8; 32] {
 /// * `verb` - Operation type (e.g., "transfer", "mint", "burn", "balance-key")
 ///
 /// # Panics
-/// Debug-asserts that `verb` is non-empty and contains no NUL or `/` characters.
+/// Panics if `verb` is empty or contains NUL or `/` characters.
 pub fn token_domain_hasher(policy_commit: &[u8; 32], verb: &str) -> Hasher {
-    debug_assert!(!verb.is_empty(), "verb must not be empty");
-    debug_assert!(
+    assert!(!verb.is_empty(), "verb must not be empty");
+    assert!(
         !verb.contains('\0') && !verb.contains('/'),
         "verb must not contain NUL or '/' characters, got: {verb}"
     );
@@ -355,6 +361,18 @@ mod tests_token_domain {
         hasher.update(data);
         let streaming = hasher.finalize();
         assert_eq!(one_shot, streaming);
+    }
+
+    #[test]
+    #[should_panic(expected = "verb must not be empty")]
+    fn token_domain_rejects_empty_verb() {
+        let _ = token_domain_hasher(&test_policy_a(), "");
+    }
+
+    #[test]
+    #[should_panic(expected = "verb must not contain NUL or '/' characters")]
+    fn token_domain_rejects_slash_in_verb() {
+        let _ = token_domain_hasher(&test_policy_a(), "bad/verb");
     }
 }
 

@@ -586,35 +586,54 @@ fn initialize_sdk_core() -> Result<Vec<u8>, pb::Error> {
     }
 }
 
-fn prime_identity_app_state(device_id: &[u8], genesis_hash: &[u8]) {
+fn prime_identity_app_state(device_id: &[u8], genesis_hash: &[u8]) -> Result<(), pb::Error> {
     // Derive the REAL SPHINCS+ public key from the canonical entropy triple.
-    // The binding key MUST already be installed (via install_canonical_binding_key)
-    // before this function is called. If it isn't, that's a bug — panic.
+    // The binding key should already be installed by the startup flow. If it is not,
+    // surface that as a typed startup failure rather than terminating the process.
     let Some(bk) = crate::binding_key::get_binding_key() else {
-        #[allow(clippy::panic)]
-        {
-            panic!("prime_identity_app_state: binding key MUST be installed before this call");
-        }
+        return Err(ingress_error(
+            ERROR_CODE_PROCESSING_FAILED,
+            "startup: binding key missing before identity priming",
+        ));
     };
-    assert_eq!(device_id.len(), 32, "device_id must be 32 bytes");
-    assert_eq!(genesis_hash.len(), 32, "genesis_hash must be 32 bytes");
-    assert_eq!(bk.len(), 32, "binding_key must be 32 bytes");
+    if device_id.len() != 32 {
+        return Err(ingress_error(
+            ERROR_CODE_INVALID_INPUT,
+            format!(
+                "startup: device_id must be 32 bytes before identity priming, got {}",
+                device_id.len()
+            ),
+        ));
+    }
+    if genesis_hash.len() != 32 {
+        return Err(ingress_error(
+            ERROR_CODE_INVALID_INPUT,
+            format!(
+                "startup: genesis_hash must be 32 bytes before identity priming, got {}",
+                genesis_hash.len()
+            ),
+        ));
+    }
+    if bk.len() != 32 {
+        return Err(ingress_error(
+            ERROR_CODE_PROCESSING_FAILED,
+            format!(
+                "startup: binding key must be 32 bytes before identity priming, got {}",
+                bk.len()
+            ),
+        ));
+    }
 
     let mut entropy = Vec::with_capacity(96);
     entropy.extend_from_slice(genesis_hash);
     entropy.extend_from_slice(device_id);
     entropy.extend_from_slice(&bk);
-    let kp = match dsm::crypto::SignatureKeyPair::generate_from_entropy(&entropy) {
-        Ok(kp) => kp,
-        Err(e) => {
-            #[allow(clippy::panic)]
-            {
-                panic!(
-                    "prime_identity_app_state: canonical SPHINCS+ key derivation must not fail: {e:?}"
-                );
-            }
-        }
-    };
+    let kp = dsm::crypto::SignatureKeyPair::generate_from_entropy(&entropy).map_err(|e| {
+        ingress_error(
+            ERROR_CODE_PROCESSING_FAILED,
+            format!("startup: canonical SPHINCS+ key derivation failed: {e}"),
+        )
+    })?;
     log::info!(
         "prime_identity_app_state: derived canonical SPHINCS+ public key (len={})",
         kp.public_key().len()
@@ -632,6 +651,8 @@ fn prime_identity_app_state(device_id: &[u8], genesis_hash: &[u8]) {
         smt_root,
     );
     crate::sdk::app_state::AppState::set_has_identity(true);
+
+    Ok(())
 }
 
 fn ensure_identity_context_compatible(
@@ -729,7 +750,7 @@ fn install_identity_context_core(
     #[cfg(target_os = "android")]
     crate::jni::cdbrw::set_cdbrw_binding_key(binding_key.clone());
 
-    prime_identity_app_state(&device_id, &genesis_hash);
+    prime_identity_app_state(&device_id, &genesis_hash)?;
 
     // Self-heal: republish DeviceTreeEntry to the registry if it is below
     // quorum on the network. Genesis creation used to swallow publish
@@ -1327,6 +1348,18 @@ endpoint = "http://127.0.0.1:8080"
             vec![0x33; 32]
         );
         assert!(crate::is_sdk_context_initialized());
+    }
+
+    #[test]
+    #[serial]
+    fn prime_identity_app_state_returns_error_when_binding_key_missing() {
+        let _guard = setup_test_env();
+
+        let error = prime_identity_app_state(&[0x11; 32], &[0x22; 32])
+            .expect_err("missing binding key should be surfaced as startup error");
+
+        assert_eq!(error.code, ERROR_CODE_PROCESSING_FAILED);
+        assert!(error.message.contains("binding key missing before identity priming"));
     }
 
     #[test]

@@ -832,9 +832,18 @@ impl AppRouterImpl {
             }
             Ok(None) => {}
             Err(e) => {
-                return err(format!(
-                    "wallet.send: recipient identity quorum could not be established ({e})"
-                ))
+                if can_fallback_to_cached_contact_identity(&contact_record) {
+                    log::warn!(
+                        "[wallet.send] recipient identity quorum unavailable for {} (alias={}); using cached verified identity: {}",
+                        to_device_id_str.get(..8).unwrap_or("?"),
+                        contact_record.alias,
+                        e
+                    );
+                } else {
+                    return err(format!(
+                        "wallet.send: recipient identity quorum could not be established ({e})"
+                    ));
+                }
             }
         }
         let preflight_sync = generated::StorageSyncRequest {
@@ -2279,6 +2288,15 @@ pub(crate) fn collect_rotated_inbox_addresses(
         .collect()
 }
 
+fn can_fallback_to_cached_contact_identity(
+    contact_record: &crate::storage::client_db::ContactRecord,
+) -> bool {
+    contact_record.verified
+        && contact_record.device_id.len() == 32
+        && contact_record.genesis_hash.len() == 32
+        && contact_record.public_key.len() >= 32
+}
+
 fn select_quorum_device_identity(
     candidates: impl IntoIterator<Item = QuorumDeviceIdentity>,
 ) -> Option<QuorumDeviceIdentity> {
@@ -2913,11 +2931,11 @@ async fn verify_device_tree_evidence_quorum_once(
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_rotated_inbox_addresses, collect_tagged_inbox_addresses,
-        compute_initial_relationship_chain_tip, ensure_inbox_recipient_targets_local,
-        format_registry_quorum_failure, registry_retry_delay, relationship_tip_for_contact_restore,
-        select_quorum_device_identity, AppRouterImpl, QuorumDeviceIdentity,
-        RegistryQuorumAttemptStats, RouteFreshness,
+        can_fallback_to_cached_contact_identity, collect_rotated_inbox_addresses,
+        collect_tagged_inbox_addresses, compute_initial_relationship_chain_tip,
+        ensure_inbox_recipient_targets_local, format_registry_quorum_failure, registry_retry_delay,
+        relationship_tip_for_contact_restore, select_quorum_device_identity, AppRouterImpl,
+        QuorumDeviceIdentity, RegistryQuorumAttemptStats, RouteFreshness,
     };
     use crate::storage::client_db::ContactRecord;
     use dsm::utils::time::Duration;
@@ -3278,6 +3296,54 @@ mod tests {
         ]);
 
         assert!(selected.is_none());
+    }
+
+    #[test]
+    fn cached_verified_contact_identity_can_backstop_quorum_lookup() {
+        let contact = ContactRecord {
+            contact_id: "c_quorum_ok".to_string(),
+            device_id: vec![0x11u8; 32],
+            alias: "peer".to_string(),
+            genesis_hash: vec![0x22u8; 32],
+            public_key: vec![0x33u8; 64],
+            current_chain_tip: None,
+            added_at: 7,
+            verified: true,
+            verification_proof: None,
+            metadata: HashMap::new(),
+            ble_address: None,
+            status: "Created".to_string(),
+            needs_online_reconcile: false,
+            last_seen_online_counter: 0,
+            last_seen_ble_counter: 0,
+            previous_chain_tip: None,
+        };
+
+        assert!(can_fallback_to_cached_contact_identity(&contact));
+    }
+
+    #[test]
+    fn cached_identity_fallback_requires_verified_complete_contact() {
+        let contact = ContactRecord {
+            contact_id: "c_quorum_bad".to_string(),
+            device_id: vec![0x11u8; 32],
+            alias: "peer".to_string(),
+            genesis_hash: vec![0x22u8; 32],
+            public_key: vec![],
+            current_chain_tip: None,
+            added_at: 7,
+            verified: false,
+            verification_proof: None,
+            metadata: HashMap::new(),
+            ble_address: None,
+            status: "Created".to_string(),
+            needs_online_reconcile: false,
+            last_seen_online_counter: 0,
+            last_seen_ble_counter: 0,
+            previous_chain_tip: None,
+        };
+
+        assert!(!can_fallback_to_cached_contact_identity(&contact));
     }
 
     #[test]
