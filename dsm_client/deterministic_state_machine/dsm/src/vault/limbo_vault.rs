@@ -2558,6 +2558,107 @@ mod tests {
         assert!(vault.verify().expect("vault verification"));
     }
 
+    /// Helper: build a draft with explicit content + fulfillment + ref_state
+    /// so anchoring tests can vary one input at a time.
+    fn draft_with(
+        creator_pk: &[u8],
+        encryption_pk: &[u8],
+        fulfillment: FulfillmentMechanism,
+        content: &[u8],
+        ref_hash: [u8; 32],
+    ) -> LimboVaultDraft {
+        LimboVault::create_draft(
+            creator_pk,
+            fulfillment,
+            content,
+            "application/octet-stream",
+            None,
+            encryption_pk,
+            &ref_hash,
+        )
+        .expect("vault draft")
+    }
+
+    /// G.1.4 — idempotent anchoring: identical inputs → byte-identical
+    /// vault_id.  (parameters_hash bundles the Pedersen commitment whose
+    /// blinding factor is intentionally randomised per call; only the
+    /// vault_id is guaranteed byte-identical across calls.)
+    #[test]
+    fn vault_anchoring_idempotent() {
+        let (creator_pk, _) =
+            crate::crypto::sphincs::generate_sphincs_keypair().expect("sphincs keypair");
+        let kp = crate::crypto::kyber::generate_kyber_keypair().expect("kyber");
+        let fm = FulfillmentMechanism::CryptoCondition {
+            condition_hash: vec![0x11; 32],
+            public_params: vec![0x22; 16],
+        };
+        let ref_hash = [0x42; 32];
+        let a = draft_with(&creator_pk, &kp.public_key, fm.clone(), b"same", ref_hash);
+        let b = draft_with(&creator_pk, &kp.public_key, fm, b"same", ref_hash);
+        assert_eq!(a.id, b.id, "identical inputs must produce identical vault_id");
+    }
+
+    /// G.1.1 — vault_id binds the content.  Same creator/policy/ref_state,
+    /// different content → different vault_id.
+    #[test]
+    fn vault_anchoring_binds_content() {
+        let (creator_pk, _) =
+            crate::crypto::sphincs::generate_sphincs_keypair().expect("sphincs keypair");
+        let kp = crate::crypto::kyber::generate_kyber_keypair().expect("kyber");
+        let fm = FulfillmentMechanism::CryptoCondition {
+            condition_hash: vec![0x11; 32],
+            public_params: vec![0x22; 16],
+        };
+        let ref_hash = [0x43; 32];
+        let a = draft_with(&creator_pk, &kp.public_key, fm.clone(), b"content-A", ref_hash);
+        let b = draft_with(&creator_pk, &kp.public_key, fm, b"content-B", ref_hash);
+        assert_ne!(
+            a.id, b.id,
+            "different content MUST produce different vault_id (anchoring binds content)"
+        );
+    }
+
+    /// G.1.2 — vault_id binds the fulfillment mechanism.
+    #[test]
+    fn vault_anchoring_binds_fulfillment() {
+        let (creator_pk, _) =
+            crate::crypto::sphincs::generate_sphincs_keypair().expect("sphincs keypair");
+        let kp = crate::crypto::kyber::generate_kyber_keypair().expect("kyber");
+        let ref_hash = [0x44; 32];
+        let fm_a = FulfillmentMechanism::CryptoCondition {
+            condition_hash: vec![0x01; 32],
+            public_params: vec![0x02; 16],
+        };
+        let fm_b = FulfillmentMechanism::CryptoCondition {
+            condition_hash: vec![0xaa; 32],
+            public_params: vec![0xbb; 16],
+        };
+        let a = draft_with(&creator_pk, &kp.public_key, fm_a, b"content", ref_hash);
+        let b = draft_with(&creator_pk, &kp.public_key, fm_b, b"content", ref_hash);
+        assert_ne!(
+            a.id, b.id,
+            "different fulfillment MUST produce different vault_id"
+        );
+    }
+
+    /// G.1.3 — vault_id binds the reference_state_hash.
+    #[test]
+    fn vault_anchoring_binds_ref_state() {
+        let (creator_pk, _) =
+            crate::crypto::sphincs::generate_sphincs_keypair().expect("sphincs keypair");
+        let kp = crate::crypto::kyber::generate_kyber_keypair().expect("kyber");
+        let fm = FulfillmentMechanism::CryptoCondition {
+            condition_hash: vec![0x11; 32],
+            public_params: vec![0x22; 16],
+        };
+        let a = draft_with(&creator_pk, &kp.public_key, fm.clone(), b"content", [0x01; 32]);
+        let b = draft_with(&creator_pk, &kp.public_key, fm, b"content", [0x02; 32]);
+        assert_ne!(
+            a.id, b.id,
+            "different ref_state_hash MUST produce different vault_id"
+        );
+    }
+
     #[test]
     fn create_draft_keeps_vault_id_deterministic() {
         let (creator_public_key, _creator_secret_key) =
