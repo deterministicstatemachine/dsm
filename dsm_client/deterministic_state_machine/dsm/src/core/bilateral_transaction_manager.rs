@@ -587,26 +587,23 @@ impl BilateralTransactionManager {
     /// Sign a commitment hash using the local keypair.
     /// This is used by the BLE handler when registering a sender session for bilateral transfers.
     /// The signature is required for the commit phase.
-    pub fn sign_commitment(&self, commitment_hash: &[u8; 32]) -> Vec<u8> {
+    pub fn sign_commitment(&self, commitment_hash: &[u8; 32]) -> Result<Vec<u8>, DsmError> {
         // §ISSUE-B4 FIX: canonical "DSM/<domain>\0" domain separator format.
         let mut msg = Vec::with_capacity(22 + 32);
         msg.extend_from_slice(b"DSM/bilateral-sign\0");
         msg.extend_from_slice(commitment_hash);
 
-        match self.signature_keypair.sign(&msg) {
-            Ok(sig) => {
-                info!(
-                    "[BTM] sign_commitment: signed commitment {}... with {} byte signature",
-                    labeling::hash_to_short_id(commitment_hash),
-                    sig.len()
-                );
-                sig
-            }
-            Err(e) => {
-                error!("[BTM] sign_commitment: failed to sign: {}", e);
-                Vec::new()
-            }
-        }
+        let sig = self.signature_keypair.sign(&msg).map_err(|e| {
+            error!("[BTM] sign_commitment: failed to sign: {}", e);
+            e
+        })?;
+
+        info!(
+            "[BTM] sign_commitment: signed commitment {}... with {} byte signature",
+            labeling::hash_to_short_id(commitment_hash),
+            sig.len()
+        );
+        Ok(sig)
     }
 
     pub fn add_verified_contact(&mut self, c: DsmVerifiedContact) -> Result<(), DsmError> {
@@ -1631,6 +1628,40 @@ mod tests {
         assert_eq!(manager.list_pending_commitments().len(), 0);
         assert!(manager.get_current_ticks() > 0);
         assert_eq!(manager.local_genesis_hash(), make_manager_ids().1);
+    }
+
+    #[test]
+    fn sign_commitment_returns_signature_bytes_on_success() {
+        let (manager, _kp) = make_manager();
+        let commitment_hash = [0xAB; 32];
+
+        let sig = manager
+            .sign_commitment(&commitment_hash)
+            .expect("sign_commitment should succeed for a valid keypair");
+
+        assert!(!sig.is_empty(), "signature bytes should not be empty");
+    }
+
+    #[test]
+    fn sign_commitment_propagates_signer_failures() {
+        crate::utils::deterministic_time::reset_for_tests();
+
+        let (local_device_id, local_genesis_hash) = make_manager_ids();
+        let contact_manager = DsmContactManager::new(local_device_id, vec![]);
+        let broken_keypair = SignatureKeyPair {
+            public_key: vec![0x11; 64],
+            secret_key: Vec::new(),
+            params: crate::crypto::signatures::ParameterSet::SPX256s,
+        };
+        let manager = BilateralTransactionManager::new(
+            contact_manager,
+            broken_keypair,
+            local_device_id,
+            local_genesis_hash,
+        );
+
+        let err = manager.sign_commitment(&[0xCD; 32]);
+        assert!(err.is_err(), "signer failures must be propagated");
     }
 
     #[tokio::test]

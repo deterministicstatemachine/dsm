@@ -1241,7 +1241,7 @@ impl BilateralBleHandler {
         // Track session (sender doesn't have a BLE address from counterparty yet)
         let commit_signature = {
             let m = self.bilateral_tx_manager.read().await;
-            m.sign_commitment(&pre_commitment.bilateral_commitment_hash)
+            m.sign_commitment(&pre_commitment.bilateral_commitment_hash)?
         };
 
         let sessions = self.sessions.sessions.lock().await;
@@ -2123,7 +2123,7 @@ impl BilateralBleHandler {
         // Track session as PendingUserAction (NOT auto-accepted)
         let commit_signature = {
             let m = self.bilateral_tx_manager.read().await;
-            m.sign_commitment(&origin_commitment_hash)
+            m.sign_commitment(&origin_commitment_hash)?
         };
 
         let sessions = self.sessions.sessions.lock().await;
