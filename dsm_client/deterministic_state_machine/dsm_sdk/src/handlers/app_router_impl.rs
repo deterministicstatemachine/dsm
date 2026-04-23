@@ -646,6 +646,22 @@ impl AppRouterImpl {
         let dlv_manager = Arc::new(dsm::vault::DLVManager::new());
         let bitcoin_tap = Arc::new(crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::new(dlv_manager));
 
+        // One-shot purge of retired prefs keyspace (plan Part E).
+        // `dsm.token.*`, `dsm.dlv.*`, `dsm.detfi.*` used to mirror token +
+        // vault state in the app-state KV.  Every writer is gone and the
+        // readers are dead code; wipe stale keys at boot so the next
+        // release can drop this hook entirely.  Fail-soft on missing store.
+        let purged = crate::sdk::app_state::AppState::purge_keys_with_prefixes(&[
+            "dsm.token.",
+            "dsm.dlv.",
+            "dsm.detfi.",
+        ]);
+        if purged > 0 {
+            log::info!(
+                "[app_router] purged {purged} legacy prefs keys (dsm.token.* / dsm.dlv.* / dsm.detfi.*)"
+            );
+        }
+
         Ok(Self {
             _config: config,
             contact_manager: cm,
