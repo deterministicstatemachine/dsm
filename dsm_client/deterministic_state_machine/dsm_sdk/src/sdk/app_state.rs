@@ -429,6 +429,37 @@ impl AppState {
         }
     }
 
+    /// Remove every key in the generic key-value store whose name starts
+    /// with any of the supplied prefixes.  Returns the number of keys
+    /// removed.  Fail-soft: if the store is unavailable the call is a
+    /// no-op and returns 0.
+    ///
+    /// Used by `purge_legacy_prefs` at AppRouterImpl boot to wipe the
+    /// retired `dsm.token.*` / `dsm.dlv.*` / `dsm.detfi.*` keyspace.
+    pub fn purge_keys_with_prefixes(prefixes: &[&str]) -> usize {
+        Self::ensure_storage_loaded();
+        let removed = {
+            let mut guard = STORAGE.lock().unwrap_or_else(|p| p.into_inner());
+            let Some(ref mut store) = *guard else {
+                return 0;
+            };
+            let keys: Vec<String> = store
+                .key_value_store
+                .keys()
+                .filter(|k| prefixes.iter().any(|p| k.starts_with(p)))
+                .cloned()
+                .collect();
+            for k in &keys {
+                store.key_value_store.remove(k);
+            }
+            keys.len()
+        };
+        if removed > 0 {
+            Self::save_storage();
+        }
+        removed
+    }
+
     /// Recovery session helpers
     pub fn set_recovery_state(recovery_id: &str, status: &str) -> Result<(), String> {
         Self::ensure_storage_loaded();
@@ -511,6 +542,45 @@ mod tests {
         // Prime in-memory storage so global is Some (no file I/O in test mode)
         *STORAGE.lock().unwrap_or_else(|p| p.into_inner()) = Some(AppStateStorage::default());
         STORAGE_INITIALIZED.store(true, Ordering::SeqCst);
+    }
+
+    // ── purge_keys_with_prefixes ──
+
+    #[test]
+    #[serial]
+    fn purge_keys_with_prefixes_wipes_matching_and_keeps_others() {
+        setup_test_env();
+        // Seed keys across the retired prefixes plus a keeper.
+        AppState::handle_app_state_request("dsm.token.ABC", "set", "anchor-abc");
+        AppState::handle_app_state_request("dsm.token.XYZ", "set", "anchor-xyz");
+        AppState::handle_app_state_request("dsm.dlv.VID1", "set", "dlv1");
+        AppState::handle_app_state_request("dsm.detfi.VID2", "set", "detfi2");
+        AppState::handle_app_state_request("dsm.policy.keep", "set", "keeper");
+
+        let removed = AppState::purge_keys_with_prefixes(&[
+            "dsm.token.",
+            "dsm.dlv.",
+            "dsm.detfi.",
+        ]);
+        assert_eq!(removed, 4);
+
+        // Purged keys read empty, keeper survives.
+        assert!(AppState::handle_app_state_request("dsm.token.ABC", "get", "").is_empty());
+        assert!(AppState::handle_app_state_request("dsm.token.XYZ", "get", "").is_empty());
+        assert!(AppState::handle_app_state_request("dsm.dlv.VID1", "get", "").is_empty());
+        assert!(AppState::handle_app_state_request("dsm.detfi.VID2", "get", "").is_empty());
+        assert_eq!(
+            AppState::handle_app_state_request("dsm.policy.keep", "get", ""),
+            "keeper"
+        );
+
+        // Idempotent: second call finds nothing to remove.
+        let removed_again = AppState::purge_keys_with_prefixes(&[
+            "dsm.token.",
+            "dsm.dlv.",
+            "dsm.detfi.",
+        ]);
+        assert_eq!(removed_again, 0);
     }
 
     // ── AppStateStorage default ──

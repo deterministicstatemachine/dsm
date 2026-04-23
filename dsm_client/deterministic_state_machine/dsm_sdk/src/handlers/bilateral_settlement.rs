@@ -72,24 +72,12 @@ fn parse_transfer(operation_bytes: &[u8]) -> Option<TransferFields> {
 }
 
 fn resolve_policy_commit(token_id: &str) -> Result<[u8; 32], String> {
-    if let Ok(commit) = crate::policy::strict_policy_commit_for_token(token_id, None) {
-        return Ok(commit);
-    }
-
-    let anchor_b32 = crate::sdk::app_state::AppState::handle_app_state_request(
-        &format!("dsm.token.{token_id}"),
-        "get",
-        "",
-    );
-    if anchor_b32.is_empty() {
-        return Err(format!("missing policy anchor for token {token_id}"));
-    }
-
-    crate::policy::strict_policy_commit_for_token(
-        token_id,
-        Some(&format!("dsm:policy:{anchor_b32}")),
-    )
-    .map_err(|e| format!("resolve policy commit failed for {token_id}: {e}"))
+    // Builtins (ERA, dBTC) resolve via the constant table.  Custom tokens
+    // MUST be resolved through the authoritative TokenPolicySystem +
+    // TokenMetadata cache via `TokenSDK::resolve_policy_commit_strict`;
+    // the old `dsm.token.<id>` prefs fallback is gone (plan Part E).
+    crate::policy::strict_policy_commit_for_token(token_id, None)
+        .map_err(|e| format!("resolve policy commit failed for {token_id}: {e}"))
 }
 
 /// Build the post-settlement balance projection from the canonical

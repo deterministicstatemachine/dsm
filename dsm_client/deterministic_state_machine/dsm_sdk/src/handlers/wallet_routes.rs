@@ -93,38 +93,13 @@ fn enrich_balance_metadata(reply: &mut generated::BalanceGetResponse) {
         _ => {}
     }
 
-    let anchor_b32 = crate::sdk::app_state::AppState::handle_app_state_request(
-        &format!("dsm.token.{}", reply.token_id),
-        "get",
-        "",
-    );
-    if anchor_b32.is_empty() {
-        return;
-    }
-
-    let policy_b32 = crate::sdk::app_state::AppState::handle_app_state_request(
-        &format!("dsm.policy.{anchor_b32}"),
-        "get",
-        "",
-    );
-    if policy_b32.is_empty() {
-        return;
-    }
-
-    let Some(policy_bytes) = crate::util::text_id::decode_base32_crockford(&policy_b32) else {
-        return;
-    };
-    let Some(meta) = parse_cached_policy_metadata(&policy_bytes) else {
-        return;
-    };
-
-    if !meta.ticker.is_empty() {
-        reply.symbol = meta.ticker;
-    }
-    if !meta.alias.is_empty() {
-        reply.token_name = meta.alias;
-    }
-    reply.decimals = meta.decimals;
+    // Custom token metadata enrichment formerly read `dsm.token.<id>` +
+    // `dsm.policy.<anchor>` from app_state.  Those writers are gone
+    // (plan Part E) and the readers were orphans.  The authoritative
+    // source is the in-memory TokenSDK metadata cache; a follow-up
+    // commit wires enrichment through a typed lookup on AppRouterImpl.
+    // For now the response carries its canonicalised token_id with
+    // default decimals; builtin ERA/dBTC paths above remain exact.
 }
 
 fn ensure_default_visible_balances(items: &mut Vec<generated::BalanceGetResponse>) {
@@ -164,33 +139,12 @@ pub(crate) fn resolve_token_decimals(token_id: &str) -> u32 {
     match canonicalize_token_id(token_id).as_str() {
         "ERA" => 0,
         "dBTC" => 8,
-        other => {
-            let anchor_b32 = crate::sdk::app_state::AppState::handle_app_state_request(
-                &format!("dsm.token.{other}"),
-                "get",
-                "",
-            );
-            if anchor_b32.is_empty() {
-                return 0;
-            }
-
-            let policy_b32 = crate::sdk::app_state::AppState::handle_app_state_request(
-                &format!("dsm.policy.{anchor_b32}"),
-                "get",
-                "",
-            );
-            if policy_b32.is_empty() {
-                return 0;
-            }
-
-            let Some(policy_bytes) = crate::util::text_id::decode_base32_crockford(&policy_b32)
-            else {
-                return 0;
-            };
-            parse_cached_policy_metadata(&policy_bytes)
-                .map(|meta| meta.decimals)
-                .unwrap_or(0)
-        }
+        // Custom-token decimals formerly came from `dsm.token.<id>` +
+        // `dsm.policy.<anchor>` prefs; those paths are gone (plan Part E).
+        // The authoritative source is the TokenSDK metadata cache; a
+        // follow-up commit wires this lookup through AppRouterImpl.  For
+        // now custom tokens default to 0 decimals in the display path.
+        _ => 0,
     }
 }
 

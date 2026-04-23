@@ -16,7 +16,6 @@ use super::response_helpers::{err, pack_envelope_ok};
 
 const POLICY_INDEX_KEY: &str = "dsm.policy.index";
 const POLICY_PREFIX: &str = "dsm.policy.";
-const TOKEN_PREFIX: &str = "dsm.token.";
 
 #[derive(Debug, Clone, Default)]
 struct ParsedTokenPolicy {
@@ -815,7 +814,6 @@ mod tests {
     fn token_route_constants() {
         assert_eq!(POLICY_INDEX_KEY, "dsm.policy.index");
         assert!(POLICY_PREFIX.starts_with("dsm.policy."));
-        assert!(TOKEN_PREFIX.starts_with("dsm.token."));
     }
 
     #[test]
