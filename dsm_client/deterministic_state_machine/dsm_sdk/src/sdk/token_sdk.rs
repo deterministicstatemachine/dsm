@@ -2664,7 +2664,7 @@ impl<I: Send + Sync> TokenSDK<I> {
         };
         let rel_key =
             dsm::core::bilateral_transaction_manager::compute_smt_key(&sender, &recipient_devid);
-        let policy_commit = dsm::core::token::token_state_manager::resolve_policy_commit(&token_id);
+        let policy_commit = self.resolve_policy_commit_strict(&token_id)?;
         let deltas = [dsm::types::device_state::BalanceDelta {
             policy_commit,
             direction: dsm::types::device_state::BalanceDirection::Debit,

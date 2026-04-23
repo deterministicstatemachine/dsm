@@ -2847,12 +2847,19 @@ impl BilateralBleHandler {
                 if tid.is_empty() {
                     Vec::new()
                 } else {
-                    let pc = dsm::core::token::token_state_manager::resolve_policy_commit(tid);
-                    vec![dsm::types::device_state::BalanceDelta {
-                        policy_commit: pc,
-                        direction: dsm::types::device_state::BalanceDirection::Debit,
-                        amount: amount.value(),
-                    }]
+                    match dsm::core::token::token_state_manager::resolve_policy_commit(tid) {
+                        Ok(pc) => vec![dsm::types::device_state::BalanceDelta {
+                            policy_commit: pc,
+                            direction: dsm::types::device_state::BalanceDirection::Debit,
+                            amount: amount.value(),
+                        }],
+                        Err(e) => {
+                            log::warn!(
+                                "[bilateral_ble] skipping delta projection for unresolved token_id={tid}: {e}"
+                            );
+                            Vec::new()
+                        }
+                    }
                 }
             }
             _ => Vec::new(),
@@ -3480,12 +3487,19 @@ impl BilateralBleHandler {
                 if tid.is_empty() {
                     Vec::new()
                 } else {
-                    let pc = dsm::core::token::token_state_manager::resolve_policy_commit(tid);
-                    vec![dsm::types::device_state::BalanceDelta {
-                        policy_commit: pc,
-                        direction: dsm::types::device_state::BalanceDirection::Credit,
-                        amount: amount.value(),
-                    }]
+                    match dsm::core::token::token_state_manager::resolve_policy_commit(tid) {
+                        Ok(pc) => vec![dsm::types::device_state::BalanceDelta {
+                            policy_commit: pc,
+                            direction: dsm::types::device_state::BalanceDirection::Credit,
+                            amount: amount.value(),
+                        }],
+                        Err(e) => {
+                            log::warn!(
+                                "[bilateral_ble] skipping delta projection for unresolved token_id={tid}: {e}"
+                            );
+                            Vec::new()
+                        }
+                    }
                 }
             }
             _ => Vec::new(),
@@ -3973,13 +3987,19 @@ impl BilateralBleHandler {
                         if tid.is_empty() {
                             Vec::new()
                         } else {
-                            let pc =
-                                dsm::core::token::token_state_manager::resolve_policy_commit(tid);
-                            vec![dsm::types::device_state::BalanceDelta {
-                                policy_commit: pc,
-                                direction: dsm::types::device_state::BalanceDirection::Debit,
-                                amount: amount.value(),
-                            }]
+                            match dsm::core::token::token_state_manager::resolve_policy_commit(tid) {
+                                Ok(pc) => vec![dsm::types::device_state::BalanceDelta {
+                                    policy_commit: pc,
+                                    direction: dsm::types::device_state::BalanceDirection::Debit,
+                                    amount: amount.value(),
+                                }],
+                                Err(e) => {
+                                    log::warn!(
+                                        "[bilateral_ble] skipping delta projection for unresolved token_id={tid}: {e}"
+                                    );
+                                    Vec::new()
+                                }
+                            }
                         }
                     }
                     _ => Vec::new(),

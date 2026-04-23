@@ -841,7 +841,32 @@ impl TokenStateManager {
 
 #[cfg(test)]
 mod tests {
-    use super::derive_canonical_balance_key;
+    use super::{derive_canonical_balance_key, resolve_policy_commit};
+
+    #[test]
+    fn resolve_policy_commit_succeeds_for_builtins() {
+        let era = resolve_policy_commit("ERA").expect("ERA is a builtin");
+        let dbtc = resolve_policy_commit("dBTC").expect("dBTC is a builtin");
+        assert_ne!(era, [0u8; 32]);
+        assert_ne!(dbtc, [0u8; 32]);
+        assert_ne!(era, dbtc);
+    }
+
+    #[test]
+    fn resolve_policy_commit_fails_for_unregistered_token() {
+        // No BLAKE3-of-token-id fallback: custom tokens MUST carry policy_commit
+        // on the BalanceDelta path.  Strict-fail closed here.
+        let err = resolve_policy_commit("FOOBAR").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("FOOBAR"),
+            "error must name the offending token_id, got: {msg}"
+        );
+        assert!(
+            msg.contains("no registered policy"),
+            "error must explain missing registration, got: {msg}"
+        );
+    }
 
     #[test]
     fn canonical_balance_key_is_stable_for_same_semantic_input() {
