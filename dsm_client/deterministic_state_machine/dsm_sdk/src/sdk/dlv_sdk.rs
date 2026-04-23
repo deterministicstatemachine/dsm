@@ -31,8 +31,12 @@ fn policy_hash_b3(policy: &SmartPolicy) -> [u8; 32] {
 }
 
 fn vault_post_from_proto(proto: VaultPostProto) -> VaultPost {
+    let mut vid = [0u8; 32];
+    if proto.vault_id.len() == 32 {
+        vid.copy_from_slice(&proto.vault_id);
+    }
     VaultPost {
-        vault_id: proto.vault_id,
+        vault_id: vid,
         lock_description: proto.lock_description,
         creator_id: proto.creator_id,
         commitment_hash: proto.commitment_hash,
@@ -89,8 +93,8 @@ pub struct VaultConfig {
 /// Result of a vault creation operation
 #[derive(Debug, Clone)]
 pub struct VaultCreationResult {
-    /// Unique identifier of the created vault
-    pub vault_id: String,
+    /// Unique identifier of the created vault (raw 32-byte hash).
+    pub vault_id: [u8; 32],
     /// Creator's SPHINCS+ public key (identity key)
     pub creator_public_key: Vec<u8>,
     /// Vault post ready for storage/sharing
@@ -102,8 +106,8 @@ pub struct VaultCreationResult {
 /// Information about a vault's current state
 #[derive(Debug, Clone)]
 pub struct VaultInfo {
-    /// Vault identifier
-    pub id: String,
+    /// Vault identifier (raw 32-byte hash).
+    pub id: [u8; 32],
     /// Creator's public key
     pub creator_public_key: Vec<u8>,
     /// Current state of the vault
@@ -260,7 +264,10 @@ impl DlvSdk {
             })?;
 
             let mut asset = DigitalAsset::new(
-                format!("vault_{vault_id}"),
+                format!(
+                    "vault_{}",
+                    base32::encode(base32::Alphabet::Crockford, &vault_id)
+                ),
                 AssetType::EncryptedState,
                 config.content.clone(),
             );
@@ -322,7 +329,7 @@ impl DlvSdk {
     }
 
     /// Get information about a vault
-    pub async fn get_vault_info(&self, vault_id: &str) -> Result<VaultInfo, DsmError> {
+    pub async fn get_vault_info(&self, vault_id: &[u8; 32]) -> Result<VaultInfo, DsmError> {
         let vault_lock = self.manager.get_vault(vault_id).await?;
         let vault = vault_lock.lock().await;
 
@@ -362,7 +369,7 @@ impl DlvSdk {
         };
 
         Ok(VaultInfo {
-            id: vault.id.clone(),
+            id: vault.id,
             creator_public_key: vault.creator_public_key.clone(),
             state: vault.state.clone(),
             content_type: vault.content_type.clone(),
@@ -372,13 +379,16 @@ impl DlvSdk {
         })
     }
 
-    /// List all vaults managed by this SDK instance
-    pub async fn list_vaults(&self) -> Result<Vec<String>, DsmError> {
+    /// List all vaults managed by this SDK instance (raw 32-byte IDs).
+    pub async fn list_vaults(&self) -> Result<Vec<[u8; 32]>, DsmError> {
         self.manager.list_vaults().await
     }
 
-    /// Get vaults by their current state
-    pub async fn get_vaults_by_state(&self, state: VaultState) -> Result<Vec<String>, DsmError> {
+    /// Get vaults by their current state (raw 32-byte IDs).
+    pub async fn get_vaults_by_state(
+        &self,
+        state: VaultState,
+    ) -> Result<Vec<[u8; 32]>, DsmError> {
         self.manager.get_vaults_by_status(state).await
     }
 
@@ -389,7 +399,7 @@ impl DlvSdk {
     /// Attempt to unlock a time-based vault (no longer supported)
     pub async fn unlock_time_vault(
         &self,
-        _vault_id: &str,
+        _vault_id: &[u8; 32],
         _options: UnlockOptions,
         _reference_state: &State,
     ) -> Result<bool, DsmError> {
@@ -401,7 +411,7 @@ impl DlvSdk {
     /// Attempt to unlock a payment-locked vault
     pub async fn unlock_payment_vault(
         &self,
-        vault_id: &str,
+        vault_id: &[u8; 32],
         payment_proof: Vec<u8>,
         options: UnlockOptions,
         reference_state: &State,
@@ -411,7 +421,7 @@ impl DlvSdk {
             let payload = encode_protocol_transition_payload(
                 b"dlv.payment.unlock",
                 &[
-                    vault_id.as_bytes(),
+                    vault_id,
                     &payment_proof,
                     &options.requester_public_key,
                     &state_hash,
@@ -445,7 +455,7 @@ impl DlvSdk {
     /// Claim the content of an unlocked vault
     pub async fn claim_vault(
         &self,
-        vault_id: &str,
+        vault_id: &[u8; 32],
         claimant_identity: &str,
         reference_state: &State,
     ) -> Result<Vec<u8>, DsmError> {
@@ -461,13 +471,13 @@ impl DlvSdk {
     /// Invalidate a vault (only by creator)
     pub async fn invalidate_vault(
         &self,
-        vault_id: &str,
+        vault_id: &[u8; 32],
         _creator_identity: &str,
         reason: &str,
         reference_state: &State,
     ) -> Result<(), DsmError> {
         let invalidation_message = [
-            vault_id.as_bytes(),
+            &vault_id[..],
             reason.as_bytes(),
             &reference_state.hash[..],
         ]
@@ -484,10 +494,10 @@ impl DlvSdk {
         Ok(())
     }
 
-    /// Load a vault from a vault post
-    pub async fn load_vault_from_post(&self, post: &VaultPost) -> Result<String, DsmError> {
+    /// Load a vault from a vault post (returns raw 32-byte vault id).
+    pub async fn load_vault_from_post(&self, post: &VaultPost) -> Result<[u8; 32], DsmError> {
         let vault = LimboVault::from_vault_post(post)?;
-        let vault_id = vault.id.clone();
+        let vault_id = vault.id;
 
         self.manager
             .add_vault(vault)
@@ -498,7 +508,11 @@ impl DlvSdk {
     }
 
     /// Export a vault as a vault post
-    pub async fn export_vault(&self, vault_id: &str, purpose: &str) -> Result<VaultPost, DsmError> {
+    pub async fn export_vault(
+        &self,
+        vault_id: &[u8; 32],
+        purpose: &str,
+    ) -> Result<VaultPost, DsmError> {
         let data = self
             .manager
             .create_vault_post(vault_id, purpose, None)
@@ -515,7 +529,7 @@ impl DlvSdk {
     }
 
     /// Verify the integrity of a vault
-    pub async fn verify_vault(&self, vault_id: &str) -> Result<bool, DsmError> {
+    pub async fn verify_vault(&self, vault_id: &[u8; 32]) -> Result<bool, DsmError> {
         let v = self.manager.get_vault(vault_id).await?;
         let g = v.lock().await;
         g.verify()
@@ -846,7 +860,10 @@ mod tests {
         assert!(stats.limbo_vaults >= 1);
 
         println!("Successfully created DLV with smart commitments:");
-        println!("  Vault ID: {}", result.vault_id);
+        println!(
+            "  Vault ID: {}",
+            base32::encode(base32::Alphabet::Crockford, &result.vault_id)
+        );
         println!("  Creator: smart_commitment_creator");
         println!("  Content type: {}", info.content_type);
         println!("  Condition: {}", info.condition_description);

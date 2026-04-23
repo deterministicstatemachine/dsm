@@ -356,7 +356,7 @@ pub struct EncryptedContent {
 
 #[derive(Debug, Clone)]
 pub struct VaultPost {
-    pub vault_id: String,
+    pub vault_id: [u8; 32],
     pub lock_description: String,
     pub creator_id: String,
     pub commitment_hash: Vec<u8>,
@@ -379,7 +379,7 @@ impl From<&VaultPost> for crate::types::proto::VaultPostProto {
         metadata_vec.sort_by(|a, b| a.key.cmp(&b.key));
 
         crate::types::proto::VaultPostProto {
-            vault_id: v.vault_id.clone(),
+            vault_id: v.vault_id.to_vec(),
             lock_description: v.lock_description.clone(),
             creator_id: v.creator_id.clone(),
             commitment_hash: v.commitment_hash.clone(),
@@ -392,7 +392,7 @@ impl From<&VaultPost> for crate::types::proto::VaultPostProto {
 
 #[derive(Debug, Clone)]
 pub struct LimboVault {
-    pub id: String,
+    pub id: [u8; 32],
     pub created_at_state: u64,
     pub creator_public_key: Vec<u8>,
     pub fulfillment_condition: FulfillmentMechanism,
@@ -419,7 +419,7 @@ pub struct ClaimResult {
 
 #[derive(Debug, Clone)]
 pub struct LimboVaultDraft {
-    pub id: String,
+    pub id: [u8; 32],
     pub created_at_state: u64,
     pub creator_public_key: Vec<u8>,
     pub fulfillment_condition: FulfillmentMechanism,
@@ -438,7 +438,13 @@ impl TryFrom<crate::types::proto::LimboVaultProto> for LimboVault {
     type Error = DsmError;
 
     fn try_from(p: crate::types::proto::LimboVaultProto) -> Result<Self, Self::Error> {
-        let id = p.id;
+        if p.id.len() != 32 {
+            return Err(DsmError::SerializationError(
+                "LimboVaultProto.id must be 32 bytes".into(),
+            ));
+        }
+        let mut id = [0u8; 32];
+        id.copy_from_slice(&p.id);
         let created_at_state = p.created_at_state;
         let creator_public_key = p.creator_public_key;
 
@@ -530,7 +536,7 @@ impl TryFrom<crate::types::proto::LimboVaultProto> for LimboVault {
 impl From<&LimboVault> for crate::types::proto::LimboVaultProto {
     fn from(v: &LimboVault) -> Self {
         crate::types::proto::LimboVaultProto {
-            id: v.id.clone(),
+            id: v.id.to_vec(),
             created_at_state: v.created_at_state,
             creator_public_key: v.creator_public_key.clone(),
             fulfillment_condition: Some((&v.fulfillment_condition).into()),
@@ -812,7 +818,7 @@ impl LimboVault {
     /// - `claim()` is never called for dBTC vaults (exit goes through `draw_tap`)
     /// - `verify_fulfillment()` only checks the fulfillment condition
     pub fn new_minimal(
-        id: String,
+        id: [u8; 32],
         fulfillment_condition: FulfillmentMechanism,
         reference_state_hash: [u8; 32],
     ) -> Self {
@@ -862,29 +868,35 @@ impl LimboVault {
         // but different fulfillment conditions (e.g. different HTLCs) from colliding on vault_id.
         let fm_bytes = encode_fulfillment_condition(&fulfillment_condition)?;
 
-        // Deterministic ID label from (creator_pk || ref_hash || H(content) || H(fulfillment))
+        // Deterministic ID from (creator_pk || ref_hash || H(content) || H(fulfillment))
+        // as raw 32 bytes — NOT a decimal label.  Binds every relevant input so
+        // two vaults differing only in content/fulfillment/ref_state cannot
+        // collide on vault_id.
         let id_material = concat_bytes(&[
             creator_public_key,
             &ref_hash,
             domain_hash("DSM/dlv-content", content).as_bytes(),
             domain_hash("DSM/dlv-fulfillment", &fm_bytes).as_bytes(),
         ]);
-        let vault_id = decimal_label("vault-", &id_material);
+        let vault_id: [u8; 32] = *domain_hash("DSM/dlv-vault-id", &id_material).as_bytes();
 
         // Recipient KEM — always use the explicit Kyber encryption key
         let (shared_secret, encapsulated_key) = kyber::kyber_encapsulate(encryption_public_key)
             .map_err(|e| DsmError::crypto("kyber_encapsulate", Some(e)))?;
 
-        // Nonce and AAD (deterministic; no clocks)
+        // Nonce seed uses a distinct domain tag from the vault_id derivation to
+        // avoid domain collision.  Still bound to the same id_material so the
+        // nonce is pinned to the exact vault identity.
         let nonce_seed = concat_bytes(&[
-            domain_hash("DSM/dlv-vault-id", &id_material).as_bytes(),
+            domain_hash("DSM/dlv-nonce-seed", &id_material).as_bytes(),
             &ref_hash,
         ]);
         let nonce = domain_hash_bytes("DSM/dlv-nonce", &nonce_seed)[0..12].to_vec();
 
+        // AAD carries raw 32-byte vault_id (NOT decimal-label string bytes).
         let mut aad = Vec::new();
         aad.extend_from_slice(creator_public_key);
-        aad.extend_from_slice(vault_id.as_bytes());
+        aad.extend_from_slice(&vault_id);
         aad.extend_from_slice(&ref_hash);
 
         // Symmetric key for AES-GCM: bind KEM secret + aad + content hash
@@ -905,10 +917,10 @@ impl LimboVault {
         let params = PedersenParams::new(SecurityLevel::Standard128)?;
         let commitment = PedersenCommitment::commit(content, &params)?;
 
-        // Parameters hash (protobuf of fulfillment + core fields)
+        // Parameters hash (protobuf of fulfillment + core fields) — raw 32 bytes.
         let mut parameters = Vec::new();
         parameters.extend_from_slice(creator_public_key);
-        parameters.extend_from_slice(vault_id.as_bytes());
+        parameters.extend_from_slice(&vault_id);
         parameters.extend_from_slice(&ref_hash);
 
         // fm_bytes already computed above for id_material; reuse here.
@@ -924,7 +936,7 @@ impl LimboVault {
         // Random-walk positions
         let seed = generate_seed(
             &domain_hash("DSM/dlv-params", &parameters),
-            vault_id.as_bytes(),
+            &vault_id,
             None,
         );
         let verification_positions = generate_positions(
@@ -998,7 +1010,7 @@ impl LimboVault {
     pub fn verify(&self) -> Result<bool, DsmError> {
         let mut parameters = Vec::new();
         parameters.extend_from_slice(&self.creator_public_key);
-        parameters.extend_from_slice(self.id.as_bytes());
+        parameters.extend_from_slice(&self.id);
         parameters.extend_from_slice(&self.reference_state_hash);
 
         let fm_proto: crate::types::proto::FulfillmentMechanism =
@@ -1702,7 +1714,7 @@ impl LimboVault {
 
         // Construct claim binding
         let mut claim_data = Vec::new();
-        claim_data.extend_from_slice(self.id.as_bytes());
+        claim_data.extend_from_slice(&self.id);
         claim_data.extend_from_slice(&self.parameters_hash);
         claim_data.extend_from_slice(&reference_state_hash[..8]);
         claim_data.extend_from_slice(domain_hash("DSM/dlv-claim", &proof.to_bytes()).as_bytes());
@@ -1813,12 +1825,12 @@ impl LimboVault {
             };
             return Err(DsmError::invalid_operation(format!(
                 "vault {} is in {label} state and cannot be invalidated",
-                self.id
+                base32::encode(base32::Alphabet::Crockford, &self.id)
             )));
         }
         // Bind id + reason + reference state hash
         let mut data = Vec::new();
-        data.extend_from_slice(self.id.as_bytes());
+        data.extend_from_slice(&self.id);
         data.extend_from_slice(reason.as_bytes());
         data.extend_from_slice(reference_state_hash);
 
@@ -1904,7 +1916,7 @@ impl LimboVault {
 impl Default for LimboVault {
     fn default() -> Self {
         Self {
-            id: String::new(),
+            id: [0u8; 32],
             created_at_state: 0,
             creator_public_key: Vec::new(),
             fulfillment_condition: FulfillmentMechanism::CryptoCondition {
@@ -2374,8 +2386,9 @@ mod tests {
         metadata.insert("alpha".to_string(), "a_val".to_string());
         metadata.insert("mid".to_string(), "m_val".to_string());
 
+        let vid = [0x11u8; 32];
         let post = VaultPost {
-            vault_id: "v1".to_string(),
+            vault_id: vid,
             lock_description: "test".to_string(),
             creator_id: "c1".to_string(),
             commitment_hash: vec![],
@@ -2391,8 +2404,9 @@ mod tests {
 
     #[test]
     fn vault_post_proto_fields_match() {
+        let vid = [0x22u8; 32];
         let post = VaultPost {
-            vault_id: "vid".to_string(),
+            vault_id: vid,
             lock_description: "lock".to_string(),
             creator_id: "cid".to_string(),
             commitment_hash: vec![99],
@@ -2402,7 +2416,7 @@ mod tests {
         };
 
         let proto: crate::types::proto::VaultPostProto = (&post).into();
-        assert_eq!(proto.vault_id, "vid");
+        assert_eq!(proto.vault_id, vid.to_vec());
         assert_eq!(proto.lock_description, "lock");
         assert_eq!(proto.creator_id, "cid");
         assert_eq!(proto.commitment_hash, vec![99]);
@@ -2419,9 +2433,10 @@ mod tests {
             public_params: vec![2],
         };
         let ref_hash = [0xAAu8; 32];
-        let v = LimboVault::new_minimal("test-vault".to_string(), cond, ref_hash);
+        let vid = [0x33u8; 32];
+        let v = LimboVault::new_minimal(vid, cond, ref_hash);
 
-        assert_eq!(v.id, "test-vault");
+        assert_eq!(v.id, vid);
         assert_eq!(v.created_at_state, 0);
         assert!(v.creator_public_key.is_empty());
         assert!(v.intended_recipient.is_none());
@@ -2444,7 +2459,7 @@ mod tests {
     fn limbo_vault_default() {
         let v = LimboVault::default();
 
-        assert!(v.id.is_empty());
+        assert_eq!(v.id, [0u8; 32]);
         assert_eq!(v.created_at_state, 0);
         assert!(v.creator_public_key.is_empty());
         assert!(v.intended_recipient.is_none());
@@ -2532,7 +2547,9 @@ mod tests {
     #[test]
     fn create_draft_exposes_signable_parameters_hash() {
         let (draft, creator_secret_key, _reference_state_hash) = make_test_vault_draft();
-        assert!(draft.id.starts_with("vault-"));
+        // vault_id is now a raw 32-byte domain hash, not a decimal-labeled string.
+        assert_eq!(draft.id.len(), 32);
+        assert!(draft.id.iter().any(|b| *b != 0));
         assert_eq!(draft.parameters_hash.len(), 32);
         let creator_signature =
             crate::crypto::sphincs::sphincs_sign(&creator_secret_key, &draft.parameters_hash)
@@ -2598,8 +2615,8 @@ mod tests {
     fn invalidate_accepts_precomputed_creator_signature() {
         let (mut vault, creator_secret_key, reference_state_hash) = make_signed_test_vault();
         let invalidation_message = [
-            vault.id.as_bytes(),
-            b"creator-requested",
+            &vault.id[..],
+            b"creator-requested".as_slice(),
             &reference_state_hash[..],
         ]
         .concat();
@@ -2633,8 +2650,8 @@ mod tests {
         let (_wrong_public_key, wrong_secret_key) =
             crate::crypto::sphincs::generate_sphincs_keypair().expect("wrong sphincs keypair");
         let invalidation_message = [
-            vault.id.as_bytes(),
-            b"creator-requested",
+            &vault.id[..],
+            b"creator-requested".as_slice(),
             &reference_state_hash[..],
         ]
         .concat();
@@ -2912,7 +2929,7 @@ impl DeterministicLimboVault {
             None => String::new(),
         };
         Ok(Self {
-            id: v.id.clone(),
+            id: base32::encode(base32::Alphabet::Crockford, &v.id),
             creator_id,
             recipient_id,
             data: v.encrypted_content.encrypted_data.clone(),

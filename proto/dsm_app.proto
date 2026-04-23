@@ -699,7 +699,7 @@ message Invalidated { uint64 invalidated_state_number = 1; string reason = 2; by
 
 // Limbo vault canonical proto for storage/transport
 message LimboVaultProto {
-  string id = 1;
+  bytes id = 1 [(dsm_fixed_len)=32];
   uint64 created_at_state = 2;
   bytes creator_public_key = 3;
   FulfillmentMechanism fulfillment_condition = 4;
@@ -717,7 +717,7 @@ message LimboVaultProto {
 
 // Vault post wrapper for storage nodes
 message VaultPostProto {
-  string vault_id = 1;
+  bytes vault_id = 1 [(dsm_fixed_len)=32];
   string lock_description = 2;
   string creator_id = 3;
   bytes commitment_hash = 4;

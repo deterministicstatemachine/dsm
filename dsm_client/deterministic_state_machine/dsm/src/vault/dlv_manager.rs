@@ -36,8 +36,8 @@ use std::{collections::HashMap, sync::Arc};
 
 /// Manages Limbo Vaults
 pub struct DLVManager {
-    /// Vaults managed by this instance, keyed by vault ID
-    vaults: tokio::sync::RwLock<HashMap<String, Arc<tokio::sync::Mutex<LimboVault>>>>,
+    /// Vaults managed by this instance, keyed by raw 32-byte vault ID.
+    vaults: tokio::sync::RwLock<HashMap<[u8; 32], Arc<tokio::sync::Mutex<LimboVault>>>>,
 }
 
 impl DLVManager {
@@ -82,10 +82,10 @@ impl DLVManager {
         creator_signature: &[u8],
         token_id: Option<&str>,
         locked_amount: Option<u64>,
-    ) -> Result<(String, Operation), DsmError> {
+    ) -> Result<([u8; 32], Operation), DsmError> {
         let vault = draft.finalize(creator_signature)?;
 
-        let vault_id = vault.id.clone();
+        let vault_id: [u8; 32] = vault.id;
 
         // Serialize the fulfillment condition via proto for the operation
         let fm_proto: crate::types::proto::FulfillmentMechanism =
@@ -97,7 +97,7 @@ impl DLVManager {
             locked_amount.map(|amt| Balance::from_state(amt, vault.reference_state_hash));
 
         let operation = Operation::DlvCreate {
-            vault_id: vault_id.as_bytes().to_vec(),
+            vault_id: vault_id.to_vec(),
             creator_public_key: vault.creator_public_key.clone(),
             parameters_hash: vault.parameters_hash.clone(),
             fulfillment_condition: fulfillment_bytes,
@@ -110,7 +110,7 @@ impl DLVManager {
 
         // Store the vault
         let mut vaults = self.vaults.write().await;
-        vaults.insert(vault_id.clone(), Arc::new(tokio::sync::Mutex::new(vault)));
+        vaults.insert(vault_id, Arc::new(tokio::sync::Mutex::new(vault)));
 
         Ok((vault_id, operation))
     }
@@ -118,28 +118,37 @@ impl DLVManager {
     /// Get a vault by ID
     pub async fn get_vault(
         &self,
-        vault_id: &str,
+        vault_id: &[u8; 32],
     ) -> Result<Arc<tokio::sync::Mutex<LimboVault>>, DsmError> {
         let vaults = self.vaults.read().await;
         vaults.get(vault_id).cloned().ok_or_else(|| {
-            DsmError::not_found("Vault", Some(format!("Vault with ID {vault_id} not found")))
+            DsmError::not_found(
+                "Vault",
+                Some(format!(
+                    "Vault with ID {} not found",
+                    base32::encode(base32::Alphabet::Crockford, vault_id)
+                )),
+            )
         })
     }
 
     /// List all vault IDs
-    pub async fn list_vaults(&self) -> Result<Vec<String>, DsmError> {
+    pub async fn list_vaults(&self) -> Result<Vec<[u8; 32]>, DsmError> {
         let vaults = self.vaults.read().await;
-        Ok(vaults.keys().cloned().collect())
+        Ok(vaults.keys().copied().collect())
     }
 
     /// Get vaults by status
-    pub async fn get_vaults_by_status(&self, status: VaultState) -> Result<Vec<String>, DsmError> {
+    pub async fn get_vaults_by_status(
+        &self,
+        status: VaultState,
+    ) -> Result<Vec<[u8; 32]>, DsmError> {
         // Avoid holding the RwLock guard across async awaits on individual vault mutexes.
-        // Clone the handles first, then release the map read guard before locking each vault.
+        // Copy the handles first, then release the map read guard before locking each vault.
         let vaults = self.vaults.read().await;
-        let handles: Vec<(String, Arc<tokio::sync::Mutex<LimboVault>>)> = vaults
+        let handles: Vec<([u8; 32], Arc<tokio::sync::Mutex<LimboVault>>)> = vaults
             .iter()
-            .map(|(id, v)| (id.clone(), v.clone()))
+            .map(|(id, v)| (*id, v.clone()))
             .collect();
         drop(vaults);
 
@@ -163,7 +172,7 @@ impl DLVManager {
     /// to the state machine via `apply_transition()`.
     pub async fn try_unlock_vault(
         &self,
-        vault_id: &str,
+        vault_id: &[u8; 32],
         proof: FulfillmentProof,
         requester: &[u8],
         signing_public_key: &[u8],
@@ -176,7 +185,7 @@ impl DLVManager {
         let unlocked = vault.unlock(proof, requester, reference_state_hash)?;
 
         let operation = Operation::DlvUnlock {
-            vault_id: vault_id.as_bytes().to_vec(),
+            vault_id: vault_id.to_vec(),
             fulfillment_proof: proof_bytes,
             requester_public_key: signing_public_key.to_vec(),
             signature: vec![], // unsigned — caller must sign
@@ -194,7 +203,7 @@ impl DLVManager {
     /// an internal state change, not a hash-chain entry.
     pub async fn activate_vault(
         &self,
-        vault_id: &str,
+        vault_id: &[u8; 32],
         proof: FulfillmentProof,
         requester: &[u8],
         reference_state_hash: &[u8; 32],
@@ -214,7 +223,7 @@ impl DLVManager {
     /// to the state machine via `apply_transition()`.
     pub async fn claim_vault_content(
         &self,
-        vault_id: &str,
+        vault_id: &[u8; 32],
         claimant_kyber_sk: &[u8],
         claimant_signing_pk: &[u8],
         reference_state_hash: &[u8; 32],
@@ -224,7 +233,7 @@ impl DLVManager {
         let result = vault.claim(claimant_kyber_sk, reference_state_hash)?;
 
         let operation = Operation::DlvClaim {
-            vault_id: vault_id.as_bytes().to_vec(),
+            vault_id: vault_id.to_vec(),
             claim_proof: result.claim_proof.clone(),
             claimant_public_key: claimant_signing_pk.to_vec(),
             signature: vec![], // unsigned — caller must sign
@@ -240,7 +249,7 @@ impl DLVManager {
     /// to the state machine via `apply_transition()`.
     pub async fn invalidate_vault(
         &self,
-        vault_id: &str,
+        vault_id: &[u8; 32],
         reason: &str,
         creator_signature: &[u8],
         reference_state_hash: &[u8; 32],
@@ -254,7 +263,7 @@ impl DLVManager {
         vault.invalidate(reason, creator_signature, reference_state_hash)?;
 
         let operation = Operation::DlvInvalidate {
-            vault_id: vault_id.as_bytes().to_vec(),
+            vault_id: vault_id.to_vec(),
             reason: reason.to_string(),
             creator_public_key: creator_pk,
             signature: vec![], // unsigned — caller must sign
@@ -265,17 +274,17 @@ impl DLVManager {
     }
 
     /// Add an existing vault to the manager
-    pub async fn add_vault(&self, vault: LimboVault) -> Result<String, DsmError> {
-        let vault_id = vault.id.clone();
+    pub async fn add_vault(&self, vault: LimboVault) -> Result<[u8; 32], DsmError> {
+        let vault_id = vault.id;
         let mut vaults = self.vaults.write().await;
-        vaults.insert(vault_id.clone(), Arc::new(tokio::sync::Mutex::new(vault)));
+        vaults.insert(vault_id, Arc::new(tokio::sync::Mutex::new(vault)));
         Ok(vault_id)
     }
 
     /// Create a vault post (protobuf-encoded bytes; no bincode)
     pub async fn create_vault_post(
         &self,
-        vault_id: &str,
+        vault_id: &[u8; 32],
         purpose: &str,
         timeout: Option<u64>,
     ) -> Result<Vec<u8>, DsmError> {
@@ -301,12 +310,18 @@ mod tests {
     use crate::crypto::pedersen::{PedersenCommitment, PedersenParams, SecurityLevel};
     use crate::vault::limbo_vault::{EncryptedContent, VaultState as VS};
 
-    fn dummy_vault(id: &str, state: VS) -> LimboVault {
+    fn vid(n: u8) -> [u8; 32] {
+        let mut v = [0u8; 32];
+        v[0] = n;
+        v
+    }
+
+    fn dummy_vault(id: [u8; 32], state: VS) -> LimboVault {
         let params = PedersenParams::new(SecurityLevel::Standard128).expect("pedersen params");
         let commitment =
             PedersenCommitment::commit(b"test_content", &params).expect("pedersen commit");
         LimboVault {
-            id: id.to_string(),
+            id,
             created_at_state: 0,
             creator_public_key: vec![0x01; 32],
             fulfillment_condition: FulfillmentMechanism::CryptoCondition {
@@ -345,21 +360,22 @@ mod tests {
     #[tokio::test]
     async fn add_and_get_vault() {
         let mgr = DLVManager::new();
-        let vault = dummy_vault("vault_1", VS::Limbo);
+        let id_in = vid(1);
+        let vault = dummy_vault(id_in, VS::Limbo);
 
         let id = mgr.add_vault(vault).await.unwrap();
-        assert_eq!(id, "vault_1");
+        assert_eq!(id, id_in);
 
-        let lock = mgr.get_vault("vault_1").await.unwrap();
+        let lock = mgr.get_vault(&id_in).await.unwrap();
         let v = lock.lock().await;
-        assert_eq!(v.id, "vault_1");
+        assert_eq!(v.id, id_in);
         assert_eq!(v.state, VS::Limbo);
     }
 
     #[tokio::test]
     async fn get_vault_not_found() {
         let mgr = DLVManager::new();
-        let result = mgr.get_vault("nonexistent").await;
+        let result = mgr.get_vault(&vid(0xFF)).await;
         assert!(result.is_err());
     }
 
@@ -375,14 +391,15 @@ mod tests {
     #[tokio::test]
     async fn list_vaults_after_adds() {
         let mgr = DLVManager::new();
-        mgr.add_vault(dummy_vault("v1", VS::Limbo)).await.unwrap();
-        mgr.add_vault(dummy_vault("v2", VS::Limbo)).await.unwrap();
+        let v1 = vid(1);
+        let v2 = vid(2);
+        mgr.add_vault(dummy_vault(v1, VS::Limbo)).await.unwrap();
+        mgr.add_vault(dummy_vault(v2, VS::Limbo)).await.unwrap();
 
-        let mut ids = mgr.list_vaults().await.unwrap();
-        ids.sort();
+        let ids = mgr.list_vaults().await.unwrap();
         assert_eq!(ids.len(), 2);
-        assert!(ids.contains(&"v1".to_string()));
-        assert!(ids.contains(&"v2".to_string()));
+        assert!(ids.contains(&v1));
+        assert!(ids.contains(&v2));
     }
 
     // ── get_vaults_by_status ────────────────────────────────────────
@@ -397,13 +414,16 @@ mod tests {
     #[tokio::test]
     async fn get_vaults_by_status_filters() {
         let mgr = DLVManager::new();
-        mgr.add_vault(dummy_vault("limbo_1", VS::Limbo))
+        let limbo_1 = vid(1);
+        let limbo_2 = vid(2);
+        let active_1 = vid(3);
+        mgr.add_vault(dummy_vault(limbo_1, VS::Limbo))
             .await
             .unwrap();
-        mgr.add_vault(dummy_vault("limbo_2", VS::Limbo))
+        mgr.add_vault(dummy_vault(limbo_2, VS::Limbo))
             .await
             .unwrap();
-        mgr.add_vault(dummy_vault("active_1", VS::Active))
+        mgr.add_vault(dummy_vault(active_1, VS::Active))
             .await
             .unwrap();
 
@@ -412,7 +432,7 @@ mod tests {
 
         let active = mgr.get_vaults_by_status(VS::Active).await.unwrap();
         assert_eq!(active.len(), 1);
-        assert_eq!(active[0], "active_1");
+        assert_eq!(active[0], active_1);
     }
 
     // ── add_vault overwrites existing ───────────────────────────────
@@ -420,13 +440,14 @@ mod tests {
     #[tokio::test]
     async fn add_vault_overwrites_same_id() {
         let mgr = DLVManager::new();
-        mgr.add_vault(dummy_vault("dup", VS::Limbo)).await.unwrap();
-        mgr.add_vault(dummy_vault("dup", VS::Active)).await.unwrap();
+        let dup = vid(7);
+        mgr.add_vault(dummy_vault(dup, VS::Limbo)).await.unwrap();
+        mgr.add_vault(dummy_vault(dup, VS::Active)).await.unwrap();
 
         let ids = mgr.list_vaults().await.unwrap();
         assert_eq!(ids.len(), 1);
 
-        let lock = mgr.get_vault("dup").await.unwrap();
+        let lock = mgr.get_vault(&dup).await.unwrap();
         let v = lock.lock().await;
         assert_eq!(v.state, VS::Active);
     }
@@ -438,10 +459,10 @@ mod tests {
         let mgr = std::sync::Arc::new(DLVManager::new());
         let mut handles = Vec::new();
 
-        for i in 0..10 {
+        for i in 0..10u8 {
             let mgr = mgr.clone();
             handles.push(tokio::spawn(async move {
-                let vault = dummy_vault(&format!("v_{i}"), VS::Limbo);
+                let vault = dummy_vault(vid(i), VS::Limbo);
                 mgr.add_vault(vault).await.unwrap();
             }));
         }
