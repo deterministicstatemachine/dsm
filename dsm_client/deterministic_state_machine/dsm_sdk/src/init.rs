@@ -466,7 +466,9 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
         // DBRW is mandatory for wallet initialization/signing availability, but it must NOT
         // participate in genesis creation.
         //
-        // Per whitepaper: S_master = HKDF(G || DevID || K_DBRW || s_0)
+        // The live path concatenates `genesis || device_id || K_DBRW`, then
+        // `SignatureKeyPair::generate_from_entropy()` compresses that material with
+        // `domain_hash("DSM/sphincs-seed", ...)` before deterministic SPHINCS keygen.
         let dbrw_key = crate::fetch_dbrw_binding_key().map_err(|e| {
             format!(
                 "C-DBRW not initialized: call canonical bootstrap before initializing wallet/signing ({e})"

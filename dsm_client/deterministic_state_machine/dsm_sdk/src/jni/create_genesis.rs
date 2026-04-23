@@ -141,12 +141,16 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_createGenesis<'a>(
                 };
 
                 // CRITICAL: Derive signing keypair deterministically from genesis + device_id
-                // Per whitepaper: S_master = HKDF(G || DevID || K_DBRW || s_0)
-                // This ensures the same key is derived every time for a given identity
+                // plus the DBRW binding key.
+                // This ensures the same key is derived every time for a given identity.
+                //
+                // The live path concatenates `genesis || device_id || K_DBRW`, then
+                // `SignatureKeyPair::generate_from_entropy()` compresses that material with
+                // `domain_hash("DSM/sphincs-seed", ...)` before deterministic SPHINCS keygen.
                 //
                 // NOTE: The `entropy` passed here is the DBRW binding key derived in the JNI layer
                 // via DbrwInstance::initialize -> DbrwCommitment::derive_binding_key.
-                // It MUST be used as the sole source of entropy for this derivation.
+                // It is the DBRW component of the combined deterministic seed material.
                 let public_key = {
                     let mut key_entropy = Vec::with_capacity(96);
                     key_entropy.extend_from_slice(&genesis_hash_bytes);

@@ -344,6 +344,29 @@ mod tests {
     }
 
     #[test]
+    fn default_entropy_keypair_digest_is_stable() {
+        let kp = SignatureKeyPair::generate_from_entropy(b"DSM/default-entropy-kat")
+            .expect("deterministic keypair generation");
+        let pk_digest = *blake3::hash(&kp.public_key).as_bytes();
+        let sk_digest = *blake3::hash(&kp.secret_key).as_bytes();
+
+        assert_eq!(
+            pk_digest,
+            [
+                76, 122, 75, 56, 104, 93, 225, 30, 171, 126, 221, 51, 199, 247, 235, 203, 61,
+                74, 247, 119, 84, 208, 248, 217, 208, 161, 89, 96, 245, 217, 216, 225,
+            ]
+        );
+        assert_eq!(
+            sk_digest,
+            [
+                0, 120, 172, 29, 214, 213, 18, 207, 207, 112, 129, 26, 14, 246, 78, 249, 6,
+                87, 65, 84, 200, 188, 231, 111, 53, 92, 101, 144, 28, 92, 141, 163,
+            ]
+        );
+    }
+
+    #[test]
     fn free_function_wrappers_default() {
         let kp = SignatureKeyPair::new().expect("gen");
         let msg = b"wrapper test";
