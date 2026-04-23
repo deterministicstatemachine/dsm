@@ -3,7 +3,7 @@ jest.mock('../WebViewBridge', () => ({
 }));
 
 import * as pb from '../../proto/dsm_app_pb';
-import { createCustomDlv } from '../dlv';
+import { createCustomDlv, buildDlvInstantiateBytes } from '../dlv';
 import { routerInvokeBin } from '../WebViewBridge';
 import { encodeBase32Crockford } from '../../utils/textId';
 
@@ -179,6 +179,73 @@ describe('dlv.ts', () => {
       const result = await createCustomDlv({ lock: lockB32 });
       expect(result.success).toBe(false);
       expect(result.error).toMatch(/network fail/);
+    });
+  });
+
+  describe('buildDlvInstantiateBytes', () => {
+    const baseInput = {
+      policyDigest: new Uint8Array(32).fill(0x02),
+      contentDigest: new Uint8Array(32).fill(0x03),
+      fulfillmentDigest: new Uint8Array(32).fill(0x04),
+      content: new Uint8Array([0xaa, 0xbb]),
+      fulfillmentBytes: new Uint8Array([0xcc, 0xdd]),
+      creatorPublicKey: new Uint8Array(64).fill(0x11),
+      signature: new Uint8Array(64).fill(0x22),
+    };
+
+    test('produces a DlvInstantiateV1 that round-trips through the proto', () => {
+      const bytes = buildDlvInstantiateBytes(baseInput);
+      const req = pb.DlvInstantiateV1.fromBinary(bytes);
+      expect(req.spec).toBeDefined();
+      expect(Array.from(req.spec!.policyDigest)).toEqual(Array.from(baseInput.policyDigest));
+      expect(Array.from(req.spec!.contentDigest)).toEqual(Array.from(baseInput.contentDigest));
+      expect(Array.from(req.spec!.fulfillmentDigest)).toEqual(
+        Array.from(baseInput.fulfillmentDigest),
+      );
+      expect(Array.from(req.creatorPublicKey)).toEqual(Array.from(baseInput.creatorPublicKey));
+      expect(Array.from(req.signature)).toEqual(Array.from(baseInput.signature));
+      // No lock supplied → all-zero 16 bytes.
+      expect(req.lockedAmountU128.length).toBe(16);
+      expect(req.lockedAmountU128.every((b) => b === 0)).toBe(true);
+      // No token_id supplied → empty bytes.
+      expect(req.tokenId.length).toBe(0);
+    });
+
+    test('encodes lockedAmount big-endian u128', () => {
+      const bytes = buildDlvInstantiateBytes({
+        ...baseInput,
+        tokenId: 'FOOBAR',
+        lockedAmount: 0x0102_0304_0506_0708n,
+      });
+      const req = pb.DlvInstantiateV1.fromBinary(bytes);
+      expect(new TextDecoder().decode(req.tokenId)).toBe('FOOBAR');
+      // Big-endian encoding of 0x0102030405060708 in 16 bytes.
+      const expected = new Uint8Array(16);
+      expected[8] = 0x01;
+      expected[9] = 0x02;
+      expected[10] = 0x03;
+      expected[11] = 0x04;
+      expected[12] = 0x05;
+      expected[13] = 0x06;
+      expected[14] = 0x07;
+      expected[15] = 0x08;
+      expect(Array.from(req.lockedAmountU128)).toEqual(Array.from(expected));
+    });
+
+    test.each([
+      ['policyDigest', { policyDigest: new Uint8Array(16) }, /policyDigest must be 32 bytes/],
+      ['contentDigest', { contentDigest: new Uint8Array(16) }, /contentDigest must be 32 bytes/],
+      [
+        'fulfillmentDigest',
+        { fulfillmentDigest: new Uint8Array(16) },
+        /fulfillmentDigest must be 32 bytes/,
+      ],
+      ['creatorPublicKey', { creatorPublicKey: new Uint8Array(0) }, /creatorPublicKey is required/],
+      ['signature', { signature: new Uint8Array(0) }, /signature is required/],
+    ])('rejects invalid %s', (_label, override, pattern) => {
+      expect(() => buildDlvInstantiateBytes({ ...baseInput, ...override })).toThrow(
+        pattern as RegExp,
+      );
     });
   });
 });
