@@ -999,7 +999,7 @@ impl<I: Send + Sync> TokenSDK<I> {
                 // Route via relationship-aware path (§2.2)
                 let rel_key =
                     dsm::core::bilateral_transaction_manager::compute_smt_key(&sender, recipient);
-                let pc = dsm::core::token::token_state_manager::resolve_policy_commit(token_id);
+                let pc = self.resolve_policy_commit_strict(token_id)?;
                 let deltas = [dsm::types::device_state::BalanceDelta {
                     policy_commit: pc,
                     direction: dsm::types::device_state::BalanceDirection::Debit,
@@ -1961,7 +1961,7 @@ impl<I: Send + Sync> TokenSDK<I> {
         // rel_key = k_{A↔B} per §2.2 canonical derivation.
         let rel_key =
             dsm::core::bilateral_transaction_manager::compute_smt_key(&sender, &recipient);
-        let policy_commit = dsm::core::token::token_state_manager::resolve_policy_commit(&token_id);
+        let policy_commit = self.resolve_policy_commit_strict(&token_id)?;
         let deltas = [dsm::types::device_state::BalanceDelta {
             policy_commit,
             direction: dsm::types::device_state::BalanceDirection::Debit,
@@ -2390,7 +2390,7 @@ impl<I: Send + Sync> TokenSDK<I> {
             &current_state.device_info.device_id,
             &fee_counterparty,
         );
-        let era_pc = dsm::core::token::token_state_manager::resolve_policy_commit("ERA");
+        let era_pc = dsm::core::token::token_state_manager::resolve_policy_commit("ERA")?;
         let fee_deltas = [dsm::types::device_state::BalanceDelta {
             policy_commit: era_pc,
             direction: dsm::types::device_state::BalanceDirection::Debit,
@@ -2579,7 +2579,7 @@ impl<I: Send + Sync> TokenSDK<I> {
             crate::util::domain_helpers::device_id_hash(recipient.as_str());
         let rel_key =
             dsm::core::bilateral_transaction_manager::compute_smt_key(&sender, &recipient_bytes);
-        let policy_commit = dsm::core::token::token_state_manager::resolve_policy_commit(&token_id);
+        let policy_commit = self.resolve_policy_commit_strict(&token_id)?;
         let deltas = [dsm::types::device_state::BalanceDelta {
             policy_commit,
             direction: dsm::types::device_state::BalanceDirection::Debit,

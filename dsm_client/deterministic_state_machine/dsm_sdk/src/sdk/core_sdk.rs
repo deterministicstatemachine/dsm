@@ -827,7 +827,7 @@ impl CoreSDK {
         // Execute mint via relationship path (self-loop for authority mint)
         let dev_id = self.device_info.device_id;
         let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&dev_id, &dev_id);
-        let era_pc = dsm::core::token::token_state_manager::resolve_policy_commit("ERA");
+        let era_pc = dsm::core::token::token_state_manager::resolve_policy_commit("ERA")?;
         let deltas = [dsm::types::device_state::BalanceDelta {
             policy_commit: era_pc,
             direction: dsm::types::device_state::BalanceDirection::Credit,
@@ -1395,8 +1395,7 @@ impl CoreSDK {
                 dsm::types::operations::Operation::Transfer {
                     token_id, amount, ..
                 } => {
-                    let tid = String::from_utf8_lossy(token_id);
-                    let pc = dsm::core::token::token_state_manager::resolve_policy_commit(&tid);
+                    let pc = self.resolve_policy_commit_strict(token_id)?;
                     vec![dsm::types::device_state::BalanceDelta {
                         policy_commit: pc,
                         direction: dsm::types::device_state::BalanceDirection::Credit,
