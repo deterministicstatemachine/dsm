@@ -15,17 +15,25 @@ function frameEnvelope(envelope: pb.Envelope): Uint8Array {
   return framed;
 }
 
-function makeValidDlvCreate(): pb.DlvCreateV3 {
-  return new pb.DlvCreateV3({
-    deviceId: new Uint8Array(32).fill(0x01) as any,
-    policyDigest: new Uint8Array(32).fill(0x02) as any,
-    precommit: new Uint8Array(32).fill(0x03) as any,
-    vaultId: new Uint8Array(32).fill(0x04) as any,
+function makeValidInstantiate(): pb.DlvInstantiateV1 {
+  return new pb.DlvInstantiateV1({
+    spec: new pb.DlvSpecV1({
+      policyDigest: new Uint8Array(32).fill(0x02) as any,
+      contentDigest: new Uint8Array(32).fill(0x03) as any,
+      fulfillmentDigest: new Uint8Array(32).fill(0x04) as any,
+      intendedRecipient: new Uint8Array() as any,
+      fulfillmentBytes: new Uint8Array([0xaa, 0xbb]) as any,
+      content: new Uint8Array([0xcc]) as any,
+    }),
+    creatorPublicKey: new Uint8Array(64).fill(0x11) as any,
+    tokenId: new Uint8Array() as any,
+    lockedAmountU128: new Uint8Array(16) as any,
+    signature: new Uint8Array(64).fill(0x22) as any,
   });
 }
 
-function encodeDlvToBase32(dlv: pb.DlvCreateV3): string {
-  return encodeBase32Crockford(new Uint8Array(dlv.toBinary()));
+function encodeInstantiateToBase32(req: pb.DlvInstantiateV1): string {
+  return encodeBase32Crockford(new Uint8Array(req.toBinary()));
 }
 
 describe('dlv.ts', () => {
@@ -33,8 +41,8 @@ describe('dlv.ts', () => {
 
   describe('createCustomDlv', () => {
     test('returns success with vault id on appStateResponse', async () => {
-      const dlv = makeValidDlvCreate();
-      const lockB32 = encodeDlvToBase32(dlv);
+      const req = makeValidInstantiate();
+      const lockB32 = encodeInstantiateToBase32(req);
 
       const env = new pb.Envelope({
         version: 3,
@@ -50,9 +58,9 @@ describe('dlv.ts', () => {
       expect(result.id).toBe('VAULT_ID_B32');
     });
 
-    test('uses empty string as id when appStateResponse.value is empty', async () => {
-      const dlv = makeValidDlvCreate();
-      const lockB32 = encodeDlvToBase32(dlv);
+    test('returns empty id when appStateResponse.value is empty', async () => {
+      const req = makeValidInstantiate();
+      const lockB32 = encodeInstantiateToBase32(req);
 
       const env = new pb.Envelope({
         version: 3,
@@ -65,13 +73,12 @@ describe('dlv.ts', () => {
 
       const result = await createCustomDlv({ lock: lockB32 });
       expect(result.success).toBe(true);
-      // `??` doesn't trigger on empty string — returns '' directly
       expect(result.id).toBe('');
     });
 
-    test('falls back to vaultId encoding when appStateResponse.value is nullish', async () => {
-      const dlv = makeValidDlvCreate();
-      const lockB32 = encodeDlvToBase32(dlv);
+    test('returns empty id when appStateResponse.value is unset', async () => {
+      const req = makeValidInstantiate();
+      const lockB32 = encodeInstantiateToBase32(req);
 
       const env = new pb.Envelope({
         version: 3,
@@ -84,8 +91,7 @@ describe('dlv.ts', () => {
 
       const result = await createCustomDlv({ lock: lockB32 });
       expect(result.success).toBe(true);
-      expect(typeof result.id).toBe('string');
-      expect(result.id!.length).toBeGreaterThan(0);
+      expect(result.id).toBe('');
     });
 
     test('returns error for empty lock string', async () => {
@@ -101,8 +107,8 @@ describe('dlv.ts', () => {
     });
 
     test('returns error on error envelope', async () => {
-      const dlv = makeValidDlvCreate();
-      const lockB32 = encodeDlvToBase32(dlv);
+      const req = makeValidInstantiate();
+      const lockB32 = encodeInstantiateToBase32(req);
 
       const env = new pb.Envelope({
         version: 3,
@@ -116,8 +122,8 @@ describe('dlv.ts', () => {
     });
 
     test('returns error on unexpected payload case', async () => {
-      const dlv = makeValidDlvCreate();
-      const lockB32 = encodeDlvToBase32(dlv);
+      const req = makeValidInstantiate();
+      const lockB32 = encodeInstantiateToBase32(req);
 
       const env = new pb.Envelope({
         version: 3,
@@ -130,37 +136,43 @@ describe('dlv.ts', () => {
       expect(result.error).toMatch(/Unexpected response payload/);
     });
 
-    test('returns error when DlvCreateV3 has invalid deviceId length', async () => {
-      const dlv = new pb.DlvCreateV3({
-        deviceId: new Uint8Array(16).fill(0x01) as any,
-        policyDigest: new Uint8Array(32).fill(0x02) as any,
-        precommit: new Uint8Array(32).fill(0x03) as any,
-        vaultId: new Uint8Array(32).fill(0x04) as any,
+    test('returns error when DlvSpecV1.policy_digest is wrong length', async () => {
+      const req = new pb.DlvInstantiateV1({
+        spec: new pb.DlvSpecV1({
+          policyDigest: new Uint8Array(16).fill(0x02) as any,
+          contentDigest: new Uint8Array(32).fill(0x03) as any,
+          fulfillmentDigest: new Uint8Array(32).fill(0x04) as any,
+        }),
+        creatorPublicKey: new Uint8Array(64).fill(0x11) as any,
+        signature: new Uint8Array(64).fill(0x22) as any,
       });
-      const lockB32 = encodeDlvToBase32(dlv);
-
-      const result = await createCustomDlv({ lock: lockB32 });
-      expect(result.success).toBe(false);
-      expect(result.error).toMatch(/device_id must be 32 bytes/);
-    });
-
-    test('returns error when DlvCreateV3 has invalid policyDigest', async () => {
-      const dlv = new pb.DlvCreateV3({
-        deviceId: new Uint8Array(32).fill(0x01) as any,
-        policyDigest: new Uint8Array(16).fill(0x02) as any,
-        precommit: new Uint8Array(32).fill(0x03) as any,
-        vaultId: new Uint8Array(32).fill(0x04) as any,
-      });
-      const lockB32 = encodeDlvToBase32(dlv);
+      const lockB32 = encodeInstantiateToBase32(req);
 
       const result = await createCustomDlv({ lock: lockB32 });
       expect(result.success).toBe(false);
       expect(result.error).toMatch(/policy_digest must be 32 bytes/);
     });
 
+    test('returns error when creator_public_key is empty', async () => {
+      const req = new pb.DlvInstantiateV1({
+        spec: new pb.DlvSpecV1({
+          policyDigest: new Uint8Array(32).fill(0x02) as any,
+          contentDigest: new Uint8Array(32).fill(0x03) as any,
+          fulfillmentDigest: new Uint8Array(32).fill(0x04) as any,
+        }),
+        creatorPublicKey: new Uint8Array() as any,
+        signature: new Uint8Array(64).fill(0x22) as any,
+      });
+      const lockB32 = encodeInstantiateToBase32(req);
+
+      const result = await createCustomDlv({ lock: lockB32 });
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/creator_public_key.*required/);
+    });
+
     test('returns error when bridge throws', async () => {
-      const dlv = makeValidDlvCreate();
-      const lockB32 = encodeDlvToBase32(dlv);
+      const req = makeValidInstantiate();
+      const lockB32 = encodeInstantiateToBase32(req);
 
       (routerInvokeBin as jest.Mock).mockRejectedValue(new Error('network fail'));
 

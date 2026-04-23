@@ -787,13 +787,28 @@ message TokenCreateResponse {
 }
 
 // ------------------------- DLV Lifecycle Objects --------------------------
-message DlvCreateV3 {
-  // domain: "DSM/dlv/create\0"
-  bytes device_id      = 1 [(dsm_fixed_len)=32];
-  bytes policy_digest  = 2 [(dsm_fixed_len)=32];
-  bytes precommit      = 3 [(dsm_fixed_len)=32];
-  bytes vault_id       = 4 [(dsm_fixed_len)=32];
-  bytes parent_digest  = 5 [(dsm_fixed_len)=32]; // optional, empty allowed
+// Device-neutral, content-addressed vault template.
+// spec_id (implicit) := BLAKE3("DSM/dlv-spec\0" ||
+//     policy_digest || content_digest || fulfillment_digest || recipient_digest)
+// where recipient_digest = BLAKE3("DSM/dlv-recipient\0" || intended_recipient) if set
+// else 32 zero bytes.
+message DlvSpecV1 {
+  bytes policy_digest       = 1 [(dsm_fixed_len)=32];  // CPTA anchor
+  bytes content_digest      = 2 [(dsm_fixed_len)=32];  // H("DSM/dlv-content", content)
+  bytes fulfillment_digest  = 3 [(dsm_fixed_len)=32];  // H("DSM/dlv-fulfillment", fulfillment_bytes)
+  bytes intended_recipient  = 4 [(dsm_max_len)=1568];  // Kyber pk, optional (empty = self-encrypted)
+  bytes fulfillment_bytes   = 5 [(dsm_max_len)=65535]; // canonical FulfillmentMechanism proto
+  bytes content             = 6 [(dsm_max_len)=65535]; // plaintext for local; sender-encrypted for posted
+}
+
+// Instance creation.  Carries everything Operation::DlvCreate needs.
+// The creator's chain_tip enters via execute_on_relationship, not this proto.
+message DlvInstantiateV1 {
+  DlvSpecV1 spec            = 1;
+  bytes creator_public_key  = 2 [(dsm_max_len)=65535]; // SPHINCS+ pk
+  bytes token_id            = 3 [(dsm_max_len)=64];    // optional; empty = content-only vault
+  bytes locked_amount_u128  = 4 [(dsm_fixed_len)=16];  // big-endian u128; all-zeros if no lock
+  bytes signature           = 5 [(dsm_max_len)=65535]; // SPHINCS+ over canonical Operation::DlvCreate bytes
 }
 
 message DlvOpenV3 {
