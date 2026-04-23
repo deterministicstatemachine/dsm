@@ -553,6 +553,23 @@ impl CoreSDK {
         Ok(state)
     }
 
+    /// Register a CPTA policy for a custom token with the underlying
+    /// `TokenPolicySystem`.  This is the authoritative step that makes the
+    /// policy visible to `PolicyEnforcer` and binds `policy_commit =
+    /// PolicyAnchor::from_policy(&policy_file)` for all subsequent balance
+    /// ops on `token_id`.
+    ///
+    /// Must run before any balance-changing op references `token_id`.
+    pub async fn register_token_policy(
+        &self,
+        token_id: &str,
+        policy_file: dsm::types::policy_types::PolicyFile,
+    ) -> Result<dsm::types::policy_types::PolicyAnchor, DsmError> {
+        self.policy_system
+            .register_token_policy(token_id, policy_file)
+            .await
+    }
+
     /// Execute a DSM operation on a specific relationship chain (§2.2, §4.2).
     ///
     /// Returns `(State, AdvanceOutcome)` where the `State` is a compatibility

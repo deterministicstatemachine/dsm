@@ -667,7 +667,7 @@ impl<I: Send + Sync> TokenSDK<I> {
         Ok(())
     }
 
-    fn cache_token_metadata_strict(
+    pub(crate) fn cache_token_metadata_strict(
         &self,
         mut metadata: TokenMetadata,
     ) -> Result<TokenMetadata, DsmError> {
