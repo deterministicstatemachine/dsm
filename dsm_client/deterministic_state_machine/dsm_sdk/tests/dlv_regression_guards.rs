@@ -174,6 +174,78 @@ fn dlv_claim_uses_local_rel_key_not_creator_rel_key() {
     );
 }
 
+/// Track B invariant — posted-mode DLV advertisements MUST be keyed by
+/// the intended recipient's Kyber PK, not by the creator's.  A swap would
+/// silently break the recipient's `posted_dlv.list` query (which polls
+/// `dlv/posted/{local_kyber_pk}/`).  This guard asserts the key-builder
+/// function uses `recipient_kyber_pk` as its first argument.
+#[test]
+fn posted_dlv_ad_key_uses_recipient_not_creator() {
+    let src = read(sdk_path("src/sdk/posted_dlv_sdk.rs"));
+    assert!(
+        src.contains("pub(crate) fn advertisement_key(recipient_kyber_pk: &[u8]"),
+        "regression: advertisement_key signature must put recipient_kyber_pk first \
+         (key format `dlv/posted/{{recipient_b32}}/{{dlv_id_b32}}` is load-bearing \
+         for recipient-indexed discovery)"
+    );
+    assert!(
+        src.contains("pub(crate) const POSTED_DLV_AD_ROOT: &str = \"dlv/posted/\";"),
+        "regression: POSTED_DLV_AD_ROOT prefix must remain `dlv/posted/`"
+    );
+    assert!(
+        !src.contains("format!(\"dlv/posted/{{}}\", creator"),
+        "regression: advertisement key must not be creator-indexed"
+    );
+}
+
+/// Track B invariant — `dlv.create` with a non-empty `intended_recipient`
+/// MUST publish a posted-DLV advertisement.  A regression that dropped
+/// the publish call would leave recipients unable to discover their
+/// vaults while creators see a fully committed on-chain state.
+#[test]
+fn dlv_create_publishes_advertisement_when_intended_recipient_set() {
+    let src = read(sdk_path("src/handlers/dlv_routes.rs"));
+    assert!(
+        src.contains("crate::sdk::posted_dlv_sdk::publish_active_advertisement"),
+        "regression: dlv.create no longer invokes publish_active_advertisement"
+    );
+    assert!(
+        src.contains("intended_recipient_opt.as_ref()"),
+        "regression: dlv.create publish gate must read intended_recipient_opt"
+    );
+}
+
+/// Track B invariant — `dlv.claim` MUST publish a claimed-state
+/// advertisement so the creator's device (and other observers) can see
+/// the vault has been consumed.  The dedup rule (highest
+/// updated_state_number wins) depends on this emission to function.
+#[test]
+fn dlv_claim_publishes_terminal_state_ad() {
+    let src = read(sdk_path("src/handlers/dlv_routes.rs"));
+    assert!(
+        src.contains("crate::sdk::posted_dlv_sdk::publish_terminal_state"),
+        "regression: dlv.claim no longer emits a terminal-state advertisement"
+    );
+    assert!(
+        src.contains("LIFECYCLE_CLAIMED"),
+        "regression: dlv.claim must tag its terminal ad with LIFECYCLE_CLAIMED"
+    );
+}
+
+/// Track B invariant — the digest binding advertisement → VaultPostProto
+/// MUST use the `DSM/posted-dlv-ad` BLAKE3 domain tag.  A tag swap would
+/// silently break the fetch-verify round trip, causing legitimate
+/// recipients to reject all ads.
+#[test]
+fn posted_dlv_digest_uses_stable_domain_tag() {
+    let src = read(sdk_path("src/sdk/posted_dlv_sdk.rs"));
+    assert!(
+        src.contains("pub(crate) const POSTED_DLV_AD_DOMAIN: &str = \"DSM/posted-dlv-ad\";"),
+        "regression: POSTED_DLV_AD_DOMAIN changed — this breaks every \
+         previously-published advertisement"
+    );
+}
+
 /// Commit 3 invariant — the strict resolver lives at the TokenSDK
 /// layer.  Code that derives `policy_commit` from `TokenMetadata`
 /// directly bypasses policy registration and must not come back.

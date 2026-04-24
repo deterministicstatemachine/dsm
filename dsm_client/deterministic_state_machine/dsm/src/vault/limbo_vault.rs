@@ -390,6 +390,35 @@ impl From<&VaultPost> for crate::types::proto::VaultPostProto {
     }
 }
 
+impl TryFrom<&crate::types::proto::VaultPostProto> for VaultPost {
+    type Error = DsmError;
+
+    fn try_from(p: &crate::types::proto::VaultPostProto) -> Result<Self, Self::Error> {
+        if p.vault_id.len() != 32 {
+            return Err(DsmError::invalid_operation(format!(
+                "VaultPostProto.vault_id must be 32 bytes, got {}",
+                p.vault_id.len()
+            )));
+        }
+        let mut vault_id = [0u8; 32];
+        vault_id.copy_from_slice(&p.vault_id);
+        let metadata: HashMap<String, String> = p
+            .metadata
+            .iter()
+            .map(|kv| (kv.key.clone(), kv.value.clone()))
+            .collect();
+        Ok(VaultPost {
+            vault_id,
+            lock_description: p.lock_description.clone(),
+            creator_id: p.creator_id.clone(),
+            commitment_hash: p.commitment_hash.clone(),
+            status: p.status.clone(),
+            metadata,
+            vault_data: p.vault_data.clone(),
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LimboVault {
     pub id: [u8; 32],

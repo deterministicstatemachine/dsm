@@ -818,6 +818,38 @@ message DlvOpenV3 {
   bytes reveal_material = 3 [(dsm_max_len)=65535];
 }
 
+// Storage-node-mirrored advertisement for a posted-mode DLV.
+//
+// Keyed under `dlv/posted/{recipient_kyber_pk_b32}/{dlv_id_b32}`; the full
+// VaultPostProto is mirrored alongside at `dlv/posted-proto/{recipient_kyber_pk_b32}/{dlv_id_b32}`
+// and bound to this advertisement by `vault_proto_digest = BLAKE3("DSM/posted-dlv-ad", proto_bytes)`.
+//
+// Storage nodes are dumb mirrors. Authenticity is recipient-verified:
+//   1. creator_signature (SPHINCS+) over the canonical advertisement bytes with this field zeroed.
+//   2. vault_proto_digest binds the ad to the full vault post.
+//   3. The recipient's Kyber SK is required to decrypt vault content; the advertisement
+//      carries no secrets.
+//
+// Lifecycle state transitions: "active" -> "claimed" (recipient after successful
+// DlvClaim) or "active" -> "invalidated" (creator after DlvInvalidate).
+// Deduplication at load time: highest `updated_state_number` wins; lex-smallest
+// key tiebreaker. Matches the dBTC vault selector pattern (§13 storage nodes).
+message PostedDlvAdvertisementV1 {
+  uint32 version                 = 1;
+  bytes  dlv_id                  = 2 [(dsm_fixed_len)=32];
+  bytes  recipient_kyber_pk      = 3 [(dsm_max_len)=1568]; // ML-KEM-1024 public key
+  bytes  creator_public_key      = 4 [(dsm_max_len)=65535]; // SPHINCS+ pk of creator
+  bytes  policy_commit           = 5 [(dsm_fixed_len)=32]; // CPTA anchor of locked token (if any)
+  string vault_proto_key         = 6;  // storage-node key of the full VaultPostProto
+  bytes  vault_proto_digest      = 7 [(dsm_fixed_len)=32]; // BLAKE3("DSM/posted-dlv-ad", proto_bytes)
+  string lifecycle_state         = 8;  // "active" | "claimed" | "invalidated"
+  uint64 updated_state_number    = 9;  // dedup signal; increments monotonically per state change
+  bytes  creator_signature       = 10 [(dsm_max_len)=65535]; // SPHINCS+ over canonical ad bytes (field 10 zeroed)
+  // Optional claim attestation: set only on state transitions authored by the recipient
+  // ("claimed" ads). Signed by the recipient's Kyber-derived SPHINCS+ identity.
+  bytes  claimant_signature      = 11 [(dsm_max_len)=65535];
+}
+
 // ===================== STORAGE NODE ADMIN/GOSSIP/LIST (V1) ==================
 // Protobuf-only responses for admin and gossip endpoints (no JSON, no clocks).
 
