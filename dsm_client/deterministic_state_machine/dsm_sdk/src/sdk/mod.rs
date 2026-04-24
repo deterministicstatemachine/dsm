@@ -88,6 +88,7 @@ pub mod bitcoin_tap_sdk;
 pub mod bitcoin_tx_builder;
 pub mod dlv_pre_commitment_sdk;
 pub mod dlv_receipt_sdk;
+pub mod posted_dlv_sdk;
 pub mod smart_commitment_sdk;
 pub mod transfer_hooks;
 

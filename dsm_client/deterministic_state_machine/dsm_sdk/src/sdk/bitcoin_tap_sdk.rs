@@ -2744,7 +2744,7 @@ impl BitcoinTapSdk {
         }
     }
 
-    async fn storage_delete_key(key: &str) -> Result<(), DsmError> {
+    pub(crate) async fn storage_delete_key(key: &str) -> Result<(), DsmError> {
         #[cfg(test)]
         {
             let mut state = DBTC_STORAGE_TEST_STATE
@@ -2781,7 +2781,7 @@ impl BitcoinTapSdk {
         }
     }
 
-    async fn storage_list_objects(
+    pub(crate) async fn storage_list_objects(
         prefix: &str,
         cursor: Option<&str>,
         limit: u32,

@@ -165,24 +165,31 @@ impl AppRouterImpl {
             }
         };
 
-        let deltas: Vec<dsm::types::device_state::BalanceDelta> =
+        // Resolve the locked token's policy_commit once — reused for the
+        // BalanceDelta below and for the posted-mode advertisement further
+        // down.  A strict-fail on unregistered tokens here matches the
+        // invariant landed in commit 3 (resolve_policy_commit fails closed).
+        let policy_commit_opt: Option<[u8; 32]> =
             if let (Some(tid), true) = (token_id_str_opt.as_deref(), locked_u64 > 0) {
-                let pc = match self.wallet.token_sdk.resolve_policy_commit_strict(tid) {
-                    Ok(c) => c,
+                match self.wallet.token_sdk.resolve_policy_commit_strict(tid) {
+                    Ok(c) => Some(c),
                     Err(e) => {
                         return err(format!(
                             "dlv.create: resolve policy_commit for {tid} failed: {e}"
                         ));
                     }
-                };
-                vec![dsm::types::device_state::BalanceDelta {
-                    policy_commit: pc,
-                    direction: dsm::types::device_state::BalanceDirection::Debit,
-                    amount: locked_u64,
-                }]
+                }
             } else {
-                Vec::new()
+                None
             };
+        let deltas: Vec<dsm::types::device_state::BalanceDelta> = match policy_commit_opt {
+            Some(pc) => vec![dsm::types::device_state::BalanceDelta {
+                policy_commit: pc,
+                direction: dsm::types::device_state::BalanceDirection::Debit,
+                amount: locked_u64,
+            }],
+            None => Vec::new(),
+        };
 
         // Build Operation::DlvCreate.
         let locked_balance_opt = if locked_u64 > 0 {
@@ -231,6 +238,46 @@ impl AppRouterImpl {
             .await
         {
             return err(format!("dlv.create: finalize_vault failed: {e}"));
+        }
+
+        // Posted-mode delivery: when an intended_recipient Kyber pk is set,
+        // publish an advertisement + full VaultPostProto mirror to storage
+        // nodes so the recipient's device can discover + `dlv.claim` it.
+        // Best-effort — the canonical Operation::DlvCreate has already been
+        // applied on-chain above.  A publish failure leaves the creator with
+        // a valid local vault and no discoverable ad; the recipient cannot
+        // claim until a retry publish succeeds, but nothing else breaks.
+        if let Some(recipient_pk) = intended_recipient_opt.as_ref() {
+            match dlv_manager
+                .create_vault_post(&vault_id, "posted-dlv", None)
+                .await
+            {
+                Ok(vault_post_bytes) => {
+                    let policy_commit = policy_commit_opt.unwrap_or([0u8; 32]);
+                    let publish_input = crate::sdk::posted_dlv_sdk::PublishActiveAdInput {
+                        dlv_id: &vault_id,
+                        recipient_kyber_pk: recipient_pk.as_slice(),
+                        creator_public_key: req.creator_public_key.as_slice(),
+                        policy_commit,
+                        vault_post_bytes: &vault_post_bytes,
+                    };
+                    if let Err(e) =
+                        crate::sdk::posted_dlv_sdk::publish_active_advertisement(publish_input)
+                            .await
+                    {
+                        log::warn!(
+                            "[dlv.create] posted-mode advertisement publish failed for {}: {e}",
+                            crate::util::text_id::encode_base32_crockford(&vault_id)
+                        );
+                    }
+                }
+                Err(e) => {
+                    log::warn!(
+                        "[dlv.create] create_vault_post for {} failed (advertisement skipped): {e}",
+                        crate::util::text_id::encode_base32_crockford(&vault_id)
+                    );
+                }
+            }
         }
 
         let resp = generated::AppStateResponse {
@@ -428,20 +475,22 @@ impl AppRouterImpl {
         let claim_proof = bytes[32..].to_vec();
 
         let dlv_manager = self.bitcoin_tap.dlv_manager();
-        let (locked_amount, token_id_opt) = match dlv_manager.get_vault(&vault_id).await {
-            Ok(vault_lock) => {
-                let v = vault_lock.lock().await;
-                match &v.fulfillment_condition {
-                    dsm::vault::fulfillment::FulfillmentMechanism::Payment {
-                        amount,
-                        token_id,
-                        ..
-                    } => (*amount, Some(token_id.clone())),
-                    _ => (0u64, None),
+        let (locked_amount, token_id_opt, intended_recipient) =
+            match dlv_manager.get_vault(&vault_id).await {
+                Ok(vault_lock) => {
+                    let v = vault_lock.lock().await;
+                    let (amt, tid) = match &v.fulfillment_condition {
+                        dsm::vault::fulfillment::FulfillmentMechanism::Payment {
+                            amount,
+                            token_id,
+                            ..
+                        } => (*amount, Some(token_id.clone())),
+                        _ => (0u64, None),
+                    };
+                    (amt, tid, v.intended_recipient.clone())
                 }
-            }
-            Err(e) => return err(format!("dlv.claim: vault not found: {e}")),
-        };
+                Err(e) => return err(format!("dlv.claim: vault not found: {e}")),
+            };
 
         let reference_state = match self.core_sdk.get_current_state() {
             Ok(s) => s,
@@ -496,6 +545,30 @@ impl AppRouterImpl {
             Some(init_tip),
         ) {
             return err(format!("dlv.claim: execute_on_relationship failed: {e}"));
+        }
+
+        // Posted-mode: once the on-chain DlvClaim has been applied, flip
+        // the corresponding storage-node advertisement from "active" to
+        // "claimed" so creator devices (and any other interested observers)
+        // learn the vault has been consumed.  The dedup rule — highest
+        // updated_state_number wins — guarantees the claimed ad supersedes
+        // the original on the next list.  Best-effort: a failure here only
+        // leaves stale discovery state; the canonical truth lives on the
+        // claimant's hash chain.
+        if let Some(recipient_pk) = intended_recipient.as_ref() {
+            if let Err(e) = crate::sdk::posted_dlv_sdk::publish_terminal_state(
+                recipient_pk,
+                &vault_id,
+                crate::sdk::posted_dlv_sdk::LIFECYCLE_CLAIMED,
+                Vec::new(),
+            )
+            .await
+            {
+                log::warn!(
+                    "[dlv.claim] publish claimed-state ad for {} failed: {e}",
+                    crate::util::text_id::encode_base32_crockford(&vault_id)
+                );
+            }
         }
 
         // Note: `claim_vault_content` on DLVManager decrypts the vault

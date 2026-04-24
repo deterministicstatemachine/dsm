@@ -2560,6 +2560,8 @@ impl AppRouter for AppRouterImpl {
             p if p.starts_with("recovery.") => self.handle_recovery_query(q).await,
             // Bitcoin query routes
             p if p.starts_with("bitcoin.") => self.handle_bitcoin_query(q).await,
+            // Posted-mode DLV discovery (recipient-side, read-only)
+            p if p.starts_with("posted_dlv.") => self.handle_posted_dlv_query(q).await,
             _ => {
                 log::warn!("[APP_ROUTER] unknown query path: '{}'", q.path);
                 err(format!("unknown query path: {}", q.path))
@@ -2606,6 +2608,8 @@ impl AppRouter for AppRouterImpl {
             "token.create" | "tokens.publishPolicy" => self.handle_token_invoke(i).await,
             // DLV
             m if m.starts_with("dlv.") => self.handle_dlv_invoke(i).await,
+            // Posted-mode DLV (recipient-side sync/mirror)
+            m if m.starts_with("posted_dlv.") => self.handle_posted_dlv_invoke(i).await,
             // DeTFi
             m if m.starts_with("detfi.") => self.handle_detfi_invoke(i).await,
             // BLE
