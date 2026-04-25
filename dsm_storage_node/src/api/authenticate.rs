@@ -8,7 +8,7 @@ use prost::Message;
 
 /// Attempt to decode SmartPolicy bytes and apply minimal structural checks.
 /// Returns Ok(()) if bytes decode to SmartPolicy and pass checks; Err(()) otherwise.
-pub fn validate_smart_policy_bytes(bytes: &[u8]) -> Result<(), ()> {
+pub fn authenticate_smart_policy_bytes(bytes: &[u8]) -> Result<(), ()> {
     // Decode SmartPolicy protobuf (prost generated in dsm crate)
     match dsm::types::proto::SmartPolicy::decode(bytes) {
         Ok(policy) => {
@@ -28,15 +28,15 @@ pub fn validate_smart_policy_bytes(bytes: &[u8]) -> Result<(), ()> {
 /// .public_params). This traverses common byte-carrying fields that may embed
 /// vault posts (ExternalCommit.payload, PrecommitOption.payload, Invoke.args.body,
 /// AttestedAction.payload) and also recurses into BatchEnvelope.
-pub fn validate_envelope_smart_policy(env: &dsm::types::proto::Envelope) -> Result<(), ()> {
+pub fn authenticate_envelope_smart_policy(env: &dsm::types::proto::Envelope) -> Result<(), ()> {
     use dsm::types::proto as P;
 
-    // Helper: validate a raw bytes slice as potential VaultPostProto
+    // Helper: authenticate a raw bytes slice as potential VaultPostProto
     let check_bytes = |bytes: &[u8]| -> Result<(), ()> {
         if bytes.is_empty() {
             return Ok(());
         }
-        validate_vaultpost_smart_policy_if_present(bytes)
+        authenticate_vaultpost_smart_policy_if_present(bytes)
     };
 
     match &env.payload {
@@ -68,7 +68,7 @@ pub fn validate_envelope_smart_policy(env: &dsm::types::proto::Envelope) -> Resu
         }
         Some(P::envelope::Payload::BatchEnvelope(batch)) => {
             for e in &batch.envelopes {
-                validate_envelope_smart_policy(e)?;
+                authenticate_envelope_smart_policy(e)?;
             }
             Ok(())
         }
@@ -76,16 +76,16 @@ pub fn validate_envelope_smart_policy(env: &dsm::types::proto::Envelope) -> Resu
         _ => Ok(()),
     }
 }
-/// Inspect a VaultPostProto blob and validate embedded SmartPolicy bytes if present.
+/// Inspect a VaultPostProto blob and authenticate embedded SmartPolicy bytes if present.
 /// This function is robust: if the top-level decode fails (not a VaultPostProto),
 /// we return Ok(()) and let other handlers decide; if decode succeeds and a
 /// CryptoCondition contains public_params, we require those bytes to be a valid
 /// SmartPolicy.
-pub fn validate_vaultpost_smart_policy_if_present(body: &[u8]) -> Result<(), ()> {
+pub fn authenticate_vaultpost_smart_policy_if_present(body: &[u8]) -> Result<(), ()> {
     // Try decoding VaultPostProto from raw bytes; if not a VaultPostProto, ignore.
     let post = match dsm::types::proto::VaultPostProto::decode(body) {
         Ok(p) => p,
-        Err(_) => return Ok(()), // not a vault post; nothing to validate here
+        Err(_) => return Ok(()), // not a vault post; nothing to authenticate here
     };
 
     // VaultPostProto.vault_data should contain LimboVaultProto
@@ -103,7 +103,7 @@ pub fn validate_vaultpost_smart_policy_if_present(body: &[u8]) -> Result<(), ()>
                 // If crypto condition is declared, public_params must not be empty
                 return Err(());
             }
-            validate_smart_policy_bytes(&cc.public_params)
+            authenticate_smart_policy_bytes(&cc.public_params)
         }
         // Other condition kinds do not embed SmartPolicy bytes; accept.
         _ => Ok(()),
@@ -128,53 +128,53 @@ mod tests {
     }
 
     #[test]
-    fn validate_smart_policy_bytes_valid_single_clause() {
+    fn authenticate_smart_policy_bytes_valid_single_clause() {
         let bytes = encode_smart_policy(1, 1);
-        assert!(validate_smart_policy_bytes(&bytes).is_ok());
+        assert!(authenticate_smart_policy_bytes(&bytes).is_ok());
     }
 
     #[test]
-    fn validate_smart_policy_bytes_valid_multiple_clauses() {
+    fn authenticate_smart_policy_bytes_valid_multiple_clauses() {
         let bytes = encode_smart_policy(1, 5);
-        assert!(validate_smart_policy_bytes(&bytes).is_ok());
+        assert!(authenticate_smart_policy_bytes(&bytes).is_ok());
     }
 
     #[test]
-    fn validate_smart_policy_bytes_rejects_empty_clauses() {
+    fn authenticate_smart_policy_bytes_rejects_empty_clauses() {
         let bytes = encode_smart_policy(1, 0);
-        assert!(validate_smart_policy_bytes(&bytes).is_err());
+        assert!(authenticate_smart_policy_bytes(&bytes).is_err());
     }
 
     #[test]
-    fn validate_smart_policy_bytes_rejects_garbage() {
-        assert!(validate_smart_policy_bytes(b"not-a-protobuf").is_err());
+    fn authenticate_smart_policy_bytes_rejects_garbage() {
+        assert!(authenticate_smart_policy_bytes(b"not-a-protobuf").is_err());
     }
 
     #[test]
-    fn validate_smart_policy_bytes_rejects_empty_input() {
+    fn authenticate_smart_policy_bytes_rejects_empty_input() {
         // Empty bytes decode to SmartPolicy with all defaults (0 clauses)
-        assert!(validate_smart_policy_bytes(&[]).is_err());
+        assert!(authenticate_smart_policy_bytes(&[]).is_err());
     }
 
     #[test]
-    fn validate_smart_policy_bytes_version_zero_allowed() {
+    fn authenticate_smart_policy_bytes_version_zero_allowed() {
         let bytes = encode_smart_policy(0, 1);
-        assert!(validate_smart_policy_bytes(&bytes).is_ok());
+        assert!(authenticate_smart_policy_bytes(&bytes).is_ok());
     }
 
     #[test]
-    fn validate_vaultpost_not_a_vaultpost_returns_ok() {
+    fn authenticate_vaultpost_not_a_vaultpost_returns_ok() {
         // Non-VaultPostProto bytes should be silently accepted
-        assert!(validate_vaultpost_smart_policy_if_present(b"random-bytes").is_ok());
+        assert!(authenticate_vaultpost_smart_policy_if_present(b"random-bytes").is_ok());
     }
 
     #[test]
-    fn validate_vaultpost_empty_returns_ok() {
-        assert!(validate_vaultpost_smart_policy_if_present(&[]).is_ok());
+    fn authenticate_vaultpost_empty_returns_ok() {
+        assert!(authenticate_vaultpost_smart_policy_if_present(&[]).is_ok());
     }
 
     #[test]
-    fn validate_vaultpost_with_valid_crypto_condition() {
+    fn authenticate_vaultpost_with_valid_crypto_condition() {
         let policy_bytes = encode_smart_policy(1, 2);
         let cc = P::CryptoCondition {
             condition_hash: vec![0u8; 32],
@@ -193,11 +193,11 @@ mod tests {
             vault_data: limbo.encode_to_vec(),
             ..Default::default()
         };
-        assert!(validate_vaultpost_smart_policy_if_present(&post.encode_to_vec()).is_ok());
+        assert!(authenticate_vaultpost_smart_policy_if_present(&post.encode_to_vec()).is_ok());
     }
 
     #[test]
-    fn validate_vaultpost_crypto_condition_empty_public_params_rejected() {
+    fn authenticate_vaultpost_crypto_condition_empty_public_params_rejected() {
         let cc = P::CryptoCondition {
             condition_hash: vec![0u8; 32],
             public_params: vec![], // empty — should be rejected
@@ -215,11 +215,11 @@ mod tests {
             vault_data: limbo.encode_to_vec(),
             ..Default::default()
         };
-        assert!(validate_vaultpost_smart_policy_if_present(&post.encode_to_vec()).is_err());
+        assert!(authenticate_vaultpost_smart_policy_if_present(&post.encode_to_vec()).is_err());
     }
 
     #[test]
-    fn validate_vaultpost_no_fulfillment_mechanism_accepted() {
+    fn authenticate_vaultpost_no_fulfillment_mechanism_accepted() {
         let limbo = P::LimboVaultProto {
             id: "vault-1".to_string(),
             fulfillment_condition: None,
@@ -230,20 +230,20 @@ mod tests {
             vault_data: limbo.encode_to_vec(),
             ..Default::default()
         };
-        assert!(validate_vaultpost_smart_policy_if_present(&post.encode_to_vec()).is_ok());
+        assert!(authenticate_vaultpost_smart_policy_if_present(&post.encode_to_vec()).is_ok());
     }
 
     #[test]
-    fn validate_envelope_none_payload_accepted() {
+    fn authenticate_envelope_none_payload_accepted() {
         let env = P::Envelope {
             payload: None,
             ..Default::default()
         };
-        assert!(validate_envelope_smart_policy(&env).is_ok());
+        assert!(authenticate_envelope_smart_policy(&env).is_ok());
     }
 
     #[test]
-    fn validate_envelope_empty_universal_tx_accepted() {
+    fn authenticate_envelope_empty_universal_tx_accepted() {
         let tx = P::UniversalTx {
             ops: vec![],
             ..Default::default()
@@ -252,11 +252,11 @@ mod tests {
             payload: Some(P::envelope::Payload::UniversalTx(tx)),
             ..Default::default()
         };
-        assert!(validate_envelope_smart_policy(&env).is_ok());
+        assert!(authenticate_envelope_smart_policy(&env).is_ok());
     }
 
     #[test]
-    fn validate_envelope_batch_recurses() {
+    fn authenticate_envelope_batch_recurses() {
         let inner = P::Envelope {
             payload: None,
             ..Default::default()
@@ -269,6 +269,6 @@ mod tests {
             payload: Some(P::envelope::Payload::BatchEnvelope(batch)),
             ..Default::default()
         };
-        assert!(validate_envelope_smart_policy(&env).is_ok());
+        assert!(authenticate_envelope_smart_policy(&env).is_ok());
     }
 }

@@ -25,4 +25,4 @@ pub mod recovery_capsule;
 pub mod registry;
 pub mod registry_scaling;
 pub mod unilateral_api;
-pub mod validators;
+pub mod authenticate;
