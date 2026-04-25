@@ -33,6 +33,7 @@ impl AppRouterImpl {
             "dlv.invalidate" => self.dlv_invalidate(i).await,
             "dlv.claim" => self.dlv_claim(i).await,
             "dlv.unlock" => self.dlv_unlock(i).await,
+            "dlv.unlockRouted" => self.dlv_unlock_routed(i).await,
             other => err(format!("unknown dlv invoke method: {other}")),
         }
     }
@@ -605,6 +606,111 @@ impl AppRouterImpl {
         // chain here and content decryption is a separate caller concern.
         let resp = generated::AppStateResponse {
             key: "dlv.claim".to_string(),
+            value: Some(crate::util::text_id::encode_base32_crockford(&vault_id)),
+        };
+        pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
+    }
+
+    /// dlv.unlockRouted — atomic-route unlock path for DeTFi (chunk #4).
+    ///
+    /// Decodes a `DlvUnlockRoutedV1` carrying a typed `RouteCommitV1`,
+    /// runs the SDK eligibility check (vault_id ∈ RouteCommit AND
+    /// `is_external_commitment_visible(X)` returns Ok(true)) before
+    /// emitting the standard `Operation::DlvUnlock` on the unlocker's
+    /// self-loop.  No new on-chain operation type — atomicity is
+    /// achieved off-chain via the visibility of X (DeTFi spec §3.2,
+    /// §5.1; the state machine does not know about routing).
+    ///
+    /// Failure modes are typed via `RouteCommitVerifyError` so a
+    /// failed verification returns a precise error (rather than a
+    /// generic `dlv.unlock failed`) — this is what unlocks
+    /// fail-closed semantics for vault owners that haven't yet seen
+    /// the trader's anchor publish.
+    async fn dlv_unlock_routed(&self, i: AppInvoke) -> AppResult {
+        let bytes = match unwrap_argpack(&i.args) {
+            Ok(b) => b,
+            Err(e) => return err(format!("dlv.unlockRouted: {e}")),
+        };
+        if bytes.is_empty() {
+            return err("dlv.unlockRouted: empty DlvUnlockRoutedV1 payload".into());
+        }
+        let req = match generated::DlvUnlockRoutedV1::decode(&*bytes) {
+            Ok(r) => r,
+            Err(e) => {
+                return err(format!(
+                    "dlv.unlockRouted: decode DlvUnlockRoutedV1 failed: {e}"
+                ));
+            }
+        };
+        if req.vault_id.len() != 32 {
+            return err("dlv.unlockRouted: vault_id must be 32 bytes".into());
+        }
+        if req.device_id.len() != 32 {
+            return err("dlv.unlockRouted: device_id must be 32 bytes".into());
+        }
+        if req.route_commit_bytes.is_empty() {
+            return err("dlv.unlockRouted: route_commit_bytes is required".into());
+        }
+        let mut vault_id = [0u8; 32];
+        vault_id.copy_from_slice(&req.vault_id);
+
+        // SDK eligibility gate.  Fails closed on every typed variant.
+        let _hop = match crate::sdk::route_commit_sdk::verify_route_commit_unlock_eligibility(
+            &req.route_commit_bytes,
+            &vault_id,
+        )
+        .await
+        {
+            Ok(h) => h,
+            Err(e) => {
+                return err(format!(
+                    "dlv.unlockRouted: route-commit eligibility rejected: {e:?}"
+                ));
+            }
+        };
+
+        // Past the gate.  Emit the standard DlvUnlock on the unlocker's
+        // self-loop — same operation the non-routed `dlv.unlock` path
+        // produces.  Atomicity is the X-visibility we just verified.
+        let unlocker_pk = if req.unlocker_public_key.is_empty() {
+            req.device_id.clone()
+        } else {
+            req.unlocker_public_key.clone()
+        };
+        let op = dsm::types::operations::Operation::DlvUnlock {
+            vault_id: vault_id.to_vec(),
+            fulfillment_proof: req.route_commit_bytes.clone(),
+            requester_public_key: unlocker_pk,
+            signature: req.signature.clone(),
+            mode: dsm::types::operations::TransactionMode::Unilateral,
+        };
+
+        let reference_state = match self.core_sdk.get_current_state() {
+            Ok(s) => s,
+            Err(e) => {
+                return err(format!(
+                    "dlv.unlockRouted: get_current_state failed: {e}"
+                ));
+            }
+        };
+        let actor = reference_state.device_info.device_id;
+        let rel_key =
+            dsm::core::bilateral_transaction_manager::compute_smt_key(&actor, &actor);
+        let init_tip =
+            dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                &actor, &actor,
+            );
+        if let Err(e) =
+            self.core_sdk
+                .execute_on_relationship(rel_key, actor, op, &[], Some(init_tip))
+        {
+            return err(format!(
+                "dlv.unlockRouted: execute_on_relationship failed: {e}"
+            ));
+        }
+
+        let resp = generated::AppStateResponse {
+            key: "dlv.unlockRouted".to_string(),
             value: Some(crate::util::text_id::encode_base32_crockford(&vault_id)),
         };
         pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))

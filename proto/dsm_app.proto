@@ -933,6 +933,30 @@ message RoutingVaultAdvertisementV1 {
   uint64 updated_state_number    = 14; // dedup signal; matches dBTC + posted-dlv pattern
 }
 
+// Typed request for `dlv.unlockRouted` — the routed atomic-unlock
+// path for DeTFi.  The trader hands each vault owner a copy of the
+// `RouteCommitV1` they signed; the vault owner then invokes this
+// route on their own device.  The handler runs the SDK eligibility
+// check (vault_id ∈ RouteCommit AND ExtCommit(X) visible at storage
+// nodes) before emitting the standard `Operation::DlvUnlock` on the
+// vault owner's self-loop.
+//
+// Atomic execution model: each vault unlocks INDEPENDENTLY on its
+// owner's hash chain — the coordination point is the
+// `ExternalCommitmentV1` anchor.  Until X is published all vaults
+// reject; once it is, all vaults accept.  No global coordinator.
+message DlvUnlockRoutedV1 {
+  bytes vault_id              = 1 [(dsm_fixed_len)=32];
+  bytes device_id             = 2 [(dsm_fixed_len)=32];
+  // Canonical `RouteCommitV1` bytes the trader produced via
+  // `route_commit_sdk::bind_path_to_route_commit` + signed.
+  bytes route_commit_bytes    = 3 [(dsm_max_len)=65535];
+  // SPHINCS+ pk of the unlocker (vault owner / claimant).
+  bytes unlocker_public_key   = 4 [(dsm_max_len)=65535];
+  // SPHINCS+ signature over canonical Operation::DlvUnlock bytes.
+  bytes signature             = 5 [(dsm_max_len)=65535];
+}
+
 // Typed request for `dlv.invalidate`.  Replaces the inline
 // `[32-byte vault_id][utf8 reason]` body shape used pre-Track-A; the
 // canonical Operation::DlvInvalidate carries the same fields.

@@ -471,6 +471,76 @@ fn proto_schema_carries_route_commit_messages() {
     );
 }
 
+/// DeTFi chunk #4 invariant — the routed-unlock handler MUST run the
+/// SDK eligibility check (vault_id ∈ RouteCommit AND X visible)
+/// BEFORE emitting `Operation::DlvUnlock`.  Without the gate, any
+/// caller could trigger an unlock by handing the device an arbitrary
+/// RouteCommit, defeating the atomic-visibility guarantee.
+#[test]
+fn dlv_unlock_routed_runs_eligibility_check_before_state_advance() {
+    let src = read(sdk_path("src/handlers/dlv_routes.rs"));
+    assert!(
+        src.contains("verify_route_commit_unlock_eligibility"),
+        "regression: dlv.unlockRouted no longer calls the eligibility \
+         verifier — atomic-visibility gate is missing"
+    );
+    // The verifier call must come BEFORE `execute_on_relationship` in
+    // the source order — eyeball the handler if this guard fails.
+    let verify_pos = src
+        .find("verify_route_commit_unlock_eligibility")
+        .expect("verifier must be present (asserted above)");
+    let mut search_from = 0;
+    let mut found_after = false;
+    while let Some(pos) =
+        src[search_from..].find("execute_on_relationship")
+    {
+        let abs = search_from + pos;
+        if abs > verify_pos {
+            // Found an `execute_on_relationship` call AFTER the
+            // verifier — that's the routed-unlock handler.  Done.
+            found_after = true;
+            break;
+        }
+        search_from = abs + "execute_on_relationship".len();
+    }
+    assert!(
+        found_after,
+        "regression: dlv.unlockRouted is calling execute_on_relationship \
+         BEFORE the eligibility verifier — gate must come first"
+    );
+}
+
+/// DeTFi chunk #4 invariant — the proto schema MUST carry
+/// `DlvUnlockRoutedV1` so the handler decoder continues to compile.
+#[test]
+fn proto_schema_carries_dlv_unlock_routed() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let repo_root = Path::new(manifest_dir)
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .expect("resolve repo root");
+    let proto = repo_root.join("proto").join("dsm_app.proto");
+    let proto_src = read(proto);
+    assert!(
+        proto_src.contains("message DlvUnlockRoutedV1 {"),
+        "regression: proto/dsm_app.proto is missing DlvUnlockRoutedV1"
+    );
+}
+
+/// DeTFi chunk #4 invariant — `dlv.unlockRouted` MUST be wired into
+/// the `dlv.*` invoke dispatcher.  An unrouted dispatcher would route
+/// the call to `unknown dlv invoke method` despite the handler being
+/// implemented.
+#[test]
+fn dlv_unlock_routed_is_dispatched() {
+    let src = read(sdk_path("src/handlers/dlv_routes.rs"));
+    assert!(
+        src.contains("\"dlv.unlockRouted\" => self.dlv_unlock_routed(i).await,"),
+        "regression: dlv.unlockRouted is not wired into handle_dlv_invoke"
+    );
+}
+
 /// Commit 3 invariant — the strict resolver lives at the TokenSDK
 /// layer.  Code that derives `policy_commit` from `TokenMetadata`
 /// directly bypasses policy registration and must not come back.
