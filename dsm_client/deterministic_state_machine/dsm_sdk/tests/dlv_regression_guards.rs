@@ -388,6 +388,89 @@ fn routing_path_search_compares_on_final_output() {
     );
 }
 
+/// DeTFi chunk #3 invariant — the external-commitment derivation MUST
+/// use the `DSM/ext` BLAKE3 domain tag (matches DeTFi spec §3.2:
+/// `ExtCommit(X) = H("DSM/ext" || X)`).  A tag swap silently breaks
+/// every recipient's X re-derivation, making published anchors
+/// uncorrelatable with the RouteCommits they're supposed to bind.
+#[test]
+fn external_commitment_uses_stable_domain_tag() {
+    let src = read(sdk_path("src/sdk/route_commit_sdk.rs"));
+    assert!(
+        src.contains("pub(crate) const EXT_COMMIT_DOMAIN: &str = \"DSM/ext\";"),
+        "regression: EXT_COMMIT_DOMAIN changed — this breaks every \
+         previously-published external commitment X"
+    );
+    assert!(
+        src.contains("pub(crate) const EXT_COMMIT_ROOT: &str = \"defi/extcommit/\";"),
+        "regression: EXT_COMMIT_ROOT prefix changed — every previously-\
+         published anchor would become unfindable"
+    );
+}
+
+/// DeTFi chunk #3 invariant — the canonical bytes that feed `compute_external_commitment`
+/// MUST exclude `initiator_signature`.  Otherwise the trader cannot
+/// sign over X (chicken-and-egg: signing changes the bytes which
+/// changes X which invalidates the signature).
+#[test]
+fn external_commitment_excludes_initiator_signature_from_canonical_form() {
+    let src = read(sdk_path("src/sdk/route_commit_sdk.rs"));
+    assert!(
+        src.contains("out.initiator_signature.clear();"),
+        "regression: canonicalise_for_commitment no longer zeroes \
+         initiator_signature — sign-and-commit invariant broken"
+    );
+}
+
+/// DeTFi chunk #3 boundary — `route_commit_sdk` is a PURE binder +
+/// storage anchor.  Per-hop unlock handler wiring (extending
+/// `Operation::DlvUnlock` to verify a RouteCommit + check anchor
+/// visibility) is chunk #4 and MUST NOT leak into this module before
+/// then.  Mirrors the chunk #2 / chunk #3 boundary guard.
+#[test]
+fn route_commit_sdk_does_not_emit_state_machine_operations() {
+    let src = read(sdk_path("src/sdk/route_commit_sdk.rs"));
+    assert!(
+        !src.contains("execute_on_relationship"),
+        "regression: route_commit_sdk reached into the state-machine \
+         settlement path — chunk #4 work leaked into chunk #3."
+    );
+    assert!(
+        !src.contains("Operation::DlvUnlock")
+            && !src.contains("Operation::DlvClaim")
+            && !src.contains("Operation::DlvCreate"),
+        "regression: route_commit_sdk emitted a state-machine \
+         Operation — chunk #3 produces RouteCommitV1 + anchor only."
+    );
+}
+
+/// DeTFi chunk #3 invariant — the proto schema MUST carry both
+/// `RouteCommitV1` and `ExternalCommitmentV1` so the SDK encode/decode
+/// path stays usable.  Removing either is a wire-format break.
+#[test]
+fn proto_schema_carries_route_commit_messages() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let repo_root = Path::new(manifest_dir)
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .expect("resolve repo root");
+    let proto = repo_root.join("proto").join("dsm_app.proto");
+    let proto_src = read(proto);
+    assert!(
+        proto_src.contains("message RouteCommitV1 {"),
+        "regression: proto/dsm_app.proto is missing RouteCommitV1"
+    );
+    assert!(
+        proto_src.contains("message RouteCommitHopV1 {"),
+        "regression: proto/dsm_app.proto is missing RouteCommitHopV1"
+    );
+    assert!(
+        proto_src.contains("message ExternalCommitmentV1 {"),
+        "regression: proto/dsm_app.proto is missing ExternalCommitmentV1"
+    );
+}
+
 /// Commit 3 invariant — the strict resolver lives at the TokenSDK
 /// layer.  Code that derives `policy_commit` from `TokenMetadata`
 /// directly bypasses policy registration and must not come back.

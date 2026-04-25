@@ -91,6 +91,7 @@ pub mod dlv_receipt_sdk;
 pub mod posted_dlv_sdk;
 pub mod routing_sdk;
 pub mod routing_path_sdk;
+pub mod route_commit_sdk;
 pub mod smart_commitment_sdk;
 pub mod transfer_hooks;
 
