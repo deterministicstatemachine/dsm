@@ -1091,11 +1091,17 @@ mod tests {
             .unwrap_or_else(|e| panic!("{route}: failed to decode envelope: {e}"))
     }
 
-    fn put_active_vault(vault_id: &str, amount_sats: u64) {
+    /// Derive a deterministic 32-byte test vault_id from a human-readable label.
+    /// Test labels stay descriptive in source while the on-disk + on-wire id is
+    /// the strict 32-byte form `LimboVaultProto.id` requires.
+    fn vid_from_label(label: &str) -> [u8; 32] {
+        dsm::crypto::blake3::domain_hash_bytes("DSM/dbtc-test-vault", label.as_bytes())
+    }
+
+    fn put_active_vault(vault_id: [u8; 32], amount_sats: u64) {
+        let vid_b32 = crate::util::text_id::encode_base32_crockford(&vault_id);
         let proto = generated::LimboVaultProto {
-            id: crate::util::text_id::decode_bytes32(vault_id)
-                .map(|v| v.to_vec())
-                .unwrap_or_else(|| vault_id.as_bytes().to_vec()),
+            id: vault_id.to_vec(),
             fulfillment_condition: Some(generated::FulfillmentMechanism {
                 kind: Some(generated::fulfillment_mechanism::Kind::BitcoinHtlc(
                     generated::BitcoinHtlc {
@@ -1113,18 +1119,19 @@ mod tests {
         }
         .encode_to_vec();
 
-        client_db::put_vault(vault_id, &proto, "active", &[0x44; 80], amount_sats)
+        client_db::put_vault(&vid_b32, &proto, "active", &[0x44; 80], amount_sats)
             .expect("store vault");
     }
 
-    fn put_active_vault_record(vault_id: &str, amount_sats: u64) {
+    fn put_active_vault_record(vault_id: [u8; 32], amount_sats: u64) {
+        let vid_b32 = crate::util::text_id::encode_base32_crockford(&vault_id);
         client_db::upsert_vault_record(&client_db::PersistedVaultRecord {
-            vault_op_id: format!("deposit-{vault_id}"),
+            vault_op_id: format!("deposit-{vid_b32}"),
             direction: "btc_to_dbtc".to_string(),
             vault_state: "completed".to_string(),
             hash_lock: vec![0x33; 32],
             deposit_nonce: Some(vec![0x55; 32]),
-            vault_id: Some(vault_id.to_string()),
+            vault_id: Some(vid_b32),
             btc_amount_sats: amount_sats,
             btc_pubkey: vec![0x03; 33],
             htlc_script: Some(vec![0x66; 64]),
@@ -1181,8 +1188,9 @@ mod tests {
         let router = init_withdrawal_query_test_router("withdraw_plan_list_fail");
         let requested_net_sats = 150_000;
         let full_fee = crate::sdk::bitcoin_tap_sdk::estimated_full_withdrawal_fee_sats();
-        put_active_vault("vault-list-fail", requested_net_sats + full_fee);
-        put_active_vault_record("vault-list-fail", requested_net_sats + full_fee);
+        let list_fail_vid = vid_from_label("vault-list-fail");
+        put_active_vault(list_fail_vid, requested_net_sats + full_fee);
+        put_active_vault_record(list_fail_vid, requested_net_sats + full_fee);
 
         set_withdrawal_bridge_sync_test_results(vec![Ok(generated::StorageSyncResponse {
             success: true,
@@ -1216,15 +1224,15 @@ mod tests {
         );
     }
 
-    #[ignore = "commit-2-followup: vault_id strings need bytes32 migration"]
     #[tokio::test]
     #[serial]
     async fn bitcoin_withdraw_plan_caches_plan_for_execute() {
         let router = init_withdrawal_query_test_router("withdraw_plan_caches");
         let requested_net_sats = 150_000;
         let full_fee = crate::sdk::bitcoin_tap_sdk::estimated_full_withdrawal_fee_sats();
-        put_active_vault("vault-cache-test", requested_net_sats + full_fee);
-        put_active_vault_record("vault-cache-test", requested_net_sats + full_fee);
+        let cache_vid = vid_from_label("vault-cache-test");
+        put_active_vault(cache_vid, requested_net_sats + full_fee);
+        put_active_vault_record(cache_vid, requested_net_sats + full_fee);
 
         set_withdrawal_bridge_sync_test_results(vec![Ok(generated::StorageSyncResponse {
             success: true,

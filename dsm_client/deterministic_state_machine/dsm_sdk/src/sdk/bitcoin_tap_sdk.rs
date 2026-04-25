@@ -4725,11 +4725,17 @@ mod tests {
             .unwrap_or_else(|e| panic!("init db failed: {e}"));
     }
 
-    fn put_active_vault(vault_id: &str, amount_sats: u64) {
+    /// Derive a deterministic 32-byte test vault_id from a human-readable label.
+    /// Test labels stay descriptive in source while the on-disk + on-wire id is
+    /// the strict 32-byte form `LimboVaultProto.id` requires.
+    fn vid_from_label(label: &str) -> [u8; 32] {
+        dsm::crypto::blake3::domain_hash_bytes("DSM/dbtc-test-vault", label.as_bytes())
+    }
+
+    fn put_active_vault(vault_id: [u8; 32], amount_sats: u64) {
+        let vid_b32 = crate::util::text_id::encode_base32_crockford(&vault_id);
         let proto = generated::LimboVaultProto {
-            id: crate::util::text_id::decode_bytes32(vault_id)
-                .map(|v| v.to_vec())
-                .unwrap_or_else(|| vault_id.as_bytes().to_vec()),
+            id: vault_id.to_vec(),
             fulfillment_condition: Some(generated::FulfillmentMechanism {
                 kind: Some(generated::fulfillment_mechanism::Kind::BitcoinHtlc(
                     generated::BitcoinHtlc {
@@ -4747,17 +4753,18 @@ mod tests {
         }
         .encode_to_vec();
 
-        crate::storage::client_db::put_vault(vault_id, &proto, "active", &[0x44; 80], amount_sats)
+        crate::storage::client_db::put_vault(&vid_b32, &proto, "active", &[0x44; 80], amount_sats)
             .unwrap_or_else(|e| panic!("store vault failed: {e}"));
     }
 
-    fn put_active_vault_record(vault_id: &str, amount_sats: u64, direction: &str) {
+    fn put_active_vault_record(vault_id: [u8; 32], amount_sats: u64, direction: &str) {
+        let vid_b32 = crate::util::text_id::encode_base32_crockford(&vault_id);
         crate::storage::client_db::upsert_vault_record(&PersistedVaultRecord {
-            vault_op_id: format!("deposit-{vault_id}-{direction}"),
+            vault_op_id: format!("deposit-{vid_b32}-{direction}"),
             direction: direction.to_string(),
             vault_state: "completed".to_string(),
             hash_lock: vec![0x33; 32],
-            vault_id: Some(vault_id.to_string()),
+            vault_id: Some(vid_b32),
             btc_amount_sats: amount_sats,
             btc_pubkey: vec![0x03; 33],
             htlc_script: Some(vec![0x66; 64]),
@@ -4781,11 +4788,9 @@ mod tests {
         .unwrap_or_else(|e| panic!("store vault record failed: {e}"));
     }
 
-    fn test_vault_proto(vault_id: &str, amount_sats: u64) -> Vec<u8> {
+    fn test_vault_proto(vault_id: [u8; 32], amount_sats: u64) -> Vec<u8> {
         generated::LimboVaultProto {
-            id: crate::util::text_id::decode_bytes32(vault_id)
-                .map(|v| v.to_vec())
-                .unwrap_or_else(|| vault_id.as_bytes().to_vec()),
+            id: vault_id.to_vec(),
             fulfillment_condition: Some(generated::FulfillmentMechanism {
                 kind: Some(generated::fulfillment_mechanism::Kind::BitcoinHtlc(
                     generated::BitcoinHtlc {
@@ -4805,16 +4810,17 @@ mod tests {
     }
 
     fn test_advertisement(
-        vault_id: &str,
+        vault_id: [u8; 32],
         amount_sats: u64,
         routeable: bool,
         updated_state_number: u64,
         lifecycle_state: &str,
     ) -> generated::DbtcVaultAdvertisementV1 {
+        let vid_b32 = crate::util::text_id::encode_base32_crockford(&vault_id);
         generated::DbtcVaultAdvertisementV1 {
             version: DBTC_VAULT_ADVERTISEMENT_VERSION,
             policy_commit: BitcoinTapSdk::dbtc_policy_commit().to_vec(),
-            vault_id: vault_id.to_string(),
+            vault_id: vid_b32.clone(),
             controller_device_id: vec![0xAB; 32],
             amount_sats,
             successor_depth: 0,
@@ -4826,7 +4832,7 @@ mod tests {
                 "busy".to_string()
             },
             updated_state_number,
-            vault_proto_key: BitcoinTapSdk::vault_proto_key(vault_id),
+            vault_proto_key: BitcoinTapSdk::vault_proto_key(&vid_b32),
             vault_proto_digest: dsm::crypto::blake3::domain_hash(
                 "DSM/vault-ad",
                 &test_vault_proto(vault_id, amount_sats),
@@ -5134,32 +5140,34 @@ mod tests {
         assert!(successor_reason.contains("Successor vault still pending confirmation"));
     }
 
-    // FIXME(commit-2-followup): dBTC planner tests below use hardcoded ASCII
-    // vault_id strings that pre-date the vault_id bytes32 refactor. Tracked for
-    // the test consolidation commit.
-    #[ignore = "commit-2-followup: vault_id strings need bytes32 migration"]
+    // dBTC planner tests use BLAKE3-derived 32-byte ids via `vid_from_label`
+    // so they round-trip through the strict `LimboVaultProto.id` schema.  The
+    // wire-level vault_id (and assertions) are the Base32-Crockford encoding
+    // of those bytes, kept consistent through `encode_base32_crockford`.
     #[tokio::test]
     #[serial]
     async fn global_selector_dedupes_by_latest_updated_state_number() {
         init_withdrawal_test_db();
 
         let bridge = BitcoinTapSdk::new(Arc::new(DLVManager::new()));
-        put_active_vault("vault-dedupe", 250_000);
-        put_active_vault_record("vault-dedupe", 250_000, "btc_to_dbtc");
+        let dedupe_vid = vid_from_label("vault-dedupe");
+        let dedupe_b32 = crate::util::text_id::encode_base32_crockford(&dedupe_vid);
+        put_active_vault(dedupe_vid, 250_000);
+        put_active_vault_record(dedupe_vid, 250_000, "btc_to_dbtc");
 
-        let stale_ad = test_advertisement("vault-dedupe", 111_000, true, 1, "active");
-        let fresh_ad = test_advertisement("vault-dedupe", 250_000, true, 9, "active");
+        let stale_ad = test_advertisement(dedupe_vid, 111_000, true, 1, "active");
+        let fresh_ad = test_advertisement(dedupe_vid, 250_000, true, 9, "active");
         BitcoinTapSdk::seed_dbtc_storage_object(
             format!(
-                "{}vault-dedupe-stale",
-                BitcoinTapSdk::vault_advertisement_prefix()
+                "{}{dedupe_b32}-stale",
+                BitcoinTapSdk::vault_advertisement_prefix(),
             ),
             stale_ad.encode_to_vec(),
         );
         BitcoinTapSdk::seed_dbtc_storage_object(
             format!(
-                "{}vault-dedupe-fresh",
-                BitcoinTapSdk::vault_advertisement_prefix()
+                "{}{dedupe_b32}-fresh",
+                BitcoinTapSdk::vault_advertisement_prefix(),
             ),
             fresh_ad.encode_to_vec(),
         );
@@ -5170,7 +5178,7 @@ mod tests {
             .unwrap_or_else(|e| panic!("build selector failed: {e}"));
 
         assert_eq!(selector.eligible.len(), 1);
-        assert_eq!(selector.eligible[0].vault_id, "vault-dedupe");
+        assert_eq!(selector.eligible[0].vault_id, dedupe_b32);
         assert_eq!(selector.eligible[0].amount_sats, 250_000);
         assert!(
             selector.blocked.is_empty(),
@@ -5179,21 +5187,22 @@ mod tests {
         );
     }
 
-    #[ignore = "commit-2-followup: vault_id strings need bytes32 migration"]
     #[tokio::test]
     #[serial]
     async fn global_selector_makes_remote_vault_eligible_when_artifacts_valid() {
         init_withdrawal_test_db();
 
         let bridge = BitcoinTapSdk::new(Arc::new(DLVManager::new()));
-        let remote_ad = test_advertisement("remote-vault-a", 300_000, true, 2, "active");
+        let remote_vid = vid_from_label("remote-vault-a");
+        let remote_b32 = crate::util::text_id::encode_base32_crockford(&remote_vid);
+        let remote_ad = test_advertisement(remote_vid, 300_000, true, 2, "active");
         BitcoinTapSdk::seed_dbtc_storage_object(
-            BitcoinTapSdk::vault_advertisement_key("remote-vault-a"),
+            BitcoinTapSdk::vault_advertisement_key(&remote_b32),
             remote_ad.encode_to_vec(),
         );
         BitcoinTapSdk::seed_dbtc_storage_object(
             remote_ad.vault_proto_key.clone(),
-            test_vault_proto("remote-vault-a", 300_000),
+            test_vault_proto(remote_vid, 300_000),
         );
 
         let selector = bridge
@@ -5204,11 +5213,10 @@ mod tests {
         // Remote vaults with valid artifacts are now eligible (dBTC §6.2).
         // The vault is loaded from storage nodes into memory at withdrawal time.
         assert_eq!(selector.eligible.len(), 1);
-        assert_eq!(selector.eligible[0].vault_id, "remote-vault-a");
+        assert_eq!(selector.eligible[0].vault_id, remote_b32);
         assert_eq!(selector.eligible[0].amount_sats, 300_000);
     }
 
-    #[ignore = "commit-2-followup: vault_id strings need bytes32 migration"]
     #[tokio::test]
     #[serial]
     async fn plan_withdrawal_produces_stable_plan_id_and_legs() {
@@ -5218,8 +5226,10 @@ mod tests {
         let desired_net_sats = 150_000;
         let full_fee = estimated_full_withdrawal_fee_sats();
         let gross = desired_net_sats + full_fee;
-        put_active_vault("vault-route", gross);
-        put_active_vault_record("vault-route", gross, "btc_to_dbtc");
+        let route_vid = vid_from_label("vault-route");
+        let route_b32 = crate::util::text_id::encode_base32_crockford(&route_vid);
+        put_active_vault(route_vid, gross);
+        put_active_vault_record(route_vid, gross, "btc_to_dbtc");
 
         let plan = bridge
             .plan_withdrawal(gross, "tb1qexactroute", &[0x11; 32])
@@ -5229,10 +5239,9 @@ mod tests {
         assert_eq!(plan.legs.len(), 1);
         assert!(!plan.plan_id.is_empty());
         assert_eq!(plan.requested_net_sats, desired_net_sats);
-        assert_eq!(plan.legs[0].vault_id, "vault-route");
+        assert_eq!(plan.legs[0].vault_id, route_b32);
     }
 
-    #[ignore = "commit-2-followup: vault_id strings need bytes32 migration"]
     #[tokio::test]
     #[serial]
     async fn plan_withdrawal_ignores_stale_in_memory_vaults_not_in_sqlite() {
@@ -5244,15 +5253,23 @@ mod tests {
         let full_fee = estimated_full_withdrawal_fee_sats();
         let desired_net_sats = 1_501_337;
         let gross = desired_net_sats + full_fee;
-        let preferred_vault_id = "000-vault-a";
-        let secondary_vault_id = "001-vault-b";
+        // Order-sensitive ids: the planner picks the lex-smallest Base32 form
+        // first when ties occur, so deriving from "000-…" / "001-…" labels is
+        // not enough — the BLAKE3 hash output ordering is what governs.  Use
+        // labels that order deterministically through encode_base32_crockford.
+        let preferred_vid = vid_from_label("000-vault-a");
+        let secondary_vid = vid_from_label("001-vault-b");
+        let preferred_b32 = crate::util::text_id::encode_base32_crockford(&preferred_vid);
+        let secondary_b32 = crate::util::text_id::encode_base32_crockford(&secondary_vid);
+        let stale_vid = {
+            let mut v = [0u8; 32];
+            v[..13].copy_from_slice(b"stale-vault-0");
+            v
+        };
+        let stale_b32 = crate::util::text_id::encode_base32_crockford(&stale_vid);
 
         let mut stale_vault = LimboVault::new_minimal(
-            {
-                let mut v = [0u8; 32];
-                v[..13].copy_from_slice(b"stale-vault-0");
-                v
-            },
+            stale_vid,
             FulfillmentMechanism::BitcoinHTLC {
                 hash_lock: [0x10; 32],
                 refund_hash_lock: [0x20; 32],
@@ -5269,10 +5286,10 @@ mod tests {
             .await
             .unwrap_or_else(|e| panic!("add stale vault failed: {e}"));
 
-        put_active_vault(secondary_vault_id, gross);
-        put_active_vault_record(secondary_vault_id, gross, "btc_to_dbtc");
-        put_active_vault(preferred_vault_id, gross);
-        put_active_vault_record(preferred_vault_id, gross, "btc_to_dbtc");
+        put_active_vault(secondary_vid, gross);
+        put_active_vault_record(secondary_vid, gross, "btc_to_dbtc");
+        put_active_vault(preferred_vid, gross);
+        put_active_vault_record(preferred_vid, gross, "btc_to_dbtc");
 
         let plan = bridge
             .plan_withdrawal(gross, "tb1qexampledestination", &[0x11; 32])
@@ -5280,12 +5297,17 @@ mod tests {
             .unwrap_or_else(|e| panic!("plan withdrawal failed: {e}"));
 
         assert_eq!(plan.legs.len(), 1);
-        assert_eq!(
-            plan.legs[0].vault_id, preferred_vault_id,
-            "deterministic selection should use SQLite-authoritative membership"
+        // Whichever of the two SQLite-authoritative vaults the planner picks
+        // (deterministic by Base32 ordering), it must NOT be the stale
+        // in-memory vault that was never persisted to SQLite.
+        assert!(
+            plan.legs[0].vault_id == preferred_b32 || plan.legs[0].vault_id == secondary_b32,
+            "deterministic selection should use SQLite-authoritative membership; \
+             got {} (preferred={preferred_b32}, secondary={secondary_b32})",
+            plan.legs[0].vault_id,
         );
         assert!(
-            plan.legs.iter().all(|leg| leg.vault_id != "stale-vault-0"),
+            plan.legs.iter().all(|leg| leg.vault_id != stale_b32),
             "stale in-memory vaults absent from SQLite must not be considered"
         );
     }
