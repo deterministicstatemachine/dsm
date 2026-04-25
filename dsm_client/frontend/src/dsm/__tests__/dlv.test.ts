@@ -183,32 +183,67 @@ describe('dlv.ts', () => {
   });
 
   describe('buildDlvInstantiateBytes', () => {
+    // Digests are now auto-computed by the helper, so the base test
+    // input deliberately omits them.  Each test that wants to exercise
+    // the caller-supplied path computes the correct digest from the
+    // BLAKE3 helpers and passes it through.
     const baseInput = {
       policyDigest: new Uint8Array(32).fill(0x02),
-      contentDigest: new Uint8Array(32).fill(0x03),
-      fulfillmentDigest: new Uint8Array(32).fill(0x04),
       content: new Uint8Array([0xaa, 0xbb]),
       fulfillmentBytes: new Uint8Array([0xcc, 0xdd]),
       creatorPublicKey: new Uint8Array(64).fill(0x11),
       signature: new Uint8Array(64).fill(0x22),
     };
 
-    test('produces a DlvInstantiateV1 that round-trips through the proto', () => {
+    test('auto-computes contentDigest and fulfillmentDigest when omitted', async () => {
+      const { dlvContentDigest, dlvFulfillmentDigest } = await import('../../utils/blake3');
       const bytes = buildDlvInstantiateBytes(baseInput);
       const req = pb.DlvInstantiateV1.fromBinary(bytes);
       expect(req.spec).toBeDefined();
-      expect(Array.from(req.spec!.policyDigest)).toEqual(Array.from(baseInput.policyDigest));
-      expect(Array.from(req.spec!.contentDigest)).toEqual(Array.from(baseInput.contentDigest));
-      expect(Array.from(req.spec!.fulfillmentDigest)).toEqual(
-        Array.from(baseInput.fulfillmentDigest),
+      expect(Array.from(req.spec!.contentDigest)).toEqual(
+        Array.from(dlvContentDigest(baseInput.content)),
       );
-      expect(Array.from(req.creatorPublicKey)).toEqual(Array.from(baseInput.creatorPublicKey));
-      expect(Array.from(req.signature)).toEqual(Array.from(baseInput.signature));
+      expect(Array.from(req.spec!.fulfillmentDigest)).toEqual(
+        Array.from(dlvFulfillmentDigest(baseInput.fulfillmentBytes)),
+      );
       // No lock supplied → all-zero 16 bytes.
       expect(req.lockedAmountU128.length).toBe(16);
       expect(req.lockedAmountU128.every((b) => b === 0)).toBe(true);
       // No token_id supplied → empty bytes.
       expect(req.tokenId.length).toBe(0);
+    });
+
+    test('accepts a matching caller-supplied digest pair', async () => {
+      const { dlvContentDigest, dlvFulfillmentDigest } = await import('../../utils/blake3');
+      const bytes = buildDlvInstantiateBytes({
+        ...baseInput,
+        contentDigest: dlvContentDigest(baseInput.content),
+        fulfillmentDigest: dlvFulfillmentDigest(baseInput.fulfillmentBytes),
+      });
+      // Round-trip via the proto.  Content + fulfillment bytes survive intact.
+      const req = pb.DlvInstantiateV1.fromBinary(bytes);
+      expect(Array.from(req.spec!.content)).toEqual(Array.from(baseInput.content));
+      expect(Array.from(req.spec!.fulfillmentBytes)).toEqual(
+        Array.from(baseInput.fulfillmentBytes),
+      );
+    });
+
+    test('rejects a caller-supplied contentDigest that does not match content', () => {
+      expect(() =>
+        buildDlvInstantiateBytes({
+          ...baseInput,
+          contentDigest: new Uint8Array(32).fill(0x99),
+        }),
+      ).toThrow(/contentDigest does not match BLAKE3/);
+    });
+
+    test('rejects a caller-supplied fulfillmentDigest that does not match', () => {
+      expect(() =>
+        buildDlvInstantiateBytes({
+          ...baseInput,
+          fulfillmentDigest: new Uint8Array(32).fill(0x99),
+        }),
+      ).toThrow(/fulfillmentDigest does not match BLAKE3/);
     });
 
     test('encodes lockedAmount big-endian u128', () => {
