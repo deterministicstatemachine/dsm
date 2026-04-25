@@ -234,6 +234,17 @@ pub(crate) fn find_hop<'a>(
 pub(crate) enum RouteCommitVerifyError {
     /// `route_commit_bytes` failed prost decode.
     InvalidRouteCommitEncoding,
+    /// `initiator_public_key` is empty on the wire.  Without a public
+    /// key the `initiator_signature` cannot be verified, and the
+    /// eligibility gate fails closed.
+    MissingInitiatorPublicKey,
+    /// `initiator_signature` is empty OR fails SPHINCS+ verification
+    /// against the canonical (signature-zeroed) RouteCommit bytes
+    /// under `initiator_public_key`.  Without a valid signature an
+    /// attacker could forge arbitrary RouteCommits, publish their own
+    /// anchor at the resulting `X`, and trick vault owners into
+    /// unlocking against unauthorised routes — chunk #5 closes this.
+    InvalidInitiatorSignature,
     /// `vault_id` is not in any hop of the RouteCommit.  Either the
     /// trader handed this RouteCommit to the wrong vault owner or the
     /// route was constructed without this vault.
@@ -247,17 +258,29 @@ pub(crate) enum RouteCommitVerifyError {
     /// to fail closed than risk unlocking against a forged
     /// "visible" claim.
     AnchorFetchFailed(String),
+    /// SPHINCS+ verifier returned a hard error (key/sig length
+    /// mismatch, etc.).  Surfaced separately from
+    /// `InvalidInitiatorSignature` so callers can distinguish a
+    /// malformed input from a forged route.
+    SignatureVerifierError(String),
 }
 
 /// Routed-unlock eligibility check.  Vault-owner devices run this
-/// before honouring any `dlv.unlockRouted` request.  The four-step
-/// gate:
+/// before honouring any `dlv.unlockRouted` request.  The five-step
+/// gate (chunk #4 added the first four; chunk #5 added the SPHINCS+
+/// signature verification at step 2):
 ///   1. Decode RouteCommitV1 from the bytes the trader supplied.
-///   2. Locate the hop matching this vault — must exist (else the
+///   2. Verify the SPHINCS+ `initiator_signature` against the
+///      canonical (signature-zeroed) RouteCommit bytes under
+///      `initiator_public_key`.  Without this step an attacker
+///      could forge a RouteCommit, publish their own X anchor, and
+///      trick vault owners into unlocking against unauthorised
+///      routes — chunk #5 closes that.
+///   3. Locate the hop matching this vault — must exist (else the
 ///      RouteCommit was meant for a different vault).
-///   3. Compute X from the canonical (signature-zeroed) RouteCommit
+///   4. Compute X from the canonical (signature-zeroed) RouteCommit
 ///      bytes.
-///   4. Confirm the `ExternalCommitmentV1` anchor for X is visible at
+///   5. Confirm the `ExternalCommitmentV1` anchor for X is visible at
 ///      `defi/extcommit/{X_b32}` on storage nodes — else the trader
 ///      has not yet published the atomic-visibility trigger.
 ///
@@ -270,6 +293,29 @@ pub(crate) async fn verify_route_commit_unlock_eligibility(
 ) -> Result<generated::RouteCommitHopV1, RouteCommitVerifyError> {
     let rc = generated::RouteCommitV1::decode(route_commit_bytes)
         .map_err(|_| RouteCommitVerifyError::InvalidRouteCommitEncoding)?;
+
+    // SPHINCS+ verification (chunk #5).  Run BEFORE every other
+    // expensive check so a forged route fails fast.
+    if rc.initiator_public_key.is_empty() {
+        return Err(RouteCommitVerifyError::MissingInitiatorPublicKey);
+    }
+    if rc.initiator_signature.is_empty() {
+        return Err(RouteCommitVerifyError::InvalidInitiatorSignature);
+    }
+    let canonical = canonicalise_for_commitment(&rc);
+    let canonical_bytes = canonical.encode_to_vec();
+    match dsm::crypto::sphincs::sphincs_verify(
+        &rc.initiator_public_key,
+        &canonical_bytes,
+        &rc.initiator_signature,
+    ) {
+        Ok(true) => {} // good
+        Ok(false) => return Err(RouteCommitVerifyError::InvalidInitiatorSignature),
+        Err(e) => {
+            return Err(RouteCommitVerifyError::SignatureVerifierError(format!("{e}")));
+        }
+    }
+
     let hop = match find_hop(&rc, vault_id) {
         Some(h) => h.clone(),
         None => return Err(RouteCommitVerifyError::VaultNotInRoute),
@@ -613,37 +659,51 @@ mod tests {
     }
 
     // ─────────────────────────────────────────────────────────────────
-    // Routed-unlock eligibility (chunk #4)
+    // Routed-unlock eligibility (chunks #4 + #5)
+    //
+    // Tests use REAL SPHINCS+ keypairs because chunk #5 added a hard
+    // signature-verification step at the front of the gate.  Each test
+    // generates a fresh keypair, signs the canonical RouteCommit bytes,
+    // and exercises the full validate-decode → verify-sig → find-hop
+    // → check-X chain.
     // ─────────────────────────────────────────────────────────────────
 
-    /// Build + sign + publish a RouteCommit; return its bytes + X.
-    /// Helper for the eligibility tests below.
-    async fn signed_and_published_route_commit(
+    use dsm::crypto::sphincs::{generate_keypair, sign as sphincs_sign, SphincsVariant};
+
+    /// Build a RouteCommit signed under a freshly-generated SPHINCS+
+    /// keypair, optionally publish the X anchor, and return everything
+    /// the test needs.
+    async fn make_signed_route_commit(
         path: &Path,
         nonce_tag: u8,
-    ) -> (Vec<u8>, [u8; 32]) {
+        publish_anchor: bool,
+    ) -> (Vec<u8>, [u8; 32], Vec<u8>) {
+        let kp = generate_keypair(SphincsVariant::SPX256f).expect("keygen");
         let mut rc = bind_path_to_route_commit(BindRouteCommitInput {
             path,
             nonce: nonce(nonce_tag),
-            initiator_public_key: &[0x11u8; 64],
+            initiator_public_key: &kp.public_key,
             initiator_signature: vec![],
         })
         .unwrap();
+        let canonical = canonicalise_for_commitment(&rc);
+        let canonical_bytes = canonical.encode_to_vec();
+        let sig = sphincs_sign(SphincsVariant::SPX256f, &kp.secret_key, &canonical_bytes)
+            .expect("sphincs sign");
+        rc.initiator_signature = sig;
         let x = compute_external_commitment(&rc);
-        // Pretend the trader has now signed.  Signature is excluded
-        // from X (verified by `x_excludes_initiator_signature`); the
-        // post-sign bytes must still verify against the same X.
-        rc.initiator_signature = vec![0xDD; 64];
-        publish_external_commitment(&x, &[0x11u8; 64], "test-route")
-            .await
-            .expect("publish");
-        (rc.encode_to_vec(), x)
+        if publish_anchor {
+            publish_external_commitment(&x, &kp.public_key, "test-route")
+                .await
+                .expect("publish");
+        }
+        (rc.encode_to_vec(), x, kp.public_key.clone())
     }
 
     #[tokio::test]
     async fn eligibility_passes_when_x_visible_and_vault_in_route() {
         let path = sample_path();
-        let (rc_bytes, _x) = signed_and_published_route_commit(&path, 0x40).await;
+        let (rc_bytes, _x, _pk) = make_signed_route_commit(&path, 0x40, true).await;
 
         // Vault 1 (first hop) — must pass.
         let hop = verify_route_commit_unlock_eligibility(&rc_bytes, &vid(1))
@@ -662,7 +722,7 @@ mod tests {
     #[tokio::test]
     async fn eligibility_rejects_vault_not_in_route() {
         let path = sample_path();
-        let (rc_bytes, _x) = signed_and_published_route_commit(&path, 0x41).await;
+        let (rc_bytes, _x, _pk) = make_signed_route_commit(&path, 0x41, true).await;
 
         match verify_route_commit_unlock_eligibility(&rc_bytes, &vid(99)).await {
             Err(RouteCommitVerifyError::VaultNotInRoute) => {}
@@ -672,18 +732,9 @@ mod tests {
 
     #[tokio::test]
     async fn eligibility_rejects_when_x_not_visible() {
-        // Build + sign WITHOUT publishing the anchor.
         let path = sample_path();
-        let mut rc = bind_path_to_route_commit(BindRouteCommitInput {
-            path: &path,
-            nonce: nonce(0x42),
-            initiator_public_key: &[0x11u8; 64],
-            initiator_signature: vec![],
-        })
-        .unwrap();
-        rc.initiator_signature = vec![0xDD; 64];
-        let rc_bytes = rc.encode_to_vec();
-
+        // Build + sign but DON'T publish the anchor.
+        let (rc_bytes, _x, _pk) = make_signed_route_commit(&path, 0x42, false).await;
         match verify_route_commit_unlock_eligibility(&rc_bytes, &vid(1)).await {
             Err(RouteCommitVerifyError::ExternalCommitmentNotVisible) => {}
             other => {
@@ -707,32 +758,183 @@ mod tests {
         // Anchor exists at the right key but its `x` field disagrees —
         // a forged/swapped record.  Eligibility MUST reject.
         let path = sample_path();
-        let mut rc = bind_path_to_route_commit(BindRouteCommitInput {
-            path: &path,
-            nonce: nonce(0x43),
-            initiator_public_key: &[0x11u8; 64],
-            initiator_signature: vec![],
-        })
-        .unwrap();
-        let x = compute_external_commitment(&rc);
-        rc.initiator_signature = vec![0xDD; 64];
-
-        // Plant a tampered anchor at the right key but with wrong x.
+        let (rc_bytes, x, pk) = make_signed_route_commit(&path, 0x43, false).await;
         let key = external_commitment_key(&x);
         let bogus = generated::ExternalCommitmentV1 {
             version: 1,
-            x: vec![0xFF; 32],
-            publisher_public_key: vec![0x11; 64],
+            x: vec![0xFF; 32], // intentionally wrong
+            publisher_public_key: pk.clone(),
             label: "tampered".into(),
         };
         BitcoinTapSdk::storage_put_bytes(&key, &bogus.encode_to_vec())
             .await
             .expect("plant bogus");
 
-        let rc_bytes = rc.encode_to_vec();
         match verify_route_commit_unlock_eligibility(&rc_bytes, &vid(1)).await {
             Err(RouteCommitVerifyError::AnchorFetchFailed(_)) => {}
             other => panic!("expected AnchorFetchFailed, got {other:?}"),
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Chunk #5 — SPHINCS+ signature validation
+    // ─────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn eligibility_rejects_empty_initiator_signature() {
+        let path = sample_path();
+        let kp = generate_keypair(SphincsVariant::SPX256f).expect("keygen");
+        // Build but leave signature empty (chunk #5 closes this).
+        let rc = bind_path_to_route_commit(BindRouteCommitInput {
+            path: &path,
+            nonce: nonce(0x50),
+            initiator_public_key: &kp.public_key,
+            initiator_signature: vec![],
+        })
+        .unwrap();
+        match verify_route_commit_unlock_eligibility(&rc.encode_to_vec(), &vid(1)).await
+        {
+            Err(RouteCommitVerifyError::InvalidInitiatorSignature) => {}
+            other => panic!(
+                "expected InvalidInitiatorSignature, got {other:?}"
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn eligibility_rejects_empty_initiator_public_key() {
+        let path = sample_path();
+        // Construct a RouteCommit with an empty pk.  Even with a
+        // signature present, the gate must reject.
+        let mut rc = bind_path_to_route_commit(BindRouteCommitInput {
+            path: &path,
+            nonce: nonce(0x51),
+            initiator_public_key: &[],
+            initiator_signature: vec![0xAA; 100],
+        })
+        .unwrap();
+        rc.initiator_public_key.clear(); // belt-and-suspenders
+        match verify_route_commit_unlock_eligibility(&rc.encode_to_vec(), &vid(1)).await
+        {
+            Err(RouteCommitVerifyError::MissingInitiatorPublicKey) => {}
+            other => panic!(
+                "expected MissingInitiatorPublicKey, got {other:?}"
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn eligibility_rejects_signature_under_wrong_key() {
+        // Two keypairs.  Sign with kp_a.secret_key but stamp the
+        // RouteCommit with kp_b.public_key — the SPHINCS+ verifier
+        // must reject this as a forgery.
+        let path = sample_path();
+        let kp_a = generate_keypair(SphincsVariant::SPX256f).expect("kp_a");
+        let kp_b = generate_keypair(SphincsVariant::SPX256f).expect("kp_b");
+        let mut rc = bind_path_to_route_commit(BindRouteCommitInput {
+            path: &path,
+            nonce: nonce(0x52),
+            initiator_public_key: &kp_b.public_key, // wrong pk
+            initiator_signature: vec![],
+        })
+        .unwrap();
+        let canonical = canonicalise_for_commitment(&rc);
+        let sig = sphincs_sign(
+            SphincsVariant::SPX256f,
+            &kp_a.secret_key, // signed under DIFFERENT key
+            &canonical.encode_to_vec(),
+        )
+        .expect("sign");
+        rc.initiator_signature = sig;
+        match verify_route_commit_unlock_eligibility(&rc.encode_to_vec(), &vid(1)).await
+        {
+            Err(RouteCommitVerifyError::InvalidInitiatorSignature) => {}
+            other => panic!(
+                "wrong-key signature must be rejected; got {other:?}"
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn eligibility_rejects_post_sign_tampered_route_commit() {
+        // Sign correctly, then tamper with a hop field BEFORE encoding.
+        // The signature was over the pre-tamper bytes, so verification
+        // against the tampered canonical bytes must fail.
+        let path = sample_path();
+        let kp = generate_keypair(SphincsVariant::SPX256f).expect("keygen");
+        let mut rc = bind_path_to_route_commit(BindRouteCommitInput {
+            path: &path,
+            nonce: nonce(0x53),
+            initiator_public_key: &kp.public_key,
+            initiator_signature: vec![],
+        })
+        .unwrap();
+        let canonical = canonicalise_for_commitment(&rc);
+        let sig = sphincs_sign(
+            SphincsVariant::SPX256f,
+            &kp.secret_key,
+            &canonical.encode_to_vec(),
+        )
+        .expect("sign");
+        rc.initiator_signature = sig;
+
+        // Tamper AFTER signing.
+        rc.hops[0].fee_bps += 1;
+
+        match verify_route_commit_unlock_eligibility(&rc.encode_to_vec(), &vid(1)).await
+        {
+            Err(RouteCommitVerifyError::InvalidInitiatorSignature) => {}
+            other => panic!(
+                "post-sign tamper must invalidate signature; got {other:?}"
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn eligibility_signature_check_runs_before_anchor_visibility() {
+        // A RouteCommit with a forged signature should fail at the
+        // signature step regardless of whether X is visible.  This
+        // proves the gate's ordering: forged routes never even reach
+        // the storage-anchor lookup, so an attacker can't spam
+        // storage queries with garbage RouteCommits.
+        let path = sample_path();
+        let kp_real = generate_keypair(SphincsVariant::SPX256f).expect("kp_real");
+        let kp_attacker = generate_keypair(SphincsVariant::SPX256f).expect("kp_attacker");
+        // Build under real pk + sign (correctly) so X is real and
+        // anchor publish succeeds.
+        let mut rc_real = bind_path_to_route_commit(BindRouteCommitInput {
+            path: &path,
+            nonce: nonce(0x54),
+            initiator_public_key: &kp_real.public_key,
+            initiator_signature: vec![],
+        })
+        .unwrap();
+        let canonical_real = canonicalise_for_commitment(&rc_real);
+        rc_real.initiator_signature = sphincs_sign(
+            SphincsVariant::SPX256f,
+            &kp_real.secret_key,
+            &canonical_real.encode_to_vec(),
+        )
+        .expect("sign real");
+        let x_real = compute_external_commitment(&rc_real);
+        publish_external_commitment(&x_real, &kp_real.public_key, "real")
+            .await
+            .expect("publish real");
+
+        // Now build a parallel RouteCommit with attacker's pk + a
+        // garbage signature.  X is the same in shape but signature
+        // is bogus — must reject at sig-check before reaching anchor.
+        let mut rc_attack = rc_real.clone();
+        rc_attack.initiator_public_key = kp_attacker.public_key.clone();
+        rc_attack.initiator_signature = vec![0xFF; 49856]; // SPX256f sig length
+        match verify_route_commit_unlock_eligibility(&rc_attack.encode_to_vec(), &vid(1))
+            .await
+        {
+            Err(RouteCommitVerifyError::InvalidInitiatorSignature)
+            | Err(RouteCommitVerifyError::SignatureVerifierError(_)) => {}
+            other => panic!(
+                "forged signature must reject before anchor lookup; got {other:?}"
+            ),
         }
     }
 }
