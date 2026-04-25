@@ -541,6 +541,56 @@ fn dlv_unlock_routed_is_dispatched() {
     );
 }
 
+/// DeTFi chunk #5 invariant — the eligibility verifier MUST call
+/// SPHINCS+ verification on the `initiator_signature`.  Without this
+/// step an attacker could forge arbitrary RouteCommits + publish
+/// their own X anchor + trick vault owners into unlocking against
+/// unauthorised routes.  This guard catches any future edit that
+/// removes the signature check.
+#[test]
+fn route_commit_eligibility_runs_sphincs_signature_verify() {
+    let src = read(sdk_path("src/sdk/route_commit_sdk.rs"));
+    assert!(
+        src.contains("dsm::crypto::sphincs::sphincs_verify"),
+        "regression: route_commit_sdk no longer SPHINCS+-verifies \
+         initiator_signature — forged-route attack surface re-opened"
+    );
+    // The signature check must come BEFORE the X-anchor lookup.
+    // Otherwise a forged RouteCommit can spam storage queries.
+    let sig_pos = src
+        .find("dsm::crypto::sphincs::sphincs_verify")
+        .expect("sphincs_verify present (asserted above)");
+    let anchor_pos = src
+        .find("is_external_commitment_visible(&x)")
+        .expect("anchor visibility check present");
+    assert!(
+        sig_pos < anchor_pos,
+        "regression: SPHINCS+ verification MUST run before anchor \
+         lookup — the gate's ordering protects storage-side resources \
+         from forged-route DoS"
+    );
+}
+
+/// DeTFi chunk #5 invariant — the canonical bytes fed to SPHINCS+
+/// verify MUST be the SAME canonical form fed to the external
+/// commitment X.  Any divergence would let an attacker sign one
+/// canonical form while publishing under the other's X — the gate
+/// must use a single source of canonicalisation truth.
+#[test]
+fn route_commit_signature_uses_same_canonical_form_as_x() {
+    let src = read(sdk_path("src/sdk/route_commit_sdk.rs"));
+    // Both `compute_external_commitment` and the eligibility verifier
+    // must call `canonicalise_for_commitment`.  A future edit that
+    // bypassed that helper for either path would silently break the
+    // sign-and-commit invariant.
+    let calls = src.matches("canonicalise_for_commitment(&rc)").count();
+    assert!(
+        calls >= 2,
+        "regression: canonicalise_for_commitment is called fewer than \
+         twice — sign path and X-derivation path must both use it"
+    );
+}
+
 /// Commit 3 invariant — the strict resolver lives at the TokenSDK
 /// layer.  Code that derives `policy_commit` from `TokenMetadata`
 /// directly bypasses policy registration and must not come back.
