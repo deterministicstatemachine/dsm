@@ -4960,11 +4960,17 @@ mod tests {
         }
     }
 
-    fn put_active_vault(vault_id: &str, amount_sats: u64) {
+    /// Derive a deterministic 32-byte test vault_id from a human-readable label.
+    /// Test labels stay descriptive in source while the on-disk + on-wire id is
+    /// the strict 32-byte form `LimboVaultProto.id` requires.
+    fn vid_from_label(label: &str) -> [u8; 32] {
+        dsm::crypto::blake3::domain_hash_bytes("DSM/dbtc-test-vault", label.as_bytes())
+    }
+
+    fn put_active_vault(vault_id: [u8; 32], amount_sats: u64) {
+        let vid_b32 = crate::util::text_id::encode_base32_crockford(&vault_id);
         let proto = generated::LimboVaultProto {
-            id: crate::util::text_id::decode_bytes32(vault_id)
-                .map(|v| v.to_vec())
-                .unwrap_or_else(|| vault_id.as_bytes().to_vec()),
+            id: vault_id.to_vec(),
             fulfillment_condition: Some(generated::FulfillmentMechanism {
                 kind: Some(generated::fulfillment_mechanism::Kind::BitcoinHtlc(
                     generated::BitcoinHtlc {
@@ -4982,17 +4988,18 @@ mod tests {
         }
         .encode_to_vec();
 
-        client_db::put_vault(vault_id, &proto, "active", &[0x44; 80], amount_sats)
+        client_db::put_vault(&vid_b32, &proto, "active", &[0x44; 80], amount_sats)
             .expect("store vault");
     }
 
-    fn put_active_vault_record(vault_id: &str, amount_sats: u64) {
+    fn put_active_vault_record(vault_id: [u8; 32], amount_sats: u64) {
+        let vid_b32 = crate::util::text_id::encode_base32_crockford(&vault_id);
         client_db::upsert_vault_record(&client_db::PersistedVaultRecord {
-            vault_op_id: format!("deposit-{vault_id}"),
+            vault_op_id: format!("deposit-{vid_b32}"),
             direction: "btc_to_dbtc".to_string(),
             vault_state: "completed".to_string(),
             hash_lock: vec![0x33; 32],
-            vault_id: Some(vault_id.to_string()),
+            vault_id: Some(vid_b32),
             btc_amount_sats: amount_sats,
             btc_pubkey: vec![0x03; 33],
             htlc_script: Some(vec![0x66; 64]),
@@ -5017,14 +5024,15 @@ mod tests {
     }
 
     fn seed_vault_execution_advertisement(
-        vault_id: &str,
+        vault_id: [u8; 32],
         amount_sats: u64,
         policy_commit: [u8; 32],
     ) {
+        let vid_b32 = crate::util::text_id::encode_base32_crockford(&vault_id);
         let ad_key = format!(
             "dbtc/manifold/{}/vault/{}",
             crate::util::text_id::encode_base32_crockford(&policy_commit),
-            vault_id
+            vid_b32
         );
         let redeem_params = generated::DbtcRedeemParams {
             htlc_script: vec![0x66; 64],
@@ -5037,7 +5045,7 @@ mod tests {
         let advertisement = generated::DbtcVaultAdvertisementV1 {
             version: 1,
             policy_commit: policy_commit.to_vec(),
-            vault_id: vault_id.to_string(),
+            vault_id: vid_b32,
             controller_device_id: vec![0xA1; 32],
             amount_sats,
             successor_depth: 0,
@@ -5140,13 +5148,9 @@ mod tests {
         );
     }
 
-    // FIXME(commit-2-followup): dBTC withdrawal tests below use hardcoded ASCII
-    // vault_id strings ("vault-a", "vault-dedupe" etc.) that pre-date the vault_id
-    // bytes32 refactor.  They need to be rewritten with blake3-derived 32-byte
-    // ids so the put_active_vault helper round-trips.  Tracked for the test
-    // consolidation commit; assertions are orthogonal to the custom-token /
-    // DLV anchoring path.
-    #[ignore = "commit-2-followup: vault_id strings need bytes32 migration"]
+    // dBTC withdrawal tests use BLAKE3-derived 32-byte ids via `vid_from_label`
+    // so they round-trip through the strict `LimboVaultProto.id` schema while
+    // keeping the source-readable test labels intact.
     #[tokio::test]
     #[serial]
     async fn bitcoin_withdraw_execute_rejects_reuse_of_consumed_plan() {
@@ -5154,10 +5158,11 @@ mod tests {
         let request_net_sats = 173_333;
         let full_fee = crate::sdk::bitcoin_tap_sdk::estimated_full_withdrawal_fee_sats();
         let source_amount = request_net_sats + full_fee;
+        let vault_id = vid_from_label("000-vault-consumed");
 
         seed_dbtc_balance(&router, request_net_sats * 3); // enough for multiple withdrawals
-        put_active_vault("000-vault-consumed", source_amount);
-        put_active_vault_record("000-vault-consumed", source_amount);
+        put_active_vault(vault_id, source_amount);
+        put_active_vault_record(vault_id, source_amount);
 
         set_withdrawal_bridge_sync_test_results(vec![
             Ok(sync_response(true, 0)),
@@ -5293,7 +5298,6 @@ mod tests {
         );
     }
 
-    #[ignore = "commit-2-followup: vault_id strings need bytes32 migration"]
     #[tokio::test]
     #[serial]
     async fn bitcoin_withdraw_execute_uses_cached_plan() {
@@ -5304,10 +5308,11 @@ mod tests {
         let request_net_sats = 150_000;
         let full_fee = crate::sdk::bitcoin_tap_sdk::estimated_full_withdrawal_fee_sats();
         let source_amount = request_net_sats + full_fee;
+        let vault_id = vid_from_label("vault-execute-success");
 
         seed_dbtc_balance(&router, request_net_sats * 3);
-        put_active_vault("vault-execute-success", source_amount);
-        put_active_vault_record("vault-execute-success", source_amount);
+        put_active_vault(vault_id, source_amount);
+        put_active_vault_record(vault_id, source_amount);
 
         set_withdrawal_bridge_sync_test_results(vec![
             Ok(sync_response(true, 0)),
@@ -5420,7 +5425,6 @@ mod tests {
         assert_withdrawal_execution_test_expectations_drained();
     }
 
-    #[ignore = "commit-2-followup: vault_id strings need bytes32 migration"]
     #[tokio::test]
     #[serial]
     async fn bitcoin_withdraw_execute_rejects_destination_address_mismatch() {
@@ -5428,9 +5432,10 @@ mod tests {
         let request_net_sats = 150_000;
         let full_fee = crate::sdk::bitcoin_tap_sdk::estimated_full_withdrawal_fee_sats();
         let source_amount = request_net_sats + full_fee;
+        let vault_id = vid_from_label("vault-addr-mismatch");
 
-        put_active_vault("vault-addr-mismatch", source_amount);
-        put_active_vault_record("vault-addr-mismatch", source_amount);
+        put_active_vault(vault_id, source_amount);
+        put_active_vault_record(vault_id, source_amount);
 
         set_withdrawal_bridge_sync_test_results(vec![
             Ok(sync_response(true, 0)),
@@ -5478,7 +5483,6 @@ mod tests {
         );
     }
 
-    #[ignore = "commit-2-followup: vault_id strings need bytes32 migration"]
     #[tokio::test]
     #[serial]
     async fn bitcoin_withdraw_execute_persists_policy_commit_from_plan() {
@@ -5486,10 +5490,11 @@ mod tests {
         let request_gross_sats = 150_000;
         let full_fee = crate::sdk::bitcoin_tap_sdk::estimated_full_withdrawal_fee_sats();
         let source_amount = request_gross_sats + full_fee;
+        let vault_id = vid_from_label("vault-policy");
 
         seed_dbtc_balance(&router, request_gross_sats * 3);
-        put_active_vault("vault-policy", source_amount);
-        put_active_vault_record("vault-policy", source_amount);
+        put_active_vault(vault_id, source_amount);
+        put_active_vault_record(vault_id, source_amount);
 
         set_withdrawal_bridge_sync_test_results(vec![
             Ok(sync_response(true, 0)),
@@ -5588,11 +5593,9 @@ mod tests {
         let mismatched_policy_commit = [0xAB; 32];
 
         seed_dbtc_balance(&router, amount_sats);
-        seed_vault_execution_advertisement(
-            "vault-policy-mismatch",
-            amount_sats,
-            actual_policy_commit,
-        );
+        let mismatch_vid = vid_from_label("vault-policy-mismatch");
+        let mismatch_b32 = crate::util::text_id::encode_base32_crockford(&mismatch_vid);
+        seed_vault_execution_advertisement(mismatch_vid, amount_sats, actual_policy_commit);
         client_db::create_withdrawal(client_db::CreateWithdrawalParams {
             withdrawal_id: "wd-policy-mismatch",
             device_id: &device_id_b32,
@@ -5609,7 +5612,7 @@ mod tests {
             .invoke(AppInvoke {
                 method: "bitcoin.full.sweep".to_string(),
                 args: pack_proto(&generated::BitcoinFractionalExitRequest {
-                    source_vault_id: "vault-policy-mismatch".to_string(),
+                    source_vault_id: mismatch_b32,
                     destination_address: "tb1qpolicymismatch".to_string(),
                     plan_id: "wd-policy-mismatch".to_string(),
                     ..Default::default()
