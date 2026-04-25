@@ -818,6 +818,53 @@ message DlvOpenV3 {
   bytes reveal_material = 3 [(dsm_max_len)=65535];
 }
 
+// Storage-node-mirrored advertisement for a DeTFi routing vault.
+//
+// Keyed under `defi/vault/{token_a_b32}/{token_b_b32}/{vault_id_b32}` —
+// PUBLIC discovery by ordered token pair, no recipient scoping.  The
+// router enumerates all vaults matching `(tokenA, tokenB)` (or its
+// reverse, in which case reserves swap roles) and feeds the result
+// into a fee-weighted Dijkstra over the resulting liquidity graph
+// (DeTFi spec §3.3, §8.3).
+//
+// Storage nodes are dumb mirrors.  Authenticity for routing purposes
+// is rooted in `vault_proto_digest` binding the ad to a full vault
+// proto under `defi/vault-proto/{..}/{..}` — exactly the same pattern
+// as DbtcVaultAdvertisementV1 and PostedDlvAdvertisementV1, mounted
+// in a different keyspace.
+//
+// Token-pair canonicalisation: `token_a` and `token_b` are the
+// LEXICOGRAPHICALLY LOWER and HIGHER token-id bytes respectively.
+// Reserves are reported in the matching order (reserve_a is the
+// pool of token_a).  This collapses the "A→B" and "B→A" entries
+// for a single vault into one canonical advertisement; the router
+// flips reserve roles based on the requested trade direction.
+message RoutingVaultAdvertisementV1 {
+  uint32 version                 = 1;
+  bytes  vault_id                = 2 [(dsm_fixed_len)=32];
+  bytes  token_a                 = 3 [(dsm_max_len)=64];   // lexicographically lower
+  bytes  token_b                 = 4 [(dsm_max_len)=64];   // lexicographically higher
+  bytes  reserve_a_u128          = 5 [(dsm_fixed_len)=16]; // big-endian u128, pool of token_a
+  bytes  reserve_b_u128          = 6 [(dsm_fixed_len)=16]; // big-endian u128, pool of token_b
+  // Fee in basis points (e.g. 30 = 0.30 %).  Full-fixed integer keeps
+  // the routing graph weights deterministic and clockless.
+  uint32 fee_bps                 = 7;
+  // Hash of the canonical CPTA spec describing the vault's unlock
+  // condition set (constant product, stable swap, custom curve, …).
+  // Routers verify a vault is satisfiable by re-fetching the spec
+  // bytes via the `unlock_spec_key` storage pointer below.
+  bytes  unlock_spec_digest      = 8 [(dsm_fixed_len)=32];
+  string unlock_spec_key         = 9;
+  bytes  vault_proto_key         = 10; // not [(dsm_fixed_len)] — string blob
+  bytes  vault_proto_digest      = 11 [(dsm_fixed_len)=32]; // BLAKE3("DSM/routing-vault-ad", proto_bytes)
+  // Vault owner's SPHINCS+ pk.  Used by the router to compute the
+  // expected per-hop unlock receipt commit; not used for ad
+  // authenticity (see vault_proto_digest above).
+  bytes  owner_public_key        = 12 [(dsm_max_len)=65535];
+  string lifecycle_state         = 13; // "active" | "exhausted" | "withdrawn"
+  uint64 updated_state_number    = 14; // dedup signal; matches dBTC + posted-dlv pattern
+}
+
 // Typed request for `dlv.invalidate`.  Replaces the inline
 // `[32-byte vault_id][utf8 reason]` body shape used pre-Track-A; the
 // canonical Operation::DlvInvalidate carries the same fields.
