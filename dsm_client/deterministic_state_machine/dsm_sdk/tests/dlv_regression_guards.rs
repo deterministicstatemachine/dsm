@@ -347,6 +347,47 @@ fn proto_schema_carries_routing_vault_advertisement() {
     );
 }
 
+/// DeTFi routing path search — the path-search module MUST stay free
+/// of any RouteCommit / atomic-execution coupling.  Chunk #2 is pure
+/// discovery + path selection; chunk #3 is where commitment + settlement
+/// land.  A regression that imported `RouteCommitV1` (or any settlement
+/// helper) into routing_path_sdk would mix algorithmic routing bugs
+/// with atomicity bugs and break the layered scope invariant.
+#[test]
+fn routing_path_sdk_does_not_touch_routecommit_or_settlement() {
+    let src = read(sdk_path("src/sdk/routing_path_sdk.rs"));
+    assert!(
+        !src.contains("RouteCommitV1"),
+        "regression: routing_path_sdk imported RouteCommitV1 — chunk #3 work \
+         leaked into chunk #2.  Path search must remain pure."
+    );
+    assert!(
+        !src.contains("execute_on_relationship"),
+        "regression: routing_path_sdk reached into the state-machine \
+         settlement path — chunk #2 must not touch atomic execution."
+    );
+    assert!(
+        !src.contains("Operation::DlvClaim") && !src.contains("Operation::DlvCreate"),
+        "regression: routing_path_sdk emitted a state-machine Operation — \
+         chunk #2 produces Path candidates only, no on-chain side effects."
+    );
+}
+
+/// DeTFi routing path search — the cost function MUST select on
+/// `final_output_amount`, not on summed `fee_bps`.  A pure-fee
+/// Dijkstra silently mis-routes when a multi-hop path through deep
+/// reserves nets more output than a shallow direct hop with low fee
+/// (test `multi_hop_beats_direct_when_output_better`).
+#[test]
+fn routing_path_search_compares_on_final_output() {
+    let src = read(sdk_path("src/sdk/routing_path_sdk.rs"));
+    assert!(
+        src.contains("final_output_amount > current.final_output_amount"),
+        "regression: routing_path_sdk replaced output-maximisation with \
+         a different cost rule — verify intent before proceeding"
+    );
+}
+
 /// Commit 3 invariant — the strict resolver lives at the TokenSDK
 /// layer.  Code that derives `policy_commit` from `TokenMetadata`
 /// directly bypasses policy registration and must not come back.
