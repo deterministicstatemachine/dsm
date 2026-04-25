@@ -2130,7 +2130,11 @@ fn build_token_harness(seed_bytes: &[u8; 32], pk: &[u8]) -> TokenTraceHarness {
 
     let mut state = create_test_state(seed_bytes, pk);
     let recipient = vec![0xDD; 32];
-    let policy_commit = dsm::core::token::resolve_policy_commit(TRACE_TOKEN_ID);
+    // resolve_policy_commit is now strict-fail (returns Result) per Track A.
+    // Tests that registered the policy via `register_token_policy_anchor`
+    // above can unwrap.
+    let policy_commit = dsm::core::token::resolve_policy_commit(TRACE_TOKEN_ID)
+        .expect("resolve_policy_commit for registered TRACE_TOKEN_ID");
     let sender_key =
         dsm::core::token::derive_canonical_balance_key(&policy_commit, pk, TRACE_TOKEN_ID);
     let recipient_key =

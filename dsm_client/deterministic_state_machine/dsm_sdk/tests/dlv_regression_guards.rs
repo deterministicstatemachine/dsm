@@ -291,6 +291,62 @@ fn proto_schema_carries_typed_dlv_request_messages() {
     );
 }
 
+/// DeTFi routing discovery — token-pair canonicalisation MUST sort
+/// (tokenA, tokenB) lex-lower-first before key construction.  A
+/// regression that forgot this would split each pair into two
+/// uncorrelated prefixes and the router would only see half the
+/// liquidity.
+#[test]
+fn routing_advertisement_keys_canonicalise_token_pair() {
+    let src = read(sdk_path("src/sdk/routing_sdk.rs"));
+    assert!(
+        src.contains("pub(crate) fn canonical_token_pair"),
+        "regression: routing_sdk lost the canonical_token_pair helper"
+    );
+    assert!(
+        src.contains("if a <= b") || src.contains("if a < b"),
+        "regression: canonical_token_pair must sort lex-lower-first"
+    );
+    assert!(
+        src.contains("pub(crate) const ROUTING_VAULT_AD_ROOT: &str = \"defi/vault/\";"),
+        "regression: ROUTING_VAULT_AD_ROOT prefix changed — this breaks every \
+         previously-published routing advertisement"
+    );
+}
+
+/// DeTFi routing discovery — the digest binding advertisement →
+/// vault proto MUST use the `DSM/routing-vault-ad` BLAKE3 domain tag.
+/// A tag swap would silently break the fetch-verify round trip,
+/// causing routers to reject all DeTFi vaults.
+#[test]
+fn routing_advertisement_uses_stable_domain_tag() {
+    let src = read(sdk_path("src/sdk/routing_sdk.rs"));
+    assert!(
+        src.contains("pub(crate) const ROUTING_VAULT_AD_DOMAIN: &str = \"DSM/routing-vault-ad\";"),
+        "regression: ROUTING_VAULT_AD_DOMAIN changed — this breaks every \
+         previously-published routing advertisement"
+    );
+}
+
+/// DeTFi routing discovery — the proto schema MUST carry
+/// `RoutingVaultAdvertisementV1` so the SDK's encode/decode path
+/// continues to compile.  Removing it is a wire-format break.
+#[test]
+fn proto_schema_carries_routing_vault_advertisement() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let repo_root = Path::new(manifest_dir)
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .expect("resolve repo root");
+    let proto = repo_root.join("proto").join("dsm_app.proto");
+    let proto_src = read(proto);
+    assert!(
+        proto_src.contains("message RoutingVaultAdvertisementV1 {"),
+        "regression: proto/dsm_app.proto is missing RoutingVaultAdvertisementV1"
+    );
+}
+
 /// Commit 3 invariant — the strict resolver lives at the TokenSDK
 /// layer.  Code that derives `policy_commit` from `TokenMetadata`
 /// directly bypasses policy registration and must not come back.

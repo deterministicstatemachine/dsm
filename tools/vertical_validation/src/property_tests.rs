@@ -179,7 +179,10 @@ fn build_policy_backed_token_harness(seed_bytes: &[u8; 32], pk: &[u8]) -> TokenP
     manager.register_token_policy_anchor(PROPERTY_TEST_TOKEN_ID, policy_anchor.0);
     let mut state = create_test_state(seed_bytes, pk);
     let recipient = vec![0xBB; 32];
-    let policy_commit = dsm::core::token::resolve_policy_commit(PROPERTY_TEST_TOKEN_ID);
+    // resolve_policy_commit is strict-fail per Track A; the policy was
+    // registered via `register_token_policy_anchor` above so unwrap is safe.
+    let policy_commit = dsm::core::token::resolve_policy_commit(PROPERTY_TEST_TOKEN_ID)
+        .expect("resolve_policy_commit for registered PROPERTY_TEST_TOKEN_ID");
     let sender_key =
         dsm::core::token::derive_canonical_balance_key(&policy_commit, pk, PROPERTY_TEST_TOKEN_ID);
     let recipient_key = dsm::core::token::derive_canonical_balance_key(
