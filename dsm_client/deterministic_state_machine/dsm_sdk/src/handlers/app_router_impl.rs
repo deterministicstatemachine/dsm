@@ -2562,6 +2562,8 @@ impl AppRouter for AppRouterImpl {
             p if p.starts_with("bitcoin.") => self.handle_bitcoin_query(q).await,
             // Posted-mode DLV discovery (recipient-side, read-only)
             p if p.starts_with("posted_dlv.") => self.handle_posted_dlv_query(q).await,
+            // DeTFi route-commit utilities (compute X, anchor visibility)
+            p if p.starts_with("route.") => self.handle_route_query(q).await,
             _ => {
                 log::warn!("[APP_ROUTER] unknown query path: '{}'", q.path);
                 err(format!("unknown query path: {}", q.path))
@@ -2610,6 +2612,8 @@ impl AppRouter for AppRouterImpl {
             m if m.starts_with("dlv.") => self.handle_dlv_invoke(i).await,
             // Posted-mode DLV (recipient-side sync/mirror)
             m if m.starts_with("posted_dlv.") => self.handle_posted_dlv_invoke(i).await,
+            // DeTFi route-commit anchor publish
+            m if m.starts_with("route.") => self.handle_route_invoke(i).await,
             // DeTFi
             m if m.starts_with("detfi.") => self.handle_detfi_invoke(i).await,
             // BLE
