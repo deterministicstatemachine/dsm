@@ -818,6 +818,74 @@ message DlvOpenV3 {
   bytes reveal_material = 3 [(dsm_max_len)=65535];
 }
 
+// One hop in a `RouteCommitV1`.  Bound at routing time to the vault
+// advertisement digest + state number that was current when the path
+// was selected — recipients re-verify these fields against the live
+// `RoutingVaultAdvertisementV1` at unlock time, rejecting the route if
+// the vault's state has moved on (DeTFi spec §3.3 step 5).
+message RouteCommitHopV1 {
+  bytes  vault_id                  = 1 [(dsm_fixed_len)=32];
+  bytes  token_in                  = 2 [(dsm_max_len)=64];
+  bytes  token_out                 = 3 [(dsm_max_len)=64];
+  bytes  input_amount_u128         = 4 [(dsm_fixed_len)=16];
+  bytes  expected_output_amount_u128 = 5 [(dsm_fixed_len)=16];
+  uint32 fee_bps                   = 6;
+  // BLAKE3("DSM/routing-vault-ad", vault_proto_bytes) at routing time.
+  bytes  advertisement_digest      = 7 [(dsm_fixed_len)=32];
+  uint64 state_number              = 8;
+  bytes  unlock_spec_digest        = 9 [(dsm_fixed_len)=32];
+  bytes  owner_public_key          = 10 [(dsm_max_len)=65535];
+}
+
+// Off-chain routing proof produced by chunk #2's path search and
+// signed by the initiating trader.  The external commitment
+// `X = BLAKE3("DSM/ext\0" || canonical(RouteCommitV1{initiator_signature=[]}))`
+// is the value referenced by every vault on the route — when X is
+// published to storage nodes (see `ExternalCommitmentV1` below), all
+// vaults atomically become unlockable (DeTFi spec §3.2, §5.1).
+message RouteCommitV1 {
+  uint32 version                            = 1;
+  // 32-byte random nonce — replay protection (X re-uses across
+  // identical `(input, output, amount, hops, balances)` would otherwise
+  // collide).  Caller MUST pick a fresh nonce per route.
+  bytes  nonce                              = 2 [(dsm_fixed_len)=32];
+  bytes  input_token                        = 3 [(dsm_max_len)=64];
+  bytes  output_token                       = 4 [(dsm_max_len)=64];
+  bytes  input_amount_u128                  = 5 [(dsm_fixed_len)=16];
+  bytes  expected_final_output_amount_u128  = 6 [(dsm_fixed_len)=16];
+  uint64 total_fee_bps                      = 7;
+  repeated RouteCommitHopV1 hops            = 8;
+  // SPHINCS+ pk of the initiating trader.
+  bytes  initiator_public_key               = 9 [(dsm_max_len)=65535];
+  // SPHINCS+ signature over the canonical RouteCommit bytes with
+  // `initiator_signature` zeroed.  The same canonical-bytes
+  // computation is the input to the BLAKE3-derived external
+  // commitment X — sign-and-commit once.
+  bytes  initiator_signature                = 10 [(dsm_max_len)=65535];
+}
+
+// Storage-node anchor proving an external commitment X has been
+// published.  Each unlock-time verifier fetches this record at key
+// `defi/extcommit/{x_b32}`; existence implies "all vaults bound by X
+// may now unlock" (atomic visibility, DeTFi spec §3.2).
+//
+// The record is INTENTIONALLY minimal — storage nodes are dumb
+// mirrors, the authoritative truth is the RouteCommit bytes the
+// trader hands to each vault owner.  This anchor proves only that the
+// commitment exists; the recipient still recomputes X from the
+// RouteCommit they received and checks the binding.
+message ExternalCommitmentV1 {
+  uint32 version                = 1;
+  // 32-byte X = BLAKE3("DSM/ext\0" || canonical(RouteCommit)).
+  bytes  x                      = 2 [(dsm_fixed_len)=32];
+  // SPHINCS+ pk of the publisher (typically the initiating trader,
+  // matches RouteCommitV1.initiator_public_key).
+  bytes  publisher_public_key   = 3 [(dsm_max_len)=65535];
+  // Optional human-readable hint — purely informational, ignored by
+  // verification.  Useful for tooling / audit trails.
+  string label                  = 4;
+}
+
 // Storage-node-mirrored advertisement for a DeTFi routing vault.
 //
 // Keyed under `defi/vault/{token_a_b32}/{token_b_b32}/{vault_id_b32}` —
