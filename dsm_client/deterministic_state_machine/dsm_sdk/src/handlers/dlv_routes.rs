@@ -345,31 +345,35 @@ impl AppRouterImpl {
     /// vault Invalidated.  Routes on the actor's self-loop with a Credit
     /// delta sourced from the vault's recorded locked_amount/token_id.
     ///
-    /// FIXME(commit-5-followup): no dedicated proto message exists yet for
-    /// DlvInvalidate requests.  Body shape here is `[32-byte vault_id]
-    /// [utf8 reason]`.  A later commit should add a typed
-    /// `DlvInvalidateV1 { vault_id, reason, creator_public_key, signature }`
-    /// proto and update this decoder.
+    /// Decoder accepts the typed `DlvInvalidateV1` proto.  When `creator_public_key`
+    /// is omitted the handler falls back to the on-chain creator pk recorded
+    /// on the vault — preserving the convenience UX while keeping the wire
+    /// format strict.
     async fn dlv_invalidate(&self, i: AppInvoke) -> AppResult {
         let bytes = match unwrap_argpack(&i.args) {
             Ok(b) => b,
             Err(e) => return err(format!("dlv.invalidate: {e}")),
         };
-        if bytes.len() < 32 {
-            return err("dlv.invalidate: body must start with 32-byte vault_id".into());
+        if bytes.is_empty() {
+            return err("dlv.invalidate: empty DlvInvalidateV1 payload".into());
+        }
+        let req = match generated::DlvInvalidateV1::decode(&*bytes) {
+            Ok(r) => r,
+            Err(e) => return err(format!("dlv.invalidate: decode DlvInvalidateV1 failed: {e}")),
+        };
+        if req.vault_id.len() != 32 {
+            return err("dlv.invalidate: vault_id must be 32 bytes".into());
         }
         let mut vault_id = [0u8; 32];
-        vault_id.copy_from_slice(&bytes[..32]);
-        let reason = std::str::from_utf8(&bytes[32..])
-            .map(|s| s.to_string())
-            .unwrap_or_default();
+        vault_id.copy_from_slice(&req.vault_id);
+        let reason = req.reason.clone();
 
         let dlv_manager = self.bitcoin_tap.dlv_manager();
         let vault_lock = match dlv_manager.get_vault(&vault_id).await {
             Ok(v) => v,
             Err(e) => return err(format!("dlv.invalidate: vault not found: {e}")),
         };
-        let (creator_pk, locked_amount, token_id_opt) = {
+        let (creator_pk_on_vault, locked_amount, token_id_opt) = {
             let v = vault_lock.lock().await;
             let (locked, tid): (u64, Option<String>) = match &v.fulfillment_condition {
                 dsm::vault::fulfillment::FulfillmentMechanism::Payment {
@@ -380,6 +384,19 @@ impl AppRouterImpl {
                 _ => (0, None),
             };
             (v.creator_public_key.clone(), locked, tid)
+        };
+        // The wire-supplied creator_public_key MUST match the vault's recorded
+        // creator pk (the strict-fail authority for invalidation).  An empty
+        // wire field is allowed and resolves to the vault's recorded pk.
+        let creator_pk = if req.creator_public_key.is_empty() {
+            creator_pk_on_vault
+        } else if req.creator_public_key.as_slice() == creator_pk_on_vault.as_slice() {
+            req.creator_public_key.clone()
+        } else {
+            return err(
+                "dlv.invalidate: creator_public_key on request does not match vault creator"
+                    .into(),
+            );
         };
 
         let deltas: Vec<dsm::types::device_state::BalanceDelta> = match (
@@ -408,7 +425,7 @@ impl AppRouterImpl {
             vault_id: vault_id.to_vec(),
             reason: reason.clone(),
             creator_public_key: creator_pk.clone(),
-            signature: Vec::new(),
+            signature: req.signature.clone(),
             mode: dsm::types::operations::TransactionMode::Unilateral,
         };
 
@@ -457,22 +474,28 @@ impl AppRouterImpl {
     /// creator.  The rel_key MUST NOT be derived from
     /// `vault.creator_public_key`.
     ///
-    /// FIXME(commit-5-followup): no dedicated proto message exists yet for
-    /// DlvClaim requests.  Body shape here is `[32-byte vault_id]
-    /// [claim_proof bytes]`.  A later commit should add a typed
-    /// `DlvClaimV1 { vault_id, claim_proof, claimant_public_key, signature }`
-    /// proto and update this decoder.
+    /// Decoder accepts the typed `DlvClaimV1` proto.  When `claimant_public_key`
+    /// is omitted on the wire the handler falls back to the local device's
+    /// signing pk — the on-chain claim binding is rooted in the actor
+    /// self-loop regardless of which pk is recorded on the operation.
     async fn dlv_claim(&self, i: AppInvoke) -> AppResult {
         let bytes = match unwrap_argpack(&i.args) {
             Ok(b) => b,
             Err(e) => return err(format!("dlv.claim: {e}")),
         };
-        if bytes.len() < 32 {
-            return err("dlv.claim: body must start with 32-byte vault_id".into());
+        if bytes.is_empty() {
+            return err("dlv.claim: empty DlvClaimV1 payload".into());
+        }
+        let req = match generated::DlvClaimV1::decode(&*bytes) {
+            Ok(r) => r,
+            Err(e) => return err(format!("dlv.claim: decode DlvClaimV1 failed: {e}")),
+        };
+        if req.vault_id.len() != 32 {
+            return err("dlv.claim: vault_id must be 32 bytes".into());
         }
         let mut vault_id = [0u8; 32];
-        vault_id.copy_from_slice(&bytes[..32]);
-        let claim_proof = bytes[32..].to_vec();
+        vault_id.copy_from_slice(&req.vault_id);
+        let claim_proof = req.claim_proof.clone();
 
         let dlv_manager = self.bitcoin_tap.dlv_manager();
         let (locked_amount, token_id_opt, intended_recipient) =
@@ -521,13 +544,18 @@ impl AppRouterImpl {
             _ => Vec::new(),
         };
 
-        let claimant_pk = crate::sdk::signing_authority::current_public_key()
-            .unwrap_or_default();
+        // Wire-supplied claimant pk takes precedence; fall back to the
+        // local device's signing pk if the field is omitted.
+        let claimant_pk = if req.claimant_public_key.is_empty() {
+            crate::sdk::signing_authority::current_public_key().unwrap_or_default()
+        } else {
+            req.claimant_public_key.clone()
+        };
         let op = dsm::types::operations::Operation::DlvClaim {
             vault_id: vault_id.to_vec(),
             claim_proof: claim_proof.clone(),
             claimant_public_key: claimant_pk,
-            signature: Vec::new(),
+            signature: req.signature.clone(),
             mode: dsm::types::operations::TransactionMode::Unilateral,
         };
 

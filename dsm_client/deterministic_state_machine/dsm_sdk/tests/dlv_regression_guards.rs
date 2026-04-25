@@ -246,6 +246,51 @@ fn posted_dlv_digest_uses_stable_domain_tag() {
     );
 }
 
+/// Track A invariant — `dlv.invalidate` and `dlv.claim` MUST decode their
+/// requests via the typed `DlvInvalidateV1` / `DlvClaimV1` protos, not via
+/// the historical inline `[32-byte vault_id][rest]` body shape.  A
+/// regression that re-introduced the inline format would silently accept
+/// undersized payloads with no schema enforcement.
+#[test]
+fn dlv_invalidate_and_claim_decode_typed_protos() {
+    let src = read(sdk_path("src/handlers/dlv_routes.rs"));
+    assert!(
+        src.contains("generated::DlvInvalidateV1::decode"),
+        "regression: dlv.invalidate decoder no longer reads DlvInvalidateV1 proto"
+    );
+    assert!(
+        src.contains("generated::DlvClaimV1::decode"),
+        "regression: dlv.claim decoder no longer reads DlvClaimV1 proto"
+    );
+    assert!(
+        !src.contains("body must start with 32-byte vault_id"),
+        "regression: dlv handlers reverted to the inline [vault_id][rest] format"
+    );
+}
+
+/// Track A invariant — the proto schema MUST keep `DlvInvalidateV1` and
+/// `DlvClaimV1` as the canonical request shapes.  Removing them would
+/// break the dlv_routes decoders without warning.
+#[test]
+fn proto_schema_carries_typed_dlv_request_messages() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let repo_root = Path::new(manifest_dir)
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .expect("resolve repo root");
+    let proto = repo_root.join("proto").join("dsm_app.proto");
+    let proto_src = read(proto);
+    assert!(
+        proto_src.contains("message DlvInvalidateV1 {"),
+        "regression: proto/dsm_app.proto is missing DlvInvalidateV1"
+    );
+    assert!(
+        proto_src.contains("message DlvClaimV1 {"),
+        "regression: proto/dsm_app.proto is missing DlvClaimV1"
+    );
+}
+
 /// Commit 3 invariant — the strict resolver lives at the TokenSDK
 /// layer.  Code that derives `policy_commit` from `TokenMetadata`
 /// directly bypasses policy registration and must not come back.

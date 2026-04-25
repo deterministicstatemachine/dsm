@@ -818,6 +818,26 @@ message DlvOpenV3 {
   bytes reveal_material = 3 [(dsm_max_len)=65535];
 }
 
+// Typed request for `dlv.invalidate`.  Replaces the inline
+// `[32-byte vault_id][utf8 reason]` body shape used pre-Track-A; the
+// canonical Operation::DlvInvalidate carries the same fields.
+message DlvInvalidateV1 {
+  bytes  vault_id              = 1 [(dsm_fixed_len)=32];
+  string reason                = 2 [(dsm_max_len)=512];   // optional human-readable reason
+  bytes  creator_public_key    = 3 [(dsm_max_len)=65535]; // SPHINCS+ pk of vault creator
+  bytes  signature             = 4 [(dsm_max_len)=65535]; // SPHINCS+ over canonical Operation::DlvInvalidate
+}
+
+// Typed request for `dlv.claim`.  Replaces the inline
+// `[32-byte vault_id][claim_proof bytes]` body shape used pre-Track-A;
+// the canonical Operation::DlvClaim carries the same fields.
+message DlvClaimV1 {
+  bytes vault_id              = 1 [(dsm_fixed_len)=32];
+  bytes claim_proof           = 2 [(dsm_max_len)=65535];
+  bytes claimant_public_key   = 3 [(dsm_max_len)=65535]; // SPHINCS+ pk of claimant
+  bytes signature             = 4 [(dsm_max_len)=65535]; // SPHINCS+ over canonical Operation::DlvClaim
+}
+
 // Storage-node-mirrored advertisement for a posted-mode DLV.
 //
 // Keyed under `dlv/posted/{recipient_kyber_pk_b32}/{dlv_id_b32}`; the full
