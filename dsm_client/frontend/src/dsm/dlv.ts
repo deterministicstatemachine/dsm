@@ -9,26 +9,30 @@ import * as pb from '../proto/dsm_app_pb';
 import { routerInvokeBin } from './WebViewBridge';
 import { decodeBase32Crockford, encodeBase32Crockford } from '../utils/textId';
 import { decodeFramedEnvelopeV3 } from './decoding';
+import { dlvContentDigest, dlvFulfillmentDigest } from '../utils/blake3';
 
 /**
  * Typed input for constructing a `DlvInstantiateV1` proto payload
  * without hand-packing the v2 TLV.
  *
- * BLAKE3 is not yet in the frontend bundle so the caller is expected
- * to supply `contentDigest` and `fulfillmentDigest` pre-computed (via
- * Rust over the bridge, or via an ambient hashing helper wired in a
- * later commit).  The Rust `dlv.create` handler strict-verifies that
- * each digest matches its bytes; a mismatched pair will be rejected
- * at the core boundary before any state transition runs.
+ * `contentDigest` and `fulfillmentDigest` are now optional: when
+ * omitted, `buildDlvInstantiateBytes` computes them locally via
+ * `BLAKE3("DSM/dlv-content\0" || content)` and
+ * `BLAKE3("DSM/dlv-fulfillment\0" || fulfillmentBytes)` so callers
+ * don't need to pre-hash.  Pre-computed digests are still accepted
+ * (e.g. for vaults whose plaintext is held off-device); when supplied
+ * they are checked against the locally re-computed digest and the call
+ * fails closed on any mismatch — matching the Rust handler's
+ * strict-verify semantics, except eagerly at build time.
  */
 export interface BuildDlvInstantiateInput {
   /** 32-byte CPTA anchor bound to the token's policy.  Typically the
    *  Base32-Crockford-decoded response from `tokens.publishPolicy`. */
   policyDigest: Uint8Array;
-  /** `blake3("DSM/dlv-content\0" || content)` — 32 bytes. */
-  contentDigest: Uint8Array;
-  /** `blake3("DSM/dlv-fulfillment\0" || fulfillmentBytes)` — 32 bytes. */
-  fulfillmentDigest: Uint8Array;
+  /** Optional pre-computed `blake3("DSM/dlv-content\0" || content)`. */
+  contentDigest?: Uint8Array;
+  /** Optional pre-computed `blake3("DSM/dlv-fulfillment\0" || fulfillmentBytes)`. */
+  fulfillmentDigest?: Uint8Array;
   /** Plaintext bytes the vault will hold (local mode) or the
    *  sender-encrypted ciphertext (posted mode). */
   content: Uint8Array;
@@ -46,6 +50,14 @@ export interface BuildDlvInstantiateInput {
   signature: Uint8Array;
 }
 
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
 function lockedAmountU128BigEndian(n: bigint): Uint8Array {
   if (n < 0n) throw new Error('lockedAmount must be non-negative');
   const out = new Uint8Array(16);
@@ -61,21 +73,17 @@ function lockedAmountU128BigEndian(n: bigint): Uint8Array {
 /**
  * Build the canonical `DlvInstantiateV1` proto bytes from typed inputs.
  *
- * Digests are not computed here — the caller supplies
- * `contentDigest = H("DSM/dlv-content", content)` and
- * `fulfillmentDigest = H("DSM/dlv-fulfillment", fulfillmentBytes)`
- * matching the Rust handler's strict-verify pair.  A mismatch fails
- * closed at the core boundary before any state advance.
+ * If `contentDigest` / `fulfillmentDigest` are omitted, both are
+ * computed locally via the BLAKE3 helpers in `utils/blake3` so the
+ * caller doesn't need to pre-hash.  When pre-computed digests ARE
+ * supplied, they are checked against the local computation and the
+ * call throws on any mismatch — same strict-verify the Rust handler
+ * runs, executed eagerly at build time so misuse surfaces as a
+ * frontend error rather than as a cryptic state-machine reject.
  */
 export function buildDlvInstantiateBytes(input: BuildDlvInstantiateInput): Uint8Array {
   if (input.policyDigest.length !== 32) {
     throw new Error('policyDigest must be 32 bytes');
-  }
-  if (input.contentDigest.length !== 32) {
-    throw new Error('contentDigest must be 32 bytes');
-  }
-  if (input.fulfillmentDigest.length !== 32) {
-    throw new Error('fulfillmentDigest must be 32 bytes');
   }
   if (input.creatorPublicKey.length === 0) {
     throw new Error('creatorPublicKey is required');
@@ -84,10 +92,37 @@ export function buildDlvInstantiateBytes(input: BuildDlvInstantiateInput): Uint8
     throw new Error('signature is required');
   }
 
+  // Compute the digests the Rust handler will strict-verify.  Caller-
+  // supplied digests are honoured but cross-checked against the local
+  // computation to catch hash drift early.
+  const computedContentDigest = dlvContentDigest(input.content);
+  const computedFulfillmentDigest = dlvFulfillmentDigest(input.fulfillmentBytes);
+
+  if (input.contentDigest !== undefined) {
+    if (input.contentDigest.length !== 32) {
+      throw new Error('contentDigest must be 32 bytes');
+    }
+    if (!bytesEqual(input.contentDigest, computedContentDigest)) {
+      throw new Error(
+        'contentDigest does not match BLAKE3("DSM/dlv-content", content)',
+      );
+    }
+  }
+  if (input.fulfillmentDigest !== undefined) {
+    if (input.fulfillmentDigest.length !== 32) {
+      throw new Error('fulfillmentDigest must be 32 bytes');
+    }
+    if (!bytesEqual(input.fulfillmentDigest, computedFulfillmentDigest)) {
+      throw new Error(
+        'fulfillmentDigest does not match BLAKE3("DSM/dlv-fulfillment", fulfillmentBytes)',
+      );
+    }
+  }
+
   const spec = new pb.DlvSpecV1({
     policyDigest: input.policyDigest as any,
-    contentDigest: input.contentDigest as any,
-    fulfillmentDigest: input.fulfillmentDigest as any,
+    contentDigest: computedContentDigest as any,
+    fulfillmentDigest: computedFulfillmentDigest as any,
     intendedRecipient: (input.intendedRecipient ?? new Uint8Array()) as any,
     fulfillmentBytes: input.fulfillmentBytes as any,
     content: input.content as any,
