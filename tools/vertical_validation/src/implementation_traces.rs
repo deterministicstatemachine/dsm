@@ -1201,6 +1201,41 @@ fn trace_receipt_verifier_tripwire(
         Err(e) => failures.push(format!("receipt verifier errored on fork attempt: {e}")),
     }
 
+    let mut malformed_replace = receipt_a.clone();
+    malformed_replace.set_rel_replace_witness(Vec::new());
+    malformed_replace.sig_a.clear();
+    let malformed_commitment = match malformed_replace.compute_commitment() {
+        Ok(commitment) => commitment,
+        Err(e) => {
+            failures.push(format!("failed to recompute malformed receipt commitment: {e}"));
+            [0u8; 32]
+        }
+    };
+    if malformed_commitment != [0u8; 32] {
+        match keypair_a.sign(&malformed_commitment) {
+            Ok(sig) => malformed_replace.add_sig_a(sig),
+            Err(e) => failures.push(format!("failed to resign malformed receipt: {e}")),
+        }
+
+        match verify_stitched_receipt(&malformed_replace, &ctx, &mut tracker) {
+            Ok(result) => {
+                if result.valid {
+                    failures.push("receipt with malformed SMT replace witness was accepted".into());
+                } else {
+                    let reason = result.reason.unwrap_or_default();
+                    if !reason.contains("SMT replace recomputation failed") {
+                        failures.push(format!(
+                            "malformed SMT replace rejection reason was unexpected: {reason}"
+                        ));
+                    }
+                }
+            }
+            Err(e) => failures.push(format!(
+                "receipt verifier errored on malformed SMT replace witness: {e}"
+            )),
+        }
+    }
+
     if tracker.get_child(&parent_tip) != Some(&child_tip_a) {
         failures.push("receipt verifier tracker overwrote canonical child after fork".into());
     }
@@ -1211,7 +1246,7 @@ fn trace_receipt_verifier_tripwire(
 
     ImplementationTraceResult {
         trace_name: "receipt_verifier_tripwire".into(),
-        steps: 3,
+        steps: 4,
         passed: failures.is_empty(),
         failures,
         duration_ms: start.elapsed().as_secs_f64() * 1000.0,
@@ -2179,6 +2214,12 @@ mod tests {
     #[test]
     fn repeated_djte_emission_alignment_trace_passes() {
         let result = trace_djte_repeated_emission_alignment(&[0u8; 32], &[], &[]);
+        assert!(result.passed, "{}", result.failures.join("; "));
+    }
+
+    #[test]
+    fn receipt_verifier_tripwire_trace_passes() {
+        let result = trace_receipt_verifier_tripwire(&[0u8; 32], &[], &[]);
         assert!(result.passed, "{}", result.failures.join("; "));
     }
 }
