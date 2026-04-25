@@ -226,6 +226,62 @@ pub(crate) fn find_hop<'a>(
         .find(|h| h.vault_id.as_slice() == vault_id.as_slice())
 }
 
+/// Typed failure of the routed-unlock eligibility check.  Each
+/// variant maps to a distinct rejection reason so the handler can
+/// surface a precise error to the caller (and the regression guards
+/// can prove no panic path exists).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RouteCommitVerifyError {
+    /// `route_commit_bytes` failed prost decode.
+    InvalidRouteCommitEncoding,
+    /// `vault_id` is not in any hop of the RouteCommit.  Either the
+    /// trader handed this RouteCommit to the wrong vault owner or the
+    /// route was constructed without this vault.
+    VaultNotInRoute,
+    /// `is_external_commitment_visible(X)` returned `Ok(false)`.  The
+    /// trader has not (yet) published the anchor — vault owner
+    /// rejects the unlock and waits.
+    ExternalCommitmentNotVisible,
+    /// Storage-side error fetching the anchor.  The vault owner
+    /// cannot conclude either way, so MUST reject the unlock — better
+    /// to fail closed than risk unlocking against a forged
+    /// "visible" claim.
+    AnchorFetchFailed(String),
+}
+
+/// Routed-unlock eligibility check.  Vault-owner devices run this
+/// before honouring any `dlv.unlockRouted` request.  The four-step
+/// gate:
+///   1. Decode RouteCommitV1 from the bytes the trader supplied.
+///   2. Locate the hop matching this vault — must exist (else the
+///      RouteCommit was meant for a different vault).
+///   3. Compute X from the canonical (signature-zeroed) RouteCommit
+///      bytes.
+///   4. Confirm the `ExternalCommitmentV1` anchor for X is visible at
+///      `defi/extcommit/{X_b32}` on storage nodes — else the trader
+///      has not yet published the atomic-visibility trigger.
+///
+/// On success, returns the bound hop so the handler has the
+/// expected_input / expected_output / fee_bps the trader committed
+/// to — useful for amount checks the handler may want to enforce.
+pub(crate) async fn verify_route_commit_unlock_eligibility(
+    route_commit_bytes: &[u8],
+    vault_id: &[u8; 32],
+) -> Result<generated::RouteCommitHopV1, RouteCommitVerifyError> {
+    let rc = generated::RouteCommitV1::decode(route_commit_bytes)
+        .map_err(|_| RouteCommitVerifyError::InvalidRouteCommitEncoding)?;
+    let hop = match find_hop(&rc, vault_id) {
+        Some(h) => h.clone(),
+        None => return Err(RouteCommitVerifyError::VaultNotInRoute),
+    };
+    let x = compute_external_commitment(&rc);
+    match is_external_commitment_visible(&x).await {
+        Ok(true) => Ok(hop),
+        Ok(false) => Err(RouteCommitVerifyError::ExternalCommitmentNotVisible),
+        Err(e) => Err(RouteCommitVerifyError::AnchorFetchFailed(format!("{e}"))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Chunk #3 tests.
@@ -554,5 +610,129 @@ mod tests {
         let hop2 = find_hop(&rc, &vid(2)).expect("hop 2 present");
         assert_eq!(hop2.vault_id, vid(2).to_vec());
         assert!(find_hop(&rc, &vid(99)).is_none(), "absent vault must be None");
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Routed-unlock eligibility (chunk #4)
+    // ─────────────────────────────────────────────────────────────────
+
+    /// Build + sign + publish a RouteCommit; return its bytes + X.
+    /// Helper for the eligibility tests below.
+    async fn signed_and_published_route_commit(
+        path: &Path,
+        nonce_tag: u8,
+    ) -> (Vec<u8>, [u8; 32]) {
+        let mut rc = bind_path_to_route_commit(BindRouteCommitInput {
+            path,
+            nonce: nonce(nonce_tag),
+            initiator_public_key: &[0x11u8; 64],
+            initiator_signature: vec![],
+        })
+        .unwrap();
+        let x = compute_external_commitment(&rc);
+        // Pretend the trader has now signed.  Signature is excluded
+        // from X (verified by `x_excludes_initiator_signature`); the
+        // post-sign bytes must still verify against the same X.
+        rc.initiator_signature = vec![0xDD; 64];
+        publish_external_commitment(&x, &[0x11u8; 64], "test-route")
+            .await
+            .expect("publish");
+        (rc.encode_to_vec(), x)
+    }
+
+    #[tokio::test]
+    async fn eligibility_passes_when_x_visible_and_vault_in_route() {
+        let path = sample_path();
+        let (rc_bytes, _x) = signed_and_published_route_commit(&path, 0x40).await;
+
+        // Vault 1 (first hop) — must pass.
+        let hop = verify_route_commit_unlock_eligibility(&rc_bytes, &vid(1))
+            .await
+            .expect("eligible");
+        assert_eq!(hop.vault_id, vid(1).to_vec());
+
+        // Vault 2 (second hop) — must also pass; routed unlocks are
+        // independent on each vault's own chain.
+        let hop2 = verify_route_commit_unlock_eligibility(&rc_bytes, &vid(2))
+            .await
+            .expect("eligible");
+        assert_eq!(hop2.vault_id, vid(2).to_vec());
+    }
+
+    #[tokio::test]
+    async fn eligibility_rejects_vault_not_in_route() {
+        let path = sample_path();
+        let (rc_bytes, _x) = signed_and_published_route_commit(&path, 0x41).await;
+
+        match verify_route_commit_unlock_eligibility(&rc_bytes, &vid(99)).await {
+            Err(RouteCommitVerifyError::VaultNotInRoute) => {}
+            other => panic!("expected VaultNotInRoute, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn eligibility_rejects_when_x_not_visible() {
+        // Build + sign WITHOUT publishing the anchor.
+        let path = sample_path();
+        let mut rc = bind_path_to_route_commit(BindRouteCommitInput {
+            path: &path,
+            nonce: nonce(0x42),
+            initiator_public_key: &[0x11u8; 64],
+            initiator_signature: vec![],
+        })
+        .unwrap();
+        rc.initiator_signature = vec![0xDD; 64];
+        let rc_bytes = rc.encode_to_vec();
+
+        match verify_route_commit_unlock_eligibility(&rc_bytes, &vid(1)).await {
+            Err(RouteCommitVerifyError::ExternalCommitmentNotVisible) => {}
+            other => {
+                panic!("expected ExternalCommitmentNotVisible, got {other:?}")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn eligibility_rejects_garbage_route_commit_bytes() {
+        match verify_route_commit_unlock_eligibility(b"not-a-proto", &vid(1)).await {
+            Err(RouteCommitVerifyError::InvalidRouteCommitEncoding) => {}
+            other => {
+                panic!("expected InvalidRouteCommitEncoding, got {other:?}")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn eligibility_rejects_when_anchor_x_does_not_match_key() {
+        // Anchor exists at the right key but its `x` field disagrees —
+        // a forged/swapped record.  Eligibility MUST reject.
+        let path = sample_path();
+        let mut rc = bind_path_to_route_commit(BindRouteCommitInput {
+            path: &path,
+            nonce: nonce(0x43),
+            initiator_public_key: &[0x11u8; 64],
+            initiator_signature: vec![],
+        })
+        .unwrap();
+        let x = compute_external_commitment(&rc);
+        rc.initiator_signature = vec![0xDD; 64];
+
+        // Plant a tampered anchor at the right key but with wrong x.
+        let key = external_commitment_key(&x);
+        let bogus = generated::ExternalCommitmentV1 {
+            version: 1,
+            x: vec![0xFF; 32],
+            publisher_public_key: vec![0x11; 64],
+            label: "tampered".into(),
+        };
+        BitcoinTapSdk::storage_put_bytes(&key, &bogus.encode_to_vec())
+            .await
+            .expect("plant bogus");
+
+        let rc_bytes = rc.encode_to_vec();
+        match verify_route_commit_unlock_eligibility(&rc_bytes, &vid(1)).await {
+            Err(RouteCommitVerifyError::AnchorFetchFailed(_)) => {}
+            other => panic!("expected AnchorFetchFailed, got {other:?}"),
+        }
     }
 }
