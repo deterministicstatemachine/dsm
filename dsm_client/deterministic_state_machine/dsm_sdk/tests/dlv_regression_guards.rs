@@ -591,6 +591,47 @@ fn route_commit_signature_uses_same_canonical_form_as_x() {
     );
 }
 
+/// Track C.2 invariant — `route.*` query/invoke routes MUST be wired
+/// into the dispatcher.  Without these, the TS bindings in
+/// `frontend/src/dsm/route_commit.ts` would round-trip to
+/// `unknown route query path` despite the handler being implemented.
+#[test]
+fn route_query_and_invoke_are_dispatched() {
+    let src = read(sdk_path("src/handlers/app_router_impl.rs"));
+    assert!(
+        src.contains("p if p.starts_with(\"route.\") => self.handle_route_query(q).await,"),
+        "regression: route.* query dispatch edge missing from app_router_impl"
+    );
+    assert!(
+        src.contains("m if m.starts_with(\"route.\") => self.handle_route_invoke(i).await,"),
+        "regression: route.* invoke dispatch edge missing from app_router_impl"
+    );
+}
+
+/// Track C.2 invariant — `route_routes` MUST delegate the
+/// X-compute / publish / visibility paths to the audited
+/// `route_commit_sdk` helpers.  A future edit that re-implemented
+/// the BLAKE3 derivation inline (or skipped the SDK's
+/// canonicalise→verify pipeline) would silently bypass the chunk #5
+/// signature gate.  The guard fails if any of the three
+/// route handlers stop calling its corresponding SDK function.
+#[test]
+fn route_routes_delegate_to_route_commit_sdk() {
+    let src = read(sdk_path("src/handlers/route_routes.rs"));
+    assert!(
+        src.contains("crate::sdk::route_commit_sdk::compute_external_commitment"),
+        "regression: route.computeExternalCommitment no longer calls the SDK"
+    );
+    assert!(
+        src.contains("crate::sdk::route_commit_sdk::is_external_commitment_visible"),
+        "regression: route.isExternalCommitmentVisible no longer calls the SDK"
+    );
+    assert!(
+        src.contains("crate::sdk::route_commit_sdk::publish_external_commitment"),
+        "regression: route.publishExternalCommitment no longer calls the SDK"
+    );
+}
+
 /// Commit 3 invariant — the strict resolver lives at the TokenSDK
 /// layer.  Code that derives `policy_commit` from `TokenMetadata`
 /// directly bypasses policy registration and must not come back.
