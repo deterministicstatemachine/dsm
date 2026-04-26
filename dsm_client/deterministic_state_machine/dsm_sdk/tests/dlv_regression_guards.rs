@@ -832,6 +832,49 @@ fn amm_reserve_update_uses_full_input_amount() {
     );
 }
 
+/// Track C.4 invariant — `dlv.create` MUST stamp the wallet's
+/// SPHINCS+ pk on `creator_public_key` when the field rides empty
+/// over the wire AND sign Rust-side when `signature` rides empty.
+/// This is the same accept-or-stamp pattern chunk #6 used for
+/// `route.signRouteCommit`; without it the AMM owner UI couldn't
+/// create vaults without exposing wallet keys to TS.
+///
+/// Two regressions this guard catches:
+///   * Empty-pk handling removed → frontend gets a hard error
+///     "creator_public_key is required" and the UI breaks.
+///   * Empty-sig handling removed → same.
+///   * Self-sign domain tag changed → all previously self-signed
+///     vaults fail re-verification.
+#[test]
+fn dlv_create_stamps_wallet_pk_and_signs_on_empty_fields() {
+    let src = read(sdk_path("src/handlers/dlv_routes.rs"));
+    assert!(
+        src.contains("if req.creator_public_key.is_empty() {"),
+        "regression: dlv.create no longer checks for empty creator_public_key \
+         (Track C.4 accept-or-stamp surface broken)"
+    );
+    assert!(
+        src.contains("crate::sdk::signing_authority::current_public_key()"),
+        "regression: dlv.create accept-or-stamp no longer reaches into \
+         signing_authority for the wallet pk"
+    );
+    assert!(
+        src.contains("if req.signature.is_empty() {"),
+        "regression: dlv.create no longer checks for empty signature \
+         (Track C.4 accept-or-sign surface broken)"
+    );
+    assert!(
+        src.contains("crate::sdk::signing_authority::current_secret_key()"),
+        "regression: dlv.create accept-or-sign no longer reaches into \
+         signing_authority for the wallet sk"
+    );
+    assert!(
+        src.contains("\"DSM/dlv-create-self-sign\""),
+        "regression: dlv.create self-sign domain tag changed — \
+         previously-self-signed vaults will fail re-verification"
+    );
+}
+
 /// Chunk #6 invariant — `route.signRouteCommit` MUST canonicalise
 /// via the SAME helper that the X-derivation and the eligibility
 /// verifier use.  Any divergence in canonicalisation between

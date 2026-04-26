@@ -17,6 +17,8 @@ export type ScreenType =
   | 'dev_cdbrw'
   | 'dev_policy'
   | 'dev_detfi_launch'
+  | 'dev_amm_vault'
+  | 'dev_amm_trade'
   | 'bluetooth'
   | 'vault'
   | 'lock_setup'
