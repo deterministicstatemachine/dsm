@@ -2376,6 +2376,12 @@ export class FulfillmentMechanism extends Message<FulfillmentMechanism> {
      */
     value: BitcoinHTLC;
     case: "bitcoinHtlc";
+  } | {
+    /**
+     * @generated from field: dsm.AmmConstantProduct amm_constant_product = 10;
+     */
+    value: AmmConstantProduct;
+    case: "ammConstantProduct";
   } | { case: undefined; value?: undefined } = { case: undefined };
 
   constructor(data?: PartialMessage<FulfillmentMechanism>) {
@@ -2394,6 +2400,7 @@ export class FulfillmentMechanism extends Message<FulfillmentMechanism> {
     { no: 7, name: "and", kind: "message", T: And, oneof: "kind" },
     { no: 8, name: "or", kind: "message", T: Or, oneof: "kind" },
     { no: 9, name: "bitcoin_htlc", kind: "message", T: BitcoinHTLC, oneof: "kind" },
+    { no: 10, name: "amm_constant_product", kind: "message", T: AmmConstantProduct, oneof: "kind" },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): FulfillmentMechanism {
@@ -2410,6 +2417,96 @@ export class FulfillmentMechanism extends Message<FulfillmentMechanism> {
 
   static equals(a: FulfillmentMechanism | PlainMessage<FulfillmentMechanism> | undefined, b: FulfillmentMechanism | PlainMessage<FulfillmentMechanism> | undefined): boolean {
     return proto3.util.equals(FulfillmentMechanism, a, b);
+  }
+}
+
+/**
+ * AMM (constant-product) liquidity vault.  The vault holds two token
+ * reserves and unlocks via a routed swap: a trader puts `input_amount`
+ * of `token_in` in, the vault releases `expected_output_amount` of
+ * `token_out` per the constant-product invariant
+ *   k = reserve_in * reserve_out   (post-fee adjusted at swap time)
+ *
+ * Reserves are vault-state, not advertisement state.  When a routed
+ * unlock is accepted, both reserves advance atomically:
+ *   reserve_in  += input_after_fee
+ *   reserve_out -= output
+ * and the vault republishes its `RoutingVaultAdvertisementV1` with
+ * `updated_state_number++`.  A stale advertisement causes a mis-quoted
+ * route, which the chunk-7 re-simulation gate catches at unlock time
+ * (DeTFi spec §3, §8).
+ *
+ * `token_a` / `token_b` are stored in canonical lex-sorted order so
+ * the vault has a single canonical pair identity regardless of trade
+ * direction; `reserve_a` / `reserve_b` follow the same ordering.
+ *
+ * @generated from message dsm.AmmConstantProduct
+ */
+export class AmmConstantProduct extends Message<AmmConstantProduct> {
+  /**
+   * lex-lower token id
+   *
+   * @generated from field: bytes token_a = 1;
+   */
+  tokenA = new Uint8Array(0);
+
+  /**
+   * lex-higher token id
+   *
+   * @generated from field: bytes token_b = 2;
+   */
+  tokenB = new Uint8Array(0);
+
+  /**
+   * big-endian u128
+   *
+   * @generated from field: bytes reserve_a_u128 = 3;
+   */
+  reserveAU128 = new Uint8Array(0);
+
+  /**
+   * big-endian u128
+   *
+   * @generated from field: bytes reserve_b_u128 = 4;
+   */
+  reserveBU128 = new Uint8Array(0);
+
+  /**
+   * basis points (e.g. 30 = 0.30 %)
+   *
+   * @generated from field: uint32 fee_bps = 5;
+   */
+  feeBps = 0;
+
+  constructor(data?: PartialMessage<AmmConstantProduct>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AmmConstantProduct";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "token_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "token_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "reserve_a_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "reserve_b_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "fee_bps", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AmmConstantProduct {
+    return new AmmConstantProduct().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AmmConstantProduct {
+    return new AmmConstantProduct().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AmmConstantProduct {
+    return new AmmConstantProduct().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AmmConstantProduct | PlainMessage<AmmConstantProduct> | undefined, b: AmmConstantProduct | PlainMessage<AmmConstantProduct> | undefined): boolean {
+    return proto3.util.equals(AmmConstantProduct, a, b);
   }
 }
 
@@ -7303,6 +7400,219 @@ export class DlvOpenV3 extends Message<DlvOpenV3> {
 
   static equals(a: DlvOpenV3 | PlainMessage<DlvOpenV3> | undefined, b: DlvOpenV3 | PlainMessage<DlvOpenV3> | undefined): boolean {
     return proto3.util.equals(DlvOpenV3, a, b);
+  }
+}
+
+/**
+ * ===================== ROUTE TRADE-FLOW REQUESTS (Track C.3) =====================
+ * Frontend-facing wrappers for the AMM trade pipeline.  Each request
+ * is consumed by a handler in `dsm_sdk/src/handlers/route_routes.rs`
+ * that delegates to the audited `routing_sdk` / `routing_path_sdk` /
+ * `route_commit_sdk` helpers.  Per the "all business logic stays in
+ * Rust" rule, frontend never builds digests, signs, or runs path
+ * search — it only frames typed inputs.
+ *
+ * @generated from message dsm.PublishRoutingAdvertisementRequest
+ */
+export class PublishRoutingAdvertisementRequest extends Message<PublishRoutingAdvertisementRequest> {
+  /**
+   * @generated from field: bytes vault_id = 1;
+   */
+  vaultId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes token_a = 2;
+   */
+  tokenA = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes token_b = 3;
+   */
+  tokenB = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes reserve_a_u128 = 4;
+   */
+  reserveAU128 = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes reserve_b_u128 = 5;
+   */
+  reserveBU128 = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint32 fee_bps = 6;
+   */
+  feeBps = 0;
+
+  /**
+   * @generated from field: bytes unlock_spec_digest = 7;
+   */
+  unlockSpecDigest = new Uint8Array(0);
+
+  /**
+   * @generated from field: string unlock_spec_key = 8;
+   */
+  unlockSpecKey = "";
+
+  /**
+   * @generated from field: bytes owner_public_key = 9;
+   */
+  ownerPublicKey = new Uint8Array(0);
+
+  /**
+   * Full encoded `VaultPostProto` — the handler computes the
+   * BLAKE3 digest and binds it into the advertisement.  Frontend
+   * does not derive crypto.
+   *
+   * @generated from field: bytes vault_proto_bytes = 10;
+   */
+  vaultProtoBytes = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<PublishRoutingAdvertisementRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.PublishRoutingAdvertisementRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "token_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "token_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "reserve_a_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "reserve_b_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "fee_bps", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 7, name: "unlock_spec_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 8, name: "unlock_spec_key", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 9, name: "owner_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 10, name: "vault_proto_bytes", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): PublishRoutingAdvertisementRequest {
+    return new PublishRoutingAdvertisementRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): PublishRoutingAdvertisementRequest {
+    return new PublishRoutingAdvertisementRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): PublishRoutingAdvertisementRequest {
+    return new PublishRoutingAdvertisementRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: PublishRoutingAdvertisementRequest | PlainMessage<PublishRoutingAdvertisementRequest> | undefined, b: PublishRoutingAdvertisementRequest | PlainMessage<PublishRoutingAdvertisementRequest> | undefined): boolean {
+    return proto3.util.equals(PublishRoutingAdvertisementRequest, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.RoutingPairRequest
+ */
+export class RoutingPairRequest extends Message<RoutingPairRequest> {
+  /**
+   * @generated from field: bytes token_a = 1;
+   */
+  tokenA = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes token_b = 2;
+   */
+  tokenB = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<RoutingPairRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.RoutingPairRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "token_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "token_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RoutingPairRequest {
+    return new RoutingPairRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): RoutingPairRequest {
+    return new RoutingPairRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): RoutingPairRequest {
+    return new RoutingPairRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: RoutingPairRequest | PlainMessage<RoutingPairRequest> | undefined, b: RoutingPairRequest | PlainMessage<RoutingPairRequest> | undefined): boolean {
+    return proto3.util.equals(RoutingPairRequest, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.FindAndBindRouteRequest
+ */
+export class FindAndBindRouteRequest extends Message<FindAndBindRouteRequest> {
+  /**
+   * @generated from field: bytes input_token = 1;
+   */
+  inputToken = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes output_token = 2;
+   */
+  outputToken = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes input_amount_u128 = 3;
+   */
+  inputAmountU128 = new Uint8Array(0);
+
+  /**
+   * 0 → server default (4)
+   *
+   * @generated from field: uint32 max_hops = 4;
+   */
+  maxHops = 0;
+
+  /**
+   * initiator_public_key is left empty here on purpose — the
+   * subsequent `route.signRouteCommit` invoke stamps the wallet's
+   * pk and overwrites whatever the bind step put there.
+   *
+   * @generated from field: bytes nonce = 5;
+   */
+  nonce = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<FindAndBindRouteRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.FindAndBindRouteRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "input_token", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "output_token", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "input_amount_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "max_hops", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 5, name: "nonce", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): FindAndBindRouteRequest {
+    return new FindAndBindRouteRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): FindAndBindRouteRequest {
+    return new FindAndBindRouteRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): FindAndBindRouteRequest {
+    return new FindAndBindRouteRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: FindAndBindRouteRequest | PlainMessage<FindAndBindRouteRequest> | undefined, b: FindAndBindRouteRequest | PlainMessage<FindAndBindRouteRequest> | undefined): boolean {
+    return proto3.util.equals(FindAndBindRouteRequest, a, b);
   }
 }
 

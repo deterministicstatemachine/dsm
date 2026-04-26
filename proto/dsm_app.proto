@@ -845,6 +845,45 @@ message DlvOpenV3 {
   bytes reveal_material = 3 [(dsm_max_len)=65535];
 }
 
+// ===================== ROUTE TRADE-FLOW REQUESTS (Track C.3) =====================
+// Frontend-facing wrappers for the AMM trade pipeline.  Each request
+// is consumed by a handler in `dsm_sdk/src/handlers/route_routes.rs`
+// that delegates to the audited `routing_sdk` / `routing_path_sdk` /
+// `route_commit_sdk` helpers.  Per the "all business logic stays in
+// Rust" rule, frontend never builds digests, signs, or runs path
+// search — it only frames typed inputs.
+message PublishRoutingAdvertisementRequest {
+  bytes  vault_id              = 1 [(dsm_fixed_len)=32];
+  bytes  token_a               = 2 [(dsm_max_len)=64];
+  bytes  token_b               = 3 [(dsm_max_len)=64];
+  bytes  reserve_a_u128        = 4 [(dsm_fixed_len)=16];
+  bytes  reserve_b_u128        = 5 [(dsm_fixed_len)=16];
+  uint32 fee_bps               = 6;
+  bytes  unlock_spec_digest    = 7 [(dsm_fixed_len)=32];
+  string unlock_spec_key       = 8;
+  bytes  owner_public_key      = 9 [(dsm_max_len)=65535];
+  // Full encoded `VaultPostProto` — the handler computes the
+  // BLAKE3 digest and binds it into the advertisement.  Frontend
+  // does not derive crypto.
+  bytes  vault_proto_bytes     = 10;
+}
+
+message RoutingPairRequest {
+  bytes token_a = 1 [(dsm_max_len)=64];
+  bytes token_b = 2 [(dsm_max_len)=64];
+}
+
+message FindAndBindRouteRequest {
+  bytes  input_token            = 1 [(dsm_max_len)=64];
+  bytes  output_token           = 2 [(dsm_max_len)=64];
+  bytes  input_amount_u128      = 3 [(dsm_fixed_len)=16];
+  uint32 max_hops               = 4; // 0 → server default (4)
+  bytes  nonce                  = 5 [(dsm_fixed_len)=32];
+  // initiator_public_key is left empty here on purpose — the
+  // subsequent `route.signRouteCommit` invoke stamps the wallet's
+  // pk and overwrites whatever the bind step put there.
+}
+
 // One hop in a `RouteCommitV1`.  Bound at routing time to the vault
 // advertisement digest + state number that was current when the path
 // was selected — recipients re-verify these fields against the live

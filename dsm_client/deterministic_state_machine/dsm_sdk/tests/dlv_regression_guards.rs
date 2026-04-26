@@ -591,6 +591,76 @@ fn route_commit_signature_uses_same_canonical_form_as_x() {
     );
 }
 
+/// Track C.3 invariant — the four trade-flow routes MUST be wired
+/// into the `route.*` dispatcher.  Without these, the frontend's
+/// `publishRoutingAdvertisement` / `listAdvertisementsForPair` /
+/// `syncVaultsForPair` / `findAndBindBestPath` calls would round-trip
+/// to "unknown route invoke method" / "unknown route query path"
+/// even though the handlers are implemented.
+#[test]
+fn route_trade_flow_routes_are_dispatched() {
+    let src = read(sdk_path("src/handlers/route_routes.rs"));
+    let needles = [
+        "\"route.publishRoutingAdvertisement\" => {",
+        "\"route.listAdvertisementsForPair\" => {",
+        "\"route.syncVaultsForPair\" => self.route_sync_vaults_for_pair(i).await,",
+        "\"route.findAndBindBestPath\" => self.route_find_and_bind_best_path(i).await,",
+    ];
+    for needle in needles {
+        assert!(
+            src.contains(needle),
+            "regression: trade-flow dispatch edge missing: {needle}"
+        );
+    }
+}
+
+/// Track C.3 invariant — each trade-flow handler MUST delegate to the
+/// audited SDK helper (chunk #1 / #2 / #3) rather than re-implementing
+/// the logic inline.  A regression that copy-pasted the BLAKE3
+/// derivation into a handler would silently bypass the chunk #1 digest
+/// binding; one that re-implemented path search would drift from the
+/// chunk #2 simulator the chunk #7 gate checks against.
+#[test]
+fn trade_flow_handlers_delegate_to_audited_sdks() {
+    let src = read(sdk_path("src/handlers/route_routes.rs"));
+    let needles = [
+        // publish_routing_advertisement → routing_sdk::publish_active_advertisement
+        "crate::sdk::routing_sdk::publish_active_advertisement",
+        // list_advertisements_for_pair → routing_sdk::load_active_advertisements_for_pair
+        "crate::sdk::routing_sdk::load_active_advertisements_for_pair",
+        // sync_vaults_for_pair → routing_sdk::fetch_and_verify_vault_proto
+        "crate::sdk::routing_sdk::fetch_and_verify_vault_proto",
+        // find_and_bind_best_path → routing_path_sdk::find_and_verify_best_path
+        "crate::sdk::routing_path_sdk::find_and_verify_best_path",
+        // find_and_bind_best_path → route_commit_sdk::bind_path_to_route_commit
+        "crate::sdk::route_commit_sdk::bind_path_to_route_commit",
+    ];
+    for needle in needles {
+        assert!(
+            src.contains(needle),
+            "regression: trade-flow handler stopped delegating to SDK: {needle}"
+        );
+    }
+}
+
+/// Track C.3 invariant — `route.findAndBindBestPath` MUST leave
+/// `initiator_public_key` empty in the unsigned RouteCommit it
+/// returns.  The subsequent `route.signRouteCommit` invoke
+/// overrides that field with the wallet's pk per chunk #6.  If the
+/// bind step stamped any other pk, sign-as-someone-else attacks
+/// would re-open: a caller could ask the wallet to sign a route
+/// they pre-attributed to anyone else.
+#[test]
+fn find_and_bind_leaves_initiator_pk_empty_for_sign_to_overwrite() {
+    let src = read(sdk_path("src/handlers/route_routes.rs"));
+    assert!(
+        src.contains("initiator_public_key: &[],"),
+        "regression: route.findAndBindBestPath no longer leaves \
+         initiator_public_key empty for the sign step to fill in — \
+         sign-as-someone-else attack surface re-opened"
+    );
+}
+
 /// Track C.2 invariant — `route.*` query/invoke routes MUST be wired
 /// into the dispatcher.  Without these, the TS bindings in
 /// `frontend/src/dsm/route_commit.ts` would round-trip to

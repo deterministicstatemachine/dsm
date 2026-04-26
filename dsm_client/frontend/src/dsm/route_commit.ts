@@ -27,6 +27,7 @@
 import * as pb from '../proto/dsm_app_pb';
 import { routerInvokeBin, routerQueryBin } from './WebViewBridge';
 import { decodeFramedEnvelopeV3 } from './decoding';
+import { decodeBase32Crockford, encodeBase32Crockford } from '../utils/textId';
 
 function packBody(body: Uint8Array): Uint8Array {
   const argPack = new pb.ArgPack({
@@ -225,5 +226,238 @@ export async function unlockVaultRouted(input: {
     return { success: true, vaultIdBase32 };
   } catch (e: any) {
     return { success: false, error: e?.message || 'unlockVaultRouted failed' };
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Track C.3 — frontend trade-flow helpers
+// ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Big-endian u128 encoding helper.  Reused for amounts and reserves
+ * across the trade-flow protos.  Pure framing — no protocol logic.
+ */
+function u128BigEndian(n: bigint): Uint8Array {
+  if (n < 0n) throw new Error('amount must be non-negative');
+  const out = new Uint8Array(16);
+  let v = n;
+  for (let i = 15; i >= 0; i--) {
+    out[i] = Number(v & 0xffn);
+    v >>= 8n;
+  }
+  if (v !== 0n) throw new Error('amount exceeds u128');
+  return out;
+}
+
+/**
+ * Vault owner: publish a routing-vault advertisement for an AMM vault.
+ * The Rust handler computes the BLAKE3 digest from
+ * `vaultProtoBytes` per the chunk #1 substrate; frontend only frames
+ * typed inputs.
+ */
+export async function publishRoutingAdvertisement(input: {
+  vaultId: Uint8Array;
+  tokenA: Uint8Array;
+  tokenB: Uint8Array;
+  reserveA: bigint;
+  reserveB: bigint;
+  feeBps: number;
+  unlockSpecDigest: Uint8Array;
+  unlockSpecKey: string;
+  ownerPublicKey: Uint8Array;
+  vaultProtoBytes: Uint8Array;
+}): Promise<{ success: boolean; vaultIdBase32?: string; error?: string }> {
+  try {
+    if (!input?.vaultId || input.vaultId.length !== 32) {
+      return { success: false, error: 'vaultId must be 32 bytes' };
+    }
+    if (!input.unlockSpecDigest || input.unlockSpecDigest.length !== 32) {
+      return { success: false, error: 'unlockSpecDigest must be 32 bytes' };
+    }
+    if (!input.ownerPublicKey || input.ownerPublicKey.length === 0) {
+      return { success: false, error: 'ownerPublicKey is required' };
+    }
+    if (!input.vaultProtoBytes || input.vaultProtoBytes.length === 0) {
+      return { success: false, error: 'vaultProtoBytes is required' };
+    }
+    const req = new pb.PublishRoutingAdvertisementRequest({
+      vaultId: input.vaultId as any,
+      tokenA: input.tokenA as any,
+      tokenB: input.tokenB as any,
+      reserveAU128: u128BigEndian(input.reserveA) as any,
+      reserveBU128: u128BigEndian(input.reserveB) as any,
+      feeBps: input.feeBps,
+      unlockSpecDigest: input.unlockSpecDigest as any,
+      unlockSpecKey: input.unlockSpecKey,
+      ownerPublicKey: input.ownerPublicKey as any,
+      vaultProtoBytes: input.vaultProtoBytes as any,
+    });
+    const resBytes = await routerInvokeBin(
+      'route.publishRoutingAdvertisement',
+      packBody(new Uint8Array(req.toBinary())),
+    );
+    const env = decodeFramedEnvelopeV3(resBytes);
+    const vaultIdBase32 = readAppStateValue(env, 'route.publishRoutingAdvertisement');
+    return { success: true, vaultIdBase32 };
+  } catch (e: any) {
+    return {
+      success: false,
+      error: e?.message || 'publishRoutingAdvertisement failed',
+    };
+  }
+}
+
+/**
+ * Lightweight summary returned by `listAdvertisementsForPair`.  Carries
+ * the fields a trader UI needs to render liquidity without re-fetching.
+ */
+export interface RoutingAdvertisementSummary {
+  vaultIdBase32: string;
+  tokenA: Uint8Array;
+  tokenB: Uint8Array;
+  reserveA: bigint;
+  reserveB: bigint;
+  feeBps: number;
+  stateNumber: bigint;
+  ownerPublicKey: Uint8Array;
+}
+
+function decodeReserveBigInt(bytes: Uint8Array): bigint {
+  let acc = 0n;
+  for (const b of bytes) {
+    acc = (acc << 8n) | BigInt(b);
+  }
+  return acc;
+}
+
+/**
+ * Anyone: list active routing-vault advertisements for a token pair.
+ * The handler returns a newline-separated list of Base32-encoded
+ * `RoutingVaultAdvertisementV1` protos; this helper decodes each line
+ * into a typed summary.
+ *
+ * Token-pair canonicalisation is the Rust side's responsibility — the
+ * caller may pass `(A, B)` or `(B, A)` and get the same result.
+ */
+export async function listAdvertisementsForPair(input: {
+  tokenA: Uint8Array;
+  tokenB: Uint8Array;
+}): Promise<{
+  success: boolean;
+  advertisements?: RoutingAdvertisementSummary[];
+  error?: string;
+}> {
+  try {
+    const req = new pb.RoutingPairRequest({
+      tokenA: input.tokenA as any,
+      tokenB: input.tokenB as any,
+    });
+    const resBytes = await routerQueryBin(
+      'route.listAdvertisementsForPair',
+      packBody(new Uint8Array(req.toBinary())),
+    );
+    const env = decodeFramedEnvelopeV3(resBytes);
+    const value = readAppStateValue(env, 'route.listAdvertisementsForPair');
+    const lines = value ? value.split('\n').filter((l) => l.length > 0) : [];
+    const advertisements: RoutingAdvertisementSummary[] = lines.map((line) => {
+      const adBytes = decodeBase32Crockford(line);
+      const ad = pb.RoutingVaultAdvertisementV1.fromBinary(new Uint8Array(adBytes));
+      return {
+        vaultIdBase32: encodeBase32Crockford(ad.vaultId),
+        tokenA: ad.tokenA,
+        tokenB: ad.tokenB,
+        reserveA: decodeReserveBigInt(ad.reserveAU128),
+        reserveB: decodeReserveBigInt(ad.reserveBU128),
+        feeBps: ad.feeBps,
+        stateNumber: ad.updatedStateNumber,
+        ownerPublicKey: ad.ownerPublicKey,
+      };
+    });
+    return { success: true, advertisements };
+  } catch (e: any) {
+    return {
+      success: false,
+      error: e?.message || 'listAdvertisementsForPair failed',
+    };
+  }
+}
+
+/**
+ * Trader: fetch + verify + mirror every routing vault for a pair into
+ * the local DLVManager so a subsequent `findAndBindBestPath` and
+ * `unlockVaultRouted` can re-simulate against the real vault state.
+ * Idempotent — already-mirrored vaults are skipped.  Returns the
+ * Base32 vault_ids that were freshly inserted in this call.
+ */
+export async function syncVaultsForPair(input: {
+  tokenA: Uint8Array;
+  tokenB: Uint8Array;
+}): Promise<{
+  success: boolean;
+  newlyMirroredBase32?: string[];
+  error?: string;
+}> {
+  try {
+    const req = new pb.RoutingPairRequest({
+      tokenA: input.tokenA as any,
+      tokenB: input.tokenB as any,
+    });
+    const resBytes = await routerInvokeBin(
+      'route.syncVaultsForPair',
+      packBody(new Uint8Array(req.toBinary())),
+    );
+    const env = decodeFramedEnvelopeV3(resBytes);
+    const value = readAppStateValue(env, 'route.syncVaultsForPair');
+    const lines = value ? value.split('\n').filter((l) => l.length > 0) : [];
+    return { success: true, newlyMirroredBase32: lines };
+  } catch (e: any) {
+    return { success: false, error: e?.message || 'syncVaultsForPair failed' };
+  }
+}
+
+/**
+ * Trader: ask Rust to run chunk #2 path search over the locally-known
+ * advertisements (caller should `syncVaultsForPair` first) and bind
+ * the chosen Path into an UNSIGNED `RouteCommitV1`.  The wallet's pk
+ * is stamped during the subsequent `signRouteCommit` call, not here.
+ *
+ * Returns the unsigned RouteCommit bytes (not Base32) — pass them
+ * directly into `signRouteCommit`.
+ */
+export async function findAndBindBestPath(input: {
+  inputToken: Uint8Array;
+  outputToken: Uint8Array;
+  inputAmount: bigint;
+  /** 32-byte random nonce for replay protection.  Caller MUST pick
+   *  a fresh value per route. */
+  nonce: Uint8Array;
+  /** 0 → server default (4). */
+  maxHops?: number;
+}): Promise<{
+  success: boolean;
+  unsignedRouteCommitBytes?: Uint8Array;
+  error?: string;
+}> {
+  try {
+    if (!input?.nonce || input.nonce.length !== 32) {
+      return { success: false, error: 'nonce must be 32 bytes' };
+    }
+    const req = new pb.FindAndBindRouteRequest({
+      inputToken: input.inputToken as any,
+      outputToken: input.outputToken as any,
+      inputAmountU128: u128BigEndian(input.inputAmount) as any,
+      maxHops: input.maxHops ?? 0,
+      nonce: input.nonce as any,
+    });
+    const resBytes = await routerInvokeBin(
+      'route.findAndBindBestPath',
+      packBody(new Uint8Array(req.toBinary())),
+    );
+    const env = decodeFramedEnvelopeV3(resBytes);
+    const base32 = readAppStateValue(env, 'route.findAndBindBestPath');
+    const unsignedRouteCommitBytes = new Uint8Array(decodeBase32Crockford(base32));
+    return { success: true, unsignedRouteCommitBytes };
+  } catch (e: any) {
+    return { success: false, error: e?.message || 'findAndBindBestPath failed' };
   }
 }
