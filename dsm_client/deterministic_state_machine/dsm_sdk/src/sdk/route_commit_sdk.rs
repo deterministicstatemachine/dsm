@@ -1275,4 +1275,349 @@ mod tests {
             ),
         }
     }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //                    BACKEND DEMO — END-TO-END
+    // ═══════════════════════════════════════════════════════════════════
+    //
+    // The single test below walks the entire DeTFi trade pipeline in
+    // one process: routing-vault publish → discovery → path search →
+    // RouteCommit binding → SPHINCS+ signing → external-commitment
+    // anchor → eligibility gate (chunks #4 + #5) → AMM re-simulation
+    // gate (chunk #7) → reserve advance → stale-reserves attack
+    // rejection → fresh route succeeds.
+    //
+    // No frontend, no devices, no network — just the protocol stack
+    // proving every gate fires correctly.  Run with:
+    //
+    //     cargo test -p dsm_sdk --lib demo_full_amm_trade_e2e -- --nocapture
+    //
+    // Acts as both Alice (trader) and Bob (vault owner) on a single
+    // process.  Storage is the in-process mock backend the chunk-#1/
+    // chunk-#3 publish flows already use.
+
+    #[tokio::test]
+    async fn demo_full_amm_trade_e2e() {
+        use dsm::crypto::sphincs::{generate_keypair, sign as sphincs_sign, SphincsVariant};
+        use dsm::vault::FulfillmentMechanism;
+        use prost::Message as _;
+
+        // ── Setup ──────────────────────────────────────────────────────
+        let alice = generate_keypair(SphincsVariant::SPX256f).expect("alice keygen");
+        let bob = generate_keypair(SphincsVariant::SPX256f).expect("bob keygen");
+
+        let token_aaa = b"DEMO_AAA".to_vec();
+        let token_bbb = b"DEMO_BBB".to_vec();
+        // Lex-canonical: AAA < BBB (string compare).
+        assert!(token_aaa < token_bbb);
+
+        let vault_id = {
+            let mut v = [0u8; 32];
+            v[0] = 0xDE;
+            v[1] = 0x70;
+            v[31] = 0xA1;
+            v
+        };
+        let initial_reserve_a: u128 = 1_000_000;
+        let initial_reserve_b: u128 = 1_000_000;
+        let fee_bps: u32 = 30;
+
+        // Bob's vault state (the chunk-#7 verifier consumes this directly).
+        let mut bobs_fulfillment = FulfillmentMechanism::AmmConstantProduct {
+            token_a: token_aaa.clone(),
+            token_b: token_bbb.clone(),
+            reserve_a: initial_reserve_a,
+            reserve_b: initial_reserve_b,
+            fee_bps,
+        };
+
+        // ── STEP 1 ─ Bob publishes the routing-vault advertisement ────
+        // Synthetic vault proto bytes — chunk #1 hashes them but doesn't
+        // decode at publish time, only at fetch-verify time.  For a
+        // pure-protocol demo we never call fetch-verify.
+        let vault_proto_bytes = format!(
+            "demo-vault-proto-bytes-{}",
+            crate::util::text_id::encode_base32_crockford(&vault_id)
+        )
+        .into_bytes();
+        crate::sdk::routing_sdk::publish_active_advertisement(
+            crate::sdk::routing_sdk::PublishRoutingAdInput {
+                vault_id: &vault_id,
+                token_a: &token_aaa,
+                token_b: &token_bbb,
+                reserve_a_u128: initial_reserve_a.to_be_bytes(),
+                reserve_b_u128: initial_reserve_b.to_be_bytes(),
+                fee_bps,
+                unlock_spec_digest: [0u8; 32],
+                unlock_spec_key: "defi/spec/demo".to_string(),
+                owner_public_key: &bob.public_key,
+                vault_proto_bytes: &vault_proto_bytes,
+            },
+        )
+        .await
+        .expect("Bob publishes routing advertisement");
+
+        // ── STEP 2 ─ Alice discovers ──────────────────────────────────
+        let advert_set = crate::sdk::routing_sdk::load_active_advertisements_for_pair(
+            &token_aaa, &token_bbb,
+        )
+        .await
+        .expect("Alice lists ads");
+        assert_eq!(advert_set.len(), 1, "Alice sees exactly Bob's vault");
+        assert_eq!(advert_set[0].advertisement.vault_id, vault_id.to_vec());
+        let ads_for_search: Vec<_> =
+            advert_set.into_iter().map(|p| p.advertisement).collect();
+
+        // ── STEP 3 ─ Alice path-searches + binds ──────────────────────
+        let trade_input: u128 = 10_000;
+        let path = crate::sdk::routing_path_sdk::find_best_path(
+            &ads_for_search,
+            &token_aaa,
+            &token_bbb,
+            trade_input,
+            crate::sdk::routing_path_sdk::DEFAULT_MAX_HOPS,
+        )
+        .expect("Alice finds a path");
+        assert_eq!(path.hops.len(), 1, "single-hop direct route");
+        assert_eq!(path.hops[0].vault_id, vault_id);
+        let route_quoted_output = path.final_output_amount;
+        // What the SAME math against Bob's actual reserves yields.  Must
+        // match — same `constant_product_output` is used in both places.
+        let expected_simulated =
+            crate::sdk::routing_path_sdk::constant_product_output(
+                trade_input,
+                initial_reserve_a,
+                initial_reserve_b,
+                fee_bps,
+            )
+            .expect("simulator");
+        assert_eq!(
+            route_quoted_output, expected_simulated,
+            "path search must agree with the on-vault simulator"
+        );
+
+        let nonce_1 = {
+            let mut n = [0u8; 32];
+            n[0] = 0x01;
+            n[1] = 0x77;
+            n[31] = 0x55;
+            n
+        };
+        let unsigned_rc = bind_path_to_route_commit(BindRouteCommitInput {
+            path: &path,
+            nonce: nonce_1,
+            initiator_public_key: &alice.public_key,
+            initiator_signature: vec![],
+        })
+        .expect("bind_path_to_route_commit");
+
+        // ── STEP 4 ─ Alice signs ──────────────────────────────────────
+        let canonical_bytes = canonicalise_for_commitment(&unsigned_rc).encode_to_vec();
+        let alice_sig = sphincs_sign(SphincsVariant::SPX256f, &alice.secret_key, &canonical_bytes)
+            .expect("alice signs");
+        let mut signed_rc = unsigned_rc.clone();
+        signed_rc.initiator_signature = alice_sig;
+        let signed_rc_bytes = signed_rc.encode_to_vec();
+
+        // ── STEP 5 ─ Alice publishes the external commitment ──────────
+        let x_1 = compute_external_commitment(&signed_rc);
+        publish_external_commitment(&x_1, &alice.public_key, "trade-1")
+            .await
+            .expect("publish X");
+        assert!(
+            is_external_commitment_visible(&x_1).await.unwrap(),
+            "anchor visible after publish"
+        );
+
+        // ── STEP 6 ─ Bob's eligibility gate (chunks #4 + #5) ──────────
+        let bound_hop = verify_route_commit_unlock_eligibility(&signed_rc_bytes, &vault_id)
+            .await
+            .expect("eligibility — SPHINCS+ verify, hop matches, X visible");
+        assert_eq!(bound_hop.vault_id, vault_id.to_vec());
+
+        // ── STEP 7 ─ Bob's AMM re-simulation gate (chunk #7) ──────────
+        let outcome = verify_amm_swap_against_reserves(&bound_hop, &bobs_fulfillment)
+            .expect("re-sim returns Ok")
+            .expect("AMM vault");
+        // Full input enters reserve_a, simulated output leaves reserve_b.
+        assert_eq!(outcome.new_reserve_a, initial_reserve_a + trade_input);
+        assert_eq!(outcome.new_reserve_b, initial_reserve_b - expected_simulated);
+        // Constant-product invariant: post-trade k >= pre-trade k (fee accrual).
+        let pre_k = initial_reserve_a * initial_reserve_b;
+        let post_k = outcome.new_reserve_a * outcome.new_reserve_b;
+        assert!(
+            post_k >= pre_k,
+            "k must be non-decreasing through a fee-bearing swap"
+        );
+
+        // ── STEP 8 ─ Trade 1 settles; Bob's vault state advances ──────
+        if let FulfillmentMechanism::AmmConstantProduct {
+            ref mut reserve_a,
+            ref mut reserve_b,
+            ..
+        } = bobs_fulfillment
+        {
+            *reserve_a = outcome.new_reserve_a;
+            *reserve_b = outcome.new_reserve_b;
+        } else {
+            panic!("vault must remain AMM-typed");
+        }
+
+        // ── STEP 9 ─ Stale-reserves attack — Alice tries to settle
+        //            against Bob's NEW state with a route quoted from
+        //            the ORIGINAL reserves.  The chunk-#7 gate must
+        //            reject with OutputMismatch.
+        // Reuse the chunk-#3 binding from the original path (same hop,
+        // same expected_output_amount derived from the original
+        // reserves), but with a new nonce so the X anchor is distinct.
+        let nonce_2_stale = {
+            let mut n = [0u8; 32];
+            n[0] = 0x02;
+            n[1] = 0x77;
+            n[31] = 0x66;
+            n
+        };
+        let stale_unsigned = bind_path_to_route_commit(BindRouteCommitInput {
+            path: &path, // ← original path with PRE-trade-1 reserves
+            nonce: nonce_2_stale,
+            initiator_public_key: &alice.public_key,
+            initiator_signature: vec![],
+        })
+        .unwrap();
+        let stale_canonical = canonicalise_for_commitment(&stale_unsigned).encode_to_vec();
+        let stale_sig =
+            sphincs_sign(SphincsVariant::SPX256f, &alice.secret_key, &stale_canonical).unwrap();
+        let mut stale_signed = stale_unsigned;
+        stale_signed.initiator_signature = stale_sig;
+        let x_stale = compute_external_commitment(&stale_signed);
+        publish_external_commitment(&x_stale, &alice.public_key, "trade-2-stale")
+            .await
+            .unwrap();
+
+        // Eligibility (chunks #4/#5) still passes — the route is
+        // structurally valid; only the AMM gate catches the
+        // reserve-staleness.
+        let stale_hop = verify_route_commit_unlock_eligibility(
+            &stale_signed.encode_to_vec(),
+            &vault_id,
+        )
+        .await
+        .expect("stale route is structurally valid for chunks #4/#5");
+
+        match verify_amm_swap_against_reserves(&stale_hop, &bobs_fulfillment) {
+            Err(AmmVerifyError::OutputMismatch {
+                simulated,
+                expected,
+            }) => {
+                assert_eq!(expected, route_quoted_output);
+                let live = crate::sdk::routing_path_sdk::constant_product_output(
+                    trade_input,
+                    outcome.new_reserve_a, // post-trade reserve_a
+                    outcome.new_reserve_b, // post-trade reserve_b
+                    fee_bps,
+                )
+                .expect("live simulator");
+                assert_eq!(simulated, live);
+                assert_ne!(
+                    simulated, expected,
+                    "the entire point: live reserves yield a different output"
+                );
+            }
+            other => panic!(
+                "stale-reserves attack must reject with OutputMismatch; got {other:?}"
+            ),
+        }
+
+        // ── STEP 10 ─ Fresh route — Alice rebuilds against the
+        //             post-trade-1 reserves and trade 2 settles. ───────
+        // Alice must republish the routing advertisement with the new
+        // reserves (or in production, Bob would; the routing-keyspace
+        // is owner-write, but for the demo we just publish again).
+        crate::sdk::routing_sdk::publish_active_advertisement(
+            crate::sdk::routing_sdk::PublishRoutingAdInput {
+                vault_id: &vault_id,
+                token_a: &token_aaa,
+                token_b: &token_bbb,
+                reserve_a_u128: outcome.new_reserve_a.to_be_bytes(),
+                reserve_b_u128: outcome.new_reserve_b.to_be_bytes(),
+                fee_bps,
+                unlock_spec_digest: [0u8; 32],
+                unlock_spec_key: "defi/spec/demo".to_string(),
+                owner_public_key: &bob.public_key,
+                vault_proto_bytes: &vault_proto_bytes,
+            },
+        )
+        .await
+        .expect("Bob republishes with post-trade reserves");
+
+        // The republished ad has updated_state_number=1 (re-publish
+        // semantics in chunk #1 use the same publish path).  In
+        // production the owner would bump the state number; for this
+        // demo we just rely on the fresh reserves making the next
+        // path search agree with on-vault state.
+        let fresh_ads: Vec<_> = crate::sdk::routing_sdk::load_active_advertisements_for_pair(
+            &token_aaa, &token_bbb,
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|p| p.advertisement)
+        .collect();
+        let fresh_path = crate::sdk::routing_path_sdk::find_best_path(
+            &fresh_ads,
+            &token_aaa,
+            &token_bbb,
+            trade_input,
+            crate::sdk::routing_path_sdk::DEFAULT_MAX_HOPS,
+        )
+        .expect("fresh path");
+
+        let nonce_3 = {
+            let mut n = [0u8; 32];
+            n[0] = 0x03;
+            n[1] = 0x77;
+            n[31] = 0x77;
+            n
+        };
+        let fresh_unsigned = bind_path_to_route_commit(BindRouteCommitInput {
+            path: &fresh_path,
+            nonce: nonce_3,
+            initiator_public_key: &alice.public_key,
+            initiator_signature: vec![],
+        })
+        .unwrap();
+        let fresh_canonical = canonicalise_for_commitment(&fresh_unsigned).encode_to_vec();
+        let fresh_sig =
+            sphincs_sign(SphincsVariant::SPX256f, &alice.secret_key, &fresh_canonical).unwrap();
+        let mut fresh_signed = fresh_unsigned;
+        fresh_signed.initiator_signature = fresh_sig;
+        let x_3 = compute_external_commitment(&fresh_signed);
+        publish_external_commitment(&x_3, &alice.public_key, "trade-3-fresh")
+            .await
+            .unwrap();
+
+        let fresh_hop = verify_route_commit_unlock_eligibility(
+            &fresh_signed.encode_to_vec(),
+            &vault_id,
+        )
+        .await
+        .expect("fresh route eligibility");
+        let trade2_outcome =
+            verify_amm_swap_against_reserves(&fresh_hop, &bobs_fulfillment)
+                .expect("re-sim ok")
+                .expect("AMM");
+        // Trade 2 settles; constant-product invariant still preserved.
+        let pre_k_2 = outcome.new_reserve_a * outcome.new_reserve_b;
+        let post_k_2 = trade2_outcome.new_reserve_a * trade2_outcome.new_reserve_b;
+        assert!(
+            post_k_2 >= pre_k_2,
+            "Trade 2 must also non-decrease k"
+        );
+
+        // ── Final accounting ──────────────────────────────────────────
+        // Two successful trades (1 and 3), one rejected stale-reserves
+        // attack (2).  Reserves moved through the constant-product
+        // invariant on each accepted swap.  Every gate fired correctly.
+        // The protocol layer is end-to-end working.
+    }
 }
