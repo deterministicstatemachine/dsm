@@ -178,7 +178,34 @@ message FulfillmentMechanism {
     And and = 7;
     Or or = 8;
     BitcoinHTLC bitcoin_htlc = 9;
+    AmmConstantProduct amm_constant_product = 10;
   }
+}
+
+// AMM (constant-product) liquidity vault.  The vault holds two token
+// reserves and unlocks via a routed swap: a trader puts `input_amount`
+// of `token_in` in, the vault releases `expected_output_amount` of
+// `token_out` per the constant-product invariant
+//   k = reserve_in * reserve_out   (post-fee adjusted at swap time)
+//
+// Reserves are vault-state, not advertisement state.  When a routed
+// unlock is accepted, both reserves advance atomically:
+//   reserve_in  += input_after_fee
+//   reserve_out -= output
+// and the vault republishes its `RoutingVaultAdvertisementV1` with
+// `updated_state_number++`.  A stale advertisement causes a mis-quoted
+// route, which the chunk-7 re-simulation gate catches at unlock time
+// (DeTFi spec §3, §8).
+//
+// `token_a` / `token_b` are stored in canonical lex-sorted order so
+// the vault has a single canonical pair identity regardless of trade
+// direction; `reserve_a` / `reserve_b` follow the same ordering.
+message AmmConstantProduct {
+  bytes  token_a            = 1 [(dsm_max_len)=64];   // lex-lower token id
+  bytes  token_b            = 2 [(dsm_max_len)=64];   // lex-higher token id
+  bytes  reserve_a_u128     = 3 [(dsm_fixed_len)=16]; // big-endian u128
+  bytes  reserve_b_u128     = 4 [(dsm_fixed_len)=16]; // big-endian u128
+  uint32 fee_bps            = 5;                      // basis points (e.g. 30 = 0.30 %)
 }
 
 message BitcoinHTLC {

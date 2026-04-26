@@ -681,7 +681,7 @@ impl AppRouterImpl {
         vault_id.copy_from_slice(&req.vault_id);
 
         // SDK eligibility gate.  Fails closed on every typed variant.
-        let _hop = match crate::sdk::route_commit_sdk::verify_route_commit_unlock_eligibility(
+        let hop = match crate::sdk::route_commit_sdk::verify_route_commit_unlock_eligibility(
             &req.route_commit_bytes,
             &vault_id,
         )
@@ -692,6 +692,51 @@ impl AppRouterImpl {
                 return err(format!(
                     "dlv.unlockRouted: route-commit eligibility rejected: {e:?}"
                 ));
+            }
+        };
+
+        // Chunk #7 — AMM re-simulation gate.  For vaults whose
+        // fulfillment condition is `AmmConstantProduct`, re-run the
+        // constant-product math against THE VAULT'S CURRENT
+        // RESERVES (not the advertisement's, which may be stale)
+        // and reject if the trader's claimed `expected_output` does
+        // not match.  This is the difference between
+        // "signed-route execution" and
+        // "independently re-simulated reserve-math execution".
+        //
+        // Reserves are read inside the vault mutex but the actual
+        // post-trade update happens AFTER `execute_on_relationship`
+        // succeeds — see the post-advance block below.  A concurrent
+        // unlock between read and update is serialised by
+        // `Mutex<LimboVault>`, so the lock-free window only matters
+        // if the on-chain advance fails (in which case reserves were
+        // never advanced — correct fail-closed).
+        let dlv_manager = self.bitcoin_tap.dlv_manager();
+        // Stage post-trade reserves in canonical (a, b) ordering.  When
+        // the on-chain DlvUnlock succeeds below we re-acquire the vault
+        // lock and write these into `fulfillment_condition`.
+        let amm_post_trade_reserves: Option<(u128, u128)> = {
+            let vault_lock = match dlv_manager.get_vault(&vault_id).await {
+                Ok(v) => v,
+                Err(e) => {
+                    return err(format!(
+                        "dlv.unlockRouted: vault {} not in local DLVManager: {e}",
+                        crate::util::text_id::encode_base32_crockford(&vault_id)
+                    ));
+                }
+            };
+            let vault = vault_lock.lock().await;
+            match crate::sdk::route_commit_sdk::verify_amm_swap_against_reserves(
+                &hop,
+                &vault.fulfillment_condition,
+            ) {
+                Ok(Some(outcome)) => Some((outcome.new_reserve_a, outcome.new_reserve_b)),
+                Ok(None) => None,
+                Err(e) => {
+                    return err(format!(
+                        "dlv.unlockRouted: AMM re-simulation rejected: {e:?}"
+                    ));
+                }
             }
         };
 
@@ -733,6 +778,41 @@ impl AppRouterImpl {
             return err(format!(
                 "dlv.unlockRouted: execute_on_relationship failed: {e}"
             ));
+        }
+
+        // Chunk #7 — post-advance reserve update.  The on-chain DlvUnlock
+        // succeeded, so the swap is committed; mutate the vault's
+        // reserves so the next routed unlock against this vault sees
+        // the post-trade state and any stale routing-vault advertisement
+        // gets caught at the chunk-#7 re-simulation gate.  Republishing
+        // the advertisement is a follow-up task — until that lands, a
+        // vault becomes "unusable for new routes" until the owner
+        // republishes, but no incorrect swaps execute.
+        if let Some((new_a, new_b)) = amm_post_trade_reserves {
+            // Best-effort: a failure here means the vault's local state
+            // diverges from the advanced chain by one swap.  The chain
+            // is authoritative; the vault state will resync at next
+            // restart from the proto stored on chain.  Log + continue.
+            match dlv_manager.get_vault(&vault_id).await {
+                Ok(vault_lock) => {
+                    let mut vault = vault_lock.lock().await;
+                    if let dsm::vault::FulfillmentMechanism::AmmConstantProduct {
+                        reserve_a,
+                        reserve_b,
+                        ..
+                    } = &mut vault.fulfillment_condition
+                    {
+                        *reserve_a = new_a;
+                        *reserve_b = new_b;
+                    }
+                }
+                Err(e) => {
+                    log::warn!(
+                        "[dlv.unlockRouted] post-advance reserve update for {} failed: {e}",
+                        crate::util::text_id::encode_base32_crockford(&vault_id)
+                    );
+                }
+            }
         }
 
         let resp = generated::AppStateResponse {

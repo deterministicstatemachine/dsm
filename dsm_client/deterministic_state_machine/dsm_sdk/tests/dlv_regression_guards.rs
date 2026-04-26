@@ -685,6 +685,83 @@ fn route_sign_route_commit_overwrites_initiator_public_key() {
     );
 }
 
+/// Chunk #7 invariant — `dlv.unlockRouted` MUST run the AMM
+/// re-simulation gate against the VAULT'S CURRENT reserves (not the
+/// advertisement's, which may be stale).  This is the difference
+/// between "signed-route execution" and "independently re-simulated
+/// reserve-math execution".  A regression that removed the call
+/// would re-open the stale-reserves attack: a trader could sign a
+/// route quoted against deep advertised reserves, then unlock against
+/// shallow live reserves and extract the difference.
+#[test]
+fn dlv_unlock_routed_runs_amm_re_simulation_gate() {
+    let src = read(sdk_path("src/handlers/dlv_routes.rs"));
+    // Scope the ordering check to the body of `dlv_unlock_routed`
+    // specifically — other dlv.* handlers also call
+    // `execute_on_relationship` and would otherwise distort the
+    // earlier-than check.
+    let routed_start = src
+        .find("async fn dlv_unlock_routed")
+        .expect("dlv_unlock_routed handler present");
+    let routed_end = src[routed_start..]
+        .find("\n    }\n}")
+        .map(|i| routed_start + i)
+        .unwrap_or(src.len());
+    let routed_body = &src[routed_start..routed_end];
+
+    assert!(
+        routed_body.contains("verify_amm_swap_against_reserves"),
+        "regression: dlv.unlockRouted no longer calls the AMM re-simulation \
+         gate — chunk #7 reserve-math verification is bypassed"
+    );
+    let resim_pos = routed_body
+        .find("verify_amm_swap_against_reserves")
+        .expect("re-simulation present");
+    // Anchor on the actual call site (`.execute_on_relationship(...`)
+    // rather than the bare identifier — doc-comments mention the name
+    // before the call, which would distort the ordering check.
+    let advance_pos = routed_body
+        .find(".execute_on_relationship(rel_key")
+        .expect("on-chain advance present in dlv_unlock_routed");
+    assert!(
+        resim_pos < advance_pos,
+        "regression: AMM re-simulation MUST run before execute_on_relationship \
+         in dlv_unlock_routed — checking math AFTER the chain advances is \
+         too late to reject"
+    );
+}
+
+/// Chunk #7 invariant — the re-simulation MUST use the SAME
+/// `constant_product_output` function that chunk #2's path search
+/// uses.  Any divergence between path-time and unlock-time
+/// computation means the trader's signed `expected_output` will
+/// systematically fail re-simulation, breaking every routed unlock.
+#[test]
+fn amm_re_simulation_uses_path_search_simulator() {
+    let src = read(sdk_path("src/sdk/route_commit_sdk.rs"));
+    assert!(
+        src.contains("crate::sdk::routing_path_sdk::constant_product_output"),
+        "regression: route_commit_sdk no longer delegates to the path-search \
+         simulator — sign-time and unlock-time math could drift"
+    );
+}
+
+/// Chunk #7 invariant — the post-trade reserve update MUST use the
+/// FULL `input_amount` (Uniswap V2 invariant: fee accrues to the
+/// pool as LP yield).  A regression that subtracted the fee from
+/// the input before adding to the reserve would leak fees out of
+/// the pool, breaking the constant-product invariant the simulator
+/// relies on.
+#[test]
+fn amm_reserve_update_uses_full_input_amount() {
+    let src = read(sdk_path("src/sdk/route_commit_sdk.rs"));
+    assert!(
+        src.contains("reserve_in\n        .checked_add(input_amount)"),
+        "regression: AMM post-trade reserve update no longer uses the full \
+         input_amount — fees would leak out of the pool"
+    );
+}
+
 /// Chunk #6 invariant — `route.signRouteCommit` MUST canonicalise
 /// via the SAME helper that the X-derivation and the eligibility
 /// verifier use.  Any divergence in canonicalisation between

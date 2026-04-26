@@ -366,6 +366,16 @@ impl DlvSdk {
             } => {
                 format!("Bitcoin HTLC vault ({expected_btc_amount_sats} sats)")
             }
+            FulfillmentMechanism::AmmConstantProduct {
+                reserve_a,
+                reserve_b,
+                fee_bps,
+                ..
+            } => {
+                format!(
+                    "AMM constant-product (a={reserve_a}, b={reserve_b}, fee={fee_bps}bps)"
+                )
+            }
         };
 
         Ok(VaultInfo {

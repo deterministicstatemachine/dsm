@@ -213,6 +213,138 @@ pub(crate) async fn is_external_commitment_visible(
     }
 }
 
+/// AMM-side re-simulation outcome.  `Some((new_reserve_a, new_reserve_b))`
+/// signals an AMM vault whose post-trade reserves have been computed
+/// and should be written back to the vault on a successful unlock;
+/// `None` signals a non-AMM vault for which the chunks #4 / #5 gate
+/// is sufficient.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AmmVerifyOutcome {
+    pub new_reserve_a: u128,
+    pub new_reserve_b: u128,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AmmVerifyError {
+    /// Hop's `(token_in, token_out)` doesn't map onto the AMM vault's
+    /// canonical pair `(token_a, token_b)`.  Either the trader handed
+    /// this RouteCommit to the wrong vault or constructed a route
+    /// against tokens this vault doesn't trade.
+    HopTokensDoNotMatchVaultPair,
+    /// `input_amount_u128` or `expected_output_amount_u128` was not
+    /// 16 bytes — malformed wire input.
+    AmountFieldsMustBe16BytesBigEndian,
+    /// Constant-product simulation produced zero output (insufficient
+    /// reserves or arithmetic overflow).  Reserves moved or the route
+    /// was always invalid for this vault.
+    InsufficientReservesOrOverflow,
+    /// Re-simulation against the vault's current reserves yielded a
+    /// different output than the trader's signed `expected_output`.
+    /// Reserves moved between routing time and unlock; trader must
+    /// rebuild the route.  Carries the simulated and expected values
+    /// for diagnostics.
+    OutputMismatch { simulated: u128, expected: u128 },
+    /// `simulated > reserve_out` — impossible by the formula but
+    /// surfaced anyway as a defensive check.
+    SimulatedExceedsReserveOut,
+    /// `reserve_in + input_amount` overflowed u128.  Pool is too
+    /// large for the swap; should never happen under realistic
+    /// reserves but the pure code fails closed rather than wrapping.
+    ReserveInOverflow,
+}
+
+/// Re-simulate the AMM swap a routed-unlock hop describes against the
+/// vault's CURRENT reserves and reject if the trader's signed
+/// `expected_output_amount` does not match.  This is the chunk-#7
+/// "independently re-simulated reserve-math execution" gate — what
+/// makes routed unlocks cryptographically self-verifying rather than
+/// signed-intent settlement.
+///
+/// Returns:
+///   * `Ok(Some(outcome))` — AMM vault, swap accepted; caller must
+///     write `outcome.new_reserve_a` / `_b` into
+///     `vault.fulfillment_condition` after the on-chain advance succeeds.
+///   * `Ok(None)` — non-AMM vault; no extra check, no reserve
+///     update.
+///   * `Err(AmmVerifyError)` — typed rejection; caller surfaces
+///     verbatim.
+pub(crate) fn verify_amm_swap_against_reserves(
+    hop: &generated::RouteCommitHopV1,
+    fulfillment: &dsm::vault::FulfillmentMechanism,
+) -> Result<Option<AmmVerifyOutcome>, AmmVerifyError> {
+    let (token_a, token_b, reserve_a, reserve_b, fee_bps) = match fulfillment {
+        dsm::vault::FulfillmentMechanism::AmmConstantProduct {
+            token_a,
+            token_b,
+            reserve_a,
+            reserve_b,
+            fee_bps,
+        } => (token_a, token_b, *reserve_a, *reserve_b, *fee_bps),
+        _ => return Ok(None),
+    };
+
+    // Direction.  The vault stores its pair lex-canonical; the hop
+    // names whichever direction the route requires.
+    let input_is_a = hop.token_in.as_slice() == token_a.as_slice()
+        && hop.token_out.as_slice() == token_b.as_slice();
+    let input_is_b = hop.token_in.as_slice() == token_b.as_slice()
+        && hop.token_out.as_slice() == token_a.as_slice();
+    if !input_is_a && !input_is_b {
+        return Err(AmmVerifyError::HopTokensDoNotMatchVaultPair);
+    }
+    let (reserve_in, reserve_out) = if input_is_a {
+        (reserve_a, reserve_b)
+    } else {
+        (reserve_b, reserve_a)
+    };
+
+    if hop.input_amount_u128.len() != 16 || hop.expected_output_amount_u128.len() != 16 {
+        return Err(AmmVerifyError::AmountFieldsMustBe16BytesBigEndian);
+    }
+    let mut in_buf = [0u8; 16];
+    in_buf.copy_from_slice(&hop.input_amount_u128);
+    let mut out_buf = [0u8; 16];
+    out_buf.copy_from_slice(&hop.expected_output_amount_u128);
+    let input_amount = u128::from_be_bytes(in_buf);
+    let expected_output = u128::from_be_bytes(out_buf);
+
+    let simulated = crate::sdk::routing_path_sdk::constant_product_output(
+        input_amount,
+        reserve_in,
+        reserve_out,
+        fee_bps,
+    )
+    .ok_or(AmmVerifyError::InsufficientReservesOrOverflow)?;
+
+    if simulated != expected_output {
+        return Err(AmmVerifyError::OutputMismatch {
+            simulated,
+            expected: expected_output,
+        });
+    }
+
+    // Standard Uniswap V2 invariant: the FULL input_amount enters the
+    // reserve; the fee accrues to the pool as LP yield (already baked
+    // into the lower output the simulator produced).
+    let new_reserve_in = reserve_in
+        .checked_add(input_amount)
+        .ok_or(AmmVerifyError::ReserveInOverflow)?;
+    if simulated > reserve_out {
+        return Err(AmmVerifyError::SimulatedExceedsReserveOut);
+    }
+    let new_reserve_out = reserve_out - simulated;
+
+    let (new_reserve_a, new_reserve_b) = if input_is_a {
+        (new_reserve_in, new_reserve_out)
+    } else {
+        (new_reserve_out, new_reserve_in)
+    };
+    Ok(Some(AmmVerifyOutcome {
+        new_reserve_a,
+        new_reserve_b,
+    }))
+}
+
 /// Locate a hop in the RouteCommit by `vault_id`.  Vault owners use
 /// this at unlock time: given the RouteCommit the trader handed them,
 /// find their own hop and verify the bound amounts / digests against
@@ -886,6 +1018,212 @@ mod tests {
             Err(RouteCommitVerifyError::InvalidInitiatorSignature) => {}
             other => panic!(
                 "post-sign tamper must invalidate signature; got {other:?}"
+            ),
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Chunk #7 — AMM constant-product re-simulation
+    //
+    // Pure-function tests on `verify_amm_swap_against_reserves`.  The
+    // chunk-#4/#5 eligibility gate runs first; this layer adds the
+    // reserve-math check that turns "signed-route execution" into
+    // "independently re-simulated reserve-math execution".
+    // ─────────────────────────────────────────────────────────────────
+
+    use dsm::vault::FulfillmentMechanism;
+
+    fn token_a_pair() -> (Vec<u8>, Vec<u8>) {
+        // Deliberately lex-canonical: A < B.
+        (b"AAA".to_vec(), b"BBB".to_vec())
+    }
+
+    fn amm_vault(reserve_a: u128, reserve_b: u128, fee_bps: u32) -> FulfillmentMechanism {
+        let (a, b) = token_a_pair();
+        FulfillmentMechanism::AmmConstantProduct {
+            token_a: a,
+            token_b: b,
+            reserve_a,
+            reserve_b,
+            fee_bps,
+        }
+    }
+
+    fn hop_for(
+        vault_id: [u8; 32],
+        token_in: &[u8],
+        token_out: &[u8],
+        input: u128,
+        expected_output: u128,
+        fee_bps: u32,
+    ) -> generated::RouteCommitHopV1 {
+        generated::RouteCommitHopV1 {
+            vault_id: vault_id.to_vec(),
+            token_in: token_in.to_vec(),
+            token_out: token_out.to_vec(),
+            input_amount_u128: input.to_be_bytes().to_vec(),
+            expected_output_amount_u128: expected_output.to_be_bytes().to_vec(),
+            fee_bps,
+            advertisement_digest: [0u8; 32].to_vec(),
+            state_number: 1,
+            unlock_spec_digest: [0u8; 32].to_vec(),
+            owner_public_key: vec![0xABu8; 64],
+        }
+    }
+
+    #[test]
+    fn amm_verify_non_amm_vault_returns_none() {
+        // Payment vault — chunk-#4/#5 gate is sufficient.
+        let payment = FulfillmentMechanism::Payment {
+            amount: 100,
+            token_id: "ERA".to_string(),
+            recipient: "recipient".to_string(),
+            verification_state: vec![],
+        };
+        let (a, b) = token_a_pair();
+        let hop = hop_for(vid(1), &a, &b, 100, 99, 30);
+        match verify_amm_swap_against_reserves(&hop, &payment) {
+            Ok(None) => {}
+            other => panic!("non-AMM vault must return Ok(None), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn amm_verify_matched_output_accepts_and_advances_reserves() {
+        let (a, b) = token_a_pair();
+        let vault = amm_vault(1_000_000, 1_000_000, 30);
+        // Compute what the simulator produces for input=10_000 to match.
+        let simulated = crate::sdk::routing_path_sdk::constant_product_output(
+            10_000, 1_000_000, 1_000_000, 30,
+        )
+        .expect("simulate");
+        let hop = hop_for(vid(1), &a, &b, 10_000, simulated, 30);
+        let outcome = verify_amm_swap_against_reserves(&hop, &vault)
+            .expect("ok")
+            .expect("AMM");
+        // Full input enters reserve_a, simulated leaves reserve_b.
+        assert_eq!(outcome.new_reserve_a, 1_000_000 + 10_000);
+        assert_eq!(outcome.new_reserve_b, 1_000_000 - simulated);
+        // Constant-product invariant should be approximately preserved
+        // (post-fee k > pre-fee k due to fee accrual to the pool).
+        let pre_k = 1_000_000u128 * 1_000_000u128;
+        let post_k = outcome.new_reserve_a * outcome.new_reserve_b;
+        assert!(
+            post_k >= pre_k,
+            "post-trade k must be >= pre-trade k (fee accrues to pool); \
+             pre={pre_k}, post={post_k}"
+        );
+    }
+
+    #[test]
+    fn amm_verify_stale_reserves_rejects_with_typed_mismatch() {
+        // Trader signed a route quoting reserves of 1M / 1M, but the
+        // vault's CURRENT reserves are 500k / 500k (someone else
+        // settled a swap in between).  Re-simulation must catch.
+        let (a, b) = token_a_pair();
+        let route_simulated = crate::sdk::routing_path_sdk::constant_product_output(
+            10_000, 1_000_000, 1_000_000, 30,
+        )
+        .expect("route simulate");
+        let hop = hop_for(vid(1), &a, &b, 10_000, route_simulated, 30);
+        let stale_vault = amm_vault(500_000, 500_000, 30); // moved
+        match verify_amm_swap_against_reserves(&hop, &stale_vault) {
+            Err(AmmVerifyError::OutputMismatch {
+                simulated,
+                expected,
+            }) => {
+                assert_eq!(expected, route_simulated);
+                let live_simulated = crate::sdk::routing_path_sdk::constant_product_output(
+                    10_000, 500_000, 500_000, 30,
+                )
+                .expect("live simulate");
+                assert_eq!(simulated, live_simulated);
+            }
+            other => panic!("expected OutputMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn amm_verify_wrong_pair_rejects() {
+        let (a, _b) = token_a_pair();
+        let vault = amm_vault(1_000_000, 1_000_000, 30);
+        // Hop names tokens that don't exist on this vault.
+        let bogus = b"XYZ".to_vec();
+        let hop = hop_for(vid(1), &a, &bogus, 10_000, 9_500, 30);
+        match verify_amm_swap_against_reserves(&hop, &vault) {
+            Err(AmmVerifyError::HopTokensDoNotMatchVaultPair) => {}
+            other => panic!("expected HopTokensDoNotMatchVaultPair, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn amm_verify_b_to_a_direction_works_symmetrically() {
+        // Vault is canonical (token_a, token_b).  A hop trading B→A
+        // must remap reserves: reserve_in = reserve_b, reserve_out =
+        // reserve_a.
+        let (a, b) = token_a_pair();
+        let vault = amm_vault(2_000_000, 1_000_000, 30);
+        // B→A swap: input is on side B, output is on side A.
+        let simulated = crate::sdk::routing_path_sdk::constant_product_output(
+            5_000, 1_000_000, 2_000_000, 30,
+        )
+        .expect("simulate");
+        let hop = hop_for(vid(1), &b, &a, 5_000, simulated, 30);
+        let outcome = verify_amm_swap_against_reserves(&hop, &vault)
+            .expect("ok")
+            .expect("AMM");
+        // Input adds to reserve_b; output subtracts from reserve_a.
+        assert_eq!(outcome.new_reserve_a, 2_000_000 - simulated);
+        assert_eq!(outcome.new_reserve_b, 1_000_000 + 5_000);
+    }
+
+    #[test]
+    fn amm_verify_zero_reserves_rejects_as_insufficient() {
+        let (a, b) = token_a_pair();
+        let vault = amm_vault(0, 0, 30);
+        let hop = hop_for(vid(1), &a, &b, 100, 50, 30);
+        match verify_amm_swap_against_reserves(&hop, &vault) {
+            Err(AmmVerifyError::InsufficientReservesOrOverflow) => {}
+            other => panic!(
+                "expected InsufficientReservesOrOverflow, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn amm_verify_malformed_amount_field_rejects() {
+        let (a, b) = token_a_pair();
+        let vault = amm_vault(1_000_000, 1_000_000, 30);
+        let mut hop = hop_for(vid(1), &a, &b, 10_000, 9_900, 30);
+        // Truncate input_amount_u128 to wrong length.
+        hop.input_amount_u128 = vec![0u8; 8];
+        match verify_amm_swap_against_reserves(&hop, &vault) {
+            Err(AmmVerifyError::AmountFieldsMustBe16BytesBigEndian) => {}
+            other => panic!(
+                "expected AmountFieldsMustBe16BytesBigEndian, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn amm_verify_reserve_in_overflow_protection() {
+        // A pool with reserves at u128::MAX would overflow on input.
+        let (a, b) = token_a_pair();
+        let vault = amm_vault(u128::MAX, 1_000, 30);
+        let simulated = crate::sdk::routing_path_sdk::constant_product_output(
+            1, u128::MAX, 1_000, 30,
+        );
+        // simulator already disqualifies via overflow internally;
+        // re-simulation will fail at InsufficientReservesOrOverflow
+        // before reserve-add overflow can fire.
+        let hop_input = 1u128;
+        let hop_expected = simulated.unwrap_or(0);
+        let hop = hop_for(vid(1), &a, &b, hop_input, hop_expected, 30);
+        match verify_amm_swap_against_reserves(&hop, &vault) {
+            Err(AmmVerifyError::InsufficientReservesOrOverflow)
+            | Err(AmmVerifyError::ReserveInOverflow) => {}
+            other => panic!(
+                "extreme-reserve hop must reject with overflow-class error, got {other:?}"
             ),
         }
     }

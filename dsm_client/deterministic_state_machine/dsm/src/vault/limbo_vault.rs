@@ -693,6 +693,23 @@ impl From<&FulfillmentMechanism> for crate::types::proto::FulfillmentMechanism {
                     })),
                 }
             }
+            FulfillmentMechanism::AmmConstantProduct {
+                token_a,
+                token_b,
+                reserve_a,
+                reserve_b,
+                fee_bps,
+            } => proto::FulfillmentMechanism {
+                kind: Some(fulfillment_mechanism::Kind::AmmConstantProduct(
+                    proto::AmmConstantProduct {
+                        token_a: token_a.clone(),
+                        token_b: token_b.clone(),
+                        reserve_a_u128: reserve_a.to_be_bytes().to_vec(),
+                        reserve_b_u128: reserve_b.to_be_bytes().to_vec(),
+                        fee_bps: *fee_bps,
+                    },
+                )),
+            },
         }
     }
 }
@@ -771,6 +788,48 @@ impl TryFrom<crate::types::proto::FulfillmentMechanism> for FulfillmentMechanism
                     out.push(FulfillmentMechanism::try_from(c)?);
                 }
                 FulfillmentMechanism::Or(out)
+            }
+            Kind::AmmConstantProduct(amm) => {
+                if amm.reserve_a_u128.len() != 16 {
+                    return Err(DsmError::serialization_error(
+                        "AmmConstantProduct",
+                        "reserve_a_u128 must be 16 bytes",
+                        None::<&str>,
+                        None::<core::convert::Infallible>,
+                    ));
+                }
+                if amm.reserve_b_u128.len() != 16 {
+                    return Err(DsmError::serialization_error(
+                        "AmmConstantProduct",
+                        "reserve_b_u128 must be 16 bytes",
+                        None::<&str>,
+                        None::<core::convert::Infallible>,
+                    ));
+                }
+                let mut a_buf = [0u8; 16];
+                a_buf.copy_from_slice(&amm.reserve_a_u128);
+                let mut b_buf = [0u8; 16];
+                b_buf.copy_from_slice(&amm.reserve_b_u128);
+                // Lex-canonical pair invariant: token_a <= token_b.  An
+                // ad/vault that violates this is malformed.
+                if !amm.token_a.is_empty()
+                    && !amm.token_b.is_empty()
+                    && amm.token_a.as_slice() > amm.token_b.as_slice()
+                {
+                    return Err(DsmError::serialization_error(
+                        "AmmConstantProduct",
+                        "token_a must be lex-lower than token_b",
+                        None::<&str>,
+                        None::<core::convert::Infallible>,
+                    ));
+                }
+                FulfillmentMechanism::AmmConstantProduct {
+                    token_a: amm.token_a,
+                    token_b: amm.token_b,
+                    reserve_a: u128::from_be_bytes(a_buf),
+                    reserve_b: u128::from_be_bytes(b_buf),
+                    fee_bps: amm.fee_bps,
+                }
             }
         })
     }
@@ -1908,6 +1967,14 @@ impl LimboVault {
             } => format!("Bitcoin HTLC vault ({expected_btc_amount_sats} sats)"),
             FulfillmentMechanism::And(v) => format!("All of {} conditions must be met", v.len()),
             FulfillmentMechanism::Or(v) => format!("Any of {} conditions must be met", v.len()),
+            FulfillmentMechanism::AmmConstantProduct {
+                reserve_a,
+                reserve_b,
+                fee_bps,
+                ..
+            } => format!(
+                "AMM constant-product (a={reserve_a}, b={reserve_b}, fee={fee_bps}bps)"
+            ),
         };
 
         let mut metadata = HashMap::new();
