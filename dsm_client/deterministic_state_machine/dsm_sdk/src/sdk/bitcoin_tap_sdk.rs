@@ -558,7 +558,13 @@ struct WithdrawalSelectorInput {
     eligible_advertisements: Vec<generated::DbtcVaultAdvertisementV1>,
 }
 
-#[cfg(test)]
+// In-process mock storage backend.  Active under `#[cfg(test)]` for
+// crate-internal tests AND under `--features demos` so example
+// binaries (notably `cargo run --example detfi_demo`) can drive the
+// full pipeline without standing up real storage nodes.  The `demos`
+// feature is opt-in (not in the default set) so production builds
+// never see this path.
+#[cfg(any(test, feature = "demos"))]
 #[derive(Default)]
 struct DbtcStorageTestState {
     list_results: std::collections::VecDeque<Result<generated::ObjectListResponseV1, String>>,
@@ -567,7 +573,7 @@ struct DbtcStorageTestState {
     object_store: HashMap<String, Vec<u8>>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "demos"))]
 static DBTC_STORAGE_TEST_STATE: once_cell::sync::Lazy<std::sync::Mutex<DbtcStorageTestState>> =
     once_cell::sync::Lazy::new(|| std::sync::Mutex::new(DbtcStorageTestState::default()));
 
@@ -2660,7 +2666,7 @@ impl BitcoinTapSdk {
     }
 
     pub(crate) async fn storage_put_bytes(key: &str, payload: &[u8]) -> Result<String, DsmError> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "demos"))]
         {
             let mut state = DBTC_STORAGE_TEST_STATE
                 .lock()
@@ -2675,7 +2681,7 @@ impl BitcoinTapSdk {
             Ok(key.to_string())
         }
 
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "demos")))]
         {
             let config = crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config()
                 .await
@@ -2703,7 +2709,7 @@ impl BitcoinTapSdk {
     }
 
     pub(crate) async fn storage_get_bytes(key: &str) -> Result<Vec<u8>, DsmError> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "demos"))]
         {
             let mut state = DBTC_STORAGE_TEST_STATE
                 .lock()
@@ -2722,7 +2728,7 @@ impl BitcoinTapSdk {
             })
         }
 
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "demos")))]
         {
             let config = crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config()
                 .await
@@ -2745,7 +2751,7 @@ impl BitcoinTapSdk {
     }
 
     pub(crate) async fn storage_delete_key(key: &str) -> Result<(), DsmError> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "demos"))]
         {
             let mut state = DBTC_STORAGE_TEST_STATE
                 .lock()
@@ -2754,7 +2760,7 @@ impl BitcoinTapSdk {
             Ok(())
         }
 
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "demos")))]
         {
             let config = crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config()
                 .await
@@ -2786,7 +2792,7 @@ impl BitcoinTapSdk {
         cursor: Option<&str>,
         limit: u32,
     ) -> Result<generated::ObjectListResponseV1, DsmError> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "demos"))]
         {
             let mut state = DBTC_STORAGE_TEST_STATE
                 .lock()
@@ -2829,7 +2835,7 @@ impl BitcoinTapSdk {
             })
         }
 
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "demos")))]
         {
             let config = crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config()
                 .await
