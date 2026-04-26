@@ -87,6 +87,56 @@ export async function listPostedDlvs(): Promise<{
 }
 
 /**
+ * Claim a DLV the local device received in posted mode.  Caller
+ * supplies the vault_id (from `listPostedDlvs`) and optional
+ * claim_proof bytes — for vaults whose `FulfillmentMechanism`
+ * does not require a proof (typical posted-mode token transfer)
+ * empty bytes are correct.
+ *
+ * `claimant_public_key` and `signature` ride empty over the wire;
+ * the Rust handler stamps the wallet's current SPHINCS+ pk and
+ * accepts the empty signature for unilateral-mode claims (the
+ * actor-self-loop routing rule already binds the claim to this
+ * device's chain).
+ */
+export async function claimPostedDlv(input: {
+  vaultId: Uint8Array;
+  claimProof?: Uint8Array;
+}): Promise<{ success: boolean; vaultIdBase32?: string; error?: string }> {
+  try {
+    if (!(input?.vaultId instanceof Uint8Array) || input.vaultId.length !== 32) {
+      return { success: false, error: 'vaultId must be 32 bytes' };
+    }
+    const req = new pb.DlvClaimV1({
+      vaultId: input.vaultId as any,
+      claimProof: (input.claimProof ?? new Uint8Array()) as any,
+      // Empty pk → handler falls back to wallet pk (existing behaviour
+      // in dlv_claim, lines 645-649 of dlv_routes.rs).
+      claimantPublicKey: new Uint8Array() as any,
+      signature: new Uint8Array() as any,
+    });
+    const argPack = new pb.ArgPack({
+      codec: pb.Codec.PROTO as any,
+      body: new Uint8Array(req.toBinary()),
+    });
+    const resBytes = await routerInvokeBin('dlv.claim', new Uint8Array(argPack.toBinary()));
+    const env = decodeFramedEnvelopeV3(resBytes);
+    if (env.payload.case === 'error') {
+      return { success: false, error: env.payload.value.message || 'dlv.claim failed' };
+    }
+    if (env.payload.case === 'appStateResponse') {
+      return { success: true, vaultIdBase32: env.payload.value.value ?? '' };
+    }
+    return {
+      success: false,
+      error: `Unexpected response payload: ${env.payload.case}`,
+    };
+  } catch (e: any) {
+    return { success: false, error: e?.message || 'claimPostedDlv failed' };
+  }
+}
+
+/**
  * Fetch + verify + mirror every active advertisement into the local
  * DLVManager.  Returns the Base32 vault_ids that were freshly
  * inserted in this call (already-mirrored vaults are silently

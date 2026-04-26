@@ -13,6 +13,7 @@ import DevPolicyScreen from './screens/DevPolicyScreen';
 import DevDeTfiLaunchScreen from './screens/DevDeTfiLaunchScreen';
 import DevAmmVaultScreen from './screens/DevAmmVaultScreen';
 import DevAmmTradeScreen from './screens/DevAmmTradeScreen';
+import DevPostedInboxScreen from './screens/DevPostedInboxScreen';
 import LockSetupScreen from './screens/LockSetupScreen';
 import QRCodeScannerScreen from './screens/QRCodeScannerScreen';
 import MyContactInfoScreen from './screens/MyContactInfoScreen';
@@ -32,6 +33,7 @@ const MemoDevPolicy = React.memo(DevPolicyScreen);
 const MemoDevDeTfiLaunch = React.memo(DevDeTfiLaunchScreen);
 const MemoDevAmmVault = React.memo(DevAmmVaultScreen);
 const MemoDevAmmTrade = React.memo(DevAmmTradeScreen);
+const MemoDevPostedInbox = React.memo(DevPostedInboxScreen);
 const MemoLockSetup = React.memo(LockSetupScreen);
 const MemoQR = React.memo(QRCodeScannerScreen);
 const MemoMyContact = React.memo(MyContactInfoScreen);
@@ -86,6 +88,8 @@ export default function AppScreenRouter({
       return <MemoDevAmmVault />;
     case 'dev_amm_trade':
       return <MemoDevAmmTrade />;
+    case 'dev_posted_inbox':
+      return <MemoDevPostedInbox />;
     case 'lock_setup':
       return <MemoLockSetup onNavigate={onNavigate} />;
     case 'qr':
