@@ -884,6 +884,23 @@ message FindAndBindRouteRequest {
   // pk and overwrites whatever the bind step put there.
 }
 
+// Owner-side summary of an AMM vault for the monitor screen.
+// Returned by `dlv.listOwnedAmmVaults` (one entry per vault whose
+// `creator_public_key` matches the local wallet's signing pk).
+message AmmVaultSummaryV1 {
+  bytes  vault_id                  = 1 [(dsm_fixed_len)=32];
+  bytes  token_a                   = 2 [(dsm_max_len)=64];
+  bytes  token_b                   = 3 [(dsm_max_len)=64];
+  bytes  reserve_a_u128            = 4 [(dsm_fixed_len)=16];
+  bytes  reserve_b_u128            = 5 [(dsm_fixed_len)=16];
+  uint32 fee_bps                   = 6;
+  // Mirror of the published advertisement's state_number; 0 if not advertised.
+  uint64 advertised_state_number   = 7;
+  // True if a routing-vault advertisement was found at the canonical
+  // pair key for this vault on storage nodes.
+  bool   routing_advertised        = 8;
+}
+
 // One hop in a `RouteCommitV1`.  Bound at routing time to the vault
 // advertisement digest + state number that was current when the path
 // was selected — recipients re-verify these fields against the live

@@ -145,6 +145,82 @@ export async function createDlv(
 }
 
 /**
+ * Create a posted-mode DLV addressed to a specific recipient (Kyber
+ * pk).  Pure proto framing — no crypto in TS per the Track C.4
+ * accept-or-stamp pattern: `creatorPublicKey` and `signature` ride
+ * empty over the wire and the Rust `dlv.create` handler fills both
+ * in using the wallet's current SPHINCS+ key.
+ *
+ * The Track B Rust path on `dlv.create` already publishes the
+ * posted-DLV advertisement when `intended_recipient` is non-empty,
+ * so this single bridge call covers create + deliver.
+ *
+ * Returns the vault id Base32 on success.
+ */
+export async function createPostedDlv(input: {
+  /** Recipient Kyber-1024 pk (1568 bytes). */
+  recipientKyberPk: Uint8Array;
+  /** 32-byte CPTA anchor of the policy governing the locked token. */
+  policyDigest: Uint8Array;
+  /** Optional locked token id (empty for content-only vault). */
+  tokenId?: string;
+  /** Optional locked amount (u128, big-endian).  0 / omit = no lock. */
+  lockedAmount?: bigint;
+  /** Optional content bytes (default: small placeholder). */
+  content?: Uint8Array;
+  /** Canonical `FulfillmentMechanism` proto bytes.  Default: empty
+   *  Payment fulfillment for content-only vaults — Rust will
+   *  reject if it can't decode the FulfillmentMechanism, so callers
+   *  expecting a specific unlock condition supply their own bytes. */
+  fulfillmentBytes?: Uint8Array;
+}): Promise<{ success: boolean; id?: string; error?: string }> {
+  try {
+    if (
+      !(input?.recipientKyberPk instanceof Uint8Array) ||
+      input.recipientKyberPk.length === 0
+    ) {
+      return { success: false, error: 'recipientKyberPk required' };
+    }
+    if (!input?.policyDigest || input.policyDigest.length !== 32) {
+      return { success: false, error: 'policyDigest must be 32 bytes' };
+    }
+    if (input.lockedAmount !== undefined && input.lockedAmount < 0n) {
+      return { success: false, error: 'lockedAmount must be non-negative' };
+    }
+
+    const content = input.content ?? new TextEncoder().encode('Posted DLV');
+    const fulfillmentBytes =
+      input.fulfillmentBytes ?? new Uint8Array();
+    const lockedBytes = lockedAmountU128BigEndian(input.lockedAmount ?? 0n);
+
+    const spec = new pb.DlvSpecV1({
+      policyDigest: input.policyDigest as any,
+      // Empty digests → Rust accept-or-compute (chunk #6).
+      contentDigest: new Uint8Array() as any,
+      fulfillmentDigest: new Uint8Array() as any,
+      intendedRecipient: input.recipientKyberPk as any,
+      fulfillmentBytes: fulfillmentBytes as any,
+      content: content as any,
+    });
+    const req = new pb.DlvInstantiateV1({
+      spec,
+      // Empty pk + signature → Rust stamps wallet pk + signs (Track
+      // C.4 accept-or-stamp).
+      creatorPublicKey: new Uint8Array() as any,
+      tokenId: (input.tokenId
+        ? new TextEncoder().encode(input.tokenId)
+        : new Uint8Array()) as any,
+      lockedAmountU128: lockedBytes as any,
+      signature: new Uint8Array() as any,
+    });
+    const lockBase32 = encodeBase32Crockford(new Uint8Array(req.toBinary()));
+    return await createCustomDlv({ lock: lockBase32 });
+  } catch (e: any) {
+    return { success: false, error: e?.message || 'createPostedDlv failed' };
+  }
+}
+
+/**
  * Create a DLV (Deterministic Limbo Vault) from a serialised DlvInstantiateV1 proto.
  *
  * Commit 8 replaces this thin Base32-in/Base32-out wrapper with a typed
@@ -181,12 +257,9 @@ export async function createCustomDlv(params: {
     if (!req.spec.policyDigest || req.spec.policyDigest.length !== 32) {
       return { success: false, error: 'DlvSpecV1.policy_digest must be 32 bytes' };
     }
-    if (!req.creatorPublicKey || req.creatorPublicKey.length === 0) {
-      return { success: false, error: 'DlvInstantiateV1.creator_public_key is required' };
-    }
-    if (!req.signature || req.signature.length === 0) {
-      return { success: false, error: 'DlvInstantiateV1.signature is required' };
-    }
+    // `creatorPublicKey` and `signature` may ride empty over the wire:
+    // the Track C.4 accept-or-stamp path on `dlv.create` stamps the
+    // wallet pk + signs Rust-side.  Frontend does NOT validate them.
 
     const argPack = new pb.ArgPack({
       codec: pb.Codec.PROTO as any,

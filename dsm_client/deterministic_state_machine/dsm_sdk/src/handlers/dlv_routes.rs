@@ -26,6 +26,14 @@ fn unwrap_argpack(args: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 impl AppRouterImpl {
+    /// Dispatch handler for `dlv.*` query (read-only) routes.
+    pub(crate) async fn handle_dlv_query(&self, q: crate::bridge::AppQuery) -> AppResult {
+        match q.path.as_str() {
+            "dlv.listOwnedAmmVaults" => self.dlv_list_owned_amm_vaults(q).await,
+            other => err(format!("unknown dlv query path: {other}")),
+        }
+    }
+
     /// Dispatch handler for `dlv.*` invoke routes.
     pub(crate) async fn handle_dlv_invoke(&self, i: AppInvoke) -> AppResult {
         match i.method.as_str() {
@@ -36,6 +44,110 @@ impl AppRouterImpl {
             "dlv.unlockRouted" => self.dlv_unlock_routed(i).await,
             other => err(format!("unknown dlv invoke method: {other}")),
         }
+    }
+
+    /// `dlv.listOwnedAmmVaults` (query) — enumerate the local
+    /// `DLVManager` and return the AMM constant-product vaults whose
+    /// `creator_public_key` matches the wallet's current SPHINCS+ pk.
+    /// Each entry carries the live reserves + fee + advertised
+    /// state_number from storage (best-effort: storage failure
+    /// renders the vault as `routing_advertised = false`).
+    async fn dlv_list_owned_amm_vaults(&self, _q: crate::bridge::AppQuery) -> AppResult {
+        let wallet_pk = match crate::sdk::signing_authority::current_public_key() {
+            Ok(pk) if !pk.is_empty() => pk,
+            Ok(_) => {
+                return err(
+                    "dlv.listOwnedAmmVaults: wallet signing public key is empty".into(),
+                );
+            }
+            Err(e) => {
+                return err(format!(
+                    "dlv.listOwnedAmmVaults: get_current_public_key failed: {e}"
+                ));
+            }
+        };
+
+        let dlv_manager = self.bitcoin_tap.dlv_manager();
+        let summaries: Vec<generated::AmmVaultSummaryV1> = {
+            let vault_ids = match dlv_manager.list_vaults().await {
+                Ok(v) => v,
+                Err(e) => {
+                    return err(format!(
+                        "dlv.listOwnedAmmVaults: list_vaults failed: {e}"
+                    ));
+                }
+            };
+            let mut out: Vec<generated::AmmVaultSummaryV1> = Vec::new();
+            for vid in vault_ids {
+                let vault_lock = match dlv_manager.get_vault(&vid).await {
+                    Ok(l) => l,
+                    Err(_) => continue,
+                };
+                let vault = vault_lock.lock().await;
+                if vault.creator_public_key.as_slice() != wallet_pk.as_slice() {
+                    continue;
+                }
+                let (token_a, token_b, reserve_a, reserve_b, fee_bps) = match &vault.fulfillment_condition
+                {
+                    dsm::vault::FulfillmentMechanism::AmmConstantProduct {
+                        token_a,
+                        token_b,
+                        reserve_a,
+                        reserve_b,
+                        fee_bps,
+                    } => (
+                        token_a.clone(),
+                        token_b.clone(),
+                        *reserve_a,
+                        *reserve_b,
+                        *fee_bps,
+                    ),
+                    _ => continue,
+                };
+                drop(vault);
+
+                // Best-effort storage fetch for advertised state_number.
+                let (state_number, advertised) =
+                    match crate::sdk::routing_sdk::load_active_advertisements_for_pair(
+                        &token_a, &token_b,
+                    )
+                    .await
+                    {
+                        Ok(ads) => match ads
+                            .into_iter()
+                            .find(|p| p.advertisement.vault_id == vid.to_vec())
+                        {
+                            Some(p) => (p.advertisement.updated_state_number, true),
+                            None => (0, false),
+                        },
+                        Err(_) => (0, false),
+                    };
+
+                out.push(generated::AmmVaultSummaryV1 {
+                    vault_id: vid.to_vec(),
+                    token_a,
+                    token_b,
+                    reserve_a_u128: reserve_a.to_be_bytes().to_vec(),
+                    reserve_b_u128: reserve_b.to_be_bytes().to_vec(),
+                    fee_bps,
+                    advertised_state_number: state_number,
+                    routing_advertised: advertised,
+                });
+            }
+            out
+        };
+
+        let lines: Vec<String> = summaries
+            .iter()
+            .map(|s| {
+                crate::util::text_id::encode_base32_crockford(&s.encode_to_vec())
+            })
+            .collect();
+        let resp = generated::AppStateResponse {
+            key: "dlv.listOwnedAmmVaults".to_string(),
+            value: Some(lines.join("\n")),
+        };
+        pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
     }
 
     /// dlv.create — decode DlvInstantiateV1, verify digests, prepare the

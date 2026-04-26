@@ -165,3 +165,89 @@ export async function createAmmVault(input: {
 
 // Re-export for screens that prefer importing both AMM helpers from one place.
 export { encodeBase32Crockford } from '../utils/textId';
+
+import { decodeBase32Crockford, encodeBase32Crockford } from '../utils/textId';
+import { decodeFramedEnvelopeV3 } from './decoding';
+import { routerQueryBin } from './WebViewBridge';
+
+/**
+ * Lightweight summary returned by `listOwnedAmmVaults`.  Bigint
+ * reserves keep the full u128 range without rounding.
+ */
+export interface AmmVaultSummary {
+  vaultIdBase32: string;
+  tokenA: Uint8Array;
+  tokenB: Uint8Array;
+  reserveA: bigint;
+  reserveB: bigint;
+  feeBps: number;
+  advertisedStateNumber: bigint;
+  routingAdvertised: boolean;
+}
+
+function decodeReserveBigInt(bytes: Uint8Array): bigint {
+  let acc = 0n;
+  for (const b of bytes) {
+    acc = (acc << 8n) | BigInt(b);
+  }
+  return acc;
+}
+
+/**
+ * Owner: enumerate the local DLVManager's AMM vaults (filtered to
+ * those whose creator pk matches the wallet's signing pk).  Each
+ * entry carries the live reserves + fee + advertised state_number
+ * from storage.  Powers the `DevAmmMonitorScreen`.
+ *
+ * Returns a typed `AmmVaultSummary[]`.  Rust-side filtering is the
+ * authority — TS just decodes the wire shape (newline-separated
+ * Base32 of `AmmVaultSummaryV1` protos).
+ */
+export async function listOwnedAmmVaults(): Promise<{
+  success: boolean;
+  vaults?: AmmVaultSummary[];
+  error?: string;
+}> {
+  try {
+    const argPack = new pb.ArgPack({
+      codec: pb.Codec.PROTO as any,
+      body: new Uint8Array(),
+    });
+    const resBytes = await routerQueryBin(
+      'dlv.listOwnedAmmVaults',
+      new Uint8Array(argPack.toBinary()),
+    );
+    const env = decodeFramedEnvelopeV3(resBytes);
+    if (env.payload.case === 'error') {
+      return {
+        success: false,
+        error: env.payload.value.message || 'dlv.listOwnedAmmVaults failed',
+      };
+    }
+    if (env.payload.case !== 'appStateResponse') {
+      return {
+        success: false,
+        error: `Unexpected response payload: ${String(env.payload.case)}`,
+      };
+    }
+    const value = env.payload.value.value ?? '';
+    const lines = value ? value.split('\n').filter((l) => l.length > 0) : [];
+    const vaults: AmmVaultSummary[] = lines.map((line) => {
+      const summaryBytes = decodeBase32Crockford(line);
+      const summary = pb.AmmVaultSummaryV1.fromBinary(new Uint8Array(summaryBytes));
+      return {
+        vaultIdBase32: encodeBase32Crockford(summary.vaultId),
+        tokenA: summary.tokenA,
+        tokenB: summary.tokenB,
+        reserveA: decodeReserveBigInt(summary.reserveAU128),
+        reserveB: decodeReserveBigInt(summary.reserveBU128),
+        feeBps: summary.feeBps,
+        advertisedStateNumber: summary.advertisedStateNumber,
+        routingAdvertised: summary.routingAdvertised,
+      };
+    });
+    return { success: true, vaults };
+  } catch (e: any) {
+    return { success: false, error: e?.message || 'listOwnedAmmVaults failed' };
+  }
+}

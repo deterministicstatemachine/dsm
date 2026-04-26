@@ -153,7 +153,11 @@ describe('dlv.ts', () => {
       expect(result.error).toMatch(/policy_digest must be 32 bytes/);
     });
 
-    test('returns error when creator_public_key is empty', async () => {
+    test('forwards empty creator_public_key + signature to Rust (Track C.4 accept-or-stamp)', async () => {
+      // Frontend does NOT validate empty pk / signature — those ride
+      // over the wire and the Rust handler stamps the wallet pk and
+      // signs.  This test verifies the bridge call goes through with
+      // empty fields rather than rejecting client-side.
       const req = new pb.DlvInstantiateV1({
         spec: new pb.DlvSpecV1({
           policyDigest: new Uint8Array(32).fill(0x02) as any,
@@ -161,13 +165,22 @@ describe('dlv.ts', () => {
           fulfillmentDigest: new Uint8Array(32).fill(0x04) as any,
         }),
         creatorPublicKey: new Uint8Array() as any,
-        signature: new Uint8Array(64).fill(0x22) as any,
+        signature: new Uint8Array() as any,
       });
       const lockB32 = encodeInstantiateToBase32(req);
 
+      const env = new pb.Envelope({
+        version: 3,
+        payload: {
+          case: 'appStateResponse',
+          value: new pb.AppStateResponse({ value: 'STAMPED_VAULT_ID_B32' }),
+        },
+      });
+      (routerInvokeBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
+
       const result = await createCustomDlv({ lock: lockB32 });
-      expect(result.success).toBe(false);
-      expect(result.error).toMatch(/creator_public_key.*required/);
+      expect(result.success).toBe(true);
+      expect(result.id).toBe('STAMPED_VAULT_ID_B32');
     });
 
     test('returns error when bridge throws', async () => {

@@ -2562,6 +2562,8 @@ impl AppRouter for AppRouterImpl {
             p if p.starts_with("bitcoin.") => self.handle_bitcoin_query(q).await,
             // Posted-mode DLV discovery (recipient-side, read-only)
             p if p.starts_with("posted_dlv.") => self.handle_posted_dlv_query(q).await,
+            // DLV read-only routes (e.g. owner inventory monitor)
+            p if p.starts_with("dlv.") => self.handle_dlv_query(q).await,
             // DeTFi route-commit utilities (compute X, anchor visibility)
             p if p.starts_with("route.") => self.handle_route_query(q).await,
             _ => {

@@ -7617,6 +7617,94 @@ export class FindAndBindRouteRequest extends Message<FindAndBindRouteRequest> {
 }
 
 /**
+ * Owner-side summary of an AMM vault for the monitor screen.
+ * Returned by `dlv.listOwnedAmmVaults` (one entry per vault whose
+ * `creator_public_key` matches the local wallet's signing pk).
+ *
+ * @generated from message dsm.AmmVaultSummaryV1
+ */
+export class AmmVaultSummaryV1 extends Message<AmmVaultSummaryV1> {
+  /**
+   * @generated from field: bytes vault_id = 1;
+   */
+  vaultId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes token_a = 2;
+   */
+  tokenA = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes token_b = 3;
+   */
+  tokenB = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes reserve_a_u128 = 4;
+   */
+  reserveAU128 = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes reserve_b_u128 = 5;
+   */
+  reserveBU128 = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint32 fee_bps = 6;
+   */
+  feeBps = 0;
+
+  /**
+   * Mirror of the published advertisement's state_number; 0 if not advertised.
+   *
+   * @generated from field: uint64 advertised_state_number = 7;
+   */
+  advertisedStateNumber = protoInt64.zero;
+
+  /**
+   * True if a routing-vault advertisement was found at the canonical
+   * pair key for this vault on storage nodes.
+   *
+   * @generated from field: bool routing_advertised = 8;
+   */
+  routingAdvertised = false;
+
+  constructor(data?: PartialMessage<AmmVaultSummaryV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AmmVaultSummaryV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "token_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "token_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "reserve_a_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "reserve_b_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "fee_bps", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 7, name: "advertised_state_number", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 8, name: "routing_advertised", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AmmVaultSummaryV1 {
+    return new AmmVaultSummaryV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AmmVaultSummaryV1 {
+    return new AmmVaultSummaryV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AmmVaultSummaryV1 {
+    return new AmmVaultSummaryV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AmmVaultSummaryV1 | PlainMessage<AmmVaultSummaryV1> | undefined, b: AmmVaultSummaryV1 | PlainMessage<AmmVaultSummaryV1> | undefined): boolean {
+    return proto3.util.equals(AmmVaultSummaryV1, a, b);
+  }
+}
+
+/**
  * One hop in a `RouteCommitV1`.  Bound at routing time to the vault
  * advertisement digest + state number that was current when the path
  * was selected — recipients re-verify these fields against the live

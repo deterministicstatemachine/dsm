@@ -832,6 +832,44 @@ fn amm_reserve_update_uses_full_input_amount() {
     );
 }
 
+/// Tier 1 invariant — `dlv.listOwnedAmmVaults` MUST be wired into the
+/// `dlv.*` query dispatch and MUST delegate filtering to the audited
+/// signing-authority + DLVManager primitives.  Without this, the AMM
+/// monitor screen has no data source.  A regression that
+/// re-implemented the filter inline would silently bypass the
+/// "wallet pk owns the vault" check.
+#[test]
+fn dlv_list_owned_amm_vaults_is_dispatched_and_delegates() {
+    let routes_src = read(sdk_path("src/handlers/dlv_routes.rs"));
+    assert!(
+        routes_src.contains("\"dlv.listOwnedAmmVaults\" => self.dlv_list_owned_amm_vaults(q).await,"),
+        "regression: dlv.listOwnedAmmVaults dispatch edge missing in handle_dlv_query"
+    );
+    assert!(
+        routes_src.contains("crate::sdk::signing_authority::current_public_key()"),
+        "regression: dlv.listOwnedAmmVaults no longer reaches into \
+         signing_authority for the owner-filter wallet pk"
+    );
+    assert!(
+        routes_src.contains("self.bitcoin_tap.dlv_manager()"),
+        "regression: dlv.listOwnedAmmVaults no longer reads vaults from \
+         the DLVManager"
+    );
+    assert!(
+        routes_src.contains("crate::sdk::routing_sdk::load_active_advertisements_for_pair"),
+        "regression: dlv.listOwnedAmmVaults no longer cross-references \
+         the routing-vault advertisements for state_number / advertised flag"
+    );
+
+    let app_router_src = read(sdk_path("src/handlers/app_router_impl.rs"));
+    assert!(
+        app_router_src.contains(
+            "p if p.starts_with(\"dlv.\") => self.handle_dlv_query(q).await,"
+        ),
+        "regression: dlv.* query dispatch edge missing in app_router_impl"
+    );
+}
+
 /// Republish-on-settled invariant — `dlv.unlockRouted` MUST call
 /// `routing_sdk::republish_active_advertisement_with_reserves` after
 /// the post-trade vault reserve update so the next trader's quote
