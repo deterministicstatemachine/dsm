@@ -115,28 +115,29 @@ export async function computeExternalCommitment(
 /**
  * Publish the external-commitment anchor to storage nodes.  Caller
  * supplies the 32-byte X (typically obtained via
- * `computeExternalCommitment` first), the publisher's SPHINCS+
- * public key, and an optional human-readable label.
+ * `computeExternalCommitment` first) and an optional human-readable
+ * label.  `publisherPublicKey` is optional: when omitted the Rust
+ * handler stamps the wallet's current SPHINCS+ pk per the
+ * "all crypto stays in Rust" rule.
  *
  * Once this resolves successfully every vault on the route may
  * atomically unlock — visibility of X is the trigger.
  */
 export async function publishExternalCommitment(input: {
   x: Uint8Array;
-  publisherPublicKey: Uint8Array;
+  /** Optional — empty / omitted lets Rust stamp the wallet pk. */
+  publisherPublicKey?: Uint8Array;
   label?: string;
 }): Promise<{ success: boolean; xBase32?: string; error?: string }> {
   try {
     if (!input?.x || input.x.length !== 32) {
       return { success: false, error: 'x must be 32 bytes' };
     }
-    if (!input.publisherPublicKey || input.publisherPublicKey.length === 0) {
-      return { success: false, error: 'publisherPublicKey is required' };
-    }
     const anchor = new pb.ExternalCommitmentV1({
       version: 1,
       x: input.x as any,
-      publisherPublicKey: input.publisherPublicKey as any,
+      // Empty bytes → Rust accept-or-stamp; the wallet pk is filled in.
+      publisherPublicKey: (input.publisherPublicKey ?? new Uint8Array()) as any,
       label: input.label ?? '',
     });
     const resBytes = await routerInvokeBin(
@@ -264,7 +265,8 @@ export async function publishRoutingAdvertisement(input: {
   feeBps: number;
   unlockSpecDigest: Uint8Array;
   unlockSpecKey: string;
-  ownerPublicKey: Uint8Array;
+  /** Optional — empty / omitted lets Rust stamp the wallet pk. */
+  ownerPublicKey?: Uint8Array;
   vaultProtoBytes: Uint8Array;
 }): Promise<{ success: boolean; vaultIdBase32?: string; error?: string }> {
   try {
@@ -273,9 +275,6 @@ export async function publishRoutingAdvertisement(input: {
     }
     if (!input.unlockSpecDigest || input.unlockSpecDigest.length !== 32) {
       return { success: false, error: 'unlockSpecDigest must be 32 bytes' };
-    }
-    if (!input.ownerPublicKey || input.ownerPublicKey.length === 0) {
-      return { success: false, error: 'ownerPublicKey is required' };
     }
     if (!input.vaultProtoBytes || input.vaultProtoBytes.length === 0) {
       return { success: false, error: 'vaultProtoBytes is required' };
@@ -289,7 +288,8 @@ export async function publishRoutingAdvertisement(input: {
       feeBps: input.feeBps,
       unlockSpecDigest: input.unlockSpecDigest as any,
       unlockSpecKey: input.unlockSpecKey,
-      ownerPublicKey: input.ownerPublicKey as any,
+      // Empty bytes → Rust accept-or-stamp; wallet pk is filled in.
+      ownerPublicKey: (input.ownerPublicKey ?? new Uint8Array()) as any,
       vaultProtoBytes: input.vaultProtoBytes as any,
     });
     const resBytes = await routerInvokeBin(

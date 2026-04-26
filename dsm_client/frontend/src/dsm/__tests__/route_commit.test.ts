@@ -155,13 +155,30 @@ describe('route_commit.ts', () => {
       expect(routerInvokeBin).not.toHaveBeenCalled();
     });
 
-    test('rejects empty publisher_public_key', async () => {
+    test('forwards empty publisher_public_key to Rust (Track C.5 accept-or-stamp)', async () => {
+      // Per the architectural rule, the wallet pk is stamped Rust-side.
+      // The TS binding must NOT reject empty bytes — it should pass them
+      // through so the handler can fill in the wallet's current pk.
+      (routerInvokeBin as jest.Mock).mockResolvedValue(appStateEnvelope('XB32'));
       const result = await publishExternalCommitment({
         x: validX,
         publisherPublicKey: new Uint8Array(0),
       });
-      expect(result.success).toBe(false);
-      expect(result.error).toMatch(/publisherPublicKey/i);
+      expect(result.success).toBe(true);
+      const [, body] = (routerInvokeBin as jest.Mock).mock.calls[0];
+      const argPack = pb.ArgPack.fromBinary(body);
+      const anchor = pb.ExternalCommitmentV1.fromBinary(argPack.body);
+      expect(anchor.publisherPublicKey.length).toBe(0);
+    });
+
+    test('omitted publisher_public_key forwards empty bytes (default accept-or-stamp)', async () => {
+      (routerInvokeBin as jest.Mock).mockResolvedValue(appStateEnvelope('XB32'));
+      const result = await publishExternalCommitment({ x: validX });
+      expect(result.success).toBe(true);
+      const [, body] = (routerInvokeBin as jest.Mock).mock.calls[0];
+      const argPack = pb.ArgPack.fromBinary(body);
+      const anchor = pb.ExternalCommitmentV1.fromBinary(argPack.body);
+      expect(anchor.publisherPublicKey.length).toBe(0);
     });
 
     test('omitted label defaults to empty string', async () => {
@@ -335,13 +352,33 @@ describe('route_commit.ts', () => {
       expect(result.error).toMatch(/32 bytes/);
     });
 
-    test('rejects empty owner public key', async () => {
+    test('forwards empty owner public key to Rust (Track C.5 accept-or-stamp)', async () => {
+      (routerInvokeBin as jest.Mock).mockResolvedValue(
+        appStateEnvelope(encodeBase32Crockford(validInput.vaultId)),
+      );
       const result = await publishRoutingAdvertisement({
         ...validInput,
         ownerPublicKey: new Uint8Array(0),
       });
-      expect(result.success).toBe(false);
-      expect(result.error).toMatch(/ownerPublicKey/i);
+      expect(result.success).toBe(true);
+      const [, body] = (routerInvokeBin as jest.Mock).mock.calls[0];
+      const argPack = pb.ArgPack.fromBinary(body);
+      const req = pb.PublishRoutingAdvertisementRequest.fromBinary(argPack.body);
+      expect(req.ownerPublicKey.length).toBe(0);
+    });
+
+    test('omitted owner public key forwards empty bytes (default accept-or-stamp)', async () => {
+      (routerInvokeBin as jest.Mock).mockResolvedValue(
+        appStateEnvelope(encodeBase32Crockford(validInput.vaultId)),
+      );
+      const { ownerPublicKey, ...inputWithoutPk } = validInput;
+      const _ = ownerPublicKey;
+      const result = await publishRoutingAdvertisement(inputWithoutPk);
+      expect(result.success).toBe(true);
+      const [, body] = (routerInvokeBin as jest.Mock).mock.calls[0];
+      const argPack = pb.ArgPack.fromBinary(body);
+      const req = pb.PublishRoutingAdvertisementRequest.fromBinary(argPack.body);
+      expect(req.ownerPublicKey.length).toBe(0);
     });
 
     test('rejects wrong-length unlockSpecDigest', async () => {

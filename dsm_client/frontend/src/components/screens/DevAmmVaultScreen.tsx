@@ -146,13 +146,8 @@ export default function DevAmmVaultScreen(): JSX.Element {
       const vaultProtoPlaceholder = new TextEncoder().encode(
         `dev-amm-vault-${lastVaultIdB32}`,
       );
-      const ownerPlaceholder = new Uint8Array(64);
-      // Owner pk is stamped at the routing-vault advertisement layer
-      // by the publishing device's wallet.  Placeholder zeros are
-      // safe here because the chunk-#1 advertisement does not
-      // signature-verify the owner pk; chunk #5 / chunk #7 verify
-      // RouteCommits separately.
-
+      // ownerPublicKey omitted → Rust stamps the wallet pk per the
+      // Track C.5 accept-or-stamp pattern.  No crypto in TS.
       const result = await publishRoutingAdvertisement({
         vaultId: vaultIdBytes,
         tokenA: new TextEncoder().encode(tokenA),
@@ -162,7 +157,6 @@ export default function DevAmmVaultScreen(): JSX.Element {
         feeBps: feeBpsVal,
         unlockSpecDigest: policyAnchorBytes,
         unlockSpecKey: 'defi/spec/dev-amm',
-        ownerPublicKey: ownerPlaceholder,
         vaultProtoBytes: vaultProtoPlaceholder,
       });
       if (result.success) {

@@ -202,15 +202,10 @@ export default function DevAmmTradeScreen(): JSX.Element {
 
       // 5. Publish anchor
       updateStep(4, 'running');
-      // Wallet pk is exposed via the existing wallet bridge; for a
-      // dev-tools screen we forward an empty publisher pk and let the
-      // handler reject if needed (Track C.4 follow-up: stamp wallet pk
-      // on empty publisher field too).  For now, use a zero placeholder
-      // — the chunk #4 anchor verifier checks digest binding, not pk.
-      const publisherPlaceholder = new Uint8Array(64);
+      // publisherPublicKey omitted → Rust stamps wallet pk per the
+      // Track C.5 accept-or-stamp pattern.  No crypto in TS.
       const pubRes = await publishExternalCommitment({
         x: xBytes,
-        publisherPublicKey: publisherPlaceholder,
         label: 'dev-amm-trade',
       });
       if (!pubRes.success) {

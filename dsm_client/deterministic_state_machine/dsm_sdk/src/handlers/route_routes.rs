@@ -245,8 +245,13 @@ impl AppRouterImpl {
 
     /// `route.publishExternalCommitment` — writes the anchor to
     /// storage nodes.  Body MUST decode as `ExternalCommitmentV1`;
-    /// the handler enforces `len(x) == 32` and a non-empty publisher
-    /// public key before the put.
+    /// the handler enforces `len(x) == 32`.
+    ///
+    /// `publisher_public_key` is accept-or-stamp per the same rule
+    /// chunk #6 / Track C.4 use elsewhere: empty → handler stamps
+    /// the wallet's current SPHINCS+ pk; non-empty → honoured as-is.
+    /// Frontend trader UI passes empty bytes; routing-service
+    /// integrations pass their own pk.
     async fn route_publish_external_commitment(&self, i: AppInvoke) -> AppResult {
         let bytes = match unwrap_argpack(&i.args) {
             Ok(b) => b,
@@ -257,7 +262,7 @@ impl AppRouterImpl {
                 "route.publishExternalCommitment: empty ExternalCommitmentV1 payload".into(),
             );
         }
-        let req = match generated::ExternalCommitmentV1::decode(&*bytes) {
+        let mut req = match generated::ExternalCommitmentV1::decode(&*bytes) {
             Ok(r) => r,
             Err(e) => {
                 return err(format!(
@@ -271,10 +276,24 @@ impl AppRouterImpl {
                 req.x.len()
             ));
         }
+        // Accept-or-stamp: empty pk → wallet pk; non-empty → caller-supplied.
         if req.publisher_public_key.is_empty() {
-            return err(
-                "route.publishExternalCommitment: publisher_public_key is required".into(),
-            );
+            match crate::sdk::signing_authority::current_public_key() {
+                Ok(pk) if !pk.is_empty() => req.publisher_public_key = pk,
+                Ok(_) => {
+                    return err(
+                        "route.publishExternalCommitment: empty publisher_public_key \
+                         requested wallet stamping but the wallet signing pk is empty"
+                            .into(),
+                    );
+                }
+                Err(e) => {
+                    return err(format!(
+                        "route.publishExternalCommitment: empty publisher_public_key \
+                         requested wallet stamping but get_current_public_key failed: {e}"
+                    ));
+                }
+            }
         }
         let mut x = [0u8; 32];
         x.copy_from_slice(&req.x);
@@ -314,7 +333,7 @@ impl AppRouterImpl {
             Ok(b) => b,
             Err(e) => return err(format!("route.publishRoutingAdvertisement: {e}")),
         };
-        let req = match generated::PublishRoutingAdvertisementRequest::decode(&*bytes) {
+        let mut req = match generated::PublishRoutingAdvertisementRequest::decode(&*bytes) {
             Ok(r) => r,
             Err(e) => {
                 return err(format!(
@@ -340,10 +359,28 @@ impl AppRouterImpl {
                 "route.publishRoutingAdvertisement: vault_proto_bytes is required".into(),
             );
         }
+        // Accept-or-stamp: empty owner pk → wallet pk; non-empty →
+        // caller-supplied.  Same pattern as chunk #6 / Track C.4 /
+        // route.publishExternalCommitment above.  Frontend AMM owner
+        // UI passes empty bytes; routing-service integrations pass
+        // their own pk.
         if req.owner_public_key.is_empty() {
-            return err(
-                "route.publishRoutingAdvertisement: owner_public_key is required".into(),
-            );
+            match crate::sdk::signing_authority::current_public_key() {
+                Ok(pk) if !pk.is_empty() => req.owner_public_key = pk,
+                Ok(_) => {
+                    return err(
+                        "route.publishRoutingAdvertisement: empty owner_public_key \
+                         requested wallet stamping but the wallet signing pk is empty"
+                            .into(),
+                    );
+                }
+                Err(e) => {
+                    return err(format!(
+                        "route.publishRoutingAdvertisement: empty owner_public_key \
+                         requested wallet stamping but get_current_public_key failed: {e}"
+                    ));
+                }
+            }
         }
 
         let mut vault_id = [0u8; 32];
