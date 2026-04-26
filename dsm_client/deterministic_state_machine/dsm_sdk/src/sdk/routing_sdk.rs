@@ -200,6 +200,49 @@ pub(crate) async fn publish_terminal_state(
     Ok(())
 }
 
+/// Republish an existing routing-vault advertisement with new reserves
+/// after a settled swap.  Reads the current ad from storage, updates
+/// `reserve_a_u128` / `reserve_b_u128` to the post-trade values,
+/// increments `updated_state_number` so the dedup rule supersedes the
+/// pre-trade form, and writes back to the same key.  All other fields
+/// (vault_id, token pair, fee_bps, vault_proto_key, vault_proto_digest,
+/// owner_public_key, lifecycle_state, unlock_spec_*) are preserved
+/// verbatim — the swap moves reserves, not vault identity.
+///
+/// Reserves are accepted in CANONICAL pair order: `new_reserve_a` is
+/// the new pool of `token_a` (lex-lower), `new_reserve_b` is the pool
+/// of `token_b`.  The caller (chunk #7 unlock handler) is responsible
+/// for mapping its hop-direction `(reserve_in, reserve_out)` back to
+/// canonical order before calling.
+///
+/// Best-effort failure mode: an absent advertisement (vault never
+/// advertised, or the owner withdrew it) returns `Err` — caller logs
+/// and continues; the post-trade vault state is already on-chain.
+pub(crate) async fn republish_active_advertisement_with_reserves(
+    token_a: &[u8],
+    token_b: &[u8],
+    vault_id: &[u8; 32],
+    new_reserve_a: u128,
+    new_reserve_b: u128,
+) -> Result<(), dsm::types::error::DsmError> {
+    let ad_key = advertisement_key(token_a, token_b, vault_id);
+    let ad_bytes = BitcoinTapSdk::storage_get_bytes(&ad_key).await?;
+    let mut ad =
+        generated::RoutingVaultAdvertisementV1::decode(ad_bytes.as_slice()).map_err(|e| {
+            dsm::types::error::DsmError::serialization_error(
+                "RoutingVaultAdvertisementV1",
+                "decode",
+                Some(ad_key.clone()),
+                Some(e),
+            )
+        })?;
+    ad.reserve_a_u128 = new_reserve_a.to_be_bytes().to_vec();
+    ad.reserve_b_u128 = new_reserve_b.to_be_bytes().to_vec();
+    ad.updated_state_number = ad.updated_state_number.saturating_add(1);
+    BitcoinTapSdk::storage_put_bytes(&ad_key, &ad.encode_to_vec()).await?;
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct PublishedRoutingAdvertisement {
     pub key: String,
@@ -685,5 +728,162 @@ mod tests {
         let b = b"ZZZ".to_vec();
         assert_eq!(canonical_token_pair(&a, &b), (a.as_slice(), b.as_slice()));
         assert_eq!(canonical_token_pair(&b, &a), (a.as_slice(), b.as_slice()));
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // republish_active_advertisement_with_reserves
+    // ─────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn republish_with_reserves_bumps_state_and_updates_reserves() {
+        let token_a = token(0x60);
+        let token_b = token(0x61);
+        let vault_id = vid(0x60);
+        publish_simple(0x60, &token_a, &token_b, &vault_id, 1_000_000, 2_000_000).await;
+
+        // Sanity baseline.
+        let baseline = load_active_advertisements_for_pair(&token_a, &token_b)
+            .await
+            .expect("baseline list");
+        let baseline_ad = baseline
+            .iter()
+            .find(|p| p.advertisement.vault_id == vault_id.to_vec())
+            .expect("baseline ad");
+        assert_eq!(baseline_ad.advertisement.updated_state_number, 1);
+
+        republish_active_advertisement_with_reserves(
+            &token_a, &token_b, &vault_id, 1_500_000, 1_500_000,
+        )
+        .await
+        .expect("republish");
+
+        let after = load_active_advertisements_for_pair(&token_a, &token_b)
+            .await
+            .expect("after list");
+        let after_ad = after
+            .iter()
+            .find(|p| p.advertisement.vault_id == vault_id.to_vec())
+            .expect("after ad");
+        assert_eq!(after_ad.advertisement.updated_state_number, 2);
+        assert_eq!(
+            after_ad.advertisement.reserve_a_u128,
+            u128_be(1_500_000).to_vec()
+        );
+        assert_eq!(
+            after_ad.advertisement.reserve_b_u128,
+            u128_be(1_500_000).to_vec()
+        );
+    }
+
+    #[tokio::test]
+    async fn republish_preserves_non_reserve_fields() {
+        let token_a = token(0x70);
+        let token_b = token(0x71);
+        let vault_id = vid(0x70);
+        publish_simple(0x70, &token_a, &token_b, &vault_id, 100, 200).await;
+
+        let baseline = load_active_advertisements_for_pair(&token_a, &token_b)
+            .await
+            .expect("list")
+            .into_iter()
+            .find(|p| p.advertisement.vault_id == vault_id.to_vec())
+            .expect("baseline ad");
+
+        republish_active_advertisement_with_reserves(
+            &token_a, &token_b, &vault_id, 150, 175,
+        )
+        .await
+        .expect("republish");
+
+        let after = load_active_advertisements_for_pair(&token_a, &token_b)
+            .await
+            .expect("after")
+            .into_iter()
+            .find(|p| p.advertisement.vault_id == vault_id.to_vec())
+            .expect("after ad");
+
+        // Token pair, fee, owner pk, lifecycle, vault_proto_*, unlock_*
+        // must all stay verbatim — only reserves + state_number move.
+        assert_eq!(after.advertisement.token_a, baseline.advertisement.token_a);
+        assert_eq!(after.advertisement.token_b, baseline.advertisement.token_b);
+        assert_eq!(after.advertisement.fee_bps, baseline.advertisement.fee_bps);
+        assert_eq!(
+            after.advertisement.owner_public_key,
+            baseline.advertisement.owner_public_key
+        );
+        assert_eq!(
+            after.advertisement.lifecycle_state,
+            baseline.advertisement.lifecycle_state
+        );
+        assert_eq!(
+            after.advertisement.vault_proto_key,
+            baseline.advertisement.vault_proto_key
+        );
+        assert_eq!(
+            after.advertisement.vault_proto_digest,
+            baseline.advertisement.vault_proto_digest
+        );
+        assert_eq!(
+            after.advertisement.unlock_spec_digest,
+            baseline.advertisement.unlock_spec_digest
+        );
+        assert_eq!(
+            after.advertisement.unlock_spec_key,
+            baseline.advertisement.unlock_spec_key
+        );
+    }
+
+    #[tokio::test]
+    async fn republish_for_absent_advertisement_returns_err() {
+        // Vault that was never advertised — republish must surface
+        // the storage-not-found error so the caller (chunk #7
+        // unlock handler) can log and continue.
+        let token_a = token(0x80);
+        let token_b = token(0x81);
+        let vault_id = vid(0x80);
+        match republish_active_advertisement_with_reserves(
+            &token_a, &token_b, &vault_id, 1, 1,
+        )
+        .await
+        {
+            Err(_) => {} // correct: storage GET fails
+            Ok(()) => panic!(
+                "republish for absent ad must Err, got Ok"
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn republish_supersedes_baseline_in_dedup() {
+        // Republish must produce a higher updated_state_number so the
+        // chunk-#1 dedup selector picks the post-trade ad in any
+        // listing.  This test exercises the full dedup path
+        // explicitly rather than just trusting the bump.
+        let token_a = token(0x90);
+        let token_b = token(0x91);
+        let vault_id = vid(0x90);
+        publish_simple(0x90, &token_a, &token_b, &vault_id, 100, 100).await;
+        republish_active_advertisement_with_reserves(
+            &token_a, &token_b, &vault_id, 110, 91,
+        )
+        .await
+        .expect("republish");
+
+        let listed = load_active_advertisements_for_pair(&token_a, &token_b)
+            .await
+            .expect("list");
+        let entry = listed
+            .iter()
+            .find(|p| p.advertisement.vault_id == vault_id.to_vec())
+            .expect("present");
+        assert_eq!(entry.advertisement.updated_state_number, 2);
+        assert_eq!(
+            entry.advertisement.reserve_a_u128,
+            u128_be(110).to_vec()
+        );
+        assert_eq!(
+            entry.advertisement.reserve_b_u128,
+            u128_be(91).to_vec()
+        );
     }
 }

@@ -832,6 +832,31 @@ fn amm_reserve_update_uses_full_input_amount() {
     );
 }
 
+/// Republish-on-settled invariant — `dlv.unlockRouted` MUST call
+/// `routing_sdk::republish_active_advertisement_with_reserves` after
+/// the post-trade vault reserve update so the next trader's quote
+/// reflects post-trade liquidity.  Without this, every subsequent
+/// trader hits a chunk-#7 `OutputMismatch` rejection until somebody
+/// manually republishes — terrible UX.  The republish is best-
+/// effort (failure logs but doesn't fail the trade); the regression
+/// guard just enforces the call still happens.
+#[test]
+fn dlv_unlock_routed_republishes_advertisement_after_settled_swap() {
+    let src = read(sdk_path("src/handlers/dlv_routes.rs"));
+    let routed_start = src
+        .find("async fn dlv_unlock_routed")
+        .expect("dlv_unlock_routed handler present");
+    let routed_body = &src[routed_start..];
+    assert!(
+        routed_body.contains(
+            "crate::sdk::routing_sdk::republish_active_advertisement_with_reserves"
+        ),
+        "regression: dlv.unlockRouted no longer republishes the routing-vault \
+         advertisement after a settled swap — every subsequent trader will hit \
+         OutputMismatch on a stale quote"
+    );
+}
+
 /// Track C.5 invariant — both storage publishers MUST honour the
 /// accept-or-stamp pattern on the publisher / owner pk field.
 /// Frontend dev-tools screens (and any future routing-service

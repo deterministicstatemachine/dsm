@@ -853,11 +853,16 @@ impl AppRouterImpl {
         // succeeded, so the swap is committed; mutate the vault's
         // reserves so the next routed unlock against this vault sees
         // the post-trade state and any stale routing-vault advertisement
-        // gets caught at the chunk-#7 re-simulation gate.  Republishing
-        // the advertisement is a follow-up task — until that lands, a
-        // vault becomes "unusable for new routes" until the owner
-        // republishes, but no incorrect swaps execute.
+        // gets caught at the chunk-#7 re-simulation gate.  After the
+        // local reserve update we ALSO republish the routing-vault
+        // advertisement on storage (republish-on-settled) so the next
+        // trader's quote reflects the post-trade reserves rather than
+        // hitting OutputMismatch on every attempt.
         if let Some((new_a, new_b)) = amm_post_trade_reserves {
+            // Capture the canonical token pair from the vault's AMM
+            // fulfillment so we can address the routing advertisement
+            // for republish without reconstructing it from the route.
+            let mut canonical_pair: Option<(Vec<u8>, Vec<u8>)> = None;
             // Best-effort: a failure here means the vault's local state
             // diverges from the advanced chain by one swap.  The chain
             // is authoritative; the vault state will resync at next
@@ -866,6 +871,8 @@ impl AppRouterImpl {
                 Ok(vault_lock) => {
                     let mut vault = vault_lock.lock().await;
                     if let dsm::vault::FulfillmentMechanism::AmmConstantProduct {
+                        token_a,
+                        token_b,
                         reserve_a,
                         reserve_b,
                         ..
@@ -873,11 +880,32 @@ impl AppRouterImpl {
                     {
                         *reserve_a = new_a;
                         *reserve_b = new_b;
+                        canonical_pair = Some((token_a.clone(), token_b.clone()));
                     }
                 }
                 Err(e) => {
                     log::warn!(
                         "[dlv.unlockRouted] post-advance reserve update for {} failed: {e}",
+                        crate::util::text_id::encode_base32_crockford(&vault_id)
+                    );
+                }
+            }
+
+            // Republish the routing-vault advertisement with the new
+            // reserves + bumped state_number so the next trader's
+            // quote reflects post-trade liquidity.  Best-effort: a
+            // failure (e.g. vault never advertised) leaves the vault
+            // local-only and traders won't discover it for further
+            // routes — correct fail-closed semantics.
+            if let Some((token_a, token_b)) = canonical_pair {
+                if let Err(e) =
+                    crate::sdk::routing_sdk::republish_active_advertisement_with_reserves(
+                        &token_a, &token_b, &vault_id, new_a, new_b,
+                    )
+                    .await
+                {
+                    log::warn!(
+                        "[dlv.unlockRouted] post-advance routing-ad republish for {} failed (vault may not be advertised): {e}",
                         crate::util::text_id::encode_base32_crockford(&vault_id)
                     );
                 }
