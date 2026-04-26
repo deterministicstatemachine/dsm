@@ -19,6 +19,7 @@ export type ScreenType =
   | 'dev_detfi_launch'
   | 'dev_amm_vault'
   | 'dev_amm_trade'
+  | 'dev_posted_inbox'
   | 'bluetooth'
   | 'vault'
   | 'lock_setup'
