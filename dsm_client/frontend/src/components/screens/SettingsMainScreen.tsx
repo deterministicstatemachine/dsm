@@ -499,6 +499,24 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
               type="button"
               className="settings-shell__button"
               style={{ fontSize: '9px' }}
+              onClick={() => onNavigate?.('dev_amm_vault')}
+            >
+              AMM VAULT (DEV)
+            </button>
+
+            <button
+              type="button"
+              className="settings-shell__button"
+              style={{ fontSize: '9px' }}
+              onClick={() => onNavigate?.('dev_amm_trade')}
+            >
+              AMM TRADE (DEV)
+            </button>
+
+            <button
+              type="button"
+              className="settings-shell__button"
+              style={{ fontSize: '9px' }}
               onClick={openDiagnosticsWorkspace}
             >
               REPORT ISSUE / FEEDBACK

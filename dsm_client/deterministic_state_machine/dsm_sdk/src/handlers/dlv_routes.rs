@@ -50,7 +50,7 @@ impl AppRouterImpl {
         if bytes.is_empty() {
             return err("dlv.create: empty DlvInstantiateV1 payload".into());
         }
-        let req = match generated::DlvInstantiateV1::decode(&*bytes) {
+        let mut req = match generated::DlvInstantiateV1::decode(&*bytes) {
             Ok(r) => r,
             Err(e) => return err(format!("dlv.create: decode DlvInstantiateV1 failed: {e}")),
         };
@@ -109,14 +109,83 @@ impl AppRouterImpl {
             }
         }
 
+        // Accept-or-stamp: empty `creator_public_key` is the canonical
+        // request shape per the "all crypto stays in Rust" rule (Track
+        // C.4 UI work).  When empty, the wallet's current SPHINCS+ pk
+        // is stamped.  When supplied, it is honoured as-is —
+        // preserves the off-device-signing path used by integration
+        // tests + paste tools that pre-built a fully-signed
+        // `DlvInstantiateV1`.
         if req.creator_public_key.is_empty() {
-            return err("dlv.create: creator_public_key is required".into());
-        }
-        if req.signature.is_empty() {
-            return err("dlv.create: signature is required".into());
+            match crate::sdk::signing_authority::current_public_key() {
+                Ok(pk) if !pk.is_empty() => req.creator_public_key = pk,
+                Ok(_) => {
+                    return err(
+                        "dlv.create: empty creator_public_key requested wallet \
+                         signing but the wallet signing pk is empty"
+                            .into(),
+                    );
+                }
+                Err(e) => {
+                    return err(format!(
+                        "dlv.create: empty creator_public_key requested wallet \
+                         signing but get_current_public_key failed: {e}"
+                    ));
+                }
+            }
         }
         if req.locked_amount_u128.len() != 16 {
             return err("dlv.create: locked_amount_u128 must be 16 bytes (big-endian u128)".into());
+        }
+        // Accept-or-sign: empty `signature` triggers wallet-side
+        // signing.  Must run AFTER `creator_public_key` is finalised
+        // so the signature covers the same canonical bytes the Rust
+        // verifier will recompute.  The signing pre-image is a
+        // domain-separated BLAKE3 over the encoded
+        // `DlvInstantiateV1` bytes (with `signature` zero) +
+        // `creator_public_key`, mirroring the chunk #6
+        // `route_commit_sdk::canonicalise_for_commitment` pattern.
+        if req.signature.is_empty() {
+            let mut canonical_for_sign = req.clone();
+            canonical_for_sign.signature = Vec::new();
+            let canonical_bytes = canonical_for_sign.encode_to_vec();
+            let signing_input: Vec<u8> = {
+                let mut buf = Vec::with_capacity(canonical_bytes.len() + req.creator_public_key.len());
+                buf.extend_from_slice(&canonical_bytes);
+                buf.extend_from_slice(&req.creator_public_key);
+                buf
+            };
+            let canonical_digest: [u8; 32] = dsm::crypto::blake3::domain_hash_bytes(
+                "DSM/dlv-create-self-sign",
+                &signing_input,
+            );
+            let sk = match crate::sdk::signing_authority::current_secret_key() {
+                Ok(s) if !s.is_empty() => s,
+                Ok(_) => {
+                    return err(
+                        "dlv.create: empty signature requested wallet signing \
+                         but the wallet signing sk is empty"
+                            .into(),
+                    );
+                }
+                Err(e) => {
+                    return err(format!(
+                        "dlv.create: empty signature requested wallet signing \
+                         but get_current_secret_key failed: {e}"
+                    ));
+                }
+            };
+            let sig = match dsm::crypto::sphincs::sign(
+                dsm::crypto::sphincs::SphincsVariant::SPX256f,
+                &sk,
+                canonical_digest.as_ref(),
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    return err(format!("dlv.create: SPHINCS+ sign failed: {e}"));
+                }
+            };
+            req.signature = sig;
         }
 
         // Decode FulfillmentMechanism from the canonical proto bytes.

@@ -9,6 +9,9 @@
 // digest verification) on receipt.
 
 import * as pb from '../proto/dsm_app_pb';
+import { routerInvokeBin } from './WebViewBridge';
+import { decodeFramedEnvelopeV3 } from './decoding';
+import { encodeBase32Crockford } from '../utils/textId';
 
 /**
  * Encode an `AmmConstantProduct` fulfillment mechanism into the
@@ -77,3 +80,88 @@ function compareBytes(a: Uint8Array, b: Uint8Array): number {
   }
   return a.length - b.length;
 }
+
+/**
+ * Create an AMM constant-product vault.  Pure proto framing — the
+ * wallet's SPHINCS+ pk + signature are stamped by the Rust
+ * `dlv.create` handler when the corresponding fields ride empty
+ * over the wire (Track C.4 accept-or-stamp path; mirrors chunk #6's
+ * `route.signRouteCommit`).
+ *
+ * `policyDigest` MUST be the 32-byte CPTA anchor of the token
+ * governing this vault.  `content` is a small placeholder (AMM
+ * vaults don't carry encrypted content the way posted-mode DLVs do).
+ *
+ * Returns the vault_id Base32 on success.
+ */
+export async function createAmmVault(input: {
+  /** Lex-lower token id (must be < tokenB by byte order). */
+  tokenA: Uint8Array;
+  /** Lex-higher token id. */
+  tokenB: Uint8Array;
+  reserveA: bigint;
+  reserveB: bigint;
+  feeBps: number;
+  /** 32-byte CPTA anchor of the policy governing this vault. */
+  policyDigest: Uint8Array;
+  /** Optional informational content (default = "AMM vault"). */
+  content?: Uint8Array;
+}): Promise<{ success: boolean; vaultIdBase32?: string; error?: string }> {
+  try {
+    if (!input?.policyDigest || input.policyDigest.length !== 32) {
+      return { success: false, error: 'policyDigest must be 32 bytes' };
+    }
+    const fulfillmentBytes = encodeAmmConstantProductFulfillment({
+      tokenA: input.tokenA,
+      tokenB: input.tokenB,
+      reserveA: input.reserveA,
+      reserveB: input.reserveB,
+      feeBps: input.feeBps,
+    });
+    const content = input.content ?? new TextEncoder().encode('AMM vault');
+
+    const spec = new pb.DlvSpecV1({
+      policyDigest: input.policyDigest as any,
+      // Empty digests → Rust accept-or-compute (chunk #6).
+      contentDigest: new Uint8Array() as any,
+      fulfillmentDigest: new Uint8Array() as any,
+      intendedRecipient: new Uint8Array() as any,
+      fulfillmentBytes: fulfillmentBytes as any,
+      content: content as any,
+    });
+    const req = new pb.DlvInstantiateV1({
+      spec,
+      // Empty pk + signature → Rust stamps wallet pk + signs (Track
+      // C.4 accept-or-stamp).  No crypto in TS.
+      creatorPublicKey: new Uint8Array() as any,
+      tokenId: new Uint8Array() as any,
+      lockedAmountU128: new Uint8Array(16) as any,
+      signature: new Uint8Array() as any,
+    });
+    const argPack = new pb.ArgPack({
+      codec: pb.Codec.PROTO as any,
+      body: new Uint8Array(req.toBinary()),
+    });
+
+    const resBytes = await routerInvokeBin(
+      'dlv.create',
+      new Uint8Array(argPack.toBinary()),
+    );
+    const env = decodeFramedEnvelopeV3(resBytes);
+    if (env.payload.case === 'error') {
+      return { success: false, error: env.payload.value.message || 'dlv.create failed' };
+    }
+    if (env.payload.case === 'appStateResponse') {
+      return { success: true, vaultIdBase32: env.payload.value.value ?? '' };
+    }
+    return {
+      success: false,
+      error: `Unexpected response payload: ${env.payload.case}`,
+    };
+  } catch (e: any) {
+    return { success: false, error: e?.message || 'createAmmVault failed' };
+  }
+}
+
+// Re-export for screens that prefer importing both AMM helpers from one place.
+export { encodeBase32Crockford } from '../utils/textId';
