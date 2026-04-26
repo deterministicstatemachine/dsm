@@ -184,12 +184,14 @@ mod tests {
             kind: Some(P::fulfillment_mechanism::Kind::CryptoCondition(cc)),
         };
         let limbo = P::LimboVaultProto {
-            id: "vault-1".to_string(),
+            // vault_id migrated from String to bytes[32] in the PR #251
+            // proto cut-over; tests use a deterministic 32-byte placeholder.
+            id: vec![1u8; 32],
             fulfillment_condition: Some(fm),
             ..Default::default()
         };
         let post = P::VaultPostProto {
-            vault_id: "vault-1".to_string(),
+            vault_id: vec![1u8; 32],
             vault_data: limbo.encode_to_vec(),
             ..Default::default()
         };
@@ -206,12 +208,14 @@ mod tests {
             kind: Some(P::fulfillment_mechanism::Kind::CryptoCondition(cc)),
         };
         let limbo = P::LimboVaultProto {
-            id: "vault-1".to_string(),
+            // vault_id migrated from String to bytes[32] in the PR #251
+            // proto cut-over; tests use a deterministic 32-byte placeholder.
+            id: vec![1u8; 32],
             fulfillment_condition: Some(fm),
             ..Default::default()
         };
         let post = P::VaultPostProto {
-            vault_id: "vault-1".to_string(),
+            vault_id: vec![1u8; 32],
             vault_data: limbo.encode_to_vec(),
             ..Default::default()
         };
@@ -221,12 +225,14 @@ mod tests {
     #[test]
     fn authenticate_vaultpost_no_fulfillment_mechanism_accepted() {
         let limbo = P::LimboVaultProto {
-            id: "vault-1".to_string(),
+            // vault_id migrated from String to bytes[32] in the PR #251
+            // proto cut-over; tests use a deterministic 32-byte placeholder.
+            id: vec![1u8; 32],
             fulfillment_condition: None,
             ..Default::default()
         };
         let post = P::VaultPostProto {
-            vault_id: "vault-1".to_string(),
+            vault_id: vec![1u8; 32],
             vault_data: limbo.encode_to_vec(),
             ..Default::default()
         };
