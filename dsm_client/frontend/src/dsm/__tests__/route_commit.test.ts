@@ -10,8 +10,13 @@ import {
   publishExternalCommitment,
   isExternalCommitmentVisible,
   unlockVaultRouted,
+  publishRoutingAdvertisement,
+  listAdvertisementsForPair,
+  syncVaultsForPair,
+  findAndBindBestPath,
 } from '../route_commit';
 import { routerInvokeBin, routerQueryBin } from '../WebViewBridge';
+import { encodeBase32Crockford } from '../../utils/textId';
 
 function frameEnvelope(envelope: pb.Envelope): Uint8Array {
   const bytes = envelope.toBinary();
@@ -285,6 +290,222 @@ describe('route_commit.ts', () => {
       });
       expect(result.success).toBe(false);
       expect(result.error).toMatch(/InvalidInitiatorSignature/);
+    });
+  });
+
+  // ───────────────────────────────────────────────────────────────────
+  // Track C.3 — trade-flow helpers
+  // ───────────────────────────────────────────────────────────────────
+
+  describe('publishRoutingAdvertisement', () => {
+    const validInput = {
+      vaultId: new Uint8Array(32).fill(0x77),
+      tokenA: new TextEncoder().encode('AAA'),
+      tokenB: new TextEncoder().encode('BBB'),
+      reserveA: 1_000_000n,
+      reserveB: 2_000_000n,
+      feeBps: 30,
+      unlockSpecDigest: new Uint8Array(32).fill(0x88),
+      unlockSpecKey: 'defi/spec/test',
+      ownerPublicKey: new Uint8Array(64).fill(0x11),
+      vaultProtoBytes: new Uint8Array([0xCA, 0xFE, 0xBA, 0xBE]),
+    };
+
+    test('round-trips a typed PublishRoutingAdvertisementRequest', async () => {
+      (routerInvokeBin as jest.Mock).mockResolvedValue(
+        appStateEnvelope(encodeBase32Crockford(validInput.vaultId)),
+      );
+      const result = await publishRoutingAdvertisement(validInput);
+      expect(result.success).toBe(true);
+      const [route, body] = (routerInvokeBin as jest.Mock).mock.calls[0];
+      expect(route).toBe('route.publishRoutingAdvertisement');
+      const argPack = pb.ArgPack.fromBinary(body);
+      const req = pb.PublishRoutingAdvertisementRequest.fromBinary(argPack.body);
+      expect(Array.from(req.vaultId)).toEqual(Array.from(validInput.vaultId));
+      expect(req.feeBps).toBe(30);
+      expect(req.reserveAU128.length).toBe(16);
+    });
+
+    test('rejects wrong-length vaultId', async () => {
+      const result = await publishRoutingAdvertisement({
+        ...validInput,
+        vaultId: new Uint8Array(16),
+      });
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/32 bytes/);
+    });
+
+    test('rejects empty owner public key', async () => {
+      const result = await publishRoutingAdvertisement({
+        ...validInput,
+        ownerPublicKey: new Uint8Array(0),
+      });
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/ownerPublicKey/i);
+    });
+
+    test('rejects wrong-length unlockSpecDigest', async () => {
+      const result = await publishRoutingAdvertisement({
+        ...validInput,
+        unlockSpecDigest: new Uint8Array(16),
+      });
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/32 bytes/);
+    });
+
+    test('rejects empty vaultProtoBytes', async () => {
+      const result = await publishRoutingAdvertisement({
+        ...validInput,
+        vaultProtoBytes: new Uint8Array(0),
+      });
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/vaultProtoBytes/);
+    });
+  });
+
+  describe('listAdvertisementsForPair', () => {
+    const tokenA = new TextEncoder().encode('AAA');
+    const tokenB = new TextEncoder().encode('BBB');
+
+    test('decodes newline-separated Base32 advertisement protos', async () => {
+      const ad = new pb.RoutingVaultAdvertisementV1({
+        version: 1,
+        vaultId: new Uint8Array(32).fill(0x55) as any,
+        tokenA: tokenA as any,
+        tokenB: tokenB as any,
+        reserveAU128: new Uint8Array(16) as any,
+        reserveBU128: new Uint8Array(16) as any,
+        feeBps: 30,
+        unlockSpecDigest: new Uint8Array(32) as any,
+        unlockSpecKey: 'defi/spec/test',
+        vaultProtoKey: new Uint8Array(0) as any,
+        vaultProtoDigest: new Uint8Array(32) as any,
+        ownerPublicKey: new Uint8Array(64).fill(0x11) as any,
+        lifecycleState: 'active',
+        updatedStateNumber: 7n,
+      });
+      const adBase32 = encodeBase32Crockford(new Uint8Array(ad.toBinary()));
+      (routerQueryBin as jest.Mock).mockResolvedValue(appStateEnvelope(adBase32));
+      const result = await listAdvertisementsForPair({ tokenA, tokenB });
+      expect(result.success).toBe(true);
+      expect(result.advertisements?.length).toBe(1);
+      const summary = result.advertisements?.[0];
+      expect(summary?.feeBps).toBe(30);
+      expect(summary?.stateNumber).toBe(7n);
+      expect(Array.from(summary?.tokenA ?? [])).toEqual(Array.from(tokenA));
+    });
+
+    test('returns empty list on empty value', async () => {
+      (routerQueryBin as jest.Mock).mockResolvedValue(appStateEnvelope(''));
+      const result = await listAdvertisementsForPair({ tokenA, tokenB });
+      expect(result.success).toBe(true);
+      expect(result.advertisements).toEqual([]);
+    });
+
+    test('surfaces error envelopes', async () => {
+      (routerQueryBin as jest.Mock).mockResolvedValue(errorEnvelope('storage down'));
+      const result = await listAdvertisementsForPair({ tokenA, tokenB });
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/storage down/);
+    });
+  });
+
+  describe('syncVaultsForPair', () => {
+    const tokenA = new TextEncoder().encode('AAA');
+    const tokenB = new TextEncoder().encode('BBB');
+
+    test('returns newly mirrored vault_ids on success', async () => {
+      (routerInvokeBin as jest.Mock).mockResolvedValue(
+        appStateEnvelope('VAULTID_1\nVAULTID_2'),
+      );
+      const result = await syncVaultsForPair({ tokenA, tokenB });
+      expect(result.success).toBe(true);
+      expect(result.newlyMirroredBase32).toEqual(['VAULTID_1', 'VAULTID_2']);
+    });
+
+    test('returns empty list when nothing was newly mirrored', async () => {
+      (routerInvokeBin as jest.Mock).mockResolvedValue(appStateEnvelope(''));
+      const result = await syncVaultsForPair({ tokenA, tokenB });
+      expect(result.success).toBe(true);
+      expect(result.newlyMirroredBase32).toEqual([]);
+    });
+
+    test('surfaces bridge errors', async () => {
+      (routerInvokeBin as jest.Mock).mockRejectedValue(new Error('bridge dead'));
+      const result = await syncVaultsForPair({ tokenA, tokenB });
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/bridge dead/);
+    });
+  });
+
+  describe('findAndBindBestPath', () => {
+    const inputToken = new TextEncoder().encode('AAA');
+    const outputToken = new TextEncoder().encode('BBB');
+    const nonce = new Uint8Array(32).fill(0xDD);
+
+    test('decodes Base32 unsigned RouteCommit on success', async () => {
+      const fakeUnsignedBytes = new Uint8Array([0x01, 0x02, 0x03, 0x04]);
+      (routerInvokeBin as jest.Mock).mockResolvedValue(
+        appStateEnvelope(encodeBase32Crockford(fakeUnsignedBytes)),
+      );
+      const result = await findAndBindBestPath({
+        inputToken,
+        outputToken,
+        inputAmount: 10_000n,
+        nonce,
+      });
+      expect(result.success).toBe(true);
+      expect(Array.from(result.unsignedRouteCommitBytes ?? [])).toEqual(
+        Array.from(fakeUnsignedBytes),
+      );
+    });
+
+    test('round-trips trade params through the FindAndBindRouteRequest proto', async () => {
+      (routerInvokeBin as jest.Mock).mockResolvedValue(
+        appStateEnvelope(encodeBase32Crockford(new Uint8Array([0xAA]))),
+      );
+      await findAndBindBestPath({
+        inputToken,
+        outputToken,
+        inputAmount: 0x0102_0304n,
+        nonce,
+        maxHops: 3,
+      });
+      const [, body] = (routerInvokeBin as jest.Mock).mock.calls[0];
+      const argPack = pb.ArgPack.fromBinary(body);
+      const req = pb.FindAndBindRouteRequest.fromBinary(argPack.body);
+      expect(Array.from(req.inputToken)).toEqual(Array.from(inputToken));
+      expect(Array.from(req.outputToken)).toEqual(Array.from(outputToken));
+      expect(req.maxHops).toBe(3);
+      expect(req.nonce.length).toBe(32);
+      // big-endian u128 of 0x01020304 in last 4 bytes.
+      expect(req.inputAmountU128[12]).toBe(0x01);
+      expect(req.inputAmountU128[15]).toBe(0x04);
+    });
+
+    test('rejects wrong-length nonce', async () => {
+      const result = await findAndBindBestPath({
+        inputToken,
+        outputToken,
+        inputAmount: 100n,
+        nonce: new Uint8Array(16),
+      });
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/nonce.*32 bytes/);
+    });
+
+    test('surfaces NoPath errors verbatim', async () => {
+      (routerInvokeBin as jest.Mock).mockResolvedValue(
+        errorEnvelope('route.findAndBindBestPath: path search rejected: NoPath { .. }'),
+      );
+      const result = await findAndBindBestPath({
+        inputToken,
+        outputToken,
+        inputAmount: 100n,
+        nonce,
+      });
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/NoPath/);
     });
   });
 });

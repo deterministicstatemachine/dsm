@@ -52,6 +52,9 @@ impl AppRouterImpl {
             "route.isExternalCommitmentVisible" => {
                 self.route_is_external_commitment_visible(q).await
             }
+            "route.listAdvertisementsForPair" => {
+                self.route_list_advertisements_for_pair(q).await
+            }
             other => err(format!("unknown route query path: {other}")),
         }
     }
@@ -63,6 +66,11 @@ impl AppRouterImpl {
                 self.route_publish_external_commitment(i).await
             }
             "route.signRouteCommit" => self.route_sign_route_commit(i).await,
+            "route.publishRoutingAdvertisement" => {
+                self.route_publish_routing_advertisement(i).await
+            }
+            "route.syncVaultsForPair" => self.route_sync_vaults_for_pair(i).await,
+            "route.findAndBindBestPath" => self.route_find_and_bind_best_path(i).await,
             other => err(format!("unknown route invoke method: {other}")),
         }
     }
@@ -286,6 +294,331 @@ impl AppRouterImpl {
         let resp = generated::AppStateResponse {
             key: "route.publishExternalCommitment".to_string(),
             value: Some(crate::util::text_id::encode_base32_crockford(&x)),
+        };
+        pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Track C.3 — frontend trade-flow handlers (chunks #1, #2, #3 over
+    // the bridge).  Each delegates to the audited SDK helpers; the
+    // handler is a typed-input adapter, not a re-implementation.
+    // ─────────────────────────────────────────────────────────────────
+
+    /// `route.publishRoutingAdvertisement` — publish a vault's routing
+    /// advertisement + its full proto mirror to storage nodes.  The
+    /// handler computes the BLAKE3 digest from `vault_proto_bytes`
+    /// per the chunk #1 substrate; frontend only frames the typed
+    /// inputs (token pair, reserves, fee, owner pk).
+    async fn route_publish_routing_advertisement(&self, i: AppInvoke) -> AppResult {
+        let bytes = match unwrap_argpack(&i.args) {
+            Ok(b) => b,
+            Err(e) => return err(format!("route.publishRoutingAdvertisement: {e}")),
+        };
+        let req = match generated::PublishRoutingAdvertisementRequest::decode(&*bytes) {
+            Ok(r) => r,
+            Err(e) => {
+                return err(format!(
+                    "route.publishRoutingAdvertisement: decode failed: {e}"
+                ));
+            }
+        };
+        if req.vault_id.len() != 32 {
+            return err("route.publishRoutingAdvertisement: vault_id must be 32 bytes".into());
+        }
+        if req.reserve_a_u128.len() != 16 || req.reserve_b_u128.len() != 16 {
+            return err(
+                "route.publishRoutingAdvertisement: reserves must be 16-byte big-endian u128".into(),
+            );
+        }
+        if req.unlock_spec_digest.len() != 32 {
+            return err(
+                "route.publishRoutingAdvertisement: unlock_spec_digest must be 32 bytes".into(),
+            );
+        }
+        if req.vault_proto_bytes.is_empty() {
+            return err(
+                "route.publishRoutingAdvertisement: vault_proto_bytes is required".into(),
+            );
+        }
+        if req.owner_public_key.is_empty() {
+            return err(
+                "route.publishRoutingAdvertisement: owner_public_key is required".into(),
+            );
+        }
+
+        let mut vault_id = [0u8; 32];
+        vault_id.copy_from_slice(&req.vault_id);
+        let mut reserve_a = [0u8; 16];
+        reserve_a.copy_from_slice(&req.reserve_a_u128);
+        let mut reserve_b = [0u8; 16];
+        reserve_b.copy_from_slice(&req.reserve_b_u128);
+        let mut unlock_digest = [0u8; 32];
+        unlock_digest.copy_from_slice(&req.unlock_spec_digest);
+
+        let publish_input = crate::sdk::routing_sdk::PublishRoutingAdInput {
+            vault_id: &vault_id,
+            token_a: &req.token_a,
+            token_b: &req.token_b,
+            reserve_a_u128: reserve_a,
+            reserve_b_u128: reserve_b,
+            fee_bps: req.fee_bps,
+            unlock_spec_digest: unlock_digest,
+            unlock_spec_key: req.unlock_spec_key,
+            owner_public_key: &req.owner_public_key,
+            vault_proto_bytes: &req.vault_proto_bytes,
+        };
+        if let Err(e) = crate::sdk::routing_sdk::publish_active_advertisement(publish_input).await
+        {
+            return err(format!(
+                "route.publishRoutingAdvertisement: SDK publish failed: {e}"
+            ));
+        }
+
+        let resp = generated::AppStateResponse {
+            key: "route.publishRoutingAdvertisement".to_string(),
+            value: Some(crate::util::text_id::encode_base32_crockford(&vault_id)),
+        };
+        pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
+    }
+
+    /// `route.listAdvertisementsForPair` — enumerate active routing-
+    /// vault advertisements for a token pair.  Returns
+    /// `AppStateResponse.value` as a newline-separated list of Base32-
+    /// encoded `RoutingVaultAdvertisementV1` protos.  The trader
+    /// frontend decodes each line to display vault liquidity.
+    async fn route_list_advertisements_for_pair(&self, q: AppQuery) -> AppResult {
+        let bytes = match unwrap_argpack(&q.params) {
+            Ok(b) => b,
+            Err(e) => return err(format!("route.listAdvertisementsForPair: {e}")),
+        };
+        let req = match generated::RoutingPairRequest::decode(&*bytes) {
+            Ok(r) => r,
+            Err(e) => {
+                return err(format!(
+                    "route.listAdvertisementsForPair: decode failed: {e}"
+                ));
+            }
+        };
+        let ads = match crate::sdk::routing_sdk::load_active_advertisements_for_pair(
+            &req.token_a,
+            &req.token_b,
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                return err(format!(
+                    "route.listAdvertisementsForPair: SDK load failed: {e}"
+                ));
+            }
+        };
+        let lines: Vec<String> = ads
+            .iter()
+            .map(|p| {
+                crate::util::text_id::encode_base32_crockford(
+                    &p.advertisement.encode_to_vec(),
+                )
+            })
+            .collect();
+        let resp = generated::AppStateResponse {
+            key: "route.listAdvertisementsForPair".to_string(),
+            value: Some(lines.join("\n")),
+        };
+        pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
+    }
+
+    /// `route.syncVaultsForPair` — fetch + verify + mirror every
+    /// active routing-vault for a token pair into the local
+    /// `DLVManager` so subsequent `dlv.unlockRouted` calls have the
+    /// vault state to re-simulate against.  Mirrors the
+    /// `posted_dlv.sync` flow but for routing-keyspace vaults.
+    /// Returns newline-separated Base32 vault_ids that were freshly
+    /// inserted on this call (already-mirrored vaults are skipped).
+    async fn route_sync_vaults_for_pair(&self, i: AppInvoke) -> AppResult {
+        let bytes = match unwrap_argpack(&i.args) {
+            Ok(b) => b,
+            Err(e) => return err(format!("route.syncVaultsForPair: {e}")),
+        };
+        let req = match generated::RoutingPairRequest::decode(&*bytes) {
+            Ok(r) => r,
+            Err(e) => return err(format!("route.syncVaultsForPair: decode failed: {e}")),
+        };
+        let ads = match crate::sdk::routing_sdk::load_active_advertisements_for_pair(
+            &req.token_a,
+            &req.token_b,
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                return err(format!("route.syncVaultsForPair: SDK load failed: {e}"));
+            }
+        };
+        let dlv_manager = self.bitcoin_tap.dlv_manager();
+        let mut newly_mirrored: Vec<[u8; 32]> = Vec::new();
+        for published in ads {
+            let ad = &published.advertisement;
+            if ad.vault_id.len() != 32 {
+                continue;
+            }
+            let mut vid = [0u8; 32];
+            vid.copy_from_slice(&ad.vault_id);
+            if dlv_manager.get_vault(&vid).await.is_ok() {
+                continue;
+            }
+            let proto_bytes = match crate::sdk::routing_sdk::fetch_and_verify_vault_proto(ad)
+                .await
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    log::warn!(
+                        "[route.syncVaultsForPair] skipping {}: digest verify failed: {e}",
+                        crate::util::text_id::encode_base32_crockford(&vid)
+                    );
+                    continue;
+                }
+            };
+            let post_proto =
+                match generated::VaultPostProto::decode(proto_bytes.as_slice()) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        log::warn!(
+                            "[route.syncVaultsForPair] decode VaultPostProto for {} failed: {e}",
+                            crate::util::text_id::encode_base32_crockford(&vid)
+                        );
+                        continue;
+                    }
+                };
+            let post = match dsm::vault::limbo_vault::VaultPost::try_from(&post_proto) {
+                Ok(p) => p,
+                Err(e) => {
+                    log::warn!(
+                        "[route.syncVaultsForPair] VaultPost conversion for {} failed: {e}",
+                        crate::util::text_id::encode_base32_crockford(&vid)
+                    );
+                    continue;
+                }
+            };
+            let vault = match dsm::vault::limbo_vault::LimboVault::from_vault_post(&post) {
+                Ok(v) => v,
+                Err(e) => {
+                    log::warn!(
+                        "[route.syncVaultsForPair] from_vault_post for {} failed: {e}",
+                        crate::util::text_id::encode_base32_crockford(&vid)
+                    );
+                    continue;
+                }
+            };
+            if let Err(e) = dlv_manager.add_vault(vault).await {
+                log::warn!(
+                    "[route.syncVaultsForPair] add_vault for {} failed: {e}",
+                    crate::util::text_id::encode_base32_crockford(&vid)
+                );
+                continue;
+            }
+            newly_mirrored.push(vid);
+        }
+        let value = newly_mirrored
+            .iter()
+            .map(|id| crate::util::text_id::encode_base32_crockford(id))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let resp = generated::AppStateResponse {
+            key: "route.syncVaultsForPair".to_string(),
+            value: Some(value),
+        };
+        pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
+    }
+
+    /// `route.findAndBindBestPath` — run chunk #2 path search over
+    /// the locally-known advertisements (caller should
+    /// `syncVaultsForPair` first to refresh) and bind the chosen Path
+    /// into an UNSIGNED `RouteCommitV1` (chunk #3 binder).  Returns
+    /// the unsigned proto Base32-encoded; caller follows up with
+    /// `route.signRouteCommit` to stamp the wallet pk + signature.
+    async fn route_find_and_bind_best_path(&self, i: AppInvoke) -> AppResult {
+        let bytes = match unwrap_argpack(&i.args) {
+            Ok(b) => b,
+            Err(e) => return err(format!("route.findAndBindBestPath: {e}")),
+        };
+        let req = match generated::FindAndBindRouteRequest::decode(&*bytes) {
+            Ok(r) => r,
+            Err(e) => return err(format!("route.findAndBindBestPath: decode failed: {e}")),
+        };
+        if req.input_amount_u128.len() != 16 {
+            return err(
+                "route.findAndBindBestPath: input_amount_u128 must be 16 bytes (big-endian u128)"
+                    .into(),
+            );
+        }
+        if req.nonce.len() != 32 {
+            return err("route.findAndBindBestPath: nonce must be 32 bytes".into());
+        }
+        let mut amount_buf = [0u8; 16];
+        amount_buf.copy_from_slice(&req.input_amount_u128);
+        let input_amount = u128::from_be_bytes(amount_buf);
+        let max_hops = if req.max_hops == 0 {
+            crate::sdk::routing_path_sdk::DEFAULT_MAX_HOPS
+        } else {
+            req.max_hops as usize
+        };
+        let mut nonce = [0u8; 32];
+        nonce.copy_from_slice(&req.nonce);
+
+        // Fetch + verify ads for the canonical pair.  We trust the
+        // local set: the verified-search wrapper drops any tampered
+        // ads on its way through `fetch_and_verify_vault_proto`.
+        let ads = match crate::sdk::routing_sdk::load_active_advertisements_for_pair(
+            &req.input_token,
+            &req.output_token,
+        )
+        .await
+        {
+            Ok(v) => v.into_iter().map(|p| p.advertisement).collect::<Vec<_>>(),
+            Err(e) => {
+                return err(format!(
+                    "route.findAndBindBestPath: load ads failed: {e}"
+                ));
+            }
+        };
+
+        let path = match crate::sdk::routing_path_sdk::find_and_verify_best_path(
+            &ads,
+            &req.input_token,
+            &req.output_token,
+            input_amount,
+            max_hops,
+        )
+        .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                return err(format!(
+                    "route.findAndBindBestPath: path search rejected: {e:?}"
+                ));
+            }
+        };
+
+        // Chunk #3 binder.  `initiator_public_key` is left empty here;
+        // `route.signRouteCommit` will stamp the wallet's pk during
+        // signing per the chunk #6 invariant.
+        let unsigned = match crate::sdk::route_commit_sdk::bind_path_to_route_commit(
+            crate::sdk::route_commit_sdk::BindRouteCommitInput {
+                path: &path,
+                nonce,
+                initiator_public_key: &[],
+                initiator_signature: vec![],
+            },
+        ) {
+            Ok(rc) => rc,
+            Err(e) => {
+                return err(format!("route.findAndBindBestPath: bind rejected: {e:?}"));
+            }
+        };
+        let unsigned_bytes = unsigned.encode_to_vec();
+        let resp = generated::AppStateResponse {
+            key: "route.findAndBindBestPath".to_string(),
+            value: Some(crate::util::text_id::encode_base32_crockford(&unsigned_bytes)),
         };
         pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
     }
