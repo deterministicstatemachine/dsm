@@ -608,6 +608,97 @@ fn route_query_and_invoke_are_dispatched() {
     );
 }
 
+/// "All business logic stays in Rust" invariant — the frontend
+/// MUST NOT carry a BLAKE3 implementation.  Track C.1 originally
+/// shipped `@noble/hashes` to compute DLV digests inline; chunk #6
+/// migrated that to a Rust accept-or-compute path on `dlv.create`.
+/// A regression that re-installed the dep or restored
+/// `utils/blake3.ts` would re-open the protocol-logic-duplication
+/// surface this rule exists to prevent.
+#[test]
+fn frontend_does_not_carry_blake3() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let repo_root = Path::new(manifest_dir)
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .expect("resolve repo root");
+    let pkg = repo_root
+        .join("dsm_client")
+        .join("frontend")
+        .join("package.json");
+    let pkg_src = read(pkg);
+    assert!(
+        !pkg_src.contains("@noble/hashes"),
+        "regression: @noble/hashes is back in the frontend — \
+         all crypto must stay Rust-side per the architectural rule"
+    );
+    let blake3_ts = repo_root
+        .join("dsm_client")
+        .join("frontend")
+        .join("src")
+        .join("utils")
+        .join("blake3.ts");
+    assert!(
+        !blake3_ts.exists(),
+        "regression: utils/blake3.ts has been re-introduced — \
+         the frontend must delegate BLAKE3 to Rust over the bridge"
+    );
+}
+
+/// Chunk #6 invariant — `dlv.create` MUST accept-or-compute the
+/// content + fulfillment digests.  Frontend calls that omit them
+/// (the canonical shape per "all business logic stays in Rust")
+/// MUST succeed; frontend calls that supply 32-byte digests MUST
+/// be strict-verified against the Rust-computed canonical values.
+/// A regression that re-required pre-supplied digests would force
+/// the frontend to compute them locally, re-opening the BLAKE3-in-
+/// the-wrong-layer hole.
+#[test]
+fn dlv_create_accepts_empty_or_strict_verifies_supplied_digests() {
+    let src = read(sdk_path("src/handlers/dlv_routes.rs"));
+    assert!(
+        src.contains("0 => {} // accept-or-compute path"),
+        "regression: dlv.create no longer accepts empty content_digest \
+         (forces frontend BLAKE3 computation)"
+    );
+    assert!(
+        src.contains("must be 0 or 32 bytes"),
+        "regression: dlv.create must reject digest lengths other than 0 \
+         or 32 bytes — empty (Rust computes) or full (Rust verifies)"
+    );
+}
+
+/// Chunk #6 invariant — `route.signRouteCommit` MUST sign with the
+/// wallet's CURRENT signing key, not whatever the caller stamped on
+/// `initiator_public_key`.  Otherwise an attacker could ask the
+/// wallet to sign-as-someone-else by submitting a RouteCommit with
+/// a forged initiator pk.  The handler must overwrite the field.
+#[test]
+fn route_sign_route_commit_overwrites_initiator_public_key() {
+    let src = read(sdk_path("src/handlers/route_routes.rs"));
+    assert!(
+        src.contains("rc.initiator_public_key = pk;"),
+        "regression: route.signRouteCommit no longer stamps the wallet \
+         pk on initiator_public_key — caller-supplied pk would be honoured \
+         and sign-as-someone-else attacks become possible"
+    );
+}
+
+/// Chunk #6 invariant — `route.signRouteCommit` MUST canonicalise
+/// via the SAME helper that the X-derivation and the eligibility
+/// verifier use.  Any divergence in canonicalisation between
+/// signing and verification breaks sign-and-commit.
+#[test]
+fn route_sign_route_commit_uses_canonicalise_for_commitment() {
+    let src = read(sdk_path("src/handlers/route_routes.rs"));
+    assert!(
+        src.contains("canonicalise_for_commitment(&rc)"),
+        "regression: route.signRouteCommit no longer uses the shared \
+         canonicalise_for_commitment helper — sign and verify could drift"
+    );
+}
+
 /// Track C.2 invariant — `route_routes` MUST delegate the
 /// X-compute / publish / visibility paths to the audited
 /// `route_commit_sdk` helpers.  A future edit that re-implemented

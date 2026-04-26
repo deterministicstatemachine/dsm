@@ -47,6 +47,43 @@ function readAppStateValue(env: pb.Envelope, route: string): string {
 }
 
 /**
+ * Sign an unsigned `RouteCommitV1` byte payload with the local
+ * wallet's SPHINCS+ key.  Per the "all business logic stays in Rust"
+ * rule, all cryptographic operations run server-side: the trader UI
+ * hands an unsigned RouteCommit to this helper, the Rust handler
+ * stamps the wallet's public key on `initiator_public_key`,
+ * canonicalises (zeros the signature field), runs SPHINCS+, and
+ * returns the signed bytes ready for `computeExternalCommitment` →
+ * `publishExternalCommitment`.
+ *
+ * Returns the signed RouteCommit as Base32 Crockford so the caller
+ * can keep it as a single string token through the rest of the
+ * publish flow.  Decode with `decodeBase32Crockford` before
+ * forwarding to other helpers.
+ */
+export async function signRouteCommit(
+  unsignedRouteCommitBytes: Uint8Array,
+): Promise<{ success: boolean; signedRouteCommitBase32?: string; error?: string }> {
+  try {
+    if (
+      !(unsignedRouteCommitBytes instanceof Uint8Array) ||
+      unsignedRouteCommitBytes.length === 0
+    ) {
+      return { success: false, error: 'unsignedRouteCommitBytes required' };
+    }
+    const resBytes = await routerInvokeBin(
+      'route.signRouteCommit',
+      packBody(unsignedRouteCommitBytes),
+    );
+    const env = decodeFramedEnvelopeV3(resBytes);
+    const signedRouteCommitBase32 = readAppStateValue(env, 'route.signRouteCommit');
+    return { success: true, signedRouteCommitBase32 };
+  } catch (e: any) {
+    return { success: false, error: e?.message || 'signRouteCommit failed' };
+  }
+}
+
+/**
  * Compute the external commitment `X = BLAKE3("DSM/ext\0" ||
  * canonical(RouteCommit{initiator_signature=[]}))` for a given
  * RouteCommitV1 byte payload.  Server-side compute keeps the

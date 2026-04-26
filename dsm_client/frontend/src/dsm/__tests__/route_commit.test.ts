@@ -5,6 +5,7 @@ jest.mock('../WebViewBridge', () => ({
 
 import * as pb from '../../proto/dsm_app_pb';
 import {
+  signRouteCommit,
   computeExternalCommitment,
   publishExternalCommitment,
   isExternalCommitmentVisible,
@@ -43,6 +44,44 @@ function errorEnvelope(message: string): Uint8Array {
 
 describe('route_commit.ts', () => {
   beforeEach(() => jest.clearAllMocks());
+
+  describe('signRouteCommit', () => {
+    test('returns the Base32 signed RouteCommit on success', async () => {
+      (routerInvokeBin as jest.Mock).mockResolvedValue(
+        appStateEnvelope('SIGNED_RC_B32'),
+      );
+      const result = await signRouteCommit(new Uint8Array([1, 2, 3]));
+      expect(result.success).toBe(true);
+      expect(result.signedRouteCommitBase32).toBe('SIGNED_RC_B32');
+      expect(routerInvokeBin).toHaveBeenCalledWith(
+        'route.signRouteCommit',
+        expect.any(Uint8Array),
+      );
+    });
+
+    test('rejects empty input without round-tripping', async () => {
+      const result = await signRouteCommit(new Uint8Array(0));
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/required/i);
+      expect(routerInvokeBin).not.toHaveBeenCalled();
+    });
+
+    test('surfaces signing-error envelopes verbatim', async () => {
+      (routerInvokeBin as jest.Mock).mockResolvedValue(
+        errorEnvelope('route.signRouteCommit: wallet signing public key is empty'),
+      );
+      const result = await signRouteCommit(new Uint8Array([0xAA]));
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/wallet signing public key is empty/);
+    });
+
+    test('handles bridge throws', async () => {
+      (routerInvokeBin as jest.Mock).mockRejectedValue(new Error('bridge dead'));
+      const result = await signRouteCommit(new Uint8Array([1]));
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/bridge dead/);
+    });
+  });
 
   describe('computeExternalCommitment', () => {
     test('returns the Base32 X on success', async () => {

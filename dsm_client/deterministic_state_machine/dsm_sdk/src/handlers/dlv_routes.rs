@@ -62,25 +62,51 @@ impl AppRouterImpl {
         if spec.policy_digest.len() != 32 {
             return err("dlv.create: spec.policy_digest must be 32 bytes".into());
         }
-        if spec.content_digest.len() != 32 {
-            return err("dlv.create: spec.content_digest must be 32 bytes".into());
-        }
-        if spec.fulfillment_digest.len() != 32 {
-            return err("dlv.create: spec.fulfillment_digest must be 32 bytes".into());
-        }
 
-        // Strict-verify the content and fulfillment digests match the bytes.
+        // Compute the canonical digests Rust-side.  Per the
+        // "all business logic stays in Rust" rule, the frontend MUST
+        // NOT pre-compute these; if it does pass values in, they're
+        // strict-verified against the local computation (cheap
+        // sanity check that catches schema drift).  Empty fields are
+        // the canonical request shape: caller declines to commit to
+        // the digest and lets Rust derive it.
         let expected_content_digest: [u8; 32] =
             dsm::crypto::blake3::domain_hash_bytes("DSM/dlv-content", &spec.content);
-        if expected_content_digest.as_slice() != spec.content_digest.as_slice() {
-            return err("dlv.create: content_digest does not match H(DSM/dlv-content, content)".into());
-        }
         let expected_fm_digest: [u8; 32] = dsm::crypto::blake3::domain_hash_bytes(
             "DSM/dlv-fulfillment",
             &spec.fulfillment_bytes,
         );
-        if expected_fm_digest.as_slice() != spec.fulfillment_digest.as_slice() {
-            return err("dlv.create: fulfillment_digest does not match H(DSM/dlv-fulfillment, fulfillment_bytes)".into());
+        match spec.content_digest.len() {
+            0 => {} // accept-or-compute path
+            32 => {
+                if expected_content_digest.as_slice() != spec.content_digest.as_slice() {
+                    return err(
+                        "dlv.create: content_digest does not match H(DSM/dlv-content, content)"
+                            .into(),
+                    );
+                }
+            }
+            n => {
+                return err(format!(
+                    "dlv.create: spec.content_digest must be 0 or 32 bytes, got {n}"
+                ));
+            }
+        }
+        match spec.fulfillment_digest.len() {
+            0 => {}
+            32 => {
+                if expected_fm_digest.as_slice() != spec.fulfillment_digest.as_slice() {
+                    return err(
+                        "dlv.create: fulfillment_digest does not match H(DSM/dlv-fulfillment, fulfillment_bytes)"
+                            .into(),
+                    );
+                }
+            }
+            n => {
+                return err(format!(
+                    "dlv.create: spec.fulfillment_digest must be 0 or 32 bytes, got {n}"
+                ));
+            }
         }
 
         if req.creator_public_key.is_empty() {

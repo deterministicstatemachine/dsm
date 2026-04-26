@@ -183,10 +183,11 @@ describe('dlv.ts', () => {
   });
 
   describe('buildDlvInstantiateBytes', () => {
-    // Digests are now auto-computed by the helper, so the base test
-    // input deliberately omits them.  Each test that wants to exercise
-    // the caller-supplied path computes the correct digest from the
-    // BLAKE3 helpers and passes it through.
+    // The frontend builder is a PURE proto packer per the
+    // "all business logic stays in Rust" rule.  Digests are NOT
+    // computed here; callers omit them and the Rust handler derives
+    // canonical values from the content + fulfillment bytes on
+    // arrival.  These tests exercise the proto-shape contract only.
     const baseInput = {
       policyDigest: new Uint8Array(32).fill(0x02),
       content: new Uint8Array([0xaa, 0xbb]),
@@ -195,17 +196,13 @@ describe('dlv.ts', () => {
       signature: new Uint8Array(64).fill(0x22),
     };
 
-    test('auto-computes contentDigest and fulfillmentDigest when omitted', async () => {
-      const { dlvContentDigest, dlvFulfillmentDigest } = await import('../../utils/blake3');
+    test('omits content and fulfillment digests by default', () => {
       const bytes = buildDlvInstantiateBytes(baseInput);
       const req = pb.DlvInstantiateV1.fromBinary(bytes);
       expect(req.spec).toBeDefined();
-      expect(Array.from(req.spec!.contentDigest)).toEqual(
-        Array.from(dlvContentDigest(baseInput.content)),
-      );
-      expect(Array.from(req.spec!.fulfillmentDigest)).toEqual(
-        Array.from(dlvFulfillmentDigest(baseInput.fulfillmentBytes)),
-      );
+      // Both digest fields ride empty over the wire — Rust computes.
+      expect(req.spec!.contentDigest.length).toBe(0);
+      expect(req.spec!.fulfillmentDigest.length).toBe(0);
       // No lock supplied → all-zero 16 bytes.
       expect(req.lockedAmountU128.length).toBe(16);
       expect(req.lockedAmountU128.every((b) => b === 0)).toBe(true);
@@ -213,37 +210,20 @@ describe('dlv.ts', () => {
       expect(req.tokenId.length).toBe(0);
     });
 
-    test('accepts a matching caller-supplied digest pair', async () => {
-      const { dlvContentDigest, dlvFulfillmentDigest } = await import('../../utils/blake3');
+    test('passes 32-byte caller-supplied digests through verbatim (Rust strict-verifies)', () => {
+      const cd = new Uint8Array(32).fill(0x77);
+      const fd = new Uint8Array(32).fill(0x88);
       const bytes = buildDlvInstantiateBytes({
         ...baseInput,
-        contentDigest: dlvContentDigest(baseInput.content),
-        fulfillmentDigest: dlvFulfillmentDigest(baseInput.fulfillmentBytes),
+        contentDigest: cd,
+        fulfillmentDigest: fd,
       });
-      // Round-trip via the proto.  Content + fulfillment bytes survive intact.
       const req = pb.DlvInstantiateV1.fromBinary(bytes);
-      expect(Array.from(req.spec!.content)).toEqual(Array.from(baseInput.content));
-      expect(Array.from(req.spec!.fulfillmentBytes)).toEqual(
-        Array.from(baseInput.fulfillmentBytes),
-      );
-    });
-
-    test('rejects a caller-supplied contentDigest that does not match content', () => {
-      expect(() =>
-        buildDlvInstantiateBytes({
-          ...baseInput,
-          contentDigest: new Uint8Array(32).fill(0x99),
-        }),
-      ).toThrow(/contentDigest does not match BLAKE3/);
-    });
-
-    test('rejects a caller-supplied fulfillmentDigest that does not match', () => {
-      expect(() =>
-        buildDlvInstantiateBytes({
-          ...baseInput,
-          fulfillmentDigest: new Uint8Array(32).fill(0x99),
-        }),
-      ).toThrow(/fulfillmentDigest does not match BLAKE3/);
+      // The frontend does NOT validate digest correctness — that is
+      // Rust's job on the receiving end.  The builder just forwards
+      // whatever bytes the caller chose.
+      expect(Array.from(req.spec!.contentDigest)).toEqual(Array.from(cd));
+      expect(Array.from(req.spec!.fulfillmentDigest)).toEqual(Array.from(fd));
     });
 
     test('encodes lockedAmount big-endian u128', () => {
@@ -269,11 +249,15 @@ describe('dlv.ts', () => {
 
     test.each([
       ['policyDigest', { policyDigest: new Uint8Array(16) }, /policyDigest must be 32 bytes/],
-      ['contentDigest', { contentDigest: new Uint8Array(16) }, /contentDigest must be 32 bytes/],
       [
-        'fulfillmentDigest',
+        'contentDigest length',
+        { contentDigest: new Uint8Array(16) },
+        /contentDigest must be 0 or 32 bytes/,
+      ],
+      [
+        'fulfillmentDigest length',
         { fulfillmentDigest: new Uint8Array(16) },
-        /fulfillmentDigest must be 32 bytes/,
+        /fulfillmentDigest must be 0 or 32 bytes/,
       ],
       ['creatorPublicKey', { creatorPublicKey: new Uint8Array(0) }, /creatorPublicKey is required/],
       ['signature', { signature: new Uint8Array(0) }, /signature is required/],

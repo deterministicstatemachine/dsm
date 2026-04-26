@@ -62,6 +62,7 @@ impl AppRouterImpl {
             "route.publishExternalCommitment" => {
                 self.route_publish_external_commitment(i).await
             }
+            "route.signRouteCommit" => self.route_sign_route_commit(i).await,
             other => err(format!("unknown route invoke method: {other}")),
         }
     }
@@ -133,6 +134,105 @@ impl AppRouterImpl {
                 "route.isExternalCommitmentVisible: storage error: {e}"
             )),
         }
+    }
+
+    /// `route.signRouteCommit` — sign a `RouteCommitV1` with the
+    /// local wallet's SPHINCS+ key.  Per the "all business logic
+    /// stays in Rust" rule, frontend traders never hold or invoke
+    /// SPHINCS+ keys directly; they hand the unsigned proto to this
+    /// route, which:
+    ///   1. Decodes the input.
+    ///   2. Stamps `initiator_public_key` with the wallet's current
+    ///      SPHINCS+ public key (overwriting whatever the caller
+    ///      passed — the wallet IS the trader).
+    ///   3. Computes the canonical (signature-zeroed) bytes via the
+    ///      same `canonicalise_for_commitment` helper that feeds the
+    ///      external commitment X.  Single source of truth: a future
+    ///      edit can't drift the sign-side and verify-side
+    ///      canonicalisations apart.
+    ///   4. Calls `crypto::sphincs::sign` with the wallet's secret
+    ///      key.
+    ///   5. Re-encodes with `initiator_signature` populated and
+    ///      returns the bytes for the caller to publish.
+    ///
+    /// Returns the signed RouteCommit bytes Base32-encoded in
+    /// `AppStateResponse.value`.
+    async fn route_sign_route_commit(&self, i: AppInvoke) -> AppResult {
+        let bytes = match unwrap_argpack(&i.args) {
+            Ok(b) => b,
+            Err(e) => return err(format!("route.signRouteCommit: {e}")),
+        };
+        if bytes.is_empty() {
+            return err("route.signRouteCommit: empty RouteCommitV1 payload".into());
+        }
+        let mut rc = match generated::RouteCommitV1::decode(&*bytes) {
+            Ok(r) => r,
+            Err(e) => {
+                return err(format!(
+                    "route.signRouteCommit: decode RouteCommitV1 failed: {e}"
+                ));
+            }
+        };
+
+        // Wallet pk + sk.  Both must be available — strict-fail
+        // otherwise so callers get a precise error rather than a
+        // signed-with-empty-key result that the eligibility gate
+        // would later reject.
+        let pk = match crate::sdk::signing_authority::current_public_key() {
+            Ok(p) if !p.is_empty() => p,
+            Ok(_) => {
+                return err(
+                    "route.signRouteCommit: wallet signing public key is empty".into(),
+                );
+            }
+            Err(e) => {
+                return err(format!(
+                    "route.signRouteCommit: get_current_public_key failed: {e}"
+                ));
+            }
+        };
+        let sk = match crate::sdk::signing_authority::current_secret_key() {
+            Ok(s) if !s.is_empty() => s,
+            Ok(_) => {
+                return err(
+                    "route.signRouteCommit: wallet signing secret key is empty".into(),
+                );
+            }
+            Err(e) => {
+                return err(format!(
+                    "route.signRouteCommit: get_current_secret_key failed: {e}"
+                ));
+            }
+        };
+
+        // The wallet is the trader: stamp our pk on the route.  Any
+        // value the caller supplied is overwritten — sign-as-this-
+        // device semantics keep the verifier's check meaningful
+        // (anyone could otherwise claim to sign as anyone).
+        rc.initiator_public_key = pk;
+
+        // Same canonicalisation as `compute_external_commitment`.
+        let canonical =
+            crate::sdk::route_commit_sdk::canonicalise_for_commitment(&rc);
+        let canonical_bytes = canonical.encode_to_vec();
+        let sig = match dsm::crypto::sphincs::sign(
+            dsm::crypto::sphincs::SphincsVariant::SPX256f,
+            &sk,
+            &canonical_bytes,
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                return err(format!("route.signRouteCommit: sphincs sign failed: {e}"));
+            }
+        };
+        rc.initiator_signature = sig;
+
+        let signed_bytes = rc.encode_to_vec();
+        let resp = generated::AppStateResponse {
+            key: "route.signRouteCommit".to_string(),
+            value: Some(crate::util::text_id::encode_base32_crockford(&signed_bytes)),
+        };
+        pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
     }
 
     /// `route.publishExternalCommitment` — writes the anchor to
