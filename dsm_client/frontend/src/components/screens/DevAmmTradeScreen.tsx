@@ -232,7 +232,24 @@ export default function DevAmmTradeScreen(): JSX.Element {
         return;
       }
       updateStep(5, 'ok', `vault_id=${unlockRes.vaultIdBase32}`);
-      setStatus('Trade settled.');
+      // Republish-on-settled (Rust handler) has already bumped the
+      // routing-vault advertisement on storage.  Refresh the local
+      // discovery list so the displayed reserves reflect the new
+      // post-trade state — without this, the user sees stale numbers
+      // until they manually re-Quote.  Best-effort: a refresh failure
+      // doesn't undo the settled trade.
+      try {
+        const refreshed = await listAdvertisementsForPair({
+          tokenA: inputBytes,
+          tokenB: outputBytes,
+        });
+        if (refreshed.success && refreshed.advertisements) {
+          setDiscoveredAds(refreshed.advertisements);
+        }
+      } catch {
+        /* discovery refresh is purely cosmetic post-trade */
+      }
+      setStatus('Trade settled. Reserves refreshed.');
     } catch (e: any) {
       setStatus(e?.message || 'Trade pipeline failed');
     } finally {

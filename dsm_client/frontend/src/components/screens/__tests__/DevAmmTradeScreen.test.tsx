@@ -128,6 +128,73 @@ describe('DevAmmTradeScreen', () => {
     await waitFor(() => expect(publishExternalCommitment).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(unlockVaultRouted).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(screen.getByText(/Trade settled/i)).toBeInTheDocument());
+
+    // Auto-re-quote after settled trade — `listAdvertisementsForPair`
+    // should have been called twice: once for the initial Quote and
+    // again post-trade to refresh the displayed reserves.
+    await waitFor(() =>
+      expect(listAdvertisementsForPair).toHaveBeenCalledTimes(2),
+    );
+    expect(screen.getByText(/Reserves refreshed/i)).toBeInTheDocument();
+  });
+
+  test('post-trade refresh updates the displayed reserves', async () => {
+    // Start: ad with reserves (1M, 1M).  After the trade, mock the
+    // refreshed list to show post-trade reserves (1.01M, 990k); the
+    // UI must re-render with the new numbers.
+    const preTradeAd = {
+      vaultIdBase32: okVaultId,
+      tokenA: new TextEncoder().encode('DEMO_AAA'),
+      tokenB: new TextEncoder().encode('DEMO_BBB'),
+      reserveA: 1_000_000n,
+      reserveB: 1_000_000n,
+      feeBps: 30,
+      stateNumber: 1n,
+      ownerPublicKey: new Uint8Array(64),
+    };
+    const postTradeAd = { ...preTradeAd, reserveA: 1_010_000n, reserveB: 990_129n, stateNumber: 2n };
+    (listAdvertisementsForPair as jest.Mock)
+      .mockResolvedValueOnce({ success: true, advertisements: [preTradeAd] })
+      .mockResolvedValueOnce({ success: true, advertisements: [postTradeAd] });
+    (syncVaultsForPair as jest.Mock).mockResolvedValue({
+      success: true,
+      newlyMirroredBase32: [],
+    });
+    (findAndBindBestPath as jest.Mock).mockResolvedValue({
+      success: true,
+      unsignedRouteCommitBytes: new Uint8Array([0x01]),
+    });
+    (signRouteCommit as jest.Mock).mockResolvedValue({
+      success: true,
+      signedRouteCommitBase32: encodeBase32Crockford(new Uint8Array([0x02])),
+    });
+    (computeExternalCommitment as jest.Mock).mockResolvedValue({
+      success: true,
+      xBase32: encodeBase32Crockford(new Uint8Array(32).fill(0xAA)),
+    });
+    (publishExternalCommitment as jest.Mock).mockResolvedValue({
+      success: true,
+      xBase32: encodeBase32Crockford(new Uint8Array(32).fill(0xAA)),
+    });
+    (unlockVaultRouted as jest.Mock).mockResolvedValue({
+      success: true,
+      vaultIdBase32: okVaultId,
+    });
+
+    render(<DevAmmTradeScreen />);
+    fireEvent.click(screen.getByText(/^Quote$/i));
+    await waitFor(() =>
+      expect(screen.getByText(/reserves=\(1000000, 1000000\)/)).toBeInTheDocument(),
+    );
+
+    fireEvent.click(await screen.findByText(/Execute trade/i));
+    await waitFor(() =>
+      expect(screen.getByText(/Trade settled\. Reserves refreshed/i)).toBeInTheDocument(),
+    );
+    // Display now shows post-trade reserves.
+    await waitFor(() =>
+      expect(screen.getByText(/reserves=\(1010000, 990129\)/)).toBeInTheDocument(),
+    );
   });
 
   test('aborts pipeline if step 2 (find+bind) fails', async () => {
