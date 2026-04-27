@@ -1025,3 +1025,27 @@ fn no_policy_commit_derived_from_metadata_cache() {
         );
     }
 }
+
+/// Tier 2 Foundation invariant — `dlv.create` must publish the
+/// genesis vault state anchor for AMM (Required / Optional) vaults
+/// via the `vault_state_anchor` module.  The guard fails if the
+/// publish call, the reserves-digest derivation, or the enforcement
+/// dispatch are removed.
+#[test]
+fn dlv_create_invokes_genesis_anchor_publish_for_required_amm_vault() {
+    let src = read(sdk_path("src/handlers/dlv_routes.rs"));
+    // The genesis-anchor publish path uses these symbols in dlv_create:
+    assert!(
+        src.contains("publish_vault_state_anchor"),
+        "dlv_routes.rs must call publish_vault_state_anchor for Tier 2 Foundation"
+    );
+    assert!(
+        src.contains("compute_reserves_digest")
+            || src.contains("vault_state_anchor::compute_reserves_digest"),
+        "dlv_routes.rs must derive reserves_digest via the anchor module"
+    );
+    assert!(
+        src.contains("AnchorEnforcement::Required") || src.contains("AnchorEnforcement::Optional"),
+        "dlv_routes.rs must dispatch on anchor_enforcement"
+    );
+}
