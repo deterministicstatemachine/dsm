@@ -924,6 +924,12 @@ message AmmVaultSummaryV1 {
   // True if a routing-vault advertisement was found at the canonical
   // pair key for this vault on storage nodes.
   bool   routing_advertised        = 8;
+  // Tier 2 Foundation: vault's local current_sequence (the
+  // authoritative truth source for the chunks #7 gate).
+  uint64 anchor_sequence       = 9;
+  // Vault policy for anchor enforcement.  REQUIRED vaults reject
+  // routed unlocks lacking the anchor binding fields.
+  AnchorEnforcement anchor_enforcement = 10;
 }
 
 // Per-vault signed state anchor.  Owner publishes one at vault

@@ -40,6 +40,8 @@ describe('DevAmmMonitorScreen', () => {
           feeBps: 30,
           advertisedStateNumber: 5n,
           routingAdvertised: true,
+          anchorSequence: 0n,
+          anchorEnforcement: 'required',
         },
       ],
     });
@@ -66,6 +68,8 @@ describe('DevAmmMonitorScreen', () => {
           feeBps: 5,
           advertisedStateNumber: 0n,
           routingAdvertised: false,
+          anchorSequence: 0n,
+          anchorEnforcement: 'required',
         },
       ],
     });

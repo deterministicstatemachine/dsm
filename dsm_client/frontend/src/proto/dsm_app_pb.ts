@@ -7712,6 +7712,22 @@ export class AmmVaultSummaryV1 extends Message<AmmVaultSummaryV1> {
    */
   routingAdvertised = false;
 
+  /**
+   * Tier 2 Foundation: vault's local current_sequence (the
+   * authoritative truth source for the chunks #7 gate).
+   *
+   * @generated from field: uint64 anchor_sequence = 9;
+   */
+  anchorSequence = protoInt64.zero;
+
+  /**
+   * Vault policy for anchor enforcement.  REQUIRED vaults reject
+   * routed unlocks lacking the anchor binding fields.
+   *
+   * @generated from field: dsm.AnchorEnforcement anchor_enforcement = 10;
+   */
+  anchorEnforcement = AnchorEnforcement.UNSPECIFIED;
+
   constructor(data?: PartialMessage<AmmVaultSummaryV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -7728,6 +7744,8 @@ export class AmmVaultSummaryV1 extends Message<AmmVaultSummaryV1> {
     { no: 6, name: "fee_bps", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
     { no: 7, name: "advertised_state_number", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 8, name: "routing_advertised", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 9, name: "anchor_sequence", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 10, name: "anchor_enforcement", kind: "enum", T: proto3.getEnumType(AnchorEnforcement) },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AmmVaultSummaryV1 {

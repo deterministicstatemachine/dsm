@@ -186,6 +186,8 @@ export interface AmmVaultSummary {
   feeBps: number;
   advertisedStateNumber: bigint;
   routingAdvertised: boolean;
+  anchorSequence: bigint;
+  anchorEnforcement: 'unspecified' | 'optional' | 'required';
 }
 
 function decodeReserveBigInt(bytes: Uint8Array): bigint {
@@ -194,6 +196,19 @@ function decodeReserveBigInt(bytes: Uint8Array): bigint {
     acc = (acc << 8n) | BigInt(b);
   }
   return acc;
+}
+
+function anchorEnforcementToString(
+  e: pb.AnchorEnforcement,
+): 'unspecified' | 'optional' | 'required' {
+  switch (e) {
+    case pb.AnchorEnforcement.REQUIRED:
+      return 'required';
+    case pb.AnchorEnforcement.OPTIONAL:
+      return 'optional';
+    default:
+      return 'unspecified';
+  }
 }
 
 /**
@@ -247,6 +262,8 @@ export async function listOwnedAmmVaults(): Promise<{
         feeBps: summary.feeBps,
         advertisedStateNumber: summary.advertisedStateNumber,
         routingAdvertised: summary.routingAdvertised,
+        anchorSequence: summary.anchorSequence,
+        anchorEnforcement: anchorEnforcementToString(summary.anchorEnforcement),
       };
     });
     return { success: true, vaults };

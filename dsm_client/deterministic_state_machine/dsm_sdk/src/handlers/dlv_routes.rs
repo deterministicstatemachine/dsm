@@ -105,6 +105,8 @@ impl AppRouterImpl {
                     ),
                     _ => continue,
                 };
+                let anchor_sequence = vault.current_sequence;
+                let anchor_enforcement = vault.anchor_enforcement;
                 drop(vault);
 
                 // Best-effort storage fetch for advertised state_number.
@@ -133,6 +135,8 @@ impl AppRouterImpl {
                     fee_bps,
                     advertised_state_number: state_number,
                     routing_advertised: advertised,
+                    anchor_sequence,
+                    anchor_enforcement,
                 });
             }
             out

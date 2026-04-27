@@ -113,6 +113,8 @@ export default function DevAmmMonitorScreen(): JSX.Element {
                   ? `✓ published (state_number=${String(v.advertisedStateNumber)})`
                   : '✗ not published — run "Publish routing ad" on the vault screen'}
               </div>
+              <div>anchor seq: {v.anchorSequence.toString()}</div>
+              <div>anchor enforcement: {v.anchorEnforcement}</div>
             </div>
           ))}
         </section>
