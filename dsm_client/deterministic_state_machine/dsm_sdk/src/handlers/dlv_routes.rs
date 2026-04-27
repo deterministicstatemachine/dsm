@@ -1223,6 +1223,14 @@ impl AppRouterImpl {
             // fulfillment so we can address the routing advertisement
             // for republish without reconstructing it from the route.
             let mut canonical_pair: Option<(Vec<u8>, Vec<u8>)> = None;
+            // Tier 2 Foundation: capture the post-settle (sequence,
+            // reserves_digest) cloned out of the lock so we can sign +
+            // republish a fresh `VaultStateAnchorV1` after the lock is
+            // released.  The local sequence is the LOCAL authoritative
+            // truth — the chunks #7 gate binds against it.  The storage
+            // anchor is republished best-effort as a discovery
+            // advertisement only.
+            let mut post_settle_anchor: Option<(u64, [u8; 32])> = None;
             // Best-effort: a failure here means the vault's local state
             // diverges from the advanced chain by one swap.  The chain
             // is authoritative; the vault state will resync at next
@@ -1235,12 +1243,32 @@ impl AppRouterImpl {
                         token_b,
                         reserve_a,
                         reserve_b,
-                        ..
+                        fee_bps,
                     } = &mut vault.fulfillment_condition
                     {
                         *reserve_a = new_a;
                         *reserve_b = new_b;
-                        canonical_pair = Some((token_a.clone(), token_b.clone()));
+                        let token_a_clone = token_a.clone();
+                        let token_b_clone = token_b.clone();
+                        let fee_bps_val: u32 = *fee_bps;
+                        canonical_pair = Some((token_a_clone.clone(), token_b_clone.clone()));
+                        // Advance vault internal sequence.  Use
+                        // `current_sequence.saturating_add(1)` so a
+                        // pathological u64::MAX doesn't wrap silently;
+                        // saturation is correct fail-closed because the
+                        // chunks #7 gate binds equality and any further
+                        // routes against a saturated vault would simply
+                        // mismatch and reject (preferable to silent wrap).
+                        vault.current_sequence = vault.current_sequence.saturating_add(1);
+                        let new_seq = vault.current_sequence;
+                        let new_digest = dsm::dlv::vault_state_anchor::compute_reserves_digest(
+                            &token_a_clone,
+                            &token_b_clone,
+                            new_a,
+                            new_b,
+                            fee_bps_val,
+                        );
+                        post_settle_anchor = Some((new_seq, new_digest));
                     }
                 }
                 Err(e) => {
@@ -1267,6 +1295,63 @@ impl AppRouterImpl {
                     log::warn!(
                         "[dlv.unlockRouted] post-advance routing-ad republish for {} failed (vault may not be advertised): {e}",
                         crate::util::text_id::encode_base32_crockford(&vault_id)
+                    );
+                }
+            }
+
+            // Tier 2 Foundation: republish the vault state anchor for
+            // the post-settle (sequence, reserves_digest) so off-device
+            // traders quoting the next swap stamp the matching
+            // `RouteCommitHop` binding fields.  This is an
+            // advertisement-only write — vault internal state is the
+            // authoritative truth and the chunks #7 gate already
+            // verified the prior anchor against the local vault.
+            // Best-effort: failure logs a warning, never rolls back
+            // the on-chain unlock.
+            if let Some((new_seq, new_digest)) = post_settle_anchor {
+                if let (Ok(pk), Ok(sk)) = (
+                    crate::sdk::signing_authority::current_public_key(),
+                    crate::sdk::signing_authority::current_secret_key(),
+                ) {
+                    if !pk.is_empty() && !sk.is_empty() {
+                        match dsm::dlv::vault_state_anchor::sign_vault_state_anchor(
+                            &vault_id, new_seq, &new_digest, &pk, &sk,
+                        ) {
+                            Ok(signed) => {
+                                let proto_bytes =
+                                    crate::sdk::vault_state_anchor_codec::encode_anchor_to_proto(
+                                        &signed,
+                                    );
+                                if let Err(e) =
+                                    publish_vault_state_anchor(&vault_id, &proto_bytes).await
+                                {
+                                    log::warn!(
+                                        "[dlv.unlockRouted] anchor republish (seq={}) failed for {}: {e}",
+                                        new_seq,
+                                        crate::util::text_id::encode_base32_crockford(&vault_id),
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                log::warn!(
+                                    "[dlv.unlockRouted] anchor sign failed for seq={} vault={}: {e:?}",
+                                    new_seq,
+                                    crate::util::text_id::encode_base32_crockford(&vault_id),
+                                );
+                            }
+                        }
+                    } else {
+                        log::warn!(
+                            "[dlv.unlockRouted] anchor republish (seq={}) skipped for {}: signing authority empty",
+                            new_seq,
+                            crate::util::text_id::encode_base32_crockford(&vault_id),
+                        );
+                    }
+                } else {
+                    log::warn!(
+                        "[dlv.unlockRouted] anchor republish (seq={}) skipped for {}: signing authority unavailable",
+                        new_seq,
+                        crate::util::text_id::encode_base32_crockford(&vault_id),
                     );
                 }
             }
