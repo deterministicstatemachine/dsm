@@ -488,6 +488,84 @@ impl AppRouterImpl {
             }
         }
 
+        // Tier 2 Foundation: publish genesis vault state anchor
+        // (sequence=0) for AMM vaults whose spec declares
+        // anchor_enforcement = REQUIRED or OPTIONAL.  Vault internal
+        // state is authoritative; the anchor is a best-effort
+        // off-device-trader-readable advertisement.  Failure is
+        // logged but does NOT roll back vault creation.
+        {
+            use dsm::types::proto::AnchorEnforcement;
+            let enforcement = AnchorEnforcement::try_from(spec.anchor_enforcement)
+                .unwrap_or(AnchorEnforcement::Unspecified);
+            let should_publish = match enforcement {
+                AnchorEnforcement::Required | AnchorEnforcement::Optional => true,
+                AnchorEnforcement::Unspecified => false,
+            };
+            if should_publish {
+                match dlv_manager.get_vault(&vault_id).await {
+                    Ok(vault_lock) => {
+                        let vault = vault_lock.lock().await;
+                        let reserves_digest_opt = vault.current_reserves_digest();
+                        drop(vault);
+                        if let Some(reserves_digest) = reserves_digest_opt {
+                            let pk_res = crate::sdk::signing_authority::current_public_key();
+                            let sk_res = crate::sdk::signing_authority::current_secret_key();
+                            match (pk_res, sk_res) {
+                                (Ok(pk), Ok(sk)) if !pk.is_empty() && !sk.is_empty() => {
+                                    match dsm::dlv::vault_state_anchor::sign_vault_state_anchor(
+                                        &vault_id,
+                                        0,
+                                        &reserves_digest,
+                                        &pk,
+                                        &sk,
+                                    ) {
+                                        Ok(signed) => {
+                                            let proto_bytes =
+                                                crate::sdk::vault_state_anchor_codec::encode_anchor_to_proto(
+                                                    &signed,
+                                                );
+                                            if let Err(e) = publish_vault_state_anchor(
+                                                &vault_id,
+                                                &proto_bytes,
+                                            )
+                                            .await
+                                            {
+                                                log::warn!(
+                                                    "[dlv.create] genesis anchor publish failed for {}: {e}; vault is locally consistent but may not be quotable off-device until republish",
+                                                    crate::util::text_id::encode_base32_crockford(&vault_id),
+                                                );
+                                            }
+                                        }
+                                        Err(e) => {
+                                            log::warn!(
+                                                "[dlv.create] genesis anchor sign failed for {}: {e:?}",
+                                                crate::util::text_id::encode_base32_crockford(&vault_id),
+                                            );
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    log::warn!(
+                                        "[dlv.create] genesis anchor: signing authority unavailable for {}",
+                                        crate::util::text_id::encode_base32_crockford(&vault_id),
+                                    );
+                                }
+                            }
+                        }
+                        // No reserves digest: non-AMM vault.  Tier 2 Foundation
+                        // is AMM-only — silently skip.
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "[dlv.create] genesis anchor: get_vault for {} failed: {e}",
+                            crate::util::text_id::encode_base32_crockford(&vault_id),
+                        );
+                    }
+                }
+            }
+        }
+
         let resp = generated::AppStateResponse {
             key: "dlv.create".to_string(),
             value: Some(crate::util::text_id::encode_base32_crockford(&vault_id)),
@@ -1030,4 +1108,23 @@ impl AppRouterImpl {
         };
         pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
     }
+}
+
+/// Publish a `VaultStateAnchorV1` proto blob to storage at the
+/// canonical Tier 2 Foundation key
+/// `defi/vault-state/{vault_id_b32}/latest`.  Best-effort —
+/// vault internal state is authoritative; this storage write is
+/// advertisement-and-discovery only.
+async fn publish_vault_state_anchor(
+    vault_id: &[u8; 32],
+    proto_bytes: &[u8],
+) -> Result<(), String> {
+    let key = format!(
+        "defi/vault-state/{}/latest",
+        crate::util::text_id::encode_base32_crockford(vault_id),
+    );
+    crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::storage_put_bytes(&key, proto_bytes)
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("storage put failed: {e:?}"))
 }
