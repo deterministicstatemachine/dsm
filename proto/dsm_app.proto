@@ -819,6 +819,30 @@ message TokenCreateResponse {
 //     policy_digest || content_digest || fulfillment_digest || recipient_digest)
 // where recipient_digest = BLAKE3("DSM/dlv-recipient\0" || intended_recipient) if set
 // else 32 zero bytes.
+
+// Anchor enforcement posture for an AMM vault.
+//
+// REQUIRED: every routed unlock against this vault MUST carry
+//   `(vault_state_anchor_seq, vault_state_reserves_digest,
+//   vault_state_anchor_digest)` on its `RouteCommitHopV1`.  The
+//   chunks #7 gate verifies these against the vault's local
+//   `DLVManager` state (NOT against storage).  Missing fields or
+//   mismatch ⇒ typed reject.
+//
+// OPTIONAL: anchor fields are accepted if present but not required.
+//   When absent, gate falls through to the existing reserves-value
+//   check.  The unlock response surfaces a flag indicating identity-
+//   binding was not enforced.
+//
+// UNSPECIFIED: grandfathered behaviour for vaults predating Tier 2
+//   Foundation.  Treated as OPTIONAL by the gate.  New vaults SHOULD
+//   set REQUIRED.
+enum AnchorEnforcement {
+  ANCHOR_ENFORCEMENT_UNSPECIFIED = 0;
+  ANCHOR_ENFORCEMENT_OPTIONAL    = 1;
+  ANCHOR_ENFORCEMENT_REQUIRED    = 2;
+}
+
 message DlvSpecV1 {
   bytes policy_digest       = 1 [(dsm_fixed_len)=32];  // CPTA anchor
   bytes content_digest      = 2 [(dsm_fixed_len)=32];  // H("DSM/dlv-content", content)
