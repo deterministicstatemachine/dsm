@@ -437,6 +437,12 @@ pub struct LimboVault {
     /// Bitcoin block header cached at entry time (80 bytes).
     /// dBTC paper §12.2.3, Invariant 19: exit proofs must chain back to this anchor.
     pub entry_header: Option<[u8; 80]>,
+    /// Tier 2 Foundation: monotonic sequence advanced on every accepted
+    /// routed unlock.  The chunks #7 gate verifies a trader's
+    /// `RouteCommitHop.vault_state_anchor_seq` matches this value.  This
+    /// is the LOCAL authoritative truth — never read from storage.
+    /// Domain-only: not persisted in `LimboVaultProto`.
+    pub current_sequence: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -558,6 +564,9 @@ impl TryFrom<crate::types::proto::LimboVaultProto> for LimboVault {
                     None
                 }
             }),
+            // Tier 2 Foundation: domain-only; not persisted in the proto.
+            // Loaded vaults start at 0 and advance through routed unlocks.
+            current_sequence: 0,
         })
     }
 }
@@ -930,6 +939,7 @@ impl LimboVault {
             verification_positions: Vec::new(),
             reference_state_hash,
             entry_header: None,
+            current_sequence: 0,
         }
     }
 
@@ -1074,6 +1084,7 @@ impl LimboVaultDraft {
             verification_positions: self.verification_positions,
             reference_state_hash: self.reference_state_hash,
             entry_header: None,
+            current_sequence: 0,
         };
 
         if !vault.verify()? {
@@ -2034,6 +2045,7 @@ impl Default for LimboVault {
             verification_positions: Vec::new(),
             reference_state_hash: [0u8; 32],
             entry_header: None,
+            current_sequence: 0,
         }
     }
 }

@@ -323,6 +323,33 @@ impl Default for DLVManager {
     }
 }
 
+/// Tier 2 Foundation accessors used by the chunks #7 routed-unlock gate.
+///
+/// The gate authenticates a trader's `RouteCommitHopV1.vault_state_anchor_seq`
+/// and `vault_state_reserves_digest` against the LOCAL vault — storage anchors
+/// are advertisement-and-discovery only, never the verification source.
+impl LimboVault {
+    /// Returns the canonical reserves digest for this vault if it
+    /// uses an AMM constant-product fulfillment.  Returns `None` for
+    /// other fulfillment kinds — Tier 2 Foundation is AMM-only.
+    pub fn current_reserves_digest(&self) -> Option<[u8; 32]> {
+        if let crate::vault::FulfillmentMechanism::AmmConstantProduct {
+            token_a,
+            token_b,
+            reserve_a,
+            reserve_b,
+            fee_bps,
+        } = &self.fulfillment_condition
+        {
+            Some(crate::dlv::vault_state_anchor::compute_reserves_digest(
+                token_a, token_b, *reserve_a, *reserve_b, *fee_bps,
+            ))
+        } else {
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,6 +389,7 @@ mod tests {
             verification_positions: vec![],
             reference_state_hash: [0xCC; 32],
             entry_header: None,
+            current_sequence: 0,
         }
     }
 
@@ -492,5 +520,75 @@ mod tests {
 
         let ids = mgr.list_vaults().await.unwrap();
         assert_eq!(ids.len(), 10);
+    }
+
+    // ── Tier 2 Foundation accessors ────────────────────────────────
+
+    /// Build a minimal AMM-fulfilment `LimboVault` directly on the stack
+    /// for accessor tests. The chunks #7 gate consumes `current_sequence`
+    /// and `current_reserves_digest()` directly off the vault — no
+    /// `DLVManager` traversal needed for these unit tests.
+    fn amm_vault(token_a: &[u8], token_b: &[u8], reserve_a: u128, reserve_b: u128, fee_bps: u32)
+        -> LimboVault
+    {
+        let params = PedersenParams::new(SecurityLevel::Standard128).expect("pedersen params");
+        let commitment =
+            PedersenCommitment::commit(b"amm_vault", &params).expect("pedersen commit");
+        LimboVault {
+            id: vid(0xAA),
+            created_at_state: 0,
+            creator_public_key: vec![0x01; 32],
+            fulfillment_condition: FulfillmentMechanism::AmmConstantProduct {
+                token_a: token_a.to_vec(),
+                token_b: token_b.to_vec(),
+                reserve_a,
+                reserve_b,
+                fee_bps,
+            },
+            intended_recipient: None,
+            state: VS::Limbo,
+            content_type: "application/octet-stream".into(),
+            encrypted_content: EncryptedContent {
+                encapsulated_key: vec![],
+                encrypted_data: vec![],
+                nonce: vec![],
+                aad: vec![],
+            },
+            content_commitment: commitment,
+            parameters_hash: vec![0xAA; 32],
+            creator_signature: vec![0xBB; 64],
+            verification_positions: vec![],
+            reference_state_hash: [0xCC; 32],
+            entry_header: None,
+            current_sequence: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn vault_current_sequence_starts_at_zero() {
+        // Through DLVManager: construct, insert, fetch, observe seq=0.
+        let mgr = DLVManager::new();
+        let v = amm_vault(b"AAA", b"BBB", 1_000, 2_000, 30);
+        let id = mgr.add_vault(v).await.unwrap();
+        let lock = mgr.get_vault(&id).await.unwrap();
+        let v = lock.lock().await;
+        assert_eq!(v.current_sequence, 0);
+    }
+
+    #[tokio::test]
+    async fn vault_current_reserves_digest_matches_amm_helper() {
+        use crate::dlv::vault_state_anchor::compute_reserves_digest;
+        let v = amm_vault(b"AAA", b"BBB", 1_000, 2_000, 30);
+        assert_eq!(
+            v.current_reserves_digest(),
+            Some(compute_reserves_digest(b"AAA", b"BBB", 1_000, 2_000, 30)),
+        );
+    }
+
+    #[tokio::test]
+    async fn vault_current_reserves_digest_returns_none_for_non_amm() {
+        // Non-AMM fulfilment (CryptoCondition) — Tier 2 Foundation is AMM-only.
+        let v = dummy_vault(vid(1), VS::Limbo);
+        assert_eq!(v.current_reserves_digest(), None);
     }
 }
