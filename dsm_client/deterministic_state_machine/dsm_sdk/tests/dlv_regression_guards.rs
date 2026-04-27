@@ -1082,3 +1082,27 @@ fn dlv_unlock_routed_enforces_anchor_against_local_vault_state() {
         "gate must surface bypass flag for Optional fall-through"
     );
 }
+
+/// Tier 2 Foundation invariant — after an accepted routed unlock, the
+/// vault's internal `current_sequence` must advance by exactly one and
+/// a fresh `VaultStateAnchorV1` must be republished for the post-trade
+/// state.  The guard fails if either step regresses.
+#[test]
+fn dlv_unlock_routed_advances_sequence_and_republishes_anchor_on_settle() {
+    let src = read(sdk_path("src/handlers/dlv_routes.rs"));
+    // After accepted unlock, sequence must advance.
+    assert!(
+        src.contains("current_sequence.saturating_add(1)")
+            || src.contains("current_sequence += 1"),
+        "settle path must advance vault.current_sequence"
+    );
+    // A second call to `publish_vault_state_anchor` must exist —
+    // one in `dlv_create` for genesis, one in `dlv_unlock_routed`
+    // for settle.  If only one (or zero) calls exist, either the
+    // genesis or the post-settle republish has regressed.
+    let count = src.matches("publish_vault_state_anchor").count();
+    assert!(
+        count >= 2,
+        "publish_vault_state_anchor must be called from both dlv_create and dlv_unlock_routed (found {count})"
+    );
+}
