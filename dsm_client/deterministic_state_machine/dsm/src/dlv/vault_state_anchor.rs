@@ -36,6 +36,97 @@ pub fn compute_reserves_digest(
     *h.finalize().as_bytes()
 }
 
+/// Signed canonical form of a vault state anchor.  Wire-encoded as
+/// `VaultStateAnchorV1` proto; this struct is the in-memory typed
+/// view.
+#[derive(Debug, Clone)]
+pub struct SignedVaultStateAnchor {
+    pub vault_id: [u8; 32],
+    pub sequence: u64,
+    pub reserves_digest: [u8; 32],
+    pub owner_public_key: Vec<u8>,
+    pub owner_signature: Vec<u8>,
+}
+
+/// Errors raised by `sign_vault_state_anchor` /
+/// `verify_vault_state_anchor`.  Avoids pulling `thiserror` for a
+/// pure-crypto leaf module — manual `Display` + `std::error::Error`
+/// keeps the dependency surface honest.
+#[derive(Debug)]
+pub enum AnchorError {
+    /// Signature verification failed (bad signature, key mismatch,
+    /// or tampered fields).
+    SignatureInvalid,
+    /// Underlying SPHINCS+ sign call failed.
+    SignFailed(String),
+}
+
+impl core::fmt::Display for AnchorError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            AnchorError::SignatureInvalid => write!(f, "signature verification failed"),
+            AnchorError::SignFailed(msg) => write!(f, "sphincs sign failed: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for AnchorError {}
+
+fn anchor_sign_payload(
+    vault_id: &[u8; 32],
+    sequence: u64,
+    reserves_digest: &[u8; 32],
+) -> [u8; 32] {
+    let mut h = Hasher::new();
+    h.update(DOMAIN_ANCHOR);
+    h.update(vault_id);
+    h.update(&sequence.to_be_bytes());
+    h.update(reserves_digest);
+    *h.finalize().as_bytes()
+}
+
+/// Sign a vault state anchor with the owner's SPHINCS+ secret key.
+///
+/// The signed payload is the BLAKE3 digest of
+/// `DOMAIN_ANCHOR || vault_id || sequence_be || reserves_digest`.
+pub fn sign_vault_state_anchor(
+    vault_id: &[u8; 32],
+    sequence: u64,
+    reserves_digest: &[u8; 32],
+    owner_public_key: &[u8],
+    owner_secret_key: &[u8],
+) -> Result<SignedVaultStateAnchor, AnchorError> {
+    let payload = anchor_sign_payload(vault_id, sequence, reserves_digest);
+    let signature = crate::crypto::sphincs::sphincs_sign(owner_secret_key, &payload)
+        .map_err(|e| AnchorError::SignFailed(format!("{e:?}")))?;
+    Ok(SignedVaultStateAnchor {
+        vault_id: *vault_id,
+        sequence,
+        reserves_digest: *reserves_digest,
+        owner_public_key: owner_public_key.to_vec(),
+        owner_signature: signature,
+    })
+}
+
+/// Verify the owner's SPHINCS+ signature on a vault state anchor.
+/// Returns `Ok(())` when the signature matches the canonical payload
+/// derived from the anchor's public fields, `Err(SignatureInvalid)`
+/// otherwise.
+pub fn verify_vault_state_anchor(anchor: &SignedVaultStateAnchor) -> Result<(), AnchorError> {
+    let payload = anchor_sign_payload(&anchor.vault_id, anchor.sequence, &anchor.reserves_digest);
+    let ok = crate::crypto::sphincs::sphincs_verify(
+        &anchor.owner_public_key,
+        &payload,
+        &anchor.owner_signature,
+    )
+    .map_err(|_| AnchorError::SignatureInvalid)?;
+    if ok {
+        Ok(())
+    } else {
+        Err(AnchorError::SignatureInvalid)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -55,5 +146,46 @@ mod tests {
         assert_ne!(base, compute_reserves_digest(b"AAA", b"BBB", 1001, 2000, 30));
         assert_ne!(base, compute_reserves_digest(b"AAA", b"BBB", 1000, 2001, 30));
         assert_ne!(base, compute_reserves_digest(b"AAA", b"BBB", 1000, 2000, 31));
+    }
+
+    #[test]
+    fn anchor_signing_round_trips() {
+        let (pk, sk) =
+            crate::crypto::sphincs::generate_sphincs_keypair().expect("keypair");
+        let vault_id = [0x11u8; 32];
+        let reserves_digest = compute_reserves_digest(b"AAA", b"BBB", 100, 200, 30);
+
+        let signed = sign_vault_state_anchor(&vault_id, 0, &reserves_digest, &pk, &sk)
+            .expect("sign succeeds");
+
+        verify_vault_state_anchor(&signed).expect("verify succeeds");
+    }
+
+    #[test]
+    fn anchor_verification_rejects_tampered_sequence() {
+        let (pk, sk) =
+            crate::crypto::sphincs::generate_sphincs_keypair().expect("keypair");
+        let vault_id = [0x22u8; 32];
+        let reserves_digest = compute_reserves_digest(b"AAA", b"BBB", 100, 200, 30);
+
+        let mut signed = sign_vault_state_anchor(&vault_id, 5, &reserves_digest, &pk, &sk)
+            .expect("sign succeeds");
+        signed.sequence = 6;
+
+        assert!(verify_vault_state_anchor(&signed).is_err());
+    }
+
+    #[test]
+    fn anchor_verification_rejects_tampered_reserves_digest() {
+        let (pk, sk) =
+            crate::crypto::sphincs::generate_sphincs_keypair().expect("keypair");
+        let vault_id = [0x33u8; 32];
+        let reserves_digest = compute_reserves_digest(b"AAA", b"BBB", 100, 200, 30);
+
+        let mut signed = sign_vault_state_anchor(&vault_id, 0, &reserves_digest, &pk, &sk)
+            .expect("sign succeeds");
+        signed.reserves_digest[0] ^= 0xff;
+
+        assert!(verify_vault_state_anchor(&signed).is_err());
     }
 }
