@@ -2022,7 +2022,7 @@ impl LimboVault {
         let creator_id = decimal_label("pk-", &self.creator_public_key);
 
         Ok(VaultPost {
-            vault_id: self.id.clone(),
+            vault_id: self.id,
             lock_description,
             creator_id,
             commitment_hash: self.parameters_hash.clone(),
