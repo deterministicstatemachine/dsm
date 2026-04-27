@@ -1049,3 +1049,36 @@ fn dlv_create_invokes_genesis_anchor_publish_for_required_amm_vault() {
         "dlv_routes.rs must dispatch on anchor_enforcement"
     );
 }
+
+/// Tier 2 Foundation invariant — the `dlv.unlockRouted` anchor gate
+/// must compare against the vault's *internal* sequence and reserves
+/// digest (local truth), reject Required vaults that lack the
+/// anchor binding, and surface the bypass flag for Optional
+/// fall-through cases.  The guard fails if any of those four
+/// surfaces regress.
+#[test]
+fn dlv_unlock_routed_enforces_anchor_against_local_vault_state() {
+    let src = read(sdk_path("src/handlers/dlv_routes.rs"));
+    // The gate must verify against vault.current_sequence and
+    // vault.current_reserves_digest() — NOT against storage.
+    assert!(
+        src.contains("vault.current_sequence"),
+        "gate must compare against vault.current_sequence (local truth)"
+    );
+    assert!(
+        src.contains("current_reserves_digest"),
+        "gate must compare against vault.current_reserves_digest()"
+    );
+    // The Required path must hard-reject missing fields.
+    assert!(
+        src.contains("anchor binding")
+            || src.contains("MissingAnchorBinding")
+            || src.contains("requires anchor binding"),
+        "gate must reject Required vaults missing anchor fields"
+    );
+    // The Optional path must surface the bypass flag.
+    assert!(
+        src.contains("anchor_enforcement_bypassed_optional_vault"),
+        "gate must surface bypass flag for Optional fall-through"
+    );
+}
