@@ -3835,9 +3835,7 @@ impl AppRouterImpl {
                             }
                         }
                     } else {
-                        log::warn!(
-                            "[AWAIT_AND_COMPLETE] Invalid Base32 vault_id {vault_id}"
-                        );
+                        log::warn!("[AWAIT_AND_COMPLETE] Invalid Base32 vault_id {vault_id}");
                     }
                 }
 

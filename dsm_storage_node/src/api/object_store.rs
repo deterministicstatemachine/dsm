@@ -16,8 +16,8 @@ use log::{info, warn};
 use prost::Message;
 use std::sync::Arc;
 
-use super::hardening::blake3_tagged;
 use super::authenticate::authenticate_vaultpost_smart_policy_if_present;
+use super::hardening::blake3_tagged;
 use crate::auth::DeviceContext;
 use crate::db::{self};
 

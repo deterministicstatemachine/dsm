@@ -165,10 +165,8 @@ impl DLVManager {
         // Avoid holding the RwLock guard across async awaits on individual vault mutexes.
         // Copy the handles first, then release the map read guard before locking each vault.
         let vaults = self.vaults.read().await;
-        let handles: Vec<([u8; 32], Arc<tokio::sync::Mutex<LimboVault>>)> = vaults
-            .iter()
-            .map(|(id, v)| (*id, v.clone()))
-            .collect();
+        let handles: Vec<([u8; 32], Arc<tokio::sync::Mutex<LimboVault>>)> =
+            vaults.iter().map(|(id, v)| (*id, v.clone())).collect();
         drop(vaults);
 
         let mut result = Vec::new();
@@ -529,9 +527,13 @@ mod tests {
     /// for accessor tests. The chunks #7 gate consumes `current_sequence`
     /// and `current_reserves_digest()` directly off the vault — no
     /// `DLVManager` traversal needed for these unit tests.
-    fn amm_vault(token_a: &[u8], token_b: &[u8], reserve_a: u128, reserve_b: u128, fee_bps: u32)
-        -> LimboVault
-    {
+    fn amm_vault(
+        token_a: &[u8],
+        token_b: &[u8],
+        reserve_a: u128,
+        reserve_b: u128,
+        fee_bps: u32,
+    ) -> LimboVault {
         let params = PedersenParams::new(SecurityLevel::Standard128).expect("pedersen params");
         let commitment =
             PedersenCommitment::commit(b"amm_vault", &params).expect("pedersen commit");

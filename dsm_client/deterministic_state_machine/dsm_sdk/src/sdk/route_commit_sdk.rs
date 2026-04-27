@@ -89,7 +89,8 @@ pub(crate) fn bind_path_to_route_commit(
         return Err(RouteCommitError::InvalidNonce);
     }
 
-    let mut hops_proto: Vec<generated::RouteCommitHopV1> = Vec::with_capacity(input.path.hops.len());
+    let mut hops_proto: Vec<generated::RouteCommitHopV1> =
+        Vec::with_capacity(input.path.hops.len());
     for hop in &input.path.hops {
         hops_proto.push(generated::RouteCommitHopV1 {
             vault_id: hop.vault_id.to_vec(),
@@ -146,9 +147,7 @@ pub(crate) fn canonicalise_for_commitment(
 /// Compute `X = BLAKE3("DSM/ext\0" || canonical_bytes)` over the
 /// signature-zeroed RouteCommit.  Deterministic across encoders —
 /// prost emits canonical wire bytes for a given proto message.
-pub(crate) fn compute_external_commitment(
-    rc: &generated::RouteCommitV1,
-) -> [u8; 32] {
+pub(crate) fn compute_external_commitment(rc: &generated::RouteCommitV1) -> [u8; 32] {
     let canonical = canonicalise_for_commitment(rc);
     let canonical_bytes = canonical.encode_to_vec();
     dsm::crypto::blake3::domain_hash_bytes(EXT_COMMIT_DOMAIN, &canonical_bytes)
@@ -454,7 +453,9 @@ pub(crate) async fn verify_route_commit_unlock_eligibility(
         Ok(true) => {} // good
         Ok(false) => return Err(RouteCommitVerifyError::InvalidInitiatorSignature),
         Err(e) => {
-            return Err(RouteCommitVerifyError::SignatureVerifierError(format!("{e}")));
+            return Err(RouteCommitVerifyError::SignatureVerifierError(format!(
+                "{e}"
+            )));
         }
     }
 
@@ -742,9 +743,7 @@ mod tests {
         let visible = is_external_commitment_visible(&x).await;
         match visible {
             Ok(false) => {} // correct
-            other => panic!(
-                "unpublished X must report Ok(false), got {other:?}"
-            ),
+            other => panic!("unpublished X must report Ok(false), got {other:?}"),
         }
     }
 
@@ -797,7 +796,10 @@ mod tests {
         assert_eq!(hop.vault_id, vid(1).to_vec());
         let hop2 = find_hop(&rc, &vid(2)).expect("hop 2 present");
         assert_eq!(hop2.vault_id, vid(2).to_vec());
-        assert!(find_hop(&rc, &vid(99)).is_none(), "absent vault must be None");
+        assert!(
+            find_hop(&rc, &vid(99)).is_none(),
+            "absent vault must be None"
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -934,12 +936,9 @@ mod tests {
             initiator_signature: vec![],
         })
         .unwrap();
-        match verify_route_commit_unlock_eligibility(&rc.encode_to_vec(), &vid(1)).await
-        {
+        match verify_route_commit_unlock_eligibility(&rc.encode_to_vec(), &vid(1)).await {
             Err(RouteCommitVerifyError::InvalidInitiatorSignature) => {}
-            other => panic!(
-                "expected InvalidInitiatorSignature, got {other:?}"
-            ),
+            other => panic!("expected InvalidInitiatorSignature, got {other:?}"),
         }
     }
 
@@ -956,12 +955,9 @@ mod tests {
         })
         .unwrap();
         rc.initiator_public_key.clear(); // belt-and-suspenders
-        match verify_route_commit_unlock_eligibility(&rc.encode_to_vec(), &vid(1)).await
-        {
+        match verify_route_commit_unlock_eligibility(&rc.encode_to_vec(), &vid(1)).await {
             Err(RouteCommitVerifyError::MissingInitiatorPublicKey) => {}
-            other => panic!(
-                "expected MissingInitiatorPublicKey, got {other:?}"
-            ),
+            other => panic!("expected MissingInitiatorPublicKey, got {other:?}"),
         }
     }
 
@@ -988,12 +984,9 @@ mod tests {
         )
         .expect("sign");
         rc.initiator_signature = sig;
-        match verify_route_commit_unlock_eligibility(&rc.encode_to_vec(), &vid(1)).await
-        {
+        match verify_route_commit_unlock_eligibility(&rc.encode_to_vec(), &vid(1)).await {
             Err(RouteCommitVerifyError::InvalidInitiatorSignature) => {}
-            other => panic!(
-                "wrong-key signature must be rejected; got {other:?}"
-            ),
+            other => panic!("wrong-key signature must be rejected; got {other:?}"),
         }
     }
 
@@ -1023,12 +1016,9 @@ mod tests {
         // Tamper AFTER signing.
         rc.hops[0].fee_bps += 1;
 
-        match verify_route_commit_unlock_eligibility(&rc.encode_to_vec(), &vid(1)).await
-        {
+        match verify_route_commit_unlock_eligibility(&rc.encode_to_vec(), &vid(1)).await {
             Err(RouteCommitVerifyError::InvalidInitiatorSignature) => {}
-            other => panic!(
-                "post-sign tamper must invalidate signature; got {other:?}"
-            ),
+            other => panic!("post-sign tamper must invalidate signature; got {other:?}"),
         }
     }
 
@@ -1109,10 +1099,9 @@ mod tests {
         let (a, b) = token_a_pair();
         let vault = amm_vault(1_000_000, 1_000_000, 30);
         // Compute what the simulator produces for input=10_000 to match.
-        let simulated = crate::sdk::routing_path_sdk::constant_product_output(
-            10_000, 1_000_000, 1_000_000, 30,
-        )
-        .expect("simulate");
+        let simulated =
+            crate::sdk::routing_path_sdk::constant_product_output(10_000, 1_000_000, 1_000_000, 30)
+                .expect("simulate");
         let hop = hop_for(vid(1), &a, &b, 10_000, simulated, 30);
         let outcome = verify_amm_swap_against_reserves(&hop, &vault)
             .expect("ok")
@@ -1137,10 +1126,9 @@ mod tests {
         // vault's CURRENT reserves are 500k / 500k (someone else
         // settled a swap in between).  Re-simulation must catch.
         let (a, b) = token_a_pair();
-        let route_simulated = crate::sdk::routing_path_sdk::constant_product_output(
-            10_000, 1_000_000, 1_000_000, 30,
-        )
-        .expect("route simulate");
+        let route_simulated =
+            crate::sdk::routing_path_sdk::constant_product_output(10_000, 1_000_000, 1_000_000, 30)
+                .expect("route simulate");
         let hop = hop_for(vid(1), &a, &b, 10_000, route_simulated, 30);
         let stale_vault = amm_vault(500_000, 500_000, 30); // moved
         match verify_amm_swap_against_reserves(&hop, &stale_vault) {
@@ -1180,10 +1168,9 @@ mod tests {
         let (a, b) = token_a_pair();
         let vault = amm_vault(2_000_000, 1_000_000, 30);
         // B→A swap: input is on side B, output is on side A.
-        let simulated = crate::sdk::routing_path_sdk::constant_product_output(
-            5_000, 1_000_000, 2_000_000, 30,
-        )
-        .expect("simulate");
+        let simulated =
+            crate::sdk::routing_path_sdk::constant_product_output(5_000, 1_000_000, 2_000_000, 30)
+                .expect("simulate");
         let hop = hop_for(vid(1), &b, &a, 5_000, simulated, 30);
         let outcome = verify_amm_swap_against_reserves(&hop, &vault)
             .expect("ok")
@@ -1200,9 +1187,7 @@ mod tests {
         let hop = hop_for(vid(1), &a, &b, 100, 50, 30);
         match verify_amm_swap_against_reserves(&hop, &vault) {
             Err(AmmVerifyError::InsufficientReservesOrOverflow) => {}
-            other => panic!(
-                "expected InsufficientReservesOrOverflow, got {other:?}"
-            ),
+            other => panic!("expected InsufficientReservesOrOverflow, got {other:?}"),
         }
     }
 
@@ -1215,9 +1200,7 @@ mod tests {
         hop.input_amount_u128 = vec![0u8; 8];
         match verify_amm_swap_against_reserves(&hop, &vault) {
             Err(AmmVerifyError::AmountFieldsMustBe16BytesBigEndian) => {}
-            other => panic!(
-                "expected AmountFieldsMustBe16BytesBigEndian, got {other:?}"
-            ),
+            other => panic!("expected AmountFieldsMustBe16BytesBigEndian, got {other:?}"),
         }
     }
 
@@ -1226,9 +1209,8 @@ mod tests {
         // A pool with reserves at u128::MAX would overflow on input.
         let (a, b) = token_a_pair();
         let vault = amm_vault(u128::MAX, 1_000, 30);
-        let simulated = crate::sdk::routing_path_sdk::constant_product_output(
-            1, u128::MAX, 1_000, 30,
-        );
+        let simulated =
+            crate::sdk::routing_path_sdk::constant_product_output(1, u128::MAX, 1_000, 30);
         // simulator already disqualifies via overflow internally;
         // re-simulation will fail at InsufficientReservesOrOverflow
         // before reserve-add overflow can fire.
@@ -1238,9 +1220,9 @@ mod tests {
         match verify_amm_swap_against_reserves(&hop, &vault) {
             Err(AmmVerifyError::InsufficientReservesOrOverflow)
             | Err(AmmVerifyError::ReserveInOverflow) => {}
-            other => panic!(
-                "extreme-reserve hop must reject with overflow-class error, got {other:?}"
-            ),
+            other => {
+                panic!("extreme-reserve hop must reject with overflow-class error, got {other:?}")
+            }
         }
     }
 
@@ -1281,14 +1263,10 @@ mod tests {
         let mut rc_attack = rc_real.clone();
         rc_attack.initiator_public_key = kp_attacker.public_key.clone();
         rc_attack.initiator_signature = vec![0xFF; 49856]; // SPX256f sig length
-        match verify_route_commit_unlock_eligibility(&rc_attack.encode_to_vec(), &vid(1))
-            .await
-        {
+        match verify_route_commit_unlock_eligibility(&rc_attack.encode_to_vec(), &vid(1)).await {
             Err(RouteCommitVerifyError::InvalidInitiatorSignature)
             | Err(RouteCommitVerifyError::SignatureVerifierError(_)) => {}
-            other => panic!(
-                "forged signature must reject before anchor lookup; got {other:?}"
-            ),
+            other => panic!("forged signature must reject before anchor lookup; got {other:?}"),
         }
     }
 
@@ -1374,15 +1352,13 @@ mod tests {
         .expect("Bob publishes routing advertisement");
 
         // ── STEP 2 ─ Alice discovers ──────────────────────────────────
-        let advert_set = crate::sdk::routing_sdk::load_active_advertisements_for_pair(
-            &token_aaa, &token_bbb,
-        )
-        .await
-        .expect("Alice lists ads");
+        let advert_set =
+            crate::sdk::routing_sdk::load_active_advertisements_for_pair(&token_aaa, &token_bbb)
+                .await
+                .expect("Alice lists ads");
         assert_eq!(advert_set.len(), 1, "Alice sees exactly Bob's vault");
         assert_eq!(advert_set[0].advertisement.vault_id, vault_id.to_vec());
-        let ads_for_search: Vec<_> =
-            advert_set.into_iter().map(|p| p.advertisement).collect();
+        let ads_for_search: Vec<_> = advert_set.into_iter().map(|p| p.advertisement).collect();
 
         // ── STEP 3 ─ Alice path-searches + binds ──────────────────────
         let trade_input: u128 = 10_000;
@@ -1399,14 +1375,13 @@ mod tests {
         let route_quoted_output = path.final_output_amount;
         // What the SAME math against Bob's actual reserves yields.  Must
         // match — same `constant_product_output` is used in both places.
-        let expected_simulated =
-            crate::sdk::routing_path_sdk::constant_product_output(
-                trade_input,
-                initial_reserve_a,
-                initial_reserve_b,
-                fee_bps,
-            )
-            .expect("simulator");
+        let expected_simulated = crate::sdk::routing_path_sdk::constant_product_output(
+            trade_input,
+            initial_reserve_a,
+            initial_reserve_b,
+            fee_bps,
+        )
+        .expect("simulator");
         assert_eq!(
             route_quoted_output, expected_simulated,
             "path search must agree with the on-vault simulator"
@@ -1457,7 +1432,10 @@ mod tests {
             .expect("AMM vault");
         // Full input enters reserve_a, simulated output leaves reserve_b.
         assert_eq!(outcome.new_reserve_a, initial_reserve_a + trade_input);
-        assert_eq!(outcome.new_reserve_b, initial_reserve_b - expected_simulated);
+        assert_eq!(
+            outcome.new_reserve_b,
+            initial_reserve_b - expected_simulated
+        );
         // Constant-product invariant: post-trade k >= pre-trade k (fee accrual).
         let pre_k = initial_reserve_a * initial_reserve_b;
         let post_k = outcome.new_reserve_a * outcome.new_reserve_b;
@@ -1513,12 +1491,10 @@ mod tests {
         // Eligibility (chunks #4/#5) still passes — the route is
         // structurally valid; only the AMM gate catches the
         // reserve-staleness.
-        let stale_hop = verify_route_commit_unlock_eligibility(
-            &stale_signed.encode_to_vec(),
-            &vault_id,
-        )
-        .await
-        .expect("stale route is structurally valid for chunks #4/#5");
+        let stale_hop =
+            verify_route_commit_unlock_eligibility(&stale_signed.encode_to_vec(), &vault_id)
+                .await
+                .expect("stale route is structurally valid for chunks #4/#5");
 
         match verify_amm_swap_against_reserves(&stale_hop, &bobs_fulfillment) {
             Err(AmmVerifyError::OutputMismatch {
@@ -1539,9 +1515,7 @@ mod tests {
                     "the entire point: live reserves yield a different output"
                 );
             }
-            other => panic!(
-                "stale-reserves attack must reject with OutputMismatch; got {other:?}"
-            ),
+            other => panic!("stale-reserves attack must reject with OutputMismatch; got {other:?}"),
         }
 
         // ── STEP 10 ─ Fresh route — Alice rebuilds against the
@@ -1571,14 +1545,13 @@ mod tests {
         // production the owner would bump the state number; for this
         // demo we just rely on the fresh reserves making the next
         // path search agree with on-vault state.
-        let fresh_ads: Vec<_> = crate::sdk::routing_sdk::load_active_advertisements_for_pair(
-            &token_aaa, &token_bbb,
-        )
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|p| p.advertisement)
-        .collect();
+        let fresh_ads: Vec<_> =
+            crate::sdk::routing_sdk::load_active_advertisements_for_pair(&token_aaa, &token_bbb)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|p| p.advertisement)
+                .collect();
         let fresh_path = crate::sdk::routing_path_sdk::find_best_path(
             &fresh_ads,
             &token_aaa,
@@ -1612,23 +1585,17 @@ mod tests {
             .await
             .unwrap();
 
-        let fresh_hop = verify_route_commit_unlock_eligibility(
-            &fresh_signed.encode_to_vec(),
-            &vault_id,
-        )
-        .await
-        .expect("fresh route eligibility");
-        let trade2_outcome =
-            verify_amm_swap_against_reserves(&fresh_hop, &bobs_fulfillment)
-                .expect("re-sim ok")
-                .expect("AMM");
+        let fresh_hop =
+            verify_route_commit_unlock_eligibility(&fresh_signed.encode_to_vec(), &vault_id)
+                .await
+                .expect("fresh route eligibility");
+        let trade2_outcome = verify_amm_swap_against_reserves(&fresh_hop, &bobs_fulfillment)
+            .expect("re-sim ok")
+            .expect("AMM");
         // Trade 2 settles; constant-product invariant still preserved.
         let pre_k_2 = outcome.new_reserve_a * outcome.new_reserve_b;
         let post_k_2 = trade2_outcome.new_reserve_a * trade2_outcome.new_reserve_b;
-        assert!(
-            post_k_2 >= pre_k_2,
-            "Trade 2 must also non-decrease k"
-        );
+        assert!(post_k_2 >= pre_k_2, "Trade 2 must also non-decrease k");
 
         // ── Final accounting ──────────────────────────────────────────
         // Two successful trades (1 and 3), one rejected stale-reserves

@@ -1359,7 +1359,9 @@ endpoint = "http://127.0.0.1:8080"
             .expect_err("missing binding key should be surfaced as startup error");
 
         assert_eq!(error.code, ERROR_CODE_PROCESSING_FAILED);
-        assert!(error.message.contains("binding key missing before identity priming"));
+        assert!(error
+            .message
+            .contains("binding key missing before identity priming"));
     }
 
     #[test]

@@ -72,11 +72,7 @@ impl core::fmt::Display for AnchorError {
 
 impl std::error::Error for AnchorError {}
 
-fn anchor_sign_payload(
-    vault_id: &[u8; 32],
-    sequence: u64,
-    reserves_digest: &[u8; 32],
-) -> [u8; 32] {
+fn anchor_sign_payload(vault_id: &[u8; 32], sequence: u64, reserves_digest: &[u8; 32]) -> [u8; 32] {
     let mut h = Hasher::new();
     h.update(DOMAIN_ANCHOR);
     h.update(vault_id);
@@ -141,17 +137,31 @@ mod tests {
     #[test]
     fn reserves_digest_differs_on_any_field_change() {
         let base = compute_reserves_digest(b"AAA", b"BBB", 1000, 2000, 30);
-        assert_ne!(base, compute_reserves_digest(b"AAB", b"BBB", 1000, 2000, 30));
-        assert_ne!(base, compute_reserves_digest(b"AAA", b"BBC", 1000, 2000, 30));
-        assert_ne!(base, compute_reserves_digest(b"AAA", b"BBB", 1001, 2000, 30));
-        assert_ne!(base, compute_reserves_digest(b"AAA", b"BBB", 1000, 2001, 30));
-        assert_ne!(base, compute_reserves_digest(b"AAA", b"BBB", 1000, 2000, 31));
+        assert_ne!(
+            base,
+            compute_reserves_digest(b"AAB", b"BBB", 1000, 2000, 30)
+        );
+        assert_ne!(
+            base,
+            compute_reserves_digest(b"AAA", b"BBC", 1000, 2000, 30)
+        );
+        assert_ne!(
+            base,
+            compute_reserves_digest(b"AAA", b"BBB", 1001, 2000, 30)
+        );
+        assert_ne!(
+            base,
+            compute_reserves_digest(b"AAA", b"BBB", 1000, 2001, 30)
+        );
+        assert_ne!(
+            base,
+            compute_reserves_digest(b"AAA", b"BBB", 1000, 2000, 31)
+        );
     }
 
     #[test]
     fn anchor_signing_round_trips() {
-        let (pk, sk) =
-            crate::crypto::sphincs::generate_sphincs_keypair().expect("keypair");
+        let (pk, sk) = crate::crypto::sphincs::generate_sphincs_keypair().expect("keypair");
         let vault_id = [0x11u8; 32];
         let reserves_digest = compute_reserves_digest(b"AAA", b"BBB", 100, 200, 30);
 
@@ -163,8 +173,7 @@ mod tests {
 
     #[test]
     fn anchor_verification_rejects_tampered_sequence() {
-        let (pk, sk) =
-            crate::crypto::sphincs::generate_sphincs_keypair().expect("keypair");
+        let (pk, sk) = crate::crypto::sphincs::generate_sphincs_keypair().expect("keypair");
         let vault_id = [0x22u8; 32];
         let reserves_digest = compute_reserves_digest(b"AAA", b"BBB", 100, 200, 30);
 
@@ -177,8 +186,7 @@ mod tests {
 
     #[test]
     fn anchor_verification_rejects_tampered_reserves_digest() {
-        let (pk, sk) =
-            crate::crypto::sphincs::generate_sphincs_keypair().expect("keypair");
+        let (pk, sk) = crate::crypto::sphincs::generate_sphincs_keypair().expect("keypair");
         let vault_id = [0x33u8; 32];
         let reserves_digest = compute_reserves_digest(b"AAA", b"BBB", 100, 200, 30);
 

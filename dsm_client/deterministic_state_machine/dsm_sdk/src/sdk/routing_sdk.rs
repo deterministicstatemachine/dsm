@@ -46,10 +46,7 @@ pub(crate) const LIFECYCLE_WITHDRAWN: &str = "withdrawn";
 /// canonical lex order.  Token IDs in DeTFi adverts MUST be sorted
 /// — otherwise two advertisements for the same pair would split into
 /// distinct prefixes and the router would only see half the liquidity.
-pub(crate) fn canonical_token_pair<'a>(
-    a: &'a [u8],
-    b: &'a [u8],
-) -> (&'a [u8], &'a [u8]) {
+pub(crate) fn canonical_token_pair<'a>(a: &'a [u8], b: &'a [u8]) -> (&'a [u8], &'a [u8]) {
     if a <= b {
         (a, b)
     } else {
@@ -58,11 +55,7 @@ pub(crate) fn canonical_token_pair<'a>(
 }
 
 /// Storage-node key for an advertisement keyed by (canonical pair, vault_id).
-pub(crate) fn advertisement_key(
-    token_a: &[u8],
-    token_b: &[u8],
-    vault_id: &[u8; 32],
-) -> String {
+pub(crate) fn advertisement_key(token_a: &[u8], token_b: &[u8], vault_id: &[u8; 32]) -> String {
     let (lower, higher) = canonical_token_pair(token_a, token_b);
     format!(
         "{prefix}{a}/{b}/{id}",
@@ -74,11 +67,7 @@ pub(crate) fn advertisement_key(
 }
 
 /// Storage-node key for the full vault proto mirror.
-pub(crate) fn proto_key(
-    token_a: &[u8],
-    token_b: &[u8],
-    vault_id: &[u8; 32],
-) -> String {
+pub(crate) fn proto_key(token_a: &[u8], token_b: &[u8], vault_id: &[u8; 32]) -> String {
     let (lower, higher) = canonical_token_pair(token_a, token_b);
     format!(
         "{prefix}{a}/{b}/{id}",
@@ -91,10 +80,7 @@ pub(crate) fn proto_key(
 
 /// Listing prefix for a canonical token pair.  Routers walk this to
 /// enumerate all advertised vaults trading the pair.
-pub(crate) fn advertisement_prefix_for_pair(
-    token_a: &[u8],
-    token_b: &[u8],
-) -> String {
+pub(crate) fn advertisement_prefix_for_pair(token_a: &[u8], token_b: &[u8]) -> String {
     let (lower, higher) = canonical_token_pair(token_a, token_b);
     format!(
         "{prefix}{a}/{b}/",
@@ -135,16 +121,13 @@ pub(crate) async fn publish_active_advertisement(
     let ad_key = advertisement_key(input.token_a, input.token_b, input.vault_id);
     let proto_key_str = proto_key(input.token_a, input.token_b, input.vault_id);
 
-    let digest: [u8; 32] = dsm::crypto::blake3::domain_hash_bytes(
-        ROUTING_VAULT_AD_DOMAIN,
-        input.vault_proto_bytes,
-    );
+    let digest: [u8; 32] =
+        dsm::crypto::blake3::domain_hash_bytes(ROUTING_VAULT_AD_DOMAIN, input.vault_proto_bytes);
 
     // Canonicalise token-id ordering once so on-disk reserve_a / reserve_b
     // always describe the LEX-LOWER / LEX-HIGHER token, not whichever
     // direction the caller happened to pass.
-    let (canonical_a, canonical_b) =
-        canonical_token_pair(input.token_a, input.token_b);
+    let (canonical_a, canonical_b) = canonical_token_pair(input.token_a, input.token_b);
     let (reserve_a, reserve_b) = if canonical_a == input.token_a {
         (input.reserve_a_u128, input.reserve_b_u128)
     } else {
@@ -277,17 +260,14 @@ pub(crate) async fn load_all_advertisements_for_pair(
     let mut fetched: Vec<PublishedRoutingAdvertisement> = Vec::new();
 
     loop {
-        let resp = BitcoinTapSdk::storage_list_objects(&prefix, cursor.as_deref(), LIST_LIMIT)
-            .await?;
+        let resp =
+            BitcoinTapSdk::storage_list_objects(&prefix, cursor.as_deref(), LIST_LIMIT).await?;
         let page_len = resp.items.len();
         for item in resp.items {
             let payload = match BitcoinTapSdk::storage_get_bytes(&item.key).await {
                 Ok(b) => b,
                 Err(e) => {
-                    log::warn!(
-                        "[routing.list] skipping {}: fetch failed: {e}",
-                        &item.key
-                    );
+                    log::warn!("[routing.list] skipping {}: fetch failed: {e}", &item.key);
                     continue;
                 }
             };
@@ -295,10 +275,7 @@ pub(crate) async fn load_all_advertisements_for_pair(
                 match generated::RoutingVaultAdvertisementV1::decode(payload.as_slice()) {
                     Ok(a) => a,
                     Err(e) => {
-                        log::warn!(
-                            "[routing.list] skipping {}: decode failed: {e}",
-                            &item.key
-                        );
+                        log::warn!("[routing.list] skipping {}: decode failed: {e}", &item.key);
                         continue;
                     }
                 };
@@ -483,7 +460,9 @@ mod tests {
             .await
             .expect("list forward");
         assert!(
-            forward.iter().any(|p| p.advertisement.vault_id == v1.to_vec()),
+            forward
+                .iter()
+                .any(|p| p.advertisement.vault_id == v1.to_vec()),
             "forward listing must include published ad"
         );
 
@@ -591,9 +570,7 @@ mod tests {
         let ad = view[0].advertisement.clone();
 
         // Happy path: digest verification succeeds.
-        let payload = fetch_and_verify_vault_proto(&ad)
-            .await
-            .expect("verify ok");
+        let payload = fetch_and_verify_vault_proto(&ad).await.expect("verify ok");
         assert!(!payload.is_empty());
 
         // Tamper: overwrite the proto mirror with garbage; the next
@@ -650,8 +627,7 @@ mod tests {
         let proto = fake_vault_proto_bytes(0x40);
         let ad_key = advertisement_key(&token_a, &token_b, &vault_id);
         let proto_key_str = proto_key(&token_a, &token_b, &vault_id);
-        let digest =
-            dsm::crypto::blake3::domain_hash_bytes(ROUTING_VAULT_AD_DOMAIN, &proto);
+        let digest = dsm::crypto::blake3::domain_hash_bytes(ROUTING_VAULT_AD_DOMAIN, &proto);
 
         let (lower, higher) = canonical_token_pair(&token_a, &token_b);
         let mut ad = generated::RoutingVaultAdvertisementV1 {
@@ -702,14 +678,18 @@ mod tests {
         let ad_key = advertisement_key(&token_a, &token_b, &vault_id);
         let proto_key_str = proto_key(&token_a, &token_b, &vault_id);
         assert!(BitcoinTapSdk::storage_get_bytes(&ad_key).await.is_ok());
-        assert!(BitcoinTapSdk::storage_get_bytes(&proto_key_str).await.is_ok());
+        assert!(BitcoinTapSdk::storage_get_bytes(&proto_key_str)
+            .await
+            .is_ok());
 
         delete_routing_advertisement(&token_a, &token_b, &vault_id)
             .await
             .expect("delete");
 
         assert!(BitcoinTapSdk::storage_get_bytes(&ad_key).await.is_err());
-        assert!(BitcoinTapSdk::storage_get_bytes(&proto_key_str).await.is_err());
+        assert!(BitcoinTapSdk::storage_get_bytes(&proto_key_str)
+            .await
+            .is_err());
     }
 
     #[tokio::test]
@@ -789,11 +769,9 @@ mod tests {
             .find(|p| p.advertisement.vault_id == vault_id.to_vec())
             .expect("baseline ad");
 
-        republish_active_advertisement_with_reserves(
-            &token_a, &token_b, &vault_id, 150, 175,
-        )
-        .await
-        .expect("republish");
+        republish_active_advertisement_with_reserves(&token_a, &token_b, &vault_id, 150, 175)
+            .await
+            .expect("republish");
 
         let after = load_active_advertisements_for_pair(&token_a, &token_b)
             .await
@@ -841,15 +819,11 @@ mod tests {
         let token_a = token(0x80);
         let token_b = token(0x81);
         let vault_id = vid(0x80);
-        match republish_active_advertisement_with_reserves(
-            &token_a, &token_b, &vault_id, 1, 1,
-        )
-        .await
+        match republish_active_advertisement_with_reserves(&token_a, &token_b, &vault_id, 1, 1)
+            .await
         {
             Err(_) => {} // correct: storage GET fails
-            Ok(()) => panic!(
-                "republish for absent ad must Err, got Ok"
-            ),
+            Ok(()) => panic!("republish for absent ad must Err, got Ok"),
         }
     }
 
@@ -863,11 +837,9 @@ mod tests {
         let token_b = token(0x91);
         let vault_id = vid(0x90);
         publish_simple(0x90, &token_a, &token_b, &vault_id, 100, 100).await;
-        republish_active_advertisement_with_reserves(
-            &token_a, &token_b, &vault_id, 110, 91,
-        )
-        .await
-        .expect("republish");
+        republish_active_advertisement_with_reserves(&token_a, &token_b, &vault_id, 110, 91)
+            .await
+            .expect("republish");
 
         let listed = load_active_advertisements_for_pair(&token_a, &token_b)
             .await
@@ -877,13 +849,7 @@ mod tests {
             .find(|p| p.advertisement.vault_id == vault_id.to_vec())
             .expect("present");
         assert_eq!(entry.advertisement.updated_state_number, 2);
-        assert_eq!(
-            entry.advertisement.reserve_a_u128,
-            u128_be(110).to_vec()
-        );
-        assert_eq!(
-            entry.advertisement.reserve_b_u128,
-            u128_be(91).to_vec()
-        );
+        assert_eq!(entry.advertisement.reserve_a_u128, u128_be(110).to_vec());
+        assert_eq!(entry.advertisement.reserve_b_u128, u128_be(91).to_vec());
     }
 }

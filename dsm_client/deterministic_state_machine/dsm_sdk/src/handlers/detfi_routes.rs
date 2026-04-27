@@ -86,9 +86,7 @@ impl AppRouterImpl {
                 // Pre-decode so a malformed body fails here with a targeted
                 // error rather than inside dlv.create.
                 if let Err(e) = generated::DlvInstantiateV1::decode(payload) {
-                    return err(format!(
-                        "detfi.launch: decode DlvInstantiateV1 failed: {e}"
-                    ));
+                    return err(format!("detfi.launch: decode DlvInstantiateV1 failed: {e}"));
                 }
 
                 let argpack = generated::ArgPack {
@@ -117,9 +115,7 @@ impl AppRouterImpl {
             // ---- policy (type=1) ----
             1 => {
                 if let Err(e) = generated::TokenPolicyV3::decode(payload) {
-                    return err(format!(
-                        "detfi.launch: decode TokenPolicyV3 failed: {e}"
-                    ));
+                    return err(format!("detfi.launch: decode TokenPolicyV3 failed: {e}"));
                 }
                 let inner = AppInvoke {
                     method: "tokens.publishPolicy".to_string(),
@@ -154,14 +150,10 @@ impl AppRouterImpl {
             .await
         {
             Ok(_) => {
-                log::info!(
-                    "[detfi.launch] posted-mode vault post prepared for {vault_id_b32}"
-                );
+                log::info!("[detfi.launch] posted-mode vault post prepared for {vault_id_b32}");
             }
             Err(e) => {
-                log::warn!(
-                    "[detfi.launch] posted-mode mirror failed to build vault post: {e}"
-                );
+                log::warn!("[detfi.launch] posted-mode mirror failed to build vault post: {e}");
             }
         }
     }

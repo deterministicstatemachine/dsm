@@ -83,20 +83,20 @@ pub mod storage_node_sdk;
 // bilateral_transaction_manager + contacts store.
 
 // Smart contract and commitment functionality
+#[cfg(feature = "demos")]
+pub mod amm_demo;
 pub mod bitcoin_key_store;
 pub mod bitcoin_tap_sdk;
 pub mod bitcoin_tx_builder;
 pub mod dlv_pre_commitment_sdk;
 pub mod dlv_receipt_sdk;
 pub mod posted_dlv_sdk;
-pub mod routing_sdk;
-pub mod routing_path_sdk;
 pub mod route_commit_sdk;
-pub mod vault_state_anchor_codec;
-#[cfg(feature = "demos")]
-pub mod amm_demo;
+pub mod routing_path_sdk;
+pub mod routing_sdk;
 pub mod smart_commitment_sdk;
 pub mod transfer_hooks;
+pub mod vault_state_anchor_codec;
 
 // Recovery system SDK
 pub mod recovery_sdk;

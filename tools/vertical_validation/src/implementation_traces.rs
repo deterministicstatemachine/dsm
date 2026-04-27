@@ -1207,7 +1207,9 @@ fn trace_receipt_verifier_tripwire(
     let malformed_commitment = match malformed_replace.compute_commitment() {
         Ok(commitment) => commitment,
         Err(e) => {
-            failures.push(format!("failed to recompute malformed receipt commitment: {e}"));
+            failures.push(format!(
+                "failed to recompute malformed receipt commitment: {e}"
+            ));
             [0u8; 32]
         }
     };

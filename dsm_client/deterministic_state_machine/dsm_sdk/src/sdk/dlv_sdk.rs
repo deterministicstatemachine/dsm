@@ -372,9 +372,7 @@ impl DlvSdk {
                 fee_bps,
                 ..
             } => {
-                format!(
-                    "AMM constant-product (a={reserve_a}, b={reserve_b}, fee={fee_bps}bps)"
-                )
+                format!("AMM constant-product (a={reserve_a}, b={reserve_b}, fee={fee_bps}bps)")
             }
         };
 
@@ -395,10 +393,7 @@ impl DlvSdk {
     }
 
     /// Get vaults by their current state (raw 32-byte IDs).
-    pub async fn get_vaults_by_state(
-        &self,
-        state: VaultState,
-    ) -> Result<Vec<[u8; 32]>, DsmError> {
+    pub async fn get_vaults_by_state(&self, state: VaultState) -> Result<Vec<[u8; 32]>, DsmError> {
         self.manager.get_vaults_by_status(state).await
     }
 
@@ -486,12 +481,8 @@ impl DlvSdk {
         reason: &str,
         reference_state: &State,
     ) -> Result<(), DsmError> {
-        let invalidation_message = [
-            &vault_id[..],
-            reason.as_bytes(),
-            &reference_state.hash[..],
-        ]
-        .concat();
+        let invalidation_message =
+            [&vault_id[..], reason.as_bytes(), &reference_state.hash[..]].concat();
         let creator_signature = dsm::crypto::sphincs::sphincs_sign(
             &crate::sdk::signing_authority::current_secret_key()?,
             &invalidation_message,

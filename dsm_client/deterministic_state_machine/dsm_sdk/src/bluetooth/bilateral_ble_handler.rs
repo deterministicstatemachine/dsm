@@ -3987,7 +3987,8 @@ impl BilateralBleHandler {
                         if tid.is_empty() {
                             Vec::new()
                         } else {
-                            match dsm::core::token::token_state_manager::resolve_policy_commit(tid) {
+                            match dsm::core::token::token_state_manager::resolve_policy_commit(tid)
+                            {
                                 Ok(pc) => vec![dsm::types::device_state::BalanceDelta {
                                     policy_commit: pc,
                                     direction: dsm::types::device_state::BalanceDirection::Debit,

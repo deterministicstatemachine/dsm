@@ -37,9 +37,7 @@
 use dsm::types::proto as generated;
 use std::collections::HashMap;
 
-use crate::sdk::routing_sdk::{
-    canonical_token_pair, fetch_and_verify_vault_proto, LIFECYCLE_ACTIVE,
-};
+use crate::sdk::routing_sdk::{canonical_token_pair, fetch_and_verify_vault_proto, LIFECYCLE_ACTIVE};
 
 /// Default search depth — three intermediate tokens is enough for the
 /// liquidity topologies the spec contemplates (§5.1) and keeps the
@@ -256,8 +254,7 @@ fn build_adjacency(
 
         // Verify the on-disk pair is canonical (lex-sorted).  An ad
         // that violates this invariant is malformed; skip it.
-        let (canonical_a, canonical_b) =
-            canonical_token_pair(&ad.token_a, &ad.token_b);
+        let (canonical_a, canonical_b) = canonical_token_pair(&ad.token_a, &ad.token_b);
         if canonical_a != ad.token_a.as_slice() || canonical_b != ad.token_b.as_slice() {
             continue;
         }
@@ -405,15 +402,9 @@ fn enumerate(
             // Complete path candidate.
             let total_fee_bps: u64 = current_hops.iter().map(|h| u64::from(h.fee_bps)).sum();
             let candidate = Path {
-                input_token: visited_tokens
-                    .first()
-                    .cloned()
-                    .unwrap_or_default(),
+                input_token: visited_tokens.first().cloned().unwrap_or_default(),
                 output_token: output_token.to_vec(),
-                input_amount: current_hops
-                    .first()
-                    .map(|h| h.input_amount)
-                    .unwrap_or(0),
+                input_amount: current_hops.first().map(|h| h.input_amount).unwrap_or(0),
                 final_output_amount: output,
                 total_fee_bps,
                 hops: current_hops.clone(),
@@ -448,8 +439,11 @@ fn replace_if_better(best: &mut Option<Path>, candidate: Path) {
             } else {
                 // Equal output — deterministic tie-break on the lex-
                 // smaller vault_id sequence.
-                let cand_seq: Vec<&[u8]> =
-                    candidate.hops.iter().map(|h| h.vault_id.as_slice()).collect();
+                let cand_seq: Vec<&[u8]> = candidate
+                    .hops
+                    .iter()
+                    .map(|h| h.vault_id.as_slice())
+                    .collect();
                 let cur_seq: Vec<&[u8]> =
                     current.hops.iter().map(|h| h.vault_id.as_slice()).collect();
                 cand_seq < cur_seq
@@ -486,9 +480,7 @@ pub(crate) async fn find_and_verify_best_path(
                 } else {
                     crate::util::text_id::encode_base32_crockford(&ad.vault_id)
                 };
-                log::warn!(
-                    "[routing.path] excluding {vid_b32}: digest verify failed: {e}"
-                );
+                log::warn!("[routing.path] excluding {vid_b32}: digest verify failed: {e}");
             }
         }
     }
@@ -548,8 +540,7 @@ mod tests {
             v.push(state_number as u8);
             v
         };
-        let digest =
-            dsm::crypto::blake3::domain_hash_bytes(ROUTING_VAULT_AD_DOMAIN, &proto_bytes);
+        let digest = dsm::crypto::blake3::domain_hash_bytes(ROUTING_VAULT_AD_DOMAIN, &proto_bytes);
         generated::RoutingVaultAdvertisementV1 {
             version: 1,
             vault_id: vault_id.to_vec(),
@@ -560,8 +551,7 @@ mod tests {
             fee_bps,
             unlock_spec_digest: vec![0u8; 32],
             unlock_spec_key: "defi/spec/test".into(),
-            vault_proto_key: format!("defi/vault-proto/test/{:x?}", &vault_id[..4])
-                .into_bytes(),
+            vault_proto_key: format!("defi/vault-proto/test/{:x?}", &vault_id[..4]).into_bytes(),
             vault_proto_digest: digest.to_vec(),
             owner_public_key: vec![0xABu8; 64],
             lifecycle_state: LIFECYCLE_ACTIVE.to_string(),
@@ -578,10 +568,13 @@ mod tests {
         // Reserves 1_000_000 / 1_000_000, swap 10_000 in at 30 bps.
         // input_after_fee = 10_000 * 9970 / 10000 = 9970
         // output = 1_000_000 * 9970 / (1_000_000 + 9970) = ~9871
-        let out = constant_product_output(10_000, 1_000_000, 1_000_000, 30)
-            .expect("non-zero output");
+        let out =
+            constant_product_output(10_000, 1_000_000, 1_000_000, 30).expect("non-zero output");
         assert!(out > 9000 && out < 10_000, "got {out}");
-        assert!(out < 10_000, "AMM must produce strictly less than 1:1 due to fee + slippage");
+        assert!(
+            out < 10_000,
+            "AMM must produce strictly less than 1:1 due to fee + slippage"
+        );
     }
 
     #[test]
@@ -593,10 +586,7 @@ mod tests {
     #[test]
     fn constant_product_overflow_disqualifies_hop() {
         // Reserves at u128::MAX would overflow `reserve_in * 10000`.
-        assert_eq!(
-            constant_product_output(1, u128::MAX, u128::MAX, 30),
-            None
-        );
+        assert_eq!(constant_product_output(1, u128::MAX, u128::MAX, 30), None);
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -640,13 +630,12 @@ mod tests {
         // Fresh ad with shallow reserves but newer state number — newer
         // wins regardless of fee / reserves.
         let fresh = ad(v, &a, &b, 100_000, 100_000, 30, 99);
-        let path = find_best_path(&[stale, fresh], &a, &b, 10_000, DEFAULT_MAX_HOPS)
-            .expect("path");
+        let path = find_best_path(&[stale, fresh], &a, &b, 10_000, DEFAULT_MAX_HOPS).expect("path");
         assert_eq!(path.hops[0].state_number, 99);
         // Output reflects the FRESH (shallow) reserves, not the stale ones.
         let stale_only = vec![ad(v, &a, &b, 10_000_000, 10_000_000, 30, 1)];
-        let stale_path = find_best_path(&stale_only, &a, &b, 10_000, DEFAULT_MAX_HOPS)
-            .expect("stale-only path");
+        let stale_path =
+            find_best_path(&stale_only, &a, &b, 10_000, DEFAULT_MAX_HOPS).expect("stale-only path");
         assert!(
             path.final_output_amount < stale_path.final_output_amount,
             "fresh shallow ad must produce LESS output than stale deep ad — \
@@ -721,8 +710,7 @@ mod tests {
 
         // Tamper with the bad ad's proto mirror so its digest no longer
         // binds.  The verified-path wrapper must drop it.
-        let bad_proto_key =
-            crate::sdk::routing_sdk::proto_key(&a, &b, &bad_vid);
+        let bad_proto_key = crate::sdk::routing_sdk::proto_key(&a, &b, &bad_vid);
         crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::storage_put_bytes(
             &bad_proto_key,
             b"tampered-bytes",
@@ -734,10 +722,9 @@ mod tests {
             .await
             .expect("list ads");
         let just_ads: Vec<_> = ads.into_iter().map(|p| p.advertisement).collect();
-        let path =
-            find_and_verify_best_path(&just_ads, &a, &b, 10_000, DEFAULT_MAX_HOPS)
-                .await
-                .expect("path");
+        let path = find_and_verify_best_path(&just_ads, &a, &b, 10_000, DEFAULT_MAX_HOPS)
+            .await
+            .expect("path");
         assert_eq!(
             path.hops[0].vault_id, good_vid,
             "tampered ad must be excluded; the surviving ad is the only choice"
@@ -754,8 +741,8 @@ mod tests {
         let b = token("BBB");
         let cheap = ad(vid(50), &a, &b, 1_000_000, 1_000_000, 5, 1);
         let pricey = ad(vid(51), &a, &b, 1_000_000, 1_000_000, 100, 1);
-        let path = find_best_path(&[cheap, pricey], &a, &b, 10_000, DEFAULT_MAX_HOPS)
-            .expect("path");
+        let path =
+            find_best_path(&[cheap, pricey], &a, &b, 10_000, DEFAULT_MAX_HOPS).expect("path");
         assert_eq!(path.hops[0].vault_id, vid(50), "cheap fee must win");
         assert_eq!(path.hops[0].fee_bps, 5);
     }
@@ -776,14 +763,8 @@ mod tests {
         let leg_ac = ad(vid(61), &a, &c, 10_000_000, 10_000_000, 30, 1);
         let leg_cb = ad(vid(62), &c, &b, 10_000_000, 10_000_000, 30, 1);
 
-        let path = find_best_path(
-            &[direct, leg_ac, leg_cb],
-            &a,
-            &b,
-            100_000,
-            DEFAULT_MAX_HOPS,
-        )
-        .expect("path");
+        let path = find_best_path(&[direct, leg_ac, leg_cb], &a, &b, 100_000, DEFAULT_MAX_HOPS)
+            .expect("path");
         assert_eq!(
             path.hops.len(),
             2,
@@ -880,8 +861,7 @@ mod tests {
             DEFAULT_MAX_HOPS,
         )
         .expect("p1");
-        let p2 = find_best_path(&[ad_high, ad_low], &a, &b, 10_000, DEFAULT_MAX_HOPS)
-            .expect("p2");
+        let p2 = find_best_path(&[ad_high, ad_low], &a, &b, 10_000, DEFAULT_MAX_HOPS).expect("p2");
         assert_eq!(p1.hops[0].vault_id, v_low);
         assert_eq!(p2.hops[0].vault_id, v_low);
     }

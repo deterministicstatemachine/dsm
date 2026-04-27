@@ -1046,11 +1046,7 @@ impl LimboVault {
         let parameters_hash = domain_hash_bytes("DSM/dlv-params", &parameters).to_vec();
 
         // Random-walk positions
-        let seed = generate_seed(
-            &domain_hash("DSM/dlv-params", &parameters),
-            &vault_id,
-            None,
-        );
+        let seed = generate_seed(&domain_hash("DSM/dlv-params", &parameters), &vault_id, None);
         let verification_positions = generate_positions(
             &seed,
             None::<crate::core::state_machine::random_walk::algorithms::RandomWalkConfig>,
@@ -1998,9 +1994,7 @@ impl LimboVault {
                 reserve_b,
                 fee_bps,
                 ..
-            } => format!(
-                "AMM constant-product (a={reserve_a}, b={reserve_b}, fee={fee_bps}bps)"
-            ),
+            } => format!("AMM constant-product (a={reserve_a}, b={reserve_b}, fee={fee_bps}bps)"),
         };
 
         let mut metadata = HashMap::new();
@@ -2719,7 +2713,10 @@ mod tests {
         let ref_hash = [0x42; 32];
         let a = draft_with(&creator_pk, &kp.public_key, fm.clone(), b"same", ref_hash);
         let b = draft_with(&creator_pk, &kp.public_key, fm, b"same", ref_hash);
-        assert_eq!(a.id, b.id, "identical inputs must produce identical vault_id");
+        assert_eq!(
+            a.id, b.id,
+            "identical inputs must produce identical vault_id"
+        );
     }
 
     /// G.1.1 — vault_id binds the content.  Same creator/policy/ref_state,
@@ -2734,7 +2731,13 @@ mod tests {
             public_params: vec![0x22; 16],
         };
         let ref_hash = [0x43; 32];
-        let a = draft_with(&creator_pk, &kp.public_key, fm.clone(), b"content-A", ref_hash);
+        let a = draft_with(
+            &creator_pk,
+            &kp.public_key,
+            fm.clone(),
+            b"content-A",
+            ref_hash,
+        );
         let b = draft_with(&creator_pk, &kp.public_key, fm, b"content-B", ref_hash);
         assert_ne!(
             a.id, b.id,
@@ -2775,7 +2778,13 @@ mod tests {
             condition_hash: vec![0x11; 32],
             public_params: vec![0x22; 16],
         };
-        let a = draft_with(&creator_pk, &kp.public_key, fm.clone(), b"content", [0x01; 32]);
+        let a = draft_with(
+            &creator_pk,
+            &kp.public_key,
+            fm.clone(),
+            b"content",
+            [0x01; 32],
+        );
         let b = draft_with(&creator_pk, &kp.public_key, fm, b"content", [0x02; 32]);
         assert_ne!(
             a.id, b.id,

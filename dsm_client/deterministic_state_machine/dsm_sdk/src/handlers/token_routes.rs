@@ -457,24 +457,16 @@ impl AppRouterImpl {
                 // `PolicyAnchor::from_policy` produces the authoritative
                 // policy_commit used by every subsequent balance op.
                 let policy_file = {
-                    let transferable =
-                        parsed.as_ref().map(|p| p.transferable).unwrap_or(true);
-                    let description =
-                        parsed.as_ref().and_then(|p| p.description.clone());
-                    let mut pf = dsm::types::policy_types::PolicyFile::new(
-                        &ticker,
-                        "1",
-                        "dsm_token_route",
-                    );
+                    let transferable = parsed.as_ref().map(|p| p.transferable).unwrap_or(true);
+                    let description = parsed.as_ref().and_then(|p| p.description.clone());
+                    let mut pf =
+                        dsm::types::policy_types::PolicyFile::new(&ticker, "1", "dsm_token_route");
                     if let Some(desc) = description.as_ref() {
                         pf.description = Some(desc.clone());
                     }
                     pf.add_metadata("created_by", "dsm_token_route")
                         .add_metadata("token_name", &ticker)
-                        .add_metadata(
-                            "transferable",
-                            if transferable { "true" } else { "false" },
-                        );
+                        .add_metadata("transferable", if transferable { "true" } else { "false" });
                     if !transferable {
                         pf.add_metadata("transfer_restricted", "true")
                             .add_metadata("allowed_operations", "mint,burn");
@@ -492,9 +484,7 @@ impl AppRouterImpl {
                 {
                     Ok(a) => a,
                     Err(e) => {
-                        return err(format!(
-                            "token.create: register_token_policy failed: {e}"
-                        ));
+                        return err(format!("token.create: register_token_policy failed: {e}"));
                     }
                 };
                 let policy_commit: [u8; 32] = *anchor.as_bytes();
@@ -523,9 +513,7 @@ impl AppRouterImpl {
 
                     let dev_id = self.device_id_bytes;
                     let rel_key =
-                        dsm::core::bilateral_transaction_manager::compute_smt_key(
-                            &dev_id, &dev_id,
-                        );
+                        dsm::core::bilateral_transaction_manager::compute_smt_key(&dev_id, &dev_id);
                     let init_tip =
                         dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
                             &dev_id, &dev_id,
@@ -562,9 +550,7 @@ impl AppRouterImpl {
                         &deltas,
                         Some(init_tip),
                     ) {
-                        return err(format!(
-                            "token.create: initial-allocation Mint failed: {e}"
-                        ));
+                        return err(format!("token.create: initial-allocation Mint failed: {e}"));
                     }
                 }
 

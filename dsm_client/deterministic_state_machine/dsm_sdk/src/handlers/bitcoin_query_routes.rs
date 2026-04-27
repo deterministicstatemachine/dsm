@@ -369,9 +369,7 @@ impl AppRouterImpl {
                             }
                         }
                     } else {
-                        log::warn!(
-                            "[CHECK_CONFIRMATIONS] Invalid Base32 vault_id {vault_id}"
-                        );
+                        log::warn!("[CHECK_CONFIRMATIONS] Invalid Base32 vault_id {vault_id}");
                     }
                 }
 

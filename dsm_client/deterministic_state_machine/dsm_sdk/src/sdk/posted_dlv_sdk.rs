@@ -192,8 +192,8 @@ pub(crate) async fn load_all_advertisements_for_recipient(
     let mut fetched: Vec<PublishedPostedDlvAdvertisement> = Vec::new();
 
     loop {
-        let resp = BitcoinTapSdk::storage_list_objects(&prefix, cursor.as_deref(), LIST_LIMIT)
-            .await?;
+        let resp =
+            BitcoinTapSdk::storage_list_objects(&prefix, cursor.as_deref(), LIST_LIMIT).await?;
         let page_len = resp.items.len();
         for item in resp.items {
             let payload = match BitcoinTapSdk::storage_get_bytes(&item.key).await {
@@ -369,11 +369,7 @@ mod tests {
         proto.encode_to_vec()
     }
 
-    async fn alice_publishes_for_bob(
-        alice_tag: u8,
-        bob_pk: &[u8],
-        dlv_id: &[u8; 32],
-    ) -> Vec<u8> {
+    async fn alice_publishes_for_bob(alice_tag: u8, bob_pk: &[u8], dlv_id: &[u8; 32]) -> Vec<u8> {
         let alice_pk = pk(alice_tag, 64);
         let post_bytes = fake_vault_post_proto(dlv_id);
         publish_active_advertisement(PublishActiveAdInput {
@@ -475,7 +471,9 @@ mod tests {
             .await
             .expect("list active");
         assert!(
-            active.iter().all(|p| p.advertisement.dlv_id != dlv_id.to_vec()),
+            active
+                .iter()
+                .all(|p| p.advertisement.dlv_id != dlv_id.to_vec()),
             "claimed ad must filter out of active view"
         );
 
@@ -556,7 +554,9 @@ mod tests {
             "ad present before delete"
         );
         assert!(
-            BitcoinTapSdk::storage_get_bytes(&proto_key_str).await.is_ok(),
+            BitcoinTapSdk::storage_get_bytes(&proto_key_str)
+                .await
+                .is_ok(),
             "proto present before delete"
         );
 
@@ -567,7 +567,9 @@ mod tests {
             "ad gone after delete"
         );
         assert!(
-            BitcoinTapSdk::storage_get_bytes(&proto_key_str).await.is_err(),
+            BitcoinTapSdk::storage_get_bytes(&proto_key_str)
+                .await
+                .is_err(),
             "proto gone after delete"
         );
     }

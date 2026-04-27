@@ -30,16 +30,12 @@ use prost::Message as _;
 
 use crate::sdk::route_commit_sdk::{
     bind_path_to_route_commit, canonicalise_for_commitment, compute_external_commitment,
-    is_external_commitment_visible, publish_external_commitment,
-    verify_amm_swap_against_reserves, verify_route_commit_unlock_eligibility,
-    AmmVerifyError, BindRouteCommitInput,
+    is_external_commitment_visible, publish_external_commitment, verify_amm_swap_against_reserves,
+    verify_route_commit_unlock_eligibility, AmmVerifyError, BindRouteCommitInput,
 };
-use crate::sdk::routing_path_sdk::{
-    constant_product_output, find_best_path, DEFAULT_MAX_HOPS,
-};
+use crate::sdk::routing_path_sdk::{constant_product_output, find_best_path, DEFAULT_MAX_HOPS};
 use crate::sdk::routing_sdk::{
-    load_active_advertisements_for_pair, publish_active_advertisement,
-    PublishRoutingAdInput,
+    load_active_advertisements_for_pair, publish_active_advertisement, PublishRoutingAdInput,
 };
 use dsm::crypto::sphincs::{generate_keypair, sign as sphincs_sign, SphincsVariant};
 use dsm::vault::FulfillmentMechanism;
@@ -85,10 +81,9 @@ pub async fn run_amm_e2e_demo() -> Result<DemoReport, String> {
     }
 
     // ── Setup ────────────────────────────────────────────────────────
-    let alice = generate_keypair(SphincsVariant::SPX256f)
-        .map_err(|e| format!("alice keygen: {e}"))?;
-    let bob = generate_keypair(SphincsVariant::SPX256f)
-        .map_err(|e| format!("bob keygen: {e}"))?;
+    let alice =
+        generate_keypair(SphincsVariant::SPX256f).map_err(|e| format!("alice keygen: {e}"))?;
+    let bob = generate_keypair(SphincsVariant::SPX256f).map_err(|e| format!("bob keygen: {e}"))?;
     let token_aaa = b"DEMO_AAA".to_vec();
     let token_bbb = b"DEMO_BBB".to_vec();
     let vault_id = {
@@ -164,9 +159,7 @@ pub async fn run_amm_e2e_demo() -> Result<DemoReport, String> {
         format!(
             "{} ad(s) discovered, vault_id={}",
             advert_set.len(),
-            crate::util::text_id::encode_base32_crockford(
-                &advert_set[0].advertisement.vault_id
-            )
+            crate::util::text_id::encode_base32_crockford(&advert_set[0].advertisement.vault_id)
         )
     );
     let ads_for_search: Vec<_> = advert_set.into_iter().map(|p| p.advertisement).collect();
@@ -283,9 +276,7 @@ pub async fn run_amm_e2e_demo() -> Result<DemoReport, String> {
     }
     step!(
         "8. Trade 1 settles",
-        format!(
-            "Bob's vault state advances: reserves = ({trade_1_post_a}, {trade_1_post_b})"
-        )
+        format!("Bob's vault state advances: reserves = ({trade_1_post_a}, {trade_1_post_b})")
     );
 
     // ── 9. Stale-reserves attack ─────────────────────────────────────
@@ -312,12 +303,10 @@ pub async fn run_amm_e2e_demo() -> Result<DemoReport, String> {
     publish_external_commitment(&x_stale, &alice.public_key, "trade-2-stale")
         .await
         .map_err(|e| format!("step 9 publish anchor: {e}"))?;
-    let stale_hop = verify_route_commit_unlock_eligibility(
-        &stale_signed.encode_to_vec(),
-        &vault_id,
-    )
-    .await
-    .map_err(|e| format!("step 9 eligibility: {e:?}"))?;
+    let stale_hop =
+        verify_route_commit_unlock_eligibility(&stale_signed.encode_to_vec(), &vault_id)
+            .await
+            .map_err(|e| format!("step 9 eligibility: {e:?}"))?;
     let (sim, exp) = match verify_amm_swap_against_reserves(&stale_hop, &bobs_fulfillment) {
         Err(AmmVerifyError::OutputMismatch {
             simulated,
@@ -332,9 +321,7 @@ pub async fn run_amm_e2e_demo() -> Result<DemoReport, String> {
     let live = constant_product_output(trade_input, trade_1_post_a, trade_1_post_b, fee_bps)
         .ok_or_else(|| "step 9: live simulator returned None".to_string())?;
     if sim != live {
-        return Err(format!(
-            "step 9: simulated ({sim}) != live ({live})"
-        ));
+        return Err(format!("step 9: simulated ({sim}) != live ({live})"));
     }
     step!(
         "9. Stale-reserves attack — rejected at chunk #7 gate",
@@ -396,16 +383,13 @@ pub async fn run_amm_e2e_demo() -> Result<DemoReport, String> {
     publish_external_commitment(&x_3, &alice.public_key, "trade-3-fresh")
         .await
         .map_err(|e| format!("step 10 publish anchor: {e}"))?;
-    let fresh_hop = verify_route_commit_unlock_eligibility(
-        &fresh_signed.encode_to_vec(),
-        &vault_id,
-    )
-    .await
-    .map_err(|e| format!("step 10 eligibility: {e:?}"))?;
-    let trade2_outcome =
-        verify_amm_swap_against_reserves(&fresh_hop, &bobs_fulfillment)
-            .map_err(|e| format!("step 10 AMM gate: {e:?}"))?
-            .ok_or_else(|| "step 10: vault non-AMM".to_string())?;
+    let fresh_hop =
+        verify_route_commit_unlock_eligibility(&fresh_signed.encode_to_vec(), &vault_id)
+            .await
+            .map_err(|e| format!("step 10 eligibility: {e:?}"))?;
+    let trade2_outcome = verify_amm_swap_against_reserves(&fresh_hop, &bobs_fulfillment)
+        .map_err(|e| format!("step 10 AMM gate: {e:?}"))?
+        .ok_or_else(|| "step 10: vault non-AMM".to_string())?;
     let pre_k_2 = trade_1_post_a * trade_1_post_b;
     let post_k_2 = trade2_outcome.new_reserve_a * trade2_outcome.new_reserve_b;
     if post_k_2 < pre_k_2 {

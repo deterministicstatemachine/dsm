@@ -557,11 +557,7 @@ mod tests {
         AppState::handle_app_state_request("dsm.detfi.VID2", "set", "detfi2");
         AppState::handle_app_state_request("dsm.policy.keep", "set", "keeper");
 
-        let removed = AppState::purge_keys_with_prefixes(&[
-            "dsm.token.",
-            "dsm.dlv.",
-            "dsm.detfi.",
-        ]);
+        let removed = AppState::purge_keys_with_prefixes(&["dsm.token.", "dsm.dlv.", "dsm.detfi."]);
         assert_eq!(removed, 4);
 
         // Purged keys read empty, keeper survives.
@@ -575,11 +571,8 @@ mod tests {
         );
 
         // Idempotent: second call finds nothing to remove.
-        let removed_again = AppState::purge_keys_with_prefixes(&[
-            "dsm.token.",
-            "dsm.dlv.",
-            "dsm.detfi.",
-        ]);
+        let removed_again =
+            AppState::purge_keys_with_prefixes(&["dsm.token.", "dsm.dlv.", "dsm.detfi."]);
         assert_eq!(removed_again, 0);
     }
 

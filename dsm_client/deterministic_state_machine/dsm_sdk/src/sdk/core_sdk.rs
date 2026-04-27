@@ -751,10 +751,10 @@ impl CoreSDK {
         let mut storage_nodes = Vec::with_capacity(mpc_participants.len());
         let mut contributor_entropies = Vec::with_capacity(mpc_participants.len());
         for (index, participant) in mpc_participants.into_iter().enumerate() {
-            let contributor_entropy: [u8; 32] = participant
-                .as_slice()
-                .try_into()
-                .map_err(|_| DsmError::invalid_operation("MPC participant entropy must be 32 bytes"))?;
+            let contributor_entropy: [u8; 32] =
+                participant.as_slice().try_into().map_err(|_| {
+                    DsmError::invalid_operation("MPC participant entropy must be 32 bytes")
+                })?;
             contributor_entropies.push(contributor_entropy);
             storage_nodes.push(dsm::types::identifiers::NodeId::new(format!(
                 "storage-node-{}",

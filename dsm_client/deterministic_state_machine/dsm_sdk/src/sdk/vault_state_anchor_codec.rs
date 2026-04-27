@@ -69,8 +69,7 @@ mod tests {
 
     #[test]
     fn anchor_proto_round_trip() {
-        let (pk, sk) =
-            dsm::crypto::sphincs::generate_sphincs_keypair().expect("keypair");
+        let (pk, sk) = dsm::crypto::sphincs::generate_sphincs_keypair().expect("keypair");
         let vault_id = [0x44u8; 32];
         let reserves_digest = compute_reserves_digest(b"AAA", b"BBB", 100, 200, 30);
 
@@ -91,8 +90,7 @@ mod tests {
 
     #[test]
     fn anchor_digest_matches_blake3_over_proto() {
-        let (pk, sk) =
-            dsm::crypto::sphincs::generate_sphincs_keypair().expect("keypair");
+        let (pk, sk) = dsm::crypto::sphincs::generate_sphincs_keypair().expect("keypair");
         let vault_id = [0x55u8; 32];
         let reserves_digest = compute_reserves_digest(b"AAA", b"BBB", 100, 200, 30);
 

@@ -57,9 +57,7 @@ impl AppRouterImpl {
         let wallet_pk = match crate::sdk::signing_authority::current_public_key() {
             Ok(pk) if !pk.is_empty() => pk,
             Ok(_) => {
-                return err(
-                    "dlv.listOwnedAmmVaults: wallet signing public key is empty".into(),
-                );
+                return err("dlv.listOwnedAmmVaults: wallet signing public key is empty".into());
             }
             Err(e) => {
                 return err(format!(
@@ -73,9 +71,7 @@ impl AppRouterImpl {
             let vault_ids = match dlv_manager.list_vaults().await {
                 Ok(v) => v,
                 Err(e) => {
-                    return err(format!(
-                        "dlv.listOwnedAmmVaults: list_vaults failed: {e}"
-                    ));
+                    return err(format!("dlv.listOwnedAmmVaults: list_vaults failed: {e}"));
                 }
             };
             let mut out: Vec<generated::AmmVaultSummaryV1> = Vec::new();
@@ -88,23 +84,23 @@ impl AppRouterImpl {
                 if vault.creator_public_key.as_slice() != wallet_pk.as_slice() {
                     continue;
                 }
-                let (token_a, token_b, reserve_a, reserve_b, fee_bps) = match &vault.fulfillment_condition
-                {
-                    dsm::vault::FulfillmentMechanism::AmmConstantProduct {
-                        token_a,
-                        token_b,
-                        reserve_a,
-                        reserve_b,
-                        fee_bps,
-                    } => (
-                        token_a.clone(),
-                        token_b.clone(),
-                        *reserve_a,
-                        *reserve_b,
-                        *fee_bps,
-                    ),
-                    _ => continue,
-                };
+                let (token_a, token_b, reserve_a, reserve_b, fee_bps) =
+                    match &vault.fulfillment_condition {
+                        dsm::vault::FulfillmentMechanism::AmmConstantProduct {
+                            token_a,
+                            token_b,
+                            reserve_a,
+                            reserve_b,
+                            fee_bps,
+                        } => (
+                            token_a.clone(),
+                            token_b.clone(),
+                            *reserve_a,
+                            *reserve_b,
+                            *fee_bps,
+                        ),
+                        _ => continue,
+                    };
                 let anchor_sequence = vault.current_sequence;
                 let anchor_enforcement = vault.anchor_enforcement;
                 drop(vault);
@@ -144,9 +140,7 @@ impl AppRouterImpl {
 
         let lines: Vec<String> = summaries
             .iter()
-            .map(|s| {
-                crate::util::text_id::encode_base32_crockford(&s.encode_to_vec())
-            })
+            .map(|s| crate::util::text_id::encode_base32_crockford(&s.encode_to_vec()))
             .collect();
         let resp = generated::AppStateResponse {
             key: "dlv.listOwnedAmmVaults".to_string(),
@@ -243,10 +237,8 @@ impl AppRouterImpl {
         // the digest and lets Rust derive it.
         let expected_content_digest: [u8; 32] =
             dsm::crypto::blake3::domain_hash_bytes("DSM/dlv-content", &spec.content);
-        let expected_fm_digest: [u8; 32] = dsm::crypto::blake3::domain_hash_bytes(
-            "DSM/dlv-fulfillment",
-            &spec.fulfillment_bytes,
-        );
+        let expected_fm_digest: [u8; 32] =
+            dsm::crypto::blake3::domain_hash_bytes("DSM/dlv-fulfillment", &spec.fulfillment_bytes);
         match spec.content_digest.len() {
             0 => {} // accept-or-compute path
             32 => {
@@ -291,11 +283,9 @@ impl AppRouterImpl {
             match crate::sdk::signing_authority::current_public_key() {
                 Ok(pk) if !pk.is_empty() => req.creator_public_key = pk,
                 Ok(_) => {
-                    return err(
-                        "dlv.create: empty creator_public_key requested wallet \
+                    return err("dlv.create: empty creator_public_key requested wallet \
                          signing but the wallet signing pk is empty"
-                            .into(),
-                    );
+                        .into());
                 }
                 Err(e) => {
                     return err(format!(
@@ -321,23 +311,20 @@ impl AppRouterImpl {
             canonical_for_sign.signature = Vec::new();
             let canonical_bytes = canonical_for_sign.encode_to_vec();
             let signing_input: Vec<u8> = {
-                let mut buf = Vec::with_capacity(canonical_bytes.len() + req.creator_public_key.len());
+                let mut buf =
+                    Vec::with_capacity(canonical_bytes.len() + req.creator_public_key.len());
                 buf.extend_from_slice(&canonical_bytes);
                 buf.extend_from_slice(&req.creator_public_key);
                 buf
             };
-            let canonical_digest: [u8; 32] = dsm::crypto::blake3::domain_hash_bytes(
-                "DSM/dlv-create-self-sign",
-                &signing_input,
-            );
+            let canonical_digest: [u8; 32] =
+                dsm::crypto::blake3::domain_hash_bytes("DSM/dlv-create-self-sign", &signing_input);
             let sk = match crate::sdk::signing_authority::current_secret_key() {
                 Ok(s) if !s.is_empty() => s,
                 Ok(_) => {
-                    return err(
-                        "dlv.create: empty signature requested wallet signing \
+                    return err("dlv.create: empty signature requested wallet signing \
                          but the wallet signing sk is empty"
-                            .into(),
-                    );
+                        .into());
                 }
                 Err(e) => {
                     return err(format!(
@@ -362,11 +349,19 @@ impl AppRouterImpl {
         // Decode FulfillmentMechanism from the canonical proto bytes.
         let fm_proto = match generated::FulfillmentMechanism::decode(&*spec.fulfillment_bytes) {
             Ok(p) => p,
-            Err(e) => return err(format!("dlv.create: decode FulfillmentMechanism failed: {e}")),
+            Err(e) => {
+                return err(format!(
+                    "dlv.create: decode FulfillmentMechanism failed: {e}"
+                ))
+            }
         };
         let fulfillment = match dsm::vault::FulfillmentMechanism::try_from(fm_proto) {
             Ok(m) => m,
-            Err(e) => return err(format!("dlv.create: FulfillmentMechanism conversion failed: {e}")),
+            Err(e) => {
+                return err(format!(
+                    "dlv.create: FulfillmentMechanism conversion failed: {e}"
+                ))
+            }
         };
 
         // Reference state (current device head).
@@ -481,12 +476,10 @@ impl AppRouterImpl {
 
         // Actor self-loop routing.
         let actor = reference_state.device_info.device_id;
-        let rel_key =
-            dsm::core::bilateral_transaction_manager::compute_smt_key(&actor, &actor);
-        let init_tip =
-            dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-                &actor, &actor,
-            );
+        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&actor, &actor);
+        let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &actor, &actor,
+        );
         if let Err(e) =
             self.core_sdk
                 .execute_on_relationship(rel_key, actor, op, &deltas, Some(init_tip))
@@ -500,7 +493,11 @@ impl AppRouterImpl {
                 draft,
                 &req.signature,
                 token_id_str_opt.as_deref(),
-                if locked_u64 > 0 { Some(locked_u64) } else { None },
+                if locked_u64 > 0 {
+                    Some(locked_u64)
+                } else {
+                    None
+                },
             )
             .await
         {
@@ -603,11 +600,9 @@ impl AppRouterImpl {
                                                 crate::sdk::vault_state_anchor_codec::encode_anchor_to_proto(
                                                     &signed,
                                                 );
-                                            if let Err(e) = publish_vault_state_anchor(
-                                                &vault_id,
-                                                &proto_bytes,
-                                            )
-                                            .await
+                                            if let Err(e) =
+                                                publish_vault_state_anchor(&vault_id, &proto_bytes)
+                                                    .await
                                             {
                                                 log::warn!(
                                                     "[dlv.create] genesis anchor publish failed for {}: {e}; vault is locally consistent but may not be quotable off-device until republish",
@@ -686,14 +681,13 @@ impl AppRouterImpl {
             Err(e) => return err(format!("dlv.unlock: get_current_state failed: {e}")),
         };
         let actor = reference_state.device_info.device_id;
-        let rel_key =
-            dsm::core::bilateral_transaction_manager::compute_smt_key(&actor, &actor);
-        let init_tip =
-            dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-                &actor, &actor,
-            );
+        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&actor, &actor);
+        let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &actor, &actor,
+        );
         if let Err(e) =
-            self.core_sdk.execute_on_relationship(rel_key, actor, op, &[], Some(init_tip))
+            self.core_sdk
+                .execute_on_relationship(rel_key, actor, op, &[], Some(init_tip))
         {
             return err(format!("dlv.unlock: execute_on_relationship failed: {e}"));
         }
@@ -723,7 +717,11 @@ impl AppRouterImpl {
         }
         let req = match generated::DlvInvalidateV1::decode(&*bytes) {
             Ok(r) => r,
-            Err(e) => return err(format!("dlv.invalidate: decode DlvInvalidateV1 failed: {e}")),
+            Err(e) => {
+                return err(format!(
+                    "dlv.invalidate: decode DlvInvalidateV1 failed: {e}"
+                ))
+            }
         };
         if req.vault_id.len() != 32 {
             return err("dlv.invalidate: vault_id must be 32 bytes".into());
@@ -741,9 +739,7 @@ impl AppRouterImpl {
             let v = vault_lock.lock().await;
             let (locked, tid): (u64, Option<String>) = match &v.fulfillment_condition {
                 dsm::vault::fulfillment::FulfillmentMechanism::Payment {
-                    amount,
-                    token_id,
-                    ..
+                    amount, token_id, ..
                 } => (*amount, Some(token_id.clone())),
                 _ => (0, None),
             };
@@ -758,32 +754,29 @@ impl AppRouterImpl {
             req.creator_public_key.clone()
         } else {
             return err(
-                "dlv.invalidate: creator_public_key on request does not match vault creator"
-                    .into(),
+                "dlv.invalidate: creator_public_key on request does not match vault creator".into(),
             );
         };
 
-        let deltas: Vec<dsm::types::device_state::BalanceDelta> = match (
-            &token_id_opt,
-            locked_amount,
-        ) {
-            (Some(tid), amt) if amt > 0 => {
-                let pc = match self.wallet.token_sdk.resolve_policy_commit_strict(tid) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        return err(format!(
-                            "dlv.invalidate: resolve policy_commit for {tid} failed: {e}"
-                        ));
-                    }
-                };
-                vec![dsm::types::device_state::BalanceDelta {
-                    policy_commit: pc,
-                    direction: dsm::types::device_state::BalanceDirection::Credit,
-                    amount: amt,
-                }]
-            }
-            _ => Vec::new(),
-        };
+        let deltas: Vec<dsm::types::device_state::BalanceDelta> =
+            match (&token_id_opt, locked_amount) {
+                (Some(tid), amt) if amt > 0 => {
+                    let pc = match self.wallet.token_sdk.resolve_policy_commit_strict(tid) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            return err(format!(
+                                "dlv.invalidate: resolve policy_commit for {tid} failed: {e}"
+                            ));
+                        }
+                    };
+                    vec![dsm::types::device_state::BalanceDelta {
+                        policy_commit: pc,
+                        direction: dsm::types::device_state::BalanceDirection::Credit,
+                        amount: amt,
+                    }]
+                }
+                _ => Vec::new(),
+            };
 
         let op = dsm::types::operations::Operation::DlvInvalidate {
             vault_id: vault_id.to_vec(),
@@ -798,20 +791,17 @@ impl AppRouterImpl {
             Err(e) => return err(format!("dlv.invalidate: get_current_state failed: {e}")),
         };
         let actor = reference_state.device_info.device_id;
-        let rel_key =
-            dsm::core::bilateral_transaction_manager::compute_smt_key(&actor, &actor);
-        let init_tip =
-            dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-                &actor, &actor,
-            );
-        if let Err(e) = self.core_sdk.execute_on_relationship(
-            rel_key,
-            actor,
-            op,
-            &deltas,
-            Some(init_tip),
-        ) {
-            return err(format!("dlv.invalidate: execute_on_relationship failed: {e}"));
+        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&actor, &actor);
+        let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &actor, &actor,
+        );
+        if let Err(e) =
+            self.core_sdk
+                .execute_on_relationship(rel_key, actor, op, &deltas, Some(init_tip))
+        {
+            return err(format!(
+                "dlv.invalidate: execute_on_relationship failed: {e}"
+            ));
         }
 
         if let Err(e) = dlv_manager
@@ -886,27 +876,25 @@ impl AppRouterImpl {
         // Actor IS the claimant.  rel_key must NOT be derived from vault creator.
         let actor = reference_state.device_info.device_id;
 
-        let deltas: Vec<dsm::types::device_state::BalanceDelta> = match (
-            &token_id_opt,
-            locked_amount,
-        ) {
-            (Some(tid), amt) if amt > 0 => {
-                let pc = match self.wallet.token_sdk.resolve_policy_commit_strict(tid) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        return err(format!(
-                            "dlv.claim: resolve policy_commit for {tid} failed: {e}"
-                        ));
-                    }
-                };
-                vec![dsm::types::device_state::BalanceDelta {
-                    policy_commit: pc,
-                    direction: dsm::types::device_state::BalanceDirection::Credit,
-                    amount: amt,
-                }]
-            }
-            _ => Vec::new(),
-        };
+        let deltas: Vec<dsm::types::device_state::BalanceDelta> =
+            match (&token_id_opt, locked_amount) {
+                (Some(tid), amt) if amt > 0 => {
+                    let pc = match self.wallet.token_sdk.resolve_policy_commit_strict(tid) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            return err(format!(
+                                "dlv.claim: resolve policy_commit for {tid} failed: {e}"
+                            ));
+                        }
+                    };
+                    vec![dsm::types::device_state::BalanceDelta {
+                        policy_commit: pc,
+                        direction: dsm::types::device_state::BalanceDirection::Credit,
+                        amount: amt,
+                    }]
+                }
+                _ => Vec::new(),
+            };
 
         // Wire-supplied claimant pk takes precedence; fall back to the
         // local device's signing pk if the field is omitted.
@@ -923,19 +911,14 @@ impl AppRouterImpl {
             mode: dsm::types::operations::TransactionMode::Unilateral,
         };
 
-        let rel_key =
-            dsm::core::bilateral_transaction_manager::compute_smt_key(&actor, &actor);
-        let init_tip =
-            dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-                &actor, &actor,
-            );
-        if let Err(e) = self.core_sdk.execute_on_relationship(
-            rel_key,
-            actor,
-            op,
-            &deltas,
-            Some(init_tip),
-        ) {
+        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&actor, &actor);
+        let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &actor, &actor,
+        );
+        if let Err(e) =
+            self.core_sdk
+                .execute_on_relationship(rel_key, actor, op, &deltas, Some(init_tip))
+        {
             return err(format!("dlv.claim: execute_on_relationship failed: {e}"));
         }
 
@@ -1102,15 +1085,12 @@ impl AppRouterImpl {
                     && !hop.vault_state_anchor_digest.is_empty();
                 match (policy, has_anchor_fields) {
                     (AnchorEnforcement::Required, false) => {
-                        return err(
-                            "dlv.unlockRouted: vault requires anchor binding but \
+                        return err("dlv.unlockRouted: vault requires anchor binding but \
                              RouteCommit hop omits one or more fields \
                              (vault_state_reserves_digest / vault_state_anchor_digest)"
-                                .to_string(),
-                        );
+                            .to_string());
                     }
-                    (AnchorEnforcement::Required, true)
-                    | (AnchorEnforcement::Optional, true) => {
+                    (AnchorEnforcement::Required, true) | (AnchorEnforcement::Optional, true) => {
                         let internal_seq = vault.current_sequence;
                         if hop.vault_state_anchor_seq != internal_seq {
                             return err(format!(
@@ -1122,26 +1102,21 @@ impl AppRouterImpl {
                         let internal_digest = match vault.current_reserves_digest() {
                             Some(d) => d,
                             None => {
-                                return err(
-                                    "dlv.unlockRouted: AMM reserves digest unavailable \
+                                return err("dlv.unlockRouted: AMM reserves digest unavailable \
                                      for non-AMM vault"
-                                        .to_string(),
-                                );
+                                    .to_string());
                             }
                         };
                         if hop.vault_state_reserves_digest != internal_digest.to_vec() {
-                            return err(
-                                "dlv.unlockRouted: vault state reserves digest mismatch"
-                                    .to_string(),
-                            );
+                            return err("dlv.unlockRouted: vault state reserves digest mismatch"
+                                .to_string());
                         }
                         // anchor_digest is bound at quote time; the gate
                         // does not re-fetch storage.  Architectural
                         // commitment: never re-read storage to "confirm"
                         // the anchor.
                     }
-                    (AnchorEnforcement::Optional, false)
-                    | (AnchorEnforcement::Unspecified, _) => {
+                    (AnchorEnforcement::Optional, false) | (AnchorEnforcement::Unspecified, _) => {
                         anchor_bypassed_optional = true;
                         log::info!(
                             "[dlv.unlockRouted] anchor_enforcement_bypassed_optional_vault \
@@ -1192,18 +1167,14 @@ impl AppRouterImpl {
         let reference_state = match self.core_sdk.get_current_state() {
             Ok(s) => s,
             Err(e) => {
-                return err(format!(
-                    "dlv.unlockRouted: get_current_state failed: {e}"
-                ));
+                return err(format!("dlv.unlockRouted: get_current_state failed: {e}"));
             }
         };
         let actor = reference_state.device_info.device_id;
-        let rel_key =
-            dsm::core::bilateral_transaction_manager::compute_smt_key(&actor, &actor);
-        let init_tip =
-            dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-                &actor, &actor,
-            );
+        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&actor, &actor);
+        let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &actor, &actor,
+        );
         if let Err(e) =
             self.core_sdk
                 .execute_on_relationship(rel_key, actor, op, &[], Some(init_tip))
@@ -1319,7 +1290,11 @@ impl AppRouterImpl {
                 ) {
                     if !pk.is_empty() && !sk.is_empty() {
                         match dsm::dlv::vault_state_anchor::sign_vault_state_anchor(
-                            &vault_id, new_seq, &new_digest, &pk, &sk,
+                            &vault_id,
+                            new_seq,
+                            &new_digest,
+                            &pk,
+                            &sk,
                         ) {
                             Ok(signed) => {
                                 let proto_bytes =
@@ -1374,10 +1349,7 @@ impl AppRouterImpl {
 /// `defi/vault-state/{vault_id_b32}/latest`.  Best-effort —
 /// vault internal state is authoritative; this storage write is
 /// advertisement-and-discovery only.
-async fn publish_vault_state_anchor(
-    vault_id: &[u8; 32],
-    proto_bytes: &[u8],
-) -> Result<(), String> {
+async fn publish_vault_state_anchor(vault_id: &[u8; 32], proto_bytes: &[u8]) -> Result<(), String> {
     let key = format!(
         "defi/vault-state/{}/latest",
         crate::util::text_id::encode_base32_crockford(vault_id),

@@ -56,10 +56,7 @@ fn no_dsm_token_prefs_writes_in_token_routes() {
 /// persist-via-prefs shim is gone (commits 5 + 6 + 7).
 #[test]
 fn no_dsm_dlv_or_detfi_prefs_writes_in_handlers() {
-    for rel in [
-        "src/handlers/dlv_routes.rs",
-        "src/handlers/detfi_routes.rs",
-    ] {
+    for rel in ["src/handlers/dlv_routes.rs", "src/handlers/detfi_routes.rs"] {
         let src = read(sdk_path(rel));
         assert!(
             !src.contains("app_state_set(&format!(\"dsm.dlv."),
@@ -101,10 +98,7 @@ fn resolve_policy_commit_placeholder_deleted() {
 #[test]
 fn no_dlv_create_v3_in_rust_or_proto_sources() {
     // Rust source files in dsm + dsm_sdk crates.
-    for rel in [
-        "src/vault/limbo_vault.rs",
-        "src/vault/dlv_manager.rs",
-    ] {
+    for rel in ["src/vault/limbo_vault.rs", "src/vault/dlv_manager.rs"] {
         let src = read(core_path(rel));
         assert!(
             !src.contains("DlvCreateV3"),
@@ -497,9 +491,7 @@ fn dlv_unlock_routed_runs_eligibility_check_before_state_advance() {
         .expect("verifier must be present (asserted above)");
     let mut search_from = 0;
     let mut found_after = false;
-    while let Some(pos) =
-        src[search_from..].find("execute_on_relationship")
-    {
+    while let Some(pos) = src[search_from..].find("execute_on_relationship") {
         let abs = search_from + pos;
         if abs > verify_pos {
             // Found an `execute_on_relationship` call AFTER the
@@ -848,7 +840,8 @@ fn amm_reserve_update_uses_full_input_amount() {
 fn dlv_list_owned_amm_vaults_is_dispatched_and_delegates() {
     let routes_src = read(sdk_path("src/handlers/dlv_routes.rs"));
     assert!(
-        routes_src.contains("\"dlv.listOwnedAmmVaults\" => self.dlv_list_owned_amm_vaults(q).await,"),
+        routes_src
+            .contains("\"dlv.listOwnedAmmVaults\" => self.dlv_list_owned_amm_vaults(q).await,"),
         "regression: dlv.listOwnedAmmVaults dispatch edge missing in handle_dlv_query"
     );
     assert!(
@@ -869,9 +862,7 @@ fn dlv_list_owned_amm_vaults_is_dispatched_and_delegates() {
 
     let app_router_src = read(sdk_path("src/handlers/app_router_impl.rs"));
     assert!(
-        app_router_src.contains(
-            "p if p.starts_with(\"dlv.\") => self.handle_dlv_query(q).await,"
-        ),
+        app_router_src.contains("p if p.starts_with(\"dlv.\") => self.handle_dlv_query(q).await,"),
         "regression: dlv.* query dispatch edge missing in app_router_impl"
     );
 }
@@ -892,9 +883,8 @@ fn dlv_unlock_routed_republishes_advertisement_after_settled_swap() {
         .expect("dlv_unlock_routed handler present");
     let routed_body = &src[routed_start..];
     assert!(
-        routed_body.contains(
-            "crate::sdk::routing_sdk::republish_active_advertisement_with_reserves"
-        ),
+        routed_body
+            .contains("crate::sdk::routing_sdk::republish_active_advertisement_with_reserves"),
         "regression: dlv.unlockRouted no longer republishes the routing-vault \
          advertisement after a settled swap — every subsequent trader will hit \
          OutputMismatch on a stale quote"
@@ -914,11 +904,23 @@ fn route_publish_routes_stamp_wallet_pk_on_empty() {
     let src = read(sdk_path("src/handlers/route_routes.rs"));
     let needles = [
         // publishExternalCommitment branch
-        ("publish_external_commitment\\b", "if req.publisher_public_key.is_empty() {"),
-        ("publish_external_commitment\\b", "req.publisher_public_key = pk"),
+        (
+            "publish_external_commitment\\b",
+            "if req.publisher_public_key.is_empty() {",
+        ),
+        (
+            "publish_external_commitment\\b",
+            "req.publisher_public_key = pk",
+        ),
         // publishRoutingAdvertisement branch
-        ("publish_routing_advertisement\\b", "if req.owner_public_key.is_empty() {"),
-        ("publish_routing_advertisement\\b", "req.owner_public_key = pk"),
+        (
+            "publish_routing_advertisement\\b",
+            "if req.owner_public_key.is_empty() {",
+        ),
+        (
+            "publish_routing_advertisement\\b",
+            "req.owner_public_key = pk",
+        ),
     ];
     for (_route, needle) in needles {
         assert!(
@@ -1098,8 +1100,7 @@ fn dlv_unlock_routed_advances_sequence_and_republishes_anchor_on_settle() {
     let src = read(sdk_path("src/handlers/dlv_routes.rs"));
     // After accepted unlock, sequence must advance.
     assert!(
-        src.contains("current_sequence.saturating_add(1)")
-            || src.contains("current_sequence += 1"),
+        src.contains("current_sequence.saturating_add(1)") || src.contains("current_sequence += 1"),
         "settle path must advance vault.current_sequence"
     );
     // A second call to `publish_vault_state_anchor` must exist —

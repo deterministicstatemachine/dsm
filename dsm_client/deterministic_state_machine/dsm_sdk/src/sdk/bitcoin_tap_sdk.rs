@@ -710,10 +710,11 @@ impl BitcoinTapSdk {
     async fn persist_vault(&self, vault_id: &str) -> Result<(), DsmError> {
         use crate::storage::client_db;
         use dsm::vault::fulfillment::FulfillmentMechanism;
-        let vid32 = crate::util::text_id::decode_bytes32(vault_id)
-            .ok_or_else(|| DsmError::invalid_operation(format!(
+        let vid32 = crate::util::text_id::decode_bytes32(vault_id).ok_or_else(|| {
+            DsmError::invalid_operation(format!(
                 "persist_vault: vault_id {vault_id} is not a valid Base32 32-byte id"
-            )))?;
+            ))
+        })?;
         let (proto_bytes, state_str, entry_hdr, btc_amount_sats) = {
             let vault_lock =
                 self.dlv_manager
@@ -1077,11 +1078,8 @@ impl BitcoinTapSdk {
                     }
                     let mut pid = [0u8; 32];
                     pid.copy_from_slice(&proto.id);
-                    let mut v = dsm::vault::LimboVault::new_minimal(
-                        pid,
-                        fulfillment_condition,
-                        ref_hash,
-                    );
+                    let mut v =
+                        dsm::vault::LimboVault::new_minimal(pid, fulfillment_condition, ref_hash);
                     v.entry_header = Some(entry_hdr);
                     log::info!(
                         "[bitcoin_tap] Using minimal vault construction for hint-originated vault {vault_id}"
@@ -3449,8 +3447,8 @@ impl BitcoinTapSdk {
                 Some(e),
             )
         })?;
-        let ad_vault_id_bytes =
-            crate::util::text_id::decode_bytes32(&advertisement.vault_id).ok_or_else(|| {
+        let ad_vault_id_bytes = crate::util::text_id::decode_bytes32(&advertisement.vault_id)
+            .ok_or_else(|| {
                 DsmError::invalid_operation(
                     "advertisement vault_id is not a valid Base32 32-byte id",
                 )

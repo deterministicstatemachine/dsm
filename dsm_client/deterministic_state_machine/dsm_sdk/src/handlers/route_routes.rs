@@ -46,15 +46,11 @@ impl AppRouterImpl {
     /// Query dispatch for `route.*` read-only paths.
     pub(crate) async fn handle_route_query(&self, q: AppQuery) -> AppResult {
         match q.path.as_str() {
-            "route.computeExternalCommitment" => {
-                self.route_compute_external_commitment(q).await
-            }
+            "route.computeExternalCommitment" => self.route_compute_external_commitment(q).await,
             "route.isExternalCommitmentVisible" => {
                 self.route_is_external_commitment_visible(q).await
             }
-            "route.listAdvertisementsForPair" => {
-                self.route_list_advertisements_for_pair(q).await
-            }
+            "route.listAdvertisementsForPair" => self.route_list_advertisements_for_pair(q).await,
             other => err(format!("unknown route query path: {other}")),
         }
     }
@@ -62,9 +58,7 @@ impl AppRouterImpl {
     /// Invoke dispatch for `route.*` mutating paths.
     pub(crate) async fn handle_route_invoke(&self, i: AppInvoke) -> AppResult {
         match i.method.as_str() {
-            "route.publishExternalCommitment" => {
-                self.route_publish_external_commitment(i).await
-            }
+            "route.publishExternalCommitment" => self.route_publish_external_commitment(i).await,
             "route.signRouteCommit" => self.route_sign_route_commit(i).await,
             "route.publishRoutingAdvertisement" => {
                 self.route_publish_routing_advertisement(i).await
@@ -88,9 +82,7 @@ impl AppRouterImpl {
             Err(e) => return err(format!("route.computeExternalCommitment: {e}")),
         };
         if bytes.is_empty() {
-            return err(
-                "route.computeExternalCommitment: empty RouteCommitV1 payload".into(),
-            );
+            return err("route.computeExternalCommitment: empty RouteCommitV1 payload".into());
         }
         let rc = match generated::RouteCommitV1::decode(&*bytes) {
             Ok(r) => r,
@@ -134,7 +126,11 @@ impl AppRouterImpl {
             Ok(visible) => {
                 let resp = generated::AppStateResponse {
                     key: "route.isExternalCommitmentVisible".to_string(),
-                    value: Some(if visible { "true".into() } else { "false".into() }),
+                    value: Some(if visible {
+                        "true".into()
+                    } else {
+                        "false".into()
+                    }),
                 };
                 pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
             }
@@ -189,9 +185,7 @@ impl AppRouterImpl {
         let pk = match crate::sdk::signing_authority::current_public_key() {
             Ok(p) if !p.is_empty() => p,
             Ok(_) => {
-                return err(
-                    "route.signRouteCommit: wallet signing public key is empty".into(),
-                );
+                return err("route.signRouteCommit: wallet signing public key is empty".into());
             }
             Err(e) => {
                 return err(format!(
@@ -202,9 +196,7 @@ impl AppRouterImpl {
         let sk = match crate::sdk::signing_authority::current_secret_key() {
             Ok(s) if !s.is_empty() => s,
             Ok(_) => {
-                return err(
-                    "route.signRouteCommit: wallet signing secret key is empty".into(),
-                );
+                return err("route.signRouteCommit: wallet signing secret key is empty".into());
             }
             Err(e) => {
                 return err(format!(
@@ -220,8 +212,7 @@ impl AppRouterImpl {
         rc.initiator_public_key = pk;
 
         // Same canonicalisation as `compute_external_commitment`.
-        let canonical =
-            crate::sdk::route_commit_sdk::canonicalise_for_commitment(&rc);
+        let canonical = crate::sdk::route_commit_sdk::canonicalise_for_commitment(&rc);
         let canonical_bytes = canonical.encode_to_vec();
         let sig = match dsm::crypto::sphincs::sign(
             dsm::crypto::sphincs::SphincsVariant::SPX256f,
@@ -346,7 +337,8 @@ impl AppRouterImpl {
         }
         if req.reserve_a_u128.len() != 16 || req.reserve_b_u128.len() != 16 {
             return err(
-                "route.publishRoutingAdvertisement: reserves must be 16-byte big-endian u128".into(),
+                "route.publishRoutingAdvertisement: reserves must be 16-byte big-endian u128"
+                    .into(),
             );
         }
         if req.unlock_spec_digest.len() != 32 {
@@ -355,9 +347,7 @@ impl AppRouterImpl {
             );
         }
         if req.vault_proto_bytes.is_empty() {
-            return err(
-                "route.publishRoutingAdvertisement: vault_proto_bytes is required".into(),
-            );
+            return err("route.publishRoutingAdvertisement: vault_proto_bytes is required".into());
         }
         // Accept-or-stamp: empty owner pk → wallet pk; non-empty →
         // caller-supplied.  Same pattern as chunk #6 / Track C.4 /
@@ -368,11 +358,9 @@ impl AppRouterImpl {
             match crate::sdk::signing_authority::current_public_key() {
                 Ok(pk) if !pk.is_empty() => req.owner_public_key = pk,
                 Ok(_) => {
-                    return err(
-                        "route.publishRoutingAdvertisement: empty owner_public_key \
+                    return err("route.publishRoutingAdvertisement: empty owner_public_key \
                          requested wallet stamping but the wallet signing pk is empty"
-                            .into(),
-                    );
+                        .into());
                 }
                 Err(e) => {
                     return err(format!(
@@ -404,8 +392,7 @@ impl AppRouterImpl {
             owner_public_key: &req.owner_public_key,
             vault_proto_bytes: &req.vault_proto_bytes,
         };
-        if let Err(e) = crate::sdk::routing_sdk::publish_active_advertisement(publish_input).await
-        {
+        if let Err(e) = crate::sdk::routing_sdk::publish_active_advertisement(publish_input).await {
             return err(format!(
                 "route.publishRoutingAdvertisement: SDK publish failed: {e}"
             ));
@@ -452,9 +439,7 @@ impl AppRouterImpl {
         let lines: Vec<String> = ads
             .iter()
             .map(|p| {
-                crate::util::text_id::encode_base32_crockford(
-                    &p.advertisement.encode_to_vec(),
-                )
+                crate::util::text_id::encode_base32_crockford(&p.advertisement.encode_to_vec())
             })
             .collect();
         let resp = generated::AppStateResponse {
@@ -503,8 +488,7 @@ impl AppRouterImpl {
             if dlv_manager.get_vault(&vid).await.is_ok() {
                 continue;
             }
-            let proto_bytes = match crate::sdk::routing_sdk::fetch_and_verify_vault_proto(ad)
-                .await
+            let proto_bytes = match crate::sdk::routing_sdk::fetch_and_verify_vault_proto(ad).await
             {
                 Ok(p) => p,
                 Err(e) => {
@@ -515,17 +499,16 @@ impl AppRouterImpl {
                     continue;
                 }
             };
-            let post_proto =
-                match generated::VaultPostProto::decode(proto_bytes.as_slice()) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        log::warn!(
-                            "[route.syncVaultsForPair] decode VaultPostProto for {} failed: {e}",
-                            crate::util::text_id::encode_base32_crockford(&vid)
-                        );
-                        continue;
-                    }
-                };
+            let post_proto = match generated::VaultPostProto::decode(proto_bytes.as_slice()) {
+                Ok(p) => p,
+                Err(e) => {
+                    log::warn!(
+                        "[route.syncVaultsForPair] decode VaultPostProto for {} failed: {e}",
+                        crate::util::text_id::encode_base32_crockford(&vid)
+                    );
+                    continue;
+                }
+            };
             let post = match dsm::vault::limbo_vault::VaultPost::try_from(&post_proto) {
                 Ok(p) => p,
                 Err(e) => {
@@ -613,9 +596,7 @@ impl AppRouterImpl {
         {
             Ok(v) => v.into_iter().map(|p| p.advertisement).collect::<Vec<_>>(),
             Err(e) => {
-                return err(format!(
-                    "route.findAndBindBestPath: load ads failed: {e}"
-                ));
+                return err(format!("route.findAndBindBestPath: load ads failed: {e}"));
             }
         };
 
@@ -655,7 +636,9 @@ impl AppRouterImpl {
         let unsigned_bytes = unsigned.encode_to_vec();
         let resp = generated::AppStateResponse {
             key: "route.findAndBindBestPath".to_string(),
-            value: Some(crate::util::text_id::encode_base32_crockford(&unsigned_bytes)),
+            value: Some(crate::util::text_id::encode_base32_crockford(
+                &unsigned_bytes,
+            )),
         };
         pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
     }

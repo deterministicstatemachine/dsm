@@ -53,13 +53,14 @@ impl AppRouterImpl {
             Err(e) => return err(format!("posted_dlv.list: get_kyber_public_key failed: {e}")),
         };
 
-        let ads =
-            match crate::sdk::posted_dlv_sdk::load_active_advertisements_for_recipient(&recipient_pk)
-                .await
-            {
-                Ok(v) => v,
-                Err(e) => return err(format!("posted_dlv.list: load failed: {e}")),
-            };
+        let ads = match crate::sdk::posted_dlv_sdk::load_active_advertisements_for_recipient(
+            &recipient_pk,
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => return err(format!("posted_dlv.list: load failed: {e}")),
+        };
 
         let lines: Vec<String> = ads
             .iter()
@@ -92,13 +93,14 @@ impl AppRouterImpl {
             Err(e) => return err(format!("posted_dlv.sync: get_kyber_public_key failed: {e}")),
         };
 
-        let ads =
-            match crate::sdk::posted_dlv_sdk::load_active_advertisements_for_recipient(&recipient_pk)
-                .await
-            {
-                Ok(v) => v,
-                Err(e) => return err(format!("posted_dlv.sync: load failed: {e}")),
-            };
+        let ads = match crate::sdk::posted_dlv_sdk::load_active_advertisements_for_recipient(
+            &recipient_pk,
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => return err(format!("posted_dlv.sync: load failed: {e}")),
+        };
 
         let dlv_manager = self.bitcoin_tap.dlv_manager();
         let mut newly_mirrored: Vec<[u8; 32]> = Vec::new();
@@ -120,17 +122,17 @@ impl AppRouterImpl {
                 continue;
             }
 
-            let post_proto =
-                match crate::sdk::posted_dlv_sdk::fetch_and_verify_vault_post(ad).await {
-                    Ok(p) => p,
-                    Err(e) => {
-                        log::warn!(
-                            "[posted_dlv.sync] skipping {}: fetch_and_verify failed: {e}",
-                            crate::util::text_id::encode_base32_crockford(&ad.dlv_id)
-                        );
-                        continue;
-                    }
-                };
+            let post_proto = match crate::sdk::posted_dlv_sdk::fetch_and_verify_vault_post(ad).await
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    log::warn!(
+                        "[posted_dlv.sync] skipping {}: fetch_and_verify failed: {e}",
+                        crate::util::text_id::encode_base32_crockford(&ad.dlv_id)
+                    );
+                    continue;
+                }
+            };
 
             let post = match dsm::vault::limbo_vault::VaultPost::try_from(&post_proto) {
                 Ok(p) => p,
