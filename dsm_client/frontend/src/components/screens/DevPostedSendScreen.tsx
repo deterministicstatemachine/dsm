@@ -114,8 +114,8 @@ export default function DevPostedSendScreen(): JSX.Element {
       <section style={{ marginBottom: 16 }}>
         <h2>Recipient</h2>
         <p style={{ fontSize: 12, color: '#666' }}>
-          Recipient's Kyber-1024 public key as Base32 Crockford.  Get
-          it from their wallet's bootstrap output.
+          Recipient&apos;s Kyber-1024 public key as Base32 Crockford.  Get
+          it from their wallet&apos;s bootstrap output.
         </p>
         <textarea
           value={recipientPkBase32}
