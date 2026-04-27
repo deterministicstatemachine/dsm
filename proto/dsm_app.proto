@@ -964,6 +964,14 @@ message RouteCommitHopV1 {
   uint64 state_number              = 8;
   bytes  unlock_spec_digest        = 9 [(dsm_fixed_len)=32];
   bytes  owner_public_key          = 10 [(dsm_max_len)=65535];
+  // Tier 2 Foundation state-anchor binding.  Trader stamps these
+  // from the vault's `defi/vault-state/{vault_id}/latest` at quote
+  // time.  Gate verifies against local DLVManager state (NOT storage).
+  // For vaults with `anchor_enforcement = REQUIRED` these fields are
+  // mandatory; for OPTIONAL/UNSPECIFIED they may be absent.
+  uint64 vault_state_anchor_seq      = 11;
+  bytes  vault_state_reserves_digest = 12 [(dsm_fixed_len)=32];
+  bytes  vault_state_anchor_digest   = 13 [(dsm_fixed_len)=32];
 }
 
 // Off-chain routing proof produced by chunk #2's path search and
