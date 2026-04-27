@@ -14,7 +14,8 @@ use parking_lot::Mutex;
 use prost::Message;
 use std::sync::atomic::AtomicU64;
 
-use dsm::core::identity::genesis::create_genesis_via_blind_mpc;
+use dsm::core::identity::genesis::create_genesis_via_blind_mpc_with_contributors;
+use dsm::core::identity::genesis_mpc::generate_device_entropy;
 use dsm::core::state_machine::StateMachine;
 use dsm::core::token::policy::TokenPolicySystem;
 use dsm::types::error::DsmError;
@@ -747,22 +748,31 @@ impl CoreSDK {
             .try_into()
             .map_err(|_| DsmError::invalid_operation("device_id must be 32 bytes"))?;
 
-        // Map participant bytes to NodeId using deterministic hex strings for display; core remains bytes-only
-        let storage_nodes: Vec<dsm::types::identifiers::NodeId> = mpc_participants
-            .into_iter()
-            .map(|p| {
-                dsm::types::identifiers::NodeId::new(crate::util::text_id::encode_base32_crockford(
-                    &p,
-                ))
-            })
-            .collect();
+        let mut storage_nodes = Vec::with_capacity(mpc_participants.len());
+        let mut contributor_entropies = Vec::with_capacity(mpc_participants.len());
+        for (index, participant) in mpc_participants.into_iter().enumerate() {
+            let contributor_entropy: [u8; 32] = participant
+                .as_slice()
+                .try_into()
+                .map_err(|_| DsmError::invalid_operation("MPC participant entropy must be 32 bytes"))?;
+            contributor_entropies.push(contributor_entropy);
+            storage_nodes.push(dsm::types::identifiers::NodeId::new(format!(
+                "storage-node-{}",
+                index
+            )));
+        }
 
         let threshold = storage_nodes.len();
+        let device_entropy = generate_device_entropy(&device_id_arr);
 
-        // Await the async MPC genesis function and propagate errors
-        let genesis_state =
-            create_genesis_via_blind_mpc(device_id_arr, storage_nodes, threshold, client_entropy)
-                .await?;
+        let genesis_state = create_genesis_via_blind_mpc_with_contributors(
+            device_id_arr,
+            storage_nodes,
+            threshold,
+            device_entropy,
+            contributor_entropies,
+            client_entropy,
+        )?;
         let public_key = genesis_state.signing_key.public_key.clone();
         let smt_root = genesis_state.merkle_root.unwrap_or(genesis_state.hash);
 

@@ -361,6 +361,32 @@ pub async fn create_genesis_via_blind_mpc(
     Ok(gs)
 }
 
+pub fn create_genesis_via_blind_mpc_with_contributors(
+    device_id: [u8; 32],
+    storage_nodes: Vec<NodeId>,
+    threshold: usize,
+    device_entropy: [u8; 32],
+    mpc_entropies: Vec<[u8; 32]>,
+    metadata: Option<Vec<u8>>,
+) -> Result<GenesisState, DsmError> {
+    let metadata = metadata.unwrap_or_else(|| b"DSMv2|bytes|no-wallclock".to_vec());
+
+    let mut session = crate::core::identity::genesis_mpc::GenesisSession::new(metadata)?;
+    session.initialize_mpc(device_id, storage_nodes, threshold)?;
+    session.set_entropies(device_entropy, mpc_entropies)?;
+    session.compute_commitments();
+    session.compute_genesis_id();
+    session.validate_session()?;
+
+    let gs = convert_session_to_genesis_state_compat(&session)?;
+    if !verify_genesis_state(&gs)? {
+        return Err(DsmError::invalid_operation(
+            "MPC genesis verification failed",
+        ));
+    }
+    Ok(gs)
+}
+
 // -------------------- Device entropy (no DBRW) --------------------
 
 pub fn get_device_entropy(
@@ -563,6 +589,36 @@ mod tests {
             Err(e) => panic!("verify_genesis_state should be callable: {e:?}"),
         };
         assert!(ok);
+    }
+
+    #[test]
+    fn test_mpc_genesis_with_provided_contributors_preserves_entropy_bytes() {
+        let device_id = [0x41; 32];
+        let device_entropy = [0x52; 32];
+        let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
+        let node_entropies = vec![[0x61; 32], [0x62; 32], [0x63; 32]];
+        let metadata = b"meta".to_vec();
+
+        let genesis = create_genesis_via_blind_mpc_with_contributors(
+            device_id,
+            nodes,
+            3,
+            device_entropy,
+            node_entropies.clone(),
+            Some(metadata.clone()),
+        )
+        .expect("provided contributors should build a valid genesis state");
+
+        assert_eq!(genesis.contributions.len(), 1 + node_entropies.len() + 1);
+
+        let mut expected_device_contribution = Vec::with_capacity(64);
+        expected_device_contribution.extend_from_slice(&device_id);
+        expected_device_contribution.extend_from_slice(&device_entropy);
+        assert_eq!(genesis.contributions[0].data, expected_device_contribution);
+        assert_eq!(genesis.contributions[1].data, node_entropies[0].to_vec());
+        assert_eq!(genesis.contributions[2].data, node_entropies[1].to_vec());
+        assert_eq!(genesis.contributions[3].data, node_entropies[2].to_vec());
+        assert_eq!(genesis.contributions[4].data, metadata);
     }
 
     #[tokio::test]
