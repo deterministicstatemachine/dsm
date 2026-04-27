@@ -102,6 +102,16 @@ pub(crate) fn bind_path_to_route_commit(
             state_number: hop.state_number,
             unlock_spec_digest: hop.unlock_spec_digest.to_vec(),
             owner_public_key: hop.owner_public_key.clone(),
+            // Tier 2 Foundation fields default-initialised here.  The
+            // trader-side anchor read populates them in a later phase
+            // (the `RouteCommitHop` input struct doesn't carry them
+            // yet — that wiring lives in the path-search +
+            // anchor-fetch flow).  Empty digests + zero seq mean
+            // "no anchor binding" — vault-side gate enforces per
+            // `anchor_enforcement` policy.
+            vault_state_anchor_seq: 0,
+            vault_state_reserves_digest: Vec::new(),
+            vault_state_anchor_digest: Vec::new(),
         });
     }
 

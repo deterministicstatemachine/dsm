@@ -128,6 +128,50 @@ proto3.util.setEnumType(TransactionType, "dsm.TransactionType", [
 ]);
 
 /**
+ * Anchor enforcement posture for an AMM vault.
+ *
+ * REQUIRED: every routed unlock against this vault MUST carry
+ *   `(vault_state_anchor_seq, vault_state_reserves_digest,
+ *   vault_state_anchor_digest)` on its `RouteCommitHopV1`.  The
+ *   chunks #7 gate verifies these against the vault's local
+ *   `DLVManager` state (NOT against storage).  Missing fields or
+ *   mismatch ⇒ typed reject.
+ *
+ * OPTIONAL: anchor fields are accepted if present but not required.
+ *   When absent, gate falls through to the existing reserves-value
+ *   check.  The unlock response surfaces a flag indicating identity-
+ *   binding was not enforced.
+ *
+ * UNSPECIFIED: grandfathered behaviour for vaults predating Tier 2
+ *   Foundation.  Treated as OPTIONAL by the gate.  New vaults SHOULD
+ *   set REQUIRED.
+ *
+ * @generated from enum dsm.AnchorEnforcement
+ */
+export enum AnchorEnforcement {
+  /**
+   * @generated from enum value: ANCHOR_ENFORCEMENT_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: ANCHOR_ENFORCEMENT_OPTIONAL = 1;
+   */
+  OPTIONAL = 1,
+
+  /**
+   * @generated from enum value: ANCHOR_ENFORCEMENT_REQUIRED = 2;
+   */
+  REQUIRED = 2,
+}
+// Retrieve enum metadata with: proto3.getEnumType(AnchorEnforcement)
+proto3.util.setEnumType(AnchorEnforcement, "dsm.AnchorEnforcement", [
+  { no: 0, name: "ANCHOR_ENFORCEMENT_UNSPECIFIED" },
+  { no: 1, name: "ANCHOR_ENFORCEMENT_OPTIONAL" },
+  { no: 2, name: "ANCHOR_ENFORCEMENT_REQUIRED" },
+]);
+
+/**
  * @generated from enum dsm.StorageNodeStatus
  */
 export enum StorageNodeStatus {
@@ -7195,13 +7239,6 @@ export class TokenCreateResponse extends Message<TokenCreateResponse> {
 }
 
 /**
- * ------------------------- DLV Lifecycle Objects --------------------------
- * Device-neutral, content-addressed vault template.
- * spec_id (implicit) := BLAKE3("DSM/dlv-spec\0" ||
- *     policy_digest || content_digest || fulfillment_digest || recipient_digest)
- * where recipient_digest = BLAKE3("DSM/dlv-recipient\0" || intended_recipient) if set
- * else 32 zero bytes.
- *
  * @generated from message dsm.DlvSpecV1
  */
 export class DlvSpecV1 extends Message<DlvSpecV1> {
@@ -7247,6 +7284,11 @@ export class DlvSpecV1 extends Message<DlvSpecV1> {
    */
   content = new Uint8Array(0);
 
+  /**
+   * @generated from field: dsm.AnchorEnforcement anchor_enforcement = 7;
+   */
+  anchorEnforcement = AnchorEnforcement.UNSPECIFIED;
+
   constructor(data?: PartialMessage<DlvSpecV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -7261,6 +7303,7 @@ export class DlvSpecV1 extends Message<DlvSpecV1> {
     { no: 4, name: "intended_recipient", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 5, name: "fulfillment_bytes", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 6, name: "content", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 7, name: "anchor_enforcement", kind: "enum", T: proto3.getEnumType(AnchorEnforcement) },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DlvSpecV1 {
@@ -7705,6 +7748,81 @@ export class AmmVaultSummaryV1 extends Message<AmmVaultSummaryV1> {
 }
 
 /**
+ * Per-vault signed state anchor.  Owner publishes one at vault
+ * creation (sequence=0) and one after every accepted routed unlock
+ * (sequence=N+1).  Stored at `defi/vault-state/{vault_id_b32}/latest`
+ * for off-device traders to read at quote time.  The chunks #7 gate
+ * does NOT read this — it verifies against the local DLVManager.
+ *
+ * `reserves_digest` =
+ *   BLAKE3("DSM/amm-reserves\0" || token_a || token_b ||
+ *          reserve_a_u128_be || reserve_b_u128_be || fee_bps_be)
+ *
+ * `owner_signature` is SPHINCS+ over
+ *   BLAKE3("DSM/vault-state-anchor\0" || vault_id || sequence_be ||
+ *          reserves_digest)
+ *
+ * @generated from message dsm.VaultStateAnchorV1
+ */
+export class VaultStateAnchorV1 extends Message<VaultStateAnchorV1> {
+  /**
+   * @generated from field: bytes vault_id = 1;
+   */
+  vaultId = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 sequence = 2;
+   */
+  sequence = protoInt64.zero;
+
+  /**
+   * @generated from field: bytes reserves_digest = 3;
+   */
+  reservesDigest = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes owner_public_key = 4;
+   */
+  ownerPublicKey = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes owner_signature = 5;
+   */
+  ownerSignature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<VaultStateAnchorV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.VaultStateAnchorV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "sequence", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 3, name: "reserves_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "owner_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "owner_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): VaultStateAnchorV1 {
+    return new VaultStateAnchorV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): VaultStateAnchorV1 {
+    return new VaultStateAnchorV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): VaultStateAnchorV1 {
+    return new VaultStateAnchorV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: VaultStateAnchorV1 | PlainMessage<VaultStateAnchorV1> | undefined, b: VaultStateAnchorV1 | PlainMessage<VaultStateAnchorV1> | undefined): boolean {
+    return proto3.util.equals(VaultStateAnchorV1, a, b);
+  }
+}
+
+/**
  * One hop in a `RouteCommitV1`.  Bound at routing time to the vault
  * advertisement digest + state number that was current when the path
  * was selected — recipients re-verify these fields against the live
@@ -7766,6 +7884,27 @@ export class RouteCommitHopV1 extends Message<RouteCommitHopV1> {
    */
   ownerPublicKey = new Uint8Array(0);
 
+  /**
+   * Tier 2 Foundation state-anchor binding.  Trader stamps these
+   * from the vault's `defi/vault-state/{vault_id}/latest` at quote
+   * time.  Gate verifies against local DLVManager state (NOT storage).
+   * For vaults with `anchor_enforcement = REQUIRED` these fields are
+   * mandatory; for OPTIONAL/UNSPECIFIED they may be absent.
+   *
+   * @generated from field: uint64 vault_state_anchor_seq = 11;
+   */
+  vaultStateAnchorSeq = protoInt64.zero;
+
+  /**
+   * @generated from field: bytes vault_state_reserves_digest = 12;
+   */
+  vaultStateReservesDigest = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes vault_state_anchor_digest = 13;
+   */
+  vaultStateAnchorDigest = new Uint8Array(0);
+
   constructor(data?: PartialMessage<RouteCommitHopV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -7784,6 +7923,9 @@ export class RouteCommitHopV1 extends Message<RouteCommitHopV1> {
     { no: 8, name: "state_number", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 9, name: "unlock_spec_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 10, name: "owner_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 11, name: "vault_state_anchor_seq", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 12, name: "vault_state_reserves_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 13, name: "vault_state_anchor_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RouteCommitHopV1 {
