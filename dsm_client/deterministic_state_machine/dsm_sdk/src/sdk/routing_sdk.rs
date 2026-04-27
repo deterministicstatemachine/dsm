@@ -440,7 +440,7 @@ mod tests {
     fn u128_be(n: u128) -> [u8; 16] {
         let mut out = [0u8; 16];
         for i in (0..16).rev() {
-            out[i] = (n >> ((15 - i) * 8)) as u8 & 0xff;
+            out[i] = (n >> ((15 - i) * 8)) as u8;
         }
         out
     }

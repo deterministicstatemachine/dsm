@@ -8,6 +8,12 @@
 //!
 //! Plan references: Part G.4 (negative / regression).
 
+// Test-only file: `expect`-on-Option/Result is the idiomatic shape for
+// assertion-driven regression checks.  The workspace's
+// `disallowed-methods` clippy config disallows them in production code;
+// allow at the file level for tests.
+#![allow(clippy::disallowed_methods)]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 

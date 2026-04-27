@@ -81,25 +81,22 @@ fn enrich_balance_metadata(reply: &mut generated::BalanceGetResponse) {
             reply.symbol = "ERA".to_string();
             reply.decimals = 0;
             reply.token_name = "ERA".to_string();
-            return;
         }
         "DBTC" => {
             reply.token_id = "dBTC".to_string();
             reply.symbol = "dBTC".to_string();
             reply.decimals = 8;
             reply.token_name = "dBTC".to_string();
-            return;
         }
+        // Custom token metadata enrichment formerly read `dsm.token.<id>` +
+        // `dsm.policy.<anchor>` from app_state.  Those writers are gone
+        // (plan Part E) and the readers were orphans.  The authoritative
+        // source is the in-memory TokenSDK metadata cache; a follow-up
+        // commit wires enrichment through a typed lookup on AppRouterImpl.
+        // For now the response carries its canonicalised token_id with
+        // default decimals; builtin ERA/dBTC paths above remain exact.
         _ => {}
     }
-
-    // Custom token metadata enrichment formerly read `dsm.token.<id>` +
-    // `dsm.policy.<anchor>` from app_state.  Those writers are gone
-    // (plan Part E) and the readers were orphans.  The authoritative
-    // source is the in-memory TokenSDK metadata cache; a follow-up
-    // commit wires enrichment through a typed lookup on AppRouterImpl.
-    // For now the response carries its canonicalised token_id with
-    // default decimals; builtin ERA/dBTC paths above remain exact.
 }
 
 fn ensure_default_visible_balances(items: &mut Vec<generated::BalanceGetResponse>) {

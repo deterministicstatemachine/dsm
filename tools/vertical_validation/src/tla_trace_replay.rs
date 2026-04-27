@@ -1393,9 +1393,11 @@ fn create_direct_trace_state(
         .hash()
         .map_err(|e| anyhow!("failed to hash direct replay genesis state: {e}"))?;
     // ERA is a builtin token — `resolve_policy_commit` strict-fails for
-    // non-builtins per Track A, but ERA always resolves cleanly.
+    // non-builtins per Track A, but ERA always resolves cleanly.  Surface
+    // any unexpected breakage as an anyhow error rather than panic so the
+    // replay binary's Result return type is honoured.
     let policy_commit = dsm::core::token::resolve_policy_commit("ERA")
-        .expect("ERA is a builtin and must resolve");
+        .map_err(|e| anyhow!("ERA policy resolution failed (builtin invariant broken): {e}"))?;
     let balance_key =
         dsm::core::token::derive_canonical_balance_key(&policy_commit, public_key, "ERA");
     state.token_balances.insert(

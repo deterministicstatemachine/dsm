@@ -625,7 +625,7 @@ mod tests {
 
         // Bob starts with zero exposure to this policy_commit.
         assert!(
-            bob.balances.get(&custom_token).is_none(),
+            !bob.balances.contains_key(&custom_token),
             "precondition: fresh device has no entry for the custom token"
         );
 
@@ -665,7 +665,7 @@ mod tests {
 
         // The original bob remains unchanged — functional transform contract.
         assert!(
-            bob.balances.get(&custom_token).is_none(),
+            !bob.balances.contains_key(&custom_token),
             "advance must not mutate &self"
         );
     }
