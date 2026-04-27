@@ -74,6 +74,7 @@ pub mod core;
 pub mod cpta;
 pub mod crypto;
 pub mod crypto_verification;
+pub mod dlv;
 pub mod emissions;
 pub mod envelope;
 pub mod merkle;
