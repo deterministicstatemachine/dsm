@@ -30,6 +30,7 @@ impl AppRouterImpl {
     pub(crate) async fn handle_dlv_query(&self, q: crate::bridge::AppQuery) -> AppResult {
         match q.path.as_str() {
             "dlv.listOwnedAmmVaults" => self.dlv_list_owned_amm_vaults(q).await,
+            "dlv.getVaultStateAnchor" => self.dlv_get_vault_state_anchor(q).await,
             other => err(format!("unknown dlv query path: {other}")),
         }
     }
@@ -146,6 +147,60 @@ impl AppRouterImpl {
         let resp = generated::AppStateResponse {
             key: "dlv.listOwnedAmmVaults".to_string(),
             value: Some(lines.join("\n")),
+        };
+        pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
+    }
+
+    /// `dlv.getVaultStateAnchor` (query) — fetch the latest signed
+    /// `VaultStateAnchorV1` proto blob published at
+    /// `defi/vault-state/{vault_id_b32}/latest`.  Vault internal
+    /// state is authoritative; this route serves the
+    /// off-device-trader discovery path only.  Returns the Base32
+    /// Crockford encoding of the proto bytes in
+    /// `AppStateResponse.value`, or an empty value when no anchor
+    /// has been published yet.
+    ///
+    /// Input: `q.params` carries the vault_id Base32 string as
+    /// UTF-8 bytes.
+    async fn dlv_get_vault_state_anchor(&self, q: crate::bridge::AppQuery) -> AppResult {
+        let vault_id_b32 = match std::str::from_utf8(&q.params) {
+            Ok(s) => s.trim().to_string(),
+            Err(e) => {
+                return err(format!(
+                    "dlv.getVaultStateAnchor: vault id is not valid UTF-8: {e}"
+                ));
+            }
+        };
+        if vault_id_b32.is_empty() {
+            return err("dlv.getVaultStateAnchor: vault id is empty".into());
+        }
+        let vault_id_bytes = match crate::util::text_id::decode_base32_crockford(&vault_id_b32) {
+            Some(v) => v,
+            None => {
+                return err(
+                    "dlv.getVaultStateAnchor: vault id is not valid Base32 Crockford".into(),
+                );
+            }
+        };
+        if vault_id_bytes.len() != 32 {
+            return err(format!(
+                "dlv.getVaultStateAnchor: vault id must decode to 32 bytes, got {}",
+                vault_id_bytes.len()
+            ));
+        }
+        let key = format!("defi/vault-state/{}/latest", vault_id_b32);
+        let value = match crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::storage_get_bytes(&key).await
+        {
+            Ok(proto_bytes) => crate::util::text_id::encode_base32_crockford(&proto_bytes),
+            Err(_) => {
+                // No anchor published yet (or storage backend unreachable).
+                // Return empty value — caller treats absent as "no anchor".
+                String::new()
+            }
+        };
+        let resp = generated::AppStateResponse {
+            key: "dlv.getVaultStateAnchor".to_string(),
+            value: Some(value),
         };
         pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
     }
