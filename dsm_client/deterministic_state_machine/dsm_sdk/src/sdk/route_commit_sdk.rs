@@ -1078,6 +1078,12 @@ mod tests {
             state_number: 1,
             unlock_spec_digest: [0u8; 32].to_vec(),
             owner_public_key: vec![0xABu8; 64],
+            // Tier 2 Foundation default-init: anchor binding absent.
+            // OPTIONAL/UNSPECIFIED enforcement passes through; REQUIRED
+            // would fail-closed at the gate, which is correct.
+            vault_state_anchor_seq: 0,
+            vault_state_reserves_digest: Vec::new(),
+            vault_state_anchor_digest: Vec::new(),
         }
     }
 
