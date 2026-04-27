@@ -926,6 +926,27 @@ message AmmVaultSummaryV1 {
   bool   routing_advertised        = 8;
 }
 
+// Per-vault signed state anchor.  Owner publishes one at vault
+// creation (sequence=0) and one after every accepted routed unlock
+// (sequence=N+1).  Stored at `defi/vault-state/{vault_id_b32}/latest`
+// for off-device traders to read at quote time.  The chunks #7 gate
+// does NOT read this — it verifies against the local DLVManager.
+//
+// `reserves_digest` =
+//   BLAKE3("DSM/amm-reserves\0" || token_a || token_b ||
+//          reserve_a_u128_be || reserve_b_u128_be || fee_bps_be)
+//
+// `owner_signature` is SPHINCS+ over
+//   BLAKE3("DSM/vault-state-anchor\0" || vault_id || sequence_be ||
+//          reserves_digest)
+message VaultStateAnchorV1 {
+  bytes  vault_id           = 1 [(dsm_fixed_len)=32];
+  uint64 sequence           = 2;
+  bytes  reserves_digest    = 3 [(dsm_fixed_len)=32];
+  bytes  owner_public_key   = 4 [(dsm_max_len)=65535];
+  bytes  owner_signature    = 5 [(dsm_max_len)=65535];
+}
+
 // One hop in a `RouteCommitV1`.  Bound at routing time to the vault
 // advertisement digest + state number that was current when the path
 // was selected — recipients re-verify these fields against the live
