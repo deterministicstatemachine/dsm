@@ -850,6 +850,7 @@ message DlvSpecV1 {
   bytes intended_recipient  = 4 [(dsm_max_len)=1568];  // Kyber pk, optional (empty = self-encrypted)
   bytes fulfillment_bytes   = 5 [(dsm_max_len)=65535]; // canonical FulfillmentMechanism proto
   bytes content             = 6 [(dsm_max_len)=65535]; // plaintext for local; sender-encrypted for posted
+  AnchorEnforcement anchor_enforcement = 7;
 }
 
 // Instance creation.  Carries everything Operation::DlvCreate needs.
