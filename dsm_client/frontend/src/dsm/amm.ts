@@ -128,6 +128,9 @@ export async function createAmmVault(input: {
       intendedRecipient: new Uint8Array() as any,
       fulfillmentBytes: fulfillmentBytes as any,
       content: content as any,
+      // Tier 2 Foundation: new wallet-created vaults default to
+      // REQUIRED so the anchor gate enforces vault state anchors.
+      anchorEnforcement: pb.AnchorEnforcement.REQUIRED,
     });
     const req = new pb.DlvInstantiateV1({
       spec,
