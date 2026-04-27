@@ -166,7 +166,7 @@ export default function DevPostedInboxScreen(): JSX.Element {
     <div className="settings-screen">
       <h1>Posted DLV Inbox (Dev)</h1>
       <p className="settings-subtitle">
-        DLVs addressed to this device's Kyber public key.  Refresh
+        DLVs addressed to this device&apos;s Kyber public key.  Refresh
         discovers pending vaults; Sync mirrors them locally; Claim
         runs `dlv.claim` per vault.
       </p>
