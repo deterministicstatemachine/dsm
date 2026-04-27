@@ -543,6 +543,25 @@ impl AppRouterImpl {
             }
         }
 
+        // Tier 2 Foundation: stamp the vault's `anchor_enforcement`
+        // policy from the spec.  This is the LOCAL authoritative copy
+        // consulted by the chunks #7 gate at routed-unlock time.  The
+        // proto value is passed through verbatim — the gate decodes it
+        // via `AnchorEnforcement::try_from` and falls back to
+        // `Unspecified` for unknown variants.
+        match dlv_manager.get_vault(&vault_id).await {
+            Ok(vault_lock) => {
+                let mut vault = vault_lock.lock().await;
+                vault.anchor_enforcement = spec.anchor_enforcement;
+            }
+            Err(e) => {
+                log::warn!(
+                    "[dlv.create] anchor_enforcement stamp: get_vault for {} failed: {e}",
+                    crate::util::text_id::encode_base32_crockford(&vault_id),
+                );
+            }
+        }
+
         // Tier 2 Foundation: publish genesis vault state anchor
         // (sequence=0) for AMM vaults whose spec declares
         // anchor_enforcement = REQUIRED or OPTIONAL.  Vault internal
@@ -1026,6 +1045,13 @@ impl AppRouterImpl {
         // if the on-chain advance fails (in which case reserves were
         // never advanced — correct fail-closed).
         let dlv_manager = self.bitcoin_tap.dlv_manager();
+        // Tier 2 Foundation: track whether the anchor-enforcement gate
+        // bypassed verification because the vault's policy was Optional
+        // (with no fields supplied) or Unspecified.  Surfaced via log so
+        // callers can audit identity-binding posture.  The literal
+        // sentinel string `anchor_enforcement_bypassed_optional_vault`
+        // appears verbatim in this path so the regression guard finds it.
+        let mut anchor_bypassed_optional: bool = false;
         // Stage post-trade reserves in canonical (a, b) ordering.  When
         // the on-chain DlvUnlock succeeds below we re-acquire the vault
         // lock and write these into `fulfillment_condition`.
@@ -1040,6 +1066,89 @@ impl AppRouterImpl {
                 }
             };
             let vault = vault_lock.lock().await;
+
+            // Tier 2 Foundation: anchor enforcement gate.  Verify the
+            // RouteCommit hop's vault state binding fields match the
+            // vault's LOCAL internal state (`current_sequence` +
+            // `current_reserves_digest`) per the vault's
+            // `anchor_enforcement` policy.  Storage anchors are
+            // advertisement-only — the gate trusts the local
+            // `DLVManager`, never re-reading from storage to "confirm"
+            // the anchor (that would re-introduce storage trust).
+            //
+            //   Required    => fields MUST be present and match → reject otherwise
+            //   Optional    => if fields present, must match; if absent,
+            //                  fall through with a flag so callers know
+            //                  identity-binding wasn't enforced
+            //   Unspecified => grandfathered; same behaviour as Optional
+            //                  with no enforcement
+            //
+            // The (seq + reserves_digest) match is sufficient because
+            // owner_signature on the storage anchor couples them.
+            {
+                use dsm::types::proto::AnchorEnforcement;
+                let policy = AnchorEnforcement::try_from(vault.anchor_enforcement)
+                    .unwrap_or(AnchorEnforcement::Unspecified);
+                // `vault_state_anchor_seq` is u64; its zero value is
+                // meaningful at genesis, so we cannot use 0 as
+                // "missing".  The two digest fields' emptiness is the
+                // missing-flag because both are 32-byte fixed-len when
+                // present.
+                let has_anchor_fields = !hop.vault_state_reserves_digest.is_empty()
+                    && !hop.vault_state_anchor_digest.is_empty();
+                match (policy, has_anchor_fields) {
+                    (AnchorEnforcement::Required, false) => {
+                        return err(
+                            "dlv.unlockRouted: vault requires anchor binding but \
+                             RouteCommit hop omits one or more fields \
+                             (vault_state_reserves_digest / vault_state_anchor_digest)"
+                                .to_string(),
+                        );
+                    }
+                    (AnchorEnforcement::Required, true)
+                    | (AnchorEnforcement::Optional, true) => {
+                        let internal_seq = vault.current_sequence;
+                        if hop.vault_state_anchor_seq != internal_seq {
+                            return err(format!(
+                                "dlv.unlockRouted: vault state anchor sequence mismatch \
+                                 (route={}, vault={})",
+                                hop.vault_state_anchor_seq, internal_seq,
+                            ));
+                        }
+                        let internal_digest = match vault.current_reserves_digest() {
+                            Some(d) => d,
+                            None => {
+                                return err(
+                                    "dlv.unlockRouted: AMM reserves digest unavailable \
+                                     for non-AMM vault"
+                                        .to_string(),
+                                );
+                            }
+                        };
+                        if hop.vault_state_reserves_digest != internal_digest.to_vec() {
+                            return err(
+                                "dlv.unlockRouted: vault state reserves digest mismatch"
+                                    .to_string(),
+                            );
+                        }
+                        // anchor_digest is bound at quote time; the gate
+                        // does not re-fetch storage.  Architectural
+                        // commitment: never re-read storage to "confirm"
+                        // the anchor.
+                    }
+                    (AnchorEnforcement::Optional, false)
+                    | (AnchorEnforcement::Unspecified, _) => {
+                        anchor_bypassed_optional = true;
+                        log::info!(
+                            "[dlv.unlockRouted] anchor_enforcement_bypassed_optional_vault \
+                             vault={} policy={:?}",
+                            crate::util::text_id::encode_base32_crockford(&vault_id),
+                            policy,
+                        );
+                    }
+                }
+            }
+
             match crate::sdk::route_commit_sdk::verify_amm_swap_against_reserves(
                 &hop,
                 &vault.fulfillment_condition,
@@ -1053,6 +1162,12 @@ impl AppRouterImpl {
                 }
             }
         };
+        // Suppress unused-warning for the anchor-enforcement bypass
+        // tracker when the function path doesn't otherwise consume it
+        // (today the response path doesn't surface it).  Reading the
+        // local keeps it visible to future response-shape changes
+        // without flagging dead-code.
+        let _ = anchor_bypassed_optional;
 
         // Past the gate.  Emit the standard DlvUnlock on the unlocker's
         // self-loop — same operation the non-routed `dlv.unlock` path

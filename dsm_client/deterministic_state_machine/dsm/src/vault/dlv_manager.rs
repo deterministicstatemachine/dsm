@@ -390,6 +390,7 @@ mod tests {
             reference_state_hash: [0xCC; 32],
             entry_header: None,
             current_sequence: 0,
+            anchor_enforcement: 0,
         }
     }
 
@@ -561,6 +562,7 @@ mod tests {
             reference_state_hash: [0xCC; 32],
             entry_header: None,
             current_sequence: 0,
+            anchor_enforcement: 0,
         }
     }
 

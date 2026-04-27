@@ -443,6 +443,14 @@ pub struct LimboVault {
     /// is the LOCAL authoritative truth — never read from storage.
     /// Domain-only: not persisted in `LimboVaultProto`.
     pub current_sequence: u64,
+    /// Tier 2 Foundation: anchor-enforcement policy carried over from the
+    /// vault's `DlvSpecV1.anchor_enforcement` at creation time.  Stored as
+    /// `i32` to match the proto-generated `AnchorEnforcement` enum (0 =
+    /// `Unspecified`, 1 = `Optional`, 2 = `Required`).  The chunks #7 gate
+    /// uses this to decide whether `RouteCommitHop` anchor binding fields
+    /// are mandatory, accepted-if-present, or grandfathered.  Domain-only:
+    /// not persisted in `LimboVaultProto`.
+    pub anchor_enforcement: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -567,6 +575,11 @@ impl TryFrom<crate::types::proto::LimboVaultProto> for LimboVault {
             // Tier 2 Foundation: domain-only; not persisted in the proto.
             // Loaded vaults start at 0 and advance through routed unlocks.
             current_sequence: 0,
+            // Tier 2 Foundation: domain-only; defaults to Unspecified when
+            // loaded from the proto (no anchor enforcement on legacy
+            // vaults).  Routed-unlock construction sites override this
+            // from `DlvSpecV1.anchor_enforcement`.
+            anchor_enforcement: 0,
         })
     }
 }
@@ -940,6 +953,7 @@ impl LimboVault {
             reference_state_hash,
             entry_header: None,
             current_sequence: 0,
+            anchor_enforcement: 0,
         }
     }
 
@@ -1085,6 +1099,7 @@ impl LimboVaultDraft {
             reference_state_hash: self.reference_state_hash,
             entry_header: None,
             current_sequence: 0,
+            anchor_enforcement: 0,
         };
 
         if !vault.verify()? {
@@ -2046,6 +2061,7 @@ impl Default for LimboVault {
             reference_state_hash: [0u8; 32],
             entry_header: None,
             current_sequence: 0,
+            anchor_enforcement: 0,
         }
     }
 }
