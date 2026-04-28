@@ -11,11 +11,6 @@ import DevDlvScreen from './screens/DevDlvScreen';
 import DevCdbrwScreen from './screens/DevCdbrwScreen';
 import DevPolicyScreen from './screens/DevPolicyScreen';
 import DevDeTfiLaunchScreen from './screens/DevDeTfiLaunchScreen';
-import DevAmmVaultScreen from './screens/DevAmmVaultScreen';
-import DevAmmTradeScreen from './screens/DevAmmTradeScreen';
-import DevPostedInboxScreen from './screens/DevPostedInboxScreen';
-import DevPostedSendScreen from './screens/DevPostedSendScreen';
-import DevAmmMonitorScreen from './screens/DevAmmMonitorScreen';
 import LockSetupScreen from './screens/LockSetupScreen';
 import QRCodeScannerScreen from './screens/QRCodeScannerScreen';
 import MyContactInfoScreen from './screens/MyContactInfoScreen';
@@ -33,11 +28,6 @@ const MemoDevDlv = React.memo(DevDlvScreen);
 const MemoDevCdbrw = React.memo(DevCdbrwScreen);
 const MemoDevPolicy = React.memo(DevPolicyScreen);
 const MemoDevDeTfiLaunch = React.memo(DevDeTfiLaunchScreen);
-const MemoDevAmmVault = React.memo(DevAmmVaultScreen);
-const MemoDevAmmTrade = React.memo(DevAmmTradeScreen);
-const MemoDevPostedInbox = React.memo(DevPostedInboxScreen);
-const MemoDevPostedSend = React.memo(DevPostedSendScreen);
-const MemoDevAmmMonitor = React.memo(DevAmmMonitorScreen);
 const MemoLockSetup = React.memo(LockSetupScreen);
 const MemoQR = React.memo(QRCodeScannerScreen);
 const MemoMyContact = React.memo(MyContactInfoScreen);
@@ -88,16 +78,6 @@ export default function AppScreenRouter({
       return <MemoDevPolicy />;
     case 'dev_detfi_launch':
       return <MemoDevDeTfiLaunch />;
-    case 'dev_amm_vault':
-      return <MemoDevAmmVault />;
-    case 'dev_amm_trade':
-      return <MemoDevAmmTrade />;
-    case 'dev_posted_inbox':
-      return <MemoDevPostedInbox />;
-    case 'dev_posted_send':
-      return <MemoDevPostedSend />;
-    case 'dev_amm_monitor':
-      return <MemoDevAmmMonitor />;
     case 'lock_setup':
       return <MemoLockSetup onNavigate={onNavigate} />;
     case 'qr':
