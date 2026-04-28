@@ -41,18 +41,17 @@ impl CoreBootstrapAdapter {
                 .map(|url| dsm::types::NodeId::new(url.clone()))
                 .collect();
 
-            let threshold: usize = 3;
-
             let device_id_array: [u8; 32] = {
                 let mut arr = [0u8; 32];
                 arr.copy_from_slice(&entropy);
                 arr
             };
 
+            // Per whitepaper §2.5: n-of-n MPC; all storage nodes contribute.
+            let participant_count = storage_node_ids.len() as u32;
             let genesis_state = dsm::core::identity::genesis::create_genesis_via_blind_mpc(
                 device_id_array,
                 storage_node_ids,
-                threshold,
                 Some(entropy.clone()),
             )
             .await
@@ -107,7 +106,7 @@ impl CoreBootstrapAdapter {
                     mpc_proof: String::new(),
                     dbrw_binding: crate::util::text_id::encode_base32_crockford(&entropy),
                     merkle_root: crate::util::text_id::encode_base32_crockford(&[0u8; 32]),
-                    participant_count: threshold as u32,
+                    participant_count,
                     progress_marker: "genesis".to_string(),
                     publication_hash: genesis_id_b32,
                     storage_nodes: storage_endpoints.clone(),

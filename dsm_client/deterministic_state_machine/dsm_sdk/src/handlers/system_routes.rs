@@ -40,7 +40,7 @@ pub(crate) fn handle_system_genesis_query(q: AppQuery) -> AppResult {
         let res = crate::sdk::storage_node_sdk::StorageNodeSDK::new(cfg)
             .await
             .map_err(|e| format!("sdk.new: {e}"))?
-            .create_genesis_with_mpc(Some(3), Some(entropy.clone()))
+            .create_genesis_with_mpc(Some(entropy.clone()))
             .await
             .map_err(|e| format!("MPC genesis failed (strict; no alternate path): {e}"))?;
 
@@ -63,7 +63,7 @@ pub(crate) fn handle_system_genesis_query(q: AppQuery) -> AppResult {
             mpc_proof: res.session_id.clone(),
             dbrw_binding: crate::util::text_id::encode_base32_crockford(&entropy),
             merkle_root: crate::util::text_id::encode_base32_crockford(&[0u8; 32]),
-            participant_count: res.threshold as u32,
+            participant_count: res.participating_nodes.len() as u32,
             progress_marker: "genesis".to_string(),
             publication_hash: genesis_id_b32,
             storage_nodes: res.participating_nodes.clone(),

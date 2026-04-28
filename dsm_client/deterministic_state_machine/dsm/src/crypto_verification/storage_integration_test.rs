@@ -21,7 +21,6 @@ mod tests {
         let master_genesis = crate::core::identity::GenesisState {
             hash: [1u8; 32],
             initial_entropy: [2u8; 32],
-            threshold: 2,
             participants: ["participant1".to_string(), "participant2".to_string()].into(),
             merkle_root: None,
             device_id: None,
@@ -42,7 +41,6 @@ mod tests {
                 sub_genesis: crate::core::identity::GenesisState {
                     hash: [3u8; 32],
                     initial_entropy: [4u8; 32],
-                    threshold: 3,
                     participants: ["device".to_string()].into(),
                     merkle_root: None,
                     device_id: Some(device_id_bytes),
@@ -78,7 +76,6 @@ mod tests {
         let master_genesis = crate::core::identity::GenesisState {
             hash: [5u8; 32],
             initial_entropy: [6u8; 32],
-            threshold: 2,
             participants: ["participant1".to_string(), "participant2".to_string()].into(),
             merkle_root: None,
             device_id: None,
@@ -97,7 +94,6 @@ mod tests {
                 sub_genesis: crate::core::identity::GenesisState {
                     hash: [7u8; 32],
                     initial_entropy: [8u8; 32],
-                    threshold: 3,
                     participants: ["device".to_string()].into(),
                     merkle_root: None,
                     device_id: Some(device_id_bytes),
