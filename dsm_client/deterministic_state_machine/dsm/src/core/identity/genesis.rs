@@ -1,7 +1,8 @@
 // File: dsm/src/core/identity/genesis.rs
 //! DSM Genesis (STRICT, bytes-first)
 //!
-//! - Enforces MPC security invariants in-core (threshold ≥3; participants ≥3).
+//! - Enforces MPC security invariants in-core (≥3 participants; n-of-n by
+//!   construction — every reveal is bound into the canonical anchor).
 //! - DBRW is a local, optional anti-cloning signal; it must not be required for
 //!   genesis / identity creation and is not part of genesis binding.
 //! - No system wall-clock dependence.
@@ -83,7 +84,6 @@ pub struct Contribution {
 pub struct GenesisState {
     pub hash: [u8; 32],            // 32 bytes
     pub initial_entropy: [u8; 32], // 32 bytes
-    pub threshold: usize,
     pub participants: HashSet<String>,
     pub merkle_root: Option<[u8; 32]>,
     pub device_id: Option<[u8; 32]>,
@@ -259,7 +259,6 @@ pub fn derive_device_sub_genesis(
             data: device_specific_entropy.to_vec(),
             verified: true,
         }],
-        threshold: 3,
     })
 }
 
@@ -322,10 +321,9 @@ pub fn process_invalidation(identity: &Identity, request: &[u8]) -> Result<bool,
 // -------------------- Verification --------------------
 
 pub fn verify_genesis_state(genesis: &GenesisState) -> Result<bool, DsmError> {
-    if genesis.threshold < 3 {
-        return Ok(false);
-    }
-    if genesis.contributions.len() < genesis.threshold {
+    // Genesis MPC is n-of-n by construction: ≥3 participants and every
+    // contribution must be present (device + nodes + metadata).
+    if genesis.contributions.len() < 3 {
         return Ok(false);
     }
 
@@ -359,12 +357,11 @@ pub fn verify_genesis_state(genesis: &GenesisState) -> Result<bool, DsmError> {
 //   (c) uses `genesis_mpc::DeterministicTestTransport` under cfg(test).
 //
 // There is no honest local-RNG MPC path; any such function would defeat the
-// threshold security argument and is rejected at the `GenesisA0` boundary.
+// MPC security argument and is rejected at the `GenesisA0` boundary.
 
 pub fn create_genesis_via_blind_mpc_with_contributors(
     device_id: [u8; 32],
     storage_nodes: Vec<NodeId>,
-    threshold: usize,
     device_entropy: [u8; 32],
     mpc_entropies: Vec<[u8; 32]>,
     metadata: Option<Vec<u8>>,
@@ -372,7 +369,7 @@ pub fn create_genesis_via_blind_mpc_with_contributors(
     let metadata = metadata.unwrap_or_else(|| b"DSMv2|bytes|no-wallclock".to_vec());
 
     let mut session = crate::core::identity::genesis_mpc::GenesisSession::new(metadata)?;
-    session.initialize_mpc(device_id, storage_nodes, threshold)?;
+    session.initialize_mpc(device_id, storage_nodes)?;
     session.set_entropies(device_entropy, mpc_entropies)?;
     session.compute_genesis_id()?;
     session.validate_session()?;
@@ -407,7 +404,6 @@ impl GenesisState {
             initial_entropy: [0u8; 32],
             signing_key,
             kyber_keypair,
-            threshold: 3,
             participants: HashSet::new(),
             merkle_root: Some([0u8; 32]),
             device_id: None,
@@ -491,7 +487,6 @@ pub fn convert_session_to_genesis_state(
     let gs = GenesisState {
         hash,
         initial_entropy,
-        threshold: session.threshold,
         participants,
         merkle_root: None,
         device_id: Some(session.device_id),
@@ -500,9 +495,9 @@ pub fn convert_session_to_genesis_state(
         contributions,
     };
 
-    if gs.threshold < 3 {
+    if gs.participants.len() < 3 {
         return Err(DsmError::invalid_parameter(
-            "GenesisSession threshold < 3 is not permitted",
+            "GenesisSession must have ≥3 participants",
         ));
     }
     Ok(gs)
@@ -520,7 +515,6 @@ mod tests {
             GenesisState {
                 hash: [hash_byte; 32],
                 initial_entropy: [hash_byte.wrapping_add(1); 32],
-                threshold: 3,
                 participants: ["p1".to_string(), "p2".to_string(), "p3".to_string()]
                     .into_iter()
                     .collect(),
@@ -540,12 +534,10 @@ mod tests {
         };
         let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
         let device_id = [0xAB; 32];
-        let threshold = 3;
         let transport = DeterministicTestTransport::new([0x42; 32]);
         let session = create_mpc_genesis_with_transport(
             device_id,
             nodes,
-            threshold,
             Some(b"test".to_vec()),
             &transport,
             None,
@@ -553,7 +545,7 @@ mod tests {
         .await
         .expect("two-phase MPC should succeed");
         let genesis = convert_session_to_genesis_state(&session).expect("compat conversion");
-        assert_eq!(genesis.threshold, threshold);
+        assert_eq!(genesis.participants.len(), 3);
         assert_eq!(genesis.hash.len(), 32);
         assert_eq!(genesis.initial_entropy.len(), 32);
     }
@@ -564,7 +556,6 @@ mod tests {
         let master = GenesisState {
             hash: [1u8; 32],
             initial_entropy: [2u8; 32],
-            threshold: 3,
             participants: participants.into_iter().collect(),
             merkle_root: None,
             device_id: None,
@@ -581,7 +572,6 @@ mod tests {
             Err(e) => panic!("derive_device_sub_genesis should succeed: {e:?}"),
         };
 
-        assert_eq!(device.threshold, 3);
         assert_eq!(device.participants.len(), 1);
         assert!(device.merkle_root.is_some());
         assert_eq!(device.merkle_root.unwrap(), master.hash);
@@ -601,10 +591,9 @@ mod tests {
         let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
         let device_id = [7u8; 32];
         let transport = DeterministicTestTransport::new([0x42; 32]);
-        let session =
-            create_mpc_genesis_with_transport(device_id, nodes, 3, None, &transport, None)
-                .await
-                .expect("two-phase MPC should succeed");
+        let session = create_mpc_genesis_with_transport(device_id, nodes, None, &transport, None)
+            .await
+            .expect("two-phase MPC should succeed");
         let genesis =
             convert_session_to_genesis_state(&session).expect("compat conversion should succeed");
         let ok = verify_genesis_state(&genesis).expect("verify_genesis_state callable");
@@ -622,7 +611,6 @@ mod tests {
         let genesis = create_genesis_via_blind_mpc_with_contributors(
             device_id,
             nodes,
-            3,
             device_entropy,
             node_entropies.clone(),
             Some(metadata.clone()),
@@ -653,8 +641,7 @@ mod tests {
         let transport = DeterministicTestTransport::new([0x42; 32]);
 
         let session =
-            match create_mpc_genesis_with_transport(device_id, nodes, 3, None, &transport, None)
-                .await
+            match create_mpc_genesis_with_transport(device_id, nodes, None, &transport, None).await
             {
                 Ok(x) => x,
                 Err(_) => return,

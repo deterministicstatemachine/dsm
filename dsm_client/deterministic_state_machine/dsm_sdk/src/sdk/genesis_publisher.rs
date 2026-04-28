@@ -36,9 +36,6 @@ impl SdkGenesisPublisher {
         data.extend_from_slice(&pk_len.to_le_bytes());
         data.extend_from_slice(&payload.public_key);
 
-        // threshold: 8 bytes
-        data.extend_from_slice(&(payload.threshold as u64).to_le_bytes());
-
         // participants: length-prefixed vector of strings
         let participants_count = payload.participants.len() as u32;
         data.extend_from_slice(&participants_count.to_le_bytes());
@@ -57,7 +54,7 @@ impl SdkGenesisPublisher {
 
     /// Deserialize bytes to SanitizedGenesisPayload
     fn deserialize_payload(data: &[u8]) -> Result<SanitizedGenesisPayload, DsmError> {
-        if data.len() < 32 + 32 + 4 + 8 + 4 + 8 {
+        if data.len() < 32 + 32 + 4 + 4 + 8 {
             return Err(DsmError::InvalidState("Payload too short".into()));
         }
 
@@ -102,10 +99,6 @@ impl SdkGenesisPublisher {
         let public_key = data[offset..offset + pk_len].to_vec();
         offset += pk_len;
 
-        // threshold: 8 bytes
-        let threshold = read_u64_le(data, offset, "threshold")? as usize;
-        offset += 8;
-
         // participants: length-prefixed vector of strings
         let participants_count = read_u32_le(data, offset, "participants count")? as usize;
         offset += 4;
@@ -138,7 +131,6 @@ impl SdkGenesisPublisher {
             genesis_hash,
             device_id,
             public_key,
-            threshold,
             participants,
             created_at_ticks,
         })
@@ -149,11 +141,10 @@ impl SdkGenesisPublisher {
 impl GenesisPublisher for SdkGenesisPublisher {
     async fn publish(&self, payload: &SanitizedGenesisPayload) -> Result<(), DsmError> {
         log::info!(
-            "SdkGenesisPublisher::publish(start): genesis_hash_b32={} device_id_b32={} public_key_len={} threshold={} participants={}",
+            "SdkGenesisPublisher::publish(start): genesis_hash_b32={} device_id_b32={} public_key_len={} participants={}",
             crate::util::text_id::encode_base32_crockford(&payload.genesis_hash),
             crate::util::text_id::encode_base32_crockford(&payload.device_id),
             payload.public_key.len(),
-            payload.threshold,
             payload.participants.len()
         );
         // Serialize payload to bytes (using deterministic protobuf if possible, or just raw bytes for now)
@@ -227,7 +218,6 @@ mod tests {
             genesis_hash: [1u8; 32],
             device_id: [2u8; 32],
             public_key: vec![3u8; 64],
-            threshold: 3,
             participants: vec![
                 NodeId::new("node1".to_string()),
                 NodeId::new("node2".to_string()),
@@ -247,7 +237,6 @@ mod tests {
         assert_eq!(deserialized.genesis_hash, payload.genesis_hash);
         assert_eq!(deserialized.device_id, payload.device_id);
         assert_eq!(deserialized.public_key, payload.public_key);
-        assert_eq!(deserialized.threshold, payload.threshold);
         assert_eq!(deserialized.participants, payload.participants);
         assert_eq!(deserialized.created_at_ticks, payload.created_at_ticks);
     }
@@ -263,12 +252,11 @@ mod tests {
             genesis_hash: [1u8; 32],
             device_id: [2u8; 32],
             public_key: vec![3u8; 64],
-            threshold: 1,
             participants: vec![NodeId::new("valid".to_string())],
             created_at_ticks: 123,
         });
         // Corrupt the participant string to have invalid UTF-8
-        let participant_start = 32 + 32 + 4 + 64 + 8 + 4; // offset to participant length
+        let participant_start = 32 + 32 + 4 + 64 + 4; // offset to participant length
         if participant_start + 4 < invalid_data.len() {
             invalid_data[participant_start + 4] = 0xFF; // invalid UTF-8 byte
         }

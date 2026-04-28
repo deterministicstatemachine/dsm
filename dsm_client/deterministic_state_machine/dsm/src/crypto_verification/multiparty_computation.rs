@@ -218,7 +218,6 @@ impl MpcIdentityFactory {
                 public_key: kyber_keypair.public_key.clone(),
                 secret_key: kyber_keypair.secret_key.clone(),
             },
-            threshold: self.threshold,
             participants,
             merkle_root: None, // can be filled by caller using canonical contribution tree if desired
             device_id: None, // genesis is identity-scoped; device-specific sub-identities derive later
@@ -257,7 +256,6 @@ impl MpcIdentityFactory {
                 public_key: kyber_keypair.public_key.clone(),
                 secret_key: kyber_keypair.secret_key.clone(),
             },
-            threshold: 3,
             participants,
             merkle_root: None,
             device_id: None,

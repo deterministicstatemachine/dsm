@@ -265,7 +265,6 @@ mod tests {
         GS {
             hash,
             initial_entropy: [0u8; 32],
-            threshold: 2,
             participants: Default::default(),
             merkle_root: None,
             device_id: Some([0x01; 32]),

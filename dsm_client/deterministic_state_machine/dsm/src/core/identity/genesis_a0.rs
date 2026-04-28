@@ -24,8 +24,13 @@ use crate::crypto::sphincs::{self, SphincsVariant};
 use crate::types::error::DsmError;
 use crate::types::identifiers::NodeId;
 
-/// DSM Schema 2.5.0 packed as `0xMMmm_PPPP_0000`.
-pub const SCHEMA_VERSION_2_5_0: u64 = 0x0002_0005_0000;
+/// DSM Schema 2.6.0 packed as `0xMMmm_PPPP_0000`.
+///
+/// 2.6.0 removed the decorative `threshold` field from the genesis preimage:
+/// genesis MPC binds to every reveal in `participants_sorted`, so the
+/// effective rule is always n-of-n and the recorded threshold value was
+/// never operationally consulted.
+pub const SCHEMA_VERSION_2_6_0: u64 = 0x0002_0006_0000;
 
 /// Per-participant reveal in a genesis MPC session.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,7 +44,6 @@ pub struct GenesisMpcReveal {
 pub struct GenesisA0 {
     pub session_id: [u8; 32],
     pub devid_a: [u8; 32],
-    pub threshold: u32,
     /// MUST be in bytewise-ascending order (caller responsibility; enforced
     /// by [`canonical_bytes`] returning an error otherwise).
     pub participants_sorted: Vec<Vec<u8>>,
@@ -58,7 +62,6 @@ impl GenesisA0 {
     pub fn build(
         session_id: [u8; 32],
         devid_a: [u8; 32],
-        threshold: u32,
         participants: Vec<NodeId>,
         device_entropy: [u8; 32],
         node_reveals: Vec<(NodeId, [u8; 32])>,
@@ -67,11 +70,6 @@ impl GenesisA0 {
         if participants.len() < 3 {
             return Err(DsmError::invalid_parameter(
                 "GenesisA0: requires ≥3 participants",
-            ));
-        }
-        if threshold < 3 || (threshold as usize) > participants.len() {
-            return Err(DsmError::invalid_parameter(
-                "GenesisA0: threshold must be ≥3 and ≤ participants",
             ));
         }
         if node_reveals.len() != participants.len() {
@@ -110,12 +108,11 @@ impl GenesisA0 {
         Ok(Self {
             session_id,
             devid_a,
-            threshold,
             participants_sorted,
             device_entropy,
             mpc_reveals,
             metadata,
-            schema_version: SCHEMA_VERSION_2_5_0,
+            schema_version: SCHEMA_VERSION_2_6_0,
         })
     }
 
@@ -150,9 +147,7 @@ impl GenesisA0 {
         out.extend_from_slice(&self.session_id);
         // Field 2: devid_a (fixed 32)
         out.extend_from_slice(&self.devid_a);
-        // Field 3: threshold (u32 be)
-        out.extend_from_slice(&self.threshold.to_be_bytes());
-        // Field 4: participants_sorted (count u32-be, then each: u32-be len + bytes)
+        // Field 3: participants_sorted (count u32-be, then each: u32-be len + bytes)
         let pcount = u32::try_from(self.participants_sorted.len())
             .map_err(|_| DsmError::invalid_parameter("GenesisA0: too many participants"))?;
         out.extend_from_slice(&pcount.to_be_bytes());
@@ -162,9 +157,9 @@ impl GenesisA0 {
             out.extend_from_slice(&plen.to_be_bytes());
             out.extend_from_slice(p);
         }
-        // Field 5: device_entropy (fixed 32)
+        // Field 4: device_entropy (fixed 32)
         out.extend_from_slice(&self.device_entropy);
-        // Field 6: mpc_reveals (count u32-be, then each: u32-be node_id_len + bytes + 32B reveal)
+        // Field 5: mpc_reveals (count u32-be, then each: u32-be node_id_len + bytes + 32B reveal)
         let rcount = u32::try_from(self.mpc_reveals.len())
             .map_err(|_| DsmError::invalid_parameter("GenesisA0: too many reveals"))?;
         out.extend_from_slice(&rcount.to_be_bytes());
@@ -175,12 +170,12 @@ impl GenesisA0 {
             out.extend_from_slice(&rev.node_id);
             out.extend_from_slice(&rev.reveal);
         }
-        // Field 7: metadata (u32-be len + bytes)
+        // Field 6: metadata (u32-be len + bytes)
         let mlen = u32::try_from(self.metadata.len())
             .map_err(|_| DsmError::invalid_parameter("GenesisA0: metadata too long"))?;
         out.extend_from_slice(&mlen.to_be_bytes());
         out.extend_from_slice(&self.metadata);
-        // Field 8: schema_version (u64 be)
+        // Field 7: schema_version (u64 be)
         out.extend_from_slice(&self.schema_version.to_be_bytes());
 
         Ok(out)
@@ -288,16 +283,8 @@ mod tests {
             (NodeId::new("node-a"), [0xAA; 32]),
             (NodeId::new("node-b"), [0xBB; 32]),
         ];
-        let a0 = GenesisA0::build(
-            [1; 32],
-            [2; 32],
-            3,
-            nodes,
-            [3; 32],
-            reveals,
-            b"meta".to_vec(),
-        )
-        .unwrap();
+        let a0 =
+            GenesisA0::build([1; 32], [2; 32], nodes, [3; 32], reveals, b"meta".to_vec()).unwrap();
         let order: Vec<&[u8]> = a0
             .participants_sorted
             .iter()
@@ -311,16 +298,14 @@ mod tests {
     }
 
     #[test]
-    fn build_rejects_threshold_below_three() {
-        let nodes = ids();
+    fn build_rejects_below_three_participants() {
+        let nodes = vec![NodeId::new("node-a"), NodeId::new("node-b")];
         let reveals = vec![
             (NodeId::new("node-a"), [0xAA; 32]),
             (NodeId::new("node-b"), [0xBB; 32]),
-            (NodeId::new("node-c"), [0xCC; 32]),
         ];
-        let err =
-            GenesisA0::build([0; 32], [0; 32], 2, nodes, [0; 32], reveals, vec![]).unwrap_err();
-        assert!(format!("{err:?}").contains("threshold"));
+        let err = GenesisA0::build([0; 32], [0; 32], nodes, [0; 32], reveals, vec![]).unwrap_err();
+        assert!(format!("{err:?}").contains("participants"));
     }
 
     #[test]
@@ -331,8 +316,7 @@ mod tests {
             (NodeId::new("node-b"), [0xBB; 32]),
             (NodeId::new("node-z"), [0xCC; 32]),
         ];
-        let err =
-            GenesisA0::build([0; 32], [0; 32], 3, nodes, [0; 32], reveals, vec![]).unwrap_err();
+        let err = GenesisA0::build([0; 32], [0; 32], nodes, [0; 32], reveals, vec![]).unwrap_err();
         assert!(format!("{err:?}").contains("set equality"));
     }
 
@@ -347,7 +331,6 @@ mod tests {
         let a0 = GenesisA0::build(
             [1; 32],
             [2; 32],
-            3,
             nodes.clone(),
             [3; 32],
             reveals.clone(),
@@ -355,41 +338,41 @@ mod tests {
         )
         .unwrap();
         let bytes1 = a0.canonical_bytes().unwrap();
-        let a0b = GenesisA0::build(
-            [1; 32],
-            [2; 32],
-            3,
-            nodes,
-            [3; 32],
-            reveals,
-            b"meta".to_vec(),
-        )
-        .unwrap();
+        let a0b =
+            GenesisA0::build([1; 32], [2; 32], nodes, [3; 32], reveals, b"meta".to_vec()).unwrap();
         let bytes2 = a0b.canonical_bytes().unwrap();
         assert_eq!(bytes1, bytes2);
     }
 
     #[test]
-    fn genesis_id_changes_with_threshold() {
-        let nodes = ids();
-        let reveals = vec![
+    fn genesis_id_changes_with_participants() {
+        let reveals_3 = vec![
             (NodeId::new("node-a"), [0xAA; 32]),
             (NodeId::new("node-b"), [0xBB; 32]),
             (NodeId::new("node-c"), [0xCC; 32]),
         ];
-        let a0_t3 = GenesisA0::build(
+        let reveals_4 = vec![
+            (NodeId::new("node-a"), [0xAA; 32]),
+            (NodeId::new("node-b"), [0xBB; 32]),
+            (NodeId::new("node-c"), [0xCC; 32]),
+            (NodeId::new("node-d"), [0xDD; 32]),
+        ];
+        let a0_3 = GenesisA0::build([1; 32], [2; 32], ids(), [3; 32], reveals_3, vec![]).unwrap();
+        let a0_4 = GenesisA0::build(
             [1; 32],
             [2; 32],
-            3,
-            nodes.clone(),
+            vec![
+                NodeId::new("node-a"),
+                NodeId::new("node-b"),
+                NodeId::new("node-c"),
+                NodeId::new("node-d"),
+            ],
             [3; 32],
-            reveals.clone(),
+            reveals_4,
             vec![],
         )
         .unwrap();
-        let mut a0_t2 = a0_t3.clone();
-        a0_t2.threshold = 2; // illegal but here we only check hash sensitivity
-        assert_ne!(a0_t3.genesis_id().unwrap(), a0_t2.genesis_id().unwrap());
+        assert_ne!(a0_3.genesis_id().unwrap(), a0_4.genesis_id().unwrap());
     }
 
     #[test]

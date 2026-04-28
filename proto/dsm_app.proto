@@ -1443,6 +1443,8 @@ message TokenMpcRequest {
 // ======================= System Genesis (binary) ====================
 message SystemGenesisRequest { string locale = 1; string network_id = 2; bytes device_entropy = 3 [(dsm_fixed_len)=32]; }
 message SystemGenesisResponse { Hash32 genesis_hash = 1; bytes public_key = 2 [(dsm_max_len)=512]; }
+// Schema 2.6.0: `threshold` (field 7) removed; genesis MPC is n-of-n by
+// construction (see GenesisA0V1).
 message GenesisCreated {
   bytes  device_id    = 1 [(dsm_fixed_len)=32];
   Hash32 genesis_hash = 2;
@@ -1450,7 +1452,8 @@ message GenesisCreated {
   Hash32 smt_root     = 4;
   bytes  device_entropy = 5 [(dsm_fixed_len)=32];
   string session_id   = 6;
-  uint32 threshold    = 7;
+  reserved 7;
+  reserved "threshold";
   repeated string storage_nodes = 8;
   string network_id   = 9;
   string locale       = 10;
@@ -3451,23 +3454,32 @@ message GenesisMpcRevealV1 {
 // Canonical anchor A_0. ProtoDet bytes feed G = BLAKE3("DSM/genesis\0" || ProtoDet(A_0)).
 // MUST be deterministically encoded (DSM-CPE): ascending tag order, no unknown fields,
 // repeated fields in given order. participants_sorted is bytewise-ascending.
+//
+// Schema 2.6.0: `threshold` (was field 3) was removed. Genesis MPC binds to
+// every reveal in `participants_sorted` (n-of-n by construction), so the
+// threshold value was decorative and has been deleted from the canonical
+// preimage. Field 3 is permanently reserved.
 message GenesisA0V1 {
   Hash32 session_id                       = 1;
   Hash32 devid_a                          = 2;
-  uint32 threshold                        = 3;
+  reserved 3;
+  reserved "threshold";
   repeated bytes participants_sorted      = 4 [(dsm_max_len)=128];
   Hash32 device_entropy                   = 5;
   repeated GenesisMpcRevealV1 mpc_reveals = 6;
   bytes  metadata                         = 7 [(dsm_max_len)=65535];
-  uint64 schema_version                   = 8; // 0x0002_0005_0000 == 2.5.0
+  uint64 schema_version                   = 8; // 0x0002_0006_0000 == 2.6.0
 }
 
 // On-device MPC session capture; carries both commits and reveals plus the
 // derived a0_digest and genesis_id for cross-checking by verifiers.
+//
+// Schema 2.6.0: `threshold` (field 3) removed. See GenesisA0V1.
 message GenesisMpcSessionV1 {
   Hash32 session_id                       = 1;
   Hash32 devid_a                          = 2;
-  uint32 threshold                        = 3;
+  reserved 3;
+  reserved "threshold";
   repeated bytes participants_sorted      = 4 [(dsm_max_len)=128];
   Hash32 device_entropy                   = 5;
   repeated GenesisMpcCommitV1 commits     = 6;
@@ -3479,10 +3491,13 @@ message GenesisMpcSessionV1 {
 }
 
 // Identity root binding record (post key-derivation). DBRW-free.
+//
+// Schema 2.6.0: `threshold` (field 3) removed. See GenesisA0V1.
 message RootBindingRecordV1 {
   Hash32 genesis_id                       = 1;
   Hash32 devid_a                          = 2;
-  uint32 threshold                        = 3;
+  reserved 3;
+  reserved "threshold";
   repeated bytes participants_sorted      = 4 [(dsm_max_len)=128];
   bytes  sphincs_pk                       = 5 [(dsm_max_len)=65535];
   bytes  kyber_pk                         = 6 [(dsm_max_len)=4096];

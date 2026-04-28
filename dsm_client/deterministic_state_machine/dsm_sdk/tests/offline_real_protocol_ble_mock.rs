@@ -281,7 +281,7 @@ async fn offline_real_protocol_ble_mock_roundtrip() {
     let mut alice_entropy = vec![0u8; 32];
     os_rng.fill_bytes(&mut alice_entropy);
     let alice_genesis = storage_sdk
-        .create_genesis_with_mpc(Some(3), Some(alice_entropy))
+        .create_genesis_with_mpc(Some(alice_entropy))
         .await
         .expect("alice MPC genesis failed");
     let alice_dev_id = bytes32(alice_genesis.genesis_device_id);
@@ -295,7 +295,7 @@ async fn offline_real_protocol_ble_mock_roundtrip() {
     let mut bob_entropy = vec![1u8; 32];
     os_rng.fill_bytes(&mut bob_entropy);
     let bob_genesis = storage_sdk
-        .create_genesis_with_mpc(Some(3), Some(bob_entropy))
+        .create_genesis_with_mpc(Some(bob_entropy))
         .await
         .expect("bob MPC genesis failed");
     let bob_dev_id = bytes32(bob_genesis.genesis_device_id);
@@ -593,15 +593,15 @@ async fn offline_real_protocol_ble_mock_multi_relationship_multi_tx() {
     os_rng.fill_bytes(&mut carol_entropy);
 
     let alice_genesis = storage_sdk
-        .create_genesis_with_mpc(Some(3), Some(alice_entropy))
+        .create_genesis_with_mpc(Some(alice_entropy))
         .await
         .expect("alice MPC genesis failed");
     let bob_genesis = storage_sdk
-        .create_genesis_with_mpc(Some(3), Some(bob_entropy))
+        .create_genesis_with_mpc(Some(bob_entropy))
         .await
         .expect("bob MPC genesis failed");
     let carol_genesis = storage_sdk
-        .create_genesis_with_mpc(Some(3), Some(carol_entropy))
+        .create_genesis_with_mpc(Some(carol_entropy))
         .await
         .expect("carol MPC genesis failed");
 

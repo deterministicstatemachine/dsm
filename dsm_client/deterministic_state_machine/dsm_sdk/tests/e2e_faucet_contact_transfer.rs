@@ -73,7 +73,7 @@ async fn e2e_flow_faucet_contact_transfer() {
 
     let alice_genesis = timeout(
         Duration::from_secs(20),
-        storage_sdk.create_genesis_with_mpc(Some(3), Some(alice_entropy)),
+        storage_sdk.create_genesis_with_mpc(Some(alice_entropy)),
     )
     .await
     .unwrap_or_else(|e| panic!("Alice MPC genesis timeout: {e}"))
@@ -177,7 +177,7 @@ async fn e2e_flow_faucet_contact_transfer() {
     println!("Creating Bob genesis via MPC...");
     let bob_genesis = timeout(
         Duration::from_secs(20),
-        storage_sdk_contact.create_genesis_with_mpc(Some(3), Some(bob_entropy.clone())),
+        storage_sdk_contact.create_genesis_with_mpc(Some(bob_entropy.clone())),
     )
     .await
     .unwrap_or_else(|e| panic!("Bob genesis MPC timed out: {e}"))
