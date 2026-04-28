@@ -24,7 +24,6 @@ use dsm::crypto::sphincs::{
     generate_keypair_from_seed, sphincs_sign, sphincs_verify, SphincsVariant,
 };
 use dsm::types::operations::{Operation, TransactionMode, VerificationType};
-use dsm::types::policy_types::PolicyFile;
 use dsm::types::state_types::{DeviceInfo, State};
 use dsm::types::token_types::Balance;
 
@@ -54,12 +53,11 @@ pub struct PropertyTestSuiteResult {
 // ---------------------------------------------------------------------------
 
 const PROPERTY_TEST_VARIANT: SphincsVariant = SphincsVariant::SPX256f;
-const PROPERTY_TEST_TOKEN_ID: &str = "VVTEST";
+const PROPERTY_TEST_TOKEN_ID: &str = "ERA";
 const PROPERTY_TEST_INITIAL_BALANCE: u64 = 10_000;
 
 struct TokenPropertyHarness {
-    // Manager is no longer the canonical transition driver (§4.3 shim path)
-    // but it still owns the token policy registration used by the harness.
+    // Manager is no longer the canonical transition driver (§4.3 shim path).
     #[allow(dead_code)]
     manager: TokenStateManager,
     state: State,
@@ -171,25 +169,11 @@ fn compute_next_entropy(current_state: &State, operation: &Operation) -> Vec<u8>
 }
 
 fn build_policy_backed_token_harness(seed_bytes: &[u8; 32], pk: &[u8]) -> TokenPropertyHarness {
-    let mut policy = PolicyFile::new("Vertical Validation Token", "1.0.0", "vertical-validation");
-    policy.add_metadata("token_type", "validation");
-    policy.add_metadata("scope", "real-code-property-test");
-    let policy_anchor = policy.generate_anchor().expect("validation policy anchor");
     let manager = TokenStateManager::new();
-    manager.register_token_policy_anchor(PROPERTY_TEST_TOKEN_ID, policy_anchor.0);
     let mut state = create_test_state(seed_bytes, pk);
     let recipient = vec![0xBB; 32];
-    // resolve_policy_commit is strict-fail per Track A; the policy was
-    // registered via `register_token_policy_anchor` above so unwrap is safe.
-    let policy_commit = dsm::core::token::resolve_policy_commit(PROPERTY_TEST_TOKEN_ID)
-        .expect("resolve_policy_commit for registered PROPERTY_TEST_TOKEN_ID");
-    let sender_key =
-        dsm::core::token::derive_canonical_balance_key(&policy_commit, pk, PROPERTY_TEST_TOKEN_ID);
-    let recipient_key = dsm::core::token::derive_canonical_balance_key(
-        &policy_commit,
-        &recipient,
-        PROPERTY_TEST_TOKEN_ID,
-    );
+    let sender_key = builtin_balance_key(pk, PROPERTY_TEST_TOKEN_ID);
+    let recipient_key = builtin_balance_key(&recipient, PROPERTY_TEST_TOKEN_ID);
 
     state.token_balances.insert(
         sender_key.clone(),
