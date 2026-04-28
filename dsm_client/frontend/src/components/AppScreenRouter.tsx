@@ -12,6 +12,7 @@ import DevCdbrwScreen from './screens/DevCdbrwScreen';
 import DevPolicyScreen from './screens/DevPolicyScreen';
 import DevDeTfiLaunchScreen from './screens/DevDeTfiLaunchScreen';
 import LiquidityScreen from './screens/LiquidityScreen';
+import MailScreen from './screens/MailScreen';
 import LockSetupScreen from './screens/LockSetupScreen';
 import QRCodeScannerScreen from './screens/QRCodeScannerScreen';
 import MyContactInfoScreen from './screens/MyContactInfoScreen';
@@ -30,6 +31,7 @@ const MemoDevCdbrw = React.memo(DevCdbrwScreen);
 const MemoDevPolicy = React.memo(DevPolicyScreen);
 const MemoDevDeTfiLaunch = React.memo(DevDeTfiLaunchScreen);
 const MemoLiquidity = React.memo(LiquidityScreen);
+const MemoMail = React.memo(MailScreen);
 const MemoLockSetup = React.memo(LockSetupScreen);
 const MemoQR = React.memo(QRCodeScannerScreen);
 const MemoMyContact = React.memo(MyContactInfoScreen);
@@ -82,6 +84,8 @@ export default function AppScreenRouter({
       return <MemoDevDeTfiLaunch />;
     case 'liquidity':
       return <MemoLiquidity onNavigate={onNavigate} />;
+    case 'mail':
+      return <MemoMail onNavigate={onNavigate} />;
     case 'lock_setup':
       return <MemoLockSetup onNavigate={onNavigate} />;
     case 'qr':

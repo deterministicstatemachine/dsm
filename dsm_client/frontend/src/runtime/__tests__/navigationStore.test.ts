@@ -41,6 +41,7 @@ describe('navigationStore VALID_NAV_TARGETS coverage', () => {
     'dev_policy',
     'dev_detfi_launch',
     'liquidity',
+    'mail',
     'lock_setup',
     'recovery',
     'nfc_recovery',
