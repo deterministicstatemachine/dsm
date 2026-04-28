@@ -577,6 +577,17 @@ struct DbtcStorageTestState {
 static DBTC_STORAGE_TEST_STATE: once_cell::sync::Lazy<std::sync::Mutex<DbtcStorageTestState>> =
     once_cell::sync::Lazy::new(|| std::sync::Mutex::new(DbtcStorageTestState::default()));
 
+#[cfg(any(test, feature = "demos"))]
+fn dbtc_storage_test_state() -> std::sync::MutexGuard<'static, DbtcStorageTestState> {
+    match DBTC_STORAGE_TEST_STATE.lock() {
+        Ok(state) => state,
+        Err(poisoned) => {
+            log::warn!("dbtc storage test state mutex poisoned; recovering inner state");
+            poisoned.into_inner()
+        }
+    }
+}
+
 /// Bitcoin Tap SDK — the "taproom" that manages all taps on the Bitcoin keg.
 ///
 /// Orchestrates bidirectional vault deposits between Bitcoin and DSM dBTC tokens.
@@ -2585,17 +2596,13 @@ impl BitcoinTapSdk {
 
     #[cfg(test)]
     pub(crate) fn reset_dbtc_storage_test_state() {
-        let mut state = DBTC_STORAGE_TEST_STATE
-            .lock()
-            .unwrap_or_else(|e| panic!("dbtc storage test state mutex poisoned: {e}"));
+        let mut state = dbtc_storage_test_state();
         *state = DbtcStorageTestState::default();
     }
 
     #[cfg(test)]
     pub(crate) fn seed_dbtc_storage_object(key: impl Into<String>, payload: Vec<u8>) {
-        DBTC_STORAGE_TEST_STATE
-            .lock()
-            .unwrap_or_else(|e| panic!("dbtc storage test state mutex poisoned: {e}"))
+        dbtc_storage_test_state()
             .object_store
             .insert(key.into(), payload);
     }
@@ -2604,27 +2611,21 @@ impl BitcoinTapSdk {
     pub(crate) fn set_dbtc_storage_list_results(
         results: impl IntoIterator<Item = Result<generated::ObjectListResponseV1, String>>,
     ) {
-        let mut state = DBTC_STORAGE_TEST_STATE
-            .lock()
-            .unwrap_or_else(|e| panic!("dbtc storage test state mutex poisoned: {e}"));
+        let mut state = dbtc_storage_test_state();
         state.list_results.clear();
         state.list_results.extend(results);
     }
 
     #[cfg(test)]
     pub(crate) fn set_dbtc_storage_put_failure(key: impl Into<String>, message: impl Into<String>) {
-        DBTC_STORAGE_TEST_STATE
-            .lock()
-            .unwrap_or_else(|e| panic!("dbtc storage test state mutex poisoned: {e}"))
+        dbtc_storage_test_state()
             .put_failures
             .insert(key.into(), message.into());
     }
 
     #[cfg(test)]
     pub(crate) fn set_dbtc_storage_get_failure(key: impl Into<String>, message: impl Into<String>) {
-        DBTC_STORAGE_TEST_STATE
-            .lock()
-            .unwrap_or_else(|e| panic!("dbtc storage test state mutex poisoned: {e}"))
+        dbtc_storage_test_state()
             .get_failures
             .insert(key.into(), message.into());
     }
@@ -2666,9 +2667,7 @@ impl BitcoinTapSdk {
     pub(crate) async fn storage_put_bytes(key: &str, payload: &[u8]) -> Result<String, DsmError> {
         #[cfg(any(test, feature = "demos"))]
         {
-            let mut state = DBTC_STORAGE_TEST_STATE
-                .lock()
-                .unwrap_or_else(|e| panic!("dbtc storage test state mutex poisoned: {e}"));
+            let mut state = dbtc_storage_test_state();
             if let Some(message) = state.put_failures.remove(key) {
                 return Err(DsmError::storage(
                     format!("store {key}: {message}"),
@@ -2709,9 +2708,7 @@ impl BitcoinTapSdk {
     pub(crate) async fn storage_get_bytes(key: &str) -> Result<Vec<u8>, DsmError> {
         #[cfg(any(test, feature = "demos"))]
         {
-            let mut state = DBTC_STORAGE_TEST_STATE
-                .lock()
-                .unwrap_or_else(|e| panic!("dbtc storage test state mutex poisoned: {e}"));
+            let mut state = dbtc_storage_test_state();
             if let Some(message) = state.get_failures.remove(key) {
                 return Err(DsmError::storage(
                     format!("load {key}: {message}"),
@@ -2751,9 +2748,7 @@ impl BitcoinTapSdk {
     pub(crate) async fn storage_delete_key(key: &str) -> Result<(), DsmError> {
         #[cfg(any(test, feature = "demos"))]
         {
-            let mut state = DBTC_STORAGE_TEST_STATE
-                .lock()
-                .unwrap_or_else(|e| panic!("dbtc storage test state mutex poisoned: {e}"));
+            let mut state = dbtc_storage_test_state();
             state.object_store.remove(key);
             Ok(())
         }
@@ -2792,9 +2787,7 @@ impl BitcoinTapSdk {
     ) -> Result<generated::ObjectListResponseV1, DsmError> {
         #[cfg(any(test, feature = "demos"))]
         {
-            let mut state = DBTC_STORAGE_TEST_STATE
-                .lock()
-                .unwrap_or_else(|e| panic!("dbtc storage test state mutex poisoned: {e}"));
+            let mut state = dbtc_storage_test_state();
             if let Some(result) = state.list_results.pop_front() {
                 return result.map_err(|message| {
                     DsmError::storage(format!("list {prefix}: {message}"), None::<std::io::Error>)
