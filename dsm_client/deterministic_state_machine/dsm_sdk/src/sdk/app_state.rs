@@ -435,7 +435,7 @@ impl AppState {
     /// no-op and returns 0.
     ///
     /// Used by `purge_legacy_prefs` at AppRouterImpl boot to wipe the
-    /// retired `dsm.token.*` / `dsm.dlv.*` / `dsm.detfi.*` keyspace.
+    /// retired `dsm.token.*` / `dsm.dlv.*` / `dsm.sofi.*` keyspace.
     pub fn purge_keys_with_prefixes(prefixes: &[&str]) -> usize {
         Self::ensure_storage_loaded();
         let removed = {
@@ -554,17 +554,17 @@ mod tests {
         AppState::handle_app_state_request("dsm.token.ABC", "set", "anchor-abc");
         AppState::handle_app_state_request("dsm.token.XYZ", "set", "anchor-xyz");
         AppState::handle_app_state_request("dsm.dlv.VID1", "set", "dlv1");
-        AppState::handle_app_state_request("dsm.detfi.VID2", "set", "detfi2");
+        AppState::handle_app_state_request("dsm.sofi.VID2", "set", "sofi2");
         AppState::handle_app_state_request("dsm.policy.keep", "set", "keeper");
 
-        let removed = AppState::purge_keys_with_prefixes(&["dsm.token.", "dsm.dlv.", "dsm.detfi."]);
+        let removed = AppState::purge_keys_with_prefixes(&["dsm.token.", "dsm.dlv.", "dsm.sofi."]);
         assert_eq!(removed, 4);
 
         // Purged keys read empty, keeper survives.
         assert!(AppState::handle_app_state_request("dsm.token.ABC", "get", "").is_empty());
         assert!(AppState::handle_app_state_request("dsm.token.XYZ", "get", "").is_empty());
         assert!(AppState::handle_app_state_request("dsm.dlv.VID1", "get", "").is_empty());
-        assert!(AppState::handle_app_state_request("dsm.detfi.VID2", "get", "").is_empty());
+        assert!(AppState::handle_app_state_request("dsm.sofi.VID2", "get", "").is_empty());
         assert_eq!(
             AppState::handle_app_state_request("dsm.policy.keep", "get", ""),
             "keeper"
@@ -572,7 +572,7 @@ mod tests {
 
         // Idempotent: second call finds nothing to remove.
         let removed_again =
-            AppState::purge_keys_with_prefixes(&["dsm.token.", "dsm.dlv.", "dsm.detfi."]);
+            AppState::purge_keys_with_prefixes(&["dsm.token.", "dsm.dlv.", "dsm.sofi."]);
         assert_eq!(removed_again, 0);
     }
 

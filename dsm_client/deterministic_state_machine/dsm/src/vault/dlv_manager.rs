@@ -16,7 +16,7 @@
 //! release must be expressed through a separate canonical transfer receipt per
 //! DSM spec §18.4 ("normal stitched receipt with a smart commitment clause").
 //!
-//! ## Coverage map against DeTFi §10.3 client verifier (11-step acceptance)
+//! ## Coverage map against SoFi §10.3 client verifier (11-step acceptance)
 //!
 //! Chunks #1–#7 of the routing pipeline cover the off-chain portions of the
 //! verifier directly; the SMT-side portions remain composed at higher layers.

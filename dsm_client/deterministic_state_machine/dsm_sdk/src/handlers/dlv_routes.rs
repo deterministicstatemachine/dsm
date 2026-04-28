@@ -957,14 +957,14 @@ impl AppRouterImpl {
         pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
     }
 
-    /// dlv.unlockRouted — atomic-route unlock path for DeTFi (chunk #4).
+    /// dlv.unlockRouted — atomic-route unlock path for SoFi (chunk #4).
     ///
     /// Decodes a `DlvUnlockRoutedV1` carrying a typed `RouteCommitV1`,
     /// runs the SDK eligibility check (vault_id ∈ RouteCommit AND
     /// `is_external_commitment_visible(X)` returns Ok(true)) before
     /// emitting the standard `Operation::DlvUnlock` on the unlocker's
     /// self-loop.  No new on-chain operation type — atomicity is
-    /// achieved off-chain via the visibility of X (DeTFi spec §3.2,
+    /// achieved off-chain via the visibility of X (SoFi spec §3.2,
     /// §5.1; the state machine does not know about routing).
     ///
     /// Failure modes are typed via `RouteCommitVerifyError` so a

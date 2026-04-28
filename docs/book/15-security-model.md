@@ -199,7 +199,7 @@ This runs in the core crate (pure Rust, no I/O) and cannot be bypassed by the SD
 
 ## AMM Vault Manipulation Resistance
 
-DeTFi AMM vaults use constant-product pricing. Each vault is its own market — there is no global price tape, no cross-vault aggregator, and no external oracle feed. This bounds the manipulation surface in a structurally specific way.
+SoFi AMM vaults use constant-product pricing. Each vault is its own market — there is no global price tape, no cross-vault aggregator, and no external oracle feed. This bounds the manipulation surface in a structurally specific way.
 
 ### Per-Vault Pricing Function
 

@@ -15,7 +15,7 @@ Terminology reference for the DSM protocol.
 | **CPTA** | Content-Addressed Token Policy Anchor. Binds token policies to their canonical content hash: `BLAKE3("DSM/cpta\0" \|\| canonical_bytes)`. |
 | **dBTC** | Deterministic Bitcoin. A 1:1 Bitcoin-backed token inside DSM. Bridge uses HTLCs on Bitcoin and DLVs on DSM. |
 | **DBRW** | Device-Bound Random Walk. Anti-cloning mechanism using dual-factor binding: silicon fingerprint + environment entropy. |
-| **DeTFi** | Decentralized Token Finance. DSM's framework for programmable token operations including DLVs, smart commitments, and atomic swaps. |
+| **SoFi** | Decentralized Token Finance. DSM's framework for programmable token operations including DLVs, smart commitments, and atomic swaps. |
 | **Device Tree** | Hierarchical structure aggregating per-device Sparse Merkle Trees into a global tree for cross-device verification. |
 | **DJTE** | Deterministic Join-Triggered Emissions. Token emission model where new tokens are minted deterministically when new participants join. |
 | **DLV** | Deterministic Limbo Vault. Time-locked vault with lifecycle states (PendingActive → Active → PendingClosure → Claimed). Used for Bitcoin bridge, atomic swaps, and conditional transfers. |

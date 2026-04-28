@@ -1,4 +1,4 @@
-# DeTFi LP Walkthrough — Alice's Journey
+# SoFi LP Walkthrough — Alice's Journey
 
 A side-by-side narrative for liquidity providers transitioning from
 pool-AMM mental models (Uniswap, Curve, Balancer) to DSM's sovereign-
@@ -204,7 +204,7 @@ The storage node holds:
 
 Nothing the storage node holds lets it sign on Alice's behalf, gate
 her trades, censor her vault, or skim fees. The storage node is index-
-only — exactly the same role it plays for non-DeTFi DSM operations.
+only — exactly the same role it plays for non-SoFi DSM operations.
 
 ---
 

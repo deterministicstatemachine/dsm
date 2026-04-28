@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! DeTFi route handlers for AppRouterImpl.
+//! SoFi route handlers for AppRouterImpl.
 //!
-//! Handles `detfi.launch`.  Payload shape:
+//! Handles `sofi.launch`.  Payload shape:
 //!
 //!   byte 0 = version (must be 1)
 //!   byte 1 = mode    (0 = local, 1 = posted)
@@ -12,7 +12,7 @@
 //!
 //! Per plan Part D.5 this handler owns ONLY header parse + routing; the
 //! actual state-machine work lives behind the two delegate routes so
-//! DeTFi stays a composition layer with no parallel legacy path.  Posted
+//! SoFi stays a composition layer with no parallel legacy path.  Posted
 //! mode additionally mirrors the resulting vault artifact via the DLV
 //! manager's `create_vault_post` so the storage-sync pipeline can pick
 //! it up after the core transition commits.
@@ -37,19 +37,19 @@ fn extract_app_state_response_value(data: &[u8]) -> Option<String> {
 }
 
 impl AppRouterImpl {
-    /// Dispatch handler for `detfi.*` invoke routes.
-    pub(crate) async fn handle_detfi_invoke(&self, i: AppInvoke) -> AppResult {
+    /// Dispatch handler for `sofi.*` invoke routes.
+    pub(crate) async fn handle_sofi_invoke(&self, i: AppInvoke) -> AppResult {
         match i.method.as_str() {
-            "detfi.launch" => self.detfi_launch(i).await,
-            other => err(format!("unknown detfi invoke method: {other}")),
+            "sofi.launch" => self.sofi_launch(i).await,
+            other => err(format!("unknown sofi invoke method: {other}")),
         }
     }
 
-    async fn detfi_launch(&self, i: AppInvoke) -> AppResult {
+    async fn sofi_launch(&self, i: AppInvoke) -> AppResult {
         // Unwrap ArgPack if present; outer body is still header + proto payload.
         let blob: Vec<u8> = if let Ok(pack) = generated::ArgPack::decode(&*i.args) {
             if pack.codec != generated::Codec::Proto as i32 {
-                return err("detfi.launch: ArgPack.codec must be PROTO".into());
+                return err("sofi.launch: ArgPack.codec must be PROTO".into());
             }
             pack.body
         } else {
@@ -57,7 +57,7 @@ impl AppRouterImpl {
         };
 
         if blob.len() < 3 {
-            return err("detfi.launch: payload must have at least 3-byte header".into());
+            return err("sofi.launch: payload must have at least 3-byte header".into());
         }
 
         let version = blob[0];
@@ -66,18 +66,18 @@ impl AppRouterImpl {
 
         if version != 1 {
             return err(format!(
-                "detfi.launch: unsupported version {version}, expected 1"
+                "sofi.launch: unsupported version {version}, expected 1"
             ));
         }
         if mode > 1 {
             return err(format!(
-                "detfi.launch: invalid mode {mode}, expected 0 (local) or 1 (posted)"
+                "sofi.launch: invalid mode {mode}, expected 0 (local) or 1 (posted)"
             ));
         }
 
         let payload = &blob[3..];
         if payload.is_empty() {
-            return err("detfi.launch: empty payload after header".into());
+            return err("sofi.launch: empty payload after header".into());
         }
 
         match typ {
@@ -86,7 +86,7 @@ impl AppRouterImpl {
                 // Pre-decode so a malformed body fails here with a targeted
                 // error rather than inside dlv.create.
                 if let Err(e) = generated::DlvInstantiateV1::decode(payload) {
-                    return err(format!("detfi.launch: decode DlvInstantiateV1 failed: {e}"));
+                    return err(format!("sofi.launch: decode DlvInstantiateV1 failed: {e}"));
                 }
 
                 let argpack = generated::ArgPack {
@@ -115,7 +115,7 @@ impl AppRouterImpl {
             // ---- policy (type=1) ----
             1 => {
                 if let Err(e) = generated::TokenPolicyV3::decode(payload) {
-                    return err(format!("detfi.launch: decode TokenPolicyV3 failed: {e}"));
+                    return err(format!("sofi.launch: decode TokenPolicyV3 failed: {e}"));
                 }
                 let inner = AppInvoke {
                     method: "tokens.publishPolicy".to_string(),
@@ -125,7 +125,7 @@ impl AppRouterImpl {
             }
 
             _ => err(format!(
-                "detfi.launch: unknown type byte {typ}, expected 0 (vault) or 1 (policy)"
+                "sofi.launch: unknown type byte {typ}, expected 0 (vault) or 1 (policy)"
             )),
         }
     }
@@ -139,21 +139,21 @@ impl AppRouterImpl {
             Some(v) => v,
             None => {
                 log::warn!(
-                    "[detfi.launch] posted-mode mirror skipped: invalid Base32 vault_id {vault_id_b32}"
+                    "[sofi.launch] posted-mode mirror skipped: invalid Base32 vault_id {vault_id_b32}"
                 );
                 return;
             }
         };
         let dlv_manager = self.bitcoin_tap.dlv_manager();
         match dlv_manager
-            .create_vault_post(&vid32, "detfi-launch", None)
+            .create_vault_post(&vid32, "sofi-launch", None)
             .await
         {
             Ok(_) => {
-                log::info!("[detfi.launch] posted-mode vault post prepared for {vault_id_b32}");
+                log::info!("[sofi.launch] posted-mode vault post prepared for {vault_id_b32}");
             }
             Err(e) => {
-                log::warn!("[detfi.launch] posted-mode mirror failed to build vault post: {e}");
+                log::warn!("[sofi.launch] posted-mode mirror failed to build vault post: {e}");
             }
         }
     }

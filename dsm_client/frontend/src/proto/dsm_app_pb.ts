@@ -2478,7 +2478,7 @@ export class FulfillmentMechanism extends Message<FulfillmentMechanism> {
  * and the vault republishes its `RoutingVaultAdvertisementV1` with
  * `updated_state_number++`.  A stale advertisement causes a mis-quoted
  * route, which the chunk-7 re-simulation gate catches at unlock time
- * (DeTFi spec §3, §8).
+ * (SoFi spec §3, §8).
  *
  * `token_a` / `token_b` are stored in canonical lex-sorted order so
  * the vault has a single canonical pair identity regardless of trade
@@ -7845,7 +7845,7 @@ export class VaultStateAnchorV1 extends Message<VaultStateAnchorV1> {
  * advertisement digest + state number that was current when the path
  * was selected — recipients re-verify these fields against the live
  * `RoutingVaultAdvertisementV1` at unlock time, rejecting the route if
- * the vault's state has moved on (DeTFi spec §3.3 step 5).
+ * the vault's state has moved on (SoFi spec §3.3 step 5).
  *
  * @generated from message dsm.RouteCommitHopV1
  */
@@ -7969,7 +7969,7 @@ export class RouteCommitHopV1 extends Message<RouteCommitHopV1> {
  * `X = BLAKE3("DSM/ext\0" || canonical(RouteCommitV1{initiator_signature=[]}))`
  * is the value referenced by every vault on the route — when X is
  * published to storage nodes (see `ExternalCommitmentV1` below), all
- * vaults atomically become unlockable (DeTFi spec §3.2, §5.1).
+ * vaults atomically become unlockable (SoFi spec §3.2, §5.1).
  *
  * @generated from message dsm.RouteCommitV1
  */
@@ -8076,7 +8076,7 @@ export class RouteCommitV1 extends Message<RouteCommitV1> {
  * Storage-node anchor proving an external commitment X has been
  * published.  Each unlock-time verifier fetches this record at key
  * `defi/extcommit/{x_b32}`; existence implies "all vaults bound by X
- * may now unlock" (atomic visibility, DeTFi spec §3.2).
+ * may now unlock" (atomic visibility, SoFi spec §3.2).
  *
  * The record is INTENTIONALLY minimal — storage nodes are dumb
  * mirrors, the authoritative truth is the RouteCommit bytes the
@@ -8147,14 +8147,14 @@ export class ExternalCommitmentV1 extends Message<ExternalCommitmentV1> {
 }
 
 /**
- * Storage-node-mirrored advertisement for a DeTFi routing vault.
+ * Storage-node-mirrored advertisement for a SoFi routing vault.
  *
  * Keyed under `defi/vault/{token_a_b32}/{token_b_b32}/{vault_id_b32}` —
  * PUBLIC discovery by ordered token pair, no recipient scoping.  The
  * router enumerates all vaults matching `(tokenA, tokenB)` (or its
  * reverse, in which case reserves swap roles) and feeds the result
  * into a fee-weighted Dijkstra over the resulting liquidity graph
- * (DeTFi spec §3.3, §8.3).
+ * (SoFi spec §3.3, §8.3).
  *
  * Storage nodes are dumb mirrors.  Authenticity for routing purposes
  * is rooted in `vault_proto_digest` binding the ad to a full vault
@@ -8313,7 +8313,7 @@ export class RoutingVaultAdvertisementV1 extends Message<RoutingVaultAdvertiseme
 
 /**
  * Typed request for `dlv.unlockRouted` — the routed atomic-unlock
- * path for DeTFi.  The trader hands each vault owner a copy of the
+ * path for SoFi.  The trader hands each vault owner a copy of the
  * `RouteCommitV1` they signed; the vault owner then invokes this
  * route on their own device.  The handler runs the SDK eligibility
  * check (vault_id ∈ RouteCommit AND ExtCommit(X) visible at storage
