@@ -1053,6 +1053,197 @@ mod tests {
         );
     }
 
+    /// Mock GenesisMpcTransport for Issue #252 regression tests:
+    /// returns a pre-set entropy byte-pattern per node and records
+    /// every call so tests can assert no node was skipped (sub-bug 2:
+    /// prefix-bias from `threshold_count` truncation).
+    struct FixedEntropyTransport {
+        table: std::collections::HashMap<Vec<u8>, [u8; 32]>,
+        calls: std::sync::Mutex<Vec<Vec<u8>>>,
+    }
+
+    impl FixedEntropyTransport {
+        fn new(map: &[(NodeId, [u8; 32])]) -> Self {
+            let table = map
+                .iter()
+                .map(|(n, e)| (n.as_bytes().to_vec(), *e))
+                .collect();
+            Self {
+                table,
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+        fn called_nodes(&self) -> Vec<Vec<u8>> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl GenesisMpcTransport for FixedEntropyTransport {
+        async fn collect_node_entropy(
+            &self,
+            node: &NodeId,
+            _session_id: &[u8; 32],
+            _device_commitment: &[u8; 32],
+        ) -> Result<[u8; 32], DsmError> {
+            self.calls.lock().unwrap().push(node.as_bytes().to_vec());
+            self.table.get(node.as_bytes()).copied().ok_or_else(|| {
+                DsmError::invalid_operation("unknown node in mock transport")
+            })
+        }
+    }
+
+    /// Issue #252 sub-bug 1: entropy fetched from storage nodes MUST
+    /// be preserved byte-for-byte through the genesis derivation, with
+    /// no drops or mangling on the call path.  Pinned by recomputing
+    /// `G` independently from the transport-supplied bytes.
+    #[tokio::test]
+    async fn issue_252_entropy_from_transport_is_preserved_in_genesis_hash() {
+        let device_id = id32(0xCC);
+        let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
+        let map = [
+            (nodes[0].clone(), id32(0xA1)),
+            (nodes[1].clone(), id32(0xA2)),
+            (nodes[2].clone(), id32(0xA3)),
+        ];
+        let transport = FixedEntropyTransport::new(&map);
+        let k_dbrw = id32(0xDB);
+        let session = create_mpc_genesis_with_transport(
+            device_id,
+            nodes.clone(),
+            k_dbrw,
+            Some(b"DSMv2|sub1".to_vec()),
+            &transport,
+        )
+        .await
+        .expect("transport-driven genesis should succeed");
+
+        // Transport-supplied entropy must land in mpc_entropies in
+        // call order (i.e. iteration order over storage_nodes).
+        assert_eq!(session.mpc_entropies.len(), 3);
+        assert_eq!(session.mpc_entropies[0], id32(0xA1));
+        assert_eq!(session.mpc_entropies[1], id32(0xA2));
+        assert_eq!(session.mpc_entropies[2], id32(0xA3));
+
+        // Independent recomputation of G per whitepaper §2.5.  The
+        // device_entropy is sampled locally inside
+        // `create_mpc_genesis_with_transport`, so we read it back.
+        let mut h = dsm_domain_hasher("DSM/genesis");
+        h.update(&session.device_entropy);
+        for m in &session.mpc_entropies {
+            h.update(m);
+        }
+        h.update(&canonical_a(
+            &session.device_id,
+            &session.storage_nodes,
+            &session.metadata,
+        ));
+        let mut expected = [0u8; 32];
+        expected.copy_from_slice(h.finalize().as_bytes());
+        assert_eq!(
+            session.genesis_id, expected,
+            "transport-supplied entropy bytes did not survive the call path"
+        );
+    }
+
+    /// Issue #252 sub-bug 2: with 5 storage nodes configured, entropy
+    /// collection MUST contact all 5 — not the first `threshold_count`
+    /// (the prefix-bias bug).  After Step 2 dropped the threshold
+    /// concept, this is a regression guard.
+    #[tokio::test]
+    async fn issue_252_all_n_storage_nodes_contribute_no_prefix_bias() {
+        let device_id = id32(0x55);
+        let nodes = vec![
+            NodeId::new("n1"),
+            NodeId::new("n2"),
+            NodeId::new("n3"),
+            NodeId::new("n4"),
+            NodeId::new("n5"),
+        ];
+        let map = [
+            (nodes[0].clone(), id32(0xB1)),
+            (nodes[1].clone(), id32(0xB2)),
+            (nodes[2].clone(), id32(0xB3)),
+            (nodes[3].clone(), id32(0xB4)),
+            (nodes[4].clone(), id32(0xB5)),
+        ];
+        let transport = FixedEntropyTransport::new(&map);
+        let k_dbrw = id32(0xDB);
+        let session = create_mpc_genesis_with_transport(
+            device_id,
+            nodes.clone(),
+            k_dbrw,
+            None,
+            &transport,
+        )
+        .await
+        .expect("5-node genesis should succeed");
+
+        // All 5 nodes were contacted exactly once each.
+        let called = transport.called_nodes();
+        assert_eq!(
+            called.len(),
+            5,
+            "all n nodes must be contacted (no prefix-bias)"
+        );
+        let mut called_sorted = called;
+        called_sorted.sort();
+        let mut expected_called: Vec<Vec<u8>> =
+            nodes.iter().map(|n| n.as_bytes().to_vec()).collect();
+        expected_called.sort();
+        assert_eq!(called_sorted, expected_called);
+
+        // All 5 node entropies are bound into the session.
+        assert_eq!(session.mpc_entropies.len(), 5);
+        let mut got: Vec<[u8; 32]> = session.mpc_entropies.clone();
+        got.sort();
+        let mut want = vec![
+            id32(0xB1),
+            id32(0xB2),
+            id32(0xB3),
+            id32(0xB4),
+            id32(0xB5),
+        ];
+        want.sort();
+        assert_eq!(got, want);
+    }
+
+    /// Issue #252 sub-bug 3 (transport variant): the hash returned to
+    /// callers via `convert_session_to_genesis_state_compat` must equal
+    /// the session's own `genesis_id` even when the entropy came over
+    /// a transport (the path most exposed to mangling).  Complements
+    /// `session_genesis_id_matches_caller_facing_state_hash` above.
+    #[tokio::test]
+    async fn issue_252_transport_session_hash_matches_caller_hash() {
+        use crate::core::identity::genesis::convert_session_to_genesis_state_compat;
+        let device_id = id32(0x77);
+        let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
+        let map = [
+            (nodes[0].clone(), id32(0xC1)),
+            (nodes[1].clone(), id32(0xC2)),
+            (nodes[2].clone(), id32(0xC3)),
+        ];
+        let transport = FixedEntropyTransport::new(&map);
+        let k_dbrw = id32(0xDB);
+        let session = create_mpc_genesis_with_transport(
+            device_id,
+            nodes,
+            k_dbrw,
+            Some(b"DSMv2|sub3-transport".to_vec()),
+            &transport,
+        )
+        .await
+        .expect("transport-driven genesis should succeed");
+
+        let gs = convert_session_to_genesis_state_compat(&session)
+            .expect("convert succeeds");
+        assert_eq!(
+            session.genesis_id, gs.hash,
+            "Issue #252 sub-bug 3 (transport): session genesis_id must \
+             match GenesisState.hash returned to callers"
+        );
+    }
+
     /// Independent recomputation of S_master from public inputs +
     /// K_DBRW must match the value the session derives, end-to-end.
     /// This pins the §11.1 IKM ordering.
