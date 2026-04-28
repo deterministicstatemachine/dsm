@@ -234,7 +234,9 @@ pub async fn fetch_genesis_state(
     let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
 
     // Per whitepaper §2.5: n-of-n MPC; no threshold parameter.
-    create_genesis_via_blind_mpc(device_id_arr, nodes, None).await
+    // Bootstrap-tagged K_DBRW (test/no-network path).
+    let k_dbrw = dsm::crypto::cdbrw_binding::derive_bootstrap_k_dbrw(&device_id_arr)?;
+    create_genesis_via_blind_mpc(device_id_arr, nodes, k_dbrw, None).await
 }
 
 /// Verify a Genesis state against known storage nodes

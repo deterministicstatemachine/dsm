@@ -369,11 +369,13 @@ pub fn verify_genesis_state(genesis: &GenesisState) -> Result<bool, DsmError> {
 pub async fn create_genesis_via_blind_mpc(
     device_id: [u8; 32],
     storage_nodes: Vec<NodeId>,
+    k_dbrw: [u8; 32],
     metadata: Option<Vec<u8>>,
 ) -> Result<GenesisState, DsmError> {
     let session = crate::core::identity::genesis_mpc::create_mpc_genesis(
         device_id,
         storage_nodes,
+        k_dbrw,
         metadata,
     )
     .await?;
@@ -390,6 +392,7 @@ pub async fn create_genesis_via_blind_mpc(
 pub fn create_genesis_via_blind_mpc_with_contributors(
     device_id: [u8; 32],
     storage_nodes: Vec<NodeId>,
+    k_dbrw: [u8; 32],
     device_entropy: [u8; 32],
     mpc_entropies: Vec<[u8; 32]>,
     metadata: Option<Vec<u8>>,
@@ -399,6 +402,7 @@ pub fn create_genesis_via_blind_mpc_with_contributors(
     let mut session = crate::core::identity::genesis_mpc::GenesisSession::new(metadata)?;
     session.initialize_mpc(device_id, storage_nodes)?;
     session.set_entropies(device_entropy, mpc_entropies)?;
+    session.set_dbrw_binding(k_dbrw);
     session.compute_commitments();
     session.compute_genesis_id();
     session.validate_session()?;
@@ -550,8 +554,10 @@ mod tests {
     async fn test_genesis_state_creation_mpc_only() {
         let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
         let device_id = [0xAB; 32];
+        let k_dbrw = [0xDB; 32];
 
-        let res = create_genesis_via_blind_mpc(device_id, nodes, Some(b"test".to_vec())).await;
+        let res =
+            create_genesis_via_blind_mpc(device_id, nodes, k_dbrw, Some(b"test".to_vec())).await;
 
         let genesis = match res {
             Ok(g) => g,
@@ -600,8 +606,9 @@ mod tests {
     async fn test_verification_mpc() {
         let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
         let device_id = [7u8; 32];
+        let k_dbrw = [0xDB; 32];
 
-        let genesis = match create_genesis_via_blind_mpc(device_id, nodes, None).await {
+        let genesis = match create_genesis_via_blind_mpc(device_id, nodes, k_dbrw, None).await {
             Ok(g) => g,
             Err(e) => panic!("create_genesis_via_blind_mpc should succeed: {e:?}"),
         };
@@ -620,10 +627,12 @@ mod tests {
         let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
         let node_entropies = vec![[0x61; 32], [0x62; 32], [0x63; 32]];
         let metadata = b"meta".to_vec();
+        let k_dbrw = [0xDB; 32];
 
         let genesis = create_genesis_via_blind_mpc_with_contributors(
             device_id,
             nodes,
+            k_dbrw,
             device_entropy,
             node_entropies.clone(),
             Some(metadata.clone()),
@@ -648,8 +657,9 @@ mod tests {
 
         let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
         let device_id = [0x11; 32];
+        let k_dbrw = [0xDB; 32];
 
-        let g = match create_genesis_via_blind_mpc(device_id, nodes, None).await {
+        let g = match create_genesis_via_blind_mpc(device_id, nodes, k_dbrw, None).await {
             Ok(x) => x,
             Err(_) => return,
         };

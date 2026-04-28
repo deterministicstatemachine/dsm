@@ -119,17 +119,23 @@ pub struct GenesisSession {
     pub session_id: [u8; 32],
     /// Device-specific entropy (32B)
     pub device_entropy: [u8; 32],
-    /// DBRW binding (32B) when available (record-only, not part of genesis binding)
-    pub dbrw_binding: Option<[u8; 32]>,
+    /// DBRW binding K_DBRW (32B) per whitepaper §12 def.3.
+    ///
+    /// Mixed into `S_master` IKM (whitepaper §11.1 eq.13) at keypair
+    /// derivation time — NEVER serialised, logged, or included in any
+    /// commitment.  Zeroised when the session is dropped.  Not part of
+    /// the genesis hash `G` (which §2.5 keeps publicly recomputable).
+    pub dbrw_binding: [u8; 32],
     /// Entropies from storage nodes (32B each)
     pub mpc_entropies: Vec<[u8; 32]>,
     /// Session metadata (opaque bytes)
     pub metadata: Vec<u8>,
-    /// Commitments C_i = H(session_id || contribution_i_material)
+    /// Commitments C_i = H("DSM/genesis-commit\0" || session_id || contribution_i)
     pub commitments: Vec<[u8; 32]>,
     /// Reveals: exact contribution materials used for each commitment
     pub reveals: Vec<Vec<u8>>,
-    /// Final genesis id: H(session_id || device_entropy || mpc_i... || metadata)
+    /// Genesis hash per whitepaper §2.5:
+    /// G = BLAKE3("DSM/genesis\0" || device_entropy || mpc_i... || A)
     pub genesis_id: [u8; 32],
     /// Participants
     pub storage_nodes: Vec<NodeId>,
@@ -141,6 +147,9 @@ pub struct GenesisSession {
 
 impl GenesisSession {
     /// Create a new session with random session_id; other fields zero/empty.
+    /// `dbrw_binding` MUST be set via `set_dbrw_binding` before
+    /// `compute_genesis_id` finalises (or, for end-to-end production,
+    /// is supplied to `create_mpc_genesis*` and routed through here).
     pub fn new(metadata: Vec<u8>) -> Result<Self, DsmError> {
         let mut sid = [0u8; 32];
         crate::crypto::rng::random_bytes(32)
@@ -151,7 +160,7 @@ impl GenesisSession {
         Ok(Self {
             session_id: sid,
             device_entropy: [0u8; 32],
-            dbrw_binding: None,
+            dbrw_binding: [0u8; 32],
             mpc_entropies: Vec::new(),
             metadata,
             commitments: Vec::new(),
@@ -161,6 +170,12 @@ impl GenesisSession {
             device_id: [0u8; 32],
             created_at_ticks: now_tick(),
         })
+    }
+
+    /// Set the DBRW binding K_DBRW for this session.  Required before
+    /// `validate_session()` (and Step-5 keypair derivation).
+    pub fn set_dbrw_binding(&mut self, k_dbrw: [u8; 32]) {
+        self.dbrw_binding = k_dbrw;
     }
 
     /// Initialize MPC with participants (≥3 storage nodes; whitepaper §2.5
@@ -270,7 +285,8 @@ impl GenesisSession {
         self.genesis_id = out;
     }
 
-    /// Validate full session
+    /// Validate full session.  Requires DBRW binding (K_DBRW) to be set
+    /// per whitepaper §11.1 eq.13 prerequisite for master-seed derivation.
     pub fn validate_session(&self) -> Result<(), DsmError> {
         if self.storage_nodes.len() < 3 {
             return Err(DsmError::invalid_operation("MPC requires ≥3 storage nodes"));
@@ -288,7 +304,32 @@ impl GenesisSession {
         if self.genesis_id == [0u8; 32] {
             return Err(DsmError::invalid_operation("Genesis ID not computed"));
         }
+        if self.dbrw_binding == [0u8; 32] {
+            return Err(DsmError::invalid_operation(
+                "DBRW binding (K_DBRW) not set; required by whitepaper §11.1 eq.13",
+            ));
+        }
         Ok(())
+    }
+}
+
+impl zeroize::Zeroize for GenesisSession {
+    /// Zeroize sensitive material on drop.  K_DBRW MUST NEVER outlive
+    /// the session in serialised or in-memory form (whitepaper §11.1
+    /// + §12 normative rule).
+    fn zeroize(&mut self) {
+        self.dbrw_binding.zeroize();
+        self.device_entropy.zeroize();
+        for e in &mut self.mpc_entropies {
+            e.zeroize();
+        }
+    }
+}
+
+impl Drop for GenesisSession {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.zeroize();
     }
 }
 
@@ -343,6 +384,17 @@ fn canonical_a(device_id: &[u8; 32], storage_nodes: &[NodeId], metadata: &[u8]) 
     a
 }
 
+/// Per-genesis step-salt: `s_0 = BLAKE3("DSM/step-salt\0" || G)` per
+/// storage-nodes spec §5.  Mixed into the master-seed IKM (whitepaper
+/// §11.1 eq.13) at keypair derivation time.
+pub fn compute_step_salt(g: &[u8; 32]) -> [u8; 32] {
+    let mut h = crate::crypto::blake3::dsm_domain_hasher("DSM/step-salt");
+    h.update(g);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(h.finalize().as_bytes());
+    out
+}
+
 /// Deterministic device entropy (bytes-only), derived from 32-byte device_id
 pub fn generate_device_entropy(device_id: &[u8; 32]) -> [u8; 32] {
     let mut h = crate::crypto::blake3::dsm_domain_hasher("DSM/genesis-device-entropy");
@@ -362,6 +414,7 @@ pub fn generate_device_entropy(device_id: &[u8; 32]) -> [u8; 32] {
 pub async fn create_mpc_genesis(
     device_id: [u8; 32],
     storage_nodes: Vec<NodeId>,
+    k_dbrw: [u8; 32],
     metadata: Option<Vec<u8>>,
 ) -> Result<GenesisSession, DsmError> {
     if storage_nodes.len() < 3 {
@@ -369,6 +422,11 @@ pub async fn create_mpc_genesis(
             "MPC requires ≥3 nodes, got {}",
             storage_nodes.len()
         )));
+    }
+    if k_dbrw == [0u8; 32] {
+        return Err(DsmError::InvalidParameter(
+            "K_DBRW must be a non-zero binding (whitepaper §12)".into(),
+        ));
     }
 
     let meta = metadata.unwrap_or_else(|| b"DSMv2|bytes|no-wallclock".to_vec());
@@ -399,6 +457,7 @@ pub async fn create_mpc_genesis(
     let mut session = GenesisSession::new(meta)?;
     session.initialize_mpc(device_id, storage_nodes)?;
     session.set_entropies(device_entropy, mpc_entropies)?;
+    session.set_dbrw_binding(k_dbrw);
 
     session.compute_commitments();
     session.compute_genesis_id();
@@ -408,20 +467,28 @@ pub async fn create_mpc_genesis(
 }
 
 /// SDK-integrated MPC Creation using a transport for node entropy collection.
-/// DBRW is optional and stored in the session for later gating/attestation; it is not
-/// part of genesis binding.
+///
+/// `K_DBRW` is mandatory (whitepaper §11.1 eq.13: required IKM for the
+/// master-seed derivation that produces the SPHINCS+/Kyber keypair).
+/// Callers obtain it from `crate::crypto::cdbrw_binding::derive_cdbrw_binding_key`
+/// against real hardware/environment fingerprints.
 pub async fn create_mpc_genesis_with_transport<T: GenesisMpcTransport + Sync>(
     device_id: [u8; 32],
     storage_nodes: Vec<NodeId>,
+    k_dbrw: [u8; 32],
     metadata: Option<Vec<u8>>,
     transport: &T,
-    dbrw_binding: Option<[u8; 32]>,
 ) -> Result<GenesisSession, DsmError> {
     if storage_nodes.len() < 3 {
         return Err(DsmError::InvalidParameter(format!(
             "MPC requires ≥3 nodes, got {}",
             storage_nodes.len()
         )));
+    }
+    if k_dbrw == [0u8; 32] {
+        return Err(DsmError::InvalidParameter(
+            "K_DBRW must be a non-zero binding (whitepaper §12)".into(),
+        ));
     }
 
     let meta = metadata.unwrap_or_else(|| b"DSMv2|bytes|no-wallclock".to_vec());
@@ -441,7 +508,7 @@ pub async fn create_mpc_genesis_with_transport<T: GenesisMpcTransport + Sync>(
     let mut session = GenesisSession::new(meta)?;
     session.initialize_mpc(device_id, storage_nodes.clone())?;
     session.device_entropy = device_entropy;
-    session.dbrw_binding = dbrw_binding;
+    session.set_dbrw_binding(k_dbrw);
 
     // Device commitment material for transport calls: H(session_id || device_entropy)
     let device_commitment = {
@@ -581,8 +648,8 @@ mod tests {
         s.device_entropy = id32(11);
         s.mpc_entropies = vec![id32(21), id32(22), id32(23)];
 
-        // DBRW may exist, but doesn't affect genesis binding
-        s.dbrw_binding = Some(id32(0xDB));
+        // K_DBRW is mandatory for validate_session; not part of genesis hash.
+        s.set_dbrw_binding(id32(0xDB));
 
         s.compute_commitments();
         assert_eq!(s.commitments.len(), 1 + s.mpc_entropies.len());
@@ -597,7 +664,8 @@ mod tests {
     async fn test_create_mpc_genesis_path() {
         let dev = id32(0xAA);
         let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
-        let s = create_mpc_genesis(dev, nodes, Some(b"DSMv2|test".to_vec())).await;
+        let k_dbrw = id32(0xDB);
+        let s = create_mpc_genesis(dev, nodes, k_dbrw, Some(b"DSMv2|test".to_vec())).await;
 
         let sess = match s {
             Ok(sess) => sess,
@@ -668,7 +736,8 @@ mod tests {
         use crate::core::identity::genesis::convert_session_to_genesis_state_compat;
         let dev = id32(0x77);
         let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
-        let session = create_mpc_genesis(dev, nodes, Some(b"meta".to_vec()))
+        let k_dbrw = id32(0xDB);
+        let session = create_mpc_genesis(dev, nodes, k_dbrw, Some(b"meta".to_vec()))
             .await
             .expect("create_mpc_genesis succeeds");
 
