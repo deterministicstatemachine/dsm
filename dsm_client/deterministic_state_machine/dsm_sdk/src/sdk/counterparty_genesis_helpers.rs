@@ -217,24 +217,26 @@ pub fn create_genesis_binding(
 // state-history tree is superseded by DeviceState's per-relationship SMT.
 // Zero external callers for either function.
 
-/// Fetch a Genesis state from a storage node (network operation)
+/// Fetch a counterparty's Genesis state from the storage-node layer.
+///
+/// A counterparty's genesis is the byte-exact artifact that the counterparty
+/// originally published when it ran its own MPC ceremony. It MUST be retrieved
+/// over the network (storage-node read), never re-derived locally — the
+/// counterparty's reveals are unknown to us, so any local "MPC re-creation"
+/// would produce a different hash than the real one.
+///
+/// This helper is currently a stub: a real `SdkStorageReader` integration is
+/// required and is tracked as a dedicated follow-up. Callers that need
+/// counterparty-genesis lookup must inject the genesis through the storage
+/// SDK path until that integration lands.
 pub async fn fetch_genesis_state(
-    device_id: &str,
+    _device_id: &str,
     _storage_endpoint: &str,
 ) -> Result<GenesisState, DsmError> {
-    // In a real implementation, this would make an HTTP request to the storage node
-    // For now (tests/utilities), synthesize a MPC-style Genesis using the strict path
-    use dsm::core::identity::genesis::create_genesis_via_blind_mpc;
-    use dsm::types::identifiers::NodeId;
-
-    // Derive a deterministic 32-byte device id from the provided string
-    let device_id_arr = crate::util::domain_helpers::device_id_hash(device_id);
-
-    // Use a fixed small set of test nodes (deterministic; no network dependency)
-    let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
-
-    // Threshold pinned to production minimum (3)
-    create_genesis_via_blind_mpc(device_id_arr, nodes, 3, None).await
+    Err(DsmError::invalid_operation(
+        "counterparty genesis fetch not yet wired: requires storage-node REST integration; \
+         do not synthesize counterparty genesis locally (it would not match the real hash)",
+    ))
 }
 
 /// Verify a Genesis state against known storage nodes
@@ -263,7 +265,6 @@ mod tests {
         GS {
             hash,
             initial_entropy: [0u8; 32],
-            threshold: 2,
             participants: Default::default(),
             merkle_root: None,
             device_id: Some([0x01; 32]),

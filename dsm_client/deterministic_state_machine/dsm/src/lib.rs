@@ -92,10 +92,7 @@ pub mod utils;
 pub mod vault;
 pub mod verification;
 
-use crate::core::identity;
 use crate::types::error::DsmError;
-
-pub use crate::core::identity::TrustlessGenesisArtifacts;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const RUST_VERSION: &str = env!("DSM_RUSTC_VERSION");
@@ -148,25 +145,6 @@ fn get_enabled_features() -> Vec<String> {
     features.push("threadsafe".to_string());
     features
 }
-
-/// Expose core trustless genesis creation to SDK consumers.
-pub async fn create_trustless_genesis<
-    S: crate::core::identity::genesis_mpc::GenesisStorage + Sync + Send,
->(
-    device_id: String,
-    storage_nodes: Vec<crate::types::identifiers::NodeId>,
-    threshold: usize,
-    metadata: Option<String>,
-    storage: Option<&S>,
-) -> Result<TrustlessGenesisArtifacts, DsmError> {
-    identity::create_trustless_genesis(device_id, storage_nodes, threshold, metadata, storage)
-        .await
-        .map_err(DsmError::from)
-}
-
-// verify_trustless_identity wrapper deleted: zero external callers, and
-// the underlying impl was deleted (it relied on state_number reads
-// reconstructed from `state.hash[0] as u64` after §4.3 — meaningless).
 
 #[cfg(test)]
 mod tests {

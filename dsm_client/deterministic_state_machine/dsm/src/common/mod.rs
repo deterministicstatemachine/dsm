@@ -21,6 +21,8 @@ pub const MAX_BUFFER_SIZE: usize = 4_096;
 
 /// Centralized canonical encoding for cryptographic commitments
 pub mod canonical_encoding;
+/// DBRW (Dual-Binding Random Walk) per-device binding provider — WP §12
+pub mod dbrw;
 /// Deterministic ID generation (no UUID, no wall-clock)
 pub mod deterministic_id;
 pub mod device_tree;

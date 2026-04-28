@@ -115,21 +115,17 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_createGenesis<'a>(
                     .map_err(|e| format!("sdk.new: {e}"))?;
 
                 // MPC-only genesis (strict mode): local bootstrap path is not permitted.
-                let mpc_res = sdk
-                    .create_genesis_with_mpc(Some(3), Some(entropy.clone()))
-                    .await;
+                let mpc_res = sdk.create_genesis_with_mpc(Some(entropy.clone())).await;
 
-                let (
-                    genesis_device_id,
-                    session_id,
-                    threshold_usize,
-                    genesis_hash_bytes,
-                    participating_nodes,
-                ): (Vec<u8>, String, usize, Vec<u8>, Vec<String>) = match mpc_res {
+                let (genesis_device_id, session_id, genesis_hash_bytes, participating_nodes): (
+                    Vec<u8>,
+                    String,
+                    Vec<u8>,
+                    Vec<String>,
+                ) = match mpc_res {
                     Ok(resp) => (
                         resp.genesis_device_id.clone(),
                         resp.session_id.clone(),
-                        resp.threshold as usize,
                         resp.genesis_hash.clone().unwrap_or_else(|| vec![0u8; 32]),
                         resp.participating_nodes.clone(),
                     ),
@@ -188,7 +184,6 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_createGenesis<'a>(
                     }),
                     device_entropy: entropy.clone(),
                     session_id: session_id.clone(),
-                    threshold: threshold_usize as u32,
                     storage_nodes: participating_nodes.clone(),
                     network_id: network_id.clone(),
                     locale: locale.clone(),
@@ -438,7 +433,7 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_createGenesis<'a>(
                         mpc_proof: session_id.clone(),
                         dbrw_binding: crate::util::text_id::encode_base32_crockford(&entropy),
                         merkle_root: crate::util::text_id::encode_base32_crockford(&[0u8; 32]), // Initial empty SMT root
-                        participant_count: threshold_usize as u32,
+                        participant_count: participating_nodes.len() as u32,
                         // Deterministic, clockless marker (no wall-clock time).
                         progress_marker: "genesis".to_string(),
                         publication_hash: crate::util::text_id::encode_base32_crockford(

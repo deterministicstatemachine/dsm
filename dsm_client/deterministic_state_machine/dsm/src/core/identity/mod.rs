@@ -29,6 +29,7 @@ const _: () = assert!(
 );
 
 pub mod genesis;
+pub mod genesis_a0;
 pub mod genesis_mpc;
 // hierarchical_device_management deleted: 1180-line module with zero external
 // callers. Its own doc comment noted "DO NOT use this Merkle implementation for
@@ -37,19 +38,15 @@ pub mod genesis_mpc;
 // JNI bridge moved to dsm_sdk - see dsm_sdk/src/jni/unified_protobuf_bridge.rs
 
 use crate::types::state_types::MerkleProof;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use crate::types::error::DsmError;
-use crate::types::identifiers::NodeId;
 use crate::prelude::*; // common items incl. Uuid, etc.
-use crate::crypto::blake3::{dsm_domain_hasher, domain_hash};
+use crate::crypto::blake3::domain_hash;
 use blake3;
-use tracing;
 use zeroize::Zeroize;
 
-// Import MPC types
-use crate::core::identity::genesis_mpc::{create_mpc_genesis, GenesisSession};
 // Re-export GenesisState for other modules
 pub use crate::core::identity::genesis::{verify_genesis_state, GenesisState};
 
@@ -61,263 +58,12 @@ fn sanitize_genesis_state(genesis: &GenesisState) -> GenesisState {
     sanitized
 }
 
-fn compute_contribution_merkle_root(contributions: &[genesis::Contribution]) -> Option<[u8; 32]> {
-    if contributions.is_empty() {
-        return None;
-    }
-
-    // Leaf = BLAKE3("DSM/GENESIS/CONTRIB/v2" || data)
-    let mut leaves: Vec<[u8; 32]> = contributions
-        .iter()
-        .map(|c| {
-            let mut h = dsm_domain_hasher("DSM/GENESIS/CONTRIB/v2");
-            h.update(&c.data);
-            *h.finalize().as_bytes()
-        })
-        .collect();
-
-    // Canonicalize order
-    leaves.sort();
-
-    // Pairwise hash up the tree (duplicate last if odd)
-    let mut level = leaves;
-    while level.len() > 1 {
-        let mut next = Vec::with_capacity(level.len().div_ceil(2));
-        let mut i = 0usize;
-        while i < level.len() {
-            let left = &level[i];
-            let right = if i + 1 < level.len() {
-                &level[i + 1]
-            } else {
-                &level[i]
-            };
-            let mut h = dsm_domain_hasher("DSM/genesis");
-            h.update(left);
-            h.update(right);
-            next.push(*h.finalize().as_bytes());
-            i += 2;
-        }
-        level = next;
-    }
-
-    level.into_iter().next()
-}
-
-/// Convert session to genesis state for compatibility (no encodings for IDs)
-pub fn convert_session_to_genesis_state(
-    session: &GenesisSession,
-) -> Result<GenesisState, IdentityError> {
-    // DBRW is an optional, local anti-cloning signal and must NOT be required to
-    // create or represent genesis / identity. Genesis must remain derivable and
-    // recoverable without DBRW present.
-
-    if session.storage_nodes.is_empty() {
-        return Err(IdentityError::InvalidParameter(
-            "MPC session did not record any storage node participants".into(),
-        ));
-    }
-
-    if session.threshold == 0 {
-        return Err(IdentityError::InvalidParameter(
-            "MPC session reported threshold of zero".into(),
-        ));
-    }
-
-    if session.genesis_id == [0u8; 32] {
-        return Err(IdentityError::GenesisError {
-            context: "MPC session is missing computed genesis identifier".into(),
-            step: "verify_session".into(),
-            internal_error: None,
-        });
-    }
-
-    let signing_key = genesis::SigningKey::new().map_err(|e| IdentityError::GenesisError {
-        context: "Failed to generate signing key".into(),
-        step: "key_generation".into(),
-        internal_error: Some(format!("{e:?}")),
-    })?;
-    let kyber_keypair = genesis::KyberKey::new().map_err(|e| IdentityError::GenesisError {
-        context: "Failed to generate kyber key".into(),
-        step: "key_generation".into(),
-        internal_error: Some(format!("{e:?}")),
-    })?;
-
-    let participants: HashSet<String> = session
-        .storage_nodes
-        .iter()
-        .map(|n| n.to_string())
-        .collect();
-
-    let contributions: Vec<genesis::Contribution> = session
-        .mpc_entropies
-        .iter()
-        .map(|entropy| genesis::Contribution {
-            data: entropy.to_vec(),
-            verified: true,
-        })
-        .collect();
-
-    let merkle_root = compute_contribution_merkle_root(&contributions);
-
-    Ok(GenesisState {
-        hash: session.genesis_id,
-        initial_entropy: session.device_entropy,
-        signing_key,
-        kyber_keypair,
-        threshold: session.threshold,
-        participants,
-        merkle_root,
-        // device_id is display-only in GenesisState; omit any encoding
-        device_id: None,
-        contributions,
-    })
-}
-
 /// Genesis creation result
 #[derive(Debug, Clone)]
 pub struct GenesisCreationResult {
     pub genesis_id: [u8; 32],
     pub device_id: [u8; 32],
 }
-
-/// Detailed artifacts produced by trustless MPC genesis creation.
-#[derive(Debug, Clone)]
-pub struct TrustlessGenesisArtifacts {
-    pub device_id: [u8; 32],
-    pub genesis_state: GenesisState,
-    pub session: GenesisSession,
-}
-
-impl TrustlessGenesisArtifacts {
-    /// Convert artifacts into a lightweight creation result summary.
-    pub fn as_creation_result(&self) -> GenesisCreationResult {
-        GenesisCreationResult {
-            genesis_id: self.genesis_state.hash,
-            device_id: self.device_id,
-        }
-    }
-}
-
-/// Perform trustless blind MPC genesis creation at the core level.
-pub async fn create_trustless_genesis<
-    S: crate::core::identity::genesis_mpc::GenesisStorage + Sync + Send,
->(
-    device_id: String,
-    storage_nodes: Vec<NodeId>,
-    threshold: usize,
-    metadata: Option<String>,
-    storage: Option<&S>,
-) -> Result<TrustlessGenesisArtifacts, IdentityError> {
-    let span = tracing::span!(
-        tracing::Level::INFO,
-        "MPC/genesis/create_trustless",
-        device_id = %device_id,
-        session_id = tracing::field::Empty,
-        threshold = threshold,
-        n_participants = storage_nodes.len()
-    );
-    let _enter = span.enter();
-
-    if storage_nodes.len() < MIN_PARTICIPANTS {
-        return Err(IdentityError::InvalidParameter(
-            "MPC/threshold/too_low: requires at least 3 participants for trustless genesis".into(),
-        ));
-    }
-
-    if threshold < MIN_THRESHOLD {
-        return Err(IdentityError::InvalidParameter(
-            "MPC/threshold/too_low: threshold must be at least 3 for MPC security".into(),
-        ));
-    }
-
-    if threshold > storage_nodes.len() {
-        return Err(IdentityError::InvalidParameter(
-            "MPC/threshold/invalid: threshold cannot exceed number of participants".into(),
-        ));
-    }
-
-    // Deterministic 32B device hash label for MPC inputs
-    let device_id_bytes: [u8; 32] = *domain_hash("DSM/device-id", device_id.as_bytes()).as_bytes();
-
-    let session = create_mpc_genesis(
-        device_id_bytes,
-        storage_nodes,
-        threshold,
-        metadata.map(|s| s.into_bytes()),
-    )
-    .await
-    .map_err(|e| IdentityError::GenesisError {
-        context: "MPC genesis failed".into(),
-        step: "mpc_genesis".into(),
-        internal_error: Some(format!("{e:?}")),
-    })?;
-
-    // Purely for tracing: generate a decimal label from session.genesis_id (no hex)
-    let sess_label = {
-        let bytes = &session.genesis_id;
-        if bytes.len() >= 8 {
-            let mut lo = [0u8; 8];
-            lo.copy_from_slice(&bytes[0..8]);
-            u64::from_le_bytes(lo).to_string()
-        } else {
-            "0".to_string()
-        }
-    };
-    span.record("session_id", tracing::field::display(&sess_label));
-
-    let genesis_state =
-        convert_session_to_genesis_state(&session).map_err(|e| IdentityError::GenesisError {
-            context: "MPC genesis conversion failed".into(),
-            step: "mpc_conversion".into(),
-            internal_error: Some(format!("{e:?}")),
-        })?;
-
-    // Optionally publish sanitized genesis state to storage (binary, deterministic; no serde/json)
-    if let Some(s) = storage {
-        fn encode_genesis_for_storage(gs: &genesis::GenesisState) -> Vec<u8> {
-            let mut out = Vec::new();
-            // hash (len + bytes)
-            out.extend_from_slice(&(gs.hash.len() as u32).to_le_bytes());
-            out.extend_from_slice(&gs.hash);
-            // threshold (u64)
-            out.extend_from_slice(&(gs.threshold as u64).to_le_bytes());
-            // participants sorted (len + each len+bytes)
-            let mut parts: Vec<_> = gs.participants.iter().cloned().collect();
-            parts.sort();
-            out.extend_from_slice(&(parts.len() as u32).to_le_bytes());
-            for p in parts {
-                let pb = p.as_bytes();
-                out.extend_from_slice(&(pb.len() as u32).to_le_bytes());
-                out.extend_from_slice(pb);
-            }
-            // merkle_root optional
-            match &gs.merkle_root {
-                Some(mr) => {
-                    out.push(1);
-                    out.extend_from_slice(&(mr.len() as u32).to_le_bytes());
-                    out.extend_from_slice(mr);
-                }
-                None => out.push(0),
-            }
-            // device_id optional (omitted to avoid encodings)
-            out.push(0);
-            out
-        }
-
-        let ser = encode_genesis_for_storage(&genesis_state);
-        let mut hash32 = [0u8; 32];
-        hash32.copy_from_slice(&genesis_state.hash[0..32]);
-        s.put(&hash32, &ser).await?;
-    }
-
-    let device_id_bytes = domain_hash("DSM/device-id", device_id.as_bytes()).into();
-    Ok(TrustlessGenesisArtifacts {
-        device_id: device_id_bytes,
-        genesis_state,
-        session,
-    })
-}
-
 /// Context-based identity store
 /// Replaces global store to enforce bilateral isolation (no global state)
 #[derive(Clone)]
@@ -419,124 +165,6 @@ impl IdentityStore {
                 "Failed to access identity store".into(),
             ))
         }
-    }
-
-    /// Create a new identity with MANDATORY MPC genesis creation
-    pub async fn create_identity<
-        S: crate::core::identity::genesis_mpc::GenesisStorage + Sync + Send,
-    >(
-        &self,
-        name: &str,
-        threshold: usize,
-        participants: Vec<NodeId>,
-        storage: Option<&S>,
-    ) -> Result<Identity, IdentityError> {
-        let span = tracing::span!(
-            tracing::Level::INFO,
-            "MPC/identity/create",
-            name = %name,
-            session_id = tracing::field::Empty,
-            threshold = threshold,
-            n_participants = participants.len()
-        );
-        let _enter = span.enter();
-
-        if participants.len() < MIN_PARTICIPANTS {
-            return Err(IdentityError::InvalidParameter(
-                "MPC/threshold/too_low: MPC requires at least 3 storage-node participants (plus device entropy)"
-                    .into(),
-            ));
-        }
-
-        if threshold < MIN_THRESHOLD {
-            return Err(IdentityError::InvalidParameter(
-                "MPC/threshold/too_low: threshold must be ≥3 to resist 2 colluding nodes".into(),
-            ));
-        }
-
-        if threshold > participants.len() {
-            return Err(IdentityError::InvalidParameter(
-                "MPC/threshold/invalid: threshold cannot be greater than number of participants"
-                    .into(),
-            ));
-        }
-
-        let device_id = format!("device_{:016x}", crate::performance::mono_commit_height());
-
-        // Core-level trustless MPC genesis protocol
-        let artifacts = create_trustless_genesis(
-            device_id.clone(),
-            participants.clone(),
-            threshold,
-            Some(format!("DSM_IDENTITY_{name}")),
-            storage,
-        )
-        .await?;
-
-        // Purely for tracing: decimal session label from genesis hash
-        let sess_label = {
-            let bytes = &artifacts.genesis_state.hash;
-            if bytes.len() >= 8 {
-                let mut lo = [0u8; 8];
-                lo.copy_from_slice(&bytes[0..8]);
-                u64::from_le_bytes(lo).to_string()
-            } else {
-                "0".to_string()
-            }
-        };
-        span.record("session_id", tracing::field::display(&sess_label));
-
-        let genesis = artifacts.genesis_state.clone();
-
-        // Derive device-specific sub-genesis
-        let device_entropy = genesis::get_device_entropy(&device_id)?;
-        let device_identity =
-            genesis::derive_device_sub_genesis(&genesis, &device_id, &device_entropy).map_err(
-                |e| IdentityError::DeviceError(format!("Device genesis derivation failed: {e:?}")),
-            )?;
-
-        let device_id_bytes = domain_hash("DSM/device-id", device_id.as_bytes()).into();
-        let identity = Identity {
-            name: name.to_string(),
-            master_genesis: genesis,
-            devices: vec![DeviceIdentity {
-                device_id: device_id_bytes,
-                sub_genesis: device_identity,
-            }],
-            invalidated: false,
-        };
-
-        if let Ok(mut store) = self.store.write() {
-            store.insert(identity.master_genesis.hash, identity.clone());
-        }
-
-        Ok(identity)
-    }
-
-    /// Create identity with storage nodes for MPC (production method)
-    pub async fn create_identity_with_storage_nodes<
-        S: crate::core::identity::genesis_mpc::GenesisStorage + Sync + Send,
-    >(
-        &self,
-        name: &str,
-        storage_nodes: Vec<NodeId>,
-        threshold: usize,
-        storage: Option<&S>,
-    ) -> Result<Identity, IdentityError> {
-        if storage_nodes.len() < MIN_PARTICIPANTS {
-            return Err(IdentityError::InvalidParameter(
-                "At least 3 storage nodes required for MPC genesis creation".into(),
-            ));
-        }
-
-        if threshold > storage_nodes.len() {
-            return Err(IdentityError::InvalidParameter(
-                "Threshold cannot exceed number of storage nodes".into(),
-            ));
-        }
-
-        self.create_identity(name, threshold, storage_nodes, storage)
-            .await
     }
 
     /// Get the public key for this identity (binary; not encoded)

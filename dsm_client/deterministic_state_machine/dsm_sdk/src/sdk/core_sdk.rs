@@ -762,13 +762,11 @@ impl CoreSDK {
             )));
         }
 
-        let threshold = storage_nodes.len();
         let device_entropy = generate_device_entropy(&device_id_arr);
 
         let genesis_state = create_genesis_via_blind_mpc_with_contributors(
             device_id_arr,
             storage_nodes,
-            threshold,
             device_entropy,
             contributor_entropies,
             client_entropy,
