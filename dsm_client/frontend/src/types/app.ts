@@ -17,6 +17,7 @@ export type ScreenType =
   | 'dev_cdbrw'
   | 'dev_policy'
   | 'dev_detfi_launch'
+  | 'defi'
   | 'liquidity'
   | 'mail'
   | 'bluetooth'

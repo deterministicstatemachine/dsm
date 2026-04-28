@@ -40,6 +40,7 @@ describe('navigationStore VALID_NAV_TARGETS coverage', () => {
     'dev_cdbrw',
     'dev_policy',
     'dev_detfi_launch',
+    'defi',
     'liquidity',
     'mail',
     'lock_setup',
