@@ -520,9 +520,12 @@ impl IdentitySDK {
             "IdentitySDK::create_genesis: calling create_genesis_via_blind_mpc(nodes={})",
             test_nodes.len()
         );
+        // Bootstrap-tagged K_DBRW per whitepaper §11.1 + §12.
+        let k_dbrw = dsm::crypto::cdbrw_binding::derive_bootstrap_k_dbrw(&device_id_arr)?;
         let genesis_state = futures::executor::block_on(create_genesis_via_blind_mpc(
             device_id_arr,
             test_nodes.clone(),
+            k_dbrw,
             None,
         ))?;
 

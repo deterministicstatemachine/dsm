@@ -49,9 +49,14 @@ impl CoreBootstrapAdapter {
 
             // Per whitepaper §2.5: n-of-n MPC; all storage nodes contribute.
             let participant_count = storage_node_ids.len() as u32;
+            // Bootstrap K_DBRW per whitepaper §11.1 + §12 — deterministic
+            // placeholder until real silicon fingerprinting wires here.
+            let k_dbrw = dsm::crypto::cdbrw_binding::derive_bootstrap_k_dbrw(&device_id_array)
+                .map_err(|e| format!("K_DBRW bootstrap derivation failed: {e}"))?;
             let genesis_state = dsm::core::identity::genesis::create_genesis_via_blind_mpc(
                 device_id_array,
                 storage_node_ids,
+                k_dbrw,
                 Some(entropy.clone()),
             )
             .await
