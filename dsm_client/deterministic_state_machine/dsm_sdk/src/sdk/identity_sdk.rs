@@ -68,7 +68,6 @@ pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 use dsm::crypto::signatures::SignatureKeyPair;
 use dsm::types::state_types::{State, DeviceInfo};
 use dsm::types::operations::{Operation, TransactionMode};
-use dsm::core::identity::genesis::create_genesis_via_blind_mpc;
 
 // ExtendedRelationshipContext struct deleted: only used by
 // IdentitySDK::create_relationship_context + get_relationship_context, both
@@ -482,139 +481,27 @@ impl IdentitySDK {
         participant_inputs: Vec<Vec<u8>>,
         metadata: Option<Vec<u8>>,
     ) -> Result<State, DsmError> {
-        #[cfg(feature = "storage")]
-        log::info!(
-            "IdentitySDK::create_genesis(start): identity_id='{}' device_label='{}' participant_inputs={} storage_sdk_set={}",
-            self.identity_id,
-            crate::util::text_id::encode_base32_crockford(&device_info.device_id),
-            participant_inputs.len(),
-            self.storage_sdk.read().map(|g| g.is_some()).unwrap_or(false)
-        );
-
-        // Convert participant inputs to deterministic base32 strings (canonical, display-safe).
-        let participants: Vec<String> = participant_inputs
-            .iter()
-            .map(|p| crate::util::text_id::encode_base32_crockford(p))
-            .collect();
-
-        // Use threshold equal to number of participants for MPC-style genesis
-        let threshold = participants.len().max(1);
-
-        // Call core backend genesis creation via MPC to get proper cryptographic genesis
-        // Derive a deterministic device id for MPC path from identity id + device id to keep tests stable
-        let mut id_hasher = dsm_domain_hasher("DSM/identity-mpc-id");
-        id_hasher.update(self.identity_id.as_bytes());
-        id_hasher.update(&device_info.device_id);
-        let id_hash = id_hasher.finalize();
-        let mut device_id_arr = [0u8; 32];
-        device_id_arr.copy_from_slice(id_hash.as_bytes());
-
-        // Use a fixed set of test node IDs
-        let test_nodes = vec![
-            dsm::types::identifiers::NodeId::new("n1"),
-            dsm::types::identifiers::NodeId::new("n2"),
-            dsm::types::identifiers::NodeId::new("n3"),
-        ];
-
-        // Production minimum threshold is 3; use max(threshold, 3)
-        let eff_threshold = std::cmp::max(threshold, 3);
-
-        #[cfg(feature = "storage")]
-        log::info!(
-            "IdentitySDK::create_genesis: calling create_genesis_via_blind_mpc(threshold={}, nodes={})",
-            eff_threshold,
-            test_nodes.len()
-        );
-        let genesis_state = futures::executor::block_on(create_genesis_via_blind_mpc(
-            device_id_arr,
-            test_nodes.clone(),
-            eff_threshold,
-            None,
-        ))?;
-
-        #[cfg(feature = "storage")]
-        log::info!(
-            "IdentitySDK::create_genesis: MPC returned genesis_state.hash_len={} signing_pk_len={} entropy_len={}",
-            genesis_state.hash.len(),
-            genesis_state.signing_key.public_key.len(),
-            genesis_state.initial_entropy.len()
-        );
-
-        // Publish genesis if storage SDK is available
-        #[cfg(feature = "storage")]
-        if let Some(storage_sdk) = self
-            .storage_sdk
-            .read()
-            .map_err(|_| DsmError::LockError)?
-            .as_ref()
-        {
-            let publisher = SdkGenesisPublisher::new(storage_sdk.clone());
-
-            let mut genesis_hash_arr = [0u8; 32];
-            if genesis_state.hash.len() == 32 {
-                genesis_hash_arr.copy_from_slice(&genesis_state.hash);
-            } else {
-                return Err(DsmError::invalid_parameter(format!(
-                    "Invalid genesis hash length: expected 32, got {}",
-                    genesis_state.hash.len()
-                )));
-            }
-
-            let payload = SanitizedGenesisPayload {
-                genesis_hash: genesis_hash_arr,
-                device_id: device_id_arr,
-                public_key: genesis_state.signing_key.public_key.clone(),
-                threshold: eff_threshold,
-                participants: test_nodes,
-                created_at_ticks: dsm::utils::deterministic_time::tick_index(),
-            };
-
-            log::info!(
-                "IdentitySDK::create_genesis: publishing genesis payload (genesis_hash_b32={}, device_id_b32={}, pk_len={})",
-                crate::util::text_id::encode_base32_crockford(&payload.genesis_hash),
-                crate::util::text_id::encode_base32_crockford(&payload.device_id),
-                payload.public_key.len()
-            );
-
-            // NOTE: This blocks on an async HTTP call while we're in a sync function.
-            // If this hangs, it's a network/IO stall, not an MPC stall.
-            futures::executor::block_on(publisher.publish(&payload))?;
-
-            log::info!("IdentitySDK::create_genesis: publish done");
-        }
-
-        // Use the initial entropy from the cryptographic genesis
-        let entropy = genesis_state.initial_entropy;
-
-        // Create the state using the cryptographically secure entropy
-        let mut state = State::new_genesis(entropy, device_info);
-
-        // §4.3 — State.external_data parameter map removed. Metadata
-        // attached to identity creation is no longer carried on the
-        // canonical State; if needed, callers should attach it to a
-        // separate identity-metadata sidecar.
-        let _ = metadata;
-
-        // The state hash should incorporate the genesis hash for cryptographic integrity
-        let mut combined_hash_data = Vec::new();
-        combined_hash_data.extend_from_slice(&genesis_state.hash);
-        combined_hash_data.extend_from_slice(&state.compute_hash()?);
-        let final_hash =
-            *dsm::crypto::blake3::domain_hash("DSM/identity-combine", &combined_hash_data)
-                .as_bytes();
-        state.hash = final_hash;
-
-        // Store in the device genesis states
-        {
-            let device_id = state.device_info.device_id;
-            let mut device_states = self
-                .device_genesis_states
-                .write()
-                .map_err(|_| DsmError::internal("Error occurred", None::<std::io::Error>))?;
-            device_states.insert(device_id, state.clone());
-        }
-
-        Ok(state)
+        // Genesis MPC creation is intrinsically online and storage-node-coupled
+        // (WP §10, §14; storage-node spec): the ceremony requires N≥3 distinct
+        // storage nodes that each contribute a reveal in a two-phase
+        // commit/reveal handshake. The previous implementation here pinned a
+        // hard-coded `n1/n2/n3` set and called a local-RNG path that defeated
+        // the threshold security argument; that path is now removed at the
+        // core layer.
+        //
+        // Until a real `SdkGenesisMpcTransport` (storage-node REST client) is
+        // wired into `IdentitySDK`, this entrypoint MUST refuse to mint a fake
+        // genesis. Callers should construct the transport explicitly and call
+        // `dsm::core::identity::genesis_mpc::create_mpc_genesis_with_transport`
+        // directly until the SDK-side wrapper lands.
+        let _ = (device_info, participant_inputs, metadata);
+        Err(DsmError::invalid_operation(
+            "IdentitySDK::create_genesis: SdkGenesisMpcTransport not wired; \
+             genesis MPC requires interaction with ≥3 distinct storage nodes \
+             (WP §10/§14). Use create_mpc_genesis_with_transport with a real \
+             transport that performs the two-phase commit/reveal handshake \
+             against real storage-node endpoints.",
+        ))
     }
 
     /// Create a device-specific sub-genesis state
