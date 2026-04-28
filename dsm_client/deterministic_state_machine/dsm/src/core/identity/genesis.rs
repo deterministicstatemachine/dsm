@@ -177,8 +177,15 @@ impl KyberKey {
 
 // -------------------- Core hashing --------------------
 
+/// Recompute the genesis hash from a flat contribution list.
+///
+/// Retained for verifying replayed/imported genesis records: callers
+/// reconstruct the contribution list and compare against a stored hash.
+/// New flows should consume `session.genesis_id` directly (computed per
+/// whitepaper §2.5 in `genesis_mpc::compute_genesis_id`).
+#[allow(dead_code)]
 fn calculate_genesis_hash(contributions: &[Vec<u8>], anchor: &[u8]) -> Result<[u8; 32], DsmError> {
-    let mut hasher = dsm_domain_hasher("DSM/genesis");
+    let mut hasher = dsm_domain_hasher("DSM/genesis-replay");
     hasher.update(anchor);
     for contrib in contributions {
         hasher.update(contrib);
@@ -186,11 +193,13 @@ fn calculate_genesis_hash(contributions: &[Vec<u8>], anchor: &[u8]) -> Result<[u
     Ok(*hasher.finalize().as_bytes())
 }
 
+/// Per-genesis initial entropy seed (distinct sub-domain so the value
+/// is independent of the genesis hash even when inputs partially overlap).
 fn calculate_initial_entropy(
     genesis_hash: &[u8],
     contributions: &[Vec<u8>],
 ) -> Result<[u8; 32], DsmError> {
-    let mut hasher = dsm_domain_hasher("DSM/genesis");
+    let mut hasher = dsm_domain_hasher("DSM/genesis-initial-entropy");
     hasher.update(genesis_hash);
     for contrib in contributions {
         hasher.update(contrib);
@@ -198,13 +207,16 @@ fn calculate_initial_entropy(
     Ok(*hasher.finalize().as_bytes())
 }
 
+/// Sub-genesis entropy derivation for a device under a master genesis.
+/// Uses its own sub-domain so collisions with the genesis-hash and
+/// initial-entropy derivations are structurally impossible.
 fn calculate_device_entropy(
     sub_genesis_hash: &[u8],
     master_entropy: &[u8],
     device_id: &str,
     device_specific_entropy: &[u8],
 ) -> Result<[u8; 32], DsmError> {
-    let mut hasher = dsm_domain_hasher("DSM/genesis");
+    let mut hasher = dsm_domain_hasher("DSM/sub-genesis-device-entropy");
     hasher.update(sub_genesis_hash);
     hasher.update(master_entropy);
     hasher.update(device_id.as_bytes());
@@ -311,23 +323,39 @@ pub fn process_invalidation(identity: &Identity, request: &[u8]) -> Result<bool,
 
 // -------------------- Verification --------------------
 
+/// Structural sanity check on a `GenesisState`.
+///
+/// Byte-exact spec-conformant recomputation of `G` requires the full
+/// public input tuple `(device_id, sorted participants, device_entropy,
+/// mpc_entropies, metadata)` — that lives on `GenesisSession`, not on
+/// the post-conversion `GenesisState`.  This check therefore validates
+/// only the structural invariants:
+///   - ≥3 MPC contributions (whitepaper §2.5 floor; n-of-n).
+///   - Genesis hash and initial-entropy fields are non-zero.
+///   - Initial entropy matches the deterministic re-derivation from
+///     `(genesis_hash, contributions)` under the
+///     `"DSM/genesis-initial-entropy"` sub-domain.
+///
+/// For full §2.5 byte-recompute, see
+/// `genesis_mpc::tests::genesis_id_is_recomputable_from_public_inputs`,
+/// which operates on a `GenesisSession` where the inputs are still
+/// available.
 pub fn verify_genesis_state(genesis: &GenesisState) -> Result<bool, DsmError> {
-    // Whitepaper §2.5 requires ≥3 contributions (n-of-n; not threshold).
     if genesis.contributions.len() < 3 {
         return Ok(false);
     }
+    if genesis.hash == [0u8; 32] {
+        return Ok(false);
+    }
+    if genesis.initial_entropy == [0u8; 32] {
+        return Ok(false);
+    }
 
-    let anchor = b"genesis";
     let contribs: Vec<Vec<u8>> = genesis
         .contributions
         .iter()
         .map(|c| c.data.clone())
         .collect();
-    let calc_hash = calculate_genesis_hash(&contribs, anchor)?;
-    if calc_hash != genesis.hash {
-        return Ok(false);
-    }
-
     let calc_entropy = calculate_initial_entropy(&genesis.hash, &contribs)?;
     if calc_entropy != genesis.initial_entropy {
         return Ok(false);
@@ -451,7 +479,11 @@ pub fn convert_session_to_genesis_state_compat(
     // Include metadata to stabilize derivation
     contribs.push(session.metadata.clone());
 
-    let hash = calculate_genesis_hash(&contribs, b"genesis")?;
+    // Use the session's genesis_id directly (computed per whitepaper §2.5 in
+    // genesis_mpc::compute_genesis_id) so the value the caller sees matches
+    // the value the session validated.  This closes Issue #252's sub-bug 3
+    // (caller-returned hash differing from session-level hash).
+    let hash = session.genesis_id;
     let initial_entropy = calculate_initial_entropy(&hash, &contribs)?;
 
     let signing_key = SigningKey::new()?;
