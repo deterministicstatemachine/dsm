@@ -377,7 +377,7 @@ pub fn create_genesis_via_blind_mpc_with_contributors(
     session.compute_genesis_id()?;
     session.validate_session()?;
 
-    let gs = convert_session_to_genesis_state_compat(&session)?;
+    let gs = convert_session_to_genesis_state(&session)?;
     if !verify_genesis_state(&gs)? {
         return Err(DsmError::invalid_operation(
             "MPC genesis verification failed",
@@ -432,7 +432,7 @@ impl std::fmt::Display for GenesisState {
 
 // -------------------- Session compatibility --------------------
 
-pub fn convert_session_to_genesis_state_compat(
+pub fn convert_session_to_genesis_state(
     session: &crate::core::identity::genesis_mpc::GenesisSession,
 ) -> Result<GenesisState, DsmError> {
     // Build deterministic contribution set from the session (bytes-only)
@@ -552,7 +552,7 @@ mod tests {
         )
         .await
         .expect("two-phase MPC should succeed");
-        let genesis = convert_session_to_genesis_state_compat(&session).expect("compat conversion");
+        let genesis = convert_session_to_genesis_state(&session).expect("compat conversion");
         assert_eq!(genesis.threshold, threshold);
         assert_eq!(genesis.hash.len(), 32);
         assert_eq!(genesis.initial_entropy.len(), 32);
@@ -605,8 +605,8 @@ mod tests {
             create_mpc_genesis_with_transport(device_id, nodes, 3, None, &transport, None)
                 .await
                 .expect("two-phase MPC should succeed");
-        let genesis = convert_session_to_genesis_state_compat(&session)
-            .expect("compat conversion should succeed");
+        let genesis =
+            convert_session_to_genesis_state(&session).expect("compat conversion should succeed");
         let ok = verify_genesis_state(&genesis).expect("verify_genesis_state callable");
         assert!(ok);
     }
@@ -659,7 +659,7 @@ mod tests {
                 Ok(x) => x,
                 Err(_) => return,
             };
-        let g = match convert_session_to_genesis_state_compat(&session) {
+        let g = match convert_session_to_genesis_state(&session) {
             Ok(g) => g,
             Err(_) => return,
         };

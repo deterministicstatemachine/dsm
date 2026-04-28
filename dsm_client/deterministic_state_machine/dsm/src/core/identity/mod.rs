@@ -38,17 +38,15 @@ pub mod genesis_mpc;
 // JNI bridge moved to dsm_sdk - see dsm_sdk/src/jni/unified_protobuf_bridge.rs
 
 use crate::types::state_types::MerkleProof;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use crate::types::error::DsmError;
 use crate::prelude::*; // common items incl. Uuid, etc.
-use crate::crypto::blake3::{dsm_domain_hasher, domain_hash};
+use crate::crypto::blake3::domain_hash;
 use blake3;
 use zeroize::Zeroize;
 
-// Import MPC types
-use crate::core::identity::genesis_mpc::GenesisSession;
 // Re-export GenesisState for other modules
 pub use crate::core::identity::genesis::{verify_genesis_state, GenesisState};
 
@@ -58,118 +56,6 @@ fn sanitize_genesis_state(genesis: &GenesisState) -> GenesisState {
     sanitized.signing_key.secret_key.zeroize();
     sanitized.kyber_keypair.secret_key.zeroize();
     sanitized
-}
-
-fn compute_contribution_merkle_root(contributions: &[genesis::Contribution]) -> Option<[u8; 32]> {
-    if contributions.is_empty() {
-        return None;
-    }
-
-    // Leaf = BLAKE3("DSM/GENESIS/CONTRIB/v2" || data)
-    let mut leaves: Vec<[u8; 32]> = contributions
-        .iter()
-        .map(|c| {
-            let mut h = dsm_domain_hasher("DSM/GENESIS/CONTRIB/v2");
-            h.update(&c.data);
-            *h.finalize().as_bytes()
-        })
-        .collect();
-
-    // Canonicalize order
-    leaves.sort();
-
-    // Pairwise hash up the tree (duplicate last if odd)
-    let mut level = leaves;
-    while level.len() > 1 {
-        let mut next = Vec::with_capacity(level.len().div_ceil(2));
-        let mut i = 0usize;
-        while i < level.len() {
-            let left = &level[i];
-            let right = if i + 1 < level.len() {
-                &level[i + 1]
-            } else {
-                &level[i]
-            };
-            let mut h = dsm_domain_hasher("DSM/genesis");
-            h.update(left);
-            h.update(right);
-            next.push(*h.finalize().as_bytes());
-            i += 2;
-        }
-        level = next;
-    }
-
-    level.into_iter().next()
-}
-
-/// Convert session to genesis state for compatibility (no encodings for IDs)
-pub fn convert_session_to_genesis_state(
-    session: &GenesisSession,
-) -> Result<GenesisState, IdentityError> {
-    // DBRW is an optional, local anti-cloning signal and must NOT be required to
-    // create or represent genesis / identity. Genesis must remain derivable and
-    // recoverable without DBRW present.
-
-    if session.storage_nodes.is_empty() {
-        return Err(IdentityError::InvalidParameter(
-            "MPC session did not record any storage node participants".into(),
-        ));
-    }
-
-    if session.threshold == 0 {
-        return Err(IdentityError::InvalidParameter(
-            "MPC session reported threshold of zero".into(),
-        ));
-    }
-
-    if session.genesis_id == [0u8; 32] {
-        return Err(IdentityError::GenesisError {
-            context: "MPC session is missing computed genesis identifier".into(),
-            step: "verify_session".into(),
-            internal_error: None,
-        });
-    }
-
-    let signing_key = genesis::SigningKey::new().map_err(|e| IdentityError::GenesisError {
-        context: "Failed to generate signing key".into(),
-        step: "key_generation".into(),
-        internal_error: Some(format!("{e:?}")),
-    })?;
-    let kyber_keypair = genesis::KyberKey::new().map_err(|e| IdentityError::GenesisError {
-        context: "Failed to generate kyber key".into(),
-        step: "key_generation".into(),
-        internal_error: Some(format!("{e:?}")),
-    })?;
-
-    let participants: HashSet<String> = session
-        .storage_nodes
-        .iter()
-        .map(|n| n.to_string())
-        .collect();
-
-    let contributions: Vec<genesis::Contribution> = session
-        .mpc_entropies
-        .iter()
-        .map(|entropy| genesis::Contribution {
-            data: entropy.to_vec(),
-            verified: true,
-        })
-        .collect();
-
-    let merkle_root = compute_contribution_merkle_root(&contributions);
-
-    Ok(GenesisState {
-        hash: session.genesis_id,
-        initial_entropy: session.device_entropy,
-        signing_key,
-        kyber_keypair,
-        threshold: session.threshold,
-        participants,
-        merkle_root,
-        // device_id is display-only in GenesisState; omit any encoding
-        device_id: None,
-        contributions,
-    })
 }
 
 /// Genesis creation result
