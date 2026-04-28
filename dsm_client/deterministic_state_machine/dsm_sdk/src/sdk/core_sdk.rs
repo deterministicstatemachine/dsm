@@ -14,7 +14,8 @@ use parking_lot::Mutex;
 use prost::Message;
 use std::sync::atomic::AtomicU64;
 
-use dsm::core::identity::genesis::create_genesis_via_blind_mpc;
+use dsm::core::identity::genesis::create_genesis_via_blind_mpc_with_contributors;
+use dsm::core::identity::genesis_mpc::generate_device_entropy;
 use dsm::core::state_machine::StateMachine;
 use dsm::core::token::policy::TokenPolicySystem;
 use dsm::types::error::DsmError;
@@ -553,6 +554,23 @@ impl CoreSDK {
         Ok(state)
     }
 
+    /// Register a CPTA policy for a custom token with the underlying
+    /// `TokenPolicySystem`.  This is the authoritative step that makes the
+    /// policy visible to `PolicyEnforcer` and binds `policy_commit =
+    /// PolicyAnchor::from_policy(&policy_file)` for all subsequent balance
+    /// ops on `token_id`.
+    ///
+    /// Must run before any balance-changing op references `token_id`.
+    pub async fn register_token_policy(
+        &self,
+        token_id: &str,
+        policy_file: dsm::types::policy_types::PolicyFile,
+    ) -> Result<dsm::types::policy_types::PolicyAnchor, DsmError> {
+        self.policy_system
+            .register_token_policy(token_id, policy_file)
+            .await
+    }
+
     /// Execute a DSM operation on a specific relationship chain (§2.2, §4.2).
     ///
     /// Returns `(State, AdvanceOutcome)` where the `State` is a compatibility
@@ -730,22 +748,31 @@ impl CoreSDK {
             .try_into()
             .map_err(|_| DsmError::invalid_operation("device_id must be 32 bytes"))?;
 
-        // Map participant bytes to NodeId using deterministic hex strings for display; core remains bytes-only
-        let storage_nodes: Vec<dsm::types::identifiers::NodeId> = mpc_participants
-            .into_iter()
-            .map(|p| {
-                dsm::types::identifiers::NodeId::new(crate::util::text_id::encode_base32_crockford(
-                    &p,
-                ))
-            })
-            .collect();
+        let mut storage_nodes = Vec::with_capacity(mpc_participants.len());
+        let mut contributor_entropies = Vec::with_capacity(mpc_participants.len());
+        for (index, participant) in mpc_participants.into_iter().enumerate() {
+            let contributor_entropy: [u8; 32] =
+                participant.as_slice().try_into().map_err(|_| {
+                    DsmError::invalid_operation("MPC participant entropy must be 32 bytes")
+                })?;
+            contributor_entropies.push(contributor_entropy);
+            storage_nodes.push(dsm::types::identifiers::NodeId::new(format!(
+                "storage-node-{}",
+                index
+            )));
+        }
 
         let threshold = storage_nodes.len();
+        let device_entropy = generate_device_entropy(&device_id_arr);
 
-        // Await the async MPC genesis function and propagate errors
-        let genesis_state =
-            create_genesis_via_blind_mpc(device_id_arr, storage_nodes, threshold, client_entropy)
-                .await?;
+        let genesis_state = create_genesis_via_blind_mpc_with_contributors(
+            device_id_arr,
+            storage_nodes,
+            threshold,
+            device_entropy,
+            contributor_entropies,
+            client_entropy,
+        )?;
         let public_key = genesis_state.signing_key.public_key.clone();
         let smt_root = genesis_state.merkle_root.unwrap_or(genesis_state.hash);
 
@@ -827,7 +854,7 @@ impl CoreSDK {
         // Execute mint via relationship path (self-loop for authority mint)
         let dev_id = self.device_info.device_id;
         let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&dev_id, &dev_id);
-        let era_pc = dsm::core::token::token_state_manager::resolve_policy_commit("ERA");
+        let era_pc = dsm::core::token::token_state_manager::resolve_policy_commit("ERA")?;
         let deltas = [dsm::types::device_state::BalanceDelta {
             policy_commit: era_pc,
             direction: dsm::types::device_state::BalanceDirection::Credit,
@@ -1395,8 +1422,7 @@ impl CoreSDK {
                 dsm::types::operations::Operation::Transfer {
                     token_id, amount, ..
                 } => {
-                    let tid = String::from_utf8_lossy(token_id);
-                    let pc = dsm::core::token::token_state_manager::resolve_policy_commit(&tid);
+                    let pc = self.resolve_policy_commit_strict(token_id)?;
                     vec![dsm::types::device_state::BalanceDelta {
                         policy_commit: pc,
                         direction: dsm::types::device_state::BalanceDirection::Credit,

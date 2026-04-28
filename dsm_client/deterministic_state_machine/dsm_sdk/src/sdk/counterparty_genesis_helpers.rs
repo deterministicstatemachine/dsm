@@ -212,7 +212,7 @@ pub fn create_genesis_binding(
 }
 
 // create_bilateral_branch + get_branch_tip_id deleted alongside HashChainSDK:
-// both were TODO-stubs that took a HashChainSDK but either ignored it
+// both were placeholder stubs that took a HashChainSDK but either ignored it
 // (`_hashchain_sdk`) or called `hashchain_sdk.merkle_root()` whose underlying
 // state-history tree is superseded by DeviceState's per-relationship SMT.
 // Zero external callers for either function.

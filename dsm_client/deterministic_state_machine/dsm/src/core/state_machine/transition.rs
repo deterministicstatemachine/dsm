@@ -1025,9 +1025,12 @@ fn apply_token_balance_delta(
                 })?
                 .to_string();
             // §8 Atomicity: all token ops MUST apply balance deltas in the
-            // same state transition. resolve_policy_commit handles both
-            // builtins (ERA/dBTC) and CPTA-anchored custom tokens.
-            let policy_commit = crate::core::token::resolve_policy_commit(&token_id_str);
+            // same state transition. resolve_policy_commit returns the
+            // builtin policy_commit (ERA/dBTC) or fails closed for
+            // CPTA-anchored custom tokens — those flow via the
+            // `execute_on_relationship` path with policy_commit carried
+            // on the `BalanceDelta`, not through this direct-op path.
+            let policy_commit = crate::core::token::resolve_policy_commit(&token_id_str)?;
             let is_recipient = to_device_id.len() == 32
                 && to_device_id.as_slice() == current_state.device_info.device_id.as_slice();
 
@@ -1116,7 +1119,7 @@ fn apply_token_balance_delta(
             let token_id_str = canonical_token_id_str(token_id)
                 .ok_or_else(|| DsmError::invalid_operation("Mint has malformed or empty token_id"))?
                 .to_string();
-            let policy_commit = crate::core::token::resolve_policy_commit(&token_id_str);
+            let policy_commit = crate::core::token::resolve_policy_commit(&token_id_str)?;
             let owner_key = crate::core::token::derive_canonical_balance_key(
                 &policy_commit,
                 &current_state.device_info.public_key,
@@ -1144,7 +1147,7 @@ fn apply_token_balance_delta(
             let token_id_str = canonical_token_id_str(token_id)
                 .ok_or_else(|| DsmError::invalid_operation("Burn has malformed or empty token_id"))?
                 .to_string();
-            let policy_commit = crate::core::token::resolve_policy_commit(&token_id_str);
+            let policy_commit = crate::core::token::resolve_policy_commit(&token_id_str)?;
             let owner_key = crate::core::token::derive_canonical_balance_key(
                 &policy_commit,
                 &current_state.device_info.public_key,

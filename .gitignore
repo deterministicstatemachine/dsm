@@ -248,6 +248,7 @@ Agent-Refinement-System-Final.md
 # ---------------------------------------------------------------------------
 .agents/
 .claude/
+docs/plans/
 .claude-plugin/
 .clinerules/
 .cursor/
@@ -261,3 +262,4 @@ plugins/caveman/
 rules/caveman-*.md
 skills/
 desktop-extensions/
+WEBSITE_ROADMAP.md

@@ -119,10 +119,11 @@ impl DlvPreCommitmentSdk {
             )
             .map_err(|e| DsmError::crypto("sphincs_sign", Some(e)))?;
             // Create vault strictly with provided inputs
-            let (vault_id, _op) = self
+            let (vault_id_bytes, _op) = self
                 .dlv_manager
                 .finalize_vault(draft, &creator_signature, None, None)
                 .await?;
+            let vault_id = crate::util::text_id::encode_base32_crockford(&vault_id_bytes);
 
             fork_vault_bindings.insert(fork_id.clone(), vault_id.clone());
             dlv_ids.push(vault_id.clone());
@@ -229,10 +230,15 @@ impl DlvPreCommitmentSdk {
         };
 
         // Attempt unlock, then claim
+        let vid32 = crate::util::text_id::decode_bytes32(&vault_id).ok_or_else(|| {
+            DsmError::invalid_operation(format!(
+                "execute_dlv_pre_commitment: fork vault_id {vault_id} is not a valid Base32 32-byte id"
+            ))
+        })?;
         let (unlocked, _unlock_op) = self
             .dlv_manager
             .try_unlock_vault(
-                &vault_id,
+                &vid32,
                 proof,
                 requester_kyber_pk,
                 &executor_signing_public_key,
@@ -248,7 +254,7 @@ impl DlvPreCommitmentSdk {
         let (_content, _claim_op) = self
             .dlv_manager
             .claim_vault_content(
-                &vault_id,
+                &vid32,
                 executor_kyber_sk,
                 &executor_signing_public_key,
                 &reference_state.hash,
@@ -442,7 +448,12 @@ impl DlvPreCommitmentSdk {
     ) -> Result<HashMap<String, VaultState>, DsmError> {
         let mut out = HashMap::new();
         for id in dlv_ids {
-            let v = self.dlv_manager.get_vault(id).await?;
+            let vid32 = crate::util::text_id::decode_bytes32(id).ok_or_else(|| {
+                DsmError::invalid_operation(format!(
+                    "get_dlv_status: vault_id {id} is not a valid Base32 32-byte id"
+                ))
+            })?;
+            let v = self.dlv_manager.get_vault(&vid32).await?;
             let guard = v.lock().await;
             out.insert(id.clone(), guard.state.clone());
         }

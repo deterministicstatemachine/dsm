@@ -178,7 +178,34 @@ message FulfillmentMechanism {
     And and = 7;
     Or or = 8;
     BitcoinHTLC bitcoin_htlc = 9;
+    AmmConstantProduct amm_constant_product = 10;
   }
+}
+
+// AMM (constant-product) liquidity vault.  The vault holds two token
+// reserves and unlocks via a routed swap: a trader puts `input_amount`
+// of `token_in` in, the vault releases `expected_output_amount` of
+// `token_out` per the constant-product invariant
+//   k = reserve_in * reserve_out   (post-fee adjusted at swap time)
+//
+// Reserves are vault-state, not advertisement state.  When a routed
+// unlock is accepted, both reserves advance atomically:
+//   reserve_in  += input_after_fee
+//   reserve_out -= output
+// and the vault republishes its `RoutingVaultAdvertisementV1` with
+// `updated_state_number++`.  A stale advertisement causes a mis-quoted
+// route, which the chunk-7 re-simulation gate catches at unlock time
+// (DeTFi spec §3, §8).
+//
+// `token_a` / `token_b` are stored in canonical lex-sorted order so
+// the vault has a single canonical pair identity regardless of trade
+// direction; `reserve_a` / `reserve_b` follow the same ordering.
+message AmmConstantProduct {
+  bytes  token_a            = 1 [(dsm_max_len)=64];   // lex-lower token id
+  bytes  token_b            = 2 [(dsm_max_len)=64];   // lex-higher token id
+  bytes  reserve_a_u128     = 3 [(dsm_fixed_len)=16]; // big-endian u128
+  bytes  reserve_b_u128     = 4 [(dsm_fixed_len)=16]; // big-endian u128
+  uint32 fee_bps            = 5;                      // basis points (e.g. 30 = 0.30 %)
 }
 
 message BitcoinHTLC {
@@ -699,7 +726,7 @@ message Invalidated { uint64 invalidated_state_number = 1; string reason = 2; by
 
 // Limbo vault canonical proto for storage/transport
 message LimboVaultProto {
-  string id = 1;
+  bytes id = 1 [(dsm_fixed_len)=32];
   uint64 created_at_state = 2;
   bytes creator_public_key = 3;
   FulfillmentMechanism fulfillment_condition = 4;
@@ -717,7 +744,7 @@ message LimboVaultProto {
 
 // Vault post wrapper for storage nodes
 message VaultPostProto {
-  string vault_id = 1;
+  bytes vault_id = 1 [(dsm_fixed_len)=32];
   string lock_description = 2;
   string creator_id = 3;
   bytes commitment_hash = 4;
@@ -787,13 +814,53 @@ message TokenCreateResponse {
 }
 
 // ------------------------- DLV Lifecycle Objects --------------------------
-message DlvCreateV3 {
-  // domain: "DSM/dlv/create\0"
-  bytes device_id      = 1 [(dsm_fixed_len)=32];
-  bytes policy_digest  = 2 [(dsm_fixed_len)=32];
-  bytes precommit      = 3 [(dsm_fixed_len)=32];
-  bytes vault_id       = 4 [(dsm_fixed_len)=32];
-  bytes parent_digest  = 5 [(dsm_fixed_len)=32]; // optional, empty allowed
+// Device-neutral, content-addressed vault template.
+// spec_id (implicit) := BLAKE3("DSM/dlv-spec\0" ||
+//     policy_digest || content_digest || fulfillment_digest || recipient_digest)
+// where recipient_digest = BLAKE3("DSM/dlv-recipient\0" || intended_recipient) if set
+// else 32 zero bytes.
+
+// Anchor enforcement posture for an AMM vault.
+//
+// REQUIRED: every routed unlock against this vault MUST carry
+//   `(vault_state_anchor_seq, vault_state_reserves_digest,
+//   vault_state_anchor_digest)` on its `RouteCommitHopV1`.  The
+//   chunks #7 gate verifies these against the vault's local
+//   `DLVManager` state (NOT against storage).  Missing fields or
+//   mismatch ⇒ typed reject.
+//
+// OPTIONAL: anchor fields are accepted if present but not required.
+//   When absent, gate falls through to the existing reserves-value
+//   check.  The unlock response surfaces a flag indicating identity-
+//   binding was not enforced.
+//
+// UNSPECIFIED: grandfathered behaviour for vaults predating Tier 2
+//   Foundation.  Treated as OPTIONAL by the gate.  New vaults SHOULD
+//   set REQUIRED.
+enum AnchorEnforcement {
+  ANCHOR_ENFORCEMENT_UNSPECIFIED = 0;
+  ANCHOR_ENFORCEMENT_OPTIONAL    = 1;
+  ANCHOR_ENFORCEMENT_REQUIRED    = 2;
+}
+
+message DlvSpecV1 {
+  bytes policy_digest       = 1 [(dsm_fixed_len)=32];  // CPTA anchor
+  bytes content_digest      = 2 [(dsm_fixed_len)=32];  // H("DSM/dlv-content", content)
+  bytes fulfillment_digest  = 3 [(dsm_fixed_len)=32];  // H("DSM/dlv-fulfillment", fulfillment_bytes)
+  bytes intended_recipient  = 4 [(dsm_max_len)=1568];  // Kyber pk, optional (empty = self-encrypted)
+  bytes fulfillment_bytes   = 5 [(dsm_max_len)=65535]; // canonical FulfillmentMechanism proto
+  bytes content             = 6 [(dsm_max_len)=65535]; // plaintext for local; sender-encrypted for posted
+  AnchorEnforcement anchor_enforcement = 7;
+}
+
+// Instance creation.  Carries everything Operation::DlvCreate needs.
+// The creator's chain_tip enters via execute_on_relationship, not this proto.
+message DlvInstantiateV1 {
+  DlvSpecV1 spec            = 1;
+  bytes creator_public_key  = 2 [(dsm_max_len)=65535]; // SPHINCS+ pk
+  bytes token_id            = 3 [(dsm_max_len)=64];    // optional; empty = content-only vault
+  bytes locked_amount_u128  = 4 [(dsm_fixed_len)=16];  // big-endian u128; all-zeros if no lock
+  bytes signature           = 5 [(dsm_max_len)=65535]; // SPHINCS+ over canonical Operation::DlvCreate bytes
 }
 
 message DlvOpenV3 {
@@ -801,6 +868,288 @@ message DlvOpenV3 {
   bytes device_id       = 1 [(dsm_fixed_len)=32];
   bytes vault_id        = 2 [(dsm_fixed_len)=32];
   bytes reveal_material = 3 [(dsm_max_len)=65535];
+}
+
+// ===================== ROUTE TRADE-FLOW REQUESTS (Track C.3) =====================
+// Frontend-facing wrappers for the AMM trade pipeline.  Each request
+// is consumed by a handler in `dsm_sdk/src/handlers/route_routes.rs`
+// that delegates to the audited `routing_sdk` / `routing_path_sdk` /
+// `route_commit_sdk` helpers.  Per the "all business logic stays in
+// Rust" rule, frontend never builds digests, signs, or runs path
+// search — it only frames typed inputs.
+message PublishRoutingAdvertisementRequest {
+  bytes  vault_id              = 1 [(dsm_fixed_len)=32];
+  bytes  token_a               = 2 [(dsm_max_len)=64];
+  bytes  token_b               = 3 [(dsm_max_len)=64];
+  bytes  reserve_a_u128        = 4 [(dsm_fixed_len)=16];
+  bytes  reserve_b_u128        = 5 [(dsm_fixed_len)=16];
+  uint32 fee_bps               = 6;
+  bytes  unlock_spec_digest    = 7 [(dsm_fixed_len)=32];
+  string unlock_spec_key       = 8;
+  bytes  owner_public_key      = 9 [(dsm_max_len)=65535];
+  // Full encoded `VaultPostProto` — the handler computes the
+  // BLAKE3 digest and binds it into the advertisement.  Frontend
+  // does not derive crypto.
+  bytes  vault_proto_bytes     = 10;
+}
+
+message RoutingPairRequest {
+  bytes token_a = 1 [(dsm_max_len)=64];
+  bytes token_b = 2 [(dsm_max_len)=64];
+}
+
+message FindAndBindRouteRequest {
+  bytes  input_token            = 1 [(dsm_max_len)=64];
+  bytes  output_token           = 2 [(dsm_max_len)=64];
+  bytes  input_amount_u128      = 3 [(dsm_fixed_len)=16];
+  uint32 max_hops               = 4; // 0 → server default (4)
+  bytes  nonce                  = 5 [(dsm_fixed_len)=32];
+  // initiator_public_key is left empty here on purpose — the
+  // subsequent `route.signRouteCommit` invoke stamps the wallet's
+  // pk and overwrites whatever the bind step put there.
+}
+
+// Owner-side summary of an AMM vault for the monitor screen.
+// Returned by `dlv.listOwnedAmmVaults` (one entry per vault whose
+// `creator_public_key` matches the local wallet's signing pk).
+message AmmVaultSummaryV1 {
+  bytes  vault_id                  = 1 [(dsm_fixed_len)=32];
+  bytes  token_a                   = 2 [(dsm_max_len)=64];
+  bytes  token_b                   = 3 [(dsm_max_len)=64];
+  bytes  reserve_a_u128            = 4 [(dsm_fixed_len)=16];
+  bytes  reserve_b_u128            = 5 [(dsm_fixed_len)=16];
+  uint32 fee_bps                   = 6;
+  // Mirror of the published advertisement's state_number; 0 if not advertised.
+  uint64 advertised_state_number   = 7;
+  // True if a routing-vault advertisement was found at the canonical
+  // pair key for this vault on storage nodes.
+  bool   routing_advertised        = 8;
+  // Tier 2 Foundation: vault's local current_sequence (the
+  // authoritative truth source for the chunks #7 gate).
+  uint64 anchor_sequence       = 9;
+  // Vault policy for anchor enforcement.  REQUIRED vaults reject
+  // routed unlocks lacking the anchor binding fields.
+  AnchorEnforcement anchor_enforcement = 10;
+}
+
+// Per-vault signed state anchor.  Owner publishes one at vault
+// creation (sequence=0) and one after every accepted routed unlock
+// (sequence=N+1).  Stored at `defi/vault-state/{vault_id_b32}/latest`
+// for off-device traders to read at quote time.  The chunks #7 gate
+// does NOT read this — it verifies against the local DLVManager.
+//
+// `reserves_digest` =
+//   BLAKE3("DSM/amm-reserves\0" || token_a || token_b ||
+//          reserve_a_u128_be || reserve_b_u128_be || fee_bps_be)
+//
+// `owner_signature` is SPHINCS+ over
+//   BLAKE3("DSM/vault-state-anchor\0" || vault_id || sequence_be ||
+//          reserves_digest)
+message VaultStateAnchorV1 {
+  bytes  vault_id           = 1 [(dsm_fixed_len)=32];
+  uint64 sequence           = 2;
+  bytes  reserves_digest    = 3 [(dsm_fixed_len)=32];
+  bytes  owner_public_key   = 4 [(dsm_max_len)=65535];
+  bytes  owner_signature    = 5 [(dsm_max_len)=65535];
+}
+
+// One hop in a `RouteCommitV1`.  Bound at routing time to the vault
+// advertisement digest + state number that was current when the path
+// was selected — recipients re-verify these fields against the live
+// `RoutingVaultAdvertisementV1` at unlock time, rejecting the route if
+// the vault's state has moved on (DeTFi spec §3.3 step 5).
+message RouteCommitHopV1 {
+  bytes  vault_id                  = 1 [(dsm_fixed_len)=32];
+  bytes  token_in                  = 2 [(dsm_max_len)=64];
+  bytes  token_out                 = 3 [(dsm_max_len)=64];
+  bytes  input_amount_u128         = 4 [(dsm_fixed_len)=16];
+  bytes  expected_output_amount_u128 = 5 [(dsm_fixed_len)=16];
+  uint32 fee_bps                   = 6;
+  // BLAKE3("DSM/routing-vault-ad", vault_proto_bytes) at routing time.
+  bytes  advertisement_digest      = 7 [(dsm_fixed_len)=32];
+  uint64 state_number              = 8;
+  bytes  unlock_spec_digest        = 9 [(dsm_fixed_len)=32];
+  bytes  owner_public_key          = 10 [(dsm_max_len)=65535];
+  // Tier 2 Foundation state-anchor binding.  Trader stamps these
+  // from the vault's `defi/vault-state/{vault_id}/latest` at quote
+  // time.  Gate verifies against local DLVManager state (NOT storage).
+  // For vaults with `anchor_enforcement = REQUIRED` these fields are
+  // mandatory; for OPTIONAL/UNSPECIFIED they may be absent.
+  uint64 vault_state_anchor_seq      = 11;
+  bytes  vault_state_reserves_digest = 12 [(dsm_fixed_len)=32];
+  bytes  vault_state_anchor_digest   = 13 [(dsm_fixed_len)=32];
+}
+
+// Off-chain routing proof produced by chunk #2's path search and
+// signed by the initiating trader.  The external commitment
+// `X = BLAKE3("DSM/ext\0" || canonical(RouteCommitV1{initiator_signature=[]}))`
+// is the value referenced by every vault on the route — when X is
+// published to storage nodes (see `ExternalCommitmentV1` below), all
+// vaults atomically become unlockable (DeTFi spec §3.2, §5.1).
+message RouteCommitV1 {
+  uint32 version                            = 1;
+  // 32-byte random nonce — replay protection (X re-uses across
+  // identical `(input, output, amount, hops, balances)` would otherwise
+  // collide).  Caller MUST pick a fresh nonce per route.
+  bytes  nonce                              = 2 [(dsm_fixed_len)=32];
+  bytes  input_token                        = 3 [(dsm_max_len)=64];
+  bytes  output_token                       = 4 [(dsm_max_len)=64];
+  bytes  input_amount_u128                  = 5 [(dsm_fixed_len)=16];
+  bytes  expected_final_output_amount_u128  = 6 [(dsm_fixed_len)=16];
+  uint64 total_fee_bps                      = 7;
+  repeated RouteCommitHopV1 hops            = 8;
+  // SPHINCS+ pk of the initiating trader.
+  bytes  initiator_public_key               = 9 [(dsm_max_len)=65535];
+  // SPHINCS+ signature over the canonical RouteCommit bytes with
+  // `initiator_signature` zeroed.  The same canonical-bytes
+  // computation is the input to the BLAKE3-derived external
+  // commitment X — sign-and-commit once.
+  bytes  initiator_signature                = 10 [(dsm_max_len)=65535];
+}
+
+// Storage-node anchor proving an external commitment X has been
+// published.  Each unlock-time verifier fetches this record at key
+// `defi/extcommit/{x_b32}`; existence implies "all vaults bound by X
+// may now unlock" (atomic visibility, DeTFi spec §3.2).
+//
+// The record is INTENTIONALLY minimal — storage nodes are dumb
+// mirrors, the authoritative truth is the RouteCommit bytes the
+// trader hands to each vault owner.  This anchor proves only that the
+// commitment exists; the recipient still recomputes X from the
+// RouteCommit they received and checks the binding.
+message ExternalCommitmentV1 {
+  uint32 version                = 1;
+  // 32-byte X = BLAKE3("DSM/ext\0" || canonical(RouteCommit)).
+  bytes  x                      = 2 [(dsm_fixed_len)=32];
+  // SPHINCS+ pk of the publisher (typically the initiating trader,
+  // matches RouteCommitV1.initiator_public_key).
+  bytes  publisher_public_key   = 3 [(dsm_max_len)=65535];
+  // Optional human-readable hint — purely informational, ignored by
+  // verification.  Useful for tooling / audit trails.
+  string label                  = 4;
+}
+
+// Storage-node-mirrored advertisement for a DeTFi routing vault.
+//
+// Keyed under `defi/vault/{token_a_b32}/{token_b_b32}/{vault_id_b32}` —
+// PUBLIC discovery by ordered token pair, no recipient scoping.  The
+// router enumerates all vaults matching `(tokenA, tokenB)` (or its
+// reverse, in which case reserves swap roles) and feeds the result
+// into a fee-weighted Dijkstra over the resulting liquidity graph
+// (DeTFi spec §3.3, §8.3).
+//
+// Storage nodes are dumb mirrors.  Authenticity for routing purposes
+// is rooted in `vault_proto_digest` binding the ad to a full vault
+// proto under `defi/vault-proto/{..}/{..}` — exactly the same pattern
+// as DbtcVaultAdvertisementV1 and PostedDlvAdvertisementV1, mounted
+// in a different keyspace.
+//
+// Token-pair canonicalisation: `token_a` and `token_b` are the
+// LEXICOGRAPHICALLY LOWER and HIGHER token-id bytes respectively.
+// Reserves are reported in the matching order (reserve_a is the
+// pool of token_a).  This collapses the "A→B" and "B→A" entries
+// for a single vault into one canonical advertisement; the router
+// flips reserve roles based on the requested trade direction.
+message RoutingVaultAdvertisementV1 {
+  uint32 version                 = 1;
+  bytes  vault_id                = 2 [(dsm_fixed_len)=32];
+  bytes  token_a                 = 3 [(dsm_max_len)=64];   // lexicographically lower
+  bytes  token_b                 = 4 [(dsm_max_len)=64];   // lexicographically higher
+  bytes  reserve_a_u128          = 5 [(dsm_fixed_len)=16]; // big-endian u128, pool of token_a
+  bytes  reserve_b_u128          = 6 [(dsm_fixed_len)=16]; // big-endian u128, pool of token_b
+  // Fee in basis points (e.g. 30 = 0.30 %).  Full-fixed integer keeps
+  // the routing graph weights deterministic and clockless.
+  uint32 fee_bps                 = 7;
+  // Hash of the canonical CPTA spec describing the vault's unlock
+  // condition set (constant product, stable swap, custom curve, …).
+  // Routers verify a vault is satisfiable by re-fetching the spec
+  // bytes via the `unlock_spec_key` storage pointer below.
+  bytes  unlock_spec_digest      = 8 [(dsm_fixed_len)=32];
+  string unlock_spec_key         = 9;
+  bytes  vault_proto_key         = 10; // not [(dsm_fixed_len)] — string blob
+  bytes  vault_proto_digest      = 11 [(dsm_fixed_len)=32]; // BLAKE3("DSM/routing-vault-ad", proto_bytes)
+  // Vault owner's SPHINCS+ pk.  Used by the router to compute the
+  // expected per-hop unlock receipt commit; not used for ad
+  // authenticity (see vault_proto_digest above).
+  bytes  owner_public_key        = 12 [(dsm_max_len)=65535];
+  string lifecycle_state         = 13; // "active" | "exhausted" | "withdrawn"
+  uint64 updated_state_number    = 14; // dedup signal; matches dBTC + posted-dlv pattern
+}
+
+// Typed request for `dlv.unlockRouted` — the routed atomic-unlock
+// path for DeTFi.  The trader hands each vault owner a copy of the
+// `RouteCommitV1` they signed; the vault owner then invokes this
+// route on their own device.  The handler runs the SDK eligibility
+// check (vault_id ∈ RouteCommit AND ExtCommit(X) visible at storage
+// nodes) before emitting the standard `Operation::DlvUnlock` on the
+// vault owner's self-loop.
+//
+// Atomic execution model: each vault unlocks INDEPENDENTLY on its
+// owner's hash chain — the coordination point is the
+// `ExternalCommitmentV1` anchor.  Until X is published all vaults
+// reject; once it is, all vaults accept.  No global coordinator.
+message DlvUnlockRoutedV1 {
+  bytes vault_id              = 1 [(dsm_fixed_len)=32];
+  bytes device_id             = 2 [(dsm_fixed_len)=32];
+  // Canonical `RouteCommitV1` bytes the trader produced via
+  // `route_commit_sdk::bind_path_to_route_commit` + signed.
+  bytes route_commit_bytes    = 3 [(dsm_max_len)=65535];
+  // SPHINCS+ pk of the unlocker (vault owner / claimant).
+  bytes unlocker_public_key   = 4 [(dsm_max_len)=65535];
+  // SPHINCS+ signature over canonical Operation::DlvUnlock bytes.
+  bytes signature             = 5 [(dsm_max_len)=65535];
+}
+
+// Typed request for `dlv.invalidate`.  Replaces the inline
+// `[32-byte vault_id][utf8 reason]` body shape used pre-Track-A; the
+// canonical Operation::DlvInvalidate carries the same fields.
+message DlvInvalidateV1 {
+  bytes  vault_id              = 1 [(dsm_fixed_len)=32];
+  string reason                = 2 [(dsm_max_len)=512];   // optional human-readable reason
+  bytes  creator_public_key    = 3 [(dsm_max_len)=65535]; // SPHINCS+ pk of vault creator
+  bytes  signature             = 4 [(dsm_max_len)=65535]; // SPHINCS+ over canonical Operation::DlvInvalidate
+}
+
+// Typed request for `dlv.claim`.  Replaces the inline
+// `[32-byte vault_id][claim_proof bytes]` body shape used pre-Track-A;
+// the canonical Operation::DlvClaim carries the same fields.
+message DlvClaimV1 {
+  bytes vault_id              = 1 [(dsm_fixed_len)=32];
+  bytes claim_proof           = 2 [(dsm_max_len)=65535];
+  bytes claimant_public_key   = 3 [(dsm_max_len)=65535]; // SPHINCS+ pk of claimant
+  bytes signature             = 4 [(dsm_max_len)=65535]; // SPHINCS+ over canonical Operation::DlvClaim
+}
+
+// Storage-node-mirrored advertisement for a posted-mode DLV.
+//
+// Keyed under `dlv/posted/{recipient_kyber_pk_b32}/{dlv_id_b32}`; the full
+// VaultPostProto is mirrored alongside at `dlv/posted-proto/{recipient_kyber_pk_b32}/{dlv_id_b32}`
+// and bound to this advertisement by `vault_proto_digest = BLAKE3("DSM/posted-dlv-ad", proto_bytes)`.
+//
+// Storage nodes are dumb mirrors. Authenticity is recipient-verified:
+//   1. creator_signature (SPHINCS+) over the canonical advertisement bytes with this field zeroed.
+//   2. vault_proto_digest binds the ad to the full vault post.
+//   3. The recipient's Kyber SK is required to decrypt vault content; the advertisement
+//      carries no secrets.
+//
+// Lifecycle state transitions: "active" -> "claimed" (recipient after successful
+// DlvClaim) or "active" -> "invalidated" (creator after DlvInvalidate).
+// Deduplication at load time: highest `updated_state_number` wins; lex-smallest
+// key tiebreaker. Matches the dBTC vault selector pattern (§13 storage nodes).
+message PostedDlvAdvertisementV1 {
+  uint32 version                 = 1;
+  bytes  dlv_id                  = 2 [(dsm_fixed_len)=32];
+  bytes  recipient_kyber_pk      = 3 [(dsm_max_len)=1568]; // ML-KEM-1024 public key
+  bytes  creator_public_key      = 4 [(dsm_max_len)=65535]; // SPHINCS+ pk of creator
+  bytes  policy_commit           = 5 [(dsm_fixed_len)=32]; // CPTA anchor of locked token (if any)
+  string vault_proto_key         = 6;  // storage-node key of the full VaultPostProto
+  bytes  vault_proto_digest      = 7 [(dsm_fixed_len)=32]; // BLAKE3("DSM/posted-dlv-ad", proto_bytes)
+  string lifecycle_state         = 8;  // "active" | "claimed" | "invalidated"
+  uint64 updated_state_number    = 9;  // dedup signal; increments monotonically per state change
+  bytes  creator_signature       = 10 [(dsm_max_len)=65535]; // SPHINCS+ over canonical ad bytes (field 10 zeroed)
+  // Optional claim attestation: set only on state transitions authored by the recipient
+  // ("claimed" ads). Signed by the recipient's Kyber-derived SPHINCS+ identity.
+  bytes  claimant_signature      = 11 [(dsm_max_len)=65535];
 }
 
 // ===================== STORAGE NODE ADMIN/GOSSIP/LIST (V1) ==================

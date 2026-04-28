@@ -302,7 +302,7 @@ impl Default for WalletConfig {
 pub struct WalletSDK {
     #[allow(dead_code)]
     core_sdk: Arc<CoreSDK>,
-    token_sdk: Arc<TokenSDK<IdentitySDK>>,
+    pub(crate) token_sdk: Arc<TokenSDK<IdentitySDK>>,
     config: RwLock<WalletConfig>,
     bilateral_chains: RwLock<HashMap<Vec<u8>, ChainTipInfo>>,
     transactions: RwLock<Vec<WalletTransaction>>,

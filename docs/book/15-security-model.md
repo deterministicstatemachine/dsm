@@ -197,6 +197,57 @@ This runs in the core crate (pure Rust, no I/O) and cannot be bypassed by the SD
 
 ---
 
+## AMM Vault Manipulation Resistance
+
+DeTFi AMM vaults use constant-product pricing. Each vault is its own market — there is no global price tape, no cross-vault aggregator, and no external oracle feed. This bounds the manipulation surface in a structurally specific way.
+
+### Per-Vault Pricing Function
+
+For an AMM vault with reserves `(reserve_a, reserve_b)` and fee `fee_bps`:
+
+```
+input_effective = input · (10000 - fee_bps) / 10000
+output          = reserve_b · input_effective / (reserve_a + input_effective)
+```
+
+The output is fully determined by the vault's local reserves and the trader's input. There is no external price reference.
+
+### Manipulation Bound
+
+A wash-trader who repeatedly trades against a low-liquidity vault distorts only that vault's local price. The cost of distortion scales with reserve depth:
+
+- **Shallow vault** (reserves comparable to trader's input): each round-trip pays approximately `2 · fee_bps · input` to the vault owner. The local price moves a lot, but no external system reads this vault's price, so the distortion is leverage-less. Manipulation accrues fees to the LP, not exploits.
+- **Deep vault** (reserves >> trader's input): each trade barely moves the price. Moving the price meaningfully requires input comparable to `reserve_a`, which is the cost of moving a real market.
+
+### No Cross-Vault Aggregation
+
+DSM does not aggregate prices across vaults into a system-wide reference. There is no module that reads "the DEMO_AAA/DEMO_BBB price" from many vaults and produces a global price tape. Each trade settles against the specific vault selected by the route; no other vault's price changes as a result.
+
+This eliminates the standard manipulation-as-leverage pattern from pool-based DEXes:
+
+- **No liquidation oracle to manipulate** — DSM has no liquidation engine consuming AMM prices. Liquidation, if introduced later, would be per-vault and reference that vault's own commitment chain, not a cross-vault average.
+- **No funding-rate index** — there is no perpetual-style funding mechanism that sums vault prices to derive a rate.
+- **No cross-vault arbitrage trigger** — vault prices diverging across LPs is the *expected* state. There is no protocol-level mechanism that fires actions based on price spread.
+
+The manipulation surface is bounded to "the specific vault you're trading against."
+
+### Trader-Side Protection
+
+A trader cannot be tricked by a manipulated vault. The chunks #1–#7 AMM re-simulation gate (`verify_amm_swap_against_reserves` in the routing path) re-runs the constant-product math against the vault's current reserves at unlock time. The trader's signed route commit references specific reserves; if the vault's reserves have moved since the trader's quote (manipulated or not), the gate produces `OutputMismatch` and rejects. The trade fails safely — no funds move, no state advances.
+
+When intent-bounds (Tier 2) lands, the trader will additionally specify `min_out`, `max_fee`, and expiry on the route commit. Even if the vault's quoted output passes the constant-product math, `min_out` provides an explicit slippage envelope set by the trader.
+
+### What This Does NOT Cover
+
+This bound applies to single-vault manipulation. It does not address:
+
+- Cross-vault stitched-receipt safety (Tier 2: per-vault state registry + SMT inclusion proofs).
+- Encumbrance + double-claim deferral (Tier 2: pending-claim availability).
+- Route-set membership proofs (Tier 2).
+- Adversarial routing service nodes (Tier 3: the off-chain Dijkstra service is out-of-scope for current safety claims).
+
+---
+
 ## Known Security Considerations
 
 1. **DBRW thermal feedback** — health states exist but are not yet surfaced to the frontend UI

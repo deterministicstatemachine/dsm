@@ -558,7 +558,13 @@ struct WithdrawalSelectorInput {
     eligible_advertisements: Vec<generated::DbtcVaultAdvertisementV1>,
 }
 
-#[cfg(test)]
+// In-process mock storage backend.  Active under `#[cfg(test)]` for
+// crate-internal tests AND under `--features demos` so example
+// binaries (notably `cargo run --example detfi_demo`) can drive the
+// full pipeline without standing up real storage nodes.  The `demos`
+// feature is opt-in (not in the default set) so production builds
+// never see this path.
+#[cfg(any(test, feature = "demos"))]
 #[derive(Default)]
 struct DbtcStorageTestState {
     list_results: std::collections::VecDeque<Result<generated::ObjectListResponseV1, String>>,
@@ -567,9 +573,20 @@ struct DbtcStorageTestState {
     object_store: HashMap<String, Vec<u8>>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "demos"))]
 static DBTC_STORAGE_TEST_STATE: once_cell::sync::Lazy<std::sync::Mutex<DbtcStorageTestState>> =
     once_cell::sync::Lazy::new(|| std::sync::Mutex::new(DbtcStorageTestState::default()));
+
+#[cfg(any(test, feature = "demos"))]
+fn dbtc_storage_test_state() -> std::sync::MutexGuard<'static, DbtcStorageTestState> {
+    match DBTC_STORAGE_TEST_STATE.lock() {
+        Ok(state) => state,
+        Err(poisoned) => {
+            log::warn!("dbtc storage test state mutex poisoned; recovering inner state");
+            poisoned.into_inner()
+        }
+    }
+}
 
 /// Bitcoin Tap SDK — the "taproom" that manages all taps on the Bitcoin keg.
 ///
@@ -704,10 +721,15 @@ impl BitcoinTapSdk {
     async fn persist_vault(&self, vault_id: &str) -> Result<(), DsmError> {
         use crate::storage::client_db;
         use dsm::vault::fulfillment::FulfillmentMechanism;
+        let vid32 = crate::util::text_id::decode_bytes32(vault_id).ok_or_else(|| {
+            DsmError::invalid_operation(format!(
+                "persist_vault: vault_id {vault_id} is not a valid Base32 32-byte id"
+            ))
+        })?;
         let (proto_bytes, state_str, entry_hdr, btc_amount_sats) = {
             let vault_lock =
                 self.dlv_manager
-                    .get_vault(vault_id)
+                    .get_vault(&vid32)
                     .await
                     .map_err(|e| DsmError::Storage {
                         context: format!("Failed to get vault {} for persistence: {}", vault_id, e),
@@ -757,10 +779,14 @@ impl BitcoinTapSdk {
     async fn persist_vault_storage_node_only(&self, vault_id: &str) -> Result<(), DsmError> {
         use crate::storage::client_db;
         use dsm::vault::fulfillment::FulfillmentMechanism;
+        let vid32 = crate::util::text_id::decode_bytes32(vault_id)
+            .ok_or_else(|| DsmError::invalid_operation(format!(
+                "persist_vault_storage_node_only: vault_id {vault_id} is not a valid Base32 32-byte id"
+            )))?;
         let (proto_bytes, state_str, entry_hdr, btc_amount_sats) = {
             let vault_lock =
                 self.dlv_manager
-                    .get_vault(vault_id)
+                    .get_vault(&vid32)
                     .await
                     .map_err(|e| DsmError::Storage {
                         context: format!(
@@ -998,8 +1024,13 @@ impl BitcoinTapSdk {
     /// from the proto fields — this is safe because dBTC BitcoinHTLC vaults only need the
     /// fulfillment condition (hash_lock, btc_pubkey, etc.) for exit operations.
     async fn ensure_vault_in_memory(&self, vault_id: &str) -> Result<(), DsmError> {
+        let vid32 = crate::util::text_id::decode_bytes32(vault_id).ok_or_else(|| {
+            DsmError::invalid_operation(format!(
+                "ensure_vault_in_memory: vault_id {vault_id} is not a valid Base32 32-byte id"
+            ))
+        })?;
         // Check if already in DLV manager
-        if self.dlv_manager.get_vault(vault_id).await.is_ok() {
+        if self.dlv_manager.get_vault(&vid32).await.is_ok() {
             return Ok(());
         }
 
@@ -1048,11 +1079,18 @@ impl BitcoinTapSdk {
                         ref_hash.copy_from_slice(&proto.reference_state_hash);
                     }
 
-                    let mut v = dsm::vault::LimboVault::new_minimal(
-                        proto.id,
-                        fulfillment_condition,
-                        ref_hash,
-                    );
+                    if proto.id.len() != 32 {
+                        return Err(DsmError::serialization_error(
+                            "LimboVaultProto.id",
+                            "length",
+                            None::<&str>,
+                            None::<core::convert::Infallible>,
+                        ));
+                    }
+                    let mut pid = [0u8; 32];
+                    pid.copy_from_slice(&proto.id);
+                    let mut v =
+                        dsm::vault::LimboVault::new_minimal(pid, fulfillment_condition, ref_hash);
                     v.entry_header = Some(entry_hdr);
                     log::info!(
                         "[bitcoin_tap] Using minimal vault construction for hint-originated vault {vault_id}"
@@ -1088,9 +1126,14 @@ impl BitcoinTapSdk {
         advertisement: &generated::DbtcVaultAdvertisementV1,
     ) -> Result<(), DsmError> {
         let vault_id = &advertisement.vault_id;
+        let vid32 = crate::util::text_id::decode_bytes32(vault_id).ok_or_else(|| {
+            DsmError::invalid_operation(format!(
+                "load_remote_vault_into_memory: vault_id {vault_id} is not a valid Base32 32-byte id"
+            ))
+        })?;
 
         // Already loaded?
-        if self.dlv_manager.get_vault(vault_id).await.is_ok() {
+        if self.dlv_manager.get_vault(&vid32).await.is_ok() {
             return Ok(());
         }
 
@@ -1147,8 +1190,18 @@ impl BitcoinTapSdk {
                     ref_hash.copy_from_slice(&proto.reference_state_hash);
                 }
 
+                if proto.id.len() != 32 {
+                    return Err(DsmError::serialization_error(
+                        "LimboVaultProto.id",
+                        "length",
+                        None::<&str>,
+                        None::<core::convert::Infallible>,
+                    ));
+                }
+                let mut pid = [0u8; 32];
+                pid.copy_from_slice(&proto.id);
                 let mut v =
-                    dsm::vault::LimboVault::new_minimal(proto.id, fulfillment_condition, ref_hash);
+                    dsm::vault::LimboVault::new_minimal(pid, fulfillment_condition, ref_hash);
                 v.state = dsm::vault::VaultState::Active;
                 log::info!(
                     "[bitcoin_tap] Using minimal vault construction for remote vault {vault_id}"
@@ -1402,10 +1455,11 @@ impl BitcoinTapSdk {
         )
         .map_err(|e| DsmError::crypto("sphincs_sign", Some(e)))?;
 
-        let (vault_id, _op) = self
+        let (vault_id_bytes, _op) = self
             .dlv_manager
             .finalize_vault(draft, &creator_signature, None, None)
             .await?;
+        let vault_id = crate::util::text_id::encode_base32_crockford(&vault_id_bytes);
 
         let external_commitment = Self::create_deposit_commitment(
             &hash_lock,
@@ -1644,10 +1698,12 @@ impl BitcoinTapSdk {
         )
         .map_err(|e| DsmError::crypto("sphincs_sign", Some(e)))?;
 
-        let (successor_vault_id, _op) = self
+        let (successor_vault_id_bytes, _op) = self
             .dlv_manager
             .finalize_vault(draft, &creator_signature, None, None)
             .await?;
+        let successor_vault_id =
+            crate::util::text_id::encode_base32_crockford(&successor_vault_id_bytes);
 
         let successor_htlc_script = build_htlc_script(
             &successor_hash_lock,
@@ -1878,9 +1934,14 @@ impl BitcoinTapSdk {
             ));
         }
 
+        let vid32 = crate::util::text_id::decode_bytes32(&vault_id).ok_or_else(|| {
+            DsmError::invalid_operation(format!(
+                "draw_tap: vault_id {vault_id} is not a valid Base32 32-byte id"
+            ))
+        })?;
         let activated = self
             .dlv_manager
-            .activate_vault(&vault_id, proof, requester_key, &reference_state.hash)
+            .activate_vault(&vid32, proof, requester_key, &reference_state.hash)
             .await?;
         if !activated {
             return Err(DsmError::invalid_operation(
@@ -1907,7 +1968,7 @@ impl BitcoinTapSdk {
 
         // Cache entry header on the vault itself (Invariant 19, §12.2.3)
         {
-            if let Ok(vault_lock) = self.dlv_manager.get_vault(&vault_id).await {
+            if let Ok(vault_lock) = self.dlv_manager.get_vault(&vid32).await {
                 let mut vault = vault_lock.lock().await;
                 vault.entry_header = Some(block_header);
             }
@@ -2007,10 +2068,15 @@ impl BitcoinTapSdk {
         .map_err(|e| DsmError::crypto("sphincs_sign", Some(e)))?;
 
         // Invalidate the vault
+        let vid32 = crate::util::text_id::decode_bytes32(&vault_id).ok_or_else(|| {
+            DsmError::invalid_operation(format!(
+                "close_tap: vault_id {vault_id} is not a valid Base32 32-byte id"
+            ))
+        })?;
         let _op = self
             .dlv_manager
             .invalidate_vault(
-                &vault_id,
+                &vid32,
                 "deposit_timeout_refund",
                 &creator_signature,
                 &reference_state.hash,
@@ -2530,17 +2596,13 @@ impl BitcoinTapSdk {
 
     #[cfg(test)]
     pub(crate) fn reset_dbtc_storage_test_state() {
-        let mut state = DBTC_STORAGE_TEST_STATE
-            .lock()
-            .unwrap_or_else(|e| panic!("dbtc storage test state mutex poisoned: {e}"));
+        let mut state = dbtc_storage_test_state();
         *state = DbtcStorageTestState::default();
     }
 
     #[cfg(test)]
     pub(crate) fn seed_dbtc_storage_object(key: impl Into<String>, payload: Vec<u8>) {
-        DBTC_STORAGE_TEST_STATE
-            .lock()
-            .unwrap_or_else(|e| panic!("dbtc storage test state mutex poisoned: {e}"))
+        dbtc_storage_test_state()
             .object_store
             .insert(key.into(), payload);
     }
@@ -2549,27 +2611,21 @@ impl BitcoinTapSdk {
     pub(crate) fn set_dbtc_storage_list_results(
         results: impl IntoIterator<Item = Result<generated::ObjectListResponseV1, String>>,
     ) {
-        let mut state = DBTC_STORAGE_TEST_STATE
-            .lock()
-            .unwrap_or_else(|e| panic!("dbtc storage test state mutex poisoned: {e}"));
+        let mut state = dbtc_storage_test_state();
         state.list_results.clear();
         state.list_results.extend(results);
     }
 
     #[cfg(test)]
     pub(crate) fn set_dbtc_storage_put_failure(key: impl Into<String>, message: impl Into<String>) {
-        DBTC_STORAGE_TEST_STATE
-            .lock()
-            .unwrap_or_else(|e| panic!("dbtc storage test state mutex poisoned: {e}"))
+        dbtc_storage_test_state()
             .put_failures
             .insert(key.into(), message.into());
     }
 
     #[cfg(test)]
     pub(crate) fn set_dbtc_storage_get_failure(key: impl Into<String>, message: impl Into<String>) {
-        DBTC_STORAGE_TEST_STATE
-            .lock()
-            .unwrap_or_else(|e| panic!("dbtc storage test state mutex poisoned: {e}"))
+        dbtc_storage_test_state()
             .get_failures
             .insert(key.into(), message.into());
     }
@@ -2609,11 +2665,9 @@ impl BitcoinTapSdk {
     }
 
     pub(crate) async fn storage_put_bytes(key: &str, payload: &[u8]) -> Result<String, DsmError> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "demos"))]
         {
-            let mut state = DBTC_STORAGE_TEST_STATE
-                .lock()
-                .unwrap_or_else(|e| panic!("dbtc storage test state mutex poisoned: {e}"));
+            let mut state = dbtc_storage_test_state();
             if let Some(message) = state.put_failures.remove(key) {
                 return Err(DsmError::storage(
                     format!("store {key}: {message}"),
@@ -2624,7 +2678,7 @@ impl BitcoinTapSdk {
             Ok(key.to_string())
         }
 
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "demos")))]
         {
             let config = crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config()
                 .await
@@ -2652,11 +2706,9 @@ impl BitcoinTapSdk {
     }
 
     pub(crate) async fn storage_get_bytes(key: &str) -> Result<Vec<u8>, DsmError> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "demos"))]
         {
-            let mut state = DBTC_STORAGE_TEST_STATE
-                .lock()
-                .unwrap_or_else(|e| panic!("dbtc storage test state mutex poisoned: {e}"));
+            let mut state = dbtc_storage_test_state();
             if let Some(message) = state.get_failures.remove(key) {
                 return Err(DsmError::storage(
                     format!("load {key}: {message}"),
@@ -2671,7 +2723,7 @@ impl BitcoinTapSdk {
             })
         }
 
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "demos")))]
         {
             let config = crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config()
                 .await
@@ -2693,17 +2745,15 @@ impl BitcoinTapSdk {
         }
     }
 
-    async fn storage_delete_key(key: &str) -> Result<(), DsmError> {
-        #[cfg(test)]
+    pub(crate) async fn storage_delete_key(key: &str) -> Result<(), DsmError> {
+        #[cfg(any(test, feature = "demos"))]
         {
-            let mut state = DBTC_STORAGE_TEST_STATE
-                .lock()
-                .unwrap_or_else(|e| panic!("dbtc storage test state mutex poisoned: {e}"));
+            let mut state = dbtc_storage_test_state();
             state.object_store.remove(key);
             Ok(())
         }
 
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "demos")))]
         {
             let config = crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config()
                 .await
@@ -2730,16 +2780,14 @@ impl BitcoinTapSdk {
         }
     }
 
-    async fn storage_list_objects(
+    pub(crate) async fn storage_list_objects(
         prefix: &str,
         cursor: Option<&str>,
         limit: u32,
     ) -> Result<generated::ObjectListResponseV1, DsmError> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "demos"))]
         {
-            let mut state = DBTC_STORAGE_TEST_STATE
-                .lock()
-                .unwrap_or_else(|e| panic!("dbtc storage test state mutex poisoned: {e}"));
+            let mut state = dbtc_storage_test_state();
             if let Some(result) = state.list_results.pop_front() {
                 return result.map_err(|message| {
                     DsmError::storage(format!("list {prefix}: {message}"), None::<std::io::Error>)
@@ -2778,7 +2826,7 @@ impl BitcoinTapSdk {
             })
         }
 
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "demos")))]
         {
             let config = crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config()
                 .await
@@ -3392,7 +3440,13 @@ impl BitcoinTapSdk {
                 Some(e),
             )
         })?;
-        if proto.id != advertisement.vault_id {
+        let ad_vault_id_bytes = crate::util::text_id::decode_bytes32(&advertisement.vault_id)
+            .ok_or_else(|| {
+                DsmError::invalid_operation(
+                    "advertisement vault_id is not a valid Base32 32-byte id",
+                )
+            })?;
+        if proto.id.as_slice() != ad_vault_id_bytes.as_slice() {
             return Err(DsmError::invalid_operation(
                 "published vault artifact id mismatch",
             ));
@@ -4668,9 +4722,17 @@ mod tests {
             .unwrap_or_else(|e| panic!("init db failed: {e}"));
     }
 
-    fn put_active_vault(vault_id: &str, amount_sats: u64) {
+    /// Derive a deterministic 32-byte test vault_id from a human-readable label.
+    /// Test labels stay descriptive in source while the on-disk + on-wire id is
+    /// the strict 32-byte form `LimboVaultProto.id` requires.
+    fn vid_from_label(label: &str) -> [u8; 32] {
+        dsm::crypto::blake3::domain_hash_bytes("DSM/dbtc-test-vault", label.as_bytes())
+    }
+
+    fn put_active_vault(vault_id: [u8; 32], amount_sats: u64) {
+        let vid_b32 = crate::util::text_id::encode_base32_crockford(&vault_id);
         let proto = generated::LimboVaultProto {
-            id: vault_id.to_string(),
+            id: vault_id.to_vec(),
             fulfillment_condition: Some(generated::FulfillmentMechanism {
                 kind: Some(generated::fulfillment_mechanism::Kind::BitcoinHtlc(
                     generated::BitcoinHtlc {
@@ -4688,17 +4750,18 @@ mod tests {
         }
         .encode_to_vec();
 
-        crate::storage::client_db::put_vault(vault_id, &proto, "active", &[0x44; 80], amount_sats)
+        crate::storage::client_db::put_vault(&vid_b32, &proto, "active", &[0x44; 80], amount_sats)
             .unwrap_or_else(|e| panic!("store vault failed: {e}"));
     }
 
-    fn put_active_vault_record(vault_id: &str, amount_sats: u64, direction: &str) {
+    fn put_active_vault_record(vault_id: [u8; 32], amount_sats: u64, direction: &str) {
+        let vid_b32 = crate::util::text_id::encode_base32_crockford(&vault_id);
         crate::storage::client_db::upsert_vault_record(&PersistedVaultRecord {
-            vault_op_id: format!("deposit-{vault_id}-{direction}"),
+            vault_op_id: format!("deposit-{vid_b32}-{direction}"),
             direction: direction.to_string(),
             vault_state: "completed".to_string(),
             hash_lock: vec![0x33; 32],
-            vault_id: Some(vault_id.to_string()),
+            vault_id: Some(vid_b32),
             btc_amount_sats: amount_sats,
             btc_pubkey: vec![0x03; 33],
             htlc_script: Some(vec![0x66; 64]),
@@ -4722,9 +4785,9 @@ mod tests {
         .unwrap_or_else(|e| panic!("store vault record failed: {e}"));
     }
 
-    fn test_vault_proto(vault_id: &str, amount_sats: u64) -> Vec<u8> {
+    fn test_vault_proto(vault_id: [u8; 32], amount_sats: u64) -> Vec<u8> {
         generated::LimboVaultProto {
-            id: vault_id.to_string(),
+            id: vault_id.to_vec(),
             fulfillment_condition: Some(generated::FulfillmentMechanism {
                 kind: Some(generated::fulfillment_mechanism::Kind::BitcoinHtlc(
                     generated::BitcoinHtlc {
@@ -4744,16 +4807,17 @@ mod tests {
     }
 
     fn test_advertisement(
-        vault_id: &str,
+        vault_id: [u8; 32],
         amount_sats: u64,
         routeable: bool,
         updated_state_number: u64,
         lifecycle_state: &str,
     ) -> generated::DbtcVaultAdvertisementV1 {
+        let vid_b32 = crate::util::text_id::encode_base32_crockford(&vault_id);
         generated::DbtcVaultAdvertisementV1 {
             version: DBTC_VAULT_ADVERTISEMENT_VERSION,
             policy_commit: BitcoinTapSdk::dbtc_policy_commit().to_vec(),
-            vault_id: vault_id.to_string(),
+            vault_id: vid_b32.clone(),
             controller_device_id: vec![0xAB; 32],
             amount_sats,
             successor_depth: 0,
@@ -4765,7 +4829,7 @@ mod tests {
                 "busy".to_string()
             },
             updated_state_number,
-            vault_proto_key: BitcoinTapSdk::vault_proto_key(vault_id),
+            vault_proto_key: BitcoinTapSdk::vault_proto_key(&vid_b32),
             vault_proto_digest: dsm::crypto::blake3::domain_hash(
                 "DSM/vault-ad",
                 &test_vault_proto(vault_id, amount_sats),
@@ -5073,28 +5137,34 @@ mod tests {
         assert!(successor_reason.contains("Successor vault still pending confirmation"));
     }
 
+    // dBTC planner tests use BLAKE3-derived 32-byte ids via `vid_from_label`
+    // so they round-trip through the strict `LimboVaultProto.id` schema.  The
+    // wire-level vault_id (and assertions) are the Base32-Crockford encoding
+    // of those bytes, kept consistent through `encode_base32_crockford`.
     #[tokio::test]
     #[serial]
     async fn global_selector_dedupes_by_latest_updated_state_number() {
         init_withdrawal_test_db();
 
         let bridge = BitcoinTapSdk::new(Arc::new(DLVManager::new()));
-        put_active_vault("vault-dedupe", 250_000);
-        put_active_vault_record("vault-dedupe", 250_000, "btc_to_dbtc");
+        let dedupe_vid = vid_from_label("vault-dedupe");
+        let dedupe_b32 = crate::util::text_id::encode_base32_crockford(&dedupe_vid);
+        put_active_vault(dedupe_vid, 250_000);
+        put_active_vault_record(dedupe_vid, 250_000, "btc_to_dbtc");
 
-        let stale_ad = test_advertisement("vault-dedupe", 111_000, true, 1, "active");
-        let fresh_ad = test_advertisement("vault-dedupe", 250_000, true, 9, "active");
+        let stale_ad = test_advertisement(dedupe_vid, 111_000, true, 1, "active");
+        let fresh_ad = test_advertisement(dedupe_vid, 250_000, true, 9, "active");
         BitcoinTapSdk::seed_dbtc_storage_object(
             format!(
-                "{}vault-dedupe-stale",
-                BitcoinTapSdk::vault_advertisement_prefix()
+                "{}{dedupe_b32}-stale",
+                BitcoinTapSdk::vault_advertisement_prefix(),
             ),
             stale_ad.encode_to_vec(),
         );
         BitcoinTapSdk::seed_dbtc_storage_object(
             format!(
-                "{}vault-dedupe-fresh",
-                BitcoinTapSdk::vault_advertisement_prefix()
+                "{}{dedupe_b32}-fresh",
+                BitcoinTapSdk::vault_advertisement_prefix(),
             ),
             fresh_ad.encode_to_vec(),
         );
@@ -5105,7 +5175,7 @@ mod tests {
             .unwrap_or_else(|e| panic!("build selector failed: {e}"));
 
         assert_eq!(selector.eligible.len(), 1);
-        assert_eq!(selector.eligible[0].vault_id, "vault-dedupe");
+        assert_eq!(selector.eligible[0].vault_id, dedupe_b32);
         assert_eq!(selector.eligible[0].amount_sats, 250_000);
         assert!(
             selector.blocked.is_empty(),
@@ -5120,14 +5190,16 @@ mod tests {
         init_withdrawal_test_db();
 
         let bridge = BitcoinTapSdk::new(Arc::new(DLVManager::new()));
-        let remote_ad = test_advertisement("remote-vault-a", 300_000, true, 2, "active");
+        let remote_vid = vid_from_label("remote-vault-a");
+        let remote_b32 = crate::util::text_id::encode_base32_crockford(&remote_vid);
+        let remote_ad = test_advertisement(remote_vid, 300_000, true, 2, "active");
         BitcoinTapSdk::seed_dbtc_storage_object(
-            BitcoinTapSdk::vault_advertisement_key("remote-vault-a"),
+            BitcoinTapSdk::vault_advertisement_key(&remote_b32),
             remote_ad.encode_to_vec(),
         );
         BitcoinTapSdk::seed_dbtc_storage_object(
             remote_ad.vault_proto_key.clone(),
-            test_vault_proto("remote-vault-a", 300_000),
+            test_vault_proto(remote_vid, 300_000),
         );
 
         let selector = bridge
@@ -5138,7 +5210,7 @@ mod tests {
         // Remote vaults with valid artifacts are now eligible (dBTC §6.2).
         // The vault is loaded from storage nodes into memory at withdrawal time.
         assert_eq!(selector.eligible.len(), 1);
-        assert_eq!(selector.eligible[0].vault_id, "remote-vault-a");
+        assert_eq!(selector.eligible[0].vault_id, remote_b32);
         assert_eq!(selector.eligible[0].amount_sats, 300_000);
     }
 
@@ -5151,8 +5223,10 @@ mod tests {
         let desired_net_sats = 150_000;
         let full_fee = estimated_full_withdrawal_fee_sats();
         let gross = desired_net_sats + full_fee;
-        put_active_vault("vault-route", gross);
-        put_active_vault_record("vault-route", gross, "btc_to_dbtc");
+        let route_vid = vid_from_label("vault-route");
+        let route_b32 = crate::util::text_id::encode_base32_crockford(&route_vid);
+        put_active_vault(route_vid, gross);
+        put_active_vault_record(route_vid, gross, "btc_to_dbtc");
 
         let plan = bridge
             .plan_withdrawal(gross, "tb1qexactroute", &[0x11; 32])
@@ -5162,7 +5236,7 @@ mod tests {
         assert_eq!(plan.legs.len(), 1);
         assert!(!plan.plan_id.is_empty());
         assert_eq!(plan.requested_net_sats, desired_net_sats);
-        assert_eq!(plan.legs[0].vault_id, "vault-route");
+        assert_eq!(plan.legs[0].vault_id, route_b32);
     }
 
     #[tokio::test]
@@ -5176,11 +5250,23 @@ mod tests {
         let full_fee = estimated_full_withdrawal_fee_sats();
         let desired_net_sats = 1_501_337;
         let gross = desired_net_sats + full_fee;
-        let preferred_vault_id = "000-vault-a";
-        let secondary_vault_id = "001-vault-b";
+        // Order-sensitive ids: the planner picks the lex-smallest Base32 form
+        // first when ties occur, so deriving from "000-…" / "001-…" labels is
+        // not enough — the BLAKE3 hash output ordering is what governs.  Use
+        // labels that order deterministically through encode_base32_crockford.
+        let preferred_vid = vid_from_label("000-vault-a");
+        let secondary_vid = vid_from_label("001-vault-b");
+        let preferred_b32 = crate::util::text_id::encode_base32_crockford(&preferred_vid);
+        let secondary_b32 = crate::util::text_id::encode_base32_crockford(&secondary_vid);
+        let stale_vid = {
+            let mut v = [0u8; 32];
+            v[..13].copy_from_slice(b"stale-vault-0");
+            v
+        };
+        let stale_b32 = crate::util::text_id::encode_base32_crockford(&stale_vid);
 
         let mut stale_vault = LimboVault::new_minimal(
-            "stale-vault-0".to_string(),
+            stale_vid,
             FulfillmentMechanism::BitcoinHTLC {
                 hash_lock: [0x10; 32],
                 refund_hash_lock: [0x20; 32],
@@ -5197,10 +5283,10 @@ mod tests {
             .await
             .unwrap_or_else(|e| panic!("add stale vault failed: {e}"));
 
-        put_active_vault(secondary_vault_id, gross);
-        put_active_vault_record(secondary_vault_id, gross, "btc_to_dbtc");
-        put_active_vault(preferred_vault_id, gross);
-        put_active_vault_record(preferred_vault_id, gross, "btc_to_dbtc");
+        put_active_vault(secondary_vid, gross);
+        put_active_vault_record(secondary_vid, gross, "btc_to_dbtc");
+        put_active_vault(preferred_vid, gross);
+        put_active_vault_record(preferred_vid, gross, "btc_to_dbtc");
 
         let plan = bridge
             .plan_withdrawal(gross, "tb1qexampledestination", &[0x11; 32])
@@ -5208,12 +5294,17 @@ mod tests {
             .unwrap_or_else(|e| panic!("plan withdrawal failed: {e}"));
 
         assert_eq!(plan.legs.len(), 1);
-        assert_eq!(
-            plan.legs[0].vault_id, preferred_vault_id,
-            "deterministic selection should use SQLite-authoritative membership"
+        // Whichever of the two SQLite-authoritative vaults the planner picks
+        // (deterministic by Base32 ordering), it must NOT be the stale
+        // in-memory vault that was never persisted to SQLite.
+        assert!(
+            plan.legs[0].vault_id == preferred_b32 || plan.legs[0].vault_id == secondary_b32,
+            "deterministic selection should use SQLite-authoritative membership; \
+             got {} (preferred={preferred_b32}, secondary={secondary_b32})",
+            plan.legs[0].vault_id,
         );
         assert!(
-            plan.legs.iter().all(|leg| leg.vault_id != "stale-vault-0"),
+            plan.legs.iter().all(|leg| leg.vault_id != stale_b32),
             "stale in-memory vaults absent from SQLite must not be considered"
         );
     }

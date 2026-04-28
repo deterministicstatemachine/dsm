@@ -128,6 +128,50 @@ proto3.util.setEnumType(TransactionType, "dsm.TransactionType", [
 ]);
 
 /**
+ * Anchor enforcement posture for an AMM vault.
+ *
+ * REQUIRED: every routed unlock against this vault MUST carry
+ *   `(vault_state_anchor_seq, vault_state_reserves_digest,
+ *   vault_state_anchor_digest)` on its `RouteCommitHopV1`.  The
+ *   chunks #7 gate verifies these against the vault's local
+ *   `DLVManager` state (NOT against storage).  Missing fields or
+ *   mismatch ⇒ typed reject.
+ *
+ * OPTIONAL: anchor fields are accepted if present but not required.
+ *   When absent, gate falls through to the existing reserves-value
+ *   check.  The unlock response surfaces a flag indicating identity-
+ *   binding was not enforced.
+ *
+ * UNSPECIFIED: grandfathered behaviour for vaults predating Tier 2
+ *   Foundation.  Treated as OPTIONAL by the gate.  New vaults SHOULD
+ *   set REQUIRED.
+ *
+ * @generated from enum dsm.AnchorEnforcement
+ */
+export enum AnchorEnforcement {
+  /**
+   * @generated from enum value: ANCHOR_ENFORCEMENT_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: ANCHOR_ENFORCEMENT_OPTIONAL = 1;
+   */
+  OPTIONAL = 1,
+
+  /**
+   * @generated from enum value: ANCHOR_ENFORCEMENT_REQUIRED = 2;
+   */
+  REQUIRED = 2,
+}
+// Retrieve enum metadata with: proto3.getEnumType(AnchorEnforcement)
+proto3.util.setEnumType(AnchorEnforcement, "dsm.AnchorEnforcement", [
+  { no: 0, name: "ANCHOR_ENFORCEMENT_UNSPECIFIED" },
+  { no: 1, name: "ANCHOR_ENFORCEMENT_OPTIONAL" },
+  { no: 2, name: "ANCHOR_ENFORCEMENT_REQUIRED" },
+]);
+
+/**
  * @generated from enum dsm.StorageNodeStatus
  */
 export enum StorageNodeStatus {
@@ -2376,6 +2420,12 @@ export class FulfillmentMechanism extends Message<FulfillmentMechanism> {
      */
     value: BitcoinHTLC;
     case: "bitcoinHtlc";
+  } | {
+    /**
+     * @generated from field: dsm.AmmConstantProduct amm_constant_product = 10;
+     */
+    value: AmmConstantProduct;
+    case: "ammConstantProduct";
   } | { case: undefined; value?: undefined } = { case: undefined };
 
   constructor(data?: PartialMessage<FulfillmentMechanism>) {
@@ -2394,6 +2444,7 @@ export class FulfillmentMechanism extends Message<FulfillmentMechanism> {
     { no: 7, name: "and", kind: "message", T: And, oneof: "kind" },
     { no: 8, name: "or", kind: "message", T: Or, oneof: "kind" },
     { no: 9, name: "bitcoin_htlc", kind: "message", T: BitcoinHTLC, oneof: "kind" },
+    { no: 10, name: "amm_constant_product", kind: "message", T: AmmConstantProduct, oneof: "kind" },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): FulfillmentMechanism {
@@ -2410,6 +2461,96 @@ export class FulfillmentMechanism extends Message<FulfillmentMechanism> {
 
   static equals(a: FulfillmentMechanism | PlainMessage<FulfillmentMechanism> | undefined, b: FulfillmentMechanism | PlainMessage<FulfillmentMechanism> | undefined): boolean {
     return proto3.util.equals(FulfillmentMechanism, a, b);
+  }
+}
+
+/**
+ * AMM (constant-product) liquidity vault.  The vault holds two token
+ * reserves and unlocks via a routed swap: a trader puts `input_amount`
+ * of `token_in` in, the vault releases `expected_output_amount` of
+ * `token_out` per the constant-product invariant
+ *   k = reserve_in * reserve_out   (post-fee adjusted at swap time)
+ *
+ * Reserves are vault-state, not advertisement state.  When a routed
+ * unlock is accepted, both reserves advance atomically:
+ *   reserve_in  += input_after_fee
+ *   reserve_out -= output
+ * and the vault republishes its `RoutingVaultAdvertisementV1` with
+ * `updated_state_number++`.  A stale advertisement causes a mis-quoted
+ * route, which the chunk-7 re-simulation gate catches at unlock time
+ * (DeTFi spec §3, §8).
+ *
+ * `token_a` / `token_b` are stored in canonical lex-sorted order so
+ * the vault has a single canonical pair identity regardless of trade
+ * direction; `reserve_a` / `reserve_b` follow the same ordering.
+ *
+ * @generated from message dsm.AmmConstantProduct
+ */
+export class AmmConstantProduct extends Message<AmmConstantProduct> {
+  /**
+   * lex-lower token id
+   *
+   * @generated from field: bytes token_a = 1;
+   */
+  tokenA = new Uint8Array(0);
+
+  /**
+   * lex-higher token id
+   *
+   * @generated from field: bytes token_b = 2;
+   */
+  tokenB = new Uint8Array(0);
+
+  /**
+   * big-endian u128
+   *
+   * @generated from field: bytes reserve_a_u128 = 3;
+   */
+  reserveAU128 = new Uint8Array(0);
+
+  /**
+   * big-endian u128
+   *
+   * @generated from field: bytes reserve_b_u128 = 4;
+   */
+  reserveBU128 = new Uint8Array(0);
+
+  /**
+   * basis points (e.g. 30 = 0.30 %)
+   *
+   * @generated from field: uint32 fee_bps = 5;
+   */
+  feeBps = 0;
+
+  constructor(data?: PartialMessage<AmmConstantProduct>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AmmConstantProduct";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "token_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "token_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "reserve_a_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "reserve_b_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "fee_bps", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AmmConstantProduct {
+    return new AmmConstantProduct().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AmmConstantProduct {
+    return new AmmConstantProduct().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AmmConstantProduct {
+    return new AmmConstantProduct().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AmmConstantProduct | PlainMessage<AmmConstantProduct> | undefined, b: AmmConstantProduct | PlainMessage<AmmConstantProduct> | undefined): boolean {
+    return proto3.util.equals(AmmConstantProduct, a, b);
   }
 }
 
@@ -6481,9 +6622,9 @@ export class Invalidated extends Message<Invalidated> {
  */
 export class LimboVaultProto extends Message<LimboVaultProto> {
   /**
-   * @generated from field: string id = 1;
+   * @generated from field: bytes id = 1;
    */
-  id = "";
+  id = new Uint8Array(0);
 
   /**
    * @generated from field: uint64 created_at_state = 2;
@@ -6560,7 +6701,7 @@ export class LimboVaultProto extends Message<LimboVaultProto> {
   static readonly runtime: typeof proto3 = proto3;
   static readonly typeName = "dsm.LimboVaultProto";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 1, name: "id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 2, name: "created_at_state", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 3, name: "creator_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 4, name: "fulfillment_condition", kind: "message", T: FulfillmentMechanism },
@@ -6600,9 +6741,9 @@ export class LimboVaultProto extends Message<LimboVaultProto> {
  */
 export class VaultPostProto extends Message<VaultPostProto> {
   /**
-   * @generated from field: string vault_id = 1;
+   * @generated from field: bytes vault_id = 1;
    */
-  vaultId = "";
+  vaultId = new Uint8Array(0);
 
   /**
    * @generated from field: string lock_description = 2;
@@ -6646,7 +6787,7 @@ export class VaultPostProto extends Message<VaultPostProto> {
   static readonly runtime: typeof proto3 = proto3;
   static readonly typeName = "dsm.VaultPostProto";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "vault_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 2, name: "lock_description", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 3, name: "creator_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 4, name: "commitment_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
@@ -7098,69 +7239,159 @@ export class TokenCreateResponse extends Message<TokenCreateResponse> {
 }
 
 /**
- * ------------------------- DLV Lifecycle Objects --------------------------
- *
- * @generated from message dsm.DlvCreateV3
+ * @generated from message dsm.DlvSpecV1
  */
-export class DlvCreateV3 extends Message<DlvCreateV3> {
+export class DlvSpecV1 extends Message<DlvSpecV1> {
   /**
-   * domain: "DSM/dlv/create\0"
+   * CPTA anchor
    *
-   * @generated from field: bytes device_id = 1;
-   */
-  deviceId = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes policy_digest = 2;
+   * @generated from field: bytes policy_digest = 1;
    */
   policyDigest = new Uint8Array(0);
 
   /**
-   * @generated from field: bytes precommit = 3;
-   */
-  precommit = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes vault_id = 4;
-   */
-  vaultId = new Uint8Array(0);
-
-  /**
-   * optional, empty allowed
+   * H("DSM/dlv-content", content)
    *
-   * @generated from field: bytes parent_digest = 5;
+   * @generated from field: bytes content_digest = 2;
    */
-  parentDigest = new Uint8Array(0);
+  contentDigest = new Uint8Array(0);
 
-  constructor(data?: PartialMessage<DlvCreateV3>) {
+  /**
+   * H("DSM/dlv-fulfillment", fulfillment_bytes)
+   *
+   * @generated from field: bytes fulfillment_digest = 3;
+   */
+  fulfillmentDigest = new Uint8Array(0);
+
+  /**
+   * Kyber pk, optional (empty = self-encrypted)
+   *
+   * @generated from field: bytes intended_recipient = 4;
+   */
+  intendedRecipient = new Uint8Array(0);
+
+  /**
+   * canonical FulfillmentMechanism proto
+   *
+   * @generated from field: bytes fulfillment_bytes = 5;
+   */
+  fulfillmentBytes = new Uint8Array(0);
+
+  /**
+   * plaintext for local; sender-encrypted for posted
+   *
+   * @generated from field: bytes content = 6;
+   */
+  content = new Uint8Array(0);
+
+  /**
+   * @generated from field: dsm.AnchorEnforcement anchor_enforcement = 7;
+   */
+  anchorEnforcement = AnchorEnforcement.UNSPECIFIED;
+
+  constructor(data?: PartialMessage<DlvSpecV1>) {
     super();
     proto3.util.initPartial(data, this);
   }
 
   static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.DlvCreateV3";
+  static readonly typeName = "dsm.DlvSpecV1";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 2, name: "policy_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 3, name: "precommit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 4, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 5, name: "parent_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 1, name: "policy_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "content_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "fulfillment_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "intended_recipient", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "fulfillment_bytes", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "content", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 7, name: "anchor_enforcement", kind: "enum", T: proto3.getEnumType(AnchorEnforcement) },
   ]);
 
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DlvCreateV3 {
-    return new DlvCreateV3().fromBinary(bytes, options);
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DlvSpecV1 {
+    return new DlvSpecV1().fromBinary(bytes, options);
   }
 
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DlvCreateV3 {
-    return new DlvCreateV3().fromJson(jsonValue, options);
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DlvSpecV1 {
+    return new DlvSpecV1().fromJson(jsonValue, options);
   }
 
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DlvCreateV3 {
-    return new DlvCreateV3().fromJsonString(jsonString, options);
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DlvSpecV1 {
+    return new DlvSpecV1().fromJsonString(jsonString, options);
   }
 
-  static equals(a: DlvCreateV3 | PlainMessage<DlvCreateV3> | undefined, b: DlvCreateV3 | PlainMessage<DlvCreateV3> | undefined): boolean {
-    return proto3.util.equals(DlvCreateV3, a, b);
+  static equals(a: DlvSpecV1 | PlainMessage<DlvSpecV1> | undefined, b: DlvSpecV1 | PlainMessage<DlvSpecV1> | undefined): boolean {
+    return proto3.util.equals(DlvSpecV1, a, b);
+  }
+}
+
+/**
+ * Instance creation.  Carries everything Operation::DlvCreate needs.
+ * The creator's chain_tip enters via execute_on_relationship, not this proto.
+ *
+ * @generated from message dsm.DlvInstantiateV1
+ */
+export class DlvInstantiateV1 extends Message<DlvInstantiateV1> {
+  /**
+   * @generated from field: dsm.DlvSpecV1 spec = 1;
+   */
+  spec?: DlvSpecV1;
+
+  /**
+   * SPHINCS+ pk
+   *
+   * @generated from field: bytes creator_public_key = 2;
+   */
+  creatorPublicKey = new Uint8Array(0);
+
+  /**
+   * optional; empty = content-only vault
+   *
+   * @generated from field: bytes token_id = 3;
+   */
+  tokenId = new Uint8Array(0);
+
+  /**
+   * big-endian u128; all-zeros if no lock
+   *
+   * @generated from field: bytes locked_amount_u128 = 4;
+   */
+  lockedAmountU128 = new Uint8Array(0);
+
+  /**
+   * SPHINCS+ over canonical Operation::DlvCreate bytes
+   *
+   * @generated from field: bytes signature = 5;
+   */
+  signature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<DlvInstantiateV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.DlvInstantiateV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "spec", kind: "message", T: DlvSpecV1 },
+    { no: 2, name: "creator_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "token_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "locked_amount_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DlvInstantiateV1 {
+    return new DlvInstantiateV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DlvInstantiateV1 {
+    return new DlvInstantiateV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DlvInstantiateV1 {
+    return new DlvInstantiateV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: DlvInstantiateV1 | PlainMessage<DlvInstantiateV1> | undefined, b: DlvInstantiateV1 | PlainMessage<DlvInstantiateV1> | undefined): boolean {
+    return proto3.util.equals(DlvInstantiateV1, a, b);
   }
 }
 
@@ -7212,6 +7443,1213 @@ export class DlvOpenV3 extends Message<DlvOpenV3> {
 
   static equals(a: DlvOpenV3 | PlainMessage<DlvOpenV3> | undefined, b: DlvOpenV3 | PlainMessage<DlvOpenV3> | undefined): boolean {
     return proto3.util.equals(DlvOpenV3, a, b);
+  }
+}
+
+/**
+ * ===================== ROUTE TRADE-FLOW REQUESTS (Track C.3) =====================
+ * Frontend-facing wrappers for the AMM trade pipeline.  Each request
+ * is consumed by a handler in `dsm_sdk/src/handlers/route_routes.rs`
+ * that delegates to the audited `routing_sdk` / `routing_path_sdk` /
+ * `route_commit_sdk` helpers.  Per the "all business logic stays in
+ * Rust" rule, frontend never builds digests, signs, or runs path
+ * search — it only frames typed inputs.
+ *
+ * @generated from message dsm.PublishRoutingAdvertisementRequest
+ */
+export class PublishRoutingAdvertisementRequest extends Message<PublishRoutingAdvertisementRequest> {
+  /**
+   * @generated from field: bytes vault_id = 1;
+   */
+  vaultId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes token_a = 2;
+   */
+  tokenA = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes token_b = 3;
+   */
+  tokenB = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes reserve_a_u128 = 4;
+   */
+  reserveAU128 = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes reserve_b_u128 = 5;
+   */
+  reserveBU128 = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint32 fee_bps = 6;
+   */
+  feeBps = 0;
+
+  /**
+   * @generated from field: bytes unlock_spec_digest = 7;
+   */
+  unlockSpecDigest = new Uint8Array(0);
+
+  /**
+   * @generated from field: string unlock_spec_key = 8;
+   */
+  unlockSpecKey = "";
+
+  /**
+   * @generated from field: bytes owner_public_key = 9;
+   */
+  ownerPublicKey = new Uint8Array(0);
+
+  /**
+   * Full encoded `VaultPostProto` — the handler computes the
+   * BLAKE3 digest and binds it into the advertisement.  Frontend
+   * does not derive crypto.
+   *
+   * @generated from field: bytes vault_proto_bytes = 10;
+   */
+  vaultProtoBytes = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<PublishRoutingAdvertisementRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.PublishRoutingAdvertisementRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "token_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "token_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "reserve_a_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "reserve_b_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "fee_bps", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 7, name: "unlock_spec_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 8, name: "unlock_spec_key", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 9, name: "owner_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 10, name: "vault_proto_bytes", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): PublishRoutingAdvertisementRequest {
+    return new PublishRoutingAdvertisementRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): PublishRoutingAdvertisementRequest {
+    return new PublishRoutingAdvertisementRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): PublishRoutingAdvertisementRequest {
+    return new PublishRoutingAdvertisementRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: PublishRoutingAdvertisementRequest | PlainMessage<PublishRoutingAdvertisementRequest> | undefined, b: PublishRoutingAdvertisementRequest | PlainMessage<PublishRoutingAdvertisementRequest> | undefined): boolean {
+    return proto3.util.equals(PublishRoutingAdvertisementRequest, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.RoutingPairRequest
+ */
+export class RoutingPairRequest extends Message<RoutingPairRequest> {
+  /**
+   * @generated from field: bytes token_a = 1;
+   */
+  tokenA = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes token_b = 2;
+   */
+  tokenB = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<RoutingPairRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.RoutingPairRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "token_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "token_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RoutingPairRequest {
+    return new RoutingPairRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): RoutingPairRequest {
+    return new RoutingPairRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): RoutingPairRequest {
+    return new RoutingPairRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: RoutingPairRequest | PlainMessage<RoutingPairRequest> | undefined, b: RoutingPairRequest | PlainMessage<RoutingPairRequest> | undefined): boolean {
+    return proto3.util.equals(RoutingPairRequest, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.FindAndBindRouteRequest
+ */
+export class FindAndBindRouteRequest extends Message<FindAndBindRouteRequest> {
+  /**
+   * @generated from field: bytes input_token = 1;
+   */
+  inputToken = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes output_token = 2;
+   */
+  outputToken = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes input_amount_u128 = 3;
+   */
+  inputAmountU128 = new Uint8Array(0);
+
+  /**
+   * 0 → server default (4)
+   *
+   * @generated from field: uint32 max_hops = 4;
+   */
+  maxHops = 0;
+
+  /**
+   * initiator_public_key is left empty here on purpose — the
+   * subsequent `route.signRouteCommit` invoke stamps the wallet's
+   * pk and overwrites whatever the bind step put there.
+   *
+   * @generated from field: bytes nonce = 5;
+   */
+  nonce = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<FindAndBindRouteRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.FindAndBindRouteRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "input_token", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "output_token", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "input_amount_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "max_hops", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 5, name: "nonce", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): FindAndBindRouteRequest {
+    return new FindAndBindRouteRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): FindAndBindRouteRequest {
+    return new FindAndBindRouteRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): FindAndBindRouteRequest {
+    return new FindAndBindRouteRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: FindAndBindRouteRequest | PlainMessage<FindAndBindRouteRequest> | undefined, b: FindAndBindRouteRequest | PlainMessage<FindAndBindRouteRequest> | undefined): boolean {
+    return proto3.util.equals(FindAndBindRouteRequest, a, b);
+  }
+}
+
+/**
+ * Owner-side summary of an AMM vault for the monitor screen.
+ * Returned by `dlv.listOwnedAmmVaults` (one entry per vault whose
+ * `creator_public_key` matches the local wallet's signing pk).
+ *
+ * @generated from message dsm.AmmVaultSummaryV1
+ */
+export class AmmVaultSummaryV1 extends Message<AmmVaultSummaryV1> {
+  /**
+   * @generated from field: bytes vault_id = 1;
+   */
+  vaultId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes token_a = 2;
+   */
+  tokenA = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes token_b = 3;
+   */
+  tokenB = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes reserve_a_u128 = 4;
+   */
+  reserveAU128 = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes reserve_b_u128 = 5;
+   */
+  reserveBU128 = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint32 fee_bps = 6;
+   */
+  feeBps = 0;
+
+  /**
+   * Mirror of the published advertisement's state_number; 0 if not advertised.
+   *
+   * @generated from field: uint64 advertised_state_number = 7;
+   */
+  advertisedStateNumber = protoInt64.zero;
+
+  /**
+   * True if a routing-vault advertisement was found at the canonical
+   * pair key for this vault on storage nodes.
+   *
+   * @generated from field: bool routing_advertised = 8;
+   */
+  routingAdvertised = false;
+
+  /**
+   * Tier 2 Foundation: vault's local current_sequence (the
+   * authoritative truth source for the chunks #7 gate).
+   *
+   * @generated from field: uint64 anchor_sequence = 9;
+   */
+  anchorSequence = protoInt64.zero;
+
+  /**
+   * Vault policy for anchor enforcement.  REQUIRED vaults reject
+   * routed unlocks lacking the anchor binding fields.
+   *
+   * @generated from field: dsm.AnchorEnforcement anchor_enforcement = 10;
+   */
+  anchorEnforcement = AnchorEnforcement.UNSPECIFIED;
+
+  constructor(data?: PartialMessage<AmmVaultSummaryV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.AmmVaultSummaryV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "token_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "token_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "reserve_a_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "reserve_b_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "fee_bps", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 7, name: "advertised_state_number", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 8, name: "routing_advertised", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
+    { no: 9, name: "anchor_sequence", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 10, name: "anchor_enforcement", kind: "enum", T: proto3.getEnumType(AnchorEnforcement) },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AmmVaultSummaryV1 {
+    return new AmmVaultSummaryV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): AmmVaultSummaryV1 {
+    return new AmmVaultSummaryV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): AmmVaultSummaryV1 {
+    return new AmmVaultSummaryV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: AmmVaultSummaryV1 | PlainMessage<AmmVaultSummaryV1> | undefined, b: AmmVaultSummaryV1 | PlainMessage<AmmVaultSummaryV1> | undefined): boolean {
+    return proto3.util.equals(AmmVaultSummaryV1, a, b);
+  }
+}
+
+/**
+ * Per-vault signed state anchor.  Owner publishes one at vault
+ * creation (sequence=0) and one after every accepted routed unlock
+ * (sequence=N+1).  Stored at `defi/vault-state/{vault_id_b32}/latest`
+ * for off-device traders to read at quote time.  The chunks #7 gate
+ * does NOT read this — it verifies against the local DLVManager.
+ *
+ * `reserves_digest` =
+ *   BLAKE3("DSM/amm-reserves\0" || token_a || token_b ||
+ *          reserve_a_u128_be || reserve_b_u128_be || fee_bps_be)
+ *
+ * `owner_signature` is SPHINCS+ over
+ *   BLAKE3("DSM/vault-state-anchor\0" || vault_id || sequence_be ||
+ *          reserves_digest)
+ *
+ * @generated from message dsm.VaultStateAnchorV1
+ */
+export class VaultStateAnchorV1 extends Message<VaultStateAnchorV1> {
+  /**
+   * @generated from field: bytes vault_id = 1;
+   */
+  vaultId = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 sequence = 2;
+   */
+  sequence = protoInt64.zero;
+
+  /**
+   * @generated from field: bytes reserves_digest = 3;
+   */
+  reservesDigest = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes owner_public_key = 4;
+   */
+  ownerPublicKey = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes owner_signature = 5;
+   */
+  ownerSignature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<VaultStateAnchorV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.VaultStateAnchorV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "sequence", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 3, name: "reserves_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "owner_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "owner_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): VaultStateAnchorV1 {
+    return new VaultStateAnchorV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): VaultStateAnchorV1 {
+    return new VaultStateAnchorV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): VaultStateAnchorV1 {
+    return new VaultStateAnchorV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: VaultStateAnchorV1 | PlainMessage<VaultStateAnchorV1> | undefined, b: VaultStateAnchorV1 | PlainMessage<VaultStateAnchorV1> | undefined): boolean {
+    return proto3.util.equals(VaultStateAnchorV1, a, b);
+  }
+}
+
+/**
+ * One hop in a `RouteCommitV1`.  Bound at routing time to the vault
+ * advertisement digest + state number that was current when the path
+ * was selected — recipients re-verify these fields against the live
+ * `RoutingVaultAdvertisementV1` at unlock time, rejecting the route if
+ * the vault's state has moved on (DeTFi spec §3.3 step 5).
+ *
+ * @generated from message dsm.RouteCommitHopV1
+ */
+export class RouteCommitHopV1 extends Message<RouteCommitHopV1> {
+  /**
+   * @generated from field: bytes vault_id = 1;
+   */
+  vaultId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes token_in = 2;
+   */
+  tokenIn = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes token_out = 3;
+   */
+  tokenOut = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes input_amount_u128 = 4;
+   */
+  inputAmountU128 = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes expected_output_amount_u128 = 5;
+   */
+  expectedOutputAmountU128 = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint32 fee_bps = 6;
+   */
+  feeBps = 0;
+
+  /**
+   * BLAKE3("DSM/routing-vault-ad", vault_proto_bytes) at routing time.
+   *
+   * @generated from field: bytes advertisement_digest = 7;
+   */
+  advertisementDigest = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 state_number = 8;
+   */
+  stateNumber = protoInt64.zero;
+
+  /**
+   * @generated from field: bytes unlock_spec_digest = 9;
+   */
+  unlockSpecDigest = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes owner_public_key = 10;
+   */
+  ownerPublicKey = new Uint8Array(0);
+
+  /**
+   * Tier 2 Foundation state-anchor binding.  Trader stamps these
+   * from the vault's `defi/vault-state/{vault_id}/latest` at quote
+   * time.  Gate verifies against local DLVManager state (NOT storage).
+   * For vaults with `anchor_enforcement = REQUIRED` these fields are
+   * mandatory; for OPTIONAL/UNSPECIFIED they may be absent.
+   *
+   * @generated from field: uint64 vault_state_anchor_seq = 11;
+   */
+  vaultStateAnchorSeq = protoInt64.zero;
+
+  /**
+   * @generated from field: bytes vault_state_reserves_digest = 12;
+   */
+  vaultStateReservesDigest = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes vault_state_anchor_digest = 13;
+   */
+  vaultStateAnchorDigest = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<RouteCommitHopV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.RouteCommitHopV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "token_in", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "token_out", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "input_amount_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "expected_output_amount_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "fee_bps", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 7, name: "advertisement_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 8, name: "state_number", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 9, name: "unlock_spec_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 10, name: "owner_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 11, name: "vault_state_anchor_seq", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 12, name: "vault_state_reserves_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 13, name: "vault_state_anchor_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RouteCommitHopV1 {
+    return new RouteCommitHopV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): RouteCommitHopV1 {
+    return new RouteCommitHopV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): RouteCommitHopV1 {
+    return new RouteCommitHopV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: RouteCommitHopV1 | PlainMessage<RouteCommitHopV1> | undefined, b: RouteCommitHopV1 | PlainMessage<RouteCommitHopV1> | undefined): boolean {
+    return proto3.util.equals(RouteCommitHopV1, a, b);
+  }
+}
+
+/**
+ * Off-chain routing proof produced by chunk #2's path search and
+ * signed by the initiating trader.  The external commitment
+ * `X = BLAKE3("DSM/ext\0" || canonical(RouteCommitV1{initiator_signature=[]}))`
+ * is the value referenced by every vault on the route — when X is
+ * published to storage nodes (see `ExternalCommitmentV1` below), all
+ * vaults atomically become unlockable (DeTFi spec §3.2, §5.1).
+ *
+ * @generated from message dsm.RouteCommitV1
+ */
+export class RouteCommitV1 extends Message<RouteCommitV1> {
+  /**
+   * @generated from field: uint32 version = 1;
+   */
+  version = 0;
+
+  /**
+   * 32-byte random nonce — replay protection (X re-uses across
+   * identical `(input, output, amount, hops, balances)` would otherwise
+   * collide).  Caller MUST pick a fresh nonce per route.
+   *
+   * @generated from field: bytes nonce = 2;
+   */
+  nonce = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes input_token = 3;
+   */
+  inputToken = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes output_token = 4;
+   */
+  outputToken = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes input_amount_u128 = 5;
+   */
+  inputAmountU128 = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes expected_final_output_amount_u128 = 6;
+   */
+  expectedFinalOutputAmountU128 = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 total_fee_bps = 7;
+   */
+  totalFeeBps = protoInt64.zero;
+
+  /**
+   * @generated from field: repeated dsm.RouteCommitHopV1 hops = 8;
+   */
+  hops: RouteCommitHopV1[] = [];
+
+  /**
+   * SPHINCS+ pk of the initiating trader.
+   *
+   * @generated from field: bytes initiator_public_key = 9;
+   */
+  initiatorPublicKey = new Uint8Array(0);
+
+  /**
+   * SPHINCS+ signature over the canonical RouteCommit bytes with
+   * `initiator_signature` zeroed.  The same canonical-bytes
+   * computation is the input to the BLAKE3-derived external
+   * commitment X — sign-and-commit once.
+   *
+   * @generated from field: bytes initiator_signature = 10;
+   */
+  initiatorSignature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<RouteCommitV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.RouteCommitV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "version", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 2, name: "nonce", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "input_token", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "output_token", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "input_amount_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "expected_final_output_amount_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 7, name: "total_fee_bps", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 8, name: "hops", kind: "message", T: RouteCommitHopV1, repeated: true },
+    { no: 9, name: "initiator_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 10, name: "initiator_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RouteCommitV1 {
+    return new RouteCommitV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): RouteCommitV1 {
+    return new RouteCommitV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): RouteCommitV1 {
+    return new RouteCommitV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: RouteCommitV1 | PlainMessage<RouteCommitV1> | undefined, b: RouteCommitV1 | PlainMessage<RouteCommitV1> | undefined): boolean {
+    return proto3.util.equals(RouteCommitV1, a, b);
+  }
+}
+
+/**
+ * Storage-node anchor proving an external commitment X has been
+ * published.  Each unlock-time verifier fetches this record at key
+ * `defi/extcommit/{x_b32}`; existence implies "all vaults bound by X
+ * may now unlock" (atomic visibility, DeTFi spec §3.2).
+ *
+ * The record is INTENTIONALLY minimal — storage nodes are dumb
+ * mirrors, the authoritative truth is the RouteCommit bytes the
+ * trader hands to each vault owner.  This anchor proves only that the
+ * commitment exists; the recipient still recomputes X from the
+ * RouteCommit they received and checks the binding.
+ *
+ * @generated from message dsm.ExternalCommitmentV1
+ */
+export class ExternalCommitmentV1 extends Message<ExternalCommitmentV1> {
+  /**
+   * @generated from field: uint32 version = 1;
+   */
+  version = 0;
+
+  /**
+   * 32-byte X = BLAKE3("DSM/ext\0" || canonical(RouteCommit)).
+   *
+   * @generated from field: bytes x = 2;
+   */
+  x = new Uint8Array(0);
+
+  /**
+   * SPHINCS+ pk of the publisher (typically the initiating trader,
+   * matches RouteCommitV1.initiator_public_key).
+   *
+   * @generated from field: bytes publisher_public_key = 3;
+   */
+  publisherPublicKey = new Uint8Array(0);
+
+  /**
+   * Optional human-readable hint — purely informational, ignored by
+   * verification.  Useful for tooling / audit trails.
+   *
+   * @generated from field: string label = 4;
+   */
+  label = "";
+
+  constructor(data?: PartialMessage<ExternalCommitmentV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ExternalCommitmentV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "version", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 2, name: "x", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "publisher_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "label", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ExternalCommitmentV1 {
+    return new ExternalCommitmentV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ExternalCommitmentV1 {
+    return new ExternalCommitmentV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ExternalCommitmentV1 {
+    return new ExternalCommitmentV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ExternalCommitmentV1 | PlainMessage<ExternalCommitmentV1> | undefined, b: ExternalCommitmentV1 | PlainMessage<ExternalCommitmentV1> | undefined): boolean {
+    return proto3.util.equals(ExternalCommitmentV1, a, b);
+  }
+}
+
+/**
+ * Storage-node-mirrored advertisement for a DeTFi routing vault.
+ *
+ * Keyed under `defi/vault/{token_a_b32}/{token_b_b32}/{vault_id_b32}` —
+ * PUBLIC discovery by ordered token pair, no recipient scoping.  The
+ * router enumerates all vaults matching `(tokenA, tokenB)` (or its
+ * reverse, in which case reserves swap roles) and feeds the result
+ * into a fee-weighted Dijkstra over the resulting liquidity graph
+ * (DeTFi spec §3.3, §8.3).
+ *
+ * Storage nodes are dumb mirrors.  Authenticity for routing purposes
+ * is rooted in `vault_proto_digest` binding the ad to a full vault
+ * proto under `defi/vault-proto/{..}/{..}` — exactly the same pattern
+ * as DbtcVaultAdvertisementV1 and PostedDlvAdvertisementV1, mounted
+ * in a different keyspace.
+ *
+ * Token-pair canonicalisation: `token_a` and `token_b` are the
+ * LEXICOGRAPHICALLY LOWER and HIGHER token-id bytes respectively.
+ * Reserves are reported in the matching order (reserve_a is the
+ * pool of token_a).  This collapses the "A→B" and "B→A" entries
+ * for a single vault into one canonical advertisement; the router
+ * flips reserve roles based on the requested trade direction.
+ *
+ * @generated from message dsm.RoutingVaultAdvertisementV1
+ */
+export class RoutingVaultAdvertisementV1 extends Message<RoutingVaultAdvertisementV1> {
+  /**
+   * @generated from field: uint32 version = 1;
+   */
+  version = 0;
+
+  /**
+   * @generated from field: bytes vault_id = 2;
+   */
+  vaultId = new Uint8Array(0);
+
+  /**
+   * lexicographically lower
+   *
+   * @generated from field: bytes token_a = 3;
+   */
+  tokenA = new Uint8Array(0);
+
+  /**
+   * lexicographically higher
+   *
+   * @generated from field: bytes token_b = 4;
+   */
+  tokenB = new Uint8Array(0);
+
+  /**
+   * big-endian u128, pool of token_a
+   *
+   * @generated from field: bytes reserve_a_u128 = 5;
+   */
+  reserveAU128 = new Uint8Array(0);
+
+  /**
+   * big-endian u128, pool of token_b
+   *
+   * @generated from field: bytes reserve_b_u128 = 6;
+   */
+  reserveBU128 = new Uint8Array(0);
+
+  /**
+   * Fee in basis points (e.g. 30 = 0.30 %).  Full-fixed integer keeps
+   * the routing graph weights deterministic and clockless.
+   *
+   * @generated from field: uint32 fee_bps = 7;
+   */
+  feeBps = 0;
+
+  /**
+   * Hash of the canonical CPTA spec describing the vault's unlock
+   * condition set (constant product, stable swap, custom curve, …).
+   * Routers verify a vault is satisfiable by re-fetching the spec
+   * bytes via the `unlock_spec_key` storage pointer below.
+   *
+   * @generated from field: bytes unlock_spec_digest = 8;
+   */
+  unlockSpecDigest = new Uint8Array(0);
+
+  /**
+   * @generated from field: string unlock_spec_key = 9;
+   */
+  unlockSpecKey = "";
+
+  /**
+   * not [(dsm_fixed_len)] — string blob
+   *
+   * @generated from field: bytes vault_proto_key = 10;
+   */
+  vaultProtoKey = new Uint8Array(0);
+
+  /**
+   * BLAKE3("DSM/routing-vault-ad", proto_bytes)
+   *
+   * @generated from field: bytes vault_proto_digest = 11;
+   */
+  vaultProtoDigest = new Uint8Array(0);
+
+  /**
+   * Vault owner's SPHINCS+ pk.  Used by the router to compute the
+   * expected per-hop unlock receipt commit; not used for ad
+   * authenticity (see vault_proto_digest above).
+   *
+   * @generated from field: bytes owner_public_key = 12;
+   */
+  ownerPublicKey = new Uint8Array(0);
+
+  /**
+   * "active" | "exhausted" | "withdrawn"
+   *
+   * @generated from field: string lifecycle_state = 13;
+   */
+  lifecycleState = "";
+
+  /**
+   * dedup signal; matches dBTC + posted-dlv pattern
+   *
+   * @generated from field: uint64 updated_state_number = 14;
+   */
+  updatedStateNumber = protoInt64.zero;
+
+  constructor(data?: PartialMessage<RoutingVaultAdvertisementV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.RoutingVaultAdvertisementV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "version", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 2, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "token_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "token_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "reserve_a_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "reserve_b_u128", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 7, name: "fee_bps", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 8, name: "unlock_spec_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 9, name: "unlock_spec_key", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 10, name: "vault_proto_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 11, name: "vault_proto_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 12, name: "owner_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 13, name: "lifecycle_state", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 14, name: "updated_state_number", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RoutingVaultAdvertisementV1 {
+    return new RoutingVaultAdvertisementV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): RoutingVaultAdvertisementV1 {
+    return new RoutingVaultAdvertisementV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): RoutingVaultAdvertisementV1 {
+    return new RoutingVaultAdvertisementV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: RoutingVaultAdvertisementV1 | PlainMessage<RoutingVaultAdvertisementV1> | undefined, b: RoutingVaultAdvertisementV1 | PlainMessage<RoutingVaultAdvertisementV1> | undefined): boolean {
+    return proto3.util.equals(RoutingVaultAdvertisementV1, a, b);
+  }
+}
+
+/**
+ * Typed request for `dlv.unlockRouted` — the routed atomic-unlock
+ * path for DeTFi.  The trader hands each vault owner a copy of the
+ * `RouteCommitV1` they signed; the vault owner then invokes this
+ * route on their own device.  The handler runs the SDK eligibility
+ * check (vault_id ∈ RouteCommit AND ExtCommit(X) visible at storage
+ * nodes) before emitting the standard `Operation::DlvUnlock` on the
+ * vault owner's self-loop.
+ *
+ * Atomic execution model: each vault unlocks INDEPENDENTLY on its
+ * owner's hash chain — the coordination point is the
+ * `ExternalCommitmentV1` anchor.  Until X is published all vaults
+ * reject; once it is, all vaults accept.  No global coordinator.
+ *
+ * @generated from message dsm.DlvUnlockRoutedV1
+ */
+export class DlvUnlockRoutedV1 extends Message<DlvUnlockRoutedV1> {
+  /**
+   * @generated from field: bytes vault_id = 1;
+   */
+  vaultId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes device_id = 2;
+   */
+  deviceId = new Uint8Array(0);
+
+  /**
+   * Canonical `RouteCommitV1` bytes the trader produced via
+   * `route_commit_sdk::bind_path_to_route_commit` + signed.
+   *
+   * @generated from field: bytes route_commit_bytes = 3;
+   */
+  routeCommitBytes = new Uint8Array(0);
+
+  /**
+   * SPHINCS+ pk of the unlocker (vault owner / claimant).
+   *
+   * @generated from field: bytes unlocker_public_key = 4;
+   */
+  unlockerPublicKey = new Uint8Array(0);
+
+  /**
+   * SPHINCS+ signature over canonical Operation::DlvUnlock bytes.
+   *
+   * @generated from field: bytes signature = 5;
+   */
+  signature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<DlvUnlockRoutedV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.DlvUnlockRoutedV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "route_commit_bytes", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "unlocker_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DlvUnlockRoutedV1 {
+    return new DlvUnlockRoutedV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DlvUnlockRoutedV1 {
+    return new DlvUnlockRoutedV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DlvUnlockRoutedV1 {
+    return new DlvUnlockRoutedV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: DlvUnlockRoutedV1 | PlainMessage<DlvUnlockRoutedV1> | undefined, b: DlvUnlockRoutedV1 | PlainMessage<DlvUnlockRoutedV1> | undefined): boolean {
+    return proto3.util.equals(DlvUnlockRoutedV1, a, b);
+  }
+}
+
+/**
+ * Typed request for `dlv.invalidate`.  Replaces the inline
+ * `[32-byte vault_id][utf8 reason]` body shape used pre-Track-A; the
+ * canonical Operation::DlvInvalidate carries the same fields.
+ *
+ * @generated from message dsm.DlvInvalidateV1
+ */
+export class DlvInvalidateV1 extends Message<DlvInvalidateV1> {
+  /**
+   * @generated from field: bytes vault_id = 1;
+   */
+  vaultId = new Uint8Array(0);
+
+  /**
+   * optional human-readable reason
+   *
+   * @generated from field: string reason = 2;
+   */
+  reason = "";
+
+  /**
+   * SPHINCS+ pk of vault creator
+   *
+   * @generated from field: bytes creator_public_key = 3;
+   */
+  creatorPublicKey = new Uint8Array(0);
+
+  /**
+   * SPHINCS+ over canonical Operation::DlvInvalidate
+   *
+   * @generated from field: bytes signature = 4;
+   */
+  signature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<DlvInvalidateV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.DlvInvalidateV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "reason", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 3, name: "creator_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DlvInvalidateV1 {
+    return new DlvInvalidateV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DlvInvalidateV1 {
+    return new DlvInvalidateV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DlvInvalidateV1 {
+    return new DlvInvalidateV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: DlvInvalidateV1 | PlainMessage<DlvInvalidateV1> | undefined, b: DlvInvalidateV1 | PlainMessage<DlvInvalidateV1> | undefined): boolean {
+    return proto3.util.equals(DlvInvalidateV1, a, b);
+  }
+}
+
+/**
+ * Typed request for `dlv.claim`.  Replaces the inline
+ * `[32-byte vault_id][claim_proof bytes]` body shape used pre-Track-A;
+ * the canonical Operation::DlvClaim carries the same fields.
+ *
+ * @generated from message dsm.DlvClaimV1
+ */
+export class DlvClaimV1 extends Message<DlvClaimV1> {
+  /**
+   * @generated from field: bytes vault_id = 1;
+   */
+  vaultId = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes claim_proof = 2;
+   */
+  claimProof = new Uint8Array(0);
+
+  /**
+   * SPHINCS+ pk of claimant
+   *
+   * @generated from field: bytes claimant_public_key = 3;
+   */
+  claimantPublicKey = new Uint8Array(0);
+
+  /**
+   * SPHINCS+ over canonical Operation::DlvClaim
+   *
+   * @generated from field: bytes signature = 4;
+   */
+  signature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<DlvClaimV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.DlvClaimV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "vault_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "claim_proof", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "claimant_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DlvClaimV1 {
+    return new DlvClaimV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): DlvClaimV1 {
+    return new DlvClaimV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): DlvClaimV1 {
+    return new DlvClaimV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: DlvClaimV1 | PlainMessage<DlvClaimV1> | undefined, b: DlvClaimV1 | PlainMessage<DlvClaimV1> | undefined): boolean {
+    return proto3.util.equals(DlvClaimV1, a, b);
+  }
+}
+
+/**
+ * Storage-node-mirrored advertisement for a posted-mode DLV.
+ *
+ * Keyed under `dlv/posted/{recipient_kyber_pk_b32}/{dlv_id_b32}`; the full
+ * VaultPostProto is mirrored alongside at `dlv/posted-proto/{recipient_kyber_pk_b32}/{dlv_id_b32}`
+ * and bound to this advertisement by `vault_proto_digest = BLAKE3("DSM/posted-dlv-ad", proto_bytes)`.
+ *
+ * Storage nodes are dumb mirrors. Authenticity is recipient-verified:
+ *   1. creator_signature (SPHINCS+) over the canonical advertisement bytes with this field zeroed.
+ *   2. vault_proto_digest binds the ad to the full vault post.
+ *   3. The recipient's Kyber SK is required to decrypt vault content; the advertisement
+ *      carries no secrets.
+ *
+ * Lifecycle state transitions: "active" -> "claimed" (recipient after successful
+ * DlvClaim) or "active" -> "invalidated" (creator after DlvInvalidate).
+ * Deduplication at load time: highest `updated_state_number` wins; lex-smallest
+ * key tiebreaker. Matches the dBTC vault selector pattern (§13 storage nodes).
+ *
+ * @generated from message dsm.PostedDlvAdvertisementV1
+ */
+export class PostedDlvAdvertisementV1 extends Message<PostedDlvAdvertisementV1> {
+  /**
+   * @generated from field: uint32 version = 1;
+   */
+  version = 0;
+
+  /**
+   * @generated from field: bytes dlv_id = 2;
+   */
+  dlvId = new Uint8Array(0);
+
+  /**
+   * ML-KEM-1024 public key
+   *
+   * @generated from field: bytes recipient_kyber_pk = 3;
+   */
+  recipientKyberPk = new Uint8Array(0);
+
+  /**
+   * SPHINCS+ pk of creator
+   *
+   * @generated from field: bytes creator_public_key = 4;
+   */
+  creatorPublicKey = new Uint8Array(0);
+
+  /**
+   * CPTA anchor of locked token (if any)
+   *
+   * @generated from field: bytes policy_commit = 5;
+   */
+  policyCommit = new Uint8Array(0);
+
+  /**
+   * storage-node key of the full VaultPostProto
+   *
+   * @generated from field: string vault_proto_key = 6;
+   */
+  vaultProtoKey = "";
+
+  /**
+   * BLAKE3("DSM/posted-dlv-ad", proto_bytes)
+   *
+   * @generated from field: bytes vault_proto_digest = 7;
+   */
+  vaultProtoDigest = new Uint8Array(0);
+
+  /**
+   * "active" | "claimed" | "invalidated"
+   *
+   * @generated from field: string lifecycle_state = 8;
+   */
+  lifecycleState = "";
+
+  /**
+   * dedup signal; increments monotonically per state change
+   *
+   * @generated from field: uint64 updated_state_number = 9;
+   */
+  updatedStateNumber = protoInt64.zero;
+
+  /**
+   * SPHINCS+ over canonical ad bytes (field 10 zeroed)
+   *
+   * @generated from field: bytes creator_signature = 10;
+   */
+  creatorSignature = new Uint8Array(0);
+
+  /**
+   * Optional claim attestation: set only on state transitions authored by the recipient
+   * ("claimed" ads). Signed by the recipient's Kyber-derived SPHINCS+ identity.
+   *
+   * @generated from field: bytes claimant_signature = 11;
+   */
+  claimantSignature = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<PostedDlvAdvertisementV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.PostedDlvAdvertisementV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "version", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 2, name: "dlv_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "recipient_kyber_pk", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "creator_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "policy_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "vault_proto_key", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 7, name: "vault_proto_digest", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 8, name: "lifecycle_state", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 9, name: "updated_state_number", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 10, name: "creator_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 11, name: "claimant_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): PostedDlvAdvertisementV1 {
+    return new PostedDlvAdvertisementV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): PostedDlvAdvertisementV1 {
+    return new PostedDlvAdvertisementV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): PostedDlvAdvertisementV1 {
+    return new PostedDlvAdvertisementV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: PostedDlvAdvertisementV1 | PlainMessage<PostedDlvAdvertisementV1> | undefined, b: PostedDlvAdvertisementV1 | PlainMessage<PostedDlvAdvertisementV1> | undefined): boolean {
+    return proto3.util.equals(PostedDlvAdvertisementV1, a, b);
   }
 }
 

@@ -5,6 +5,7 @@
 //! paths, no wall-clock-dependent logic.
 
 pub mod admin;
+pub mod authenticate;
 pub mod bytecommit;
 pub mod device_api;
 pub mod discovery;
@@ -25,4 +26,3 @@ pub mod recovery_capsule;
 pub mod registry;
 pub mod registry_scaling;
 pub mod unilateral_api;
-pub mod validators;

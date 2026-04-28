@@ -91,6 +91,30 @@ pub enum FulfillmentMechanism {
 
     /// Compound OR condition (any can be satisfied)
     Or(Vec<FulfillmentMechanism>),
+
+    /// AMM constant-product liquidity vault.  Holds two token reserves
+    /// and unlocks via a routed swap whose `expected_output` is
+    /// re-simulated against these reserves at unlock time (DeTFi spec
+    /// §3, §8 — chunk #7 of the routing pipeline).  Reserves are
+    /// vault-state and advance atomically on every accepted routed
+    /// unlock; a routing-vault advertisement that quoted stale
+    /// reserves will fail the verifier's re-simulation check.
+    ///
+    /// `token_a` / `token_b` MUST be canonicalised in lex order;
+    /// `reserve_a` describes the `token_a` pool, `reserve_b` the
+    /// `token_b` pool.  `fee_bps` is in basis points (30 = 0.30 %).
+    AmmConstantProduct {
+        /// Lex-lower token id.
+        token_a: Vec<u8>,
+        /// Lex-higher token id.
+        token_b: Vec<u8>,
+        /// Reserve of `token_a`.
+        reserve_a: u128,
+        /// Reserve of `token_b`.
+        reserve_b: u128,
+        /// Fee in basis points (e.g. 30 = 0.30 %).
+        fee_bps: u32,
+    },
 }
 
 impl fmt::Display for FulfillmentMechanism {
@@ -118,6 +142,15 @@ impl fmt::Display for FulfillmentMechanism {
             FulfillmentMechanism::Or(conditions) => {
                 write!(f, "OR({} conditions)", conditions.len())
             }
+            FulfillmentMechanism::AmmConstantProduct {
+                reserve_a,
+                reserve_b,
+                fee_bps,
+                ..
+            } => write!(
+                f,
+                "AMM x*y=k (a={reserve_a}, b={reserve_b}, fee={fee_bps}bps)"
+            ),
         }
     }
 }

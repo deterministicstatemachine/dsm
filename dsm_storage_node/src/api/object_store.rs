@@ -16,8 +16,8 @@ use log::{info, warn};
 use prost::Message;
 use std::sync::Arc;
 
+use super::authenticate::authenticate_vaultpost_smart_policy_if_present;
 use super::hardening::blake3_tagged;
-use super::validators::validate_vaultpost_smart_policy_if_present;
 use crate::auth::DeviceContext;
 use crate::db::{self};
 
@@ -154,10 +154,10 @@ pub async fn put_object(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    // Pre-validate: if this looks like a VaultPostProto carrying a LimboVaultProto
+    // Pre-authenticate: if this looks like a VaultPostProto carrying a LimboVaultProto
     // with a CryptoCondition that embeds SmartPolicy bytes, ensure those bytes decode.
     // This check is deterministic and side-effect free; on failure, reject with 400.
-    if validate_vaultpost_smart_policy_if_present(body.as_ref()).is_err() {
+    if authenticate_vaultpost_smart_policy_if_present(body.as_ref()).is_err() {
         return Err(StatusCode::BAD_REQUEST);
     }
 
@@ -293,7 +293,7 @@ pub async fn delete_object_proto(
     let req = dsm::types::proto::StorageObjectDelete::decode(body)
         .map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    // validate simple params
+    // authenticate simple params
     if req.dlv_id.len() != 32 || req.path.is_empty() {
         return Err(StatusCode::BAD_REQUEST);
     }

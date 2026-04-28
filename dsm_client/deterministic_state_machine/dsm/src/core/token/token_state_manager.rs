@@ -106,23 +106,23 @@ const DBTC_POLICY_COMMIT: [u8; 32] = [
     0x45, 0xb9, 0x68, 0xfd, 0xb1, 0xab, 0xcb, 0x03, 0x31, 0x2d, 0x91, 0x4e, 0x35, 0x01, 0x62, 0x22,
 ];
 
-/// Resolve policy_commit for any token, including non-builtins.
+/// Resolve policy_commit for a token by ticker.
 ///
-/// §9.1: All TokenOps MUST include `policy_commit`. For builtins (ERA, dBTC),
-/// the precomputed constants are returned. For CPTA-anchored custom tokens,
-/// the policy_commit is derived deterministically from the token_id using
-/// BLAKE3 domain separation. The full CPTA bytes should ideally be cached
-/// locally and verified by digest, but this derivation ensures balance
-/// mutations are never skipped for valid token operations.
-pub fn resolve_policy_commit(token_id: &str) -> [u8; 32] {
-    builtin_policy_commit_for_token(token_id).unwrap_or_else(|| {
-        // §9.3: policy_commit := BLAKE3-256("DSM/cpta\0" || canonical_cpta_bytes)
-        // For non-builtin tokens without cached CPTA bytes, derive a
-        // deterministic placeholder from the token_id. This ensures the
-        // state machine applies balance deltas for all tokens, not just
-        // builtins. The real policy_commit is verified at the receipt
-        // acceptance layer (§9.5 binding to policy).
-        crate::crypto::blake3::domain_hash_bytes("DSM/token-policy\0", token_id.as_bytes())
+/// §9.1: all TokenOps MUST include `policy_commit`. Builtins (ERA, dBTC)
+/// resolve to their precomputed constants. For CPTA-anchored custom tokens
+/// the canonical policy_commit is `BLAKE3-256("DSM/cpta\0" || canonical_cpta_bytes)`
+/// and can only be produced by reading the registered `TokenPolicyV3` — not
+/// derived from the ticker string.
+///
+/// This function therefore strict-fails for any non-builtin token.  Callers
+/// that handle custom tokens MUST carry `policy_commit` explicitly on the
+/// `BalanceDelta` (the `execute_on_relationship` path) so the transition
+/// layer applies the authoritative value from the producing SDK.
+pub fn resolve_policy_commit(token_id: &str) -> Result<[u8; 32], DsmError> {
+    builtin_policy_commit_for_token(token_id).ok_or_else(|| {
+        DsmError::invalid_operation(format!(
+            "resolve_policy_commit: no registered policy for token_id {token_id}; custom tokens must carry policy_commit on the BalanceDelta (no fallback derivation)"
+        ))
     })
 }
 
@@ -841,7 +841,32 @@ impl TokenStateManager {
 
 #[cfg(test)]
 mod tests {
-    use super::derive_canonical_balance_key;
+    use super::{derive_canonical_balance_key, resolve_policy_commit};
+
+    #[test]
+    fn resolve_policy_commit_succeeds_for_builtins() {
+        let era = resolve_policy_commit("ERA").expect("ERA is a builtin");
+        let dbtc = resolve_policy_commit("dBTC").expect("dBTC is a builtin");
+        assert_ne!(era, [0u8; 32]);
+        assert_ne!(dbtc, [0u8; 32]);
+        assert_ne!(era, dbtc);
+    }
+
+    #[test]
+    fn resolve_policy_commit_fails_for_unregistered_token() {
+        // No BLAKE3-of-token-id fallback: custom tokens MUST carry policy_commit
+        // on the BalanceDelta path.  Strict-fail closed here.
+        let err = resolve_policy_commit("FOOBAR").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("FOOBAR"),
+            "error must name the offending token_id, got: {msg}"
+        );
+        assert!(
+            msg.contains("no registered policy"),
+            "error must explain missing registration, got: {msg}"
+        );
+    }
 
     #[test]
     fn canonical_balance_key_is_stable_for_same_semantic_input() {

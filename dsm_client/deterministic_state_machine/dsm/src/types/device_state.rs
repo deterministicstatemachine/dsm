@@ -611,6 +611,65 @@ mod tests {
         h.finalize().as_bytes().to_vec()
     }
 
+    /// I5.0 gate (plan Part J): `advance` MUST materialise a new `policy_commit`
+    /// entry on Credit when the device has zero prior exposure to that
+    /// commit — the "Bob claims Alice's custom-token vault on his own chain"
+    /// path.  Semantically equivalent to `entry().or_insert(0) += amount`.
+    ///
+    /// Without this, DlvClaim on a claimant who has never held the custom
+    /// token would silently no-op instead of crediting the locked balance.
+    #[test]
+    fn advance_credit_materialises_new_policy_commit_entry() {
+        let bob = fresh_device(0xBB);
+        let custom_token = pc(0xF1);
+
+        // Bob starts with zero exposure to this policy_commit.
+        assert!(
+            !bob.balances.contains_key(&custom_token),
+            "precondition: fresh device has no entry for the custom token"
+        );
+
+        // Simulate the DlvClaim credit landing on Bob's self-loop.
+        let rk_self =
+            crate::core::bilateral_transaction_manager::compute_smt_key(&bob.devid, &bob.devid);
+        let init_tip =
+            crate::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                &bob.devid, &bob.devid,
+            );
+
+        let outcome = bob
+            .advance(
+                rk_self,
+                bob.devid,
+                op(),
+                entropy(42),
+                None,
+                &[BalanceDelta {
+                    policy_commit: custom_token,
+                    direction: BalanceDirection::Credit,
+                    amount: 50,
+                }],
+                Some(init_tip),
+                None,
+            )
+            .expect("credit advance succeeds");
+
+        // advance() returns the successor device_state; `self` is untouched.
+        let post = outcome
+            .new_device_state
+            .balances
+            .get(&custom_token)
+            .copied()
+            .expect("Credit must materialise a new balance entry keyed by policy_commit");
+        assert_eq!(post, 50);
+
+        // The original bob remains unchanged — functional transform contract.
+        assert!(
+            !bob.balances.contains_key(&custom_token),
+            "advance must not mutate &self"
+        );
+    }
+
     /// Phase 6 test: balance witness reflects device-level total at commit time.
     /// Two relationships, each debiting from the same device-level token balance.
     /// Each chain's `balance_witness` must show the device total at the moment

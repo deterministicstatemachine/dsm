@@ -1275,11 +1275,9 @@ impl DsmImplementationHarness {
 fn replay_tripwire_trace_into_implementation(states: &[TlaState]) -> Vec<String> {
     let mut failures = Vec::new();
     let mut tracker = ParentConsumptionTracker::new();
-    let mut ledger = BTreeSet::new();
 
     for (idx, pair) in states.windows(2).enumerate() {
-        if let Err(err) =
-            replay_tripwire_step_into_implementation(&mut tracker, &mut ledger, &pair[0], &pair[1])
+        if let Err(err) = replay_tripwire_step_into_implementation(&mut tracker, &pair[0], &pair[1])
         {
             failures.push(format!("step {}: {err}", idx + 1));
         }
@@ -1290,10 +1288,14 @@ fn replay_tripwire_trace_into_implementation(states: &[TlaState]) -> Vec<String>
 
 fn replay_tripwire_step_into_implementation(
     tracker: &mut ParentConsumptionTracker,
-    ledger: &mut BTreeSet<TlaValue>,
     current: &TlaState,
     next: &TlaState,
 ) -> anyhow::Result<()> {
+    // First require the TLC step to satisfy the abstract Tripwire transition:
+    // current root revisions must match the receipt anchors, and the relation-local
+    // SMT tips must advance deterministically for both participants.
+    replay_tripwire_step(current, next)?;
+
     let current_ledger = set_var(current, "ledger")?;
     let next_ledger = set_var(next, "ledger")?;
     let added = set_difference(next_ledger, current_ledger);
@@ -1316,10 +1318,6 @@ fn replay_tripwire_step_into_implementation(
     tracker
         .try_consume(parent_hash, child_hash)
         .map_err(|e| anyhow!("ParentConsumptionTracker rejected Tripwire receipt: {e}"))?;
-    ledger.insert(receipt.clone());
-    if *ledger != *next_ledger {
-        bail!("Tripwire implementation replay ledger diverged from TLC");
-    }
     Ok(())
 }
 
@@ -1394,7 +1392,12 @@ fn create_direct_trace_state(
     state.hash = state
         .hash()
         .map_err(|e| anyhow!("failed to hash direct replay genesis state: {e}"))?;
-    let policy_commit = dsm::core::token::resolve_policy_commit("ERA");
+    // ERA is a builtin token — `resolve_policy_commit` strict-fails for
+    // non-builtins per Track A, but ERA always resolves cleanly.  Surface
+    // any unexpected breakage as an anyhow error rather than panic so the
+    // replay binary's Result return type is honoured.
+    let policy_commit = dsm::core::token::resolve_policy_commit("ERA")
+        .map_err(|e| anyhow!("ERA policy resolution failed (builtin invariant broken): {e}"))?;
     let balance_key =
         dsm::core::token::derive_canonical_balance_key(&policy_commit, public_key, "ERA");
     state.token_balances.insert(
@@ -2987,6 +2990,58 @@ STATE_2 ==
         assert!(
             failures.is_empty(),
             "tripwire replay failures: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_tripwire_impl_replay_when_roots_do_not_advance() {
+        let trace = r#"
+---------------- MODULE tripwire_impl_bad_roots -----------------
+STATE_1 ==
+/\ deviceRoots = (d1 :> 0 @@ d2 :> 0 @@ d3 :> 0)
+/\ smtState = (d1 :> ({d1, d2} :> 0 @@ {d2, d3} :> 0) @@ d2 :> ({d1, d2} :> 0 @@ {d2, d3} :> 0) @@ d3 :> ({d1, d2} :> 0 @@ {d2, d3} :> 0))
+/\ ledger = {}
+
+STATE_2 ==
+/\ deviceRoots = (d1 :> 0 @@ d2 :> 0 @@ d3 :> 0)
+/\ smtState = (d1 :> ({d1, d2} :> 1 @@ {d2, d3} :> 0) @@ d2 :> ({d1, d2} :> 1 @@ {d2, d3} :> 0) @@ d3 :> ({d1, d2} :> 0 @@ {d2, d3} :> 0))
+/\ ledger = {[oldTip |-> 0, newTip |-> 1, rel |-> {d1, d2}, r1 |-> 0, r2 |-> 0]}
+"#;
+        let states = parse_trace_states(trace).expect("parse malformed tripwire states");
+        let failures = replay_tripwire_trace_into_implementation(&states);
+        assert!(
+            !failures.is_empty(),
+            "implementation replay unexpectedly accepted malformed tripwire roots"
+        );
+        assert!(
+            failures.iter().any(|failure| failure.contains("diverged")),
+            "unexpected failure output: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_tripwire_impl_replay_when_bilateral_smt_update_is_incomplete() {
+        let trace = r#"
+---------------- MODULE tripwire_impl_bad_smt -----------------
+STATE_1 ==
+/\ deviceRoots = (d1 :> 0 @@ d2 :> 0 @@ d3 :> 0)
+/\ smtState = (d1 :> ({d1, d2} :> 0 @@ {d2, d3} :> 0) @@ d2 :> ({d1, d2} :> 0 @@ {d2, d3} :> 0) @@ d3 :> ({d1, d2} :> 0 @@ {d2, d3} :> 0))
+/\ ledger = {}
+
+STATE_2 ==
+/\ deviceRoots = (d1 :> 1 @@ d2 :> 1 @@ d3 :> 0)
+/\ smtState = (d1 :> ({d1, d2} :> 1 @@ {d2, d3} :> 0) @@ d2 :> ({d1, d2} :> 0 @@ {d2, d3} :> 0) @@ d3 :> ({d1, d2} :> 0 @@ {d2, d3} :> 0))
+/\ ledger = {[oldTip |-> 0, newTip |-> 1, rel |-> {d1, d2}, r1 |-> 0, r2 |-> 0]}
+"#;
+        let states = parse_trace_states(trace).expect("parse malformed tripwire SMT states");
+        let failures = replay_tripwire_trace_into_implementation(&states);
+        assert!(
+            !failures.is_empty(),
+            "implementation replay unexpectedly accepted malformed bilateral SMT update"
+        );
+        assert!(
+            failures.iter().any(|failure| failure.contains("diverged")),
+            "unexpected failure output: {failures:?}"
         );
     }
 }

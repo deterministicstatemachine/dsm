@@ -27,7 +27,6 @@ use dsm::emissions::{
 };
 use dsm::types::contact_types::DsmVerifiedContact;
 use dsm::types::operations::{Operation, TransactionMode, VerificationType};
-use dsm::types::policy_types::PolicyFile;
 use dsm::types::proto as pb;
 use dsm::types::receipt_types::{
     ParentConsumptionTracker, ReceiptVerificationContext, StitchedReceiptV2,
@@ -39,7 +38,7 @@ use dsm::verification::receipt_verification::verify_stitched_receipt;
 use dsm::verification::smt_replace_witness::{compute_smt_key, hash_smt_leaf};
 
 const TRACE_VARIANT: SphincsVariant = SphincsVariant::SPX256f;
-const TRACE_TOKEN_ID: &str = "VVTRACE";
+const TRACE_TOKEN_ID: &str = "ERA";
 const TRACE_INITIAL_BALANCE: u64 = 100;
 type TraceFn = fn(&[u8; 32], &[u8], &[u8]) -> ImplementationTraceResult;
 
@@ -60,8 +59,7 @@ pub struct ImplementationTraceSuiteResult {
 }
 
 struct TokenTraceHarness {
-    // Manager is no longer the canonical transition driver (§4.3 shim path)
-    // but it still owns the token policy registration used by the harness.
+    // Manager is no longer the canonical transition driver (§4.3 shim path).
     #[allow(dead_code)]
     manager: TokenStateManager,
     state: State,
@@ -1201,6 +1199,43 @@ fn trace_receipt_verifier_tripwire(
         Err(e) => failures.push(format!("receipt verifier errored on fork attempt: {e}")),
     }
 
+    let mut malformed_replace = receipt_a.clone();
+    malformed_replace.set_rel_replace_witness(Vec::new());
+    malformed_replace.sig_a.clear();
+    let malformed_commitment = match malformed_replace.compute_commitment() {
+        Ok(commitment) => commitment,
+        Err(e) => {
+            failures.push(format!(
+                "failed to recompute malformed receipt commitment: {e}"
+            ));
+            [0u8; 32]
+        }
+    };
+    if malformed_commitment != [0u8; 32] {
+        match keypair_a.sign(&malformed_commitment) {
+            Ok(sig) => malformed_replace.add_sig_a(sig),
+            Err(e) => failures.push(format!("failed to resign malformed receipt: {e}")),
+        }
+
+        match verify_stitched_receipt(&malformed_replace, &ctx, &mut tracker) {
+            Ok(result) => {
+                if result.valid {
+                    failures.push("receipt with malformed SMT replace witness was accepted".into());
+                } else {
+                    let reason = result.reason.unwrap_or_default();
+                    if !reason.contains("SMT replace recomputation failed") {
+                        failures.push(format!(
+                            "malformed SMT replace rejection reason was unexpected: {reason}"
+                        ));
+                    }
+                }
+            }
+            Err(e) => failures.push(format!(
+                "receipt verifier errored on malformed SMT replace witness: {e}"
+            )),
+        }
+    }
+
     if tracker.get_child(&parent_tip) != Some(&child_tip_a) {
         failures.push("receipt verifier tracker overwrote canonical child after fork".into());
     }
@@ -1211,7 +1246,7 @@ fn trace_receipt_verifier_tripwire(
 
     ImplementationTraceResult {
         trace_name: "receipt_verifier_tripwire".into(),
-        steps: 3,
+        steps: 4,
         passed: failures.is_empty(),
         failures,
         duration_ms: start.elapsed().as_secs_f64() * 1000.0,
@@ -2121,20 +2156,12 @@ fn encode_device_tree_proof(proof: DevTreeProof) -> Vec<u8> {
 }
 
 fn build_token_harness(seed_bytes: &[u8; 32], pk: &[u8]) -> TokenTraceHarness {
-    let mut policy = PolicyFile::new("Implementation Trace Token", "1.0.0", "vertical-validation");
-    policy.add_metadata("token_type", "validation");
-    policy.add_metadata("scope", "implementation-trace");
-    let policy_anchor = policy.generate_anchor().expect("trace policy anchor");
     let manager = TokenStateManager::new();
-    manager.register_token_policy_anchor(TRACE_TOKEN_ID, policy_anchor.0);
 
     let mut state = create_test_state(seed_bytes, pk);
     let recipient = vec![0xDD; 32];
-    let policy_commit = dsm::core::token::resolve_policy_commit(TRACE_TOKEN_ID);
-    let sender_key =
-        dsm::core::token::derive_canonical_balance_key(&policy_commit, pk, TRACE_TOKEN_ID);
-    let recipient_key =
-        dsm::core::token::derive_canonical_balance_key(&policy_commit, &recipient, TRACE_TOKEN_ID);
+    let sender_key = builtin_balance_key(pk, TRACE_TOKEN_ID);
+    let recipient_key = builtin_balance_key(&recipient, TRACE_TOKEN_ID);
 
     state.token_balances.insert(
         sender_key.clone(),
@@ -2175,6 +2202,12 @@ mod tests {
     #[test]
     fn repeated_djte_emission_alignment_trace_passes() {
         let result = trace_djte_repeated_emission_alignment(&[0u8; 32], &[], &[]);
+        assert!(result.passed, "{}", result.failures.join("; "));
+    }
+
+    #[test]
+    fn receipt_verifier_tripwire_trace_passes() {
+        let result = trace_receipt_verifier_tripwire(&[0u8; 32], &[], &[]);
         assert!(result.passed, "{}", result.failures.join("; "));
     }
 }
