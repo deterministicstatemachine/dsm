@@ -297,6 +297,7 @@ export default function AppContent({
                 actions: {
                   WALLET: () => navigate('wallet'),
                   TOKENS: () => navigate('accounts'),
+                  LIQUIDITY: () => navigate('liquidity'),
                   CONTACTS: () => navigate('contacts'),
                   STORAGE: () => navigate('storage'),
                   SETTINGS: () => navigate('settings'),
