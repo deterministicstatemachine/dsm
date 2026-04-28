@@ -18,6 +18,7 @@ export type ScreenType =
   | 'dev_policy'
   | 'dev_detfi_launch'
   | 'liquidity'
+  | 'mail'
   | 'bluetooth'
   | 'vault'
   | 'lock_setup'
