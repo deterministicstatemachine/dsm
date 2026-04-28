@@ -16,7 +16,7 @@ export function buildHomeMenuItems(appState: AppState, currentScreen: ScreenType
       return ['RETRY CONNECTION', 'VIEW ERROR LOG'];
     case 'wallet_ready':
       if (currentScreen !== 'home') return ['BACK TO HOME'];
-      return ['WALLET', 'TOKENS', 'CONTACTS', 'STORAGE', 'SETTINGS'];
+      return ['WALLET', 'TOKENS', 'LIQUIDITY', 'CONTACTS', 'STORAGE', 'SETTINGS'];
     default:
       return [];
   }

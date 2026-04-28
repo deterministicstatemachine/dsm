@@ -32,6 +32,7 @@ const VALID_NAV_TARGETS = new Set<ScreenType>([
   'dev_cdbrw',
   'dev_policy',
   'dev_detfi_launch',
+  'liquidity',
   'lock_setup',
   'recovery',
   'nfc_recovery',
