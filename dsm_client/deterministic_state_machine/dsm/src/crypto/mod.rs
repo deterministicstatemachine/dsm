@@ -42,6 +42,7 @@ pub mod cdbrw_binding;
 pub mod device_memory_manager;
 pub mod ephemeral_key;
 pub mod hash;
+pub mod hkdf;
 pub mod kyber;
 pub mod pedersen;
 pub mod random_walk_privacy;
