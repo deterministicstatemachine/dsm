@@ -490,8 +490,19 @@ pub fn convert_session_to_genesis_state_compat(
     let hash = session.genesis_id;
     let initial_entropy = calculate_initial_entropy(&hash, &contribs)?;
 
-    let signing_key = SigningKey::new()?;
-    let kyber_keypair = KyberKey::new()?;
+    // Silicon-bound master keypair per whitepaper §11.1 eq.13.  K_DBRW
+    // is folded into S_master and both keypairs are deterministic given
+    // (device_id, participants, metadata, contributions, K_DBRW).  The
+    // genesis_mpc derivation zeroises its IKM/seed buffers internally.
+    let mk = session.derive_silicon_bound_keypair()?;
+    let signing_key = SigningKey {
+        public_key: mk.sphincs_public.clone(),
+        secret_key: mk.sphincs_secret.clone(),
+    };
+    let kyber_keypair = KyberKey {
+        public_key: mk.kyber_public.clone(),
+        secret_key: mk.kyber_secret.clone(),
+    };
 
     let participants: HashSet<String> = session
         .storage_nodes
