@@ -598,16 +598,28 @@ fn route_commit_signature_uses_same_canonical_form_as_x() {
 #[test]
 fn route_trade_flow_routes_are_dispatched() {
     let src = read(sdk_path("src/handlers/route_routes.rs"));
-    let needles = [
-        "\"route.publishRoutingAdvertisement\" => {",
-        "\"route.listAdvertisementsForPair\" => {",
-        "\"route.syncVaultsForPair\" => self.route_sync_vaults_for_pair(i).await,",
-        "\"route.findAndBindBestPath\" => self.route_find_and_bind_best_path(i).await,",
+    let dispatch_edges = [
+        (
+            "route.publishRoutingAdvertisement",
+            "self.route_publish_routing_advertisement(i).await",
+        ),
+        (
+            "route.listAdvertisementsForPair",
+            "self.route_list_advertisements_for_pair(q).await",
+        ),
+        (
+            "route.syncVaultsForPair",
+            "self.route_sync_vaults_for_pair(i).await",
+        ),
+        (
+            "route.findAndBindBestPath",
+            "self.route_find_and_bind_best_path(i).await",
+        ),
     ];
-    for needle in needles {
+    for (route_name, handler_call) in dispatch_edges {
         assert!(
-            src.contains(needle),
-            "regression: trade-flow dispatch edge missing: {needle}"
+            src.contains(route_name) && src.contains(handler_call),
+            "regression: trade-flow dispatch edge missing: {route_name} -> {handler_call}"
         );
     }
 }
