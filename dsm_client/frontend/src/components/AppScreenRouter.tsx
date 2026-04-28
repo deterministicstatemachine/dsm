@@ -11,6 +11,7 @@ import DevDlvScreen from './screens/DevDlvScreen';
 import DevCdbrwScreen from './screens/DevCdbrwScreen';
 import DevPolicyScreen from './screens/DevPolicyScreen';
 import DevDeTfiLaunchScreen from './screens/DevDeTfiLaunchScreen';
+import DefiHubScreen from './screens/DefiHubScreen';
 import LiquidityScreen from './screens/LiquidityScreen';
 import MailScreen from './screens/MailScreen';
 import LockSetupScreen from './screens/LockSetupScreen';
@@ -30,6 +31,7 @@ const MemoDevDlv = React.memo(DevDlvScreen);
 const MemoDevCdbrw = React.memo(DevCdbrwScreen);
 const MemoDevPolicy = React.memo(DevPolicyScreen);
 const MemoDevDeTfiLaunch = React.memo(DevDeTfiLaunchScreen);
+const MemoDefi = React.memo(DefiHubScreen);
 const MemoLiquidity = React.memo(LiquidityScreen);
 const MemoMail = React.memo(MailScreen);
 const MemoLockSetup = React.memo(LockSetupScreen);
@@ -82,6 +84,8 @@ export default function AppScreenRouter({
       return <MemoDevPolicy />;
     case 'dev_detfi_launch':
       return <MemoDevDeTfiLaunch />;
+    case 'defi':
+      return <MemoDefi onNavigate={onNavigate} />;
     case 'liquidity':
       return <MemoLiquidity onNavigate={onNavigate} />;
     case 'mail':
