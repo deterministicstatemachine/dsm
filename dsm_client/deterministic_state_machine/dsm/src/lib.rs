@@ -150,16 +150,17 @@ fn get_enabled_features() -> Vec<String> {
 }
 
 /// Expose core trustless genesis creation to SDK consumers.
+///
+/// Per whitepaper §2.5 the MPC is n-of-n; no threshold parameter.
 pub async fn create_trustless_genesis<
     S: crate::core::identity::genesis_mpc::GenesisStorage + Sync + Send,
 >(
     device_id: String,
     storage_nodes: Vec<crate::types::identifiers::NodeId>,
-    threshold: usize,
     metadata: Option<String>,
     storage: Option<&S>,
 ) -> Result<TrustlessGenesisArtifacts, DsmError> {
-    identity::create_trustless_genesis(device_id, storage_nodes, threshold, metadata, storage)
+    identity::create_trustless_genesis(device_id, storage_nodes, metadata, storage)
         .await
         .map_err(DsmError::from)
 }

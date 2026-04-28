@@ -233,8 +233,8 @@ pub async fn fetch_genesis_state(
     // Use a fixed small set of test nodes (deterministic; no network dependency)
     let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
 
-    // Threshold pinned to production minimum (3)
-    create_genesis_via_blind_mpc(device_id_arr, nodes, 3, None).await
+    // Per whitepaper §2.5: n-of-n MPC; no threshold parameter.
+    create_genesis_via_blind_mpc(device_id_arr, nodes, None).await
 }
 
 /// Verify a Genesis state against known storage nodes
@@ -263,7 +263,6 @@ mod tests {
         GS {
             hash,
             initial_entropy: [0u8; 32],
-            threshold: 2,
             participants: Default::default(),
             merkle_root: None,
             device_id: Some([0x01; 32]),

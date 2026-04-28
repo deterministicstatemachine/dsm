@@ -4,7 +4,9 @@
 //! Invariants:
 //! - No wall-clock APIs. Use deterministic ticks (u64) from utils::deterministic_time.
 //! - No hex/base64 in data structures; bytes-only at boundaries.
-//! - ≥3 storage nodes and threshold ≥3 (no 2-of-N), no alternate-path entropy.
+//! - ≥3 storage nodes contribute entropy (n-of-n commit-then-reveal).  This is
+//!   not threshold cryptography — `b_1, ..., b_n` in whitepaper §2.5 is index
+//!   notation for "all n contributions"; there is no t-of-n DKG or Shamir.
 //! - Storage/publishing is trait-only (SDK implements I/O).
 //!
 //! This module implements the MPC genesis creation protocol with commitment–reveal,
@@ -37,7 +39,6 @@ pub struct SanitizedGenesisPayload {
     pub genesis_hash: [u8; 32],
     pub device_id: [u8; 32],
     pub public_key: Vec<u8>, // SPHINCS+ public key
-    pub threshold: usize,
     pub participants: Vec<NodeId>,
     pub created_at_ticks: u64,
 }
@@ -132,7 +133,6 @@ pub struct GenesisSession {
     pub genesis_id: [u8; 32],
     /// Participants
     pub storage_nodes: Vec<NodeId>,
-    pub threshold: usize,
     /// Device id (32B)
     pub device_id: [u8; 32],
     /// Deterministic ticks
@@ -158,30 +158,23 @@ impl GenesisSession {
             reveals: Vec::new(),
             genesis_id: [0u8; 32],
             storage_nodes: Vec::new(),
-            threshold: 0,
             device_id: [0u8; 32],
             created_at_ticks: now_tick(),
         })
     }
 
-    /// Initialize MPC with participants and threshold (≥3 and ≤ nodes)
+    /// Initialize MPC with participants (≥3 storage nodes; whitepaper §2.5
+    /// requires `b_1, ..., b_n` from all n participants — no threshold).
     pub fn initialize_mpc(
         &mut self,
         device_id: [u8; 32],
         storage_nodes: Vec<NodeId>,
-        threshold: usize,
     ) -> Result<(), DsmError> {
         if storage_nodes.len() < 3 {
             return Err(DsmError::invalid_parameter("MPC requires ≥3 storage nodes"));
         }
-        if threshold < 3 || threshold > storage_nodes.len() {
-            return Err(DsmError::invalid_parameter(
-                "Threshold must be ≥3 and ≤ participants",
-            ));
-        }
         self.device_id = device_id;
         self.storage_nodes = storage_nodes;
-        self.threshold = threshold;
         Ok(())
     }
 
@@ -263,9 +256,6 @@ impl GenesisSession {
         if self.storage_nodes.len() < 3 {
             return Err(DsmError::invalid_operation("MPC requires ≥3 storage nodes"));
         }
-        if self.threshold < 3 || self.threshold > self.storage_nodes.len() {
-            return Err(DsmError::invalid_operation("Invalid MPC threshold"));
-        }
         if self.mpc_entropies.len() != self.storage_nodes.len() {
             return Err(DsmError::invalid_operation(
                 "MPC entropy count must equal node count",
@@ -315,20 +305,12 @@ pub fn generate_device_entropy(device_id: &[u8; 32]) -> [u8; 32] {
 pub async fn create_mpc_genesis(
     device_id: [u8; 32],
     storage_nodes: Vec<NodeId>,
-    threshold: usize,
     metadata: Option<Vec<u8>>,
 ) -> Result<GenesisSession, DsmError> {
     if storage_nodes.len() < 3 {
         return Err(DsmError::InvalidParameter(format!(
             "MPC requires ≥3 nodes, got {}",
             storage_nodes.len()
-        )));
-    }
-    if threshold < 3 || threshold > storage_nodes.len() {
-        return Err(DsmError::InvalidParameter(format!(
-            "threshold must be ≥3 and ≤ nodes ({}), got {}",
-            storage_nodes.len(),
-            threshold
         )));
     }
 
@@ -358,7 +340,7 @@ pub async fn create_mpc_genesis(
     }
 
     let mut session = GenesisSession::new(meta)?;
-    session.initialize_mpc(device_id, storage_nodes, threshold)?;
+    session.initialize_mpc(device_id, storage_nodes)?;
     session.set_entropies(device_entropy, mpc_entropies)?;
 
     session.compute_commitments();
@@ -374,7 +356,6 @@ pub async fn create_mpc_genesis(
 pub async fn create_mpc_genesis_with_transport<T: GenesisMpcTransport + Sync>(
     device_id: [u8; 32],
     storage_nodes: Vec<NodeId>,
-    threshold: usize,
     metadata: Option<Vec<u8>>,
     transport: &T,
     dbrw_binding: Option<[u8; 32]>,
@@ -383,13 +364,6 @@ pub async fn create_mpc_genesis_with_transport<T: GenesisMpcTransport + Sync>(
         return Err(DsmError::InvalidParameter(format!(
             "MPC requires ≥3 nodes, got {}",
             storage_nodes.len()
-        )));
-    }
-    if threshold < 3 || threshold > storage_nodes.len() {
-        return Err(DsmError::InvalidParameter(format!(
-            "threshold must be ≥3 and ≤ nodes ({}), got {}",
-            storage_nodes.len(),
-            threshold
         )));
     }
 
@@ -408,7 +382,7 @@ pub async fn create_mpc_genesis_with_transport<T: GenesisMpcTransport + Sync>(
     };
 
     let mut session = GenesisSession::new(meta)?;
-    session.initialize_mpc(device_id, storage_nodes.clone(), threshold)?;
+    session.initialize_mpc(device_id, storage_nodes.clone())?;
     session.device_entropy = device_entropy;
     session.dbrw_binding = dbrw_binding;
 
@@ -498,22 +472,36 @@ mod tests {
     }
 
     #[test]
-    fn test_init_validate_thresholds() {
+    fn test_init_validate_participant_count() {
         let mut s = GenesisSession::new(b"m".to_vec()).unwrap();
         let device = id32(7);
         let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
-        assert!(s.initialize_mpc(device, nodes.clone(), 3).is_ok());
+        assert!(s.initialize_mpc(device, nodes.clone()).is_ok());
 
+        // <3 storage nodes rejected.
         let mut bad = GenesisSession::new(b"x".to_vec()).unwrap();
         assert!(bad
-            .initialize_mpc(device, vec![NodeId::new("n1")], 3)
+            .initialize_mpc(device, vec![NodeId::new("n1")])
             .is_err());
 
         let mut bad2 = GenesisSession::new(b"x".to_vec()).unwrap();
-        assert!(bad2.initialize_mpc(device, nodes.clone(), 2).is_err());
+        assert!(bad2
+            .initialize_mpc(device, vec![NodeId::new("n1"), NodeId::new("n2")])
+            .is_err());
 
-        let mut bad3 = GenesisSession::new(b"x".to_vec()).unwrap();
-        assert!(bad3.initialize_mpc(device, nodes.clone(), 4).is_err());
+        // ≥3 always accepted; n-of-n contribution per whitepaper §2.5.
+        let mut ok4 = GenesisSession::new(b"x".to_vec()).unwrap();
+        assert!(ok4
+            .initialize_mpc(
+                device,
+                vec![
+                    NodeId::new("n1"),
+                    NodeId::new("n2"),
+                    NodeId::new("n3"),
+                    NodeId::new("n4"),
+                ]
+            )
+            .is_ok());
     }
 
     #[test]
@@ -531,7 +519,6 @@ mod tests {
         s.initialize_mpc(
             id32(9),
             vec![NodeId::new("a"), NodeId::new("b"), NodeId::new("c")],
-            3,
         )
         .unwrap();
         s.device_entropy = id32(11);
@@ -553,7 +540,7 @@ mod tests {
     async fn test_create_mpc_genesis_path() {
         let dev = id32(0xAA);
         let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
-        let s = create_mpc_genesis(dev, nodes, 3, Some(b"DSMv2|test".to_vec())).await;
+        let s = create_mpc_genesis(dev, nodes, Some(b"DSMv2|test".to_vec())).await;
 
         let sess = match s {
             Ok(sess) => sess,

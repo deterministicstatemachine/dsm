@@ -78,12 +78,15 @@ pub struct Contribution {
     pub verified: bool,
 }
 
-/// Production Genesis state (bytes-first)
+/// Production Genesis state (bytes-first).
+///
+/// Per whitepaper §2.5 there is no threshold cryptography — `b_1, ..., b_n`
+/// is index notation for "all n contributions" from `participants` (n ≥ 3).
+/// The session is n-of-n commit-then-reveal, not t-of-n.
 #[derive(Debug, Clone)]
 pub struct GenesisState {
     pub hash: [u8; 32],            // 32 bytes
     pub initial_entropy: [u8; 32], // 32 bytes
-    pub threshold: usize,
     pub participants: HashSet<String>,
     pub merkle_root: Option<[u8; 32]>,
     pub device_id: Option<[u8; 32]>,
@@ -247,7 +250,6 @@ pub fn derive_device_sub_genesis(
             data: device_specific_entropy.to_vec(),
             verified: true,
         }],
-        threshold: 3,
     })
 }
 
@@ -310,10 +312,8 @@ pub fn process_invalidation(identity: &Identity, request: &[u8]) -> Result<bool,
 // -------------------- Verification --------------------
 
 pub fn verify_genesis_state(genesis: &GenesisState) -> Result<bool, DsmError> {
-    if genesis.threshold < 3 {
-        return Ok(false);
-    }
-    if genesis.contributions.len() < genesis.threshold {
+    // Whitepaper §2.5 requires ≥3 contributions (n-of-n; not threshold).
+    if genesis.contributions.len() < 3 {
         return Ok(false);
     }
 
@@ -341,13 +341,11 @@ pub fn verify_genesis_state(genesis: &GenesisState) -> Result<bool, DsmError> {
 pub async fn create_genesis_via_blind_mpc(
     device_id: [u8; 32],
     storage_nodes: Vec<NodeId>,
-    threshold: usize,
     metadata: Option<Vec<u8>>,
 ) -> Result<GenesisState, DsmError> {
     let session = crate::core::identity::genesis_mpc::create_mpc_genesis(
         device_id,
         storage_nodes,
-        threshold,
         metadata,
     )
     .await?;
@@ -364,7 +362,6 @@ pub async fn create_genesis_via_blind_mpc(
 pub fn create_genesis_via_blind_mpc_with_contributors(
     device_id: [u8; 32],
     storage_nodes: Vec<NodeId>,
-    threshold: usize,
     device_entropy: [u8; 32],
     mpc_entropies: Vec<[u8; 32]>,
     metadata: Option<Vec<u8>>,
@@ -372,7 +369,7 @@ pub fn create_genesis_via_blind_mpc_with_contributors(
     let metadata = metadata.unwrap_or_else(|| b"DSMv2|bytes|no-wallclock".to_vec());
 
     let mut session = crate::core::identity::genesis_mpc::GenesisSession::new(metadata)?;
-    session.initialize_mpc(device_id, storage_nodes, threshold)?;
+    session.initialize_mpc(device_id, storage_nodes)?;
     session.set_entropies(device_entropy, mpc_entropies)?;
     session.compute_commitments();
     session.compute_genesis_id();
@@ -408,7 +405,6 @@ impl GenesisState {
             initial_entropy: [0u8; 32],
             signing_key,
             kyber_keypair,
-            threshold: 3,
             participants: HashSet::new(),
             merkle_root: Some([0u8; 32]),
             device_id: None,
@@ -478,7 +474,6 @@ pub fn convert_session_to_genesis_state_compat(
     let gs = GenesisState {
         hash,
         initial_entropy,
-        threshold: session.threshold,
         participants,
         merkle_root: None,
         device_id: Some(session.device_id),
@@ -487,9 +482,9 @@ pub fn convert_session_to_genesis_state_compat(
         contributions,
     };
 
-    if gs.threshold < 3 {
+    if session.storage_nodes.len() < 3 {
         return Err(DsmError::invalid_parameter(
-            "GenesisSession threshold < 3 is not permitted",
+            "GenesisSession must have ≥3 storage_nodes (whitepaper §2.5)",
         ));
     }
     Ok(gs)
@@ -507,7 +502,6 @@ mod tests {
             GenesisState {
                 hash: [hash_byte; 32],
                 initial_entropy: [hash_byte.wrapping_add(1); 32],
-                threshold: 3,
                 participants: ["p1".to_string(), "p2".to_string(), "p3".to_string()]
                     .into_iter()
                     .collect(),
@@ -524,17 +518,15 @@ mod tests {
     async fn test_genesis_state_creation_mpc_only() {
         let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
         let device_id = [0xAB; 32];
-        let threshold = 3;
 
-        let res =
-            create_genesis_via_blind_mpc(device_id, nodes, threshold, Some(b"test".to_vec())).await;
+        let res = create_genesis_via_blind_mpc(device_id, nodes, Some(b"test".to_vec())).await;
 
         let genesis = match res {
             Ok(g) => g,
             Err(e) => panic!("create_genesis_via_blind_mpc should succeed: {e:?}"),
         };
 
-        assert_eq!(genesis.threshold, threshold);
+        assert_eq!(genesis.participants.len(), 3);
         assert_eq!(genesis.hash.len(), 32);
         assert_eq!(genesis.initial_entropy.len(), 32);
     }
@@ -545,7 +537,6 @@ mod tests {
         let master = GenesisState {
             hash: [1u8; 32],
             initial_entropy: [2u8; 32],
-            threshold: 3,
             participants: participants.into_iter().collect(),
             merkle_root: None,
             device_id: None,
@@ -562,7 +553,6 @@ mod tests {
             Err(e) => panic!("derive_device_sub_genesis should succeed: {e:?}"),
         };
 
-        assert_eq!(device.threshold, 3);
         assert_eq!(device.participants.len(), 1);
         assert!(device.merkle_root.is_some());
         assert_eq!(device.merkle_root.unwrap(), master.hash);
@@ -579,7 +569,7 @@ mod tests {
         let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
         let device_id = [7u8; 32];
 
-        let genesis = match create_genesis_via_blind_mpc(device_id, nodes, 3, None).await {
+        let genesis = match create_genesis_via_blind_mpc(device_id, nodes, None).await {
             Ok(g) => g,
             Err(e) => panic!("create_genesis_via_blind_mpc should succeed: {e:?}"),
         };
@@ -602,7 +592,6 @@ mod tests {
         let genesis = create_genesis_via_blind_mpc_with_contributors(
             device_id,
             nodes,
-            3,
             device_entropy,
             node_entropies.clone(),
             Some(metadata.clone()),
@@ -628,7 +617,7 @@ mod tests {
         let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
         let device_id = [0x11; 32];
 
-        let g = match create_genesis_via_blind_mpc(device_id, nodes, 3, None).await {
+        let g = match create_genesis_via_blind_mpc(device_id, nodes, None).await {
             Ok(x) => x,
             Err(_) => return,
         };
