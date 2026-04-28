@@ -13,6 +13,7 @@ use serde::Serialize;
 
 use dsm::core::state_machine::transition::verify_transition_integrity;
 use dsm::core::state_machine::StateMachine;
+use dsm::core::token::{derive_canonical_balance_key, resolve_policy_commit};
 use dsm::crypto::blake3::domain_hash;
 use dsm::crypto::sphincs::{
     generate_keypair_from_seed, sphincs_sign, sphincs_verify, SphincsVariant,
@@ -52,8 +53,10 @@ fn make_genesis(seed: &[u8; 32], pk: &[u8], initial_balance: u64) -> (State, Sta
     if let Ok(h) = state.hash() {
         state.hash = h;
     }
+    let era_pc = resolve_policy_commit("ERA").expect("ERA policy_commit");
+    let era_key = derive_canonical_balance_key(&era_pc, pk, "ERA");
     state.token_balances.insert(
-        "ERA".into(),
+        era_key,
         Balance::from_state(initial_balance, state.hash),
     );
 
