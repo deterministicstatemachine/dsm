@@ -24,8 +24,6 @@
 //!     the chunk #7 gate with a typed `OutputMismatch`.
 //!   * A fresh swap against the post-trade reserves succeeds.
 
-#![cfg(feature = "demos")]
-
 use prost::Message as _;
 
 use crate::sdk::route_commit_sdk::{
