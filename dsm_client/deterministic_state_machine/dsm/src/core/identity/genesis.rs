@@ -224,9 +224,23 @@ pub fn derive_device_sub_genesis(
     combined.extend_from_slice(device_specific_entropy);
 
     let sub_genesis_hash = blake3_hash(&combined)?;
+    let device_id_bytes: [u8; 32] =
+        *crate::crypto::blake3::domain_hash("DSM/device-id", device_id.as_bytes()).as_bytes();
 
-    let signing_key = SigningKey::new()?;
-    let kyber_keypair = KyberKey::new()?;
+    // WP §11.1: per-device sub-genesis keypair MUST be deterministic from the
+    // sub-genesis hash + device id. Calling `SigningKey::new()` here would
+    // refresh the keypair on every invocation and break receipt verification
+    // continuity for the device.
+    let derived =
+        crate::core::identity::genesis_a0::derive_pq_keys(&sub_genesis_hash, &device_id_bytes)?;
+    let signing_key = SigningKey {
+        public_key: derived.sphincs_pk.clone(),
+        secret_key: derived.sphincs_sk.clone(),
+    };
+    let kyber_keypair = KyberKey {
+        public_key: derived.kyber_pk.clone(),
+        secret_key: derived.kyber_sk.clone(),
+    };
 
     Ok(GenesisState {
         hash: sub_genesis_hash,
@@ -238,9 +252,7 @@ pub fn derive_device_sub_genesis(
         )?,
         participants: HashSet::from([device_id.to_string()]),
         merkle_root: Some(master_genesis.hash),
-        device_id: Some(
-            *crate::crypto::blake3::domain_hash("DSM/device-id", device_id.as_bytes()).as_bytes(),
-        ),
+        device_id: Some(device_id_bytes),
         signing_key,
         kyber_keypair,
         contributions: vec![Contribution {
@@ -445,8 +457,22 @@ pub fn convert_session_to_genesis_state_compat(
     let hash = calculate_genesis_hash(&contribs, b"genesis")?;
     let initial_entropy = calculate_initial_entropy(&hash, &contribs)?;
 
-    let signing_key = SigningKey::new()?;
-    let kyber_keypair = KyberKey::new()?;
+    // WP §11.1: derive SPHINCS+ and Kyber keypairs deterministically from the
+    // canonical GenesisA0 anchor + DevID (with K_DBRW mixed in locally, never
+    // surfaced). Re-running genesis with the same inputs MUST produce the same
+    // keys; a fresh `SigningKey::new()` / `KyberKey::new()` here would silently
+    // refresh them on every call and break that invariant.
+    let a0_genesis_id = session.build_a0()?.genesis_id()?;
+    let derived =
+        crate::core::identity::genesis_a0::derive_pq_keys(&a0_genesis_id, &session.device_id)?;
+    let signing_key = SigningKey {
+        public_key: derived.sphincs_pk.clone(),
+        secret_key: derived.sphincs_sk.clone(),
+    };
+    let kyber_keypair = KyberKey {
+        public_key: derived.kyber_pk.clone(),
+        secret_key: derived.kyber_sk.clone(),
+    };
 
     let participants: HashSet<String> = session
         .storage_nodes
