@@ -189,7 +189,12 @@ impl GenesisSession {
         Ok(())
     }
 
-    /// Compute commitments: C_i = H(session_id || contribution)
+    /// Compute participant commitments: C_i = H("DSM/genesis-commit\0" ‖
+    /// session_id ‖ contribution_i).  The commitment domain is distinct
+    /// from the genesis-hash domain so the two derivations cannot
+    /// collide; per the BLAKE3 domain-separation rule, every BLAKE3 use
+    /// gets its own tag.
+    ///
     /// contributions = [device_entropy, mpc_i...]
     pub fn compute_commitments(&mut self) {
         let mut contributions: Vec<Vec<u8>> = Vec::new();
@@ -205,7 +210,7 @@ impl GenesisSession {
         self.commitments = contributions
             .iter()
             .map(|c| {
-                let mut h = dsm_domain_hasher("DSM/genesis-mpc");
+                let mut h = dsm_domain_hasher("DSM/genesis-commit");
                 h.update(&self.session_id);
                 h.update(c);
                 let mut out = [0u8; 32];
@@ -217,13 +222,13 @@ impl GenesisSession {
         self.reveals = contributions;
     }
 
-    /// Verify commitments against reveals
+    /// Verify commitments against reveals using the commit-domain.
     pub fn verify_commitments(&self) -> bool {
         if self.commitments.len() != self.reveals.len() {
             return false;
         }
         for (rev, com) in self.reveals.iter().zip(self.commitments.iter()) {
-            let mut h = dsm_domain_hasher("DSM/genesis-mpc");
+            let mut h = dsm_domain_hasher("DSM/genesis-commit");
             h.update(&self.session_id);
             h.update(rev);
             let mut out = [0u8; 32];
@@ -235,17 +240,31 @@ impl GenesisSession {
         true
     }
 
-    /// Compute genesis id: H(session_id || device_entropy || mpc_i... || metadata)
+    /// Compute genesis id per whitepaper §2.5:
     ///
-    /// DBRW is intentionally NOT part of the genesis binding.
+    /// ```text
+    /// G = BLAKE3("DSM/genesis\0" ‖ b_1 ‖ ... ‖ b_n ‖ A)
+    /// ```
+    ///
+    /// where `b_1 = device_entropy`, `b_2..b_n = mpc_entropies` (n-of-n),
+    /// and `A` is the contextual binding parameters: device_id ‖ sorted
+    /// participants ‖ metadata.  The participant ordering is the
+    /// canonical lex-sort of NodeId bytes so the hash is independent of
+    /// transport-time order.
+    ///
+    /// `K_DBRW` is intentionally NOT part of `A` — silicon binding
+    /// happens one layer down at master-seed derivation (whitepaper
+    /// §11.1 eq.13), not at the genesis hash.
     pub fn compute_genesis_id(&mut self) {
-        let mut h = dsm_domain_hasher("DSM/genesis-mpc");
-        h.update(&self.session_id);
+        let mut h = dsm_domain_hasher("DSM/genesis");
+        // b_1 = device_entropy
         h.update(&self.device_entropy);
+        // b_2..b_n = mpc_entropies (n-of-n contributions)
         for m in &self.mpc_entropies {
             h.update(m);
         }
-        h.update(&self.metadata);
+        // A = contextual binding parameters
+        h.update(&canonical_a(&self.device_id, &self.storage_nodes, &self.metadata));
         let mut out = [0u8; 32];
         out.copy_from_slice(h.finalize().as_bytes());
         self.genesis_id = out;
@@ -284,6 +303,44 @@ fn to_arr32(v: &[u8]) -> Result<[u8; 32], DsmError> {
     let mut a = [0u8; 32];
     a.copy_from_slice(v);
     Ok(a)
+}
+
+/// Canonical encoding of the contextual binding parameters `A` from
+/// whitepaper §2.5.  Bytes-only, length-prefixed, deterministic given
+/// the same inputs regardless of transport-time NodeId ordering.
+///
+/// Layout:
+/// ```text
+/// device_id           : 32 bytes
+/// participant_count   : u32 little-endian
+/// for each participant (lex-sorted by raw NodeId bytes):
+///   length            : u32 little-endian
+///   bytes
+/// metadata_length     : u32 little-endian
+/// metadata            : bytes
+/// ```
+fn canonical_a(device_id: &[u8; 32], storage_nodes: &[NodeId], metadata: &[u8]) -> Vec<u8> {
+    let mut sorted: Vec<&[u8]> = storage_nodes.iter().map(|n| n.as_bytes()).collect();
+    sorted.sort();
+
+    let participant_bytes_total: usize = sorted.iter().map(|p| p.len() + 4).sum();
+    let mut a = Vec::with_capacity(32 + 4 + participant_bytes_total + 4 + metadata.len());
+
+    // device_id
+    a.extend_from_slice(device_id);
+
+    // sorted participants (canonical lex order on raw bytes)
+    a.extend_from_slice(&(sorted.len() as u32).to_le_bytes());
+    for p in &sorted {
+        a.extend_from_slice(&(p.len() as u32).to_le_bytes());
+        a.extend_from_slice(p);
+    }
+
+    // metadata
+    a.extend_from_slice(&(metadata.len() as u32).to_le_bytes());
+    a.extend_from_slice(metadata);
+
+    a
 }
 
 /// Deterministic device entropy (bytes-only), derived from 32-byte device_id
@@ -549,5 +606,94 @@ mod tests {
         assert_ne!(sess.genesis_id, [0u8; 32]);
         assert!(sess.verify_commitments());
         assert_eq!(sess.mpc_entropies.len(), sess.storage_nodes.len());
+    }
+
+    /// Whitepaper §2.5 conformance: an external verifier with the same
+    /// public inputs (device_id, participants, metadata, contributions)
+    /// must independently recompute the genesis hash byte-for-byte.
+    #[test]
+    fn genesis_id_is_recomputable_from_public_inputs() {
+        let mut s = GenesisSession::new(b"meta".to_vec()).unwrap();
+        // Deliberately scramble the participant order on input — the
+        // canonical_a() helper sorts internally, so order at call time
+        // must not change the hash.
+        let nodes = vec![
+            NodeId::new("zeta"),
+            NodeId::new("alpha"),
+            NodeId::new("middle"),
+        ];
+        s.initialize_mpc(id32(0x42), nodes.clone()).unwrap();
+        s.device_entropy = id32(0xD0);
+        s.mpc_entropies = vec![id32(0xE1), id32(0xE2), id32(0xE3)];
+        s.compute_commitments();
+        s.compute_genesis_id();
+
+        // Independent recomputation following whitepaper §2.5 exactly.
+        let expected = {
+            let mut h = dsm_domain_hasher("DSM/genesis");
+            h.update(&s.device_entropy);
+            for m in &s.mpc_entropies {
+                h.update(m);
+            }
+            h.update(&canonical_a(&s.device_id, &s.storage_nodes, &s.metadata));
+            let mut out = [0u8; 32];
+            out.copy_from_slice(h.finalize().as_bytes());
+            out
+        };
+        assert_eq!(s.genesis_id, expected);
+
+        // Permuting the participant order at the call site must NOT
+        // change the hash (canonical_a sorts).
+        let mut s2 = GenesisSession::new(b"meta".to_vec()).unwrap();
+        let permuted = vec![
+            NodeId::new("middle"),
+            NodeId::new("zeta"),
+            NodeId::new("alpha"),
+        ];
+        // Same session_id needs the same metadata + device_id, but
+        // session_id is random so we copy from s.
+        s2.session_id = s.session_id;
+        s2.initialize_mpc(id32(0x42), permuted).unwrap();
+        s2.device_entropy = id32(0xD0);
+        s2.mpc_entropies = vec![id32(0xE1), id32(0xE2), id32(0xE3)];
+        s2.compute_genesis_id();
+        assert_eq!(s.genesis_id, s2.genesis_id);
+    }
+
+    /// Issue #252 sub-bug 3: session.genesis_id MUST match the value the
+    /// caller-facing converter publishes.  No second recomputation under
+    /// a different formula.
+    #[tokio::test]
+    async fn session_genesis_id_matches_caller_facing_state_hash() {
+        use crate::core::identity::genesis::convert_session_to_genesis_state_compat;
+        let dev = id32(0x77);
+        let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
+        let session = create_mpc_genesis(dev, nodes, Some(b"meta".to_vec()))
+            .await
+            .expect("create_mpc_genesis succeeds");
+
+        let gs = convert_session_to_genesis_state_compat(&session)
+            .expect("convert succeeds");
+
+        assert_eq!(
+            session.genesis_id, gs.hash,
+            "Issue #252 sub-bug 3: session-level genesis_id must match \
+             the GenesisState.hash returned to callers"
+        );
+    }
+
+    /// Domain separation: the participant commitment domain
+    /// (`DSM/genesis-commit`) must NOT collide with the genesis hash
+    /// domain (`DSM/genesis`) under the same input bytes.
+    #[test]
+    fn commit_domain_is_distinct_from_genesis_domain() {
+        let input = id32(0xAB).to_vec();
+        let mut h_g = dsm_domain_hasher("DSM/genesis");
+        h_g.update(&input);
+        let g_hash = h_g.finalize();
+        let mut h_c = dsm_domain_hasher("DSM/genesis-commit");
+        h_c.update(&input);
+        let c_hash = h_c.finalize();
+        assert_ne!(g_hash.as_bytes(), c_hash.as_bytes());
     }
 }

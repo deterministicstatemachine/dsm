@@ -86,7 +86,9 @@ fn compute_contribution_merkle_root(contributions: &[genesis::Contribution]) -> 
             } else {
                 &level[i]
             };
-            let mut h = dsm_domain_hasher("DSM/genesis");
+            // Distinct sub-domain — this is the contribution Merkle tree,
+            // not the whitepaper's genesis hash (`"DSM/genesis"`).
+            let mut h = dsm_domain_hasher("DSM/genesis-merkle");
             h.update(left);
             h.update(right);
             next.push(*h.finalize().as_bytes());
