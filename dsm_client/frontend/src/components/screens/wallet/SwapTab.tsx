@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Swap tab — AMM constant-product trade flow inside the wallet.
 //
-// Mirrors SendTab's idiom (form → ConfirmModal → status → success toast)
-// over the chunks #1–#7 trade pipeline.  All cryptographic operations
-// stay Rust-side per the architectural rule; this tab only frames typed
-// inputs and orchestrates the async sequence of bridge calls.
+// Free-form symmetric token inputs: any token id pair is valid as long
+// as some vault advertises liquidity for it.  Slippage tolerance is
+// captured client-side and used to compute a min-out floor that the
+// trader can verify before signing; backend route-fallback within the
+// envelope (alternate paths when primary moves) is Tier 2 work
+// (intent-bounds on RouteCommitHopV1) and is not yet wired through —
+// the UI surface is built so the wiring is additive when that lands.
 
 import React, { useCallback, useMemo, useState } from 'react';
 import {
@@ -38,9 +41,13 @@ type QuotedRoute = {
   inputToken: Uint8Array;
   outputToken: Uint8Array;
   primaryVaultId: Uint8Array;
+  expectedOut: bigint;
 };
 
 type Props = {
+  /** Available local balances; used purely as input-token suggestions
+   *  for autocomplete, not as a hard restriction.  Any token id with
+   *  advertised liquidity is swappable. */
   balances: Balance[];
   deviceB32: string;
   onCancel: () => void;
@@ -48,6 +55,9 @@ type Props = {
   loadWalletData: () => Promise<void>;
   setError: (err: string | null) => void;
 };
+
+const DEFAULT_SLIPPAGE_PCT = '0.5';
+const MAX_SLIPPAGE_PCT = 50;
 
 function phaseLabel(phase: Phase): string {
   switch (phase) {
@@ -85,12 +95,14 @@ function u128BigEndian(n: bigint): Uint8Array {
   return out;
 }
 
-function decodeReserveBigInt(bytes: Uint8Array): bigint {
-  let acc = 0n;
-  for (const b of bytes) {
-    acc = (acc << 8n) | BigInt(b);
-  }
-  return acc;
+/** Apply slippage tolerance (percent) to a quoted output, returning
+ *  the floor the trader is willing to accept.  Slippage is treated as
+ *  basis points internally to stay in integer math. */
+function applySlippageFloor(quoted: bigint, slippagePct: number): bigint {
+  if (slippagePct <= 0) return quoted;
+  if (slippagePct >= 100) return 0n;
+  const bps = Math.round(slippagePct * 100); // 0.5% → 50 bps
+  return (quoted * BigInt(10_000 - bps)) / 10_000n;
 }
 
 function SwapTabInner({
@@ -101,23 +113,44 @@ function SwapTabInner({
   loadWalletData,
   setError,
 }: Props): JSX.Element {
-  const [inputToken, setInputToken] = useState('ERA');
+  const [inputToken, setInputToken] = useState('');
   const [outputToken, setOutputToken] = useState('');
   const [amount, setAmount] = useState('');
+  const [slippagePct, setSlippagePct] = useState(DEFAULT_SLIPPAGE_PCT);
   const [phase, setPhase] = useState<Phase>('idle');
   const [phaseDetail, setPhaseDetail] = useState<string>('');
   const [quoted, setQuoted] = useState<QuotedRoute | null>(null);
   const [showConfirm, setShowConfirm] = useState(false);
 
-  const tokenOptions = useMemo(() => {
-    if (!Array.isArray(balances) || balances.length === 0) {
-      return [{ tokenId: 'ERA', symbol: 'ERA', balance: '0' } as Balance];
-    }
-    return balances;
+  /** Datalist suggestions: union of locally-held tokens (your balances)
+   *  to ease typing. Type any token id — even one you don't hold — and
+   *  Quote will succeed if a vault advertises liquidity for the pair. */
+  const tokenSuggestions = useMemo(() => {
+    if (!Array.isArray(balances)) return [];
+    return Array.from(new Set(balances.map((b) => b.tokenId).filter(Boolean)));
   }, [balances]);
 
-  const canQuote = inputToken.trim().length > 0 && outputToken.trim().length > 0 && amount.trim().length > 0;
-  const busy = phase === 'discovering' || phase === 'signing' || phase === 'publishing' || phase === 'settling';
+  const slippageNum = useMemo(() => {
+    const n = Number(slippagePct);
+    if (!Number.isFinite(n)) return Number(DEFAULT_SLIPPAGE_PCT);
+    return Math.min(MAX_SLIPPAGE_PCT, Math.max(0, n));
+  }, [slippagePct]);
+
+  const canQuote =
+    inputToken.trim().length > 0 &&
+    outputToken.trim().length > 0 &&
+    inputToken.trim() !== outputToken.trim() &&
+    amount.trim().length > 0;
+  const busy =
+    phase === 'discovering' ||
+    phase === 'signing' ||
+    phase === 'publishing' ||
+    phase === 'settling';
+
+  const minOut = useMemo(() => {
+    if (!quoted) return 0n;
+    return applySlippageFloor(quoted.expectedOut, slippageNum);
+  }, [quoted, slippageNum]);
 
   const handleQuote = useCallback(async () => {
     setError(null);
@@ -125,8 +158,8 @@ function SwapTabInner({
     setPhaseDetail('');
     try {
       setPhase('discovering');
-      const inputTokenBytes = new TextEncoder().encode(inputToken);
-      const outputTokenBytes = new TextEncoder().encode(outputToken);
+      const inputTokenBytes = new TextEncoder().encode(inputToken.trim());
+      const outputTokenBytes = new TextEncoder().encode(outputToken.trim());
       const amountBig = bigIntFromString(amount);
 
       // Sync first so the path search runs against fresh vault state.
@@ -147,7 +180,7 @@ function SwapTabInner({
       }
       const vaults = listRes.advertisements ?? [];
       if (vaults.length === 0) {
-        throw new Error(`No vault advertised for ${inputToken} ↔ ${outputToken}`);
+        throw new Error(`No liquidity advertised for ${inputToken.trim()} ↔ ${outputToken.trim()}`);
       }
 
       const bindRes = await findAndBindBestPath({
@@ -160,6 +193,21 @@ function SwapTabInner({
         throw new Error(bindRes.error || 'findAndBindBestPath failed');
       }
 
+      // Compute the expected output from the canonical pair ordering
+      // the Rust handler returned in the advertisement.  We compare
+      // both directions because a vault advertised under (B, A) lex
+      // ordering swaps reserveIn / reserveOut in our local view.
+      const v = vaults[0];
+      const ad_token_a = new TextDecoder().decode(v.tokenA);
+      const reserveIn = ad_token_a === inputToken.trim() ? v.reserveA : v.reserveB;
+      const reserveOut = ad_token_a === inputToken.trim() ? v.reserveB : v.reserveA;
+      const fee = BigInt(10_000 - v.feeBps);
+      const inEffective = (amountBig * fee) / 10_000n;
+      const expectedOut =
+        reserveIn + inEffective === 0n
+          ? 0n
+          : (reserveOut * inEffective) / (reserveIn + inEffective);
+
       const primaryVaultBytes = decodeBase32Crockford(vaults[0].vaultIdBase32);
       setQuoted({
         unsignedBytes: bindRes.unsignedRouteCommitBytes,
@@ -168,6 +216,7 @@ function SwapTabInner({
         inputToken: inputTokenBytes,
         outputToken: outputTokenBytes,
         primaryVaultId: primaryVaultBytes,
+        expectedOut,
       });
       setPhase('quoted');
     } catch (e) {
@@ -182,6 +231,20 @@ function SwapTabInner({
     if (!quoted) return;
     setError(null);
     setPhaseDetail('');
+
+    // Slippage check (client-side floor).  Backend intent-bounds gate
+    // is Tier 2 work; until that lands the trader's protection is the
+    // chunks #7 reserves-value gate (rejects on reserve drift) plus
+    // this client refusal to sign if the quote already violates the
+    // slippage envelope.
+    if (quoted.expectedOut < minOut) {
+      const msg = `Quoted output ${quoted.expectedOut} below your slippage floor ${minOut}`;
+      setError(msg);
+      setPhase('error');
+      setPhaseDetail(msg);
+      return;
+    }
+
     try {
       setPhase('signing');
       const signed = await signRouteCommit(quoted.unsignedBytes);
@@ -226,27 +289,16 @@ function SwapTabInner({
       setPhase('error');
       setPhaseDetail(msg);
     }
-  }, [quoted, deviceB32, loadWalletData, onSwapComplete, setError]);
-
-  const expectedOutput = useMemo(() => {
-    if (!quoted || quoted.vaults.length === 0) return '';
-    // Show the primary vault's quote as the route preview.  Multi-hop
-    // routing is supported by the bridge but the headline number is
-    // the first hop's expected output for now.
-    const v = quoted.vaults[0];
-    const inA = decodeReserveBigInt(quoted.inputAmountBytes);
-    if (inA === 0n) return '';
-    const reserveIn = v.reserveA; // canonical pair-ordering enforced by Rust.
-    const reserveOut = v.reserveB;
-    const fee = BigInt(10_000 - v.feeBps);
-    const inEffective = (inA * fee) / 10_000n;
-    if (reserveIn + inEffective === 0n) return '';
-    const out = (reserveOut * inEffective) / (reserveIn + inEffective);
-    return out.toString();
-  }, [quoted]);
+  }, [quoted, minOut, deviceB32, loadWalletData, onSwapComplete, setError]);
 
   return (
     <div>
+      <datalist id="swap-token-suggestions">
+        {tokenSuggestions.map((t) => (
+          <option key={t} value={t} />
+        ))}
+      </datalist>
+
       <div className="form-group">
         <label htmlFor="swap-from">From</label>
         <div className="amount-input-group">
@@ -258,19 +310,24 @@ function SwapTabInner({
             onChange={(e) => setAmount(e.target.value)}
             placeholder="0"
             className="form-input"
+            aria-label="Input amount"
           />
-          <select
+          <input
             id="swap-from"
+            type="text"
             value={inputToken}
             onChange={(e) => setInputToken(e.target.value)}
-            className="token-selector"
-          >
-            {tokenOptions.map((b) => (
-              <option key={b.tokenId} value={b.tokenId}>{b.symbol || b.tokenId}</option>
-            ))}
-          </select>
+            placeholder="From token"
+            list="swap-token-suggestions"
+            autoCapitalize="characters"
+            autoComplete="off"
+            className="form-input"
+            style={{ flex: 1, marginLeft: 8 }}
+            aria-label="Input token id"
+          />
         </div>
       </div>
+
       <div className="form-group">
         <label htmlFor="swap-to">To</label>
         <input
@@ -278,9 +335,34 @@ function SwapTabInner({
           type="text"
           value={outputToken}
           onChange={(e) => setOutputToken(e.target.value)}
-          placeholder="Output token id"
+          placeholder="To token"
+          list="swap-token-suggestions"
+          autoCapitalize="characters"
+          autoComplete="off"
           className="form-input"
+          aria-label="Output token id"
         />
+      </div>
+
+      <div className="form-group">
+        <label htmlFor="swap-slippage">
+          Slippage tolerance (%)
+        </label>
+        <input
+          id="swap-slippage"
+          type="number"
+          min="0"
+          max={MAX_SLIPPAGE_PCT}
+          step="0.1"
+          value={slippagePct}
+          onChange={(e) => setSlippagePct(e.target.value)}
+          className="form-input"
+          aria-label="Slippage tolerance percent"
+        />
+        <div style={{ fontSize: 10, opacity: 0.65, marginTop: 4 }}>
+          Refuses to sign if the quoted output falls below your floor.
+          Backend route-fallback within tolerance lands with intent-bounds (Tier 2).
+        </div>
       </div>
 
       {quoted && (
@@ -288,10 +370,17 @@ function SwapTabInner({
           <h4 style={{ fontSize: 12, marginBottom: 8 }}>Route</h4>
           <div className="balance-card" style={{ padding: '8px 12px' }}>
             <div className="balance-info">
-              <span className="token-symbol">{quoted.vaults.length} vault{quoted.vaults.length === 1 ? '' : 's'} discovered</span>
-              <span className="balance-amount">{expectedOutput} {outputToken}</span>
+              <span className="token-symbol">
+                {quoted.vaults.length} vault{quoted.vaults.length === 1 ? '' : 's'} discovered
+              </span>
+              <span className="balance-amount">
+                ~{quoted.expectedOut.toString()} {outputToken.trim()}
+              </span>
             </div>
-            <div style={{ fontSize: 10, opacity: 0.7, marginTop: 4 }}>
+            <div style={{ fontSize: 10, opacity: 0.85, marginTop: 4 }}>
+              min out @ {slippageNum}%: <strong>{minOut.toString()}</strong> {outputToken.trim()}
+            </div>
+            <div style={{ fontSize: 10, opacity: 0.65, marginTop: 2 }}>
               fee {quoted.vaults[0]?.feeBps} bps · vault {quoted.vaults[0]?.vaultIdBase32.slice(0, 12)}…
             </div>
           </div>
@@ -345,7 +434,7 @@ function SwapTabInner({
       <ConfirmModal
         visible={showConfirm}
         title="Confirm swap"
-        message={`Swap ${amount} ${inputToken} for ~${expectedOutput} ${outputToken} via ${quoted?.vaults.length ?? 0} vault${(quoted?.vaults.length ?? 0) === 1 ? '' : 's'}?`}
+        message={`Swap ${amount} ${inputToken.trim()} for ~${quoted?.expectedOut.toString() ?? 0} ${outputToken.trim()} (min ${minOut.toString()} @ ${slippageNum}% slippage) via ${quoted?.vaults.length ?? 0} vault${(quoted?.vaults.length ?? 0) === 1 ? '' : 's'}?`}
         onConfirm={() => { setShowConfirm(false); void handleExecute(); }}
         onCancel={() => setShowConfirm(false)}
       />
