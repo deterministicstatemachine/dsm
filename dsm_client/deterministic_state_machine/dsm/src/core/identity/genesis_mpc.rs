@@ -311,6 +311,78 @@ impl GenesisSession {
         }
         Ok(())
     }
+
+    /// Derive the silicon-bound SPHINCS+ and Kyber keypairs from this
+    /// session's `S_master` per whitepaper §11.1 eq.13:
+    ///
+    /// ```text
+    /// s_0           = BLAKE3("DSM/step-salt\0" ‖ G)
+    /// S_master      = HKDF-Extract(salt = "DSM/dev\0",
+    ///                              IKM  = G ‖ DevID ‖ K_DBRW ‖ s_0)
+    /// sphincs_seed  = HKDF-Expand(S_master, "DSM/sphincs-plus-seed\0", 32)
+    /// (AK_sk, AK_pk)= SPHINCS+.KeyGen(sphincs_seed)
+    /// (KEM_sk, KEM_pk)= ML-KEM.KeyGen(BLAKE3-derive(S_master, "DSM/kyber\0"))
+    /// ```
+    ///
+    /// Both keypairs are silicon-bound: differing `K_DBRW` produces
+    /// different keys even with identical public inputs (`device_id`,
+    /// `participants`, `metadata`, contributions).  `K_DBRW` flows only
+    /// through the local IKM buffer in `derive_master_seed`, which is
+    /// zeroised before this function returns; it is never serialised,
+    /// logged, or committed.
+    ///
+    /// Preconditions:
+    /// - `compute_genesis_id` has been called (`genesis_id != [0u8; 32]`)
+    /// - `dbrw_binding` is a non-zero `K_DBRW`
+    pub fn derive_silicon_bound_keypair(&self) -> Result<GenesisMasterKeypair, DsmError> {
+        use zeroize::Zeroize;
+
+        if self.genesis_id == [0u8; 32] {
+            return Err(DsmError::invalid_operation(
+                "compute_genesis_id must be called before derive_silicon_bound_keypair",
+            ));
+        }
+        if self.dbrw_binding == [0u8; 32] {
+            return Err(DsmError::invalid_operation(
+                "K_DBRW must be set before derive_silicon_bound_keypair",
+            ));
+        }
+
+        // S_master = HKDF-Extract(salt = "DSM/dev\0", IKM).  The free
+        // function zeroises its IKM internally.
+        let mut s_master =
+            derive_master_seed(&self.genesis_id, &self.device_id, &self.dbrw_binding);
+
+        // SPHINCS+ keypair from a 32-byte seed expanded out of S_master.
+        let mut sphincs_seed_vec =
+            crate::crypto::hkdf::expand(&s_master, b"DSM/sphincs-plus-seed\0", 32);
+        let mut sphincs_seed: [u8; 32] =
+            sphincs_seed_vec.as_slice().try_into().map_err(|_| {
+                DsmError::crypto(
+                    "SPHINCS+ seed length mismatch",
+                    None::<std::io::Error>,
+                )
+            })?;
+        sphincs_seed_vec.zeroize();
+
+        let sphincs_kp =
+            sphincs::generate_keypair_from_seed(sphincs::SphincsVariant::SPX256f, &sphincs_seed)?;
+        sphincs_seed.zeroize();
+
+        // ML-KEM (Kyber) keypair, domain-separated under "DSM/kyber\0".
+        let (kyber_pk, kyber_sk) =
+            kyber::generate_kyber_keypair_from_entropy(&s_master, "DSM/kyber\0")?;
+
+        // S_master has now produced both keypairs; clear it.
+        s_master.zeroize();
+
+        Ok(GenesisMasterKeypair {
+            sphincs_public: sphincs_kp.public_key.clone(),
+            sphincs_secret: sphincs_kp.secret_key.clone(),
+            kyber_public: kyber_pk,
+            kyber_secret: kyber_sk,
+        })
+    }
 }
 
 impl zeroize::Zeroize for GenesisSession {
@@ -393,6 +465,56 @@ pub fn compute_step_salt(g: &[u8; 32]) -> [u8; 32] {
     let mut out = [0u8; 32];
     out.copy_from_slice(h.finalize().as_bytes());
     out
+}
+
+/// Derive the master seed `S_master` per whitepaper §11.1 eq.13:
+///
+/// ```text
+/// s_0      = BLAKE3("DSM/step-salt\0" ‖ G)
+/// S_master = HKDF-Extract(salt = "DSM/dev\0",
+///                         IKM  = G ‖ DevID ‖ K_DBRW ‖ s_0)
+/// ```
+///
+/// `K_DBRW` enters the master seed only through the local `ikm` buffer,
+/// which is zeroised before this function returns.  The output
+/// `S_master` is the only place the binding survives — and it must be
+/// expanded into per-purpose seeds (SPHINCS+, Kyber, etc.) and then
+/// itself zeroised by callers.
+///
+/// Pulled out as a free function so external verifiers (and the
+/// determinism property tests) can recompute it byte-for-byte from the
+/// public inputs (`g`, `device_id`) plus the held-on-device `K_DBRW`.
+pub fn derive_master_seed(
+    g: &[u8; 32],
+    device_id: &[u8; 32],
+    k_dbrw: &[u8; 32],
+) -> [u8; 32] {
+    use zeroize::Zeroize;
+
+    let s_0 = compute_step_salt(g);
+    let mut ikm: Vec<u8> = Vec::with_capacity(32 * 4);
+    ikm.extend_from_slice(g);
+    ikm.extend_from_slice(device_id);
+    ikm.extend_from_slice(k_dbrw);
+    ikm.extend_from_slice(&s_0);
+
+    let s_master = crate::crypto::hkdf::extract(b"DSM/dev\0", &ikm);
+
+    // K_DBRW is now folded into S_master — clear the staging buffer.
+    ikm.zeroize();
+
+    s_master
+}
+
+/// Outputs of the silicon-bound master-keypair derivation
+/// (whitepaper §11.1).  Both keypairs are `ZeroizeOnDrop` because they
+/// embody long-lived device secrets.
+#[derive(Debug, Clone, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
+pub struct GenesisMasterKeypair {
+    pub sphincs_public: Vec<u8>,
+    pub sphincs_secret: Vec<u8>,
+    pub kyber_public: Vec<u8>,
+    pub kyber_secret: Vec<u8>,
 }
 
 /// Deterministic device entropy (bytes-only), derived from 32-byte device_id
@@ -764,5 +886,199 @@ mod tests {
         h_c.update(&input);
         let c_hash = h_c.finalize();
         assert_ne!(g_hash.as_bytes(), c_hash.as_bytes());
+    }
+
+    /// Helper: build a session with deterministic, fixed inputs so the
+    /// silicon-bound keypair derivation is reproducible across runs.
+    fn deterministic_session(
+        device_id: [u8; 32],
+        nodes: Vec<NodeId>,
+        device_entropy: [u8; 32],
+        mpc_entropies: Vec<[u8; 32]>,
+        metadata: Vec<u8>,
+        k_dbrw: [u8; 32],
+    ) -> GenesisSession {
+        let mut s = GenesisSession::new(metadata).unwrap();
+        s.initialize_mpc(device_id, nodes).unwrap();
+        s.device_entropy = device_entropy;
+        s.mpc_entropies = mpc_entropies;
+        s.set_dbrw_binding(k_dbrw);
+        s.compute_commitments();
+        s.compute_genesis_id();
+        s
+    }
+
+    /// Whitepaper §11.1 conformance: same `(device_id, K_DBRW,
+    /// participants, metadata, contributions)` ⇒ same SPHINCS+ + Kyber
+    /// keypair.  This is the core silicon-binding determinism property.
+    #[test]
+    fn silicon_bound_keypair_is_deterministic_under_same_inputs() {
+        let device_id = id32(0x42);
+        let nodes = vec![NodeId::new("a"), NodeId::new("b"), NodeId::new("c")];
+        let dev_e = id32(0xD0);
+        let mpc_e = vec![id32(0xE1), id32(0xE2), id32(0xE3)];
+        let meta = b"DSMv2|determinism".to_vec();
+        let k_dbrw = id32(0xDB);
+
+        let s1 = deterministic_session(
+            device_id,
+            nodes.clone(),
+            dev_e,
+            mpc_e.clone(),
+            meta.clone(),
+            k_dbrw,
+        );
+        let s2 = deterministic_session(device_id, nodes, dev_e, mpc_e, meta, k_dbrw);
+
+        // Sanity: the two sessions agree on the public-recomputable G.
+        assert_eq!(s1.genesis_id, s2.genesis_id);
+
+        let kp1 = s1.derive_silicon_bound_keypair().unwrap();
+        let kp2 = s2.derive_silicon_bound_keypair().unwrap();
+
+        assert_eq!(kp1.sphincs_public, kp2.sphincs_public);
+        assert_eq!(kp1.sphincs_secret, kp2.sphincs_secret);
+        assert_eq!(kp1.kyber_public, kp2.kyber_public);
+        assert_eq!(kp1.kyber_secret, kp2.kyber_secret);
+
+        // And neither is degenerate.
+        assert!(!kp1.sphincs_public.is_empty());
+        assert!(!kp1.kyber_public.is_empty());
+    }
+
+    /// Whitepaper §12 silicon-binding: differing `K_DBRW` MUST produce
+    /// different keypairs even when every public input is identical.
+    /// Without this, `K_DBRW` is merely decorative.
+    #[test]
+    fn silicon_bound_keypair_changes_with_k_dbrw() {
+        let device_id = id32(0x42);
+        let nodes = vec![NodeId::new("a"), NodeId::new("b"), NodeId::new("c")];
+        let dev_e = id32(0xD0);
+        let mpc_e = vec![id32(0xE1), id32(0xE2), id32(0xE3)];
+        let meta = b"DSMv2|silicon".to_vec();
+
+        let s_dev_a = deterministic_session(
+            device_id,
+            nodes.clone(),
+            dev_e,
+            mpc_e.clone(),
+            meta.clone(),
+            id32(0xA0),
+        );
+        let s_dev_b = deterministic_session(
+            device_id,
+            nodes.clone(),
+            dev_e,
+            mpc_e.clone(),
+            meta.clone(),
+            id32(0xB0),
+        );
+
+        // Public-inputs ⇒ G is identical (the spec keeps G publicly
+        // recomputable; K_DBRW is not part of A).
+        assert_eq!(s_dev_a.genesis_id, s_dev_b.genesis_id);
+
+        // But the keypairs must diverge — silicon is bound one layer
+        // down, in the master-seed IKM.
+        let kp_a = s_dev_a.derive_silicon_bound_keypair().unwrap();
+        let kp_b = s_dev_b.derive_silicon_bound_keypair().unwrap();
+
+        assert_ne!(kp_a.sphincs_public, kp_b.sphincs_public);
+        assert_ne!(kp_a.sphincs_secret, kp_b.sphincs_secret);
+        assert_ne!(kp_a.kyber_public, kp_b.kyber_public);
+        assert_ne!(kp_a.kyber_secret, kp_b.kyber_secret);
+    }
+
+    /// Whitepaper §11.1 + §12 normative rule: `K_DBRW` MUST NEVER
+    /// appear in any externally-publishable bytes.  Concretely, no
+    /// 32-byte window of the SanitizedGenesisPayload encoding may
+    /// equal the `K_DBRW` value.
+    #[test]
+    fn k_dbrw_never_appears_in_sanitized_payload_bytes() {
+        let device_id = id32(0x42);
+        let nodes = vec![NodeId::new("a"), NodeId::new("b"), NodeId::new("c")];
+        let dev_e = id32(0xD0);
+        let mpc_e = vec![id32(0xE1), id32(0xE2), id32(0xE3)];
+        let meta = b"DSMv2|nonleak".to_vec();
+        // Use a high-entropy K_DBRW so accidental match probability is
+        // negligible.  (id32(b) only varies by tag byte; we want full
+        // byte-pattern uniqueness.)
+        let k_dbrw: [u8; 32] = [
+            0x9a, 0x73, 0x21, 0xf0, 0x4c, 0x88, 0xb1, 0x5d,
+            0xee, 0x06, 0x97, 0x42, 0xa8, 0x33, 0xcf, 0x10,
+            0x5b, 0xc4, 0x29, 0x77, 0x84, 0x1e, 0xd3, 0x6a,
+            0x2f, 0x90, 0xab, 0x71, 0x05, 0xfd, 0x68, 0x4e,
+        ];
+
+        let s = deterministic_session(device_id, nodes, dev_e, mpc_e, meta, k_dbrw);
+        let mk = s.derive_silicon_bound_keypair().unwrap();
+
+        // Construct the externally-publishable payload (the only thing
+        // that is allowed to leave the device).
+        let payload = SanitizedGenesisPayload {
+            genesis_hash: s.genesis_id,
+            device_id: s.device_id,
+            public_key: mk.sphincs_public.clone(),
+            participants: s.storage_nodes.clone(),
+            created_at_ticks: s.created_at_ticks,
+        };
+
+        // Flatten the payload into a single byte stream (every field
+        // that could possibly be transmitted).
+        let mut flat: Vec<u8> = Vec::new();
+        flat.extend_from_slice(&payload.genesis_hash);
+        flat.extend_from_slice(&payload.device_id);
+        flat.extend_from_slice(&payload.public_key);
+        for n in &payload.participants {
+            flat.extend_from_slice(n.as_bytes());
+        }
+        flat.extend_from_slice(&payload.created_at_ticks.to_le_bytes());
+        // And include the public Kyber key, which would also ship.
+        flat.extend_from_slice(&mk.kyber_public);
+
+        // Sanity: there's enough material to hold a 32-byte pattern.
+        assert!(flat.len() >= k_dbrw.len());
+
+        // No 32-byte window may equal K_DBRW.
+        let mut leaked = false;
+        for w in flat.windows(k_dbrw.len()) {
+            if w == k_dbrw {
+                leaked = true;
+                break;
+            }
+        }
+        assert!(
+            !leaked,
+            "K_DBRW byte-pattern leaked into externally-publishable payload"
+        );
+    }
+
+    /// Independent recomputation of S_master from public inputs +
+    /// K_DBRW must match the value the session derives, end-to-end.
+    /// This pins the §11.1 IKM ordering.
+    #[test]
+    fn master_seed_matches_independent_recomputation() {
+        let device_id = id32(0x42);
+        let nodes = vec![NodeId::new("a"), NodeId::new("b"), NodeId::new("c")];
+        let dev_e = id32(0xD0);
+        let mpc_e = vec![id32(0xE1), id32(0xE2), id32(0xE3)];
+        let meta = b"DSMv2|recompute".to_vec();
+        let k_dbrw = id32(0x55);
+
+        let s = deterministic_session(device_id, nodes, dev_e, mpc_e, meta, k_dbrw);
+
+        // Spec-side recomputation: G already lives in s.genesis_id.
+        let s_master_session = derive_master_seed(&s.genesis_id, &s.device_id, &s.dbrw_binding);
+
+        // Independent path: rebuild IKM from the spec layout directly.
+        let s_0 = compute_step_salt(&s.genesis_id);
+        let mut ikm: Vec<u8> = Vec::new();
+        ikm.extend_from_slice(&s.genesis_id);
+        ikm.extend_from_slice(&s.device_id);
+        ikm.extend_from_slice(&k_dbrw);
+        ikm.extend_from_slice(&s_0);
+        let s_master_independent = crate::crypto::hkdf::extract(b"DSM/dev\0", &ikm);
+
+        assert_eq!(s_master_session, s_master_independent);
     }
 }
