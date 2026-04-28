@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! DeTFi routing path search.
+//! SoFi routing path search.
 //!
 //! Pure deterministic path search over a set of verified
 //! `RoutingVaultAdvertisementV1` records.  Produces a typed

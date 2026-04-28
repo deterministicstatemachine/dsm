@@ -490,9 +490,9 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
               type="button"
               className="settings-shell__button"
               style={{ fontSize: '9px' }}
-              onClick={() => onNavigate?.('dev_detfi_launch')}
+              onClick={() => onNavigate?.('dev_sofi_launch')}
             >
-              DETFI LAUNCH
+              SOFI LAUNCH
             </button>
 
             <button

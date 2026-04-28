@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! DeTFi route-commit binder + external-commitment storage anchor.
+//! SoFi route-commit binder + external-commitment storage anchor.
 //!
-//! Chunk #3 of the DeTFi routing pipeline.  Consumes a chosen `Path`
+//! Chunk #3 of the SoFi routing pipeline.  Consumes a chosen `Path`
 //! from chunk #2's path search and produces:
 //!   * a typed `RouteCommitV1` proto binding every hop's vault id,
 //!     advertisement digest, state number, and expected per-hop
@@ -13,7 +13,7 @@
 //!     minimal `ExternalCommitmentV1` proof-of-existence record.
 //!
 //! When the anchor is published, every vault on the route may
-//! atomically unlock — the visibility of `X` is the trigger (DeTFi
+//! atomically unlock — the visibility of `X` is the trigger (SoFi
 //! spec §3.2, §5.1).
 //!
 //! This module deliberately STOPS at the anchor.  Per-hop unlock
@@ -30,7 +30,7 @@ use crate::util::text_id::encode_base32_crockford;
 
 /// BLAKE3 domain tag for the external commitment derivation
 /// `X = BLAKE3("DSM/ext\0" || canonical(RouteCommit))`.
-/// Matches DeTFi spec §3.2 `ExtCommit(X) = H("DSM/ext" || X)`.
+/// Matches SoFi spec §3.2 `ExtCommit(X) = H("DSM/ext" || X)`.
 pub(crate) const EXT_COMMIT_DOMAIN: &str = "DSM/ext";
 
 /// Storage-node prefix for external-commitment anchors.  Each anchor
@@ -156,7 +156,7 @@ pub(crate) fn compute_external_commitment(rc: &generated::RouteCommitV1) -> [u8;
 /// Publish the external-commitment anchor to storage nodes.  The
 /// record exists purely to make `X` visible to every vault owner on
 /// the route — its mere presence at the keyspace prefix is the
-/// "atomic visibility" trigger (DeTFi spec §3.2).
+/// "atomic visibility" trigger (SoFi spec §3.2).
 pub(crate) async fn publish_external_commitment(
     x: &[u8; 32],
     publisher_public_key: &[u8],
@@ -1274,7 +1274,7 @@ mod tests {
     //                    BACKEND DEMO — END-TO-END
     // ═══════════════════════════════════════════════════════════════════
     //
-    // The single test below walks the entire DeTFi trade pipeline in
+    // The single test below walks the entire SoFi trade pipeline in
     // one process: routing-vault publish → discovery → path search →
     // RouteCommit binding → SPHINCS+ signing → external-commitment
     // anchor → eligibility gate (chunks #4 + #5) → AMM re-simulation

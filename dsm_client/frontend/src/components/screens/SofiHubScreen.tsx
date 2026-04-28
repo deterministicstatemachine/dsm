@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-// DeFi hub — sub-menu reached from the home `DEFI` brick.  Keeps the
-// home brick set short by tucking the lower-frequency DeFi flows
+// SoFi hub — sub-menu reached from the home `SOFI` brick.  Keeps the
+// home brick set short by tucking the lower-frequency SoFi flows
 // (liquidity, mail) behind one extra tap.  Visual idiom matches the
 // home menu (same `dsm-menu` + `home-brick` CSS classes).
 
@@ -29,7 +29,7 @@ const BRICKS: Brick[] = [
   },
 ];
 
-export default function DefiHubScreen({ onNavigate }: Props): JSX.Element {
+export default function SofiHubScreen({ onNavigate }: Props): JSX.Element {
   const go = useCallback(
     (target: string) => () => onNavigate?.(target),
     [onNavigate],
@@ -38,7 +38,7 @@ export default function DefiHubScreen({ onNavigate }: Props): JSX.Element {
   return (
     <div className="enhanced-wallet-screen" style={{ position: 'relative' }}>
       <div className="wallet-header">
-        <h2>DeFi</h2>
+        <h2>SoFi</h2>
         <div className="header-buttons" style={{ display: 'flex', gap: 8 }}>
           <button
             type="button"
@@ -51,7 +51,7 @@ export default function DefiHubScreen({ onNavigate }: Props): JSX.Element {
         </div>
       </div>
 
-      <div className="dsm-menu" role="menu" aria-label="DeFi sub-menu">
+      <div className="dsm-menu" role="menu" aria-label="SoFi sub-menu">
         {BRICKS.map((brick) => (
           <div
             key={brick.target}

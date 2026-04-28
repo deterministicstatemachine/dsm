@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! DeTFi backend demo — interactive CLI walkthrough of the AMM trade
+//! SoFi backend demo — interactive CLI walkthrough of the AMM trade
 //! pipeline.
 //!
 //! Run with:
 //!
-//!     cargo run -p dsm_sdk --example detfi_demo --features demos
+//!     cargo run -p dsm_sdk --example sofi_demo --features demos
 //!
 //! Self-contained: no frontend, no network, no real storage nodes.
 //! The `demos` Cargo feature exposes the in-process mock storage
@@ -33,8 +33,8 @@
 #[cfg(not(feature = "demos"))]
 fn main() {
     eprintln!(
-        "detfi_demo requires the `demos` feature.\n\
-         Run with: cargo run -p dsm_sdk --example detfi_demo --features demos"
+        "sofi_demo requires the `demos` feature.\n\
+         Run with: cargo run -p dsm_sdk --example sofi_demo --features demos"
     );
     std::process::exit(2);
 }
@@ -46,7 +46,7 @@ async fn main() {
 
     println!();
     println!("══════════════════════════════════════════════════════════════════");
-    println!("                  DeTFi Backend Demo — End-to-End                  ");
+    println!("                  SoFi Backend Demo — End-to-End                  ");
     println!("══════════════════════════════════════════════════════════════════");
     println!();
     println!("Running the AMM trade pipeline in a single process.  No frontend,");
@@ -101,6 +101,6 @@ async fn main() {
     );
     println!();
     println!("  Two settled trades + one rejected stale-reserves attack.");
-    println!("  Every gate fired correctly.  DeTFi protocol layer: working.");
+    println!("  Every gate fired correctly.  SoFi protocol layer: working.");
     println!();
 }
