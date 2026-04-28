@@ -26,22 +26,40 @@ function makeProps(overrides: Partial<React.ComponentProps<typeof SwapTab>> = {}
   };
 }
 
+function fillForm({ from, to, amount }: { from: string; to: string; amount: string }) {
+  fireEvent.change(screen.getByLabelText(/Input token id/i), { target: { value: from } });
+  fireEvent.change(screen.getByLabelText(/Output token id/i), { target: { value: to } });
+  fireEvent.change(screen.getByLabelText(/Input amount/i), { target: { value: amount } });
+}
+
 describe('SwapTab', () => {
   beforeEach(() => {
     jest.resetAllMocks();
   });
 
-  it('renders form with empty defaults and Quote disabled until valid', () => {
+  it('renders symmetric From / To text inputs with Quote disabled until both filled', () => {
     render(<SwapTab {...makeProps()} />);
     const quote = screen.getByRole('button', { name: /Quote/ });
     expect(quote).toBeDisabled();
 
-    fireEvent.change(screen.getByPlaceholderText('Output token id'), { target: { value: 'DEMO_BBB' } });
-    fireEvent.change(screen.getByPlaceholderText('0'), { target: { value: '10000' } });
+    fillForm({ from: 'DEMO_AAA', to: 'DEMO_BBB', amount: '10000' });
     expect(quote).not.toBeDisabled();
   });
 
-  it('discovers a route and shows expected output', async () => {
+  it('disables Quote when from === to (would be a no-op pair)', () => {
+    render(<SwapTab {...makeProps()} />);
+    fillForm({ from: 'ERA', to: 'ERA', amount: '10' });
+    expect(screen.getByRole('button', { name: /Quote/ })).toBeDisabled();
+  });
+
+  it('exposes a slippage tolerance input defaulted at 0.5%', () => {
+    render(<SwapTab {...makeProps()} />);
+    const slip = screen.getByLabelText(/Slippage tolerance percent/i) as HTMLInputElement;
+    expect(slip.value).toBe('0.5');
+    expect(slip).toHaveAttribute('max', '50');
+  });
+
+  it('discovers a route and shows expected output + slippage-adjusted min-out', async () => {
     mockedSync.mockResolvedValue({ success: true, newlyMirroredBase32: [] });
     mockedList.mockResolvedValue({
       success: true,
@@ -64,12 +82,15 @@ describe('SwapTab', () => {
     });
 
     render(<SwapTab {...makeProps()} />);
-    fireEvent.change(screen.getByPlaceholderText('Output token id'), { target: { value: 'DEMO_BBB' } });
-    fireEvent.change(screen.getByPlaceholderText('0'), { target: { value: '10000' } });
+    fillForm({ from: 'DEMO_AAA', to: 'DEMO_BBB', amount: '10000' });
     fireEvent.click(screen.getByRole('button', { name: /Quote/ }));
 
     await waitFor(() => expect(screen.getByText(/1 vault discovered/)).toBeInTheDocument());
-    expect(screen.getByRole('button', { name: /Swap/ })).toBeInTheDocument();
+    // Expected output for x=10000, y=1_000_000, fee=30: ((10000*9970/10000) * 1_000_000) / (1_000_000 + 9970) ≈ 9871
+    expect(screen.getByText(/~9871 DEMO_BBB/)).toBeInTheDocument();
+    // Default 0.5% slippage on 9871 → 9821 (floor of 9871 * 9950 / 10000)
+    expect(screen.getByText(/9821/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Swap$/ })).toBeInTheDocument();
   });
 
   it('surfaces an error if no vault is advertised for the pair', async () => {
@@ -78,12 +99,11 @@ describe('SwapTab', () => {
     const setError = jest.fn();
 
     render(<SwapTab {...makeProps({ setError })} />);
-    fireEvent.change(screen.getByPlaceholderText('Output token id'), { target: { value: 'NOPAIR' } });
-    fireEvent.change(screen.getByPlaceholderText('0'), { target: { value: '1' } });
+    fillForm({ from: 'A', to: 'NOPAIR', amount: '1' });
     fireEvent.click(screen.getByRole('button', { name: /Quote/ }));
 
-    await waitFor(() => expect(setError).toHaveBeenCalledWith(expect.stringMatching(/No vault advertised/)));
-    expect(screen.queryByRole('button', { name: /Swap/ })).not.toBeInTheDocument();
+    await waitFor(() => expect(setError).toHaveBeenCalledWith(expect.stringMatching(/No liquidity advertised/)));
+    expect(screen.queryByRole('button', { name: /^Swap$/ })).not.toBeInTheDocument();
   });
 
   it('surfaces a sync error verbatim', async () => {
@@ -91,8 +111,7 @@ describe('SwapTab', () => {
     const setError = jest.fn();
 
     render(<SwapTab {...makeProps({ setError })} />);
-    fireEvent.change(screen.getByPlaceholderText('Output token id'), { target: { value: 'X' } });
-    fireEvent.change(screen.getByPlaceholderText('0'), { target: { value: '1' } });
+    fillForm({ from: 'A', to: 'X', amount: '1' });
     fireEvent.click(screen.getByRole('button', { name: /Quote/ }));
 
     await waitFor(() => expect(setError).toHaveBeenCalledWith('storage node unreachable'));
