@@ -125,7 +125,7 @@ pub fn collect_named_implementation_trace_results(
     }
 }
 
-fn implementation_trace_catalog() -> [(&'static str, TraceFn); 15] {
+fn implementation_trace_catalog() -> [(&'static str, TraceFn); 16] {
     [
         (
             "state_machine_transfer_chain",
@@ -152,6 +152,10 @@ fn implementation_trace_catalog() -> [(&'static str, TraceFn); 15] {
             trace_tripwire_parent_consumption,
         ),
         ("receipt_verifier_tripwire", trace_receipt_verifier_tripwire),
+        (
+            "tripwire_first_contact_binding",
+            trace_tripwire_first_contact_binding,
+        ),
         ("djte_emission_happy_path", trace_djte_emission_happy_path),
         (
             "djte_repeated_emission_alignment",
@@ -1253,6 +1257,143 @@ fn trace_receipt_verifier_tripwire(
     }
 }
 
+fn trace_tripwire_first_contact_binding(
+    _seed_bytes: &[u8; 32],
+    _pk: &[u8],
+    _sk: &[u8],
+) -> ImplementationTraceResult {
+    let start = Instant::now();
+    let mut failures = Vec::new();
+
+    let keypair_a = SignatureKeyPair::generate_from_entropy(
+        b"implementation-trace-first-contact-a",
+    )
+    .expect("first-contact keypair a");
+
+    let genesis = *domain_hash("DSM/trace-genesis", b"first-contact").as_bytes();
+    let devid_a = *domain_hash("DSM/trace-device", b"first-contact-a").as_bytes();
+    let devid_b = *domain_hash("DSM/trace-device", b"first-contact-b").as_bytes();
+
+    let device_tree = DeviceTree::new(vec![devid_a, devid_b]);
+    let device_tree_root = device_tree.root();
+    let dev_proof = device_tree
+        .proof(&devid_a)
+        .map(encode_device_tree_proof)
+        .expect("device tree proof");
+
+    let parent_tip = [0u8; 32];
+    let first_child = [0x51; 32];
+    let alternate_first_child = [0x52; 32];
+    let extension_child = [0x53; 32];
+
+    let first_receipt = build_signed_receipt(
+        genesis,
+        devid_a,
+        devid_b,
+        parent_tip,
+        first_child,
+        dev_proof.clone(),
+        &keypair_a,
+        None,
+    );
+    let extension_receipt = build_signed_receipt(
+        genesis,
+        devid_a,
+        devid_b,
+        first_child,
+        extension_child,
+        dev_proof.clone(),
+        &keypair_a,
+        None,
+    );
+    let alternate_first_receipt = build_signed_receipt(
+        genesis,
+        devid_a,
+        devid_b,
+        parent_tip,
+        alternate_first_child,
+        dev_proof,
+        &keypair_a,
+        None,
+    );
+
+    let first_ctx = ReceiptVerificationContext::new(
+        dsm::types::receipt_types::DeviceTreeAcceptanceCommitment::from_root(device_tree_root),
+        first_receipt.parent_root,
+        keypair_a.public_key.clone(),
+        Vec::new(),
+    );
+    let extension_ctx = ReceiptVerificationContext::new(
+        dsm::types::receipt_types::DeviceTreeAcceptanceCommitment::from_root(device_tree_root),
+        extension_receipt.parent_root,
+        keypair_a.public_key.clone(),
+        Vec::new(),
+    );
+    let mut tracker = ParentConsumptionTracker::new();
+
+    match verify_stitched_receipt(&first_receipt, &first_ctx, &mut tracker) {
+        Ok(result) => {
+            if !result.valid {
+                failures.push(format!(
+                    "first-contact receipt was rejected: {}",
+                    result.reason.unwrap_or_else(|| "unknown reason".into())
+                ));
+            }
+        }
+        Err(e) => failures.push(format!("verifier errored on first-contact receipt: {e}")),
+    }
+
+    match verify_stitched_receipt(&extension_receipt, &extension_ctx, &mut tracker) {
+        Ok(result) => {
+            if !result.valid {
+                failures.push(format!(
+                    "extension from first-contact branch was rejected: {}",
+                    result.reason.unwrap_or_else(|| "unknown reason".into())
+                ));
+            }
+        }
+        Err(e) => failures.push(format!("verifier errored on first-contact extension: {e}")),
+    }
+
+    match verify_stitched_receipt(&alternate_first_receipt, &first_ctx, &mut tracker) {
+        Ok(result) => {
+            if result.valid {
+                failures.push("alternate first-contact branch was accepted".into());
+            } else {
+                let reason = result.reason.unwrap_or_default();
+                if !(reason.contains("Fork detected") || reason.contains("conflicting children")) {
+                    failures.push(format!(
+                        "alternate first-contact rejection reason was unexpected: {reason}"
+                    ));
+                }
+            }
+        }
+        Err(e) => failures.push(format!(
+            "verifier errored on alternate first-contact branch: {e}"
+        )),
+    }
+
+    if tracker.get_child(&parent_tip) != Some(&first_child) {
+        failures.push("first-contact binding did not preserve the canonical first child".into());
+    }
+
+    if tracker.get_child(&first_child) != Some(&extension_child) {
+        failures.push("first-contact extension did not anchor on the accepted child".into());
+    }
+
+    if !tracker.is_consumed(&parent_tip) || !tracker.is_consumed(&first_child) {
+        failures.push("tracker did not mark the accepted first-contact branch as consumed".into());
+    }
+
+    ImplementationTraceResult {
+        trace_name: "tripwire_first_contact_binding".into(),
+        steps: 3,
+        passed: failures.is_empty(),
+        failures,
+        duration_ms: start.elapsed().as_secs_f64() * 1000.0,
+    }
+}
+
 fn trace_token_manager_overspend_rejection(
     seed_bytes: &[u8; 32],
     pk: &[u8],
@@ -2208,6 +2349,12 @@ mod tests {
     #[test]
     fn receipt_verifier_tripwire_trace_passes() {
         let result = trace_receipt_verifier_tripwire(&[0u8; 32], &[], &[]);
+        assert!(result.passed, "{}", result.failures.join("; "));
+    }
+
+    #[test]
+    fn tripwire_first_contact_binding_trace_passes() {
+        let result = trace_tripwire_first_contact_binding(&[0u8; 32], &[], &[]);
         assert!(result.passed, "{}", result.failures.join("; "));
     }
 }

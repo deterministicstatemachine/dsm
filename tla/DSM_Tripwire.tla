@@ -13,8 +13,21 @@ VARIABLES
 Vars == <<deviceRoots, smtState, ledger>>
 
 \* This module deliberately stops at protocol-level fork exclusion. It assumes
-\* external signature and hash soundness from the post-quantum crypto layer and
-\* does not attempt to model Shor-style break scenarios inside TLA.
+\* external signature and hash soundness from the post-quantum crypto layer,
+\* treats bilateral countersign + Device Tree inclusion as abstract acceptance
+\* guards, and does not attempt to model Shor-style break scenarios inside TLA.
+\* Pending-online lock and recovery/abort mechanics live in
+\* DSM_OfflineFinality.tla; this module assumes no unresolved pending online
+\* projection for the relationship being advanced.
+
+CountersignedByBoth(d1, d2) ==
+    d1 /= d2
+
+DeviceTreeIncluded(d) ==
+    d \in Devices
+
+ForwardAdjacent(oldTip, newTip) ==
+    newTip > oldTip
 
 \* =============================================================================
 \* Initial State
@@ -33,6 +46,15 @@ ProcessReceipt(d1, d2, oldTip, newTip, r1_old, r2_old) ==
     LET 
         rel == {d1, d2}
     IN
+    \* Guard 0: Acceptance scope from Whitepaper Sec. 4.1-4.3.
+    \* We model bilateral countersign, device-tree inclusion, and adjacency
+    \* as abstract predicates here and leave byte-exact proof validation to the
+    \* implementation-side checks.
+    /\ CountersignedByBoth(d1, d2)
+    /\ DeviceTreeIncluded(d1)
+    /\ DeviceTreeIncluded(d2)
+    /\ ForwardAdjacent(oldTip, newTip)
+
     \* Guard 1: Root Linearity / Causal Consistency
     \* The receipt must be signed by the keys associated with the CURRENT device state.
     \* In DSM terms: You must provide a valid inclusion proof of your DevID in the global tree,
@@ -53,6 +75,8 @@ ProcessReceipt(d1, d2, oldTip, newTip, r1_old, r2_old) ==
             ![d2][rel] = newTip
        ]
     /\ ledger' = ledger \cup {[
+            a |-> d1,
+            b |-> d2,
             rel |-> rel, 
             oldTip |-> oldTip, 
             newTip |-> newTip,
@@ -104,10 +128,51 @@ Next ==
 \* The Core Tripwire Guarantee:
 \* Even if the adversary tries to submit forked receipts, the combination 
 \* of Causal Consistency (deviceRoots check) and SMT Inclusion (smtState check)
-\* prevents any forked history from being accepted into the ledger.
+\* prevents any forked history from being accepted into the ledger. This is
+\* the abstract model of Whitepaper Eq. (8): no distinct accepted successor
+\* may consume the same parent.
 TripwireInvariant == 
     \A r1, r2 \in ledger :
         (r1.rel = r2.rel /\ r1.oldTip = r2.oldTip) => (r1.newTip = r2.newTip)
+
+ConsumedParentUniqueness ==
+    \A r1, r2 \in ledger :
+        (r1.rel = r2.rel /\ r1.oldTip = r2.oldTip)
+            => (r1.newTip = r2.newTip
+                /\ r1.r1 = r2.r1
+                /\ r1.r2 = r2.r2)
+
+AcceptedReceiptsAdvance ==
+    \A receipt \in ledger :
+        receipt.newTip > receipt.oldTip
+
+ReceiptEndpointsMatchRelation ==
+    \A receipt \in ledger :
+        receipt.rel = {receipt.a, receipt.b}
+
+ReceiptChainContinuity ==
+    \A receipt \in ledger :
+        receipt.oldTip = 0
+        \/ \E prev \in ledger :
+            /\ prev.rel = receipt.rel
+            /\ prev.newTip = receipt.oldTip
+
+CurrentRelationshipAgreement ==
+    \A rel \in Relationships :
+        \A d1, d2 \in rel :
+            smtState[d1][rel] = smtState[d2][rel]
+
+CurrentTipsWereAccepted ==
+    \A d \in Devices, rel \in Relationships :
+        (d \in rel /\ smtState[d][rel] # 0)
+            => \E receipt \in ledger :
+                /\ receipt.rel = rel
+                /\ receipt.newTip = smtState[d][rel]
+
+FirstContactBinding ==
+    \A r1, r2 \in ledger :
+        (r1.rel = r2.rel /\ r1.oldTip = 0 /\ r2.oldTip = 0)
+            => r1.newTip = r2.newTip
 
 \* State constraint for bounded model checking — limits counter growth
 \* so TLC can exhaustively explore the reachable state space.

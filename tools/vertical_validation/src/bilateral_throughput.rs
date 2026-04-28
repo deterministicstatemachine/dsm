@@ -16,6 +16,7 @@ use instant::Instant;
 use serde::Serialize;
 
 use dsm::core::state_machine::StateMachine;
+use dsm::core::token::{derive_canonical_balance_key, resolve_policy_commit};
 use dsm::crypto::blake3::domain_hash;
 use dsm::crypto::sphincs::{generate_keypair_from_seed, sphincs_sign, SphincsVariant};
 use dsm::types::operations::{Operation, TransactionMode, VerificationType};
@@ -63,9 +64,11 @@ fn make_genesis(seed: &[u8; 32], pk: &[u8]) -> (State, StateMachine) {
     if let Ok(h) = state.hash() {
         state.hash = h;
     }
+    let era_pc = resolve_policy_commit("ERA").expect("ERA policy_commit");
+    let era_key = derive_canonical_balance_key(&era_pc, pk, "ERA");
     state
         .token_balances
-        .insert("ERA".into(), Balance::from_state(1_000_000, state.hash));
+        .insert(era_key, Balance::from_state(1_000_000, state.hash));
     let mut machine = StateMachine::new();
     machine.set_state(state.clone());
     (state, machine)
