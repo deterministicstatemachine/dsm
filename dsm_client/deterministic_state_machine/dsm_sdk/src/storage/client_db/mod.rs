@@ -673,18 +673,28 @@ fn create_schema(conn: &Connection) -> Result<()> {
 
         -- Per-relationship cert chain heads (whitepaper §11.1 ek-cert chain).
         -- One row per (relationship_key, side). `side` is 0 for the local
-        -- device's chain head (used to verify outgoing cert signatures during
-        -- creation, and to advance after acceptance) and 1 for the
-        -- counterparty's chain head (used to verify incoming cert signatures).
+        -- device's chain head (used to sign outgoing certs and to advance
+        -- after acceptance) and 1 for the counterparty's chain head (used
+        -- to verify incoming certs).
+        --
         -- chain_head_pubkey is the SPHINCS+ public key of the prior signer:
         -- AK_pk at step 0, EK_pk_n for n > 0.
+        --
+        -- chain_head_sk_encrypted is the ChaCha20-Poly1305 ciphertext of
+        -- the corresponding SECRET key (for Local rows only; NULL for
+        -- Counterparty), encrypted under a key derived from K_DBRW so
+        -- extracted ciphertext cannot be used on a different device.
+        -- Used at receipt creation time to sign cert_{n+1}; wiped after
+        -- consumption when chain_head advances.
+        --
         -- step_count tracks the current chain length for this relationship.
         CREATE TABLE IF NOT EXISTS cert_chain_heads(
-            relationship_key  BLOB NOT NULL,
-            side              INTEGER NOT NULL CHECK(side IN (0, 1)),
-            chain_head_pubkey BLOB NOT NULL,
-            step_count        INTEGER NOT NULL DEFAULT 0,
-            updated_at        INTEGER NOT NULL,
+            relationship_key        BLOB NOT NULL,
+            side                    INTEGER NOT NULL CHECK(side IN (0, 1)),
+            chain_head_pubkey       BLOB NOT NULL,
+            chain_head_sk_encrypted BLOB,
+            step_count              INTEGER NOT NULL DEFAULT 0,
+            updated_at              INTEGER NOT NULL,
             PRIMARY KEY (relationship_key, side)
         );
         "#,
