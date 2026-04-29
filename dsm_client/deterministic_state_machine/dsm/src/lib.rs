@@ -150,16 +150,21 @@ fn get_enabled_features() -> Vec<String> {
 }
 
 /// Expose core trustless genesis creation to SDK consumers.
+///
+/// Per whitepaper §2.5 the MPC is n-of-n; no threshold parameter.
+/// `k_dbrw` is the device's DBRW binding per whitepaper §12 def.3 —
+/// callers obtain it from
+/// `crate::crypto::cdbrw_binding::derive_cdbrw_binding_key`.
 pub async fn create_trustless_genesis<
     S: crate::core::identity::genesis_mpc::GenesisStorage + Sync + Send,
 >(
     device_id: String,
     storage_nodes: Vec<crate::types::identifiers::NodeId>,
-    threshold: usize,
+    k_dbrw: [u8; 32],
     metadata: Option<String>,
     storage: Option<&S>,
 ) -> Result<TrustlessGenesisArtifacts, DsmError> {
-    identity::create_trustless_genesis(device_id, storage_nodes, threshold, metadata, storage)
+    identity::create_trustless_genesis(device_id, storage_nodes, k_dbrw, metadata, storage)
         .await
         .map_err(DsmError::from)
 }

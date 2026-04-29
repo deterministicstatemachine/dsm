@@ -647,18 +647,18 @@ impl AppRouterImpl {
         let bitcoin_tap = Arc::new(crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::new(dlv_manager));
 
         // One-shot purge of retired prefs keyspace (plan Part E).
-        // `dsm.token.*`, `dsm.dlv.*`, `dsm.detfi.*` used to mirror token +
+        // `dsm.token.*`, `dsm.dlv.*`, `dsm.sofi.*` used to mirror token +
         // vault state in the app-state KV.  Every writer is gone and the
         // readers are dead code; wipe stale keys at boot so the next
         // release can drop this hook entirely.  Fail-soft on missing store.
         let purged = crate::sdk::app_state::AppState::purge_keys_with_prefixes(&[
             "dsm.token.",
             "dsm.dlv.",
-            "dsm.detfi.",
+            "dsm.sofi.",
         ]);
         if purged > 0 {
             log::info!(
-                "[app_router] purged {purged} legacy prefs keys (dsm.token.* / dsm.dlv.* / dsm.detfi.*)"
+                "[app_router] purged {purged} legacy prefs keys (dsm.token.* / dsm.dlv.* / dsm.sofi.*)"
             );
         }
 
@@ -2564,7 +2564,7 @@ impl AppRouter for AppRouterImpl {
             p if p.starts_with("posted_dlv.") => self.handle_posted_dlv_query(q).await,
             // DLV read-only routes (e.g. owner inventory monitor)
             p if p.starts_with("dlv.") => self.handle_dlv_query(q).await,
-            // DeTFi route-commit utilities (compute X, anchor visibility)
+            // SoFi route-commit utilities (compute X, anchor visibility)
             p if p.starts_with("route.") => self.handle_route_query(q).await,
             _ => {
                 log::warn!("[APP_ROUTER] unknown query path: '{}'", q.path);
@@ -2614,10 +2614,10 @@ impl AppRouter for AppRouterImpl {
             m if m.starts_with("dlv.") => self.handle_dlv_invoke(i).await,
             // Posted-mode DLV (recipient-side sync/mirror)
             m if m.starts_with("posted_dlv.") => self.handle_posted_dlv_invoke(i).await,
-            // DeTFi route-commit anchor publish
+            // SoFi route-commit anchor publish
             m if m.starts_with("route.") => self.handle_route_invoke(i).await,
-            // DeTFi
-            m if m.starts_with("detfi.") => self.handle_detfi_invoke(i).await,
+            // SoFi
+            m if m.starts_with("sofi.") => self.handle_sofi_invoke(i).await,
             // BLE
             "ble.command" => self.handle_ble_invoke(i).await,
             // Bilateral reconcile

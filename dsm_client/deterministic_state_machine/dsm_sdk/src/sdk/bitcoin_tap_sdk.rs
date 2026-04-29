@@ -560,7 +560,7 @@ struct WithdrawalSelectorInput {
 
 // In-process mock storage backend.  Active under `#[cfg(test)]` for
 // crate-internal tests AND under `--features demos` so example
-// binaries (notably `cargo run --example detfi_demo`) can drive the
+// binaries (notably `cargo run --example sofi_demo`) can drive the
 // full pipeline without standing up real storage nodes.  The `demos`
 // feature is opt-in (not in the default set) so production builds
 // never see this path.

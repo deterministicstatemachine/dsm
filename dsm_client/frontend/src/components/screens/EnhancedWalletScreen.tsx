@@ -4,6 +4,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import { useWalletScreenData } from './wallet/hooks/useWalletScreenData';
 import OverviewTab from './wallet/OverviewTab';
 import SendTab from './wallet/SendTab';
+import SwapTab from './wallet/SwapTab';
 import HistoryTab from './wallet/HistoryTab';
 import InboxOverlay from './wallet/InboxOverlay';
 import BitcoinTapTab from './bitcoin/BitcoinTapTab';
@@ -15,7 +16,7 @@ import '../../styles/EnhancedWallet.css';
 interface EnhancedWalletScreenProps {
   eraTokenSrc?: string;
   btcLogoSrc?: string;
-  initialTab?: 'overview' | 'send' | 'history' | 'bitcoin';
+  initialTab?: 'overview' | 'send' | 'swap' | 'history' | 'bitcoin';
 }
 
 const EnhancedWalletScreen: React.FC<EnhancedWalletScreenProps> = ({ eraTokenSrc, btcLogoSrc, initialTab }) => {
@@ -59,7 +60,7 @@ const EnhancedWalletScreen: React.FC<EnhancedWalletScreenProps> = ({ eraTokenSrc
     };
   }, []);
 
-  const [activeTab, setActiveTab] = useState<'overview' | 'send' | 'history' | 'bitcoin'>(initialTab || 'overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'send' | 'swap' | 'history' | 'bitcoin'>(initialTab || 'overview');
 
   const eraGif = eraTokenSrc || 'images/logos/era_token_gb.gif';
   const btcGif = btcLogoSrc || 'images/logos/btc-logo.gif';
@@ -78,6 +79,11 @@ const EnhancedWalletScreen: React.FC<EnhancedWalletScreenProps> = ({ eraTokenSrc
   }, [data.touchFeedback]);
 
   const handleSendComplete = useCallback(() => {
+    data.setTouchFeedback('transaction_sent');
+    setActiveTab('overview');
+  }, [data]);
+
+  const handleSwapComplete = useCallback(() => {
     data.setTouchFeedback('transaction_sent');
     setActiveTab('overview');
   }, [data]);
@@ -146,7 +152,7 @@ const EnhancedWalletScreen: React.FC<EnhancedWalletScreenProps> = ({ eraTokenSrc
 
       {/* Tabs */}
       <div className="tab-navigation">
-        {(['overview', 'send', 'history', 'bitcoin'] as const).map((tab) => (
+        {(['overview', 'send', 'swap', 'history', 'bitcoin'] as const).map((tab) => (
           <button key={tab} onClick={() => setActiveTab(tab)} className={`tab-button ${activeTab === tab ? 'active' : ''}`}>
             {tab === 'bitcoin' ? 'BTC Tap' : tab.charAt(0).toUpperCase() + tab.slice(1)}
           </button>
@@ -176,6 +182,17 @@ const EnhancedWalletScreen: React.FC<EnhancedWalletScreenProps> = ({ eraTokenSrc
             btcGif={btcGif}
             onCancel={switchToOverview}
             onSendComplete={handleSendComplete}
+            loadWalletData={data.loadWalletData}
+            setError={data.setError}
+          />
+        )}
+
+        {activeTab === 'swap' && (
+          <SwapTab
+            balances={data.balances}
+            deviceB32={data.deviceB32}
+            onCancel={switchToOverview}
+            onSwapComplete={handleSwapComplete}
             loadWalletData={data.loadWalletData}
             setError={data.setError}
           />

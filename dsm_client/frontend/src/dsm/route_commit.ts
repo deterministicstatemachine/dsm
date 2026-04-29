@@ -2,7 +2,7 @@
 // path: src/dsm/route_commit.ts
 // SPDX-License-Identifier: Apache-2.0
 //
-// DeTFi route-commit + atomic-unlock helpers (Track C.2 follow-on
+// SoFi route-commit + atomic-unlock helpers (Track C.2 follow-on
 // to chunks #3 / #4 / #5).
 //
 // Flow:

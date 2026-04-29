@@ -7,25 +7,20 @@
 //! - Cross-device identity verification
 //!
 //! # DSM Core Identity Policy
-//! DSM core enforces ≥3 storage nodes and threshold ≥3; no 2-of-N convenience,
-//! no alternate-path entropy; storage is trait-only.
+//!
+//! Per whitepaper §2.5, genesis MPC is n-of-n commit-then-reveal — there is
+//! no threshold cryptography.  The `b_1, ..., b_n` notation in the spec is
+//! mathematical index notation for "all n contributions"; not a t-of-n DKG.
+//! DSM core enforces ≥3 storage nodes (anti-collusion floor); no alternate-
+//! path entropy; storage is trait-only.
 
 // DSM Protocol Security Invariants - Compile-time enforced
 pub const MIN_PARTICIPANTS: usize = 3;
-pub const MIN_THRESHOLD: usize = 3;
 
-// Compile-time assertions to prevent regression
+// Compile-time assertion to prevent regression.
 const _: () = assert!(
     MIN_PARTICIPANTS >= 3,
-    "MPC security requires at least 3 participants"
-);
-const _: () = assert!(
-    MIN_THRESHOLD >= 3,
-    "MPC threshold must be >= 3 to resist 2 colluding nodes"
-);
-const _: () = assert!(
-    MIN_THRESHOLD <= MIN_PARTICIPANTS,
-    "Threshold cannot exceed participants"
+    "MPC security requires at least 3 participants (n-of-n commit-then-reveal)"
 );
 
 pub mod genesis;
@@ -91,7 +86,9 @@ fn compute_contribution_merkle_root(contributions: &[genesis::Contribution]) -> 
             } else {
                 &level[i]
             };
-            let mut h = dsm_domain_hasher("DSM/genesis");
+            // Distinct sub-domain — this is the contribution Merkle tree,
+            // not the whitepaper's genesis hash (`"DSM/genesis"`).
+            let mut h = dsm_domain_hasher("DSM/genesis-merkle");
             h.update(left);
             h.update(right);
             next.push(*h.finalize().as_bytes());
@@ -111,15 +108,9 @@ pub fn convert_session_to_genesis_state(
     // create or represent genesis / identity. Genesis must remain derivable and
     // recoverable without DBRW present.
 
-    if session.storage_nodes.is_empty() {
+    if session.storage_nodes.len() < 3 {
         return Err(IdentityError::InvalidParameter(
-            "MPC session did not record any storage node participants".into(),
-        ));
-    }
-
-    if session.threshold == 0 {
-        return Err(IdentityError::InvalidParameter(
-            "MPC session reported threshold of zero".into(),
+            "MPC session must record ≥3 storage node participants (whitepaper §2.5)".into(),
         ));
     }
 
@@ -164,7 +155,6 @@ pub fn convert_session_to_genesis_state(
         initial_entropy: session.device_entropy,
         signing_key,
         kyber_keypair,
-        threshold: session.threshold,
         participants,
         merkle_root,
         // device_id is display-only in GenesisState; omit any encoding
@@ -199,12 +189,16 @@ impl TrustlessGenesisArtifacts {
 }
 
 /// Perform trustless blind MPC genesis creation at the core level.
+///
+/// Per whitepaper §2.5 the MPC is n-of-n commit-then-reveal — there is no
+/// threshold cryptography.  All `storage_nodes` participate; the `≥3`
+/// floor is enforced (per spec invariant; resists 2-collusion-only).
 pub async fn create_trustless_genesis<
     S: crate::core::identity::genesis_mpc::GenesisStorage + Sync + Send,
 >(
     device_id: String,
     storage_nodes: Vec<NodeId>,
-    threshold: usize,
+    k_dbrw: [u8; 32],
     metadata: Option<String>,
     storage: Option<&S>,
 ) -> Result<TrustlessGenesisArtifacts, IdentityError> {
@@ -213,26 +207,13 @@ pub async fn create_trustless_genesis<
         "MPC/genesis/create_trustless",
         device_id = %device_id,
         session_id = tracing::field::Empty,
-        threshold = threshold,
         n_participants = storage_nodes.len()
     );
     let _enter = span.enter();
 
     if storage_nodes.len() < MIN_PARTICIPANTS {
         return Err(IdentityError::InvalidParameter(
-            "MPC/threshold/too_low: requires at least 3 participants for trustless genesis".into(),
-        ));
-    }
-
-    if threshold < MIN_THRESHOLD {
-        return Err(IdentityError::InvalidParameter(
-            "MPC/threshold/too_low: threshold must be at least 3 for MPC security".into(),
-        ));
-    }
-
-    if threshold > storage_nodes.len() {
-        return Err(IdentityError::InvalidParameter(
-            "MPC/threshold/invalid: threshold cannot exceed number of participants".into(),
+            "MPC/participants/too_few: requires at least 3 storage nodes for trustless genesis (whitepaper §2.5)".into(),
         ));
     }
 
@@ -242,7 +223,7 @@ pub async fn create_trustless_genesis<
     let session = create_mpc_genesis(
         device_id_bytes,
         storage_nodes,
-        threshold,
+        k_dbrw,
         metadata.map(|s| s.into_bytes()),
     )
     .await
@@ -279,8 +260,6 @@ pub async fn create_trustless_genesis<
             // hash (len + bytes)
             out.extend_from_slice(&(gs.hash.len() as u32).to_le_bytes());
             out.extend_from_slice(&gs.hash);
-            // threshold (u64)
-            out.extend_from_slice(&(gs.threshold as u64).to_le_bytes());
             // participants sorted (len + each len+bytes)
             let mut parts: Vec<_> = gs.participants.iter().cloned().collect();
             parts.sort();
@@ -427,8 +406,8 @@ impl IdentityStore {
     >(
         &self,
         name: &str,
-        threshold: usize,
         participants: Vec<NodeId>,
+        k_dbrw: [u8; 32],
         storage: Option<&S>,
     ) -> Result<Identity, IdentityError> {
         let span = tracing::span!(
@@ -436,27 +415,13 @@ impl IdentityStore {
             "MPC/identity/create",
             name = %name,
             session_id = tracing::field::Empty,
-            threshold = threshold,
             n_participants = participants.len()
         );
         let _enter = span.enter();
 
         if participants.len() < MIN_PARTICIPANTS {
             return Err(IdentityError::InvalidParameter(
-                "MPC/threshold/too_low: MPC requires at least 3 storage-node participants (plus device entropy)"
-                    .into(),
-            ));
-        }
-
-        if threshold < MIN_THRESHOLD {
-            return Err(IdentityError::InvalidParameter(
-                "MPC/threshold/too_low: threshold must be ≥3 to resist 2 colluding nodes".into(),
-            ));
-        }
-
-        if threshold > participants.len() {
-            return Err(IdentityError::InvalidParameter(
-                "MPC/threshold/invalid: threshold cannot be greater than number of participants"
+                "MPC/participants/too_few: MPC requires at least 3 storage-node participants (plus device entropy) per whitepaper §2.5"
                     .into(),
             ));
         }
@@ -467,7 +432,7 @@ impl IdentityStore {
         let artifacts = create_trustless_genesis(
             device_id.clone(),
             participants.clone(),
-            threshold,
+            k_dbrw,
             Some(format!("DSM_IDENTITY_{name}")),
             storage,
         )
@@ -513,29 +478,26 @@ impl IdentityStore {
         Ok(identity)
     }
 
-    /// Create identity with storage nodes for MPC (production method)
+    /// Create identity with storage nodes for MPC (production method).
+    ///
+    /// Per whitepaper §2.5 the MPC is n-of-n; all storage nodes contribute.
+    /// No threshold parameter — `≥3` floor enforced.
     pub async fn create_identity_with_storage_nodes<
         S: crate::core::identity::genesis_mpc::GenesisStorage + Sync + Send,
     >(
         &self,
         name: &str,
         storage_nodes: Vec<NodeId>,
-        threshold: usize,
+        k_dbrw: [u8; 32],
         storage: Option<&S>,
     ) -> Result<Identity, IdentityError> {
         if storage_nodes.len() < MIN_PARTICIPANTS {
             return Err(IdentityError::InvalidParameter(
-                "At least 3 storage nodes required for MPC genesis creation".into(),
+                "At least 3 storage nodes required for MPC genesis creation (whitepaper §2.5)".into(),
             ));
         }
 
-        if threshold > storage_nodes.len() {
-            return Err(IdentityError::InvalidParameter(
-                "Threshold cannot exceed number of storage nodes".into(),
-            ));
-        }
-
-        self.create_identity(name, threshold, storage_nodes, storage)
+        self.create_identity(name, storage_nodes, k_dbrw, storage)
             .await
     }
 

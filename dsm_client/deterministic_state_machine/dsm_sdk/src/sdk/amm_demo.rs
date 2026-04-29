@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Self-contained DeTFi backend demo.
+//! Self-contained SoFi backend demo.
 //!
 //! Single public entry point — `run_amm_e2e_demo()` — that walks the
 //! entire AMM trade pipeline in one process and returns a structured
-//! transcript.  Designed for the `cargo run --example detfi_demo
+//! transcript.  Designed for the `cargo run --example sofi_demo
 //! --features demos` invocation: the example just calls this and
 //! prints each step.
 //!
