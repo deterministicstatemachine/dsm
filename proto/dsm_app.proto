@@ -1628,6 +1628,16 @@ message ReceiptCommit {
   // Proto3 omits empty bytes fields, so canonical encode_to_vec() skips these.
   bytes sig_a = 12 [(dsm_max_len)=65535]; // SPHINCS+ sig from party A
   bytes sig_b = 13 [(dsm_max_len)=65535]; // SPHINCS+ sig from party B
+  // Per-step ephemeral-key certificates (whitepaper §11.1).
+  // cert_{n+1} = Sign_{SK_n}( BLAKE3("DSM/ek-cert\0" || EK_pk_{n+1} || h_n) )
+  // Carried in the envelope alongside sig_a/sig_b. NOT in canonical commit
+  // preimage (§4.2.1 freezes the 10-field commit form). The cert binds the
+  // per-step EK to the prior chain head (AK at n=0, else EK_n) and lets a
+  // verifier walk the chain back to the device-attested AK_pk. Empty bytes
+  // are omitted by proto3, so receipts without a valid chain-head context
+  // (e.g., at session genesis) can leave these unset.
+  bytes ek_cert_a = 14 [(dsm_max_len)=65535];
+  bytes ek_cert_b = 15 [(dsm_max_len)=65535];
 }
 
 
