@@ -12,7 +12,7 @@ use axum::{
 };
 use std::sync::Arc;
 
-use super::hardening::blake3_tagged;
+use crate::api::infra::hardening::blake3_tagged;
 use crate::AppState;
 
 const MAX_ROOT_BYTES: usize = 256; // small protobuf

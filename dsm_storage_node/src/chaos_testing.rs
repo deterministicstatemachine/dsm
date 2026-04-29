@@ -322,7 +322,7 @@ impl IntegrationTester {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::hardening;
+    use crate::api::infra::hardening;
 
     #[tokio::test]
     async fn test_chaos_engine_basic() {

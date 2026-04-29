@@ -95,6 +95,6 @@ pub async fn build_app_for_tests() -> anyhow::Result<axum::Router> {
 
     // Only mount registry routes for the current tests
     Ok(axum::Router::new()
-        .merge(api::registry::create_router(state_arc.clone()))
+        .merge(api::registry::core::create_router(state_arc.clone()))
         .layer(Extension(state_arc)))
 }
