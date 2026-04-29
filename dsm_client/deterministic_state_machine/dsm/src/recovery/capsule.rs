@@ -80,8 +80,28 @@ pub struct EncryptedCapsule {
     pub nonce: Vec<u8>,
     /// Reserved for compatibility. v3 capsules leave this empty.
     pub salt: Vec<u8>,
+    /// Per-Device SMT root at capsule creation. Authenticated as part of the
+    /// AEAD associated data per whitepaper §13/§16.10:
+    /// `AD := "DSM/recovery-capsule-v3\0" || r_t || u64le(c_t)`.
+    /// Stored unencrypted alongside ciphertext so the decryptor can rebuild
+    /// the AAD; tampering causes AEAD verification to fail.
+    pub smt_root: Vec<u8>,
     /// Metadata duplicated outside the ciphertext for quick inspection.
     pub metadata: CapsuleMetadata,
+}
+
+/// Build the AEAD associated data per whitepaper §13/§16.10:
+/// `AD := "DSM/recovery-capsule-v3\0" || r_t || u64le(c_t)`.
+///
+/// The AAD binds the encrypted capsule to its current Per-Device SMT root and
+/// monotone capsule counter, preventing transplant of a valid ciphertext
+/// across recovery streams or contexts.
+fn build_capsule_aad(smt_root: &[u8], counter: u64) -> Vec<u8> {
+    let mut ad = Vec::with_capacity(RECOVERY_CAPSULE_AAD.len() + smt_root.len() + 8);
+    ad.extend_from_slice(RECOVERY_CAPSULE_AAD);
+    ad.extend_from_slice(smt_root);
+    ad.extend_from_slice(&counter.to_le_bytes());
+    ad
 }
 
 impl EncryptedCapsule {
@@ -96,6 +116,8 @@ impl EncryptedCapsule {
             + self.tag.len()
             + 4
             + self.ciphertext.len()
+            + 4
+            + self.smt_root.len()
             + 20
     }
 
@@ -111,6 +133,10 @@ impl EncryptedCapsule {
         bytes.extend_from_slice(&self.tag);
         bytes.extend_from_slice(&(self.ciphertext.len() as u32).to_le_bytes());
         bytes.extend_from_slice(&self.ciphertext);
+        // smt_root is authenticated as part of the AEAD AAD (see build_capsule_aad).
+        // Stored unencrypted so the decryptor can reconstruct the AAD.
+        bytes.extend_from_slice(&(self.smt_root.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&self.smt_root);
         bytes.extend_from_slice(&self.metadata.version.to_le_bytes());
         bytes.extend_from_slice(&self.metadata.flags.to_le_bytes());
         bytes.extend_from_slice(&self.metadata.logical_time.to_le_bytes());
@@ -316,12 +342,16 @@ pub fn decrypt_capsule_with_key(
     let mut full_ciphertext = encrypted.ciphertext.clone();
     full_ciphertext.extend_from_slice(&encrypted.tag);
 
+    // AAD per whitepaper §13/§16.10: tag || r_t || u64le(c_t).
+    // r_t is the unencrypted smt_root carried alongside ciphertext; tampering
+    // causes AEAD to fail.
+    let aad = build_capsule_aad(&encrypted.smt_root, encrypted.metadata.counter);
     let plaintext = cipher
         .decrypt(
             XNonce::from_slice(&encrypted.nonce),
             Payload {
                 msg: full_ciphertext.as_slice(),
-                aad: RECOVERY_CAPSULE_AAD,
+                aad: aad.as_slice(),
             },
         )
         .map_err(|_| DsmError::verification("Failed to decrypt capsule"))?;
@@ -339,12 +369,14 @@ fn encrypt_capsule_with_key(
     let nonce_bytes = derive_nonce(capsule.metadata.counter, &capsule.rollup_hash);
     let cipher = XChaCha20Poly1305::new_from_slice(key)
         .map_err(|_| DsmError::crypto("Invalid key length", None::<String>))?;
+    // AAD per whitepaper §13/§16.10: tag || r_t || u64le(c_t).
+    let aad = build_capsule_aad(&capsule.smt_root, capsule.metadata.counter);
     let full_ciphertext = cipher
         .encrypt(
             XNonce::from_slice(&nonce_bytes),
             Payload {
                 msg: capsule.to_bytes().as_slice(),
-                aad: RECOVERY_CAPSULE_AAD,
+                aad: aad.as_slice(),
             },
         )
         .map_err(|_| DsmError::verification("Failed to encrypt capsule"))?;
@@ -359,6 +391,7 @@ fn encrypt_capsule_with_key(
         tag: full_ciphertext[tag_start..].to_vec(),
         nonce: nonce_bytes.to_vec(),
         salt: Vec::new(),
+        smt_root: capsule.smt_root.clone(),
         metadata: capsule.metadata.clone(),
     })
 }
@@ -431,6 +464,7 @@ fn decode_v3_encrypted_capsule(data: &[u8]) -> Result<EncryptedCapsule, DsmError
     let salt = read_len_bytes(&mut p)?;
     let tag = read_len_bytes(&mut p)?;
     let ciphertext = read_len_bytes(&mut p)?;
+    let smt_root = read_len_bytes(&mut p)?;
     let metadata = decode_metadata(&mut p)?;
     if !p.is_empty() {
         return Err(DsmError::invalid_operation(
@@ -442,6 +476,7 @@ fn decode_v3_encrypted_capsule(data: &[u8]) -> Result<EncryptedCapsule, DsmError
         tag,
         nonce,
         salt,
+        smt_root,
         metadata,
     })
 }
@@ -682,6 +717,41 @@ mod tests {
         if let Some(first) = encrypted.ciphertext.first_mut() {
             *first ^= 0xFF;
         }
+        assert!(decrypt_capsule(&encrypted, MNEMONIC).is_err());
+        Ok(())
+    }
+
+    /// Whitepaper §13/§16.10: AAD binds the capsule to its current Per-Device
+    /// SMT root. Tampering with the unencrypted `smt_root` (the AEAD AAD input)
+    /// must cause decrypt to fail — otherwise capsule transplant across recovery
+    /// streams would be undetectable.
+    #[test]
+    fn test_smt_root_tamper_fails() -> Result<(), DsmError> {
+        init_capsule_subsystem()?;
+        let smt_root = vec![0xAA; 32];
+        let counterparty_tips = HashMap::new();
+        let rollup = ReceiptRollup::new();
+        let mut encrypted =
+            create_encrypted_capsule(&smt_root, counterparty_tips, &rollup, MNEMONIC, 7u64)?;
+        // Sanity: the unmodified capsule still decrypts.
+        assert!(decrypt_capsule(&encrypted, MNEMONIC).is_ok());
+        // Flip a bit in the smt_root (AAD input). Decrypt must fail.
+        encrypted.smt_root[0] ^= 0x01;
+        assert!(decrypt_capsule(&encrypted, MNEMONIC).is_err());
+        Ok(())
+    }
+
+    /// Whitepaper §13/§16.10: AAD also binds the monotone capsule counter.
+    /// Replaying a capsule under a different counter must fail decrypt.
+    #[test]
+    fn test_counter_tamper_fails() -> Result<(), DsmError> {
+        init_capsule_subsystem()?;
+        let smt_root = vec![0xBB; 32];
+        let counterparty_tips = HashMap::new();
+        let rollup = ReceiptRollup::new();
+        let mut encrypted =
+            create_encrypted_capsule(&smt_root, counterparty_tips, &rollup, MNEMONIC, 5u64)?;
+        encrypted.metadata.counter = encrypted.metadata.counter.wrapping_add(1);
         assert!(decrypt_capsule(&encrypted, MNEMONIC).is_err());
         Ok(())
     }
