@@ -1876,7 +1876,8 @@ impl PreCommitment {
 
         w.push_len_prefixed(next_entropy);
 
-        Ok(*domain_hash("DSM/precommit-hash", w.as_slice()).as_bytes())
+        // Whitepaper §4.1: C_pre := BLAKE3("DSM/precommit\0" || h_n || payload || e)
+        Ok(*domain_hash("DSM/precommit", w.as_slice()).as_bytes())
     }
 
     /// Add a signature to this pre-commitment

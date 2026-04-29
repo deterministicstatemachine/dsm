@@ -1470,7 +1470,7 @@ impl StorageNodeSDK {
         preimage.extend_from_slice(&state_hash_bytes);
         preimage.extend_from_slice(&params_bytes);
         preimage.extend_from_slice(&next_state.to_le_bytes());
-        let pre_commitment_hash = dsm::crypto::blake3::domain_hash("DSM/precommit-hash", &preimage);
+        let pre_commitment_hash = dsm::crypto::blake3::domain_hash("DSM/precommit", &preimage);
 
         // transaction_payload is the canonical proto bytes for parameters
         let transaction_payload = params_bytes.clone();
@@ -1540,7 +1540,7 @@ impl StorageNodeSDK {
         expected_preimage.extend_from_slice(&params_bytes);
         expected_preimage.extend_from_slice(&next_state.to_le_bytes());
         let expected_hash =
-            dsm::crypto::blake3::domain_hash("DSM/precommit-hash", &expected_preimage);
+            dsm::crypto::blake3::domain_hash("DSM/precommit", &expected_preimage);
 
         if bilateral_entry.pre_commitment_hash != expected_hash.as_bytes() {
             bilateral_entry.status = BilateralTransactionStatus::Rejected;
@@ -2993,7 +2993,7 @@ mod tests {
         preimage.extend_from_slice(&state_hash_bytes_for_test);
         preimage.extend_from_slice(&params_bytes);
         preimage.extend_from_slice(&2u64.to_le_bytes());
-        let expected = dsm::crypto::blake3::domain_hash("DSM/precommit-hash", &preimage);
+        let expected = dsm::crypto::blake3::domain_hash("DSM/precommit", &preimage);
         assert_eq!(entry.pre_commitment_hash, expected.as_bytes());
         assert_eq!(entry.state_number, 1);
         assert_eq!(entry.status, BilateralTransactionStatus::Pending);
