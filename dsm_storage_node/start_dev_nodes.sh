@@ -45,7 +45,7 @@ check_api_responding() {
 # Function to start a node
 start_node() {
     local node_num=$1
-    local config_file="config-dev-node${node_num}.toml"
+    local config_file="config/dev/node${node_num}.toml"
     local port=$((8079 + node_num))
     local log_file="logs/dev-node${node_num}.log"
     
@@ -256,7 +256,7 @@ check_endpoints() {
     echo -e "${BLUE}Checking API endpoints...${NC}"
     for i in {1..5}; do
         local port=$((8079 + i))
-        local config_file="config-dev-node${i}.toml"
+        local config_file="config/dev/node${i}.toml"
         local proto="http"
         # Detect TLS and check with https -k when necessary
         if [ -f "$config_file" ] && awk '/^\s*\[tls\]/ { in_tls=1; next } /^\s*\[/ { in_tls=0 } in_tls && /^\s*enabled\s*=/' "$config_file" | grep -Eiq 'enabled\s*=\s*true'; then
