@@ -1,6 +1,8 @@
 //! Integration tests for binary-only policy endpoints.
 //! These tests will be skipped if the test database isn't available.
 
+#![allow(clippy::disallowed_methods)]
+
 use axum::{body::Bytes, http::StatusCode};
 use dsm_storage_node::{
     api, db,
