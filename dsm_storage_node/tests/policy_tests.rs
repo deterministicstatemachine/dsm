@@ -10,19 +10,8 @@ use dsm_storage_node::{
 use std::sync::Arc;
 use tower::ServiceExt; // for .oneshot
 
-fn ok_or_panic<T, E: std::fmt::Debug>(result: Result<T, E>, context: &str) -> T {
-    match result {
-        Ok(value) => value,
-        Err(err) => panic!("{context}: {err:?}"),
-    }
-}
-
-fn some_or_panic<T>(value: Option<T>, context: &str) -> T {
-    match value {
-        Some(value) => value,
-        None => panic!("{context}"),
-    }
-}
+mod common;
+use common::{ok_or_panic, some_or_panic};
 
 // Helper to build a minimal app with only the policy routes mounted.
 async fn build_policy_app() -> Option<axum::Router> {
@@ -61,9 +50,8 @@ async fn build_policy_app() -> Option<axum::Router> {
         Arc::new(pool),
         replication_manager,
     );
-    let app = axum::Router::new()
-        .merge(api::vault::policy::create_router())
-        .with_state(state);
+    let state_arc = Arc::new(state);
+    let app = axum::Router::new().merge(api::vault::policy::create_router(state_arc));
     Some(app)
 }
 
@@ -108,7 +96,7 @@ async fn policy_round_trip_binary_ok() {
         "32"
     );
     let bytes = ok_or_panic(
-        hyper::body::to_bytes(response.into_body()).await,
+        axum::body::to_bytes(response.into_body(), usize::MAX).await,
         "failed to read policy create response body",
     );
     assert_eq!(bytes.len(), 32);
@@ -138,7 +126,7 @@ async fn policy_round_trip_binary_ok() {
         "application/octet-stream"
     );
     let got = ok_or_panic(
-        hyper::body::to_bytes(get_resp.into_body()).await,
+        axum::body::to_bytes(get_resp.into_body(), usize::MAX).await,
         "failed to read policy get response body",
     );
     assert_eq!(got.as_ref(), b"allow:always\nversion:1\n");

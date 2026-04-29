@@ -12,7 +12,6 @@
 //! - [`vault`]      — DLV / policy / recovery / paidk
 //! - [`registry`]   — node registry, scaling, discovery, drain-proof
 //! - [`transport`]  — message delivery (b0x, gossip)
-//! - [`tests`]      — integration test modules
 
 pub mod identity;
 pub mod infra;
@@ -20,6 +19,3 @@ pub mod objects;
 pub mod registry;
 pub mod transport;
 pub mod vault;
-
-#[cfg(test)]
-pub mod tests;

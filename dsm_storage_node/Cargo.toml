@@ -83,7 +83,6 @@ dev-inbox-blinded = []
 dev-discovery = []
 unilateral = []
 dev-replication = []
-chaos-testing = []
 benchmarking = []
 
 [[bin]]

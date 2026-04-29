@@ -7,13 +7,9 @@ use std::sync::Arc;
 
 pub mod api;
 pub mod auth;
-#[cfg(feature = "chaos-testing")]
-pub mod chaos_testing;
 pub mod db;
 #[cfg(feature = "dev-replication")]
 pub mod dev_replication;
-pub mod operational;
-pub mod partitioning;
 pub mod replication;
 pub mod timing;
 
