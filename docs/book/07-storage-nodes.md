@@ -91,7 +91,7 @@ cd dsm_storage_node
 ./scripts/setup_dev_db.sh
 
 # 2. Start 5 local storage nodes
-./start_dev_nodes.sh
+./scripts/start_dev_nodes.sh
 
 # 3. Verify all nodes
 for port in 8080 8081 8082 8083 8084; do
