@@ -55,9 +55,14 @@ async fn build_policy_app() -> Option<axum::Router> {
             return None;
         }
     };
-    let state = AppState::new("test-node".to_string(), None, Arc::new(pool), replication_manager);
+    let state = AppState::new(
+        "test-node".to_string(),
+        None,
+        Arc::new(pool),
+        replication_manager,
+    );
     let app = axum::Router::new()
-        .merge(api::policy::create_router())
+        .merge(api::vault::policy::create_router())
         .with_state(state);
     Some(app)
 }
@@ -119,7 +124,10 @@ async fn policy_round_trip_binary_ok() {
             .body(axum::body::Body::from(Bytes::from(anchor.to_vec()))),
         "failed to build policy get request",
     );
-    let get_resp = ok_or_panic(app.oneshot(get_req).await, "failed to send policy get request");
+    let get_resp = ok_or_panic(
+        app.oneshot(get_req).await,
+        "failed to send policy get request",
+    );
     assert_eq!(get_resp.status(), StatusCode::OK);
     let get_headers = get_resp.headers();
     assert_eq!(
@@ -171,6 +179,9 @@ async fn policy_put_empty_body_rejected() {
             .body(axum::body::Body::from(Bytes::new())),
         "failed to build empty-policy request",
     );
-    let resp = ok_or_panic(app.oneshot(req).await, "failed to send empty-policy request");
+    let resp = ok_or_panic(
+        app.oneshot(req).await,
+        "failed to send empty-policy request",
+    );
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }

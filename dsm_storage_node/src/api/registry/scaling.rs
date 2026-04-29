@@ -23,7 +23,7 @@ use log::info;
 use prost::Message;
 use std::sync::Arc;
 
-use super::hardening::blake3_tagged;
+use crate::api::infra::hardening::blake3_tagged;
 use crate::db;
 use crate::AppState;
 use dsm::types::proto as pb;

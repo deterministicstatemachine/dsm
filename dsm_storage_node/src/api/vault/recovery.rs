@@ -16,7 +16,7 @@ use axum::{
 };
 use std::sync::Arc;
 
-use super::hardening::blake3_tagged;
+use crate::api::infra::hardening::blake3_tagged;
 use crate::db;
 use crate::AppState;
 use dsm_sdk::util::text_id;
@@ -199,7 +199,7 @@ mod tests {
                 .body(axum::body::Body::from(Vec::<u8>::new()))
                 .unwrap_or_else(|e| panic!("request build failed: {e}"));
             // Build a tiny router for slot ops
-            let slot_app = crate::api::dlv_slot::create_router(state.clone());
+            let slot_app = crate::api::vault::slot::create_router(state.clone());
             let resp_slot = slot_app
                 .clone()
                 .oneshot(req_slot)

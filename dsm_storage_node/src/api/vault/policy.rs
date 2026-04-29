@@ -17,7 +17,7 @@ use axum::{
 };
 use std::sync::Arc;
 
-use super::hardening::blake3_tagged;
+use crate::api::infra::hardening::blake3_tagged;
 use crate::{db, AppState};
 
 /// Internal-only: DB uses TEXT keys; we encode anchor bytes to ASCII for storage (hex).

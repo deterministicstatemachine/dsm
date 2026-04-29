@@ -41,7 +41,7 @@ async fn publish_with_octet_stream_returns_200_and_addr_header() {
 
     let addr_hdr = resp
         .headers()
-        .get(dsm_storage_node::api::registry::HDR_ADDR);
+        .get(dsm_storage_node::api::registry::core::HDR_ADDR);
     assert!(
         addr_hdr.is_some(),
         "x-object-address header should be present"

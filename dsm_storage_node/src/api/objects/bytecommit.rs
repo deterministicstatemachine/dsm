@@ -19,7 +19,7 @@ use axum::{
 use log::{info, warn};
 use std::sync::Arc;
 
-use super::hardening::{blake3_tagged, mirror_set_w, window_index, B_GLOBAL};
+use crate::api::infra::hardening::{blake3_tagged, mirror_set_w, window_index, B_GLOBAL};
 use crate::db;
 use crate::AppState;
 use dsm_sdk::util::text_id;
