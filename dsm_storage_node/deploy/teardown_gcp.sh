@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TERRAFORM_DIR="${SCRIPT_DIR}/../terraform-gcp"
+TERRAFORM_DIR="${SCRIPT_DIR}/../terraform/gcp"
 SSH_KEY="" GCP_PROJECT="" FORCE=false
 
 while [[ $# -gt 0 ]]; do

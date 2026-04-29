@@ -42,12 +42,12 @@ Storage Node (Rust / Axum)
 
 ### Replication Parameters
 
-| Parameter | Value | Description |
-|-----------|-------|-------------|
-| N | 6 | Total replica count |
-| K | 3 | Minimum replicas for durability |
-| U_up | 0.85 | Upscale utilization threshold |
-| U_down | 0.35 | Downscale utilization threshold |
+| Parameter | Value | Description                     |
+| --------- | ----- | ------------------------------- |
+| N         | 6     | Total replica count             |
+| K         | 3     | Minimum replicas for durability |
+| U_up      | 0.85  | Upscale utilization threshold   |
+| U_down    | 0.35  | Downscale utilization threshold |
 
 Replica placement uses keyed Fisher-Yates shuffle (deterministic, no coordination required).
 
@@ -55,13 +55,13 @@ Replica placement uses keyed Fisher-Yates shuffle (deterministic, no coordinatio
 
 The default app config (`dsm_env_config.toml`) connects to 6 production storage nodes on AWS:
 
-| Node | Region | IP | Endpoint |
-|------|--------|----|----------|
-| dsm-node-1 | us-east-1 | 13.218.83.69 | `https://13.218.83.69:8080` |
-| dsm-node-2 | us-east-1 | 44.223.31.184 | `https://44.223.31.184:8080` |
-| dsm-node-3 | eu-west-1 | 54.74.145.172 | `https://54.74.145.172:8080` |
-| dsm-node-4 | eu-west-1 | 3.249.79.215 | `https://3.249.79.215:8080` |
-| dsm-node-5 | ap-southeast-1 | 18.141.56.252 | `https://18.141.56.252:8080` |
+| Node       | Region         | IP             | Endpoint                      |
+| ---------- | -------------- | -------------- | ----------------------------- |
+| dsm-node-1 | us-east-1      | 13.218.83.69   | `https://13.218.83.69:8080`   |
+| dsm-node-2 | us-east-1      | 44.223.31.184  | `https://44.223.31.184:8080`  |
+| dsm-node-3 | eu-west-1      | 54.74.145.172  | `https://54.74.145.172:8080`  |
+| dsm-node-4 | eu-west-1      | 3.249.79.215   | `https://3.249.79.215:8080`   |
+| dsm-node-5 | ap-southeast-1 | 18.141.56.252  | `https://18.141.56.252:8080`  |
 | dsm-node-6 | ap-southeast-1 | 13.215.175.231 | `https://13.215.175.231:8080` |
 
 No local setup, PostgreSQL, or port forwarding is required. The app works out of the box.
@@ -84,7 +84,7 @@ cd dsm_storage_node
 ./scripts/setup_dev_db.sh
 
 # 2. Start 5 local dev nodes
-./start_dev_nodes.sh
+./scripts/dev/start_dev_nodes.sh
 
 # 3. Verify all nodes are healthy
 for port in 8080 8081 8082 8083 8084; do
@@ -99,7 +99,7 @@ PIDs saved in `dev-node*.pid`, logs in `logs/`.
 ### Stop
 
 ```bash
-./scripts/stop_dev_nodes.sh
+./scripts/dev/stop_dev_nodes.sh
 ```
 
 ### Connect Phone to Local Nodes
@@ -138,16 +138,16 @@ GET /api/v2/health
 
 ### Operational (protobuf-only)
 
-| Endpoint | Method | Purpose |
-|----------|--------|---------|
-| `/api/v2/envelope` | POST | Submit Envelope v3 (protobuf bytes) |
-| `/api/v2/genesis/entropy` | GET/POST | Genesis entropy contribution |
-| `/api/v2/bytecommit` | POST | ByteCommit anchoring |
-| `/api/v2/dlv/slot` | POST | DLV slot management |
-| `/api/v2/unilateral` | POST | Unilateral (b0x) transport |
-| `/api/v2/recovery/capsule` | POST | Recovery capsule storage |
-| `/api/v2/identity` | GET/POST | Identity and Device Tree queries |
-| `/api/v2/gossip` | POST | Inter-node state sync |
+| Endpoint                   | Method   | Purpose                             |
+| -------------------------- | -------- | ----------------------------------- |
+| `/api/v2/envelope`         | POST     | Submit Envelope v3 (protobuf bytes) |
+| `/api/v2/genesis/entropy`  | GET/POST | Genesis entropy contribution        |
+| `/api/v2/bytecommit`       | POST     | ByteCommit anchoring                |
+| `/api/v2/dlv/slot`         | POST     | DLV slot management                 |
+| `/api/v2/unilateral`       | POST     | Unilateral (b0x) transport          |
+| `/api/v2/recovery/capsule` | POST     | Recovery capsule storage            |
+| `/api/v2/identity`         | GET/POST | Identity and Device Tree queries    |
+| `/api/v2/gossip`           | POST     | Inter-node state sync               |
 
 ## Source Layout
 
@@ -200,18 +200,19 @@ cargo build --release
 
 Storage nodes use the same post-quantum primitives as the rest of DSM:
 
-| Primitive | Algorithm | Usage |
-|-----------|-----------|-------|
-| Hashing | BLAKE3-256 | Domain-separated, all hashing |
-| Key Exchange | ML-KEM-768 | Post-quantum key encapsulation (TLS) |
-| Signatures | SPHINCS+ | Post-quantum signatures (client-side only) |
-| Encryption | ChaCha20-Poly1305 | At-rest encryption |
+| Primitive    | Algorithm         | Usage                                      |
+| ------------ | ----------------- | ------------------------------------------ |
+| Hashing      | BLAKE3-256        | Domain-separated, all hashing              |
+| Key Exchange | ML-KEM-768        | Post-quantum key encapsulation (TLS)       |
+| Signatures   | SPHINCS+          | Post-quantum signatures (client-side only) |
+| Encryption   | ChaCha20-Poly1305 | At-rest encryption                         |
 
 Storage nodes themselves never sign anything. The crypto stack is used for TLS transport and verifying client-provided proofs.
 
 ## Troubleshooting
 
 **"Database connection failed"**
+
 ```bash
 # Check PostgreSQL is running
 brew services list | grep postgresql   # macOS
@@ -222,17 +223,19 @@ sudo systemctl status postgresql       # Linux
 ```
 
 **"Port already in use"**
+
 ```bash
-./scripts/stop_dev_nodes.sh
+./scripts/dev/stop_dev_nodes.sh
 rm -f dev-node*.pid
 ```
 
 **Schema drift errors**
+
 ```bash
 # Drop and recreate dev databases
-./scripts/stop_dev_nodes.sh
+./scripts/dev/stop_dev_nodes.sh
 ./scripts/setup_dev_db.sh
-./start_dev_nodes.sh
+./scripts/dev/start_dev_nodes.sh
 ```
 
 ## AWS Cloud Deployment
@@ -241,11 +244,11 @@ Deploy 6 independent storage nodes across 3 AWS regions (us-east-1, eu-west-1, a
 
 ### Cloud Prerequisites
 
-| Tool | Version | Install |
-|------|---------|---------|
-| Terraform | >= 1.5 | `brew install terraform` |
-| AWS CLI | v2 | `brew install awscli` |
-| Docker | Desktop or Engine | [docker.com](https://www.docker.com/products/docker-desktop/) |
+| Tool      | Version           | Install                                                       |
+| --------- | ----------------- | ------------------------------------------------------------- |
+| Terraform | >= 1.5            | `brew install terraform`                                      |
+| AWS CLI   | v2                | `brew install awscli`                                         |
+| Docker    | Desktop or Engine | [docker.com](https://www.docker.com/products/docker-desktop/) |
 
 ### AWS Account Setup
 
@@ -278,6 +281,7 @@ bash deploy/provision_aws.sh --ssh-key ~/.ssh/dsm-deploy
 ```
 
 This single command:
+
 1. Provisions 6 EC2 instances across 3 AWS regions via Terraform
 2. Waits for all instances to be SSH-ready (~2-3 minutes)
 3. Generates per-node TLS certificates and configs
@@ -314,12 +318,12 @@ Each node runs:
 
 ### Cost
 
-| Resource | Spec | Monthly Cost |
-|----------|------|-------------|
-| 6x EC2 t3.small | 2 vCPU, 2GB RAM | ~$75 |
-| 6x 20GB gp3 EBS | SSD storage | ~$10 |
-| Data transfer | Inter-region gossip | ~$5 |
-| **Total** | | **~$90/month** |
+| Resource        | Spec                | Monthly Cost   |
+| --------------- | ------------------- | -------------- |
+| 6x EC2 t3.small | 2 vCPU, 2GB RAM     | ~$75           |
+| 6x 20GB gp3 EBS | SSD storage         | ~$10           |
+| Data transfer   | Inter-region gossip | ~$5            |
+| **Total**       |                     | **~$90/month** |
 
 ### Cloud Commands
 
@@ -358,13 +362,13 @@ Edit these module blocks to change regions or distribution.
 
 ### Terraform Variables
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `instance_type` | `t3.small` | EC2 instance type |
-| `volume_size_gb` | `20` | Root EBS volume (GB) |
-| `ssh_public_key` | *(required)* | SSH public key content |
-| `allowed_ssh_cidr` | `0.0.0.0/0` | CIDR for SSH access (restrict to your IP) |
-| `project_tag` | `dsm-storage` | AWS resource tag for cost tracking |
+| Variable           | Default       | Description                               |
+| ------------------ | ------------- | ----------------------------------------- |
+| `instance_type`    | `t3.small`    | EC2 instance type                         |
+| `volume_size_gb`   | `20`          | Root EBS volume (GB)                      |
+| `ssh_public_key`   | _(required)_  | SSH public key content                    |
+| `allowed_ssh_cidr` | `0.0.0.0/0`   | CIDR for SSH access (restrict to your IP) |
+| `project_tag`      | `dsm-storage` | AWS resource tag for cost tracking        |
 
 ### Cloud File Structure
 
@@ -399,6 +403,7 @@ dsm_storage_node/
 **SSH timeout** — Instances take 1-3 minutes to bootstrap. The script waits up to 300 seconds. If it times out, SSH in and check `/var/log/cloud-init-output.log`.
 
 **Health check fails** — Nodes take 10-30 seconds to start after deploy. Wait and retry:
+
 ```bash
 sleep 30 && bash deploy/check_nodes.sh <IPs>
 ```

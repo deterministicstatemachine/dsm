@@ -10,73 +10,73 @@ Run from the repository root. `make help` lists all targets, `make menu` opens a
 
 ### Setup
 
-| Target | Description |
-|--------|-------------|
-| `make menu` | Interactive launcher for the most common tasks |
+| Target        | Description                                                                                                                                                                                           |
+| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `make menu`   | Interactive launcher for the most common tasks                                                                                                                                                        |
 | `make doctor` | Read-only prerequisite check for Rust/cargo, the pinned Rust toolchain version, node, npm, protoc, adb, PostgreSQL, Java, `cargo-ndk`, Android NDK state, and generated Android cargo-config metadata |
-| `make setup` | First-time onboarding: verify the pinned Rust toolchain, install frontend dependencies, resolve the local Android NDK/host tag, and generate `.cargo/config.toml` when the Android NDK is configured |
-| `make help` | List all available targets |
+| `make setup`  | First-time onboarding: verify the pinned Rust toolchain, install frontend dependencies, resolve the local Android NDK/host tag, and generate `.cargo/config.toml` when the Android NDK is configured  |
+| `make help`   | List all available targets                                                                                                                                                                            |
 
 ### Build
 
-| Target | Description |
-|--------|-------------|
-| `make build` | Build full Rust workspace (`cargo build --locked --workspace --all-features`) |
-| `make build-release` | Build Rust workspace in release mode |
-| `make android-libs` | Canonical Android JNI build wrapper: runs `cargo ndk` for all 3 Android ABIs (arm64-v8a, armeabi-v7a, x86_64) and mirrors the resulting `.so` files into both `jniLibs/` trees |
-| `make frontend` | Build React frontend (copies assets into Android) |
-| `make android` | Full debug APK: native libs + frontend + Gradle assemble |
-| `make android-release` | Full release APK; prompts for keystore path, key alias, keystore password, and optional key password in an interactive shell when signing |
+| Target                 | Description                                                                                                                                                                    |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `make build`           | Build full Rust workspace (`cargo build --locked --workspace --all-features`)                                                                                                  |
+| `make build-release`   | Build Rust workspace in release mode                                                                                                                                           |
+| `make android-libs`    | Canonical Android JNI build wrapper: runs `cargo ndk` for all 3 Android ABIs (arm64-v8a, armeabi-v7a, x86_64) and mirrors the resulting `.so` files into both `jniLibs/` trees |
+| `make frontend`        | Build React frontend (copies assets into Android)                                                                                                                              |
+| `make android`         | Full debug APK: native libs + frontend + Gradle assemble                                                                                                                       |
+| `make android-release` | Full release APK; prompts for keystore path, key alias, keystore password, and optional key password in an interactive shell when signing                                      |
 
 ### Install
 
-| Target | Description |
-|--------|-------------|
-| `make install` | Build debug APK and install on all connected adb devices |
+| Target              | Description                                                 |
+| ------------------- | ----------------------------------------------------------- |
+| `make install`      | Build debug APK and install on all connected adb devices    |
 | `make install-only` | Install existing APK without rebuilding (fastest iteration) |
 
 ### Test
 
-| Target | Description |
-|--------|-------------|
-| `make test` | Run the full Rust workspace + frontend Jest suites (broader than the onboarding smoke check) |
-| `make test-rust` | Rust tests only, including broader SDK integration coverage |
-| `make test-frontend` | Frontend Jest suite (broader than `make typecheck`) |
-| `make typecheck` | TypeScript type-check only |
+| Target               | Description                                                                                  |
+| -------------------- | -------------------------------------------------------------------------------------------- |
+| `make test`          | Run the full Rust workspace + frontend Jest suites (broader than the onboarding smoke check) |
+| `make test-rust`     | Rust tests only, including broader SDK integration coverage                                  |
+| `make test-frontend` | Frontend Jest suite (broader than `make typecheck`)                                          |
+| `make typecheck`     | TypeScript type-check only                                                                   |
 
 `make typecheck` is the fastest supported frontend validation. The `make test*` targets are fuller development suites rather than the initial onboarding smoke check.
 
 ### Lint / Quality
 
-| Target | Description |
-|--------|-------------|
-| `make lint` | Run all linters: `cargo fmt --check`, `cargo clippy`, frontend lint |
-| `make fmt` | Auto-format Rust code (`cargo fmt --all`) |
-| `make audit` | Security audit: `cargo-audit` + `cargo-deny` |
-| `make deny` | Run `cargo-deny` license/advisory check |
+| Target       | Description                                                         |
+| ------------ | ------------------------------------------------------------------- |
+| `make lint`  | Run all linters: `cargo fmt --check`, `cargo clippy`, frontend lint |
+| `make fmt`   | Auto-format Rust code (`cargo fmt --all`)                           |
+| `make audit` | Security audit: `cargo-audit` + `cargo-deny`                        |
+| `make deny`  | Run `cargo-deny` license/advisory check                             |
 
 ### Storage Nodes
 
-| Target | Description |
-|--------|-------------|
-| `make nodes-up` | Set up the dev database and start the 5 local storage nodes |
-| `make nodes-down` | Stop the local storage dev nodes |
-| `make nodes-status` | Check local storage node health and port status |
-| `make nodes-reset` | Stop local nodes and clean pid/log state |
+| Target              | Description                                                 |
+| ------------------- | ----------------------------------------------------------- |
+| `make nodes-up`     | Set up the dev database and start the 5 local storage nodes |
+| `make nodes-down`   | Stop the local storage dev nodes                            |
+| `make nodes-status` | Check local storage node health and port status             |
+| `make nodes-reset`  | Stop local nodes and clean pid/log state                    |
 
 ### CI / Proto
 
-| Target | Description |
-|--------|-------------|
-| `make proto-guard` | Verify protobuf sources are in sync |
-| `make ci-scan` | Run all CI gate scripts (flow assertions, symbol checks) |
-| `make flow-assertions` | Run flow assertion checks |
-| `make flow-mapping-assertions` | Run flow mapping assertion checks |
+| Target                         | Description                                              |
+| ------------------------------ | -------------------------------------------------------- |
+| `make proto-guard`             | Verify protobuf sources are in sync                      |
+| `make ci-scan`                 | Run all CI gate scripts (flow assertions, symbol checks) |
+| `make flow-assertions`         | Run flow assertion checks                                |
+| `make flow-mapping-assertions` | Run flow mapping assertion checks                        |
 
 ### Clean
 
-| Target | Description |
-|--------|-------------|
+| Target       | Description                                         |
+| ------------ | --------------------------------------------------- |
 | `make clean` | Remove all build artifacts (Rust, frontend, Gradle) |
 
 ---
@@ -85,17 +85,17 @@ Run from the repository root. `make help` lists all targets, `make menu` opens a
 
 Run from the repository root using `.\scripts\dev.ps1`.
 
-| Target | Description |
-|--------|-------------|
-| `.\scripts\dev.ps1 help` | List all available targets |
-| `.\scripts\dev.ps1 menu` | Interactive launcher |
-| `.\scripts\dev.ps1 setup` | Check prerequisites |
-| `.\scripts\dev.ps1 doctor` | Alias of `setup` |
-| `.\scripts\dev.ps1 build` | Build Rust workspace |
-| `.\scripts\dev.ps1 test` | Run all tests |
-| `.\scripts\dev.ps1 nodes-up` | Set up database + start storage nodes |
-| `.\scripts\dev.ps1 nodes-down` | Stop the local storage nodes |
-| `.\scripts\dev.ps1 nodes-status` | Check local storage node health |
+| Target                           | Description                           |
+| -------------------------------- | ------------------------------------- |
+| `.\scripts\dev.ps1 help`         | List all available targets            |
+| `.\scripts\dev.ps1 menu`         | Interactive launcher                  |
+| `.\scripts\dev.ps1 setup`        | Check prerequisites                   |
+| `.\scripts\dev.ps1 doctor`       | Alias of `setup`                      |
+| `.\scripts\dev.ps1 build`        | Build Rust workspace                  |
+| `.\scripts\dev.ps1 test`         | Run all tests                         |
+| `.\scripts\dev.ps1 nodes-up`     | Set up database + start storage nodes |
+| `.\scripts\dev.ps1 nodes-down`   | Stop the local storage nodes          |
+| `.\scripts\dev.ps1 nodes-status` | Check local storage node health       |
 
 ---
 
@@ -130,17 +130,17 @@ Notable examples:
 
 Run from `dsm_client/frontend/`.
 
-| Script | Description |
-|--------|-------------|
-| `npm run build` | Production webpack build |
-| `npm run build:full-deploy` | Type-check → lint → webpack → copy to Android assets |
-| `npm run dev` | Webpack dev server (hot reload) |
-| `npm run type-check` | TypeScript type-check (`tsc --noEmit`) |
-| `npm run lint` | ESLint check |
-| `npm run lint:fix` | ESLint auto-fix |
-| `npm test` | Jest test suite |
-| `npm test -- --watch` | Jest in watch mode |
-| `npm run proto:gen` | Regenerate TypeScript protobuf types from `proto/dsm_app.proto` |
+| Script                      | Description                                                     |
+| --------------------------- | --------------------------------------------------------------- |
+| `npm run build`             | Production webpack build                                        |
+| `npm run build:full-deploy` | Type-check → lint → webpack → copy to Android assets            |
+| `npm run dev`               | Webpack dev server (hot reload)                                 |
+| `npm run type-check`        | TypeScript type-check (`tsc --noEmit`)                          |
+| `npm run lint`              | ESLint check                                                    |
+| `npm run lint:fix`          | ESLint auto-fix                                                 |
+| `npm test`                  | Jest test suite                                                 |
+| `npm test -- --watch`       | Jest in watch mode                                              |
+| `npm run proto:gen`         | Regenerate TypeScript protobuf types from `proto/dsm_app.proto` |
 
 ---
 
@@ -222,13 +222,13 @@ The maintained shell surface is intentionally limited. If a task is not listed h
 
 ### Storage Nodes (`dsm_storage_node/`)
 
-| Script | Usage | Description |
-|--------|-------|-------------|
-| `setup_dev_db.sh` | `bash scripts/setup_dev_db.sh` | Create dev PostgreSQL databases (one-time) |
-| `start_dev_nodes.sh` | `cd dsm_storage_node && ./start_dev_nodes.sh` | Start 5 local storage nodes (ports 8080-8084) |
-| `stop_dev_nodes.sh` | `./scripts/stop_dev_nodes.sh` | Stop all local dev nodes |
-| `check_node_status.sh` | `./scripts/check_node_status.sh` | Check port usage and `/api/v2/health` status for all local nodes |
-| `dev_nodes_reset.sh` | `bash scripts/dev_nodes_reset.sh [--start]` | Stop local nodes, clean logs/pids, optionally relaunch |
+| Script                 | Usage                                                     | Description                                                      |
+| ---------------------- | --------------------------------------------------------- | ---------------------------------------------------------------- |
+| `setup_dev_db.sh`      | `bash scripts/setup_dev_db.sh`                            | Create dev PostgreSQL databases (one-time)                       |
+| `start_dev_nodes.sh`   | `cd dsm_storage_node && ./scripts/dev/start_dev_nodes.sh` | Start 5 local storage nodes (ports 8080-8084)                    |
+| `stop_dev_nodes.sh`    | `./scripts/dev/stop_dev_nodes.sh`                         | Stop all local dev nodes                                         |
+| `check_node_status.sh` | `./scripts/dev/check_node_status.sh`                      | Check port usage and `/api/v2/health` status for all local nodes |
+| `dev_nodes_reset.sh`   | `bash scripts/dev_nodes_reset.sh [--start]`               | Stop local nodes, clean logs/pids, optionally relaunch           |
 
 ### Bitcoin Signet
 
@@ -236,30 +236,30 @@ The app now uses signet through the configured mempool backend. There are no loc
 
 ### CI / Quality (`scripts/`)
 
-| Script | Usage | Description |
-|--------|-------|-------------|
-| `ci_scan.sh` | `bash scripts/ci_scan.sh` | Run all CI gate scans |
-| `flow_assertions.sh` | `bash scripts/flow_assertions.sh` | Verify flow assertions |
+| Script                       | Usage                                     | Description                    |
+| ---------------------------- | ----------------------------------------- | ------------------------------ |
+| `ci_scan.sh`                 | `bash scripts/ci_scan.sh`                 | Run all CI gate scans          |
+| `flow_assertions.sh`         | `bash scripts/flow_assertions.sh`         | Verify flow assertions         |
 | `flow_mapping_assertions.sh` | `bash scripts/flow_mapping_assertions.sh` | Verify flow mapping assertions |
-| `guard_protos.sh` | `bash scripts/guard_protos.sh` | Check protobuf sync |
-| `codegen_enforce.sh` | `bash scripts/codegen_enforce.sh` | Enforce codegen rules |
+| `guard_protos.sh`            | `bash scripts/guard_protos.sh`            | Check protobuf sync            |
+| `codegen_enforce.sh`         | `bash scripts/codegen_enforce.sh`         | Enforce codegen rules          |
 
 ### Build / Install (`scripts/`)
 
-| Script | Usage | Description |
-|--------|-------|-------------|
-| `install_apk_connected_devices.sh` | (called by `make install`) | Install APK on all connected adb devices |
-| `push_env_override.sh` | `bash scripts/push_env_override.sh` | Push env config to connected devices |
+| Script                             | Usage                               | Description                              |
+| ---------------------------------- | ----------------------------------- | ---------------------------------------- |
+| `install_apk_connected_devices.sh` | (called by `make install`)          | Install APK on all connected adb devices |
+| `push_env_override.sh`             | `bash scripts/push_env_override.sh` | Push env config to connected devices     |
 
 ### AWS Deployment (`dsm_storage_node/deploy/`)
 
-| Script | Usage | Description |
-|--------|-------|-------------|
-| `provision_aws.sh` | `bash deploy/provision_aws.sh --ssh-key <key>` | Full AWS deploy (Terraform + Docker + push) |
-| `generate_node_configs.sh` | (called by provision) | Generate per-node TLS certs + configs |
-| `push_and_start.sh` | (called by provision) | Docker build + push + start on nodes |
-| `check_nodes.sh` | `bash deploy/check_nodes.sh <IPs>` | Health check all cloud nodes |
-| `teardown_aws.sh` | `bash deploy/teardown_aws.sh --ssh-key <key>` | Destroy all AWS resources |
+| Script                     | Usage                                          | Description                                 |
+| -------------------------- | ---------------------------------------------- | ------------------------------------------- |
+| `provision_aws.sh`         | `bash deploy/provision_aws.sh --ssh-key <key>` | Full AWS deploy (Terraform + Docker + push) |
+| `generate_node_configs.sh` | (called by provision)                          | Generate per-node TLS certs + configs       |
+| `push_and_start.sh`        | (called by provision)                          | Docker build + push + start on nodes        |
+| `check_nodes.sh`           | `bash deploy/check_nodes.sh <IPs>`             | Health check all cloud nodes                |
+| `teardown_aws.sh`          | `bash deploy/teardown_aws.sh --ssh-key <key>`  | Destroy all AWS resources                   |
 
 ---
 
@@ -267,13 +267,13 @@ The app now uses signet through the configured mempool backend. There are no loc
 
 Run from the repository root. Requires Python 3.9+ and two connected Android devices.
 
-| Script | Usage | Description |
-|--------|-------|-------------|
-| `tools/ble_pairing_e2e.py` | `python3 tools/ble_pairing_e2e.py --device1 <s1> --device2 <s2>` | Automate BLE pairing |
-| `tools/offline_send_e2e.py` | `python3 tools/offline_send_e2e.py --device1 <s1> --device2 <s2>` | Automate offline bilateral transfer |
-| `tools/verify_persistence.py` | `python3 tools/verify_persistence.py --device1 <s1> --device2 <s2>` | Verify on-device SQLite persistence |
+| Script                             | Usage                                                                    | Description                             |
+| ---------------------------------- | ------------------------------------------------------------------------ | --------------------------------------- |
+| `tools/ble_pairing_e2e.py`         | `python3 tools/ble_pairing_e2e.py --device1 <s1> --device2 <s2>`         | Automate BLE pairing                    |
+| `tools/offline_send_e2e.py`        | `python3 tools/offline_send_e2e.py --device1 <s1> --device2 <s2>`        | Automate offline bilateral transfer     |
+| `tools/verify_persistence.py`      | `python3 tools/verify_persistence.py --device1 <s1> --device2 <s2>`      | Verify on-device SQLite persistence     |
 | `tools/live_smoke_orchestrator.py` | `python3 tools/live_smoke_orchestrator.py --device1 <s1> --device2 <s2>` | Full smoke test (pairing + persistence) |
-| `tools/adb_utils.py` | (library) | Core ADB utilities, UI automation |
+| `tools/adb_utils.py`               | (library)                                                                | Core ADB utilities, UI automation       |
 
 ---
 

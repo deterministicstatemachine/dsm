@@ -377,15 +377,15 @@ deny: ## Run cargo-deny license and advisory checks
 .PHONY: nodes-up
 nodes-up: ## Set up the dev database and start the 5 local storage nodes
 	@bash $(REPO_ROOT)/scripts/setup_dev_db.sh
-	@cd $(STORAGE_NODE_DIR) && ./start_dev_nodes.sh
+	@cd $(STORAGE_NODE_DIR) && ./scripts/dev/start_dev_nodes.sh
 
 .PHONY: nodes-down
 nodes-down: ## Stop the 5 local storage dev nodes
-	@bash $(STORAGE_NODE_DIR)/scripts/stop_dev_nodes.sh
+	@bash $(STORAGE_NODE_DIR)/scripts/dev/stop_dev_nodes.sh
 
 .PHONY: nodes-status
 nodes-status: ## Check local storage node health and port status
-	@bash $(STORAGE_NODE_DIR)/scripts/check_node_status.sh
+	@bash $(STORAGE_NODE_DIR)/scripts/dev/check_node_status.sh
 
 .PHONY: nodes-reset
 nodes-reset: ## Stop nodes and clean local node logs and pid files

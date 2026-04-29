@@ -47,8 +47,8 @@ async fn build_object_app() -> Option<axum::Router> {
     let state_arc = Arc::new(state);
     // Merge both read and write routers (tests bypass auth middleware)
     let app = axum::Router::new()
-        .merge(api::object_store::create_router(state_arc.clone()))
-        .merge(api::object_store::create_write_router())
+        .merge(api::objects::store::create_router(state_arc.clone()))
+        .merge(api::objects::store::create_write_router())
         .layer(Extension(state_arc));
     Some(app)
 }

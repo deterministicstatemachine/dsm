@@ -3,6 +3,7 @@
 use dsm_sdk::handlers::AppRouterImpl;
 use dsm_sdk::bridge::{AppQuery, AppInvoke, AppRouter as _};
 use dsm_sdk::init::SdkConfig;
+use serial_test::serial;
 use std::path::PathBuf;
 
 fn init_test_storage() {
@@ -22,6 +23,7 @@ fn init_test_storage() {
 }
 
 #[tokio::test]
+#[serial]
 async fn unknown_query_path_returns_fallback() {
     init_test_storage();
     let cfg = SdkConfig {
@@ -45,6 +47,7 @@ async fn unknown_query_path_returns_fallback() {
 }
 
 #[tokio::test]
+#[serial]
 async fn unknown_invoke_method_returns_fallback() {
     init_test_storage();
     let cfg = SdkConfig {
