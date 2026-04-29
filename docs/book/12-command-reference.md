@@ -225,7 +225,7 @@ The maintained shell surface is intentionally limited. If a task is not listed h
 | Script | Usage | Description |
 |--------|-------|-------------|
 | `setup_dev_db.sh` | `bash scripts/setup_dev_db.sh` | Create dev PostgreSQL databases (one-time) |
-| `start_dev_nodes.sh` | `cd dsm_storage_node && ./start_dev_nodes.sh` | Start 5 local storage nodes (ports 8080-8084) |
+| `start_dev_nodes.sh` | `cd dsm_storage_node && ./scripts/start_dev_nodes.sh` | Start 5 local storage nodes (ports 8080-8084) |
 | `stop_dev_nodes.sh` | `./scripts/stop_dev_nodes.sh` | Stop all local dev nodes |
 | `check_node_status.sh` | `./scripts/check_node_status.sh` | Check port usage and `/api/v2/health` status for all local nodes |
 | `dev_nodes_reset.sh` | `bash scripts/dev_nodes_reset.sh [--start]` | Stop local nodes, clean logs/pids, optionally relaunch |

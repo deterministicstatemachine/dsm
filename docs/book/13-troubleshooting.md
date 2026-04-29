@@ -167,7 +167,7 @@ The `SDK_READY` atomic flag must be set before any post-bootstrap operations. Ch
 curl http://localhost:8080/api/v2/health
 
 # Restart
-cd dsm_storage_node && ./scripts/stop_dev_nodes.sh && ./start_dev_nodes.sh
+cd dsm_storage_node && ./scripts/stop_dev_nodes.sh && ./scripts/start_dev_nodes.sh
 ```
 
 **`make test-rust` fails in SDK integration tests that contact the default storage network**
@@ -219,7 +219,7 @@ pkill -f dsm_storage_node
 cd dsm_storage_node
 ./scripts/stop_dev_nodes.sh
 ./scripts/setup_dev_db.sh    # recreates databases
-./start_dev_nodes.sh
+./scripts/start_dev_nodes.sh
 ```
 
 **"role dsm does not exist"**

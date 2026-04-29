@@ -5,6 +5,10 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+NODE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$NODE_DIR"
+
 echo "Starting DSM storage dev nodes..."
 
 # Colors for output
@@ -325,7 +329,7 @@ case "${1:-start}" in
     "restart")
         stop_nodes
         sleep 3
-        $0 start
+        "${BASH_SOURCE[0]}" start
         ;;
         
     *)
