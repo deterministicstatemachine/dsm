@@ -116,7 +116,7 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_createGenesis<'a>(
 
                 // MPC-only genesis (strict mode): local bootstrap path is not permitted.
                 let mpc_res = sdk
-                    .create_genesis_with_mpc(Some(3), Some(entropy.clone()))
+                    .create_genesis_with_mpc(Some(entropy.clone()))
                     .await;
 
                 let (

@@ -70,7 +70,7 @@ async fn e2e_token_create_lifecycle() {
     println!("Creating genesis via MPC...");
     let genesis = timeout(
         Duration::from_secs(20),
-        storage_sdk.create_genesis_with_mpc(Some(3), Some(entropy)),
+        storage_sdk.create_genesis_with_mpc(Some(entropy)),
     )
     .await
     .expect("MPC genesis timeout")
