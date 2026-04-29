@@ -23,6 +23,15 @@ pub fn derive_relationship_key(counterparty_pk: &[u8]) -> [u8; 32] {
 /// Delegates to the canonical core verifier. Replay protection is enforced
 /// by the `ParentConsumptionTracker` (one-time parent-tip lock per relationship),
 /// NOT by sequence numbers — the protocol is clockless (§4.3).
+///
+/// Cert chain verification (whitepaper §11.1): if the
+/// `cert_chain_heads` table has chain heads recorded for this relationship,
+/// they are loaded automatically and threaded into the verification context.
+/// The receipt's `ek_cert_a` / `ek_cert_b` MUST then verify against those
+/// heads. If no chain head is recorded (relationship not yet established
+/// or pre-feature legacy data), cert verification is skipped — the
+/// transitional behavior. To make cert verification mandatory for a
+/// relationship, call `init_cert_chain_head_for_relationship` first.
 #[allow(clippy::too_many_arguments)]
 pub fn verify_stitched_receipt(
     receipt: &StitchedReceiptV2,
@@ -33,13 +42,63 @@ pub fn verify_stitched_receipt(
     device_tree_commitment: DeviceTreeAcceptanceCommitment,
     guard: Option<&mut ReceiptGuard>,
 ) -> Result<(), DsmError> {
-    // Create verification context
-    let ctx = ReceiptVerificationContext::new(
+    use crate::sdk::app_state::AppState;
+    use crate::storage::client_db::{
+        load_cert_chain_head_pubkey, CertChainSide,
+    };
+    use dsm::verification::smt_replace_witness::compute_smt_key;
+
+    let smt_key = compute_smt_key(&receipt.devid_a, &receipt.devid_b);
+    // Per-relationship chain heads are optional during the transitional
+    // period. When set, they make cert verification MANDATORY for this
+    // relationship's receipts.
+    //
+    // Match receipt party (A vs B) to local-vs-counterparty roles by
+    // looking up the local device id. If we can't determine which side
+    // is local (genesis not initialized, etc.), skip auto-loading rather
+    // than risk threading the wrong head into verification.
+    let local_id = AppState::get_device_id();
+    let (head_for_a, head_for_b): (Option<Vec<u8>>, Option<Vec<u8>>) =
+        match local_id.as_deref() {
+            Some(id) if id.len() == 32 && id == receipt.devid_a.as_slice() => {
+                // We are party A. Our chain head verifies our own cert (sig_a),
+                // counterparty's chain head verifies their cert (sig_b).
+                (
+                    load_cert_chain_head_pubkey(&smt_key, CertChainSide::Local)
+                        .ok()
+                        .flatten(),
+                    load_cert_chain_head_pubkey(&smt_key, CertChainSide::Counterparty)
+                        .ok()
+                        .flatten(),
+                )
+            }
+            Some(id) if id.len() == 32 && id == receipt.devid_b.as_slice() => {
+                // We are party B (counter-signer). Local side maps to B; A is
+                // the remote sender whose chain we track as Counterparty.
+                (
+                    load_cert_chain_head_pubkey(&smt_key, CertChainSide::Counterparty)
+                        .ok()
+                        .flatten(),
+                    load_cert_chain_head_pubkey(&smt_key, CertChainSide::Local)
+                        .ok()
+                        .flatten(),
+                )
+            }
+            _ => (None, None),
+        };
+
+    let mut ctx = ReceiptVerificationContext::new(
         device_tree_commitment,
         receipt.parent_root,
         pk_a.to_vec(),
         pk_b.to_vec(),
     );
+    if let Some(head) = head_for_a {
+        ctx = ctx.with_chain_head_a(head);
+    }
+    if let Some(head) = head_for_b {
+        ctx = ctx.with_chain_head_b(head);
+    }
 
     // Prepare signatures on the receipt
     let mut receipt_with_sigs = receipt.clone();

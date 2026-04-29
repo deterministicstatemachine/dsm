@@ -21,6 +21,7 @@ mod bilateral_sessions;
 pub mod bilateral_tip_sync;
 mod bitcoin_accounts;
 mod ble_chunk_buffer;
+pub mod cert_chain;
 mod contacts;
 mod dlv_receipts;
 mod export;
@@ -49,6 +50,7 @@ pub use bcr::*;
 pub use bilateral_sessions::*;
 pub use bitcoin_accounts::*;
 pub use ble_chunk_buffer::*;
+pub use cert_chain::*;
 pub use contacts::*;
 pub use dlv_receipts::*;
 pub use export::*;
@@ -668,6 +670,23 @@ fn create_schema(conn: &Connection) -> Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_in_flight_withdrawal_legs_withdrawal
             ON in_flight_withdrawal_legs(withdrawal_id, state);
+
+        -- Per-relationship cert chain heads (whitepaper §11.1 ek-cert chain).
+        -- One row per (relationship_key, side). `side` is 0 for the local
+        -- device's chain head (used to verify outgoing cert signatures during
+        -- creation, and to advance after acceptance) and 1 for the
+        -- counterparty's chain head (used to verify incoming cert signatures).
+        -- chain_head_pubkey is the SPHINCS+ public key of the prior signer:
+        -- AK_pk at step 0, EK_pk_n for n > 0.
+        -- step_count tracks the current chain length for this relationship.
+        CREATE TABLE IF NOT EXISTS cert_chain_heads(
+            relationship_key  BLOB NOT NULL,
+            side              INTEGER NOT NULL CHECK(side IN (0, 1)),
+            chain_head_pubkey BLOB NOT NULL,
+            step_count        INTEGER NOT NULL DEFAULT 0,
+            updated_at        INTEGER NOT NULL,
+            PRIMARY KEY (relationship_key, side)
+        );
         "#,
         );
         match res {
