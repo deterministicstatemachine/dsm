@@ -67,6 +67,22 @@ pub struct RecoveryCapsule {
     /// Genesis hash of the Device Tree this capsule belongs to (32 bytes).
     /// Empty for pre-v4 capsules that don't carry this field.
     pub genesis_hash: Vec<u8>,
+    /// Per-relationship cert-chain heads at capsule creation
+    /// (whitepaper §11.1).
+    ///
+    /// Maps counterparty_id (same key space as `counterparty_tips`) to the
+    /// most recent ephemeral public key (`EK_pk_n`) that signed cert_{n+1}
+    /// in that relationship. After capsule decryption during cold recovery,
+    /// the resumed device seeds its per-relationship cert chain head from
+    /// this map without replaying the full cert chain. Empty for relationships
+    /// whose cert chain head is the device's AK (n=0 case) or for pre-cert
+    /// capsules.
+    pub cert_chain_heads: HashMap<String, Vec<u8>>,
+    /// Most recent cert (`cert_n`) per relationship, keyed by counterparty_id.
+    /// Optional: a recovering device CAN re-anchor by signing a fresh cert
+    /// from AK at the next step, but carrying the prior cert lets a third
+    /// party re-verify the entire pre-recovery chain if needed.
+    pub last_certs: HashMap<String, Vec<u8>>,
 }
 
 /// Encrypted capsule for NFC storage.
@@ -192,6 +208,32 @@ impl RecoveryCapsule {
         out.extend_from_slice(&self.source_device_id);
         out.extend_from_slice(&(self.genesis_hash.len() as u32).to_le_bytes());
         out.extend_from_slice(&self.genesis_hash);
+        // v5 extension: per-relationship cert chain heads + last certs
+        // (whitepaper §11.1 ek-cert chain, cold-recovery support).
+        // Backward-compatible trailing fields: pre-v5 capsules omit them and
+        // decode them as empty maps.
+        let mut chain_keys: Vec<_> = self.cert_chain_heads.keys().cloned().collect();
+        chain_keys.sort();
+        out.extend_from_slice(&(chain_keys.len() as u32).to_le_bytes());
+        for key in chain_keys {
+            let pk = &self.cert_chain_heads[&key];
+            let key_bytes = key.as_bytes();
+            out.extend_from_slice(&(key_bytes.len() as u32).to_le_bytes());
+            out.extend_from_slice(key_bytes);
+            out.extend_from_slice(&(pk.len() as u32).to_le_bytes());
+            out.extend_from_slice(pk);
+        }
+        let mut cert_keys: Vec<_> = self.last_certs.keys().cloned().collect();
+        cert_keys.sort();
+        out.extend_from_slice(&(cert_keys.len() as u32).to_le_bytes());
+        for key in cert_keys {
+            let cert = &self.last_certs[&key];
+            let key_bytes = key.as_bytes();
+            out.extend_from_slice(&(key_bytes.len() as u32).to_le_bytes());
+            out.extend_from_slice(key_bytes);
+            out.extend_from_slice(&(cert.len() as u32).to_le_bytes());
+            out.extend_from_slice(cert);
+        }
         out
     }
 }
@@ -299,6 +341,59 @@ pub fn create_encrypted_capsule_with_binding(
         metadata: metadata.clone(),
         source_device_id: source_device_id.to_vec(),
         genesis_hash: genesis_hash.to_vec(),
+        // Cert chain heads + last certs are populated by higher-level
+        // builders that have access to per-relationship session state.
+        // The default empty maps mean: cold recovery falls back to AK
+        // (n=0 case) for any relationship not represented here.
+        cert_chain_heads: HashMap::new(),
+        last_certs: HashMap::new(),
+    };
+    encrypt_capsule_with_key(&capsule, key)
+}
+
+/// Build a recovery capsule with explicit cert-chain-head material
+/// (whitepaper §11.1 ek-cert chain support for cold recovery).
+///
+/// `cert_chain_heads` maps counterparty_id → most-recent EK_pk that signed
+/// the cert chain in that relationship. `last_certs` (optional) carries
+/// the most recent cert per relationship for third-party re-verification.
+/// Both default to empty if the caller has no chain-head context yet
+/// (genesis-step relationships, pre-cert capsules).
+#[allow(clippy::too_many_arguments)]
+pub fn create_encrypted_capsule_with_cert_chain(
+    smt_root: &[u8],
+    counterparty_tips: HashMap<String, (u64, Vec<u8>)>,
+    rollup: &super::ReceiptRollup,
+    key: &[u8; 32],
+    counter: u64,
+    source_device_id: &[u8],
+    genesis_hash: &[u8],
+    cert_chain_heads: HashMap<String, Vec<u8>>,
+    last_certs: HashMap<String, Vec<u8>>,
+) -> Result<EncryptedCapsule, DsmError> {
+    if smt_root.len() != 32 {
+        return Err(DsmError::invalid_operation(format!(
+            "smt_root must be exactly 32 bytes, got {}",
+            smt_root.len()
+        )));
+    }
+    let metadata = CapsuleMetadata {
+        version: 3,
+        flags: 0,
+        logical_time: counter,
+        counter,
+    };
+    let rollup_hash = rollup.current_hash().to_vec();
+    let capsule = RecoveryCapsule {
+        smt_root: smt_root.to_vec(),
+        counterparty_tips,
+        rollup_hash: rollup_hash.clone(),
+        challenge: derive_challenge(&rollup_hash, smt_root, counter).to_vec(),
+        metadata,
+        source_device_id: source_device_id.to_vec(),
+        genesis_hash: genesis_hash.to_vec(),
+        cert_chain_heads,
+        last_certs,
     };
     encrypt_capsule_with_key(&capsule, key)
 }
@@ -509,6 +604,36 @@ fn decode_capsule_bytes(data: &[u8]) -> Result<RecoveryCapsule, DsmError> {
     } else {
         Vec::new()
     };
+    // v5 extension: cert chain heads + last certs (backward-compatible).
+    // Pre-v5 capsules have no remaining bytes here and decode as empty maps.
+    let cert_chain_heads = if p.len() >= 4 {
+        let n = read_u32(&mut p)? as usize;
+        let mut map = HashMap::with_capacity(n);
+        for _ in 0..n {
+            let key_bytes = read_len_bytes(&mut p)?;
+            let key = String::from_utf8(key_bytes)
+                .map_err(|_| DsmError::invalid_operation("capsule decode: bad utf8 in cert chain head key"))?;
+            let pk = read_len_bytes(&mut p)?;
+            map.insert(key, pk);
+        }
+        map
+    } else {
+        HashMap::new()
+    };
+    let last_certs = if p.len() >= 4 {
+        let n = read_u32(&mut p)? as usize;
+        let mut map = HashMap::with_capacity(n);
+        for _ in 0..n {
+            let key_bytes = read_len_bytes(&mut p)?;
+            let key = String::from_utf8(key_bytes)
+                .map_err(|_| DsmError::invalid_operation("capsule decode: bad utf8 in last_certs key"))?;
+            let cert = read_len_bytes(&mut p)?;
+            map.insert(key, cert);
+        }
+        map
+    } else {
+        HashMap::new()
+    };
     if !p.is_empty() {
         return Err(DsmError::invalid_operation(
             "capsule decode: trailing plaintext bytes",
@@ -522,6 +647,8 @@ fn decode_capsule_bytes(data: &[u8]) -> Result<RecoveryCapsule, DsmError> {
         metadata,
         source_device_id,
         genesis_hash,
+        cert_chain_heads,
+        last_certs,
     })
 }
 
@@ -630,6 +757,8 @@ mod tests {
             },
             source_device_id: vec![0x44; 32],
             genesis_hash: vec![0x55; 32],
+            cert_chain_heads: HashMap::new(),
+            last_certs: HashMap::new(),
         };
 
         let bytes = capsule.to_bytes();
@@ -822,9 +951,81 @@ mod tests {
             },
             source_device_id: Vec::new(),
             genesis_hash: Vec::new(),
+            cert_chain_heads: HashMap::new(),
+            last_certs: HashMap::new(),
         };
 
         assert!(encrypt_capsule_with_key(&capsule, &key).is_err());
+        Ok(())
+    }
+
+    /// Whitepaper §11.1 cold-recovery support: cert chain heads + last certs
+    /// must round-trip through capsule encrypt → wire → decrypt cleanly.
+    /// This proves the v5 envelope extension preserves chain-head material
+    /// across NFC storage so a recovering device can re-anchor without
+    /// replaying the full cert chain.
+    #[test]
+    fn test_capsule_cert_chain_heads_round_trip() -> Result<(), DsmError> {
+        init_capsule_subsystem()?;
+        let key = derive_recovery_key(MNEMONIC)?;
+        let mut counterparty_tips = HashMap::new();
+        counterparty_tips.insert("alice".to_string(), (3u64, vec![0xAA; 32]));
+        counterparty_tips.insert("bob".to_string(), (7u64, vec![0xBB; 32]));
+
+        let mut cert_chain_heads = HashMap::new();
+        cert_chain_heads.insert("alice".to_string(), vec![0xCC; 64]); // EK_pk_n^A
+        cert_chain_heads.insert("bob".to_string(), vec![0xDD; 64]); // EK_pk_n^B
+
+        let mut last_certs = HashMap::new();
+        last_certs.insert("alice".to_string(), vec![0xEE; 100]); // shorter stub cert bytes
+        last_certs.insert("bob".to_string(), vec![0xFF; 100]);
+
+        let encrypted = create_encrypted_capsule_with_cert_chain(
+            &[0x11; 32],
+            counterparty_tips.clone(),
+            &ReceiptRollup::new(),
+            &key,
+            42,
+            &[0x44; 32],
+            &[0x55; 32],
+            cert_chain_heads.clone(),
+            last_certs.clone(),
+        )?;
+
+        // Wire round-trip.
+        let wire = encrypted.to_bytes();
+        let restored = EncryptedCapsule::from_bytes(&wire)?;
+        let plaintext = decrypt_capsule_with_key(&restored, &key)?;
+
+        assert_eq!(plaintext.cert_chain_heads, cert_chain_heads);
+        assert_eq!(plaintext.last_certs, last_certs);
+        assert_eq!(plaintext.counterparty_tips, counterparty_tips);
+        Ok(())
+    }
+
+    /// Pre-v5 capsules (no cert_chain_heads, no last_certs) must continue
+    /// to round-trip. The v5 fields are appended trailing-optional so old
+    /// capsules decode with empty maps.
+    #[test]
+    fn test_capsule_pre_v5_backward_compat() -> Result<(), DsmError> {
+        init_capsule_subsystem()?;
+        let key = derive_recovery_key(MNEMONIC)?;
+
+        // Build a capsule via the legacy path (no cert chain heads).
+        let encrypted = create_encrypted_capsule_with_key(
+            &[0x11; 32],
+            HashMap::new(),
+            &ReceiptRollup::new(),
+            &key,
+            7,
+        )?;
+
+        let wire = encrypted.to_bytes();
+        let restored = EncryptedCapsule::from_bytes(&wire)?;
+        let plaintext = decrypt_capsule_with_key(&restored, &key)?;
+
+        assert!(plaintext.cert_chain_heads.is_empty());
+        assert!(plaintext.last_certs.is_empty());
         Ok(())
     }
 }
