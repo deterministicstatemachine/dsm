@@ -18,6 +18,76 @@ pub fn derive_relationship_key(counterparty_pk: &[u8]) -> [u8; 32] {
     dsm::crypto::blake3::domain_hash_bytes("DSM/relationship-key", counterparty_pk)
 }
 
+/// Inputs for per-step ephemeral SPHINCS+ key derivation (whitepaper §11.1).
+///
+/// The signer's per-step EK is derived as:
+///   `E_{n+1} = HKDF-BLAKE3("DSM/ek\0", h_n || C_pre || k_step || K_DBRW)`
+///   `(EK_pk_{n+1}, EK_sk_{n+1}) = SPHINCS+.KeyGen(E_{n+1})`
+///
+/// All three inputs MUST be 32 bytes. `k_step` comes from a Kyber exchange
+/// between the parties; for relationships that don't yet run per-step
+/// Kyber, callers may pass a deterministic stub derived from chain context
+/// (see `derive_stub_k_step_for_relationship`).
+#[derive(Debug, Clone, Copy)]
+pub struct PerStepEkContext {
+    /// Current bilateral chain tip h_n (parent_tip of the receipt being built).
+    pub h_n: [u8; 32],
+    /// Pre-commitment hash C_pre for this step (whitepaper §4.1).
+    pub c_pre: [u8; 32],
+    /// Kyber-derived step key: `BLAKE3("DSM/kyber-ss\0" || ss)` where ss
+    /// is the Kyber shared secret for this step.
+    pub k_step: [u8; 32],
+}
+
+/// Derive the per-step ephemeral SPHINCS+ keypair (whitepaper §11.1).
+///
+/// Wraps the underlying primitives `derive_ephemeral_seed` +
+/// `generate_ephemeral_keypair` from `dsm::crypto::ephemeral_key`. Returns
+/// `(EK_pk, EK_sk)`. The result is fully deterministic in `(h_n, c_pre,
+/// k_step, k_dbrw)` — same inputs always produce the same keypair.
+pub fn derive_per_step_ek(
+    ctx: &PerStepEkContext,
+    k_dbrw: &[u8; 32],
+) -> Result<(Vec<u8>, Vec<u8>), DsmError> {
+    let seed =
+        dsm::crypto::ephemeral_key::derive_ephemeral_seed(&ctx.h_n, &ctx.c_pre, &ctx.k_step, k_dbrw);
+    dsm::crypto::ephemeral_key::generate_ephemeral_keypair(&seed)
+}
+
+/// Deterministic-stub `k_step` for relationships that haven't yet run a
+/// per-step Kyber exchange (transitional pre-mainnet path).
+///
+/// Per spec §11, `k_step` should come from a fresh Kyber encapsulation
+/// per step. This stub provides a deterministic substitute derived from
+/// public chain context only:
+///   `k_step_stub = BLAKE3("DSM/k-step-stub\0" || h_n || C_pre || min(devid_a, devid_b) || max(devid_a, devid_b))`
+///
+/// **Spec-compliance note**: when both sides agree to use this stub, the
+/// cert chain still provides AK-rooted authorization at the verifier
+/// (which is what §11.1 actually enforces). The stub doesn't satisfy
+/// §11's claim about fresh per-step Kyber-derived randomness — that
+/// requires Phase F integration of bilateral-session Kyber. Use the
+/// stub only when full Kyber per step is not yet wired (a contact
+/// established without exchanging Kyber pubkeys, or test fixtures).
+pub fn derive_stub_k_step_for_relationship(
+    h_n: &[u8; 32],
+    c_pre: &[u8; 32],
+    devid_a: &[u8; 32],
+    devid_b: &[u8; 32],
+) -> [u8; 32] {
+    let mut hasher = dsm::crypto::blake3::dsm_domain_hasher("DSM/k-step-stub");
+    hasher.update(h_n);
+    hasher.update(c_pre);
+    let (lo, hi) = if devid_a <= devid_b {
+        (devid_a, devid_b)
+    } else {
+        (devid_b, devid_a)
+    };
+    hasher.update(lo);
+    hasher.update(hi);
+    *hasher.finalize().as_bytes()
+}
+
 /// Verify a stitched receipt with signatures.
 ///
 /// Delegates to the canonical core verifier. Replay protection is enforced
@@ -623,6 +693,111 @@ mod tests {
     use dsm::merkle::sparse_merkle_tree::SmtInclusionProof;
     use dsm::types::device_state::DeviceState;
     use dsm::types::operations::Operation;
+
+    // ── derive_per_step_ek (whitepaper §11.1) ──
+
+    fn ek_ctx() -> PerStepEkContext {
+        PerStepEkContext {
+            h_n: [0x11; 32],
+            c_pre: [0x22; 32],
+            k_step: [0x33; 32],
+        }
+    }
+
+    /// Derivation is deterministic in (h_n, c_pre, k_step, k_dbrw).
+    #[test]
+    fn derive_per_step_ek_deterministic() {
+        let ctx = ek_ctx();
+        let k_dbrw = [0x44; 32];
+        let (pk1, sk1) = derive_per_step_ek(&ctx, &k_dbrw).unwrap();
+        let (pk2, sk2) = derive_per_step_ek(&ctx, &k_dbrw).unwrap();
+        assert_eq!(pk1, pk2);
+        assert_eq!(sk1, sk2);
+    }
+
+    /// Distinct h_n produces distinct keypairs.
+    #[test]
+    fn derive_per_step_ek_diverges_on_h_n() {
+        let mut ctx_a = ek_ctx();
+        let mut ctx_b = ek_ctx();
+        ctx_b.h_n = [0xAA; 32];
+        let k_dbrw = [0x44; 32];
+        let (pk_a, _) = derive_per_step_ek(&ctx_a, &k_dbrw).unwrap();
+        let (pk_b, _) = derive_per_step_ek(&ctx_b, &k_dbrw).unwrap();
+        // Suppress "unused mut" since we want explicit construction
+        let _ = (&mut ctx_a, &mut ctx_b);
+        assert_ne!(pk_a, pk_b);
+    }
+
+    /// Distinct k_step produces distinct keypairs (the spec's per-step
+    /// freshness property when fed real Kyber output).
+    #[test]
+    fn derive_per_step_ek_diverges_on_k_step() {
+        let ctx_a = ek_ctx();
+        let mut ctx_b = ek_ctx();
+        ctx_b.k_step = [0xBB; 32];
+        let k_dbrw = [0x44; 32];
+        let (pk_a, _) = derive_per_step_ek(&ctx_a, &k_dbrw).unwrap();
+        let (pk_b, _) = derive_per_step_ek(&ctx_b, &k_dbrw).unwrap();
+        assert_ne!(pk_a, pk_b);
+    }
+
+    /// Distinct K_DBRW produces distinct keypairs (DBRW binding works).
+    #[test]
+    fn derive_per_step_ek_diverges_on_k_dbrw() {
+        let ctx = ek_ctx();
+        let (pk_a, _) = derive_per_step_ek(&ctx, &[0x44; 32]).unwrap();
+        let (pk_b, _) = derive_per_step_ek(&ctx, &[0x55; 32]).unwrap();
+        assert_ne!(pk_a, pk_b);
+    }
+
+    /// Resulting keypair signs and verifies correctly under SPHINCS+.
+    #[test]
+    fn derive_per_step_ek_keypair_signs_and_verifies() {
+        let ctx = ek_ctx();
+        let k_dbrw = [0x44; 32];
+        let (pk, sk) = derive_per_step_ek(&ctx, &k_dbrw).unwrap();
+        let msg = b"receipt commitment";
+        let sig = dsm::crypto::sphincs::sphincs_sign(&sk, msg).expect("sign");
+        assert!(dsm::crypto::sphincs::sphincs_verify(&pk, msg, &sig).expect("verify"));
+    }
+
+    // ── stub k_step ──
+
+    #[test]
+    fn stub_k_step_deterministic() {
+        let h_n = [0x11; 32];
+        let c_pre = [0x22; 32];
+        let a = [0x33; 32];
+        let b = [0x44; 32];
+        let k1 = derive_stub_k_step_for_relationship(&h_n, &c_pre, &a, &b);
+        let k2 = derive_stub_k_step_for_relationship(&h_n, &c_pre, &a, &b);
+        assert_eq!(k1, k2);
+    }
+
+    /// Stub k_step is symmetric in (devid_a, devid_b) — both parties derive
+    /// the same value regardless of who they call A vs B locally.
+    #[test]
+    fn stub_k_step_symmetric_in_devids() {
+        let h_n = [0x11; 32];
+        let c_pre = [0x22; 32];
+        let a = [0x33; 32];
+        let b = [0x44; 32];
+        let k_ab = derive_stub_k_step_for_relationship(&h_n, &c_pre, &a, &b);
+        let k_ba = derive_stub_k_step_for_relationship(&h_n, &c_pre, &b, &a);
+        assert_eq!(k_ab, k_ba);
+    }
+
+    /// Stub k_step varies with chain context.
+    #[test]
+    fn stub_k_step_diverges_on_h_n() {
+        let c_pre = [0x22; 32];
+        let a = [0x33; 32];
+        let b = [0x44; 32];
+        let k1 = derive_stub_k_step_for_relationship(&[0x11; 32], &c_pre, &a, &b);
+        let k2 = derive_stub_k_step_for_relationship(&[0xAA; 32], &c_pre, &a, &b);
+        assert_ne!(k1, k2);
+    }
 
     // ── derive_relationship_key ──
 

@@ -94,6 +94,21 @@ pub struct StitchedReceiptV2 {
     /// Ephemeral-key certificate for party B's per-step EK (counterparty).
     /// Optional — only present when `sig_b` is present (counter-signed receipts).
     pub ek_cert_b: Vec<u8>,
+
+    /// Per-step ephemeral SPHINCS+ public key for party A (whitepaper §11.1).
+    ///
+    /// `EK_pk_{n+1} = SPHINCS+.KeyGen(E_{n+1})`, where
+    /// `E_{n+1} = HKDF("DSM/ek\0" || h_n || C_pre || k_step || K_DBRW)`.
+    ///
+    /// Carried in the envelope alongside `sig_a` so verifiers don't need
+    /// the per-step EK out-of-band. NOT in canonical commit form (§4.2.1).
+    /// Empty for legacy receipts signed by the wallet's long-term key.
+    pub ek_pk_a: Vec<u8>,
+
+    /// Per-step ephemeral SPHINCS+ public key for party B (counterparty).
+    /// Same semantics as `ek_pk_a`. Empty when sig_b is empty or for
+    /// legacy receipts.
+    pub ek_pk_b: Vec<u8>,
 }
 
 impl StitchedReceiptV2 {
@@ -127,6 +142,8 @@ impl StitchedReceiptV2 {
             sig_b: Vec::new(),
             ek_cert_a: Vec::new(),
             ek_cert_b: Vec::new(),
+            ek_pk_a: Vec::new(),
+            ek_pk_b: Vec::new(),
         }
     }
 
@@ -157,16 +174,20 @@ impl StitchedReceiptV2 {
             sig_b: vec![],
             ek_cert_a: vec![],
             ek_cert_b: vec![],
+            ek_pk_a: vec![],
+            ek_pk_b: vec![],
         }
     }
 
-    /// Convert to prost-generated `ReceiptCommit` (full form, with sigs + certs).
+    /// Convert to prost-generated `ReceiptCommit` (full form, with sigs + certs + EK pks).
     fn to_proto_full(&self) -> crate::types::proto::ReceiptCommit {
         let mut proto = self.to_proto_canonical();
         proto.sig_a.clone_from(&self.sig_a);
         proto.sig_b.clone_from(&self.sig_b);
         proto.ek_cert_a.clone_from(&self.ek_cert_a);
         proto.ek_cert_b.clone_from(&self.ek_cert_b);
+        proto.ek_pk_a.clone_from(&self.ek_pk_a);
+        proto.ek_pk_b.clone_from(&self.ek_pk_b);
         proto
     }
 
@@ -208,6 +229,12 @@ impl StitchedReceiptV2 {
         }
         if !rc.ek_cert_b.is_empty() {
             receipt.set_ek_cert_b(rc.ek_cert_b);
+        }
+        if !rc.ek_pk_a.is_empty() {
+            receipt.set_ek_pk_a(rc.ek_pk_a);
+        }
+        if !rc.ek_pk_b.is_empty() {
+            receipt.set_ek_pk_b(rc.ek_pk_b);
         }
         Ok(receipt)
     }
@@ -273,6 +300,17 @@ impl StitchedReceiptV2 {
     /// Set party B's per-step ephemeral-key certificate (counterparty).
     pub fn set_ek_cert_b(&mut self, cert: Vec<u8>) {
         self.ek_cert_b = cert;
+    }
+
+    /// Set party A's per-step ephemeral SPHINCS+ public key.
+    /// See whitepaper §11.1.
+    pub fn set_ek_pk_a(&mut self, pk: Vec<u8>) {
+        self.ek_pk_a = pk;
+    }
+
+    /// Set party B's per-step ephemeral SPHINCS+ public key.
+    pub fn set_ek_pk_b(&mut self, pk: Vec<u8>) {
+        self.ek_pk_b = pk;
     }
 
     /// Check if both signatures are present

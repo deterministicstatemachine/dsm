@@ -1638,6 +1638,15 @@ message ReceiptCommit {
   // (e.g., at session genesis) can leave these unset.
   bytes ek_cert_a = 14 [(dsm_max_len)=65535];
   bytes ek_cert_b = 15 [(dsm_max_len)=65535];
+  // Per-step ephemeral SPHINCS+ public keys (whitepaper §11.1). Each receipt
+  // is signed by a freshly-derived EK_pk_{n+1} = SPHINCS+.KeyGen(E_{n+1}),
+  // where E_{n+1} = HKDF("DSM/ek\0" || h_n || C_pre || k_step || K_DBRW).
+  // The verifier uses these to verify sig_a/sig_b without needing them
+  // out-of-band; ek_cert_a/b chain them back to AK_pk. Wire-only — same
+  // placement rationale as ek_cert_a/b. Empty bytes omitted by proto3 for
+  // legacy receipts that pre-date the per-step EK abstraction.
+  bytes ek_pk_a = 16 [(dsm_max_len)=65535];
+  bytes ek_pk_b = 17 [(dsm_max_len)=65535];
 }
 
 
