@@ -245,5 +245,11 @@ fn build_receipt_commit(case_id: &str) -> Result<gp::ReceiptCommit> {
         dev_proof,
         sig_a: vec![],
         sig_b: vec![],
+        // Envelope-only fields (whitepaper §11.1 ek-cert chain). Not part of
+        // the canonical commit form per §4.2.1; left empty for vector
+        // generation since vector_builder produces deterministic test fixtures
+        // independent of session cert chains.
+        ek_cert_a: vec![],
+        ek_cert_b: vec![],
     })
 }
