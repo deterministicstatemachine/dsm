@@ -44,11 +44,12 @@ pub fn verify_stitched_receipt(
 ) -> Result<(), DsmError> {
     use crate::sdk::app_state::AppState;
     use crate::storage::client_db::{
-        load_cert_chain_head_pubkey, CertChainSide,
+        is_strict_cert_chain_mode, load_cert_chain_head_pubkey, CertChainSide,
     };
     use dsm::verification::smt_replace_witness::compute_smt_key;
 
     let smt_key = compute_smt_key(&receipt.devid_a, &receipt.devid_b);
+    let strict_mode = is_strict_cert_chain_mode().unwrap_or(false);
     // Per-relationship chain heads are optional during the transitional
     // period. When set, they make cert verification MANDATORY for this
     // relationship's receipts.
@@ -86,6 +87,19 @@ pub fn verify_stitched_receipt(
             }
             _ => (None, None),
         };
+
+    // Strict mode (whitepaper §11.1, mainnet-required): reject receipts for
+    // relationships that have no recorded chain heads. Without this, a
+    // relationship that "forgot" to call init_cert_chain_for_relationship
+    // would silently skip cert verification — fail-open security regression.
+    // Default off pre-mainnet to keep the transitional development path
+    // workable; mainnet MUST call set_strict_cert_chain_mode(true).
+    if strict_mode && head_for_a.is_none() && head_for_b.is_none() {
+        return Err(DsmError::invalid_operation(
+            "Receipt verification failed: strict cert-chain mode is on and no chain heads \
+             are recorded for this relationship (init_cert_chain_for_relationship not called)",
+        ));
+    }
 
     let mut ctx = ReceiptVerificationContext::new(
         device_tree_commitment,
@@ -878,6 +892,79 @@ mod tests {
             !verify_receipt_bytes(&receipt_with_cas_root, device_tree_commitment),
             "using parent_r_a should fail receipt verification on first-ever advances"
         );
+    }
+
+    /// Strict cert-chain mode (whitepaper §11.1, mainnet-required) rejects
+    /// receipts for relationships that have no recorded chain heads. This
+    /// is the fail-closed behavior that closes the security gap Gemini
+    /// flagged in adversarial review of the chain-head threading commit
+    /// — without strict mode, a relationship whose `init_cert_chain_for_relationship`
+    /// was never called would silently skip cert verification.
+    #[test]
+    #[serial_test::serial]
+    fn strict_mode_rejects_receipt_without_chain_heads() {
+        use crate::storage::client_db::{
+            reset_database_for_tests, set_strict_cert_chain_mode,
+        };
+
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+
+        let devid_a = [0x71u8; 32];
+        let devid_b = [0x72u8; 32];
+        let genesis = [0x73u8; 32];
+        let public_key = vec![0x74u8; 64];
+
+        let storage_dir = std::env::temp_dir()
+            .join(format!("dsm_strict_mode_test_{}", std::process::id()));
+        let _ = crate::storage_utils::set_storage_base_dir(storage_dir);
+        reset_database_for_tests();
+
+        crate::sdk::app_state::AppState::set_identity_info(
+            devid_a.to_vec(),
+            public_key.clone(),
+            genesis.to_vec(),
+            [0u8; 32].to_vec(),
+        );
+
+        // Enable strict mode, but DO NOT initialize chain heads for this
+        // relationship — exactly the scenario Gemini flagged.
+        set_strict_cert_chain_mode(true).unwrap();
+
+        // Build a minimal receipt; we don't need it to verify
+        // cryptographically — strict-mode rejection fires BEFORE the
+        // canonical core verifier runs.
+        let receipt = StitchedReceiptV2::new(
+            genesis, devid_a, devid_b,
+            [0x01; 32], [0x02; 32],
+            [0x03; 32], [0x04; 32],
+            vec![], vec![], vec![],
+        );
+        let device_tree_commitment = DeviceTreeAcceptanceCommitment::from_root(
+            dsm::common::device_tree::DeviceTree::single(devid_a).root(),
+        );
+
+        let result = verify_stitched_receipt(
+            &receipt,
+            &[0xAA; 64],
+            &[0xBB; 64],
+            &public_key,
+            &public_key,
+            device_tree_commitment,
+            None,
+        );
+
+        assert!(result.is_err(), "strict mode without chain heads must reject");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("strict cert-chain mode") || err.contains("init_cert_chain_for_relationship"),
+            "wrong rejection reason: {}",
+            err
+        );
+
+        // Reset strict mode for any subsequent tests.
+        set_strict_cert_chain_mode(false).unwrap();
     }
 
     // ── encode_protocol_transition_payload ──
