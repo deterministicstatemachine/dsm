@@ -19,6 +19,22 @@ Vars == <<deviceRoots, smtState, ledger>>
 \* Pending-online lock and recovery/abort mechanics live in
 \* DSM_OfflineFinality.tla; this module assumes no unresolved pending online
 \* projection for the relationship being advanced.
+\*
+\* Refinement note (whitepaper §11.1 per-step EK signing):
+\* The CountersignedByBoth predicate below is satisfied in the implementation
+\* by a per-step ephemeral SPHINCS+ key chain:
+\*   (1) Each receipt's sig_a / sig_b is produced by a freshly-derived
+\*       EK_{n+1} = SPHINCS+.KeyGen(HKDF("DSM/ek\0" || h_n || C_pre || k_step
+\*                                       || K_DBRW)).
+\*   (2) Each EK_{n+1} carries a cert cert_{n+1} = Sign_{SK_n}(BLAKE3(
+\*       "DSM/ek-cert\0" || EK_pk_{n+1} || h_n)) chaining it back to the
+\*       device's attested AK_pk via prior step keys.
+\*   (3) The verifier replays the cert chain to AK_pk and verifies the
+\*       receipt body against EK_pk_{n+1}.
+\* Because this is a strict refinement of "abstract bilateral countersign,"
+\* the Tripwire fork-exclusion theorem proven here applies unchanged. The
+\* refinement is implemented in dsm_sdk::sdk::receipts::sign_receipt_with_per_step_ek
+\* and verified end-to-end via per_step_signing_end_to_end_two_steps.
 
 CountersignedByBoth(d1, d2) ==
     d1 /= d2

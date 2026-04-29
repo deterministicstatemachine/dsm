@@ -1189,6 +1189,179 @@ mod tests {
         .unwrap();
     }
 
+    /// Property-style test (loop-based, no proptest dependency).
+    ///
+    /// For each chain length N in {1, 3, 5, 8}, builds a chain of N
+    /// per-step signings and asserts the structural invariants:
+    ///
+    ///   (P1) Step n's cert verifies against step (n-1)'s pubkey
+    ///        (with step 0's cert verifying against AK_pk).
+    ///   (P2) For n >= 1, step n's cert does NOT verify against
+    ///        AK_pk — the chain has actually walked.
+    ///   (P3) For n >= 1, step n's cert does NOT verify against
+    ///        step (n-2)'s pubkey (when it exists) — adjacent chain
+    ///        only, no skip-level authorization.
+    ///   (P4) Each step's receipt-body sig verifies against that
+    ///        step's EK_pk (and only that step's EK_pk).
+    ///   (P5) All EK_pks across the chain are distinct.
+    ///   (P6) Cert chain integrity is preserved across distinct
+    ///        h_n values per step (the canonical operating mode).
+    ///
+    /// This is the closest thing to a proptest formulation of the
+    /// DSMCertChain.lean theorem statements without adding a dev-dependency.
+    /// It exercises each invariant under multiple chain lengths and
+    /// distinct chain contexts.
+    #[test]
+    #[serial_test::serial]
+    fn per_step_signing_chain_property_invariants() {
+        use crate::storage::client_db::reset_database_for_tests;
+        use dsm::crypto::ephemeral_key::{generate_ephemeral_keypair, verify_ek_cert};
+        use dsm::crypto::sphincs::sphincs_verify;
+
+        for &chain_length in &[1usize, 3, 5, 8] {
+            reset_database_for_tests();
+
+            let (ak_pk, ak_sk) = generate_ephemeral_keypair(&[0xA0; 32]).unwrap();
+            let rel_key = [0xB0; 32];
+            let k_dbrw = [0xC0; 32];
+
+            let mut chain_pubkeys: Vec<Vec<u8>> = Vec::with_capacity(chain_length);
+            let mut chain_certs: Vec<Vec<u8>> = Vec::with_capacity(chain_length);
+            let mut chain_h_ns: Vec<[u8; 32]> = Vec::with_capacity(chain_length);
+            let mut chain_sigs: Vec<Vec<u8>> = Vec::with_capacity(chain_length);
+            let mut chain_commits: Vec<[u8; 32]> = Vec::with_capacity(chain_length);
+
+            for step in 0..chain_length {
+                // Distinct h_n + commit per step (structural property: chain
+                // walks under varying contexts).
+                let mut h_n = [0u8; 32];
+                h_n[0] = step as u8;
+                h_n[1] = 0xAA;
+                let mut commit = [0u8; 32];
+                commit[0] = step as u8;
+                commit[1] = 0xCC;
+
+                let inputs = PerStepSigningInputs {
+                    commitment: &commit,
+                    h_n,
+                    c_pre: [0xBB; 32],
+                    devid_local: [0x11; 32],
+                    devid_counterparty: [0x22; 32],
+                    relationship_key: rel_key,
+                    k_dbrw: &k_dbrw,
+                    fallback_ak_keypair: Some((&ak_pk, &ak_sk)),
+                    k_step_override: None,
+                };
+                let out = sign_receipt_with_per_step_ek(&inputs).unwrap();
+
+                // Advance chain head so step+1 won't take the AK fallback.
+                advance_local_chain_head_after_signing(
+                    &rel_key,
+                    &out.ek_pk,
+                    &out.ek_sk,
+                    &k_dbrw,
+                    /*init=*/ step == 0,
+                )
+                .unwrap();
+
+                chain_pubkeys.push(out.ek_pk);
+                chain_certs.push(out.ek_cert);
+                chain_h_ns.push(h_n);
+                chain_sigs.push(out.sig);
+                chain_commits.push(commit);
+            }
+
+            // ── Property checks ──
+
+            // (P1) Each step's cert verifies against the prior pubkey
+            //      (AK for step 0, EK_{i-1} for step i>0).
+            for i in 0..chain_length {
+                let prior_pk: &[u8] = if i == 0 {
+                    &ak_pk
+                } else {
+                    &chain_pubkeys[i - 1]
+                };
+                assert!(
+                    verify_ek_cert(prior_pk, &chain_pubkeys[i], &chain_h_ns[i], &chain_certs[i])
+                        .unwrap(),
+                    "P1 violated at len={}, step={}",
+                    chain_length,
+                    i
+                );
+            }
+
+            // (P2) For step >= 1, cert MUST NOT verify against AK_pk.
+            for i in 1..chain_length {
+                assert!(
+                    !verify_ek_cert(&ak_pk, &chain_pubkeys[i], &chain_h_ns[i], &chain_certs[i])
+                        .unwrap(),
+                    "P2 violated at len={}, step={}: cert verifies against AK \
+                     when it should chain through EK_{}",
+                    chain_length,
+                    i,
+                    i - 1
+                );
+            }
+
+            // (P3) For step >= 2, cert MUST NOT verify against step (i-2)'s pubkey
+            //      (only adjacent step authorizes; no skip-level).
+            for i in 2..chain_length {
+                assert!(
+                    !verify_ek_cert(
+                        &chain_pubkeys[i - 2],
+                        &chain_pubkeys[i],
+                        &chain_h_ns[i],
+                        &chain_certs[i]
+                    )
+                    .unwrap(),
+                    "P3 violated at len={}, step={}: cert verifies against \
+                     skip-prior pubkey EK_{} instead of EK_{}",
+                    chain_length,
+                    i,
+                    i - 2,
+                    i - 1
+                );
+            }
+
+            // (P4) Each step's receipt-body sig verifies against that
+            //      step's EK_pk only.
+            for i in 0..chain_length {
+                assert!(
+                    sphincs_verify(&chain_pubkeys[i], &chain_commits[i], &chain_sigs[i]).unwrap(),
+                    "P4 violated at len={}, step={}",
+                    chain_length,
+                    i
+                );
+                // And NOT under the previous step's EK_pk.
+                if i > 0 {
+                    assert!(
+                        !sphincs_verify(
+                            &chain_pubkeys[i - 1],
+                            &chain_commits[i],
+                            &chain_sigs[i]
+                        )
+                        .unwrap(),
+                        "P4 violated at len={}, step={}: sig verifies under \
+                         WRONG EK_pk (the prior step's)",
+                        chain_length,
+                        i
+                    );
+                }
+            }
+
+            // (P5) All EK pubkeys are distinct.
+            for i in 0..chain_length {
+                for j in (i + 1)..chain_length {
+                    assert_ne!(
+                        chain_pubkeys[i], chain_pubkeys[j],
+                        "P5 violated at len={}: EK_pk[{}] == EK_pk[{}]",
+                        chain_length, i, j
+                    );
+                }
+            }
+        }
+    }
+
     /// Without a fallback AK keypair AND without a stored chain head,
     /// signing fails with a clear error.
     #[test]
