@@ -1815,6 +1815,204 @@ mod tests {
         );
     }
 
+    /// Multi-step verifier regression — proves that after a verifier
+    /// successfully passes step 0 and the caller advances the
+    /// Counterparty chain head, step 1 verification still passes when
+    /// expected_prev_pk is loaded from `cert_chain_heads.Counterparty`
+    /// (now the fresh EK_pk_0, not the stale AK_pk).
+    ///
+    /// This is the unit-level analogue of the BLE handler fix from the
+    /// Stage-6 adversarial critique — without the post-commit
+    /// `advance_cert_chain_head(Counterparty, …)` call, this test would
+    /// fail at step 1 because the cert chains to EK_pk_0 but the
+    /// verifier would still be reading AK_pk.
+    #[test]
+    #[serial_test::serial]
+    fn verify_per_step_ek_signing_multi_step_with_counterparty_advance() {
+        use crate::storage::client_db::{
+            advance_cert_chain_head, init_cert_chain_head, load_cert_chain_head_pubkey,
+            reset_database_for_tests, set_strict_cert_chain_mode, CertChainSide,
+        };
+        use dsm::crypto::ephemeral_key::generate_ephemeral_keypair;
+
+        reset_database_for_tests();
+        // Strict mode on — proves the multi-step path works under
+        // mainnet enforcement, not just the transitional fail-open path.
+        set_strict_cert_chain_mode(true).unwrap();
+
+        // The unit test runs both signer and verifier in the same
+        // process / DB, so we let `sign_receipt_with_per_step_ek` use
+        // the `Local` row of `cert_chain_heads` for its outbound chain
+        // (just like a real signer process would), and we manually seed
+        // `Counterparty` with the signer's AK_pk to mirror what the
+        // verifier's process would store as its remote-chain mirror.
+        let (sender_ak_pk, sender_ak_sk) = generate_ephemeral_keypair(&[0xA1; 32]).unwrap();
+
+        let kyber_kp = dsm::crypto::kyber::generate_kyber_keypair().expect("kyber keygen");
+        let kyber_pk = kyber_kp.public_key.clone();
+
+        let sender_rel_key = [0xCA; 32];
+        let k_dbrw = [0xE9; 32];
+
+        // Seed only the Counterparty row (the verifier's mirror of the
+        // signer's chain). Leave Local empty so the signer path
+        // initializes it fresh on the first sign.
+        init_cert_chain_head(&sender_rel_key, CertChainSide::Counterparty, &sender_ak_pk)
+            .unwrap();
+
+        // ────── Step 0 (sender signs) ──────
+        let mut receipt_step0 = StitchedReceiptV2::new(
+            [0x01; 32],
+            [0x02; 32],
+            [0x03; 32],
+            [0xAA; 32],
+            [0x04; 32],
+            [0x05; 32],
+            [0x06; 32],
+            vec![0x07; 16],
+            vec![0x08; 16],
+            vec![0x09; 16],
+        );
+        let commit0 = receipt_step0.compute_commitment().unwrap();
+        let inputs0 = PerStepSigningInputs {
+            commitment: &commit0,
+            h_n: [0xAA; 32],
+            c_pre: [0xBB; 32],
+            devid_sender: [0x11; 32],
+            relationship_key: sender_rel_key,
+            k_dbrw: &k_dbrw,
+            fallback_ak_keypair: Some((&sender_ak_pk, &sender_ak_sk)),
+            recipient_kyber_pk: &kyber_pk,
+        };
+        let out0 = sign_receipt_with_per_step_ek(&inputs0).unwrap();
+        receipt_step0.set_ek_pk_a(out0.ek_pk.clone());
+        receipt_step0.set_ek_cert_a(out0.ek_cert);
+        receipt_step0.set_kyber_ct_a(out0.kyber_ct);
+        receipt_step0.add_sig_a(out0.sig);
+
+        // Sender advances Local during signing (already done by
+        // sign_receipt_with_per_step_ek + advance_local_chain_head_after_signing
+        // in the BLE handler signer path).
+        advance_local_chain_head_after_signing(
+            &sender_rel_key,
+            &out0.ek_pk,
+            &out0.ek_sk,
+            &k_dbrw,
+            out0.used_ak_fallback,
+        )
+        .unwrap();
+
+        // Step 0 verifier check: the sender's chain head as observed by
+        // the receiver (Counterparty side from receiver's POV) is
+        // sender_ak_pk. This unit test models the SENDER verifying B-side
+        // — but to keep it on one side, we model it from the RECEIVER's
+        // verifier perspective: A-side. The Counterparty row was seeded
+        // to sender_ak_pk above, which is the correct expected_prev_pk
+        // at step 0.
+        let prev_pk_loaded =
+            load_cert_chain_head_pubkey(&sender_rel_key, CertChainSide::Counterparty)
+                .unwrap()
+                .expect("Counterparty row should be initialized");
+        verify_per_step_ek_signing_strict_aware(
+            &receipt_step0,
+            BilateralSide::A,
+            &prev_pk_loaded,
+            &[0xAA; 32],
+        )
+        .expect("step 0 must verify under freshly-seeded Counterparty AK_pk");
+
+        // ────── Critical post-commit step: advance Counterparty ──────
+        // This is the missing call that the Stage-6 critique caught.
+        // After verifying A-side, the receiver MUST mirror the sender's
+        // outbound chain head in their own Counterparty row so step 1+
+        // verification finds the fresh prev_pk (EK_pk_0), not the stale
+        // genesis AK_pk.
+        let new_step = advance_cert_chain_head(
+            &sender_rel_key,
+            CertChainSide::Counterparty,
+            &out0.ek_pk,
+        )
+        .unwrap()
+        .expect("Counterparty advance must report new step number");
+        assert_eq!(new_step, 1, "Counterparty step counter should advance to 1");
+
+        // ────── Step 1 (sender signs again with advanced Local head) ──────
+        let mut receipt_step1 = StitchedReceiptV2::new(
+            [0x01; 32],
+            [0x02; 32],
+            [0x03; 32],
+            [0xCC; 32], // new h_n
+            [0x44; 32],
+            [0x55; 32],
+            [0x66; 32],
+            vec![0x77; 16],
+            vec![0x88; 16],
+            vec![0x99; 16],
+        );
+        let commit1 = receipt_step1.compute_commitment().unwrap();
+        let inputs1 = PerStepSigningInputs {
+            commitment: &commit1,
+            h_n: [0xCC; 32],
+            c_pre: [0xDD; 32],
+            devid_sender: [0x11; 32],
+            relationship_key: sender_rel_key,
+            k_dbrw: &k_dbrw,
+            // Fallback AK shouldn't be used now — chain head exists.
+            fallback_ak_keypair: Some((&sender_ak_pk, &sender_ak_sk)),
+            recipient_kyber_pk: &kyber_pk,
+        };
+        let out1 = sign_receipt_with_per_step_ek(&inputs1).unwrap();
+        assert!(
+            !out1.used_ak_fallback,
+            "step 1 must sign with chain head EK_sk_0, not AK fallback"
+        );
+        receipt_step1.set_ek_pk_a(out1.ek_pk.clone());
+        receipt_step1.set_ek_cert_a(out1.ek_cert);
+        receipt_step1.set_kyber_ct_a(out1.kyber_ct);
+        receipt_step1.add_sig_a(out1.sig);
+
+        // Step 1 verifier MUST resolve expected_prev_pk from the
+        // freshly-advanced Counterparty row (= EK_pk_0). With the
+        // Counterparty advance from the BLE handler fix, this works.
+        // Without it, the loaded pubkey would still be sender_ak_pk
+        // and the cert-link check would fail.
+        let prev_pk_loaded_step1 =
+            load_cert_chain_head_pubkey(&sender_rel_key, CertChainSide::Counterparty)
+                .unwrap()
+                .expect("Counterparty row should be initialized");
+        assert_eq!(
+            prev_pk_loaded_step1, out0.ek_pk,
+            "Counterparty must now point to EK_pk_0, not AK_pk"
+        );
+        verify_per_step_ek_signing_strict_aware(
+            &receipt_step1,
+            BilateralSide::A,
+            &prev_pk_loaded_step1,
+            &[0xCC; 32],
+        )
+        .expect(
+            "step 1 must verify against the advanced Counterparty chain head — \
+             this is the Stage-6 critique fix",
+        );
+
+        // Negative regression: if we try to verify step 1 against the
+        // STALE AK_pk (the relationship-genesis state, before our
+        // advance), it MUST fail. This is exactly the bug the fix
+        // closes.
+        let stale_check = verify_per_step_ek_signing_strict_aware(
+            &receipt_step1,
+            BilateralSide::A,
+            &sender_ak_pk,
+            &[0xCC; 32],
+        );
+        assert!(
+            stale_check.is_err(),
+            "step 1 against stale AK_pk MUST fail — proves the test exercises the right path"
+        );
+
+        set_strict_cert_chain_mode(false).unwrap();
+    }
+
     /// Symmetric bilateral co-signing: on a single receipt body, stamp
     /// A-side artifacts with the sender's relationship cert chain and
     /// B-side artifacts with the receiver's (different chain), then assert

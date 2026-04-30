@@ -3325,6 +3325,13 @@ impl BilateralBleHandler {
         // Pre-feature receivers leave `counter_signed_receipt` empty and
         // we skip — strict mainnet enforcement comes later via
         // `is_strict_cert_chain_mode`.
+        // Captured for the post-canonical-commit Counterparty chain-head
+        // advance below: `Some((rel_key, ek_pk_b))` iff B-side per-step
+        // EK signing verified successfully on the receiver's
+        // counter-signed receipt. Defining outside the verify block
+        // keeps the value live past the `if let Some(...)` scope.
+        let mut verified_b_side_advance: Option<([u8; 32], Vec<u8>)> = None;
+
         if response.counter_signed_receipt.is_empty()
             && crate::storage::client_db::is_strict_cert_chain_mode().unwrap_or(false)
         {
@@ -3424,6 +3431,12 @@ impl BilateralBleHandler {
                                             Some(response.counter_signed_receipt.clone());
                                     }
                                 }
+                                // Defer the Counterparty chain-head
+                                // advance until canonical commit succeeds
+                                // below (atomicity hardening per Stage-6
+                                // adversarial critique).
+                                verified_b_side_advance =
+                                    Some((rel_key, counter_signed.ek_pk_b.clone()));
                                 info!(
                                     "[BILATERAL] §11.1 per-step EK B-side verification PASS for commitment {}",
                                     bytes_to_base32(&commitment_hash[..8])
@@ -3484,6 +3497,39 @@ impl BilateralBleHandler {
             self.clear_pending_confirm_delivery(&commitment_hash);
             meta
         };
+
+        // §11.1 post-commit: advance the local mirror of the RECEIVER's
+        // cert chain head (Counterparty side from sender's POV). Done
+        // *after* canonical commit succeeds — `mark_sender_committed_…`
+        // returned `Some(meta)` above and we did not bail. If the
+        // canonical commit had failed, we would have returned the
+        // structured error before reaching this point, so the chain
+        // head is never advanced past a non-committed transition.
+        if let Some((rel_key, ek_pk_b)) = verified_b_side_advance {
+            match crate::storage::client_db::advance_cert_chain_head(
+                &rel_key,
+                crate::storage::client_db::CertChainSide::Counterparty,
+                &ek_pk_b,
+            ) {
+                Ok(Some(step)) => {
+                    info!(
+                        "[BILATERAL] §11.1 advanced Counterparty cert chain head to receiver EK_pk_{step} for commitment {}",
+                        bytes_to_base32(&commitment_hash[..8])
+                    );
+                }
+                Ok(None) => {
+                    warn!(
+                        "[BILATERAL] §11.1 cert_chain_heads.Counterparty row missing for relationship — verification used AK_pk fallback; multi-step will degrade until init_cert_chain_for_relationship is called"
+                    );
+                }
+                Err(e) => {
+                    error!(
+                        "[BILATERAL] §11.1 failed to advance Counterparty cert chain head: {} — multi-step verification may degrade until reconciled",
+                        e
+                    );
+                }
+            }
+        }
 
         crate::sdk::transfer_hooks::post_transfer_cleanup(
             &meta.token_id,
@@ -3727,6 +3773,13 @@ impl BilateralBleHandler {
         // (transitional fail-open) but log so any production-side regression
         // is visible. Strict mainnet enforcement is a follow-up tied to
         // `set_strict_cert_chain_mode`.
+        // Captured for the post-commit Counterparty chain-head advance
+        // (§11.1). Some(ek_pk_a) iff per-step EK A-side verification passed
+        // — in that case the sender's outbound chain has moved to this
+        // EK_pk and we must mirror it locally so the next step's
+        // `expected_prev_pk` lookup resolves to the fresh head, not the
+        // stale relationship-genesis AK_pk.
+        let verified_a_side_ek_pk: Option<Vec<u8>>;
         if !confirm_request.stitched_receipt.is_empty() {
             match dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
                 &confirm_request.stitched_receipt,
@@ -3767,6 +3820,7 @@ impl BilateralBleHandler {
                                 "[BILATERAL] §11.1 per-step EK A-side verification PASS for commitment {}",
                                 bytes_to_base32(&commitment_hash[..8])
                             );
+                            verified_a_side_ek_pk = Some(receipt.ek_pk_a.clone());
                         }
                         crate::sdk::receipts::PerStepEkVerifyOutcome::SkippedLegacyReceipt => {
                             warn!(
@@ -3774,6 +3828,7 @@ impl BilateralBleHandler {
                                  skipping verification (legacy/pre-feature receipt; strict mode OFF)",
                                 bytes_to_base32(&commitment_hash[..8])
                             );
+                            verified_a_side_ek_pk = None;
                         }
                     }
                 }
@@ -3790,6 +3845,8 @@ impl BilateralBleHandler {
                 "strict cert-chain mode: incoming bilateral confirm omits stitched_receipt — \
                  rejecting",
             ));
+        } else {
+            verified_a_side_ek_pk = None;
         }
 
         // Extract h_{n+1} from confirm request
@@ -3899,6 +3956,49 @@ impl BilateralBleHandler {
             .map_err(|e| {
                 DsmError::state_machine(format!("receiver confirm advance failed: {e}"))
             })?;
+
+        // §11.1 post-commit: advance the local mirror of the SENDER's
+        // cert chain head (Counterparty side from receiver's POV). Done
+        // *after* canonical commit succeeds — if the advance call above
+        // had failed, we would have bailed before getting here, so the
+        // chain head is never advanced past a transition that wasn't
+        // committed canonically. The advance MUST happen for multi-step
+        // bilateral correctness: at step n+1 the verifier looks up
+        // `expected_prev_pk` from this row, so a stale AK_pk would
+        // reject all post-step-0 transitions.
+        if let Some(ref ek_pk_a) = verified_a_side_ek_pk {
+            match crate::storage::client_db::advance_cert_chain_head(
+                &rel_key,
+                crate::storage::client_db::CertChainSide::Counterparty,
+                ek_pk_a,
+            ) {
+                Ok(Some(step)) => {
+                    info!(
+                        "[BILATERAL] §11.1 advanced Counterparty cert chain head to sender EK_pk_{step} for commitment {}",
+                        bytes_to_base32(&commitment_hash[..8])
+                    );
+                }
+                Ok(None) => {
+                    // No row to update — relationship was never seeded via
+                    // init_cert_chain_for_relationship. Verification still
+                    // succeeded against the contact's AK_pk fallback above,
+                    // and this is the transitional path; no action needed
+                    // beyond logging.
+                    warn!(
+                        "[BILATERAL] §11.1 cert_chain_heads.Counterparty row missing for relationship — verification used AK_pk fallback; multi-step will degrade until init_cert_chain_for_relationship is called"
+                    );
+                }
+                Err(e) => {
+                    // Advancement is bookkeeping; canonical commit
+                    // already succeeded. Log as an error but do not
+                    // unwind the canonical state.
+                    error!(
+                        "[BILATERAL] §11.1 failed to advance Counterparty cert chain head: {} — multi-step verification may degrade until reconciled",
+                        e
+                    );
+                }
+            }
+        }
 
         // Advance BTM anchor + persisted contact tip to new_chain_tip (§16.6 symmetric).
         {
