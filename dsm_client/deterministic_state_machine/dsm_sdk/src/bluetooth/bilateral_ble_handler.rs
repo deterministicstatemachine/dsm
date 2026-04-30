@@ -3305,6 +3305,142 @@ impl BilateralBleHandler {
                 DsmError::invalid_operation("commit ack post_state_hash must be 32 bytes")
             })?;
 
+        // §11.1 sender-side B-side verification: the receiver counter-signs
+        // their locally-built copy of the stitched receipt with B-side
+        // per-step EK signing artifacts and ships those bytes back in
+        // `counter_signed_receipt`. Verify that:
+        //   1. The bytes parse as a `StitchedReceiptV2`.
+        //   2. The receipt's identity fields match this transfer (anti-
+        //      substitution: `devid_a` is the counterparty, `devid_b` is
+        //      this sender).
+        //   3. Cert chain link: `ek_cert_b` chains `ek_pk_b` back to the
+        //      receiver's prior cert-chain head — loaded from
+        //      `cert_chain_heads` (Local-side from the receiver's POV =
+        //      Counterparty-side from this sender's POV) or falling back
+        //      to the contact's AK_pk at relationship genesis.
+        //   4. Receipt sig: `sig_b` verifies under `ek_pk_b` over the
+        //      receipt's canonical commitment.
+        // On success we replace the in-memory cached A-only receipt with
+        // the fully co-signed bytes so settlement archives both sigs.
+        // Pre-feature receivers leave `counter_signed_receipt` empty and
+        // we skip — strict mainnet enforcement comes later via
+        // `is_strict_cert_chain_mode`.
+        if !response.counter_signed_receipt.is_empty() {
+            // Fetch the counterparty (receiver) device_id from the session
+            // store. Required for identity checks and chain-head lookup; if
+            // the session is gone we skip verification (recovery path).
+            let counterparty_device_id_opt: Option<[u8; 32]> = {
+                let sessions = self.sessions.sessions.lock().await;
+                sessions
+                    .get(&commitment_hash)
+                    .map(|s| s.counterparty_device_id)
+            };
+
+            if let Some(counterparty_device_id) = counterparty_device_id_opt {
+                match dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
+                    &response.counter_signed_receipt,
+                ) {
+                    Ok(counter_signed) => {
+                        let receipt_carries_per_step_ek_b =
+                            !counter_signed.ek_pk_b.is_empty()
+                                && !counter_signed.ek_cert_b.is_empty()
+                                && !counter_signed.sig_b.is_empty();
+
+                        if receipt_carries_per_step_ek_b {
+                            // Identity check — the receiver builds the receipt
+                            // with their own device_id as devid_a and the
+                            // sender's as devid_b.
+                            if counter_signed.devid_a != counterparty_device_id {
+                                return Err(DsmError::invalid_operation(
+                                    "counter_signed_receipt: devid_a does not match the counterparty \
+                                     of this session — possible substitution",
+                                ));
+                            }
+                            if counter_signed.devid_b != self.device_id {
+                                return Err(DsmError::invalid_operation(
+                                    "counter_signed_receipt: devid_b does not match this sender \
+                                     device_id — possible substitution",
+                                ));
+                            }
+
+                            let rel_key =
+                                dsm::verification::smt_replace_witness::compute_smt_key(
+                                    &self.device_id,
+                                    &counterparty_device_id,
+                                );
+                            // From this sender's view, the RECEIVER's chain
+                            // head lives in the Counterparty-side row of
+                            // cert_chain_heads.
+                            let prev_pk_from_chain =
+                                crate::storage::client_db::load_cert_chain_head_pubkey(
+                                    &rel_key,
+                                    crate::storage::client_db::CertChainSide::Counterparty,
+                                )
+                                .ok()
+                                .flatten();
+                            let expected_prev_pk = match prev_pk_from_chain {
+                                Some(pk) => pk,
+                                None => {
+                                    let manager = self.bilateral_tx_manager.read().await;
+                                    manager
+                                        .get_contact(&counterparty_device_id)
+                                        .ok_or_else(|| {
+                                            DsmError::invalid_operation(
+                                                "counter_signed_receipt verify: contact missing \
+                                                 for AK_pk fallback",
+                                            )
+                                        })?
+                                        .public_key
+                                        .clone()
+                                }
+                            };
+
+                            crate::sdk::receipts::verify_per_step_ek_signing(
+                                &counter_signed,
+                                crate::sdk::receipts::BilateralSide::B,
+                                &expected_prev_pk,
+                                &counter_signed.parent_tip,
+                            )?;
+
+                            // Replace the in-memory A-only cached receipt
+                            // with the fully co-signed bytes so the
+                            // settlement that follows archives both sigs.
+                            {
+                                let mut sessions = self.sessions.sessions.lock().await;
+                                if let Some(s) = sessions.get_mut(&commitment_hash) {
+                                    s.stitched_receipt_bytes =
+                                        Some(response.counter_signed_receipt.clone());
+                                }
+                            }
+
+                            info!(
+                                "[BILATERAL] §11.1 per-step EK B-side verification PASS for commitment {}",
+                                bytes_to_base32(&commitment_hash[..8])
+                            );
+                        } else {
+                            warn!(
+                                "[BILATERAL] §11.1 per-step EK B-side artifacts MISSING on counter-signed receipt for commitment {} — \
+                                 skipping verification (legacy/pre-feature receipt)",
+                                bytes_to_base32(&commitment_hash[..8])
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        return Err(DsmError::invalid_operation(format!(
+                            "sender per-step EK verify: failed to decode \
+                             counter_signed_receipt: {e}"
+                        )));
+                    }
+                }
+            } else {
+                info!(
+                    "[BILATERAL] handle_commit_response: session {} not in memory — \
+                     skipping B-side verification (recovery path)",
+                    bytes_to_base32(&commitment_hash[..8])
+                );
+            }
+        }
+
         let meta = if should_attempt_persisted_recovery {
             match self
                 .recover_sender_commit_from_storage(commitment_hash, post_state_hash)
@@ -3808,6 +3944,10 @@ impl BilateralBleHandler {
         // §4.2 Full-persistence atomic boundary: delegate applies chain tip + balance +
         // history in one SQLite transaction.
 
+        // Keep a clone of the counter-signed receipt bytes for the response
+        // envelope below. The settlement context consumes its own copy.
+        let counter_signed_receipt_for_response = receipt_bytes.clone();
+
         let (_confirm_outcome, persistence_error) =
             if let Some(ref delegate) = self.settlement_delegate {
                 // Canonical advance via `execute_on_relationship_for_bilateral`
@@ -3966,6 +4106,15 @@ impl BilateralBleHandler {
                         commitment_hash: Some(generated::Hash32 {
                             v: commitment_hash.to_vec(),
                         }),
+                        // §11.1: ship the receiver's locally-built copy of the
+                        // stitched receipt with B-side per-step EK signing
+                        // artifacts so the sender can symmetrically verify
+                        // the counter-signature and persist a fully co-signed
+                        // archive. Empty when the receipt couldn't be built
+                        // (e.g. missing device_tree_commitment) — sender then
+                        // skips B-side verification (transitional fail-open).
+                        counter_signed_receipt: counter_signed_receipt_for_response
+                            .unwrap_or_default(),
                     },
                 ),
                 Some(new_chain_tip),

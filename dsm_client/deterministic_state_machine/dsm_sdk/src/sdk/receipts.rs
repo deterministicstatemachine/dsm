@@ -1749,6 +1749,117 @@ mod tests {
         );
     }
 
+    /// Symmetric bilateral co-signing: on a single receipt body, stamp
+    /// A-side artifacts with the sender's relationship cert chain and
+    /// B-side artifacts with the receiver's (different chain), then assert
+    /// that `verify_per_step_ek_signing` accepts both sides INDEPENDENTLY
+    /// on the same bytes.
+    ///
+    /// Mirrors the canonical co-signed receipt that flows back over
+    /// `BilateralCommitResponse.counter_signed_receipt` after the receiver
+    /// counter-signs the sender's signed bytes.
+    #[test]
+    #[serial_test::serial]
+    fn verify_per_step_ek_signing_accepts_symmetric_a_and_b_on_same_receipt() {
+        use crate::storage::client_db::reset_database_for_tests;
+        use dsm::crypto::ephemeral_key::generate_ephemeral_keypair;
+        reset_database_for_tests();
+
+        // Two distinct AK keypairs — one per device — and two distinct
+        // relationship cert chains so that A-side and B-side derive their
+        // EKs from independent contexts.
+        let (sender_ak_pk, sender_ak_sk) = generate_ephemeral_keypair(&[0xA1; 32]).unwrap();
+        let (receiver_ak_pk, receiver_ak_sk) = generate_ephemeral_keypair(&[0xB1; 32]).unwrap();
+        let kyber_kp = dsm::crypto::kyber::generate_kyber_keypair().expect("kyber keygen");
+        let kyber_pk = kyber_kp.public_key.clone();
+
+        let sender_rel_key = [0xCA; 32];
+        let receiver_rel_key = [0xDA; 32];
+        let k_dbrw = [0xE9; 32];
+
+        let mut receipt = StitchedReceiptV2::new(
+            [0x01; 32],
+            [0x02; 32],
+            [0x03; 32],
+            [0xAA; 32],
+            [0x04; 32],
+            [0x05; 32],
+            [0x06; 32],
+            vec![0x07; 16],
+            vec![0x08; 16],
+            vec![0x09; 16],
+        );
+        let commitment = receipt.compute_commitment().unwrap();
+
+        // A-side stamping (sender's chain).
+        let a_inputs = PerStepSigningInputs {
+            commitment: &commitment,
+            h_n: [0xAA; 32],
+            c_pre: [0xBB; 32],
+            devid_sender: [0x11; 32],
+            relationship_key: sender_rel_key,
+            k_dbrw: &k_dbrw,
+            fallback_ak_keypair: Some((&sender_ak_pk, &sender_ak_sk)),
+            recipient_kyber_pk: &kyber_pk,
+        };
+        let a_out = sign_receipt_with_per_step_ek(&a_inputs).unwrap();
+        receipt.set_ek_pk_a(a_out.ek_pk.clone());
+        receipt.set_ek_cert_a(a_out.ek_cert);
+        receipt.set_kyber_ct_a(a_out.kyber_ct);
+        receipt.add_sig_a(a_out.sig);
+
+        // B-side stamping (receiver's chain). Uses a different relationship
+        // key so the chain head lookup hits an empty row and falls back to
+        // the receiver's AK_pk.
+        let b_inputs = PerStepSigningInputs {
+            commitment: &commitment,
+            h_n: [0xAA; 32],
+            c_pre: [0xBB; 32],
+            devid_sender: [0x22; 32],
+            relationship_key: receiver_rel_key,
+            k_dbrw: &k_dbrw,
+            fallback_ak_keypair: Some((&receiver_ak_pk, &receiver_ak_sk)),
+            recipient_kyber_pk: &kyber_pk,
+        };
+        let b_out = sign_receipt_with_per_step_ek(&b_inputs).unwrap();
+        receipt.set_ek_pk_b(b_out.ek_pk.clone());
+        receipt.set_ek_cert_b(b_out.ek_cert);
+        receipt.set_kyber_ct_b(b_out.kyber_ct);
+        receipt.add_sig_b(b_out.sig);
+
+        assert!(receipt.is_fully_signed(), "receipt must carry both sigs");
+
+        // Both sides must verify independently against their respective
+        // AK pubkeys.
+        verify_per_step_ek_signing(&receipt, BilateralSide::A, &sender_ak_pk, &[0xAA; 32])
+            .expect("A-side must verify under sender's AK");
+        verify_per_step_ek_signing(&receipt, BilateralSide::B, &receiver_ak_pk, &[0xAA; 32])
+            .expect("B-side must verify under receiver's AK");
+
+        // Cross-check: A-side must NOT verify under receiver's AK, and
+        // B-side must NOT verify under sender's AK.
+        let cross_a = verify_per_step_ek_signing(
+            &receipt,
+            BilateralSide::A,
+            &receiver_ak_pk,
+            &[0xAA; 32],
+        );
+        assert!(
+            cross_a.is_err(),
+            "A-side must NOT verify under receiver's AK"
+        );
+        let cross_b = verify_per_step_ek_signing(
+            &receipt,
+            BilateralSide::B,
+            &sender_ak_pk,
+            &[0xAA; 32],
+        );
+        assert!(
+            cross_b.is_err(),
+            "B-side must NOT verify under sender's AK"
+        );
+    }
+
     /// An empty cert/sig/ek_pk surface must reject with a descriptive error
     /// instead of panicking inside the SPHINCS+ verifier.
     #[test]

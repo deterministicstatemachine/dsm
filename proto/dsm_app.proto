@@ -1592,6 +1592,14 @@ message BilateralCommitResponse {
   Hash32 transaction_hash = 3;
   string message          = 4;
   Hash32 commitment_hash  = 5;
+  // §11.1 receiver counter-sign: receiver's locally-built copy of the
+  // stitched receipt with B-side per-step EK signing artifacts
+  // (ek_pk_b / ek_cert_b / kyber_ct_b / sig_b) stamped on top of the
+  // sender's A-side fields. Sender verifies this on receipt and persists
+  // a fully co-signed copy to its own archive. Empty for pre-feature
+  // sessions (transitional fail-open until set_strict_cert_chain_mode
+  // is on).
+  bytes  counter_signed_receipt = 6 [(dsm_max_len)=131072];
 }
 
 // 3-step BLE protocol: Step 3 — Sender confirms (A→B), both finalize.
