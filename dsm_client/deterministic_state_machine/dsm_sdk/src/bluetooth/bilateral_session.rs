@@ -276,6 +276,7 @@ impl SessionStore {
             counterparty_signature: session.counterparty_signature.clone(),
             created_at_step: session.created_at_ticks,
             sender_ble_address: session.sender_ble_address.clone(),
+            stitched_receipt_bytes: session.stitched_receipt_bytes.clone(),
         };
         store_bilateral_session(&record).map_err(|e| {
             DsmError::invalid_operation(format!("Failed to persist bilateral session: {e}"))

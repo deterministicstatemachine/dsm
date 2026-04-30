@@ -584,6 +584,21 @@ impl BilateralTransactionManager {
         self.signature_keypair.public_key().to_vec()
     }
 
+    /// Return the local AK (long-term attestation) keypair as `(pk, sk)` for
+    /// cert-chain construction (whitepaper §11.1). Used at relationship genesis
+    /// (step 0) when no per-step chain head exists yet — the receipt-signing
+    /// path falls back to AK_sk to sign cert_1.
+    ///
+    /// Visibility: limited to bilateral-flow callers in the SDK. The AK_sk
+    /// material is sensitive — only the receipt-signing flow should touch
+    /// it directly.
+    pub fn ak_keypair_for_cert_chain(&self) -> (Vec<u8>, Vec<u8>) {
+        (
+            self.signature_keypair.public_key().to_vec(),
+            self.signature_keypair.secret_key().to_vec(),
+        )
+    }
+
     /// Sign a commitment hash using the local keypair.
     /// This is used by the BLE handler when registering a sender session for bilateral transfers.
     /// The signature is required for the commit phase.

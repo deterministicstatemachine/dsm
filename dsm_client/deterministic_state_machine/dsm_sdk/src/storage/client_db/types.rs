@@ -264,6 +264,13 @@ pub struct BilateralSessionRecord {
     pub counterparty_signature: Option<Vec<u8>>,
     pub created_at_step: u64,
     pub sender_ble_address: Option<String>,
+    /// Sender-cached signed stitched receipt (full protobuf, with per-step EK
+    /// signing artifacts already stamped). Persisted here so that post-crash
+    /// recovery in `mark_sender_committed_with_post_state_hash` can reuse the
+    /// already-signed bytes verbatim instead of attempting to rebuild from
+    /// the canonical `AdvanceOutcome` (which would lack §11.1 per-step EK
+    /// signing artifacts).
+    pub stitched_receipt_bytes: Option<Vec<u8>>,
 }
 
 /// Locally persisted DLV stitched receipt record (§7.3, §18.4).
