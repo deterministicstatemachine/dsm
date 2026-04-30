@@ -3325,6 +3325,19 @@ impl BilateralBleHandler {
         // Pre-feature receivers leave `counter_signed_receipt` empty and
         // we skip — strict mainnet enforcement comes later via
         // `is_strict_cert_chain_mode`.
+        if response.counter_signed_receipt.is_empty()
+            && crate::storage::client_db::is_strict_cert_chain_mode().unwrap_or(false)
+        {
+            // Mainnet: every commit response MUST carry the receiver's
+            // counter-signed receipt. There is no transitional fail-open
+            // path here — a missing counter-sign means the receiver is
+            // either pre-feature (unsupported in mainnet) or stripped the
+            // field in transit.
+            return Err(DsmError::invalid_operation(
+                "strict cert-chain mode: BilateralCommitResponse omits counter_signed_receipt — \
+                 rejecting",
+            ));
+        }
         if !response.counter_signed_receipt.is_empty() {
             // Fetch the counterparty (receiver) device_id from the session
             // store. Required for identity checks and chain-head lookup; if
@@ -3756,10 +3769,20 @@ impl BilateralBleHandler {
                             "[BILATERAL] §11.1 per-step EK A-side verification PASS for commitment {}",
                             bytes_to_base32(&commitment_hash[..8])
                         );
+                    } else if crate::storage::client_db::is_strict_cert_chain_mode()
+                        .unwrap_or(false)
+                    {
+                        // Mainnet: per-step EK signing is mandatory. Reject
+                        // any receipt that omits ek_pk_a / ek_cert_a / sig_a
+                        // — there is no transitional fail-open path here.
+                        return Err(DsmError::invalid_operation(
+                            "strict cert-chain mode: incoming bilateral confirm carries a stitched \
+                             receipt with no §11.1 per-step EK A-side artifacts — rejecting",
+                        ));
                     } else {
                         warn!(
                             "[BILATERAL] §11.1 per-step EK A-side artifacts MISSING on incoming receipt for commitment {} — \
-                             skipping verification (legacy/pre-feature receipt)",
+                             skipping verification (legacy/pre-feature receipt; strict mode OFF)",
                             bytes_to_base32(&commitment_hash[..8])
                         );
                     }
@@ -3770,6 +3793,13 @@ impl BilateralBleHandler {
                     )));
                 }
             }
+        } else if crate::storage::client_db::is_strict_cert_chain_mode().unwrap_or(false) {
+            // Mainnet: even an empty stitched_receipt is unacceptable —
+            // there is nothing to bind A-side per-step EK signing to.
+            return Err(DsmError::invalid_operation(
+                "strict cert-chain mode: incoming bilateral confirm omits stitched_receipt — \
+                 rejecting",
+            ));
         }
 
         // Extract h_{n+1} from confirm request
