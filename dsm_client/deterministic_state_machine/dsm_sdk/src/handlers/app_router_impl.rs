@@ -1428,17 +1428,52 @@ impl AppRouterImpl {
                                 &receipt.devid_b,
                             );
 
+                        // Per-step Kyber per whitepaper §11: encapsulate
+                        // against the recipient's Kyber pubkey to derive
+                        // `k_step`. Pull the pubkey from the contact record;
+                        // fail-closed if missing (no fallback path — contact
+                        // must be re-established with peer Kyber pubkey to
+                        // enable per-step EK signing).
+                        let recipient_kyber_pk = match crate::storage::client_db::get_contact_by_device_id(
+                            &receipt.devid_b,
+                        ) {
+                            Ok(Some(c)) if !c.kyber_public_key.is_empty() => c.kyber_public_key,
+                            Ok(Some(_)) => {
+                                let rollback_error = self
+                                    .rollback_failed_online_transfer(&rollback_request)
+                                    .await
+                                    .err()
+                                    .map(|rb| format!("; rollback failed: {rb}"))
+                                    .unwrap_or_default();
+                                return err(format!(
+                                    "wallet.send: recipient contact missing Kyber public key — \
+                                     re-establish contact to upgrade for per-step EK signing\
+                                     {rollback_error}"
+                                ));
+                            }
+                            _ => {
+                                let rollback_error = self
+                                    .rollback_failed_online_transfer(&rollback_request)
+                                    .await
+                                    .err()
+                                    .map(|rb| format!("; rollback failed: {rb}"))
+                                    .unwrap_or_default();
+                                return err(format!(
+                                    "wallet.send: recipient contact lookup failed{rollback_error}"
+                                ));
+                            }
+                        };
+
                         // Sign with per-step EK (whitepaper §11.1 cert chain).
                         let signing_inputs = crate::sdk::receipts::PerStepSigningInputs {
                             commitment: &commitment,
                             h_n: receipt.parent_tip,
                             c_pre: commitment, // see comment above re: c_pre source
-                            devid_local: receipt.devid_a,
-                            devid_counterparty: receipt.devid_b,
+                            devid_sender: receipt.devid_a,
                             relationship_key: rel_key,
                             k_dbrw: &k_dbrw_arr,
                             fallback_ak_keypair: Some((&ak_pk, &ak_sk)),
-                            k_step_override: None,
+                            recipient_kyber_pk: &recipient_kyber_pk,
                         };
                         match crate::sdk::receipts::sign_receipt_with_per_step_ek(&signing_inputs)
                         {
@@ -1455,6 +1490,7 @@ impl AppRouterImpl {
                                 // Stamp per-step artifacts on the receipt.
                                 receipt.set_ek_pk_a(out.ek_pk.clone());
                                 receipt.set_ek_cert_a(out.ek_cert);
+                                receipt.set_kyber_ct_a(out.kyber_ct);
                                 receipt.add_sig_a(out.sig);
 
                                 // Advance chain head so step n+1 will use this
@@ -3124,6 +3160,7 @@ mod tests {
             alias: "peer".to_string(),
             genesis_hash: remote_genesis.to_vec(),
             public_key: vec![],
+            kyber_public_key: Vec::new(),
             current_chain_tip: None,
             added_at: 0,
             verified: true,
@@ -3247,6 +3284,7 @@ mod tests {
             alias: "peer".to_string(),
             genesis_hash: [0x04u8; 32].to_vec(),
             public_key: vec![],
+            kyber_public_key: Vec::new(),
             current_chain_tip: Some(stored_tip.to_vec()),
             added_at: 0,
             verified: true,
@@ -3278,6 +3316,7 @@ mod tests {
             alias: "peer".to_string(),
             genesis_hash: remote_genesis.to_vec(),
             public_key: vec![],
+            kyber_public_key: Vec::new(),
             current_chain_tip: None,
             added_at: 0,
             verified: true,
@@ -3351,6 +3390,7 @@ mod tests {
             alias: "alice".to_string(),
             genesis_hash: alice_genesis.to_vec(),
             public_key: vec![],
+            kyber_public_key: Vec::new(),
             current_chain_tip: Some(initial_tip.to_vec()),
             added_at: 0,
             verified: true,
@@ -3432,6 +3472,7 @@ mod tests {
             alias: "peer".to_string(),
             genesis_hash: vec![0x22u8; 32],
             public_key: vec![0x33u8; 64],
+            kyber_public_key: Vec::new(),
             current_chain_tip: None,
             added_at: 7,
             verified: true,
@@ -3456,6 +3497,7 @@ mod tests {
             alias: "peer".to_string(),
             genesis_hash: vec![0x22u8; 32],
             public_key: vec![],
+            kyber_public_key: Vec::new(),
             current_chain_tip: None,
             added_at: 7,
             verified: false,
@@ -3485,6 +3527,7 @@ mod tests {
             alias: "peer".to_string(),
             genesis_hash: [0xFFu8; 32].to_vec(),
             public_key: vec![],
+            kyber_public_key: Vec::new(),
             current_chain_tip: Some(current_tip.to_vec()),
             added_at: 0,
             verified: true,
@@ -3521,6 +3564,7 @@ mod tests {
             alias: "peer".to_string(),
             genesis_hash: [0xFFu8; 32].to_vec(),
             public_key: vec![],
+            kyber_public_key: Vec::new(),
             current_chain_tip: Some(tip.to_vec()),
             added_at: 0,
             verified: true,
@@ -3550,6 +3594,7 @@ mod tests {
             alias: "peer".to_string(),
             genesis_hash: [0xFFu8; 32].to_vec(),
             public_key: vec![],
+            kyber_public_key: Vec::new(),
             current_chain_tip: Some([0xCCu8; 32].to_vec()),
             added_at: 0,
             verified: true,
@@ -3579,6 +3624,7 @@ mod tests {
             alias: "peer".to_string(),
             genesis_hash: [0xFFu8; 32].to_vec(),
             public_key: vec![],
+            kyber_public_key: Vec::new(),
             current_chain_tip: Some([0xCCu8; 32].to_vec()),
             added_at: 0,
             verified: true,

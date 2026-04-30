@@ -109,6 +109,19 @@ pub struct StitchedReceiptV2 {
     /// Same semantics as `ek_pk_a`. Empty when sig_b is empty or for
     /// legacy receipts.
     pub ek_pk_b: Vec<u8>,
+
+    /// Per-step Kyber/ML-KEM ciphertext for party A's contribution to
+    /// `k_step` (whitepaper §11). The sender encapsulates with deterministic
+    /// coins against the recipient's Kyber pubkey; the resulting ct travels
+    /// here. Recipient decapsulates with their Kyber sk to recover `ss`
+    /// and derive `k_step = BLAKE3("DSM/kyber-ss\0" || ss)`. Empty for
+    /// legacy receipts that pre-date per-step Kyber.
+    pub kyber_ct_a: Vec<u8>,
+
+    /// Per-step Kyber ciphertext for party B (counterparty's contribution).
+    /// Mirrors `kyber_ct_a` but encapsulated by B against A's Kyber pubkey.
+    /// Empty when sig_b is empty or for legacy receipts.
+    pub kyber_ct_b: Vec<u8>,
 }
 
 impl StitchedReceiptV2 {
@@ -144,6 +157,8 @@ impl StitchedReceiptV2 {
             ek_cert_b: Vec::new(),
             ek_pk_a: Vec::new(),
             ek_pk_b: Vec::new(),
+            kyber_ct_a: Vec::new(),
+            kyber_ct_b: Vec::new(),
         }
     }
 
@@ -176,10 +191,12 @@ impl StitchedReceiptV2 {
             ek_cert_b: vec![],
             ek_pk_a: vec![],
             ek_pk_b: vec![],
+            kyber_ct_a: vec![],
+            kyber_ct_b: vec![],
         }
     }
 
-    /// Convert to prost-generated `ReceiptCommit` (full form, with sigs + certs + EK pks).
+    /// Convert to prost-generated `ReceiptCommit` (full form, with sigs + certs + EK pks + Kyber ct).
     fn to_proto_full(&self) -> crate::types::proto::ReceiptCommit {
         let mut proto = self.to_proto_canonical();
         proto.sig_a.clone_from(&self.sig_a);
@@ -188,6 +205,8 @@ impl StitchedReceiptV2 {
         proto.ek_cert_b.clone_from(&self.ek_cert_b);
         proto.ek_pk_a.clone_from(&self.ek_pk_a);
         proto.ek_pk_b.clone_from(&self.ek_pk_b);
+        proto.kyber_ct_a.clone_from(&self.kyber_ct_a);
+        proto.kyber_ct_b.clone_from(&self.kyber_ct_b);
         proto
     }
 
@@ -235,6 +254,12 @@ impl StitchedReceiptV2 {
         }
         if !rc.ek_pk_b.is_empty() {
             receipt.set_ek_pk_b(rc.ek_pk_b);
+        }
+        if !rc.kyber_ct_a.is_empty() {
+            receipt.set_kyber_ct_a(rc.kyber_ct_a);
+        }
+        if !rc.kyber_ct_b.is_empty() {
+            receipt.set_kyber_ct_b(rc.kyber_ct_b);
         }
         Ok(receipt)
     }
@@ -311,6 +336,16 @@ impl StitchedReceiptV2 {
     /// Set party B's per-step ephemeral SPHINCS+ public key.
     pub fn set_ek_pk_b(&mut self, pk: Vec<u8>) {
         self.ek_pk_b = pk;
+    }
+
+    /// Set party A's per-step Kyber ciphertext (whitepaper §11).
+    pub fn set_kyber_ct_a(&mut self, ct: Vec<u8>) {
+        self.kyber_ct_a = ct;
+    }
+
+    /// Set party B's per-step Kyber ciphertext (counterparty's contribution).
+    pub fn set_kyber_ct_b(&mut self, ct: Vec<u8>) {
+        self.kyber_ct_b = ct;
     }
 
     /// Check if both signatures are present

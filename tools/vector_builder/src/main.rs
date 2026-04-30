@@ -254,5 +254,8 @@ fn build_receipt_commit(case_id: &str) -> Result<gp::ReceiptCommit> {
         ek_cert_b: vec![],
         ek_pk_a: vec![],
         ek_pk_b: vec![],
+        // Per-step Kyber ciphertexts (whitepaper §11) — wire-only.
+        kyber_ct_a: vec![],
+        kyber_ct_b: vec![],
     })
 }

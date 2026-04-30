@@ -41,6 +41,27 @@
   Refines: DSM_Tripwire.tla `CountersignedByBoth` predicate. Tripwire
   fork-exclusion remains unchanged because cert validity does not affect
   adjacency reasoning.
+
+  k_step source (Phase F real-Kyber migration):
+    The per-step EK derivation context includes a `k_step` input. This
+    module abstracts `k_step` as an arbitrary 32-byte input; in the
+    implementation `k_step` is derived from a fresh per-step Kyber-768
+    encapsulation between the bilateral parties:
+      coins  = BLAKE3-256("DSM/kyber-coins\0" || h_n || C_pre
+                          || DevID_sender || K_DBRW)
+      (ct, ss) = KyberEncDet(recipient_kyber_pk, coins)
+      k_step = BLAKE3-256("DSM/kyber-ss\0" || ss)
+    The recipient decapsulates `ct` with their Kyber sk to recover the
+    same `ss` and `k_step`. The Kyber ciphertext travels in the receipt's
+    `kyber_ct_a/b` envelope fields (proto 18/19). Code helpers:
+    `derive_kyber_k_step_for_send` / `_for_verify` in sdk/receipts.rs.
+    The cert chain proofs in this module are agnostic to where `k_step`
+    came from — they reason about cert verification given EK_pk values,
+    regardless of the derivation pathway. Real Kyber per-step BINDS the
+    EK derivation to a specific recipient (a receipt encapsulated to one
+    recipient cannot be replayed against another — Kyber binds to
+    recipient_kyber_pk), strengthening the security model the cert chain
+    proofs rest on.
 -/
 
 -- ============================================================

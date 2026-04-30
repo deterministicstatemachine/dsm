@@ -27,7 +27,6 @@ pub fn derive_relationship_key(counterparty_pk: &[u8]) -> [u8; 32] {
 /// All three inputs MUST be 32 bytes. `k_step` comes from a Kyber exchange
 /// between the parties; for relationships that don't yet run per-step
 /// Kyber, callers may pass a deterministic stub derived from chain context
-/// (see `derive_stub_k_step_for_relationship`).
 #[derive(Debug, Clone, Copy)]
 pub struct PerStepEkContext {
     /// Current bilateral chain tip h_n (parent_tip of the receipt being built).
@@ -54,38 +53,71 @@ pub fn derive_per_step_ek(
     dsm::crypto::ephemeral_key::generate_ephemeral_keypair(&seed)
 }
 
-/// Deterministic-stub `k_step` for relationships that haven't yet run a
-/// per-step Kyber exchange (transitional pre-mainnet path).
+/// Result of the sender-side per-step Kyber encapsulation.
+#[derive(Debug)]
+pub struct KyberStepEncap {
+    /// The 32-byte `k_step = BLAKE3("DSM/kyber-ss\0" || ss)` mixed into
+    /// the per-step EK derivation alongside K_DBRW.
+    pub k_step: [u8; 32],
+    /// Kyber ciphertext that travels in the receipt envelope; recipient
+    /// decapsulates with their Kyber secret key to recover the same `ss`
+    /// and derive identical `k_step`.
+    pub ciphertext: Vec<u8>,
+}
+
+/// Sender-side: derive `k_step` for the per-step EK by deterministically
+/// encapsulating against the recipient's Kyber public key (whitepaper §11).
 ///
-/// Per spec §11, `k_step` should come from a fresh Kyber encapsulation
-/// per step. This stub provides a deterministic substitute derived from
-/// public chain context only:
-///   `k_step_stub = BLAKE3("DSM/k-step-stub\0" || h_n || C_pre || min(devid_a, devid_b) || max(devid_a, devid_b))`
+/// The encapsulation coins are derived from public chain context plus the
+/// device-bound `K_DBRW`:
+///   coins = BLAKE3-256("DSM/kyber-coins\0" || h_n || C_pre
+///                       || DevID_sender || K_DBRW)
 ///
-/// **Spec-compliance note**: when both sides agree to use this stub, the
-/// cert chain still provides AK-rooted authorization at the verifier
-/// (which is what §11.1 actually enforces). The stub doesn't satisfy
-/// §11's claim about fresh per-step Kyber-derived randomness — that
-/// requires Phase F integration of bilateral-session Kyber. Use the
-/// stub only when full Kyber per step is not yet wired (a contact
-/// established without exchanging Kyber pubkeys, or test fixtures).
-pub fn derive_stub_k_step_for_relationship(
+/// Returns the `k_step` to use as input to `derive_per_step_ek` AND the
+/// ciphertext to embed in `receipt.kyber_ct_a` (or `_b` for B's side) so
+/// the recipient can recover the same `k_step`.
+pub fn derive_kyber_k_step_for_send(
     h_n: &[u8; 32],
     c_pre: &[u8; 32],
-    devid_a: &[u8; 32],
-    devid_b: &[u8; 32],
-) -> [u8; 32] {
-    let mut hasher = dsm::crypto::blake3::dsm_domain_hasher("DSM/k-step-stub");
-    hasher.update(h_n);
-    hasher.update(c_pre);
-    let (lo, hi) = if devid_a <= devid_b {
-        (devid_a, devid_b)
-    } else {
-        (devid_b, devid_a)
-    };
-    hasher.update(lo);
-    hasher.update(hi);
-    *hasher.finalize().as_bytes()
+    devid_sender: &[u8; 32],
+    k_dbrw: &[u8; 32],
+    recipient_kyber_pk: &[u8],
+) -> Result<KyberStepEncap, DsmError> {
+    if recipient_kyber_pk.is_empty() {
+        return Err(DsmError::invalid_operation(
+            "derive_kyber_k_step_for_send: recipient Kyber public key is empty; \
+             contact must be re-established with a Kyber pubkey to upgrade for \
+             per-step EK signing",
+        ));
+    }
+    // coins = BLAKE3("DSM/kyber-coins\0" || h_n || C_pre || DevID_sender || K_DBRW)
+    let coins = dsm::crypto::ephemeral_key::derive_kyber_coins(h_n, c_pre, devid_sender, k_dbrw);
+    // (ct, ss) = KyberEncDet(recipient_pk, coins)
+    let (ss, ct) = dsm::crypto::kyber::kyber_encapsulate_deterministic(recipient_kyber_pk, &coins)?;
+    // k_step = BLAKE3("DSM/kyber-ss\0" || ss)
+    let k_step = dsm::crypto::ephemeral_key::derive_kyber_step_key(&ss);
+    Ok(KyberStepEncap {
+        k_step,
+        ciphertext: ct,
+    })
+}
+
+/// Recipient-side: decapsulate the sender's Kyber ciphertext with the local
+/// Kyber secret key, recovering the same `ss` and deriving identical
+/// `k_step`. The verifier uses this to reconstruct the per-step EK derivation
+/// inputs and check that `receipt.ek_pk_a` matches what the sender claims.
+pub fn derive_kyber_k_step_for_verify(
+    sender_ciphertext: &[u8],
+    local_kyber_sk: &[u8],
+) -> Result<[u8; 32], DsmError> {
+    if sender_ciphertext.is_empty() {
+        return Err(DsmError::invalid_operation(
+            "derive_kyber_k_step_for_verify: receipt does not carry a Kyber \
+             ciphertext; cannot derive k_step",
+        ));
+    }
+    let ss = dsm::crypto::kyber::kyber_decapsulate(local_kyber_sk, sender_ciphertext)?;
+    Ok(dsm::crypto::ephemeral_key::derive_kyber_step_key(&ss))
 }
 
 /// Inputs to the high-level per-step EK signing helper.
@@ -103,10 +135,9 @@ pub struct PerStepSigningInputs<'a> {
     pub h_n: [u8; 32],
     /// Pre-commitment hash C_pre for this step (whitepaper §4.1).
     pub c_pre: [u8; 32],
-    /// Local device ID (used in stub k_step derivation).
-    pub devid_local: [u8; 32],
-    /// Counterparty device ID (used in stub k_step derivation).
-    pub devid_counterparty: [u8; 32],
+    /// Local device ID — used in the deterministic Kyber `coins` derivation
+    /// per whitepaper §11 (DevID_sender input to coins).
+    pub devid_sender: [u8; 32],
     /// Per-Device SMT relationship key (used to look up chain head).
     pub relationship_key: [u8; 32],
     /// K_DBRW binding key for SK encryption + EK derivation.
@@ -115,11 +146,14 @@ pub struct PerStepSigningInputs<'a> {
     /// recorded yet (relationship genesis / step 0 / pre-feature path).
     /// `(ak_pk, ak_sk)`. Pass `None` to require chain-head presence.
     pub fallback_ak_keypair: Option<(&'a [u8], &'a [u8])>,
-    /// Optional Kyber-derived k_step. If `Some`, used directly. If `None`,
-    /// the helper derives a stub k_step from chain context. Phase F will
-    /// wire the real Kyber path once bilateral sessions surface their
-    /// shared secret.
-    pub k_step_override: Option<[u8; 32]>,
+    /// Recipient's Kyber/ML-KEM public key. Required: the helper
+    /// encapsulates against this to derive `k_step` deterministically per
+    /// whitepaper §11. Caller pulls this from the recipient contact's
+    /// `kyber_public_key` field. An empty value causes the helper to
+    /// fail-closed — there is no fallback path; relationships must be
+    /// established with peer Kyber pubkey before per-step EK signing
+    /// can run.
+    pub recipient_kyber_pk: &'a [u8],
 }
 
 /// Output of the high-level per-step EK signing helper.
@@ -137,6 +171,11 @@ pub struct PerStepSigningOutput {
     /// SPHINCS+ signature over the receipt commitment using `EK_sk` —
     /// caller passes this to `receipt.add_sig_a` (or `add_sig_b`).
     pub sig: Vec<u8>,
+    /// Per-step Kyber ciphertext that travels in `receipt.kyber_ct_a`
+    /// (or `_b`). The recipient decapsulates this with their Kyber
+    /// secret key to derive the same `k_step` and reconstruct the per-step
+    /// EK derivation inputs at verify time.
+    pub kyber_ct: Vec<u8>,
     /// True if the helper used the AK fallback (relationship not yet
     /// initialized in cert_chain_heads). Caller should initialize the
     /// chain head with the new EK after acceptance via
@@ -151,8 +190,11 @@ pub struct PerStepSigningOutput {
 /// 1. Load prior chain head SK (encrypted, decrypted in-memory). If absent,
 ///    fall back to `inputs.fallback_ak_keypair` — required if the chain
 ///    head doesn't yet exist (relationship genesis).
-/// 2. Compute `k_step`: use `inputs.k_step_override` if provided, else
-///    derive a stub from chain context.
+/// 2. Run deterministic Kyber encapsulation against
+///    `inputs.recipient_kyber_pk` to derive `k_step` per whitepaper §11
+///    (no stubs, no fallbacks — the recipient's Kyber pubkey is mandatory).
+///    The resulting Kyber ciphertext travels in `receipt.kyber_ct_a` so
+///    the recipient can reconstruct the same `k_step`.
 /// 3. Derive `EK_{n+1}` from `(h_n, C_pre, k_step, K_DBRW)`.
 /// 4. Sign `cert_{n+1} = Sign_{prior_SK}(BLAKE3("DSM/ek-cert\0" ||
 ///    EK_pk_{n+1} || h_n))`.
@@ -185,22 +227,21 @@ pub fn sign_receipt_with_per_step_ek(
         },
     };
 
-    // 2. Compute k_step.
-    let k_step = match inputs.k_step_override {
-        Some(k) => k,
-        None => derive_stub_k_step_for_relationship(
-            &inputs.h_n,
-            &inputs.c_pre,
-            &inputs.devid_local,
-            &inputs.devid_counterparty,
-        ),
-    };
+    // 2. Per-step Kyber encapsulation per §11. No stubs — the recipient's
+    //    Kyber pubkey is mandatory and validated inside the helper.
+    let kyber_step = derive_kyber_k_step_for_send(
+        &inputs.h_n,
+        &inputs.c_pre,
+        &inputs.devid_sender,
+        inputs.k_dbrw,
+        inputs.recipient_kyber_pk,
+    )?;
 
-    // 3. Derive new EK keypair.
+    // 3. Derive new EK keypair using the Kyber-derived k_step.
     let ek_ctx = PerStepEkContext {
         h_n: inputs.h_n,
         c_pre: inputs.c_pre,
-        k_step,
+        k_step: kyber_step.k_step,
     };
     let (ek_pk, ek_sk) = derive_per_step_ek(&ek_ctx, inputs.k_dbrw)?;
 
@@ -217,6 +258,7 @@ pub fn sign_receipt_with_per_step_ek(
         ek_sk,
         ek_cert: cert,
         sig,
+        kyber_ct: kyber_step.ciphertext,
         used_ak_fallback,
     })
 }
@@ -348,6 +390,29 @@ pub fn verify_stitched_receipt(
         return Err(DsmError::invalid_operation(
             "Receipt verification failed: strict cert-chain mode is on and no chain heads \
              are recorded for this relationship (init_cert_chain_for_relationship not called)",
+        ));
+    }
+
+    // Per-step Kyber consistency (whitepaper §11): if the receipt carries
+    // a per-step EK_pk_a, it MUST also carry the corresponding kyber_ct_a
+    // — they're the two halves of the per-step EK derivation context. A
+    // receipt with ek_pk_a but no kyber_ct_a is structurally malformed:
+    // either the sender skipped the Kyber encapsulation (spec violation)
+    // or the ct was stripped in transit. Same enforcement on the B side
+    // when sig_b is present.
+    if !receipt.ek_pk_a.is_empty() && receipt.kyber_ct_a.is_empty() {
+        return Err(DsmError::invalid_operation(
+            "Receipt verification failed: ek_pk_a is set but kyber_ct_a is missing — \
+             per-step EK derivation requires both halves of the Kyber context",
+        ));
+    }
+    if !sig_b.is_empty()
+        && !receipt.ek_pk_b.is_empty()
+        && receipt.kyber_ct_b.is_empty()
+    {
+        return Err(DsmError::invalid_operation(
+            "Receipt verification failed: ek_pk_b is set but kyber_ct_b is missing — \
+             per-step EK derivation requires both halves of the Kyber context",
         ));
     }
 
@@ -963,41 +1028,94 @@ mod tests {
         assert!(dsm::crypto::sphincs::sphincs_verify(&pk, msg, &sig).expect("verify"));
     }
 
-    // ── stub k_step ──
+    // ── derive_kyber_k_step (whitepaper §11) ──
 
+    /// Sender encap + recipient decap produce the same `k_step`. Round-trip
+    /// over real Kyber-768 with deterministic coins.
     #[test]
-    fn stub_k_step_deterministic() {
-        let h_n = [0x11; 32];
-        let c_pre = [0x22; 32];
-        let a = [0x33; 32];
-        let b = [0x44; 32];
-        let k1 = derive_stub_k_step_for_relationship(&h_n, &c_pre, &a, &b);
-        let k2 = derive_stub_k_step_for_relationship(&h_n, &c_pre, &a, &b);
-        assert_eq!(k1, k2);
+    fn kyber_k_step_send_decap_round_trip() {
+        let recipient_kp = dsm::crypto::kyber::generate_kyber_keypair().expect("keygen");
+        let h_n = [0x11u8; 32];
+        let c_pre = [0x22u8; 32];
+        let devid_sender = [0x33u8; 32];
+        let k_dbrw = [0x44u8; 32];
+
+        let encap = derive_kyber_k_step_for_send(
+            &h_n, &c_pre, &devid_sender, &k_dbrw, &recipient_kp.public_key,
+        )
+        .expect("encap");
+
+        let decap = derive_kyber_k_step_for_verify(&encap.ciphertext, &recipient_kp.secret_key)
+            .expect("decap");
+
+        assert_eq!(encap.k_step, decap, "sender and recipient must derive identical k_step");
     }
 
-    /// Stub k_step is symmetric in (devid_a, devid_b) — both parties derive
-    /// the same value regardless of who they call A vs B locally.
+    /// Distinct chain context produces distinct `k_step` (per-step
+    /// freshness property). Two consecutive steps in the same relationship
+    /// MUST yield different k_steps so each step's EK derivation is
+    /// cryptographically distinct.
     #[test]
-    fn stub_k_step_symmetric_in_devids() {
-        let h_n = [0x11; 32];
-        let c_pre = [0x22; 32];
-        let a = [0x33; 32];
-        let b = [0x44; 32];
-        let k_ab = derive_stub_k_step_for_relationship(&h_n, &c_pre, &a, &b);
-        let k_ba = derive_stub_k_step_for_relationship(&h_n, &c_pre, &b, &a);
-        assert_eq!(k_ab, k_ba);
+    fn kyber_k_step_distinct_per_step() {
+        let recipient_kp = dsm::crypto::kyber::generate_kyber_keypair().expect("keygen");
+        let c_pre = [0x22u8; 32];
+        let devid_sender = [0x33u8; 32];
+        let k_dbrw = [0x44u8; 32];
+
+        let encap_1 = derive_kyber_k_step_for_send(
+            &[0xAA; 32], &c_pre, &devid_sender, &k_dbrw, &recipient_kp.public_key,
+        )
+        .expect("encap step 1");
+        let encap_2 = derive_kyber_k_step_for_send(
+            &[0xBB; 32], &c_pre, &devid_sender, &k_dbrw, &recipient_kp.public_key,
+        )
+        .expect("encap step 2");
+
+        assert_ne!(encap_1.k_step, encap_2.k_step);
+        assert_ne!(encap_1.ciphertext, encap_2.ciphertext);
     }
 
-    /// Stub k_step varies with chain context.
+    /// Same chain context but different recipient pubkey produces
+    /// different k_step. This binds the EK derivation to a specific
+    /// recipient — a receipt encapsulated to one recipient cannot be
+    /// "replayed" against another.
     #[test]
-    fn stub_k_step_diverges_on_h_n() {
-        let c_pre = [0x22; 32];
-        let a = [0x33; 32];
-        let b = [0x44; 32];
-        let k1 = derive_stub_k_step_for_relationship(&[0x11; 32], &c_pre, &a, &b);
-        let k2 = derive_stub_k_step_for_relationship(&[0xAA; 32], &c_pre, &a, &b);
-        assert_ne!(k1, k2);
+    fn kyber_k_step_binds_to_recipient_pubkey() {
+        let kp1 = dsm::crypto::kyber::generate_kyber_keypair().expect("kp1");
+        let kp2 = dsm::crypto::kyber::generate_kyber_keypair().expect("kp2");
+        let h_n = [0x11u8; 32];
+        let c_pre = [0x22u8; 32];
+        let devid_sender = [0x33u8; 32];
+        let k_dbrw = [0x44u8; 32];
+
+        let to_1 = derive_kyber_k_step_for_send(
+            &h_n, &c_pre, &devid_sender, &k_dbrw, &kp1.public_key,
+        )
+        .expect("encap to kp1");
+        let to_2 = derive_kyber_k_step_for_send(
+            &h_n, &c_pre, &devid_sender, &k_dbrw, &kp2.public_key,
+        )
+        .expect("encap to kp2");
+        assert_ne!(to_1.k_step, to_2.k_step);
+    }
+
+    /// Sender helper rejects an empty recipient Kyber pubkey (no fallback).
+    #[test]
+    fn kyber_k_step_rejects_empty_recipient_pubkey() {
+        let result = derive_kyber_k_step_for_send(
+            &[0x11; 32], &[0x22; 32], &[0x33; 32], &[0x44; 32], &[],
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("recipient Kyber public key is empty"));
+    }
+
+    /// Verifier helper rejects an empty ciphertext.
+    #[test]
+    fn kyber_k_step_verify_rejects_empty_ct() {
+        let kp = dsm::crypto::kyber::generate_kyber_keypair().expect("keygen");
+        let result = derive_kyber_k_step_for_verify(&[], &kp.secret_key);
+        assert!(result.is_err());
     }
 
     // ── sign_receipt_with_per_step_ek + advance_local_chain_head_after_signing ──
@@ -1009,17 +1127,17 @@ mod tests {
         ak_pk: &'a [u8],
         ak_sk: &'a [u8],
         k_dbrw: &'a [u8; 32],
+        recipient_kyber_pk: &'a [u8],
     ) -> PerStepSigningInputs<'a> {
         PerStepSigningInputs {
             commitment,
             h_n: [0xAA; 32],
             c_pre: [0xBB; 32],
-            devid_local: [0x11; 32],
-            devid_counterparty: [0x22; 32],
+            devid_sender: [0x11; 32],
             relationship_key: *rel_key,
             k_dbrw,
             fallback_ak_keypair: Some((ak_pk, ak_sk)),
-            k_step_override: None,
+            recipient_kyber_pk,
         }
     }
 
@@ -1036,11 +1154,14 @@ mod tests {
         reset_database_for_tests();
 
         let (ak_pk, ak_sk) = generate_ephemeral_keypair(&[0x01; 32]).unwrap();
+        let kyber_kp = dsm::crypto::kyber::generate_kyber_keypair()
+            .expect("kyber keygen");
+        let kyber_pk = kyber_kp.public_key.clone();
         let commitment = [0xCC; 32];
         let rel_key = [0xDE; 32];
         let k_dbrw = [0xFF; 32];
 
-        let inputs = signing_inputs(&commitment, &rel_key, &ak_pk, &ak_sk, &k_dbrw);
+        let inputs = signing_inputs(&commitment, &rel_key, &ak_pk, &ak_sk, &k_dbrw, &kyber_pk);
         let out = sign_receipt_with_per_step_ek(&inputs).unwrap();
 
         assert!(out.used_ak_fallback);
@@ -1069,12 +1190,15 @@ mod tests {
         reset_database_for_tests();
 
         let (ak_pk, ak_sk) = generate_ephemeral_keypair(&[0x02; 32]).unwrap();
+        let kyber_kp = dsm::crypto::kyber::generate_kyber_keypair()
+            .expect("kyber keygen");
+        let kyber_pk = kyber_kp.public_key.clone();
         let rel_key = [0xCA; 32];
         let k_dbrw = [0xFE; 32];
 
         // Step 0: AK fallback path. Sign + advance to record EK_1 as chain head.
         let commit0 = [0xC0; 32];
-        let inputs0 = signing_inputs(&commit0, &rel_key, &ak_pk, &ak_sk, &k_dbrw);
+        let inputs0 = signing_inputs(&commit0, &rel_key, &ak_pk, &ak_sk, &k_dbrw, &kyber_pk);
         let out0 = sign_receipt_with_per_step_ek(&inputs0).unwrap();
         assert!(out0.used_ak_fallback);
         advance_local_chain_head_after_signing(&rel_key, &out0.ek_pk, &out0.ek_sk, &k_dbrw, true)
@@ -1082,7 +1206,7 @@ mod tests {
 
         // Step 1: chain head is EK_1 — fallback NOT used.
         let commit1 = [0xC1; 32];
-        let mut inputs1 = signing_inputs(&commit1, &rel_key, &ak_pk, &ak_sk, &k_dbrw);
+        let mut inputs1 = signing_inputs(&commit1, &rel_key, &ak_pk, &ak_sk, &k_dbrw, &kyber_pk);
         inputs1.h_n = [0xBB; 32]; // pretend we advanced the chain
         let out1 = sign_receipt_with_per_step_ek(&inputs1).unwrap();
         assert!(!out1.used_ak_fallback, "step 1 must use chain-head SK, not AK fallback");
@@ -1095,37 +1219,6 @@ mod tests {
         let cert_against_ak =
             verify_ek_cert(&ak_pk, &out1.ek_pk, &inputs1.h_n, &out1.ek_cert).unwrap();
         assert!(!cert_against_ak, "step-1 cert must NOT verify against AK after advance");
-    }
-
-    /// k_step_override forces a specific value, bypassing the stub.
-    /// Useful when bilateral session has real Kyber-derived k_step.
-    #[test]
-    #[serial_test::serial]
-    fn per_step_signing_respects_k_step_override() {
-        use crate::storage::client_db::reset_database_for_tests;
-        use dsm::crypto::ephemeral_key::generate_ephemeral_keypair;
-
-        reset_database_for_tests();
-        let (ak_pk, ak_sk) = generate_ephemeral_keypair(&[0x03; 32]).unwrap();
-        let commit = [0xC0; 32];
-        let rel_key = [0xCB; 32];
-        let k_dbrw = [0xFD; 32];
-
-        // Sign with stub k_step.
-        let inputs_stub = signing_inputs(&commit, &rel_key, &ak_pk, &ak_sk, &k_dbrw);
-        let out_stub = sign_receipt_with_per_step_ek(&inputs_stub).unwrap();
-
-        // Reset DB so we re-take the AK fallback path for the override case.
-        reset_database_for_tests();
-
-        // Same inputs but with explicit k_step_override.
-        let mut inputs_override = signing_inputs(&commit, &rel_key, &ak_pk, &ak_sk, &k_dbrw);
-        inputs_override.k_step_override = Some([0x77; 32]);
-        let out_override = sign_receipt_with_per_step_ek(&inputs_override).unwrap();
-
-        // Different k_step → different EK → different cert.
-        assert_ne!(out_stub.ek_pk, out_override.ek_pk);
-        assert_ne!(out_stub.ek_cert, out_override.ek_cert);
     }
 
     /// End-to-end test of the per-step EK signing path: build a receipt,
@@ -1144,12 +1237,15 @@ mod tests {
         reset_database_for_tests();
 
         let (ak_pk, ak_sk) = generate_ephemeral_keypair(&[0xA1; 32]).unwrap();
+        let kyber_kp = dsm::crypto::kyber::generate_kyber_keypair()
+            .expect("kyber keygen");
+        let kyber_pk = kyber_kp.public_key.clone();
         let rel_key = [0xE1; 32];
         let k_dbrw = [0xE2; 32];
 
         // ────── Step 0 ──────
         let commit0 = [0xF0; 32];
-        let inputs0 = signing_inputs(&commit0, &rel_key, &ak_pk, &ak_sk, &k_dbrw);
+        let inputs0 = signing_inputs(&commit0, &rel_key, &ak_pk, &ak_sk, &k_dbrw, &kyber_pk);
         let out0 = sign_receipt_with_per_step_ek(&inputs0).unwrap();
 
         // Cert step 0 chains EK_0 → AK.
@@ -1164,7 +1260,7 @@ mod tests {
         // ────── Step 1 ──────
         let commit1 = [0xF1; 32];
         // Simulate chain advancement: new h_n.
-        let mut inputs1 = signing_inputs(&commit1, &rel_key, &ak_pk, &ak_sk, &k_dbrw);
+        let mut inputs1 = signing_inputs(&commit1, &rel_key, &ak_pk, &ak_sk, &k_dbrw, &kyber_pk);
         inputs1.h_n = [0xB1; 32];
         let out1 = sign_receipt_with_per_step_ek(&inputs1).unwrap();
 
@@ -1222,6 +1318,9 @@ mod tests {
             reset_database_for_tests();
 
             let (ak_pk, ak_sk) = generate_ephemeral_keypair(&[0xA0; 32]).unwrap();
+        let kyber_kp = dsm::crypto::kyber::generate_kyber_keypair()
+            .expect("kyber keygen");
+        let kyber_pk = kyber_kp.public_key.clone();
             let rel_key = [0xB0; 32];
             let k_dbrw = [0xC0; 32];
 
@@ -1245,12 +1344,11 @@ mod tests {
                     commitment: &commit,
                     h_n,
                     c_pre: [0xBB; 32],
-                    devid_local: [0x11; 32],
-                    devid_counterparty: [0x22; 32],
+                    devid_sender: [0x11; 32],
                     relationship_key: rel_key,
                     k_dbrw: &k_dbrw,
                     fallback_ak_keypair: Some((&ak_pk, &ak_sk)),
-                    k_step_override: None,
+                    recipient_kyber_pk: &kyber_pk,
                 };
                 let out = sign_receipt_with_per_step_ek(&inputs).unwrap();
 
@@ -1377,12 +1475,11 @@ mod tests {
             commitment: &commit,
             h_n: [0xAA; 32],
             c_pre: [0xBB; 32],
-            devid_local: [0x11; 32],
-            devid_counterparty: [0x22; 32],
+            devid_sender: [0x11; 32],
             relationship_key: rel_key,
             k_dbrw: &k_dbrw,
             fallback_ak_keypair: None,
-            k_step_override: None,
+            recipient_kyber_pk: &[],
         };
         let result = sign_receipt_with_per_step_ek(&inputs);
         assert!(result.is_err());

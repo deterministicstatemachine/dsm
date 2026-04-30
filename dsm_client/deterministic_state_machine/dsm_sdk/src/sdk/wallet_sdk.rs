@@ -803,6 +803,33 @@ impl WalletSDK {
         })
     }
 
+    /// Return the local Kyber/ML-KEM secret key (paired with `get_kyber_public_key`).
+    ///
+    /// Used at receipt-verification time to decapsulate the sender's per-step
+    /// Kyber ciphertext (whitepaper §11) and recover the same `k_step` the
+    /// sender used to derive `EK_pk_{n+1}`. The verifier needs this to
+    /// reconstruct the per-step EK derivation context for cross-checking.
+    pub fn get_kyber_secret_key(&self) -> Result<Vec<u8>, DsmError> {
+        if *self.locked.read() {
+            return Err(DsmError::unauthorized(
+                "Wallet is locked",
+                None::<std::io::Error>,
+            ));
+        }
+        self.update_activity_sync();
+
+        let self_id = self.device_id_string();
+        let ks = self.keystore.read();
+        let sk_key = format!("{id}_device_kyber_sk", id = self_id);
+
+        ks.get(&sk_key).cloned().ok_or_else(|| {
+            DsmError::crypto(
+                format!("Kyber secret key not found for device ID {}", self_id),
+                None::<std::io::Error>,
+            )
+        })
+    }
+
     /// Execute a pre-built, pre-signed Transfer Operation directly through the state machine.
     /// This bypasses the Operation-reconstruction in `execute_signed_transfer` that causes
     /// signature verification mismatch (different nonce/balance fields).
