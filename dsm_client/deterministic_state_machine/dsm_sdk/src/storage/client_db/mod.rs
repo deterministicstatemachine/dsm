@@ -132,6 +132,8 @@ pub fn init_database() -> Result<()> {
         ensure_contacts_device_tree_root(&conn)?;
         ensure_contacts_observed_remote_tip_columns(&conn)?;
         ensure_stitched_receipts_sig_b_nullable(&conn)?;
+        ensure_bilateral_sessions_created_at_step(&conn)?;
+        ensure_bilateral_sessions_stitched_receipt_bytes(&conn)?;
         migrate_legacy_withdrawal_states(&conn)?;
 
         {
@@ -438,7 +440,8 @@ fn create_schema(conn: &Connection) -> Result<()> {
             counterparty_signature    BLOB,
             created_at_step           INTEGER NOT NULL,
             sender_ble_address        TEXT,
-            updated_at                INTEGER NOT NULL
+            updated_at                INTEGER NOT NULL,
+            stitched_receipt_bytes    BLOB
         );
 
         -- §5.3 Atomic bilateral commit: persists the confirm envelope atomically
@@ -744,6 +747,26 @@ fn ensure_bilateral_sessions_created_at_step(conn: &Connection) -> Result<()> {
 
     conn.execute(
         "ALTER TABLE bilateral_sessions ADD COLUMN created_at_step INTEGER NOT NULL DEFAULT 0;",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Add the `stitched_receipt_bytes` column to existing `bilateral_sessions`
+/// tables created before per-step EK signing landed. The column carries the
+/// sender-side cached signed receipt so post-crash recovery can reuse it
+/// verbatim — see `BilateralSessionRecord::stitched_receipt_bytes`.
+fn ensure_bilateral_sessions_stitched_receipt_bytes(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(bilateral_sessions)")?;
+    let cols = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for col in cols {
+        if col? == "stitched_receipt_bytes" {
+            return Ok(());
+        }
+    }
+
+    conn.execute(
+        "ALTER TABLE bilateral_sessions ADD COLUMN stitched_receipt_bytes BLOB;",
         [],
     )?;
     Ok(())
