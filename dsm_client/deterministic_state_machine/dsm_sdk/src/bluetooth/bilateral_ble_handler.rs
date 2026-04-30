@@ -3561,6 +3561,81 @@ impl BilateralBleHandler {
             }
         }
 
+        // §11.1 per-step EK signing verification: receiver checks the
+        // sender's A-side artifacts on the stitched receipt before applying
+        // the advance.
+        //
+        //   1. Deserialize the receipt from the confirm payload.
+        //   2. Resolve `expected_prev_pk` — the sender's prior cert-chain
+        //      head if recorded (steady state), else AK_pk from the contact
+        //      record (relationship genesis fallback).
+        //   3. Verify ek_cert_a chains ek_pk_a back to expected_prev_pk over
+        //      h_n (= receipt.parent_tip), and that sig_a verifies under
+        //      ek_pk_a over the receipt's commitment.
+        //
+        // Legacy receipts that pre-date per-step EK signing leave
+        // `ek_pk_a`/`ek_cert_a`/`sig_a` empty — we skip verification then
+        // (transitional fail-open) but log so any production-side regression
+        // is visible. Strict mainnet enforcement is a follow-up tied to
+        // `set_strict_cert_chain_mode`.
+        if !confirm_request.stitched_receipt.is_empty() {
+            match dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
+                &confirm_request.stitched_receipt,
+            ) {
+                Ok(receipt) => {
+                    let receipt_carries_per_step_ek = !receipt.ek_pk_a.is_empty()
+                        && !receipt.ek_cert_a.is_empty()
+                        && !receipt.sig_a.is_empty();
+                    if receipt_carries_per_step_ek {
+                        let rel_key = dsm::verification::smt_replace_witness::compute_smt_key(
+                            &self.device_id,
+                            &session.counterparty_device_id,
+                        );
+                        // From the receiver's viewpoint, the SENDER is the
+                        // counterparty in the cert-chain-heads table.
+                        let prev_pk_from_chain =
+                            crate::storage::client_db::load_cert_chain_head_pubkey(
+                                &rel_key,
+                                crate::storage::client_db::CertChainSide::Counterparty,
+                            )
+                            .ok()
+                            .flatten();
+                        let expected_prev_pk = match prev_pk_from_chain {
+                            Some(pk) => pk,
+                            None => {
+                                // Relationship genesis (no chain head yet) —
+                                // sender's cert chains to their AK_pk, which
+                                // is the contact's long-term public key.
+                                counterparty_pubkey.clone()
+                            }
+                        };
+
+                        crate::sdk::receipts::verify_per_step_ek_signing(
+                            &receipt,
+                            crate::sdk::receipts::BilateralSide::A,
+                            &expected_prev_pk,
+                            &receipt.parent_tip,
+                        )?;
+                        info!(
+                            "[BILATERAL] §11.1 per-step EK A-side verification PASS for commitment {}",
+                            bytes_to_base32(&commitment_hash[..8])
+                        );
+                    } else {
+                        warn!(
+                            "[BILATERAL] §11.1 per-step EK A-side artifacts MISSING on incoming receipt for commitment {} — \
+                             skipping verification (legacy/pre-feature receipt)",
+                            bytes_to_base32(&commitment_hash[..8])
+                        );
+                    }
+                }
+                Err(e) => {
+                    return Err(DsmError::invalid_operation(format!(
+                        "receiver per-step EK verify: failed to decode stitched_receipt: {e}"
+                    )));
+                }
+            }
+        }
+
         // Extract h_{n+1} from confirm request
         let new_chain_tip: [u8; 32] = confirm_request
             .shared_chain_tip_new
