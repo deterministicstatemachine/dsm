@@ -21,20 +21,95 @@ Vars == <<deviceRoots, smtState, ledger>>
 \* projection for the relationship being advanced.
 \*
 \* Refinement note (whitepaper §11.1 per-step EK signing):
-\* The CountersignedByBoth predicate below is satisfied in the implementation
-\* by a per-step ephemeral SPHINCS+ key chain:
+\* The CountersignedByBoth predicate below is satisfied in the
+\* implementation by a per-step ephemeral SPHINCS+ key chain that BOTH
+\* parties stamp on the bilateral receipt:
+\*
 \*   (1) Each receipt's sig_a / sig_b is produced by a freshly-derived
-\*       EK_{n+1} = SPHINCS+.KeyGen(HKDF("DSM/ek\0" || h_n || C_pre || k_step
-\*                                       || K_DBRW)).
+\*       EK_{n+1} = SPHINCS+.KeyGen(HKDF("DSM/ek\0" || h_n || C_pre ||
+\*                                       k_step || K_DBRW)).
+\*       k_step is recovered via Kyber-768 deterministic encapsulation
+\*       against the recipient's contact-bound Kyber pubkey
+\*       (no stubs, recipient_kyber_pk mandatory).
+\*
 \*   (2) Each EK_{n+1} carries a cert cert_{n+1} = Sign_{SK_n}(BLAKE3(
-\*       "DSM/ek-cert\0" || EK_pk_{n+1} || h_n)) chaining it back to the
-\*       device's attested AK_pk via prior step keys.
-\*   (3) The verifier replays the cert chain to AK_pk and verifies the
-\*       receipt body against EK_pk_{n+1}.
-\* Because this is a strict refinement of "abstract bilateral countersign,"
-\* the Tripwire fork-exclusion theorem proven here applies unchanged. The
-\* refinement is implemented in dsm_sdk::sdk::receipts::sign_receipt_with_per_step_ek
-\* and verified end-to-end via per_step_signing_end_to_end_two_steps.
+\*       "DSM/ek-cert\0" || EK_pk_{n+1} || h_n)) chaining it back to
+\*       the device's attested AK_pk via prior step keys. Per-relationship
+\*       chain heads + encrypted SK material live in cert_chain_heads
+\*       (XChaCha20-Poly1305 with K_DBRW-derived AEAD key).
+\*
+\*   (3) Bilateral both-side stamping. In every accepted bilateral
+\*       transition the sender stamps {ek_pk_a, ek_cert_a, kyber_ct_a,
+\*       sig_a} on the stitched receipt, and the receiver
+\*       counter-stamps {ek_pk_b, ek_cert_b, kyber_ct_b, sig_b} on
+\*       their own copy. This is what materialises CountersignedByBoth
+\*       at the byte level — both EKs chain back to their respective
+\*       AKs independently.
+\*
+\*   (4) Symmetric verification on both bilateral handlers:
+\*         - Receiver verifies sender's A-side artifacts in
+\*           handle_confirm_request before applying the SMT advance.
+\*         - Sender verifies receiver's B-side artifacts on the
+\*           BilateralCommitResponse.counter_signed_receipt field in
+\*           handle_commit_response.
+\*       Each verifier walks the cert chain to expected_prev_pk
+\*       (prior chain head from cert_chain_heads, falling back to
+\*       AK_pk at relationship genesis) and verifies the receipt body
+\*       sig under EK_pk.
+\*
+\*   (5) Mainnet fail-closed enforcement.
+\*       set_strict_cert_chain_mode(true) makes per-step EK signing
+\*       artifacts mandatory: any receipt that omits ek_pk / ek_cert /
+\*       sig is rejected with a structured error. The
+\*       verify_per_step_ek_signing_strict_aware helper consolidates
+\*       both call sites and returns
+\*       PerStepEkVerifyOutcome::{Verified, SkippedLegacyReceipt} or a
+\*       structured error. Pre-mainnet keeps the transitional
+\*       fail-open path (warn + skip) so legacy receipts still pass.
+\*
+\*   (6) Crash recovery preserves the cryptographic binding.
+\*       The sender-cached signed stitched receipt is persisted to
+\*       bilateral_sessions.stitched_receipt_bytes (BLOB column,
+\*       ALTER TABLE migration), so post-restart settlement reuses
+\*       the original signed bytes verbatim. Re-signing on rebuild
+\*       would mint a NEW EK that does not match the cert the
+\*       receiver already verified, which is unsafe — this column is
+\*       what closes that gap.
+\*
+\* Because this is a strict refinement of "abstract bilateral
+\* countersign," the Tripwire fork-exclusion theorem proven here
+\* applies unchanged.
+\*
+\* The refinement is implemented in:
+\*   - dsm::crypto::ephemeral_key (derive_ephemeral_seed, sign_ek_cert,
+\*     verify_ek_cert)
+\*   - dsm_sdk::sdk::receipts (sign_receipt_with_per_step_ek,
+\*     verify_per_step_ek_signing,
+\*     verify_per_step_ek_signing_strict_aware,
+\*     advance_local_chain_head_after_signing)
+\*   - dsm_sdk::storage::client_db::cert_chain (chain head storage +
+\*     strict mode toggle)
+\*   - dsm_sdk::bluetooth::bilateral_ble_handler
+\*     (sign_receipt_with_per_step_ek_for_bilateral helper +
+\*     handle_confirm_request + handle_commit_response wiring)
+\*
+\* And independently formalised in lean4/DSMCertChain.lean (12
+\* theorems, zero `sorry`, no Mathlib), including
+\* extendChain_preserves_validity (Theorem 7) which establishes that
+\* the cert chain extension preserves AK-rooted authorization across
+\* multiple steps — the structural counterpart to the abstract
+\* bilateral countersign predicate this TLA module models.
+\*
+\* Verified end-to-end via:
+\*   - per_step_signing_end_to_end_two_steps (full sign + advance +
+\*     re-sign + verify chain through 2 steps)
+\*   - per_step_signing_chain_property_invariants (P1-P5 across 17
+\*     chain steps including no-skip-level authorization)
+\*   - verify_per_step_ek_signing_accepts_symmetric_a_and_b_on_same_receipt
+\*     (canonical co-signed receipt, both sides verify independently
+\*     under their respective AKs and reject under the wrong AK)
+\*   - whitepaper KAT pins for DSM/ek, DSM/ek-cert, DSM/kyber-coins,
+\*     DSM/kyber-ss derivations.
 
 CountersignedByBoth(d1, d2) ==
     d1 /= d2
