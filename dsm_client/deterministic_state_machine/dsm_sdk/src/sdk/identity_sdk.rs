@@ -492,13 +492,12 @@ impl IdentitySDK {
         );
 
         // Convert participant inputs to deterministic base32 strings (canonical, display-safe).
-        let participants: Vec<String> = participant_inputs
+        let _participants: Vec<String> = participant_inputs
             .iter()
             .map(|p| crate::util::text_id::encode_base32_crockford(p))
             .collect();
 
-        // Use threshold equal to number of participants for MPC-style genesis
-        let threshold = participants.len().max(1);
+        // Per whitepaper §2.5: n-of-n MPC; no threshold parameter.
 
         // Call core backend genesis creation via MPC to get proper cryptographic genesis
         // Derive a deterministic device id for MPC path from identity id + device id to keep tests stable
@@ -509,26 +508,24 @@ impl IdentitySDK {
         let mut device_id_arr = [0u8; 32];
         device_id_arr.copy_from_slice(id_hash.as_bytes());
 
-        // Use a fixed set of test node IDs
+        // Use a fixed set of test node IDs (≥3 per whitepaper §2.5).
         let test_nodes = vec![
             dsm::types::identifiers::NodeId::new("n1"),
             dsm::types::identifiers::NodeId::new("n2"),
             dsm::types::identifiers::NodeId::new("n3"),
         ];
 
-        // Production minimum threshold is 3; use max(threshold, 3)
-        let eff_threshold = std::cmp::max(threshold, 3);
-
         #[cfg(feature = "storage")]
         log::info!(
-            "IdentitySDK::create_genesis: calling create_genesis_via_blind_mpc(threshold={}, nodes={})",
-            eff_threshold,
+            "IdentitySDK::create_genesis: calling create_genesis_via_blind_mpc(nodes={})",
             test_nodes.len()
         );
+        // Bootstrap-tagged K_DBRW per whitepaper §11.1 + §12.
+        let k_dbrw = dsm::crypto::cdbrw_binding::derive_bootstrap_k_dbrw(&device_id_arr)?;
         let genesis_state = futures::executor::block_on(create_genesis_via_blind_mpc(
             device_id_arr,
             test_nodes.clone(),
-            eff_threshold,
+            k_dbrw,
             None,
         ))?;
 
@@ -564,7 +561,6 @@ impl IdentitySDK {
                 genesis_hash: genesis_hash_arr,
                 device_id: device_id_arr,
                 public_key: genesis_state.signing_key.public_key.clone(),
-                threshold: eff_threshold,
                 participants: test_nodes,
                 created_at_ticks: dsm::utils::deterministic_time::tick_index(),
             };

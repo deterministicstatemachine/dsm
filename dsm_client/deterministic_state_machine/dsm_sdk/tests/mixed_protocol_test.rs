@@ -53,6 +53,7 @@ fn store_online_capable_contact(
         alias: alias.into(),
         genesis_hash: genesis_hash.to_vec(),
         public_key: vec![0u8; 32],
+        kyber_public_key: Vec::new(),
         current_chain_tip: None,
         added_at: 1,
         verified: true,

@@ -351,6 +351,26 @@ impl WalletSDK {
         ))
     }
 
+    /// AK (attestation key) keypair access for cert-chain bootstrapping
+    /// (whitepaper §11.1). Used at relationship genesis (step 0) when no
+    /// per-step chain head exists yet — `sign_receipt_with_per_step_ek`
+    /// falls back to AK_sk to sign cert_1.
+    ///
+    /// Visibility: `pub(crate)` to limit attack surface — only the SDK's
+    /// receipt-signing flow should touch the AK_sk directly.
+    pub(crate) fn ak_keypair_for_cert_chain(
+        &self,
+    ) -> Result<(Vec<u8>, Vec<u8>), DsmError> {
+        if *self.locked.read() {
+            return Err(DsmError::unauthorized(
+                "Wallet is locked",
+                None::<std::io::Error>,
+            ));
+        }
+        self.update_activity_sync();
+        self.current_signing_keypair()
+    }
+
     fn device_id_string(&self) -> String {
         self.device_id.read().clone()
     }
@@ -778,6 +798,33 @@ impl WalletSDK {
         ks.get(&pk_key).cloned().ok_or_else(|| {
             DsmError::crypto(
                 format!("Kyber public key not found for device ID {}", self_id),
+                None::<std::io::Error>,
+            )
+        })
+    }
+
+    /// Return the local Kyber/ML-KEM secret key (paired with `get_kyber_public_key`).
+    ///
+    /// Used at receipt-verification time to decapsulate the sender's per-step
+    /// Kyber ciphertext (whitepaper §11) and recover the same `k_step` the
+    /// sender used to derive `EK_pk_{n+1}`. The verifier needs this to
+    /// reconstruct the per-step EK derivation context for cross-checking.
+    pub fn get_kyber_secret_key(&self) -> Result<Vec<u8>, DsmError> {
+        if *self.locked.read() {
+            return Err(DsmError::unauthorized(
+                "Wallet is locked",
+                None::<std::io::Error>,
+            ));
+        }
+        self.update_activity_sync();
+
+        let self_id = self.device_id_string();
+        let ks = self.keystore.read();
+        let sk_key = format!("{id}_device_kyber_sk", id = self_id);
+
+        ks.get(&sk_key).cloned().ok_or_else(|| {
+            DsmError::crypto(
+                format!("Kyber secret key not found for device ID {}", self_id),
                 None::<std::io::Error>,
             )
         })

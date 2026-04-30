@@ -762,13 +762,15 @@ impl CoreSDK {
             )));
         }
 
-        let threshold = storage_nodes.len();
         let device_entropy = generate_device_entropy(&device_id_arr);
+        // Bootstrap-tagged K_DBRW: deterministic-from-device, NOT real
+        // silicon binding yet.  Real hw fingerprinting wires here later.
+        let k_dbrw = dsm::crypto::cdbrw_binding::derive_bootstrap_k_dbrw(&device_id_arr)?;
 
         let genesis_state = create_genesis_via_blind_mpc_with_contributors(
             device_id_arr,
             storage_nodes,
-            threshold,
+            k_dbrw,
             device_entropy,
             contributor_entropies,
             client_entropy,
@@ -1762,6 +1764,7 @@ impl CoreSDK {
                         needs_online_reconcile: false,
                         last_seen_online_counter: crate::util::deterministic_time::tick(),
                         last_seen_ble_counter: 0,
+                        kyber_public_key: Vec::new(),
                         previous_chain_tip: None,
                     };
 
@@ -1859,6 +1862,7 @@ impl CoreSDK {
                     needs_online_reconcile: false,
                     last_seen_online_counter: crate::util::deterministic_time::tick(),
                     last_seen_ble_counter: 0,
+                    kyber_public_key: Vec::new(),
                     previous_chain_tip: None,
                 };
 

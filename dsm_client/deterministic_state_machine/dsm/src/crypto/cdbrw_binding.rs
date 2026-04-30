@@ -90,6 +90,28 @@ pub fn derive_cdbrw_binding_key(
     Ok(*hasher.finalize().as_bytes())
 }
 
+/// Derive a bootstrap-tagged K_DBRW from a 32-byte device label.
+///
+/// Used by SDK call sites that don't yet have real silicon-fingerprint
+/// inputs available at genesis time (e.g. `bootstrap_adapter`,
+/// `IdentityManager`, `core_sdk::create_genesis_with_passive_contributors`).
+/// Produces a deterministic, non-zero K_DBRW that flows through the
+/// canonical `derive_cdbrw_binding_key` path under `DSM/dbrw-bind` so
+/// the binding chain is consistent with future real-hardware paths.
+///
+/// **Security note:** this is a bootstrap-time placeholder.  Real
+/// silicon binding (whitepaper §12 def.1: `H(d)` from microarchitectural
+/// entropy) must be wired before §12 anti-cloning guarantees apply.
+/// The bootstrap-tagged inputs ensure the value is recomputable on the
+/// same device but does NOT bind to silicon yet.
+pub fn derive_bootstrap_k_dbrw(device_label: &[u8]) -> Result<[u8; 32], DsmError> {
+    derive_cdbrw_binding_key(
+        device_label,
+        b"DSM/dbrw-bootstrap-env\0",
+        b"DSM/dbrw-bootstrap-salt\0",
+    )
+}
+
 /// Seed a challenge orbit: `x_0 = H("DSM/cdbrw-seed\0" || c || K_DBRW) mod 2^32`.
 ///
 /// Given a verifier challenge `c` and the binding key `K_DBRW`, produces the

@@ -74,6 +74,14 @@ pub struct ContactRecord {
     pub alias: String,
     pub genesis_hash: Vec<u8>,              // Raw bytes (32 bytes)
     pub public_key: Vec<u8>, // SPHINCS+ signing public key for bilateral verification
+    /// Counterparty's Kyber-768 (ML-KEM) public key. Required for the
+    /// per-step Kyber encapsulation in receipt EK derivation
+    /// (whitepaper §11). The sender encapsulates against this pubkey to
+    /// derive `k_step` for the per-step EK. Empty means the contact was
+    /// established before per-step EK signing was wired (legacy path);
+    /// such contacts cannot be used as receipt recipients under strict
+    /// mode and must be re-established to upgrade.
+    pub kyber_public_key: Vec<u8>,
     pub current_chain_tip: Option<Vec<u8>>, // Raw bytes (32 bytes if present)
     pub added_at: u64,
     pub verified: bool,
@@ -256,6 +264,13 @@ pub struct BilateralSessionRecord {
     pub counterparty_signature: Option<Vec<u8>>,
     pub created_at_step: u64,
     pub sender_ble_address: Option<String>,
+    /// Sender-cached signed stitched receipt (full protobuf, with per-step EK
+    /// signing artifacts already stamped). Persisted here so that post-crash
+    /// recovery in `mark_sender_committed_with_post_state_hash` can reuse the
+    /// already-signed bytes verbatim instead of attempting to rebuild from
+    /// the canonical `AdvanceOutcome` (which would lack §11.1 per-step EK
+    /// signing artifacts).
+    pub stitched_receipt_bytes: Option<Vec<u8>>,
 }
 
 /// Locally persisted DLV stitched receipt record (§7.3, §18.4).

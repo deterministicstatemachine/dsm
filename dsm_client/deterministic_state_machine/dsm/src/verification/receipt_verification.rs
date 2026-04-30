@@ -78,6 +78,63 @@ pub fn verify_stitched_receipt(
         ));
     }
 
+    // Rule 2b: Ephemeral-key cert chain (whitepaper §11.1).
+    // When the verifier has been threaded a chain head, the receipt MUST carry
+    // a cert that links `pubkey_a` (the per-step EK that signed sig_a) back to
+    // the prior signer. This is what gives AK-rooted authorization for the
+    // per-step ephemeral; without it, K_DBRW-bound EK derivation has no
+    // cryptographic enforcement at the verifier.
+    if let Some(chain_head) = &ctx.chain_head_pubkey_a {
+        if receipt.ek_cert_a.is_empty() {
+            return Ok(ReceiptAcceptance::reject(
+                "Missing ek_cert_a (cert chain required when chain head is set)".to_string(),
+            ));
+        }
+        match crate::crypto::ephemeral_key::verify_ek_cert(
+            chain_head,
+            &ctx.pubkey_a,
+            &receipt.parent_tip,
+            &receipt.ek_cert_a,
+        ) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Ok(ReceiptAcceptance::reject(
+                    "ek_cert_a verification failed (EK_pk not authorized by chain head)"
+                        .to_string(),
+                ))
+            }
+            Err(e) => {
+                return Ok(ReceiptAcceptance::reject(format!("ek_cert_a error: {}", e)))
+            }
+        }
+    }
+    if let Some(chain_head) = &ctx.chain_head_pubkey_b {
+        // Cert B is only required when sig_b is present (counter-signed receipt).
+        if !receipt.sig_b.is_empty() {
+            if receipt.ek_cert_b.is_empty() {
+                return Ok(ReceiptAcceptance::reject(
+                    "Missing ek_cert_b (sig_b present but cert chain required)".to_string(),
+                ));
+            }
+            match crate::crypto::ephemeral_key::verify_ek_cert(
+                chain_head,
+                &ctx.pubkey_b,
+                &receipt.parent_tip,
+                &receipt.ek_cert_b,
+            ) {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Ok(ReceiptAcceptance::reject(
+                        "ek_cert_b verification failed".to_string(),
+                    ))
+                }
+                Err(e) => {
+                    return Ok(ReceiptAcceptance::reject(format!("ek_cert_b error: {}", e)))
+                }
+            }
+        }
+    }
+
     // Rule 3: Verify inclusion proofs
     let smt_key = compute_smt_key(&receipt.devid_a, &receipt.devid_b);
 
@@ -330,5 +387,134 @@ mod tests {
         // The test may fail at proof verification since roots don't match the empty proof
         // but the important thing is uniqueness is checked if proofs pass
         assert!(reason.contains("Parent uniqueness") || reason.contains("inclusion proof failed"));
+    }
+
+    /// Whitepaper §11.1: when a chain head is set on the verification context,
+    /// the receipt MUST carry a valid `ek_cert_a`. A missing cert must be
+    /// rejected with a specific error — otherwise an attacker could strip the
+    /// cert and bypass AK-rooted authorization for the per-step EK.
+    #[test]
+    fn test_missing_ek_cert_a_rejected_when_chain_head_set() {
+        use crate::crypto::ephemeral_key::generate_ephemeral_keypair;
+
+        // Build a receipt with valid sig_a but NO ek_cert_a.
+        let keypair_a = crate::crypto::signatures::SignatureKeyPair::generate_for_testing();
+        let mut receipt = StitchedReceiptV2::new(
+            [0; 32], [0; 32], [0; 32],
+            [0xaa; 32], [0xbb; 32],
+            [0x01; 32], [0x02; 32],
+            vec![], vec![], vec![],
+        );
+        let commitment = receipt.compute_commitment().unwrap();
+        let sig_a = keypair_a.sign(&commitment).unwrap();
+        receipt.add_sig_a(sig_a);
+        // Deliberately do NOT call set_ek_cert_a.
+
+        // Build a chain head pubkey (any valid SPHINCS+ key works).
+        let (chain_head_pk, _) = generate_ephemeral_keypair(&[0xCC; 32]).expect("keygen");
+
+        let ctx = ReceiptVerificationContext::new(
+            [0u8; 32], [0u8; 32],
+            keypair_a.public_key().to_vec(),
+            vec![],
+        )
+        .with_chain_head_a(chain_head_pk);
+
+        let mut tracker = ParentConsumptionTracker::new();
+        let result = verify_stitched_receipt(&receipt, &ctx, &mut tracker).unwrap();
+        assert!(!result.valid, "missing ek_cert_a must be rejected");
+        let reason = result.reason.unwrap();
+        assert!(
+            reason.contains("Missing ek_cert_a") || reason.contains("cert chain"),
+            "wrong rejection reason: {}",
+            reason
+        );
+    }
+
+    /// Forged ek_cert_a (signed by an unauthorized SK) must not verify against
+    /// the legitimate chain head — this is the core forgery resistance of the
+    /// cert chain.
+    #[test]
+    fn test_ek_cert_a_signed_by_wrong_key_rejected() {
+        use crate::crypto::ephemeral_key::{generate_ephemeral_keypair, sign_ek_cert};
+
+        let keypair_a = crate::crypto::signatures::SignatureKeyPair::generate_for_testing();
+        let mut receipt = StitchedReceiptV2::new(
+            [0; 32], [0; 32], [0; 32],
+            [0xaa; 32], [0xbb; 32],
+            [0x01; 32], [0x02; 32],
+            vec![], vec![], vec![],
+        );
+        let commitment = receipt.compute_commitment().unwrap();
+        receipt.add_sig_a(keypair_a.sign(&commitment).unwrap());
+
+        // The legitimate chain head.
+        let (legit_head_pk, _) = generate_ephemeral_keypair(&[0x01; 32]).expect("keygen");
+        // The attacker's keypair (NOT the chain head).
+        let (_, attacker_sk) = generate_ephemeral_keypair(&[0x99; 32]).expect("keygen");
+
+        // Forge a cert under the attacker's SK over the correct (pubkey_a, h_n).
+        let forged = sign_ek_cert(
+            &attacker_sk,
+            keypair_a.public_key(),
+            &[0xaa; 32], // matches receipt.parent_tip
+        )
+        .expect("forge cert");
+        receipt.set_ek_cert_a(forged);
+
+        let ctx = ReceiptVerificationContext::new(
+            [0u8; 32], [0u8; 32],
+            keypair_a.public_key().to_vec(),
+            vec![],
+        )
+        .with_chain_head_a(legit_head_pk);
+
+        let mut tracker = ParentConsumptionTracker::new();
+        let result = verify_stitched_receipt(&receipt, &ctx, &mut tracker).unwrap();
+        assert!(!result.valid, "forged ek_cert_a must be rejected");
+        let reason = result.reason.unwrap();
+        assert!(
+            reason.contains("ek_cert_a verification failed")
+                || reason.contains("not authorized"),
+            "wrong rejection reason: {}",
+            reason
+        );
+    }
+
+    /// When the verification context has no chain head set (transitional
+    /// pre-feature path), the cert verification step is skipped and the
+    /// receipt verifies based on the existing signature/proof rules alone.
+    /// This keeps existing tests and call sites working until they migrate.
+    #[test]
+    fn test_no_chain_head_skips_cert_check() {
+        // Reuse the parent_uniqueness test setup but without consuming the parent.
+        let keypair_a = crate::crypto::signatures::SignatureKeyPair::generate_for_testing();
+        let mut receipt = StitchedReceiptV2::new(
+            [0; 32], [0; 32], [0; 32],
+            [0xaa; 32], [0xbb; 32],
+            [0x01; 32], [0x02; 32],
+            vec![], vec![], vec![],
+        );
+        let commitment = receipt.compute_commitment().unwrap();
+        receipt.add_sig_a(keypair_a.sign(&commitment).unwrap());
+        // No ek_cert_a set, no chain head in context.
+
+        let ctx = ReceiptVerificationContext::new(
+            [0u8; 32], [0u8; 32],
+            keypair_a.public_key().to_vec(),
+            vec![],
+        );
+        let mut tracker = ParentConsumptionTracker::new();
+        let result = verify_stitched_receipt(&receipt, &ctx, &mut tracker).unwrap();
+        // The receipt may still fail later checks (proofs, etc.), but it must
+        // NOT fail with a cert-related reason when no chain head is set.
+        if !result.valid {
+            let reason = result.reason.unwrap();
+            assert!(
+                !reason.contains("ek_cert"),
+                "should not have failed on cert when chain head unset; reason: {}",
+                reason
+            );
+        }
     }
 }

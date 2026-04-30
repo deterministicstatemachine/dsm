@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! DeTFi routing-vault discovery substrate.
+//! SoFi routing-vault discovery substrate.
 //!
 //! Public discovery by ordered token pair: vaults are advertised at
 //! `defi/vault/{token_a_b32}/{token_b_b32}/{vault_id_b32}` and their
 //! full proto mirrored at `defi/vault-proto/{..}/{..}/{..}`.  Routers
 //! enumerate the prefix for the (canonical) trade pair, fetch + verify
 //! each vault, then feed the surviving set into a fee-weighted
-//! shortest-path search (DeTFi spec §3.3, §8.3).  This module owns the
+//! shortest-path search (SoFi spec §3.3, §8.3).  This module owns the
 //! discovery substrate ONLY — the path search and the RouteCommit
-//! emission live in subsequent commits on the same DeTFi-routing track.
+//! emission live in subsequent commits on the same SoFi-routing track.
 //!
 //! Pattern matches `bitcoin_tap_sdk` / `posted_dlv_sdk` one-for-one
 //! (publish → list with state-number dedup → delete).  Substantive
@@ -19,7 +19,7 @@
 //!     direction (A→B vs B→A) is the caller's concern — the proto
 //!     stores reserves in canonical order, the path search swaps
 //!     them based on requested direction.
-//!   * No "claimed" lifecycle state — DeTFi vaults are continuously
+//!   * No "claimed" lifecycle state — SoFi vaults are continuously
 //!     usable until exhausted (reserves drained) or withdrawn
 //!     (owner-initiated).
 
@@ -43,7 +43,7 @@ pub(crate) const LIFECYCLE_EXHAUSTED: &str = "exhausted";
 pub(crate) const LIFECYCLE_WITHDRAWN: &str = "withdrawn";
 
 /// Compare two token-id byte slices and return `(lower, higher)` in
-/// canonical lex order.  Token IDs in DeTFi adverts MUST be sorted
+/// canonical lex order.  Token IDs in SoFi adverts MUST be sorted
 /// — otherwise two advertisements for the same pair would split into
 /// distinct prefixes and the router would only see half the liquidity.
 pub(crate) fn canonical_token_pair<'a>(a: &'a [u8], b: &'a [u8]) -> (&'a [u8], &'a [u8]) {
@@ -379,7 +379,7 @@ pub(crate) async fn delete_routing_advertisement(
 
 #[cfg(test)]
 mod tests {
-    //! DeTFi routing-vault discovery tests.
+    //! SoFi routing-vault discovery tests.
     //!
     //! Exercises publish → list → verify → terminal-state → delete on
     //! the same in-process mock backend used by `bitcoin_tap_sdk` and

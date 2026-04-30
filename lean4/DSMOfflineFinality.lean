@@ -20,6 +20,22 @@
   Discharges OMITTED obligations in DSM_OfflineFinality.tla:
     - IrreversibilityInductive: chain-tip arithmetic
     - NoHalfCommitInductive: balance conservation
+
+  Refinement note (whitepaper §11.1 per-step EK signing):
+    The receipt-signing predicate this module relies on (every accepted
+    commit is signed by valid SPHINCS+ keys) is implemented in the
+    codebase via the per-step ephemeral key chain:
+      EK_{n+1} = SPHINCS+.KeyGen(HKDF("DSM/ek\0" || h_n || C_pre || k_step
+                                       || K_DBRW))
+      cert_{n+1} = Sign_{SK_n}(BLAKE3("DSM/ek-cert\0" || EK_pk_{n+1} || h_n))
+    Each receipt body is signed by EK_{n+1}; the cert chain anchors back
+    to AK_pk via prior step keys (AK at step 0).
+    The Tripwire / chain-tip-monotonicity proofs in this file are
+    invariant under this refinement because they reason at the abstract
+    level of "successor tip distinct from parent" (Theorem 4.2),
+    independent of which signing key produces the signature.
+    Code: dsm_sdk::sdk::receipts::sign_receipt_with_per_step_ek
+    Tests: per_step_signing_end_to_end_two_steps proves AK → EK_0 → EK_1.
 -/
 
 -- ============================================================

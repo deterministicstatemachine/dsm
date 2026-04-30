@@ -115,7 +115,7 @@ Targeted hardening release focused on bilateral BLE reliability. 121 files chang
 
 ### Removed
 
-- **DeTFi examples** — legacy DeTFi example code dropped from the tree.
+- **SoFi examples** — legacy SoFi example code dropped from the tree.
 - **`fix_bridge.patch`** — stale patch file removed.
 
 ---

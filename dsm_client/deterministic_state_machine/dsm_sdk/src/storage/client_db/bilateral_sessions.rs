@@ -73,15 +73,16 @@ pub fn store_bilateral_session(session: &BilateralSessionRecord) -> Result<()> {
         "INSERT INTO bilateral_sessions(
             commitment_hash, counterparty_device_id, counterparty_genesis_hash, operation_bytes, phase,
             local_signature, counterparty_signature, created_at_step,
-                sender_ble_address, updated_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                sender_ble_address, updated_at, stitched_receipt_bytes)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
          ON CONFLICT(commitment_hash) DO UPDATE SET
             phase = excluded.phase,
             local_signature = excluded.local_signature,
             counterparty_signature = excluded.counterparty_signature,
             counterparty_genesis_hash = excluded.counterparty_genesis_hash,
             sender_ble_address = excluded.sender_ble_address,
-            updated_at = excluded.updated_at",
+            updated_at = excluded.updated_at,
+            stitched_receipt_bytes = COALESCE(excluded.stitched_receipt_bytes, bilateral_sessions.stitched_receipt_bytes)",
         params![
             &session.commitment_hash,
             &session.counterparty_device_id,
@@ -93,6 +94,7 @@ pub fn store_bilateral_session(session: &BilateralSessionRecord) -> Result<()> {
             session.created_at_step as i64,
             &session.sender_ble_address,
             now as i64,
+            &session.stitched_receipt_bytes,
         ],
     );
     match result {
@@ -122,7 +124,7 @@ pub fn get_all_bilateral_sessions() -> Result<Vec<BilateralSessionRecord>> {
     let mut stmt = conn.prepare(
         "SELECT commitment_hash, counterparty_device_id, operation_bytes, phase,
                counterparty_genesis_hash, local_signature, counterparty_signature, created_at_step,
-               sender_ble_address
+               sender_ble_address, stitched_receipt_bytes
          FROM bilateral_sessions
            ORDER BY created_at_step DESC",
     )?;
@@ -138,6 +140,7 @@ pub fn get_all_bilateral_sessions() -> Result<Vec<BilateralSessionRecord>> {
             counterparty_signature: row.get(6)?,
             created_at_step: row.get::<_, i64>(7)? as u64,
             sender_ble_address: row.get(8)?,
+            stitched_receipt_bytes: row.get(9)?,
         })
     })?;
 
@@ -158,7 +161,7 @@ pub fn get_bilateral_session(commitment_hash: &[u8]) -> Result<Option<BilateralS
     conn.query_row(
         "SELECT commitment_hash, counterparty_device_id, operation_bytes, phase,
                 counterparty_genesis_hash, local_signature, counterparty_signature, created_at_step,
-                sender_ble_address
+                sender_ble_address, stitched_receipt_bytes
            FROM bilateral_sessions
           WHERE commitment_hash = ?1",
         params![commitment_hash],
@@ -173,6 +176,7 @@ pub fn get_bilateral_session(commitment_hash: &[u8]) -> Result<Option<BilateralS
                 counterparty_signature: row.get(6)?,
                 created_at_step: row.get::<_, i64>(7)? as u64,
                 sender_ble_address: row.get(8)?,
+                stitched_receipt_bytes: row.get(9)?,
             })
         },
     )
@@ -324,6 +328,7 @@ mod tests {
             counterparty_signature: None,
             created_at_step: 1,
             sender_ble_address: None,
+            stitched_receipt_bytes: None,
         }
     }
 
@@ -497,6 +502,63 @@ mod tests {
         assert_eq!(
             all[0].sender_ble_address.as_deref(),
             Some("AA:BB:CC:DD:EE:FF")
+        );
+    }
+
+    /// Regression test: the sender-cached signed stitched receipt (with §11.1
+    /// per-step EK signing artifacts already stamped) must round-trip through
+    /// SQLite so post-crash recovery in `mark_sender_committed_with_post_state_hash`
+    /// can reuse it verbatim instead of attempting an unsigned rebuild.
+    #[test]
+    #[serial]
+    fn bilateral_session_preserves_stitched_receipt_bytes() {
+        init_test_db();
+        let mut s = make_session("confirm_pending");
+        let receipt_bytes = vec![0x99; 4096]; // arbitrary opaque payload
+        s.stitched_receipt_bytes = Some(receipt_bytes.clone());
+        store_bilateral_session(&s).unwrap();
+
+        let restored = get_bilateral_session(&[0x11; 32])
+            .unwrap()
+            .expect("session row should exist");
+        assert_eq!(
+            restored.stitched_receipt_bytes,
+            Some(receipt_bytes),
+            "signed stitched receipt should round-trip through SQLite"
+        );
+    }
+
+    /// Regression test: an upsert that does not provide `stitched_receipt_bytes`
+    /// (e.g. a phase-only update like Accepted → ConfirmPending arriving from a
+    /// code path that does not have the receipt in hand) must NOT clobber the
+    /// previously-cached signed bytes. Loss here would force the recovery path
+    /// to fall back to an unsigned rebuild.
+    #[test]
+    #[serial]
+    fn bilateral_session_upsert_preserves_existing_stitched_receipt_bytes() {
+        init_test_db();
+        let mut original = make_session("confirm_pending");
+        let receipt_bytes = vec![0x77; 1024];
+        original.stitched_receipt_bytes = Some(receipt_bytes.clone());
+        store_bilateral_session(&original).unwrap();
+
+        // Simulate a later upsert that doesn't carry the receipt (e.g. a
+        // phase-only persistence call from a different code path).
+        let mut phase_only = make_session("committed");
+        phase_only.stitched_receipt_bytes = None;
+        store_bilateral_session(&phase_only).unwrap();
+
+        let restored = get_bilateral_session(&[0x11; 32])
+            .unwrap()
+            .expect("session row should still exist");
+        assert_eq!(
+            restored.phase, "committed",
+            "phase should be updated by upsert"
+        );
+        assert_eq!(
+            restored.stitched_receipt_bytes,
+            Some(receipt_bytes),
+            "previously-cached signed receipt must survive an upsert with None"
         );
     }
 }

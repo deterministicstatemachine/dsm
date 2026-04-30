@@ -80,6 +80,48 @@ pub struct StitchedReceiptV2 {
 
     /// SPHINCS+ signature from party B over canonical commit bytes
     pub sig_b: Vec<u8>,
+
+    /// Ephemeral-key certificate for party A's per-step EK (whitepaper §11.1).
+    ///
+    /// `cert_{n+1} = Sign_{SK_n}( BLAKE3("DSM/ek-cert\0" || EK_pk_{n+1} || h_n) )`
+    ///
+    /// Where `SK_n` is the prior signer's secret key (AK at n=0, else EK_n).
+    /// Carried in the receipt envelope (NOT in canonical commit form per §4.2.1).
+    /// Verifier walks the cert chain back to AK_pk to establish AK-rooted
+    /// authorization for the per-step EK that signed `sig_a`.
+    pub ek_cert_a: Vec<u8>,
+
+    /// Ephemeral-key certificate for party B's per-step EK (counterparty).
+    /// Optional — only present when `sig_b` is present (counter-signed receipts).
+    pub ek_cert_b: Vec<u8>,
+
+    /// Per-step ephemeral SPHINCS+ public key for party A (whitepaper §11.1).
+    ///
+    /// `EK_pk_{n+1} = SPHINCS+.KeyGen(E_{n+1})`, where
+    /// `E_{n+1} = HKDF("DSM/ek\0" || h_n || C_pre || k_step || K_DBRW)`.
+    ///
+    /// Carried in the envelope alongside `sig_a` so verifiers don't need
+    /// the per-step EK out-of-band. NOT in canonical commit form (§4.2.1).
+    /// Empty for legacy receipts signed by the wallet's long-term key.
+    pub ek_pk_a: Vec<u8>,
+
+    /// Per-step ephemeral SPHINCS+ public key for party B (counterparty).
+    /// Same semantics as `ek_pk_a`. Empty when sig_b is empty or for
+    /// legacy receipts.
+    pub ek_pk_b: Vec<u8>,
+
+    /// Per-step Kyber/ML-KEM ciphertext for party A's contribution to
+    /// `k_step` (whitepaper §11). The sender encapsulates with deterministic
+    /// coins against the recipient's Kyber pubkey; the resulting ct travels
+    /// here. Recipient decapsulates with their Kyber sk to recover `ss`
+    /// and derive `k_step = BLAKE3("DSM/kyber-ss\0" || ss)`. Empty for
+    /// legacy receipts that pre-date per-step Kyber.
+    pub kyber_ct_a: Vec<u8>,
+
+    /// Per-step Kyber ciphertext for party B (counterparty's contribution).
+    /// Mirrors `kyber_ct_a` but encapsulated by B against A's Kyber pubkey.
+    /// Empty when sig_b is empty or for legacy receipts.
+    pub kyber_ct_b: Vec<u8>,
 }
 
 impl StitchedReceiptV2 {
@@ -111,6 +153,12 @@ impl StitchedReceiptV2 {
             rel_replace_witness: Vec::new(),
             sig_a: Vec::new(),
             sig_b: Vec::new(),
+            ek_cert_a: Vec::new(),
+            ek_cert_b: Vec::new(),
+            ek_pk_a: Vec::new(),
+            ek_pk_b: Vec::new(),
+            kyber_ct_a: Vec::new(),
+            kyber_ct_b: Vec::new(),
         }
     }
 
@@ -121,6 +169,9 @@ impl StitchedReceiptV2 {
 
     /// Convert to prost-generated `ReceiptCommit` (canonical form, no sigs).
     /// Proto3 omits empty bytes → encode_to_vec() produces fields 1-11 only.
+    /// Per §4.2.1 the canonical commit form is FROZEN at 10 fields plus the
+    /// rel_replace_witness (field 11). Signatures (12, 13) and ephemeral-key
+    /// certs (14, 15) live in the envelope only and are explicitly empty here.
     fn to_proto_canonical(&self) -> crate::types::proto::ReceiptCommit {
         crate::types::proto::ReceiptCommit {
             genesis: self.genesis.to_vec(),
@@ -136,14 +187,26 @@ impl StitchedReceiptV2 {
             rel_replace_witness: self.rel_replace_witness.clone(),
             sig_a: vec![],
             sig_b: vec![],
+            ek_cert_a: vec![],
+            ek_cert_b: vec![],
+            ek_pk_a: vec![],
+            ek_pk_b: vec![],
+            kyber_ct_a: vec![],
+            kyber_ct_b: vec![],
         }
     }
 
-    /// Convert to prost-generated `ReceiptCommit` (full form, with sigs).
+    /// Convert to prost-generated `ReceiptCommit` (full form, with sigs + certs + EK pks + Kyber ct).
     fn to_proto_full(&self) -> crate::types::proto::ReceiptCommit {
         let mut proto = self.to_proto_canonical();
         proto.sig_a.clone_from(&self.sig_a);
         proto.sig_b.clone_from(&self.sig_b);
+        proto.ek_cert_a.clone_from(&self.ek_cert_a);
+        proto.ek_cert_b.clone_from(&self.ek_cert_b);
+        proto.ek_pk_a.clone_from(&self.ek_pk_a);
+        proto.ek_pk_b.clone_from(&self.ek_pk_b);
+        proto.kyber_ct_a.clone_from(&self.kyber_ct_a);
+        proto.kyber_ct_b.clone_from(&self.kyber_ct_b);
         proto
     }
 
@@ -179,6 +242,24 @@ impl StitchedReceiptV2 {
         }
         if !rc.sig_b.is_empty() {
             receipt.add_sig_b(rc.sig_b);
+        }
+        if !rc.ek_cert_a.is_empty() {
+            receipt.set_ek_cert_a(rc.ek_cert_a);
+        }
+        if !rc.ek_cert_b.is_empty() {
+            receipt.set_ek_cert_b(rc.ek_cert_b);
+        }
+        if !rc.ek_pk_a.is_empty() {
+            receipt.set_ek_pk_a(rc.ek_pk_a);
+        }
+        if !rc.ek_pk_b.is_empty() {
+            receipt.set_ek_pk_b(rc.ek_pk_b);
+        }
+        if !rc.kyber_ct_a.is_empty() {
+            receipt.set_kyber_ct_a(rc.kyber_ct_a);
+        }
+        if !rc.kyber_ct_b.is_empty() {
+            receipt.set_kyber_ct_b(rc.kyber_ct_b);
         }
         Ok(receipt)
     }
@@ -233,6 +314,38 @@ impl StitchedReceiptV2 {
     /// Add signature from party B
     pub fn add_sig_b(&mut self, sig: Vec<u8>) {
         self.sig_b = sig;
+    }
+
+    /// Set party A's per-step ephemeral-key certificate.
+    /// See whitepaper §11.1 ephemeral certification.
+    pub fn set_ek_cert_a(&mut self, cert: Vec<u8>) {
+        self.ek_cert_a = cert;
+    }
+
+    /// Set party B's per-step ephemeral-key certificate (counterparty).
+    pub fn set_ek_cert_b(&mut self, cert: Vec<u8>) {
+        self.ek_cert_b = cert;
+    }
+
+    /// Set party A's per-step ephemeral SPHINCS+ public key.
+    /// See whitepaper §11.1.
+    pub fn set_ek_pk_a(&mut self, pk: Vec<u8>) {
+        self.ek_pk_a = pk;
+    }
+
+    /// Set party B's per-step ephemeral SPHINCS+ public key.
+    pub fn set_ek_pk_b(&mut self, pk: Vec<u8>) {
+        self.ek_pk_b = pk;
+    }
+
+    /// Set party A's per-step Kyber ciphertext (whitepaper §11).
+    pub fn set_kyber_ct_a(&mut self, ct: Vec<u8>) {
+        self.kyber_ct_a = ct;
+    }
+
+    /// Set party B's per-step Kyber ciphertext (counterparty's contribution).
+    pub fn set_kyber_ct_b(&mut self, ct: Vec<u8>) {
+        self.kyber_ct_b = ct;
     }
 
     /// Check if both signatures are present
@@ -330,11 +443,29 @@ pub struct ReceiptVerificationContext {
     /// Expected parent Per-Device SMT root
     pub expected_parent_root: [u8; 32],
 
-    /// SPHINCS+ public key for party A
+    /// SPHINCS+ public key for party A (the per-step EK_pk for this receipt).
     pub pubkey_a: Vec<u8>,
 
-    /// SPHINCS+ public key for party B
+    /// SPHINCS+ public key for party B (counterparty's per-step EK_pk).
     pub pubkey_b: Vec<u8>,
+
+    /// Per-relationship cert chain head for party A.
+    ///
+    /// This is the SPHINCS+ public key that authorized the current `pubkey_a`
+    /// via the ek-cert chain (whitepaper §11.1):
+    ///   - At step n=0: AK_pk (the device-attested long-term key).
+    ///   - At step n>0: the previous step's `EK_pk_n` (which signed cert_{n+1}).
+    ///
+    /// `Some(pk)` means cert verification is REQUIRED — the receipt must carry
+    /// a valid `ek_cert_a` that verifies against `pk`. `None` means the caller
+    /// has not yet threaded the chain head (transitional / pre-feature path);
+    /// cert verification is skipped in that case.
+    pub chain_head_pubkey_a: Option<Vec<u8>>,
+
+    /// Per-relationship cert chain head for party B (counterparty).
+    /// Same semantics as `chain_head_pubkey_a`. Only consulted when `sig_b`
+    /// is present on the receipt.
+    pub chain_head_pubkey_b: Option<Vec<u8>>,
 
     /// Set of previously consumed parent tips (for uniqueness check)
     pub consumed_parents: std::collections::HashSet<[u8; 32]>,
@@ -352,8 +483,23 @@ impl ReceiptVerificationContext {
             expected_parent_root,
             pubkey_a,
             pubkey_b,
+            chain_head_pubkey_a: None,
+            chain_head_pubkey_b: None,
             consumed_parents: std::collections::HashSet::new(),
         }
+    }
+
+    /// Builder: set the cert chain head for party A.
+    /// Once set, the receipt MUST carry a valid `ek_cert_a` (whitepaper §11.1).
+    pub fn with_chain_head_a(mut self, pubkey: Vec<u8>) -> Self {
+        self.chain_head_pubkey_a = Some(pubkey);
+        self
+    }
+
+    /// Builder: set the cert chain head for party B.
+    pub fn with_chain_head_b(mut self, pubkey: Vec<u8>) -> Self {
+        self.chain_head_pubkey_b = Some(pubkey);
+        self
     }
 
     /// Mark a parent tip as consumed

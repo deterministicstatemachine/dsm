@@ -124,7 +124,7 @@ async fn e2e_online_transfer_era_and_custom_token() {
     println!("Creating Alice genesis via MPC...");
     let alice_genesis = timeout(
         Duration::from_secs(20),
-        storage_sdk.create_genesis_with_mpc(Some(3), Some(alice_entropy)),
+        storage_sdk.create_genesis_with_mpc(Some(alice_entropy)),
     )
     .await
     .unwrap_or_else(|e| panic!("Alice MPC genesis timeout: {e}"))
@@ -223,7 +223,7 @@ async fn e2e_online_transfer_era_and_custom_token() {
     println!("Creating Bob genesis via MPC...");
     let bob_genesis = timeout(
         Duration::from_secs(20),
-        storage_sdk_bob.create_genesis_with_mpc(Some(3), Some(bob_entropy)),
+        storage_sdk_bob.create_genesis_with_mpc(Some(bob_entropy)),
     )
     .await
     .unwrap_or_else(|e| panic!("Bob MPC genesis timeout: {e}"))
@@ -509,7 +509,7 @@ async fn live_aws_online_transfer_recipient_storage_sync() {
         let mut receiver_entropy = vec![0u8; 32];
         os_rng.fill_bytes(&mut receiver_entropy);
         let receiver_genesis = storage_sdk
-            .create_genesis_with_mpc(Some(3), Some(receiver_entropy.clone()))
+            .create_genesis_with_mpc(Some(receiver_entropy.clone()))
             .await
             .unwrap_or_else(|e| panic!("Receiver MPC genesis failed: {e}"));
         let receiver_device_id = receiver_genesis.genesis_device_id.clone();
@@ -560,7 +560,7 @@ async fn live_aws_online_transfer_recipient_storage_sync() {
         let mut sender_entropy = vec![0u8; 32];
         os_rng.fill_bytes(&mut sender_entropy);
         let sender_genesis_record = storage_sdk
-            .create_genesis_with_mpc(Some(3), Some(sender_entropy.clone()))
+            .create_genesis_with_mpc(Some(sender_entropy.clone()))
             .await
             .unwrap_or_else(|e| panic!("Sender MPC genesis failed: {e}"));
         let sender_device_id = sender_genesis_record.genesis_device_id.clone();
@@ -626,6 +626,7 @@ async fn live_aws_online_transfer_recipient_storage_sync() {
             alias: "receiver".to_string(),
             genesis_hash: receiver_genesis.clone(),
             public_key: receiver_pk.clone(),
+            kyber_public_key: Vec::new(),
             current_chain_tip: Some(relationship_tip.clone()),
             added_at: 1,
             verified: true,
@@ -729,6 +730,7 @@ async fn live_aws_online_transfer_recipient_storage_sync() {
         alias: "sender".to_string(),
         genesis_hash: sender_genesis.clone(),
         public_key: sender_pk.clone(),
+        kyber_public_key: Vec::new(),
         current_chain_tip: Some(relationship_tip.clone()),
         added_at: 1,
         verified: true,

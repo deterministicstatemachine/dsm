@@ -265,7 +265,6 @@ pub fn ca_certs_loaded_count() -> u32 {
 #[derive(Debug, Clone)]
 pub struct MpcGenesisConfig {
     pub identity_id: String,
-    pub threshold: u32,
     pub participants: Vec<String>,
     pub quantum_resistant: bool,
     pub key_rotation_interval_hours: u64,
@@ -301,10 +300,8 @@ pub struct GenesisCreationResponse {
     pub genesis_device_id: Vec<u8>,
     /// Current session state
     pub state: String,
-    /// Number of contributions received
+    /// Number of contributions received (n-of-n; whitepaper §2.5)
     pub contributions_received: usize,
-    /// Required threshold
-    pub threshold: usize,
     /// Whether genesis creation is complete
     pub complete: bool,
     /// Genesis hash for verification (available when complete)
@@ -1057,11 +1054,9 @@ impl StorageNodeSDK {
             *mpc_config = Some(config.clone());
         } // Lock is released here
 
-        // Initialize identity with the storage node using the create_genesis_with_mpc method
-        match self
-            .create_genesis_with_mpc(Some(config.threshold as u8), None)
-            .await
-        {
+        // Initialize identity with the storage node using the create_genesis_with_mpc method.
+        // No threshold parameter — n-of-n MPC per whitepaper §2.5.
+        match self.create_genesis_with_mpc(None).await {
             Ok(response) => {
                 if !response.session_id.is_empty() {
                     info!(
@@ -1161,7 +1156,6 @@ impl StorageNodeSDK {
                         genesis_device_id: g.device_id.clone(),
                         state: "complete".to_string(),
                         contributions_received: 0_usize, // detailed counts not always provided here
-                        threshold: g.threshold as usize,
                         complete: true,
                         genesis_hash: g.genesis_hash.as_ref().map(|h| h.v.clone()),
                         participating_nodes: g.storage_nodes.clone(),
@@ -1476,7 +1470,7 @@ impl StorageNodeSDK {
         preimage.extend_from_slice(&state_hash_bytes);
         preimage.extend_from_slice(&params_bytes);
         preimage.extend_from_slice(&next_state.to_le_bytes());
-        let pre_commitment_hash = dsm::crypto::blake3::domain_hash("DSM/precommit-hash", &preimage);
+        let pre_commitment_hash = dsm::crypto::blake3::domain_hash("DSM/precommit", &preimage);
 
         // transaction_payload is the canonical proto bytes for parameters
         let transaction_payload = params_bytes.clone();
@@ -1546,7 +1540,7 @@ impl StorageNodeSDK {
         expected_preimage.extend_from_slice(&params_bytes);
         expected_preimage.extend_from_slice(&next_state.to_le_bytes());
         let expected_hash =
-            dsm::crypto::blake3::domain_hash("DSM/precommit-hash", &expected_preimage);
+            dsm::crypto::blake3::domain_hash("DSM/precommit", &expected_preimage);
 
         if bilateral_entry.pre_commitment_hash != expected_hash.as_bytes() {
             bilateral_entry.status = BilateralTransactionStatus::Rejected;
@@ -1628,12 +1622,16 @@ impl StorageNodeSDK {
         Ok(())
     }
 
-    /// Create a DSM Genesis Identity via Multi-Party Computation (MPC)
+    /// Create a DSM Genesis Identity via Multi-Party Computation (MPC).
     ///
-    /// See module docs above for full details.
+    /// Per whitepaper §2.5: this is n-of-n commit-then-reveal entropy
+    /// aggregation, NOT threshold cryptography.  Every configured storage
+    /// node contributes; the floor is `≥3` (anti-2-collusion).  The prior
+    /// `threshold` argument and `node_urls.iter().take(threshold_count)`
+    /// pre-truncation (Issue #252 prefix-bias sub-bug) have been removed:
+    /// every node contributes its entropy, every contribution goes into G.
     pub async fn create_genesis_with_mpc(
         &self,
-        threshold: Option<u8>,
         client_entropy: Option<Vec<u8>>,
     ) -> Result<GenesisCreationResponse, DsmError> {
         // Genesis is created LOCALLY by gathering entropy from storage nodes
@@ -1669,27 +1667,25 @@ impl StorageNodeSDK {
             ));
         }
 
-        // Gather entropy from storage nodes
+        // Gather entropy from ALL storage nodes (n-of-n).
         let node_urls = self.get_node_urls();
-        let threshold_count = threshold.unwrap_or(3).min(node_urls.len() as u8) as usize;
 
-        if node_urls.len() < threshold_count {
+        if node_urls.len() < 3 {
             return Err(DsmError::invalid_operation(format!(
-                "Need at least {} storage nodes, only {} configured",
-                threshold_count,
+                "Need at least 3 storage nodes for MPC genesis (whitepaper §2.5), only {} configured",
                 node_urls.len()
             )));
         }
 
         log::info!(
-            "Gathering entropy from {} storage nodes (threshold={})",
+            "Gathering entropy from all {} storage nodes (n-of-n; whitepaper §2.5)",
             node_urls.len(),
-            threshold_count
         );
 
-        // Fetch entropy from each storage node
+        // Fetch entropy from EVERY storage node.  No prefix truncation —
+        // closes Issue #252's "first threshold_count nodes" bias.
         let mut mpc_participants = Vec::new();
-        for (i, url) in node_urls.iter().take(threshold_count).enumerate() {
+        for (i, url) in node_urls.iter().enumerate() {
             let entropy_url = format!("{}/api/v2/genesis/entropy", url.trim_end_matches('/'));
 
             log::info!("Fetching entropy from node {}: {}", i, entropy_url);
@@ -1772,7 +1768,6 @@ impl StorageNodeSDK {
             genesis_device_id: device_id, // Genesis hash = Device ID for root device
             state: "complete".to_string(),
             contributions_received: mpc_participants.len(),
-            threshold: threshold_count,
             complete: true,
             genesis_hash: Some(genesis_info.genesis_hash),
             participating_nodes: mpc_participants
@@ -1901,7 +1896,6 @@ impl StorageNodeSDK {
             genesis_device_id: new_device_id,
             state: "complete".to_string(),
             contributions_received: 0, // No MPC for secondary devices
-            threshold: 0,
             complete: true,
             genesis_hash: Some(genesis_hash),
             participating_nodes: vec![],
@@ -1949,7 +1943,6 @@ impl StorageNodeSDK {
                                     .clone()
                                     .try_into()
                                     .unwrap_or([0u8; 32]),
-                                threshold: gen.threshold as usize,
                                 participants: HashSet::new(),
                                 merkle_root: None,
                                 device_id: None,
@@ -3000,7 +2993,7 @@ mod tests {
         preimage.extend_from_slice(&state_hash_bytes_for_test);
         preimage.extend_from_slice(&params_bytes);
         preimage.extend_from_slice(&2u64.to_le_bytes());
-        let expected = dsm::crypto::blake3::domain_hash("DSM/precommit-hash", &preimage);
+        let expected = dsm::crypto::blake3::domain_hash("DSM/precommit", &preimage);
         assert_eq!(entry.pre_commitment_hash, expected.as_bytes());
         assert_eq!(entry.state_number, 1);
         assert_eq!(entry.status, BilateralTransactionStatus::Pending);

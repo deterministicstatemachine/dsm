@@ -51,28 +51,28 @@ fn no_dsm_token_prefs_writes_in_token_routes() {
     );
 }
 
-/// G.4 regression — `dlv.create` and `detfi.launch` must not write to
-/// the retired `dsm.dlv.*` / `dsm.detfi.*` keyspaces.  The whole
+/// G.4 regression — `dlv.create` and `sofi.launch` must not write to
+/// the retired `dsm.dlv.*` / `dsm.sofi.*` keyspaces.  The whole
 /// persist-via-prefs shim is gone (commits 5 + 6 + 7).
 #[test]
-fn no_dsm_dlv_or_detfi_prefs_writes_in_handlers() {
-    for rel in ["src/handlers/dlv_routes.rs", "src/handlers/detfi_routes.rs"] {
+fn no_dsm_dlv_or_sofi_prefs_writes_in_handlers() {
+    for rel in ["src/handlers/dlv_routes.rs", "src/handlers/sofi_routes.rs"] {
         let src = read(sdk_path(rel));
         assert!(
             !src.contains("app_state_set(&format!(\"dsm.dlv."),
             "regression: {rel} has reintroduced a dsm.dlv.* prefs write"
         );
         assert!(
-            !src.contains("app_state_set(&format!(\"dsm.detfi."),
-            "regression: {rel} has reintroduced a dsm.detfi.* prefs write"
+            !src.contains("app_state_set(&format!(\"dsm.sofi."),
+            "regression: {rel} has reintroduced a dsm.sofi.* prefs write"
         );
         assert!(
             !src.contains("DLV_PREFIX"),
             "regression: {rel} has reintroduced the retired DLV_PREFIX constant"
         );
         assert!(
-            !src.contains("DETFI_PREFIX"),
-            "regression: {rel} has reintroduced the retired DETFI_PREFIX constant"
+            !src.contains("SOFI_PREFIX"),
+            "regression: {rel} has reintroduced the retired SOFI_PREFIX constant"
         );
     }
 }
@@ -107,7 +107,7 @@ fn no_dlv_create_v3_in_rust_or_proto_sources() {
     }
     for rel in [
         "src/handlers/dlv_routes.rs",
-        "src/handlers/detfi_routes.rs",
+        "src/handlers/sofi_routes.rs",
         "src/vault/lifecycle.rs",
     ] {
         let src = read(sdk_path(rel));
@@ -291,7 +291,7 @@ fn proto_schema_carries_typed_dlv_request_messages() {
     );
 }
 
-/// DeTFi routing discovery — token-pair canonicalisation MUST sort
+/// SoFi routing discovery — token-pair canonicalisation MUST sort
 /// (tokenA, tokenB) lex-lower-first before key construction.  A
 /// regression that forgot this would split each pair into two
 /// uncorrelated prefixes and the router would only see half the
@@ -314,10 +314,10 @@ fn routing_advertisement_keys_canonicalise_token_pair() {
     );
 }
 
-/// DeTFi routing discovery — the digest binding advertisement →
+/// SoFi routing discovery — the digest binding advertisement →
 /// vault proto MUST use the `DSM/routing-vault-ad` BLAKE3 domain tag.
 /// A tag swap would silently break the fetch-verify round trip,
-/// causing routers to reject all DeTFi vaults.
+/// causing routers to reject all SoFi vaults.
 #[test]
 fn routing_advertisement_uses_stable_domain_tag() {
     let src = read(sdk_path("src/sdk/routing_sdk.rs"));
@@ -328,7 +328,7 @@ fn routing_advertisement_uses_stable_domain_tag() {
     );
 }
 
-/// DeTFi routing discovery — the proto schema MUST carry
+/// SoFi routing discovery — the proto schema MUST carry
 /// `RoutingVaultAdvertisementV1` so the SDK's encode/decode path
 /// continues to compile.  Removing it is a wire-format break.
 #[test]
@@ -347,7 +347,7 @@ fn proto_schema_carries_routing_vault_advertisement() {
     );
 }
 
-/// DeTFi routing path search — the path-search module MUST stay free
+/// SoFi routing path search — the path-search module MUST stay free
 /// of any RouteCommit / atomic-execution coupling.  Chunk #2 is pure
 /// discovery + path selection; chunk #3 is where commitment + settlement
 /// land.  A regression that imported `RouteCommitV1` (or any settlement
@@ -373,7 +373,7 @@ fn routing_path_sdk_does_not_touch_routecommit_or_settlement() {
     );
 }
 
-/// DeTFi routing path search — the cost function MUST select on
+/// SoFi routing path search — the cost function MUST select on
 /// `final_output_amount`, not on summed `fee_bps`.  A pure-fee
 /// Dijkstra silently mis-routes when a multi-hop path through deep
 /// reserves nets more output than a shallow direct hop with low fee
@@ -388,8 +388,8 @@ fn routing_path_search_compares_on_final_output() {
     );
 }
 
-/// DeTFi chunk #3 invariant — the external-commitment derivation MUST
-/// use the `DSM/ext` BLAKE3 domain tag (matches DeTFi spec §3.2:
+/// SoFi chunk #3 invariant — the external-commitment derivation MUST
+/// use the `DSM/ext` BLAKE3 domain tag (matches SoFi spec §3.2:
 /// `ExtCommit(X) = H("DSM/ext" || X)`).  A tag swap silently breaks
 /// every recipient's X re-derivation, making published anchors
 /// uncorrelatable with the RouteCommits they're supposed to bind.
@@ -408,7 +408,7 @@ fn external_commitment_uses_stable_domain_tag() {
     );
 }
 
-/// DeTFi chunk #3 invariant — the canonical bytes that feed `compute_external_commitment`
+/// SoFi chunk #3 invariant — the canonical bytes that feed `compute_external_commitment`
 /// MUST exclude `initiator_signature`.  Otherwise the trader cannot
 /// sign over X (chicken-and-egg: signing changes the bytes which
 /// changes X which invalidates the signature).
@@ -422,7 +422,7 @@ fn external_commitment_excludes_initiator_signature_from_canonical_form() {
     );
 }
 
-/// DeTFi chunk #3 boundary — `route_commit_sdk` is a PURE binder +
+/// SoFi chunk #3 boundary — `route_commit_sdk` is a PURE binder +
 /// storage anchor.  Per-hop unlock handler wiring (extending
 /// `Operation::DlvUnlock` to verify a RouteCommit + check anchor
 /// visibility) is chunk #4 and MUST NOT leak into this module before
@@ -444,7 +444,7 @@ fn route_commit_sdk_does_not_emit_state_machine_operations() {
     );
 }
 
-/// DeTFi chunk #3 invariant — the proto schema MUST carry both
+/// SoFi chunk #3 invariant — the proto schema MUST carry both
 /// `RouteCommitV1` and `ExternalCommitmentV1` so the SDK encode/decode
 /// path stays usable.  Removing either is a wire-format break.
 #[test]
@@ -471,7 +471,7 @@ fn proto_schema_carries_route_commit_messages() {
     );
 }
 
-/// DeTFi chunk #4 invariant — the routed-unlock handler MUST run the
+/// SoFi chunk #4 invariant — the routed-unlock handler MUST run the
 /// SDK eligibility check (vault_id ∈ RouteCommit AND X visible)
 /// BEFORE emitting `Operation::DlvUnlock`.  Without the gate, any
 /// caller could trigger an unlock by handing the device an arbitrary
@@ -508,7 +508,7 @@ fn dlv_unlock_routed_runs_eligibility_check_before_state_advance() {
     );
 }
 
-/// DeTFi chunk #4 invariant — the proto schema MUST carry
+/// SoFi chunk #4 invariant — the proto schema MUST carry
 /// `DlvUnlockRoutedV1` so the handler decoder continues to compile.
 #[test]
 fn proto_schema_carries_dlv_unlock_routed() {
@@ -526,7 +526,7 @@ fn proto_schema_carries_dlv_unlock_routed() {
     );
 }
 
-/// DeTFi chunk #4 invariant — `dlv.unlockRouted` MUST be wired into
+/// SoFi chunk #4 invariant — `dlv.unlockRouted` MUST be wired into
 /// the `dlv.*` invoke dispatcher.  An unrouted dispatcher would route
 /// the call to `unknown dlv invoke method` despite the handler being
 /// implemented.
@@ -539,7 +539,7 @@ fn dlv_unlock_routed_is_dispatched() {
     );
 }
 
-/// DeTFi chunk #5 invariant — the eligibility verifier MUST call
+/// SoFi chunk #5 invariant — the eligibility verifier MUST call
 /// SPHINCS+ verification on the `initiator_signature`.  Without this
 /// step an attacker could forge arbitrary RouteCommits + publish
 /// their own X anchor + trick vault owners into unlocking against
@@ -569,7 +569,7 @@ fn route_commit_eligibility_runs_sphincs_signature_verify() {
     );
 }
 
-/// DeTFi chunk #5 invariant — the canonical bytes fed to SPHINCS+
+/// SoFi chunk #5 invariant — the canonical bytes fed to SPHINCS+
 /// verify MUST be the SAME canonical form fed to the external
 /// commitment X.  Any divergence would let an attacker sign one
 /// canonical form while publishing under the other's X — the gate
@@ -1031,7 +1031,7 @@ fn no_policy_commit_derived_from_metadata_cache() {
     for rel in [
         "src/handlers/token_routes.rs",
         "src/handlers/dlv_routes.rs",
-        "src/handlers/detfi_routes.rs",
+        "src/handlers/sofi_routes.rs",
         "src/handlers/bilateral_settlement.rs",
     ] {
         let src = read(sdk_path(rel));
