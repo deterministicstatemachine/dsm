@@ -32,7 +32,7 @@ zeroize = { version = "1.6.0", features = ["derive"] }
 subtle = "2"
 
 # Configuration
-clap = { version = "4.4.3", features = ["derive"] }
+clap = { version = "4.6.1", features = ["derive"] }
 config = "0.15.22"
 toml = "0.8.20"
 
@@ -50,7 +50,7 @@ tokio-postgres = { version = "0.7.17", default-features = false, features = ["ru
 deadpool-postgres = { version = "0.14.1", optional = true }
 tokio-postgres-rustls = { version = "0.13", optional = true }
 rustls-native-certs = "0.8"      # use system roots (optional)
-webpki-roots = "1.0.6"
+webpki-roots = "1.0.7"
 
 # Database (SQLite — local-dev only)
 rusqlite = { version = "0.39.0", features = ["bundled"], optional = true }
