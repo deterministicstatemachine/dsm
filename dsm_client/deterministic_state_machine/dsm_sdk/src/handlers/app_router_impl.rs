@@ -1361,48 +1361,148 @@ impl AppRouterImpl {
                 ));
             }
 
-            // §4.2 Non-repudiation: Sender signs receipt commitment → sig_a.
-            // Deserialize canonical receipt, compute commitment hash, sign with
-            // sender's SPHINCS+ key, re-serialize with sig_a embedded (field 12).
-            // The commitment hash is over fields 1-11 only (no circular dependency).
+            // §4.2 + §11.1 Non-repudiation: Sender signs receipt commitment → sig_a
+            // using a freshly-derived per-step ephemeral SPHINCS+ key (§11.1).
+            // The cert chain anchors the per-step EK back to the device's AK_pk;
+            // the receipt body sig is verified against the EK_pk_a carried in
+            // the envelope (proto field 16). Verifiers don't need the wallet's
+            // long-term identity key out-of-band — sig_a verifies against
+            // receipt.ek_pk_a, which is authorized via receipt.ek_cert_a.
+            //
+            // c_pre source: we use the receipt commitment hash itself as c_pre.
+            // The per-step EK derivation needs a deterministic, per-step-distinct
+            // input bound to this transition; the commitment serves that role
+            // (the verifier doesn't recompute EK — they trust receipt.ek_pk_a
+            // and verify the cert chain). Whitepaper §4.1's canonical C_pre
+            // = BLAKE3("DSM/precommit\0" || h_n || payload || e) is currently
+            // not threaded through the online send path; using the commitment
+            // hash provides equivalent freshness for EK derivation. Threading
+            // canonical C_pre is a planned refinement.
+            //
+            // k_step source: stub-derived from chain context until Phase F
+            // surfaces the bilateral session's Kyber shared secret (whitepaper
+            // §11). Stub k_step preserves the cert-chain security property
+            // (AK-rooted authorization) but doesn't satisfy §11's claim about
+            // fresh per-step Kyber-derived randomness.
             let rc = match dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
                 &rc_canonical,
             ) {
                 Ok(mut receipt) => match receipt.compute_commitment() {
-                    Ok(commitment) => match self.wallet.sign_operation_bytes(&commitment) {
-                        Ok(sig_a) => {
-                            log::info!(
-                                        "[wallet.send] §4.2 sig_a: sender signed receipt commitment (sig_len={})",
-                                        sig_a.len()
-                                    );
-                            receipt.add_sig_a(sig_a);
-                            match receipt.to_full_protobuf() {
-                                Ok(full_bytes) => full_bytes,
-                                Err(e) => {
-                                    let rollback_error = self
-                                        .rollback_failed_online_transfer(&rollback_request)
-                                        .await
-                                        .err()
-                                        .map(|rb| format!("; rollback failed: {rb}"))
-                                        .unwrap_or_default();
-                                    return err(format!(
-                                        "wallet.send: receipt full serialization failed: {e}{rollback_error}"
-                                    ));
-                                }
+                    Ok(commitment) => {
+                        // Resolve K_DBRW + AK fallback keypair.
+                        let k_dbrw_vec = match crate::fetch_dbrw_binding_key() {
+                            Ok(k) => k,
+                            Err(e) => {
+                                let rollback_error = self
+                                    .rollback_failed_online_transfer(&rollback_request)
+                                    .await
+                                    .err()
+                                    .map(|rb| format!("; rollback failed: {rb}"))
+                                    .unwrap_or_default();
+                                return err(format!(
+                                    "wallet.send: K_DBRW unavailable for cert chain: {e}{rollback_error}"
+                                ));
                             }
-                        }
-                        Err(e) => {
-                            let rollback_error = self
-                                .rollback_failed_online_transfer(&rollback_request)
-                                .await
-                                .err()
-                                .map(|rb| format!("; rollback failed: {rb}"))
-                                .unwrap_or_default();
+                        };
+                        if k_dbrw_vec.len() < 32 {
                             return err(format!(
-                                "wallet.send: receipt signing failed: {e}{rollback_error}"
+                                "wallet.send: K_DBRW too short ({} bytes, need 32)",
+                                k_dbrw_vec.len()
                             ));
                         }
-                    },
+                        let mut k_dbrw_arr = [0u8; 32];
+                        k_dbrw_arr.copy_from_slice(&k_dbrw_vec[..32]);
+                        let (ak_pk, ak_sk) = match self.wallet.ak_keypair_for_cert_chain() {
+                            Ok(kp) => kp,
+                            Err(e) => {
+                                return err(format!(
+                                    "wallet.send: AK keypair unavailable for cert chain: {e}"
+                                ));
+                            }
+                        };
+
+                        // Compute relationship_key for chain head lookup.
+                        let rel_key =
+                            dsm::verification::smt_replace_witness::compute_smt_key(
+                                &receipt.devid_a,
+                                &receipt.devid_b,
+                            );
+
+                        // Sign with per-step EK (whitepaper §11.1 cert chain).
+                        let signing_inputs = crate::sdk::receipts::PerStepSigningInputs {
+                            commitment: &commitment,
+                            h_n: receipt.parent_tip,
+                            c_pre: commitment, // see comment above re: c_pre source
+                            devid_local: receipt.devid_a,
+                            devid_counterparty: receipt.devid_b,
+                            relationship_key: rel_key,
+                            k_dbrw: &k_dbrw_arr,
+                            fallback_ak_keypair: Some((&ak_pk, &ak_sk)),
+                            k_step_override: None,
+                        };
+                        match crate::sdk::receipts::sign_receipt_with_per_step_ek(&signing_inputs)
+                        {
+                            Ok(out) => {
+                                log::info!(
+                                    "[wallet.send] §11.1 per-step EK sign: ek_pk_len={}, \
+                                     cert_len={}, sig_len={}, used_ak_fallback={}",
+                                    out.ek_pk.len(),
+                                    out.ek_cert.len(),
+                                    out.sig.len(),
+                                    out.used_ak_fallback,
+                                );
+
+                                // Stamp per-step artifacts on the receipt.
+                                receipt.set_ek_pk_a(out.ek_pk.clone());
+                                receipt.set_ek_cert_a(out.ek_cert);
+                                receipt.add_sig_a(out.sig);
+
+                                // Advance chain head so step n+1 will use this
+                                // EK_sk_n. After advance, ek_sk in memory is no
+                                // longer needed.
+                                if let Err(e) =
+                                    crate::sdk::receipts::advance_local_chain_head_after_signing(
+                                        &rel_key,
+                                        &out.ek_pk,
+                                        &out.ek_sk,
+                                        &k_dbrw_arr,
+                                        out.used_ak_fallback,
+                                    )
+                                {
+                                    log::warn!(
+                                        "[wallet.send] §11.1 chain head advance failed (non-fatal — \
+                                         next signing will fall back to AK if needed): {e}"
+                                    );
+                                }
+
+                                match receipt.to_full_protobuf() {
+                                    Ok(full_bytes) => full_bytes,
+                                    Err(e) => {
+                                        let rollback_error = self
+                                            .rollback_failed_online_transfer(&rollback_request)
+                                            .await
+                                            .err()
+                                            .map(|rb| format!("; rollback failed: {rb}"))
+                                            .unwrap_or_default();
+                                        return err(format!(
+                                            "wallet.send: receipt full serialization failed: {e}{rollback_error}"
+                                        ));
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                let rollback_error = self
+                                    .rollback_failed_online_transfer(&rollback_request)
+                                    .await
+                                    .err()
+                                    .map(|rb| format!("; rollback failed: {rb}"))
+                                    .unwrap_or_default();
+                                return err(format!(
+                                    "wallet.send: per-step EK signing failed: {e}{rollback_error}"
+                                ));
+                            }
+                        }
+                    }
                     Err(e) => {
                         let rollback_error = self
                             .rollback_failed_online_transfer(&rollback_request)
