@@ -227,6 +227,28 @@ fn kat_recovery_capsule_aad_format() {
 }
 
 // =============================================================================
+// §11.1 — Per-step EK derivation seed (anchors sign_receipt_with_per_step_ek)
+// =============================================================================
+
+#[test]
+fn kat_dsm_ek_derivation_seed() {
+    // E_{n+1} = HKDF("DSM/ek\0" || h_n || C_pre || k_step || K_DBRW)
+    // The dsm crate exposes the underlying derive_ephemeral_seed primitive;
+    // sdk's PerStepEkContext + derive_per_step_ek wrap it.
+    let h_n = [0x11; 32];
+    let c_pre = [0x22; 32];
+    let k_step = [0x33; 32];
+    let k_dbrw = [0x44; 32];
+
+    let seed = dsm::crypto::ephemeral_key::derive_ephemeral_seed(&h_n, &c_pre, &k_step, &k_dbrw);
+    assert_pin(
+        "DSM/ek (per-step EK derivation seed)",
+        seed,
+        "1702f92624fed18d753141cce163f3ea3da7645002f82f0f8e2cd466caa2e39b",
+    );
+}
+
+// =============================================================================
 // §12 — DBRW binding (verified aligned)
 // =============================================================================
 
