@@ -2124,6 +2124,320 @@ mod tests {
         );
     }
 
+    /// Two-device 3-step bilateral end-to-end (Item 2 of plan).
+    ///
+    /// Models a full bilateral relationship across THREE sequential
+    /// transitions, exercising both A and B chains advancing in
+    /// parallel under strict cert-chain mode. This is the integration
+    /// analogue of Lean's `extendChain_preserves_validity` (Theorem 7)
+    /// and proves the post-Stage-6-fix BLE wiring keeps both chains
+    /// consistent across multi-step.
+    ///
+    /// Per step n we drive:
+    ///   1. Sender (Device A) signs receipt with A-side per-step EK
+    ///      derived from sender's chain head (AK_pk_A at step 0,
+    ///      EK_pk_a_{n-1} thereafter).
+    ///   2. Receiver (Device B) verifies A-side under their mirror of
+    ///      sender's chain (Counterparty row from B's POV), then
+    ///      counter-signs with B-side per-step EK from receiver's
+    ///      chain.
+    ///   3. Sender verifies B-side under their mirror of receiver's
+    ///      chain (Counterparty row from A's POV).
+    ///   4. Both sides advance their respective Counterparty mirrors
+    ///      to the just-verified EK_pk (the Stage-6 fix).
+    ///
+    /// Asserts at every step:
+    ///   - A-side and B-side verifications both pass (Verified outcome).
+    ///   - The cert-link verification at step n+1 uses EK_pk_n (not
+    ///     the relationship-genesis AK_pk).
+    ///   - Step counter on both Counterparty rows advances monotonically.
+    ///   - Cross-substitution: a step-n receipt does NOT verify under
+    ///     a step-m chain head (m != n).
+    ///
+    /// Because the unit test runs both signers in one DB, we use TWO
+    /// distinct relationship keys (rel_key_a for sender's outbound chain
+    /// + B's mirror of it; rel_key_b for receiver's outbound chain + A's
+    /// mirror of it) so each `sign_receipt_with_per_step_ek` call only
+    /// touches its own Local row. In production each device has its own
+    /// SQLite, so this DB partitioning is implicit.
+    #[test]
+    #[serial_test::serial]
+    fn bilateral_three_step_chain_extension_e2e() {
+        use crate::storage::client_db::{
+            advance_cert_chain_head, init_cert_chain_head, load_cert_chain_head_pubkey,
+            reset_database_for_tests, set_strict_cert_chain_mode, CertChainSide,
+        };
+        use dsm::crypto::ephemeral_key::generate_ephemeral_keypair;
+
+        reset_database_for_tests();
+        set_strict_cert_chain_mode(true).unwrap();
+
+        // Two AK keypairs, one per device.
+        let (ak_pk_a, ak_sk_a) = generate_ephemeral_keypair(&[0xA1; 32]).unwrap();
+        let (ak_pk_b, ak_sk_b) = generate_ephemeral_keypair(&[0xB1; 32]).unwrap();
+        let kyber_kp = dsm::crypto::kyber::generate_kyber_keypair().expect("kyber keygen");
+        let kyber_pk = kyber_kp.public_key.clone();
+
+        // Two relationship keys (separate DB partitions for the unit
+        // test); the Counterparty row of rel_a is B's mirror of A's
+        // outbound chain, and vice versa.
+        let rel_a: [u8; 32] = [0xCA; 32];
+        let rel_b: [u8; 32] = [0xCB; 32];
+        let k_dbrw = [0xE9; 32];
+
+        // Seed Counterparty rows on both partitions:
+        //   rel_a.Counterparty = ak_pk_a (B's mirror of A's chain).
+        //   rel_b.Counterparty = ak_pk_b (A's mirror of B's chain).
+        init_cert_chain_head(&rel_a, CertChainSide::Counterparty, &ak_pk_a).unwrap();
+        init_cert_chain_head(&rel_b, CertChainSide::Counterparty, &ak_pk_b).unwrap();
+
+        // Track every step's EK_pk on both sides for negative
+        // cross-substitution checks at the end.
+        let mut ek_pks_a: Vec<Vec<u8>> = Vec::with_capacity(3);
+        let mut ek_pks_b: Vec<Vec<u8>> = Vec::with_capacity(3);
+
+        for step in 0..3u8 {
+            // Per-step h_n (asymmetric per side; same value here for
+            // simplicity since only the cert-link check uses it and
+            // both sides drive it independently).
+            let h_n_a: [u8; 32] = [0xA0 | step; 32];
+            let h_n_b: [u8; 32] = [0xB0 | step; 32];
+            let c_pre: [u8; 32] = [0xC0 | step; 32];
+
+            // ─── Receipt body (canonical, identical fields aside ───
+            // from per-step h_n). The per-step EK signing only depends
+            // on the commit hash + h_n + cert-chain context.
+            let mut receipt = StitchedReceiptV2::new(
+                [0x01; 32],
+                [0x02; 32],
+                [0x03; 32],
+                h_n_a, // parent_tip on A-side view
+                [0x04 | step; 32],
+                [0x05 | step; 32],
+                [0x06 | step; 32],
+                vec![0x07; 16],
+                vec![0x08; 16],
+                vec![0x09; 16],
+            );
+            let commitment = receipt.compute_commitment().unwrap();
+
+            // ─── A-side signing (Device A) ───
+            let a_inputs = PerStepSigningInputs {
+                commitment: &commitment,
+                h_n: h_n_a,
+                c_pre,
+                devid_sender: [0x11; 32],
+                relationship_key: rel_a,
+                k_dbrw: &k_dbrw,
+                fallback_ak_keypair: Some((&ak_pk_a, &ak_sk_a)),
+                recipient_kyber_pk: &kyber_pk,
+            };
+            let a_out = sign_receipt_with_per_step_ek(&a_inputs).unwrap();
+            // Step 0 must use AK fallback; step 1+ must use chain head.
+            if step == 0 {
+                assert!(
+                    a_out.used_ak_fallback,
+                    "step 0 A-side must use AK fallback (chain head not yet established)"
+                );
+            } else {
+                assert!(
+                    !a_out.used_ak_fallback,
+                    "step {step} A-side must use prior chain head EK_sk, not AK fallback"
+                );
+            }
+            receipt.set_ek_pk_a(a_out.ek_pk.clone());
+            receipt.set_ek_cert_a(a_out.ek_cert.clone());
+            receipt.set_kyber_ct_a(a_out.kyber_ct.clone());
+            receipt.add_sig_a(a_out.sig.clone());
+            advance_local_chain_head_after_signing(
+                &rel_a,
+                &a_out.ek_pk,
+                &a_out.ek_sk,
+                &k_dbrw,
+                a_out.used_ak_fallback,
+            )
+            .unwrap();
+
+            // ─── B-side verification of A (Device B verifies A) ───
+            let prev_pk_a_loaded =
+                load_cert_chain_head_pubkey(&rel_a, CertChainSide::Counterparty)
+                    .unwrap()
+                    .expect("rel_a.Counterparty must be initialized");
+            // At step n, prev_pk_a_loaded should be:
+            //   step 0 → ak_pk_a (genesis seed)
+            //   step n>0 → ek_pks_a[n-1] (advanced after step n-1)
+            if step == 0 {
+                assert_eq!(
+                    prev_pk_a_loaded, ak_pk_a,
+                    "step 0: B's mirror of A's chain should be A's AK"
+                );
+            } else {
+                assert_eq!(
+                    prev_pk_a_loaded,
+                    ek_pks_a[(step - 1) as usize],
+                    "step {step}: B's mirror of A's chain should be EK_pk_a_{}",
+                    step - 1
+                );
+            }
+            verify_per_step_ek_signing_strict_aware(
+                &receipt,
+                BilateralSide::A,
+                &prev_pk_a_loaded,
+                &h_n_a,
+            )
+            .unwrap_or_else(|e| panic!("step {step} A-side verify failed: {e}"));
+
+            // ─── B-side counter-signing (Device B) ───
+            // Receipt's parent_tip remains h_n_a (A-side view) but
+            // B's per-step EK derivation uses h_n_b. The verifier on
+            // sender side will use receipt.parent_tip = h_n_a, so we
+            // need to either (a) keep parent_tip aligned with B's
+            // h_n_b or (b) drive verifier with h_n_b explicitly. We
+            // model (b) — sender knows the receiver's h_n_b out-of-
+            // band (in production, via the SMT proofs). The receipt's
+            // parent_tip is A-side asymmetric and irrelevant to B's
+            // cert-link verification.
+            let b_inputs = PerStepSigningInputs {
+                commitment: &commitment,
+                h_n: h_n_b,
+                c_pre,
+                devid_sender: [0x22; 32],
+                relationship_key: rel_b,
+                k_dbrw: &k_dbrw,
+                fallback_ak_keypair: Some((&ak_pk_b, &ak_sk_b)),
+                recipient_kyber_pk: &kyber_pk,
+            };
+            let b_out = sign_receipt_with_per_step_ek(&b_inputs).unwrap();
+            if step == 0 {
+                assert!(b_out.used_ak_fallback, "step 0 B-side must use AK fallback");
+            } else {
+                assert!(
+                    !b_out.used_ak_fallback,
+                    "step {step} B-side must use prior chain head"
+                );
+            }
+            receipt.set_ek_pk_b(b_out.ek_pk.clone());
+            receipt.set_ek_cert_b(b_out.ek_cert.clone());
+            receipt.set_kyber_ct_b(b_out.kyber_ct.clone());
+            receipt.add_sig_b(b_out.sig.clone());
+            advance_local_chain_head_after_signing(
+                &rel_b,
+                &b_out.ek_pk,
+                &b_out.ek_sk,
+                &k_dbrw,
+                b_out.used_ak_fallback,
+            )
+            .unwrap();
+
+            assert!(
+                receipt.is_fully_signed(),
+                "step {step} receipt must carry both A and B sigs"
+            );
+
+            // ─── A-side verification of B (Device A verifies B) ───
+            let prev_pk_b_loaded =
+                load_cert_chain_head_pubkey(&rel_b, CertChainSide::Counterparty)
+                    .unwrap()
+                    .expect("rel_b.Counterparty must be initialized");
+            if step == 0 {
+                assert_eq!(prev_pk_b_loaded, ak_pk_b);
+            } else {
+                assert_eq!(prev_pk_b_loaded, ek_pks_b[(step - 1) as usize]);
+            }
+            verify_per_step_ek_signing_strict_aware(
+                &receipt,
+                BilateralSide::B,
+                &prev_pk_b_loaded,
+                &h_n_b,
+            )
+            .unwrap_or_else(|e| panic!("step {step} B-side verify failed: {e}"));
+
+            // ─── Post-commit Counterparty advances (Stage-6 fix) ───
+            // Both devices advance their mirrors of the other's chain.
+            let new_step_a = advance_cert_chain_head(
+                &rel_a,
+                CertChainSide::Counterparty,
+                &a_out.ek_pk,
+            )
+            .unwrap()
+            .expect("rel_a.Counterparty advance must succeed");
+            let new_step_b = advance_cert_chain_head(
+                &rel_b,
+                CertChainSide::Counterparty,
+                &b_out.ek_pk,
+            )
+            .unwrap()
+            .expect("rel_b.Counterparty advance must succeed");
+            assert_eq!(
+                new_step_a,
+                step as u64 + 1,
+                "rel_a.Counterparty step counter monotonicity"
+            );
+            assert_eq!(
+                new_step_b,
+                step as u64 + 1,
+                "rel_b.Counterparty step counter monotonicity"
+            );
+
+            ek_pks_a.push(a_out.ek_pk);
+            ek_pks_b.push(b_out.ek_pk);
+        }
+
+        // ─── Cross-substitution negative regression ───
+        // Build a fresh step-2 receipt, sign A-side with rel_a's
+        // current chain head (which after the loop is EK_pk_a_2),
+        // then assert it does NOT verify under any earlier step's
+        // chain head. This cryptographically pins the chain
+        // freshness invariant the Stage-6 fix is supposed to enforce.
+        let mut substitution_check_receipt = StitchedReceiptV2::new(
+            [0x01; 32],
+            [0x02; 32],
+            [0x03; 32],
+            [0xAF; 32],
+            [0x04; 32],
+            [0x05; 32],
+            [0x06; 32],
+            vec![0x07; 16],
+            vec![0x08; 16],
+            vec![0x09; 16],
+        );
+        let sub_commitment = substitution_check_receipt.compute_commitment().unwrap();
+        let sub_inputs = PerStepSigningInputs {
+            commitment: &sub_commitment,
+            h_n: [0xAF; 32],
+            c_pre: [0xCF; 32],
+            devid_sender: [0x11; 32],
+            relationship_key: rel_a,
+            k_dbrw: &k_dbrw,
+            fallback_ak_keypair: Some((&ak_pk_a, &ak_sk_a)),
+            recipient_kyber_pk: &kyber_pk,
+        };
+        let sub_out = sign_receipt_with_per_step_ek(&sub_inputs).unwrap();
+        substitution_check_receipt.set_ek_pk_a(sub_out.ek_pk.clone());
+        substitution_check_receipt.set_ek_cert_a(sub_out.ek_cert);
+        substitution_check_receipt.set_kyber_ct_a(sub_out.kyber_ct);
+        substitution_check_receipt.add_sig_a(sub_out.sig);
+
+        // The freshly-signed receipt's cert chains to ek_pks_a[2]
+        // (the head right before this signing). Any earlier head
+        // (ak_pk_a, ek_pks_a[0], ek_pks_a[1]) MUST fail the cert link.
+        for (idx, stale_pk) in [&ak_pk_a, &ek_pks_a[0], &ek_pks_a[1]].iter().enumerate() {
+            let result = verify_per_step_ek_signing_strict_aware(
+                &substitution_check_receipt,
+                BilateralSide::A,
+                stale_pk,
+                &[0xAF; 32],
+            );
+            assert!(
+                result.is_err(),
+                "substitution check {idx}: stale chain head MUST reject — \
+                 this is the Stage-6 anti-substitution invariant"
+            );
+        }
+
+        set_strict_cert_chain_mode(false).unwrap();
+    }
+
     // ── verify_per_step_ek_signing_strict_aware ────────────────────────
 
     /// Strict mode OFF + receipt has artifacts → verification runs and
