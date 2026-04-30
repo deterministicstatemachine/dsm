@@ -3354,88 +3354,88 @@ impl BilateralBleHandler {
                     &response.counter_signed_receipt,
                 ) {
                     Ok(counter_signed) => {
-                        let receipt_carries_per_step_ek_b =
-                            !counter_signed.ek_pk_b.is_empty()
-                                && !counter_signed.ek_cert_b.is_empty()
-                                && !counter_signed.sig_b.is_empty();
+                        // Identity check — the receiver builds the receipt
+                        // with their own device_id as devid_a and the
+                        // sender's as devid_b. Anti-substitution: any
+                        // counter-signed receipt for an unrelated transfer
+                        // would carry mismatched ids.
+                        if counter_signed.devid_a != counterparty_device_id {
+                            return Err(DsmError::invalid_operation(
+                                "counter_signed_receipt: devid_a does not match the counterparty \
+                                 of this session — possible substitution",
+                            ));
+                        }
+                        if counter_signed.devid_b != self.device_id {
+                            return Err(DsmError::invalid_operation(
+                                "counter_signed_receipt: devid_b does not match this sender \
+                                 device_id — possible substitution",
+                            ));
+                        }
 
-                        if receipt_carries_per_step_ek_b {
-                            // Identity check — the receiver builds the receipt
-                            // with their own device_id as devid_a and the
-                            // sender's as devid_b.
-                            if counter_signed.devid_a != counterparty_device_id {
-                                return Err(DsmError::invalid_operation(
-                                    "counter_signed_receipt: devid_a does not match the counterparty \
-                                     of this session — possible substitution",
-                                ));
+                        let rel_key =
+                            dsm::verification::smt_replace_witness::compute_smt_key(
+                                &self.device_id,
+                                &counterparty_device_id,
+                            );
+                        // From this sender's view, the RECEIVER's chain head
+                        // lives in the Counterparty-side row of
+                        // cert_chain_heads.
+                        let prev_pk_from_chain =
+                            crate::storage::client_db::load_cert_chain_head_pubkey(
+                                &rel_key,
+                                crate::storage::client_db::CertChainSide::Counterparty,
+                            )
+                            .ok()
+                            .flatten();
+                        let expected_prev_pk = match prev_pk_from_chain {
+                            Some(pk) => pk,
+                            None => {
+                                let manager = self.bilateral_tx_manager.read().await;
+                                manager
+                                    .get_contact(&counterparty_device_id)
+                                    .ok_or_else(|| {
+                                        DsmError::invalid_operation(
+                                            "counter_signed_receipt verify: contact missing \
+                                             for AK_pk fallback",
+                                        )
+                                    })?
+                                    .public_key
+                                    .clone()
                             }
-                            if counter_signed.devid_b != self.device_id {
-                                return Err(DsmError::invalid_operation(
-                                    "counter_signed_receipt: devid_b does not match this sender \
-                                     device_id — possible substitution",
-                                ));
-                            }
+                        };
 
-                            let rel_key =
-                                dsm::verification::smt_replace_witness::compute_smt_key(
-                                    &self.device_id,
-                                    &counterparty_device_id,
-                                );
-                            // From this sender's view, the RECEIVER's chain
-                            // head lives in the Counterparty-side row of
-                            // cert_chain_heads.
-                            let prev_pk_from_chain =
-                                crate::storage::client_db::load_cert_chain_head_pubkey(
-                                    &rel_key,
-                                    crate::storage::client_db::CertChainSide::Counterparty,
-                                )
-                                .ok()
-                                .flatten();
-                            let expected_prev_pk = match prev_pk_from_chain {
-                                Some(pk) => pk,
-                                None => {
-                                    let manager = self.bilateral_tx_manager.read().await;
-                                    manager
-                                        .get_contact(&counterparty_device_id)
-                                        .ok_or_else(|| {
-                                            DsmError::invalid_operation(
-                                                "counter_signed_receipt verify: contact missing \
-                                                 for AK_pk fallback",
-                                            )
-                                        })?
-                                        .public_key
-                                        .clone()
-                                }
-                            };
-
-                            crate::sdk::receipts::verify_per_step_ek_signing(
+                        let outcome =
+                            crate::sdk::receipts::verify_per_step_ek_signing_strict_aware(
                                 &counter_signed,
                                 crate::sdk::receipts::BilateralSide::B,
                                 &expected_prev_pk,
                                 &counter_signed.parent_tip,
                             )?;
-
-                            // Replace the in-memory A-only cached receipt
-                            // with the fully co-signed bytes so the
-                            // settlement that follows archives both sigs.
-                            {
-                                let mut sessions = self.sessions.sessions.lock().await;
-                                if let Some(s) = sessions.get_mut(&commitment_hash) {
-                                    s.stitched_receipt_bytes =
-                                        Some(response.counter_signed_receipt.clone());
+                        match outcome {
+                            crate::sdk::receipts::PerStepEkVerifyOutcome::Verified => {
+                                // Replace the in-memory A-only cached
+                                // receipt with the fully co-signed bytes so
+                                // the settlement that follows archives both
+                                // sigs.
+                                {
+                                    let mut sessions = self.sessions.sessions.lock().await;
+                                    if let Some(s) = sessions.get_mut(&commitment_hash) {
+                                        s.stitched_receipt_bytes =
+                                            Some(response.counter_signed_receipt.clone());
+                                    }
                                 }
+                                info!(
+                                    "[BILATERAL] §11.1 per-step EK B-side verification PASS for commitment {}",
+                                    bytes_to_base32(&commitment_hash[..8])
+                                );
                             }
-
-                            info!(
-                                "[BILATERAL] §11.1 per-step EK B-side verification PASS for commitment {}",
-                                bytes_to_base32(&commitment_hash[..8])
-                            );
-                        } else {
-                            warn!(
-                                "[BILATERAL] §11.1 per-step EK B-side artifacts MISSING on counter-signed receipt for commitment {} — \
-                                 skipping verification (legacy/pre-feature receipt)",
-                                bytes_to_base32(&commitment_hash[..8])
-                            );
+                            crate::sdk::receipts::PerStepEkVerifyOutcome::SkippedLegacyReceipt => {
+                                warn!(
+                                    "[BILATERAL] §11.1 per-step EK B-side artifacts MISSING on counter-signed receipt for commitment {} — \
+                                     skipping verification (legacy/pre-feature receipt; strict mode OFF)",
+                                    bytes_to_base32(&commitment_hash[..8])
+                                );
+                            }
                         }
                     }
                     Err(e) => {
@@ -3732,59 +3732,49 @@ impl BilateralBleHandler {
                 &confirm_request.stitched_receipt,
             ) {
                 Ok(receipt) => {
-                    let receipt_carries_per_step_ek = !receipt.ek_pk_a.is_empty()
-                        && !receipt.ek_cert_a.is_empty()
-                        && !receipt.sig_a.is_empty();
-                    if receipt_carries_per_step_ek {
-                        let rel_key = dsm::verification::smt_replace_witness::compute_smt_key(
-                            &self.device_id,
-                            &session.counterparty_device_id,
-                        );
-                        // From the receiver's viewpoint, the SENDER is the
-                        // counterparty in the cert-chain-heads table.
-                        let prev_pk_from_chain =
-                            crate::storage::client_db::load_cert_chain_head_pubkey(
-                                &rel_key,
-                                crate::storage::client_db::CertChainSide::Counterparty,
-                            )
-                            .ok()
-                            .flatten();
-                        let expected_prev_pk = match prev_pk_from_chain {
-                            Some(pk) => pk,
-                            None => {
-                                // Relationship genesis (no chain head yet) —
-                                // sender's cert chains to their AK_pk, which
-                                // is the contact's long-term public key.
-                                counterparty_pubkey.clone()
-                            }
-                        };
+                    let rel_key = dsm::verification::smt_replace_witness::compute_smt_key(
+                        &self.device_id,
+                        &session.counterparty_device_id,
+                    );
+                    // From the receiver's viewpoint, the SENDER is the
+                    // counterparty in the cert-chain-heads table.
+                    let prev_pk_from_chain =
+                        crate::storage::client_db::load_cert_chain_head_pubkey(
+                            &rel_key,
+                            crate::storage::client_db::CertChainSide::Counterparty,
+                        )
+                        .ok()
+                        .flatten();
+                    let expected_prev_pk = match prev_pk_from_chain {
+                        Some(pk) => pk,
+                        None => {
+                            // Relationship genesis (no chain head yet) —
+                            // sender's cert chains to their AK_pk, which is
+                            // the contact's long-term public key.
+                            counterparty_pubkey.clone()
+                        }
+                    };
 
-                        crate::sdk::receipts::verify_per_step_ek_signing(
-                            &receipt,
-                            crate::sdk::receipts::BilateralSide::A,
-                            &expected_prev_pk,
-                            &receipt.parent_tip,
-                        )?;
-                        info!(
-                            "[BILATERAL] §11.1 per-step EK A-side verification PASS for commitment {}",
-                            bytes_to_base32(&commitment_hash[..8])
-                        );
-                    } else if crate::storage::client_db::is_strict_cert_chain_mode()
-                        .unwrap_or(false)
-                    {
-                        // Mainnet: per-step EK signing is mandatory. Reject
-                        // any receipt that omits ek_pk_a / ek_cert_a / sig_a
-                        // — there is no transitional fail-open path here.
-                        return Err(DsmError::invalid_operation(
-                            "strict cert-chain mode: incoming bilateral confirm carries a stitched \
-                             receipt with no §11.1 per-step EK A-side artifacts — rejecting",
-                        ));
-                    } else {
-                        warn!(
-                            "[BILATERAL] §11.1 per-step EK A-side artifacts MISSING on incoming receipt for commitment {} — \
-                             skipping verification (legacy/pre-feature receipt; strict mode OFF)",
-                            bytes_to_base32(&commitment_hash[..8])
-                        );
+                    let outcome = crate::sdk::receipts::verify_per_step_ek_signing_strict_aware(
+                        &receipt,
+                        crate::sdk::receipts::BilateralSide::A,
+                        &expected_prev_pk,
+                        &receipt.parent_tip,
+                    )?;
+                    match outcome {
+                        crate::sdk::receipts::PerStepEkVerifyOutcome::Verified => {
+                            info!(
+                                "[BILATERAL] §11.1 per-step EK A-side verification PASS for commitment {}",
+                                bytes_to_base32(&commitment_hash[..8])
+                            );
+                        }
+                        crate::sdk::receipts::PerStepEkVerifyOutcome::SkippedLegacyReceipt => {
+                            warn!(
+                                "[BILATERAL] §11.1 per-step EK A-side artifacts MISSING on incoming receipt for commitment {} — \
+                                 skipping verification (legacy/pre-feature receipt; strict mode OFF)",
+                                bytes_to_base32(&commitment_hash[..8])
+                            );
+                        }
                     }
                 }
                 Err(e) => {

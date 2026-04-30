@@ -426,6 +426,72 @@ pub fn verify_per_step_ek_signing(
     Ok(())
 }
 
+/// Outcome of [`verify_per_step_ek_signing_strict_aware`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PerStepEkVerifyOutcome {
+    /// Receipt carried per-step EK artifacts and they verified successfully.
+    Verified,
+    /// Receipt carried no per-step EK artifacts and strict cert-chain mode
+    /// was OFF, so verification was skipped (transitional fail-open).
+    SkippedLegacyReceipt,
+}
+
+/// Strict-mode-aware wrapper around [`verify_per_step_ek_signing`].
+///
+/// Combines two policies in one call site:
+///
+///   1. If the receipt carries `ek_pk_{side}`, `ek_cert_{side}`, and
+///      `sig_{side}`, run [`verify_per_step_ek_signing`] and bubble its
+///      result. On success returns [`PerStepEkVerifyOutcome::Verified`].
+///   2. If any of those artifacts is missing:
+///      - When `is_strict_cert_chain_mode()` is on, return a structured
+///        error rejecting the receipt — mainnet must fail-closed.
+///      - Otherwise return
+///        [`PerStepEkVerifyOutcome::SkippedLegacyReceipt`] so callers can
+///        log a warn and proceed (transitional fail-open for pre-feature
+///        peers).
+///
+/// Use this from BLE bilateral handler call sites instead of duplicating
+/// the same `if strict { Err(...) } else { warn!(...) }` block in every
+/// caller.
+pub fn verify_per_step_ek_signing_strict_aware(
+    receipt: &StitchedReceiptV2,
+    side: BilateralSide,
+    expected_prev_pk: &[u8],
+    h_n: &[u8; 32],
+) -> Result<PerStepEkVerifyOutcome, DsmError> {
+    use crate::storage::client_db::is_strict_cert_chain_mode;
+
+    let (ek_pk, ek_cert, sig, label) = match side {
+        BilateralSide::A => (
+            &receipt.ek_pk_a,
+            &receipt.ek_cert_a,
+            &receipt.sig_a,
+            "A",
+        ),
+        BilateralSide::B => (
+            &receipt.ek_pk_b,
+            &receipt.ek_cert_b,
+            &receipt.sig_b,
+            "B",
+        ),
+    };
+
+    let has_artifacts = !ek_pk.is_empty() && !ek_cert.is_empty() && !sig.is_empty();
+    if has_artifacts {
+        verify_per_step_ek_signing(receipt, side, expected_prev_pk, h_n)?;
+        return Ok(PerStepEkVerifyOutcome::Verified);
+    }
+
+    if is_strict_cert_chain_mode().unwrap_or(false) {
+        return Err(DsmError::invalid_operation(format!(
+            "strict cert-chain mode: receipt carries no §11.1 per-step EK {label}-side \
+             artifacts (ek_pk_{label} / ek_cert_{label} / sig_{label}) — rejecting"
+        )));
+    }
+    Ok(PerStepEkVerifyOutcome::SkippedLegacyReceipt)
+}
+
 /// Verify a stitched receipt with signatures.
 ///
 /// Delegates to the canonical core verifier. Replay protection is enforced
@@ -1859,6 +1925,160 @@ mod tests {
             "B-side must NOT verify under sender's AK"
         );
     }
+
+    // ── verify_per_step_ek_signing_strict_aware ────────────────────────
+
+    /// Strict mode OFF + receipt has artifacts → verification runs and
+    /// returns `Verified`.
+    #[test]
+    #[serial_test::serial]
+    fn strict_aware_verifies_when_artifacts_present_and_strict_off() {
+        use crate::storage::client_db::set_strict_cert_chain_mode;
+        let (receipt, ak_pk, h_n) =
+            build_signed_receipt_for_verifier_test(BilateralSide::A, &[0xC1; 32]);
+        set_strict_cert_chain_mode(false).unwrap();
+
+        let outcome = verify_per_step_ek_signing_strict_aware(
+            &receipt,
+            BilateralSide::A,
+            &ak_pk,
+            &h_n,
+        )
+        .expect("well-formed A-side must verify");
+        assert_eq!(outcome, PerStepEkVerifyOutcome::Verified);
+    }
+
+    /// Strict mode ON + receipt has artifacts → verification runs and
+    /// returns `Verified` (strict mode does not interfere with valid
+    /// receipts).
+    #[test]
+    #[serial_test::serial]
+    fn strict_aware_verifies_when_artifacts_present_and_strict_on() {
+        use crate::storage::client_db::set_strict_cert_chain_mode;
+        let (receipt, ak_pk, h_n) =
+            build_signed_receipt_for_verifier_test(BilateralSide::A, &[0xC2; 32]);
+        set_strict_cert_chain_mode(true).unwrap();
+
+        let outcome = verify_per_step_ek_signing_strict_aware(
+            &receipt,
+            BilateralSide::A,
+            &ak_pk,
+            &h_n,
+        )
+        .expect("well-formed A-side must verify even under strict mode");
+        assert_eq!(outcome, PerStepEkVerifyOutcome::Verified);
+
+        // Reset for other tests.
+        set_strict_cert_chain_mode(false).unwrap();
+    }
+
+    /// Strict mode OFF + receipt has NO artifacts → returns
+    /// `SkippedLegacyReceipt` (transitional fail-open for pre-feature
+    /// peers).
+    #[test]
+    #[serial_test::serial]
+    fn strict_aware_skips_legacy_receipt_when_strict_off() {
+        use crate::storage::client_db::{reset_database_for_tests, set_strict_cert_chain_mode};
+        reset_database_for_tests();
+        set_strict_cert_chain_mode(false).unwrap();
+
+        // Receipt with no per-step EK artifacts (all empty).
+        let receipt = StitchedReceiptV2::new(
+            [0x01; 32],
+            [0x02; 32],
+            [0x03; 32],
+            [0xAA; 32],
+            [0x04; 32],
+            [0x05; 32],
+            [0x06; 32],
+            vec![0x07; 16],
+            vec![0x08; 16],
+            vec![0x09; 16],
+        );
+
+        let outcome = verify_per_step_ek_signing_strict_aware(
+            &receipt,
+            BilateralSide::A,
+            &[0x99u8; 32], // expected_prev_pk irrelevant when artifacts absent
+            &[0xAA; 32],
+        )
+        .expect("missing artifacts in non-strict mode must skip cleanly");
+        assert_eq!(outcome, PerStepEkVerifyOutcome::SkippedLegacyReceipt);
+    }
+
+    /// Strict mode ON + receipt has NO artifacts → fail-closed with a
+    /// structured error referencing strict mode.
+    #[test]
+    #[serial_test::serial]
+    fn strict_aware_rejects_legacy_receipt_when_strict_on() {
+        use crate::storage::client_db::{reset_database_for_tests, set_strict_cert_chain_mode};
+        reset_database_for_tests();
+        set_strict_cert_chain_mode(true).unwrap();
+
+        let receipt = StitchedReceiptV2::new(
+            [0x01; 32],
+            [0x02; 32],
+            [0x03; 32],
+            [0xAA; 32],
+            [0x04; 32],
+            [0x05; 32],
+            [0x06; 32],
+            vec![0x07; 16],
+            vec![0x08; 16],
+            vec![0x09; 16],
+        );
+
+        let err = verify_per_step_ek_signing_strict_aware(
+            &receipt,
+            BilateralSide::A,
+            &[0x99u8; 32],
+            &[0xAA; 32],
+        )
+        .expect_err("strict mode must reject legacy receipts");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("strict cert-chain mode"),
+            "error must reference strict mode, got: {msg}"
+        );
+
+        // Reset for subsequent tests.
+        set_strict_cert_chain_mode(false).unwrap();
+    }
+
+    /// Strict mode ON + receipt with artifacts present but cryptographically
+    /// invalid → propagates the underlying verification error (NOT the
+    /// strict-mode rejection — that's only for missing artifacts).
+    #[test]
+    #[serial_test::serial]
+    fn strict_aware_propagates_crypto_failure_not_strict_error() {
+        use crate::storage::client_db::set_strict_cert_chain_mode;
+        let (mut receipt, ak_pk, h_n) =
+            build_signed_receipt_for_verifier_test(BilateralSide::A, &[0xC3; 32]);
+        // Tamper the body — sig will fail verification.
+        receipt.parent_root = [0xDE; 32];
+        set_strict_cert_chain_mode(true).unwrap();
+
+        let err = verify_per_step_ek_signing_strict_aware(
+            &receipt,
+            BilateralSide::A,
+            &ak_pk,
+            &h_n,
+        )
+        .expect_err("tampered receipt must fail crypto check");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("sig_A does NOT verify"),
+            "error must surface the crypto failure, got: {msg}"
+        );
+        assert!(
+            !msg.contains("strict cert-chain mode"),
+            "should not surface strict-mode error when artifacts ARE present, got: {msg}"
+        );
+
+        set_strict_cert_chain_mode(false).unwrap();
+    }
+
+    // ── verify_per_step_ek_signing (low-level) ─────────────────────────
 
     /// An empty cert/sig/ek_pk surface must reject with a descriptive error
     /// instead of panicking inside the SPHINCS+ verifier.
