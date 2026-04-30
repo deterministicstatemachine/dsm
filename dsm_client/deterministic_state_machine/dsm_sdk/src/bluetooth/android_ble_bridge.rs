@@ -872,6 +872,7 @@ mod tests {
             last_seen_online_counter: 0,
             last_seen_ble_counter: 0,
             public_key: Vec::new(),
+            kyber_public_key: Vec::new(),
             added_at: 1,
             previous_chain_tip: None,
         };
@@ -1005,6 +1006,7 @@ mod tests {
             last_seen_online_counter: 0,
             last_seen_ble_counter: 0,
             public_key: Vec::new(),
+            kyber_public_key: Vec::new(),
             added_at: 1,
             previous_chain_tip: None,
         };
@@ -1096,6 +1098,7 @@ mod tests {
             last_seen_online_counter: 0,
             last_seen_ble_counter: 0,
             public_key: Vec::new(),
+            kyber_public_key: Vec::new(),
             added_at: 1,
             previous_chain_tip: None,
         };

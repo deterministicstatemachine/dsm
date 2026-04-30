@@ -1647,6 +1647,19 @@ message ReceiptCommit {
   // legacy receipts that pre-date the per-step EK abstraction.
   bytes ek_pk_a = 16 [(dsm_max_len)=65535];
   bytes ek_pk_b = 17 [(dsm_max_len)=65535];
+  // Per-step Kyber/ML-KEM ciphertexts (whitepaper §11). The sender derives
+  // deterministic Kyber coins from
+  //   coins = BLAKE3-256("DSM/kyber-coins\0" || h_n || C_pre
+  //                       || DevID_sender || K_DBRW)
+  // encapsulates against the recipient's Kyber public key, and the
+  // resulting ciphertext travels here. The recipient decapsulates with
+  // their local Kyber secret key to recover the same shared secret `ss`,
+  // then derives k_step = BLAKE3("DSM/kyber-ss\0" || ss). Both parties
+  // arrive at identical k_step, which is then mixed into the per-step
+  // EK derivation alongside K_DBRW. Wire-only — not part of canonical
+  // commit form (§4.2.1).
+  bytes kyber_ct_a = 18 [(dsm_max_len)=2048];
+  bytes kyber_ct_b = 19 [(dsm_max_len)=2048];
 }
 
 

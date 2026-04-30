@@ -152,6 +152,7 @@ fn faucet_claim_keeps_bilateral_tips_isolated_from_protocol_peer_progression() {
         alias: "peer".to_string(),
         genesis_hash: [0x63u8; 32].to_vec(),
         public_key: vec![0x55; 64],
+        kyber_public_key: Vec::new(),
         current_chain_tip: Some(original_tip.to_vec()),
         added_at: 1,
         verified: true,

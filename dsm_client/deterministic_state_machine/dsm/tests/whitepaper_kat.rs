@@ -174,6 +174,30 @@ fn kat_dsm_kyber_ss() {
 }
 
 // =============================================================================
+// §11 — Kyber coins for per-step EK derivation
+// =============================================================================
+
+/// Pins the canonical kyber_coins preimage form per spec:
+///   coins = BLAKE3-256("DSM/kyber-coins\0" || h_n || C_pre || DevID_sender || K_DBRW)
+/// This is what the sender feeds into the deterministic Kyber encapsulation
+/// to derive `k_step`, which then mixes into the per-step EK derivation
+/// alongside K_DBRW. (Phase F real-Kyber migration.)
+#[test]
+fn kat_dsm_kyber_coins_per_step() {
+    let h_n = [0x11u8; 32];
+    let c_pre = [0x22u8; 32];
+    let devid_sender = [0x33u8; 32];
+    let k_dbrw = [0x44u8; 32];
+    let from_code =
+        dsm::crypto::ephemeral_key::derive_kyber_coins(&h_n, &c_pre, &devid_sender, &k_dbrw);
+    assert_pin(
+        "DSM/kyber-coins per-step",
+        from_code,
+        "65d5b645be1bc2e275e1eaa5358bfaba56611c1f06b6ab985dbe85353b07acc6",
+    );
+}
+
+// =============================================================================
 // §13 — Recovery (Phase 2 rename: rollup-state → recovery-roll)
 // =============================================================================
 

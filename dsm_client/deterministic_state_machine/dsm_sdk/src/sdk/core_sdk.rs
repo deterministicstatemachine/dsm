@@ -1764,6 +1764,7 @@ impl CoreSDK {
                         needs_online_reconcile: false,
                         last_seen_online_counter: crate::util::deterministic_time::tick(),
                         last_seen_ble_counter: 0,
+                        kyber_public_key: Vec::new(),
                         previous_chain_tip: None,
                     };
 
@@ -1861,6 +1862,7 @@ impl CoreSDK {
                     needs_online_reconcile: false,
                     last_seen_online_counter: crate::util::deterministic_time::tick(),
                     last_seen_ble_counter: 0,
+                    kyber_public_key: Vec::new(),
                     previous_chain_tip: None,
                 };
 
