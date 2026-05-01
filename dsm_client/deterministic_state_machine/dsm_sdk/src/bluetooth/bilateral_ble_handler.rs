@@ -181,9 +181,14 @@ impl BilateralBleHandler {
     /// side (A for sender, B for receiver), and advances the local chain
     /// head. Returns the full-protobuf bytes of the signed receipt.
     ///
-    /// `c_pre` is the bilateral commitment hash for this transition — the
-    /// session-level precommit that the per-step EK derivation context binds
-    /// to.
+    /// `commitment_hash` is the bilateral session's commitment hash for
+    /// this transition — the session-level precommit that BOTH the
+    /// per-step EK derivation context (HKDF "DSM/ek" salt input) AND the
+    /// per-step EK signing target (BLAKE3 "DSM/receipt-bind-session"
+    /// preimage, whitepaper §11.1 Item 7) bind to. The whitepaper uses
+    /// the symbol `C_pre` for this same value at the protocol layer; we
+    /// use `commitment_hash` here to make the session-equivalence
+    /// name-evident at the call sites and avoid future refactor drift.
     ///
     /// `side` selects which side of the bilateral receipt to stamp:
     ///   * `BilateralSide::A` — local device is the sender (stamps
@@ -195,7 +200,7 @@ impl BilateralBleHandler {
         unsigned_receipt_bytes: Vec<u8>,
         counterparty_device_id: &[u8; 32],
         parent_tip: [u8; 32],
-        c_pre: [u8; 32],
+        commitment_hash: [u8; 32],
         side: BilateralSide,
     ) -> Result<Vec<u8>, DsmError> {
         let mut receipt =
@@ -239,18 +244,25 @@ impl BilateralBleHandler {
         let signing_inputs = crate::sdk::receipts::PerStepSigningInputs {
             commitment: &receipt_commitment,
             h_n: parent_tip,
-            c_pre,
+            // C_pre is the precommit for this transition. In the bilateral
+            // BLE flow the bilateral session's commitment_hash IS C_pre
+            // (verified at the call sites); the parameter rename above
+            // makes the equivalence name-evident.
+            c_pre: commitment_hash,
             devid_sender: self.device_id,
             relationship_key: rel_key,
             k_dbrw: &k_dbrw_arr,
             fallback_ak_keypair: Some((&ak_pk, &ak_sk)),
             recipient_kyber_pk: &recipient_kyber_pk,
-            // §11.1 Item 7: bind the per-step EK signature to the
-            // bilateral session's commitment_hash. `c_pre` IS the
-            // bilateral commitment hash for this transition (passed in
-            // by the caller as `commitment_hash`), so we reuse it as the
-            // session-binding input.
-            session_binding: Some(&c_pre),
+            // §11.1 Item 7: bind the per-step EK signature to this
+            // bilateral session via the BLAKE3 "DSM/receipt-bind-session"
+            // domain-separated signing target. Using the same
+            // commitment_hash value here as in `c_pre` is intentional
+            // defense-in-depth: HKDF makes EK_pk session-unique,
+            // session_binding makes sig session-unique, and the two
+            // domain tags (DSM/ek vs DSM/receipt-bind-session) keep the
+            // layers cryptographically independent.
+            session_binding: Some(&commitment_hash),
         };
         let signing_out =
             crate::sdk::receipts::sign_receipt_with_per_step_ek(&signing_inputs)?;
@@ -3331,12 +3343,15 @@ impl BilateralBleHandler {
         // Pre-feature receivers leave `counter_signed_receipt` empty and
         // we skip — strict mainnet enforcement comes later via
         // `is_strict_cert_chain_mode`.
-        // Captured for the post-canonical-commit Counterparty chain-head
-        // advance below: `Some((rel_key, ek_pk_b))` iff B-side per-step
-        // EK signing verified successfully on the receiver's
-        // counter-signed receipt. Defining outside the verify block
-        // keeps the value live past the `if let Some(...)` scope.
-        let mut verified_b_side_advance: Option<([u8; 32], Vec<u8>)> = None;
+        // §11.1 Item 8 (B-tight): the Counterparty chain-head advance
+        // that was previously here has been moved INSIDE
+        // `mark_sender_committed_with_post_state_hash`, where it sits
+        // tightly adjacent to canonical commit + session deletion.
+        // Sourcing `ek_pk_b` from the in-session cached receipt
+        // (replaced below on B-side verify success) lets the advance
+        // happen at the right SQL boundary without plumbing extra
+        // context through the function call. The startup
+        // reconciliation sweep covers any remaining wedge window.
 
         if response.counter_signed_receipt.is_empty()
             && crate::storage::client_db::is_strict_cert_chain_mode().unwrap_or(false)
@@ -3432,22 +3447,56 @@ impl BilateralBleHandler {
                         match outcome {
                             crate::sdk::receipts::PerStepEkVerifyOutcome::Verified => {
                                 // Replace the in-memory A-only cached
-                                // receipt with the fully co-signed bytes so
-                                // the settlement that follows archives both
-                                // sigs.
+                                // receipt with the fully co-signed bytes
+                                // so settlement archives both sigs AND so
+                                // mark_sender_committed_with_post_state_hash
+                                // can source ek_pk_b from this cache for
+                                // the Item 8 (B-tight) Counterparty
+                                // advance.
+                                let snapshot_for_persist: BilateralBleSession;
                                 {
                                     let mut sessions = self.sessions.sessions.lock().await;
                                     if let Some(s) = sessions.get_mut(&commitment_hash) {
                                         s.stitched_receipt_bytes =
                                             Some(response.counter_signed_receipt.clone());
+                                        snapshot_for_persist = s.clone();
+                                    } else {
+                                        // Session vanished between lookup and
+                                        // verify — recovery path raced with
+                                        // cleanup. Skip persistence; the
+                                        // in-flight advance still uses the
+                                        // in-memory bytes.
+                                        let _ = rel_key;
+                                        info!(
+                                            "[BILATERAL] §11.1 per-step EK B-side verification PASS for commitment {} (session vanished before persist)",
+                                            bytes_to_base32(&commitment_hash[..8])
+                                        );
+                                        return Ok(());
                                     }
                                 }
-                                // Defer the Counterparty chain-head
-                                // advance until canonical commit succeeds
-                                // below (atomicity hardening per Stage-6
-                                // adversarial critique).
-                                verified_b_side_advance =
-                                    Some((rel_key, counter_signed.ek_pk_b.clone()));
+                                // Flush the counter-signed bytes to SQLite
+                                // RIGHT NOW so the startup reconciliation
+                                // sweep can see ek_pk_b after a crash inside
+                                // mark_sender_committed_with_post_state_hash.
+                                // Without this flush, the SQLite row would
+                                // still carry the A-only bytes from the
+                                // initial persist_session call and the sweep
+                                // would have no way to recover the
+                                // Counterparty chain head.
+                                if let Err(e) = self
+                                    .persist_session(&snapshot_for_persist, None)
+                                    .await
+                                {
+                                    warn!(
+                                        "[BILATERAL] §11.1 (B-tight) failed to persist counter-signed receipt before canonical commit: {} — wedge recovery will fall back to AK_pk on next attempt",
+                                        e
+                                    );
+                                }
+                                // rel_key is now unused at this site (the
+                                // advance migrated into mark_sender) — keep
+                                // the suppression explicit so future readers
+                                // don't cargo-cult re-add it here.
+                                let _ = rel_key;
                                 info!(
                                     "[BILATERAL] §11.1 per-step EK B-side verification PASS for commitment {}",
                                     bytes_to_base32(&commitment_hash[..8])
@@ -3509,38 +3558,10 @@ impl BilateralBleHandler {
             meta
         };
 
-        // §11.1 post-commit: advance the local mirror of the RECEIVER's
-        // cert chain head (Counterparty side from sender's POV). Done
-        // *after* canonical commit succeeds — `mark_sender_committed_…`
-        // returned `Some(meta)` above and we did not bail. If the
-        // canonical commit had failed, we would have returned the
-        // structured error before reaching this point, so the chain
-        // head is never advanced past a non-committed transition.
-        if let Some((rel_key, ek_pk_b)) = verified_b_side_advance {
-            match crate::storage::client_db::advance_cert_chain_head(
-                &rel_key,
-                crate::storage::client_db::CertChainSide::Counterparty,
-                &ek_pk_b,
-            ) {
-                Ok(Some(step)) => {
-                    info!(
-                        "[BILATERAL] §11.1 advanced Counterparty cert chain head to receiver EK_pk_{step} for commitment {}",
-                        bytes_to_base32(&commitment_hash[..8])
-                    );
-                }
-                Ok(None) => {
-                    warn!(
-                        "[BILATERAL] §11.1 cert_chain_heads.Counterparty row missing for relationship — verification used AK_pk fallback; multi-step will degrade until init_cert_chain_for_relationship is called"
-                    );
-                }
-                Err(e) => {
-                    error!(
-                        "[BILATERAL] §11.1 failed to advance Counterparty cert chain head: {} — multi-step verification may degrade until reconciled",
-                        e
-                    );
-                }
-            }
-        }
+        // §11.1 Counterparty chain-head advance has moved INSIDE
+        // `mark_sender_committed_with_post_state_hash` (Item 8 B-tight)
+        // so it sits tightly adjacent to canonical commit + session
+        // deletion. Removed from here.
 
         crate::sdk::transfer_hooks::post_transfer_cleanup(
             &meta.token_id,
@@ -4677,7 +4698,10 @@ impl BilateralBleHandler {
         // past this step; signing would mint a new EK that does not match the
         // cert the receiver already verified.
         let receipt_bytes: Option<Vec<u8>> = if cached_receipt.is_some() {
-            cached_receipt
+            // Clone here so the §11.1 (B-tight) Counterparty advance block
+            // below can still source ek_pk_b from the cached counter-signed
+            // bytes after settlement has consumed `receipt_bytes`.
+            cached_receipt.clone()
         } else {
             log::error!(
                 "[BILATERAL] No cached signed receipt for committed session — \
@@ -4751,6 +4775,64 @@ impl BilateralBleHandler {
             if let Some(sess) = sessions.get_mut(commitment_hash) {
                 sess.phase = BilateralPhase::Committed;
                 info!("Session phase updated to Committed");
+            }
+        }
+
+        // §11.1 Item 8 (B-tight) — advance the local mirror of the
+        // RECEIVER's cert chain head (Counterparty side from sender's
+        // POV) immediately before deleting the session row. Sourcing
+        // `ek_pk_b` from the in-session cached receipt (which
+        // `handle_commit_response` already replaced with the
+        // counter-signed bytes after B-side per-step EK verification)
+        // keeps the advance tightly adjacent to canonical commit:
+        // canonical commit → settlement → phase=Committed → advance
+        // → delete. A crash inside this narrow window leaves the
+        // session row visible in SQLite for the startup reconciliation
+        // sweep to repair the chain head from `stitched_receipt_bytes`.
+        // Empty `ek_pk_b` → legacy / pre-feature receiver, skip.
+        if let Some(ref counter_signed_bytes) = cached_receipt {
+            match dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
+                counter_signed_bytes,
+            ) {
+                Ok(receipt) if !receipt.ek_pk_b.is_empty() => {
+                    let rel_key = dsm::verification::smt_replace_witness::compute_smt_key(
+                        &self.device_id,
+                        &counterparty_device_id,
+                    );
+                    match crate::storage::client_db::advance_cert_chain_head(
+                        &rel_key,
+                        crate::storage::client_db::CertChainSide::Counterparty,
+                        &receipt.ek_pk_b,
+                    ) {
+                        Ok(Some(step)) => {
+                            info!(
+                                "[BILATERAL] §11.1 (B-tight) advanced Counterparty cert chain head to receiver EK_pk_{step} for commitment {}",
+                                bytes_to_base32(&commitment_hash[..8])
+                            );
+                        }
+                        Ok(None) => {
+                            warn!(
+                                "[BILATERAL] §11.1 cert_chain_heads.Counterparty row missing for relationship — verification used AK_pk fallback"
+                            );
+                        }
+                        Err(e) => {
+                            error!(
+                                "[BILATERAL] §11.1 (B-tight) failed to advance Counterparty cert chain head: {} — startup reconciliation sweep will retry from session row",
+                                e
+                            );
+                        }
+                    }
+                }
+                Ok(_) => {
+                    // ek_pk_b empty — legacy / pre-feature receiver,
+                    // no Counterparty advance needed.
+                }
+                Err(e) => {
+                    warn!(
+                        "[BILATERAL] §11.1 (B-tight) cached counter-signed receipt failed to decode for advance: {} — startup reconciliation sweep will retry",
+                        e
+                    );
+                }
             }
         }
 
