@@ -273,6 +273,34 @@ fn kat_dsm_ek_derivation_seed() {
 }
 
 // =============================================================================
+// §11.1 — Receipt-to-session binding (Item 7 forward hardening)
+// =============================================================================
+
+/// Pins the canonical session-binding signing target. The per-step EK signing
+/// helper uses this domain when the caller supplies the bilateral session's
+/// `commitment_hash` — `sig_a` / `sig_b` then sign over
+///   target = BLAKE3("DSM/receipt-bind-session\0" || receipt_commitment ||
+///                   commitment_hash)
+/// instead of over `receipt_commitment` directly. Cryptographically binds the
+/// signature to a specific bilateral session, defeating cross-session receipt
+/// substitution. The §4.2.1 canonical commit form stays unchanged — binding is
+/// added at the signing target level only.
+#[test]
+fn kat_dsm_receipt_bind_session() {
+    let receipt_commitment = [0xAA_u8; 32];
+    let commitment_hash = [0xBB_u8; 32];
+    let mut input = Vec::with_capacity(64);
+    input.extend_from_slice(&receipt_commitment);
+    input.extend_from_slice(&commitment_hash);
+    let expected = spec_digest("DSM/receipt-bind-session", &input);
+    assert_pin(
+        "DSM/receipt-bind-session",
+        expected,
+        "14e7e00737d95d527a1181d969568b6ef627cd7d8044a2bfd762b775b5374f93",
+    );
+}
+
+// =============================================================================
 // §12 — DBRW binding (verified aligned)
 // =============================================================================
 

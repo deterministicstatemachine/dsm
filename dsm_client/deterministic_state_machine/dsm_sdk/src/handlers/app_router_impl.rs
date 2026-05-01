@@ -1474,6 +1474,12 @@ impl AppRouterImpl {
                             k_dbrw: &k_dbrw_arr,
                             fallback_ak_keypair: Some((&ak_pk, &ak_sk)),
                             recipient_kyber_pk: &recipient_kyber_pk,
+                            // §11.1 Item 7: bind the per-step EK
+                            // signature to the bilateral session.
+                            // For online wallet.send the receipt
+                            // commitment IS the session identifier,
+                            // so we reuse it as session_binding.
+                            session_binding: Some(&commitment),
                         };
                         match crate::sdk::receipts::sign_receipt_with_per_step_ek(&signing_inputs)
                         {

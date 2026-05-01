@@ -245,6 +245,12 @@ impl BilateralBleHandler {
             k_dbrw: &k_dbrw_arr,
             fallback_ak_keypair: Some((&ak_pk, &ak_sk)),
             recipient_kyber_pk: &recipient_kyber_pk,
+            // §11.1 Item 7: bind the per-step EK signature to the
+            // bilateral session's commitment_hash. `c_pre` IS the
+            // bilateral commitment hash for this transition (passed in
+            // by the caller as `commitment_hash`), so we reuse it as the
+            // session-binding input.
+            session_binding: Some(&c_pre),
         };
         let signing_out =
             crate::sdk::receipts::sign_receipt_with_per_step_ek(&signing_inputs)?;
@@ -3417,6 +3423,11 @@ impl BilateralBleHandler {
                                 crate::sdk::receipts::BilateralSide::B,
                                 &expected_prev_pk,
                                 &counter_signed.parent_tip,
+                                // §11.1 Item 7: receipt's sig_b must
+                                // verify under the session-bound
+                                // signing target (commitment_hash for
+                                // this bilateral session).
+                                Some(&commitment_hash),
                             )?;
                         match outcome {
                             crate::sdk::receipts::PerStepEkVerifyOutcome::Verified => {
@@ -3813,6 +3824,10 @@ impl BilateralBleHandler {
                         crate::sdk::receipts::BilateralSide::A,
                         &expected_prev_pk,
                         &receipt.parent_tip,
+                        // §11.1 Item 7: receipt's sig_a must verify
+                        // under the session-bound signing target
+                        // (commitment_hash for this bilateral session).
+                        Some(&commitment_hash),
                     )?;
                     match outcome {
                         crate::sdk::receipts::PerStepEkVerifyOutcome::Verified => {
