@@ -1007,6 +1007,7 @@ impl BilateralBleHandler {
         let mut counterparties: HashSet<[u8; 32]> = HashSet::new();
         let mut failed_count = 0;
         let mut deleted_malformed_count = 0;
+        let mut wedge_recovered_count = 0;
 
         for record in records {
             if let Err(validation_error) = self.validate_persisted_restore_record(&record) {
@@ -1025,10 +1026,12 @@ impl BilateralBleHandler {
                 continue;
             }
 
+            let mut counterparty_device_id_arr: Option<[u8; 32]> = None;
             if record.counterparty_device_id.len() == 32 {
                 let mut counterparty_device_id = [0u8; 32];
                 counterparty_device_id.copy_from_slice(&record.counterparty_device_id);
                 counterparties.insert(counterparty_device_id);
+                counterparty_device_id_arr = Some(counterparty_device_id);
             }
 
             if matches!(record.phase.as_str(), "committed" | "rejected" | "failed") {
@@ -1037,6 +1040,115 @@ impl BilateralBleHandler {
                     record.phase
                 );
                 continue;
+            }
+
+            // §11.1 Item 8b — Counterparty cert-chain-head wedge
+            // recovery sweep. If a ConfirmPending session carries a
+            // counter-signed receipt (ek_pk_b populated, B-side
+            // verified successfully BEFORE the crash), check whether
+            // the cert link from current Counterparty → ek_pk_b
+            // verifies. If it does, current Counterparty is exactly
+            // one step behind the receipt's chain head — this is the
+            // wedge state from a crash inside
+            // `mark_sender_committed_with_post_state_hash` between
+            // canonical commit and the inline Counterparty advance.
+            // Advancing now closes the wedge before the existing
+            // "mark failed" logic moves the session to terminal.
+            //
+            // Safety: the cert-link check is the gate. Verification
+            // only passes when current Counterparty IS the prior
+            // chain head. Receipts where Counterparty is already
+            // advanced (cert chains from older key) fail the check
+            // and the sweep skips. Receipts unrelated to this
+            // relationship also fail. Conservative by construction —
+            // we never advance unless cryptographically provable.
+            if record.phase == "confirm_pending" {
+                if let Some(counterparty_id) = counterparty_device_id_arr {
+                    if let Some(ref bytes) = record.stitched_receipt_bytes {
+                        match dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
+                            bytes,
+                        ) {
+                            Ok(receipt)
+                                if !receipt.ek_pk_b.is_empty()
+                                    && !receipt.ek_cert_b.is_empty() =>
+                            {
+                                let rel_key =
+                                    dsm::verification::smt_replace_witness::compute_smt_key(
+                                        &self.device_id,
+                                        &counterparty_id,
+                                    );
+                                if let Ok(Some(current_cp_pk)) =
+                                    crate::storage::client_db::load_cert_chain_head_pubkey(
+                                        &rel_key,
+                                        crate::storage::client_db::CertChainSide::Counterparty,
+                                    )
+                                {
+                                    match dsm::crypto::ephemeral_key::verify_ek_cert(
+                                        &current_cp_pk,
+                                        &receipt.ek_pk_b,
+                                        &receipt.parent_tip,
+                                        &receipt.ek_cert_b,
+                                    ) {
+                                        Ok(true) => {
+                                            // Wedge case: current
+                                            // Counterparty IS the prior
+                                            // chain head, advance.
+                                            match crate::storage::client_db::advance_cert_chain_head(
+                                                &rel_key,
+                                                crate::storage::client_db::CertChainSide::Counterparty,
+                                                &receipt.ek_pk_b,
+                                            ) {
+                                                Ok(Some(step)) => {
+                                                    info!(
+                                                        "[BLE_HANDLER] §11.1 Item 8b: reconciled Counterparty wedge for commitment {} → step {}",
+                                                        bytes_to_base32(&record.commitment_hash[..8.min(record.commitment_hash.len())]),
+                                                        step
+                                                    );
+                                                    wedge_recovered_count += 1;
+                                                }
+                                                Ok(None) => {
+                                                    debug!(
+                                                        "[BLE_HANDLER] §11.1 Item 8b: Counterparty row vanished between load and advance — skipping"
+                                                    );
+                                                }
+                                                Err(e) => {
+                                                    warn!(
+                                                        "[BLE_HANDLER] §11.1 Item 8b: failed to advance Counterparty during wedge recovery: {}",
+                                                        e
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        Ok(false) => {
+                                            // Cert link fails — Counterparty
+                                            // is either already advanced or
+                                            // at an unrelated state.
+                                            // Conservative skip.
+                                            debug!(
+                                                "[BLE_HANDLER] §11.1 Item 8b: cert-link check did not match current Counterparty — skipping wedge recovery (already advanced or unrelated session)"
+                                            );
+                                        }
+                                        Err(e) => {
+                                            debug!(
+                                                "[BLE_HANDLER] §11.1 Item 8b: verify_ek_cert error during wedge recovery: {} — skipping",
+                                                e
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            Ok(_) => {
+                                // ek_pk_b empty — B-side never
+                                // verified; this is a normal in-flight
+                                // ConfirmPending session, not a wedge.
+                            }
+                            Err(_) => {
+                                // Receipt malformed — leave to existing
+                                // "mark failed" handling.
+                            }
+                        }
+                    }
+                }
             }
 
             if let Err(e) = crate::storage::client_db::update_bilateral_session_phase(
@@ -1068,6 +1180,12 @@ impl BilateralBleHandler {
             info!(
                 "[BLE_HANDLER] Deleted {} malformed bilateral session(s) during restore",
                 deleted_malformed_count
+            );
+        }
+        if wedge_recovered_count > 0 {
+            info!(
+                "[BLE_HANDLER] §11.1 Item 8b: reconciled {} Counterparty cert-chain-head wedge(s) during restore",
+                wedge_recovered_count
             );
         }
 
@@ -5894,6 +6012,188 @@ mod tests {
                 .expect("load terminal")
                 .is_some(),
             "existing terminal row should remain untouched"
+        );
+    }
+
+    /// §11.1 Item 8b — wedge recovery: a ConfirmPending session with a
+    /// counter-signed receipt whose ek_cert_b chains from the current
+    /// Counterparty pubkey MUST be reconciled by advancing Counterparty
+    /// to ek_pk_b during `restore_sessions_from_storage`.
+    #[tokio::test]
+    #[serial]
+    async fn test_restore_sweep_reconciles_counterparty_wedge() {
+        use crate::storage::client_db::{
+            init_cert_chain_head, load_cert_chain_head_pubkey, CertChainSide,
+        };
+        use dsm::crypto::ephemeral_key::generate_ephemeral_keypair;
+        use dsm::types::receipt_types::StitchedReceiptV2;
+
+        init_test_db();
+
+        let local_device_id = [11u8; 32];
+        let counterparty_device_id = [13u8; 32];
+        let (_bilateral_manager, handler) =
+            make_test_handler(local_device_id, [12u8; 32], b"sweep-wedge-recovery");
+
+        // Build a counter-signed receipt where ek_cert_b chains from a
+        // known prior key (= the current Counterparty pubkey we'll seed).
+        let (prior_cp_pk, prior_cp_sk) = generate_ephemeral_keypair(&[0xA1; 32]).unwrap();
+        let (next_ek_pk, _next_ek_sk) = generate_ephemeral_keypair(&[0xA2; 32]).unwrap();
+        let h_n = [0xCA; 32];
+
+        let cert_b =
+            dsm::crypto::ephemeral_key::sign_ek_cert(&prior_cp_sk, &next_ek_pk, &h_n).unwrap();
+
+        let mut receipt = StitchedReceiptV2::new(
+            [0x01; 32],         // genesis
+            counterparty_device_id, // devid_a (= receiver in their own view)
+            local_device_id,    // devid_b (= sender from their view)
+            h_n,                // parent_tip
+            [0x04; 32],
+            [0x05; 32],
+            [0x06; 32],
+            vec![0x07; 16],
+            vec![0x08; 16],
+            vec![0x09; 16],
+        );
+        receipt.set_ek_pk_b(next_ek_pk.clone());
+        receipt.set_ek_cert_b(cert_b);
+        receipt.add_sig_b(vec![0xAA; 64]); // body sig — content irrelevant for sweep gate
+
+        let canonical_bytes = receipt.to_canonical_protobuf().unwrap();
+        // We need the FULL bytes (including ek_cert_b/ek_pk_b/sig_b) so
+        // round-tripping decodes the per-step EK fields.
+        let full_bytes = receipt.to_full_protobuf().unwrap();
+        let _ = canonical_bytes; // ensure method compiles
+
+        // Compute rel_key the same way the sweep does.
+        let rel_key = dsm::verification::smt_replace_witness::compute_smt_key(
+            &local_device_id,
+            &counterparty_device_id,
+        );
+        // Seed Counterparty at the prior key — this is exactly the
+        // wedge state (chain head behind the receipt's ek_pk_b by
+        // one step).
+        init_cert_chain_head(&rel_key, CertChainSide::Counterparty, &prior_cp_pk).unwrap();
+
+        // Persist a ConfirmPending session carrying the counter-signed
+        // bytes — mirrors what the in-flight flush would have left
+        // behind on a crash inside mark_sender_committed.
+        let record = crate::storage::client_db::BilateralSessionRecord {
+            commitment_hash: vec![0xA3; 32],
+            counterparty_device_id: counterparty_device_id.to_vec(),
+            counterparty_genesis_hash: Some(vec![0xB3; 32]),
+            operation_bytes: crate::storage::client_db::serialize_operation(&Operation::Noop),
+            phase: "confirm_pending".to_string(),
+            local_signature: Some(vec![0xC3; 64]),
+            counterparty_signature: Some(vec![0xD3; 64]),
+            created_at_step: 42,
+            sender_ble_address: None,
+            stitched_receipt_bytes: Some(full_bytes),
+        };
+        crate::storage::client_db::store_bilateral_session(&record).expect("persist wedge session");
+
+        // Run the sweep.
+        handler
+            .restore_sessions_from_storage()
+            .await
+            .expect("restore");
+
+        // Counterparty must now be at next_ek_pk (advanced).
+        let after = load_cert_chain_head_pubkey(&rel_key, CertChainSide::Counterparty)
+            .unwrap()
+            .expect("Counterparty row still exists");
+        assert_eq!(
+            after, next_ek_pk,
+            "Item 8b sweep must advance Counterparty when cert_b chains from current head"
+        );
+    }
+
+    /// §11.1 Item 8b — safety: a session whose ek_cert_b does NOT chain
+    /// from the current Counterparty (e.g., Counterparty already
+    /// advanced past, or unrelated cert) MUST NOT be advanced. The
+    /// sweep is conservative by construction — only the cert-link
+    /// check unlocks an advance.
+    #[tokio::test]
+    #[serial]
+    async fn test_restore_sweep_does_not_advance_when_cert_does_not_chain() {
+        use crate::storage::client_db::{
+            init_cert_chain_head, load_cert_chain_head_pubkey, CertChainSide,
+        };
+        use dsm::crypto::ephemeral_key::generate_ephemeral_keypair;
+        use dsm::types::receipt_types::StitchedReceiptV2;
+
+        init_test_db();
+
+        let local_device_id = [21u8; 32];
+        let counterparty_device_id = [23u8; 32];
+        let (_bilateral_manager, handler) =
+            make_test_handler(local_device_id, [22u8; 32], b"sweep-conservative-safety");
+
+        // Cert signed by an UNRELATED key, NOT by the seeded
+        // Counterparty pubkey.
+        let (unrelated_pk, unrelated_sk) = generate_ephemeral_keypair(&[0xB1; 32]).unwrap();
+        let (seeded_cp_pk, _seeded_cp_sk) = generate_ephemeral_keypair(&[0xB2; 32]).unwrap();
+        let (next_ek_pk, _) = generate_ephemeral_keypair(&[0xB3; 32]).unwrap();
+        let h_n = [0xCB; 32];
+
+        let cert_b =
+            dsm::crypto::ephemeral_key::sign_ek_cert(&unrelated_sk, &next_ek_pk, &h_n).unwrap();
+        let _ = unrelated_pk;
+
+        let mut receipt = StitchedReceiptV2::new(
+            [0x01; 32],
+            counterparty_device_id,
+            local_device_id,
+            h_n,
+            [0x04; 32],
+            [0x05; 32],
+            [0x06; 32],
+            vec![0x07; 16],
+            vec![0x08; 16],
+            vec![0x09; 16],
+        );
+        receipt.set_ek_pk_b(next_ek_pk);
+        receipt.set_ek_cert_b(cert_b);
+        receipt.add_sig_b(vec![0xAA; 64]);
+        let full_bytes = receipt.to_full_protobuf().unwrap();
+
+        let rel_key = dsm::verification::smt_replace_witness::compute_smt_key(
+            &local_device_id,
+            &counterparty_device_id,
+        );
+        // Seed Counterparty at a different key — the cert was NOT signed
+        // by the SK behind this pubkey, so the cert-link check must fail.
+        init_cert_chain_head(&rel_key, CertChainSide::Counterparty, &seeded_cp_pk).unwrap();
+
+        let record = crate::storage::client_db::BilateralSessionRecord {
+            commitment_hash: vec![0xB4; 32],
+            counterparty_device_id: counterparty_device_id.to_vec(),
+            counterparty_genesis_hash: Some(vec![0xB5; 32]),
+            operation_bytes: crate::storage::client_db::serialize_operation(&Operation::Noop),
+            phase: "confirm_pending".to_string(),
+            local_signature: Some(vec![0xC5; 64]),
+            counterparty_signature: Some(vec![0xD5; 64]),
+            created_at_step: 99,
+            sender_ble_address: None,
+            stitched_receipt_bytes: Some(full_bytes),
+        };
+        crate::storage::client_db::store_bilateral_session(&record)
+            .expect("persist safety session");
+
+        handler
+            .restore_sessions_from_storage()
+            .await
+            .expect("restore");
+
+        // Counterparty MUST still equal seeded_cp_pk — sweep refused to
+        // advance because the cert-link check failed.
+        let after = load_cert_chain_head_pubkey(&rel_key, CertChainSide::Counterparty)
+            .unwrap()
+            .expect("Counterparty row still exists");
+        assert_eq!(
+            after, seeded_cp_pk,
+            "Item 8b sweep must NOT advance when cert_b does not chain from current Counterparty"
         );
     }
 
