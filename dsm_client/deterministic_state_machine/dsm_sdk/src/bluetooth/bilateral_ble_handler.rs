@@ -997,6 +997,25 @@ impl BilateralBleHandler {
     /// surface retry-required state, but no in-memory session is restored.
     /// The return value remains a compatibility no-op; callers should inspect
     /// persisted session state instead of relying on a restoration count.
+    /// Restore bilateral sessions from SQLite at startup.
+    ///
+    /// **Concurrency invariant — startup-only entry point.**
+    /// This function MUST only be called from the SDK bootstrap path
+    /// (currently `bluetooth::mod.rs` inside the init-time
+    /// `rt.block_on`), BEFORE any BLE handler begins processing live
+    /// messages. The §11.1 Item 8b wedge-recovery sweep below mutates
+    /// `cert_chain_heads.Counterparty` based on the cert-link gate; if
+    /// a concurrent live-handler path also writes to the same row
+    /// (e.g., a normal bilateral commit's inline advance), the result
+    /// is racy.
+    ///
+    /// The crypto gate (verify_ek_cert under current Counterparty)
+    /// makes the sweep effectively idempotent for benign double-runs
+    /// in the same startup, but it does NOT serialize against
+    /// concurrent writes from a live handler. Do not add a
+    /// "Repair Database" UI button or a background-task entry point
+    /// without first wrapping cert-chain-head writes in a SQL
+    /// transaction held across the verify→advance pair.
     pub async fn restore_sessions_from_storage(&self) -> Result<usize, DsmError> {
         info!("[BLE_HANDLER] Restoring bilateral sessions from storage...");
 
