@@ -34,6 +34,14 @@ pub const TAG_DEV_MERKLE: &str = "DSM/dev-merkle";
 pub const TAG_DEV_LEAF: &str = "DSM/dev-leaf";
 pub const TAG_DEV_EMPTY: &str = "DSM/dev-empty";
 
+/// Canonical padding leaf for odd-count Merkle levels in the Device Tree
+/// (Issue #182 Finding #4 resolution). Replaces the previous self-duplication
+/// pattern (`hash_node(&chunk[0], &chunk[0])`) so that a 3-device tree
+/// `[A, B, C]` no longer collides with a hypothetical 4-device tree
+/// `[A, B, C, C]`. Distinct domain tag from `TAG_DEV_LEAF` ensures the
+/// padding leaf cannot collide with any legitimate hashed DevID.
+pub const TAG_DEV_PAD: &str = "DSM/dev-tree-pad";
+
 // `tagged_bytes()` REMOVED — Issue #182 Finding #3.
 // The helper was only used in the module's own self-tests and had
 // ambiguous semantics relative to the auto-NUL `dsm_domain_hasher`
@@ -57,6 +65,7 @@ mod tests {
             TAG_DEV_MERKLE,
             TAG_DEV_LEAF,
             TAG_DEV_EMPTY,
+            TAG_DEV_PAD,
         ];
         for tag in &tags {
             assert!(
@@ -77,6 +86,7 @@ mod tests {
             TAG_DEV_MERKLE,
             TAG_DEV_LEAF,
             TAG_DEV_EMPTY,
+            TAG_DEV_PAD,
         ];
         let set: HashSet<&str> = tags.iter().copied().collect();
         assert_eq!(set.len(), tags.len(), "All domain tags must be unique");
@@ -92,6 +102,7 @@ mod tests {
             TAG_DEV_MERKLE,
             TAG_DEV_LEAF,
             TAG_DEV_EMPTY,
+            TAG_DEV_PAD,
         ];
         for tag in &tags {
             assert!(tag.starts_with("DSM/"), "Tag {tag:?} must start with DSM/");

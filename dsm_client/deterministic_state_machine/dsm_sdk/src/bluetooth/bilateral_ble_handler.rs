@@ -1016,6 +1016,17 @@ impl BilateralBleHandler {
     /// "Repair Database" UI button or a background-task entry point
     /// without first wrapping cert-chain-head writes in a SQL
     /// transaction held across the verify→advance pair.
+    ///
+    /// **Multi-step wedge recovery (Item 8b enhancement):** the wedge
+    /// sweep iterates to a fixed point — keep running over the
+    /// candidate set until a full pass produces no advances. This
+    /// recovers chains of single-step wedges within one relationship
+    /// (theoretical N consecutive crashes inside the inline window)
+    /// and is order-independent: candidates can be processed in any
+    /// SQLite-returned order and the chain still resolves. Bounded by
+    /// the number of candidate rows (each pass advances at most once
+    /// per row), so worst case O(N²) verify_ek_cert calls — fine for
+    /// startup.
     pub async fn restore_sessions_from_storage(&self) -> Result<usize, DsmError> {
         info!("[BLE_HANDLER] Restoring bilateral sessions from storage...");
 
@@ -1027,6 +1038,15 @@ impl BilateralBleHandler {
         let mut failed_count = 0;
         let mut deleted_malformed_count = 0;
         let mut wedge_recovered_count = 0;
+        // Phase-1 pass collects wedge candidates while validating /
+        // pruning the rest. We DEFER all advance_cert_chain_head calls
+        // until phase 2 (fixed-point loop) so the order of records
+        // doesn't matter for chained recoveries.
+        let mut wedge_candidates: Vec<(
+            Vec<u8>,                                    // commitment_hash (for logging)
+            [u8; 32],                                   // rel_key
+            dsm::types::receipt_types::StitchedReceiptV2, // decoded receipt
+        )> = Vec::new();
 
         for record in records {
             if let Err(validation_error) = self.validate_persisted_restore_record(&record) {
@@ -1062,25 +1082,21 @@ impl BilateralBleHandler {
             }
 
             // §11.1 Item 8b — Counterparty cert-chain-head wedge
-            // recovery sweep. If a ConfirmPending session carries a
-            // counter-signed receipt (ek_pk_b populated, B-side
-            // verified successfully BEFORE the crash), check whether
-            // the cert link from current Counterparty → ek_pk_b
-            // verifies. If it does, current Counterparty is exactly
-            // one step behind the receipt's chain head — this is the
-            // wedge state from a crash inside
-            // `mark_sender_committed_with_post_state_hash` between
-            // canonical commit and the inline Counterparty advance.
-            // Advancing now closes the wedge before the existing
-            // "mark failed" logic moves the session to terminal.
+            // recovery sweep. Phase 1: COLLECT candidates here. Phase 2
+            // (fixed-point loop after this for-loop) iterates over the
+            // candidate set, calling verify_ek_cert + advance, until a
+            // full pass produces no advances. Deferring the advance to
+            // phase 2 makes the recovery order-independent — chains of
+            // single-step wedges within a relationship resolve
+            // regardless of the SQLite query's row order.
             //
-            // Safety: the cert-link check is the gate. Verification
-            // only passes when current Counterparty IS the prior
-            // chain head. Receipts where Counterparty is already
-            // advanced (cert chains from older key) fail the check
-            // and the sweep skips. Receipts unrelated to this
+            // Safety: the cert-link check (in phase 2) is the gate.
+            // Verification only passes when current Counterparty IS
+            // the prior chain head. Receipts where Counterparty is
+            // already advanced (cert chains from older key) fail the
+            // check and the sweep skips. Receipts unrelated to this
             // relationship also fail. Conservative by construction —
-            // we never advance unless cryptographically provable.
+            // never advance unless cryptographically provable.
             if record.phase == "confirm_pending" {
                 if let Some(counterparty_id) = counterparty_device_id_arr {
                     if let Some(ref bytes) = record.stitched_receipt_bytes {
@@ -1096,65 +1112,11 @@ impl BilateralBleHandler {
                                         &self.device_id,
                                         &counterparty_id,
                                     );
-                                if let Ok(Some(current_cp_pk)) =
-                                    crate::storage::client_db::load_cert_chain_head_pubkey(
-                                        &rel_key,
-                                        crate::storage::client_db::CertChainSide::Counterparty,
-                                    )
-                                {
-                                    match dsm::crypto::ephemeral_key::verify_ek_cert(
-                                        &current_cp_pk,
-                                        &receipt.ek_pk_b,
-                                        &receipt.parent_tip,
-                                        &receipt.ek_cert_b,
-                                    ) {
-                                        Ok(true) => {
-                                            // Wedge case: current
-                                            // Counterparty IS the prior
-                                            // chain head, advance.
-                                            match crate::storage::client_db::advance_cert_chain_head(
-                                                &rel_key,
-                                                crate::storage::client_db::CertChainSide::Counterparty,
-                                                &receipt.ek_pk_b,
-                                            ) {
-                                                Ok(Some(step)) => {
-                                                    info!(
-                                                        "[BLE_HANDLER] §11.1 Item 8b: reconciled Counterparty wedge for commitment {} → step {}",
-                                                        bytes_to_base32(&record.commitment_hash[..8.min(record.commitment_hash.len())]),
-                                                        step
-                                                    );
-                                                    wedge_recovered_count += 1;
-                                                }
-                                                Ok(None) => {
-                                                    debug!(
-                                                        "[BLE_HANDLER] §11.1 Item 8b: Counterparty row vanished between load and advance — skipping"
-                                                    );
-                                                }
-                                                Err(e) => {
-                                                    warn!(
-                                                        "[BLE_HANDLER] §11.1 Item 8b: failed to advance Counterparty during wedge recovery: {}",
-                                                        e
-                                                    );
-                                                }
-                                            }
-                                        }
-                                        Ok(false) => {
-                                            // Cert link fails — Counterparty
-                                            // is either already advanced or
-                                            // at an unrelated state.
-                                            // Conservative skip.
-                                            debug!(
-                                                "[BLE_HANDLER] §11.1 Item 8b: cert-link check did not match current Counterparty — skipping wedge recovery (already advanced or unrelated session)"
-                                            );
-                                        }
-                                        Err(e) => {
-                                            debug!(
-                                                "[BLE_HANDLER] §11.1 Item 8b: verify_ek_cert error during wedge recovery: {} — skipping",
-                                                e
-                                            );
-                                        }
-                                    }
-                                }
+                                wedge_candidates.push((
+                                    record.commitment_hash.clone(),
+                                    rel_key,
+                                    receipt,
+                                ));
                             }
                             Ok(_) => {
                                 // ek_pk_b empty — B-side never
@@ -1182,6 +1144,102 @@ impl BilateralBleHandler {
             }
 
             failed_count += 1;
+        }
+
+        // §11.1 Item 8b — Phase 2: fixed-point wedge recovery.
+        //
+        // Iterate over `wedge_candidates` until a full pass yields no
+        // advances. This handles chains of single-step wedges where
+        // SQLite returns candidates in an arbitrary order: a candidate
+        // for transition `n+1` whose cert chains from `EK_pk_n` may
+        // appear before the candidate for transition `n` whose cert
+        // chains from `EK_pk_{n-1}`. The first pass advances `n`; the
+        // next pass advances `n+1` (which now verifies because
+        // Counterparty advanced).
+        //
+        // The cert-link gate (verify_ek_cert under current
+        // Counterparty) makes each advance cryptographically provable
+        // and the pass-by-pass progress monotonic. Bounded by
+        // `wedge_candidates.len()` outer iterations because each pass
+        // advances Counterparty for AT MOST one candidate per row, so
+        // after N passes either everything is recovered or no further
+        // progress is possible.
+        let max_passes = wedge_candidates.len();
+        for _pass in 0..max_passes {
+            let mut advanced_this_pass = 0usize;
+            for (commitment_hash, rel_key, receipt) in &wedge_candidates {
+                let current_cp_pk =
+                    match crate::storage::client_db::load_cert_chain_head_pubkey(
+                        rel_key,
+                        crate::storage::client_db::CertChainSide::Counterparty,
+                    ) {
+                        Ok(Some(pk)) => pk,
+                        _ => continue, // No row to advance against; skip.
+                    };
+
+                // Skip if already at the target — nothing to do.
+                if current_cp_pk == receipt.ek_pk_b {
+                    continue;
+                }
+
+                match dsm::crypto::ephemeral_key::verify_ek_cert(
+                    &current_cp_pk,
+                    &receipt.ek_pk_b,
+                    &receipt.parent_tip,
+                    &receipt.ek_cert_b,
+                ) {
+                    Ok(true) => {
+                        // Wedge case: current Counterparty IS the prior
+                        // chain head, advance.
+                        match crate::storage::client_db::advance_cert_chain_head(
+                            rel_key,
+                            crate::storage::client_db::CertChainSide::Counterparty,
+                            &receipt.ek_pk_b,
+                        ) {
+                            Ok(Some(step)) => {
+                                info!(
+                                    "[BLE_HANDLER] §11.1 Item 8b: reconciled Counterparty wedge for commitment {} → step {}",
+                                    bytes_to_base32(
+                                        &commitment_hash
+                                            [..8.min(commitment_hash.len())]
+                                    ),
+                                    step
+                                );
+                                wedge_recovered_count += 1;
+                                advanced_this_pass += 1;
+                            }
+                            Ok(None) => {
+                                debug!(
+                                    "[BLE_HANDLER] §11.1 Item 8b: Counterparty row vanished between load and advance — skipping"
+                                );
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "[BLE_HANDLER] §11.1 Item 8b: failed to advance Counterparty during wedge recovery: {}",
+                                    e
+                                );
+                            }
+                        }
+                    }
+                    Ok(false) => {
+                        // Cert link fails — Counterparty is either at
+                        // an unrelated state, or this candidate's cert
+                        // chains from a head NOT YET reached (will be
+                        // tried again in a later pass once an earlier
+                        // wedge is recovered).
+                    }
+                    Err(e) => {
+                        debug!(
+                            "[BLE_HANDLER] §11.1 Item 8b: verify_ek_cert error during wedge recovery: {} — skipping",
+                            e
+                        );
+                    }
+                }
+            }
+            // Fixed point reached — no further progress possible.
+            if advanced_this_pass == 0 {
+                break;
+            }
         }
 
         for counterparty_device_id in counterparties {
@@ -6213,6 +6271,119 @@ mod tests {
         assert_eq!(
             after, seeded_cp_pk,
             "Item 8b sweep must NOT advance when cert_b does not chain from current Counterparty"
+        );
+    }
+
+    /// §11.1 Item 8b multi-step wedge recovery: the sweep iterates to
+    /// a fixed point, so a chain of TWO single-step wedges within one
+    /// relationship recovers regardless of the order in which SQLite
+    /// returns the session rows.
+    ///
+    /// Setup: Counterparty seeded at AK_pk (= "step 0"). Two wedged
+    /// sessions persisted:
+    ///   - S1: receipt with ek_pk_b_1 chained from AK_pk
+    ///   - S2: receipt with ek_pk_b_2 chained from ek_pk_b_1
+    ///
+    /// Insertion order is reversed (S2 first) to exercise the
+    /// fixed-point loop's order-independence — without the loop,
+    /// processing S2 first would fail (cert chains from ek_pk_b_1 but
+    /// Counterparty is at AK_pk), then S1 would advance to ek_pk_b_1
+    /// but S2 would never be retried. With the fix, two passes reach
+    /// the chain head ek_pk_b_2.
+    #[tokio::test]
+    #[serial]
+    async fn test_restore_sweep_recovers_multi_step_wedge_chain() {
+        use crate::storage::client_db::{
+            init_cert_chain_head, load_cert_chain_head_pubkey, CertChainSide,
+        };
+        use dsm::crypto::ephemeral_key::generate_ephemeral_keypair;
+        use dsm::types::receipt_types::StitchedReceiptV2;
+
+        init_test_db();
+
+        let local_device_id = [31u8; 32];
+        let counterparty_device_id = [33u8; 32];
+        let (_bilateral_manager, handler) =
+            make_test_handler(local_device_id, [32u8; 32], b"sweep-multi-step");
+
+        // Build a 3-key chain: AK_pk → EK_pk_1 → EK_pk_2
+        let (ak_pk, ak_sk) = generate_ephemeral_keypair(&[0xC1; 32]).unwrap();
+        let (ek_pk_1, ek_sk_1) = generate_ephemeral_keypair(&[0xC2; 32]).unwrap();
+        let (ek_pk_2, _ek_sk_2) = generate_ephemeral_keypair(&[0xC3; 32]).unwrap();
+        let h_n_1 = [0xCA; 32];
+        let h_n_2 = [0xCB; 32];
+
+        // Cert for step 1: signed by AK_sk over (ek_pk_1, h_n_1).
+        let cert_1 =
+            dsm::crypto::ephemeral_key::sign_ek_cert(&ak_sk, &ek_pk_1, &h_n_1).unwrap();
+        // Cert for step 2: signed by ek_sk_1 over (ek_pk_2, h_n_2).
+        let cert_2 =
+            dsm::crypto::ephemeral_key::sign_ek_cert(&ek_sk_1, &ek_pk_2, &h_n_2).unwrap();
+
+        let make_session_record = |commitment_byte: u8,
+                                   created_at: u64,
+                                   ek_pk: Vec<u8>,
+                                   cert: Vec<u8>,
+                                   parent_tip: [u8; 32]|
+         -> crate::storage::client_db::BilateralSessionRecord {
+            let mut receipt = StitchedReceiptV2::new(
+                [0x01; 32],
+                counterparty_device_id,
+                local_device_id,
+                parent_tip,
+                [0x04; 32],
+                [0x05; 32],
+                [0x06; 32],
+                vec![0x07; 16],
+                vec![0x08; 16],
+                vec![0x09; 16],
+            );
+            receipt.set_ek_pk_b(ek_pk);
+            receipt.set_ek_cert_b(cert);
+            receipt.add_sig_b(vec![0xAA; 64]);
+            crate::storage::client_db::BilateralSessionRecord {
+                commitment_hash: vec![commitment_byte; 32],
+                counterparty_device_id: counterparty_device_id.to_vec(),
+                counterparty_genesis_hash: Some(vec![0xB0; 32]),
+                operation_bytes: crate::storage::client_db::serialize_operation(
+                    &Operation::Noop,
+                ),
+                phase: "confirm_pending".to_string(),
+                local_signature: Some(vec![0xC0; 64]),
+                counterparty_signature: Some(vec![0xD0; 64]),
+                created_at_step: created_at,
+                sender_ble_address: None,
+                stitched_receipt_bytes: Some(receipt.to_full_protobuf().unwrap()),
+            }
+        };
+
+        let rel_key = dsm::verification::smt_replace_witness::compute_smt_key(
+            &local_device_id,
+            &counterparty_device_id,
+        );
+        // Seed Counterparty at AK_pk — exactly two steps behind ek_pk_2.
+        init_cert_chain_head(&rel_key, CertChainSide::Counterparty, &ak_pk).unwrap();
+
+        // Persist S2 FIRST (so SQLite likely returns it first too).
+        // The fixed-point loop must still recover both.
+        let s2_record = make_session_record(0xE2, 100, ek_pk_2.clone(), cert_2, h_n_2);
+        let s1_record = make_session_record(0xE1, 50, ek_pk_1.clone(), cert_1, h_n_1);
+        crate::storage::client_db::store_bilateral_session(&s2_record).expect("persist s2");
+        crate::storage::client_db::store_bilateral_session(&s1_record).expect("persist s1");
+
+        handler
+            .restore_sessions_from_storage()
+            .await
+            .expect("restore");
+
+        // Counterparty must end at ek_pk_2 — both wedges recovered.
+        let after = load_cert_chain_head_pubkey(&rel_key, CertChainSide::Counterparty)
+            .unwrap()
+            .expect("Counterparty row still exists");
+        assert_eq!(
+            after, ek_pk_2,
+            "Item 8b fixed-point sweep must recover BOTH steps of a chained \
+             multi-step wedge regardless of SQLite row order"
         );
     }
 

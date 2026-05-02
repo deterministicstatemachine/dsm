@@ -3,7 +3,7 @@
 //! Internal nodes are BLAKE3 hashes with domain tag TAG_DEV_MERKLE.
 //! An explicit empty-root tag is used for the empty tree.
 
-use super::domain_tags::{TAG_DEV_EMPTY, TAG_DEV_LEAF, TAG_DEV_MERKLE};
+use super::domain_tags::{TAG_DEV_EMPTY, TAG_DEV_LEAF, TAG_DEV_MERKLE, TAG_DEV_PAD};
 use crate::crypto::blake3::dsm_domain_hasher;
 
 /// Compute the device tree internal node hash H(L || R) with domain separation.
@@ -28,6 +28,17 @@ pub fn hash_leaf(dev_id: &[u8; 32]) -> [u8; 32] {
 /// Return the canonical empty root hash for the Device Tree.
 pub fn empty_root() -> [u8; 32] {
     let hasher = dsm_domain_hasher(TAG_DEV_EMPTY);
+    *hasher.finalize().as_bytes()
+}
+
+/// Canonical padding leaf for odd-count Merkle levels (Issue #182
+/// Finding #4 resolution). Replaces the previous self-duplication
+/// pattern so that `[A, B, C]` and `[A, B, C, C]` produce distinct
+/// roots. The distinct `DSM/dev-tree-pad` domain tag — separate from
+/// `DSM/dev-leaf` — guarantees the pad cannot collide with any
+/// legitimate `hash_leaf(devid)` value.
+pub fn pad_leaf() -> [u8; 32] {
+    let hasher = dsm_domain_hasher(TAG_DEV_PAD);
     *hasher.finalize().as_bytes()
 }
 
@@ -231,8 +242,11 @@ impl DeviceTree {
                 if chunk.len() == 2 {
                     next.push(hash_node(&chunk[0], &chunk[1]));
                 } else {
-                    // Odd leaf promoted: hash with itself
-                    next.push(hash_node(&chunk[0], &chunk[0]));
+                    // Odd promotion: pair with the canonical padding
+                    // leaf (Issue #182 Finding #4) instead of duplicating
+                    // the lone child. Different domain tag prevents any
+                    // collision with a real DevID-derived leaf.
+                    next.push(hash_node(&chunk[0], &pad_leaf()));
                 }
             }
             level = next;
@@ -255,7 +269,9 @@ impl DeviceTree {
             let sib = if sib_idx < level.len() {
                 level[sib_idx]
             } else {
-                level[idx] // Odd: duplicate
+                // Odd promotion at this level: sibling is the canonical
+                // padding leaf, NOT the lone child duplicated.
+                pad_leaf()
             };
             siblings.push(sib);
             path_bits.push(!idx.is_multiple_of(2)); // true = right child
@@ -265,7 +281,7 @@ impl DeviceTree {
                 if chunk.len() == 2 {
                     next.push(hash_node(&chunk[0], &chunk[1]));
                 } else {
-                    next.push(hash_node(&chunk[0], &chunk[0]));
+                    next.push(hash_node(&chunk[0], &pad_leaf()));
                 }
             }
             level = next;
@@ -378,5 +394,83 @@ mod tests {
             // 4 leaves → 2 levels → 2 siblings
             assert_eq!(proof.siblings.len(), 2);
         }
+    }
+
+    /// Regression for Issue #182 Finding #4: odd-leaf self-duplication.
+    ///
+    /// Before the fix, `[A, B, C]` and `[A, B, C, C]` produced the same
+    /// root because the odd-promoted leaf was hashed against itself
+    /// (`hash_node(C, C)` at level 0). After the fix, the lone leaf at
+    /// any odd-count level is paired with the canonical padding leaf
+    /// (`pad_leaf()`) instead, which has a distinct domain tag and
+    /// therefore cannot collide with any real `hash_leaf(devid)` value.
+    /// This restores `(R_G, device_count)` uniqueness.
+    #[test]
+    fn three_device_root_differs_from_padded_four_device_root() {
+        let dev_a = [1u8; 32];
+        let dev_b = [2u8; 32];
+        let dev_c = [3u8; 32];
+
+        // 3-device tree using the production builder (now uses pad_leaf).
+        let tree3 = DeviceTree::new(vec![dev_a, dev_b, dev_c]);
+
+        // Synthesize the OLD-style "duplicate the lone leaf" root for
+        // [A, B, C] manually, mirroring the pre-fix build:
+        //   level 0: hash_leaf(A), hash_leaf(B), hash_leaf(C)
+        //   level 1: hash_node(hL_A, hL_B), hash_node(hL_C, hL_C)  ← old
+        //   level 2: hash_node(level1[0], level1[1])
+        let h_a = hash_leaf(&dev_a);
+        let h_b = hash_leaf(&dev_b);
+        let h_c = hash_leaf(&dev_c);
+        let n_ab = hash_node(&h_a, &h_b);
+        let n_cc_old = hash_node(&h_c, &h_c);
+        let root_old = hash_node(&n_ab, &n_cc_old);
+
+        assert_ne!(
+            tree3.root(),
+            root_old,
+            "Issue #182 Finding #4: 3-device tree root must differ from the \
+             pre-fix self-duplication root for [A, B, C]"
+        );
+
+        // Also verify: the 3-device root MUST equal the canonical
+        // pad-leaf construction, NOT the self-dup construction.
+        let n_c_pad = hash_node(&h_c, &pad_leaf());
+        let root_canonical = hash_node(&n_ab, &n_c_pad);
+        assert_eq!(
+            tree3.root(),
+            root_canonical,
+            "3-device tree root must use pad_leaf for the lone leaf"
+        );
+
+        // Inclusion proofs against the new root must verify.
+        for dev in &[dev_a, dev_b, dev_c] {
+            let proof = tree3.proof(dev).expect("member");
+            assert!(
+                proof.verify(dev, &tree3.root()),
+                "post-fix proof must verify for dev {:?}",
+                &dev[..4]
+            );
+        }
+    }
+
+    /// Pin the canonical padding-leaf value so external implementations
+    /// (Lean models, second-language ports, tests in other crates) can
+    /// reproduce the Device Tree root byte-exact.
+    #[test]
+    fn pad_leaf_is_canonical_and_distinct_from_devid_hashes() {
+        // pad_leaf is deterministic.
+        assert_eq!(pad_leaf(), pad_leaf());
+
+        // pad_leaf MUST differ from hash_leaf(any DevID) — domain tag
+        // separation is what makes the odd-leaf fix sound.
+        let zero_devid_leaf = hash_leaf(&[0u8; 32]);
+        let max_devid_leaf = hash_leaf(&[0xFF; 32]);
+        let mid_devid_leaf = hash_leaf(&[0x42; 32]);
+        assert_ne!(pad_leaf(), zero_devid_leaf);
+        assert_ne!(pad_leaf(), max_devid_leaf);
+        assert_ne!(pad_leaf(), mid_devid_leaf);
+        // And distinct from the empty-tree root sentinel.
+        assert_ne!(pad_leaf(), empty_root());
     }
 }
