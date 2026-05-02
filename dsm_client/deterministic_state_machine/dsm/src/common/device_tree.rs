@@ -8,7 +8,7 @@ use crate::crypto::blake3::dsm_domain_hasher;
 
 /// Compute the device tree internal node hash H(L || R) with domain separation.
 pub fn hash_node(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
-    let mut hasher = dsm_domain_hasher(TAG_DEV_MERKLE.trim_end_matches('\0'));
+    let mut hasher = dsm_domain_hasher(TAG_DEV_MERKLE);
     hasher.update(left);
     hasher.update(right);
     let mut out = [0u8; 32];
@@ -18,7 +18,7 @@ pub fn hash_node(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
 
 /// Compute the leaf hash for a DevID value (32 bytes), domain separated.
 pub fn hash_leaf(dev_id: &[u8; 32]) -> [u8; 32] {
-    let mut hasher = dsm_domain_hasher(TAG_DEV_LEAF.trim_end_matches('\0'));
+    let mut hasher = dsm_domain_hasher(TAG_DEV_LEAF);
     hasher.update(dev_id);
     let mut out = [0u8; 32];
     out.copy_from_slice(hasher.finalize().as_bytes());
@@ -27,7 +27,7 @@ pub fn hash_leaf(dev_id: &[u8; 32]) -> [u8; 32] {
 
 /// Return the canonical empty root hash for the Device Tree.
 pub fn empty_root() -> [u8; 32] {
-    let hasher = dsm_domain_hasher(TAG_DEV_EMPTY.trim_end_matches('\0'));
+    let hasher = dsm_domain_hasher(TAG_DEV_EMPTY);
     *hasher.finalize().as_bytes()
 }
 

@@ -1,29 +1,54 @@
 //! Centralized domain tag constants for BLAKE3 domain-separated hashing.
+//!
+//! # NUL terminator convention (Issue #182 Finding #3 resolution)
+//!
+//! These constants do NOT include a trailing `\0` byte. The
+//! `dsm::crypto::blake3::dsm_domain_hasher(tag)` primitive APPENDS the
+//! NUL terminator automatically when constructing the BLAKE3 preimage:
+//!
+//! ```text
+//! BLAKE3-256("DSM/<domain>\0" || data)
+//! ```
+//!
+//! Storing the constants without the trailing NUL eliminates the
+//! double-NUL footgun: a caller writing
+//! `dsm_domain_hasher(TAG_RECEIPT_COMMIT)` in this convention produces
+//! exactly one NUL in the preimage. Production hashing already uses
+//! inline string literals like `dsm_domain_hasher("DSM/smt-leaf")` (no
+//! trailing NUL) — this convention now matches.
+//!
+//! Whitepaper alignment: §2.1 specifies `H_X(input) := BLAKE3-256(tag
+//! || NUL || input)` where the NUL is part of the *primitive*, not the
+//! tag identifier. So tag identifiers carried as Rust `&str` constants
+//! should NOT include the NUL byte.
 
-pub const TAG_RECEIPT_COMMIT: &str = "DSM/receipt-commit\0";
-pub const TAG_SMT_NODE: &str = "DSM/smt-node\0";
-pub const TAG_SMT_LEAF: &str = "DSM/smt-leaf\0";
-pub const TAG_DBRW: &str = "DSM/dbrw\0";
-// Device Tree (standard Merkle)
-pub const TAG_DEV_MERKLE: &str = "DSM/dev-merkle\0";
-pub const TAG_DEV_LEAF: &str = "DSM/dev-leaf\0";
-pub const TAG_DEV_EMPTY: &str = "DSM/dev-empty\0";
+pub const TAG_RECEIPT_COMMIT: &str = "DSM/receipt-commit";
+pub const TAG_SMT_NODE: &str = "DSM/smt-node";
+pub const TAG_SMT_LEAF: &str = "DSM/smt-leaf";
+pub const TAG_DBRW: &str = "DSM/dbrw";
+// Device Tree (standard Merkle) — see Issue #182 Finding #2 for the
+// open spec ambiguity between §2.2 (`merkle-node`/`merkle-leaf`) and
+// §16.3 (`dev-merkle`/`dev-empty`). Implementation continues to use
+// the §16.3 ("normative") tags pending Brandon's resolution.
+pub const TAG_DEV_MERKLE: &str = "DSM/dev-merkle";
+pub const TAG_DEV_LEAF: &str = "DSM/dev-leaf";
+pub const TAG_DEV_EMPTY: &str = "DSM/dev-empty";
 
-/// Helper to build a tagged preimage by prefixing the ASCII tag and NUL.
-pub fn tagged_bytes(tag: &str, body: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(tag.len() + body.len());
-    out.extend_from_slice(tag.as_bytes());
-    out.extend_from_slice(body);
-    out
-}
+// `tagged_bytes()` REMOVED — Issue #182 Finding #3.
+// The helper was only used in the module's own self-tests and had
+// ambiguous semantics relative to the auto-NUL `dsm_domain_hasher`
+// primitive. Use `dsm::crypto::blake3::dsm_domain_hasher(tag)` (or
+// `domain_hash`/`domain_hash_bytes`) for all domain-separated hashing.
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashSet;
 
+    /// Tags MUST NOT include the trailing NUL — the hasher primitive
+    /// appends it. See module docs for the convention rationale.
     #[test]
-    fn all_tags_are_nul_terminated() {
+    fn all_tags_have_no_trailing_nul() {
         let tags = [
             TAG_RECEIPT_COMMIT,
             TAG_SMT_NODE,
@@ -34,8 +59,11 @@ mod tests {
             TAG_DEV_EMPTY,
         ];
         for tag in &tags {
-            assert!(tag.ends_with('\0'), "Tag {tag:?} must be NUL-terminated");
-            assert!(tag.len() > 1, "Tag must contain more than just NUL");
+            assert!(
+                !tag.ends_with('\0'),
+                "Tag {tag:?} must NOT be NUL-terminated; the hasher appends NUL"
+            );
+            assert!(!tag.is_empty(), "Tag must not be empty");
         }
     }
 
@@ -68,33 +96,5 @@ mod tests {
         for tag in &tags {
             assert!(tag.starts_with("DSM/"), "Tag {tag:?} must start with DSM/");
         }
-    }
-
-    #[test]
-    fn tagged_bytes_concatenates_tag_and_body() {
-        let result = tagged_bytes("DSM/test\0", b"hello");
-        assert_eq!(&result[..9], b"DSM/test\0");
-        assert_eq!(&result[9..], b"hello");
-        assert_eq!(result.len(), 9 + 5);
-    }
-
-    #[test]
-    fn tagged_bytes_with_empty_body() {
-        let result = tagged_bytes(TAG_DBRW, b"");
-        assert_eq!(result, TAG_DBRW.as_bytes());
-    }
-
-    #[test]
-    fn tagged_bytes_different_tags_produce_different_output() {
-        let a = tagged_bytes(TAG_SMT_NODE, b"data");
-        let b = tagged_bytes(TAG_SMT_LEAF, b"data");
-        assert_ne!(a, b);
-    }
-
-    #[test]
-    fn tagged_bytes_different_bodies_produce_different_output() {
-        let a = tagged_bytes(TAG_DBRW, b"alpha");
-        let b = tagged_bytes(TAG_DBRW, b"beta");
-        assert_ne!(a, b);
     }
 }
