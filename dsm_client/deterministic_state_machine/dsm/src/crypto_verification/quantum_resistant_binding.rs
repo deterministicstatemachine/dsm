@@ -20,19 +20,81 @@ fn elapsed_ticks_since(start_tick: u64) -> u64 {
     now_tick().saturating_sub(start_tick)
 }
 
-/// Represents a quantum-resistant device binding attestation
+/// Represents a quantum-resistant device binding attestation.
+///
+/// **Issue #185 Findings #1 + #4 resolution.** Earlier versions of this
+/// struct omitted both `additional_entropy` (the freshness/challenge
+/// nonce signed at attestation time) and authenticated coverage of
+/// `encapsulated_state` from the signed payload. Without those, the
+/// freshness challenge feature was unusable (verifier couldn't
+/// reconstruct the signed message) and an attacker could swap the
+/// Kyber ciphertext without invalidating the SPHINCS+ signature.
+///
+/// The signed payload now covers ALL of:
+///   * `tick` (8 bytes BE)
+///   * `device_hash`
+///   * `additional_entropy` (length-prefixed)
+///   * `encapsulated_state` (length-prefixed)
+///
+/// All four are stored on the struct so `verify_attestation` can
+/// reconstruct the exact byte string the signer signed over.
 #[derive(Debug, Clone)]
 pub struct DeviceAttestation {
     /// Attestation tick (deterministic)
     pub tick: u64,
     /// Device identifier hash
     pub device_hash: HashOutput,
-    /// SPHINCS+ signature over attestation data
+    /// SPHINCS+ signature over the canonical attestation message
+    /// (see `serialize_attestation_message`).
     pub signature: Signature,
-    /// Kyber encapsulated state (for secure communication)
+    /// Kyber encapsulated state (for secure communication). NOW signed.
     pub encapsulated_state: Vec<u8>,
-    /// Additional entropy for verification
+    /// Additional freshness/challenge entropy passed to
+    /// `create_attestation`. Stored here so the verifier can
+    /// reconstruct the signed message; previously omitted, which made
+    /// any non-empty challenge unverifiable (Issue #185 Finding #1).
+    pub additional_entropy: Vec<u8>,
+    /// Domain-separated digest of the attestation message, retained
+    /// for backward-compatible callers that wanted a quick integrity
+    /// check without re-running SPHINCS+ verify. NOT a substitute for
+    /// signature verification.
     pub verification_entropy: HashOutput,
+}
+
+/// Serialize the canonical attestation message that gets signed (and
+/// re-derived during verification). Length-prefixed to prevent any
+/// ambiguity between the variable-length fields.
+///
+/// Layout:
+///   "DSM/device-attestation\0"
+///   || tick (8 bytes BE)
+///   || device_hash (32 bytes)
+///   || u32_be(additional_entropy.len()) || additional_entropy
+///   || u32_be(encapsulated_state.len()) || encapsulated_state
+fn serialize_attestation_message(
+    tick: u64,
+    device_hash: &HashOutput,
+    additional_entropy: &[u8],
+    encapsulated_state: &[u8],
+) -> Vec<u8> {
+    const TAG: &[u8] = b"DSM/device-attestation\0";
+    let mut buf = Vec::with_capacity(
+        TAG.len()
+            + 8
+            + 32
+            + 4
+            + additional_entropy.len()
+            + 4
+            + encapsulated_state.len(),
+    );
+    buf.extend_from_slice(TAG);
+    buf.extend_from_slice(&tick.to_be_bytes());
+    buf.extend_from_slice(device_hash.as_bytes());
+    buf.extend_from_slice(&(additional_entropy.len() as u32).to_be_bytes());
+    buf.extend_from_slice(additional_entropy);
+    buf.extend_from_slice(&(encapsulated_state.len() as u32).to_be_bytes());
+    buf.extend_from_slice(encapsulated_state);
+    buf
 }
 
 /// Quantum-resistant device binding mechanism
@@ -135,28 +197,35 @@ impl QuantumResistantBinding {
         // Get current tick
         let tick = now_tick();
 
-        // Create attestation data
-        let mut attestation_data = Vec::new();
-        attestation_data.extend_from_slice(&tick.to_be_bytes());
-        attestation_data.extend_from_slice(self.device_hash.as_bytes());
-        attestation_data.extend_from_slice(additional_entropy);
+        // Prepare encapsulated state using Kyber FIRST so it can be
+        // included in the signed attestation message (Issue #185 F4).
+        let self_encapsulation = kyber_keypair.encapsulate()?;
+        let encapsulated_state = self_encapsulation.ciphertext.clone();
 
-        // Create verification entropy
+        // Build the canonical signed payload covering tick, device_hash,
+        // additional_entropy (freshness challenge), AND encapsulated_state
+        // (Issue #185 F1+F4).
+        let attestation_data = serialize_attestation_message(
+            tick,
+            &self.device_hash,
+            additional_entropy,
+            &encapsulated_state,
+        );
+
+        // Verification-entropy digest retained for backward-compat
+        // callers; the authoritative integrity check is the SPHINCS+
+        // signature below.
         let verification_entropy = blake3(&attestation_data);
 
-        // Sign the attestation data using SPHINCS+
+        // Sign the canonical attestation data using SPHINCS+
         let signature = sphincs_keypair.sign(&attestation_data)?;
-
-        // Prepare encapsulated state using Kyber
-        let self_encapsulation = kyber_keypair.encapsulate()?;
-        // Clone the ciphertext rather than moving it out of the structure
-        let encapsulated_state = self_encapsulation.ciphertext.clone();
 
         Ok(DeviceAttestation {
             tick,
             device_hash: self.device_hash,
             signature,
             encapsulated_state,
+            additional_entropy: additional_entropy.to_vec(),
             verification_entropy,
         })
     }
@@ -174,25 +243,34 @@ impl QuantumResistantBinding {
         attestation: &DeviceAttestation,
         public_key: &[u8],
     ) -> Result<bool, DsmError> {
-        // Verify device hash
+        // Verify device hash matches this binding's identity.
         if attestation.device_hash != self.device_hash {
             return Ok(false);
         }
 
-        // Rebuild attestation data
-        let mut attestation_data = Vec::new();
-        attestation_data.extend_from_slice(&attestation.tick.to_be_bytes());
-        attestation_data.extend_from_slice(attestation.device_hash.as_bytes());
+        // Reconstruct the EXACT canonical attestation message the
+        // signer signed. Now covers `additional_entropy` and
+        // `encapsulated_state` from the stored fields (Issue #185
+        // F1+F4).
+        let attestation_data = serialize_attestation_message(
+            attestation.tick,
+            &attestation.device_hash,
+            &attestation.additional_entropy,
+            &attestation.encapsulated_state,
+        );
 
-        // Derive expected verification entropy
+        // Cross-check verification_entropy digest matches the
+        // canonical message. Fail-fast for tampered structs before
+        // burning a SPHINCS+ verify.
         let expected_verification = blake3(&attestation_data);
-
-        // Verify entropy matches
         if attestation.verification_entropy != expected_verification {
             return Ok(false);
         }
 
-        // Verify signature using SPHINCS+ (construct a transient verifier with provided public key)
+        // Authoritative check: SPHINCS+ verify under the supplied
+        // public key. Because the signed bytes include
+        // `additional_entropy` and `encapsulated_state`, any tampering
+        // with either field rejects here.
         let mut verifier = SignatureKeyPair::new()?;
         verifier.public_key = public_key.to_vec();
         verifier.verify(&attestation_data, &attestation.signature)
@@ -375,5 +453,84 @@ mod tests {
             .unwrap();
 
         assert_ne!(att1.verification_entropy, att2.verification_entropy);
+    }
+
+    /// Issue #185 Finding #1 regression: an attestation created with
+    /// non-empty `additional_entropy` MUST verify successfully. Before
+    /// the fix, `verify_attestation` reconstructed the signed message
+    /// without `additional_entropy`, so any non-empty challenge made
+    /// verification fail unconditionally — the freshness/challenge
+    /// feature was unusable.
+    #[test]
+    fn test_verify_attestation_succeeds_with_non_empty_challenge_entropy() {
+        let (sphincs, kyber) = make_keypairs();
+        let binding = QuantumResistantBinding::new("app-1", b"seed", &sphincs, &kyber).unwrap();
+
+        let challenge_nonce = b"freshness-nonce-from-verifier-12";
+        let att = binding
+            .create_attestation(&sphincs, &kyber, challenge_nonce)
+            .unwrap();
+        // Pre-fix this would fail; post-fix it must succeed because
+        // `additional_entropy` is now stored on `att` and threaded into
+        // the canonical signed-message reconstruction.
+        let valid = binding
+            .verify_attestation(&att, &sphincs.public_key)
+            .unwrap();
+        assert!(
+            valid,
+            "Issue #185 F1: attestation with non-empty challenge entropy must verify"
+        );
+        // Sanity: the entropy round-trips through the struct.
+        assert_eq!(att.additional_entropy, challenge_nonce);
+    }
+
+    /// Issue #185 Finding #4 regression: tampering with
+    /// `encapsulated_state` MUST invalidate the attestation. Before
+    /// the fix, the Kyber ciphertext was carried in the struct but
+    /// not covered by the SPHINCS+ signature, so an attacker could
+    /// swap it without invalidating attestation.
+    #[test]
+    fn test_verify_attestation_rejects_encapsulated_state_tamper() {
+        let (sphincs, kyber) = make_keypairs();
+        let binding = QuantumResistantBinding::new("app-1", b"seed", &sphincs, &kyber).unwrap();
+
+        let mut att = binding
+            .create_attestation(&sphincs, &kyber, b"any")
+            .unwrap();
+
+        // Replace the encapsulated_state with arbitrary bytes —
+        // mirrors a MITM substitution.
+        att.encapsulated_state = vec![0xAA; att.encapsulated_state.len()];
+
+        let valid = binding
+            .verify_attestation(&att, &sphincs.public_key)
+            .unwrap();
+        assert!(
+            !valid,
+            "Issue #185 F4: tampered encapsulated_state must invalidate attestation"
+        );
+    }
+
+    /// Issue #185 Finding #1 regression (negative): tampering with the
+    /// stored `additional_entropy` MUST invalidate the attestation,
+    /// since it's now part of the signed canonical message.
+    #[test]
+    fn test_verify_attestation_rejects_additional_entropy_tamper() {
+        let (sphincs, kyber) = make_keypairs();
+        let binding = QuantumResistantBinding::new("app-1", b"seed", &sphincs, &kyber).unwrap();
+
+        let mut att = binding
+            .create_attestation(&sphincs, &kyber, b"original-nonce")
+            .unwrap();
+
+        att.additional_entropy = b"tampered-nonce".to_vec();
+
+        let valid = binding
+            .verify_attestation(&att, &sphincs.public_key)
+            .unwrap();
+        assert!(
+            !valid,
+            "Issue #185 F1: tampered additional_entropy must invalidate attestation"
+        );
     }
 }
