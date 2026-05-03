@@ -143,7 +143,7 @@ Both devices independently commit the new state. When connectivity returns, each
 
 ## MTU and Chunking
 
-BLE has MTU limitations (typically 20–512 bytes per packet). The `ble_frame_coordinator.rs` handles:
+BLE has MTU limitations (typically 20-512 bytes per packet). The `ble_frame_coordinator.rs` handles:
 
 1. **Segmentation** — large protobuf messages split into MTU-sized frames
 2. **Reassembly** — frames collected and reassembled on receiving end

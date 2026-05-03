@@ -38,7 +38,7 @@ message Hash16 { bytes v = 1 [(dsm_fixed_len)=16]; }     // 16-byte opaque id / 
 message U128   { bytes le = 1 [(dsm_fixed_len)=16]; }    // little-endian u128
 message S128   { bytes le = 1 [(dsm_fixed_len)=16]; }    // little-endian two’s-compl. s128
 
-// Acyclic program reference (non–TC DAG root bound to identity).
+// Acyclic program reference (non-TC DAG root bound to identity).
 message ProgramRef {
   string program_id = 1; // e.g., "dex.swap.v3"
   Hash32 dag_root   = 2; // Merkle root of program DAG
@@ -239,7 +239,7 @@ message DepositCompleteRequest {
   repeated bytes header_chain = 8; // Sequence of 80-byte headers from checkpoint anchor to block_header
   bytes  recipient_device_id = 9 [(dsm_fixed_len)=32]; // Optional mint recipient override (defaults to local device)
   // Burn receipt + sigma are derived internally by the SDK from the applied
-  // Burn transition before vault unlock (§6.1–§6.2).
+  // Burn transition before vault unlock (§6.1-§6.2).
 }
 
 message DepositRefundRequest {
@@ -1400,7 +1400,7 @@ message GenesisLifecycleEvent {
     GENESIS_KIND_SECURING_ABORTED   = 7;
   }
   Kind   kind     = 1;
-  uint32 progress = 2; // 0–100, only meaningful for SECURING_PROGRESS
+  uint32 progress = 2; // 0-100, only meaningful for SECURING_PROGRESS
 }
 
 // BLE permission denied notification — authored by Rust, transport via BleEvent.

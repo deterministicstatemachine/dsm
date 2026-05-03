@@ -1,6 +1,6 @@
 # Chapter 4 — Architecture
 
-Deep dive into DSM's system design, layer boundaries, data flow, and crate structure.
+System design, layer boundaries, data flow, and crate structure.
 
 ---
 

@@ -224,7 +224,7 @@ After completing scenarios A and B successfully on two real
 phones, the following claims are defensible:
 
 - A user can create an AMM vault on Phone 1 and have Phone 2
-  trade against it through the full chunks #1–#7 pipeline
+  trade against it through the full chunks #1-#7 pipeline
   (advertisement publish → discovery → path search → RouteCommit
   bind → SPHINCS+ sign → external commitment → anchor publish →
   eligibility gate → AMM re-simulation → reserve advance →

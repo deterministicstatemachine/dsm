@@ -138,7 +138,7 @@ access to:
 (a) Physical access: Amay observe electromagnetic emanations, power traces, and timing
 side-channels of a target device D, but cannot destructively inspect the silicon die (non-
 invasive model).
-(b) Polynomial oracle queries: Amay request challenge–response pairs (ci,ri) from D
+(b) Polynomial oracle queries: Amay request challenge-response pairs (ci,ri) from D
 under arbitrary thermal conditions µ∈M.
 4
 (c) Quantum computation: A has access to a quantum computer capable of running
@@ -479,7 +479,7 @@ This establishes strict inter-device separation.
 We now derive a sharper lower bound on inter-device separation in terms of the KL divergence
 between thermal distributions, connecting device identity directly to information-theoretic en-
 tropy.
-Lemma 4.13 (Kernel–Distribution Identity). For any state x∈X,
+Lemma 4.13 (Kernel-Distribution Identity). For any state x∈X,
 ∥PD(x,·)−PD′(x,·)∥TV = ∥νD−νD′∥TV.
 Consequently,
 ∥PD−PD′∥TV = ∥νD−νD′∥TV.
@@ -591,7 +591,7 @@ is γ ≤1−2−8, which requires N ≥16384 for strong mixing. The i.i.d. boun
 valid when thermal sampling is sufficiently faster than the correlation time (∆t≫τc).
 4.5.2 Explicit Inter-Device Separation
 Proposition 4.17 (Numeric Separation Bound). Under the following conservative assumptions:
-(i) silicon process variation induces per-symbol distribution shifts of 1–3%,
+(i) silicon process variation induces per-symbol distribution shifts of 1-3%,
 (ii) inter-device KL divergence DKL(νD∥νD′) ≥0.02,
 (iii) orbit length N = 4096, bin count B = 256,
 the inter-device separation satisfies
@@ -626,7 +626,7 @@ Since ϵinter ≥0.05 and ϵintra ≤0.01, the separation gap is
 increasing to ≈7.3σ at N = 8192.
 4.5.3 Certified Authentication Error Bounds
 We convert the separation and contraction results into rigorous false-accept and false-reject rates
-using the Dvoretzky–Kiefer–Wolfowitz (DKW) inequality.
+using the Dvoretzky-Kiefer-Wolfowitz (DKW) inequality.
 Definition4.9(AuthenticationThreshold). Letτ >0 betheWassersteinacceptancethreshold.
 A device D′presenting an orbit is accepted as device D if
 W1(ˆ ρD′,ρD) ≤τ,
@@ -703,7 +703,7 @@ and the geometric mixing rate of the ARX chain satisfies
 γ ≤1−2−k(h0−ϵ)
 .
 16
-Proof. By the Shannon–McMillan–Breiman theorem, for a stationary ergodic source with en-
+Proof. By the Shannon-McMillan-Breiman theorem, for a stationary ergodic source with en-
 tropy rate h0,
 1
 −
@@ -741,12 +741,12 @@ Bias ∆/σT p H(p) (bits)
 0.5 0.69 0.88
 1.0 0.84 0.61
 1.5 0.93 0.35
-A realistic per-event entropy range is 0.5–0.9 bits.
+A realistic per-event entropy range is 0.5-0.9 bits.
 Proof. At T = 300 K, kBT ≈4.14×10−21 J. For C = 10 fF: σT = kBT/C= √4.14 ×10−7 ≈
 0.64 mV. The entropy values follow from H(p) =−plog2 p−(1−p) log2(1−p) evaluated at
 p= Φ(∆/σT).
 Proposition 4.23 (Entropy Rate Under Autocorrelation). If the thermal sampling period ∆t
-is comparable to the correlation time τc ≈RC ≈10–100 ns, the entropy rate is
+is comparable to the correlation time τc ≈RC ≈10-100 ns, the entropy rate is
 h0 ≈H(p)(1−ρ),
 where ρ is the lag-1 autocorrelation coefficient. For H(p) ≈0.7 bits/event and ρ≈0.3:
 h0 ≈0.5 bits/sample.
@@ -805,7 +805,7 @@ process MUST satisfy
 σdevice >σthermal,
 where σthermal is the maximum intra-device thermal variation. That is, device-level man-
 ufacturing variation MUST dominate environmental noise. Empirically, silicon process
-variation (σdevice ≈3–5%) exceeds thermal drift (σthermal ≈0.5–1%) by a factor of 3–
+variation (σdevice ≈3-5%) exceeds thermal drift (σthermal ≈0.5-1%) by a factor of 3-
 10×, satisfying this requirement.
 4.5.7 Formal Entropy Health Test
 Wedesignaruntimeentropymonitorwithprovablefalse-alarmandmissed-detectionguarantees.
@@ -847,7 +847,7 @@ i=1(µi−
 (C) Compression ratio (entropy-rate proxy):
 ˆ
 rc :=
-where LLZ78 is the LZ78 compressed length in bits. By the Shannon–McMillan theorem,
+where LLZ78 is the LZ78 compressed length in bits. By the Shannon-McMillan theorem,
 ˆ
 rc →h0 as m→∞.
 Definition 4.15 (Entropy Health Test). Fix parameters hmin = 0.5, ρmax = 0.3, and tolerance
@@ -876,7 +876,7 @@ Pr[|ˆ
 ρ/2).
 The compression testˆ
 rc converges at the same rate asˆ
-H by the Shannon–McMillan theorem, so
+H by the Shannon-McMillan theorem, so
 its false alarm contribution is absorbed into the first term. A union bound over the three tests
 yields the result.
 Corollary 4.26 (Numeric False Alarm Rates). With m= 4096, ϵ= 0.05, and δρ = 0.05:
@@ -977,7 +977,7 @@ Axiom 5.3 (SPHINCS+ Unforgeability). SPHINCS+ (BLAKE3, NIST Category 5, variant 
 is EUF-CMA secure under the second-preimage resistance of BLAKE3.
 5.2 Device Unclonability
 Theorem 5.1 (C-DBRW Unclonability). Let D be a target device. Given polynomially many
-challenge–response pairs {(ci,HD(Si,N))}q
+challenge-response pairs {(ci,HD(Si,N))}q
 i=1 for arbitrary Si ∈M, no PPT adversary Acan
 construct a device D∗ (physical or simulated) such that
 Pr Verify(D∗,c) = accept >negl(λ)
@@ -1060,7 +1060,7 @@ least one of:
 (b) breaking IND-CCA2 security of Kyber (contradicts (A4)),
 (c) forging a SPHINCS+ signature (contradicts (A4)),
 (d) inverting BLAKE3 (contradicts (A4)).
-Proof. Properties (i)–(iv) follow directly from the theorems cited. We prove (v) and (vi).
+Proof. Properties (i)-(iv) follow directly from the theorems cited. We prove (v) and (vi).
 Property (v). A software simulator Slacking physical access to D must generate thermal
 bytes {µn}consistent with ΦD. Since the thermal process has entropy rate h0 ((A1)), the
 probability of correctly predicting an N-byte sequence is at most 2−Nh0 by the source coding
@@ -1094,7 +1094,7 @@ Registration. On input (Register,D) from device D: sample a unique stationary me
 Authentication. On input (Auth,D′,c) where D′is a device and c is a challenge:
 • If D′is the registered physical device D: output accept.
 • Otherwise: output reject.
-Theorem 5.5 (UC Realization). Under assumptions (A1)–(A4) of Theorem 5.4, the C-DBRW
+Theorem 5.5 (UC Realization). Under assumptions (A1)-(A4) of Theorem 5.4, the C-DBRW
 protocol Π UC-realizes the ideal functionality FC-DBRW in the FRO-hybrid model (random oracle
 for BLAKE3). That is, for every PPT adversary A, there exists a PPT simulator Ssuch that
 for all PPT environments Z:
@@ -1375,13 +1375,13 @@ the DSM spec, Section 12) MUST be instantiated as the C-DBRW attractor commitmen
 H(d) := ACD.
 This replaces any static PUF measurement with a chaotic attractor fingerprint that cap-
 tures the full thermodynamic manifold of the device.
-Definition 8.1 (C-DBRW–Enhanced DBRW Binding). The enhanced DBRW binding key is
+Definition 8.1 (C-DBRW-Enhanced DBRW Binding). The enhanced DBRW binding key is
 KDBRW := HDSM/dbrw-bind ACD∥E(e)∥sdevice , (16)
 where ACD is the C-DBRW attractor commitment (Equation (8)), E(e) is the execution envi-
 ronment fingerprint, and sdevice
 $ ←−{0,1}256 is a per-device salt from CSPRNG.
 Theorem8.1(EnhancedAnti-Cloning). Under Definition 5.1, Definition 4.2, and Theorem 5.1,
-the C-DBRW–enhanced DBRW binding provides strictly stronger anti-cloning guarantees than
+the C-DBRW-enhanced DBRW binding provides strictly stronger anti-cloning guarantees than
 static PUF-based DBRW:
 (i) The attractor commitment ACD encodes the full nonlinear thermal response surface, not
 a single-point measurement.
@@ -1426,7 +1426,7 @@ memory during the execution of dsm_core.
 8.3 Receipt Binding
 Every DSM stitched receipt is signed by an ephemeral SPHINCS+ key derived (transitively)
 from ACD via the chain in Equation (17). This ensures that:
-Corollary 8.2 (Receipt–Device Binding). A valid stitched receipt τA↔B can only have been
+Corollary 8.2 (Receipt-Device Binding). A valid stitched receipt τA↔B can only have been
 produced by the physical device DA whose attractor generated ACDA , under the assumptions of
 Theorem 5.1 and Definition 5.3.
 9 Implementation Architecture
@@ -1555,7 +1555,7 @@ Definition 5.3, the C-DBRW system with post-quantum binding achieves:
 on BLAKE3 and Module-LWE hardness of Kyber.
 (ii) Zero-knowledge verification (Theorem 6.1), in the random oracle model.
 (iii) Forward secrecy of per-step keys (Theorem 5.3), under IND-CCA2 of Kyber.
-(iv) Receipt–device binding(Theorem 8.2), ensuring that DSMstitchedreceipts are hardware-
+(iv) Receipt-device binding(Theorem 8.2), ensuring that DSMstitchedreceipts are hardware-
 anchored.
 (v) Thermal resilience(Theorem 4.10, Theorem 4.29), with configurable false-rejection rate.
 (vi) No helper data leakage, unlike fuzzy extractor or sketch-based PUF constructions.
@@ -1615,7 +1615,7 @@ References
 [1] S. H. Strogatz. Nonlinear Dynamics and Chaos: With Applications to Physics, Biology,
 Chemistry, and Engineering. Westview Press, 2nd edition, 2015.
 [2] M. Walker, J. Lee, and R. Chen. Physically unclonable functions based on thermodynamic
-chaos. IEEE Transactions on Dependable and Secure Computing, 20(4):2891–2905, 2023.
+chaos. IEEE Transactions on Dependable and Secure Computing, 20(4):2891-2905, 2023.
 [3] J. O’Connor, J.-P. Aumasson, S. Neves, and Z. Wilcox-O’Hearn. The BLAKE3 crypto-
 graphic hash function. Specification document, 2021. https://github.com/BLAKE3-team/
 BLAKE3-specs.
@@ -1626,15 +1626,15 @@ supporting documentation (v3.02). NIST Post-Quantum Cryptography Standardization
 [5] D. J. Bernstein, A. Hülsing, S. Kölbl, R. Niederhagen, J. Rijneveld, and P. Schwabe. The
 SPHINCS+ signature framework. In ACM CCS, 2019.
 [6] R. Pappu, B. Recht, J. Taylor, and N. Gershenfeld. Physical one-way functions. Science,
-297(5589):2026–2030, 2002.
+297(5589):2026-2030, 2002.
 [7] C. Herder, M.-D. Yu, F. Koushanfar, and S. Devadas. Physical unclonable functions and
-applications: A tutorial. Proceedings of the IEEE, 102(8):1126–1141, 2014.
+applications: A tutorial. Proceedings of the IEEE, 102(8):1126-1141, 2014.
 [8] B. “Cryptskii” Ramsay. Deterministic State Machine: A concise, post-quantum specifica-
 tion. Technical report, DSM Project, December 2025.
 [9] B. “Cryptskii” Ramsay. Sovereign sovereign finance architecture: Trustless Bitcoin
 bridge via bilateral state machines. Technical report (submitted for review), 2025.
 [10] J.-P. Eckmann and D. Ruelle. Ergodic theory of chaos and strange attractors. Reviews of
-Modern Physics, 57(3):617–656, 1985.
+Modern Physics, 57(3):617-656, 1985.
 [11] National Institute of Standards and Technology. Post-quantum cryptography standardiza-
 tion. https://csrc.nist.gov/Projects/post-quantum-cryptography, 2024.
 [12] Open Quantum Safe Project. liboqs: C library for quantum-safe cryptographic algorithms.

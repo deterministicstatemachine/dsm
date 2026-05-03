@@ -28,7 +28,7 @@ Definition 1.2 (Revocable Witness System (RWS)). An RWS augments GSCM with a wit
 refresh rule: when Statet →Statet+1, previously valid wit may be revoked; users must refresh to wit′
 consistent with Roott+1. A scheme is refresh-light if the expected number of users who must refresh
 per transition is sublinear in the number of accounts.
-Theorem 1.1 (Christ–Bonneau impossibility, informal). In any RWS where validators keep a
+Theorem 1.1 (Christ-Bonneau impossibility, informal). In any RWS where validators keep a
 constant-sized commitment Roott to a global state, there exists a distribution of transactions for
 which the expected number of users requiring witness refresh over T steps is Ω(T ), even if many
 users are inactive.
@@ -90,7 +90,7 @@ drawals/verification.
 Corollary 5.1 (Witness refresh persists under rollups). RCM systems inherit Theorem 1.1: unless
 users obtain fresh inclusion data (or rely on proof-serving/DA committees), withdrawal/interaction
 witnesses go stale as unrelated rollup activity proceeds.
-Interpretation. INTMAX optimizes within RCM/GSCM: it minimizes on-chain data (e.g.,∼4–
+Interpretation. INTMAX optimizes within RCM/GSCM: it minimizes on-chain data (e.g.,∼4-
 5 bytes/tx via short nullifiers) and frames itself as a “stateless, client-driven” rollup [2, 3, 4].
 That reduces byte growth and DA cost but does not remove the global-commitment premise; the
 information-theoretic witness churn still follows the a16z model [1]. DSM (PRLSM) eliminates the
@@ -116,7 +116,7 @@ on-the-impossibility-of-stateless-blockchains/.
 [2] INTMAX. No State, No Trace: Stateless Systems and the Fu-
 ture of Digital Privacy (Jan. 28, 2025). https://intmax.io/blog/
 no-state-no-trace-stateless-systems-and-the-future-of-digital-privacy.
-[3] INTMAX. INTMAX – Stateless Layer for Billions (site overview; nullifiers 4–5 bytes/tx).
+[3] INTMAX. INTMAX - Stateless Layer for Billions (site overview; nullifiers 4-5 bytes/tx).
 https://intmax.io/.
 [4] INTMAX. Rollup Architecture (developer docs). https://docs.network.intmax.io/
 developers-hub/core-concepts/rollup-architecture.

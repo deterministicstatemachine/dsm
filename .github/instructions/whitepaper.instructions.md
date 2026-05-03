@@ -2,58 +2,58 @@
 applyTo: '**'
 ---
 Deterministic State Machine:
-A Concise, Post–Quantum Specification
+A Concise, Post-Quantum Specification
 Brandon “Cryptskii” Ramsay
 December 15, 2025
 The modern internet relies on centralized trust infrastructures such as certificate
 authorities, OAuth servers and validator networks. These architectures impose
 bottlenecks, enable censorship and remain vulnerable to quantum computing. The
-DeterministicStateMachine(DSM)isacryptographicallyself–verifyingframework
-that replaces consensus, accounts and third–party authorization with deterministic
+DeterministicStateMachine(DSM)isacryptographicallyself-verifyingframework
+that replaces consensus, accounts and third-party authorization with deterministic
 hash chains and Merkle commitments. This document synthesizes the DSM
 architecture and its recent extensions into a concise, implementable specification.
 It formalizes bilateral state progression without clocks or heights, introduces
-the Tripwire fork–exclusion theorem, incorporates the Dual–Binding Random
-Walk (DBRW) anti–cloning mechanism, details an offline recovery protocol using
-encrypted NFC capsules, and specifies Deterministic Join–Triggered Emissions
-(DJTE): a capped, halving–scheduled distribution mechanism sourced from a
-CPTA–bound Deterministic Limbo Vault (DLV) and activated only by a spend–
-gate unlock. DJTE is proof–carrying and offline–verifiable: eligibility is committed
+the Tripwire fork-exclusion theorem, incorporates the Dual-Binding Random
+Walk (DBRW) anti-cloning mechanism, details an offline recovery protocol using
+encrypted NFC capsules, and specifies Deterministic Join-Triggered Emissions
+(DJTE): a capped, halving-scheduled distribution mechanism sourced from a
+CPTA-bound Deterministic Limbo Vault (DLV) and activated only by a spend-
+gate unlock. DJTE is proof-carrying and offline-verifiable: eligibility is committed
 via shard activation accumulators, global population counts are committed via a
-sparse Merkle root, winner selection is exact–uniform over the activated set using
+sparse Merkle root, winner selection is exact-uniform over the activated set using
 deterministic index descent, and double consumption is structurally prevented by
-a spent–proof SMT that transitions a Join Activation Proof (JAP) from unspent
-to spent under strict–fail validation. All algorithms are post–quantum secure
-and admit efficient verification on resource–constrained devices. Terminology is
+a spent-proof SMT that transitions a Join Activation Proof (JAP) from unspent
+to spent under strict-fail validation. All algorithms are post-quantum secure
+and admit efficient verification on resource-constrained devices. Terminology is
 aligned with current usage: we use inclusion proof (not “membership proof”), we
 avoid “relationship keys,” and ordering is by hash adjacency, not time.
 1 Introduction
-The original vision for a peer–to–peer electronic cash system promised direct transactions
+The original vision for a peer-to-peer electronic cash system promised direct transactions
 without financial intermediaries. Conventional blockchains approximate this ideal yet still
 require global consensus, miners or validators, and incur probabilistic finality. DSM dis-
 penses with global state entirely by localizing state to bilateral relationships and enforcing
 1
 DSM: Deterministic State Machines 2
-forward–only progression through cryptographic commitments. Each participant maintains
+forward-only progression through cryptographic commitments. Each participant maintains
 independent hash chains for every counterparty; transactions are validated by the involved
 parties alone. This architecture eliminates reorganization, censorship and liquidity constraints
 while enabling true offline operation.
 Deterministic emissions without consensus or time. DSM treats emissions as a deter-
 ministic state transition, not a “network event.” Under DJTE, new distribution is triggered
-only when a device unlocks its spend–gate and produces a Join Activation Proof (JAP). The
-activated population is committed in shard–local append–only accumulators, while a global
+only when a device unlocks its spend-gate and produces a Join Activation Proof (JAP). The
+activated population is committed in shard-local append-only accumulators, while a global
 sparse Merkle commitment binds the shard counts into a single root that defines the exact
-eligible population size N. Given a public seed derived from hash–adjacent DSM state (not
-time), any verifier can compute an exact–uniform winner index k∈[0,N), deterministically
+eligible population size N. Given a public seed derived from hash-adjacent DSM state (not
+time), any verifier can compute an exact-uniform winner index k∈[0,N), deterministically
 map k into a shard and local position, and verify the winner by inclusion proof. Supply is
-enforced by debiting a CPTA–bound source DLV with an explicit remaining balance and a
-deterministic halving schedule; emissions never exceed the cap because over–issuance fails
+enforced by debiting a CPTA-bound source DLV with an explicit remaining balance and a
+deterministic halving schedule; emissions never exceed the cap because over-issuance fails
 verification.
 Paradigmatic shift (beyond the account model). DSM is not a better account ledger;
 it replaces the account model underlying the modern internet. In DSM, identity and own-
 ership are not mutable rows curated by institutions but immutable mathematical objects
 bound to users’ cryptographic state. Devices attach to a user’s genesis via the Device
-Tree, and each device’s Per–Device SMT defines the user’s bilateral relationships from first
+Tree, and each device’s Per-Device SMT defines the user’s bilateral relationships from first
 principles—eliminating custodial account recovery, authorization servers, and third-party
 revocation lists. The result is a continuously evolving, self-verifying user-controlled state,
 rather than institution-controlled accounts.
@@ -92,7 +92,7 @@ tained; this is an implementation optimization that does not affect acceptance r
 DSM uses two Merkle structures:
 • Device Tree (standard Merkle). A standard Merkle tree whose leaves are device
 identifiers DevID owned by a single genesis account G. This tree binds all devices to G.
-• Per–Device SMT. For each device A, a Sparse Merkle Tree (SMT) indexes A’s bilateral
+• Per-Device SMT. For each device A, a Sparse Merkle Tree (SMT) indexes A’s bilateral
 relationships. Each leaf represents one relationship (A ↔B) and stores the current
 relationship commitment (e.g. the current chain tip digest hA↔B).
 In both structures, internal nodes store the hash of their two children and inclusion proofs
@@ -142,18 +142,18 @@ message MUST contain:
 No CBOR, JSON, base64, or hex-text encodings are permitted for proofs in acceptance
 predicates.
 DSM: Deterministic State Machines 5
-2.3 Two–Layer Commit Path (Genesis to Device to Relationship)
+2.3 Two-Layer Commit Path (Genesis to Device to Relationship)
 Each accepted relationship state has a compact commit path:
 hA↔B πrel −−−→rA and DevIDA
 πdev −−−→RG, (2)
-where rA is A’s Per–Device SMT root and RG is the Device Tree root for genesis G. Here
+where rA is A’s Per-Device SMT root and RG is the Device Tree root for genesis G. Here
 πrel and πdev are inclusion proofs. This ties every bilateral update to both the device and its
 genesis without any global ledger.
 2.4 Genesis, Device IDs, and Domain Separation
-Each user has a genesis digest G∈{0,1}256. Each device holds a long–term post–quantum
-attestation keypair (skA,pkA) (SPHINCS+), a stable device identifier DevIDA (a domain–
-separated digest bound to pkA and device attestation), and a Per–Device SMT over relation-
-ships. All hashes and signatures are domain–separated (e.g. labels like "DSM/receipt\0").
+Each user has a genesis digest G∈{0,1}256. Each device holds a long-term post-quantum
+attestation keypair (skA,pkA) (SPHINCS+), a stable device identifier DevIDA (a domain-
+separated digest bound to pkA and device attestation), and a Per-Device SMT over relation-
+ships. All hashes and signatures are domain-separated (e.g. labels like "DSM/receipt\0").
 Domain tags are part of the commitment and are not optional.
 Device identifier (normative). specific, but deterministic). Then
 Let AttA be the stable device attestation digest (platform-
@@ -166,19 +166,19 @@ G= BLAKE3-256 "DSM/genesis\0" ∥b1∥···∥bt∥A . (3)
 Device Tree (standard Merkle). The Device Tree (leaves = device IDs) is fully replicated
 across storage nodes and across all devices under G. Adding a device is an online event: a
 new leaf is inserted and the updated root RG is propagated to all devices.
-Per–Device SMT. Each device A maintains its own Per–Device SMT root rA. These per–
+Per-Device SMT. Each device A maintains its own Per-Device SMT root rA. These per-
 device SMTs are not mirrored across the user’s other devices. Storage nodes keep aggregated
 mirrors (e.g., latest rA and compact indices) for availability and recovery; storage nodes are
 dumb by design and do not validate transitions.
 DSM: Deterministic State Machines 6
 4 State Transition Protocol (Clockless Ordering)
 Fix parties (A,B) with local parent tip hn for the relationship CA↔B at device A.
-4.1 Pre–commitment and Attestation
+4.1 Pre-commitment and Attestation
 Initiator prepares a precommit with fresh entropy e:
 Cpre = BLAKE3-256 "DSM/precommit\0" ∥hn∥payload∥e . (4)
-Counterparty verifies and co–signs Cpre. The successor Sn+1 embeds hn; hn+1 = H(Sn+1).
+Counterparty verifies and co-signs Cpre. The successor Sn+1 embeds hn; hn+1 = H(Sn+1).
 
-4.1.1 Fork–Aware Pre–Commit Family (Deterministic Smart Commitments)
+4.1.1 Fork-Aware Pre-Commit Family (Deterministic Smart Commitments)
 The single-tag form (4) covers the classical "one candidate per parent" case.
 DSM additionally supports deterministic smart commitments built from
 pre-commit forking — authoring multiple mutually-exclusive candidate
@@ -218,8 +218,8 @@ control flow remains bounded — every branch is committed up front, and
 none of the unbounded-loop / reentrancy / gas-griefing surfaces of
 Turing-complete VMs are admitted (cross-reference Sec. 7.2).
 
-4.2 Receipt Construction (Per–Device SMT Replace)
-Aupdates its Per–Device SMT by replacing the leaf for (A↔B) from hn to hn+1, producing
+4.2 Receipt Construction (Per-Device SMT Replace)
+Aupdates its Per-Device SMT by replacing the leaf for (A↔B) from hn to hn+1, producing
 r′
 A. The stitched receipt encodes
 τA→B = enc "DSM/stitched-receipt/v3\0", G, DevIDA, DevIDB,
@@ -283,10 +283,10 @@ A) under G, a verifier checks:
 1. Both signatures verify under the presented SPHINCS+ public keys (Sec. 11.1).
 2. πrel proves hn ∈rA and π′
 rel proves hn+1 ∈r′
-A (Per–Device SMT inclusion).
+A (Per-Device SMT inclusion).
 3. πdev proves DevIDA is included in RG (Device Tree inclusion).
-4. Recomputing the Per–Device SMT leaf replace yields r′
-A byte–exactly.
+4. Recomputing the Per-Device SMT leaf replace yields r′
+A byte-exactly.
 5. The parent tip hn has not been previously consumed for this relationship.
 There are no timestamps, heights, or counters in acceptance predicates.
 The acceptance predicate is fully algorithmic:
@@ -332,7 +332,7 @@ out-of-band) as a normal deliverable object.
 5.4 Modal Synchronization Lock
 Let PendingA↔B hold if an accepted but not-yet-adjacent online projection exists for (A,B)
 in either party’s b0x or local queue.
-Theorem 1 (Pending–Online Lock). If PendingA↔B holds, initiating an offline transaction
+Theorem 1 (Pending-Online Lock). If PendingA↔B holds, initiating an offline transaction
 for (A,B) is invalid until the pending items are resolved (accepted or rejected). Relationships
 (A,C) for C ̸= B proceed unaffected.
 DSM: Deterministic State Machines 10
@@ -342,12 +342,12 @@ Disjoint relationships commute.
 6 Tripwire Theorem and Causal Consistency
 6.1 Atomic Interlock Tripwire
 The Tripwire theorem formalizes fork exclusion in stitched DSM updates.
-Theorem 2 (Atomic Interlock Tripwire). Assume SPHINCS+ is EUF–CMA and H is
+Theorem 2 (Atomic Interlock Tripwire). Assume SPHINCS+ is EUF-CMA and H is
 collision resistant. The probability that an adversary generates two distinct receipts that both
 consume the same parent tip and both verify is negligible.
 Sketch. Two accepted successors to the same parent require either a signature forgery or a
 collision in the chained hash or Merkle commit path.
-Intuition: Tripwire as a Ledger Replacement. Each device A maintains a Per–Device
+Intuition: Tripwire as a Ledger Replacement. Each device A maintains a Per-Device
 SMT with root rA that commits to all bilateral relationships (A↔B) as leaves, with each
 leaf storing the current relationship tip hA↔B. Whenever (A,B) updates their chain, both
 parties update their local SMT roots, and stitched receipts prove inclusion of the old and
@@ -366,12 +366,12 @@ shared counterparties: per-device SMT roots and stitched receipts form a web of 
 that collectively forbid double-spend, without a global public ledger.
 DSM: Deterministic State Machines 11
 6.2 Causal Consistency
-Stitched receipts induce a DAG of Per–Device SMT roots across devices. A root rD is
+Stitched receipts induce a DAG of Per-Device SMT roots across devices. A root rD is
 accepted iff for every referenced relationship tip along the path into rD, there exists a valid
-inclusion proof demonstrating its presence in the corresponding Per–Device SMT and a
+inclusion proof demonstrating its presence in the corresponding Per-Device SMT and a
 Device Tree inclusion for the signing device. This enforces causal consistency without a global
 sequence.
-6.3 First–Contact Binding
+6.3 First-Contact Binding
 When an isolated device presents its first countersigned receipt, it irrevocably binds to that
 branch: future states must extend it, or verification fails unless H or SPHINCS+ is broken.
 7 Architectural Rationale and Differentiators
@@ -453,7 +453,7 @@ Atomicity (normative). Any token-affecting operation MUST be represented as a DS
 state transition and MUST be coupled to the same adjacency and receipt predicates as any
 other state update. Token deltas cannot be applied “out of band”; a balance change without
 a valid adjacent receipt is invalid.
-Theorem 3 (Double–Spending Impossibility). There do not exist two distinct accepted
+Theorem 3 (Double-Spending Impossibility). There do not exist two distinct accepted
 successors of Sn that allocate the same spendable balance to different recipients.
 Sketch. Conflicting successors would both consume the same parent but assign identical
 spend power to different recipients; acceptance of both contradicts Tripwire or hash collision
@@ -477,7 +477,7 @@ conservation-preserving with respect to the fixed total supply: an emission allo
 the recipient while debiting−αfrom the source DLV balance in the same adjacent transition.
 Any transition that would cause the source DLV to underflow is invalid.
 8.1 Deterministic Limbo Vault Invariants
-Let a vault be V = (L,C,H). The unlocking secret emerges only upon stitched proof–of–
+Let a vault be V = (L,C,H). The unlocking secret emerges only upon stitched proof-of-
 completion σ:
 skV = H(L∥C∥σ). (11)
 Without σ, recovering skV is negligible in λ.
@@ -489,7 +489,7 @@ This section specifies a deterministic, immutable policy object used to define t
 and to constrain subsequent token operations under DSM. A CPTA is a single canonical
 Protobuf object with a BLAKE3 commitment; clients cache the object locally and may
 fetch its full bytes from any storage node by commitment digest. Enforcement is entirely
-device–local via inclusion proofs and receipt predicates; no external executor is trusted.
+device-local via inclusion proofs and receipt predicates; no external executor is trusted.
 DSM: Deterministic State Machines 15
 Goals. (1) Deterministic structure for the parts DSM must verify directly (ticker, alias,
 decimals, caps, transferability constraints, emission source binding). (2) An expressive hook
@@ -518,16 +518,16 @@ A CPTA splits into a structured core(deterministically enforced by DSM) and an e
 section (pure commitments—hashes the policy refers to but never executes).
 Structured core (normative fields).
 • identity: GT (32B), version (u32).
-• display: alias (UTF-8), ticker (A–Z, 2–8 chars), decimals (u8; 0 for NFTs/SBTs).
+• display: alias (UTF-8), ticker (A-Z, 2-8 chars), decimals (u8; 0 for NFTs/SBTs).
 • kind: FUNGIBLE |NFT |SBT (non-transferable).
 • supply: cap (u128, fixed); initial_alloc (u128, optional, debited from source DLV if
 nonzero).
 • emission: DJTE parameters, binding deterministic join-triggered reveals to this token:
 DSM: Deterministic State Machines 16
-– source_dlv: 32B vault identifier (CPTA-bound DLV holding the pre-existing supply).
-– halving_interval: u64 (number of emissions per halving epoch).
-– base_amount: u128 (epoch-0 emission amount before halving).
-– recipient_mode: WINNER_UNIFORM (deterministic exact-uniform selection over activated
+- source_dlv: 32B vault identifier (CPTA-bound DLV holding the pre-existing supply).
+- halving_interval: u64 (number of emissions per halving epoch).
+- base_amount: u128 (epoch-0 emission amount before halving).
+- recipient_mode: WINNER_UNIFORM (deterministic exact-uniform selection over activated
 set; Sec. ??).
 • authority (discretionary operations): threshold t-of-N over a sorted list of issuer
 genesis IDs. Discretionary mint/burn is OPTIONAL and, if enabled, MUST still respect
@@ -727,7 +727,7 @@ commit and (optionally) by ticker and alias (non-
 authoritative). Devices cache CPTAs locally; any node can serve bytes (clients verify by
 digest). For pointer-style retrieval, policy_pointer is a hint only—the digest is the source
 of truth.
-Short identifiers. UI and tables may display a short policy number (first 8–16 bytes of
+Short identifiers. UI and tables may display a short policy number (first 8-16 bytes of
 policy_
 commit) and ticker/alias for human legibility; protocol logic always uses full 32B
 digests.
@@ -745,7 +745,7 @@ are checked in the stitched receipt verification path; failure causes rejection 
 calls.
 10 Storage Node Regulation and Incentives
 The decentralized storage layer is governed by cryptography and economics, not discretion.
-Storage nodes (a) serve object availability (Device Tree, Per–Device SMT aggregates, and
+Storage nodes (a) serve object availability (Device Tree, Per-Device SMT aggregates, and
 b0x messages), (b) serve Merkle/SMT proof material derived from stored byte-indexes on
 demand, and (c) submit to objective audits. Sustainability follows from the subscription
 model (Sec. 7.1); incentive alignment follows from hardware-bound identity and staking.
@@ -772,7 +772,7 @@ DSM: Deterministic State Machines 23
 DLV reference plus its stitched proof-of-funding).
 All three are verifiable from canonical digests that advance via stitched receipts. Service
 obligations are objective:
-• Availability: serve Device Tree snapshots and Per–Device SMT aggregate heads with
+• Availability: serve Device Tree snapshots and Per-Device SMT aggregate heads with
 valid inclusion proofs for requested keys.
 • Delivery: accept and relay b0x-prefixed message blobs and make them retrievable until
 consumed.
@@ -786,7 +786,7 @@ We fix the following normative audit structure:
 1. Replica placement and PaidK gate. For any object address addr, a deterministic
 placement function maps
 addr −→ Replicas(addr) ⊆{nodeID}
-using a Fisher–Yates permutation seeded from
+using a Fisher-Yates permutation seeded from
 BLAKE3-256 "DSM/place\0" ∥addr
 and the current Node Registry vector. Reads are subject to a PaidK gate: a client accepts
 the content at addr only if at least K distinct nodes in Replicas(addr) return identical bytes
@@ -876,8 +876,8 @@ derivable from:
 DSM: Deterministic State Machines 26
 • stake and subscription pricing recorded in DLVs.
 Any verifier with access to the same bytes reaches the same slashing and admission decisions.
-11 Post–Quantum Key Evolution and Transport
-DSMusesaKyberKEMtoderiveper–transitionstepmaterialandSPHINCS+toauthenticate
+11 Post-Quantum Key Evolution and Transport
+DSMusesaKyberKEMtoderiveper-transitionstepmaterialandSPHINCS+toauthenticate
 receipts. All derivations are clockless and deterministically bound to adjacency inputs.
 Deterministic Kyber encapsulation (normative). from public and local secret inputs:
 Let coins be deterministically derived
@@ -885,8 +885,8 @@ coins := BLAKE3-256 "DSM/kyber-coins\0" ∥hn ∥Cpre ∥DevIDsender ∥KDBRW.
 Encapsulation uses a deterministic coins interface (equivalently, a seeded KEM):
 (ct,ss) = KyberEncDet(pkrecipient,coins), kstep = BLAKE3-256 "DSM/kyber-ss\0" ∥ss ,
 (12)
-where all hashing uses BLAKE3–256 with domain separation. Second–preimage resistance of
-chained commitments prevents forks; SPHINCS+ ensures non–repudiation.
+where all hashing uses BLAKE3-256 with domain separation. Second-preimage resistance of
+chained commitments prevents forks; SPHINCS+ ensures non-repudiation.
 11.1 SPHINCS+ Ephemeral Keys Chained to Parent (Clockless)
 Signatures (normative). Parameter set: SPHINCS+ BLAKE3, level = NIST Category
 5, variant = ‘f‘ (fast). The DSM implementation uses BLAKE3 for all hash, PRF, and
@@ -895,11 +895,11 @@ serialized size ≤128 KiB (including two signatures and included proof material
 exceeding the cap are invalid and MUST be rejected prior to proof verification.
 Key derivation (normative). Let KDBRW be the DBRW binding (Sec. 12). KDBRW MUST
 NEVER be serialized, logged, or included in any commitment. Derive a master seed using
-HKDF–BLAKE3:
+HKDF-BLAKE3:
 Smaster = HKDF-ExtractBLAKE3(salt= "DSM/dev\0", IKM= G∥DevID ∥KDBRW ∥s0),
 (13)
 and an attestation key (AKsk,AKpk) ←SPHINCS+.KeyGen(Smaster).
-Given parent hn and precommit Cpre, derive the per–step seed
+Given parent hn and precommit Cpre, derive the per-step seed
 En+1 = HKDFBLAKE3("DSM/ek\0", hn ∥Cpre ∥kstep ∥KDBRW), (14)
 then generate the ephemeral keypair (EKsk
 n+1,EKpk
@@ -916,21 +916,21 @@ Sign the receipt body with EKsk
 n+1.
 Verification (normative). checks inclusion proofs (Sec. 4.2).
 Verification replays the chain of certificates back to AKpk and
-11.2 Identity Pre–commitment
+11.2 Identity Pre-commitment
 Let P0 be a provisioning seed; define Pi = BLAKE3-256("DSM/provision\0" ∥Pi−1). Under
 collision resistance, adversaries cannot forge a different identity chain consistent with {Pi}
 without breaking P0. For transport, commitments may be sealed via Kyber and verified upon
 decryption by checking BLAKE3-256("DSM/commit\0" ∥Sn ∥P) = expected.
-12 Dual–Binding Random Walk (DBRW)
-Definition 1 (Hardware Entropy). H(d) ∈{0,1}n extracts device–specific microarchitectural
+12 Dual-Binding Random Walk (DBRW)
+Definition 1 (Hardware Entropy). H(d) ∈{0,1}n extracts device-specific microarchitectural
 entropy.
 Definition 2 (Environment Fingerprint). E(e) ∈{0,1}m fingerprints the execution environ-
 ment.
-Definition 3 (Dual–Binding).
+Definition 3 (Dual-Binding).
 KDBRW = BLAKE3-256 "DSM/dbrw-bind\0" ∥H(d) ∥E(e) ∥sdevice ,
 where sdevice is a per-device salt ensuring uniqueness even for similar hardware or environ-
 ments.
-Theorem 5 (Binding Inseparability). Given KDBRW and collision resistance of BLAKE3–256
+Theorem 5 (Binding Inseparability). Given KDBRW and collision resistance of BLAKE3-256
 under domain separation, it is infeasible to find (h′,e′,s′) ̸= (h,e,s) such that BLAKE3-256("DSM/dbrw-bind
 h′ ∥e′ ∥s′) = BLAKE3-256("DSM/dbrw-bind\0" ∥h ∥e ∥s). The per-device salt sdevice
 prevents correlation attacks by ensuring unique bindings even when hardware entropy or
@@ -978,19 +978,19 @@ plaintext as:
 Plaint := ProtoDet rt, Meta, {(DevID(8),hA↔Dev)}, Rollt, challenget, ct , (17)
 where:
 • ct is a monotone capsule index (local to the capsule stream; not a clock).
-• rt is the Per–Device SMT root after accepting receipt t.
-• DevID(8) are 8–byte truncated device digests used only for compact indexing; protocol
-verification binds to full 32–byte DevIDs elsewhere.
+• rt is the Per-Device SMT root after accepting receipt t.
+• DevID(8) are 8-byte truncated device digests used only for compact indexing; protocol
+verification binds to full 32-byte DevIDs elsewhere.
 • hA↔Dev are the current relationship chain tips for each listed device relationship.
 • Rollt is an accumulator over accepted receipts (defined below).
 • challenget binds the capsule to its creation context and prevents replay between streams.
 DSM: Deterministic State Machines 29
-Key derivation (normative; mnemonic ring). Let the user supply a 24–word mnemonic.
+Key derivation (normative; mnemonic ring). Let the user supply a 24-word mnemonic.
 Derive a fixed-length seed using a memory-hard KDF with fixed parameters (no time-based
 tuning):
 Smn := Argon2id "DSM/recovery-ring\0", mnemonic
 _bytes,
-then derive the AEAD key using HKDF–BLAKE3:
+then derive the AEAD key using HKDF-BLAKE3:
 KR := HKDFBLAKE3 "DSM/recovery-aead\0", Smn.
 (mnemonic
 _bytes is the canonical wordlist encoding; implementations MUST NOT treat
@@ -998,9 +998,9 @@ locale or whitespace as significant.)
 Nonce derivation (normative; clockless). AEAD nonces are derived deterministically
 from the capsule index and the current roll:
 noncet := BLAKE3-256 "DSM/recovery-nonce\0" ∥u64le(ct) ∥Rollt 0..23,
-i.e., the first 24 bytes for XChaCha20–Poly1305. Nonce reuse is prevented by the monotone
+i.e., the first 24 bytes for XChaCha20-Poly1305. Nonce reuse is prevented by the monotone
 ct.
-Capsule encryption (normative). Use XChaCha20–Poly1305:
+Capsule encryption (normative). Use XChaCha20-Poly1305:
 Captt = XChaCha20-Poly1305.EncKR, nonce=noncet Plaint; AD = "DSM/recovery-capsule-v3\0".
 (18)
 Roll accumulator (normative). Let Receiptt be the accepted stitched receipt bytes (trans-
@@ -1138,7 +1138,7 @@ of message ordering, timing, or network topology.
 CAP presumes a single, globally shared object whose operations must trade off consistency,
 availability, and partition tolerance. DSM rejects that premise: there is no monolithic global
 state. Instead, DSM is a collection of independent bilateral relationships, each with its own
-straight hash chain and Per–Device SMT head, stitched by countersigned receipts.
+straight hash chain and Per-Device SMT head, stitched by countersigned receipts.
 15.2 Local Predicates (Per Relationship)
 Let Ri,j denote the relationship domain between devices i and j. We define, locally:
 Ci,j ⇔ all receipts on Ri,j verify (signatures + inclusion proofs) and the chain has no forked successor,
@@ -1152,7 +1152,7 @@ satisfies Ci,j, Ai,j, and Pi,j.
 DSM: Deterministic State Machines 34
 Proof. Consistency: stitched receipts and collision resistance eliminate acceptable double
 successors for the same parent (Tripwire), so Ci,j holds. Availability: each operation either
-(a) completes online via b0x delivery into the counterparty’s Per–Device SMT pipeline, or (b)
+(a) completes online via b0x delivery into the counterparty’s Per-Device SMT pipeline, or (b)
 completes offline via live co-signing; in both cases the response is deterministic, establishing
 Ai,j. Partition tolerance: a partition only affects the ability of that pair to synchronize; all
 other Rk,ℓ continue, so Pi,j holds. Because DSM does not attempt to maintain a global shared
@@ -1161,42 +1161,42 @@ object, the global CAP trade-off never arises.
 Since the system is the disjoint union of {Ri,j}, the classical CAP impossibility is out of
 scope. DSM achieves consistency, availability, and partition tolerance within each relationship
 domain—the only domain where the predicates are semantically meaningful in DSM.
-15.5 Bifurcation Resistance and Pre–Sign Commitments
-Mandatory pre–sign commitments Cpre lock parameters; forging conflicting successors requires
+15.5 Bifurcation Resistance and Pre-Sign Commitments
+Mandatory pre-sign commitments Cpre lock parameters; forging conflicting successors requires
 a hash collision or signature forgery. Offline bilateral exchanges realize the same security via
 proximity channels.
-15.6 Non–Repudiation and Causal Ordering
+15.6 Non-Repudiation and Causal Ordering
 Countersigned receipts are undeniable; causal ordering emerges from parent embedding and
-Per–Device/Device Tree inclusion proofs.
-15.7 Anti–Cloning Guarantees
+Per-Device/Device Tree inclusion proofs.
+15.7 Anti-Cloning Guarantees
 DBRW binds state to both hardware and environment; without KDBRW, extending state is
 infeasible.
 15.8 Offline Liveness and Recovery
-Thecapsule+TR/SRschemeenablesimmediateresumptionafterdeviceloss; per–relationship
+Thecapsule+TR/SRschemeenablesimmediateresumptionafterdeviceloss; per-relationship
 parents allow constructing successors without replaying history; the roll accumulator anchors
 recovered state integrity.
 15.9 Additional Guarantees
 Auditing can enumerate stitched digests between indices; proofs remain logarithmic. Reputa-
-tion or rate–limits can be computed from local deterministic counters or bounded windows
+tion or rate-limits can be computed from local deterministic counters or bounded windows
 orthogonal to acceptance rules.
 DSM: Deterministic State Machines 35
 16 System Architecture and Implementation
-This section is a drop–in replacement that specifies the complete DSM system design for the
-current mobile–first SDK. Android (NDK/JNI) is the reference target, but the SDK is defined
-as cross–platform. It ties the cryptographic model to concrete code structure, transport, and
+This section is a drop-in replacement that specifies the complete DSM system design for the
+current mobile-first SDK. Android (NDK/JNI) is the reference target, but the SDK is defined
+as cross-platform. It ties the cryptographic model to concrete code structure, transport, and
 mobile integration, while retaining all prior protocol invariants (no global consensus, no wall
 clocks or heights, bilateral isolation, inclusion proofs only).
 16.1 Codebase Layout and Roles
 Rust Core (dsm_core) Single source of truth for all state transition rules, cryptography,
-and verification. It is transport–agnostic and exposes stable ABI surfaces for mobile and
+and verification. It is transport-agnostic and exposes stable ABI surfaces for mobile and
 other bindings.
-• core/: Genesis/device creation, relationship (pair) straight-hash-chains, Per–Device SMT
+• core/: Genesis/device creation, relationship (pair) straight-hash-chains, Per-Device SMT
 maintenance, Device Tree verification.
-• crypto/: Post–quantum primitives (Kyber KEM, SPHINCS+ signatures), BLAKE3,
-HKDF–BLAKE3, Argon2id, AEAD.
+• crypto/: Post-quantum primitives (Kyber KEM, SPHINCS+ signatures), BLAKE3,
+HKDF-BLAKE3, Argon2id, AEAD.
 • receipt/: Stitched receipts, inclusion proofs, canonical commit bytes, Tripwire enforce-
 ment.
-• bilateral/: Offline co–sign flow (BLE/NFC transport-agnostic), conflict detection, local
+• bilateral/: Offline co-sign flow (BLE/NFC transport-agnostic), conflict detection, local
 apply.
 • unilateral/: Online unilateral submit/retrieve using b0x[...] spool keys.
 • recovery/: Tombstone/Succession, recovery capsule AEAD stream, DLV primitives
@@ -1205,13 +1205,13 @@ relevant to recovery predicates.
 16.2 SDK Architecture and Build Targets
 Scope and authority (normative). The Rust protocol core crate dsm_core is the sole
 execution authority for: (1) canonical commit bytes, (2) acceptance predicates, (3) Merkle
-and SMT inclusion proof verification, (4) Per–Device SMT replace semantics, (5) signature
-creation/verification, and (6) all KDFs (HKDF–BLAKE3, Argon2id). Platform SDKs and
+and SMT inclusion proof verification, (4) Per-Device SMT replace semantics, (5) signature
+creation/verification, and (6) all KDFs (HKDF-BLAKE3, Argon2id). Platform SDKs and
 bindings are non-authoritative shims that MUST delegate these operations to dsm_core and
 MUST NOT re-implement canonical encodings or predicates.
 DSM: Deterministic State Machines 36
 16.2.1 SDK repository (language-agnostic)
-The SDK refers to the cross–platform repository DSM_SDK, which packages bindings, transport
+The SDK refers to the cross-platform repository DSM_SDK, which packages bindings, transport
 schemas(.proto), anddevelopertoolingarounddsm_core. TheSDKisdefinedindependently
 of any one platform.
 16.2.2 Android target (NDK/JNI) and app
@@ -1224,7 +1224,7 @@ ABI-stable and versioned.
 co_sign_offline, verify_receipt, get_per_device_root, prove_incl.
 • Hardware shim: Kotlin mediates BLE/NFC, GNSS/UI sensors, and storage I/O;
 dsm_core never touches Android SDK objects directly.
-• WebView bridge: the frontend emits/receives length–prefixed binary Protobuf envelopes
+• WebView bridge: the frontend emits/receives length-prefixed binary Protobuf envelopes
 (e.g. Uint8Array) through a single bridge. Kotlin converts between WebView binary buffers
 and Rust FFI buffers. No JSON, no base64, and no hex encodings are used on
 the protocol path.
@@ -1249,8 +1249,8 @@ semantic upgrades are coordinated and explicit.
 • Encoding ban: JSON, base64, hex, and Serde-derived canonicalization are forbidden
 on the protocol path (wire, storage keys used for protocol addressing, and acceptance
 predicates).
-Storage Nodes Storage nodes are dumb, signature–free persistence surfaces. They store
-Device Tree material, Per–Device SMT mirrors (aggregated), b0x spools, ByteCommit chains,
+Storage Nodes Storage nodes are dumb, signature-free persistence surfaces. They store
+Device Tree material, Per-Device SMT mirrors (aggregated), b0x spools, ByteCommit chains,
 and recovery capsules. They do not evaluate acceptance predicates. Validation is device-side;
 nodes persist and serve bytes. Censorship resistance derives from replication plus client-side
 verification.
@@ -1264,7 +1264,7 @@ Hdev(L,R) := BLAKE3 "DSM/dev-merkle\0" ∥L∥R .
 Empty tree root.
 R∅
 G := BLAKE3 "DSM/dev-empty\0".
-Per–Device SMT (sparse). For each device, a Per–Device Sparse Merkle Tree indexes that
+Per-Device SMT (sparse). For each device, a Per-Device Sparse Merkle Tree indexes that
 device’s bilateral relationships; leaves store the current relationship chain tip digest hA↔B
 per counterparty key. Other devices do not mirror this SMT; storage nodes may keep concise
 aggregated mirrors. Receipts always carry inclusion proofs against relevant SMT roots.
@@ -1316,12 +1316,12 @@ not re-encode commits.
 commit hashing, receipt signing, storage addressing keys).
 16.6 Ordering and Concurrency (No Clocks, No Heights)
 DSM uses the bilateral straight hash chain itself for strict ordering; no timestamps or heights
-appear in any predicate. Concurrency is resolved by stitched receipts and Per–Device SMT
+appear in any predicate. Concurrency is resolved by stitched receipts and Per-Device SMT
 replace:
 1. Each proposed successor at tip hn carries a pre-commit Cpre = BLAKE3 "DSM/pre\0" ∥
-hn ∥op ∥e and an inclusion proof that hn is the current Per–Device SMT leaf.
+hn ∥op ∥e and an inclusion proof that hn is the current Per-Device SMT leaf.
 2. The successor hn+1 = BLAKE3 "DSM/tip\0" ∥hn ∥op ∥e∥σ is accepted iff the stitched
-receipt validates and the Per–Device SMT replace hn →hn+1 recomputes the advertised
+receipt validates and the Per-Device SMT replace hn →hn+1 recomputes the advertised
 new root r′
 A with valid inclusion proofs (old and new).
 3. Any concurrent attempt consuming the same hn that is not bit-identical is rejected by the
@@ -1335,15 +1335,15 @@ DSM: Deterministic State Machines 40
 Per-step key derivation is specified in Sec. 11.1 and Sec. 12. In summary:
 • Device-bound secret KDBRW derives from hardware and environment (DBRW) and is never
 serialized, logged, or committed.
-• Master seed Smaster derives via HKDF–BLAKE3 from (G,DevID,KDBRW,s0).
-• For each parent hn and pre-commit Cpre, a per-step seed En+1 derives via HKDF–BLAKE3
+• Master seed Smaster derives via HKDF-BLAKE3 from (G,DevID,KDBRW,s0).
+• For each parent hn and pre-commit Cpre, a per-step seed En+1 derives via HKDF-BLAKE3
 from (hn,Cpre,kstep,KDBRW), where kstep is derived from Kyber shared secret material.
 • Ephemeral SPHINCS+ keys are deterministically generated from En+1 and certified by
 the previous key (AK or prior EK).
 No long-term signing key is exposed at the protocol layer; all signatures are ephemeral and
 chained to the parent and DBRW binding.
-Receipts (Per–Device SMT replace). For (A↔B) at tip hn, a stitched receipt carries:
-(i) old/new tips (hn,hn+1), (ii) old/new Per–Device SMT roots (rA,r′
+Receipts (Per-Device SMT replace). For (A↔B) at tip hn, a stitched receipt carries:
+(i) old/new tips (hn,hn+1), (ii) old/new Per-Device SMT roots (rA,r′
 A) (and symmetrically
 rB,r′
 B when required), (iii) inclusion proofs for the old and new leaves, (iv) Device Tree
@@ -1352,7 +1352,7 @@ SPHINCS+ signatures over the canonical commit bytes of the receipt body. If any 
 proof fails or SMT replace does not recompute the advertised root, the receipt is invalid.
 16.8 Offline vs. Online Flows
 Offline (bilateral, co-sign live). Devices exchange Cpre, verify inclusion proofs locally,
-derive per-step keys, co-sign the receipt, and each applies the Per–Device SMT replace. No
+derive per-step keys, co-sign the receipt, and each applies the Per-Device SMT replace. No
 storage node is required for finality.
 Online (unilateral, b0x[...] spool). Sender posts a unilateral submission to the derived
 b0x[...] key. The recipient syncs, verifies proofs and signatures, then stitches and applies.
@@ -1360,7 +1360,7 @@ The relationship-local modal lock forbids starting an offline transaction for (A
 pending online projections exist for (A,B).
 16.9 Storage Nodes and Censorship Resistance
 Storage nodes expose protobuf-only endpoints to store/fetch: (i) Device Tree material and
-roots, (ii) Per–Device SMT mirrors (aggregated), (iii) b0x[...] spool items, (iv) recovery
+roots, (ii) Per-Device SMT mirrors (aggregated), (iii) b0x[...] spool items, (iv) recovery
 capsules, and (v) ByteCommit chains.
 Nodes never validate acceptance predicates. Censorship resistance follows from: (1) client-side
 verification of all fetched bytes and proofs, (2) deterministic replica placement and PaidK
@@ -1370,17 +1370,17 @@ protobuf object is relayed to other nodes.
 16.10 Recovery Capsule AEAD and DLV
 Recovery capsules are defined in Sec. 13. This subsection pins implementation choices for the
 SDK.
-AEAD choice (normative). Use XChaCha20–Poly1305 with a 256-bit key KR derived from
+AEAD choice (normative). Use XChaCha20-Poly1305 with a 256-bit key KR derived from
 the mnemonic ring key derivation, and a 24-byte nonce derived deterministically from the
 capsule counter and roll accumulator (Sec. 13).
 Associated data (normative).
 AD := "DSM/recovery-capsule-v3\0" ∥rt ∥u64le(ct).
 Associated data is authenticated but not encrypted; it binds the capsule to the current
-Per–Device SMT root and capsule index without clocks.
+Per-Device SMT root and capsule index without clocks.
 Nonce uniqueness (normative). Nonce reuse is forbidden. Uniqueness is enforced by
 monotone counter ct per capsule stream and deterministic nonce derivation under KR.
 16.11 Build, Tooling, and Generation Pipeline
-• Rust workspace: cargo build –locked –workspace –all-features.
+• Rust workspace: cargo build -locked -workspace -all-features.
 • AndroidNDK:cargo-ndk -t armeabi-v7a -t arm64-v8a -t x86_64 -o ./android/app/src/mai
 build -r.
 • JNI: Minimal surface in DsmNativeWrapper.kt; all parameter validation and all crypto-
@@ -1399,7 +1399,7 @@ Sec. 11.1).
 • KEM: Kyber for step secrets; secrets never serialized.
 • SMT: 256-bit key space; inclusion proofs logarithmic; device-local authoritative.
 • Device Tree: Standard Merkle; replicated to storage nodes and user devices.
-• Entropy: s0 andsdevice fromCSPRNG;per-stepseedsviaHKDF–BLAKE3over(hn,Cpre,kstep,KDBRW).
+• Entropy: s0 andsdevice fromCSPRNG;per-stepseedsviaHKDF-BLAKE3over(hn,Cpre,kstep,KDBRW).
 • Time: No timestamps, epochs, or heights in predicates or encodings.
 • Modal rule: Pending online for (A,B) blocks offline for (A,B) until synchronized; other
 relationships commute.
@@ -1407,11 +1407,11 @@ Summary. DSM’s implementation is mobile-first: Rust compiles into an Android n
 library (NDK), invoked through a thin JNI layer, and surfaced to a React UI via a single
 bridge. Transport uses protobuf (Envelope v3). All cryptographic commits are canonical
 protobuf commit bytes emitted and verified solely by dsm_core. Ordering is enforced by
-bilateral hash adjacency and Per–Device SMT replace, not by time or height. SPHINCS+ is
+bilateral hash adjacency and Per-Device SMT replace, not by time or height. SPHINCS+ is
 per-step and deterministically derived with Kyber and DBRW binding.
 17 Conclusion
 DSM is a clockless bilateral trust fabric with two Merkle layers: a replicated Device Tree
-that binds DevIDs to a single genesis, and a Per–Device SMT that indexes relationship
+that binds DevIDs to a single genesis, and a Per-Device SMT that indexes relationship
 domains and their linear straight hash chains. Ordering is enforced solely by hash adjacency.
 Receipts carry inclusion proofs and post-quantum signatures; ephemeral SPHINCS+ keys are
 chained to the parent and bound to the device via DBRW. Online delivery is deterministic
@@ -1427,15 +1427,15 @@ DevID stable device identifier (domain-separated hash of a post-quantum attestat
 and metadata); leaf in the device tree
 device tree standard merkle tree whose leaves are device ids bound to the user’s genesis;
 root RG
-per–device SMT device-local SMT that maps each bilateral relationship to its current chain
+per-device SMT device-local SMT that maps each bilateral relationship to its current chain
 tip; root rA
 chain tip latest digest hn of a bilateral straight hash chain
 hash adjacency ordering rule: the successor must embed the parent hash under canonical
 encoding (no clocks/heights)
 inclusion proof merkle authentication path proving a key/value is committed in a given root
-non–inclusion proof sparse proof that a key resolves to the zero leaf in an SMT
+non-inclusion proof sparse proof that a key resolves to the zero leaf in an SMT
 zero leaf canonical empty value for absent keys in an SMT
-pre–commit (Cpre) deterministic hash at the parent that locks the candidate op and entropy
+pre-commit (Cpre) deterministic hash at the parent that locks the candidate op and entropy
 stitched receipt signed envelope binding (hn→hn+1), (rA→r′
 A), and inclusion proofs
 smt replace deterministic per-device SMT update hn →hn+1 recomputing r′
@@ -1444,9 +1444,9 @@ canonical commit form byte-exact serialization used for hashing/signing (separat
 on-wire protobuf)
 protobuf envelope on-wire transport encoding for requests/replies; never hashed for crypto-
 graphic commits
-smart commitment deterministic, non–turing-complete transition predicate built from pre–
+smart commitment deterministic, non-turing-complete transition predicate built from pre-
 commit (Cpre) and stitched receipts
-pre–commit forking authoring mutually exclusive pre–commit (Cpre) candidates at the same
+pre-commit forking authoring mutually exclusive pre-commit (Cpre) candidates at the same
 parent; only one can be stitched
 DSM: Deterministic State Machines 44
 external commitment hash commitment to external data/state, referenced inside receipts
@@ -1458,7 +1458,7 @@ address; recipient stitches upon sync
 offline (bilateral) both devices co-sign the successor live over BLE/NFC; no b0x
 modal lock if any pending online submission exists for (A,B), new offline (A,B) is rejected
 until sync
-tripwire theorem fork-exclusion: with EUF–CMA signatures and collision-resistant hashing,
+tripwire theorem fork-exclusion: with EUF-CMA signatures and collision-resistant hashing,
 two accepted successors for the same parent are negligible
 causal consistency acceptance requires valid inclusion proofs along per-device/device-tree
 paths; no global order
@@ -1487,7 +1487,7 @@ RTT round-trip time
 UI user interface
 FFI foreign function interface
 SPHINCS+ stateless hash-based signature scheme
-DBRW dual–binding random walk; binds state to hardware entropy and environment
+DBRW dual-binding random walk; binds state to hardware entropy and environment
 fingerprint
 DLV deterministic limbo vault; unlock key derives only upon stitched proof-of-completion
 NDK android native toolchain
@@ -1499,7 +1499,7 @@ DSM: Deterministic State Machines 46
 This section gives concrete, implementation-ready traces that exercise DSM’s core flows: (1)
 offline bilateral (co-sign live), (2) online unilateral via b0x[...], (3) DLV + deterministic
 smart commitments with an external commitment, and (4) a three-party choreography
-(Alice–Bob–Carol) realized as composable bilateral updates. Transport is always Protobuf;
+(Alice-Bob-Carol) realized as composable bilateral updates. Transport is always Protobuf;
 all cryptographic commits use the canonical commit form (Sec. 4.2.1).
 Normative Authority (core vs. SDK). The Rust protocol core crate dsm_core is
 the sole source of truth for: canonical commit bytes, acceptance predicates, Merkle proof
@@ -1522,7 +1522,7 @@ n ∈rA)
 πdev(DevIDA ∈RGA ) (Device Tree proof)
 Leaf value vA↔B = hA↔B
 n
-Bob’s device B holds the symmetric view for (A,B) with its own Per–Device SMT root rB
+Bob’s device B holds the symmetric view for (A,B) with its own Per-Device SMT root rB
 and parent hA↔B
 n.
 For brevity in the examples below, we often write hn when the relationship is clear from
@@ -1667,7 +1667,7 @@ Given any claimed successor, an acceptor MUST:
 1. Verify SPX signatures against the canonical commit bytes.
 2. Verify inclusion proofs for (hn ∈r) and (hn+1 ∈r′).
 3. Verify DevID inclusion in the Device Tree (RG).
-4. Recompute Per–Device SMT replace and match r′ byte-exactly.
+4. Recompute Per-Device SMT replace and match r′ byte-exactly.
 5. Enforce token invariants (Bn+1 ≥0; supply conservation).
 6. Enforce modal lock for (A,B) if pending online exists.
 7. Enforce receipt size ≤128 KiB (signatures + proofs).

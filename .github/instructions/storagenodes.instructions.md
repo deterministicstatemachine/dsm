@@ -11,7 +11,7 @@ Contents
 2 Notation and Primitives 3
 3 Deterministic Protobuf Encoding (DSM-CPE) 3
 4 Device Identity, Binding, and Step Keys 3
-5 Genesis Anchor (Commit–Reveal, Clockless) 4
+5 Genesis Anchor (Commit-Reveal, Clockless) 4
 6 Addressing, Placement, and Enforcement 4
 7 Node Storage SMT and ByteCommit Mirroring 4
 8 Capacity Signals and Position Delta 5
@@ -79,11 +79,11 @@ _fp)).
 Step keys. derive via HKDF with salts tied to the last accepted device commit digest, never wall
 time. Only devices sign stitched receipts; nodes do not sign.
 3
-5 Genesis Anchor (Commit–Reveal, Clockless)
+5 Genesis Anchor (Commit-Reveal, Clockless)
 A single network-wide genesis anchor binds parameters, initial registry, and entropy. Let
 G= H(DSM/genesis\0∥ProtoDet(A0)),
 s0 = H(DSM/step-salt\0∥G).
-Commit–reveal produces η0 = H(DSM/anchor/eta\0∥Dcommit∥Dreveal); withholding a reveal cannot
+Commit-reveal produces η0 = H(DSM/anchor/eta\0∥Dcommit∥Dreveal); withholding a reveal cannot
 bias ordering post-commit.
 Genesis Parameters (normative).
 P = [ H= BLAKE3-256, Sig = SPHINCS+, KDF = HKDF, N, K, U↑, U↓, w, Gnew, FLAT
@@ -310,7 +310,7 @@ _
 RATE } ≥K.
 On first satisfaction, spend is permanently enabled; no renewals by time.
 17 Permutation Determinism
-Keyed Fisher–Yates over a stable pre-order (bytewise ascending order of 32-byte digests). Seed:
+Keyed Fisher-Yates over a stable pre-order (bytewise ascending order of 32-byte digests). Seed:
 s = H(DSM/place\0∥x) for item x. Derive swap stream ri = H(s∥uint32(i)). Inputs MUST be
 strictly in the stable pre-order before permutation. This ensures all honest clients compute identical
 replica sets.
@@ -325,11 +325,11 @@ holds for all j.
 4. Registry update. Given prior N, valid U,D, and applicant set A, compute ∆P, compute
 salt, rank applicants deterministically, update Nby the pure add/remove rules.
 5. PaidK. Spend enabled iff PaidK(G,DevID,R) holds over canonical device-signed receipts.
-6. Contacts. Accept ContactAddV3 and ContactAcceptV3 per §12 rules C1–C2. Cache tips for
+6. Contacts. Accept ContactAddV3 and ContactAcceptV3 per §12 rules C1-C2. Cache tips for
 bilateral sessions.
-7. Policies (CTPA). Accept TokenPolicyV3 and PolicyAnchorV3 per §13 rules P1–P2. Reject
+7. Policies (CTPA). Accept TokenPolicyV3 and PolicyAnchorV3 per §13 rules P1-P2. Reject
 any token transition that lacks a cached exact-byte policy match.
-8. DLVs. Accept DLVCreateV3/DLVOpenV3 per §14 rules V1–V2. Policy satisfaction is mandatory
+8. DLVs. Accept DLVCreateV3/DLVOpenV3 per §14 rules V1-V2. Policy satisfaction is mandatory
 for openings.
 19 Parameter Defaults (Normative)
 • Redundancy: N=6, K=3.
