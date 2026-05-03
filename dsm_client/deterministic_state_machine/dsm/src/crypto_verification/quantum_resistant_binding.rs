@@ -79,13 +79,7 @@ fn serialize_attestation_message(
 ) -> Vec<u8> {
     const TAG: &[u8] = b"DSM/device-attestation\0";
     let mut buf = Vec::with_capacity(
-        TAG.len()
-            + 8
-            + 32
-            + 4
-            + additional_entropy.len()
-            + 4
-            + encapsulated_state.len(),
+        TAG.len() + 8 + 32 + 4 + additional_entropy.len() + 4 + encapsulated_state.len(),
     );
     buf.extend_from_slice(TAG);
     buf.extend_from_slice(&tick.to_be_bytes());

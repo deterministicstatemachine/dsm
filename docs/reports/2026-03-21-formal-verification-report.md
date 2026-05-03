@@ -138,9 +138,11 @@ Seed: `42` | Total: 373.2s
 | ML-KEM-768 | encapsulation sizes | PASS |
 | ML-KEM-768 | decapsulate round trip | PASS |
 | ML-KEM-768 | deterministic keygen | PASS |
-| Pedersen | hiding property | PASS |
-| Pedersen | binding property | PASS |
-| Pedersen | commit-verify round trip | PASS |
+| ~~Pedersen~~ | ~~hiding property~~ | REMOVED — Issue #184 F2 + Pedersen excision; module no longer present |
+| ~~Pedersen~~ | ~~binding property~~ | REMOVED — see above |
+| ~~Pedersen~~ | ~~commit-verify round trip~~ | REMOVED — see above |
+| Salted-BLAKE3 commitment | hiding (random-oracle / 32-byte blinding) | inherited from BLAKE3 PRF assumption — covered by core BLAKE3 PBT suite |
+| Salted-BLAKE3 commitment | binding (collision resistance) | inherited from BLAKE3 collision resistance — covered by core BLAKE3 PBT suite |
 
 ## Bilateral Throughput
 

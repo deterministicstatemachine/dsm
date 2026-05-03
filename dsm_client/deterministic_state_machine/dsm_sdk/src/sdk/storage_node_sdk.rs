@@ -1539,8 +1539,7 @@ impl StorageNodeSDK {
         expected_preimage.extend_from_slice(&state_hash_bytes);
         expected_preimage.extend_from_slice(&params_bytes);
         expected_preimage.extend_from_slice(&next_state.to_le_bytes());
-        let expected_hash =
-            dsm::crypto::blake3::domain_hash("DSM/precommit", &expected_preimage);
+        let expected_hash = dsm::crypto::blake3::domain_hash("DSM/precommit", &expected_preimage);
 
         if bilateral_entry.pre_commitment_hash != expected_hash.as_bytes() {
             bilateral_entry.status = BilateralTransactionStatus::Rejected;

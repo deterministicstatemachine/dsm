@@ -203,23 +203,21 @@ impl BilateralBleHandler {
         commitment_hash: [u8; 32],
         side: BilateralSide,
     ) -> Result<Vec<u8>, DsmError> {
-        let mut receipt =
-            dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
-                &unsigned_receipt_bytes,
-            )?;
+        let mut receipt = dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
+            &unsigned_receipt_bytes,
+        )?;
         let receipt_commitment = receipt.compute_commitment()?;
 
-        let recipient_kyber_pk = match crate::storage::client_db::get_contact_by_device_id(
-            counterparty_device_id,
-        ) {
-            Ok(Some(c)) if !c.kyber_public_key.is_empty() => c.kyber_public_key,
-            _ => {
-                return Err(DsmError::invalid_operation(
-                    "bilateral receipt: counterparty contact missing Kyber public key — \
+        let recipient_kyber_pk =
+            match crate::storage::client_db::get_contact_by_device_id(counterparty_device_id) {
+                Ok(Some(c)) if !c.kyber_public_key.is_empty() => c.kyber_public_key,
+                _ => {
+                    return Err(DsmError::invalid_operation(
+                        "bilateral receipt: counterparty contact missing Kyber public key — \
                      re-establish contact to upgrade for per-step EK signing",
-                ));
-            }
-        };
+                    ));
+                }
+            };
 
         let k_dbrw_vec = crate::fetch_dbrw_binding_key()?;
         if k_dbrw_vec.len() < 32 {
@@ -264,8 +262,7 @@ impl BilateralBleHandler {
             // layers cryptographically independent.
             session_binding: Some(&commitment_hash),
         };
-        let signing_out =
-            crate::sdk::receipts::sign_receipt_with_per_step_ek(&signing_inputs)?;
+        let signing_out = crate::sdk::receipts::sign_receipt_with_per_step_ek(&signing_inputs)?;
 
         match side {
             BilateralSide::A => {
@@ -1043,8 +1040,8 @@ impl BilateralBleHandler {
         // until phase 2 (fixed-point loop) so the order of records
         // doesn't matter for chained recoveries.
         let mut wedge_candidates: Vec<(
-            Vec<u8>,                                    // commitment_hash (for logging)
-            [u8; 32],                                   // rel_key
+            Vec<u8>,                                      // commitment_hash (for logging)
+            [u8; 32],                                     // rel_key
             dsm::types::receipt_types::StitchedReceiptV2, // decoded receipt
         )> = Vec::new();
 
@@ -1104,8 +1101,7 @@ impl BilateralBleHandler {
                             bytes,
                         ) {
                             Ok(receipt)
-                                if !receipt.ek_pk_b.is_empty()
-                                    && !receipt.ek_cert_b.is_empty() =>
+                                if !receipt.ek_pk_b.is_empty() && !receipt.ek_cert_b.is_empty() =>
                             {
                                 let rel_key =
                                     dsm::verification::smt_replace_witness::compute_smt_key(
@@ -1168,14 +1164,13 @@ impl BilateralBleHandler {
         for _pass in 0..max_passes {
             let mut advanced_this_pass = 0usize;
             for (commitment_hash, rel_key, receipt) in &wedge_candidates {
-                let current_cp_pk =
-                    match crate::storage::client_db::load_cert_chain_head_pubkey(
-                        rel_key,
-                        crate::storage::client_db::CertChainSide::Counterparty,
-                    ) {
-                        Ok(Some(pk)) => pk,
-                        _ => continue, // No row to advance against; skip.
-                    };
+                let current_cp_pk = match crate::storage::client_db::load_cert_chain_head_pubkey(
+                    rel_key,
+                    crate::storage::client_db::CertChainSide::Counterparty,
+                ) {
+                    Ok(Some(pk)) => pk,
+                    _ => continue, // No row to advance against; skip.
+                };
 
                 // Skip if already at the target — nothing to do.
                 if current_cp_pk == receipt.ek_pk_b {
@@ -3595,11 +3590,10 @@ impl BilateralBleHandler {
                             ));
                         }
 
-                        let rel_key =
-                            dsm::verification::smt_replace_witness::compute_smt_key(
-                                &self.device_id,
-                                &counterparty_device_id,
-                            );
+                        let rel_key = dsm::verification::smt_replace_witness::compute_smt_key(
+                            &self.device_id,
+                            &counterparty_device_id,
+                        );
                         // From this sender's view, the RECEIVER's chain head
                         // lives in the Counterparty-side row of
                         // cert_chain_heads.
@@ -3678,9 +3672,8 @@ impl BilateralBleHandler {
                                 // initial persist_session call and the sweep
                                 // would have no way to recover the
                                 // Counterparty chain head.
-                                if let Err(e) = self
-                                    .persist_session(&snapshot_for_persist, None)
-                                    .await
+                                if let Err(e) =
+                                    self.persist_session(&snapshot_for_persist, None).await
                                 {
                                     warn!(
                                         "[BILATERAL] §11.1 (B-tight) failed to persist counter-signed receipt before canonical commit: {} — wedge recovery will fall back to AK_pk on next attempt",
@@ -6122,10 +6115,10 @@ mod tests {
             dsm::crypto::ephemeral_key::sign_ek_cert(&prior_cp_sk, &next_ek_pk, &h_n).unwrap();
 
         let mut receipt = StitchedReceiptV2::new(
-            [0x01; 32],         // genesis
+            [0x01; 32],             // genesis
             counterparty_device_id, // devid_a (= receiver in their own view)
-            local_device_id,    // devid_b (= sender from their view)
-            h_n,                // parent_tip
+            local_device_id,        // devid_b (= sender from their view)
+            h_n,                    // parent_tip
             [0x04; 32],
             [0x05; 32],
             [0x06; 32],
@@ -6314,11 +6307,9 @@ mod tests {
         let h_n_2 = [0xCB; 32];
 
         // Cert for step 1: signed by AK_sk over (ek_pk_1, h_n_1).
-        let cert_1 =
-            dsm::crypto::ephemeral_key::sign_ek_cert(&ak_sk, &ek_pk_1, &h_n_1).unwrap();
+        let cert_1 = dsm::crypto::ephemeral_key::sign_ek_cert(&ak_sk, &ek_pk_1, &h_n_1).unwrap();
         // Cert for step 2: signed by ek_sk_1 over (ek_pk_2, h_n_2).
-        let cert_2 =
-            dsm::crypto::ephemeral_key::sign_ek_cert(&ek_sk_1, &ek_pk_2, &h_n_2).unwrap();
+        let cert_2 = dsm::crypto::ephemeral_key::sign_ek_cert(&ek_sk_1, &ek_pk_2, &h_n_2).unwrap();
 
         let make_session_record = |commitment_byte: u8,
                                    created_at: u64,
@@ -6345,9 +6336,7 @@ mod tests {
                 commitment_hash: vec![commitment_byte; 32],
                 counterparty_device_id: counterparty_device_id.to_vec(),
                 counterparty_genesis_hash: Some(vec![0xB0; 32]),
-                operation_bytes: crate::storage::client_db::serialize_operation(
-                    &Operation::Noop,
-                ),
+                operation_bytes: crate::storage::client_db::serialize_operation(&Operation::Noop),
                 phase: "confirm_pending".to_string(),
                 local_signature: Some(vec![0xC0; 64]),
                 counterparty_signature: Some(vec![0xD0; 64]),

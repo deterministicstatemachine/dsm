@@ -611,8 +611,9 @@ fn decode_capsule_bytes(data: &[u8]) -> Result<RecoveryCapsule, DsmError> {
         let mut map = HashMap::with_capacity(n);
         for _ in 0..n {
             let key_bytes = read_len_bytes(&mut p)?;
-            let key = String::from_utf8(key_bytes)
-                .map_err(|_| DsmError::invalid_operation("capsule decode: bad utf8 in cert chain head key"))?;
+            let key = String::from_utf8(key_bytes).map_err(|_| {
+                DsmError::invalid_operation("capsule decode: bad utf8 in cert chain head key")
+            })?;
             let pk = read_len_bytes(&mut p)?;
             map.insert(key, pk);
         }
@@ -625,8 +626,9 @@ fn decode_capsule_bytes(data: &[u8]) -> Result<RecoveryCapsule, DsmError> {
         let mut map = HashMap::with_capacity(n);
         for _ in 0..n {
             let key_bytes = read_len_bytes(&mut p)?;
-            let key = String::from_utf8(key_bytes)
-                .map_err(|_| DsmError::invalid_operation("capsule decode: bad utf8 in last_certs key"))?;
+            let key = String::from_utf8(key_bytes).map_err(|_| {
+                DsmError::invalid_operation("capsule decode: bad utf8 in last_certs key")
+            })?;
             let cert = read_len_bytes(&mut p)?;
             map.insert(key, cert);
         }

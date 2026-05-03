@@ -35,7 +35,8 @@ Deep dive into DSM's system design, layer boundaries, data flow, and crate struc
 │                                                                     │
 ├─────────────────────────────────────────────────────────────────────┤
 │  Layer 4: Core Library (dsm, pure Rust)                             │
-│    crypto/ — BLAKE3, SPHINCS+, ML-KEM-768, Pedersen, ChaCha20      │
+│    crypto/ — BLAKE3, SPHINCS+, ML-KEM-768, ChaCha20, salted-BLAKE3 │
+│              commitments (Pedersen removed — Issue #184 F2)        │
 │    core/ — state machine, bilateral, token, merkle/SMT              │
 │    vault/ — DLV (Limbo Vaults), fulfillment                        │
 │    emissions.rs — DJTE emissions                                    │
@@ -72,7 +73,7 @@ The core crate contains all protocol logic with zero I/O dependencies:
 | `crypto/sphincs.rs` | SPHINCS+ post-quantum signatures |
 | `crypto/kyber.rs` | ML-KEM-768 key encapsulation |
 | `crypto/dbrw.rs` | DBRW anti-cloning |
-| `crypto/pedersen.rs` | Pedersen commitments |
+| `crypto/blake3.rs` (commitments) | Salted-BLAKE3 commitments via `dsm_domain_hasher`; replaces the removed Pedersen module (Issue #184 F2) — see `vault::limbo_vault::dlv_content_commitment` |
 | `merkle/sparse_merkle_tree.rs` | Per-device Sparse Merkle Tree |
 | `vault/dlv_manager.rs` | Deterministic Limbo Vault management |
 | `vault/limbo_vault.rs` | Vault lifecycle states |

@@ -1422,11 +1422,10 @@ impl AppRouterImpl {
                         };
 
                         // Compute relationship_key for chain head lookup.
-                        let rel_key =
-                            dsm::verification::smt_replace_witness::compute_smt_key(
-                                &receipt.devid_a,
-                                &receipt.devid_b,
-                            );
+                        let rel_key = dsm::verification::smt_replace_witness::compute_smt_key(
+                            &receipt.devid_a,
+                            &receipt.devid_b,
+                        );
 
                         // Per-step Kyber per whitepaper §11: encapsulate
                         // against the recipient's Kyber pubkey to derive
@@ -1434,35 +1433,36 @@ impl AppRouterImpl {
                         // fail-closed if missing (no fallback path — contact
                         // must be re-established with peer Kyber pubkey to
                         // enable per-step EK signing).
-                        let recipient_kyber_pk = match crate::storage::client_db::get_contact_by_device_id(
-                            &receipt.devid_b,
-                        ) {
-                            Ok(Some(c)) if !c.kyber_public_key.is_empty() => c.kyber_public_key,
-                            Ok(Some(_)) => {
-                                let rollback_error = self
-                                    .rollback_failed_online_transfer(&rollback_request)
-                                    .await
-                                    .err()
-                                    .map(|rb| format!("; rollback failed: {rb}"))
-                                    .unwrap_or_default();
-                                return err(format!(
+                        let recipient_kyber_pk =
+                            match crate::storage::client_db::get_contact_by_device_id(
+                                &receipt.devid_b,
+                            ) {
+                                Ok(Some(c)) if !c.kyber_public_key.is_empty() => c.kyber_public_key,
+                                Ok(Some(_)) => {
+                                    let rollback_error = self
+                                        .rollback_failed_online_transfer(&rollback_request)
+                                        .await
+                                        .err()
+                                        .map(|rb| format!("; rollback failed: {rb}"))
+                                        .unwrap_or_default();
+                                    return err(format!(
                                     "wallet.send: recipient contact missing Kyber public key — \
                                      re-establish contact to upgrade for per-step EK signing\
                                      {rollback_error}"
                                 ));
-                            }
-                            _ => {
-                                let rollback_error = self
-                                    .rollback_failed_online_transfer(&rollback_request)
-                                    .await
-                                    .err()
-                                    .map(|rb| format!("; rollback failed: {rb}"))
-                                    .unwrap_or_default();
-                                return err(format!(
+                                }
+                                _ => {
+                                    let rollback_error = self
+                                        .rollback_failed_online_transfer(&rollback_request)
+                                        .await
+                                        .err()
+                                        .map(|rb| format!("; rollback failed: {rb}"))
+                                        .unwrap_or_default();
+                                    return err(format!(
                                     "wallet.send: recipient contact lookup failed{rollback_error}"
                                 ));
-                            }
-                        };
+                                }
+                            };
 
                         // Sign with per-step EK (whitepaper §11.1 cert chain).
                         let signing_inputs = crate::sdk::receipts::PerStepSigningInputs {
@@ -1481,8 +1481,7 @@ impl AppRouterImpl {
                             // so we reuse it as session_binding.
                             session_binding: Some(&commitment),
                         };
-                        match crate::sdk::receipts::sign_receipt_with_per_step_ek(&signing_inputs)
-                        {
+                        match crate::sdk::receipts::sign_receipt_with_per_step_ek(&signing_inputs) {
                             Ok(out) => {
                                 log::info!(
                                     "[wallet.send] §11.1 per-step EK sign: ek_pk_len={}, \

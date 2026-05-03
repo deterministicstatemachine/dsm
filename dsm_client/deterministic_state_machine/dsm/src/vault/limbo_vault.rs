@@ -9,9 +9,37 @@ use std::collections::{HashMap, HashSet};
 
 use prost::Message;
 use crate::crypto::kyber;
-use crate::crypto::pedersen::{PedersenCommitment, PedersenParams, SecurityLevel};
 use crate::crypto::sphincs;
 use crate::types::error::DsmError;
+
+/// Compute a salted BLAKE3 content commitment for a DLV vault.
+///
+/// Replaces the prior classical group-based commitment (Issue #184
+/// Finding #2 — see `crypto::mod.rs` removal note). The commitment is:
+///
+/// ```text
+/// content_commitment = BLAKE3("DSM/dlv-content-commit\0" || blinding || content)
+/// ```
+///
+/// where `blinding` is 32 bytes from a CSPRNG. The salted hash provides:
+///   * **Hiding** — under random oracle / 32-byte uniform blinding, the
+///     commitment leaks nothing about the content.
+///   * **Binding** — under BLAKE3-256 collision resistance (~256-bit
+///     pre-quantum, ~128-bit Grover-bounded post-quantum).
+///
+/// Post-quantum-secure under standard assumptions. The prior
+/// classical group-based commitment's distinguishing property —
+/// additive homomorphism `Com(a)·Com(b) = Com(a+b)` — is not used
+/// anywhere in DSM (no DLV path performs commitment addition), so
+/// the simpler primitive is strictly better: smaller (32 bytes
+/// fixed vs. 256+ bytes variable), faster, no big-int math, no
+/// classical-DLP assumption that Shor breaks.
+fn dlv_content_commitment(blinding: &[u8; 32], content: &[u8]) -> [u8; 32] {
+    let mut h = dsm_domain_hasher("DSM/dlv-content-commit");
+    h.update(blinding);
+    h.update(content);
+    *h.finalize().as_bytes()
+}
 use crate::types::policy_types::VaultCondition;
 // State import removed: vault lifecycle APIs now take &[u8; 32] (the
 // resolved reference state hash) directly. Callers supply the digest from
@@ -429,7 +457,11 @@ pub struct LimboVault {
     pub state: VaultState,
     pub content_type: String,
     pub encrypted_content: EncryptedContent,
-    pub content_commitment: PedersenCommitment,
+    /// Salted BLAKE3 commitment to the encrypted content
+    /// (`BLAKE3("DSM/dlv-content-commit\0" || blinding || content)`).
+    /// 32 bytes. Replaces the prior classical group-based commitment
+    /// per Issue #184 Finding #2 — see `dlv_content_commitment()` above.
+    pub content_commitment: [u8; 32],
     pub parameters_hash: Vec<u8>,
     pub creator_signature: Vec<u8>,
     pub verification_positions: Vec<Position>,
@@ -469,7 +501,9 @@ pub struct LimboVaultDraft {
     pub intended_recipient: Option<Vec<u8>>,
     pub content_type: String,
     pub encrypted_content: EncryptedContent,
-    pub content_commitment: PedersenCommitment,
+    /// Salted BLAKE3 content commitment (32 bytes). Replaces the
+    /// prior classical group-based commitment per Issue #184 F2.
+    pub content_commitment: [u8; 32],
     pub parameters_hash: Vec<u8>,
     pub verification_positions: Vec<Position>,
     pub reference_state_hash: [u8; 32],
@@ -516,15 +550,16 @@ impl TryFrom<crate::types::proto::LimboVaultProto> for LimboVault {
             aad: encrypted_content_proto.aad,
         };
 
-        let content_commitment =
-            PedersenCommitment::from_bytes(&p.content_commitment).map_err(|e| {
-                DsmError::serialization_error(
-                    "content_commitment",
-                    "deserialize",
-                    None::<&str>,
-                    Some(e),
-                )
-            })?;
+        // Salted BLAKE3 commitment is exactly 32 bytes on the wire
+        // (Issue #184 F2 — was prior classical group-based commitment).
+        if p.content_commitment.len() != 32 {
+            return Err(DsmError::SerializationError(format!(
+                "content_commitment must be 32 bytes (BLAKE3-256), got {}",
+                p.content_commitment.len()
+            )));
+        }
+        let mut content_commitment = [0u8; 32];
+        content_commitment.copy_from_slice(&p.content_commitment);
 
         // Decode RW positions
         let mut verification_positions: Vec<Position> =
@@ -600,7 +635,7 @@ impl From<&LimboVault> for crate::types::proto::LimboVaultProto {
                 nonce: v.encrypted_content.nonce.clone(),
                 aad: v.encrypted_content.aad.clone(),
             }),
-            content_commitment: v.content_commitment.to_bytes(),
+            content_commitment: v.content_commitment.to_vec(),
             parameters_hash: v.parameters_hash.clone(),
             creator_signature: v.creator_signature.clone(),
             verification_positions: v
@@ -946,7 +981,7 @@ impl LimboVault {
                 nonce: Vec::new(),
                 aad: Vec::new(),
             },
-            content_commitment: PedersenCommitment::default(),
+            content_commitment: [0u8; 32],
             parameters_hash: Vec::new(),
             creator_signature: Vec::new(),
             verification_positions: Vec::new(),
@@ -1025,9 +1060,21 @@ impl LimboVault {
         let encrypted_data = kyber::aes_encrypt(&sym_key, &nonce, content)
             .map_err(|e| DsmError::crypto("aes_encrypt", Some(e)))?;
 
-        // Pedersen commitment to content
-        let params = PedersenParams::new(SecurityLevel::Standard128)?;
-        let commitment = PedersenCommitment::commit(content, &params)?;
+        // §14 DLV content commitment (Issue #184 F2 — the classical
+        // group-based commitment was removed). Salted BLAKE3:
+        //   `BLAKE3("DSM/dlv-content-commit\0" || blinding || content)`
+        // — provides hiding (under uniform 32-byte blinding from a
+        // CSPRNG, never persisted) and binding (under BLAKE3 collision
+        // resistance). Matches the prior commitment design's
+        // hiding-via-fresh-randomness-and-discard pattern, just with
+        // a post-quantum-secure primitive instead of classical DLP.
+        let blinding = {
+            use rand::RngCore;
+            let mut b = [0u8; 32];
+            crate::crypto::rng::SecureRng.fill_bytes(&mut b);
+            b
+        };
+        let commitment = dlv_content_commitment(&blinding, content);
 
         // Parameters hash (protobuf of fulfillment + core fields) — raw 32 bytes.
         let mut parameters = Vec::new();
@@ -1041,7 +1088,10 @@ impl LimboVault {
         if let Some(rec) = &intended_recipient {
             parameters.extend_from_slice(rec);
         }
-        parameters.extend_from_slice(&commitment.to_bytes());
+        // 32-byte raw commitment hash (Issue #184 F2 — was the prior
+        // commitment's variable-length to_bytes(); now just the
+        // salted-BLAKE3 32 bytes).
+        parameters.extend_from_slice(&commitment);
 
         let parameters_hash = domain_hash_bytes("DSM/dlv-params", &parameters).to_vec();
 
@@ -1134,7 +1184,8 @@ impl LimboVault {
         if let Some(rec) = &self.intended_recipient {
             parameters.extend_from_slice(rec);
         }
-        parameters.extend_from_slice(&self.content_commitment.to_bytes());
+        // 32-byte raw commitment hash (Issue #184 F2).
+        parameters.extend_from_slice(&self.content_commitment);
 
         let computed = domain_hash_bytes("DSM/dlv-params", &parameters).to_vec();
         if !secure_eq(&computed, &self.parameters_hash) {
@@ -2048,7 +2099,7 @@ impl Default for LimboVault {
                 nonce: Vec::new(),
                 aad: Vec::new(),
             },
-            content_commitment: PedersenCommitment::default(),
+            content_commitment: [0u8; 32],
             parameters_hash: Vec::new(),
             creator_signature: Vec::new(),
             verification_positions: Vec::new(),
@@ -2698,9 +2749,10 @@ mod tests {
     }
 
     /// G.1.4 — idempotent anchoring: identical inputs → byte-identical
-    /// vault_id.  (parameters_hash bundles the Pedersen commitment whose
-    /// blinding factor is intentionally randomised per call; only the
-    /// vault_id is guaranteed byte-identical across calls.)
+    /// vault_id.  (parameters_hash bundles the salted-BLAKE3 content
+    /// commitment whose 32-byte blinding factor is intentionally
+    /// randomised per call; only the vault_id is guaranteed
+    /// byte-identical across calls.)
     #[test]
     fn vault_anchoring_idempotent() {
         let (creator_pk, _) =

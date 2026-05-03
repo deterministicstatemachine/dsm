@@ -35,7 +35,7 @@
 //! ## Module Organization
 //!
 //! - [`core`] — State machine, bridge traits, bilateral management, identity, token subsystem
-//! - [`crypto`] — BLAKE3 (domain-separated), SPHINCS+, ML-KEM-768, Pedersen, DBRW, ChaCha20-Poly1305
+//! - [`crypto`] — BLAKE3 (domain-separated), SPHINCS+, ML-KEM-768, DBRW, ChaCha20-Poly1305 (salted-BLAKE3 commitments via `dsm_domain_hasher`)
 //! - [`types`] — All protocol types: [`types::state_types::State`], [`types::error::DsmError`], identifiers, tokens
 //! - [`vault`] — Deterministic Limbo Vaults (DLV), asset management, fulfillment
 //! - [`merkle`] — Sparse Merkle Tree (per-device SMT) and Device Trees

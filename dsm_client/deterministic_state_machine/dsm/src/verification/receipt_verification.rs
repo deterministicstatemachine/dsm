@@ -103,9 +103,7 @@ pub fn verify_stitched_receipt(
                         .to_string(),
                 ))
             }
-            Err(e) => {
-                return Ok(ReceiptAcceptance::reject(format!("ek_cert_a error: {}", e)))
-            }
+            Err(e) => return Ok(ReceiptAcceptance::reject(format!("ek_cert_a error: {}", e))),
         }
     }
     if let Some(chain_head) = &ctx.chain_head_pubkey_b {
@@ -128,9 +126,7 @@ pub fn verify_stitched_receipt(
                         "ek_cert_b verification failed".to_string(),
                     ))
                 }
-                Err(e) => {
-                    return Ok(ReceiptAcceptance::reject(format!("ek_cert_b error: {}", e)))
-                }
+                Err(e) => return Ok(ReceiptAcceptance::reject(format!("ek_cert_b error: {}", e))),
             }
         }
     }
@@ -400,10 +396,16 @@ mod tests {
         // Build a receipt with valid sig_a but NO ek_cert_a.
         let keypair_a = crate::crypto::signatures::SignatureKeyPair::generate_for_testing();
         let mut receipt = StitchedReceiptV2::new(
-            [0; 32], [0; 32], [0; 32],
-            [0xaa; 32], [0xbb; 32],
-            [0x01; 32], [0x02; 32],
-            vec![], vec![], vec![],
+            [0; 32],
+            [0; 32],
+            [0; 32],
+            [0xaa; 32],
+            [0xbb; 32],
+            [0x01; 32],
+            [0x02; 32],
+            vec![],
+            vec![],
+            vec![],
         );
         let commitment = receipt.compute_commitment().unwrap();
         let sig_a = keypair_a.sign(&commitment).unwrap();
@@ -414,7 +416,8 @@ mod tests {
         let (chain_head_pk, _) = generate_ephemeral_keypair(&[0xCC; 32]).expect("keygen");
 
         let ctx = ReceiptVerificationContext::new(
-            [0u8; 32], [0u8; 32],
+            [0u8; 32],
+            [0u8; 32],
             keypair_a.public_key().to_vec(),
             vec![],
         )
@@ -440,10 +443,16 @@ mod tests {
 
         let keypair_a = crate::crypto::signatures::SignatureKeyPair::generate_for_testing();
         let mut receipt = StitchedReceiptV2::new(
-            [0; 32], [0; 32], [0; 32],
-            [0xaa; 32], [0xbb; 32],
-            [0x01; 32], [0x02; 32],
-            vec![], vec![], vec![],
+            [0; 32],
+            [0; 32],
+            [0; 32],
+            [0xaa; 32],
+            [0xbb; 32],
+            [0x01; 32],
+            [0x02; 32],
+            vec![],
+            vec![],
+            vec![],
         );
         let commitment = receipt.compute_commitment().unwrap();
         receipt.add_sig_a(keypair_a.sign(&commitment).unwrap());
@@ -463,7 +472,8 @@ mod tests {
         receipt.set_ek_cert_a(forged);
 
         let ctx = ReceiptVerificationContext::new(
-            [0u8; 32], [0u8; 32],
+            [0u8; 32],
+            [0u8; 32],
             keypair_a.public_key().to_vec(),
             vec![],
         )
@@ -474,8 +484,7 @@ mod tests {
         assert!(!result.valid, "forged ek_cert_a must be rejected");
         let reason = result.reason.unwrap();
         assert!(
-            reason.contains("ek_cert_a verification failed")
-                || reason.contains("not authorized"),
+            reason.contains("ek_cert_a verification failed") || reason.contains("not authorized"),
             "wrong rejection reason: {}",
             reason
         );
@@ -490,17 +499,24 @@ mod tests {
         // Reuse the parent_uniqueness test setup but without consuming the parent.
         let keypair_a = crate::crypto::signatures::SignatureKeyPair::generate_for_testing();
         let mut receipt = StitchedReceiptV2::new(
-            [0; 32], [0; 32], [0; 32],
-            [0xaa; 32], [0xbb; 32],
-            [0x01; 32], [0x02; 32],
-            vec![], vec![], vec![],
+            [0; 32],
+            [0; 32],
+            [0; 32],
+            [0xaa; 32],
+            [0xbb; 32],
+            [0x01; 32],
+            [0x02; 32],
+            vec![],
+            vec![],
+            vec![],
         );
         let commitment = receipt.compute_commitment().unwrap();
         receipt.add_sig_a(keypair_a.sign(&commitment).unwrap());
         // No ek_cert_a set, no chain head in context.
 
         let ctx = ReceiptVerificationContext::new(
-            [0u8; 32], [0u8; 32],
+            [0u8; 32],
+            [0u8; 32],
             keypair_a.public_key().to_vec(),
             vec![],
         );

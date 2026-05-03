@@ -377,11 +377,8 @@ pub fn init_cert_chain_for_relationship(
     local_ak_pubkey: &[u8],
     counterparty_ak_pubkey: &[u8],
 ) -> Result<(bool, bool)> {
-    let local_inserted = init_cert_chain_head(
-        relationship_key,
-        CertChainSide::Local,
-        local_ak_pubkey,
-    )?;
+    let local_inserted =
+        init_cert_chain_head(relationship_key, CertChainSide::Local, local_ak_pubkey)?;
     let cp_inserted = init_cert_chain_head(
         relationship_key,
         CertChainSide::Counterparty,
@@ -404,11 +401,8 @@ pub fn advance_cert_chain_for_relationship(
     local_new_pubkey: &[u8],
     counterparty_new_pubkey: &[u8],
 ) -> Result<Option<(u64, u64)>> {
-    let local_step = advance_cert_chain_head(
-        relationship_key,
-        CertChainSide::Local,
-        local_new_pubkey,
-    )?;
+    let local_step =
+        advance_cert_chain_head(relationship_key, CertChainSide::Local, local_new_pubkey)?;
     let cp_step = advance_cert_chain_head(
         relationship_key,
         CertChainSide::Counterparty,
@@ -733,10 +727,9 @@ mod tests {
         let k_dbrw = [0x33; 32];
 
         init_local_cert_chain_head_with_sk(&r, &pk0, &sk0, &k_dbrw).unwrap();
-        let step1 =
-            advance_local_cert_chain_head_with_sk(&r, &pk1, &sk1, &k_dbrw)
-                .unwrap()
-                .unwrap();
+        let step1 = advance_local_cert_chain_head_with_sk(&r, &pk1, &sk1, &k_dbrw)
+            .unwrap()
+            .unwrap();
         assert_eq!(step1, 1);
 
         let loaded_sk = load_local_chain_head_sk(&r, &k_dbrw).unwrap().unwrap();

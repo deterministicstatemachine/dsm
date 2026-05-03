@@ -358,9 +358,7 @@ impl WalletSDK {
     ///
     /// Visibility: `pub(crate)` to limit attack surface — only the SDK's
     /// receipt-signing flow should touch the AK_sk directly.
-    pub(crate) fn ak_keypair_for_cert_chain(
-        &self,
-    ) -> Result<(Vec<u8>, Vec<u8>), DsmError> {
+    pub(crate) fn ak_keypair_for_cert_chain(&self) -> Result<(Vec<u8>, Vec<u8>), DsmError> {
         if *self.locked.read() {
             return Err(DsmError::unauthorized(
                 "Wallet is locked",

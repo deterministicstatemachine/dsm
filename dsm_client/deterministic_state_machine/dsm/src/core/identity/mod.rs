@@ -493,7 +493,8 @@ impl IdentityStore {
     ) -> Result<Identity, IdentityError> {
         if storage_nodes.len() < MIN_PARTICIPANTS {
             return Err(IdentityError::InvalidParameter(
-                "At least 3 storage nodes required for MPC genesis creation (whitepaper §2.5)".into(),
+                "At least 3 storage nodes required for MPC genesis creation (whitepaper §2.5)"
+                    .into(),
             ));
         }
 

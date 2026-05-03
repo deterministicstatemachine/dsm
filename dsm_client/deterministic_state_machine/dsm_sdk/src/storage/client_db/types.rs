@@ -72,8 +72,8 @@ pub struct ContactRecord {
     pub contact_id: String,
     pub device_id: Vec<u8>, // Raw bytes (32 bytes for device_id)
     pub alias: String,
-    pub genesis_hash: Vec<u8>,              // Raw bytes (32 bytes)
-    pub public_key: Vec<u8>, // SPHINCS+ signing public key for bilateral verification
+    pub genesis_hash: Vec<u8>, // Raw bytes (32 bytes)
+    pub public_key: Vec<u8>,   // SPHINCS+ signing public key for bilateral verification
     /// Counterparty's Kyber-768 (ML-KEM) public key. Required for the
     /// per-step Kyber encapsulation in receipt EK derivation
     /// (whitepaper §11). The sender encapsulates against this pubkey to

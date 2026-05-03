@@ -146,5 +146,4 @@ mod tests {
         let h2 = domain_separated_hash("DSM/tag", b"data-2");
         assert_ne!(h1, h2);
     }
-
 }

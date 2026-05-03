@@ -55,10 +55,9 @@ fn make_genesis(seed: &[u8; 32], pk: &[u8], initial_balance: u64) -> (State, Sta
     }
     let era_pc = resolve_policy_commit("ERA").expect("ERA policy_commit");
     let era_key = derive_canonical_balance_key(&era_pc, pk, "ERA");
-    state.token_balances.insert(
-        era_key,
-        Balance::from_state(initial_balance, state.hash),
-    );
+    state
+        .token_balances
+        .insert(era_key, Balance::from_state(initial_balance, state.hash));
 
     let mut machine = StateMachine::new();
     machine.set_state(state.clone());

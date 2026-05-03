@@ -571,7 +571,7 @@ pub enum DsmError {
         /// Additional context about why it is invalid.
         context: Option<String>,
     },
-    /// Cryptographic primitive error (BLAKE3, SPHINCS+, ML-KEM, Pedersen).
+    /// Cryptographic primitive error (BLAKE3, SPHINCS+, ML-KEM, salted-BLAKE3 commitments).
     Crypto(CryptoError),
     /// OS-level system error (file permissions, resource limits).
     SystemError(String),

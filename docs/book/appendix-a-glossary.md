@@ -33,7 +33,7 @@ Terminology reference for the DSM protocol.
 | **ML-KEM-768** | Module-Lattice Key Encapsulation Mechanism (formerly Kyber). Post-quantum key exchange used for BLE sessions and TLS. |
 | **MPC** | Multi-Party Computation. Used for genesis creation — the MPC service contributes entropy that no single party controls. |
 | **PBI** | Platform Boot Identity. The bootstrap process that establishes device identity from DBRW entropy, device ID, and genesis hash. |
-| **Pedersen Commitment** | Cryptographic commitment scheme with hiding and binding properties. Used for token conservation proofs. |
+| **Salted-BLAKE3 Commitment** | Hiding + binding cryptographic commitment of the form `BLAKE3-256("DSM/<purpose>\0" \|\| blinding \|\| value)` where `blinding` is 32 bytes of CSPRNG output used once per commit. Replaces the previously-used (and misnamed) "Quantum-Resistant Pedersen" commitments — see Issue #184 Finding #2. Used for DLV vault content commitments via `vault::limbo_vault::dlv_content_commitment`. |
 | **PRLSM** | Partitioned Replicated Lightweight State Machine. DSM's approach to statelessness across the network. |
 | **Signet** | Bitcoin's shared test network. Public test coins, public blocks, and realistic confirmation flow without using mainnet funds. |
 | **SDK_READY** | Atomic flag in the Rust SDK that gates all post-bootstrap operations. Set after successful PBI initialization. |

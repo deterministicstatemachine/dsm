@@ -279,7 +279,11 @@ impl GenesisSession {
             h.update(m);
         }
         // A = contextual binding parameters
-        h.update(&canonical_a(&self.device_id, &self.storage_nodes, &self.metadata));
+        h.update(&canonical_a(
+            &self.device_id,
+            &self.storage_nodes,
+            &self.metadata,
+        ));
         let mut out = [0u8; 32];
         out.copy_from_slice(h.finalize().as_bytes());
         self.genesis_id = out;
@@ -356,13 +360,9 @@ impl GenesisSession {
         // SPHINCS+ keypair from a 32-byte seed expanded out of S_master.
         let mut sphincs_seed_vec =
             crate::crypto::hkdf::expand(&s_master, b"DSM/sphincs-plus-seed\0", 32);
-        let mut sphincs_seed: [u8; 32] =
-            sphincs_seed_vec.as_slice().try_into().map_err(|_| {
-                DsmError::crypto(
-                    "SPHINCS+ seed length mismatch",
-                    None::<std::io::Error>,
-                )
-            })?;
+        let mut sphincs_seed: [u8; 32] = sphincs_seed_vec.as_slice().try_into().map_err(|_| {
+            DsmError::crypto("SPHINCS+ seed length mismatch", None::<std::io::Error>)
+        })?;
         sphincs_seed_vec.zeroize();
 
         let sphincs_kp =
@@ -484,11 +484,7 @@ pub fn compute_step_salt(g: &[u8; 32]) -> [u8; 32] {
 /// Pulled out as a free function so external verifiers (and the
 /// determinism property tests) can recompute it byte-for-byte from the
 /// public inputs (`g`, `device_id`) plus the held-on-device `K_DBRW`.
-pub fn derive_master_seed(
-    g: &[u8; 32],
-    device_id: &[u8; 32],
-    k_dbrw: &[u8; 32],
-) -> [u8; 32] {
+pub fn derive_master_seed(g: &[u8; 32], device_id: &[u8; 32], k_dbrw: &[u8; 32]) -> [u8; 32] {
     use zeroize::Zeroize;
 
     let s_0 = compute_step_salt(g);
@@ -726,9 +722,7 @@ mod tests {
 
         // <3 storage nodes rejected.
         let mut bad = GenesisSession::new(b"x".to_vec()).unwrap();
-        assert!(bad
-            .initialize_mpc(device, vec![NodeId::new("n1")])
-            .is_err());
+        assert!(bad.initialize_mpc(device, vec![NodeId::new("n1")]).is_err());
 
         let mut bad2 = GenesisSession::new(b"x".to_vec()).unwrap();
         assert!(bad2
@@ -863,8 +857,7 @@ mod tests {
             .await
             .expect("create_mpc_genesis succeeds");
 
-        let gs = convert_session_to_genesis_state_compat(&session)
-            .expect("convert succeeds");
+        let gs = convert_session_to_genesis_state_compat(&session).expect("convert succeeds");
 
         assert_eq!(
             session.genesis_id, gs.hash,
@@ -1004,10 +997,9 @@ mod tests {
         // negligible.  (id32(b) only varies by tag byte; we want full
         // byte-pattern uniqueness.)
         let k_dbrw: [u8; 32] = [
-            0x9a, 0x73, 0x21, 0xf0, 0x4c, 0x88, 0xb1, 0x5d,
-            0xee, 0x06, 0x97, 0x42, 0xa8, 0x33, 0xcf, 0x10,
-            0x5b, 0xc4, 0x29, 0x77, 0x84, 0x1e, 0xd3, 0x6a,
-            0x2f, 0x90, 0xab, 0x71, 0x05, 0xfd, 0x68, 0x4e,
+            0x9a, 0x73, 0x21, 0xf0, 0x4c, 0x88, 0xb1, 0x5d, 0xee, 0x06, 0x97, 0x42, 0xa8, 0x33,
+            0xcf, 0x10, 0x5b, 0xc4, 0x29, 0x77, 0x84, 0x1e, 0xd3, 0x6a, 0x2f, 0x90, 0xab, 0x71,
+            0x05, 0xfd, 0x68, 0x4e,
         ];
 
         let s = deterministic_session(device_id, nodes, dev_e, mpc_e, meta, k_dbrw);
@@ -1087,9 +1079,10 @@ mod tests {
             _device_commitment: &[u8; 32],
         ) -> Result<[u8; 32], DsmError> {
             self.calls.lock().unwrap().push(node.as_bytes().to_vec());
-            self.table.get(node.as_bytes()).copied().ok_or_else(|| {
-                DsmError::invalid_operation("unknown node in mock transport")
-            })
+            self.table
+                .get(node.as_bytes())
+                .copied()
+                .ok_or_else(|| DsmError::invalid_operation("unknown node in mock transport"))
         }
     }
 
@@ -1169,15 +1162,10 @@ mod tests {
         ];
         let transport = FixedEntropyTransport::new(&map);
         let k_dbrw = id32(0xDB);
-        let session = create_mpc_genesis_with_transport(
-            device_id,
-            nodes.clone(),
-            k_dbrw,
-            None,
-            &transport,
-        )
-        .await
-        .expect("5-node genesis should succeed");
+        let session =
+            create_mpc_genesis_with_transport(device_id, nodes.clone(), k_dbrw, None, &transport)
+                .await
+                .expect("5-node genesis should succeed");
 
         // All 5 nodes were contacted exactly once each.
         let called = transport.called_nodes();
@@ -1197,13 +1185,7 @@ mod tests {
         assert_eq!(session.mpc_entropies.len(), 5);
         let mut got: Vec<[u8; 32]> = session.mpc_entropies.clone();
         got.sort();
-        let mut want = vec![
-            id32(0xB1),
-            id32(0xB2),
-            id32(0xB3),
-            id32(0xB4),
-            id32(0xB5),
-        ];
+        let mut want = vec![id32(0xB1), id32(0xB2), id32(0xB3), id32(0xB4), id32(0xB5)];
         want.sort();
         assert_eq!(got, want);
     }
@@ -1235,8 +1217,7 @@ mod tests {
         .await
         .expect("transport-driven genesis should succeed");
 
-        let gs = convert_session_to_genesis_state_compat(&session)
-            .expect("convert succeeds");
+        let gs = convert_session_to_genesis_state_compat(&session).expect("convert succeeds");
         assert_eq!(
             session.genesis_id, gs.hash,
             "Issue #252 sub-bug 3 (transport): session genesis_id must \

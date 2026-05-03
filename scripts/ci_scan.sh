@@ -130,6 +130,52 @@ if [ -d "$CORE_DIR" ]; then
   fail_if_found "unsafe blocks in core" "${EXCLUDES[@]}" -e '^ *unsafe \{' "$CORE_DIR"
 fi
 
+# 6) Ban Pedersen commitments (Issue #184 F2 + Brandon's reintroduction-prevention gate).
+#
+# A `crypto/pedersen` module previously lived in this repo, mislabeled
+# "Quantum-Resistant Pedersen Commitments" but implementing a classical
+# Z_p* construction whose security reduces to discrete-log — broken in
+# polynomial time by Shor. It was excised entirely; DSM uses salted
+# BLAKE3 commitments (`vault::limbo_vault::dlv_content_commitment`)
+# which provide identical hiding + binding under post-quantum-secure
+# assumptions.
+#
+# This gate prevents the module / re-exports / dead constants from
+# creeping back in. The legitimate keyword `pedersen` does not appear
+# anywhere in the canonical DSM stack, so a string match here is
+# unambiguous.
+PEDERSEN_BAN_SCOPES=(
+  "dsm_client/deterministic_state_machine/dsm/src"
+  "dsm_client/deterministic_state_machine/dsm_sdk/src"
+)
+PEDERSEN_PATTERN='\bpedersen\b|\bPedersen\b|\bPEDERSEN\b|\bPedersenCommitment\b|\bPedersenParams\b'
+for scope in "${PEDERSEN_BAN_SCOPES[@]}"; do
+  if [ -d "$scope" ]; then
+    fail_if_found \
+      "Pedersen reintroduction in ${scope} (use salted BLAKE3 commitment instead — Issue #184 F2)" \
+      "${EXCLUDES[@]}" \
+      -e "$PEDERSEN_PATTERN" \
+      "$scope"
+  fi
+done
+
+# Also ban num-bigint / num-primes / num-traits / num-integer
+# dependencies — they were Pedersen-only. Dropping them keeps the
+# build minimal and prevents Pedersen reintroduction by way of
+# big-int infrastructure.
+NUMBIG_BAN_PATTERN='^\s*num-(bigint|primes|traits|integer)\s*='
+for cargo in \
+  "dsm_client/deterministic_state_machine/dsm/Cargo.toml" \
+  "dsm_client/deterministic_state_machine/dsm_sdk/Cargo.toml"
+do
+  if [ -f "$cargo" ]; then
+    fail_if_found \
+      "Pedersen-era num-* dependency reintroduced in $cargo" \
+      -e "$NUMBIG_BAN_PATTERN" \
+      "$cargo"
+  fi
+done
+
 # 6) Protobuf library usage
 # NOTE: This repo currently uses `prost::Message` in several core modules for
 # deterministic encoding/canonicalization and internal migrations.

@@ -1265,10 +1265,9 @@ fn trace_tripwire_first_contact_binding(
     let start = Instant::now();
     let mut failures = Vec::new();
 
-    let keypair_a = SignatureKeyPair::generate_from_entropy(
-        b"implementation-trace-first-contact-a",
-    )
-    .expect("first-contact keypair a");
+    let keypair_a =
+        SignatureKeyPair::generate_from_entropy(b"implementation-trace-first-contact-a")
+            .expect("first-contact keypair a");
 
     let genesis = *domain_hash("DSM/trace-genesis", b"first-contact").as_bytes();
     let devid_a = *domain_hash("DSM/trace-device", b"first-contact-a").as_bytes();
