@@ -176,6 +176,23 @@ do
   fi
 done
 
+# 7) Ban dead-code-by-default modules that have crept back before.
+# `crypto_verification` (Issue #185, all 4 findings) was a 600-line
+# module exposing `QuantumResistantBinding` + `MpcIdentityFactory`
+# with zero production callers; its audit findings were all on a
+# never-executed path. Removed entirely. Reintroduction without an
+# explicit production caller and CI gate update is flagged here.
+QRB_BAN_PATTERN='\bcrypto_verification\b|\bQuantumResistantBinding\b|\bMpcIdentityFactory\b'
+for scope in "${PEDERSEN_BAN_SCOPES[@]}"; do
+  if [ -d "$scope" ]; then
+    fail_if_found \
+      "crypto_verification reintroduction in ${scope} (use crypto::cdbrw_binding for hardware-bound attestation — Issue #185)" \
+      "${EXCLUDES[@]}" \
+      -e "$QRB_BAN_PATTERN" \
+      "$scope"
+  fi
+done
+
 # 6) Protobuf library usage
 # NOTE: This repo currently uses `prost::Message` in several core modules for
 # deterministic encoding/canonicalization and internal migrations.

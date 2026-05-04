@@ -73,7 +73,14 @@ pub mod common;
 pub mod core;
 pub mod cpta;
 pub mod crypto;
-pub mod crypto_verification;
+// A separate dead-code attestation module previously lived here
+// (Issue #185 — all 4 findings). It exported types with zero
+// production callers anywhere in `dsm/` or `dsm_sdk/` (verified by
+// source inspection); the audit findings were all on a never-
+// executed path. Module removed entirely. If a real hardware-bound
+// attestation surface is later needed, the C-DBRW infrastructure in
+// `crypto::cdbrw_binding` is already wired through the SDK and is
+// the canonical entry point — see Issue #213.
 pub mod dlv;
 pub mod emissions;
 pub mod envelope;
