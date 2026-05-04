@@ -49,8 +49,16 @@ impl CoreBootstrapAdapter {
 
             // Per whitepaper §2.5: n-of-n MPC; all storage nodes contribute.
             let participant_count = storage_node_ids.len() as u32;
-            // Bootstrap K_DBRW per whitepaper §11.1 + §12 — deterministic
-            // placeholder until real silicon fingerprinting wires here.
+            // §11.1 + §12 K_DBRW. Issue #213: this call site uses the
+            // bootstrap-tagged placeholder path (NOT silicon-bound). The
+            // strict-mode gate fail-closes here before mainnet flips
+            // unless a platform-specific hardware-entropy collector is
+            // wired in. Until then, bootstrap with a clear warning log
+            // that anti-cloning guarantees aren't yet enforced.
+            crate::storage::client_db::cdbrw_strict_mode::enforce_strict_dbrw_or_proceed(
+                "bootstrap_adapter",
+            )
+            .map_err(|e| format!("K_DBRW strict-mode gate: {e}"))?;
             let k_dbrw = dsm::crypto::cdbrw_binding::derive_bootstrap_k_dbrw(&device_id_array)
                 .map_err(|e| format!("K_DBRW bootstrap derivation failed: {e}"))?;
             let genesis_state = dsm::core::identity::genesis::create_genesis_via_blind_mpc(

@@ -520,7 +520,13 @@ impl IdentitySDK {
             "IdentitySDK::create_genesis: calling create_genesis_via_blind_mpc(nodes={})",
             test_nodes.len()
         );
-        // Bootstrap-tagged K_DBRW per whitepaper §11.1 + §12.
+        // §11.1 + §12 K_DBRW. Issue #213: bootstrap-tagged placeholder
+        // (NOT silicon-bound). Strict-mode gate fail-closes here when
+        // mainnet flips until a platform hardware-entropy collector is
+        // wired in.
+        crate::storage::client_db::cdbrw_strict_mode::enforce_strict_dbrw_or_proceed(
+            "identity_sdk",
+        )?;
         let k_dbrw = dsm::crypto::cdbrw_binding::derive_bootstrap_k_dbrw(&device_id_arr)?;
         let genesis_state = futures::executor::block_on(create_genesis_via_blind_mpc(
             device_id_arr,

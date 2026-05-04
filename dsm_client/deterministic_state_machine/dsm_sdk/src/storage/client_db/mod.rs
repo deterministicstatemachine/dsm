@@ -21,6 +21,7 @@ mod bilateral_sessions;
 pub mod bilateral_tip_sync;
 mod bitcoin_accounts;
 mod ble_chunk_buffer;
+pub mod cdbrw_strict_mode;
 pub mod cert_chain;
 mod contacts;
 mod dlv_receipts;

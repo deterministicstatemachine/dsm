@@ -234,7 +234,13 @@ pub async fn fetch_genesis_state(
     let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
 
     // Per whitepaper §2.5: n-of-n MPC; no threshold parameter.
-    // Bootstrap-tagged K_DBRW (test/no-network path).
+    // §11.1 + §12 K_DBRW. Issue #213: bootstrap-tagged placeholder
+    // (test/no-network path; NOT silicon-bound). Strict-mode gate
+    // fail-closes here when mainnet flips until a platform hardware-
+    // entropy collector is wired in.
+    crate::storage::client_db::cdbrw_strict_mode::enforce_strict_dbrw_or_proceed(
+        "counterparty_genesis_helpers",
+    )?;
     let k_dbrw = dsm::crypto::cdbrw_binding::derive_bootstrap_k_dbrw(&device_id_arr)?;
     create_genesis_via_blind_mpc(device_id_arr, nodes, k_dbrw, None).await
 }
