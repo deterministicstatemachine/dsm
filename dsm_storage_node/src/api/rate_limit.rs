@@ -46,17 +46,41 @@ pub async fn rate_limit_noop(req: Request, next: Next) -> Response {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn rate_limiter_is_clockless_pass_through() {
-        let limiter = RateLimiter::new();
-        for _ in 0..1_000 {
-            assert!(limiter.check_rate_limit("any").await.is_ok());
-        }
+    #[test]
+    fn rate_limiter_is_clockless_pass_through() {
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(err) => panic!("failed to build Tokio runtime: {err}"),
+        };
+
+        runtime.block_on(async {
+            let limiter = RateLimiter::new();
+            for _ in 0..1_000 {
+                if let Err(err) = limiter.check_rate_limit("any").await {
+                    panic!("rate limiter unexpectedly rejected request: {err:?}");
+                }
+            }
+        });
     }
 
-    #[tokio::test]
-    async fn bypass_constructor_is_equivalent() {
-        let limiter = RateLimiter::new_bypass();
-        assert!(limiter.check_rate_limit("any").await.is_ok());
+    #[test]
+    fn bypass_constructor_is_equivalent() {
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(err) => panic!("failed to build Tokio runtime: {err}"),
+        };
+
+        runtime.block_on(async {
+            let limiter = RateLimiter::new_bypass();
+            if let Err(err) = limiter.check_rate_limit("any").await {
+                panic!("bypass limiter unexpectedly rejected request: {err:?}");
+            }
+        });
     }
 }
