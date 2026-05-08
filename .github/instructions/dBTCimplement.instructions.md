@@ -160,4 +160,33 @@ achieved.
 burial before re-admission into the DSM live collateral set.
 Therefore the burial parameter applies to vault admission, including successor-vault admission, and
 not as an additional hold on the user-directed withdrawal amount.
+
+Definition 17 (Vault-Layer Bearer Authorization). For every limbo vault v with fulfillment mechanism
+BitcoinHTLC under policy class P, exit authorization at the DSM vault layer is determined solely by
+satisfaction of the executable withdrawal predicate Exec(w, v) — i.e., possession of policy-class-bound
+witness-completion material U(w, v) under the committed in-flight conversion state Θ(w). The DSM-side
+vault field intended_recipient (a Kyber public key used by non-dBTC vaults for recipient-bound content
+decryption) does not gate exit authorization for BitcoinHTLC fulfillment. Recipient binding for dBTC
+withdrawals is enforced exclusively at the Bitcoin layer via the HTLC spend path and the destination
+addrBTC(w).
+
+Equivalently: dBTC vaults are bearer-authorized at the DSM-vault layer. Possession of policy-class-bound
+witness-completion material is the sole authorization predicate; no Kyber-recipient-pubkey check is
+applied at the DSM layer.
+
+Invariant 5 (Bearer Authorization for dBTC Vaults). For every committed withdrawal w and every
+compatible vault v with fulfillment(v) = BitcoinHTLC,
+
+    Exec(w, v) ⇒ DSM-vault-layer admits unlock(w, v),
+
+independent of any DSM-side intended_recipient field on v. Recipient identity is enforced solely at the
+Bitcoin layer through addrBTC(w) and the HTLC spend predicate.
+
+Remark (Implementation Note). The DSM vault implementation (vault::limbo_vault) carries an
+intended_recipient: Option<Vec<u8>> field on every vault. For non-dBTC fulfillment mechanisms this
+field gates unlock, activate, and claim against the requester's public key. For BitcoinHTLC fulfillment
+this field is, by Invariant 5, ignored at the DSM layer. Setting intended_recipient: Some(_) on a
+BitcoinHTLC vault is therefore semantically meaningless for authorization and should be avoided by
+callers; the recipient is determined by the addrBTC paid by the HTLC spend transaction.
+
 5

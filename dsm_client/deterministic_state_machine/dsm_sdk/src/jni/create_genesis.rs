@@ -52,9 +52,6 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_createGenesis<'a>(
         };
 
         // ---- Convert Java byte[] -> Vec<u8> (strict 32B) ----
-        // Genesis creation must NOT depend on DBRW being initialized.
-        // DBRW remains mandatory for wallet initialization / signing, but first-time genesis
-        // needs to be able to run on a fresh device.
         let entropy = match env.convert_byte_array(unsafe { JByteArray::from_raw(_entropy_bytes) })
         {
             Ok(bytes) => {
@@ -81,6 +78,21 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_createGenesis<'a>(
                 );
             }
         };
+        let k_dbrw =
+            match crate::sdk::app_state::AppState::take_platform_cdbrw_binding_key("createGenesis")
+            {
+                Ok(k) => k,
+                Err(e) => {
+                    log::error!("createGenesis: {e}");
+                    return encode_env_as_bytes(
+                        &mut env,
+                        crate::jni::helpers::encode_error_transport(400, &e),
+                    );
+                }
+            };
+        let binding_record = crate::util::text_id::encode_base32_crockford(
+            dsm::crypto::blake3::domain_hash("DSM/cdbrw-binding-record", &k_dbrw).as_bytes(),
+        );
 
         // ---- Ensure runtime for async work ----
         crate::runtime::dsm_init_runtime();
@@ -90,6 +102,7 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_createGenesis<'a>(
             let locale = locale.clone();
             let network_id = network_id.clone();
             let entropy = entropy.clone();
+            let binding_record = binding_record.clone();
 
             async move {
                 use crate::sdk::storage_node_sdk::{StorageNodeConfig, StorageNodeSDK};
@@ -137,23 +150,22 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_createGenesis<'a>(
                         return Err(msg);
                     }
                 };
+                crate::install_canonical_binding_key(k_dbrw.to_vec())
+                    .map_err(|e| format!("createGenesis: install C-DBRW binding failed: {e}"))?;
+                crate::jni::cdbrw::set_cdbrw_binding_key(k_dbrw.to_vec());
 
                 // CRITICAL: Derive signing keypair deterministically from genesis + device_id
-                // plus the DBRW binding key.
+                // plus the C-DBRW binding key.
                 // This ensures the same key is derived every time for a given identity.
                 //
                 // The live path concatenates `genesis || device_id || K_DBRW`, then
                 // `SignatureKeyPair::generate_from_entropy()` compresses that material with
                 // `domain_hash("DSM/sphincs-seed", ...)` before deterministic SPHINCS keygen.
-                //
-                // NOTE: The `entropy` passed here is the DBRW binding key derived in the JNI layer
-                // via DbrwInstance::initialize -> DbrwCommitment::derive_binding_key.
-                // It is the DBRW component of the combined deterministic seed material.
                 let public_key = {
                     let mut key_entropy = Vec::with_capacity(96);
                     key_entropy.extend_from_slice(&genesis_hash_bytes);
                     key_entropy.extend_from_slice(&genesis_device_id);
-                    key_entropy.extend_from_slice(&entropy); // DBRW binding key
+                    key_entropy.extend_from_slice(&k_dbrw);
 
                     match dsm::crypto::SignatureKeyPair::generate_from_entropy(&key_entropy) {
                         Ok(kp) => {
@@ -434,7 +446,7 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_createGenesis<'a>(
                             &genesis_device_id,
                         ),
                         mpc_proof: session_id.clone(),
-                        dbrw_binding: crate::util::text_id::encode_base32_crockford(&entropy),
+                        dbrw_binding: binding_record,
                         merkle_root: crate::util::text_id::encode_base32_crockford(&[0u8; 32]), // Initial empty SMT root
                         participant_count: threshold_usize as u32,
                         // Deterministic, clockless marker (no wall-clock time).

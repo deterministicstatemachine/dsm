@@ -456,10 +456,9 @@ pub struct ReceiptVerificationContext {
     ///   - At step n=0: AK_pk (the device-attested long-term key).
     ///   - At step n>0: the previous step's `EK_pk_n` (which signed cert_{n+1}).
     ///
-    /// `Some(pk)` means cert verification is REQUIRED — the receipt must carry
-    /// a valid `ek_cert_a` that verifies against `pk`. `None` means the caller
-    /// has not yet threaded the chain head (transitional / pre-feature path);
-    /// cert verification is skipped in that case.
+    /// `Some(pk)` means the receipt must carry a valid `ek_cert_a` that verifies
+    /// against `pk`. `None` is fail-closed for receipt acceptance because
+    /// parent/root inclusion alone is not spend authority.
     pub chain_head_pubkey_a: Option<Vec<u8>>,
 
     /// Per-relationship cert chain head for party B (counterparty).

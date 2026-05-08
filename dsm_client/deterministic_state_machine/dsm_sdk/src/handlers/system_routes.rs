@@ -30,6 +30,33 @@ pub(crate) fn handle_system_genesis_query(q: AppQuery) -> AppResult {
     if entropy.len() != 32 {
         return err("system.genesis: device_entropy must be 32 bytes".into());
     }
+    if req.cdbrw_hw_entropy.is_empty() {
+        return err("system.genesis: cdbrw_hw_entropy is required".into());
+    }
+    if req.cdbrw_env_fingerprint.is_empty() {
+        return err("system.genesis: cdbrw_env_fingerprint is required".into());
+    }
+    if req.cdbrw_salt.len() != 32 {
+        return err(format!(
+            "system.genesis: cdbrw_salt must be 32 bytes, got {}",
+            req.cdbrw_salt.len()
+        ));
+    }
+    let k_dbrw = match dsm::crypto::cdbrw_binding::derive_cdbrw_binding_key(
+        &req.cdbrw_hw_entropy,
+        &req.cdbrw_env_fingerprint,
+        &req.cdbrw_salt,
+    ) {
+        Ok(k) => k,
+        Err(e) => {
+            return err(format!(
+                "system.genesis: C-DBRW binding derivation failed: {e}"
+            ))
+        }
+    };
+    let binding_record = crate::util::text_id::encode_base32_crockford(
+        dsm::crypto::blake3::domain_hash("DSM/cdbrw-binding-record", &k_dbrw).as_bytes(),
+    );
 
     // Perform MPC-only genesis using storage node SDK.
     let fut = async move {
@@ -46,6 +73,10 @@ pub(crate) fn handle_system_genesis_query(q: AppQuery) -> AppResult {
 
         let device_id = res.genesis_device_id.clone();
         let genesis_hash = res.genesis_hash.clone().unwrap_or_else(|| vec![0u8; 32]);
+        crate::install_canonical_binding_key(k_dbrw.to_vec())
+            .map_err(|e| format!("system.genesis: install C-DBRW binding failed: {e}"))?;
+        #[cfg(all(target_os = "android", feature = "jni"))]
+        crate::jni::cdbrw::set_cdbrw_binding_key(k_dbrw.to_vec());
         let public_key = crate::sdk::app_state::AppState::get_public_key().unwrap_or_default();
         let smt_root = dsm::merkle::sparse_merkle_tree::empty_root(
             dsm::merkle::sparse_merkle_tree::DEFAULT_SMT_HEIGHT,
@@ -61,7 +92,7 @@ pub(crate) fn handle_system_genesis_query(q: AppQuery) -> AppResult {
             genesis_id: genesis_id_b32.clone(),
             device_id: device_id_b32.clone(),
             mpc_proof: res.session_id.clone(),
-            dbrw_binding: crate::util::text_id::encode_base32_crockford(&entropy),
+            dbrw_binding: binding_record,
             merkle_root: crate::util::text_id::encode_base32_crockford(&[0u8; 32]),
             participant_count: res.participating_nodes.len() as u32,
             progress_marker: "genesis".to_string(),

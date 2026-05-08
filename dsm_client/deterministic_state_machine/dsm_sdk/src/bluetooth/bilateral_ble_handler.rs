@@ -250,7 +250,7 @@ impl BilateralBleHandler {
             devid_sender: self.device_id,
             relationship_key: rel_key,
             k_dbrw: &k_dbrw_arr,
-            fallback_ak_keypair: Some((&ak_pk, &ak_sk)),
+            root_ak_keypair: Some((&ak_pk, &ak_sk)),
             recipient_kyber_pk: &recipient_kyber_pk,
             // §11.1 Item 7: bind the per-step EK signature to this
             // bilateral session via the BLAKE3 "DSM/receipt-bind-session"
@@ -284,7 +284,7 @@ impl BilateralBleHandler {
             &signing_out.ek_pk,
             &signing_out.ek_sk,
             &k_dbrw_arr,
-            signing_out.used_ak_fallback,
+            signing_out.used_root_ak,
         )?;
 
         receipt.to_full_protobuf()
@@ -677,13 +677,13 @@ impl BilateralBleHandler {
             ));
         }
 
-        let confirm_message =
-            generated::Envelope::decode(confirm_envelope.as_slice()).map_err(|e| {
+        let confirm_message = crate::envelope::from_canonical_bytes(confirm_envelope.as_slice())
+            .map_err(|e| {
                 DsmError::serialization_error(
                     "decode_persisted_confirm_envelope",
                     "protobuf",
                     Some(e.to_string()),
-                    Some(e),
+                    None::<std::io::Error>,
                 )
             })?;
         let confirm_request = self.extract_confirm_request(&confirm_message)?;
@@ -1511,9 +1511,9 @@ impl BilateralBleHandler {
             let mut mgr = self.bilateral_tx_manager.write().await;
             if let Some(contact) = mgr.get_contact(&counterparty_device_id).cloned() {
                 // Try to get chain tip from SQLite storage first (most up-to-date)
-                // IMPORTANT: Use the raw variant (no genesis_hash compatibility fallback).
+                // IMPORTANT: Use the raw variant (no genesis_hash compatibility root).
                 // For a fresh contact, get_contact_chain_tip returns the genesis_hash as a
-                // "compatibility" fallback when chain_tip is NULL, which would set
+                // "compatibility" root when chain_tip is NULL, which would set
                 // remote_chain_tip = B.genesis_hash.  But the receiver seeds its local tip
                 // as initial_relationship_chain_tip(A,B) — a completely different value —
                 // causing a guaranteed mismatch on every first transaction.
@@ -1917,7 +1917,7 @@ impl BilateralBleHandler {
         debug!("Handling bilateral prepare request");
 
         // Decode as Envelope - this is the only supported format
-        let envelope = generated::Envelope::decode(envelope_bytes).map_err(|e| {
+        let envelope = crate::envelope::from_canonical_bytes(envelope_bytes).map_err(|e| {
             DsmError::serialization_error(
                 "decode_prepare_envelope",
                 "protobuf",
@@ -1925,7 +1925,7 @@ impl BilateralBleHandler {
                     "Failed to decode Envelope: {}. Raw BilateralPrepareRequest is not supported.",
                     e
                 )),
-                Some(e),
+                None::<std::io::Error>,
             )
         })?;
 
@@ -2046,7 +2046,7 @@ impl BilateralBleHandler {
             // Fallback: if not in memory, try loading from SQLite (handles boot race)
             if !is_verified {
                 log::warn!(
-                    "[BilateralBleHandler] 🔄 Contact not in BLE memory — checking SQLite fallback"
+                    "[BilateralBleHandler] 🔄 Contact not in BLE memory — checking SQLite root"
                 );
                 if let Ok(Some(record)) =
                     crate::storage::client_db::get_contact_by_device_id(&counterparty_device_id)
@@ -2754,12 +2754,12 @@ impl BilateralBleHandler {
         debug!("Handling bilateral prepare rejection");
 
         // Decode envelope
-        let envelope = generated::Envelope::decode(envelope_bytes).map_err(|e| {
+        let envelope = crate::envelope::from_canonical_bytes(envelope_bytes).map_err(|e| {
             DsmError::serialization_error(
                 "decode_prepare_reject",
                 "protobuf",
                 Some(e.to_string()),
-                Some(e),
+                None::<std::io::Error>,
             )
         })?;
 
@@ -2868,12 +2868,12 @@ impl BilateralBleHandler {
         debug!("Handling bilateral prepare response");
 
         // Decode envelope
-        let envelope = generated::Envelope::decode(envelope_bytes).map_err(|e| {
+        let envelope = crate::envelope::from_canonical_bytes(envelope_bytes).map_err(|e| {
             DsmError::serialization_error(
                 "decode_prepare_response",
                 "protobuf",
                 Some(e.to_string()),
-                Some(e),
+                None::<std::io::Error>,
             )
         })?;
 
@@ -3440,12 +3440,12 @@ impl BilateralBleHandler {
     /// Sender-side terminal acknowledgment: finalize only after the receiver confirms it has
     /// completed its side of the bilateral transfer.
     pub async fn handle_commit_response(&self, envelope_bytes: &[u8]) -> Result<(), DsmError> {
-        let envelope = generated::Envelope::decode(envelope_bytes).map_err(|e| {
+        let envelope = crate::envelope::from_canonical_bytes(envelope_bytes).map_err(|e| {
             DsmError::serialization_error(
                 "decode_commit_response_envelope",
                 "protobuf",
                 Some(e.to_string()),
-                Some(e),
+                None::<std::io::Error>,
             )
         })?;
 
@@ -3529,10 +3529,9 @@ impl BilateralBleHandler {
         //   4. Receipt sig: `sig_b` verifies under `ek_pk_b` over the
         //      receipt's canonical commitment.
         // On success we replace the in-memory cached A-only receipt with
-        // the fully co-signed bytes so settlement archives both sigs.
-        // Pre-feature receivers leave `counter_signed_receipt` empty and
-        // we skip — strict mainnet enforcement comes later via
-        // `is_strict_cert_chain_mode`.
+        // the fully co-signed bytes so settlement archives both sigs. A
+        // commit response without a counter-signed receipt is not a valid
+        // offline receipt authorization path.
         // §11.1 Item 8 (B-tight): the Counterparty chain-head advance
         // that was previously here has been moved INSIDE
         // `mark_sender_committed_with_post_state_hash`, where it sits
@@ -3543,20 +3542,12 @@ impl BilateralBleHandler {
         // context through the function call. The startup
         // reconciliation sweep covers any remaining wedge window.
 
-        if response.counter_signed_receipt.is_empty()
-            && crate::storage::client_db::is_strict_cert_chain_mode().unwrap_or(false)
-        {
-            // Mainnet: every commit response MUST carry the receiver's
-            // counter-signed receipt. There is no transitional fail-open
-            // path here — a missing counter-sign means the receiver is
-            // either pre-feature (unsupported in mainnet) or stripped the
-            // field in transit.
+        if response.counter_signed_receipt.is_empty() {
             return Err(DsmError::invalid_operation(
-                "strict cert-chain mode: BilateralCommitResponse omits counter_signed_receipt — \
-                 rejecting",
+                "BilateralCommitResponse omits counter_signed_receipt; rejecting",
             ));
         }
-        if !response.counter_signed_receipt.is_empty() {
+        {
             // Fetch the counterparty (receiver) device_id from the session
             // store. Required for identity checks and chain-head lookup; if
             // the session is gone we skip verification (recovery path).
@@ -3613,7 +3604,7 @@ impl BilateralBleHandler {
                                     .ok_or_else(|| {
                                         DsmError::invalid_operation(
                                             "counter_signed_receipt verify: contact missing \
-                                             for AK_pk fallback",
+                                             for AK_pk root",
                                         )
                                     })?
                                     .public_key
@@ -3621,83 +3612,41 @@ impl BilateralBleHandler {
                             }
                         };
 
-                        let outcome =
-                            crate::sdk::receipts::verify_per_step_ek_signing_strict_aware(
-                                &counter_signed,
-                                crate::sdk::receipts::BilateralSide::B,
-                                &expected_prev_pk,
-                                &counter_signed.parent_tip,
-                                // §11.1 Item 7: receipt's sig_b must
-                                // verify under the session-bound
-                                // signing target (commitment_hash for
-                                // this bilateral session).
-                                Some(&commitment_hash),
-                            )?;
-                        match outcome {
-                            crate::sdk::receipts::PerStepEkVerifyOutcome::Verified => {
-                                // Replace the in-memory A-only cached
-                                // receipt with the fully co-signed bytes
-                                // so settlement archives both sigs AND so
-                                // mark_sender_committed_with_post_state_hash
-                                // can source ek_pk_b from this cache for
-                                // the Item 8 (B-tight) Counterparty
-                                // advance.
-                                let snapshot_for_persist: BilateralBleSession;
-                                {
-                                    let mut sessions = self.sessions.sessions.lock().await;
-                                    if let Some(s) = sessions.get_mut(&commitment_hash) {
-                                        s.stitched_receipt_bytes =
-                                            Some(response.counter_signed_receipt.clone());
-                                        snapshot_for_persist = s.clone();
-                                    } else {
-                                        // Session vanished between lookup and
-                                        // verify — recovery path raced with
-                                        // cleanup. Skip persistence; the
-                                        // in-flight advance still uses the
-                                        // in-memory bytes.
-                                        let _ = rel_key;
-                                        info!(
-                                            "[BILATERAL] §11.1 per-step EK B-side verification PASS for commitment {} (session vanished before persist)",
-                                            bytes_to_base32(&commitment_hash[..8])
-                                        );
-                                        return Ok(());
-                                    }
-                                }
-                                // Flush the counter-signed bytes to SQLite
-                                // RIGHT NOW so the startup reconciliation
-                                // sweep can see ek_pk_b after a crash inside
-                                // mark_sender_committed_with_post_state_hash.
-                                // Without this flush, the SQLite row would
-                                // still carry the A-only bytes from the
-                                // initial persist_session call and the sweep
-                                // would have no way to recover the
-                                // Counterparty chain head.
-                                if let Err(e) =
-                                    self.persist_session(&snapshot_for_persist, None).await
-                                {
-                                    warn!(
-                                        "[BILATERAL] §11.1 (B-tight) failed to persist counter-signed receipt before canonical commit: {} — wedge recovery will fall back to AK_pk on next attempt",
-                                        e
-                                    );
-                                }
-                                // rel_key is now unused at this site (the
-                                // advance migrated into mark_sender) — keep
-                                // the suppression explicit so future readers
-                                // don't cargo-cult re-add it here.
+                        crate::sdk::receipts::verify_per_step_ek_signing_strict_aware(
+                            &counter_signed,
+                            crate::sdk::receipts::BilateralSide::B,
+                            &expected_prev_pk,
+                            &counter_signed.parent_tip,
+                            Some(&commitment_hash),
+                        )?;
+
+                        let snapshot_for_persist: BilateralBleSession;
+                        {
+                            let mut sessions = self.sessions.sessions.lock().await;
+                            if let Some(s) = sessions.get_mut(&commitment_hash) {
+                                s.stitched_receipt_bytes =
+                                    Some(response.counter_signed_receipt.clone());
+                                snapshot_for_persist = s.clone();
+                            } else {
                                 let _ = rel_key;
                                 info!(
-                                    "[BILATERAL] §11.1 per-step EK B-side verification PASS for commitment {}",
+                                    "[BILATERAL] §11.1 per-step EK B-side verification PASS for commitment {} (session vanished before persist)",
                                     bytes_to_base32(&commitment_hash[..8])
                                 );
-                            }
-                            crate::sdk::receipts::PerStepEkVerifyOutcome::SkippedLegacyReceipt => {
-                                warn!(
-                                    "[BILATERAL] §11.1 per-step EK B-side artifacts MISSING on counter-signed receipt for commitment {} — \
-                                     skipping verification (legacy/pre-feature receipt; strict mode OFF)",
-                                    bytes_to_base32(&commitment_hash[..8])
-                                );
+                                return Ok(());
                             }
                         }
+                        if let Err(e) = self.persist_session(&snapshot_for_persist, None).await {
+                            warn!(
+                                "[BILATERAL] §11.1 (B-tight) failed to persist counter-signed receipt before canonical commit: {}",
+                                e
+                            );
+                        }
+                        let _ = rel_key;
+                        info!(
+                            "[BILATERAL] §11.1 per-step EK B-side verification PASS for commitment {}",
+                            bytes_to_base32(&commitment_hash[..8])
+                        );
                     }
                     Err(e) => {
                         return Err(DsmError::invalid_operation(format!(
@@ -3773,12 +3722,12 @@ impl BilateralBleHandler {
         info!("[BILATERAL] handle_confirm_request: processing confirm (3-step step 3, receiver)");
 
         // Decode envelope
-        let envelope = generated::Envelope::decode(envelope_bytes).map_err(|e| {
+        let envelope = crate::envelope::from_canonical_bytes(envelope_bytes).map_err(|e| {
             DsmError::serialization_error(
                 "decode_confirm_envelope",
                 "protobuf",
                 Some(e.to_string()),
-                Some(e),
+                None::<std::io::Error>,
             )
         })?;
 
@@ -3983,16 +3932,10 @@ impl BilateralBleHandler {
         //   1. Deserialize the receipt from the confirm payload.
         //   2. Resolve `expected_prev_pk` — the sender's prior cert-chain
         //      head if recorded (steady state), else AK_pk from the contact
-        //      record (relationship genesis fallback).
+        //      record (relationship genesis root).
         //   3. Verify ek_cert_a chains ek_pk_a back to expected_prev_pk over
         //      h_n (= receipt.parent_tip), and that sig_a verifies under
         //      ek_pk_a over the receipt's commitment.
-        //
-        // Legacy receipts that pre-date per-step EK signing leave
-        // `ek_pk_a`/`ek_cert_a`/`sig_a` empty — we skip verification then
-        // (transitional fail-open) but log so any production-side regression
-        // is visible. Strict mainnet enforcement is a follow-up tied to
-        // `set_strict_cert_chain_mode`.
         // Captured for the post-commit Counterparty chain-head advance
         // (§11.1). Some(ek_pk_a) iff per-step EK A-side verification passed
         // — in that case the sender's outbound chain has moved to this
@@ -4028,7 +3971,7 @@ impl BilateralBleHandler {
                         }
                     };
 
-                    let outcome = crate::sdk::receipts::verify_per_step_ek_signing_strict_aware(
+                    crate::sdk::receipts::verify_per_step_ek_signing_strict_aware(
                         &receipt,
                         crate::sdk::receipts::BilateralSide::A,
                         &expected_prev_pk,
@@ -4038,23 +3981,11 @@ impl BilateralBleHandler {
                         // (commitment_hash for this bilateral session).
                         Some(&commitment_hash),
                     )?;
-                    match outcome {
-                        crate::sdk::receipts::PerStepEkVerifyOutcome::Verified => {
-                            info!(
-                                "[BILATERAL] §11.1 per-step EK A-side verification PASS for commitment {}",
-                                bytes_to_base32(&commitment_hash[..8])
-                            );
-                            verified_a_side_ek_pk = Some(receipt.ek_pk_a.clone());
-                        }
-                        crate::sdk::receipts::PerStepEkVerifyOutcome::SkippedLegacyReceipt => {
-                            warn!(
-                                "[BILATERAL] §11.1 per-step EK A-side artifacts MISSING on incoming receipt for commitment {} — \
-                                 skipping verification (legacy/pre-feature receipt; strict mode OFF)",
-                                bytes_to_base32(&commitment_hash[..8])
-                            );
-                            verified_a_side_ek_pk = None;
-                        }
-                    }
+                    info!(
+                        "[BILATERAL] §11.1 per-step EK A-side verification PASS for commitment {}",
+                        bytes_to_base32(&commitment_hash[..8])
+                    );
+                    verified_a_side_ek_pk = Some(receipt.ek_pk_a.clone());
                 }
                 Err(e) => {
                     return Err(DsmError::invalid_operation(format!(
@@ -4062,15 +3993,10 @@ impl BilateralBleHandler {
                     )));
                 }
             }
-        } else if crate::storage::client_db::is_strict_cert_chain_mode().unwrap_or(false) {
-            // Mainnet: even an empty stitched_receipt is unacceptable —
-            // there is nothing to bind A-side per-step EK signing to.
-            return Err(DsmError::invalid_operation(
-                "strict cert-chain mode: incoming bilateral confirm omits stitched_receipt — \
-                 rejecting",
-            ));
         } else {
-            verified_a_side_ek_pk = None;
+            return Err(DsmError::invalid_operation(
+                "incoming bilateral confirm omits stitched_receipt; rejecting",
+            ));
         }
 
         // Extract h_{n+1} from confirm request
@@ -4205,11 +4131,11 @@ impl BilateralBleHandler {
                 Ok(None) => {
                     // No row to update — relationship was never seeded via
                     // init_cert_chain_for_relationship. Verification still
-                    // succeeded against the contact's AK_pk fallback above,
-                    // and this is the transitional path; no action needed
-                    // beyond logging.
+                    // succeeded against the contact's AK_pk root above,
+                    // but the mirror row must be initialized before the next
+                    // step can verify against the fresh EK head.
                     warn!(
-                        "[BILATERAL] §11.1 cert_chain_heads.Counterparty row missing for relationship — verification used AK_pk fallback; multi-step will degrade until init_cert_chain_for_relationship is called"
+                        "[BILATERAL] §11.1 cert_chain_heads.Counterparty row missing for relationship — verification used AK_pk root; multi-step will degrade until init_cert_chain_for_relationship is called"
                     );
                 }
                 Err(e) => {
@@ -4434,6 +4360,11 @@ impl BilateralBleHandler {
         // Sender verifies this independently from (h_n, op, entropy, σ) — no
         // access to T_receiver needed (§16.6 shared-tip derivation).
         let receiver_post_state_hash = new_chain_tip;
+        let counter_signed_receipt = counter_signed_receipt_for_response.ok_or_else(|| {
+            DsmError::invalid_operation(
+                "receiver could not build counter_signed_receipt; rejecting commit response",
+            )
+        })?;
 
         let ack_envelope = self
             .create_envelope_with_tip(
@@ -4454,11 +4385,8 @@ impl BilateralBleHandler {
                         // stitched receipt with B-side per-step EK signing
                         // artifacts so the sender can symmetrically verify
                         // the counter-signature and persist a fully co-signed
-                        // archive. Empty when the receipt couldn't be built
-                        // (e.g. missing device_tree_commitment) — sender then
-                        // skips B-side verification (transitional fail-open).
-                        counter_signed_receipt: counter_signed_receipt_for_response
-                            .unwrap_or_default(),
+                        // archive.
+                        counter_signed_receipt,
                     },
                 ),
                 Some(new_chain_tip),
@@ -4977,7 +4905,6 @@ impl BilateralBleHandler {
         // → delete. A crash inside this narrow window leaves the
         // session row visible in SQLite for the startup reconciliation
         // sweep to repair the chain head from `stitched_receipt_bytes`.
-        // Empty `ek_pk_b` → legacy / pre-feature receiver, skip.
         if let Some(ref counter_signed_bytes) = cached_receipt {
             match dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
                 counter_signed_bytes,
@@ -5000,7 +4927,7 @@ impl BilateralBleHandler {
                         }
                         Ok(None) => {
                             warn!(
-                                "[BILATERAL] §11.1 cert_chain_heads.Counterparty row missing for relationship — verification used AK_pk fallback"
+                                "[BILATERAL] §11.1 cert_chain_heads.Counterparty row missing for relationship — verification used AK_pk root"
                             );
                         }
                         Err(e) => {
@@ -5011,10 +4938,7 @@ impl BilateralBleHandler {
                         }
                     }
                 }
-                Ok(_) => {
-                    // ek_pk_b empty — legacy / pre-feature receiver,
-                    // no Counterparty advance needed.
-                }
+                Ok(_) => {}
                 Err(e) => {
                     warn!(
                         "[BILATERAL] §11.1 (B-tight) cached counter-signed receipt failed to decode for advance: {} — startup reconciliation sweep will retry",

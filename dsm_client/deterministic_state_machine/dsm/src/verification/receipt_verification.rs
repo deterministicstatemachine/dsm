@@ -1,7 +1,8 @@
 //! Receipt Verification Module
 //!
-//! Implements the complete verification predicates from the whitepaper.
-//! All acceptance rules are enforced deterministically without clocks or heights.
+//! Implements cryptographic stitched-receipt verification predicates.
+//! State-transition semantics such as token balance conservation are enforced
+//! when applying transitions, not from opaque receipt tip hashes alone.
 
 use crate::types::error::DsmError;
 use crate::types::receipt_types::{
@@ -20,8 +21,10 @@ use crate::verification::smt_replace_witness::compute_smt_key;
 /// 2. Inclusion proofs verify (old/new leaves in SMT, device in Device Tree)
 /// 3. SMT replace recomputes child_root exactly
 /// 4. Parent tip has not been previously consumed (uniqueness)
-/// 5. Token balance invariants hold (if applicable)
-/// 6. Size cap enforced (≤128 KiB)
+/// 5. Size cap enforced (≤128 KiB)
+///
+/// Token balance conservation and non-negativity are verified by the
+/// state-transition layer when the receipt is applied, not here.
 ///
 /// # Arguments
 /// * `receipt` - The stitched receipt to verify
@@ -78,33 +81,34 @@ pub fn verify_stitched_receipt(
         ));
     }
 
-    // Rule 2b: Ephemeral-key cert chain (whitepaper §11.1).
-    // When the verifier has been threaded a chain head, the receipt MUST carry
-    // a cert that links `pubkey_a` (the per-step EK that signed sig_a) back to
-    // the prior signer. This is what gives AK-rooted authorization for the
-    // per-step ephemeral; without it, K_DBRW-bound EK derivation has no
-    // cryptographic enforcement at the verifier.
-    if let Some(chain_head) = &ctx.chain_head_pubkey_a {
-        if receipt.ek_cert_a.is_empty() {
+    // Rule 2b: C-DBRW-bound ephemeral-key authorization (whitepaper §11.1).
+    // Offline receipt acceptance is fail-closed: the sender signature must be
+    // made by a per-step EK that is certified by the current AK/EK chain head.
+    // Parent/root inclusion proves state consistency; this cert proves live
+    // enrolled-device authorization for the proposed transition.
+    let Some(chain_head) = &ctx.chain_head_pubkey_a else {
+        return Ok(ReceiptAcceptance::reject(
+            "Missing chain_head_pubkey_a (C-DBRW EK cert chain required)".to_string(),
+        ));
+    };
+    if receipt.ek_cert_a.is_empty() {
+        return Ok(ReceiptAcceptance::reject(
+            "Missing ek_cert_a (C-DBRW EK cert chain required)".to_string(),
+        ));
+    }
+    match crate::crypto::ephemeral_key::verify_ek_cert(
+        chain_head,
+        &ctx.pubkey_a,
+        &receipt.parent_tip,
+        &receipt.ek_cert_a,
+    ) {
+        Ok(true) => {}
+        Ok(false) => {
             return Ok(ReceiptAcceptance::reject(
-                "Missing ek_cert_a (cert chain required when chain head is set)".to_string(),
-            ));
+                "ek_cert_a verification failed (EK_pk not authorized by chain head)".to_string(),
+            ))
         }
-        match crate::crypto::ephemeral_key::verify_ek_cert(
-            chain_head,
-            &ctx.pubkey_a,
-            &receipt.parent_tip,
-            &receipt.ek_cert_a,
-        ) {
-            Ok(true) => {}
-            Ok(false) => {
-                return Ok(ReceiptAcceptance::reject(
-                    "ek_cert_a verification failed (EK_pk not authorized by chain head)"
-                        .to_string(),
-                ))
-            }
-            Err(e) => return Ok(ReceiptAcceptance::reject(format!("ek_cert_a error: {}", e))),
-        }
+        Err(e) => return Ok(ReceiptAcceptance::reject(format!("ek_cert_a error: {}", e))),
     }
     if let Some(chain_head) = &ctx.chain_head_pubkey_b {
         // Cert B is only required when sig_b is present (counter-signed receipt).
@@ -191,11 +195,8 @@ pub fn verify_stitched_receipt(
         )));
     }
 
-    // Rule 6: Token balance invariants
-    // Verify balance conservation and non-negativity
-    // In the DSM model, receipts represent state transitions that must preserve
-    // the total token supply and ensure all balances remain non-negative
-    verify_balance_invariants(receipt)?;
+    // Token balance invariants are enforced in the state-transition layer via
+    // core::state_machine::transition::verify_token_balance_consistency().
 
     // All checks passed
     Ok(ReceiptAcceptance::accept(commitment))
@@ -263,38 +264,6 @@ fn verify_sphincs_signature(
     crate::crypto::signatures::SignatureKeyPair::verify_raw(commitment, signature, public_key)
 }
 
-/// Helper: Verify token balance invariants
-///
-/// Ensures that the state transition preserves token supply and non-negativity.
-/// In the DSM model, receipts encode balance changes that must satisfy:
-/// 1. Conservation: sum of all balance deltas = 0
-/// 2. Non-negativity: all resulting balances >= 0
-///
-/// Note: Balance information would be encoded in the receipt's payload or
-/// extracted from the tip hashes. For now, we verify structural correctness.
-fn verify_balance_invariants(_receipt: &StitchedReceiptV2) -> Result<(), DsmError> {
-    // Balance verification requires decoding the state encoded in parent_tip and child_tip
-    // or additional fields in the receipt structure.
-    //
-    // The whitepaper specifies that tips encode:
-    // - Transaction hash
-    // - Balances for both parties
-    // - Sequence numbers
-    //
-    // Full implementation would:
-    // 1. Decode balances from parent_tip (B_a_old, B_b_old)
-    // 2. Decode balances from child_tip (B_a_new, B_b_new)
-    // 3. Verify: B_a_new + B_b_new == B_a_old + B_b_old (conservation)
-    // 4. Verify: B_a_new >= 0 && B_b_new >= 0 (non-negativity)
-    //
-    // Since the tip format is opaque 32-byte hashes in the current receipt structure,
-    // and the actual balance encoding would be defined by the transaction format,
-    // we accept all transitions here. The signature verification ensures both
-    // parties agreed to the state transition.
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,6 +302,8 @@ mod tests {
 
     #[test]
     fn test_parent_uniqueness_enforcement() {
+        use crate::crypto::ephemeral_key::{generate_ephemeral_keypair, sign_ek_cert};
+
         // Create keypairs for testing
         let keypair_a = crate::crypto::signatures::SignatureKeyPair::generate_for_testing();
         let keypair_b = crate::crypto::signatures::SignatureKeyPair::generate_for_testing();
@@ -362,6 +333,10 @@ mod tests {
         let sig_b = keypair_b.sign(&commitment).unwrap();
         receipt.add_sig_a(sig_a);
         receipt.add_sig_b(sig_b);
+        let (chain_head_pk, chain_head_sk) = generate_ephemeral_keypair(&[0xA5; 32]).unwrap();
+        receipt.set_ek_cert_a(
+            sign_ek_cert(&chain_head_sk, keypair_a.public_key(), &[0xaa; 32]).unwrap(),
+        );
 
         // Create context with the public keys
         let ctx = ReceiptVerificationContext::new(
@@ -369,7 +344,8 @@ mod tests {
             [0u8; 32],
             keypair_a.public_key().to_vec(),
             keypair_b.public_key().to_vec(),
-        );
+        )
+        .with_chain_head_a(chain_head_pk);
         let mut tracker = ParentConsumptionTracker::new();
 
         // Manually mark parent as consumed first
@@ -490,12 +466,11 @@ mod tests {
         );
     }
 
-    /// When the verification context has no chain head set (transitional
-    /// pre-feature path), the cert verification step is skipped and the
-    /// receipt verifies based on the existing signature/proof rules alone.
-    /// This keeps existing tests and call sites working until they migrate.
+    /// Receipt verification is fail-closed when no sender chain head is set.
+    /// Parent/root inclusion alone is not spend authority; the recipient must
+    /// also verify the C-DBRW-bound per-step EK cert chain.
     #[test]
-    fn test_no_chain_head_skips_cert_check() {
+    fn test_no_chain_head_rejects_receipt_authorization() {
         // Reuse the parent_uniqueness test setup but without consuming the parent.
         let keypair_a = crate::crypto::signatures::SignatureKeyPair::generate_for_testing();
         let mut receipt = StitchedReceiptV2::new(
@@ -522,15 +497,12 @@ mod tests {
         );
         let mut tracker = ParentConsumptionTracker::new();
         let result = verify_stitched_receipt(&receipt, &ctx, &mut tracker).unwrap();
-        // The receipt may still fail later checks (proofs, etc.), but it must
-        // NOT fail with a cert-related reason when no chain head is set.
-        if !result.valid {
-            let reason = result.reason.unwrap();
-            assert!(
-                !reason.contains("ek_cert"),
-                "should not have failed on cert when chain head unset; reason: {}",
-                reason
-            );
-        }
+        assert!(!result.valid, "missing chain head must reject");
+        let reason = result.reason.unwrap();
+        assert!(
+            reason.contains("chain_head_pubkey_a") || reason.contains("C-DBRW"),
+            "wrong rejection reason: {}",
+            reason
+        );
     }
 }

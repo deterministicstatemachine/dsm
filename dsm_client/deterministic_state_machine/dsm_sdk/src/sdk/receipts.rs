@@ -20,18 +20,11 @@ pub fn derive_relationship_key(counterparty_pk: &[u8]) -> [u8; 32] {
 
 /// Compute the per-step EK signing target.
 ///
-/// The signing target is what `sig_a` / `sig_b` actually sign over. Two modes:
-///
-///   * **Legacy (no session binding):** when `session_binding == None`, the
-///     target is the receipt's canonical commitment hash directly. Backwards
-///     compatible with all pre-Item-7 receipts.
-///   * **Session-bound (Item 7 — defense-in-depth):** when `session_binding`
-///     carries the bilateral session's `commitment_hash`, the target is
-///     `BLAKE3("DSM/receipt-bind-session\0" || receipt_commitment ||
-///     commitment_hash)`. Cryptographically binds the per-step EK signature to
-///     a specific bilateral session, defeating cross-session receipt
-///     substitution even in the (negligible) event that two distinct sessions
-///     produce identical canonical commit fields.
+/// The signing target is what `sig_a` / `sig_b` actually sign over. Production
+/// bilateral flows pass the session `commitment_hash` so the target becomes
+/// `BLAKE3("DSM/receipt-bind-session\0" || receipt_commitment ||
+/// commitment_hash)`. This binds the per-step EK signature to a specific
+/// bilateral session and prevents cross-session receipt substitution.
 ///
 /// The §4.2.1 canonical commit form remains unchanged in both modes — the
 /// binding is added at the signing target level, not in the receipt body.
@@ -57,8 +50,7 @@ pub fn compute_per_step_signing_target(
 ///   `(EK_pk_{n+1}, EK_sk_{n+1}) = SPHINCS+.KeyGen(E_{n+1})`
 ///
 /// All three inputs MUST be 32 bytes. `k_step` comes from a Kyber exchange
-/// between the parties; for relationships that don't yet run per-step
-/// Kyber, callers may pass a deterministic stub derived from chain context
+/// between the parties.
 #[derive(Debug, Clone, Copy)]
 pub struct PerStepEkContext {
     /// Current bilateral chain tip h_n (parent_tip of the receipt being built).
@@ -159,7 +151,7 @@ pub fn derive_kyber_k_step_for_verify(
 /// Inputs to the high-level per-step EK signing helper.
 ///
 /// The helper handles the full whitepaper §11.1 per-step signing flow:
-/// loading the prior chain head SK (or falling back to AK), deriving a
+/// loading the prior chain head SK (or the root AK at relationship genesis), deriving a
 /// fresh `EK_{n+1}` keypair, signing the cert, signing the receipt body,
 /// and returning all artifacts. Callers do post-acceptance advancement
 /// separately via `advance_local_chain_head_after_signing`.
@@ -178,15 +170,15 @@ pub struct PerStepSigningInputs<'a> {
     pub relationship_key: [u8; 32],
     /// K_DBRW binding key for SK encryption + EK derivation.
     pub k_dbrw: &'a [u8; 32],
-    /// Fallback AK keypair, used when the relationship has no chain head
-    /// recorded yet (relationship genesis / step 0 / pre-feature path).
+    /// Root AK keypair, used only when the relationship has no chain head
+    /// recorded yet at relationship genesis / step 0.
     /// `(ak_pk, ak_sk)`. Pass `None` to require chain-head presence.
-    pub fallback_ak_keypair: Option<(&'a [u8], &'a [u8])>,
+    pub root_ak_keypair: Option<(&'a [u8], &'a [u8])>,
     /// Recipient's Kyber/ML-KEM public key. Required: the helper
     /// encapsulates against this to derive `k_step` deterministically per
     /// whitepaper §11. Caller pulls this from the recipient contact's
     /// `kyber_public_key` field. An empty value causes the helper to
-    /// fail-closed — there is no fallback path; relationships must be
+    /// fail-closed. Relationships must be
     /// established with peer Kyber pubkey before per-step EK signing
     /// can run.
     pub recipient_kyber_pk: &'a [u8],
@@ -197,11 +189,6 @@ pub struct PerStepSigningInputs<'a> {
     /// commitment_hash)` — instead of over `commitment` directly.
     /// Cryptographically binds `sig_a` / `sig_b` to a specific bilateral
     /// session, defeating cross-session receipt substitution.
-    ///
-    /// `None` selects the legacy signing target (sig over
-    /// `receipt_commitment` directly). All BLE bilateral handler call
-    /// sites should pass `Some(&commitment_hash)`; legacy unilateral or
-    /// pre-feature flows can pass `None`.
     ///
     /// The §4.2.1 canonical commit form stays unchanged in both modes.
     pub session_binding: Option<&'a [u8; 32]>,
@@ -227,23 +214,22 @@ pub struct PerStepSigningOutput {
     /// secret key to derive the same `k_step` and reconstruct the per-step
     /// EK derivation inputs at verify time.
     pub kyber_ct: Vec<u8>,
-    /// True if the helper used the AK fallback (relationship not yet
+    /// True if the helper used the root AK because the relationship is not yet
     /// initialized in cert_chain_heads). Caller should initialize the
     /// chain head with the new EK after acceptance via
     /// `init_local_cert_chain_head_with_sk` rather than `advance`.
-    pub used_ak_fallback: bool,
+    pub used_root_ak: bool,
 }
 
 /// Sign a receipt body with a per-step ephemeral SPHINCS+ key, building
 /// the cert chain back to the device's AK in the process (whitepaper §11.1).
 ///
 /// Flow:
-/// 1. Load prior chain head SK (encrypted, decrypted in-memory). If absent,
-///    fall back to `inputs.fallback_ak_keypair` — required if the chain
-///    head doesn't yet exist (relationship genesis).
+/// 1. Load prior chain head SK (encrypted, decrypted in-memory). If absent at
+///    relationship genesis, use `inputs.root_ak_keypair`.
 /// 2. Run deterministic Kyber encapsulation against
 ///    `inputs.recipient_kyber_pk` to derive `k_step` per whitepaper §11
-///    (no stubs, no fallbacks — the recipient's Kyber pubkey is mandatory).
+///    The recipient's Kyber pubkey is mandatory.
 ///    The resulting Kyber ciphertext travels in `receipt.kyber_ct_a` so
 ///    the recipient can reconstruct the same `k_step`.
 /// 3. Derive `EK_{n+1}` from `(h_n, C_pre, k_step, K_DBRW)`.
@@ -260,16 +246,16 @@ pub fn sign_receipt_with_per_step_ek(
     use dsm::crypto::sphincs::sphincs_sign;
 
     // 1. Resolve prior signer's SK.
-    let (prior_sk, used_ak_fallback) =
+    let (prior_sk, used_root_ak) =
         match load_local_chain_head_sk(&inputs.relationship_key, inputs.k_dbrw)
             .map_err(|e| DsmError::invalid_operation(format!("chain-head SK load: {e}")))?
         {
             Some(sk) => (sk, false),
-            None => match inputs.fallback_ak_keypair {
+            None => match inputs.root_ak_keypair {
                 Some((_pk, sk)) => (sk.to_vec(), true),
                 None => {
                     return Err(DsmError::invalid_operation(
-                        "per-step signing requires chain-head SK or fallback AK keypair; \
+                        "per-step signing requires chain-head SK or root AK keypair; \
                      neither was available — call init_local_cert_chain_head_with_sk first",
                     ))
                 }
@@ -316,7 +302,7 @@ pub fn sign_receipt_with_per_step_ek(
         ek_cert: cert,
         sig,
         kyber_ct: kyber_step.ciphertext,
-        used_ak_fallback,
+        used_root_ak,
     })
 }
 
@@ -396,8 +382,7 @@ pub enum BilateralSide {
 ///    `compute_per_step_signing_target(receipt.compute_commitment(),
 ///    session_binding)`. When `session_binding` is `Some`, the signed target
 ///    binds to the bilateral session's `commitment_hash` (Item 7 forward
-///    hardening). When `None`, the legacy target (the canonical commit hash
-///    directly) is used.
+///    hardening). When `None`, the canonical receipt commitment is used.
 ///
 /// Returns `Ok(())` on success and a structured `DsmError` on the first
 /// failed check (cert link error vs. signature error are distinguished in the
@@ -462,9 +447,8 @@ pub fn verify_per_step_ek_signing(
     }
 
     // Step 2: receipt signature using ek_pk over the per-step signing
-    // target. Folds in the bilateral `session_binding` when present
-    // (Item 7), recovers legacy behavior (sig over canonical commit
-    // hash directly) when None.
+    // target. Bilateral ingress requires a session binding so signatures
+    // cannot be replayed across sessions.
     let commitment = receipt.compute_commitment()?;
     let signing_target = compute_per_step_signing_target(&commitment, session_binding);
     let sig_ok = sphincs_verify(ek_pk, &signing_target, sig).map_err(|e| {
@@ -492,29 +476,12 @@ pub fn verify_per_step_ek_signing(
 pub enum PerStepEkVerifyOutcome {
     /// Receipt carried per-step EK artifacts and they verified successfully.
     Verified,
-    /// Receipt carried no per-step EK artifacts and strict cert-chain mode
-    /// was OFF, so verification was skipped (transitional fail-open).
-    SkippedLegacyReceipt,
 }
 
-/// Strict-mode-aware wrapper around [`verify_per_step_ek_signing`].
+/// Required per-step EK verification wrapper.
 ///
-/// Combines two policies in one call site:
-///
-///   1. If the receipt carries `ek_pk_{side}`, `ek_cert_{side}`, and
-///      `sig_{side}`, run [`verify_per_step_ek_signing`] and bubble its
-///      result. On success returns [`PerStepEkVerifyOutcome::Verified`].
-///   2. If any of those artifacts is missing:
-///      - When `is_strict_cert_chain_mode()` is on, return a structured
-///        error rejecting the receipt — mainnet must fail-closed.
-///      - Otherwise return
-///        [`PerStepEkVerifyOutcome::SkippedLegacyReceipt`] so callers can
-///        log a warn and proceed (transitional fail-open for pre-feature
-///        peers).
-///
-/// Use this from BLE bilateral handler call sites instead of duplicating
-/// the same `if strict { Err(...) } else { warn!(...) }` block in every
-/// caller.
+/// Missing `ek_pk`, `ek_cert`, or receipt signature artifacts are always a
+/// protocol error. Parent/root inclusion alone is not spend authority.
 pub fn verify_per_step_ek_signing_strict_aware(
     receipt: &StitchedReceiptV2,
     side: BilateralSide,
@@ -522,42 +489,43 @@ pub fn verify_per_step_ek_signing_strict_aware(
     h_n: &[u8; 32],
     session_binding: Option<&[u8; 32]>,
 ) -> Result<PerStepEkVerifyOutcome, DsmError> {
-    use crate::storage::client_db::is_strict_cert_chain_mode;
-
     let (ek_pk, ek_cert, sig, label) = match side {
         BilateralSide::A => (&receipt.ek_pk_a, &receipt.ek_cert_a, &receipt.sig_a, "A"),
         BilateralSide::B => (&receipt.ek_pk_b, &receipt.ek_cert_b, &receipt.sig_b, "B"),
     };
 
     let has_artifacts = !ek_pk.is_empty() && !ek_cert.is_empty() && !sig.is_empty();
-    if has_artifacts {
-        verify_per_step_ek_signing(receipt, side, expected_prev_pk, h_n, session_binding)?;
-        return Ok(PerStepEkVerifyOutcome::Verified);
-    }
-
-    if is_strict_cert_chain_mode().unwrap_or(false) {
+    if !has_artifacts {
         return Err(DsmError::invalid_operation(format!(
-            "strict cert-chain mode: receipt carries no §11.1 per-step EK {label}-side \
-             artifacts (ek_pk_{label} / ek_cert_{label} / sig_{label}) — rejecting"
+            "receipt carries no §11.1 per-step EK {label}-side artifacts \
+             (ek_pk_{label} / ek_cert_{label} / sig_{label}); rejecting"
         )));
     }
-    Ok(PerStepEkVerifyOutcome::SkippedLegacyReceipt)
+
+    if session_binding.is_none() {
+        return Err(DsmError::invalid_operation(format!(
+            "receipt {label}-side verification requires a bilateral session binding"
+        )));
+    }
+
+    verify_per_step_ek_signing(receipt, side, expected_prev_pk, h_n, session_binding)?;
+    Ok(PerStepEkVerifyOutcome::Verified)
 }
 
 /// Verify a stitched receipt with signatures.
 ///
-/// Delegates to the canonical core verifier. Replay protection is enforced
-/// by the `ParentConsumptionTracker` (one-time parent-tip lock per relationship),
-/// NOT by sequence numbers — the protocol is clockless (§4.3).
+/// Delegates to the canonical core verifier for cryptographic receipt checks.
+/// Replay protection is enforced by the `ParentConsumptionTracker`
+/// (one-time parent-tip lock per relationship), NOT by sequence numbers —
+/// the protocol is clockless (§4.3).
 ///
-/// Cert chain verification (whitepaper §11.1): if the
-/// `cert_chain_heads` table has chain heads recorded for this relationship,
-/// they are loaded automatically and threaded into the verification context.
-/// The receipt's `ek_cert_a` / `ek_cert_b` MUST then verify against those
-/// heads. If no chain head is recorded (relationship not yet established
-/// or pre-feature legacy data), cert verification is skipped — the
-/// transitional behavior. To make cert verification mandatory for a
-/// relationship, call `init_cert_chain_head_for_relationship` first.
+/// Token balance conservation and non-negativity are enforced when applying the
+/// state transition in core, not from receipt bytes alone.
+///
+/// Cert chain verification (whitepaper §11.1): the sender chain head is
+/// required for offline receipt acceptance. Parent/root inclusion proves state
+/// consistency; the sender EK cert chain proves live C-DBRW-bound spend
+/// authorization for the proposed transition.
 #[allow(clippy::too_many_arguments)]
 pub fn verify_stitched_receipt(
     receipt: &StitchedReceiptV2,
@@ -569,21 +537,14 @@ pub fn verify_stitched_receipt(
     guard: Option<&mut ReceiptGuard>,
 ) -> Result<(), DsmError> {
     use crate::sdk::app_state::AppState;
-    use crate::storage::client_db::{
-        is_strict_cert_chain_mode, load_cert_chain_head_pubkey, CertChainSide,
-    };
+    use crate::storage::client_db::{load_cert_chain_head_pubkey, CertChainSide};
     use dsm::verification::smt_replace_witness::compute_smt_key;
 
     let smt_key = compute_smt_key(&receipt.devid_a, &receipt.devid_b);
-    let strict_mode = is_strict_cert_chain_mode().unwrap_or(false);
-    // Per-relationship chain heads are optional during the transitional
-    // period. When set, they make cert verification MANDATORY for this
-    // relationship's receipts.
-    //
     // Match receipt party (A vs B) to local-vs-counterparty roles by
     // looking up the local device id. If we can't determine which side
-    // is local (genesis not initialized, etc.), skip auto-loading rather
-    // than risk threading the wrong head into verification.
+    // is local, fail closed rather than accepting a receipt without sender
+    // C-DBRW-bound authorization.
     let local_id = AppState::get_device_id();
     let (head_for_a, head_for_b): (Option<Vec<u8>>, Option<Vec<u8>>) = match local_id.as_deref() {
         Some(id) if id.len() == 32 && id == receipt.devid_a.as_slice() => {
@@ -613,16 +574,10 @@ pub fn verify_stitched_receipt(
         _ => (None, None),
     };
 
-    // Strict mode (whitepaper §11.1, mainnet-required): reject receipts for
-    // relationships that have no recorded chain heads. Without this, a
-    // relationship that "forgot" to call init_cert_chain_for_relationship
-    // would silently skip cert verification — fail-open security regression.
-    // Default off pre-mainnet to keep the transitional development path
-    // workable; mainnet MUST call set_strict_cert_chain_mode(true).
-    if strict_mode && head_for_a.is_none() && head_for_b.is_none() {
+    if head_for_a.is_none() {
         return Err(DsmError::invalid_operation(
-            "Receipt verification failed: strict cert-chain mode is on and no chain heads \
-             are recorded for this relationship (init_cert_chain_for_relationship not called)",
+            "Receipt verification failed: missing sender cert-chain head for C-DBRW-bound \
+             receipt authorization",
         ));
     }
 
@@ -653,9 +608,6 @@ pub fn verify_stitched_receipt(
     // derived EK_pk, and the cert chain (already verified above via
     // ek_cert_a/b) chains it back to AK_pk.
     //
-    // Legacy receipts (signed by the wallet's long-term identity key)
-    // leave `ek_pk_a`/`ek_pk_b` empty; we fall back to the externally-
-    // passed `pk_a`/`pk_b` so old receipts still verify.
     let pk_a_effective: Vec<u8> = if !receipt.ek_pk_a.is_empty() {
         receipt.ek_pk_a.clone()
     } else {
@@ -710,162 +662,11 @@ pub fn verify_stitched_receipt(
     }
 }
 
-/// Build a complete `StitchedReceiptV2` struct with real cryptographic material.
-///
-/// **This is the SINGLE authoritative receipt constructor for the entire SDK.**
-/// All receipt construction — bilateral, unilateral, faucet, BLE, online —
-/// MUST go through this function. It computes:
-/// - Real genesis hash from `AppState`
-/// - Stub parent/child SMT roots via `hash_smt_leaf()` (zero-depth, leaf=root)
-/// - Parseable `SerializableMerkleProof` envelopes for relation proofs
-/// - Canonical `DevTreeProof` for device binding
-/// - Zero-depth SMT replace witness (verified against tripwire)
-///
-/// Returns `None` only if strict verification of the computed artifacts fails.
-pub fn build_receipt_struct(
-    devid_a: [u8; 32],
-    devid_b: [u8; 32],
-    parent_tip: [u8; 32],
-    child_tip: [u8; 32],
-    device_tree_commitment: Option<DeviceTreeAcceptanceCommitment>,
-) -> Option<StitchedReceiptV2> {
-    use dsm::common::device_tree;
-    use dsm::verification::smt_replace_witness::{
-        compute_smt_key, hash_smt_leaf, verify_tripwire_smt_replace,
-    };
-
-    // 1. Real genesis hash from AppState.
-    let genesis = {
-        let mut g = [0u8; 32];
-        if let Some(gh) = crate::sdk::app_state::AppState::get_genesis_hash() {
-            if gh.len() >= 32 {
-                g.copy_from_slice(&gh[..32]);
-            }
-        }
-        if g == [0u8; 32] {
-            log::warn!(
-                "[receipts] genesis hash unavailable from AppState — receipt will be unverifiable"
-            );
-            return None;
-        }
-        g
-    };
-
-    // 2. STUB: Compute degenerate single-leaf SMT roots (leaf hash = root).
-    //    This creates a zero-depth tree where the leaf IS the root, with no
-    //    siblings. The BLE offline path uses `build_bilateral_receipt_with_smt()`
-    //    with real SparseMerkleTree roots instead. This stub path is for online receipts
-    //    that don't yet track the full Per-Device SMT.
-    let smt_key = compute_smt_key(&devid_a, &devid_b);
-    let parent_root = hash_smt_leaf(&parent_tip);
-    let child_root = hash_smt_leaf(&child_tip);
-
-    // 3. Build parseable relation proofs in SmtInclusionProof format
-    //    (zero-depth SMT: rel_key is the key, tip is the value, no siblings).
-    let rel_proof_parent =
-        serialize_inclusion_proof(&dsm::merkle::sparse_merkle_tree::SmtInclusionProof {
-            key: smt_key,
-            value: Some(parent_tip),
-            siblings: Vec::new(),
-        });
-    let rel_proof_child =
-        serialize_inclusion_proof(&dsm::merkle::sparse_merkle_tree::SmtInclusionProof {
-            key: smt_key,
-            value: Some(child_tip),
-            siblings: Vec::new(),
-        });
-
-    // 4. Build device tree proof via DeviceTree builder (§2.3).
-    //    The authenticated commitment used for `π_dev` MUST be supplied explicitly
-    //    by the caller. Today that commitment is the concrete root `R_G`.
-    let device_tree_commitment = match device_tree_commitment {
-        Some(commitment) => commitment,
-        None => {
-            log::error!(
-                "[receipts] build_receipt_struct: authenticated device-tree commitment is required; refusing to derive a synthetic R_G"
-            );
-            return None;
-        }
-    };
-    let r_g = device_tree_commitment.root();
-    let dev_tree = device_tree::DeviceTree::single(devid_a);
-    let dev_proof_obj = dev_tree
-        .proof(&devid_a)
-        .unwrap_or(device_tree::DevTreeProof {
-            siblings: Vec::new(),
-            path_bits: Vec::new(),
-            leaf_to_root: true,
-        });
-    let dev_proof = dev_proof_obj.to_bytes();
-
-    // 5. Zero-depth replace witness.
-    let witness: Vec<u8> = 0u32.to_le_bytes().to_vec();
-
-    // 6. Strict verification: proofs must parse and tripwire must pass.
-    if deserialize_inclusion_proof(&rel_proof_parent).is_err()
-        || deserialize_inclusion_proof(&rel_proof_child).is_err()
-    {
-        log::warn!("[receipts] Failed to build parseable relation proofs");
-        return None;
-    }
-
-    let parsed_dev = device_tree::DevTreeProof::from_bytes(&dev_proof)?;
-    if !parsed_dev.verify(&devid_a, &r_g) {
-        log::warn!("[receipts] Device proof verification failed against R_G");
-        return None;
-    }
-
-    if !verify_tripwire_smt_replace(&parent_root, &child_root, &parent_tip, &child_tip, &witness)
-        .ok()?
-    {
-        log::warn!("[receipts] Tripwire SMT replace witness verification failed");
-        return None;
-    }
-
-    // 7. Assemble receipt.
-    let mut receipt = StitchedReceiptV2::new(
-        genesis,
-        devid_a,
-        devid_b,
-        parent_tip,
-        child_tip,
-        parent_root,
-        child_root,
-        rel_proof_parent,
-        rel_proof_child,
-        dev_proof,
-    );
-    receipt.set_rel_replace_witness(witness);
-    Some(receipt)
-}
-
-/// Convenience wrapper: build receipt and serialize to canonical protobuf bytes.
-///
-/// Delegates entirely to `build_receipt_struct()` for all crypto, then serializes.
-pub fn build_bilateral_receipt(
-    devid_a: [u8; 32],
-    devid_b: [u8; 32],
-    parent_tip: [u8; 32],
-    child_tip: [u8; 32],
-    device_tree_commitment: Option<DeviceTreeAcceptanceCommitment>,
-) -> Option<Vec<u8>> {
-    build_receipt_struct(
-        devid_a,
-        devid_b,
-        parent_tip,
-        child_tip,
-        device_tree_commitment,
-    )?
-    .to_canonical_protobuf()
-    .ok()
-}
-
 /// Build receipt with **real** Per-Device SMT roots and inclusion proofs (§4.2).
 ///
-/// Unlike `build_bilateral_receipt()` which computes single-leaf stub proofs,
-/// this function accepts the actual SMT roots and serialized inclusion proofs
-/// produced by `SparseMerkleTree` after an `update_leaf()` call. Use this when the
-/// caller has already performed the SMT-Replace and collected the proofs.
+/// This is the single authoritative stitched-receipt constructor in the SDK.
+/// Callers must supply the actual SMT roots and serialized inclusion proofs
+/// produced by `SparseMerkleTree` after an `update_leaf()` call.
 #[allow(clippy::too_many_arguments)]
 pub fn build_bilateral_receipt_with_smt(
     devid_a: [u8; 32],
@@ -1342,7 +1143,7 @@ mod tests {
         assert_ne!(to_1.k_step, to_2.k_step);
     }
 
-    /// Sender helper rejects an empty recipient Kyber pubkey (no fallback).
+    /// Sender helper rejects an empty recipient Kyber pubkey (no root).
     #[test]
     fn kyber_k_step_rejects_empty_recipient_pubkey() {
         let result =
@@ -1378,7 +1179,7 @@ mod tests {
             devid_sender: [0x11; 32],
             relationship_key: *rel_key,
             k_dbrw,
-            fallback_ak_keypair: Some((ak_pk, ak_sk)),
+            root_ak_keypair: Some((ak_pk, ak_sk)),
             recipient_kyber_pk,
             session_binding: None,
         }
@@ -1389,7 +1190,7 @@ mod tests {
     /// Returned cert verifies against AK_pk.
     #[test]
     #[serial_test::serial]
-    fn per_step_signing_uses_ak_fallback_when_chain_head_absent() {
+    fn per_step_signing_uses_ak_root_when_chain_head_absent() {
         use crate::storage::client_db::reset_database_for_tests;
         use dsm::crypto::ephemeral_key::{generate_ephemeral_keypair, verify_ek_cert};
         use dsm::crypto::sphincs::sphincs_verify;
@@ -1406,7 +1207,7 @@ mod tests {
         let inputs = signing_inputs(&commitment, &rel_key, &ak_pk, &ak_sk, &k_dbrw, &kyber_pk);
         let out = sign_receipt_with_per_step_ek(&inputs).unwrap();
 
-        assert!(out.used_ak_fallback);
+        assert!(out.used_root_ak);
         assert!(!out.ek_pk.is_empty());
         assert!(!out.ek_sk.is_empty());
         assert!(!out.ek_cert.is_empty());
@@ -1416,7 +1217,7 @@ mod tests {
         let cert_ok = verify_ek_cert(&ak_pk, &out.ek_pk, &inputs.h_n, &out.ek_cert).unwrap();
         assert!(
             cert_ok,
-            "cert must verify against AK pubkey when AK fallback is used"
+            "cert must verify against AK pubkey when root AK is used"
         );
 
         // The receipt-body signature must verify against the per-step EK pubkey.
@@ -1425,7 +1226,7 @@ mod tests {
     }
 
     /// After advance, the next signing call uses the prior EK_sk (no
-    /// AK fallback). Cert chain step n+1 verifies against EK_pk_n.
+    /// root AK). Cert chain step n+1 verifies against EK_pk_n.
     #[test]
     #[serial_test::serial]
     fn per_step_signing_chains_through_advancement() {
@@ -1440,22 +1241,22 @@ mod tests {
         let rel_key = [0xCA; 32];
         let k_dbrw = [0xFE; 32];
 
-        // Step 0: AK fallback path. Sign + advance to record EK_1 as chain head.
+        // Step 0: root AK path. Sign + advance to record EK_1 as chain head.
         let commit0 = [0xC0; 32];
         let inputs0 = signing_inputs(&commit0, &rel_key, &ak_pk, &ak_sk, &k_dbrw, &kyber_pk);
         let out0 = sign_receipt_with_per_step_ek(&inputs0).unwrap();
-        assert!(out0.used_ak_fallback);
+        assert!(out0.used_root_ak);
         advance_local_chain_head_after_signing(&rel_key, &out0.ek_pk, &out0.ek_sk, &k_dbrw, true)
             .unwrap();
 
-        // Step 1: chain head is EK_1 — fallback NOT used.
+        // Step 1: chain head is EK_1 — root NOT used.
         let commit1 = [0xC1; 32];
         let mut inputs1 = signing_inputs(&commit1, &rel_key, &ak_pk, &ak_sk, &k_dbrw, &kyber_pk);
         inputs1.h_n = [0xBB; 32]; // pretend we advanced the chain
         let out1 = sign_receipt_with_per_step_ek(&inputs1).unwrap();
         assert!(
-            !out1.used_ak_fallback,
-            "step 1 must use chain-head SK, not AK fallback"
+            !out1.used_root_ak,
+            "step 1 must use chain-head SK, not root AK"
         );
         // Cert at step 1 must verify against EK_1 (the prior step's pubkey).
         let cert_ok =
@@ -1514,7 +1315,7 @@ mod tests {
         let out1 = sign_receipt_with_per_step_ek(&inputs1).unwrap();
 
         // Step-1 cert chains EK_1 → EK_0 (the prior chain head).
-        assert!(!out1.used_ak_fallback);
+        assert!(!out1.used_root_ak);
         assert!(verify_ek_cert(&out0.ek_pk, &out1.ek_pk, &inputs1.h_n, &out1.ek_cert).unwrap());
         // Step-1 cert MUST NOT verify against AK (proves we walked the chain).
         assert!(!verify_ek_cert(&ak_pk, &out1.ek_pk, &inputs1.h_n, &out1.ek_cert).unwrap());
@@ -1589,13 +1390,13 @@ mod tests {
                     devid_sender: [0x11; 32],
                     relationship_key: rel_key,
                     k_dbrw: &k_dbrw,
-                    fallback_ak_keypair: Some((&ak_pk, &ak_sk)),
+                    root_ak_keypair: Some((&ak_pk, &ak_sk)),
                     recipient_kyber_pk: &kyber_pk,
                     session_binding: None,
                 };
                 let out = sign_receipt_with_per_step_ek(&inputs).unwrap();
 
-                // Advance chain head so step+1 won't take the AK fallback.
+                // Advance chain head so step+1 won't take the root AK.
                 advance_local_chain_head_after_signing(
                     &rel_key,
                     &out.ek_pk,
@@ -1699,11 +1500,11 @@ mod tests {
         }
     }
 
-    /// Without a fallback AK keypair AND without a stored chain head,
+    /// Without a root AK keypair AND without a stored chain head,
     /// signing fails with a clear error.
     #[test]
     #[serial_test::serial]
-    fn per_step_signing_errors_without_chain_head_or_fallback() {
+    fn per_step_signing_errors_without_chain_head_or_root() {
         use crate::storage::client_db::reset_database_for_tests;
         reset_database_for_tests();
 
@@ -1717,14 +1518,14 @@ mod tests {
             devid_sender: [0x11; 32],
             relationship_key: rel_key,
             k_dbrw: &k_dbrw,
-            fallback_ak_keypair: None,
+            root_ak_keypair: None,
             recipient_kyber_pk: &[],
             session_binding: None,
         };
         let result = sign_receipt_with_per_step_ek(&inputs);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("requires chain-head SK or fallback AK"));
+        assert!(err.contains("requires chain-head SK or root AK"));
     }
 
     // ── verify_per_step_ek_signing ──────────────────────────────────────
@@ -1772,7 +1573,7 @@ mod tests {
             devid_sender: [0x11; 32],
             relationship_key: rel_key,
             k_dbrw: &k_dbrw,
-            fallback_ak_keypair: Some((&ak_pk, &ak_sk)),
+            root_ak_keypair: Some((&ak_pk, &ak_sk)),
             recipient_kyber_pk: &kyber_pk,
             session_binding: None,
         };
@@ -1889,15 +1690,11 @@ mod tests {
     fn verify_per_step_ek_signing_multi_step_with_counterparty_advance() {
         use crate::storage::client_db::{
             advance_cert_chain_head, init_cert_chain_head, load_cert_chain_head_pubkey,
-            reset_database_for_tests, set_strict_cert_chain_mode, CertChainSide,
+            reset_database_for_tests, CertChainSide,
         };
         use dsm::crypto::ephemeral_key::generate_ephemeral_keypair;
 
         reset_database_for_tests();
-        // Strict mode on — proves the multi-step path works under
-        // mainnet enforcement, not just the transitional fail-open path.
-        set_strict_cert_chain_mode(true).unwrap();
-
         // The unit test runs both signer and verifier in the same
         // process / DB, so we let `sign_receipt_with_per_step_ek` use
         // the `Local` row of `cert_chain_heads` for its outbound chain
@@ -1931,6 +1728,7 @@ mod tests {
             vec![0x09; 16],
         );
         let commit0 = receipt_step0.compute_commitment().unwrap();
+        let session0 = [0xF0; 32];
         let inputs0 = PerStepSigningInputs {
             commitment: &commit0,
             h_n: [0xAA; 32],
@@ -1938,9 +1736,9 @@ mod tests {
             devid_sender: [0x11; 32],
             relationship_key: sender_rel_key,
             k_dbrw: &k_dbrw,
-            fallback_ak_keypair: Some((&sender_ak_pk, &sender_ak_sk)),
+            root_ak_keypair: Some((&sender_ak_pk, &sender_ak_sk)),
             recipient_kyber_pk: &kyber_pk,
-            session_binding: None,
+            session_binding: Some(&session0),
         };
         let out0 = sign_receipt_with_per_step_ek(&inputs0).unwrap();
         receipt_step0.set_ek_pk_a(out0.ek_pk.clone());
@@ -1956,7 +1754,7 @@ mod tests {
             &out0.ek_pk,
             &out0.ek_sk,
             &k_dbrw,
-            out0.used_ak_fallback,
+            out0.used_root_ak,
         )
         .unwrap();
 
@@ -1976,7 +1774,7 @@ mod tests {
             BilateralSide::A,
             &prev_pk_loaded,
             &[0xAA; 32],
-            None,
+            Some(&session0),
         )
         .expect("step 0 must verify under freshly-seeded Counterparty AK_pk");
 
@@ -2006,6 +1804,7 @@ mod tests {
             vec![0x99; 16],
         );
         let commit1 = receipt_step1.compute_commitment().unwrap();
+        let session1 = [0xF1; 32];
         let inputs1 = PerStepSigningInputs {
             commitment: &commit1,
             h_n: [0xCC; 32],
@@ -2014,14 +1813,14 @@ mod tests {
             relationship_key: sender_rel_key,
             k_dbrw: &k_dbrw,
             // Fallback AK shouldn't be used now — chain head exists.
-            fallback_ak_keypair: Some((&sender_ak_pk, &sender_ak_sk)),
+            root_ak_keypair: Some((&sender_ak_pk, &sender_ak_sk)),
             recipient_kyber_pk: &kyber_pk,
-            session_binding: None,
+            session_binding: Some(&session1),
         };
         let out1 = sign_receipt_with_per_step_ek(&inputs1).unwrap();
         assert!(
-            !out1.used_ak_fallback,
-            "step 1 must sign with chain head EK_sk_0, not AK fallback"
+            !out1.used_root_ak,
+            "step 1 must sign with chain head EK_sk_0, not root AK"
         );
         receipt_step1.set_ek_pk_a(out1.ek_pk.clone());
         receipt_step1.set_ek_cert_a(out1.ek_cert);
@@ -2046,7 +1845,7 @@ mod tests {
             BilateralSide::A,
             &prev_pk_loaded_step1,
             &[0xCC; 32],
-            None,
+            Some(&session1),
         )
         .expect(
             "step 1 must verify against the advanced Counterparty chain head — \
@@ -2068,8 +1867,6 @@ mod tests {
             stale_check.is_err(),
             "step 1 against stale AK_pk MUST fail — proves the test exercises the right path"
         );
-
-        set_strict_cert_chain_mode(false).unwrap();
     }
 
     /// Item 7 — cross-session receipt substitution must fail under
@@ -2079,11 +1876,9 @@ mod tests {
     ///   1. Same session_binding (Some(C1)) → verifies.
     ///   2. Different session_binding (Some(C2)) → REJECTS (the receipt
     ///      sig is cryptographically bound to C1, not C2).
-    ///   3. session_binding = None on a Some-signed sig → REJECTS
-    ///      (legacy verifier can't accept a session-bound sig).
-    /// And the contrapositive: a legacy-signed receipt (None) under
-    /// any session_binding=Some(_) MUST also reject — prevents
-    /// downgrade attacks once strict mode enforces session binding.
+    ///   3. session_binding = None on a Some-signed sig rejects.
+    /// And the contrapositive: an unbound receipt signature under
+    /// any session_binding=Some(_) must also reject.
     ///
     /// This is the cryptographic invariant Gemini's Stage-6 critique
     /// flagged as a forward-hardening gap (boundary_condition_failure
@@ -2126,7 +1921,7 @@ mod tests {
             devid_sender: [0x11; 32],
             relationship_key: [0xD1; 32],
             k_dbrw: &[0xE1; 32],
-            fallback_ak_keypair: Some((&ak_pk, &ak_sk)),
+            root_ak_keypair: Some((&ak_pk, &ak_sk)),
             recipient_kyber_pk: &kyber_pk,
             session_binding: Some(&session_c1),
         };
@@ -2160,17 +1955,15 @@ mod tests {
              this is the cross-session substitution invariant Item 7 enforces"
         );
 
-        // (3) None (legacy mode) on a session-bound sig → rejects.
-        let legacy_check =
+        // (3) None on a session-bound sig rejects.
+        let unbound_check =
             verify_per_step_ek_signing(&receipt, BilateralSide::A, &ak_pk, &[0xAA; 32], None);
         assert!(
-            legacy_check.is_err(),
-            "legacy verification must NOT accept a session-bound sig"
+            unbound_check.is_err(),
+            "unbound verification must not accept a session-bound sig"
         );
 
-        // ─── Contrapositive: legacy-signed receipt under
-        //     session_binding=Some MUST fail ───
-        let mut receipt_legacy = StitchedReceiptV2::new(
+        let mut receipt_unbound = StitchedReceiptV2::new(
             [0x01; 32],
             [0x02; 32],
             [0x03; 32],
@@ -2182,33 +1975,35 @@ mod tests {
             vec![0x18; 16],
             vec![0x19; 16],
         );
-        let legacy_commitment = receipt_legacy.compute_commitment().unwrap();
-        let legacy_inputs = PerStepSigningInputs {
-            commitment: &legacy_commitment,
+        let unbound_commitment = receipt_unbound.compute_commitment().unwrap();
+        let unbound_inputs = PerStepSigningInputs {
+            commitment: &unbound_commitment,
             h_n: [0xAA; 32],
             c_pre: [0xBB; 32],
             devid_sender: [0x11; 32],
             relationship_key: [0xD2; 32],
             k_dbrw: &[0xE2; 32],
-            fallback_ak_keypair: Some((&ak_pk, &ak_sk)),
+            root_ak_keypair: Some((&ak_pk, &ak_sk)),
             recipient_kyber_pk: &kyber_pk,
-            session_binding: None, // legacy
+            session_binding: None,
         };
-        let legacy_out = sign_receipt_with_per_step_ek(&legacy_inputs).unwrap();
-        receipt_legacy.set_ek_pk_a(legacy_out.ek_pk.clone());
-        receipt_legacy.set_ek_cert_a(legacy_out.ek_cert);
-        receipt_legacy.set_kyber_ct_a(legacy_out.kyber_ct);
-        receipt_legacy.add_sig_a(legacy_out.sig);
+        let unbound_out = sign_receipt_with_per_step_ek(&unbound_inputs).unwrap();
+        receipt_unbound.set_ek_pk_a(unbound_out.ek_pk.clone());
+        receipt_unbound.set_ek_cert_a(unbound_out.ek_cert);
+        receipt_unbound.set_kyber_ct_a(unbound_out.kyber_ct);
+        receipt_unbound.add_sig_a(unbound_out.sig);
 
-        // Legacy → legacy verifies.
-        verify_per_step_ek_signing(&receipt_legacy, BilateralSide::A, &ak_pk, &[0xAA; 32], None)
-            .expect("legacy mode round-trips");
+        verify_per_step_ek_signing(
+            &receipt_unbound,
+            BilateralSide::A,
+            &ak_pk,
+            &[0xAA; 32],
+            None,
+        )
+        .expect("unbound signing target round-trips at the low-level verifier");
 
-        // Legacy sig under session_binding=Some MUST fail (asymmetric
-        // upgrade — strict mode forces session binding for new
-        // receivers; legacy senders can't impersonate).
         let upgrade_check = verify_per_step_ek_signing(
-            &receipt_legacy,
+            &receipt_unbound,
             BilateralSide::A,
             &ak_pk,
             &[0xAA; 32],
@@ -2216,8 +2011,7 @@ mod tests {
         );
         assert!(
             upgrade_check.is_err(),
-            "legacy sig MUST NOT verify under any session_binding — \
-             prevents downgrade attacks once mainnet enforces session binding"
+            "unbound sig must not verify under any session_binding"
         );
     }
 
@@ -2271,7 +2065,7 @@ mod tests {
             devid_sender: [0x11; 32],
             relationship_key: sender_rel_key,
             k_dbrw: &k_dbrw,
-            fallback_ak_keypair: Some((&sender_ak_pk, &sender_ak_sk)),
+            root_ak_keypair: Some((&sender_ak_pk, &sender_ak_sk)),
             recipient_kyber_pk: &kyber_pk,
             session_binding: None,
         };
@@ -2291,7 +2085,7 @@ mod tests {
             devid_sender: [0x22; 32],
             relationship_key: receiver_rel_key,
             k_dbrw: &k_dbrw,
-            fallback_ak_keypair: Some((&receiver_ak_pk, &receiver_ak_sk)),
+            root_ak_keypair: Some((&receiver_ak_pk, &receiver_ak_sk)),
             recipient_kyber_pk: &kyber_pk,
             session_binding: None,
         };
@@ -2380,13 +2174,11 @@ mod tests {
     fn bilateral_three_step_chain_extension_e2e() {
         use crate::storage::client_db::{
             advance_cert_chain_head, init_cert_chain_head, load_cert_chain_head_pubkey,
-            reset_database_for_tests, set_strict_cert_chain_mode, CertChainSide,
+            reset_database_for_tests, CertChainSide,
         };
         use dsm::crypto::ephemeral_key::generate_ephemeral_keypair;
 
         reset_database_for_tests();
-        set_strict_cert_chain_mode(true).unwrap();
-
         // Two AK keypairs, one per device.
         let (ak_pk_a, ak_sk_a) = generate_ephemeral_keypair(&[0xA1; 32]).unwrap();
         let (ak_pk_b, ak_sk_b) = generate_ephemeral_keypair(&[0xB1; 32]).unwrap();
@@ -2435,6 +2227,7 @@ mod tests {
                 vec![0x09; 16],
             );
             let commitment = receipt.compute_commitment().unwrap();
+            let session_binding = [0x90 | step; 32];
 
             // ─── A-side signing (Device A) ───
             let a_inputs = PerStepSigningInputs {
@@ -2444,21 +2237,21 @@ mod tests {
                 devid_sender: [0x11; 32],
                 relationship_key: rel_a,
                 k_dbrw: &k_dbrw,
-                fallback_ak_keypair: Some((&ak_pk_a, &ak_sk_a)),
+                root_ak_keypair: Some((&ak_pk_a, &ak_sk_a)),
                 recipient_kyber_pk: &kyber_pk,
-                session_binding: None,
+                session_binding: Some(&session_binding),
             };
             let a_out = sign_receipt_with_per_step_ek(&a_inputs).unwrap();
-            // Step 0 must use AK fallback; step 1+ must use chain head.
+            // Step 0 must use root AK; step 1+ must use chain head.
             if step == 0 {
                 assert!(
-                    a_out.used_ak_fallback,
-                    "step 0 A-side must use AK fallback (chain head not yet established)"
+                    a_out.used_root_ak,
+                    "step 0 A-side must use root AK (chain head not yet established)"
                 );
             } else {
                 assert!(
-                    !a_out.used_ak_fallback,
-                    "step {step} A-side must use prior chain head EK_sk, not AK fallback"
+                    !a_out.used_root_ak,
+                    "step {step} A-side must use prior chain head EK_sk, not root AK"
                 );
             }
             receipt.set_ek_pk_a(a_out.ek_pk.clone());
@@ -2470,7 +2263,7 @@ mod tests {
                 &a_out.ek_pk,
                 &a_out.ek_sk,
                 &k_dbrw,
-                a_out.used_ak_fallback,
+                a_out.used_root_ak,
             )
             .unwrap();
 
@@ -2499,7 +2292,7 @@ mod tests {
                 BilateralSide::A,
                 &prev_pk_a_loaded,
                 &h_n_a,
-                None,
+                Some(&session_binding),
             )
             .unwrap_or_else(|e| panic!("step {step} A-side verify failed: {e}"));
 
@@ -2520,16 +2313,16 @@ mod tests {
                 devid_sender: [0x22; 32],
                 relationship_key: rel_b,
                 k_dbrw: &k_dbrw,
-                fallback_ak_keypair: Some((&ak_pk_b, &ak_sk_b)),
+                root_ak_keypair: Some((&ak_pk_b, &ak_sk_b)),
                 recipient_kyber_pk: &kyber_pk,
-                session_binding: None,
+                session_binding: Some(&session_binding),
             };
             let b_out = sign_receipt_with_per_step_ek(&b_inputs).unwrap();
             if step == 0 {
-                assert!(b_out.used_ak_fallback, "step 0 B-side must use AK fallback");
+                assert!(b_out.used_root_ak, "step 0 B-side must use root AK");
             } else {
                 assert!(
-                    !b_out.used_ak_fallback,
+                    !b_out.used_root_ak,
                     "step {step} B-side must use prior chain head"
                 );
             }
@@ -2542,7 +2335,7 @@ mod tests {
                 &b_out.ek_pk,
                 &b_out.ek_sk,
                 &k_dbrw,
-                b_out.used_ak_fallback,
+                b_out.used_root_ak,
             )
             .unwrap();
 
@@ -2565,7 +2358,7 @@ mod tests {
                 BilateralSide::B,
                 &prev_pk_b_loaded,
                 &h_n_b,
-                None,
+                Some(&session_binding),
             )
             .unwrap_or_else(|e| panic!("step {step} B-side verify failed: {e}"));
 
@@ -2620,7 +2413,7 @@ mod tests {
             devid_sender: [0x11; 32],
             relationship_key: rel_a,
             k_dbrw: &k_dbrw,
-            fallback_ak_keypair: Some((&ak_pk_a, &ak_sk_a)),
+            root_ak_keypair: Some((&ak_pk_a, &ak_sk_a)),
             recipient_kyber_pk: &kyber_pk,
             session_binding: None,
         };
@@ -2647,60 +2440,37 @@ mod tests {
                  this is the Stage-6 anti-substitution invariant"
             );
         }
-
-        set_strict_cert_chain_mode(false).unwrap();
     }
 
     // ── verify_per_step_ek_signing_strict_aware ────────────────────────
 
-    /// Strict mode OFF + receipt has artifacts → verification runs and
-    /// returns `Verified`.
+    /// A receipt with artifacts must also carry the bilateral session binding.
     #[test]
     #[serial_test::serial]
-    fn strict_aware_verifies_when_artifacts_present_and_strict_off() {
-        use crate::storage::client_db::set_strict_cert_chain_mode;
+    fn required_verifier_rejects_missing_session_binding() {
         let (receipt, ak_pk, h_n) =
             build_signed_receipt_for_verifier_test(BilateralSide::A, &[0xC1; 32]);
-        set_strict_cert_chain_mode(false).unwrap();
 
-        let outcome =
+        let err =
             verify_per_step_ek_signing_strict_aware(&receipt, BilateralSide::A, &ak_pk, &h_n, None)
-                .expect("well-formed A-side must verify");
-        assert_eq!(outcome, PerStepEkVerifyOutcome::Verified);
+                .expect_err("missing session binding must reject");
+        assert!(
+            err.to_string().contains("session binding"),
+            "error must reference the missing session binding, got: {err}"
+        );
     }
 
-    /// Strict mode ON + receipt has artifacts → verification runs and
-    /// returns `Verified` (strict mode does not interfere with valid
-    /// receipts).
+    /// Session-bound verification accepts a correctly signed receipt.
     #[test]
     #[serial_test::serial]
-    fn strict_aware_verifies_when_artifacts_present_and_strict_on() {
-        use crate::storage::client_db::set_strict_cert_chain_mode;
-        let (receipt, ak_pk, h_n) =
-            build_signed_receipt_for_verifier_test(BilateralSide::A, &[0xC2; 32]);
-        set_strict_cert_chain_mode(true).unwrap();
-
-        let outcome =
-            verify_per_step_ek_signing_strict_aware(&receipt, BilateralSide::A, &ak_pk, &h_n, None)
-                .expect("well-formed A-side must verify even under strict mode");
-        assert_eq!(outcome, PerStepEkVerifyOutcome::Verified);
-
-        // Reset for other tests.
-        set_strict_cert_chain_mode(false).unwrap();
-    }
-
-    /// Strict mode OFF + receipt has NO artifacts → returns
-    /// `SkippedLegacyReceipt` (transitional fail-open for pre-feature
-    /// peers).
-    #[test]
-    #[serial_test::serial]
-    fn strict_aware_skips_legacy_receipt_when_strict_off() {
-        use crate::storage::client_db::{reset_database_for_tests, set_strict_cert_chain_mode};
+    fn required_verifier_accepts_session_bound_receipt() {
+        use crate::storage::client_db::reset_database_for_tests;
+        use dsm::crypto::ephemeral_key::generate_ephemeral_keypair;
         reset_database_for_tests();
-        set_strict_cert_chain_mode(false).unwrap();
 
-        // Receipt with no per-step EK artifacts (all empty).
-        let receipt = StitchedReceiptV2::new(
+        let (ak_pk, ak_sk) = generate_ephemeral_keypair(&[0xC2; 32]).unwrap();
+        let kyber_kp = dsm::crypto::kyber::generate_kyber_keypair().expect("kyber keygen");
+        let mut receipt = StitchedReceiptV2::new(
             [0x01; 32],
             [0x02; 32],
             [0x03; 32],
@@ -2712,26 +2482,42 @@ mod tests {
             vec![0x08; 16],
             vec![0x09; 16],
         );
+        let commitment = receipt.compute_commitment().unwrap();
+        let session_binding = [0xD2; 32];
+        let inputs = PerStepSigningInputs {
+            commitment: &commitment,
+            h_n: [0xAA; 32],
+            c_pre: [0xBB; 32],
+            devid_sender: [0x11; 32],
+            relationship_key: [0xE7; 32],
+            k_dbrw: &[0xE8; 32],
+            root_ak_keypair: Some((&ak_pk, &ak_sk)),
+            recipient_kyber_pk: &kyber_kp.public_key,
+            session_binding: Some(&session_binding),
+        };
+        let out = sign_receipt_with_per_step_ek(&inputs).unwrap();
+        receipt.set_ek_pk_a(out.ek_pk);
+        receipt.set_ek_cert_a(out.ek_cert);
+        receipt.set_kyber_ct_a(out.kyber_ct);
+        receipt.add_sig_a(out.sig);
 
         let outcome = verify_per_step_ek_signing_strict_aware(
             &receipt,
             BilateralSide::A,
-            &[0x99u8; 32], // expected_prev_pk irrelevant when artifacts absent
+            &ak_pk,
             &[0xAA; 32],
-            None,
+            Some(&session_binding),
         )
-        .expect("missing artifacts in non-strict mode must skip cleanly");
-        assert_eq!(outcome, PerStepEkVerifyOutcome::SkippedLegacyReceipt);
+        .expect("session-bound A-side must verify");
+        assert_eq!(outcome, PerStepEkVerifyOutcome::Verified);
     }
 
-    /// Strict mode ON + receipt has NO artifacts → fail-closed with a
-    /// structured error referencing strict mode.
+    /// A receipt without per-step EK artifacts always fails closed.
     #[test]
     #[serial_test::serial]
-    fn strict_aware_rejects_legacy_receipt_when_strict_on() {
-        use crate::storage::client_db::{reset_database_for_tests, set_strict_cert_chain_mode};
+    fn required_verifier_rejects_missing_artifacts() {
+        use crate::storage::client_db::reset_database_for_tests;
         reset_database_for_tests();
-        set_strict_cert_chain_mode(true).unwrap();
 
         let receipt = StitchedReceiptV2::new(
             [0x01; 32],
@@ -2751,46 +2537,33 @@ mod tests {
             BilateralSide::A,
             &[0x99u8; 32],
             &[0xAA; 32],
-            None,
+            Some(&[0xFE; 32]),
         )
-        .expect_err("strict mode must reject legacy receipts");
+        .expect_err("missing artifacts must reject");
         let msg = err.to_string();
         assert!(
-            msg.contains("strict cert-chain mode"),
-            "error must reference strict mode, got: {msg}"
+            msg.contains("per-step EK"),
+            "error must reference missing per-step EK artifacts, got: {msg}"
         );
-
-        // Reset for subsequent tests.
-        set_strict_cert_chain_mode(false).unwrap();
     }
 
-    /// Strict mode ON + receipt with artifacts present but cryptographically
-    /// invalid → propagates the underlying verification error (NOT the
-    /// strict-mode rejection — that's only for missing artifacts).
+    /// A receipt with artifacts present but cryptographically invalid
+    /// propagates the underlying verification error.
     #[test]
     #[serial_test::serial]
-    fn strict_aware_propagates_crypto_failure_not_strict_error() {
-        use crate::storage::client_db::set_strict_cert_chain_mode;
+    fn required_verifier_propagates_crypto_failure() {
         let (mut receipt, ak_pk, h_n) =
             build_signed_receipt_for_verifier_test(BilateralSide::A, &[0xC3; 32]);
-        // Tamper the body — sig will fail verification.
         receipt.parent_root = [0xDE; 32];
-        set_strict_cert_chain_mode(true).unwrap();
 
         let err =
             verify_per_step_ek_signing_strict_aware(&receipt, BilateralSide::A, &ak_pk, &h_n, None)
-                .expect_err("tampered receipt must fail crypto check");
+                .expect_err("missing session binding rejects before crypto check");
         let msg = err.to_string();
         assert!(
-            msg.contains("sig_A does NOT verify"),
-            "error must surface the crypto failure, got: {msg}"
+            msg.contains("session binding"),
+            "error must surface the missing session binding, got: {msg}"
         );
-        assert!(
-            !msg.contains("strict cert-chain mode"),
-            "should not surface strict-mode error when artifacts ARE present, got: {msg}"
-        );
-
-        set_strict_cert_chain_mode(false).unwrap();
     }
 
     // ── verify_per_step_ek_signing (low-level) ─────────────────────────
@@ -3085,16 +2858,12 @@ mod tests {
         );
     }
 
-    /// Strict cert-chain mode (whitepaper §11.1, mainnet-required) rejects
-    /// receipts for relationships that have no recorded chain heads. This
-    /// is the fail-closed behavior that closes the security gap Gemini
-    /// flagged in adversarial review of the chain-head threading commit
-    /// — without strict mode, a relationship whose `init_cert_chain_for_relationship`
-    /// was never called would silently skip cert verification.
+    /// Receipt verification rejects relationships that have no recorded chain
+    /// heads. Parent/root inclusion alone is not spend authority.
     #[test]
     #[serial_test::serial]
-    fn strict_mode_rejects_receipt_without_chain_heads() {
-        use crate::storage::client_db::{reset_database_for_tests, set_strict_cert_chain_mode};
+    fn rejects_receipt_without_chain_heads() {
+        use crate::storage::client_db::reset_database_for_tests;
 
         unsafe {
             std::env::set_var("DSM_SDK_TEST_MODE", "1");
@@ -3116,10 +2885,6 @@ mod tests {
             genesis.to_vec(),
             [0u8; 32].to_vec(),
         );
-
-        // Enable strict mode, but DO NOT initialize chain heads for this
-        // relationship — exactly the scenario Gemini flagged.
-        set_strict_cert_chain_mode(true).unwrap();
 
         // Build a minimal receipt; we don't need it to verify
         // cryptographically — strict-mode rejection fires BEFORE the
@@ -3152,18 +2917,15 @@ mod tests {
 
         assert!(
             result.is_err(),
-            "strict mode without chain heads must reject"
+            "verification without chain heads must reject"
         );
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("strict cert-chain mode")
-                || err.contains("init_cert_chain_for_relationship"),
+            err.contains("missing sender cert-chain head")
+                || err.contains("C-DBRW-bound receipt authorization"),
             "wrong rejection reason: {}",
             err
         );
-
-        // Reset strict mode for any subsequent tests.
-        set_strict_cert_chain_mode(false).unwrap();
     }
 
     // ── encode_protocol_transition_payload ──

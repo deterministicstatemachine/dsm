@@ -21,14 +21,7 @@ pub fn to_transport_bytes(env: &Envelope) -> Result<Vec<u8>, DsmError> {
 
 /// Decode an `Envelope` from transport bytes (protobuf)
 pub fn from_transport_bytes(bytes: &[u8]) -> Result<Envelope, DsmError> {
-    Envelope::decode(bytes).map_err(|e| {
-        DsmError::serialization_error(
-            "Transport decode (prost)",
-            "Envelope",
-            None::<&str>,
-            Some(e),
-        )
-    })
+    super::from_canonical_bytes(bytes)
 }
 
 /// Helper: encode a `UniversalRx` result into an `Envelope` and then to transport bytes.
@@ -240,16 +233,31 @@ mod tests {
     }
 
     #[test]
-    fn minimal_envelope_transport_roundtrip() {
+    fn minimal_envelope_transport_rejects_missing_required_fields() {
         let env = Envelope {
-            version: 0,
+            version: 3,
             headers: None,
             message_id: vec![],
             payload: None,
         };
         let bytes = to_transport_bytes(&env).unwrap();
-        let decoded = from_transport_bytes(&bytes).unwrap();
-        assert!(decoded.headers.is_none());
-        assert!(decoded.payload.is_none());
+        let err = from_transport_bytes(&bytes).expect_err("missing fields must fail");
+        assert!(err.to_string().contains("headers"));
+    }
+
+    #[test]
+    fn transport_decode_rejects_wrong_version() {
+        let env = Envelope {
+            version: 2,
+            headers: Some(sample_headers()),
+            message_id: vec![1; 16],
+            payload: None,
+        };
+        let bytes = to_transport_bytes(&env).unwrap();
+        let err = from_transport_bytes(&bytes).expect_err("wrong version must fail");
+        assert!(
+            err.to_string().contains("Envelope.version must be 3"),
+            "unexpected error: {err}"
+        );
     }
 }

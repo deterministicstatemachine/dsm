@@ -220,7 +220,7 @@ fn decode_sync_response(data: &[u8]) -> Option<(u32, u32)> {
         data
     };
 
-    let envelope = generated::Envelope::decode(envelope_bytes).ok()?;
+    let envelope = dsm::envelope::from_canonical_bytes(envelope_bytes).ok()?;
     match envelope.payload {
         Some(generated::envelope::Payload::StorageSyncResponse(resp)) => {
             if !resp.errors.is_empty() {
@@ -290,7 +290,12 @@ mod tests {
         };
         let envelope = generated::Envelope {
             version: 3,
-            headers: None,
+            headers: Some(generated::Headers {
+                device_id: vec![1; 32],
+                chain_tip: vec![2; 32],
+                genesis_hash: vec![3; 32],
+                seq: 0,
+            }),
             message_id: vec![0u8; 16],
             payload: Some(generated::envelope::Payload::StorageSyncResponse(sync_resp)),
         };
@@ -315,7 +320,12 @@ mod tests {
         };
         let envelope = generated::Envelope {
             version: 3,
-            headers: None,
+            headers: Some(generated::Headers {
+                device_id: vec![1; 32],
+                chain_tip: vec![2; 32],
+                genesis_hash: vec![3; 32],
+                seq: 0,
+            }),
             message_id: vec![0u8; 16],
             payload: Some(generated::envelope::Payload::StorageSyncResponse(sync_resp)),
         };

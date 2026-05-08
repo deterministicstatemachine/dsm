@@ -23,12 +23,40 @@ impl CoreBootstrapAdapter {
         CoreBootstrapAdapter
     }
 
+    fn derive_request_cdbrw_binding(
+        req: &generated::SystemGenesisRequest,
+    ) -> Result<[u8; 32], String> {
+        if req.cdbrw_hw_entropy.is_empty() {
+            return Err("system.genesis: cdbrw_hw_entropy is required".to_string());
+        }
+        if req.cdbrw_env_fingerprint.is_empty() {
+            return Err("system.genesis: cdbrw_env_fingerprint is required".to_string());
+        }
+        if req.cdbrw_salt.len() != 32 {
+            return Err(format!(
+                "system.genesis: cdbrw_salt must be 32 bytes, got {}",
+                req.cdbrw_salt.len()
+            ));
+        }
+
+        dsm::crypto::cdbrw_binding::derive_cdbrw_binding_key(
+            &req.cdbrw_hw_entropy,
+            &req.cdbrw_env_fingerprint,
+            &req.cdbrw_salt,
+        )
+        .map_err(|e| format!("system.genesis: C-DBRW binding derivation failed: {e}"))
+    }
+
     fn run_system_genesis(req: generated::SystemGenesisRequest) -> Result<Vec<u8>, String> {
         // Validate entropy strictly
         let entropy = req.device_entropy.clone();
         if entropy.len() != 32 {
             return Err("system.genesis: device_entropy must be 32 bytes".to_string());
         }
+        let k_dbrw = Self::derive_request_cdbrw_binding(&req)?;
+        let binding_record = crate::util::text_id::encode_base32_crockford(
+            dsm::crypto::blake3::domain_hash("DSM/cdbrw-binding-record", &k_dbrw).as_bytes(),
+        );
 
         let fut = async move {
             log::info!(
@@ -49,18 +77,6 @@ impl CoreBootstrapAdapter {
 
             // Per whitepaper §2.5: n-of-n MPC; all storage nodes contribute.
             let participant_count = storage_node_ids.len() as u32;
-            // §11.1 + §12 K_DBRW. Issue #213: this call site uses the
-            // bootstrap-tagged placeholder path (NOT silicon-bound). The
-            // strict-mode gate fail-closes here before mainnet flips
-            // unless a platform-specific hardware-entropy collector is
-            // wired in. Until then, bootstrap with a clear warning log
-            // that anti-cloning guarantees aren't yet enforced.
-            crate::storage::client_db::cdbrw_strict_mode::enforce_strict_dbrw_or_proceed(
-                "bootstrap_adapter",
-            )
-            .map_err(|e| format!("K_DBRW strict-mode gate: {e}"))?;
-            let k_dbrw = dsm::crypto::cdbrw_binding::derive_bootstrap_k_dbrw(&device_id_array)
-                .map_err(|e| format!("K_DBRW bootstrap derivation failed: {e}"))?;
             let genesis_state = dsm::core::identity::genesis::create_genesis_via_blind_mpc(
                 device_id_array,
                 storage_node_ids,
@@ -72,6 +88,11 @@ impl CoreBootstrapAdapter {
 
             let genesis_bytes = genesis_state.hash;
             log::info!("Genesis created via MPC (canonical root of all hash chains)");
+
+            crate::install_canonical_binding_key(k_dbrw.to_vec())
+                .map_err(|e| format!("install C-DBRW binding failed: {e}"))?;
+            #[cfg(all(target_os = "android", feature = "jni"))]
+            crate::jni::cdbrw::set_cdbrw_binding_key(k_dbrw.to_vec());
 
             let device_id_label = String::from_utf8_lossy(&entropy[..8]).to_string();
 
@@ -117,7 +138,7 @@ impl CoreBootstrapAdapter {
                     genesis_id: genesis_id_b32.clone(),
                     device_id: device_id_b32.clone(),
                     mpc_proof: String::new(),
-                    dbrw_binding: crate::util::text_id::encode_base32_crockford(&entropy),
+                    dbrw_binding: binding_record,
                     merkle_root: crate::util::text_id::encode_base32_crockford(&[0u8; 32]),
                     participant_count,
                     progress_marker: "genesis".to_string(),
@@ -296,4 +317,46 @@ impl dsm::core::BootstrapHandler for CoreBootstrapAdapter {
 pub fn install_bootstrap_adapter() {
     use dsm::core::install_bootstrap_handler;
     install_bootstrap_handler(Arc::new(CoreBootstrapAdapter::new()));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request_with_cdbrw(
+        hw: Vec<u8>,
+        env: Vec<u8>,
+        salt: Vec<u8>,
+    ) -> generated::SystemGenesisRequest {
+        generated::SystemGenesisRequest {
+            locale: "en-US".to_string(),
+            network_id: "testnet".to_string(),
+            device_entropy: vec![0x42; 32],
+            cdbrw_hw_entropy: hw,
+            cdbrw_env_fingerprint: env,
+            cdbrw_salt: salt,
+        }
+    }
+
+    #[test]
+    fn system_genesis_requires_cdbrw_inputs() {
+        let req = request_with_cdbrw(Vec::new(), vec![0x22; 32], vec![0x33; 32]);
+        let err = CoreBootstrapAdapter::derive_request_cdbrw_binding(&req)
+            .expect_err("missing hardware entropy must fail closed");
+        assert!(err.contains("cdbrw_hw_entropy"));
+    }
+
+    #[test]
+    fn system_genesis_derives_real_cdbrw_binding_from_request() {
+        let hw = vec![0x11; 32];
+        let env = vec![0x22; 32];
+        let salt = vec![0x33; 32];
+        let req = request_with_cdbrw(hw.clone(), env.clone(), salt.clone());
+
+        let derived =
+            CoreBootstrapAdapter::derive_request_cdbrw_binding(&req).expect("derive binding");
+        let expected = dsm::crypto::cdbrw_binding::derive_cdbrw_binding_key(&hw, &env, &salt)
+            .expect("direct binding");
+        assert_eq!(derived, expected);
+    }
 }

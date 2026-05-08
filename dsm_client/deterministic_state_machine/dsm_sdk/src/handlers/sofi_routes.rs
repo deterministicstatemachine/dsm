@@ -29,7 +29,7 @@ use super::response_helpers::err;
 /// non-AppStateResponse payload.  Used by posted-mode mirroring.
 fn extract_app_state_response_value(data: &[u8]) -> Option<String> {
     let payload = data.strip_prefix(&[0x03])?;
-    let env = generated::Envelope::decode(payload).ok()?;
+    let env = dsm::envelope::from_canonical_bytes(payload).ok()?;
     match env.payload? {
         generated::envelope::Payload::AppStateResponse(asr) => asr.value,
         _ => None,

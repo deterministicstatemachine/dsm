@@ -319,7 +319,12 @@ impl SessionManager {
 fn envelope_wrap_snapshot(snapshot: generated::AppSessionStateProto) -> Vec<u8> {
     let envelope = generated::Envelope {
         version: 3,
-        headers: None,
+        headers: Some(generated::Headers {
+            device_id: vec![0u8; 32],
+            chain_tip: vec![0u8; 32],
+            genesis_hash: vec![0u8; 32],
+            seq: 0,
+        }),
         message_id: vec![0u8; 16],
         payload: Some(generated::envelope::Payload::SessionStateResponse(snapshot)),
     };

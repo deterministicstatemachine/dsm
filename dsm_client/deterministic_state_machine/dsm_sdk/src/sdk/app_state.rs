@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use prost::Message;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 use dsm::types::receipt_types::DeviceTreeAcceptanceCommitment;
 
 #[cfg(unix)]
@@ -56,6 +57,49 @@ struct AppStateStorage {
 
 // Global storage slot
 static STORAGE: Mutex<Option<AppStateStorage>> = Mutex::new(None);
+
+// —————————————————————————–
+// Platform entropy inputs (C-DBRW silicon-binding material)
+//
+// Transient, process-lifetime-only slot for the three byte arrays that
+// the platform layer (Android JNI / Kotlin) collects from real hardware
+// sources before genesis. NOT persisted to disk — the secret material
+// must remain ephemeral and zeroized after consumption.
+//
+// Genesis call sites consume this slot via `take_platform_entropy_inputs()`
+// (one-shot Option::take) and feed the values into
+// `dsm::crypto::cdbrw_binding::derive_cdbrw_binding_key` so K_DBRW is
+// silicon-bound per whitepaper §11.1 + §12.
+//
+// See dBTC bearer-fungibility plan + the per-step EK signing §11.1
+// alignment work for the broader context. This slot is the production
+// C-DBRW bootstrap contract.
+// —————————————————————————–
+
+/// Three byte arrays collected by the platform entropy collector
+/// (Android Kotlin: `PlatformEntropyCollector`). Consumed at genesis
+/// time to derive K_DBRW via the canonical
+/// `derive_cdbrw_binding_key(hw, env, salt)` path.
+///
+/// Drop zeroizes all three vectors. Construct via
+/// `AppState::set_platform_entropy_inputs` and consume via
+/// `AppState::take_platform_entropy_inputs`.
+#[derive(Debug, Clone, Zeroize, ZeroizeOnDrop)]
+pub struct PlatformEntropyInputs {
+    /// Hardware-bound entropy: BLAKE3 mix of StrongBox / hardware-Keystore
+    /// / attestation chain root (Android side). Must be non-empty.
+    pub hw_entropy: Vec<u8>,
+    /// Canonical environment fingerprint: BLAKE3 hash of stable platform
+    /// identifiers (manufacturer, model, hardware, board, bootloader, OS
+    /// API level). Must be non-empty.
+    pub env_fingerprint: Vec<u8>,
+    /// Per-install random salt, generated once on first launch by the
+    /// platform's CSPRNG and persisted in EncryptedSharedPreferences
+    /// (or equivalent platform secure storage). Must be non-empty.
+    pub salt: Vec<u8>,
+}
+
+static PLATFORM_ENTROPY_INPUTS: Mutex<Option<PlatformEntropyInputs>> = Mutex::new(None);
 
 // —————————————————————————–
 // Public API
@@ -497,6 +541,89 @@ impl AppState {
         Ok(())
     }
 
+    // ----------------- Platform entropy inputs (C-DBRW silicon binding) -----------------
+
+    /// Store the three byte arrays the platform entropy collector
+    /// produced (hw_entropy, env_fingerprint, salt) for consumption at
+    /// the next genesis attempt. Idempotent: a second call overwrites
+    /// the prior values (which are zeroized on drop).
+    ///
+    /// All three inputs MUST be non-empty. Empty inputs are rejected
+    /// here so the gate fires at the JNI boundary rather than deep
+    /// inside `derive_cdbrw_binding_key`.
+    ///
+    /// Returns `Ok(())` on success or a structured error if any input
+    /// is empty.
+    pub fn set_platform_entropy_inputs(
+        hw_entropy: Vec<u8>,
+        env_fingerprint: Vec<u8>,
+        salt: Vec<u8>,
+    ) -> Result<(), String> {
+        if hw_entropy.is_empty() {
+            return Err("platform entropy: hw_entropy must not be empty".to_string());
+        }
+        if env_fingerprint.is_empty() {
+            return Err("platform entropy: env_fingerprint must not be empty".to_string());
+        }
+        if salt.is_empty() {
+            return Err("platform entropy: salt must not be empty".to_string());
+        }
+
+        let inputs = PlatformEntropyInputs {
+            hw_entropy,
+            env_fingerprint,
+            salt,
+        };
+
+        let mut slot = PLATFORM_ENTROPY_INPUTS
+            .lock()
+            .map_err(|e| format!("platform entropy: lock poisoned: {e}"))?;
+        *slot = Some(inputs);
+        Ok(())
+    }
+
+    /// One-shot consume the platform entropy inputs. Returns
+    /// `Some(PlatformEntropyInputs)` exactly once after a successful
+    /// `set_platform_entropy_inputs` call; subsequent calls return
+    /// `None` until the platform layer sets fresh inputs.
+    ///
+    /// The returned struct zeroizes its byte vectors on drop, so
+    /// callers MUST consume it (e.g. pass to
+    /// `derive_cdbrw_binding_key`) within a bounded scope and let it
+    /// drop afterward.
+    pub fn take_platform_entropy_inputs() -> Option<PlatformEntropyInputs> {
+        match PLATFORM_ENTROPY_INPUTS.lock() {
+            Ok(mut slot) => slot.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        }
+    }
+
+    /// Consume platform entropy inputs and derive the canonical C-DBRW binding key.
+    /// Production genesis paths call this when the request itself does not carry
+    /// the platform C-DBRW fields.
+    pub fn take_platform_cdbrw_binding_key(context: &str) -> Result<[u8; 32], String> {
+        let inputs = Self::take_platform_entropy_inputs().ok_or_else(|| {
+            format!("{context}: C-DBRW platform entropy inputs are required for genesis")
+        })?;
+
+        dsm::crypto::cdbrw_binding::derive_cdbrw_binding_key(
+            &inputs.hw_entropy,
+            &inputs.env_fingerprint,
+            &inputs.salt,
+        )
+        .map_err(|e| format!("{context}: C-DBRW binding derivation failed: {e}"))
+    }
+
+    /// Non-consuming check for whether platform entropy inputs are
+    /// currently set. Used by UI/JNI bootstrap readiness checks without
+    /// consuming the inputs.
+    pub fn has_platform_entropy_inputs() -> bool {
+        match PLATFORM_ENTROPY_INPUTS.lock() {
+            Ok(slot) => slot.is_some(),
+            Err(poisoned) => poisoned.into_inner().is_some(),
+        }
+    }
+
     // ----------------- Test utilities -----------------
     #[cfg(test)]
     pub fn reset_for_testing() {
@@ -506,6 +633,10 @@ impl AppState {
 
         if let Ok(mut storage) = STORAGE.try_lock() {
             *storage = None;
+        }
+
+        if let Ok(mut slot) = PLATFORM_ENTROPY_INPUTS.try_lock() {
+            *slot = None;
         }
 
         let path = Self::get_storage_path();
@@ -520,6 +651,9 @@ impl AppState {
         SDK_INITIALIZED.store(false, Ordering::SeqCst);
         STORAGE_INITIALIZED.store(false, Ordering::SeqCst);
         *STORAGE.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        *PLATFORM_ENTROPY_INPUTS
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = None;
     }
 
     #[cfg(test)]
@@ -1016,5 +1150,121 @@ mod tests {
     fn app_state_storage_contact_roots_empty() {
         let s = AppStateStorage::default();
         assert!(s.contact_device_tree_roots.is_empty());
+    }
+
+    // ── platform entropy inputs (C-DBRW silicon binding) ──
+
+    #[test]
+    #[serial]
+    fn platform_entropy_inputs_initial_state_is_none() {
+        setup_test_env();
+        assert!(!AppState::has_platform_entropy_inputs());
+        assert!(AppState::take_platform_entropy_inputs().is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn platform_entropy_inputs_set_then_take_round_trip() {
+        setup_test_env();
+        let hw = vec![0xAAu8; 32];
+        let env = vec![0xBBu8; 32];
+        let salt = vec![0xCCu8; 32];
+
+        AppState::set_platform_entropy_inputs(hw.clone(), env.clone(), salt.clone())
+            .expect("set must succeed for non-empty inputs");
+
+        assert!(AppState::has_platform_entropy_inputs());
+
+        let taken = AppState::take_platform_entropy_inputs()
+            .expect("take must return the inputs we just set");
+        assert_eq!(taken.hw_entropy, hw);
+        assert_eq!(taken.env_fingerprint, env);
+        assert_eq!(taken.salt, salt);
+
+        // One-shot semantics: second take returns None.
+        assert!(AppState::take_platform_entropy_inputs().is_none());
+        assert!(!AppState::has_platform_entropy_inputs());
+    }
+
+    #[test]
+    #[serial]
+    fn platform_entropy_inputs_rejects_empty_hw_entropy() {
+        setup_test_env();
+        let err = AppState::set_platform_entropy_inputs(vec![], vec![0xBB; 32], vec![0xCC; 32])
+            .expect_err("empty hw_entropy must be rejected");
+        assert!(
+            err.contains("hw_entropy"),
+            "error must name the bad field: {err}"
+        );
+        assert!(!AppState::has_platform_entropy_inputs());
+    }
+
+    #[test]
+    #[serial]
+    fn platform_entropy_inputs_rejects_empty_env_fingerprint() {
+        setup_test_env();
+        let err = AppState::set_platform_entropy_inputs(vec![0xAA; 32], vec![], vec![0xCC; 32])
+            .expect_err("empty env_fingerprint must be rejected");
+        assert!(
+            err.contains("env_fingerprint"),
+            "error must name the bad field: {err}"
+        );
+        assert!(!AppState::has_platform_entropy_inputs());
+    }
+
+    #[test]
+    #[serial]
+    fn platform_entropy_inputs_rejects_empty_salt() {
+        setup_test_env();
+        let err = AppState::set_platform_entropy_inputs(vec![0xAA; 32], vec![0xBB; 32], vec![])
+            .expect_err("empty salt must be rejected");
+        assert!(err.contains("salt"), "error must name the bad field: {err}");
+        assert!(!AppState::has_platform_entropy_inputs());
+    }
+
+    #[test]
+    #[serial]
+    fn platform_entropy_inputs_set_overwrites_prior() {
+        setup_test_env();
+
+        AppState::set_platform_entropy_inputs(vec![0x01; 32], vec![0x02; 32], vec![0x03; 32])
+            .expect("first set");
+        AppState::set_platform_entropy_inputs(vec![0x10; 32], vec![0x20; 32], vec![0x30; 32])
+            .expect("second set must overwrite, not error");
+
+        let taken = AppState::take_platform_entropy_inputs()
+            .expect("take should return the second-set values");
+        assert_eq!(taken.hw_entropy, vec![0x10; 32]);
+        assert_eq!(taken.env_fingerprint, vec![0x20; 32]);
+        assert_eq!(taken.salt, vec![0x30; 32]);
+    }
+
+    #[test]
+    #[serial]
+    fn platform_entropy_inputs_drives_canonical_k_dbrw() {
+        setup_test_env();
+        // The whole point of the slot: feeding it into
+        // derive_cdbrw_binding_key must produce the same K_DBRW as a
+        // direct call with the same byte arrays.
+        let hw = b"hw_entropy_test_vector_32_bytes_aaaa".to_vec();
+        let env = b"env_fingerprint_test_vector_aaaa".to_vec();
+        let salt = b"per_install_salt_test_vector_aaaa".to_vec();
+
+        AppState::set_platform_entropy_inputs(hw.clone(), env.clone(), salt.clone()).expect("set");
+        let taken = AppState::take_platform_entropy_inputs().expect("take");
+
+        let k_via_slot = dsm::crypto::cdbrw_binding::derive_cdbrw_binding_key(
+            &taken.hw_entropy,
+            &taken.env_fingerprint,
+            &taken.salt,
+        )
+        .expect("k_dbrw via slot");
+        let k_direct = dsm::crypto::cdbrw_binding::derive_cdbrw_binding_key(&hw, &env, &salt)
+            .expect("k_dbrw direct");
+
+        assert_eq!(
+            k_via_slot, k_direct,
+            "K_DBRW derived from the AppState slot must match a direct canonical call"
+        );
     }
 }

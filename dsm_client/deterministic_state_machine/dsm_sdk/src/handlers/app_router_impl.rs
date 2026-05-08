@@ -54,8 +54,9 @@ use dsm::utils::time::Duration;
 include!(concat!(env!("OUT_DIR"), "/dsm_contact_schema_hash.rs"));
 
 // Build a stitched receipt from an applied state transition.
-// Delegates to the shared `build_bilateral_receipt()` in `sdk::receipts`
-// which computes real genesis, SMT roots, relation proofs, and device proofs.
+// Delegates to the shared `build_bilateral_receipt_with_smt()` constructor in
+// `sdk::receipts`, which consumes real SMT roots, relation proofs, and the
+// authenticated device-tree commitment.
 
 use super::response_helpers::{pack_envelope_ok, err};
 
@@ -658,7 +659,7 @@ impl AppRouterImpl {
         ]);
         if purged > 0 {
             log::info!(
-                "[app_router] purged {purged} legacy prefs keys (dsm.token.* / dsm.dlv.* / dsm.sofi.*)"
+                "[app_router] purged {purged} retired prefs keys (dsm.token.* / dsm.dlv.* / dsm.sofi.*)"
             );
         }
 
@@ -806,7 +807,7 @@ impl AppRouterImpl {
         // The frontend never supplies it — transfer_req.chain_tip is reserved/ignored.
         // When a stored tip is missing, restore the canonical initial relationship tip
         // derived from both devices' genesis/device identities instead of inventing a
-        // zero-tip legacy route.
+        // zero-tip route.
         let local_genesis_for_routing: [u8; 32] = match self
             .core_sdk
             .local_genesis_hash()
@@ -848,7 +849,7 @@ impl AppRouterImpl {
             }
             Ok(None) => {}
             Err(e) => {
-                if can_fallback_to_cached_contact_identity(&contact_record) {
+                if can_root_to_cached_contact_identity(&contact_record) {
                     log::warn!(
                         "[wallet.send] recipient identity quorum unavailable for {} (alias={}); using cached verified identity: {}",
                         to_device_id_str.get(..8).unwrap_or("?"),
@@ -1389,7 +1390,7 @@ impl AppRouterImpl {
             ) {
                 Ok(mut receipt) => match receipt.compute_commitment() {
                     Ok(commitment) => {
-                        // Resolve K_DBRW + AK fallback keypair.
+                        // Resolve K_DBRW + root AK keypair.
                         let k_dbrw_vec = match crate::fetch_dbrw_binding_key() {
                             Ok(k) => k,
                             Err(e) => {
@@ -1430,7 +1431,7 @@ impl AppRouterImpl {
                         // Per-step Kyber per whitepaper §11: encapsulate
                         // against the recipient's Kyber pubkey to derive
                         // `k_step`. Pull the pubkey from the contact record;
-                        // fail-closed if missing (no fallback path — contact
+                        // fail-closed if missing (no root path — contact
                         // must be re-established with peer Kyber pubkey to
                         // enable per-step EK signing).
                         let recipient_kyber_pk =
@@ -1472,7 +1473,7 @@ impl AppRouterImpl {
                             devid_sender: receipt.devid_a,
                             relationship_key: rel_key,
                             k_dbrw: &k_dbrw_arr,
-                            fallback_ak_keypair: Some((&ak_pk, &ak_sk)),
+                            root_ak_keypair: Some((&ak_pk, &ak_sk)),
                             recipient_kyber_pk: &recipient_kyber_pk,
                             // §11.1 Item 7: bind the per-step EK
                             // signature to the bilateral session.
@@ -1485,11 +1486,11 @@ impl AppRouterImpl {
                             Ok(out) => {
                                 log::info!(
                                     "[wallet.send] §11.1 per-step EK sign: ek_pk_len={}, \
-                                     cert_len={}, sig_len={}, used_ak_fallback={}",
+                                     cert_len={}, sig_len={}, used_root_ak={}",
                                     out.ek_pk.len(),
                                     out.ek_cert.len(),
                                     out.sig.len(),
-                                    out.used_ak_fallback,
+                                    out.used_root_ak,
                                 );
 
                                 // Stamp per-step artifacts on the receipt.
@@ -1507,7 +1508,7 @@ impl AppRouterImpl {
                                         &out.ek_pk,
                                         &out.ek_sk,
                                         &k_dbrw_arr,
-                                        out.used_ak_fallback,
+                                        out.used_root_ak,
                                     )
                                 {
                                     log::warn!(
@@ -2234,7 +2235,7 @@ pub(crate) fn relationship_tip_for_contact_restore(
     )
 }
 
-/// Route freshness tag for stale-route delivery fallback.
+/// Route freshness tag for stale-route delivery root.
 /// `Current` = derived from the contact's current chain tip.
 /// `PreviousTip` = derived from the predecessor tip (bounded lookback of 1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2445,7 +2446,7 @@ pub(crate) fn collect_rotated_inbox_addresses(
         .collect()
 }
 
-fn can_fallback_to_cached_contact_identity(
+fn can_root_to_cached_contact_identity(
     contact_record: &crate::storage::client_db::ContactRecord,
 ) -> bool {
     contact_record.verified
@@ -3098,7 +3099,7 @@ async fn verify_device_tree_evidence_quorum_once(
 #[cfg(test)]
 mod tests {
     use super::{
-        can_fallback_to_cached_contact_identity, collect_rotated_inbox_addresses,
+        can_root_to_cached_contact_identity, collect_rotated_inbox_addresses,
         collect_tagged_inbox_addresses, compute_initial_relationship_chain_tip,
         ensure_inbox_recipient_targets_local, format_registry_quorum_failure, registry_retry_delay,
         relationship_tip_for_contact_restore, select_quorum_device_identity, AppRouterImpl,
@@ -3491,11 +3492,11 @@ mod tests {
             previous_chain_tip: None,
         };
 
-        assert!(can_fallback_to_cached_contact_identity(&contact));
+        assert!(can_root_to_cached_contact_identity(&contact));
     }
 
     #[test]
-    fn cached_identity_fallback_requires_verified_complete_contact() {
+    fn cached_identity_root_requires_verified_complete_contact() {
         let contact = ContactRecord {
             contact_id: "c_quorum_bad".to_string(),
             device_id: vec![0x11u8; 32],
@@ -3516,7 +3517,7 @@ mod tests {
             previous_chain_tip: None,
         };
 
-        assert!(!can_fallback_to_cached_contact_identity(&contact));
+        assert!(!can_root_to_cached_contact_identity(&contact));
     }
 
     #[test]

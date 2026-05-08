@@ -106,43 +106,6 @@ pub fn decrypt_chain_sk(ciphertext: &[u8], k_dbrw: &[u8; 32]) -> Result<Vec<u8>>
         .map_err(|_| anyhow!("cert-chain SK decryption failed (tamper or wrong K_DBRW)"))
 }
 
-/// Setting key for strict cert-chain verification mode.
-///
-/// When set to `"1"`, the verification path FAILS CLOSED if a relationship
-/// has no recorded chain heads — i.e., absence of chain heads becomes a
-/// rejection rather than a silent skip. Default `"0"` (transitional /
-/// fail-open) for pre-mainnet development; mainnet deployments MUST set
-/// this to `"1"` so that relationships established without `init_cert_chain_for_relationship`
-/// cannot silently bypass cert verification.
-const STRICT_CERT_CHAIN_KEY: &str = "strict_cert_chain_mode";
-
-/// Read the strict cert-chain mode flag. Returns `false` (fail-open transitional)
-/// by default if the setting has never been written.
-pub fn is_strict_cert_chain_mode() -> Result<bool> {
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-    let val: Option<String> = conn
-        .query_row(
-            "SELECT value FROM settings WHERE key = ?1",
-            params![STRICT_CERT_CHAIN_KEY],
-            |row| row.get(0),
-        )
-        .optional()?;
-    Ok(val.as_deref() == Some("1"))
-}
-
-/// Enable or disable strict cert-chain mode. Mainnet deployments MUST call
-/// `set_strict_cert_chain_mode(true)` before accepting any production traffic.
-pub fn set_strict_cert_chain_mode(enabled: bool) -> Result<()> {
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-    conn.execute(
-        "INSERT OR REPLACE INTO settings(key, value) VALUES (?1, ?2)",
-        params![STRICT_CERT_CHAIN_KEY, if enabled { "1" } else { "0" }],
-    )?;
-    Ok(())
-}
-
 /// Which side of a bilateral relationship a chain head belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CertChainSide {
@@ -237,7 +200,7 @@ pub fn advance_cert_chain_head(
 
 /// Load the current chain head pubkey for a relationship + side. Returns
 /// `None` if no chain head has been initialized for that pair (relationship
-/// has not yet been established, or pre-feature legacy data).
+/// has not yet been established).
 pub fn load_cert_chain_head_pubkey(
     relationship_key: &[u8; 32],
     side: CertChainSide,
@@ -324,7 +287,7 @@ pub fn advance_local_cert_chain_head_with_sk(
 
 /// Load and decrypt the local chain head's secret key. Returns `None` if
 /// no row exists, or if the row exists but has no SK material (Counterparty
-/// rows always, or Local rows initialized via the legacy pubkey-only path).
+/// rows always).
 pub fn load_local_chain_head_sk(
     relationship_key: &[u8; 32],
     k_dbrw: &[u8; 32],
@@ -782,35 +745,6 @@ mod tests {
         )
         .unwrap();
         assert!(result.is_none());
-    }
-
-    /// Strict mode defaults to disabled (transitional pre-mainnet).
-    #[test]
-    #[serial_test::serial]
-    fn strict_mode_default_off() {
-        reset_database_for_tests();
-        assert!(!is_strict_cert_chain_mode().unwrap());
-    }
-
-    /// Strict mode toggles round-trip cleanly through the settings store.
-    #[test]
-    #[serial_test::serial]
-    fn strict_mode_set_and_read() {
-        reset_database_for_tests();
-        // Initially off.
-        assert!(!is_strict_cert_chain_mode().unwrap());
-
-        // Enable.
-        set_strict_cert_chain_mode(true).unwrap();
-        assert!(is_strict_cert_chain_mode().unwrap());
-
-        // Re-enable is idempotent.
-        set_strict_cert_chain_mode(true).unwrap();
-        assert!(is_strict_cert_chain_mode().unwrap());
-
-        // Disable.
-        set_strict_cert_chain_mode(false).unwrap();
-        assert!(!is_strict_cert_chain_mode().unwrap());
     }
 
     #[test]
