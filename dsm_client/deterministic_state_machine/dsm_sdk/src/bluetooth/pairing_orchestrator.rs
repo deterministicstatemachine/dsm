@@ -1316,6 +1316,7 @@ mod tests {
             last_seen_online_counter: 0,
             last_seen_ble_counter: 0,
             public_key: vec![0u8; 32],
+            kyber_public_key: Vec::new(),
             previous_chain_tip: None,
         };
         client_db::store_contact(&rec).expect("store contact");
@@ -1355,6 +1356,7 @@ mod tests {
             last_seen_online_counter: 0,
             last_seen_ble_counter: 0,
             public_key: vec![0u8; 32],
+            kyber_public_key: Vec::new(),
             previous_chain_tip: None,
         };
         client_db::store_contact(&rec).expect("store contact");
@@ -1436,6 +1438,7 @@ mod tests {
             last_seen_online_counter: 0,
             last_seen_ble_counter: 0,
             public_key: vec![0u8; 32],
+            kyber_public_key: Vec::new(),
             previous_chain_tip: None,
         };
         client_db::store_contact(&rec).expect("store contact");

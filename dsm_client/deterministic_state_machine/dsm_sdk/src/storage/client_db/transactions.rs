@@ -497,18 +497,23 @@ pub fn get_transaction_history(
     let map_row = |row: &Row| -> rusqlite::Result<TransactionRecord> {
         let meta_blob: Vec<u8> = row.get(11)?;
         let metadata = meta_from_blob(&meta_blob).unwrap_or_default();
+        let tx_type: String = row.get(5)?;
+        let proof_data = match row.get::<_, Option<Vec<u8>>>(10)? {
+            Some(_) if tx_type == "unilateral_send" => None,
+            other => other,
+        };
         Ok(TransactionRecord {
             tx_id: row.get(0)?,
             tx_hash: row.get(1)?,
             from_device: row.get(2)?,
             to_device: row.get(3)?,
             amount: row.get::<_, i64>(4)? as u64,
-            tx_type: row.get(5)?,
+            tx_type,
             status: row.get(6)?,
             chain_height: row.get::<_, i64>(7)? as u64,
             step_index: row.get::<_, i64>(8)? as u64,
             commitment_hash: row.get::<_, Option<Vec<u8>>>(9)?,
-            proof_data: row.get::<_, Option<Vec<u8>>>(10)?,
+            proof_data,
             metadata,
             created_at: row.get::<_, i64>(12)? as u64,
         })
@@ -794,6 +799,7 @@ mod tests {
             alias: "sender-peer".to_string(),
             genesis_hash: counterparty_genesis.to_vec(),
             public_key: vec![0x11; 32],
+            kyber_public_key: Vec::new(),
             current_chain_tip: Some(stale_tip.to_vec()),
             added_at: 0,
             verified: true,
@@ -889,6 +895,7 @@ mod tests {
             alias: "receiver-peer".to_string(),
             genesis_hash: counterparty_genesis.to_vec(),
             public_key: vec![0x22; 32],
+            kyber_public_key: Vec::new(),
             current_chain_tip: Some(stale_tip.to_vec()),
             added_at: 0,
             verified: true,
@@ -956,6 +963,47 @@ mod tests {
         assert_eq!(
             crate::storage::client_db::get_local_bilateral_chain_tip(&counterparty_device_id),
             Some(settled_tip)
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn unilateral_history_suppresses_legacy_proof_data() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        reset_database_for_tests();
+        init_database().expect("init db");
+
+        let device = crate::util::text_id::encode_base32_crockford(&[0x31u8; 32]);
+        let counterparty = crate::util::text_id::encode_base32_crockford(&[0x32u8; 32]);
+
+        store_transaction(&TransactionRecord {
+            tx_id: "unilateral-proof".to_string(),
+            tx_hash: crate::util::text_id::encode_base32_crockford(&[0x41u8; 32]),
+            from_device: device.clone(),
+            to_device: counterparty,
+            amount: 5,
+            tx_type: "unilateral_send".to_string(),
+            status: "submitted".to_string(),
+            chain_height: 0,
+            step_index: 1,
+            commitment_hash: None,
+            proof_data: Some(vec![0xAA; 12]),
+            metadata: HashMap::new(),
+            created_at: 0,
+        })
+        .expect("store unilateral transaction");
+
+        let history = get_transaction_history(Some(&device), Some(10)).expect("load tx history");
+        let unilateral = history
+            .into_iter()
+            .find(|tx| tx.tx_id == "unilateral-proof")
+            .expect("unilateral tx in history");
+
+        assert!(
+            unilateral.proof_data.is_none(),
+            "legacy unilateral proof_data should not surface in history"
         );
     }
 }

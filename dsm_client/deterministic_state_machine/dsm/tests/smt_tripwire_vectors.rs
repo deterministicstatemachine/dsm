@@ -162,16 +162,22 @@ fn golden_tag_initial_chain_tip() {
 
 #[test]
 fn golden_tag_bytes_exact() {
+    // §11.1 Issue #182 Finding #3 resolution: domain tag constants
+    // do NOT include the trailing NUL — `dsm_domain_hasher` appends it
+    // automatically. The on-the-wire BLAKE3 preimage still includes
+    // the NUL (verified by per-tag KAT pins in `whitepaper_kat.rs`);
+    // this test pins only the constant string identifier, which is
+    // the input to the hasher primitive.
     assert_eq!(
-        TAG_SMT_NODE, "DSM/smt-node\0",
+        TAG_SMT_NODE, "DSM/smt-node",
         "TAG_SMT_NODE string literal changed"
     );
     assert_eq!(
-        TAG_SMT_LEAF, "DSM/smt-leaf\0",
+        TAG_SMT_LEAF, "DSM/smt-leaf",
         "TAG_SMT_LEAF string literal changed"
     );
     assert_eq!(
-        TAG_RECEIPT_COMMIT, "DSM/receipt-commit\0",
+        TAG_RECEIPT_COMMIT, "DSM/receipt-commit",
         "TAG_RECEIPT_COMMIT string literal changed"
     );
 }

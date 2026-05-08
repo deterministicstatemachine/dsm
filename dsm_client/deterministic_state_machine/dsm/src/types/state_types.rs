@@ -611,7 +611,7 @@ impl State {
     // get_parameter deleted: read from now-deleted external_data field.
     // The single SDK caller (token_sdk locked_balances) always returned
     // None because external_data was never populated outside the deleted
-    // add_metadata. The caller's fallback path handles the None case.
+    // add_metadata. The caller handles the None case explicitly.
 
     /// Get the serialized operation bytes
     pub fn get_operation_bytes(&self) -> Vec<u8> {
@@ -1433,7 +1433,7 @@ impl SparseIndex {
     // per §4.3: state_number-based checkpoint indexing has no role in the
     // counterless model. Per-Device SMT keys are 32-byte relationship keys
     // (k_{A↔B}), not integer counters. SparseIndex remains as an opaque
-    // Vec<u64> for legacy serialized states only — never used in
+    // Vec<u64> for stored serialized states only — never used in
     // acceptance predicates.
 }
 
@@ -1820,7 +1820,7 @@ impl NonInclusionProof {
 // which uses 256-bit keys, ZERO_LEAF = [0u8; 32], and spec-compliant domain separation (§2.2).
 //
 // MerkleProof::from_smt_proof() and NonInclusionProof::from_smt() bridge the new SMT
-// into the legacy MerkleProof format used by the rest of the codebase.
+// into the MerkleProof format used by the rest of the codebase.
 
 // Old SparseMerkleTree impl blocks and NodeId removed — see merkle::sparse_merkle_tree
 
@@ -1864,19 +1864,11 @@ impl PreCommitment {
         operation: &Operation,
         next_entropy: &[u8],
     ) -> Result<[u8; 32], DsmError> {
-        use crate::serialization::canonical_bytes::CanonicalBytesWriter;
-
-        // Canon 2: centralized, deterministic internal canonical bytes.
-        // NOTE: This is an internal commit/hashing path; do not introduce Serde/bincode.
-        let mut w = CanonicalBytesWriter::with_capacity(32 + 4 + 256 + 4 + next_entropy.len());
-        w.push_len_prefixed(state_hash);
-
-        let op_bytes = operation.to_bytes();
-        w.push_len_prefixed(&op_bytes);
-
-        w.push_len_prefixed(next_entropy);
-
-        Ok(*domain_hash("DSM/precommit-hash", w.as_slice()).as_bytes())
+        crate::commitments::precommit::PreCommitment::generate_hash(
+            state_hash,
+            operation,
+            next_entropy,
+        )
     }
 
     /// Add a signature to this pre-commitment

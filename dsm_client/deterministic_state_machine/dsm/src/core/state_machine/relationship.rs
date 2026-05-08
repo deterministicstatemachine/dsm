@@ -542,6 +542,12 @@ impl RelationshipManager {
             ));
         }
 
+        // Fail-closed: operations that require authorization must carry it
+        // before we apply the transition. Mirrors the gate in
+        // `create_transition` so this path cannot bypass authorization
+        // checks. See `enforce_operation_authorization`.
+        crate::core::state_machine::transition::enforce_operation_authorization(&operation)?;
+
         let state_transition = StateTransition::new(
             operation.clone(),
             Some(new_entropy.to_vec()),

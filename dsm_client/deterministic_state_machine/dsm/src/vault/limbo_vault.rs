@@ -9,9 +9,37 @@ use std::collections::{HashMap, HashSet};
 
 use prost::Message;
 use crate::crypto::kyber;
-use crate::crypto::pedersen::{PedersenCommitment, PedersenParams, SecurityLevel};
 use crate::crypto::sphincs;
 use crate::types::error::DsmError;
+
+/// Compute a salted BLAKE3 content commitment for a DLV vault.
+///
+/// Replaces the prior classical group-based commitment (Issue #184
+/// Finding #2 — see `crypto::mod.rs` removal note). The commitment is:
+///
+/// ```text
+/// content_commitment = BLAKE3("DSM/dlv-content-commit\0" || blinding || content)
+/// ```
+///
+/// where `blinding` is 32 bytes from a CSPRNG. The salted hash provides:
+///   * **Hiding** — under random oracle / 32-byte uniform blinding, the
+///     commitment leaks nothing about the content.
+///   * **Binding** — under BLAKE3-256 collision resistance (~256-bit
+///     pre-quantum, ~128-bit Grover-bounded post-quantum).
+///
+/// Post-quantum-secure under standard assumptions. The prior
+/// classical group-based commitment's distinguishing property —
+/// additive homomorphism `Com(a)·Com(b) = Com(a+b)` — is not used
+/// anywhere in DSM (no DLV path performs commitment addition), so
+/// the simpler primitive is strictly better: smaller (32 bytes
+/// fixed vs. 256+ bytes variable), faster, no big-int math, no
+/// classical-DLP assumption that Shor breaks.
+fn dlv_content_commitment(blinding: &[u8; 32], content: &[u8]) -> [u8; 32] {
+    let mut h = dsm_domain_hasher("DSM/dlv-content-commit");
+    h.update(blinding);
+    h.update(content);
+    *h.finalize().as_bytes()
+}
 use crate::types::policy_types::VaultCondition;
 // State import removed: vault lifecycle APIs now take &[u8; 32] (the
 // resolved reference state hash) directly. Callers supply the digest from
@@ -429,7 +457,11 @@ pub struct LimboVault {
     pub state: VaultState,
     pub content_type: String,
     pub encrypted_content: EncryptedContent,
-    pub content_commitment: PedersenCommitment,
+    /// Salted BLAKE3 commitment to the encrypted content
+    /// (`BLAKE3("DSM/dlv-content-commit\0" || blinding || content)`).
+    /// 32 bytes. Replaces the prior classical group-based commitment
+    /// per Issue #184 Finding #2 — see `dlv_content_commitment()` above.
+    pub content_commitment: [u8; 32],
     pub parameters_hash: Vec<u8>,
     pub creator_signature: Vec<u8>,
     pub verification_positions: Vec<Position>,
@@ -469,7 +501,9 @@ pub struct LimboVaultDraft {
     pub intended_recipient: Option<Vec<u8>>,
     pub content_type: String,
     pub encrypted_content: EncryptedContent,
-    pub content_commitment: PedersenCommitment,
+    /// Salted BLAKE3 content commitment (32 bytes). Replaces the
+    /// prior classical group-based commitment per Issue #184 F2.
+    pub content_commitment: [u8; 32],
     pub parameters_hash: Vec<u8>,
     pub verification_positions: Vec<Position>,
     pub reference_state_hash: [u8; 32],
@@ -516,15 +550,16 @@ impl TryFrom<crate::types::proto::LimboVaultProto> for LimboVault {
             aad: encrypted_content_proto.aad,
         };
 
-        let content_commitment =
-            PedersenCommitment::from_bytes(&p.content_commitment).map_err(|e| {
-                DsmError::serialization_error(
-                    "content_commitment",
-                    "deserialize",
-                    None::<&str>,
-                    Some(e),
-                )
-            })?;
+        // Salted BLAKE3 commitment is exactly 32 bytes on the wire
+        // (Issue #184 F2 — was prior classical group-based commitment).
+        if p.content_commitment.len() != 32 {
+            return Err(DsmError::SerializationError(format!(
+                "content_commitment must be 32 bytes (BLAKE3-256), got {}",
+                p.content_commitment.len()
+            )));
+        }
+        let mut content_commitment = [0u8; 32];
+        content_commitment.copy_from_slice(&p.content_commitment);
 
         // Decode RW positions
         let mut verification_positions: Vec<Position> =
@@ -600,7 +635,7 @@ impl From<&LimboVault> for crate::types::proto::LimboVaultProto {
                 nonce: v.encrypted_content.nonce.clone(),
                 aad: v.encrypted_content.aad.clone(),
             }),
-            content_commitment: v.content_commitment.to_bytes(),
+            content_commitment: v.content_commitment.to_vec(),
             parameters_hash: v.parameters_hash.clone(),
             creator_signature: v.creator_signature.clone(),
             verification_positions: v
@@ -946,7 +981,7 @@ impl LimboVault {
                 nonce: Vec::new(),
                 aad: Vec::new(),
             },
-            content_commitment: PedersenCommitment::default(),
+            content_commitment: [0u8; 32],
             parameters_hash: Vec::new(),
             creator_signature: Vec::new(),
             verification_positions: Vec::new(),
@@ -973,6 +1008,33 @@ impl LimboVault {
         encryption_public_key: &[u8],        // Kyber public key for content encryption (required)
         reference_state_hash: &[u8; 32],
     ) -> Result<LimboVaultDraft, DsmError> {
+        // dBTC bearer-fungibility guard (see
+        // .github/instructions/dBTCimplement.instructions.md, Definition 17 +
+        // Invariant 5 + Implementation Note): BitcoinHTLC vaults are
+        // bearer-authorized at the DSM-vault layer. Setting an
+        // intended_recipient on a BitcoinHTLC vault is semantically
+        // meaningless — the field is ignored by unlock/activate/claim and
+        // recipient binding is enforced solely at the Bitcoin layer via the
+        // HTLC spend path and addrBTC(w). Reject the combination at
+        // construction time so callers cannot accidentally encode a
+        // misleading vault. Decode (`from_proto`) remains permissive so
+        // any pre-existing on-disk vault carrying this combination still
+        // loads.
+        if intended_recipient.is_some()
+            && matches!(
+                fulfillment_condition,
+                FulfillmentMechanism::BitcoinHTLC { .. }
+            )
+        {
+            return Err(DsmError::invalid_operation(
+                "intended_recipient is not allowed for BitcoinHTLC vaults: \
+                 dBTC vaults are bearer-authorized at the DSM-vault layer \
+                 (see dBTCimplement.instructions.md Definition 17 + Invariant 5); \
+                 recipient binding is enforced at the Bitcoin layer via the \
+                 HTLC spend path and addrBTC(w). Pass intended_recipient = None.",
+            ));
+        }
+
         let ref_hash = *reference_state_hash;
 
         // Fix #2: Encode fulfillment condition early so its domain-hash can be bound
@@ -1025,9 +1087,21 @@ impl LimboVault {
         let encrypted_data = kyber::aes_encrypt(&sym_key, &nonce, content)
             .map_err(|e| DsmError::crypto("aes_encrypt", Some(e)))?;
 
-        // Pedersen commitment to content
-        let params = PedersenParams::new(SecurityLevel::Standard128)?;
-        let commitment = PedersenCommitment::commit(content, &params)?;
+        // §14 DLV content commitment (Issue #184 F2 — the classical
+        // group-based commitment was removed). Salted BLAKE3:
+        //   `BLAKE3("DSM/dlv-content-commit\0" || blinding || content)`
+        // — provides hiding (under uniform 32-byte blinding from a
+        // CSPRNG, never persisted) and binding (under BLAKE3 collision
+        // resistance). Matches the prior commitment design's
+        // hiding-via-fresh-randomness-and-discard pattern, just with
+        // a post-quantum-secure primitive instead of classical DLP.
+        let blinding = {
+            use rand::RngCore;
+            let mut b = [0u8; 32];
+            crate::crypto::rng::SecureRng.fill_bytes(&mut b);
+            b
+        };
+        let commitment = dlv_content_commitment(&blinding, content);
 
         // Parameters hash (protobuf of fulfillment + core fields) — raw 32 bytes.
         let mut parameters = Vec::new();
@@ -1041,7 +1115,10 @@ impl LimboVault {
         if let Some(rec) = &intended_recipient {
             parameters.extend_from_slice(rec);
         }
-        parameters.extend_from_slice(&commitment.to_bytes());
+        // 32-byte raw commitment hash (Issue #184 F2 — was the prior
+        // commitment's variable-length to_bytes(); now just the
+        // salted-BLAKE3 32 bytes).
+        parameters.extend_from_slice(&commitment);
 
         let parameters_hash = domain_hash_bytes("DSM/dlv-params", &parameters).to_vec();
 
@@ -1134,7 +1211,8 @@ impl LimboVault {
         if let Some(rec) = &self.intended_recipient {
             parameters.extend_from_slice(rec);
         }
-        parameters.extend_from_slice(&self.content_commitment.to_bytes());
+        // 32-byte raw commitment hash (Issue #184 F2).
+        parameters.extend_from_slice(&self.content_commitment);
 
         let computed = domain_hash_bytes("DSM/dlv-params", &parameters).to_vec();
         if !secure_eq(&computed, &self.parameters_hash) {
@@ -1724,10 +1802,13 @@ impl LimboVault {
             ));
         }
 
-        // §7.2 Mathematical Abdication: dBTC vaults (BitcoinHTLC) use fungible
-        // CPTA-manifold tokens as authorization. Any holder who can produce a valid
-        // Burn proof σ may exit through any active vault on the same manifold.
-        // The intended_recipient Kyber-key check is only enforced for non-dBTC vaults.
+        // dBTC bearer fungibility (see .github/instructions/dBTCimplement.instructions.md,
+        // Definition 17 + Invariant 5): BitcoinHTLC vaults are bearer-authorized at the
+        // DSM-vault layer. Possession of valid policy-class-bound witness-completion
+        // material U(w, v) is the sole DSM-layer authorization predicate. The
+        // intended_recipient Kyber-key check is only enforced for non-dBTC vaults;
+        // recipient binding for dBTC is enforced at the Bitcoin layer via the HTLC
+        // spend path and addrBTC(w).
         let is_dbtc_vault = matches!(
             &self.fulfillment_condition,
             FulfillmentMechanism::BitcoinHTLC { .. }
@@ -1770,7 +1851,9 @@ impl LimboVault {
             return Err(DsmError::invalid_operation("vault not in limbo"));
         }
 
-        // §7.2 Mathematical Abdication: dBTC vaults skip intended_recipient check.
+        // dBTC bearer fungibility (see .github/instructions/dBTCimplement.instructions.md,
+        // Definition 17 + Invariant 5): BitcoinHTLC vaults skip the DSM-layer
+        // intended_recipient check. Recipient is bound at the Bitcoin layer.
         let is_dbtc_vault = matches!(
             &self.fulfillment_condition,
             FulfillmentMechanism::BitcoinHTLC { .. }
@@ -1830,8 +1913,9 @@ impl LimboVault {
         claim_data.extend_from_slice(domain_hash("DSM/dlv-claim", &proof.to_bytes()).as_bytes());
         let claim_proof = domain_hash_bytes("DSM/dlv-claim", &claim_data).to_vec();
 
-        // §7.2 Mathematical Abdication: dBTC/BitcoinHTLC vaults exit through the Bitcoin
-        // HTLC script, not through Kyber content decryption. Skip the KEM + AES path and
+        // dBTC bearer fungibility (see .github/instructions/dBTCimplement.instructions.md,
+        // Definition 17 + Invariant 5): BitcoinHTLC vaults exit through the Bitcoin HTLC
+        // spend path, not through Kyber content decryption. Skip the KEM + AES path and
         // transition directly to Claimed state. The actual BTC sweep happens in draw_tap().
         let is_dbtc_vault = matches!(
             &self.fulfillment_condition,
@@ -2048,7 +2132,7 @@ impl Default for LimboVault {
                 nonce: Vec::new(),
                 aad: Vec::new(),
             },
-            content_commitment: PedersenCommitment::default(),
+            content_commitment: [0u8; 32],
             parameters_hash: Vec::new(),
             creator_signature: Vec::new(),
             verification_positions: Vec::new(),
@@ -2698,9 +2782,10 @@ mod tests {
     }
 
     /// G.1.4 — idempotent anchoring: identical inputs → byte-identical
-    /// vault_id.  (parameters_hash bundles the Pedersen commitment whose
-    /// blinding factor is intentionally randomised per call; only the
-    /// vault_id is guaranteed byte-identical across calls.)
+    /// vault_id.  (parameters_hash bundles the salted-BLAKE3 content
+    /// commitment whose 32-byte blinding factor is intentionally
+    /// randomised per call; only the vault_id is guaranteed
+    /// byte-identical across calls.)
     #[test]
     fn vault_anchoring_idempotent() {
         let (creator_pk, _) =
@@ -3085,6 +3170,107 @@ mod tests {
         assert_eq!(ec.encrypted_data, ec2.encrypted_data);
         assert_eq!(ec.nonce, ec2.nonce);
         assert_eq!(ec.aad, ec2.aad);
+    }
+
+    // ───────── dBTC bearer-fungibility guard tests ─────────
+    // See .github/instructions/dBTCimplement.instructions.md, Definition 17 +
+    // Invariant 5 + Implementation Note. BitcoinHTLC vaults are bearer-authorized
+    // at the DSM-vault layer: `intended_recipient: Some(_)` on a BitcoinHTLC
+    // vault is semantically meaningless and `create_draft` must reject it.
+    // Decode (`TryFrom<LimboVaultProto>`) must remain permissive so any
+    // pre-existing on-disk vault carrying this combination still loads.
+
+    fn bearer_fungibility_test_btc_htlc() -> FulfillmentMechanism {
+        FulfillmentMechanism::BitcoinHTLC {
+            hash_lock: [0xAB; 32],
+            refund_hash_lock: [0xCD; 32],
+            refund_iterations: 0,
+            bitcoin_pubkey: vec![0x02; 33],
+            expected_btc_amount_sats: 100_000,
+            network: 0,
+            min_confirmations: 6,
+        }
+    }
+
+    #[test]
+    fn bearer_fungibility_create_draft_rejects_recipient_plus_btc_htlc() {
+        let (creator_pk, _creator_sk) =
+            crate::crypto::sphincs::generate_sphincs_keypair().expect("sphincs keypair");
+        let kyber_pair = crate::crypto::kyber::generate_kyber_keypair().expect("kyber keypair");
+        let bogus_recipient = vec![0xEEu8; 64]; // any non-empty Kyber-pubkey-shaped blob
+        let result = LimboVault::create_draft(
+            &creator_pk,
+            bearer_fungibility_test_btc_htlc(),
+            b"dbtc bearer test",
+            "application/dsm-dbtc-mint",
+            Some(bogus_recipient),
+            &kyber_pair.public_key,
+            &[0x42; 32],
+        );
+        let err = result.expect_err("create_draft must reject intended_recipient + BitcoinHTLC");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("BitcoinHTLC"),
+            "error must name BitcoinHTLC; got: {msg}"
+        );
+        assert!(
+            msg.contains("bearer") || msg.contains("Definition 17"),
+            "error must reference bearer-fungibility / spec; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn bearer_fungibility_create_draft_accepts_btc_htlc_with_no_recipient() {
+        let (creator_pk, _creator_sk) =
+            crate::crypto::sphincs::generate_sphincs_keypair().expect("sphincs keypair");
+        let kyber_pair = crate::crypto::kyber::generate_kyber_keypair().expect("kyber keypair");
+        let draft = LimboVault::create_draft(
+            &creator_pk,
+            bearer_fungibility_test_btc_htlc(),
+            b"dbtc bearer test",
+            "application/dsm-dbtc-mint",
+            None, // bearer-authorized: no recipient binding at DSM layer
+            &kyber_pair.public_key,
+            &[0x42; 32],
+        )
+        .expect("create_draft must accept BitcoinHTLC + intended_recipient=None");
+        assert!(draft.intended_recipient.is_none());
+        assert!(matches!(
+            draft.fulfillment_condition,
+            FulfillmentMechanism::BitcoinHTLC { .. }
+        ));
+    }
+
+    #[test]
+    fn bearer_fungibility_from_proto_permissive_for_legacy_btc_htlc_with_recipient() {
+        // Mirrors a pre-existing on-disk vault: BitcoinHTLC + Some(intended_recipient).
+        // Construction is now blocked, but legacy decode must still succeed so
+        // wallets can load existing state without forced migration.
+        let mut v = LimboVault::default();
+        v.fulfillment_condition = bearer_fungibility_test_btc_htlc();
+        v.intended_recipient = Some(vec![0xEEu8; 64]);
+        v.id = [0x55; 32];
+        v.creator_public_key = vec![0x11; 32];
+        v.reference_state_hash = [0x22; 32];
+
+        // Round-trip via the wire types — exactly what loading from disk does.
+        let proto: crate::types::proto::LimboVaultProto = (&v).into();
+        let decoded: LimboVault = proto
+            .try_into()
+            .expect("from_proto must remain permissive for legacy BitcoinHTLC + Some(recipient)");
+
+        assert!(
+            matches!(
+                decoded.fulfillment_condition,
+                FulfillmentMechanism::BitcoinHTLC { .. }
+            ),
+            "decoded vault must preserve BitcoinHTLC fulfillment"
+        );
+        assert_eq!(
+            decoded.intended_recipient,
+            Some(vec![0xEEu8; 64]),
+            "decoded vault must preserve legacy intended_recipient field verbatim"
+        );
     }
 }
 

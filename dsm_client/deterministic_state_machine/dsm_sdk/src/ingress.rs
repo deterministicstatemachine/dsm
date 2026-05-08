@@ -36,7 +36,12 @@ fn ingress_error(code: u32, message: impl Into<String>) -> pb::Error {
 fn build_envelope(payload: pb::envelope::Payload) -> Envelope {
     Envelope {
         version: 3,
-        headers: None,
+        headers: Some(pb::Headers {
+            device_id: vec![0u8; 32],
+            chain_tip: vec![0u8; 32],
+            genesis_hash: vec![0u8; 32],
+            seq: 0,
+        }),
         message_id: vec![0u8; 16],
         payload: Some(payload),
     }
@@ -378,6 +383,13 @@ fn handle_bootstrap_measurement_report_core(
 }
 
 fn process_envelope_core(envelope_in: Envelope) -> Result<Envelope, pb::Error> {
+    crate::envelope::validate_envelope_v3(&envelope_in).map_err(|e| {
+        ingress_error(
+            ERROR_CODE_INVALID_INPUT,
+            format!("ingress: envelope validation failed: {e}"),
+        )
+    })?;
+
     if let Some(pb::envelope::Payload::BootstrapMeasurementReport(report)) =
         envelope_in.payload.clone()
     {
@@ -402,7 +414,7 @@ fn process_envelope_core(envelope_in: Envelope) -> Result<Envelope, pb::Error> {
         &out[..]
     };
 
-    Envelope::decode(payload).map_err(|e| {
+    crate::envelope::from_canonical_bytes(payload).map_err(|e| {
         ingress_error(
             ERROR_CODE_PROCESSING_FAILED,
             format!("ingress: response envelope decode failed: {e}"),
@@ -870,7 +882,7 @@ pub fn dispatch_ingress(request: IngressRequest) -> IngressResponse {
                 } else {
                     op.envelope_bytes.as_slice()
                 };
-                let env_in = Envelope::decode(slice).map_err(|e| {
+                let env_in = crate::envelope::from_canonical_bytes(slice).map_err(|e| {
                     ingress_error(
                         ERROR_CODE_INVALID_INPUT,
                         format!("ingress: envelope decode failed: {e}"),
@@ -1125,6 +1137,12 @@ endpoint = "http://127.0.0.1:8080"
         let _guard = setup_test_env();
         let request_env = Envelope {
             version: 3,
+            headers: Some(pb::Headers {
+                device_id: vec![1; 32],
+                chain_tip: vec![2; 32],
+                genesis_hash: vec![3; 32],
+                seq: 0,
+            }),
             message_id: vec![7; 16],
             payload: Some(pb::envelope::Payload::Error(pb::Error {
                 code: 99,
@@ -1162,6 +1180,46 @@ endpoint = "http://127.0.0.1:8080"
         let error = expect_error(response);
         assert_eq!(error.code, ERROR_CODE_INVALID_INPUT);
         assert!(error.message.contains("envelope decode failed"));
+    }
+
+    #[test]
+    #[serial]
+    fn wrong_version_envelope_returns_invalid_input() {
+        let _guard = setup_test_env();
+        let request_env = Envelope {
+            version: 2,
+            headers: Some(pb::Headers {
+                device_id: vec![1; 32],
+                chain_tip: vec![2; 32],
+                genesis_hash: vec![3; 32],
+                seq: 0,
+            }),
+            message_id: vec![4; 16],
+            payload: Some(pb::envelope::Payload::Error(pb::Error {
+                code: 7,
+                message: "wrong version".to_string(),
+                context: Vec::new(),
+                source_tag: 0,
+                is_recoverable: false,
+                debug_b32: String::new(),
+            })),
+            ..Default::default()
+        };
+        let mut framed = vec![0x03];
+        framed.extend_from_slice(&request_env.encode_to_vec());
+
+        let response = dispatch_ingress(IngressRequest {
+            operation: Some(ingress_request::Operation::Envelope(pb::EnvelopeOp {
+                envelope_bytes: framed,
+            })),
+        });
+        let error = expect_error(response);
+        assert_eq!(error.code, ERROR_CODE_INVALID_INPUT);
+        assert!(
+            error.message.contains("Envelope.version must be 3"),
+            "unexpected error: {}",
+            error.message
+        );
     }
 
     #[test]
@@ -1320,6 +1378,9 @@ endpoint = "http://127.0.0.1:8080"
                 locale: "en-US".to_string(),
                 network_id: "testnet".to_string(),
                 device_entropy: vec![0x42; 8],
+                cdbrw_hw_entropy: Vec::new(),
+                cdbrw_env_fingerprint: Vec::new(),
+                cdbrw_salt: Vec::new(),
             }
             .encode_to_vec(),
         }

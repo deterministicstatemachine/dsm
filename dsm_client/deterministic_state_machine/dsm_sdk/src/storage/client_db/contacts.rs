@@ -70,14 +70,15 @@ pub fn store_contact(contact: &ContactRecord) -> Result<()> {
     });
     conn.execute(
         "INSERT INTO contacts (
-            contact_id, device_id, alias, genesis_hash, public_key, chain_tip,
+            contact_id, device_id, alias, genesis_hash, public_key, kyber_public_key, chain_tip,
             added_at, verified, verification_proof, metadata, ble_address,
             status, needs_online_reconcile, last_seen_online_counter, last_seen_ble_counter
-        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
+        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
         ON CONFLICT(device_id) DO UPDATE SET
             alias = excluded.alias,
             genesis_hash = excluded.genesis_hash,
             public_key = COALESCE(excluded.public_key, contacts.public_key),
+            kyber_public_key = COALESCE(excluded.kyber_public_key, contacts.kyber_public_key),
             chain_tip = COALESCE(contacts.chain_tip, excluded.chain_tip),
             added_at = contacts.added_at,
             verified = CASE
@@ -100,6 +101,14 @@ pub fn store_contact(contact: &ContactRecord) -> Result<()> {
                 None
             } else {
                 Some(&contact.public_key)
+            },
+            // Position 6: kyber_public_key. NULL when empty so legacy contacts
+            // (added before per-step EK signing was wired) can be upgraded
+            // later without overwriting a populated value.
+            if contact.kyber_public_key.is_empty() {
+                None
+            } else {
+                Some(&contact.kyber_public_key)
             },
             contact.current_chain_tip.as_ref(),
             contact.added_at as i64,
@@ -140,7 +149,7 @@ pub fn get_all_contacts() -> Result<Vec<ContactRecord>> {
         poisoned.into_inner()
     });
     let mut stmt = conn.prepare(
-        "SELECT contact_id, device_id, alias, genesis_hash, public_key, chain_tip,
+        "SELECT contact_id, device_id, alias, genesis_hash, public_key, kyber_public_key, chain_tip,
                 added_at, verified, verification_proof, metadata, ble_address,
                 status, needs_online_reconcile, last_seen_online_counter, last_seen_ble_counter,
                 previous_chain_tip
@@ -148,7 +157,7 @@ pub fn get_all_contacts() -> Result<Vec<ContactRecord>> {
        ORDER BY added_at DESC",
     )?;
     let iter = stmt.query_map([], |row| {
-        let meta_blob: Vec<u8> = row.get(9)?;
+        let meta_blob: Vec<u8> = row.get(10)?;
         let metadata = meta_from_blob(&meta_blob).unwrap_or_default();
         Ok(ContactRecord {
             contact_id: row.get(0)?,
@@ -156,19 +165,20 @@ pub fn get_all_contacts() -> Result<Vec<ContactRecord>> {
             alias: row.get(2)?,
             genesis_hash: row.get(3)?,
             public_key: row.get::<_, Option<Vec<u8>>>(4)?.unwrap_or_default(),
-            current_chain_tip: row.get(5)?,
-            added_at: row.get::<_, i64>(6)? as u64,
-            verified: row.get::<_, i32>(7)? != 0,
-            verification_proof: row.get::<_, Option<Vec<u8>>>(8)?,
+            kyber_public_key: row.get::<_, Option<Vec<u8>>>(5)?.unwrap_or_default(),
+            current_chain_tip: row.get(6)?,
+            added_at: row.get::<_, i64>(7)? as u64,
+            verified: row.get::<_, i32>(8)? != 0,
+            verification_proof: row.get::<_, Option<Vec<u8>>>(9)?,
             metadata,
-            ble_address: row.get(10)?,
+            ble_address: row.get(11)?,
             status: row
-                .get::<_, String>(11)
+                .get::<_, String>(12)
                 .unwrap_or_else(|_| "Created".to_string()),
-            needs_online_reconcile: row.get::<_, i32>(12).unwrap_or(0) != 0,
-            last_seen_online_counter: row.get::<_, i64>(13).unwrap_or(0) as u64,
-            last_seen_ble_counter: row.get::<_, i64>(14).unwrap_or(0) as u64,
-            previous_chain_tip: row.get(15).unwrap_or(None),
+            needs_online_reconcile: row.get::<_, i32>(13).unwrap_or(0) != 0,
+            last_seen_online_counter: row.get::<_, i64>(14).unwrap_or(0) as u64,
+            last_seen_ble_counter: row.get::<_, i64>(15).unwrap_or(0) as u64,
+            previous_chain_tip: row.get(16).unwrap_or(None),
         })
     })?;
 
@@ -238,7 +248,7 @@ pub fn get_contact_by_device_id(device_id: &[u8]) -> Result<Option<ContactRecord
 
     let result = conn
         .query_row(
-            "SELECT contact_id, device_id, alias, genesis_hash, public_key, chain_tip,
+            "SELECT contact_id, device_id, alias, genesis_hash, public_key, kyber_public_key, chain_tip,
                 added_at, verified, verification_proof, metadata, ble_address,
                 status, needs_online_reconcile, last_seen_online_counter, last_seen_ble_counter,
                 previous_chain_tip
@@ -246,7 +256,7 @@ pub fn get_contact_by_device_id(device_id: &[u8]) -> Result<Option<ContactRecord
           WHERE device_id = ?1",
             params![device_id],
             |row| {
-                let meta_blob: Vec<u8> = row.get(9)?;
+                let meta_blob: Vec<u8> = row.get(10)?;
                 let metadata = meta_from_blob(&meta_blob).unwrap_or_default();
                 Ok(ContactRecord {
                     contact_id: row.get(0)?,
@@ -254,19 +264,20 @@ pub fn get_contact_by_device_id(device_id: &[u8]) -> Result<Option<ContactRecord
                     alias: row.get(2)?,
                     genesis_hash: row.get(3)?,
                     public_key: row.get::<_, Option<Vec<u8>>>(4)?.unwrap_or_default(),
-                    current_chain_tip: row.get(5)?,
-                    added_at: row.get::<_, i64>(6)? as u64,
-                    verified: row.get::<_, i32>(7)? != 0,
-                    verification_proof: row.get::<_, Option<Vec<u8>>>(8)?,
+                    kyber_public_key: row.get::<_, Option<Vec<u8>>>(5)?.unwrap_or_default(),
+                    current_chain_tip: row.get(6)?,
+                    added_at: row.get::<_, i64>(7)? as u64,
+                    verified: row.get::<_, i32>(8)? != 0,
+                    verification_proof: row.get::<_, Option<Vec<u8>>>(9)?,
                     metadata,
-                    ble_address: row.get(10)?,
+                    ble_address: row.get(11)?,
                     status: row
-                        .get::<_, String>(11)
+                        .get::<_, String>(12)
                         .unwrap_or_else(|_| "Created".to_string()),
-                    needs_online_reconcile: row.get::<_, i32>(12).unwrap_or(0) != 0,
-                    last_seen_online_counter: row.get::<_, i64>(13).unwrap_or(0) as u64,
-                    last_seen_ble_counter: row.get::<_, i64>(14).unwrap_or(0) as u64,
-                    previous_chain_tip: row.get(15).unwrap_or(None),
+                    needs_online_reconcile: row.get::<_, i32>(13).unwrap_or(0) != 0,
+                    last_seen_online_counter: row.get::<_, i64>(14).unwrap_or(0) as u64,
+                    last_seen_ble_counter: row.get::<_, i64>(15).unwrap_or(0) as u64,
+                    previous_chain_tip: row.get(16).unwrap_or(None),
                 })
             },
         )
@@ -286,7 +297,7 @@ pub fn get_contact_by_alias(alias: &str) -> Result<Option<ContactRecord>> {
 
     let result = conn
         .query_row(
-            "SELECT contact_id, device_id, alias, genesis_hash, public_key, chain_tip,
+            "SELECT contact_id, device_id, alias, genesis_hash, public_key, kyber_public_key, chain_tip,
                 added_at, verified, verification_proof, metadata, ble_address,
                 status, needs_online_reconcile, last_seen_online_counter, last_seen_ble_counter,
                 previous_chain_tip
@@ -294,7 +305,7 @@ pub fn get_contact_by_alias(alias: &str) -> Result<Option<ContactRecord>> {
           WHERE alias = ?1",
             params![alias],
             |row| {
-                let meta_blob: Vec<u8> = row.get(9)?;
+                let meta_blob: Vec<u8> = row.get(10)?;
                 let metadata = meta_from_blob(&meta_blob).unwrap_or_default();
                 Ok(ContactRecord {
                     contact_id: row.get(0)?,
@@ -302,19 +313,20 @@ pub fn get_contact_by_alias(alias: &str) -> Result<Option<ContactRecord>> {
                     alias: row.get(2)?,
                     genesis_hash: row.get(3)?,
                     public_key: row.get::<_, Option<Vec<u8>>>(4)?.unwrap_or_default(),
-                    current_chain_tip: row.get(5)?,
-                    added_at: row.get::<_, i64>(6)? as u64,
-                    verified: row.get::<_, i32>(7)? != 0,
-                    verification_proof: row.get::<_, Option<Vec<u8>>>(8)?,
+                    kyber_public_key: row.get::<_, Option<Vec<u8>>>(5)?.unwrap_or_default(),
+                    current_chain_tip: row.get(6)?,
+                    added_at: row.get::<_, i64>(7)? as u64,
+                    verified: row.get::<_, i32>(8)? != 0,
+                    verification_proof: row.get::<_, Option<Vec<u8>>>(9)?,
                     metadata,
-                    ble_address: row.get(10)?,
+                    ble_address: row.get(11)?,
                     status: row
-                        .get::<_, String>(11)
+                        .get::<_, String>(12)
                         .unwrap_or_else(|_| "Created".to_string()),
-                    needs_online_reconcile: row.get::<_, i32>(12).unwrap_or(0) != 0,
-                    last_seen_online_counter: row.get::<_, i64>(13).unwrap_or(0) as u64,
-                    last_seen_ble_counter: row.get::<_, i64>(14).unwrap_or(0) as u64,
-                    previous_chain_tip: row.get(15).unwrap_or(None),
+                    needs_online_reconcile: row.get::<_, i32>(13).unwrap_or(0) != 0,
+                    last_seen_online_counter: row.get::<_, i64>(14).unwrap_or(0) as u64,
+                    last_seen_ble_counter: row.get::<_, i64>(15).unwrap_or(0) as u64,
+                    previous_chain_tip: row.get(16).unwrap_or(None),
                 })
             },
         )
@@ -339,7 +351,7 @@ pub fn get_contact_by_ble_address(ble_address: &str) -> Result<Option<ContactRec
 
     let result = conn
         .query_row(
-            "SELECT contact_id, device_id, alias, genesis_hash, public_key, chain_tip,
+            "SELECT contact_id, device_id, alias, genesis_hash, public_key, kyber_public_key, chain_tip,
                 added_at, verified, verification_proof, metadata, ble_address,
                 status, needs_online_reconcile, last_seen_online_counter, last_seen_ble_counter,
                 previous_chain_tip
@@ -347,7 +359,7 @@ pub fn get_contact_by_ble_address(ble_address: &str) -> Result<Option<ContactRec
           WHERE UPPER(ble_address) = ?1",
             params![normalized],
             |row| {
-                let meta_blob: Vec<u8> = row.get(9)?;
+                let meta_blob: Vec<u8> = row.get(10)?;
                 let metadata = meta_from_blob(&meta_blob).unwrap_or_default();
                 Ok(ContactRecord {
                     contact_id: row.get(0)?,
@@ -355,19 +367,20 @@ pub fn get_contact_by_ble_address(ble_address: &str) -> Result<Option<ContactRec
                     alias: row.get(2)?,
                     genesis_hash: row.get(3)?,
                     public_key: row.get::<_, Option<Vec<u8>>>(4)?.unwrap_or_default(),
-                    current_chain_tip: row.get(5)?,
-                    added_at: row.get::<_, i64>(6)? as u64,
-                    verified: row.get::<_, i32>(7)? != 0,
-                    verification_proof: row.get::<_, Option<Vec<u8>>>(8)?,
+                    kyber_public_key: row.get::<_, Option<Vec<u8>>>(5)?.unwrap_or_default(),
+                    current_chain_tip: row.get(6)?,
+                    added_at: row.get::<_, i64>(7)? as u64,
+                    verified: row.get::<_, i32>(8)? != 0,
+                    verification_proof: row.get::<_, Option<Vec<u8>>>(9)?,
                     metadata,
-                    ble_address: row.get(10)?,
+                    ble_address: row.get(11)?,
                     status: row
-                        .get::<_, String>(11)
+                        .get::<_, String>(12)
                         .unwrap_or_else(|_| "Created".to_string()),
-                    needs_online_reconcile: row.get::<_, i32>(12).unwrap_or(0) != 0,
-                    last_seen_online_counter: row.get::<_, i64>(13).unwrap_or(0) as u64,
-                    last_seen_ble_counter: row.get::<_, i64>(14).unwrap_or(0) as u64,
-                    previous_chain_tip: row.get(15).unwrap_or(None),
+                    needs_online_reconcile: row.get::<_, i32>(13).unwrap_or(0) != 0,
+                    last_seen_online_counter: row.get::<_, i64>(14).unwrap_or(0) as u64,
+                    last_seen_ble_counter: row.get::<_, i64>(15).unwrap_or(0) as u64,
+                    previous_chain_tip: row.get(16).unwrap_or(None),
                 })
             },
         )
@@ -1358,6 +1371,7 @@ mod tests {
             alias: alias.to_string(),
             genesis_hash: [0xAAu8; 32].to_vec(),
             public_key: vec![0xBBu8; 64],
+            kyber_public_key: Vec::new(),
             current_chain_tip: None,
             added_at: 1,
             verified: false,

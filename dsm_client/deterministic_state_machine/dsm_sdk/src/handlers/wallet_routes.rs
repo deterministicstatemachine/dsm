@@ -443,7 +443,11 @@ impl AppRouterImpl {
                             tx_type: tx_type_enum as i32,
                             status: t.status.clone(),
                             recipient,
-                            stitched_receipt: { t.proof_data.clone().unwrap_or_default() },
+                            stitched_receipt: if t.tx_type == "unilateral_send" {
+                                Vec::new()
+                            } else {
+                                t.proof_data.clone().unwrap_or_default()
+                            },
                             created_at: t.created_at,
                             memo: t
                                 .metadata
@@ -453,18 +457,21 @@ impl AppRouterImpl {
                             // §4.3#3: Derive R_G from the stored receipt's devid_a for
                             // display-only consistency check. This is historical UI display
                             // only; protocol acceptance already enforced at ingest time.
-                            receipt_verified: t
-                                .proof_data
-                                .as_ref()
-                                .map(|b| {
-                                    let r_g = dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(b)
-                                        .ok()
-                                        .map(|r| crate::sdk::receipts::DeviceTreeAcceptanceCommitment::from_root(
-                                            dsm::common::device_tree::DeviceTree::single(r.devid_a).root(),
-                                        ));
-                                    crate::sdk::receipts::verify_receipt_bytes(b, r_g)
-                                })
-                                .unwrap_or(false),
+                            receipt_verified: if t.tx_type == "unilateral_send" {
+                                false
+                            } else {
+                                t.proof_data
+                                    .as_ref()
+                                    .map(|b| {
+                                        let r_g = dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(b)
+                                            .ok()
+                                            .map(|r| crate::sdk::receipts::DeviceTreeAcceptanceCommitment::from_root(
+                                                dsm::common::device_tree::DeviceTree::single(r.devid_a).root(),
+                                            ));
+                                        crate::sdk::receipts::verify_receipt_bytes(b, r_g)
+                                    })
+                                    .unwrap_or(false)
+                            },
                         }
                     })
                     .collect();

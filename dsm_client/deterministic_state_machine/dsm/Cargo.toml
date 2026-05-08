@@ -36,11 +36,11 @@ faucet = [] # Enable faucet functionality
 # Data integrity and checksums
 crc32fast = "1.3"
 
-# Core numeric processing
-num-bigint = "0.4.6"
-num-traits = "0.2.17"
-num-integer = "0.1.46"
-num-primes = "0.3.0"
+# num-bigint / num-traits / num-integer / num-primes REMOVED —
+# Issue #184 Finding #2 + Brandon's Pedersen excision. They were
+# Pedersen-only (classical Z_p^* big-int math) and are not used
+# anywhere else in `dsm/src`. The replacement salted-BLAKE3
+# commitment uses the existing BLAKE3 infra; no big-int math needed.
 
 # Async runtime
 tokio = { version = "1.51.0", features = ["macros", "rt-multi-thread", "time", "fs", "io-util", "sync"] }

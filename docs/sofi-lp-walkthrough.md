@@ -1,4 +1,4 @@
-# DeTFi LP Walkthrough — Alice's Journey
+# SoFi LP Walkthrough — Alice's Journey
 
 A side-by-side narrative for liquidity providers transitioning from
 pool-AMM mental models (Uniswap, Curve, Balancer) to DSM's sovereign-
@@ -101,7 +101,7 @@ Bob holds 10000 DEMO_AAA. He wants DEMO_BBB. Alice has a vault.
    ads, finds Alice's vault, computes the constant-product output.
 3. Bob inspects the discovered-vaults panel. Alice's vault appears
    with reserves and fee. He confirms.
-4. Tap **Execute trade**. The wallet runs the chunks #1–#7 pipeline:
+4. Tap **Execute trade**. The wallet runs the chunks #1-#7 pipeline:
    - Sync local DLVManager from routing keyspace.
    - Bind the best path into an unsigned `RouteCommitV1`.
    - Sign the route commit with Bob's SPHINCS+ key.
@@ -173,7 +173,7 @@ options:
 
 - **Desktop wallet.** Any frontend over the same `dsm_sdk` crate.
   Manages the same vault keys, talks to the same storage nodes, runs
-  the same chunks #1–#7 pipeline.
+  the same chunks #1-#7 pipeline.
 - **Headless daemon.** No UI; scripted vault creation and republish
   flow. Suitable for a Linux box or VPS sitting next to a storage node.
 - **Server cluster.** Multiple vaults under one signing key,
@@ -204,7 +204,7 @@ The storage node holds:
 
 Nothing the storage node holds lets it sign on Alice's behalf, gate
 her trades, censor her vault, or skim fees. The storage node is index-
-only — exactly the same role it plays for non-DeTFi DSM operations.
+only — exactly the same role it plays for non-SoFi DSM operations.
 
 ---
 

@@ -2478,7 +2478,7 @@ export class FulfillmentMechanism extends Message<FulfillmentMechanism> {
  * and the vault republishes its `RoutingVaultAdvertisementV1` with
  * `updated_state_number++`.  A stale advertisement causes a mis-quoted
  * route, which the chunk-7 re-simulation gate catches at unlock time
- * (DeTFi spec §3, §8).
+ * (SoFi spec §3, §8).
  *
  * `token_a` / `token_b` are stored in canonical lex-sorted order so
  * the vault has a single canonical pair identity regardless of trade
@@ -7845,7 +7845,7 @@ export class VaultStateAnchorV1 extends Message<VaultStateAnchorV1> {
  * advertisement digest + state number that was current when the path
  * was selected — recipients re-verify these fields against the live
  * `RoutingVaultAdvertisementV1` at unlock time, rejecting the route if
- * the vault's state has moved on (DeTFi spec §3.3 step 5).
+ * the vault's state has moved on (SoFi spec §3.3 step 5).
  *
  * @generated from message dsm.RouteCommitHopV1
  */
@@ -7969,7 +7969,7 @@ export class RouteCommitHopV1 extends Message<RouteCommitHopV1> {
  * `X = BLAKE3("DSM/ext\0" || canonical(RouteCommitV1{initiator_signature=[]}))`
  * is the value referenced by every vault on the route — when X is
  * published to storage nodes (see `ExternalCommitmentV1` below), all
- * vaults atomically become unlockable (DeTFi spec §3.2, §5.1).
+ * vaults atomically become unlockable (SoFi spec §3.2, §5.1).
  *
  * @generated from message dsm.RouteCommitV1
  */
@@ -8076,7 +8076,7 @@ export class RouteCommitV1 extends Message<RouteCommitV1> {
  * Storage-node anchor proving an external commitment X has been
  * published.  Each unlock-time verifier fetches this record at key
  * `defi/extcommit/{x_b32}`; existence implies "all vaults bound by X
- * may now unlock" (atomic visibility, DeTFi spec §3.2).
+ * may now unlock" (atomic visibility, SoFi spec §3.2).
  *
  * The record is INTENTIONALLY minimal — storage nodes are dumb
  * mirrors, the authoritative truth is the RouteCommit bytes the
@@ -8147,14 +8147,14 @@ export class ExternalCommitmentV1 extends Message<ExternalCommitmentV1> {
 }
 
 /**
- * Storage-node-mirrored advertisement for a DeTFi routing vault.
+ * Storage-node-mirrored advertisement for a SoFi routing vault.
  *
  * Keyed under `defi/vault/{token_a_b32}/{token_b_b32}/{vault_id_b32}` —
  * PUBLIC discovery by ordered token pair, no recipient scoping.  The
  * router enumerates all vaults matching `(tokenA, tokenB)` (or its
  * reverse, in which case reserves swap roles) and feeds the result
  * into a fee-weighted Dijkstra over the resulting liquidity graph
- * (DeTFi spec §3.3, §8.3).
+ * (SoFi spec §3.3, §8.3).
  *
  * Storage nodes are dumb mirrors.  Authenticity for routing purposes
  * is rooted in `vault_proto_digest` binding the ad to a full vault
@@ -8313,7 +8313,7 @@ export class RoutingVaultAdvertisementV1 extends Message<RoutingVaultAdvertiseme
 
 /**
  * Typed request for `dlv.unlockRouted` — the routed atomic-unlock
- * path for DeTFi.  The trader hands each vault owner a copy of the
+ * path for SoFi.  The trader hands each vault owner a copy of the
  * `RouteCommitV1` they signed; the vault owner then invokes this
  * route on their own device.  The handler runs the SDK eligibility
  * check (vault_id ∈ RouteCommit AND ExtCommit(X) visible at storage
@@ -11193,6 +11193,21 @@ export class SystemGenesisRequest extends Message<SystemGenesisRequest> {
    */
   deviceEntropy = new Uint8Array(0);
 
+  /**
+   * @generated from field: bytes cdbrw_hw_entropy = 4;
+   */
+  cdbrwHwEntropy = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes cdbrw_env_fingerprint = 5;
+   */
+  cdbrwEnvFingerprint = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes cdbrw_salt = 6;
+   */
+  cdbrwSalt = new Uint8Array(0);
+
   constructor(data?: PartialMessage<SystemGenesisRequest>) {
     super();
     proto3.util.initPartial(data, this);
@@ -11204,6 +11219,9 @@ export class SystemGenesisRequest extends Message<SystemGenesisRequest> {
     { no: 1, name: "locale", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 2, name: "network_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 3, name: "device_entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "cdbrw_hw_entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "cdbrw_env_fingerprint", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "cdbrw_salt", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SystemGenesisRequest {
@@ -12323,6 +12341,19 @@ export class BilateralCommitResponse extends Message<BilateralCommitResponse> {
    */
   commitmentHash?: Hash32;
 
+  /**
+   * §11.1 receiver counter-sign: receiver's locally-built copy of the
+   * stitched receipt with B-side per-step EK signing artifacts
+   * (ek_pk_b / ek_cert_b / kyber_ct_b / sig_b) stamped on top of the
+   * sender's A-side fields. Sender verifies this on receipt and persists
+   * a fully co-signed copy to its own archive. Empty for pre-feature
+   * sessions (transitional fail-open until set_strict_cert_chain_mode
+   * is on).
+   *
+   * @generated from field: bytes counter_signed_receipt = 6;
+   */
+  counterSignedReceipt = new Uint8Array(0);
+
   constructor(data?: PartialMessage<BilateralCommitResponse>) {
     super();
     proto3.util.initPartial(data, this);
@@ -12336,6 +12367,7 @@ export class BilateralCommitResponse extends Message<BilateralCommitResponse> {
     { no: 3, name: "transaction_hash", kind: "message", T: Hash32 },
     { no: 4, name: "message", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 5, name: "commitment_hash", kind: "message", T: Hash32 },
+    { no: 6, name: "counter_signed_receipt", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BilateralCommitResponse {
@@ -12562,6 +12594,65 @@ export class ReceiptCommit extends Message<ReceiptCommit> {
    */
   sigB = new Uint8Array(0);
 
+  /**
+   * Per-step ephemeral-key certificates (whitepaper §11.1).
+   * cert_{n+1} = Sign_{SK_n}( BLAKE3("DSM/ek-cert\0" || EK_pk_{n+1} || h_n) )
+   * Carried in the envelope alongside sig_a/sig_b. NOT in canonical commit
+   * preimage (§4.2.1 freezes the 10-field commit form). The cert binds the
+   * per-step EK to the prior chain head (AK at n=0, else EK_n) and lets a
+   * verifier walk the chain back to the device-attested AK_pk. Empty bytes
+   * are omitted by proto3, so receipts without a valid chain-head context
+   * (e.g., at session genesis) can leave these unset.
+   *
+   * @generated from field: bytes ek_cert_a = 14;
+   */
+  ekCertA = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes ek_cert_b = 15;
+   */
+  ekCertB = new Uint8Array(0);
+
+  /**
+   * Per-step ephemeral SPHINCS+ public keys (whitepaper §11.1). Each receipt
+   * is signed by a freshly-derived EK_pk_{n+1} = SPHINCS+.KeyGen(E_{n+1}),
+   * where E_{n+1} = HKDF("DSM/ek\0" || h_n || C_pre || k_step || K_DBRW).
+   * The verifier uses these to verify sig_a/sig_b without needing them
+   * out-of-band; ek_cert_a/b chain them back to AK_pk. Wire-only — same
+   * placement rationale as ek_cert_a/b. Empty bytes omitted by proto3 for
+   * legacy receipts that pre-date the per-step EK abstraction.
+   *
+   * @generated from field: bytes ek_pk_a = 16;
+   */
+  ekPkA = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes ek_pk_b = 17;
+   */
+  ekPkB = new Uint8Array(0);
+
+  /**
+   * Per-step Kyber/ML-KEM ciphertexts (whitepaper §11). The sender derives
+   * deterministic Kyber coins from
+   *   coins = BLAKE3-256("DSM/kyber-coins\0" || h_n || C_pre
+   *                       || DevID_sender || K_DBRW)
+   * encapsulates against the recipient's Kyber public key, and the
+   * resulting ciphertext travels here. The recipient decapsulates with
+   * their local Kyber secret key to recover the same shared secret `ss`,
+   * then derives k_step = BLAKE3("DSM/kyber-ss\0" || ss). Both parties
+   * arrive at identical k_step, which is then mixed into the per-step
+   * EK derivation alongside K_DBRW. Wire-only — not part of canonical
+   * commit form (§4.2.1).
+   *
+   * @generated from field: bytes kyber_ct_a = 18;
+   */
+  kyberCtA = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes kyber_ct_b = 19;
+   */
+  kyberCtB = new Uint8Array(0);
+
   constructor(data?: PartialMessage<ReceiptCommit>) {
     super();
     proto3.util.initPartial(data, this);
@@ -12583,6 +12674,12 @@ export class ReceiptCommit extends Message<ReceiptCommit> {
     { no: 11, name: "rel_replace_witness", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 12, name: "sig_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 13, name: "sig_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 14, name: "ek_cert_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 15, name: "ek_cert_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 16, name: "ek_pk_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 17, name: "ek_pk_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 18, name: "kyber_ct_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 19, name: "kyber_ct_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ReceiptCommit {

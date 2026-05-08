@@ -46,26 +46,6 @@ impl UnilateralOpsSDK {
         Some(out)
     }
 
-    fn build_unilateral_receipt_bytes(
-        sender_device_id: &str,
-        recipient_device_id: &str,
-        sender_chain_tip: &str,
-        next_chain_tip: &str,
-    ) -> Option<Vec<u8>> {
-        let devid_a = Self::decode_b32_32(sender_device_id)?;
-        let devid_b = Self::decode_b32_32(recipient_device_id)?;
-        let parent_tip = Self::decode_b32_32(sender_chain_tip)?;
-        let child_tip = Self::decode_b32_32(next_chain_tip)?;
-
-        crate::sdk::receipts::build_bilateral_receipt(
-            devid_a,
-            devid_b,
-            parent_tip,
-            child_tip,
-            crate::sdk::app_state::AppState::get_device_tree_commitment(),
-        )
-    }
-
     /// Deterministic disabled instance for pre-genesis startup failure cases.
     ///
     /// All calls are expected to be gated by `device_id_bytes == [0u8; 32]` in handlers.
@@ -346,8 +326,6 @@ impl UnilateralOpsSDK {
             &operation,
             &self.device_id,
             &recipient_device_id,
-            &sender_chain_tip,
-            next_chain_tip_b32.as_deref(),
         ) {
             Ok(_) => info!("UnilateralOpsSDK: sender history/balance updated for {}", message_id),
             Err(e) => log::error!("UnilateralOpsSDK: CRITICAL: sender history/schema update failed after submission for {}: {:?}", message_id, e),
@@ -363,8 +341,6 @@ impl UnilateralOpsSDK {
         op: &dsm::types::operations::Operation,
         sender_id: &str,
         recipient_id: &str,
-        sender_chain_tip: &str,
-        next_chain_tip: Option<&str>,
     ) -> Result<(), DsmError> {
         let (amount, token_id) = match op {
             dsm::types::operations::Operation::Transfer {
@@ -386,10 +362,6 @@ impl UnilateralOpsSDK {
         }
 
         // Store Transaction Record
-        let proof_data = next_chain_tip.and_then(|next| {
-            Self::build_unilateral_receipt_bytes(sender_id, recipient_id, sender_chain_tip, next)
-        });
-
         let record = TransactionRecord {
             tx_id: tx_id.to_string(),
             tx_hash: tx_id.to_string(), // using ID as hash proxy for now
@@ -401,7 +373,7 @@ impl UnilateralOpsSDK {
             chain_height: 0, // not relevant/available yet
             step_index: 0,
             commitment_hash: None,
-            proof_data,
+            proof_data: None,
             metadata: {
                 let mut m: std::collections::HashMap<String, Vec<u8>> =
                     std::collections::HashMap::new();
