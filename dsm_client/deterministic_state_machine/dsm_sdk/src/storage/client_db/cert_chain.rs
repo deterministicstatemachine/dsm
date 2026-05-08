@@ -560,7 +560,7 @@ mod tests {
     fn advance_for_relationship_bumps_both_sides() {
         reset_database_for_tests();
         let r = rel(0xA2);
-        init_cert_chain_for_relationship(&r, &vec![0xAA; 64], &vec![0xBB; 64]).unwrap();
+        init_cert_chain_for_relationship(&r, &[0xAA; 64], &[0xBB; 64]).unwrap();
 
         let local_ek1 = vec![0xCC; 64];
         let cp_ek1 = vec![0xDD; 64];
@@ -599,8 +599,7 @@ mod tests {
     fn advance_for_relationship_requires_init() {
         reset_database_for_tests();
         let r = rel(0xA3);
-        let result =
-            advance_cert_chain_for_relationship(&r, &vec![0xAA; 64], &vec![0xBB; 64]).unwrap();
+        let result = advance_cert_chain_for_relationship(&r, &[0xAA; 64], &[0xBB; 64]).unwrap();
         assert!(result.is_none());
     }
 
@@ -737,13 +736,9 @@ mod tests {
     fn local_chain_head_sk_advance_requires_init() {
         reset_database_for_tests();
         let r = rel(0xB4);
-        let result = advance_local_cert_chain_head_with_sk(
-            &r,
-            &vec![0x77; 64],
-            &vec![0x88; 96],
-            &[0x99; 32],
-        )
-        .unwrap();
+        let result =
+            advance_local_cert_chain_head_with_sk(&r, &[0x77; 64], &[0x88; 96], &[0x99; 32])
+                .unwrap();
         assert!(result.is_none());
     }
 
@@ -772,7 +767,7 @@ mod tests {
             pk2
         );
         // Advance r1 doesn't touch r2.
-        advance_cert_chain_head(&r1, CertChainSide::Local, &vec![0xAB; 64]).unwrap();
+        advance_cert_chain_head(&r1, CertChainSide::Local, &[0xAB; 64]).unwrap();
         assert_eq!(
             load_cert_chain_head_pubkey(&r2, CertChainSide::Local)
                 .unwrap()

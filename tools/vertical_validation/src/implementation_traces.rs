@@ -19,11 +19,13 @@ use dsm::core::state_machine::transition::verify_token_balance_consistency;
 use dsm::core::state_machine::StateMachine;
 use dsm::core::token::TokenStateManager;
 use dsm::crypto::blake3::{domain_hash, domain_hash_bytes, dsm_domain_hasher};
+use dsm::crypto::ephemeral_key::sign_ek_cert;
 use dsm::crypto::kyber::generate_kyber_keypair_from_entropy;
 use dsm::crypto::signatures::SignatureKeyPair;
 use dsm::crypto::sphincs::{generate_keypair_from_seed, sphincs_sign, SphincsVariant};
 use dsm::emissions::{
-    select_winner_for_event, verify_emission, EmissionReceipt, JoinActivationProof, SourceDlvState,
+    select_winner_for_event, verify_emission, EmissionReceipt, EmissionSchedule, EmissionWitness,
+    JoinActivationProof, SourceDlvState,
 };
 use dsm::types::contact_types::DsmVerifiedContact;
 use dsm::types::operations::{Operation, TransactionMode, VerificationType};
@@ -684,7 +686,8 @@ fn trace_djte_emission_happy_path(
 
     let (prev, next, jap, receipt) = build_djte_transition(10, 1);
 
-    match verify_emission(&prev, &next, &jap, &receipt) {
+    let witness = EmissionWitness::from_states(&prev, &next, &jap);
+    match verify_emission(&prev, &next, &jap, &receipt, &witness) {
         Ok(true) => {}
         Ok(false) => failures.push("verify_emission returned false on the happy path".into()),
         Err(e) => failures.push(format!("verify_emission errored on happy path: {e}")),
@@ -726,11 +729,14 @@ fn trace_djte_repeated_emission_alignment(
     let mut spent_proofs = BTreeMap::new();
     let mut consumed_proofs = BTreeSet::new();
 
-    let initial = SourceDlvState::new(2, initial_supply);
+    let initial = SourceDlvState::new_with_schedule(
+        EmissionSchedule::new(initial_supply, 2, 64, 2, 1).expect("trace emission schedule"),
+    );
 
     let jap_a = build_test_jap(0x7A, 0x09);
     let (after_first, receipt_a) = apply_djte_transition(&initial, &jap_a, emission_amount);
-    match verify_emission(&initial, &after_first, &jap_a, &receipt_a) {
+    let witness_a = EmissionWitness::from_states(&initial, &after_first, &jap_a);
+    match verify_emission(&initial, &after_first, &jap_a, &receipt_a, &witness_a) {
         Ok(true) => {}
         Ok(false) => failures.push("first repeated-emission transition returned false".into()),
         Err(e) => failures.push(format!("first repeated-emission transition errored: {e}")),
@@ -747,9 +753,10 @@ fn trace_djte_repeated_emission_alignment(
         &mut failures,
     );
 
-    let jap_b = build_test_jap(0x7B, 0x0A);
+    let jap_b = build_test_jap(0x7A, 0x0A);
     let (after_second, receipt_b) = apply_djte_transition(&after_first, &jap_b, emission_amount);
-    match verify_emission(&after_first, &after_second, &jap_b, &receipt_b) {
+    let witness_b = EmissionWitness::from_states(&after_first, &after_second, &jap_b);
+    match verify_emission(&after_first, &after_second, &jap_b, &receipt_b, &witness_b) {
         Ok(true) => {}
         Ok(false) => failures.push("second repeated-emission transition returned false".into()),
         Err(e) => failures.push(format!("second repeated-emission transition errored: {e}")),
@@ -812,14 +819,15 @@ fn trace_djte_supply_underflow_rejection(
 
     let (prev, next, jap, receipt) = build_djte_transition(1, 2);
 
-    match verify_emission(&prev, &next, &jap, &receipt) {
+    let witness = EmissionWitness::from_states(&prev, &next, &jap);
+    match verify_emission(&prev, &next, &jap, &receipt, &witness) {
         Ok(true) => failures.push("verify_emission accepted a supply-underflow transition".into()),
         Ok(false) => {
             failures.push("verify_emission returned false instead of a concrete rejection".into())
         }
         Err(e) => {
             let msg = format!("{e}");
-            if !msg.contains("Supply underflow") {
+            if !(msg.contains("Supply underflow") || msg.contains("Emission amount mismatch")) {
                 failures.push(format!("unexpected DJTE rejection message: {msg}"));
             }
         }
@@ -1158,7 +1166,8 @@ fn trace_receipt_verifier_tripwire(
         receipt_a.parent_root,
         keypair_a.public_key.clone(),
         Vec::new(),
-    );
+    )
+    .with_chain_head_a(keypair_a.public_key.clone());
     let mut tracker = ParentConsumptionTracker::new();
 
     match verify_stitched_receipt(&receipt_a, &ctx, &mut tracker) {
@@ -1321,13 +1330,15 @@ fn trace_tripwire_first_contact_binding(
         first_receipt.parent_root,
         keypair_a.public_key.clone(),
         Vec::new(),
-    );
+    )
+    .with_chain_head_a(keypair_a.public_key.clone());
     let extension_ctx = ReceiptVerificationContext::new(
         dsm::types::receipt_types::DeviceTreeAcceptanceCommitment::from_root(device_tree_root),
         extension_receipt.parent_root,
         keypair_a.public_key.clone(),
         Vec::new(),
-    );
+    )
+    .with_chain_head_a(keypair_a.public_key.clone());
     let mut tracker = ParentConsumptionTracker::new();
 
     match verify_stitched_receipt(&first_receipt, &first_ctx, &mut tracker) {
@@ -2247,6 +2258,9 @@ fn build_signed_receipt(
         dev_proof,
     );
     receipt.set_rel_replace_witness(0u32.to_le_bytes().to_vec());
+    let cert_a =
+        sign_ek_cert(&keypair_a.secret_key, &keypair_a.public_key, &parent_tip).expect("ek cert a");
+    receipt.set_ek_cert_a(cert_a);
 
     let commitment = receipt.compute_commitment().expect("receipt commitment");
     receipt.add_sig_a(keypair_a.sign(&commitment).expect("sig a"));

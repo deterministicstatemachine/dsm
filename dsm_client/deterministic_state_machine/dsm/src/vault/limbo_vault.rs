@@ -3246,12 +3246,14 @@ mod tests {
         // Mirrors a pre-existing on-disk vault: BitcoinHTLC + Some(intended_recipient).
         // Construction is now blocked, but legacy decode must still succeed so
         // wallets can load existing state without forced migration.
-        let mut v = LimboVault::default();
-        v.fulfillment_condition = bearer_fungibility_test_btc_htlc();
-        v.intended_recipient = Some(vec![0xEEu8; 64]);
-        v.id = [0x55; 32];
-        v.creator_public_key = vec![0x11; 32];
-        v.reference_state_hash = [0x22; 32];
+        let v = LimboVault {
+            fulfillment_condition: bearer_fungibility_test_btc_htlc(),
+            intended_recipient: Some(vec![0xEEu8; 64]),
+            id: [0x55; 32],
+            creator_public_key: vec![0x11; 32],
+            reference_state_hash: [0x22; 32],
+            ..Default::default()
+        };
 
         // Round-trip via the wire types — exactly what loading from disk does.
         let proto: crate::types::proto::LimboVaultProto = (&v).into();
