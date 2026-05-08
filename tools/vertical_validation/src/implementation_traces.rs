@@ -23,7 +23,8 @@ use dsm::crypto::kyber::generate_kyber_keypair_from_entropy;
 use dsm::crypto::signatures::SignatureKeyPair;
 use dsm::crypto::sphincs::{generate_keypair_from_seed, sphincs_sign, SphincsVariant};
 use dsm::emissions::{
-    select_winner_for_event, verify_emission, EmissionReceipt, JoinActivationProof, SourceDlvState,
+    select_winner_for_event, verify_emission, EmissionReceipt, EmissionWitness,
+    JoinActivationProof, SourceDlvState,
 };
 use dsm::types::contact_types::DsmVerifiedContact;
 use dsm::types::operations::{Operation, TransactionMode, VerificationType};
@@ -684,7 +685,8 @@ fn trace_djte_emission_happy_path(
 
     let (prev, next, jap, receipt) = build_djte_transition(10, 1);
 
-    match verify_emission(&prev, &next, &jap, &receipt) {
+    let witness = EmissionWitness::from_states(&prev, &next, &jap);
+    match verify_emission(&prev, &next, &jap, &receipt, &witness) {
         Ok(true) => {}
         Ok(false) => failures.push("verify_emission returned false on the happy path".into()),
         Err(e) => failures.push(format!("verify_emission errored on happy path: {e}")),
@@ -730,7 +732,8 @@ fn trace_djte_repeated_emission_alignment(
 
     let jap_a = build_test_jap(0x7A, 0x09);
     let (after_first, receipt_a) = apply_djte_transition(&initial, &jap_a, emission_amount);
-    match verify_emission(&initial, &after_first, &jap_a, &receipt_a) {
+    let witness_a = EmissionWitness::from_states(&initial, &after_first, &jap_a);
+    match verify_emission(&initial, &after_first, &jap_a, &receipt_a, &witness_a) {
         Ok(true) => {}
         Ok(false) => failures.push("first repeated-emission transition returned false".into()),
         Err(e) => failures.push(format!("first repeated-emission transition errored: {e}")),
@@ -749,7 +752,8 @@ fn trace_djte_repeated_emission_alignment(
 
     let jap_b = build_test_jap(0x7B, 0x0A);
     let (after_second, receipt_b) = apply_djte_transition(&after_first, &jap_b, emission_amount);
-    match verify_emission(&after_first, &after_second, &jap_b, &receipt_b) {
+    let witness_b = EmissionWitness::from_states(&after_first, &after_second, &jap_b);
+    match verify_emission(&after_first, &after_second, &jap_b, &receipt_b, &witness_b) {
         Ok(true) => {}
         Ok(false) => failures.push("second repeated-emission transition returned false".into()),
         Err(e) => failures.push(format!("second repeated-emission transition errored: {e}")),
@@ -812,7 +816,8 @@ fn trace_djte_supply_underflow_rejection(
 
     let (prev, next, jap, receipt) = build_djte_transition(1, 2);
 
-    match verify_emission(&prev, &next, &jap, &receipt) {
+    let witness = EmissionWitness::from_states(&prev, &next, &jap);
+    match verify_emission(&prev, &next, &jap, &receipt, &witness) {
         Ok(true) => failures.push("verify_emission accepted a supply-underflow transition".into()),
         Ok(false) => {
             failures.push("verify_emission returned false instead of a concrete rejection".into())

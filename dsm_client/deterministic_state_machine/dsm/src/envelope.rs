@@ -130,7 +130,7 @@ fn validate_headers_wire(bytes: &[u8]) -> Result<HeaderScan, DsmError> {
         seen[field as usize] = true;
 
         match field {
-            1 | 2 | 3 => {
+            1..=3 => {
                 if wire_type != 2 {
                     return Err(parsing_error(format!(
                         "Envelope.headers field {field} must be bytes"

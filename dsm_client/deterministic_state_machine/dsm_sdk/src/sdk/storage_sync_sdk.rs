@@ -13,7 +13,7 @@ use reqwest::{
     Client,
 };
 
-use dsm::types::proto::{BatchEnvelope, Envelope};
+use crate::generated::{BatchEnvelope, Envelope};
 
 const CT_PROTO: &str = "application/octet-stream";
 const MAX_ENVELOPE_BYTES: usize = 128 * 1024;
