@@ -278,7 +278,7 @@ pub fn get_all_balances_strict() -> Result<Vec<crate::generated::TokenBalanceEnt
             } else {
                 &result.data
             };
-            if let Ok(envelope) = crate::generated::Envelope::decode(data) {
+            if let Ok(envelope) = crate::envelope::from_canonical_bytes(data) {
                 if let Some(crate::generated::envelope::Payload::BalancesListResponse(resp)) =
                     envelope.payload
                 {

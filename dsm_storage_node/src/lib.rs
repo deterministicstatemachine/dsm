@@ -45,7 +45,7 @@ impl AppState {
 /// When compiled with the `local-dev` feature (SQLite), defaults to an
 /// in-memory database so no PostgreSQL installation is required.
 /// When compiled with the `postgres` feature, honours the `DSM_DATABASE_URL`
-/// environment variable (no default fallback is provided — tests that need
+/// environment variable (no default database URL is provided — tests that need
 /// a real PG instance must set that variable).
 pub async fn build_app_for_tests() -> anyhow::Result<axum::Router> {
     let database_url = std::env::var("DSM_DATABASE_URL").unwrap_or_else(|_| {

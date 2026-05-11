@@ -117,7 +117,7 @@ impl AppRouterImpl {
             .data
             .strip_prefix(&[0x03])
             .ok_or_else(|| "storage.sync missing envelope v3 framing".to_string())?;
-        let env = generated::Envelope::decode(payload)
+        let env = dsm::envelope::from_canonical_bytes(payload)
             .map_err(|e| format!("storage.sync envelope decode failed: {e}"))?;
         match env.payload {
             Some(generated::envelope::Payload::StorageSyncResponse(resp)) => Ok(resp),

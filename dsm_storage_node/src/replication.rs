@@ -28,6 +28,47 @@ use std::io::BufReader;
 use std::path::Path;
 use std::sync::Arc;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StorageNodeId([u8; 32]);
+
+impl StorageNodeId {
+    pub fn derive(stable_bytes: &[u8]) -> Self {
+        Self(blake3_tagged("DSM/node-id", stable_bytes))
+    }
+
+    pub fn from_base32(value: &str) -> Option<Self> {
+        let bytes = dsm_sdk::util::text_id::decode_base32_crockford(value)?;
+        let arr: [u8; 32] = bytes.try_into().ok()?;
+        Some(Self(arr))
+    }
+
+    pub fn from_base32_or_derive(value: &str, stable_bytes: &[u8]) -> Self {
+        Self::from_base32(value).unwrap_or_else(|| Self::derive(stable_bytes))
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    pub fn to_base32(self) -> String {
+        dsm_sdk::util::text_id::encode_base32_crockford(&self.0)
+    }
+}
+
+fn canonical_node_info(input_node_id: String, address: String, tick: i64) -> pb::StorageNodeInfoV1 {
+    let node_id = StorageNodeId::from_base32_or_derive(&input_node_id, address.as_bytes());
+    pb::StorageNodeInfoV1 {
+        node_id: node_id.to_base32(),
+        address,
+        last_seen_tick: tick,
+        status: pb::StorageNodeStatus::Alive as i32,
+    }
+}
+
+fn node_sort_key(node: &pb::StorageNodeInfoV1) -> [u8; 32] {
+    *StorageNodeId::from_base32_or_derive(&node.node_id, node.address.as_bytes()).as_bytes()
+}
+
 /// Replication configuration
 #[derive(Debug, Clone)]
 pub struct ReplicationConfig {
@@ -96,30 +137,21 @@ impl ReplicationManager {
         seed_peers: Vec<String>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let mut node_states = HashMap::new();
+        let local_info = canonical_node_info(local_node_id, local_address.clone(), 0);
+        let local_node_id = local_info.node_id.clone();
 
         // Initialize with local node
-        node_states.insert(
-            local_node_id.clone(),
-            pb::StorageNodeInfoV1 {
-                node_id: local_node_id.clone(),
-                address: local_address.clone(),
-                last_seen_tick: 0,
-                status: pb::StorageNodeStatus::Alive as i32,
-            },
-        );
+        node_states.insert(local_node_id.clone(), local_info);
 
         // Seed peers from config so gossip has nodes to talk to on startup.
         // §10.3: Replica placement uses a Fisher-Yates permutation over {nodeID}.
-        // Derive a stable, deterministic peer ID from the address so seed entries
-        // don't create duplicate replica slots when reconciled with real gossip IDs.
         for peer_addr in seed_peers.iter() {
-            let addr_hash = blake3::hash(peer_addr.as_bytes());
-            let peer_id = format!("node-{}", &addr_hash.to_hex()[..12]);
-            log::info!("replication: seeding peer {peer_id} at {peer_addr}");
+            let node_id = StorageNodeId::derive(peer_addr.as_bytes()).to_base32();
+            log::info!("replication: seeding node {} at {peer_addr}", node_id);
             node_states.insert(
-                peer_id.clone(),
+                node_id.clone(),
                 pb::StorageNodeInfoV1 {
-                    node_id: peer_id,
+                    node_id,
                     address: peer_addr.clone(),
                     last_seen_tick: 0,
                     status: pb::StorageNodeStatus::Alive as i32,
@@ -142,15 +174,9 @@ impl ReplicationManager {
         local_address: String,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let mut node_states = HashMap::new();
-        node_states.insert(
-            local_node_id.clone(),
-            pb::StorageNodeInfoV1 {
-                node_id: local_node_id.clone(),
-                address: local_address.clone(),
-                last_seen_tick: 0,
-                status: pb::StorageNodeStatus::Alive as i32,
-            },
-        );
+        let local_info = canonical_node_info(local_node_id, local_address.clone(), 0);
+        let local_node_id = local_info.node_id.clone();
+        node_states.insert(local_node_id.clone(), local_info);
 
         let client = Client::builder().build()?;
 
@@ -190,8 +216,8 @@ impl ReplicationManager {
             return Vec::new();
         }
 
-        // Stable pre-order: sort by node_id ascending (spec §17)
-        alive_nodes.sort_by(|a, b| a.node_id.cmp(&b.node_id));
+        // Stable pre-order: sort by raw 32-byte node_id ascending.
+        alive_nodes.sort_by_key(node_sort_key);
 
         // Keyed Fisher-Yates: seed = H("DSM/place\0" || object_key)
         let seed = blake3_tagged("DSM/place", object_key.as_bytes());
@@ -317,10 +343,16 @@ impl ReplicationManager {
         };
 
         for remote_info in gossip.node_states {
-            let node_id = remote_info.node_id.clone();
+            let node_id = StorageNodeId::from_base32_or_derive(
+                &remote_info.node_id,
+                remote_info.address.as_bytes(),
+            )
+            .to_base32();
             if node_id == self.local_node_id {
                 continue; // Don't update our own state from gossip
             }
+            let mut remote_info = remote_info;
+            remote_info.node_id = node_id.clone();
 
             let existing = states
                 .entry(node_id.clone())
@@ -376,7 +408,7 @@ impl ReplicationManager {
                 }
             };
             let mut nodes: Vec<pb::StorageNodeInfoV1> = states.values().cloned().collect();
-            nodes.sort_by(|a, b| a.node_id.cmp(&b.node_id));
+            nodes.sort_by_key(node_sort_key);
             let gossip_msg = pb::GossipMessageV1 {
                 sender_node_id: self.local_node_id.clone(),
                 sender_tick: now_tick,
@@ -505,6 +537,10 @@ mod tests {
         ))
     }
 
+    fn node_id_for_addr(addr: &str) -> String {
+        StorageNodeId::derive(addr.as_bytes()).to_base32()
+    }
+
     #[test]
     fn default_production_config_values() {
         let cfg = default_production_config();
@@ -542,7 +578,8 @@ mod tests {
         let mgr = make_manager("node-1", "http://127.0.0.1:8080");
         let alive = mgr.get_alive_nodes();
         assert_eq!(alive.len(), 1);
-        assert_eq!(alive[0].node_id, "node-1");
+        assert_eq!(alive[0].node_id, node_id_for_addr("http://127.0.0.1:8080"));
+        assert!(StorageNodeId::from_base32(&alive[0].node_id).is_some());
         assert_eq!(alive[0].address, "http://127.0.0.1:8080");
         assert_eq!(alive[0].status, pb::StorageNodeStatus::Alive as i32);
     }
@@ -552,28 +589,31 @@ mod tests {
         let mgr = make_manager("node-local", "http://127.0.0.1:8080");
         {
             let mut states = must(mgr.node_states.write());
+            let dead_id = node_id_for_addr("http://127.0.0.1:8081");
             states.insert(
-                "node-dead".to_string(),
+                dead_id.clone(),
                 pb::StorageNodeInfoV1 {
-                    node_id: "node-dead".to_string(),
+                    node_id: dead_id,
                     address: "http://127.0.0.1:8081".to_string(),
                     last_seen_tick: 0,
                     status: pb::StorageNodeStatus::Dead as i32,
                 },
             );
+            let suspected_id = node_id_for_addr("http://127.0.0.1:8082");
             states.insert(
-                "node-suspected".to_string(),
+                suspected_id.clone(),
                 pb::StorageNodeInfoV1 {
-                    node_id: "node-suspected".to_string(),
+                    node_id: suspected_id,
                     address: "http://127.0.0.1:8082".to_string(),
                     last_seen_tick: 0,
                     status: pb::StorageNodeStatus::Suspected as i32,
                 },
             );
+            let alive_id = node_id_for_addr("http://127.0.0.1:8083");
             states.insert(
-                "node-alive".to_string(),
+                alive_id.clone(),
                 pb::StorageNodeInfoV1 {
-                    node_id: "node-alive".to_string(),
+                    node_id: alive_id,
                     address: "http://127.0.0.1:8083".to_string(),
                     last_seen_tick: 0,
                     status: pb::StorageNodeStatus::Alive as i32,
@@ -583,8 +623,9 @@ mod tests {
         let alive = mgr.get_alive_nodes();
         assert_eq!(alive.len(), 2);
         let ids: Vec<&str> = alive.iter().map(|n| n.node_id.as_str()).collect();
-        assert!(ids.contains(&"node-local"));
-        assert!(ids.contains(&"node-alive"));
+        let alive_id = node_id_for_addr("http://127.0.0.1:8083");
+        assert!(ids.contains(&mgr.local_node_id.as_str()));
+        assert!(ids.contains(&alive_id.as_str()));
     }
 
     #[tokio::test]
@@ -593,12 +634,13 @@ mod tests {
         {
             let mut states = must(mgr.node_states.write());
             for i in 0..5 {
-                let id = format!("node-{}", (b'b' + i) as char);
+                let address = format!("http://127.0.0.1:{}", 8081 + i as u16);
+                let id = node_id_for_addr(&address);
                 states.insert(
                     id.clone(),
                     pb::StorageNodeInfoV1 {
                         node_id: id.clone(),
-                        address: format!("http://127.0.0.1:{}", 8081 + i as u16),
+                        address,
                         last_seen_tick: 0,
                         status: pb::StorageNodeStatus::Alive as i32,
                     },
@@ -619,7 +661,8 @@ mod tests {
         let mgr = make_manager("node-a", "http://127.0.0.1:8080");
         {
             let mut states = must(mgr.node_states.write());
-            must_some(states.get_mut("node-a"), "node-a should exist").status =
+            let local_node_id = mgr.local_node_id.clone();
+            must_some(states.get_mut(&local_node_id), "local node should exist").status =
                 pb::StorageNodeStatus::Dead as i32;
         }
         let targets = mgr.get_replication_targets("any-key").await;
@@ -632,12 +675,13 @@ mod tests {
         {
             let mut states = must(mgr.node_states.write());
             for i in 0..10 {
-                let id = format!("node-extra-{}", i);
+                let address = format!("http://127.0.0.1:{}", 9000 + i);
+                let id = node_id_for_addr(&address);
                 states.insert(
                     id.clone(),
                     pb::StorageNodeInfoV1 {
                         node_id: id,
-                        address: format!("http://127.0.0.1:{}", 9000 + i),
+                        address,
                         last_seen_tick: 0,
                         status: pb::StorageNodeStatus::Alive as i32,
                     },
@@ -657,11 +701,12 @@ mod tests {
     #[tokio::test]
     async fn process_gossip_adds_new_nodes() {
         let mgr = make_manager("node-local", "http://127.0.0.1:8080");
+        let remote_id = node_id_for_addr("http://127.0.0.1:9090");
         let gossip = pb::GossipMessageV1 {
-            sender_node_id: "node-remote".to_string(),
+            sender_node_id: remote_id.clone(),
             sender_tick: 10,
             node_states: vec![pb::StorageNodeInfoV1 {
-                node_id: "node-remote".to_string(),
+                node_id: remote_id,
                 address: "http://127.0.0.1:9090".to_string(),
                 last_seen_tick: 10,
                 status: pb::StorageNodeStatus::Alive as i32,
@@ -679,7 +724,7 @@ mod tests {
             sender_node_id: "node-remote".to_string(),
             sender_tick: 10,
             node_states: vec![pb::StorageNodeInfoV1 {
-                node_id: "node-local".to_string(),
+                node_id: mgr.local_node_id.clone(),
                 address: "http://attacker:6666".to_string(),
                 last_seen_tick: 10,
                 status: pb::StorageNodeStatus::Dead as i32,
@@ -694,11 +739,12 @@ mod tests {
     #[tokio::test]
     async fn process_gossip_suspects_stale_nodes() {
         let mgr = make_manager("node-local", "http://127.0.0.1:8080");
+        let remote_id = node_id_for_addr("http://127.0.0.1:9090");
         let gossip = pb::GossipMessageV1 {
-            sender_node_id: "node-remote".to_string(),
+            sender_node_id: remote_id.clone(),
             sender_tick: 5,
             node_states: vec![pb::StorageNodeInfoV1 {
-                node_id: "node-remote".to_string(),
+                node_id: remote_id.clone(),
                 address: "http://127.0.0.1:9090".to_string(),
                 last_seen_tick: 5,
                 status: pb::StorageNodeStatus::Alive as i32,
@@ -712,7 +758,7 @@ mod tests {
             sender_node_id: "other".to_string(),
             sender_tick: 100,
             node_states: vec![pb::StorageNodeInfoV1 {
-                node_id: "node-remote".to_string(),
+                node_id: remote_id.clone(),
                 address: "http://127.0.0.1:9090".to_string(),
                 last_seen_tick: 5, // stale
                 status: pb::StorageNodeStatus::Alive as i32,
@@ -721,19 +767,20 @@ mod tests {
         mgr.process_gossip(gossip2, 100).await;
 
         let states = must(mgr.node_states.read());
-        let remote = must_some(states.get("node-remote"), "node-remote should exist");
+        let remote = must_some(states.get(&remote_id), "remote node should exist");
         assert_eq!(remote.status, pb::StorageNodeStatus::Suspected as i32);
     }
 
     #[tokio::test]
     async fn process_gossip_marks_suspected_as_dead() {
         let mgr = make_manager("node-local", "http://127.0.0.1:8080");
+        let stale_id = node_id_for_addr("http://127.0.0.1:9091");
         {
             let mut states = must(mgr.node_states.write());
             states.insert(
-                "node-stale".to_string(),
+                stale_id.clone(),
                 pb::StorageNodeInfoV1 {
-                    node_id: "node-stale".to_string(),
+                    node_id: stale_id.clone(),
                     address: "http://127.0.0.1:9091".to_string(),
                     last_seen_tick: 1,
                     status: pb::StorageNodeStatus::Suspected as i32,
@@ -744,7 +791,7 @@ mod tests {
             sender_node_id: "other".to_string(),
             sender_tick: 200,
             node_states: vec![pb::StorageNodeInfoV1 {
-                node_id: "node-stale".to_string(),
+                node_id: stale_id.clone(),
                 address: "http://127.0.0.1:9091".to_string(),
                 last_seen_tick: 1,
                 status: pb::StorageNodeStatus::Suspected as i32,
@@ -753,19 +800,20 @@ mod tests {
         mgr.process_gossip(gossip, 200).await;
 
         let states = must(mgr.node_states.read());
-        let stale = must_some(states.get("node-stale"), "node-stale should exist");
+        let stale = must_some(states.get(&stale_id), "stale node should exist");
         assert_eq!(stale.status, pb::StorageNodeStatus::Dead as i32);
     }
 
     #[tokio::test]
     async fn process_gossip_updates_last_seen_tick_to_max() {
         let mgr = make_manager("node-local", "http://127.0.0.1:8080");
+        let node_b_id = node_id_for_addr("http://127.0.0.1:9091");
         {
             let mut states = must(mgr.node_states.write());
             states.insert(
-                "node-b".to_string(),
+                node_b_id.clone(),
                 pb::StorageNodeInfoV1 {
-                    node_id: "node-b".to_string(),
+                    node_id: node_b_id.clone(),
                     address: "http://127.0.0.1:9091".to_string(),
                     last_seen_tick: 50,
                     status: pb::StorageNodeStatus::Alive as i32,
@@ -777,7 +825,7 @@ mod tests {
             sender_node_id: "other".to_string(),
             sender_tick: 30,
             node_states: vec![pb::StorageNodeInfoV1 {
-                node_id: "node-b".to_string(),
+                node_id: node_b_id.clone(),
                 address: "http://127.0.0.1:9091".to_string(),
                 last_seen_tick: 30,
                 status: pb::StorageNodeStatus::Alive as i32,
@@ -786,7 +834,7 @@ mod tests {
         mgr.process_gossip(gossip, 30).await;
 
         let states = must(mgr.node_states.read());
-        let b = must_some(states.get("node-b"), "node-b should exist");
+        let b = must_some(states.get(&node_b_id), "node-b should exist");
         assert_eq!(b.last_seen_tick, 50); // should keep max(50, 30)
     }
 }

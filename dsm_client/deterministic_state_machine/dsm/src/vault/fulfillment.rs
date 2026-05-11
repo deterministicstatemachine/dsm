@@ -94,7 +94,7 @@ pub enum FulfillmentMechanism {
 
     /// AMM constant-product liquidity vault.  Holds two token reserves
     /// and unlocks via a routed swap whose `expected_output` is
-    /// re-simulated against these reserves at unlock time (DeTFi spec
+    /// re-simulated against these reserves at unlock time (SoFi spec
     /// §3, §8 — chunk #7 of the routing pipeline).  Reserves are
     /// vault-state and advance atomically on every accepted routed
     /// unlock; a routing-vault advertisement that quoted stale

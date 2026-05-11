@@ -1,11 +1,11 @@
 /* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars, security/detect-object-injection, security/detect-unsafe-regex, no-console, react-hooks/exhaustive-deps */
 // SPDX-License-Identifier: Apache-2.0
 import React, { useState, useMemo } from 'react';
-import { launchDeTFi, parseDeTFiHeader } from '../../dsm/detfi';
+import { launchSoFi, parseSoFiHeader } from '../../dsm/sofi';
 import { useDpadNav } from '../../hooks/useDpadNav';
 import './SettingsScreen.css';
 
-// Pre-compiled example blobs from examples/detfi/compiled/
+// Pre-compiled example blobs from examples/sofi/compiled/
 const EXAMPLE_BLOBS = [
   {
     label: 'Simple Escrow (posted)',
@@ -21,7 +21,7 @@ const EXAMPLE_BLOBS = [
   },
 ];
 
-export default function DevDeTfiLaunchScreen(): JSX.Element {
+export default function DevSoFiLaunchScreen(): JSX.Element {
   const [blobBase32, setBlobBase32] = useState('');
   const [status, setStatus] = useState<string>('');
   const [exampleIdx, setExampleIdx] = useState(0);
@@ -29,7 +29,7 @@ export default function DevDeTfiLaunchScreen(): JSX.Element {
   // Parse header whenever blob changes
   const headerPreview = useMemo(() => {
     if (!blobBase32.trim()) return null;
-    return parseDeTFiHeader(blobBase32);
+    return parseSoFiHeader(blobBase32);
   }, [blobBase32]);
 
   const pasteFromClipboard = async () => {
@@ -53,7 +53,7 @@ export default function DevDeTfiLaunchScreen(): JSX.Element {
   const handleLaunch = async () => {
     setStatus('');
     try {
-      const out = await launchDeTFi(blobBase32);
+      const out = await launchSoFi(blobBase32);
       if (out?.success) {
         const parts = [`Launched: ${out.type ?? 'unknown'}`];
         if (out.mode) parts.push(`mode=${out.mode}`);
@@ -63,7 +63,7 @@ export default function DevDeTfiLaunchScreen(): JSX.Element {
         setStatus(`Launch failed: ${out?.error ?? 'unknown'}`);
       }
     } catch (e: any) {
-      setStatus(e?.message || 'DeTFi launch failed');
+      setStatus(e?.message || 'SoFi launch failed');
     }
   };
 
@@ -89,11 +89,11 @@ export default function DevDeTfiLaunchScreen(): JSX.Element {
 
   return (
     <div className="settings-shell settings-shell--dev">
-      <div className="settings-shell__title">DeTFi Launch</div>
+      <div className="settings-shell__title">SoFi Launch</div>
 
       <div className="settings-shell__panel">
         <div style={{ fontSize: 10, color: 'var(--text-disabled)' }}>
-          Paste a compiled DeTFi spec (Base32 blob from dsm-gen compile).
+          Paste a compiled SoFi spec (Base32 blob from dsm-gen compile).
           The app will decode the header, fill in your device identity,
           create the vault or publish the policy, and return the result.
         </div>
@@ -104,7 +104,7 @@ export default function DevDeTfiLaunchScreen(): JSX.Element {
           rows={4}
           value={blobBase32}
           onChange={(e) => setBlobBase32(e.target.value)}
-          placeholder="Base32 DeTFi spec blob..."
+          placeholder="Base32 SoFi spec blob..."
           style={{
             width: '100%',
             fontFamily: 'monospace',
@@ -139,7 +139,7 @@ export default function DevDeTfiLaunchScreen(): JSX.Element {
             onClick={() => void handleLaunch()}
             style={{ flex: 1 }}
           >
-            LAUNCH DETFI
+            LAUNCH SOFI
           </button>
           <button
             className={`settings-shell__button${fc(1)}`}

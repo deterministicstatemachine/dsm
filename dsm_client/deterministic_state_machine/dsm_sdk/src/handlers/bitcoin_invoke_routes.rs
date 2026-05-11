@@ -71,7 +71,7 @@ fn decode_internal_envelope(result: AppResult, route: &str) -> Result<generated:
         .data
         .strip_prefix(&[0x03])
         .ok_or_else(|| format!("{route}: missing envelope v3 framing"))?;
-    generated::Envelope::decode(payload)
+    dsm::envelope::from_canonical_bytes(payload)
         .map_err(|e| format!("{route}: failed to decode envelope: {e}"))
 }
 

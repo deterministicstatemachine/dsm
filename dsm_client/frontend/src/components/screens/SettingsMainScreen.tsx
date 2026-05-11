@@ -490,54 +490,9 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
               type="button"
               className="settings-shell__button"
               style={{ fontSize: '9px' }}
-              onClick={() => onNavigate?.('dev_detfi_launch')}
+              onClick={() => onNavigate?.('dev_sofi_launch')}
             >
-              DETFI LAUNCH
-            </button>
-
-            <button
-              type="button"
-              className="settings-shell__button"
-              style={{ fontSize: '9px' }}
-              onClick={() => onNavigate?.('dev_amm_vault')}
-            >
-              AMM VAULT (DEV)
-            </button>
-
-            <button
-              type="button"
-              className="settings-shell__button"
-              style={{ fontSize: '9px' }}
-              onClick={() => onNavigate?.('dev_amm_trade')}
-            >
-              AMM TRADE (DEV)
-            </button>
-
-            <button
-              type="button"
-              className="settings-shell__button"
-              style={{ fontSize: '9px' }}
-              onClick={() => onNavigate?.('dev_amm_monitor')}
-            >
-              AMM VAULT MONITOR (DEV)
-            </button>
-
-            <button
-              type="button"
-              className="settings-shell__button"
-              style={{ fontSize: '9px' }}
-              onClick={() => onNavigate?.('dev_posted_inbox')}
-            >
-              POSTED DLV INBOX (DEV)
-            </button>
-
-            <button
-              type="button"
-              className="settings-shell__button"
-              style={{ fontSize: '9px' }}
-              onClick={() => onNavigate?.('dev_posted_send')}
-            >
-              POSTED DLV SEND (DEV)
+              SOFI LAUNCH
             </button>
 
             <button

@@ -880,7 +880,9 @@ impl AppRouterImpl {
                     htlc_address,
                     entry_header: vault.entry_header.map(|h| h.to_vec()).unwrap_or_default(),
                     created_at_state: vault.created_at_state,
-                    content_commitment: vault.content_commitment.commitment_hash.clone(),
+                    // 32-byte salted-BLAKE3 commitment (Issue #184 F2 —
+                    // was previously the classical-commitment hash field).
+                    content_commitment: vault.content_commitment.to_vec(),
                     vault_op_id,
                 };
                 pack_envelope_ok(generated::envelope::Payload::BitcoinVaultGetResponse(resp))

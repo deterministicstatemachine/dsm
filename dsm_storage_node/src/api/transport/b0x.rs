@@ -6,14 +6,11 @@
 //! - Per-key ACK scoping
 //! - No genesis_hash persistence in spool
 //! - Protobuf-only; no JSON; no wall-clock markers.
-//! - Rate limiting: 100 requests per minute per device/IP
+//! - Admission: deterministic protobuf, auth, and routing-key gates only
 
 #[cfg(test)]
 use crate::replication::{ReplicationConfig, ReplicationManager};
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
 
 use axum::{
     body::Bytes,
@@ -34,78 +31,17 @@ use dsm_sdk::util::text_id;
 const MAX_ENVELOPE_BYTES: usize = 128 * 1024; // 128 KiB (normalized)
 const MAX_BATCH_RETRIEVE: i64 = 64;
 
-// Rate limiting: 100 requests per minute per key
-const RATE_LIMIT_REQUESTS: u32 = 100;
-const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
-
-#[derive(Debug, Clone)]
-struct RateLimitEntry {
-    tokens: u32,
-    last_refill: Instant,
-}
-
-impl RateLimitEntry {
-    fn new() -> Self {
-        Self {
-            tokens: RATE_LIMIT_REQUESTS,
-            last_refill: Instant::now(),
-        }
-    }
-
-    fn refill(&mut self) {
-        let now = Instant::now();
-        let elapsed = now.duration_since(self.last_refill);
-        let windows_elapsed = elapsed.as_secs() / RATE_LIMIT_WINDOW.as_secs();
-
-        if windows_elapsed > 0 {
-            self.tokens = RATE_LIMIT_REQUESTS;
-            self.last_refill = now;
-        }
-    }
-
-    fn consume(&mut self) -> bool {
-        self.refill();
-        if self.tokens > 0 {
-            self.tokens -= 1;
-            true
-        } else {
-            false
-        }
-    }
-}
-
-type RateLimitMap = HashMap<String, RateLimitEntry>;
-
 #[derive(Clone)]
-struct RateLimiter {
-    limits: Arc<RwLock<RateLimitMap>>,
-}
+struct RateLimiter;
 
 impl RateLimiter {
     fn new() -> Self {
-        Self {
-            limits: Arc::new(RwLock::new(HashMap::new())),
-        }
-    }
-
-    fn should_prune(entry: &RateLimitEntry, now: Instant) -> bool {
-        let elapsed = now.duration_since(entry.last_refill);
-        elapsed > RATE_LIMIT_WINDOW.saturating_mul(10)
+        Self
     }
 
     async fn check_rate_limit(&self, key: &str) -> Result<(), StatusCode> {
-        let mut limits = self.limits.write().await;
-        let now = Instant::now();
-        limits.retain(|_, entry| !Self::should_prune(entry, now));
-        let entry = limits
-            .entry(key.to_string())
-            .or_insert_with(RateLimitEntry::new);
-
-        if entry.consume() {
-            Ok(())
-        } else {
-            Err(StatusCode::TOO_MANY_REQUESTS)
-        }
+        let _ = key;
+        Ok(())
     }
 }
 
@@ -177,9 +113,9 @@ async fn submit_b0x_envelope(
     body: Bytes,
 ) -> Result<impl IntoResponse, StatusCode> {
     log::info!("b0x submit: recv from={} bytes={}", addr.ip(), body.len());
-    // Rate limiting: combine device_id and IP for key
-    let rate_limit_key = format!("{}_{}", _ctx.device_id, addr.ip());
-    rate_limiter.check_rate_limit(&rate_limit_key).await?;
+    // Deterministic admission context; no wall-clock throttling
+    let admission_key = format!("{}_{}", _ctx.device_id, addr.ip());
+    rate_limiter.check_rate_limit(&admission_key).await?;
 
     require_protobuf(&headers)?;
 
@@ -202,14 +138,7 @@ async fn submit_b0x_envelope(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    // Decode Envelope v3 strictly.
-    let env = dsm::types::proto::Envelope::decode(&*body).map_err(|_| StatusCode::BAD_REQUEST)?;
-    if env.version != 3 {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    if env.message_id.len() != 16 {
-        return Err(StatusCode::BAD_REQUEST);
-    }
+    let env = dsm::envelope::from_canonical_bytes(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     // NOTE: Storage nodes are dumb mirrors.
     // Do NOT validate SmartPolicy / protocol semantics here (clients verify).
@@ -287,9 +216,9 @@ async fn retrieve_b0x_batch(
     Extension(rate_limiter): Extension<Arc<RateLimiter>>,
     headers: HeaderMap,
 ) -> Result<axum::response::Response, StatusCode> {
-    // Rate limiting: combine device_id and IP for key
-    let rate_limit_key = format!("{}_{}", _ctx.device_id, addr.ip());
-    rate_limiter.check_rate_limit(&rate_limit_key).await?;
+    // Deterministic admission context; no wall-clock throttling
+    let admission_key = format!("{}_{}", _ctx.device_id, addr.ip());
+    rate_limiter.check_rate_limit(&admission_key).await?;
 
     // Fetch unacked envelopes for this device
     let device_id = _ctx.device_id.clone();
@@ -342,7 +271,7 @@ async fn retrieve_b0x_batch(
     // Build BatchEnvelope protobuf
     let mut batch = dsm::types::proto::BatchEnvelope::default();
     for item in rows {
-        match dsm::types::proto::Envelope::decode(item.as_slice()) {
+        match dsm::envelope::from_canonical_bytes(item.as_slice()) {
             Ok(env) => batch.envelopes.push(env),
             Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
         }
@@ -378,9 +307,9 @@ async fn retrieve_b0x_batch_from_seq(
     Extension(rate_limiter): Extension<Arc<RateLimiter>>,
     headers: HeaderMap,
 ) -> Result<axum::response::Response, StatusCode> {
-    // Rate limiting: combine device_id and IP for key
-    let rate_limit_key = format!("{}_{}", _ctx.device_id, addr.ip());
-    rate_limiter.check_rate_limit(&rate_limit_key).await?;
+    // Deterministic admission context; no wall-clock throttling
+    let admission_key = format!("{}_{}", _ctx.device_id, addr.ip());
+    rate_limiter.check_rate_limit(&admission_key).await?;
 
     let device_id = _ctx.device_id.clone();
 
@@ -428,7 +357,7 @@ async fn retrieve_b0x_batch_from_seq(
     let mut batch = dsm::types::proto::SequencedBatchEnvelope::default();
     let mut next_seq = from_seq;
     for (envelope_bytes, seq_num) in rows {
-        match dsm::types::proto::Envelope::decode(envelope_bytes.as_slice()) {
+        match dsm::envelope::from_canonical_bytes(envelope_bytes.as_slice()) {
             Ok(env) => {
                 let sequenced = dsm::types::proto::SequencedEnvelope {
                     envelope: Some(env),
@@ -484,9 +413,9 @@ async fn ack_b0x_batch(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<impl IntoResponse, StatusCode> {
-    // Rate limiting: combine device_id and IP for key
-    let rate_limit_key = format!("{}_{}", _ctx.device_id, addr.ip());
-    rate_limiter.check_rate_limit(&rate_limit_key).await?;
+    // Deterministic admission context; no wall-clock throttling
+    let admission_key = format!("{}_{}", _ctx.device_id, addr.ip());
+    rate_limiter.check_rate_limit(&admission_key).await?;
 
     require_protobuf(&headers)?;
     let batch =
@@ -539,8 +468,8 @@ async fn get_b0x_message_status(
     Extension(rate_limiter): Extension<Arc<RateLimiter>>,
     Path(message_id): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let rate_limit_key = format!("{}_{}", _ctx.device_id, addr.ip());
-    rate_limiter.check_rate_limit(&rate_limit_key).await?;
+    let admission_key = format!("{}_{}", _ctx.device_id, addr.ip());
+    rate_limiter.check_rate_limit(&admission_key).await?;
 
     let msg_id_bytes = text_id::decode_base32_crockford(&message_id)
         .filter(|bytes| bytes.len() == 16)
@@ -558,7 +487,7 @@ async fn get_b0x_message_status(
         return Err(StatusCode::NOT_FOUND);
     };
 
-    let env = dsm::types::proto::Envelope::decode(envelope_bytes.as_slice())
+    let env = dsm::envelope::from_canonical_bytes(envelope_bytes.as_slice())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     if env.message_id != msg_id_bytes {
         return Err(StatusCode::NOT_FOUND);
@@ -591,7 +520,7 @@ mod tests {
     use tower::ServiceExt; // oneshot
 
     #[test]
-    fn valid_spool_key_accepts_canonical_base32_and_rejects_legacy_brackets() {
+    fn valid_spool_key_accepts_canonical_base32_and_rejects_bracketed_paths() {
         let routed = text_id::encode_base32_crockford(&[0x55u8; 32]);
         assert!(valid_spool_key(&routed));
         assert!(!valid_spool_key("b0x[TEST][TEST][TEST]"));

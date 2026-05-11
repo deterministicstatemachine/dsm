@@ -16,7 +16,7 @@
 //! release must be expressed through a separate canonical transfer receipt per
 //! DSM spec §18.4 ("normal stitched receipt with a smart commitment clause").
 //!
-//! ## Coverage map against DeTFi §10.3 client verifier (11-step acceptance)
+//! ## Coverage map against SoFi §10.3 client verifier (11-step acceptance)
 //!
 //! Chunks #1–#7 of the routing pipeline cover the off-chain portions of the
 //! verifier directly; the SMT-side portions remain composed at higher layers.
@@ -351,7 +351,6 @@ impl LimboVault {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::pedersen::{PedersenCommitment, PedersenParams, SecurityLevel};
     use crate::vault::limbo_vault::{EncryptedContent, VaultState as VS};
 
     fn vid(n: u8) -> [u8; 32] {
@@ -361,9 +360,15 @@ mod tests {
     }
 
     fn dummy_vault(id: [u8; 32], state: VS) -> LimboVault {
-        let params = PedersenParams::new(SecurityLevel::Standard128).expect("pedersen params");
-        let commitment =
-            PedersenCommitment::commit(b"test_content", &params).expect("pedersen commit");
+        // Test commitment: salted-BLAKE3 over fixed test content
+        // (matches the production primitive after the Issue #184 F2
+        // classical-commitment removal).
+        let commitment = {
+            let mut h = crate::crypto::blake3::dsm_domain_hasher("DSM/dlv-content-commit");
+            h.update(&[0xDE; 32]); // fixed test blinding
+            h.update(b"test_content");
+            *h.finalize().as_bytes()
+        };
         LimboVault {
             id,
             created_at_state: 0,
@@ -534,9 +539,12 @@ mod tests {
         reserve_b: u128,
         fee_bps: u32,
     ) -> LimboVault {
-        let params = PedersenParams::new(SecurityLevel::Standard128).expect("pedersen params");
-        let commitment =
-            PedersenCommitment::commit(b"amm_vault", &params).expect("pedersen commit");
+        let commitment = {
+            let mut h = crate::crypto::blake3::dsm_domain_hasher("DSM/dlv-content-commit");
+            h.update(&[0xDE; 32]); // fixed test blinding
+            h.update(b"amm_vault");
+            *h.finalize().as_bytes()
+        };
         LimboVault {
             id: vid(0xAA),
             created_at_state: 0,
