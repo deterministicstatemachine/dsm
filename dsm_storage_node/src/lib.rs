@@ -7,13 +7,9 @@ use std::sync::Arc;
 
 pub mod api;
 pub mod auth;
-#[cfg(feature = "chaos-testing")]
-pub mod chaos_testing;
 pub mod db;
 #[cfg(feature = "dev-replication")]
 pub mod dev_replication;
-pub mod operational;
-pub mod partitioning;
 pub mod replication;
 pub mod timing;
 
@@ -95,6 +91,6 @@ pub async fn build_app_for_tests() -> anyhow::Result<axum::Router> {
 
     // Only mount registry routes for the current tests
     Ok(axum::Router::new()
-        .merge(api::registry::create_router(state_arc.clone()))
+        .merge(api::registry::core::create_router(state_arc.clone()))
         .layer(Extension(state_arc)))
 }

@@ -66,15 +66,15 @@ async fn bytecommit_chain_records_parent_link() -> anyhow::Result<()> {
     }
 
     // Emit first commitment (returns dt := H("DSM/bytecommit\0" || Bt)).
-    let dt0 = dsm_storage_node::api::bytecommit::emit_cycle_commitment(&state, 0).await?;
+    let dt0 = dsm_storage_node::api::objects::bytecommit::emit_cycle_commitment(&state, 0).await?;
 
     // Emit second commitment.
-    let dt1 = dsm_storage_node::api::bytecommit::emit_cycle_commitment(&state, 1).await?;
+    let dt1 = dsm_storage_node::api::objects::bytecommit::emit_cycle_commitment(&state, 1).await?;
 
     // Fetch commit bytes at cycle 1 and decode with prost.
     let addr1 = {
         use dsm_sdk::util::text_id;
-        use dsm_storage_node::api::hardening::blake3_tagged;
+        use dsm_storage_node::api::infra::hardening::blake3_tagged;
 
         // addr := H("DSM/obj-bytecommit\0" || node_id_32 || t || dt)
         let node_id_32 = blake3_tagged("DSM/node-id", state.node_id.as_bytes());
@@ -90,7 +90,7 @@ async fn bytecommit_chain_records_parent_link() -> anyhow::Result<()> {
         .await?
         .ok_or_else(|| anyhow::anyhow!("bytecommit object not found"))?;
 
-    let msg = dsm_storage_node::api::bytecommit::ByteCommitV3::decode(bytes.as_slice())?;
+    let msg = dsm_storage_node::api::objects::bytecommit::ByteCommitV3::decode(bytes.as_slice())?;
 
     assert_eq!(msg.cycle_index, 1);
     assert_eq!(msg.parent_digest.as_slice(), dt0.as_slice());

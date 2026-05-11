@@ -3,7 +3,7 @@
 //! Provides the same public API as `db::pg` but backed by a single SQLite file.
 //! All operations use `tokio::task::spawn_blocking` since rusqlite is synchronous.
 
-use crate::api::hardening::{BBYTES, BEV};
+use crate::api::infra::hardening::{BBYTES, BEV};
 use crate::timing::TimingStrategy;
 use anyhow::{anyhow, Result};
 use rusqlite::{params, Connection, OptionalExtension};
