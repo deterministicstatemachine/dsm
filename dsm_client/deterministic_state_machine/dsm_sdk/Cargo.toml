@@ -78,7 +78,7 @@ base32 = "0.4"
 # excised with the Pedersen module (Issue #184 F2 + Brandon).
 
 # Async runtime
-tokio = { version = "1.51.0", features = ["macros", "rt-multi-thread", "time", "fs", "io-util", "sync", "net"] }
+tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread", "time", "fs", "io-util", "sync", "net"] }
 async-trait = "0.1.77"
 futures = { version = "0.3.30", default-features = false, features = ["std"] }
 
