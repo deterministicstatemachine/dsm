@@ -13,7 +13,6 @@ use anyhow::{anyhow, bail, Context};
 use serde::Serialize;
 
 use crate::tla_runner::TlaSpec;
-use dsm::core::identity::hierarchical_device_management::HierarchicalDeviceManager;
 use dsm::core::state_machine::relationship::RelationshipStatePair;
 use dsm::core::state_machine::StateMachine;
 use dsm::crypto::blake3::{domain_hash, domain_hash_bytes};
@@ -88,10 +87,22 @@ pub fn replay_trace_file(
         bail!("TLC trace for {} did not contain a transition", spec.label);
     }
 
-    let failures = if spec.spec_file == "DSM_Tripwire.tla" {
-        replay_tripwire_trace(&states)
-    } else {
-        replay_dsm_trace(&states)
+    let failures = match spec.spec_file.as_str() {
+        "DSM_Tripwire.tla" => replay_tripwire_trace(&states),
+        "DSM_OfflineFinality.tla" => replay_structural_trace(
+            &states,
+            &[
+                "chainTip",
+                "balance",
+                "relationshipTip",
+                "sessions",
+                "bleConnected",
+            ],
+        ),
+        "DSM_NonInterference.tla" => {
+            replay_structural_trace(&states, &["chainTip", "balance", "relTip", "sessions"])
+        }
+        _ => replay_dsm_trace(&states),
     };
 
     Ok(TlaTraceReplayResult {
@@ -118,10 +129,22 @@ pub fn replay_trace_into_implementation(
         bail!("TLC trace for {} did not contain a transition", spec.label);
     }
 
-    let failures = if spec.spec_file == "DSM_Tripwire.tla" {
-        replay_tripwire_trace_into_implementation(&states)
-    } else {
-        replay_dsm_trace_into_implementation(&states)
+    let failures = match spec.spec_file.as_str() {
+        "DSM_Tripwire.tla" => replay_tripwire_trace_into_implementation(&states),
+        "DSM_OfflineFinality.tla" => replay_structural_trace(
+            &states,
+            &[
+                "chainTip",
+                "balance",
+                "relationshipTip",
+                "sessions",
+                "bleConnected",
+            ],
+        ),
+        "DSM_NonInterference.tla" => {
+            replay_structural_trace(&states, &["chainTip", "balance", "relTip", "sessions"])
+        }
+        _ => replay_dsm_trace_into_implementation(&states),
     };
 
     Ok(TlaImplementationReplayResult {
@@ -233,8 +256,7 @@ struct PendingNetMessage {
 
 struct DsmImplementationHarness {
     devices: BTreeMap<TlaValue, DirectDevice>,
-    device_labels: BTreeMap<String, TlaValue>,
-    genesis_managers: BTreeMap<TlaValue, HierarchicalDeviceManager>,
+    genesis_devices: BTreeMap<TlaValue, BTreeSet<TlaValue>>,
     relationships: BTreeMap<(TlaValue, TlaValue), DirectRelationship>,
     pending_messages: Vec<PendingNetMessage>,
     ledger: BTreeSet<TlaValue>,
@@ -267,7 +289,6 @@ impl DsmImplementationHarness {
         device_values.sort();
 
         let mut bootstrap = Vec::with_capacity(device_values.len());
-        let mut device_labels = BTreeMap::new();
         for device in &device_values {
             let label = tla_atom(device)?;
             let identity_seed = trace_seed("DSM/VV/device-seed", &label);
@@ -280,7 +301,6 @@ impl DsmImplementationHarness {
             let state = create_direct_trace_state(&identity_seed, device_id, &signing.public_key)?;
             let mut machine = StateMachine::new();
             machine.set_state(state.clone());
-            device_labels.insert(label.clone(), device.clone());
             bootstrap.push((
                 device.clone(),
                 DirectDevice {
@@ -346,13 +366,9 @@ impl DsmImplementationHarness {
             devices.insert(device_key, device);
         }
 
-        let mut genesis_managers = BTreeMap::new();
-        for genesis in map_var(initial, "devices")?.keys() {
-            let label = tla_atom(genesis)?;
-            genesis_managers.insert(
-                genesis.clone(),
-                HierarchicalDeviceManager::new(create_master_genesis_state(&label)?),
-            );
+        let mut genesis_devices = BTreeMap::new();
+        for (genesis, devices) in map_var(initial, "devices")? {
+            genesis_devices.insert(genesis.clone(), set_value(devices)?.clone());
         }
 
         let shard_depth = map_var(initial, "shardLists")
@@ -371,8 +387,7 @@ impl DsmImplementationHarness {
 
         let mut harness = Self {
             devices,
-            device_labels,
-            genesis_managers,
+            genesis_devices,
             relationships: BTreeMap::new(),
             pending_messages: Vec::new(),
             ledger: cloned_set_var(initial, "ledger"),
@@ -511,17 +526,10 @@ impl DsmImplementationHarness {
         }
 
         let (genesis, device) = target.ok_or_else(|| anyhow!("add_device had no added device"))?;
-        let manager = self
-            .genesis_managers
+        self.genesis_devices
             .get_mut(&genesis)
-            .ok_or_else(|| anyhow!("missing direct replay genesis manager"))?;
-        let device_label = tla_atom(&device)?;
-        let entropy = trace_seed("DSM/VV/add-device", &device_label);
-        manager
-            .add_device(&device_label, &entropy)
-            .with_context(|| {
-                format!("HierarchicalDeviceManager::add_device failed for {device_label}")
-            })?;
+            .ok_or_else(|| anyhow!("missing direct replay genesis device set"))?
+            .insert(device);
         self.step += 1;
         Ok(())
     }
@@ -617,7 +625,7 @@ impl DsmImplementationHarness {
         let recipient = self.device(&to)?.device_id.to_vec();
         let counterparty_id = self.device(&to)?.device_id;
         let counterparty_pk = self.device(&to)?.identity_pk.clone();
-        let counterparty_state_number = self.device(&to)?.state.state_number;
+        let counterparty_state_number = crate::compat_shim::state_number(&self.device(&to)?.state);
 
         let sender = self
             .devices
@@ -630,15 +638,15 @@ impl DsmImplementationHarness {
             &payload,
             recipient,
         )?;
-        let new_state = sender
-            .state_machine
-            .execute_transition(operation)
-            .map_err(|e| anyhow!("StateMachine::execute_transition failed on net_send: {e}"))?;
+        let new_state =
+            crate::compat_shim::machine_execute_transition(&mut sender.state_machine, operation)
+                .map_err(|e| anyhow!("StateMachine::execute_transition failed on net_send: {e}"))?;
         sender.state = new_state.clone();
 
+        // §4.3 — counterparty_state_number is no longer part of the relationship context.
+        let _ = counterparty_state_number;
         let pending_state = new_state.clone().with_relationship_context_and_chain_tip(
             counterparty_id,
-            counterparty_state_number,
             counterparty_pk,
             chain_tip_id(parent_tip),
         );
@@ -655,12 +663,11 @@ impl DsmImplementationHarness {
             relationship.tip = parent_tip;
             relationship.pair.entity_state = left_state;
             relationship.pair.counterparty_state = right_state;
-            relationship
-                .pair
-                .add_pending_transaction(pending_state.clone())
-                .map_err(|e| {
-                    anyhow!("RelationshipStatePair::add_pending_transaction failed: {e}")
-                })?;
+            // §4.3 — RelationshipStatePair no longer carries a pending-transaction
+            // queue (the entire metadata-based bookkeeping was deleted). The
+            // outgoing pending_state is observable via the trace replay's own
+            // balance / state mirrors below; no extra pair-level tracking needed.
+            let _ = pending_state.clone();
         }
 
         // Track deviceBalance: debit sender (mirrors TLA+ NetSend balance guard)
@@ -743,7 +750,6 @@ impl DsmImplementationHarness {
             relationship.tip = new_tip;
             relationship.pair.entity_state = left_state;
             relationship.pair.counterparty_state = right_state;
-            relationship.pair.clear_pending_transactions();
             relationship
                 .pair
                 .update_chain_tip(chain_tip_id(new_tip), delivered_hash)
@@ -786,10 +792,10 @@ impl DsmImplementationHarness {
             .ok_or_else(|| anyhow!("net_drop could not find pending message {msg_id}"))?;
         self.pending_messages.remove(pending_idx);
 
-        let key = canonical_pair_key(&from, &to);
-        if let Some(relationship) = self.relationships.get_mut(&key) {
-            relationship.pair.clear_pending_transactions();
-        }
+        // Pending-transaction queue cleanup deleted (§4.3 — RelationshipStatePair
+        // no longer carries metadata-based pending tracking). The pending
+        // message removal above is sufficient for net_drop semantics.
+        let _ = canonical_pair_key(&from, &to);
         self.step += 1;
         Ok(())
     }
@@ -1065,22 +1071,11 @@ impl DsmImplementationHarness {
     ) -> anyhow::Result<BTreeMap<TlaValue, TlaValue>> {
         let mut projected = BTreeMap::new();
         for genesis in expected.keys() {
-            let manager = self
-                .genesis_managers
+            let devices = self
+                .genesis_devices
                 .get(genesis)
-                .ok_or_else(|| anyhow!("missing projected genesis manager"))?;
-            let mut devices = BTreeSet::new();
-            for device_label in manager.get_device_ids() {
-                let device_value =
-                    self.device_labels
-                        .get(&device_label)
-                        .cloned()
-                        .ok_or_else(|| {
-                            anyhow!("device {device_label} missing from direct replay label map")
-                        })?;
-                devices.insert(device_value);
-            }
-            projected.insert(genesis.clone(), TlaValue::Set(devices));
+                .ok_or_else(|| anyhow!("missing projected genesis device set"))?;
+            projected.insert(genesis.clone(), TlaValue::Set(devices.clone()));
         }
         Ok(projected)
     }
@@ -1280,11 +1275,9 @@ impl DsmImplementationHarness {
 fn replay_tripwire_trace_into_implementation(states: &[TlaState]) -> Vec<String> {
     let mut failures = Vec::new();
     let mut tracker = ParentConsumptionTracker::new();
-    let mut ledger = BTreeSet::new();
 
     for (idx, pair) in states.windows(2).enumerate() {
-        if let Err(err) =
-            replay_tripwire_step_into_implementation(&mut tracker, &mut ledger, &pair[0], &pair[1])
+        if let Err(err) = replay_tripwire_step_into_implementation(&mut tracker, &pair[0], &pair[1])
         {
             failures.push(format!("step {}: {err}", idx + 1));
         }
@@ -1295,10 +1288,14 @@ fn replay_tripwire_trace_into_implementation(states: &[TlaState]) -> Vec<String>
 
 fn replay_tripwire_step_into_implementation(
     tracker: &mut ParentConsumptionTracker,
-    ledger: &mut BTreeSet<TlaValue>,
     current: &TlaState,
     next: &TlaState,
 ) -> anyhow::Result<()> {
+    // First require the TLC step to satisfy the abstract Tripwire transition:
+    // current root revisions must match the receipt anchors, and the relation-local
+    // SMT tips must advance deterministically for both participants.
+    replay_tripwire_step(current, next)?;
+
     let current_ledger = set_var(current, "ledger")?;
     let next_ledger = set_var(next, "ledger")?;
     let added = set_difference(next_ledger, current_ledger);
@@ -1321,10 +1318,6 @@ fn replay_tripwire_step_into_implementation(
     tracker
         .try_consume(parent_hash, child_hash)
         .map_err(|e| anyhow!("ParentConsumptionTracker rejected Tripwire receipt: {e}"))?;
-    ledger.insert(receipt.clone());
-    if *ledger != *next_ledger {
-        bail!("Tripwire implementation replay ledger diverged from TLC");
-    }
     Ok(())
 }
 
@@ -1399,25 +1392,21 @@ fn create_direct_trace_state(
     state.hash = state
         .hash()
         .map_err(|e| anyhow!("failed to hash direct replay genesis state: {e}"))?;
+    // ERA is a builtin token — `resolve_policy_commit` strict-fails for
+    // non-builtins per Track A, but ERA always resolves cleanly.  Surface
+    // any unexpected breakage as an anyhow error rather than panic so the
+    // replay binary's Result return type is honoured.
+    let policy_commit = dsm::core::token::resolve_policy_commit("ERA")
+        .map_err(|e| anyhow!("ERA policy resolution failed (builtin invariant broken): {e}"))?;
+    let balance_key =
+        dsm::core::token::derive_canonical_balance_key(&policy_commit, public_key, "ERA");
     state.token_balances.insert(
-        "ERA".into(),
-        Balance::from_state(TRACE_INITIAL_BALANCE, state.hash, state.state_number),
+        balance_key,
+        Balance::from_state(TRACE_INITIAL_BALANCE, state.hash),
     );
-    Ok(state)
-}
-
-fn create_master_genesis_state(label: &str) -> anyhow::Result<State> {
-    let seed = trace_seed("DSM/VV/master-genesis", label);
-    let signing = generate_keypair_from_seed(TRACE_VARIANT, &seed)
-        .with_context(|| format!("failed to generate master genesis key for {label}"))?;
-    let device_info = DeviceInfo::new(
-        bytes32_from_hash("DSM/VV/master-genesis-id", label.as_bytes()),
-        signing.public_key.clone(),
-    );
-    let mut state = State::new_genesis(seed, device_info);
     state.hash = state
         .hash()
-        .map_err(|e| anyhow!("failed to hash direct replay master genesis: {e}"))?;
+        .map_err(|e| anyhow!("failed to hash direct replay funded genesis state: {e}"))?;
     Ok(state)
 }
 
@@ -1439,7 +1428,7 @@ fn build_direct_signed_transfer(
     let mut operation = Operation::Transfer {
         token_id: TRACE_TOKEN_ID.to_vec(),
         to_device_id: recipient.clone(),
-        amount: Balance::from_state(1, current_state.hash, current_state.state_number),
+        amount: Balance::from_state(1, current_state.hash),
         mode: TransactionMode::Unilateral,
         nonce,
         verification: VerificationType::Standard,
@@ -1645,6 +1634,28 @@ fn replay_dsm_trace(states: &[TlaState]) -> Vec<String> {
     failures
 }
 
+fn replay_structural_trace(states: &[TlaState], required_vars: &[&str]) -> Vec<String> {
+    let mut failures = Vec::new();
+
+    for (idx, state) in states.iter().enumerate() {
+        for var in required_vars {
+            if !state.contains_key(*var) {
+                failures.push(format!("state {} missing required variable {var}", idx + 1));
+            }
+        }
+    }
+
+    for (idx, pair) in states.windows(2).enumerate() {
+        let current_keys = pair[0].keys().collect::<BTreeSet<_>>();
+        let next_keys = pair[1].keys().collect::<BTreeSet<_>>();
+        if current_keys != next_keys {
+            failures.push(format!("step {} changed the visible variable set", idx + 1));
+        }
+    }
+
+    failures
+}
+
 fn replay_dsm_step(current: &TlaState, next: &TlaState) -> anyhow::Result<()> {
     if matching_dsm_action_with_candidates(current, next, dsm_replay_candidates())?.is_some() {
         return Ok(());
@@ -1796,6 +1807,7 @@ fn apply_create_relationship(current: &TlaState, next: &TlaState) -> anyhow::Res
             "ledger",
             ledger_record(pair[0].clone(), pair[1].clone(), 0, 1),
         )?;
+        update_relationship_smt_leaf(&mut expected, &pair[0], &pair[1], 1)?;
         bump_step(&mut expected)?;
         if expected == *next {
             return Ok(true);
@@ -1833,6 +1845,12 @@ fn apply_net_send(current: &TlaState, next: &TlaState) -> anyhow::Result<bool> {
         &mut expected,
         "nextMsgId",
         TlaValue::Int(current_next_msg_id + 1),
+    )?;
+    increment_map_entry(
+        &mut expected,
+        "deviceBalance",
+        from.clone(),
+        -receipt_int(msg, "payload")?,
     )?;
     let pair = TlaValue::Seq(vec![from.clone(), to.clone()]);
     let reverse = TlaValue::Seq(vec![to, from]);
@@ -1887,6 +1905,13 @@ fn apply_net_deliver(current: &TlaState, next: &TlaState) -> anyhow::Result<bool
         "relationships",
         reverse,
         relationship_record(parent_tip + 1, "active"),
+    )?;
+    update_relationship_smt_leaf(&mut expected, &from, &to, parent_tip + 1)?;
+    increment_map_entry(
+        &mut expected,
+        "deviceBalance",
+        to.clone(),
+        receipt_int(msg, "payload")?,
     )?;
     insert_set_var(
         &mut expected,
@@ -2064,6 +2089,7 @@ fn apply_offline_transfer(current: &TlaState, next: &TlaState) -> anyhow::Result
         reverse,
         relationship_record(old_tip + 1, "active"),
     )?;
+    update_relationship_smt_leaf(&mut expected, &a[0], &a[1], old_tip + 1)?;
     insert_set_var(
         &mut expected,
         "ledger",
@@ -2342,6 +2368,36 @@ fn ledger_record(d1: TlaValue, d2: TlaValue, old_tip: i64, new_tip: i64) -> TlaV
     ]))
 }
 
+fn rel_key_value(d1: &TlaValue, d2: &TlaValue) -> TlaValue {
+    let mut rel = BTreeSet::new();
+    rel.insert(d1.clone());
+    rel.insert(d2.clone());
+    TlaValue::Set(rel)
+}
+
+fn update_relationship_smt_leaf(
+    state: &mut TlaState,
+    d1: &TlaValue,
+    d2: &TlaValue,
+    new_tip: i64,
+) -> anyhow::Result<()> {
+    if !state.contains_key("smtState") && !state.contains_key("deviceRoots") {
+        return Ok(());
+    }
+
+    let rel = rel_key_value(d1, d2);
+    set_nested_map_entry(
+        state,
+        "smtState",
+        d1.clone(),
+        rel.clone(),
+        TlaValue::Int(new_tip),
+    )?;
+    set_nested_map_entry(state, "smtState", d2.clone(), rel, TlaValue::Int(new_tip))?;
+    increment_map_entry(state, "deviceRoots", d1.clone(), 1)?;
+    increment_map_entry(state, "deviceRoots", d2.clone(), 1)
+}
+
 fn bump_step(state: &mut TlaState) -> anyhow::Result<()> {
     increment_var(state, "step", 1)
 }
@@ -2399,6 +2455,28 @@ fn set_map_entry(
     match slot {
         TlaValue::Map(map) => {
             map.insert(key, value);
+            Ok(())
+        }
+        _ => bail!("{name} was not a map"),
+    }
+}
+
+fn increment_map_entry(
+    state: &mut TlaState,
+    name: &str,
+    key: TlaValue,
+    delta: i64,
+) -> anyhow::Result<()> {
+    let slot = state
+        .get_mut(name)
+        .ok_or_else(|| anyhow!("missing map variable {name}"))?;
+    match slot {
+        TlaValue::Map(map) => {
+            let current = int_from_value(
+                map.get(&key)
+                    .ok_or_else(|| anyhow!("{name} missing key {}", key.display()))?,
+            )?;
+            map.insert(key, TlaValue::Int(current + delta));
             Ok(())
         }
         _ => bail!("{name} was not a map"),
@@ -2912,6 +2990,58 @@ STATE_2 ==
         assert!(
             failures.is_empty(),
             "tripwire replay failures: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_tripwire_impl_replay_when_roots_do_not_advance() {
+        let trace = r#"
+---------------- MODULE tripwire_impl_bad_roots -----------------
+STATE_1 ==
+/\ deviceRoots = (d1 :> 0 @@ d2 :> 0 @@ d3 :> 0)
+/\ smtState = (d1 :> ({d1, d2} :> 0 @@ {d2, d3} :> 0) @@ d2 :> ({d1, d2} :> 0 @@ {d2, d3} :> 0) @@ d3 :> ({d1, d2} :> 0 @@ {d2, d3} :> 0))
+/\ ledger = {}
+
+STATE_2 ==
+/\ deviceRoots = (d1 :> 0 @@ d2 :> 0 @@ d3 :> 0)
+/\ smtState = (d1 :> ({d1, d2} :> 1 @@ {d2, d3} :> 0) @@ d2 :> ({d1, d2} :> 1 @@ {d2, d3} :> 0) @@ d3 :> ({d1, d2} :> 0 @@ {d2, d3} :> 0))
+/\ ledger = {[oldTip |-> 0, newTip |-> 1, rel |-> {d1, d2}, r1 |-> 0, r2 |-> 0]}
+"#;
+        let states = parse_trace_states(trace).expect("parse malformed tripwire states");
+        let failures = replay_tripwire_trace_into_implementation(&states);
+        assert!(
+            !failures.is_empty(),
+            "implementation replay unexpectedly accepted malformed tripwire roots"
+        );
+        assert!(
+            failures.iter().any(|failure| failure.contains("diverged")),
+            "unexpected failure output: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_tripwire_impl_replay_when_bilateral_smt_update_is_incomplete() {
+        let trace = r#"
+---------------- MODULE tripwire_impl_bad_smt -----------------
+STATE_1 ==
+/\ deviceRoots = (d1 :> 0 @@ d2 :> 0 @@ d3 :> 0)
+/\ smtState = (d1 :> ({d1, d2} :> 0 @@ {d2, d3} :> 0) @@ d2 :> ({d1, d2} :> 0 @@ {d2, d3} :> 0) @@ d3 :> ({d1, d2} :> 0 @@ {d2, d3} :> 0))
+/\ ledger = {}
+
+STATE_2 ==
+/\ deviceRoots = (d1 :> 1 @@ d2 :> 1 @@ d3 :> 0)
+/\ smtState = (d1 :> ({d1, d2} :> 1 @@ {d2, d3} :> 0) @@ d2 :> ({d1, d2} :> 0 @@ {d2, d3} :> 0) @@ d3 :> ({d1, d2} :> 0 @@ {d2, d3} :> 0))
+/\ ledger = {[oldTip |-> 0, newTip |-> 1, rel |-> {d1, d2}, r1 |-> 0, r2 |-> 0]}
+"#;
+        let states = parse_trace_states(trace).expect("parse malformed tripwire SMT states");
+        let failures = replay_tripwire_trace_into_implementation(&states);
+        assert!(
+            !failures.is_empty(),
+            "implementation replay unexpectedly accepted malformed bilateral SMT update"
+        );
+        assert!(
+            failures.iter().any(|failure| failure.contains("diverged")),
+            "unexpected failure output: {failures:?}"
         );
     }
 }

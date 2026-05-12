@@ -52,10 +52,25 @@ describe('E2E bilateral accept: BLE accept flow triggers refresh and toast', () 
         if (method === 'acceptBilateralByCommitment') {
           return (global as any).createDsmBridgeSuccessResponse(frame(env.toBinary()));
         }
-        if (method === 'appRouterInvoke') return (global as any).createDsmBridgeSuccessResponse(frame(env.toBinary()));
-        if (method === 'appRouterQuery') {
-          const headers = new pb.Headers({ deviceId: new Uint8Array(32).fill(1), genesisHash: new Uint8Array(32).fill(1) as any, chainTip: new Uint8Array(32), seq: 1n as any } as any);
-          return (global as any).createDsmBridgeSuccessResponse(frame(headers.toBinary()));
+        if (method === 'nativeBoundaryIngress') {
+          const ingressRequest = pb.IngressRequest.fromBinary(
+            req.payload?.case === 'bytes' ? req.payload.value.data : new Uint8Array(0),
+          );
+          if (ingressRequest.operation.case === 'routerInvoke') {
+            return (global as any).createDsmBridgeSuccessResponse(
+              new pb.IngressResponse({
+                result: { case: 'okBytes', value: frame(env.toBinary()) },
+              }).toBinary(),
+            );
+          }
+          if (ingressRequest.operation.case === 'routerQuery') {
+            const headers = new pb.Headers({ deviceId: new Uint8Array(32).fill(1), genesisHash: new Uint8Array(32).fill(1) as any, chainTip: new Uint8Array(32), seq: 1n as any } as any);
+            return (global as any).createDsmBridgeSuccessResponse(
+              new pb.IngressResponse({
+                result: { case: 'okBytes', value: frame(headers.toBinary()) },
+              }).toBinary(),
+            );
+          }
         }
         if (method === 'getTransportHeadersV3Bin') {
           const headers = new pb.Headers({ deviceId: new Uint8Array(32).fill(1), genesisHash: new Uint8Array(32).fill(1) as any, chainTip: new Uint8Array(32), seq: 1n as any } as any);

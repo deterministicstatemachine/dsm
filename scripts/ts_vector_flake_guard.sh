@@ -11,8 +11,8 @@ LOOPS="${DSM_TS_VECTOR_FLAKE_LOOPS:-100}"
 THREADS="${DSM_TS_VECTOR_FLAKE_THREADS:-8}"
 
 TESTS=(
-  "dsm_client/frontend/src/dsm/__tests__/externalCommitV2Vectors.test.ts"
-  "dsm_client/frontend/src/dsm/__tests__/vectorsV1Assets.test.ts"
+  "src/dsm/__tests__/externalCommitV2Vectors.test.ts"
+  "src/dsm/__tests__/vectorsV1Assets.test.ts"
 )
 
 printf "🔁 TS vector flake guard: loops=%s threads=%s\n" "$LOOPS" "$THREADS"

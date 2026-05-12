@@ -8,12 +8,14 @@ const DISMISS_MS_ERROR = 5000;
 const GlobalToast: React.FC = () => {
   const { globalToast, clearToast } = useUX();
 
+  const persistent = globalToast?.persistent === true;
+
   useEffect(() => {
-    if (!globalToast) return;
+    if (!globalToast || persistent) return;
     const delay = (globalToast.type === 'error' || globalToast.type === 'warning') ? DISMISS_MS_ERROR : DISMISS_MS;
     const id = setTimeout(() => clearToast(), delay);
     return () => clearTimeout(id);
-  }, [globalToast, clearToast]);
+  }, [globalToast, clearToast, persistent]);
 
   if (!globalToast) return null;
   const { type, message } = globalToast;
@@ -22,6 +24,7 @@ const GlobalToast: React.FC = () => {
     type === 'transaction_sent' ? 'Transaction sent' :
     type === 'exit_completed' ? 'Withdrawal completed' :
     type === 'inbox_received' ? 'New inbox item received' :
+    type === 'ring_backup_prompt' ? 'BACKUP UPDATED \u2014 HOLD RING TO PHONE' :
     'Refreshed'
   );
   return (
@@ -42,13 +45,18 @@ const GlobalToast: React.FC = () => {
         gap: 12,
         padding: '10px 12px',
         border: '2px solid var(--border)',
+        borderRadius: 10,
         background: 'rgba(var(--text-rgb), 0.92)',
         color: 'var(--bg)',
         fontSize: 12,
       }}
     >
       <span style={{ lineHeight: 1.3, overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0, flex: 1 }}>{label}</span>
-      <button className="dismiss-feedback" onClick={() => clearToast()} aria-label="Dismiss" style={{ minWidth: 28, minHeight: 28, flexShrink: 0, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 16, background: 'transparent', border: 'none', color: 'inherit' }}>X</button>
+      {persistent ? (
+        <button className="dismiss-feedback" onClick={() => clearToast()} aria-label="Skip" style={{ minWidth: 44, minHeight: 28, flexShrink: 0, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 700, letterSpacing: 1, background: 'transparent', border: '1px solid currentColor', borderRadius: 6, color: 'inherit', padding: '2px 8px' }}>SKIP</button>
+      ) : (
+        <button className="dismiss-feedback" onClick={() => clearToast()} aria-label="Dismiss" style={{ minWidth: 28, minHeight: 28, flexShrink: 0, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 16, background: 'transparent', border: 'none', borderRadius: 6, color: 'inherit' }}>X</button>
+      )}
     </div>
   );
 };

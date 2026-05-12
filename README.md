@@ -2,18 +2,22 @@
 
 [![codecov](https://codecov.io/gh/deterministicstatemachine/dsm/graph/badge.svg?branch=main)](https://app.codecov.io/gh/deterministicstatemachine/dsm)
 
+># DSM is a deterministic state machine framework for building self-verifying applications without global consensus, validator ordering, or account-server trust. It uses relationship-local hash chains, device-bound identity, Merkle commitments, and post-quantum cryptography to let participants verify state transitions directly at the edge.
+>
+>### *The current workspace includes the Rust core and SDK, Android wallet, React frontend, BLE offline transaction path, storage-node integration, and beta dBTC flows on Bitcoin Signet. DSM is not a blockchain, rollup, or payment-channel network; it is a cryptographic state and identity layer designed for sovereign coordination, offline-capable settlement, and deterministic application logic.*
+
 ## 📲 Beta Testers — Start Here
 
 The fastest way to get started is to install the APK directly from the latest tagged release:
 
-**[⬇ Download dsm-wallet-v0.1.0-beta.2.apk](https://github.com/deterministicstatemachine/dsm/releases/download/v0.1.0-beta.2/dsm-wallet-v0.1.0-beta.2.apk)**
+**[⬇ Download dsm-wallet-v0.1.0-beta.3.apk](https://github.com/deterministicstatemachine/dsm/releases/download/v0.1.0-beta.3/dsm-wallet-v0.1.0-beta.3.apk)**
 
 1. **Uninstall any previous beta version first.**
 2. Download the APK to your Android device.
 3. Enable **Install from unknown sources** in your device settings if prompted.
 4. Open the downloaded file to install and launch the DSM Wallet.
 
-All release assets (APK, SBOM) are on the [v0.1.0-beta.2 releases page](https://github.com/deterministicstatemachine/dsm/releases/tag/v0.1.0-beta.2).
+All release assets (APK, SBOM) are on the [v0.1.0-beta.3 releases page](https://github.com/deterministicstatemachine/dsm/releases/tag/v0.1.0-beta.3).
 
 ---
 
@@ -28,7 +32,6 @@ All release assets (APK, SBOM) are on the [v0.1.0-beta.2 releases page](https://
 - **[Developer Handbook](docs/book/README.md)** — Architecture, setup, testing, and complete reference
 - **[DSM Primitive Paper](docs/papers/dsm_primitive.pdf)** — Boundary, definition, and composition of the core primitive
 - **[Quickstart](QUICKSTART.md)** — Zero to running in under 30 minutes
-- **[Code Generation (`dsm-gen`)](dsm-gen/README.md)** — Typed DLV and policy clients, schema validation, onboarding workflow
 - **[Contributing](CONTRIBUTING.md)** — How to contribute
 - **[Code of Conduct](CODE_OF_CONDUCT.md)** — Community participation standards
 - **[Security](SECURITY.md)** — Private vulnerability reporting process

@@ -64,10 +64,12 @@ pub struct MerkleProofParams {
 ///
 /// Collects all required and optional inputs for constructing a new state node
 /// in the hash chain. Uses the builder-style `with_*` methods for optional fields.
+///
+/// Per whitepaper §4.3, no counter/height/timestamp participates in acceptance
+/// predicates. State identity comes from hash adjacency (`prev_state_hash`) and
+/// per-transition entropy (§11 eq. 14), not a monotonic counter.
 #[derive(Clone, Debug)]
 pub struct StateParams {
-    /// Monotonically increasing sequence number for this state.
-    pub state_number: u64,
     /// Entropy value evolved deterministically across state transitions.
     pub entropy: Vec<u8>,
     /// ML-KEM-768 encapsulated entropy for post-quantum key exchange.
@@ -82,14 +84,6 @@ pub struct StateParams {
     pub device_info: DeviceInfo,
     /// Optional forward commitment binding this state to a future transition.
     pub forward_commitment: Option<PreCommitment>,
-    /// Whether the state matches externally supplied parameters.
-    pub matches_parameters: bool,
-    /// Advisory state type label (e.g., "standard", "benchmark").
-    pub state_type: String,
-    /// Auxiliary integer values for position verification.
-    pub value: Vec<i32>,
-    /// Auxiliary commitment integers.
-    pub commitment: Vec<i32>,
     /// Optional deterministic commitment to DBRW health summary for this transition.
     ///
     /// This MUST NOT be the raw DBRW binding key or any secret. It is intended to be a
@@ -118,14 +112,8 @@ pub struct StateParams {
 
 impl StateParams {
     /// Create a new state parameters object
-    pub fn new(
-        state_number: u64,
-        entropy: Vec<u8>,
-        operation: Operation,
-        device_info: DeviceInfo,
-    ) -> Self {
+    pub fn new(entropy: Vec<u8>, operation: Operation, device_info: DeviceInfo) -> Self {
         Self {
-            state_number,
             entropy,
             encapsulated_entropy: None,
             prev_state_hash: [0u8; 32],
@@ -133,10 +121,6 @@ impl StateParams {
             operation,
             device_info,
             forward_commitment: None,
-            matches_parameters: false,
-            state_type: "standard".to_string(),
-            value: Vec::new(),
-            commitment: Vec::new(),
             dbrw_summary_hash: None,
             previous_hash: [0u8; 32],
             none_field: None,
@@ -151,11 +135,8 @@ impl StateParams {
         }
     }
 
-    /// Set DBRW summary commitment hash for this transition.
-    pub fn with_dbrw_summary_hash(mut self, h: [u8; 32]) -> Self {
-        self.dbrw_summary_hash = Some(h);
-        self
-    }
+    // with_dbrw_summary_hash deleted: zero callers. The DBRW summary hash
+    // travels through DeviceState::advance directly (not StateParams).
 
     /// Set encapsulated entropy
     pub fn with_encapsulated_entropy(mut self, encapsulated_entropy: Vec<u8>) -> Self {
@@ -305,19 +286,20 @@ impl DeviceInfo {
     }
 }
 
-/// Represents the core state structure as defined in the whitepaper.
-/// Each state forms a node in the straight hash chain, containing all
-/// necessary data to cryptographically bind it to its predecessor.
+/// **DEPRECATED**: Legacy compatibility view. All instances are now derived
+/// from [`DeviceState`](crate::types::device_state::DeviceState).
+///
+/// Use `DeviceState` for the canonical device head, and
+/// `RelationshipChainState` for per-chain state. This struct exists only
+/// to support callers that haven't migrated yet. It will be deleted once
+/// all readers use the canonical types directly.
 #[derive(Clone, Debug, Default)]
 #[allow(dead_code)]
 pub struct State {
-    /// Unique identifier for this state, typically using the format "state_{state_number}"
+    /// Unique identifier for this state (opaque label; not in hash).
     pub id: String,
 
-    /// State sequence number, monotonically increasing as per whitepaper Section 6.1
-    pub state_number: u64,
-
-    /// Current entropy value, evolved deterministically as per whitepaper Section 6
+    /// Current entropy value, evolved deterministically as per whitepaper §11.
     pub entropy: Vec<u8>,
 
     /// Cryptographic hash of this state
@@ -345,9 +327,6 @@ pub struct State {
     /// Maps token identifiers to balances, format: "owner_id:token_id" -> Balance
     pub token_balances: HashMap<String, Balance>,
 
-    /// Matches parameters in the state transition
-    pub matches_parameters: bool,
-
     /// Relationship context for tracking state relationships
     pub relationship_context: Option<RelationshipContext>,
 
@@ -362,13 +341,8 @@ pub struct State {
     pub(crate) position_sequence: Option<PositionSequence>,
     pub(crate) positions: Vec<Vec<i32>>,
     pub(crate) public_key: Vec<u8>,
-    hashchain_head: Option<Vec<u8>>,
-    external_data: HashMap<String, Vec<u8>>,
     pub(crate) entity_sig: Option<Vec<u8>>,
     pub(crate) counterparty_sig: Option<Vec<u8>>,
-    pub(crate) value: Vec<i32>,
-    pub(crate) commitment: Vec<i32>,
-    pub(crate) state_type: String,
 }
 
 impl State {
@@ -413,10 +387,8 @@ pub enum StateFlag {
 }
 
 impl State {
-    /// Set the external data for this state
-    pub fn set_external_data(&mut self, external_data: HashMap<String, Vec<u8>>) {
-        self.external_data = external_data;
-    }
+    // set_external_data deleted: external_data field removed (zero callers).
+
     /// Create a new state using the parameter object pattern
     ///
     /// # Arguments
@@ -427,8 +399,7 @@ impl State {
     pub fn new(params: StateParams) -> Self {
         let public_key = params.device_info.public_key.clone();
         Self {
-            id: format!("state_{}", params.state_number),
-            state_number: params.state_number,
+            id: String::new(),
             entropy: params.entropy,
             hash: [0u8; 32], // Will be computed after construction
             prev_state_hash: params.prev_state_hash,
@@ -444,18 +415,12 @@ impl State {
             positions: Vec::new(),
             position_sequence: None,
             public_key,
-            matches_parameters: params.matches_parameters,
-            hashchain_head: None,
-            external_data: HashMap::new(),
-            value: params.value,
-            commitment: params.commitment,
             entity_sig: None,
             counterparty_sig: None,
-            state_type: params.state_type,
         }
     }
 
-    /// Create a new genesis state (state_number = 0)
+    /// Create a new genesis state.
     ///
     /// # Arguments
     /// * `initial_entropy` - Initial entropy for the genesis state
@@ -477,7 +442,6 @@ impl State {
 
         Self {
             id: "genesis".to_string(),
-            state_number: 0,
             entropy: initial_entropy.to_vec(),
             hash: [0u8; 32],
             prev_state_hash: [0u8; 32],
@@ -493,46 +457,21 @@ impl State {
             positions: Vec::new(),
             position_sequence: None,
             public_key,
-            matches_parameters: false,
-            hashchain_head: None,
-            external_data: HashMap::new(),
-            value: Vec::new(),
-            commitment: Vec::new(),
             entity_sig: None,
             counterparty_sig: None,
-            state_type: String::from("standard"),
         }
     }
 
     /// Attach a bilateral relationship context to this state.
     ///
-    /// Binds this state to a counterparty for bilateral state tracking,
-    /// recording both parties' identifiers, state numbers, and public keys.
-    pub fn with_relationship_context(
-        mut self,
-        counterparty_id: [u8; 32],
-        counterparty_state_number: u64,
-        counterparty_public_key: Vec<u8>,
-    ) -> Self {
-        self.relationship_context = Some(RelationshipContext {
-            entity_id: self.device_info.device_id,
-            entity_state_number: self.state_number,
-            counterparty_id,
-            counterparty_state_number,
-            counterparty_public_key,
-            relationship_hash: Vec::new(),
-            active: true,
-            chain_tip_id: None,
-            last_bilateral_state_hash: None,
-        });
-        self
-    }
-
+    /// Binds this state to a counterparty for bilateral state tracking by
+    /// recording both parties' identifiers and public keys. Per §4.3, no
+    /// counter is involved in bilateral acceptance — ordering comes from
+    /// per-relationship chain tip adjacency.
     /// Create state with relationship context and chain tip information
     pub fn with_relationship_context_and_chain_tip(
         mut self,
         counterparty_id: [u8; 32],
-        counterparty_state_number: u64,
         counterparty_public_key: Vec<u8>,
         chain_tip_id: String,
     ) -> Self {
@@ -542,57 +481,22 @@ impl State {
             counterparty_public_key,
             chain_tip_id,
         ));
-        // Update state numbers in the context
-        if let Some(ref mut ctx) = self.relationship_context {
-            ctx.entity_state_number = self.state_number;
-            ctx.counterparty_state_number = counterparty_state_number;
-        }
         self
     }
 
-    /// Check whether this state is in a bilateral relationship with the given counterparty.
-    pub fn in_relationship_with(&self, counterparty_id: &str) -> bool {
-        self.relationship_context
-            .as_ref()
-            .map(|ctx| {
-                ctx.counterparty_id
-                    == *domain_hash("DSM/device-id", counterparty_id.as_bytes()).as_bytes()
-            })
-            .unwrap_or(false)
-    }
-
-    /// Return the counterparty's state number if a relationship context exists.
-    pub fn get_counterparty_state(&self) -> Option<u64> {
-        self.relationship_context
-            .as_ref()
-            .map(|ctx| ctx.counterparty_state_number)
-    }
-
-    /// Returns `true` if this state is a genesis state (has the `Recovered` flag).
-    pub fn is_genesis(&self) -> bool {
-        self.flags.contains(&StateFlag::Recovered)
-    }
-
-    /// Returns `true` if this state has been invalidated.
-    pub fn is_invalidated(&self) -> bool {
-        self.flags.contains(&StateFlag::Invalidated)
-    }
+    // with_relationship_context, in_relationship_with, is_genesis deleted
+    // (zero external callers). Direct field access is the canonical path.
 
     /// Returns `true` if this state has a pending forward commitment (compromised flag).
     pub fn has_pending_commitment(&self) -> bool {
         self.flags.contains(&StateFlag::Compromised)
     }
 
-    /// Add a lifecycle flag to this state.
-    pub fn add_flag(&mut self, flag: StateFlag) {
-        self.flags.insert(flag);
-    }
+    // is_invalidated, is_recovered, is_compromised, add_flag deleted —
+    // zero external callers. The `flags` field stays for is_genesis()
+    // and the Recovery operation gating in is_operation_allowed().
 
-    /// Add metadata to the state's external data
-    pub fn add_metadata(&mut self, key: &str, value: Vec<u8>) -> Result<(), DsmError> {
-        self.external_data.insert(key.to_string(), value);
-        Ok(())
-    }
+    // add_metadata deleted: external_data field removed (zero callers).
 
     /// Calculate the hash of this state, as specified in whitepaper Section 3.1
     ///
@@ -606,12 +510,16 @@ impl State {
         self.compute_hash()
     }
 
-    /// Compute the hash of this state
+    /// Compute the canonical hash of this state per §4.2.1.
+    ///
+    /// Per §4.3, no counter/height/timestamp is included. Ordering is by hash
+    /// adjacency via `prev_state_hash` (§2.1 eq. 1). Per-transition entropy
+    /// (§11 eq. 14) makes state identity unique even when field values
+    /// round-trip.
     pub fn compute_hash(&self) -> Result<[u8; 32], DsmError> {
         let mut hasher = dsm_domain_hasher("DSM/state-hash");
 
-        // Core state properties in deterministic order
-        hasher.update(&self.state_number.to_le_bytes());
+        // Core state properties in deterministic order. No counter.
         hasher.update(&self.prev_state_hash);
         hasher.update(&self.entropy);
 
@@ -651,30 +559,15 @@ impl State {
         Ok(*hasher.finalize().as_bytes())
     }
 
-    /// Set the entity signature
-    pub fn set_entity_signature(&mut self, signature: Option<Vec<u8>>) {
-        self.entity_sig = signature;
-    }
+    // set_entity_signature / set_counterparty_signature / entity_signature /
+    // counterparty_signature accessors deleted — zero external callers.
+    // Direct field access via state.entity_sig / state.counterparty_sig is
+    // the canonical path.
 
-    /// Set the counterparty signature
-    pub fn set_counterparty_signature(&mut self, signature: Option<Vec<u8>>) {
-        self.counterparty_sig = signature;
-    }
-
-    /// Get the entity signature
-    pub fn entity_signature(&self) -> Option<&Vec<u8>> {
-        self.entity_sig.as_ref()
-    }
-
-    /// Get the counterparty signature
-    pub fn counterparty_signature(&self) -> Option<&Vec<u8>> {
-        self.counterparty_sig.as_ref()
-    }
-
-    /// Compute the pre-finalization hash that excludes token balances
+    /// Compute the pre-finalization hash that excludes token balances.
+    /// Per §4.3, no counter is included.
     pub fn pre_finalization_hash(&self) -> Result<Vec<u8>, DsmError> {
         let mut hasher = dsm_domain_hasher("DSM/pre-finalization");
-        hasher.update(&self.state_number.to_le_bytes());
         hasher.update(&self.entropy);
         hasher.update(&self.prev_state_hash);
         hasher.update(&self.operation.to_bytes());
@@ -712,155 +605,13 @@ impl State {
             .to_vec())
     }
 
-    /// Get the value of this sparse index
-    ///
-    /// # Returns
-    /// * `u64` - Deterministic value derived from the indices
-    pub fn value(&self) -> u64 {
-        // Hash all indices together to get a deterministic value
-        let mut hasher = dsm_domain_hasher("DSM/sparse-idx");
-        let mut sorted_indices: Vec<usize> = self
-            .sparse_index
-            .indices
-            .iter()
-            .map(|&x| x as usize)
-            .collect();
-        sorted_indices.sort(); // Sort indices for deterministic ordering
-        hasher.update(&self.state_number.to_le_bytes());
-
-        // Sort for deterministic ordering
-
-        for idx in sorted_indices {
-            hasher.update(&idx.to_le_bytes());
-        }
-
-        hasher.finalize().as_bytes()[0..8]
-            .try_into()
-            .map(u64::from_le_bytes)
-            .unwrap_or(0)
-    }
-
-    /// Validate sparse index integrity
-    ///
-    /// This ensures that sparse indices correctly map to the state numbers
-    /// as described in whitepaper Section 3.2.
-    ///
-    /// # Arguments
-    /// * `state_number` - The state number this sparse index should be valid for
-    ///
-    /// # Returns
-    /// * `Result<bool, DsmError>` - True if the sparse index is valid for the state number
-    pub fn validate_for_state_number(
-        &self,
-        state_number: u64,
-    ) -> Result<bool, crate::types::error::DsmError> {
-        let expected_indices = Self::calculate_sparse_indices(state_number)?;
-        Ok(expected_indices == self.sparse_index.indices)
-    }
-
-    /// Calculate sparse indices for a given state number as described in whitepaper Section 3.2
-    ///
-    /// This implementation follows the mathematical model from whitepaper Section 3.2,
-    /// creating a logarithmic set of reference points for efficient state traversal.
-    /// Critical references (genesis and direct predecessor) are guaranteed to be included
-    /// for consistent hash chain verification.
-    ///
-    /// # Arguments
-    /// * `state_number` - State number to calculate indices for
-    ///
-    /// # Returns
-    /// * `Result<Vec<u64>, DsmError>` - Calculated indices
-    pub fn calculate_sparse_indices(state_number: u64) -> Result<Vec<u64>, DsmError> {
-        // First, calculate basic sparse indices using powers of 2 algorithm
-        let mut indices = Self::calculate_basic_sparse_indices(state_number)?;
-
-        // Critical reference guarantee: Always include genesis state (0)
-        if state_number > 0 && !indices.contains(&0) {
-            indices.push(0);
-        }
-
-        // Critical reference guarantee: Always include direct predecessor
-        if state_number > 0 && !indices.contains(&state_number.saturating_sub(1)) {
-            indices.push(state_number.saturating_sub(1));
-        }
-
-        // Ensure deterministic ordering for verification consistency
-        indices.sort_unstable();
-        indices.dedup();
-
-        Ok(indices)
-    }
-
-    /// Calculate basic sparse indices using powers of 2 distance algorithm
-    ///
-    /// This implements the power-of-2 checkpoint mechanism described in whitepaper Section 3.2,
-    /// providing logarithmic-complexity state traversal.
-    ///
-    /// # Arguments
-    /// * `state_number` - State number to calculate indices for
-    ///
-    /// # Returns
-    /// * `Result<Vec<u64>, DsmError>` - Calculated basic indices
-    fn calculate_basic_sparse_indices(state_number: u64) -> Result<Vec<u64>, DsmError> {
-        if state_number == 0 {
-            return Ok(Vec::new());
-        }
-
-        let mut indices = Vec::new();
-        let mut power = 0;
-
-        // Generate power-of-2 distance references
-        while (1 << power) <= state_number {
-            let idx = state_number - (1 << power);
-            indices.push(idx);
-            power += 1;
-        }
-
-        Ok(indices)
-    }
-
-    /// Set the forward commitment for this state
-    pub fn set_forward_commitment(&mut self, commitment: Option<PreCommitment>) {
-        self.forward_commitment = commitment;
-    }
-
-    /// Get the forward commitment from this state
-    pub fn get_forward_commitment(&self) -> Option<&PreCommitment> {
-        self.forward_commitment.as_ref()
-    }
-
-    /// Get a parameter value from the state
-    pub fn get_parameter(&self, key: &str) -> Option<&Vec<u8>> {
-        // Extract parameter from external data
-        if let Some(value) = self.external_data.get(key) {
-            return Some(value);
-        }
-
-        // If parameter is not found in external data, check operation-specific fields
-        match &self.operation {
-            Operation::Transfer { .. } if key == "token_id" => {
-                // If token_id is already in external_data, return it
-                if let Some(value) = self.external_data.get("token_id") {
-                    return Some(value);
-                }
-
-                // For immutable access, we can't store the token_bytes in external_data
-                // A mutable method would be needed for that functionality
-                // Just return None since we can't store the computed value
-                None
-            }
-            Operation::AddRelationship { .. } if key == "relationship_type" => {
-                if let Some(value) = self.external_data.get("relationship_type") {
-                    Some(value)
-                } else {
-                    // Return None since we can't create a reference to a temporary value
-                    // The caller would need to use a mutable method to store this value
-                    None
-                }
-            }
-            _ => None,
-        }
-    }
+    // set_forward_commitment / get_forward_commitment / clear_forward_commitment
+    // deleted: zero external callers. Direct field access (forward_commitment is
+    // pub(crate)) is the canonical path for the few internal writers.
+    // get_parameter deleted: read from now-deleted external_data field.
+    // The single SDK caller (token_sdk locked_balances) always returned
+    // None because external_data was never populated outside the deleted
+    // add_metadata. The caller handles the None case explicitly.
 
     /// Get the serialized operation bytes
     pub fn get_operation_bytes(&self) -> Vec<u8> {
@@ -868,21 +619,23 @@ impl State {
         self.operation.to_bytes()
     }
 
-    /// Convert state to bytes for hashing and transmission
+    /// Convert state to bytes for hashing and transmission.
+    ///
+    /// Per §4.3, no counter participates in canonical encoding. Ordering is
+    /// via `prev_state_hash` (§2.1 eq. 1).
     ///
     /// # Returns
     /// * `Result<Vec<u8>, DsmError>` - Serialized state bytes
     pub fn to_bytes(&self) -> Result<Vec<u8>, DsmError> {
         // Canonical deterministic encoding for State (transport-agnostic; not protobuf)
-        use crate::types::serialization::{put_bytes, put_str, put_u32, put_u64, put_u8};
+        use crate::types::serialization::{put_bytes, put_str, put_u32, put_u8};
 
         let mut out = Vec::new();
 
         // Version tag for future evolution
         put_u8(&mut out, 1);
 
-        // Core fields
-        put_u64(&mut out, self.state_number);
+        // Core fields. No counter.
         put_bytes(&mut out, &self.prev_state_hash);
         put_bytes(&mut out, &self.entropy);
 
@@ -924,18 +677,11 @@ impl State {
             put_bytes(&mut out, &vb);
         }
 
-        // matches_parameters flag
-        put_u8(&mut out, if self.matches_parameters { 1 } else { 0 });
-
-        // state_type (advisory; not in canonical hash)
-        put_str(&mut out, &self.state_type);
+        // matches_parameters and state_type fields removed — they were
+        // advisory-only and never participated in any acceptance predicate.
+        // The canonical wire format shrinks by `1 + 4 + state_type.len()` bytes.
 
         Ok(out)
-    }
-
-    /// Return the number of state transitions that have occurred (equal to `state_number`).
-    pub fn transition_count(&self) -> u64 {
-        self.state_number
     }
 }
 
@@ -959,16 +705,14 @@ mod tests {
         let device_info = DeviceInfo::new([0x11; 32], vec![0x22; 64]);
 
         let base = State::new(StateParams::new(
-            7,
             vec![1, 2, 3, 4],
             Operation::Noop,
             device_info.clone(),
         ));
 
-        let with_dbrw = State::new(
-            StateParams::new(7, vec![1, 2, 3, 4], Operation::Noop, device_info)
-                .with_dbrw_summary_hash([0xAB; 32]),
-        );
+        let mut params = StateParams::new(vec![1, 2, 3, 4], Operation::Noop, device_info);
+        params.dbrw_summary_hash = Some([0xAB; 32]);
+        let with_dbrw = State::new(params);
 
         let base_hash = base.compute_hash().expect("base hash");
         let dbrw_hash = with_dbrw.compute_hash().expect("dbrw hash");
@@ -983,9 +727,11 @@ mod tests {
     }
 
     fn test_state(n: u64) -> State {
+        // n seeds entropy only — NOT a counter for acceptance (§4.3)
+        let mut entropy = vec![0xAA; 16];
+        entropy.extend_from_slice(&n.to_le_bytes());
         State::new(StateParams::new(
-            n,
-            vec![0xAA; 16],
+            entropy,
             Operation::Noop,
             test_device_info(),
         ))
@@ -1060,78 +806,28 @@ mod tests {
     }
 
     #[test]
-    fn sparse_index_value_deterministic() {
-        let si = SparseIndex::new(vec![1, 5, 10]);
-        let v1 = si.value();
-        let v2 = si.value();
-        assert_eq!(v1, v2);
-    }
-
-    #[test]
-    fn sparse_index_value_order_independent() {
-        let a = SparseIndex::new(vec![1, 5, 10]);
-        let b = SparseIndex::new(vec![10, 1, 5]);
-        assert_eq!(a.value(), b.value());
-    }
-
-    #[test]
     fn sparse_index_with_indices_replaces() {
         let si = SparseIndex::new(vec![1]).with_indices(vec![9, 8, 7]);
         assert_eq!(si.indices, vec![9, 8, 7]);
     }
 
-    #[test]
-    fn sparse_index_calculate_sparse_indices_zero() {
-        let indices = SparseIndex::calculate_sparse_indices(0).unwrap();
-        assert!(indices.is_empty());
-    }
-
-    #[test]
-    fn sparse_index_calculate_sparse_indices_one() {
-        let indices = SparseIndex::calculate_sparse_indices(1).unwrap();
-        assert!(indices.contains(&0), "must include genesis");
-    }
-
-    #[test]
-    fn sparse_index_calculate_includes_genesis_and_predecessor() {
-        let indices = SparseIndex::calculate_sparse_indices(10).unwrap();
-        assert!(indices.contains(&0), "must include genesis");
-        assert!(indices.contains(&9), "must include predecessor");
-    }
-
-    #[test]
-    fn sparse_index_calculate_sorted_and_deduped() {
-        let indices = SparseIndex::calculate_sparse_indices(16).unwrap();
-        for w in indices.windows(2) {
-            assert!(w[0] < w[1], "indices must be sorted and unique");
-        }
-    }
-
-    #[test]
-    fn sparse_index_calculate_logarithmic_count() {
-        let indices = SparseIndex::calculate_sparse_indices(64).unwrap();
-        assert!(
-            indices.len() <= 10,
-            "should be logarithmic: got {}",
-            indices.len()
-        );
-    }
+    // Sparse index calculation tests removed — calculate_sparse_indices and
+    // value() depended on state_number which was removed per §4.3.
 
     // ── State construction & basic properties ───────────────────────
 
     #[test]
-    fn state_new_sets_id_and_number() {
+    fn state_new_returns_valid_state() {
         let s = test_state(42);
-        assert_eq!(s.state_number, 42);
-        assert_eq!(s.id, "state_42");
+        assert_ne!(s.compute_hash().expect("hash"), [0u8; 32]);
     }
 
     #[test]
     fn state_new_genesis_properties() {
         let s = State::new_genesis([0xBB; 32], test_device_info());
-        assert_eq!(s.state_number, 0);
         assert_eq!(s.id, "genesis");
-        assert!(s.is_genesis());
+        // is_genesis() removed; check the Recovered flag directly.
+        assert!(s.flags.contains(&StateFlag::Recovered));
         assert_eq!(s.entropy, vec![0xBB; 32]);
     }
 
@@ -1184,23 +880,24 @@ mod tests {
     use super::StateFlag;
 
     #[test]
-    fn state_is_genesis_false_by_default() {
+    fn state_recovered_flag_false_by_default() {
         let s = test_state(1);
-        assert!(!s.is_genesis());
+        // is_genesis() removed; non-genesis states do not have the Recovered flag.
+        assert!(!s.flags.contains(&StateFlag::Recovered));
     }
 
     #[test]
-    fn state_add_flag_invalidated() {
+    fn state_flag_set_directly() {
         let mut s = test_state(2);
-        assert!(!s.is_invalidated());
-        s.add_flag(StateFlag::Invalidated);
-        assert!(s.is_invalidated());
+        // flags can be set via direct field access (it's pub).
+        s.flags.insert(StateFlag::Invalidated);
+        assert!(s.flags.contains(&StateFlag::Invalidated));
     }
 
     #[test]
-    fn state_add_flag_custom() {
+    fn state_custom_flag() {
         let mut s = test_state(3);
-        s.add_flag(StateFlag::Custom("test_flag".into()));
+        s.flags.insert(StateFlag::Custom("test_flag".into()));
         assert!(s.flags.contains(&StateFlag::Custom("test_flag".into())));
     }
 
@@ -1208,50 +905,18 @@ mod tests {
     fn state_has_pending_commitment_flag() {
         let mut s = test_state(4);
         assert!(!s.has_pending_commitment());
-        s.add_flag(StateFlag::Compromised);
+        s.flags.insert(StateFlag::Compromised);
         assert!(s.has_pending_commitment());
     }
 
     // ── State metadata & parameters ─────────────────────────────────
-
-    #[test]
-    fn state_add_metadata_and_get_parameter() {
-        let mut s = test_state(5);
-        s.add_metadata("my_key", vec![1, 2, 3]).unwrap();
-        assert_eq!(s.get_parameter("my_key"), Some(&vec![1, 2, 3]));
-    }
-
-    #[test]
-    fn state_get_parameter_missing_returns_none() {
-        let s = test_state(5);
-        assert_eq!(s.get_parameter("nonexistent"), None);
-    }
+    // (state_add_metadata_and_get_parameter tests removed: external_data
+    //  field deleted along with add_metadata/get_parameter accessors.)
 
     // ── State relationship context ──────────────────────────────────
-
-    #[test]
-    fn state_with_relationship_context() {
-        let s = test_state(10).with_relationship_context([0xCC; 32], 5, vec![0xDD; 32]);
-        let ctx = s.relationship_context.as_ref().unwrap();
-        assert_eq!(ctx.counterparty_id, [0xCC; 32]);
-        assert_eq!(ctx.counterparty_state_number, 5);
-        assert!(ctx.active);
-    }
-
-    #[test]
-    fn state_in_relationship_with_uses_hashed_label() {
-        let counterparty_id =
-            *crate::crypto::blake3::domain_hash("DSM/device-id", b"bob").as_bytes();
-        let s = test_state(10).with_relationship_context(counterparty_id, 3, vec![0xFF; 32]);
-        assert!(s.in_relationship_with("bob"));
-        assert!(!s.in_relationship_with("alice"));
-    }
-
-    #[test]
-    fn state_in_relationship_with_no_context() {
-        let s = test_state(10);
-        assert!(!s.in_relationship_with("anyone"));
-    }
+    // (with_relationship_context / in_relationship_with tests removed:
+    //  accessors deleted; relationship binding now travels exclusively
+    //  via DeviceState.tips, not via a side-channel field on State.)
 
     // ── State hashing variants ──────────────────────────────────────
 
@@ -1295,7 +960,7 @@ mod tests {
     #[test]
     fn state_forward_commitment_roundtrip() {
         let mut s = test_state(11);
-        assert!(s.get_forward_commitment().is_none());
+        assert!(s.forward_commitment.is_none());
 
         let pc = PreCommitment::new(
             "transfer".into(),
@@ -1304,23 +969,15 @@ mod tests {
             5,
             [0xAA; 32],
         );
-        s.set_forward_commitment(Some(pc));
-        assert!(s.get_forward_commitment().is_some());
+        s.forward_commitment = Some(pc);
+        assert!(s.forward_commitment.is_some());
         assert_eq!(
-            s.get_forward_commitment().unwrap().operation_type,
+            s.forward_commitment.as_ref().unwrap().operation_type,
             "transfer"
         );
 
-        s.set_forward_commitment(None);
-        assert!(s.get_forward_commitment().is_none());
-    }
-
-    // ── State transition_count ───────────────────────────────────────
-
-    #[test]
-    fn state_transition_count() {
-        assert_eq!(test_state(0).transition_count(), 0);
-        assert_eq!(test_state(99).transition_count(), 99);
+        s.forward_commitment = None;
+        assert!(s.forward_commitment.is_none());
     }
 
     // ── State entity_signature ───────────────────────────────────────
@@ -1328,9 +985,9 @@ mod tests {
     #[test]
     fn state_entity_signature_roundtrip() {
         let mut s = test_state(12);
-        assert!(s.entity_signature().is_none());
-        s.set_entity_signature(Some(vec![0xEE; 64]));
-        assert_eq!(s.entity_signature(), Some(&vec![0xEE; 64]));
+        assert!(s.entity_sig.is_none());
+        s.entity_sig = Some(vec![0xEE; 64]);
+        assert_eq!(s.entity_sig.as_ref(), Some(&vec![0xEE; 64]));
     }
 
     // ── State PartialEq (hash-based) ────────────────────────────────
@@ -1343,29 +1000,15 @@ mod tests {
     }
 
     #[test]
-    fn state_partial_eq_different_state_number() {
+    fn state_partial_eq_different_entropy() {
         let a = test_state(20);
         let b = test_state(21);
         assert_ne!(a, b);
     }
 
-    // ── State value ─────────────────────────────────────────────────
-
-    #[test]
-    fn state_value_deterministic() {
-        let a = test_state(7);
-        let b = test_state(7);
-        assert_eq!(a.value(), b.value());
-    }
-
-    // ── State calculate_sparse_indices ───────────────────────────────
-
-    #[test]
-    fn state_calculate_sparse_indices_matches_sparse_index() {
-        let s_indices = State::calculate_sparse_indices(10).unwrap();
-        let si_indices = SparseIndex::calculate_sparse_indices(10).unwrap();
-        assert_eq!(s_indices, si_indices);
-    }
+    // Tests for State::value(), State::calculate_sparse_indices(), and
+    // State::transition_count() removed — all depended on state_number
+    // which was removed per §4.3.
 
     // ── PreCommitment ───────────────────────────────────────────────
 
@@ -1428,8 +1071,8 @@ mod tests {
         let s = test_state(5);
         let op = Operation::Noop;
         let entropy = vec![0xFF; 16];
-        let h1 = PreCommitment::generate_hash(&s, &op, &entropy).unwrap();
-        let h2 = PreCommitment::generate_hash(&s, &op, &entropy).unwrap();
+        let h1 = PreCommitment::generate_hash(&s.hash, &op, &entropy).unwrap();
+        let h2 = PreCommitment::generate_hash(&s.hash, &op, &entropy).unwrap();
         assert_eq!(h1, h2);
         assert_ne!(h1, [0u8; 32]);
     }
@@ -1603,8 +1246,6 @@ mod tests {
         assert_eq!(ctx.entity_id, [0xAA; 32]);
         assert_eq!(ctx.counterparty_id, [0xBB; 32]);
         assert_eq!(ctx.counterparty_public_key, vec![0xCC; 64]);
-        assert_eq!(ctx.entity_state_number, 0);
-        assert_eq!(ctx.counterparty_state_number, 0);
         assert!(ctx.active);
         assert!(ctx.chain_tip_id.is_none());
         assert!(ctx.last_bilateral_state_hash.is_none());
@@ -1641,26 +1282,23 @@ mod tests {
 
     #[test]
     fn state_params_new_defaults() {
-        let sp = StateParams::new(0, vec![1], Operation::Noop, test_device_info());
-        assert_eq!(sp.state_number, 0);
+        let sp = StateParams::new(vec![1], Operation::Noop, test_device_info());
         assert_eq!(sp.entropy, vec![1]);
         assert!(sp.encapsulated_entropy.is_none());
         assert_eq!(sp.prev_state_hash, [0u8; 32]);
         assert!(sp.forward_commitment.is_none());
-        assert!(!sp.matches_parameters);
-        assert_eq!(sp.state_type, "standard");
     }
 
     #[test]
     fn state_params_with_encapsulated_entropy() {
-        let sp = StateParams::new(1, vec![], Operation::Noop, test_device_info())
+        let sp = StateParams::new(vec![], Operation::Noop, test_device_info())
             .with_encapsulated_entropy(vec![0xEE; 32]);
         assert_eq!(sp.encapsulated_entropy, Some(vec![0xEE; 32]));
     }
 
     #[test]
     fn state_params_with_prev_state_hash() {
-        let sp = StateParams::new(2, vec![], Operation::Noop, test_device_info())
+        let sp = StateParams::new(vec![], Operation::Noop, test_device_info())
             .with_prev_state_hash([0xAA; 32]);
         assert_eq!(sp.prev_state_hash, [0xAA; 32]);
     }
@@ -1669,22 +1307,22 @@ mod tests {
     fn state_params_with_sparse_index() {
         let si = SparseIndex::new(vec![1, 2, 3]);
         let sp =
-            StateParams::new(3, vec![], Operation::Noop, test_device_info()).with_sparse_index(si);
+            StateParams::new(vec![], Operation::Noop, test_device_info()).with_sparse_index(si);
         assert_eq!(sp.sparse_index.indices, vec![1, 2, 3]);
     }
 
     #[test]
     fn state_params_with_forward_commitment() {
         let pc = PreCommitment::new("test".into(), HashMap::new(), HashSet::new(), 0, [0; 32]);
-        let sp = StateParams::new(4, vec![], Operation::Noop, test_device_info())
+        let sp = StateParams::new(vec![], Operation::Noop, test_device_info())
             .with_forward_commitment(pc);
         assert!(sp.forward_commitment.is_some());
     }
 
     #[test]
-    fn state_params_with_dbrw_summary_hash() {
-        let sp = StateParams::new(5, vec![], Operation::Noop, test_device_info())
-            .with_dbrw_summary_hash([0xDD; 32]);
+    fn state_params_dbrw_summary_hash_direct() {
+        let mut sp = StateParams::new(vec![], Operation::Noop, test_device_info());
+        sp.dbrw_summary_hash = Some([0xDD; 32]);
         assert_eq!(sp.dbrw_summary_hash, Some([0xDD; 32]));
     }
 
@@ -1693,13 +1331,11 @@ mod tests {
     #[test]
     fn state_hash_varies_with_entropy() {
         let a = State::new(StateParams::new(
-            1,
             vec![0x00; 16],
             Operation::Noop,
             test_device_info(),
         ));
         let b = State::new(StateParams::new(
-            1,
             vec![0xFF; 16],
             Operation::Noop,
             test_device_info(),
@@ -1710,11 +1346,11 @@ mod tests {
     #[test]
     fn state_hash_varies_with_prev_state_hash() {
         let a = State::new(
-            StateParams::new(1, vec![1], Operation::Noop, test_device_info())
+            StateParams::new(vec![1], Operation::Noop, test_device_info())
                 .with_prev_state_hash([0x00; 32]),
         );
         let b = State::new(
-            StateParams::new(1, vec![1], Operation::Noop, test_device_info())
+            StateParams::new(vec![1], Operation::Noop, test_device_info())
                 .with_prev_state_hash([0xFF; 32]),
         );
         assert_ne!(a.compute_hash().unwrap(), b.compute_hash().unwrap());
@@ -1732,7 +1368,7 @@ mod tests {
             [0xCC; 32],
         );
         let with = State::new(
-            StateParams::new(5, vec![0xAA; 16], Operation::Noop, test_device_info())
+            StateParams::new(vec![0xAA; 16], Operation::Noop, test_device_info())
                 .with_forward_commitment(pc),
         );
 
@@ -1748,25 +1384,11 @@ mod tests {
     fn state_with_relationship_context_and_chain_tip() {
         let s = test_state(15).with_relationship_context_and_chain_tip(
             [0xDD; 32],
-            8,
             vec![0xEE; 32],
             "chain_tip_99".into(),
         );
         let ctx = s.relationship_context.as_ref().unwrap();
-        assert_eq!(ctx.counterparty_state_number, 8);
         assert_eq!(ctx.get_chain_tip_id(), Some(&"chain_tip_99".to_string()));
-    }
-
-    #[test]
-    fn state_get_counterparty_state() {
-        let s = test_state(10).with_relationship_context([0xCC; 32], 7, vec![]);
-        assert_eq!(s.get_counterparty_state(), Some(7));
-    }
-
-    #[test]
-    fn state_get_counterparty_state_none_without_context() {
-        let s = test_state(10);
-        assert_eq!(s.get_counterparty_state(), None);
     }
 }
 
@@ -1807,70 +1429,12 @@ impl SparseIndex {
         self
     }
 
-    /// Calculate sparse indices for a given state number as described in whitepaper Section 3.2
-    ///
-    /// This implementation follows the mathematical model from whitepaper Section 3.2,
-    /// creating a logarithmic set of reference points for efficient state traversal.
-    /// Critical references (genesis and direct predecessor) are guaranteed to be included
-    /// for consistent hash chain verification.
-    ///
-    /// # Arguments
-    /// * `state_number` - State number to calculate indices for
-    ///
-    /// # Returns
-    /// * `Result<Vec<u64>, crate::types::error::DsmError>` - Calculated indices
-    pub fn calculate_sparse_indices(
-        state_number: u64,
-    ) -> Result<Vec<u64>, crate::types::error::DsmError> {
-        // First, calculate basic sparse indices using powers of 2 algorithm
-        let mut indices = Self::calculate_basic_sparse_indices(state_number)?;
-
-        // Critical reference guarantee: Always include genesis state (0)
-        if state_number > 0 && !indices.contains(&0) {
-            indices.push(0);
-        }
-
-        // Critical reference guarantee: Always include direct predecessor
-        if state_number > 0 && !indices.contains(&state_number.saturating_sub(1)) {
-            indices.push(state_number.saturating_sub(1));
-        }
-
-        // Ensure deterministic ordering for verification consistency
-        indices.sort_unstable();
-        indices.dedup();
-
-        Ok(indices)
-    }
-
-    /// Calculate basic sparse indices using powers of 2 distance algorithm
-    ///
-    /// This implements the power-of-2 checkpoint mechanism described in whitepaper Section 3.2,
-    /// providing logarithmic-complexity state traversal.
-    ///
-    /// # Arguments
-    /// * `state_number` - State number to calculate indices for
-    ///
-    /// # Returns
-    /// * `Result<Vec<u64>, crate::types::error::DsmError>` - Calculated basic indices
-    fn calculate_basic_sparse_indices(
-        state_number: u64,
-    ) -> Result<Vec<u64>, crate::types::error::DsmError> {
-        if state_number == 0 {
-            return Ok(Vec::new());
-        }
-
-        let mut indices = Vec::new();
-        let mut power: u32 = 0;
-
-        // Generate power-of-2 distance references
-        while (1 << power) <= state_number {
-            let idx = state_number.saturating_sub(1 << power);
-            indices.push(idx);
-            power = power.saturating_add(1);
-        }
-
-        Ok(indices)
-    }
+    // calculate_sparse_indices and calculate_basic_sparse_indices deleted
+    // per §4.3: state_number-based checkpoint indexing has no role in the
+    // counterless model. Per-Device SMT keys are 32-byte relationship keys
+    // (k_{A↔B}), not integer counters. SparseIndex remains as an opaque
+    // Vec<u64> for stored serialized states only — never used in
+    // acceptance predicates.
 }
 
 impl Default for SparseIndex {
@@ -2256,7 +1820,7 @@ impl NonInclusionProof {
 // which uses 256-bit keys, ZERO_LEAF = [0u8; 32], and spec-compliant domain separation (§2.2).
 //
 // MerkleProof::from_smt_proof() and NonInclusionProof::from_smt() bridge the new SMT
-// into the legacy MerkleProof format used by the rest of the codebase.
+// into the MerkleProof format used by the rest of the codebase.
 
 // Old SparseMerkleTree impl blocks and NodeId removed — see merkle::sparse_merkle_tree
 
@@ -2289,30 +1853,22 @@ pub struct PreCommitment {
 }
 
 impl PreCommitment {
-    /// Generate hash for this pre-commitment
+    /// Generate hash for this pre-commitment.
     ///
-    /// # Arguments
-    /// * `state` - Current state
-    /// * `operation` - Operation to be performed
-    /// * `next_entropy` - Entropy for next state
+    /// Takes the parent chain-tip hash directly (`[u8; 32]`) — the prior
+    /// signature accepted `&State` purely to read `state.hash()?`. This is
+    /// per-chain semantic (the hash of the predecessor state on the chain
+    /// being committed against), not device-level.
     pub fn generate_hash(
-        state: &State,
+        state_hash: &[u8; 32],
         operation: &Operation,
         next_entropy: &[u8],
     ) -> Result<[u8; 32], DsmError> {
-        use crate::serialization::canonical_bytes::CanonicalBytesWriter;
-
-        // Canon 2: centralized, deterministic internal canonical bytes.
-        // NOTE: This is an internal commit/hashing path; do not introduce Serde/bincode.
-        let mut w = CanonicalBytesWriter::with_capacity(32 + 4 + 256 + 4 + next_entropy.len());
-        w.push_len_prefixed(&state.hash()?);
-
-        let op_bytes = operation.to_bytes();
-        w.push_len_prefixed(&op_bytes);
-
-        w.push_len_prefixed(next_entropy);
-
-        Ok(*domain_hash("DSM/precommit-hash", w.as_slice()).as_bytes())
+        crate::commitments::precommit::PreCommitment::generate_hash(
+            state_hash,
+            operation,
+            next_entropy,
+        )
     }
 
     /// Add a signature to this pre-commitment
@@ -2600,19 +2156,16 @@ impl IdentityAnchor {
 
 /// Context for bilateral relationship state tracking.
 ///
-/// Records both parties' identifiers, state numbers, and the current
-/// chain tip for a bilateral relationship, enabling cryptographic
-/// verification of relationship continuity across state transitions.
+/// Records both parties' identifiers and the current chain tip for a
+/// bilateral relationship, enabling cryptographic verification of
+/// relationship continuity across state transitions. Per §4.3, no state
+/// counters are tracked — ordering is by chain-tip hash adjacency.
 #[derive(Clone, Debug)]
 pub struct RelationshipContext {
     /// Device identifier of the local entity (32 bytes).
     pub entity_id: [u8; 32],
-    /// Current state number of the local entity.
-    pub entity_state_number: u64,
     /// Device identifier of the counterparty (32 bytes).
     pub counterparty_id: [u8; 32],
-    /// Current state number of the counterparty.
-    pub counterparty_state_number: u64,
     /// SPHINCS+ public key of the counterparty.
     pub counterparty_public_key: Vec<u8>,
     /// BLAKE3 hash binding the relationship.
@@ -2634,9 +2187,7 @@ impl RelationshipContext {
     ) -> Self {
         Self {
             entity_id,
-            entity_state_number: 0,
             counterparty_id,
-            counterparty_state_number: 0,
             counterparty_public_key,
             relationship_hash: Vec::new(),
             active: true,
@@ -2654,9 +2205,7 @@ impl RelationshipContext {
     ) -> Self {
         Self {
             entity_id,
-            entity_state_number: 0,
             counterparty_id,
-            counterparty_state_number: 0,
             counterparty_public_key,
             relationship_hash: Vec::new(),
             active: true,

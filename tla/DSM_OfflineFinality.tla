@@ -136,6 +136,33 @@ ReceiverReceivePrepare(sid) ==
 \* ---------- Phase 2: UserAccept ----------
 \* Maps to create_prepare_accept_envelope() in bilateral_ble_handler.rs:1557
 \* Receiver signs acceptance. Both signatures now available.
+\*
+\* REFINEMENT NOTE — `hasBothSigs = TRUE` refines to a §11.1 per-step EK
+\* signing chain on BOTH sides of the bilateral receipt:
+\*
+\*   - Sender stamps {ek_pk_a, ek_cert_a, kyber_ct_a, sig_a} during
+\*     send_bilateral_confirm (sign_receipt_with_per_step_ek_for_bilateral
+\*     with BilateralSide::A).
+\*   - Receiver verifies sender's A-side in handle_confirm_request via
+\*     verify_per_step_ek_signing_strict_aware, then counter-stamps
+\*     {ek_pk_b, ek_cert_b, kyber_ct_b, sig_b} (BilateralSide::B).
+\*   - Counter-signed bytes ride back to sender on
+\*     BilateralCommitResponse.counter_signed_receipt; sender verifies
+\*     B-side in handle_commit_response and replaces the in-memory
+\*     A-only cached receipt with the fully co-signed bytes for archive.
+\*
+\* In strict cert-chain mode (set_strict_cert_chain_mode(true) — mainnet
+\* required), missing per-step EK artifacts on EITHER side cause the
+\* respective handler to return a structured error instead of advancing
+\* — so `hasBothSigs = TRUE` cannot be reached without genuine §11.1
+\* per-step EK signing on both sides. Pre-mainnet keeps the transitional
+\* fail-open path so legacy peers without per-step signing can still
+\* progress.
+\*
+\* The full refinement is detailed in DSM_Tripwire.tla and verified
+\* end-to-end by per_step_signing_end_to_end_two_steps,
+\* per_step_signing_chain_property_invariants, and
+\* verify_per_step_ek_signing_accepts_symmetric_a_and_b_on_same_receipt.
 UserAccept(sid) ==
     /\ sessions[sid] /= NULL
     /\ sessions[sid].phase = "PendingUserAction"

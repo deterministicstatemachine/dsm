@@ -7,12 +7,15 @@
 
 use crate::types::error::DsmError;
 
-/// Domain tag for computing the canonical relationship key.
-pub const TAG_SMT_KEY: &[u8] = b"DSM/smt-key\0";
-/// Domain tag for hashing an SMT leaf.
-pub const TAG_SMT_LEAF: &[u8] = b"DSM/smt-leaf\0";
-/// Domain tag for hashing an SMT internal node.
-pub const TAG_SMT_NODE: &[u8] = b"DSM/smt-node\0";
+// Domain tag constants for `DSM/smt-key` / `DSM/smt-leaf` / `DSM/smt-node`
+// REMOVED — Issue #182 Finding #3. The constants were `pub const &[u8]`
+// with trailing `\0` and never consumed (every hash site in this module
+// uses inline string literals like `dsm_domain_hasher("DSM/smt-leaf")`,
+// which produces the canonical `"DSM/smt-leaf\0" || data` preimage via
+// the auto-NUL hasher primitive). The dead constants were inconsistent
+// with the unified `domain_tags::TAG_*` set that drops the trailing NUL
+// per the new module-level convention. If a future caller wants
+// pre-resolved constants, use `dsm::common::domain_tags::TAG_SMT_*`.
 
 /// Hard cap for witness path length (DoS resistance).
 pub const MAX_SMT_WITNESS_PATH_LEN: usize = 256;

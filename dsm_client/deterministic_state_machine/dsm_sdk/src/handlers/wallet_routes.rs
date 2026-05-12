@@ -1,3 +1,4 @@
+#![allow(unused_variables)]
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Wallet and balance route handlers for AppRouterImpl.
 //!
@@ -9,6 +10,7 @@ use prost::Message;
 
 use crate::bridge::{AppInvoke, AppQuery, AppResult};
 use super::app_router_impl::{relationship_tip_for_contact_restore, AppRouterImpl};
+use super::relationship_status::status_message;
 use super::response_helpers::{pack_envelope_ok, err};
 
 #[derive(Debug, Clone)]
@@ -79,50 +81,22 @@ fn enrich_balance_metadata(reply: &mut generated::BalanceGetResponse) {
             reply.symbol = "ERA".to_string();
             reply.decimals = 0;
             reply.token_name = "ERA".to_string();
-            return;
         }
         "DBTC" => {
             reply.token_id = "dBTC".to_string();
             reply.symbol = "dBTC".to_string();
             reply.decimals = 8;
             reply.token_name = "dBTC".to_string();
-            return;
         }
+        // Custom token metadata enrichment formerly read `dsm.token.<id>` +
+        // `dsm.policy.<anchor>` from app_state.  Those writers are gone
+        // (plan Part E) and the readers were orphans.  The authoritative
+        // source is the in-memory TokenSDK metadata cache; a follow-up
+        // commit wires enrichment through a typed lookup on AppRouterImpl.
+        // For now the response carries its canonicalised token_id with
+        // default decimals; builtin ERA/dBTC paths above remain exact.
         _ => {}
     }
-
-    let anchor_b32 = crate::sdk::app_state::AppState::handle_app_state_request(
-        &format!("dsm.token.{}", reply.token_id),
-        "get",
-        "",
-    );
-    if anchor_b32.is_empty() {
-        return;
-    }
-
-    let policy_b32 = crate::sdk::app_state::AppState::handle_app_state_request(
-        &format!("dsm.policy.{anchor_b32}"),
-        "get",
-        "",
-    );
-    if policy_b32.is_empty() {
-        return;
-    }
-
-    let Some(policy_bytes) = crate::util::text_id::decode_base32_crockford(&policy_b32) else {
-        return;
-    };
-    let Some(meta) = parse_cached_policy_metadata(&policy_bytes) else {
-        return;
-    };
-
-    if !meta.ticker.is_empty() {
-        reply.symbol = meta.ticker;
-    }
-    if !meta.alias.is_empty() {
-        reply.token_name = meta.alias;
-    }
-    reply.decimals = meta.decimals;
 }
 
 fn ensure_default_visible_balances(items: &mut Vec<generated::BalanceGetResponse>) {
@@ -162,33 +136,12 @@ pub(crate) fn resolve_token_decimals(token_id: &str) -> u32 {
     match canonicalize_token_id(token_id).as_str() {
         "ERA" => 0,
         "dBTC" => 8,
-        other => {
-            let anchor_b32 = crate::sdk::app_state::AppState::handle_app_state_request(
-                &format!("dsm.token.{other}"),
-                "get",
-                "",
-            );
-            if anchor_b32.is_empty() {
-                return 0;
-            }
-
-            let policy_b32 = crate::sdk::app_state::AppState::handle_app_state_request(
-                &format!("dsm.policy.{anchor_b32}"),
-                "get",
-                "",
-            );
-            if policy_b32.is_empty() {
-                return 0;
-            }
-
-            let Some(policy_bytes) = crate::util::text_id::decode_base32_crockford(&policy_b32)
-            else {
-                return 0;
-            };
-            parse_cached_policy_metadata(&policy_bytes)
-                .map(|meta| meta.decimals)
-                .unwrap_or(0)
-        }
+        // Custom-token decimals formerly came from `dsm.token.<id>` +
+        // `dsm.policy.<anchor>` prefs; those paths are gone (plan Part E).
+        // The authoritative source is the TokenSDK metadata cache; a
+        // follow-up commit wires this lookup through AppRouterImpl.  For
+        // now custom tokens default to 0 decimals in the display path.
+        _ => 0,
     }
 }
 
@@ -270,9 +223,11 @@ fn encode_offline_transfer_operation_canonical(
     push_u8(&mut out, 3); // Operation::Transfer tag
     push_bytes(&mut out, to_device_id);
 
-    let mut balance_bytes = Vec::with_capacity(24);
+    // §4.3 canonical Balance encoding: value (u64 le) ‖ locked (u64 le).
+    // No counter, no tick. Optional state_hash (32B) is omitted for offline
+    // transfer authoring — the receiver derives it on settlement.
+    let mut balance_bytes = Vec::with_capacity(16);
     balance_bytes.extend_from_slice(&amount.to_le_bytes());
-    balance_bytes.extend_from_slice(&0u64.to_le_bytes());
     balance_bytes.extend_from_slice(&0u64.to_le_bytes());
     push_bytes(&mut out, &balance_bytes);
 
@@ -488,7 +443,11 @@ impl AppRouterImpl {
                             tx_type: tx_type_enum as i32,
                             status: t.status.clone(),
                             recipient,
-                            stitched_receipt: { t.proof_data.clone().unwrap_or_default() },
+                            stitched_receipt: if t.tx_type == "unilateral_send" {
+                                Vec::new()
+                            } else {
+                                t.proof_data.clone().unwrap_or_default()
+                            },
                             created_at: t.created_at,
                             memo: t
                                 .metadata
@@ -498,18 +457,21 @@ impl AppRouterImpl {
                             // §4.3#3: Derive R_G from the stored receipt's devid_a for
                             // display-only consistency check. This is historical UI display
                             // only; protocol acceptance already enforced at ingest time.
-                            receipt_verified: t
-                                .proof_data
-                                .as_ref()
-                                .map(|b| {
-                                    let r_g = dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(b)
-                                        .ok()
-                                        .map(|r| crate::sdk::receipts::DeviceTreeAcceptanceCommitment::from_root(
-                                            dsm::common::device_tree::DeviceTree::single(r.devid_a).root(),
-                                        ));
-                                    crate::sdk::receipts::verify_receipt_bytes(b, r_g)
-                                })
-                                .unwrap_or(false),
+                            receipt_verified: if t.tx_type == "unilateral_send" {
+                                false
+                            } else {
+                                t.proof_data
+                                    .as_ref()
+                                    .map(|b| {
+                                        let r_g = dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(b)
+                                            .ok()
+                                            .map(|r| crate::sdk::receipts::DeviceTreeAcceptanceCommitment::from_root(
+                                                dsm::common::device_tree::DeviceTree::single(r.devid_a).root(),
+                                            ));
+                                        crate::sdk::receipts::verify_receipt_bytes(b, r_g)
+                                    })
+                                    .unwrap_or(false)
+                            },
                         }
                     })
                     .collect();
@@ -540,7 +502,7 @@ impl AppRouterImpl {
                     log::info!(
                         "[balance.list] restored BCR state hash={} state_number={} era_balance={}",
                         crate::util::text_id::encode_base32_crockford(&cs.hash),
-                        cs.state_number,
+                        0u64,
                         era_balance
                     );
                 } else {
@@ -552,8 +514,8 @@ impl AppRouterImpl {
 
                 let device_id_txt =
                     crate::util::text_id::encode_base32_crockford(&self.device_id_bytes);
-                let current_state_number = current_state.as_ref().map(|cs| cs.state_number);
-                let current_state_hash = current_state
+                let _current_state_number = current_state.as_ref().map(|_| 0u64);
+                let current_state_hash: Option<String> = current_state
                     .as_ref()
                     .and_then(|cs| cs.hash().ok())
                     .map(|hash| crate::util::text_id::encode_base32_crockford(&hash));
@@ -592,7 +554,7 @@ impl AppRouterImpl {
                             continue;
                         }
                         let projection_matches_current_state =
-                            match (current_state_number, current_state_hash.as_ref()) {
+                            match (_current_state_number, current_state_hash.as_ref()) {
                                 (Some(state_number), Some(state_hash)) => {
                                     record.source_state_number == state_number
                                         && record.source_state_hash == *state_hash
@@ -617,17 +579,7 @@ impl AppRouterImpl {
                 }
 
                 // Ensure built-in tokens always appear (even at zero balance).
-                for builtin in &["ERA", "dBTC"] {
-                    if !items.iter().any(|i| i.token_id == *builtin) {
-                        items.push(generated::BalanceGetResponse {
-                            token_id: builtin.to_string(),
-                            available: 0,
-                            locked: 0,
-                            ..Default::default()
-                        });
-                    }
-                }
-
+                // Uses case-insensitive matching + metadata enrichment.
                 ensure_default_visible_balances(&mut items);
 
                 // Deterministic order by token_id
@@ -736,6 +688,21 @@ impl AppRouterImpl {
                     return err(
                         "wallet.sendOffline: ble_address unavailable for counterparty".into(),
                     );
+                }
+
+                let send_status = self
+                    .calibrate_local_relationship_send_status(&counterparty_device_id)
+                    .await;
+                if !send_status.send_ready {
+                    let message = status_message(&send_status);
+                    let counterparty_b32 =
+                        crate::util::text_id::encode_base32_crockford(&counterparty_device_id);
+                    log::warn!(
+                        "[wallet.sendOffline] refusing BLE dispatch for {}: {}",
+                        counterparty_b32.get(..8).unwrap_or("?"),
+                        message
+                    );
+                    return err(format!("wallet.sendOffline: {message}"));
                 }
 
                 let operation_bytes = if req.operation_data.is_empty() {
@@ -868,6 +835,46 @@ impl AppRouterImpl {
                             }
                         }
                     };
+                    // Just-in-time contact sync: if the BTM doesn't have this contact
+                    // but SQLite does, load it now. This covers cases where the init-time
+                    // sync was missed (e.g., race between contacts.add and BLE init).
+                    if !transport_adapter
+                        .bilateral_handler()
+                        .has_verified_contact(&counterparty_device_id)
+                        .await
+                    {
+                        log::warn!(
+                            "[wallet.sendOffline] Contact not in BTM — attempting just-in-time sync from SQLite"
+                        );
+                        if let Ok(Some(record)) =
+                            crate::storage::client_db::get_contact_by_device_id(
+                                &counterparty_device_id,
+                            )
+                        {
+                            if let Some(verified) = record.to_verified_contact() {
+                                match transport_adapter
+                                    .bilateral_handler()
+                                    .add_verified_contact(verified)
+                                    .await
+                                {
+                                    Ok(_) => log::warn!(
+                                        "[wallet.sendOffline] ✅ Just-in-time contact sync succeeded"
+                                    ),
+                                    Err(e) => log::error!(
+                                        "[wallet.sendOffline] ❌ Just-in-time contact sync failed: {e}"
+                                    ),
+                                }
+                            } else {
+                                log::error!(
+                                    "[wallet.sendOffline] Contact in SQLite but to_verified_contact() returned None (bad field lengths)"
+                                );
+                            }
+                        } else {
+                            log::error!(
+                                "[wallet.sendOffline] Contact not found in SQLite either — user must add contact first"
+                            );
+                        }
+                    }
                     let (prepare_envelope, commitment_hash) = match transport_adapter
                         .create_prepare_message_with_commitment(
                             counterparty_device_id,
@@ -889,8 +896,11 @@ impl AppRouterImpl {
                     ) {
                         Ok(chunks) => chunks,
                         Err(e) => {
-                            transport_adapter
-                                .cancel_prepared_session_for_counterparty(counterparty_device_id)
+                            let _ = transport_adapter
+                                .fail_session_by_commitment(
+                                    commitment_hash,
+                                    "wallet.sendOffline: failed to frame BLE prepare payload",
+                                )
                                 .await;
                             return err(format!(
                                 "wallet.sendOffline: failed to frame BLE prepare payload: {e}"
@@ -902,8 +912,11 @@ impl AppRouterImpl {
                     let vm = match get_java_vm_borrowed() {
                         Some(vm) => vm,
                         None => {
-                            transport_adapter
-                                .cancel_prepared_session_for_counterparty(counterparty_device_id)
+                            let _ = transport_adapter
+                                .fail_session_by_commitment(
+                                    commitment_hash,
+                                    "wallet.sendOffline: Java VM unavailable for BLE dispatch",
+                                )
                                 .await;
                             return err(
                                 "wallet.sendOffline: Java VM unavailable for BLE dispatch".into()
@@ -929,8 +942,11 @@ impl AppRouterImpl {
                     match ble_send_result {
                         Ok(true) => {}
                         Ok(false) => {
-                            transport_adapter
-                                .cancel_prepared_session_for_counterparty(counterparty_device_id)
+                            let _ = transport_adapter
+                                .fail_session_by_commitment(
+                                    commitment_hash,
+                                    "wallet.sendOffline: BLE bridge rejected the prepared chunks",
+                                )
                                 .await;
                             return err(
                                 "wallet.sendOffline: BLE bridge rejected the prepared chunks"
@@ -938,8 +954,11 @@ impl AppRouterImpl {
                             );
                         }
                         Err(e) => {
-                            transport_adapter
-                                .cancel_prepared_session_for_counterparty(counterparty_device_id)
+                            let _ = transport_adapter
+                                .fail_session_by_commitment(
+                                    commitment_hash,
+                                    "wallet.sendOffline: BLE dispatch failed after prepare authoring",
+                                )
                                 .await;
                             return err(e);
                         }
@@ -1065,9 +1084,10 @@ impl AppRouterImpl {
                         Err(e) => return err(format!("Invalid amount: {}", e)),
                     };
 
-                // 4. Fetch Sequence (from current state)
+                // 4. Per §4.3 there's no state_number sequence; use deterministic
+                // tick as a per-request monotonic identifier (not in any hash).
                 let seq = match self.core_sdk.get_current_state() {
-                    Ok(s) => s.state_number + 1,
+                    Ok(_s) => crate::util::deterministic_time::tick(),
                     _ => 1,
                 };
 

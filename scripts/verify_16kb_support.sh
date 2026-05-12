@@ -17,7 +17,7 @@ fi
 
 # Check Rust cargo config
 echo "2. Checking Rust linker flags..."
-CONFIG_FILE="dsm_client/deterministic_state_machine/dsm_sdk/.cargo/config.toml"
+CONFIG_FILE="dsm_client/deterministic_state_machine/dsm_sdk/.cargo/config.toml.template"
 
 if grep -q 'max-page-size=16384' "$CONFIG_FILE"; then
     echo "   ✓ 16 KB page size linker flag found"

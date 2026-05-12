@@ -6,7 +6,7 @@ members = [
     "dsm_storage_node",
     "tools/vector_runner",
     "tools/vector_builder",
-    "tools/vertical_validation"
+    "tools/vertical_validation",
 ]
 
 [workspace.package]

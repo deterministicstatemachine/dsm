@@ -3,6 +3,49 @@ import java.security.MessageDigest
 import com.google.protobuf.gradle.proto
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 
+fun gradlePropertyOrEnv(propertyName: String, envName: String): String? =
+    (findProperty(propertyName) as String?)?.takeIf { it.isNotBlank() }
+        ?: System.getenv(envName)?.takeIf { it.isNotBlank() }
+
+fun releaseTaskRequested(): Boolean =
+    gradle.startParameter.taskNames.any { taskName ->
+        taskName.contains("release", ignoreCase = true)
+    }
+
+fun promptForKeystorePath(defaultPath: String): String? {
+    if (!releaseTaskRequested()) {
+        return null
+    }
+    val console = System.console() ?: return null
+    console.printf("DSM Android keystore path [%s]: ", defaultPath)
+    return console.readLine()?.trim()?.ifEmpty { defaultPath }
+}
+
+fun promptForSigningPassword(alias: String, storePath: String): String? {
+    if (!releaseTaskRequested()) {
+        return null
+    }
+    val console = System.console() ?: return null
+    val passwordChars = console.readPassword(
+        "DSM keystore password for %s (%s): ",
+        alias,
+        storePath
+    ) ?: return null
+    return String(passwordChars).trim().takeIf { it.isNotEmpty() }
+}
+
+fun promptForKeyPassword(alias: String): String? {
+    if (!releaseTaskRequested()) {
+        return null
+    }
+    val console = System.console() ?: return null
+    val passwordChars = console.readPassword(
+        "DSM key password for %s (press Enter to reuse keystore password): ",
+        alias
+    ) ?: return null
+    return String(passwordChars).trim().ifEmpty { null }
+}
+
 plugins {
     id("com.android.application")
     kotlin("android")
@@ -23,8 +66,8 @@ android {
         applicationId = "com.dsm.wallet"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.1.0-beta.1"
+        versionCode = 3
+        versionName = "0.1.0-beta.3"
 
         // Instrumentation runner for androidTest
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -55,12 +98,25 @@ android {
 
     signingConfigs {
         create("release") {
-            val pw = System.getenv("DSM_KEYSTORE_PASSWORD")
-            if (pw != null) {
-                storeFile = file(System.getenv("DSM_KEYSTORE_PATH") ?: "${System.getProperty("user.home")}/dsm-release.jks")
-                storePassword = pw
-                keyAlias = System.getenv("DSM_KEY_ALIAS") ?: "dsm-release"
-                keyPassword = pw
+            val defaultStorePath = "${System.getProperty("user.home")}/dsm-release.p12"
+            val storePath = gradlePropertyOrEnv("dsmKeystorePath", "DSM_KEYSTORE_PATH")
+                ?: promptForKeystorePath(defaultStorePath)
+                ?: defaultStorePath
+            val alias = gradlePropertyOrEnv("dsmKeyAlias", "DSM_KEY_ALIAS") ?: "dsm-release"
+            val keystorePassword = gradlePropertyOrEnv("dsmKeystorePassword", "DSM_KEYSTORE_PASSWORD")
+                ?: promptForSigningPassword(alias, storePath)
+            val keyEntryPassword = gradlePropertyOrEnv("dsmKeyPassword", "DSM_KEY_PASSWORD")
+                ?: promptForKeyPassword(alias)
+            val releaseStoreFile = file(storePath)
+            if (!keystorePassword.isNullOrBlank() && releaseStoreFile.exists()) {
+                storeFile = releaseStoreFile
+                storePassword = keystorePassword
+                keyAlias = alias
+                keyPassword = keyEntryPassword ?: keystorePassword
+                enableV1Signing = false
+                enableV2Signing = true
+                enableV3Signing = true
+                enableV4Signing = true
             }
         }
     }

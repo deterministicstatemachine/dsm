@@ -7,7 +7,7 @@ import androidx.annotation.Keep
 // DSM APP INTEGRATION BOUNDARY -- JNI Symbol Table
 // ============================================================================
 //
-// This file declares all 87+ JNI symbols implemented in the Rust SDK shared
+// This file declares every JNI symbol implemented in the Rust SDK shared
 // library (libdsm_sdk.so). Each method maps 1:1 to a Rust function named
 // Java_com_dsm_wallet_bridge_UnifiedNativeApi_<method>.
 //
@@ -17,8 +17,10 @@ import androidx.annotation.Keep
 //   Rust export in dsm_sdk/src/jni/unified_protobuf_bridge.rs.
 //
 // VERIFICATION:
-//   nm -gU libdsm_sdk.so | grep -c Java_   -> expect 87+
-//   If count drops after a Rust rebuild, a symbol was accidentally removed.
+//   nm -gU libdsm_sdk.so | grep -c Java_   -> must match `external fun` count
+//   nm -gU libdsm_sdk.so | grep -c cdbrw    -> must be 0 (router-only now)
+//   If either check fails after a Rust rebuild, a symbol was accidentally
+//   added or removed without updating the Kotlin side.
 //
 // ALL METHODS:
 //   - Accept/return ByteArray (protobuf bytes) or primitive types.
@@ -49,58 +51,25 @@ internal object UnifiedNativeApi {
     @Keep @JvmStatic external fun initSdkV3(baseDir: String): ByteArray
     @Keep @JvmStatic external fun initStorageBaseDir(path: ByteArray)
     @Keep @JvmStatic external fun initDsmSdk(configPath: String)
+    @Keep @JvmStatic external fun dispatchStartup(requestBytes: ByteArray): ByteArray
+    @Keep @JvmStatic external fun dispatchIngress(requestBytes: ByteArray): ByteArray
     @Keep @JvmStatic external fun getTransportHeadersV3Status(): Byte
     @Keep @JvmStatic external fun getTransportHeadersV3(): ByteArray
     @Keep @JvmStatic external fun processEnvelopeV3(envelope: ByteArray): ByteArray
     @Keep @JvmStatic external fun processEnvelopeV3WithAddress(envelope: ByteArray, deviceAddress: String): ByteArray
-    @Keep @JvmStatic external fun initializeSdkContext(deviceId: ByteArray, genesisHash: ByteArray, entropy: ByteArray): Boolean
     @Keep @JvmStatic external fun extractGenesisIdentity(envelopeBytes: ByteArray): ByteArray
     @Keep @JvmStatic external fun getAllBalancesStrict(): ByteArray
     @Keep @JvmStatic external fun getWalletHistoryStrict(): ByteArray
-    @Keep @JvmStatic external fun appRouterQueryFramed(framedRequest: ByteArray): ByteArray?
-    @Keep @JvmStatic external fun appRouterInvokeFramed(framedRequest: ByteArray): ByteArray?
     @Keep @JvmStatic external fun bilateralOfflineSend(envelopeBytes: ByteArray, bleAddress: String): ByteArray
     @Keep @JvmStatic external fun nowTick(): Long
     @Keep @JvmStatic external fun ensureAppRouterInstalled(): Boolean
     @Keep @JvmStatic external fun getAppRouterStatus(): Int
     @Keep @JvmStatic external fun computeB0xAddress(genesis: ByteArray, deviceId: ByteArray, tip: ByteArray): String
-    @Keep @JvmStatic external fun cdbrwDomainHash(tag: ByteArray, data: ByteArray): ByteArray?
-    @Keep @JvmStatic external fun cdbrwEncapsDeterministic(
-        publicKey: ByteArray,
-        chainTip: ByteArray,
-        commitmentPreimage: ByteArray,
-        deviceId: ByteArray,
-        kDbrw: ByteArray
-    ): Array<ByteArray>?
-    @Keep @JvmStatic external fun cdbrwEnsureVerifierPublicKey(): ByteArray?
-    @Keep @JvmStatic external fun cdbrwSignResponse(
-        chainTip: ByteArray,
-        commitmentPreimage: ByteArray,
-        kStep: ByteArray,
-        kDbrw: ByteArray,
-        gamma: ByteArray,
-        ciphertext: ByteArray,
-        challenge: ByteArray
-    ): Array<ByteArray>?
-    @Keep @JvmStatic external fun cdbrwVerifyChallengeResponse(
-        challenge: ByteArray,
-        gamma: ByteArray,
-        ciphertext: ByteArray,
-        signature: ByteArray,
-        ephemeralPublicKey: ByteArray,
-        chainTip: ByteArray,
-        commitmentPreimage: ByteArray,
-        enrollmentAnchor: ByteArray,
-        epsilonIntra: Float,
-        epsilonInter: Float
-    ): ByteArray?
-    @Keep @JvmStatic external fun cdbrwVerifyResponseSignature(
-        ephemeralPublicKey: ByteArray,
-        gamma: ByteArray,
-        ciphertext: ByteArray,
-        challenge: ByteArray,
-        signature: ByteArray
-    ): Boolean
+    // C-DBRW JNI surface removed: Kotlin is transport-only. All C-DBRW state —
+    // enrollment (Algorithm 6.1), challenge/response (Algorithm 3), entropy
+    // health, signing, verifier key mgmt — is now reached exclusively through
+    // `NativeBoundaryBridge.routerQuery("cdbrw.*", ...)`. Do not re-add any
+    // `external fun cdbrw*` declarations here; they break the single-path rule.
     @Keep @JvmStatic external fun bleNotifyConnectionState(address: String, connected: Boolean)
     @Keep @JvmStatic external fun hasContactForDeviceId(deviceId: ByteArray): Boolean
     @Keep @JvmStatic external fun isBleAddressPaired(address: String): Boolean
@@ -129,6 +98,8 @@ internal object UnifiedNativeApi {
     @Keep @JvmStatic external fun identityReadResultExtractPeerDeviceId(responseProto: ByteArray): ByteArray
     /** Extract peer_genesis_hash (32 bytes) from a BleGattIdentityReadResult proto. */
     @Keep @JvmStatic external fun identityReadResultExtractPeerGenesisHash(responseProto: ByteArray): ByteArray
+    /** Observe a paired peer's GATT identity read without emitting pairing write-back data. */
+    @Keep @JvmStatic external fun observeGattIdentityRead(bleAddress: String, rawProtoBytes: ByteArray): ByteArray
     @Keep @JvmStatic external fun sendBleChunks(deviceAddress: String, chunks: Array<ByteArray>): Boolean
     @Keep @JvmStatic external fun acceptBilateralByCommitment(commitmentHashBytes: ByteArray): ByteArray
     @Keep @JvmStatic external fun rejectBilateralByCommitment(commitmentHashBytes: ByteArray, reason: String): ByteArray
@@ -140,6 +111,7 @@ internal object UnifiedNativeApi {
     @Keep @JvmStatic external fun getGenesisHashBin(): ByteArray
     @Keep @JvmStatic external fun getSigningPublicKeyBin(): ByteArray
     @Keep @JvmStatic external fun resolveBleAddressForDeviceIdBin(deviceId: ByteArray): ByteArray
+    @Keep @JvmStatic external fun resolvePeerIdentityForBleAddressBin(address: String): ByteArray
     @Keep @JvmStatic external fun getLocalChainTipBin(deviceAddress: String): ByteArray
     @Keep @JvmStatic external fun isRejectEnvelope(envelopeBytes: ByteArray): ByteArray
     @Keep @JvmStatic external fun isErrorEnvelope(envelopeBytes: ByteArray): Int
@@ -172,14 +144,6 @@ internal object UnifiedNativeApi {
     @Keep @JvmStatic external fun createBleAdvertisingStoppedEnvelope(): ByteArray
     @Keep @JvmStatic external fun createBleConnectionEstablishedEnvelope(address: String, name: String): ByteArray
     @Keep @JvmStatic external fun createBleConnectionLostEnvelope(address: String): ByteArray
-    // Genesis lifecycle envelopes — Rust authors all content, Kotlin relays verbatim
-    @Keep @JvmStatic external fun createGenesisStartedEnvelope(): ByteArray
-    @Keep @JvmStatic external fun createGenesisOkEnvelope(): ByteArray
-    @Keep @JvmStatic external fun createGenesisErrorEnvelope(): ByteArray
-    @Keep @JvmStatic external fun createGenesisSecuringDeviceEnvelope(): ByteArray
-    @Keep @JvmStatic external fun createGenesisSecuringProgressEnvelope(progress: Int): ByteArray
-    @Keep @JvmStatic external fun createGenesisSecuringCompleteEnvelope(): ByteArray
-    @Keep @JvmStatic external fun createGenesisSecuringAbortedEnvelope(): ByteArray
     @Keep @JvmStatic external fun createBlePermissionDeniedEnvelope(operation: String): ByteArray
     @Keep @JvmStatic external fun createNfcRecoveryCapsuleEnvelope(payload: ByteArray): ByteArray
     @Keep @JvmStatic external fun createNfcBackupWrittenEnvelope(): ByteArray

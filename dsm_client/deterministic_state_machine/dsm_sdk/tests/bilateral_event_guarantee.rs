@@ -116,14 +116,14 @@ async fn verify_frontend_event_guarantees() {
     let mut alice_entropy = vec![10u8; 32];
     os_rng.fill_bytes(&mut alice_entropy);
     let alice_genesis = storage_sdk
-        .create_genesis_with_mpc(Some(3), Some(alice_entropy))
+        .create_genesis_with_mpc(Some(alice_entropy))
         .await
         .expect("alice MPC genesis");
 
     let mut bob_entropy = vec![11u8; 32];
     os_rng.fill_bytes(&mut bob_entropy);
     let bob_genesis = storage_sdk
-        .create_genesis_with_mpc(Some(3), Some(bob_entropy))
+        .create_genesis_with_mpc(Some(bob_entropy))
         .await
         .expect("bob MPC genesis");
 
@@ -230,7 +230,7 @@ async fn verify_frontend_event_guarantees() {
     // --- Execute Transfer ---
     let transfer_op = Operation::Transfer {
         to_device_id: bob_dev_id.to_vec(),
-        amount: Balance::from_state(100, [1u8; 32], 0),
+        amount: Balance::from_state(100, [1u8; 32]),
         token_id: b"ERA".to_vec(),
         mode: TransactionMode::Bilateral,
         nonce: vec![0u8; 8],

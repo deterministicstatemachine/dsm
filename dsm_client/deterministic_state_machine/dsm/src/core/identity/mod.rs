@@ -7,30 +7,28 @@
 //! - Cross-device identity verification
 //!
 //! # DSM Core Identity Policy
-//! DSM core enforces ≥3 storage nodes and threshold ≥3; no 2-of-N convenience,
-//! no alternate-path entropy; storage is trait-only.
+//!
+//! Per whitepaper §2.5, genesis MPC is n-of-n commit-then-reveal — there is
+//! no threshold cryptography.  The `b_1, ..., b_n` notation in the spec is
+//! mathematical index notation for "all n contributions"; not a t-of-n DKG.
+//! DSM core enforces ≥3 storage nodes (anti-collusion floor); no alternate-
+//! path entropy; storage is trait-only.
 
 // DSM Protocol Security Invariants - Compile-time enforced
 pub const MIN_PARTICIPANTS: usize = 3;
-pub const MIN_THRESHOLD: usize = 3;
 
-// Compile-time assertions to prevent regression
+// Compile-time assertion to prevent regression.
 const _: () = assert!(
     MIN_PARTICIPANTS >= 3,
-    "MPC security requires at least 3 participants"
-);
-const _: () = assert!(
-    MIN_THRESHOLD >= 3,
-    "MPC threshold must be >= 3 to resist 2 colluding nodes"
-);
-const _: () = assert!(
-    MIN_THRESHOLD <= MIN_PARTICIPANTS,
-    "Threshold cannot exceed participants"
+    "MPC security requires at least 3 participants (n-of-n commit-then-reveal)"
 );
 
 pub mod genesis;
 pub mod genesis_mpc;
-pub mod hierarchical_device_management;
+// hierarchical_device_management deleted: 1180-line module with zero external
+// callers. Its own doc comment noted "DO NOT use this Merkle implementation for
+// π_dev" — it's legacy superseded by crate::common::device_tree (§5 Device Tree)
+// and the SMT-based DeviceState (§2.2).
 // JNI bridge moved to dsm_sdk - see dsm_sdk/src/jni/unified_protobuf_bridge.rs
 
 use crate::types::state_types::MerkleProof;
@@ -39,7 +37,6 @@ use std::sync::{Arc, RwLock};
 
 use crate::types::error::DsmError;
 use crate::types::identifiers::NodeId;
-use crate::types::state_types::State;
 use crate::prelude::*; // common items incl. Uuid, etc.
 use crate::crypto::blake3::{dsm_domain_hasher, domain_hash};
 use blake3;
@@ -89,7 +86,9 @@ fn compute_contribution_merkle_root(contributions: &[genesis::Contribution]) -> 
             } else {
                 &level[i]
             };
-            let mut h = dsm_domain_hasher("DSM/genesis");
+            // Distinct sub-domain — this is the contribution Merkle tree,
+            // not the whitepaper's genesis hash (`"DSM/genesis"`).
+            let mut h = dsm_domain_hasher("DSM/genesis-merkle");
             h.update(left);
             h.update(right);
             next.push(*h.finalize().as_bytes());
@@ -109,15 +108,9 @@ pub fn convert_session_to_genesis_state(
     // create or represent genesis / identity. Genesis must remain derivable and
     // recoverable without DBRW present.
 
-    if session.storage_nodes.is_empty() {
+    if session.storage_nodes.len() < 3 {
         return Err(IdentityError::InvalidParameter(
-            "MPC session did not record any storage node participants".into(),
-        ));
-    }
-
-    if session.threshold == 0 {
-        return Err(IdentityError::InvalidParameter(
-            "MPC session reported threshold of zero".into(),
+            "MPC session must record ≥3 storage node participants (whitepaper §2.5)".into(),
         ));
     }
 
@@ -162,7 +155,6 @@ pub fn convert_session_to_genesis_state(
         initial_entropy: session.device_entropy,
         signing_key,
         kyber_keypair,
-        threshold: session.threshold,
         participants,
         merkle_root,
         // device_id is display-only in GenesisState; omit any encoding
@@ -197,12 +189,16 @@ impl TrustlessGenesisArtifacts {
 }
 
 /// Perform trustless blind MPC genesis creation at the core level.
+///
+/// Per whitepaper §2.5 the MPC is n-of-n commit-then-reveal — there is no
+/// threshold cryptography.  All `storage_nodes` participate; the `≥3`
+/// floor is enforced (per spec invariant; resists 2-collusion-only).
 pub async fn create_trustless_genesis<
     S: crate::core::identity::genesis_mpc::GenesisStorage + Sync + Send,
 >(
     device_id: String,
     storage_nodes: Vec<NodeId>,
-    threshold: usize,
+    k_dbrw: [u8; 32],
     metadata: Option<String>,
     storage: Option<&S>,
 ) -> Result<TrustlessGenesisArtifacts, IdentityError> {
@@ -211,26 +207,13 @@ pub async fn create_trustless_genesis<
         "MPC/genesis/create_trustless",
         device_id = %device_id,
         session_id = tracing::field::Empty,
-        threshold = threshold,
         n_participants = storage_nodes.len()
     );
     let _enter = span.enter();
 
     if storage_nodes.len() < MIN_PARTICIPANTS {
         return Err(IdentityError::InvalidParameter(
-            "MPC/threshold/too_low: requires at least 3 participants for trustless genesis".into(),
-        ));
-    }
-
-    if threshold < MIN_THRESHOLD {
-        return Err(IdentityError::InvalidParameter(
-            "MPC/threshold/too_low: threshold must be at least 3 for MPC security".into(),
-        ));
-    }
-
-    if threshold > storage_nodes.len() {
-        return Err(IdentityError::InvalidParameter(
-            "MPC/threshold/invalid: threshold cannot exceed number of participants".into(),
+            "MPC/participants/too_few: requires at least 3 storage nodes for trustless genesis (whitepaper §2.5)".into(),
         ));
     }
 
@@ -240,7 +223,7 @@ pub async fn create_trustless_genesis<
     let session = create_mpc_genesis(
         device_id_bytes,
         storage_nodes,
-        threshold,
+        k_dbrw,
         metadata.map(|s| s.into_bytes()),
     )
     .await
@@ -277,8 +260,6 @@ pub async fn create_trustless_genesis<
             // hash (len + bytes)
             out.extend_from_slice(&(gs.hash.len() as u32).to_le_bytes());
             out.extend_from_slice(&gs.hash);
-            // threshold (u64)
-            out.extend_from_slice(&(gs.threshold as u64).to_le_bytes());
             // participants sorted (len + each len+bytes)
             let mut parts: Vec<_> = gs.participants.iter().cloned().collect();
             parts.sort();
@@ -403,8 +384,6 @@ impl IdentityStore {
                 Ok(g) => DeviceIdentity {
                     device_id: device_id_bytes,
                     sub_genesis: g,
-                    current_state: None,
-                    sparse_indices: HashMap::new(),
                 },
                 Err(e) => {
                     return Err(IdentityError::DeviceError(format!(
@@ -427,8 +406,8 @@ impl IdentityStore {
     >(
         &self,
         name: &str,
-        threshold: usize,
         participants: Vec<NodeId>,
+        k_dbrw: [u8; 32],
         storage: Option<&S>,
     ) -> Result<Identity, IdentityError> {
         let span = tracing::span!(
@@ -436,27 +415,13 @@ impl IdentityStore {
             "MPC/identity/create",
             name = %name,
             session_id = tracing::field::Empty,
-            threshold = threshold,
             n_participants = participants.len()
         );
         let _enter = span.enter();
 
         if participants.len() < MIN_PARTICIPANTS {
             return Err(IdentityError::InvalidParameter(
-                "MPC/threshold/too_low: MPC requires at least 3 storage-node participants (plus device entropy)"
-                    .into(),
-            ));
-        }
-
-        if threshold < MIN_THRESHOLD {
-            return Err(IdentityError::InvalidParameter(
-                "MPC/threshold/too_low: threshold must be ≥3 to resist 2 colluding nodes".into(),
-            ));
-        }
-
-        if threshold > participants.len() {
-            return Err(IdentityError::InvalidParameter(
-                "MPC/threshold/invalid: threshold cannot be greater than number of participants"
+                "MPC/participants/too_few: MPC requires at least 3 storage-node participants (plus device entropy) per whitepaper §2.5"
                     .into(),
             ));
         }
@@ -467,7 +432,7 @@ impl IdentityStore {
         let artifacts = create_trustless_genesis(
             device_id.clone(),
             participants.clone(),
-            threshold,
+            k_dbrw,
             Some(format!("DSM_IDENTITY_{name}")),
             storage,
         )
@@ -502,8 +467,6 @@ impl IdentityStore {
             devices: vec![DeviceIdentity {
                 device_id: device_id_bytes,
                 sub_genesis: device_identity,
-                current_state: None,
-                sparse_indices: HashMap::new(),
             }],
             invalidated: false,
         };
@@ -515,29 +478,27 @@ impl IdentityStore {
         Ok(identity)
     }
 
-    /// Create identity with storage nodes for MPC (production method)
+    /// Create identity with storage nodes for MPC (production method).
+    ///
+    /// Per whitepaper §2.5 the MPC is n-of-n; all storage nodes contribute.
+    /// No threshold parameter — `≥3` floor enforced.
     pub async fn create_identity_with_storage_nodes<
         S: crate::core::identity::genesis_mpc::GenesisStorage + Sync + Send,
     >(
         &self,
         name: &str,
         storage_nodes: Vec<NodeId>,
-        threshold: usize,
+        k_dbrw: [u8; 32],
         storage: Option<&S>,
     ) -> Result<Identity, IdentityError> {
         if storage_nodes.len() < MIN_PARTICIPANTS {
             return Err(IdentityError::InvalidParameter(
-                "At least 3 storage nodes required for MPC genesis creation".into(),
+                "At least 3 storage nodes required for MPC genesis creation (whitepaper §2.5)"
+                    .into(),
             ));
         }
 
-        if threshold > storage_nodes.len() {
-            return Err(IdentityError::InvalidParameter(
-                "Threshold cannot exceed number of storage nodes".into(),
-            ));
-        }
-
-        self.create_identity(name, threshold, storage_nodes, storage)
+        self.create_identity(name, storage_nodes, k_dbrw, storage)
             .await
     }
 
@@ -607,83 +568,28 @@ impl From<IdentityError> for crate::types::error::DsmError {
     }
 }
 
-/// Verify a trustless identity chain against a genesis state.
-pub fn verify_trustless_identity(
-    genesis: &GenesisState,
-    chain: &[State],
-) -> Result<(), IdentityError> {
-    let genesis_valid = verify_genesis_state(genesis)?;
-    if !genesis_valid {
-        return Err(IdentityError::GenesisError {
-            context: "Genesis state failed structural verification".into(),
-            step: "verify_trustless_identity".into(),
-            internal_error: None,
-        });
-    }
+// verify_trustless_identity deleted: zero callers, and the body was full
+// of `state.hash[0] as u64` fake state_number reads (residue from §4.3
+// state_number deletion). Verifying a chain of legacy State objects no
+// longer maps to anything meaningful — chain integrity now flows through
+// the per-relationship SMT in DeviceState, not through array walks of
+// monolithic State.
 
-    let mut expected_prev_hash = genesis.hash;
-    let mut previous_number = 0u64;
+// IdentityProvider trait deleted: zero implementers anywhere. Each method
+// took &State (validate_identity, generate_invalidation, verify_invalidation)
+// and the create_identity/state-shape contract is obsolete in the §2.2 model.
 
-    for state in chain {
-        if state.state_number == 0 {
-            let state_hash = state.compute_hash().map_err(IdentityError::from)?;
-            if state_hash != genesis.hash {
-                return Err(IdentityError::GenesisError {
-                    context: "Provided chain contains a genesis state that does not match the supplied genesis hash".into(),
-                    step: "verify_trustless_identity".into(),
-                    internal_error: None,
-                });
-            }
-            expected_prev_hash = state_hash;
-            previous_number = 0;
-            continue;
-        }
-
-        if state.state_number != previous_number + 1 {
-            return Err(IdentityError::InvalidParameter(format!(
-                "State number {} out of sequence (expected {})",
-                state.state_number,
-                previous_number + 1
-            )));
-        }
-
-        if state.prev_state_hash != expected_prev_hash {
-            return Err(IdentityError::GenesisError {
-                context: format!("State {} has mismatched prev hash", state.state_number),
-                step: "verify_trustless_identity".into(),
-                internal_error: None,
-            });
-        }
-
-        expected_prev_hash = state.compute_hash().map_err(IdentityError::from)?;
-        previous_number = state.state_number;
-    }
-
-    Ok(())
-}
-
-/// Identity provider interface
-pub trait IdentityProvider {
-    /// Create a new identity
-    fn create_identity(&self, device_id: &str, entropy: &[u8]) -> Result<Identity, DsmError>;
-
-    /// Validate an identity
-    fn validate_identity(&self, state: &State) -> Result<bool, DsmError>;
-
-    /// Generate an invalidation marker
-    fn generate_invalidation(&self, state: &State, reason: &str) -> Result<Vec<u8>, DsmError>;
-
-    /// Verify an invalidation marker
-    fn verify_invalidation(&self, state: &State, invalidation: &[u8]) -> Result<bool, DsmError>;
-}
-
-/// DeviceIdentity holds device-specific derived genesis and current state
+/// DeviceIdentity holds device-specific derived genesis.
+///
+/// `current_state` and `sparse_indices` fields removed: the former was only
+/// touched by `Identity::apply_transition` / `get_current_state` (both deleted,
+/// zero callers) and the latter was never read after construction. Per §2.2,
+/// canonical per-device state lives in `DeviceState` (SMT root + balances +
+/// per-relationship tips), not in this identity-management struct.
 #[derive(Debug, Clone)]
 pub struct DeviceIdentity {
     pub device_id: [u8; 32],
     pub sub_genesis: GenesisState,
-    pub current_state: Option<State>,
-    pub sparse_indices: HashMap<u64, Vec<u8>>,
 }
 
 /// Identity root object
@@ -733,55 +639,12 @@ impl Identity {
             invalidated: false,
         })
     }
-    /// Apply a state transition to create a new state
-    pub async fn apply_transition(
-        &mut self,
-        transition: crate::core::state_machine::transition::StateTransition,
-    ) -> Result<State, DsmError> {
-        // Get current state
-        let current_state = self.get_current_state().await?;
-
-        // Apply the transition using the state machine
-        let new_state = crate::core::state_machine::transition::apply_transition(
-            &current_state,
-            &transition.operation,
-            &transition.new_entropy.unwrap_or_default(),
-        )?;
-
-        // Per-Device SMT update belongs at the bilateral relationship level, not here.
-        // The Per-Device SMT uses 256-bit relationship keys and lives in
-        // merkle::sparse_merkle_tree::SparseMerkleTree.
-
-        if let Some(device) = self.devices.first_mut() {
-            device.current_state = Some(new_state.clone());
-        }
-
-        Ok(new_state)
-    }
-
-    /// Get the current state of this identity
-    #[allow(clippy::unused_async)]
-    pub async fn get_current_state(&self) -> Result<State, DsmError> {
-        if let Some(device) = self.devices.first() {
-            if let Some(current_state) = &device.current_state {
-                Ok(current_state.clone())
-            } else {
-                // Create a basic genesis state if no current state exists
-                let device_info = crate::types::state_types::DeviceInfo::new(
-                    device.device_id,
-                    self.master_genesis.signing_key.public_key.clone(),
-                );
-                Ok(State::new_genesis(
-                    self.master_genesis.initial_entropy,
-                    device_info,
-                ))
-            }
-        } else {
-            Err(DsmError::InvalidState(
-                "No devices available for this identity".to_string(),
-            ))
-        }
-    }
+    // Identity::apply_transition + Identity::get_current_state deleted: zero
+    // external callers. Both took/returned monolithic State and routed through
+    // the legacy state_machine::transition::apply_transition path. The §2.2
+    // canonical transition path is StateMachine::advance_relationship which
+    // operates on DeviceState (SMT root + per-relationship tips), not on the
+    // Identity struct's first device's current_state field.
 
     /// Sign data using this identity's signing key (binary in/out, no encodings)
     #[allow(clippy::unused_async)]

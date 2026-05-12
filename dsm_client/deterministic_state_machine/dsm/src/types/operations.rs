@@ -1122,11 +1122,7 @@ impl Operation {
                 a.copy_from_slice(take(&mut cur, 8)?);
                 u64::from_le_bytes(a)
             };
-            let last_updated = {
-                let mut a = [0u8; 8];
-                a.copy_from_slice(take(&mut cur, 8)?);
-                u64::from_le_bytes(a)
-            };
+            // Per §4.3 no counter is part of canonical Balance encoding.
             let state_hash = if !cur.is_empty() {
                 if cur.len() != 32 {
                     return Err(DsmError::SerializationError(
@@ -1139,7 +1135,7 @@ impl Operation {
             } else {
                 None
             };
-            Ok(Balance::from_parts(value, locked, last_updated, state_hash))
+            Ok(Balance::from_parts(value, locked, state_hash))
         }
         #[allow(dead_code)]
         fn dec_option_bytes(inp: &mut &[u8]) -> Result<Option<Vec<u8>>, DsmError> {
@@ -2053,7 +2049,7 @@ mod tests {
     use super::*;
 
     fn test_balance(value: u64) -> Balance {
-        Balance::from_parts(value, 0, 0, Some([0xAB; 32]))
+        Balance::from_parts(value, 0, Some([0xAB; 32]))
     }
 
     fn roundtrip(op: &Operation) -> Operation {
@@ -3033,7 +3029,7 @@ mod tests {
 
         #[test]
         fn balance_with_state_hash_roundtrips() {
-            let bal = Balance::from_parts(12345, 0, 99, Some([0xFE; 32]));
+            let bal = Balance::from_parts(12345, 0, Some([0xFE; 32]));
             let op = Operation::Mint {
                 amount: bal.clone(),
                 token_id: b"T".to_vec(),
@@ -3051,7 +3047,7 @@ mod tests {
 
         #[test]
         fn balance_without_state_hash_roundtrips() {
-            let bal = Balance::from_parts(0, 0, 0, None);
+            let bal = Balance::from_parts(0, 0, None);
             let op = Operation::Burn {
                 amount: bal,
                 token_id: b"X".to_vec(),
@@ -3063,7 +3059,7 @@ mod tests {
 
         #[test]
         fn balance_with_locked_roundtrips() {
-            let bal = Balance::from_parts(1000, 200, 5, Some([0x01; 32]));
+            let bal = Balance::from_parts(1000, 200, Some([0x01; 32]));
             let op = Operation::Lock {
                 token_id: b"ERA".to_vec(),
                 amount: bal.clone(),

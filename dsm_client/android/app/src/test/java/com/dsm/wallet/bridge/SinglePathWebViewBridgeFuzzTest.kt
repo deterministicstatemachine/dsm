@@ -32,10 +32,10 @@ class SinglePathWebViewBridgeFuzzTest {
             "hasIdentityDirect",
             "getPreference",
             "setPreference",
-            "appRouterInvoke",
-            "appRouterQuery",
+            "nativeBoundaryStartup",
+            "nativeBoundaryIngress",
+            "nativeHostRequest",
             "resolveBleAddressForDeviceId",
-            "createGenesisBin",
             "initiateBleContactPairing",
             "getTransportHeadersV3Bin",
             "processEnvelopeV3",
@@ -95,7 +95,7 @@ class SinglePathWebViewBridgeFuzzTest {
         malformedProtos.forEach { proto ->
             try {
                 // Try various methods that parse protobuf
-                val methods = listOf("processEnvelopeV3", "appRouterInvoke", "createGenesisBin")
+                val methods = listOf("nativeBoundaryStartup", "nativeBoundaryIngress", "nativeHostRequest")
                 methods.forEach { method ->
                     val result = SinglePathWebViewBridge.handleBinaryRpc(method, proto)
                     // Bridge is not initialized in unit tests, so all responses
@@ -150,14 +150,9 @@ class SinglePathWebViewBridgeFuzzTest {
         payloads.add(byteArrayOf(0x00, 0x00, 0x00, 0x00)) // keyLen=0
         payloads.add(byteArrayOf(0x00, 0x00, 0x00, 0x01)) // keyLen=1 but no key data
 
-        // For appRouterInvoke/appRouterQuery: malformed frames
+        // For generic bridge decode paths: malformed protobuf-like frames
         payloads.add(byteArrayOf(0x00, 0x00, 0x00, 0x05, 0x41, 0x42, 0x43)) // methodLen=5 but truncated
         payloads.add(byteArrayOf(0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte())) // huge method length
-
-        // For createGenesisBin: malformed locale/network lengths
-        payloads.add(byteArrayOf(0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte())) // Max locale len
-        payloads.add(byteArrayOf(0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01)) // localeLen=1, netLen=1 but no data
-        payloads.add(byteArrayOf(0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)) // zero lengths
 
         // For resolveBleAddressForDeviceId: wrong sizes
         payloads.add(ByteArray(31)) // 31 bytes instead of 32
@@ -313,7 +308,7 @@ class SinglePathWebViewBridgeFuzzTest {
         // Test with extremely large payloads
         val hugePayload = ByteArray(10 * 1024 * 1024) { it.toByte() } // 10MB
 
-        val methods = listOf("appRouterInvoke", "setPreference", "createGenesisBin")
+        val methods = listOf("nativeBoundaryStartup", "nativeBoundaryIngress", "nativeHostRequest")
 
         methods.forEach { method ->
             try {

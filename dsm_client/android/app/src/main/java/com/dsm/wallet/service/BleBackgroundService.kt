@@ -92,7 +92,7 @@ class BleBackgroundService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.i(TAG, "BLE background service started (idle until explicitly requested)")
         // BLE advertising is NOT started here. It only starts when the UI explicitly
-        // calls setAdvertisingDesired(true) through a bridge RPC (device.ble.advertise.start).
+        // requests host-control advertising through the native host boundary.
         return START_STICKY
     }
 

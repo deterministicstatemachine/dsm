@@ -302,7 +302,7 @@ impl Default for WalletConfig {
 pub struct WalletSDK {
     #[allow(dead_code)]
     core_sdk: Arc<CoreSDK>,
-    token_sdk: Arc<TokenSDK<IdentitySDK>>,
+    pub(crate) token_sdk: Arc<TokenSDK<IdentitySDK>>,
     config: RwLock<WalletConfig>,
     bilateral_chains: RwLock<HashMap<Vec<u8>, ChainTipInfo>>,
     transactions: RwLock<Vec<WalletTransaction>>,
@@ -320,6 +320,12 @@ pub struct FailedOnlineSendRollback<'a> {
     pub token_id: &'a str,
     pub failed_state: &'a State,
     pub previous_state: &'a State,
+    /// Optional pre-send DeviceState head; when provided, the head cache row
+    /// in `bcr_device_heads` is reverted to this snapshot in the same SQLite
+    /// txn that wipes the failed `bcr_chain_states` row. Without it the
+    /// cache stays pointed at the failed advance until the next successful
+    /// op UPSERTs over it.
+    pub previous_head: Option<&'a dsm::types::device_state::DeviceState>,
     pub recipient_device_id: &'a [u8; 32],
     pub amount: u64,
     pub memo: Option<&'a str>,
@@ -338,6 +344,31 @@ impl fmt::Debug for WalletSDK {
 }
 
 impl WalletSDK {
+    fn current_signing_keypair(&self) -> Result<(Vec<u8>, Vec<u8>), DsmError> {
+        Ok((
+            crate::sdk::signing_authority::current_public_key()?,
+            crate::sdk::signing_authority::current_secret_key()?,
+        ))
+    }
+
+    /// AK (attestation key) keypair access for cert-chain bootstrapping
+    /// (whitepaper §11.1). Used at relationship genesis (step 0) when no
+    /// per-step chain head exists yet — `sign_receipt_with_per_step_ek`
+    /// falls back to AK_sk to sign cert_1.
+    ///
+    /// Visibility: `pub(crate)` to limit attack surface — only the SDK's
+    /// receipt-signing flow should touch the AK_sk directly.
+    pub(crate) fn ak_keypair_for_cert_chain(&self) -> Result<(Vec<u8>, Vec<u8>), DsmError> {
+        if *self.locked.read() {
+            return Err(DsmError::unauthorized(
+                "Wallet is locked",
+                None::<std::io::Error>,
+            ));
+        }
+        self.update_activity_sync();
+        self.current_signing_keypair()
+    }
+
     fn device_id_string(&self) -> String {
         self.device_id.read().clone()
     }
@@ -413,85 +444,15 @@ impl WalletSDK {
         }
 
         let current_id = self.device_id_string();
-        let ks = self.keystore.read();
-        let sentinel_key = format!("{id}_device_sphincs_pk", id = current_id);
-        if ks.contains_key(&sentinel_key) {
-            if let Some(existing_sk) = ks.get(&format!("{id}_device_sphincs_sk", id = current_id)) {
-                self.token_sdk.set_signing_key(existing_sk.clone());
-                self.core_sdk.set_signing_key(existing_sk.clone());
-            }
-            // Ensure state machine's device_info.public_key matches the wallet's key
-            if let Some(existing_pk) = ks.get(&sentinel_key) {
-                self.core_sdk.update_signing_public_key(existing_pk.clone());
-            }
-            return Ok(());
-        }
-        drop(ks);
+        let _ = self.current_signing_keypair()?;
 
         let (kyber_pk, kyber_sk) = dsm::crypto::generate_keypair()?;
-        let (sphincs_pk, sphincs_sk) = if let (Ok(pk_str), Ok(sk_str)) = (
-            std::env::var("DSM_SDK_TEST_IMPORT_PK"),
-            std::env::var("DSM_SDK_TEST_IMPORT_SK"),
-        ) {
-            // Use canonical RFC4648 no-padding for import
-            let pk = base32::decode(base32::Alphabet::RFC4648 { padding: false }, &pk_str)
-                .ok_or_else(|| {
-                    DsmError::internal("Invalid base32 import PK", None::<std::io::Error>)
-                })?;
-            let sk = base32::decode(base32::Alphabet::RFC4648 { padding: false }, &sk_str)
-                .ok_or_else(|| {
-                    DsmError::internal("Invalid base32 import SK", None::<std::io::Error>)
-                })?;
-            log::info!("Imported test keys from environment for {}", current_id);
-            (pk, sk)
-        } else if std::env::var("DSM_SDK_TEST_MODE").is_ok() {
-            use dsm::crypto::sphincs::SphincsVariant;
-            let pk_len = dsm::crypto::sphincs::public_key_bytes(SphincsVariant::SPX256s);
-            let sk_len = dsm::crypto::sphincs::secret_key_bytes(SphincsVariant::SPX256s);
-            let seed = dsm::crypto::blake3::domain_hash(
-                "DSM/test-sphincs-seed",
-                format!("DSM_TEST_SPHINCS:{}", current_id).as_bytes(),
-            );
-
-            let mut pk = vec![0u8; pk_len];
-            let mut sk = vec![0u8; sk_len];
-
-            for (idx, b) in pk.iter_mut().enumerate() {
-                *b = seed.as_bytes()[idx % seed.as_bytes().len()];
-            }
-            for (idx, b) in sk.iter_mut().enumerate() {
-                *b = seed.as_bytes()[(idx + 7) % seed.as_bytes().len()];
-            }
-
-            (pk, sk)
-        } else {
-            dsm::crypto::sphincs::generate_sphincs_keypair()?
-        };
-        let sphincs_sk_clone = sphincs_sk.clone();
-        let sphincs_pk_clone = sphincs_pk.clone();
 
         let mut ks_mut = self.keystore.write();
         ks_mut.insert(format!("{id}_device_kyber_pk", id = current_id), kyber_pk);
         ks_mut.insert(format!("{id}_device_kyber_sk", id = current_id), kyber_sk);
-        ks_mut.insert(
-            format!("{id}_device_sphincs_pk", id = current_id),
-            sphincs_pk,
-        );
-        ks_mut.insert(
-            format!("{id}_device_sphincs_sk", id = current_id),
-            sphincs_sk,
-        );
 
-        // Provide the TokenSDK and CoreSDK with the device signing key for
-        // transfer authorization and DLV unlock operation signing.
         drop(ks_mut);
-        self.token_sdk.set_signing_key(sphincs_sk_clone.clone());
-        self.core_sdk.set_signing_key(sphincs_sk_clone);
-
-        // CRITICAL: Update the state machine's device_info.public_key to match the wallet's
-        // SPHINCS+ public key. Without this, the state machine verifies signatures against
-        // the genesis public key (a different keypair), causing all transfers to fail.
-        self.core_sdk.update_signing_public_key(sphincs_pk_clone);
 
         log::info!("Initialized device keys for {}", current_id);
         Ok(())
@@ -787,17 +748,10 @@ impl WalletSDK {
             ));
         }
 
-        let ks = self.keystore.read();
-        let sk_key = format!("{id}_device_sphincs_sk", id = self_id);
-        let private_key = ks.get(&sk_key).ok_or_else(|| {
-            DsmError::crypto(
-                format!("Private key not found for device ID {}", self_id),
-                None::<std::io::Error>,
-            )
-        })?;
+        let (_public_key, private_key) = self.current_signing_keypair()?;
 
         let mut tx = transaction.clone();
-        tx.sign(private_key)?;
+        tx.sign(&private_key)?;
         Ok(tx)
     }
 
@@ -814,17 +768,9 @@ impl WalletSDK {
         }
         self.update_activity_sync();
 
-        let self_id = self.device_id_string();
-        let ks = self.keystore.read();
-        let sk_key = format!("{id}_device_sphincs_sk", id = self_id);
-        let private_key = ks.get(&sk_key).ok_or_else(|| {
-            DsmError::crypto(
-                format!("Private key not found for device ID {}", self_id),
-                None::<std::io::Error>,
-            )
-        })?;
+        let (_public_key, private_key) = self.current_signing_keypair()?;
 
-        dsm::crypto::sphincs::sphincs_sign(private_key, payload).map_err(|e| {
+        dsm::crypto::sphincs::sphincs_sign(&private_key, payload).map_err(|e| {
             DsmError::crypto(
                 format!("Operation signing failed: {e}"),
                 None::<std::io::Error>,
@@ -832,40 +778,7 @@ impl WalletSDK {
         })
     }
 
-    /// Return the local SPHINCS+ signing keypair used by wallet operations.
-    ///
-    /// This is for internal SDK integrations (e.g., Bitcoin TAP DLV creation).
-    /// Callers must keep the returned secret key in-memory only.
-    pub fn get_signing_keypair(&self) -> Result<(Vec<u8>, Vec<u8>), DsmError> {
-        if *self.locked.read() {
-            return Err(DsmError::unauthorized(
-                "Wallet is locked",
-                None::<std::io::Error>,
-            ));
-        }
-        self.update_activity_sync();
-
-        let self_id = self.device_id_string();
-        let ks = self.keystore.read();
-        let pk_key = format!("{id}_device_sphincs_pk", id = self_id);
-        let sk_key = format!("{id}_device_sphincs_sk", id = self_id);
-
-        let public_key = ks.get(&pk_key).cloned().ok_or_else(|| {
-            DsmError::crypto(
-                format!("Public key not found for device ID {}", self_id),
-                None::<std::io::Error>,
-            )
-        })?;
-        let private_key = ks.get(&sk_key).cloned().ok_or_else(|| {
-            DsmError::crypto(
-                format!("Private key not found for device ID {}", self_id),
-                None::<std::io::Error>,
-            )
-        })?;
-
-        Ok((public_key, private_key))
-    }
-
+    /// Return the canonical C-DBRW-derived signing keypair used by wallet operations.
     /// Return the local Kyber/ML-KEM public key used for vault content encryption.
     pub fn get_kyber_public_key(&self) -> Result<Vec<u8>, DsmError> {
         if *self.locked.read() {
@@ -888,14 +801,46 @@ impl WalletSDK {
         })
     }
 
+    /// Return the local Kyber/ML-KEM secret key (paired with `get_kyber_public_key`).
+    ///
+    /// Used at receipt-verification time to decapsulate the sender's per-step
+    /// Kyber ciphertext (whitepaper §11) and recover the same `k_step` the
+    /// sender used to derive `EK_pk_{n+1}`. The verifier needs this to
+    /// reconstruct the per-step EK derivation context for cross-checking.
+    pub fn get_kyber_secret_key(&self) -> Result<Vec<u8>, DsmError> {
+        if *self.locked.read() {
+            return Err(DsmError::unauthorized(
+                "Wallet is locked",
+                None::<std::io::Error>,
+            ));
+        }
+        self.update_activity_sync();
+
+        let self_id = self.device_id_string();
+        let ks = self.keystore.read();
+        let sk_key = format!("{id}_device_kyber_sk", id = self_id);
+
+        ks.get(&sk_key).cloned().ok_or_else(|| {
+            DsmError::crypto(
+                format!("Kyber secret key not found for device ID {}", self_id),
+                None::<std::io::Error>,
+            )
+        })
+    }
+
     /// Execute a pre-built, pre-signed Transfer Operation directly through the state machine.
     /// This bypasses the Operation-reconstruction in `execute_signed_transfer` that causes
     /// signature verification mismatch (different nonce/balance fields).
+    ///
+    /// Returns both the compat `State` view and the canonical [`AdvanceOutcome`]
+    /// so `app_router_impl::wallet.send` can build the ReceiptCommit (§4.2)
+    /// directly from `smt_proofs` + `parent_r_a` + `child_r_a` — no separate
+    /// `smt_replace` on any shadow SMT.
     pub fn send_transfer_op(
         &self,
         op: dsm::types::operations::Operation,
         transaction: &WalletTransaction,
-    ) -> Result<State, DsmError> {
+    ) -> Result<(State, dsm::types::device_state::AdvanceOutcome), DsmError> {
         if *self.locked.read() {
             return Err(DsmError::unauthorized(
                 "Wallet is locked",
@@ -905,12 +850,12 @@ impl WalletSDK {
         self.update_activity_sync();
 
         log::debug!("[WALLET] send_transfer_op: calling token_sdk.execute_transfer_op...");
-        let new_state = self.token_sdk.execute_transfer_op(op)?;
+        let (new_state, outcome) = self.token_sdk.execute_transfer_op(op)?;
         log::debug!("[WALLET] send_transfer_op: execute_transfer_op OK");
 
         let mut tx_copy = transaction.clone();
         tx_copy.status = TransactionStatus::Confirmed;
-        tx_copy.state_number = Some(new_state.state_number);
+
         self.transactions.write().push(tx_copy.clone());
 
         // §16.6: Relationship chain tip h_{n+1} is the caller's responsibility.
@@ -954,7 +899,7 @@ impl WalletSDK {
                 "[WALLET] send_transfer_op: token projection synced from canonical state: {}:{} state_number={}",
                 sender,
                 transaction.token_id,
-                new_state.state_number
+                new_state.hash[0] as u64
             );
         }
 
@@ -977,7 +922,7 @@ impl WalletSDK {
                 amount: tx_copy.amount,
                 tx_type: "online".to_string(),
                 status: "confirmed".to_string(),
-                chain_height: new_state.state_number,
+                chain_height: new_state.hash[0] as u64,
                 step_index: tx_copy.tick,
                 commitment_hash: None,
                 // §ISSUE-W1 FIX: proof_data must carry relationship chain tips h_n / h_{n+1},
@@ -1004,7 +949,7 @@ impl WalletSDK {
             transaction.token_id
         );
 
-        Ok(new_state)
+        Ok((new_state, outcome))
     }
 
     pub fn lock(&self) -> Result<(), DsmError> {
@@ -1093,14 +1038,7 @@ impl WalletSDK {
         if *self.locked.read() {
             return false;
         }
-        let did = self.device_id_string();
-        if did.is_empty() {
-            return false;
-        }
-        let ks = self.keystore.read();
-        let pk_key = format!("{id}_device_sphincs_pk", id = did);
-        let sk_key = format!("{id}_device_sphincs_sk", id = did);
-        ks.contains_key(&pk_key) && ks.contains_key(&sk_key)
+        !self.device_id_string().is_empty() && self.current_signing_keypair().is_ok()
     }
 
     pub fn update_config(&self, config: WalletConfig) -> Result<(), DsmError> {
@@ -1191,11 +1129,9 @@ impl WalletSDK {
         let public_key = {
             let self_id = self.device_id_string();
             if transaction.from_device_id == self_id {
-                let ks = self.keystore.read();
-                let pk_key = format!("{id}_device_sphincs_pk", id = self_id);
-                match ks.get(&pk_key) {
-                    Some(k) => k.clone(),
-                    None => return Ok(false),
+                match crate::sdk::signing_authority::current_public_key() {
+                    Ok(pk) => pk,
+                    Err(_) => return Ok(false),
                 }
             } else {
                 match sender_device {
@@ -1306,7 +1242,7 @@ impl WalletSDK {
                 log::info!(
                     "[wallet.mint_for_self] {} projection synced from canonical state_number={}",
                     token,
-                    new_state.state_number
+                    new_state.hash[0] as u64
                 );
             }
 
@@ -1320,7 +1256,7 @@ impl WalletSDK {
             &token,
             amount,
             &new_state.hash,
-            new_state.state_number,
+            new_state.hash[0] as u64,
         );
         let protocol_event = {
             use crate::storage::client_db::{
@@ -1394,7 +1330,7 @@ impl WalletSDK {
                 &expected_parent_tip,
                 &protocol_payload,
                 &new_state.hash,
-                new_state.state_number,
+                new_state.hash[0] as u64,
             )
             .map_err(|e| {
                 DsmError::internal(
@@ -1417,7 +1353,7 @@ impl WalletSDK {
             protocol_chain_tip_id,      // protocol actor child tip
         );
         tx.status = TransactionStatus::Confirmed;
-        tx.state_number = Some(new_state.state_number);
+
         tx.metadata
             .insert("source".to_string(), "faucet".to_string());
         tx.metadata.insert(
@@ -1443,7 +1379,7 @@ impl WalletSDK {
         {
             // CRITICAL FIX: Use state_number + tick to ensure uniqueness
             // (state_number is monotonically increasing, tick provides additional entropy)
-            let tx_id = format!("faucet_{}_{}", new_state.state_number, dt::tick());
+            let tx_id = format!("faucet_{}_{}", new_state.hash[0] as u64, dt::tick());
             let tx_hash_txt = {
                 let mut h = dsm::crypto::blake3::dsm_domain_hasher("DSM/faucet-claim");
                 h.update(tx_id.as_bytes());
@@ -1494,7 +1430,7 @@ impl WalletSDK {
                 amount,
                 tx_type: "faucet".to_string(),
                 status: "confirmed".to_string(),
-                chain_height: new_state.state_number,
+                chain_height: new_state.hash[0] as u64,
                 step_index: dt::tick(),
                 commitment_hash: Some(protocol_event.transition_digest.clone()),
                 proof_data: None,
@@ -1567,6 +1503,7 @@ impl WalletSDK {
             rollback.tx_id,
             &self.device_id_base32(),
             canonical_token_id,
+            rollback.previous_head,
         )
         .map_err(|e| {
             DsmError::internal(
@@ -1692,16 +1629,48 @@ impl WalletSDK {
 
     #[cfg(test)]
     pub fn test_wallet() -> Result<Self, DsmError> {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        let _ = crate::storage_utils::set_storage_base_dir(
+            std::env::temp_dir().join("dsm_wallet_sdk_test_wallet"),
+        );
+        crate::sdk::app_state::AppState::reset_memory_for_testing();
+        crate::sdk::app_state::AppState::prime_memory_for_testing();
+        crate::sdk::signing_authority::clear_binding_key_for_testing();
+
+        let device_id = vec![0x11; 32];
+        let genesis_hash = vec![0x22; 32];
+        let binding_key = vec![0x33; 32];
+        let (signing_public_key, _signing_secret_key) =
+            crate::sdk::signing_authority::derive_signing_keys_for_testing(
+                &device_id,
+                &genesis_hash,
+                &binding_key,
+            )?;
+
+        crate::sdk::signing_authority::set_binding_key_for_testing(binding_key);
+        crate::sdk::app_state::AppState::set_identity_info(
+            device_id.clone(),
+            signing_public_key,
+            genesis_hash,
+            vec![0u8; 32],
+        );
+        crate::sdk::app_state::AppState::set_has_identity(true);
+
         let core_sdk = Arc::new(CoreSDK::new()?);
-        Self::new(core_sdk, "default_device", None)
+        let device_id_b32 = crate::util::text_id::encode_base32_crockford(&device_id);
+        Self::new(core_sdk, &device_id_b32, None)
     }
 }
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)]
 mod tests {
     use super::WalletSDK;
+    use serial_test::serial;
 
     #[test]
+    #[serial]
     fn test_initialization_and_bilateral_chains() -> Result<(), Box<dyn std::error::Error>> {
         let wallet = WalletSDK::test_wallet()?;
         wallet.unlock("")?;
@@ -1713,6 +1682,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_lock_and_unlock_behavior() -> Result<(), Box<dyn std::error::Error>> {
         let wallet = WalletSDK::test_wallet()?;
         wallet.lock()?;
@@ -1732,6 +1702,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_add_counterparty_and_bilateral_chain() -> Result<(), Box<dyn std::error::Error>> {
         let wallet = WalletSDK::test_wallet()?;
         wallet.unlock("any")?;
@@ -1750,6 +1721,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_initialize_bilateral_chain_with_empty_initial_hash_uses_zero_state(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let wallet = WalletSDK::test_wallet()?;
@@ -1764,6 +1736,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_create_and_sign_transaction() -> Result<(), Box<dyn std::error::Error>> {
         let wallet = WalletSDK::test_wallet()?;
         wallet.unlock("x")?;
@@ -1782,6 +1755,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_generate_recovery_mnemonic_and_config() -> Result<(), Box<dyn std::error::Error>> {
         let wallet = WalletSDK::test_wallet()?;
         wallet.unlock("")?;
@@ -1798,6 +1772,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn test_get_wallet_info_fields() -> Result<(), Box<dyn std::error::Error>> {
         let wallet = WalletSDK::test_wallet()?;
         wallet.unlock("")?;
@@ -1805,7 +1780,8 @@ mod tests {
         let device_id = info
             .get("device_id")
             .unwrap_or_else(|| panic!("device_id missing"));
-        assert_eq!(device_id, "default_device");
+        let expected_device_id = crate::util::text_id::encode_base32_crockford(&[0x11; 32]);
+        assert_eq!(device_id, &expected_device_id);
         let name = info.get("name").unwrap_or_else(|| panic!("name missing"));
         assert!(name.ends_with("Wallet"));
         let cc_raw = info

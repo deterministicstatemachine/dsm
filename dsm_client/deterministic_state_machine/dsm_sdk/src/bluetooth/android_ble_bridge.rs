@@ -373,12 +373,6 @@ impl AndroidBleBridge {
                 // Handled at the GATT/JNI layer (processBleIdentityEnvelope).
                 // Bridge pass-through only.
             }
-            // Outbound-only push events — authored by Rust and dispatched to the
-            // frontend via dispatchToWebView. They never arrive as inbound requests
-            // from Kotlin, so the bridge takes no action here.
-            Some(Ev::GenesisLifecycle(_)) => {
-                debug!("GenesisLifecycleEvent received in bridge — outbound-only, no action");
-            }
             Some(Ev::BlePermission(_)) => {
                 debug!("BlePermissionEvent received in bridge — outbound-only, no action");
             }
@@ -878,6 +872,7 @@ mod tests {
             last_seen_online_counter: 0,
             last_seen_ble_counter: 0,
             public_key: Vec::new(),
+            kyber_public_key: Vec::new(),
             added_at: 1,
             previous_chain_tip: None,
         };
@@ -1011,6 +1006,7 @@ mod tests {
             last_seen_online_counter: 0,
             last_seen_ble_counter: 0,
             public_key: Vec::new(),
+            kyber_public_key: Vec::new(),
             added_at: 1,
             previous_chain_tip: None,
         };
@@ -1102,6 +1098,7 @@ mod tests {
             last_seen_online_counter: 0,
             last_seen_ble_counter: 0,
             public_key: Vec::new(),
+            kyber_public_key: Vec::new(),
             added_at: 1,
             previous_chain_tip: None,
         };

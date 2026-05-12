@@ -6,8 +6,6 @@ import android.content.Intent
 import android.content.SharedPreferences
 import android.util.Log
 import androidx.core.content.ContextCompat
-import com.dsm.wallet.mcp.McpService
-
 class BootCompletedReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context?, intent: Intent?) {
@@ -16,9 +14,6 @@ class BootCompletedReceiver : BroadcastReceiver() {
 
         // Ensure Unified class is loaded early (idempotent)
         try { Class.forName("com.dsm.wallet.bridge.Unified") } catch (_: Throwable) {}
-
-        // Ensure MCP runtime is up before proximity logic
-        McpService.ensureRunning(appCtx)
 
         val prefs = safePrefs(appCtx)
         val shouldAutoStart = prefs?.let(::wantsAlwaysOn) ?: false

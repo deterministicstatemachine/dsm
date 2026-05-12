@@ -2,13 +2,13 @@
 //!
 //! Core logic for:
 //! - Join Activation Proof (JAP) commitment
-//! - Deterministic exact-uniform winner selection (bounded reseed; no BigInt)
+//! - Deterministic exact-uniform winner selection (256-bit rejection sampling)
 //! - Emission receipt verification
 //! - State transition validation (activation + spent + supply + tip binding)
 //!
 //! Properties:
 //! - Fully deterministic (no wall-clock, no OS randomness)
-//! - Exact-uniform sampling over [0, N) using Lemire-style rejection on u64
+//! - Exact-uniform sampling over [0, N) using 256-bit rejection sampling
 //! - Winner selection returns the selected activation leaf hash:
 //!   leaf = H("DJTE.ACTIVE", winner_id)
 //!
@@ -34,7 +34,126 @@ pub use spent_proof_smt::SpentProofSmt;
 use crate::crypto::blake3::domain_hash_bytes;
 use crate::types::error::DsmError;
 
-const DJTE_MAX_RESEEDS: usize = 128;
+const DEFAULT_HALVING_STEPS: u32 = 64;
+const DEFAULT_INITIAL_STEP_EMISSIONS: u64 = 1;
+const DEFAULT_INITIAL_STEP_AMOUNT: u64 = 1;
+
+/// Canonical DJTE emission schedule tuple Π = (Stotal, b, E, M0, r0).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EmissionSchedule {
+    pub total_supply: u64,
+    pub shard_depth: u8,
+    pub schedule_steps: u32,
+    pub initial_step_emissions: u64,
+    pub initial_step_amount: u64,
+}
+
+impl EmissionSchedule {
+    pub fn new(
+        total_supply: u64,
+        shard_depth: u8,
+        schedule_steps: u32,
+        initial_step_emissions: u64,
+        initial_step_amount: u64,
+    ) -> Result<Self, DsmError> {
+        if schedule_steps == 0 {
+            return Err(DsmError::Validation {
+                context: "DJTE schedule_steps must be non-zero".into(),
+                source: None,
+            });
+        }
+        if initial_step_emissions == 0 {
+            return Err(DsmError::Validation {
+                context: "DJTE initial_step_emissions must be non-zero".into(),
+                source: None,
+            });
+        }
+
+        Ok(Self {
+            total_supply,
+            shard_depth,
+            schedule_steps,
+            initial_step_emissions,
+            initial_step_amount,
+        })
+    }
+
+    pub fn default_for_source(shard_depth: u8, total_supply: u64) -> Self {
+        Self {
+            total_supply,
+            shard_depth,
+            schedule_steps: DEFAULT_HALVING_STEPS,
+            initial_step_emissions: DEFAULT_INITIAL_STEP_EMISSIONS,
+            initial_step_amount: DEFAULT_INITIAL_STEP_AMOUNT,
+        }
+    }
+
+    pub fn digest(&self) -> [u8; 32] {
+        let mut buf = Vec::with_capacity(8 + 1 + 4 + 8 + 8);
+        buf.extend_from_slice(&self.total_supply.to_le_bytes());
+        buf.push(self.shard_depth);
+        buf.extend_from_slice(&self.schedule_steps.to_le_bytes());
+        buf.extend_from_slice(&self.initial_step_emissions.to_le_bytes());
+        buf.extend_from_slice(&self.initial_step_amount.to_le_bytes());
+        domain_hash_bytes("DJTE.POLICY", &buf)
+    }
+
+    pub fn amount_for_index(
+        &self,
+        emission_index: u64,
+        remaining_supply: u64,
+    ) -> Result<u64, DsmError> {
+        if emission_index == 0 {
+            return Err(DsmError::Verification("Emission index is one-based".into()));
+        }
+        let epoch = (emission_index - 1) / self.initial_step_emissions;
+        if epoch >= u64::from(self.schedule_steps) {
+            return Ok(0);
+        }
+        let step_amount = if epoch >= 64 {
+            0
+        } else {
+            self.initial_step_amount >> epoch
+        };
+        Ok(step_amount.min(remaining_supply))
+    }
+}
+
+/// Root witness supplied with an emission transition.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EmissionWitness {
+    pub policy_digest: [u8; 32],
+    pub prev_count_root: [u8; 32],
+    pub next_count_root: [u8; 32],
+    pub prev_spent_root: [u8; 32],
+    pub next_spent_root: [u8; 32],
+    pub prev_shard_roots_commitment: [u8; 32],
+    pub next_shard_roots_commitment: [u8; 32],
+    pub activation_shard: u64,
+    pub activated_leaf: [u8; 32],
+}
+
+impl EmissionWitness {
+    pub fn from_states(
+        prev_state: &SourceDlvState,
+        next_state: &SourceDlvState,
+        jap: &JoinActivationProof,
+    ) -> Self {
+        let shard_hash = domain_hash_bytes("DJTE.SHARD", &jap.id);
+        let activation_shard = extract_shard_index(&shard_hash, prev_state.count_smt.shard_depth);
+        Self {
+            policy_digest: prev_state.policy.digest(),
+            prev_count_root: prev_state.count_smt.root(),
+            next_count_root: next_state.count_smt.root(),
+            prev_spent_root: prev_state.spent_smt.root(),
+            next_spent_root: next_state.spent_smt.root(),
+            prev_shard_roots_commitment: shard_roots_commitment(prev_state),
+            next_shard_roots_commitment: shard_roots_commitment(next_state),
+            activation_shard,
+            activated_leaf: domain_hash_bytes("DJTE.ACTIVE", &jap.id),
+        }
+    }
+}
 
 /// Join Activation Proof (JAP)
 ///
@@ -83,6 +202,7 @@ impl EmissionReceipt {
 pub struct SourceDlvState {
     pub dlv_tip: [u8; 32],
     pub emission_index: u64,
+    pub policy: EmissionSchedule,
     pub spent_smt: SpentProofSmt,
     pub count_smt: ShardCountSmt,
     pub shard_accumulators: Vec<ShardActivationAccumulator>,
@@ -91,6 +211,15 @@ pub struct SourceDlvState {
 
 impl SourceDlvState {
     pub fn new(shard_depth: u8, total_supply: u64) -> Self {
+        Self::new_with_schedule(EmissionSchedule::default_for_source(
+            shard_depth,
+            total_supply,
+        ))
+    }
+
+    pub fn new_with_schedule(schedule: EmissionSchedule) -> Self {
+        let shard_depth = schedule.shard_depth;
+        let total_supply = schedule.total_supply;
         let num_shards = 1usize << shard_depth;
         let mut accs = Vec::with_capacity(num_shards);
         for _ in 0..num_shards {
@@ -100,6 +229,7 @@ impl SourceDlvState {
         Self {
             dlv_tip: [0u8; 32],
             emission_index: 0,
+            policy: schedule,
             spent_smt: SpentProofSmt::new(),
             count_smt: ShardCountSmt::new(shard_depth),
             shard_accumulators: accs,
@@ -126,38 +256,86 @@ impl SourceDlvState {
     }
 }
 
-/// Deterministic exact-uniform sampling over [0, n)
+fn two_pow_256_mod(n: u64) -> u64 {
+    let modulus = n as u128;
+    let mut rem = 1u128 % modulus;
+    for _ in 0..256 {
+        rem = (rem * 2) % modulus;
+    }
+    rem as u64
+}
+
+fn limit_2_256_minus(rem: u64) -> [u8; 32] {
+    if rem == 0 {
+        return [0u8; 32];
+    }
+
+    let subtract = rem - 1;
+    let mut limit = [0xffu8; 32];
+    let subtract_bytes = subtract.to_be_bytes();
+    let mut borrow = 0u16;
+    for i in (0..32).rev() {
+        let rhs = if i >= 24 {
+            u16::from(subtract_bytes[i - 24])
+        } else {
+            0
+        } + borrow;
+        let lhs = u16::from(limit[i]);
+        if lhs >= rhs {
+            limit[i] = (lhs - rhs) as u8;
+            borrow = 0;
+        } else {
+            limit[i] = (lhs + 256 - rhs) as u8;
+            borrow = 1;
+        }
+    }
+    limit
+}
+
+fn bytes_ge(a: &[u8; 32], b: &[u8; 32]) -> bool {
+    a >= b
+}
+
+fn rem_u64_be(bytes: &[u8; 32], n: u64) -> u64 {
+    let modulus = n as u128;
+    let mut rem = 0u128;
+    for byte in bytes {
+        rem = ((rem << 8) + u128::from(*byte)) % modulus;
+    }
+    rem as u64
+}
+
+fn reseed(seed: &[u8; 32], counter: u64) -> [u8; 32] {
+    let mut buf = Vec::with_capacity(32 + 8);
+    buf.extend_from_slice(seed);
+    buf.extend_from_slice(&counter.to_le_bytes());
+    domain_hash_bytes("DJTE.RESEED", &buf)
+}
+
+/// Deterministic exact-uniform sampling over [0, n).
 ///
-/// Lemire-style rejection on u64 derived from `seed`.
+/// Consumes a full 256-bit candidate. Values in the incomplete top range are
+/// rejected and deterministically reseeded until the sample is unbiased.
 pub fn uniform_index(seed: &[u8; 32], n: u64) -> Result<u64, DsmError> {
     if n <= 1 {
         return Ok(0);
     }
 
-    let threshold = n.wrapping_neg() % n;
+    let top_remainder = two_pow_256_mod(n);
+    let limit = limit_2_256_minus(top_remainder);
+    let mut candidate = *seed;
+    let mut counter = 0u64;
 
-    let mut s = *seed;
-    for _ in 0..DJTE_MAX_RESEEDS {
-        let x = u64::from_le_bytes(s[0..8].try_into().map_err(|_| DsmError::Internal {
-            context: "Failed to convert 8 bytes to u64 in uniform_index".to_string(),
-            source: None,
-        })?);
-        let m = (x as u128) * (n as u128);
-        let low = m as u64;
-
-        if low >= threshold {
-            return Ok((m >> 64) as u64);
+    loop {
+        if top_remainder == 0 || !bytes_ge(&candidate, &limit) {
+            return Ok(rem_u64_be(&candidate, n));
         }
 
-        s = domain_hash_bytes("DJTE.RESEED", &s);
+        counter = counter.checked_add(1).ok_or_else(|| {
+            DsmError::Verification("DJTE uniform_index reseed counter overflow".into())
+        })?;
+        candidate = reseed(seed, counter);
     }
-
-    let x = u64::from_le_bytes(seed[0..8].try_into().map_err(|_| DsmError::Internal {
-        context: "Failed to convert 8 bytes to u64 in uniform_index".to_string(),
-        source: None,
-    })?);
-    let m = (x as u128) * (n as u128);
-    Ok((m >> 64) as u64)
 }
 
 /// Deterministically select winner leaf for a given event index.
@@ -253,12 +431,56 @@ pub fn verify_emission(
     next_state: &SourceDlvState,
     jap: &JoinActivationProof,
     receipt: &EmissionReceipt,
+    witness: &EmissionWitness,
 ) -> Result<bool, DsmError> {
     if next_state.count_smt.shard_depth != prev_state.count_smt.shard_depth {
         return Err(DsmError::Verification("Shard depth changed".into()));
     }
+    if prev_state.policy != next_state.policy {
+        return Err(DsmError::Verification(
+            "Source DLV emission policy changed".into(),
+        ));
+    }
+    if prev_state.policy.shard_depth != prev_state.count_smt.shard_depth {
+        return Err(DsmError::Verification(
+            "Emission policy shard depth mismatch".into(),
+        ));
+    }
+    if witness.policy_digest != prev_state.policy.digest() {
+        return Err(DsmError::Verification(
+            "Emission witness policy digest mismatch".into(),
+        ));
+    }
+    if witness.prev_count_root != prev_state.count_smt.root()
+        || witness.next_count_root != next_state.count_smt.root()
+    {
+        return Err(DsmError::Verification(
+            "Emission witness count root mismatch".into(),
+        ));
+    }
+    if witness.prev_spent_root != prev_state.spent_smt.root()
+        || witness.next_spent_root != next_state.spent_smt.root()
+    {
+        return Err(DsmError::Verification(
+            "Emission witness spent root mismatch".into(),
+        ));
+    }
+    if witness.prev_shard_roots_commitment != shard_roots_commitment(prev_state)
+        || witness.next_shard_roots_commitment != shard_roots_commitment(next_state)
+    {
+        return Err(DsmError::Verification(
+            "Emission witness shard roots mismatch".into(),
+        ));
+    }
     if next_state.shard_accumulators.len() != prev_state.shard_accumulators.len() {
         return Err(DsmError::Verification("Shard set changed".into()));
+    }
+    if prev_state.remaining_supply > prev_state.policy.total_supply
+        || next_state.remaining_supply > next_state.policy.total_supply
+    {
+        return Err(DsmError::Verification(
+            "Remaining supply exceeds source DLV policy supply".into(),
+        ));
     }
 
     let expected_index = prev_state
@@ -275,6 +497,16 @@ pub fn verify_emission(
         return Err(DsmError::Verification(
             "Invalid emission index increment".into(),
         ));
+    }
+
+    let expected_amount = prev_state
+        .policy
+        .amount_for_index(expected_index, prev_state.remaining_supply)?;
+    if receipt.amount != expected_amount {
+        return Err(DsmError::Verification(format!(
+            "Emission amount mismatch: expected {expected_amount}, got {}",
+            receipt.amount
+        )));
     }
 
     let jap_hash = jap.digest();
@@ -312,12 +544,22 @@ pub fn verify_emission(
 
     let shard_hash = domain_hash_bytes("DJTE.SHARD", &jap.id);
     let shard_idx = extract_shard_index(&shard_hash, prev_state.count_smt.shard_depth);
+    if witness.activation_shard != shard_idx {
+        return Err(DsmError::Verification(
+            "Emission witness activation shard mismatch".into(),
+        ));
+    }
 
     if shard_idx as usize >= prev_state.shard_accumulators.len() {
         return Err(DsmError::Verification("Shard index out of bounds".into()));
     }
 
     let expected_new_leaf = domain_hash_bytes("DJTE.ACTIVE", &jap.id);
+    if witness.activated_leaf != expected_new_leaf {
+        return Err(DsmError::Verification(
+            "Emission witness activated leaf mismatch".into(),
+        ));
+    }
 
     for (i, (prev_acc, next_acc)) in prev_state
         .shard_accumulators
@@ -513,11 +755,67 @@ mod tests {
             &spent_root,
             &shard_commit,
         );
+        let witness = EmissionWitness::from_states(&prev, &next, &jap);
 
         assert_eq!(
             _winner_leaf,
             domain_hash_bytes("DJTE.ACTIVE", &receipt.winner_id)
         );
-        assert!(verify_emission(&prev, &next, &jap, &receipt).unwrap());
+        assert!(verify_emission(&prev, &next, &jap, &receipt, &witness).unwrap());
+    }
+
+    #[test]
+    fn test_verify_emission_rejects_arbitrary_amount() {
+        let prev = SourceDlvState::new(2, 10);
+        let jap = JoinActivationProof {
+            id: [7u8; 32],
+            gate_proof: vec![1, 2, 3],
+            nonce: [9u8; 32],
+        };
+        let jap_hash = jap.digest();
+        let emission_index = prev.emission_index + 1;
+
+        let mut next = prev.clone();
+        next.emission_index = emission_index;
+        next.remaining_supply = prev.remaining_supply - 2;
+        next.add_activation(&jap).unwrap();
+        next.spent_smt.mark_spent(jap_hash);
+
+        let receipt = EmissionReceipt {
+            emission_index,
+            winner_id: jap.id,
+            amount: 2,
+            jap_hash,
+        };
+        let receipt_digest = receipt.digest();
+        let count_root = next.count_smt.root();
+        let spent_root = next.spent_smt.root();
+        let shard_commit = shard_roots_commitment(&next);
+        next.dlv_tip = compute_next_tip(
+            &prev.dlv_tip,
+            &receipt_digest,
+            &count_root,
+            &spent_root,
+            &shard_commit,
+        );
+        let witness = EmissionWitness::from_states(&prev, &next, &jap);
+
+        let err = verify_emission(&prev, &next, &jap, &receipt, &witness)
+            .expect_err("arbitrary amount must be rejected");
+        assert!(err.to_string().contains("Emission amount mismatch"));
+    }
+
+    #[test]
+    fn test_uniform_index_uses_full_256_bit_candidate() {
+        let mut seed = [0u8; 32];
+        seed[31] = 42;
+        assert_eq!(uniform_index(&seed, 100).unwrap(), 42);
+
+        let mut high = [0u8; 32];
+        high[0] = 1;
+        assert_ne!(
+            uniform_index(&high, 257).unwrap(),
+            uniform_index(&[0u8; 32], 257).unwrap()
+        );
     }
 }

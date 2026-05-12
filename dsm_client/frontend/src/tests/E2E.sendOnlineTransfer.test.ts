@@ -110,27 +110,30 @@ describe('E2E: sendOnlineTransfer (unit-level, mocked storage)', () => {
         return wrapSuccessRaw(headers.toBinary());
       }
 
-      if (method === 'appRouterInvoke') {
-        // For these tests, we'll mock appRouterInvokeBin directly
-        return wrapSuccessEnvelope(new Uint8Array(0));
+      if (method === 'nativeBoundaryIngress') {
+        return wrapSuccessRaw(
+          new pb.IngressResponse({
+            result: { case: 'okBytes', value: new Uint8Array(0) },
+          }).toBinary(),
+        );
       }
 
       return wrapSuccessEnvelope(new Uint8Array(0));
     };
   });
 
-  it('sendOnlineTransfer succeeds via appRouterInvoke wallet.send (bytes-only)', async () => {
+  it('sendOnlineTransfer succeeds via nativeBoundaryIngress wallet.send (bytes-only)', async () => {
     const devB = new Uint8Array(32).fill(0x22);
 
-    // Mock appRouterInvokeBin to return framed Envelope with onlineTransferResponse
+    // Mock routerInvokeBin to return framed Envelope with onlineTransferResponse
     const mockAppRouterInvoke = jest.fn().mockResolvedValue(makeOnlineResponseFramed(true, 'ok', 1n));
-    jest.spyOn(require('../dsm/WebViewBridge'), 'appRouterInvokeBin').mockImplementation(mockAppRouterInvoke);
+    jest.spyOn(require('../dsm/WebViewBridge'), 'routerInvokeBin').mockImplementation(mockAppRouterInvoke);
 
     // Run sendOnlineTransfer
     const res = await dsm.sendOnlineTransfer({ to: encodeBase32Crockford(devB), amount: 1n, tokenId: 'ERA' });
     expect(res.accepted).toBe(true);
     expect(res.newBalance).toBe(1n);
-    // Verify it called appRouterInvokeBin with 'wallet.send'
+    // Verify it called routerInvokeBin with 'wallet.send'
     expect(mockAppRouterInvoke).toHaveBeenCalledWith('wallet.send', expect.any(Uint8Array));
   });
 
@@ -138,7 +141,7 @@ describe('E2E: sendOnlineTransfer (unit-level, mocked storage)', () => {
     const devB = new Uint8Array(32).fill(0x22);
 
     const mockAppRouterInvoke = jest.fn().mockResolvedValue(makeOnlineResponseFramed(true, 'ok', 7n));
-    jest.spyOn(require('../dsm/WebViewBridge'), 'appRouterInvokeBin').mockImplementation(mockAppRouterInvoke);
+    jest.spyOn(require('../dsm/WebViewBridge'), 'routerInvokeBin').mockImplementation(mockAppRouterInvoke);
 
     const res = await dsm.sendOnlineTransfer({
       to: encodeBase32Crockford(devB),
@@ -178,7 +181,7 @@ describe('E2E: sendOnlineTransfer (unit-level, mocked storage)', () => {
     };
 
     const mockAppRouterInvoke = jest.fn().mockResolvedValue(makeOnlineResponseFramed(true, 'ok', 5n));
-    jest.spyOn(require('../dsm/WebViewBridge'), 'appRouterInvokeBin').mockImplementation(mockAppRouterInvoke);
+    jest.spyOn(require('../dsm/WebViewBridge'), 'routerInvokeBin').mockImplementation(mockAppRouterInvoke);
 
     const res = await dsm.sendOnlineTransfer({ to: encodeBase32Crockford(devB), amount: 5n, tokenId: 'ERA' });
 
@@ -194,9 +197,9 @@ describe('E2E: sendOnlineTransfer (unit-level, mocked storage)', () => {
   it('error response: native reports failure and sendOnlineTransfer returns accepted=false', async () => {
     const devB = new Uint8Array(32).fill(0x22);
 
-    // Mock appRouterInvokeBin to return framed Envelope with failed OnlineTransferResponse
+    // Mock routerInvokeBin to return framed Envelope with failed OnlineTransferResponse
     const mockAppRouterInvoke = jest.fn().mockResolvedValue(makeOnlineResponseFramed(false, 'insufficient funds', 0n));
-    jest.spyOn(require('../dsm/WebViewBridge'), 'appRouterInvokeBin').mockImplementation(mockAppRouterInvoke);
+    jest.spyOn(require('../dsm/WebViewBridge'), 'routerInvokeBin').mockImplementation(mockAppRouterInvoke);
 
     const res = await (dsm as any).sendOnlineTransfer({ to: devB, amount: 2n, tokenId: 'ERA' });
     expect(res.accepted).toBe(false);
@@ -208,7 +211,7 @@ describe('E2E: sendOnlineTransfer (unit-level, mocked storage)', () => {
     const nativeError = 'wallet.send: authenticated device-tree commitment is required';
 
     const mockAppRouterInvoke = jest.fn().mockResolvedValue(makeErrorResponseFramed(nativeError));
-    jest.spyOn(require('../dsm/WebViewBridge'), 'appRouterInvokeBin').mockImplementation(mockAppRouterInvoke);
+    jest.spyOn(require('../dsm/WebViewBridge'), 'routerInvokeBin').mockImplementation(mockAppRouterInvoke);
 
     const res = await dsm.sendOnlineTransfer({ to: encodeBase32Crockford(devB), amount: 1n, tokenId: 'ERA' });
 
@@ -221,7 +224,7 @@ describe('E2E: sendOnlineTransfer (unit-level, mocked storage)', () => {
     const nativeError = 'wallet.sendSmart: authenticated device-tree commitment is required';
 
     const mockAppRouterInvoke = jest.fn().mockResolvedValue(makeErrorResponseFramed(nativeError));
-    jest.spyOn(require('../dsm/WebViewBridge'), 'appRouterInvokeBin').mockImplementation(mockAppRouterInvoke);
+    jest.spyOn(require('../dsm/WebViewBridge'), 'routerInvokeBin').mockImplementation(mockAppRouterInvoke);
 
     const res = await dsm.sendOnlineTransferSmart('alice', 9n, 'smart path', 'ERA');
 

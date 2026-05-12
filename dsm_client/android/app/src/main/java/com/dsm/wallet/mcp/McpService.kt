@@ -47,13 +47,20 @@ class McpService : Service() {
     }
 
     private val binder = LocalBinder()
+    @Volatile
+    private var foregroundStarted = false
 
     override fun onCreate() {
         super.onCreate()
         // Early class-load to ensure JNI lib is ready; Unified guards native calls
         try { Class.forName("com.dsm.wallet.bridge.Unified") } catch (_: Throwable) {}
 
-        startAsForeground()
+        foregroundStarted = startAsForeground()
+        if (!foregroundStarted) {
+            Log.w(TAG, "McpService foreground start denied; stopping service instead of running illegally")
+            stopSelf()
+            return
+        }
         Log.i(TAG, "McpService created (foreground)")
     }
 
@@ -61,10 +68,10 @@ class McpService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         // Deterministic event loop is owned by JNI/Rust; keep process sticky.
-        return START_STICKY
+        return if (foregroundStarted) START_STICKY else START_NOT_STICKY
     }
 
-    private fun startAsForeground() {
+    private fun startAsForeground(): Boolean {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
         if (Build.VERSION.SDK_INT >= 26) {
@@ -101,11 +108,11 @@ class McpService : Service() {
 
         try {
             startForeground(NOTIF_ID, notif)
+            return true
         } catch (e: Exception) {
-            // Android 12+ ForegroundServiceStartNotAllowedException when started from background
-            // Service will run without foreground status; acceptable for now
-            Log.w(TAG, "Could not start foreground (expected on Android 12+ from background): ${e.message}")
+            Log.w(TAG, "Could not start foreground: ${e.message}")
         }
+        return false
     }
 
     inner class LocalBinder : Binder() {

@@ -7,7 +7,7 @@
  * via the existing WebViewBridge.
  */
 
-import { appRouterQueryBin, appRouterInvokeBin } from '../dsm/WebViewBridge';
+import { routerQueryBin, routerInvokeBin } from '../dsm/WebViewBridge';
 import { decodeFramedEnvelopeV3 } from '../dsm/decoding';
 import logger from '../utils/logger';
 
@@ -100,7 +100,7 @@ export interface BitcoinAddress {
  * Each call increments the internal index counter.
  */
 export async function getBitcoinAddress(): Promise<BitcoinAddress> {
-  const res = await appRouterQueryBin('bitcoin.address');
+  const res = await routerQueryBin('bitcoin.address');
   const env = decodeFramedEnvelopeV3(res);
   const payload = env.payload;
   if (payload.case === 'bitcoinAddressResponse') {
@@ -126,7 +126,7 @@ export async function peekBitcoinAddress(index: number): Promise<BitcoinAddress>
     codec: Codec.PROTO,
     body: req.toBinary() as any,
   });
-  const res = await appRouterQueryBin('bitcoin.address.peek', arg.toBinary());
+  const res = await routerQueryBin('bitcoin.address.peek', arg.toBinary());
   const env = decodeFramedEnvelopeV3(res);
   const payload = env.payload;
   if (payload.case === 'bitcoinAddressResponse') {
@@ -155,7 +155,7 @@ export async function selectBitcoinAddress(index: number): Promise<BitcoinAddres
     codec: Codec.PROTO,
     body: req.toBinary() as any,
   });
-  const res = await appRouterInvokeBin('bitcoin.address.select', arg.toBinary());
+  const res = await routerInvokeBin('bitcoin.address.select', arg.toBinary());
   const env = decodeFramedEnvelopeV3(res);
   const payload = env.payload;
   if (payload.case === 'bitcoinAddressSelectResponse') {
@@ -199,7 +199,7 @@ export interface BitcoinWalletHealth {
  * Get the dBTC balance for this wallet.
  */
 export async function getDbtcBalance(): Promise<DbtcBalance> {
-  const res = await appRouterQueryBin('bitcoin.balance');
+  const res = await routerQueryBin('bitcoin.balance');
   const env = safeDecodeEnvelope('bitcoin.balance', res);
   if (!env) return { available: BigInt(0), locked: BigInt(0), source: 'UNKNOWN' };
   const payload = env.payload;
@@ -223,7 +223,7 @@ export async function getDbtcBalance(): Promise<DbtcBalance> {
  * excluded from the spendable number.
  */
 export async function getNativeBtcBalance(): Promise<NativeBtcBalance> {
-  const res = await appRouterQueryBin('bitcoin.wallet.balance');
+  const res = await routerQueryBin('bitcoin.wallet.balance');
   const env = safeDecodeEnvelope('bitcoin.wallet.balance', res);
   if (!env) return { available: BigInt(0), locked: BigInt(0), source: 'UNKNOWN' };
   const payload = env.payload;
@@ -248,7 +248,7 @@ export async function getNativeBtcBalance(): Promise<NativeBtcBalance> {
 }
 
 export async function getBitcoinWalletHealth(): Promise<BitcoinWalletHealth> {
-  const res = await appRouterQueryBin('bitcoin.wallet.health');
+  const res = await routerQueryBin('bitcoin.wallet.health');
   const env = decodeFramedEnvelopeV3(res);
   const payload = env.payload;
   if (payload.case === 'bitcoinWalletHealthResponse') {
@@ -302,7 +302,7 @@ export interface BitcoinWalletList {
  * List all active and completed deposits.
  */
 export async function listDeposits(): Promise<DepositEntry[]> {
-  const res = await appRouterQueryBin('bitcoin.deposit.list');
+  const res = await routerQueryBin('bitcoin.deposit.list');
   const env = decodeFramedEnvelopeV3(res);
   const payload = env.payload;
   if (payload.case === 'bitcoinDepositListResponse') {
@@ -333,7 +333,7 @@ export async function getDepositStatus(vaultOpId: string): Promise<DepositRespon
     codec: Codec.PROTO,
     body: req.toBinary() as any,
   });
-  const res = await appRouterQueryBin('bitcoin.deposit.status', arg.toBinary());
+  const res = await routerQueryBin('bitcoin.deposit.status', arg.toBinary());
   const env = decodeFramedEnvelopeV3(res);
   const payload = env.payload;
   if (payload.case === 'depositResponse') {
@@ -361,7 +361,7 @@ export async function checkConfirmations(vaultOpId: string): Promise<{
     codec: Codec.PROTO,
     body: req.toBinary() as any,
   });
-  const res = await appRouterQueryBin('bitcoin.deposit.check_confirmations', arg.toBinary());
+  const res = await routerQueryBin('bitcoin.deposit.check_confirmations', arg.toBinary());
   const env = decodeFramedEnvelopeV3(res);
   const payload = env.payload;
   if (payload.case === 'depositResponse') {
@@ -404,7 +404,7 @@ export async function initiateDeposit(
     codec: Codec.PROTO,
     body: req.toBinary() as any,
   });
-  const res = await appRouterInvokeBin('bitcoin.deposit.initiate', arg.toBinary());
+  const res = await routerInvokeBin('bitcoin.deposit.initiate', arg.toBinary());
   const env = decodeFramedEnvelopeV3(res);
   const payload = env.payload;
   if (payload.case === 'depositResponse') {
@@ -425,7 +425,7 @@ export async function refundDeposit(vaultOpId: string): Promise<DepositResponse>
     codec: Codec.PROTO,
     body: req.toBinary() as any,
   });
-  const res = await appRouterInvokeBin('bitcoin.deposit.refund', arg.toBinary());
+  const res = await routerInvokeBin('bitcoin.deposit.refund', arg.toBinary());
   const env = decodeFramedEnvelopeV3(res);
   const payload = env.payload;
   if (payload.case === 'depositResponse') {
@@ -463,7 +463,7 @@ export async function buildClaimTx(
     codec: Codec.PROTO,
     body: req.toBinary() as any,
   });
-  const res = await appRouterInvokeBin('bitcoin.claim.build', arg.toBinary());
+  const res = await routerInvokeBin('bitcoin.claim.build', arg.toBinary());
   const env = decodeFramedEnvelopeV3(res);
   const payload = env.payload;
   if (payload.case === 'bitcoinClaimTxResponse') {
@@ -491,7 +491,7 @@ export async function createBitcoinWallet(
     codec: Codec.PROTO,
     body: req.toBinary() as any,
   });
-  const res = await appRouterInvokeBin('bitcoin.wallet.create', arg.toBinary());
+  const res = await routerInvokeBin('bitcoin.wallet.create', arg.toBinary());
   const env = decodeFramedEnvelopeV3(res);
   const payload = env.payload;
   if (payload.case === 'bitcoinWalletCreateResponse') {
@@ -521,7 +521,7 @@ export async function importBitcoinWallet(
     codec: Codec.PROTO,
     body: req.toBinary() as any,
   });
-  const res = await appRouterInvokeBin('bitcoin.wallet.import', arg.toBinary());
+  const res = await routerInvokeBin('bitcoin.wallet.import', arg.toBinary());
   const env = decodeFramedEnvelopeV3(res);
   const payload = env.payload;
   if (payload.case === 'bitcoinWalletImportResponse') {
@@ -539,7 +539,7 @@ export async function listBitcoinWalletAccounts(): Promise<BitcoinWalletList> {
     codec: Codec.PROTO,
     body: req.toBinary() as any,
   });
-  const res = await appRouterQueryBin('bitcoin.wallet.list', arg.toBinary());
+  const res = await routerQueryBin('bitcoin.wallet.list', arg.toBinary());
   const env = decodeFramedEnvelopeV3(res);
   const payload = env.payload;
   if (payload.case === 'bitcoinWalletListResponse') {
@@ -569,7 +569,7 @@ export async function selectBitcoinWalletAccount(accountId: string): Promise<Bit
     codec: Codec.PROTO,
     body: req.toBinary() as any,
   });
-  const res = await appRouterInvokeBin('bitcoin.wallet.select', arg.toBinary());
+  const res = await routerInvokeBin('bitcoin.wallet.select', arg.toBinary());
   const env = decodeFramedEnvelopeV3(res);
   const payload = env.payload;
   if (payload.case === 'bitcoinWalletSelectResponse') {
@@ -593,7 +593,7 @@ export async function broadcastTx(rawTx: Uint8Array): Promise<Uint8Array> {
     codec: Codec.PROTO,
     body: req.toBinary() as any,
   });
-  const res = await appRouterInvokeBin('bitcoin.tx.broadcast', arg.toBinary());
+  const res = await routerInvokeBin('bitcoin.tx.broadcast', arg.toBinary());
   const env = decodeFramedEnvelopeV3(res);
   const payload = env.payload;
   if (payload.case === 'bitcoinBroadcastResponse') {
@@ -629,7 +629,7 @@ export async function autoClaimHtlc(
     codec: Codec.PROTO,
     body: req.toBinary() as any,
   });
-  const res = await appRouterInvokeBin('bitcoin.claim.auto', arg.toBinary());
+  const res = await routerInvokeBin('bitcoin.claim.auto', arg.toBinary());
   const env = decodeFramedEnvelopeV3(res);
   const payload = env.payload;
   if (payload.case === 'bitcoinAutoClaimResponse') {
@@ -654,7 +654,7 @@ export async function getTxStatus(
     codec: Codec.PROTO,
     body: req.toBinary() as any,
   });
-  const res = await appRouterQueryBin('bitcoin.tx.status', arg.toBinary());
+  const res = await routerQueryBin('bitcoin.tx.status', arg.toBinary());
   const env = decodeFramedEnvelopeV3(res);
   const payload = env.payload;
   if (payload.case === 'bitcoinTxStatusResponse') {
@@ -692,7 +692,7 @@ export async function listVaults(): Promise<VaultSummary[]> {
     codec: Codec.PROTO,
     body: new Uint8Array(0) as any, // BitcoinVaultListRequest has no fields
   });
-  const res = await appRouterQueryBin('bitcoin.vault.list', arg.toBinary());
+  const res = await routerQueryBin('bitcoin.vault.list', arg.toBinary());
   const env = decodeFramedEnvelopeV3(res);
   const payload = env.payload;
   if (payload.case === 'bitcoinVaultListResponse') {
@@ -721,7 +721,7 @@ export async function getVaultDetail(vaultId: string): Promise<VaultDetail> {
     codec: Codec.PROTO,
     body: req.toBinary() as any,
   });
-  const res = await appRouterQueryBin('bitcoin.vault.get', arg.toBinary());
+  const res = await routerQueryBin('bitcoin.vault.get', arg.toBinary());
   const env = decodeFramedEnvelopeV3(res);
   const payload = env.payload;
   if (payload.case === 'bitcoinVaultGetResponse') {
@@ -785,7 +785,7 @@ export async function estimateFee(
     isFractional,
   });
   const pack = new ArgPack({ codec: Codec.PROTO, body: req.toBinary() as any });
-  const res = await appRouterQueryBin('bitcoin.fee.estimate', pack.toBinary());
+  const res = await routerQueryBin('bitcoin.fee.estimate', pack.toBinary());
   const env = decodeFramedEnvelopeV3(res);
   const payload = env.payload;
   if (payload.case === 'bitcoinFeeEstimateResponse') {
@@ -821,7 +821,7 @@ export async function buildRefundTx(
     signingIndex,
   });
   const pack = new ArgPack({ codec: Codec.PROTO, body: req.toBinary() as any });
-  const res = await appRouterInvokeBin('bitcoin.refund.build', pack.toBinary());
+  const res = await routerInvokeBin('bitcoin.refund.build', pack.toBinary());
   const env = decodeFramedEnvelopeV3(res);
   const payload = env.payload;
   if (payload.case === 'bitcoinRefundTxResponse') {
@@ -939,7 +939,7 @@ export async function reviewWithdrawalPlan(
     destinationAddress,
   });
   const pack = new ArgPack({ codec: Codec.PROTO, body: req.toBinary() as any });
-  const res = await appRouterQueryBin('bitcoin.withdraw.plan', pack.toBinary());
+  const res = await routerQueryBin('bitcoin.withdraw.plan', pack.toBinary());
   const env = decodeFramedEnvelopeV3(res);
   const payload = env.payload;
   if (payload.case === 'bitcoinWithdrawalPlanResponse') {
@@ -981,7 +981,7 @@ export async function executeWithdrawalPlan(
     destinationAddress,
   });
   const pack = new ArgPack({ codec: Codec.PROTO, body: req.toBinary() as any });
-  const res = await appRouterInvokeBin('bitcoin.withdraw.execute', pack.toBinary());
+  const res = await routerInvokeBin('bitcoin.withdraw.execute', pack.toBinary());
   const env = decodeFramedEnvelopeV3(res);
   const payload = env.payload;
   if (payload.case === 'bitcoinWithdrawalExecuteResponse') {
@@ -1019,7 +1019,7 @@ export async function fundAndBroadcast(vaultOpId: string): Promise<string> {
     codec: Codec.PROTO,
     body: req.toBinary() as any,
   });
-  const res = await appRouterInvokeBin('bitcoin.deposit.fund_and_broadcast', arg.toBinary());
+  const res = await routerInvokeBin('bitcoin.deposit.fund_and_broadcast', arg.toBinary());
   const env = decodeFramedEnvelopeV3(res);
   const payload = env.payload;
   if (payload.case === 'appStateResponse') {
@@ -1042,7 +1042,7 @@ export async function awaitAndComplete(vaultOpId: string): Promise<string> {
     codec: Codec.PROTO,
     body: req.toBinary() as any,
   });
-  const res = await appRouterInvokeBin('bitcoin.deposit.await_and_complete', arg.toBinary());
+  const res = await routerInvokeBin('bitcoin.deposit.await_and_complete', arg.toBinary());
   const env = decodeFramedEnvelopeV3(res);
   const payload = env.payload;
   if (payload.case === 'appStateResponse') {
@@ -1069,7 +1069,7 @@ export async function completeExitDeposit(vaultOpId: string): Promise<string> {
     codec: Codec.PROTO,
     body: req.toBinary() as any,
   });
-  const res = await appRouterInvokeBin('bitcoin.exit.complete', arg.toBinary());
+  const res = await routerInvokeBin('bitcoin.exit.complete', arg.toBinary());
   const env = decodeFramedEnvelopeV3(res);
   const payload = env.payload;
   if (payload.case === 'appStateResponse') {
@@ -1097,7 +1097,7 @@ export async function settleWithdrawals(): Promise<string> {
     body: req.toBinary() as any,
   });
   try {
-    const res = await appRouterInvokeBin('bitcoin.withdraw.settle', arg.toBinary());
+    const res = await routerInvokeBin('bitcoin.withdraw.settle', arg.toBinary());
     const env = decodeFramedEnvelopeV3(res);
     const payload = env.payload;
     if (payload.case === 'appStateResponse') {

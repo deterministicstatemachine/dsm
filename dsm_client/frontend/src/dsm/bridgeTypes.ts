@@ -5,6 +5,9 @@ export interface AndroidBridgeV3 {
   __binary?: boolean;
   sendMessageBin?: (payload: Uint8Array) => Promise<Uint8Array>;
   __callBin?: (payload: Uint8Array) => Promise<Uint8Array>;
+  startup?: (payload: Uint8Array) => Promise<Uint8Array>;
+  ingress?: (payload: Uint8Array) => Promise<Uint8Array>;
+  hostRequest?: (payload: Uint8Array) => Promise<Uint8Array>;
   isAvailable?: () => boolean;
 
   // Optional bridge error helper

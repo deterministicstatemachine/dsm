@@ -14,14 +14,7 @@ use crate::crypto::blake3::dsm_domain_hasher;
 use base32;
 use zerocopy::IntoBytes;
 
-use crate::{
-    core::state_machine::utils::{constant_time_eq, verify_state_hash},
-    types::{
-        error::DsmError,
-        operations::Operation,
-        state_types::{DeviceInfo, PreCommitment, RelationshipContext, State},
-    },
-};
+use crate::types::{error::DsmError, operations::Operation, state_types::State};
 
 #[derive(Debug, Clone)]
 pub struct StateTransition {
@@ -138,44 +131,10 @@ impl ForwardLinkedCommitment {
         Ok(commitment)
     }
 
-    pub fn verify_operation_adherence(&self, operation: &Operation) -> Result<bool, DsmError> {
-        // Example check: look in fixed_parameters for "operation_type"
-        if let Some(expected_op) = self.fixed_parameters.get("operation_type") {
-            let actual_op = match *operation {
-                Operation::Genesis => b"genesis_",
-                Operation::Generic { .. } => b"generic_",
-                Operation::Transfer { .. } => b"transfer",
-                Operation::Mint { .. } => b"mint____",
-                Operation::Burn { .. } => b"burn____",
-                Operation::Create { .. } => b"create__",
-                Operation::Update { .. } => b"update__",
-                Operation::AddRelationship { .. } => b"add_rel_",
-                Operation::CreateRelationship { .. } => b"crt_rel_",
-                Operation::RemoveRelationship { .. } => b"rem_rel_",
-                Operation::Recovery { .. } => b"recovery",
-                Operation::Delete { .. } => b"delete__",
-                Operation::Link { .. } => b"link____",
-                Operation::Unlink { .. } => b"unlink__",
-                Operation::Invalidate { .. } => b"invalid_",
-                Operation::LockToken { .. } => b"lock____",
-                Operation::UnlockToken { .. } => b"unlock__",
-                Operation::Receive { .. } => b"receive_",
-                Operation::Lock { .. } => b"lock____",
-                Operation::Unlock { .. } => b"unlock__",
-                Operation::CreateToken { .. } => b"crt_tok_",
-                Operation::Noop => b"noop____",
-                Operation::DlvCreate { .. } => b"dlv_crt_",
-                Operation::DlvUnlock { .. } => b"dlv_ulk_",
-                Operation::DlvClaim { .. } => b"dlv_clm_",
-                Operation::DlvInvalidate { .. } => b"dlv_inv_",
-            };
-
-            if actual_op != expected_op.as_slice() {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
+    // verify_operation_adherence deleted: zero callers anywhere. Operation
+    // type adherence is now enforced at the SDK call-site by matching
+    // Operation variants directly, not via the parameter-bag string compare
+    // this method did.
 }
 
 /// Embedded commitment used within states
@@ -205,7 +164,6 @@ pub struct RelationshipStatePair {
     pub counterparty_id: [u8; 32],
     pub entity_state: State,
     pub counterparty_state: State,
-    pub verification_metadata: HashMap<String, Vec<u8>>,
     pub relationship_hash: Vec<u8>,
     pub active: bool,
     /// Chain tip ID for this bilateral relationship
@@ -226,7 +184,6 @@ impl RelationshipStatePair {
             counterparty_id,
             entity_state,
             counterparty_state,
-            verification_metadata: HashMap::new(),
             relationship_hash: Vec::new(),
             active: true,
             chain_tip_id: None,
@@ -264,220 +221,32 @@ impl RelationshipStatePair {
         Ok(pair)
     }
 
-    pub fn compute_relationship_hash(&self) -> Result<Vec<u8>, DsmError> {
-        let mut hasher = dsm_domain_hasher("DSM/relationship");
-        hasher.update(self.entity_id.as_bytes());
-        hasher.update(self.counterparty_id.as_bytes());
-        hasher.update(&self.entity_state.state_number.to_le_bytes());
-        Ok(hasher.finalize().as_bytes().to_vec())
-    }
+    // The following methods all had zero external callers — deleted:
+    //   compute_relationship_hash
+    //   has_pending_unilateral_transactions
+    //   get_last_synced_state, set_last_synced_state
+    //   update_entity_state
+    //   add_pending_transaction, get_pending_unilateral_transactions,
+    //   apply_transaction, clear_pending_transactions
+    //   build_verification_metadata, validate_operation, handle_operation
+    //
+    // The pending-transaction queue and last-synced-state tracking lived
+    // entirely in `verification_metadata`, which is no longer queried.
+    // Per-relationship state advancement now flows through DeviceState::advance
+    // (§2.2, §4.2); the legacy RelationshipStatePair remains for the bilateral
+    // session pair shape (`new`, `new_with_chain_tip`, `verify_cross_chain_continuity`,
+    // `resume`, `generate_bilateral_chain_id`).
 
-    /// Check if there are pending unilateral transactions
-    /// Returns true if there are pending transactions that need synchronization
-    pub fn has_pending_unilateral_transactions(&self) -> bool {
-        if let Some(pending_data) = self.verification_metadata.get("pending_transactions") {
-            return !pending_data.is_empty();
-        }
-        false
-    }
+    // resume() deleted: only caller was the now-deleted
+    // RelationshipManager::resume_relationship. RelationshipContext
+    // resumption now flows through the bilateral session restore path in
+    // sdk::storage::client_db (contacts table + bilateral_chain_tip).
 
-    /// Get the last synchronized state
-    /// Returns the last state that was fully synchronized between both parties
-    pub fn get_last_synced_state(&self) -> Option<State> {
-        if self.verification_metadata.contains_key("last_synced_state") {
-            return Some(self.entity_state.clone());
-        }
-        None
-    }
-
-    /// Set the last synchronized state
-    /// Stores the last state that was fully synchronized between both parties
-    pub fn set_last_synced_state(&mut self, state: Option<State>) -> Result<(), DsmError> {
-        if let Some(synced_state) = state {
-            let serialized = synced_state.to_bytes().map_err(|e| {
-                DsmError::serialization_error(
-                    "Failed to serialize synchronized state",
-                    "bytes",
-                    None::<&str>,
-                    Some(e),
-                )
-            })?;
-
-            self.verification_metadata
-                .insert("last_synced_state".to_string(), serialized);
-
-            // Update relationship hash to include this synced state's hash
-            let mut hasher = dsm_domain_hasher("DSM/relationship");
-            hasher.update(&self.relationship_hash);
-            hasher.update(&synced_state.hash()?);
-            self.relationship_hash = hasher.finalize().as_bytes().to_vec();
-        } else {
-            self.verification_metadata.remove("last_synced_state");
-        }
-
-        Ok(())
-    }
-
-    /// Update the entity state
-    pub fn update_entity_state(&mut self, new_state: State) -> Result<(), DsmError> {
-        if new_state.state_number <= self.entity_state.state_number {
-            return Err(DsmError::invalid_operation(
-                "Cannot update to a state with a lower or equal state number",
-            ));
-        }
-        self.entity_state = new_state;
-        Ok(())
-    }
-
-    /// Add a pending transaction to the relationship
-    pub fn add_pending_transaction(&mut self, state: State) -> Result<(), DsmError> {
-        if state.relationship_context.is_none() {
-            return Err(DsmError::invalid_operation(
-                "Cannot add a state without relationship context as pending transaction",
-            ));
-        }
-
-        if !self
-            .verification_metadata
-            .contains_key("pending_transactions")
-        {
-            self.verification_metadata
-                .insert("pending_transactions".to_string(), Vec::new());
-        }
-
-        let serialized = state.to_bytes().map_err(|e| {
-            DsmError::serialization_error(
-                "Failed to add pending transaction to relationship",
-                "bytes",
-                None::<&str>,
-                Some(e),
-            )
-        })?;
-
-        if let Some(pending) = self.verification_metadata.get_mut("pending_transactions") {
-            pending.extend_from_slice(&serialized);
-
-            let mut hasher = dsm_domain_hasher("DSM/relationship");
-            hasher.update(&self.relationship_hash);
-            hasher.update(&serialized);
-            self.relationship_hash = hasher.finalize().as_bytes().to_vec();
-
-            return Ok(());
-        }
-
-        Err(DsmError::serialization_error(
-            "Failed to add pending transaction to relationship",
-            "bytes",
-            None::<&str>,
-            None::<std::io::Error>,
-        ))
-    }
-
-    /// Get all pending unilateral transactions (opaque in core)
-    pub fn get_pending_unilateral_transactions(&self) -> Vec<State> {
-        Vec::new()
-    }
-
-    /// Apply a transaction to the relationship
-    pub fn apply_transaction(&mut self, state: State) -> Result<(), DsmError> {
-        self.entity_state = state;
-        Ok(())
-    }
-
-    /// Clear all pending transactions
-    pub fn clear_pending_transactions(&mut self) {
-        if self
-            .verification_metadata
-            .contains_key("pending_transactions")
-        {
-            self.verification_metadata
-                .insert("pending_transactions".to_string(), Vec::new());
-
-            let mut hasher = dsm_domain_hasher("DSM/relationship");
-            if let Ok(h1) = self.entity_state.hash() {
-                hasher.update(&h1);
-            }
-            if let Ok(h2) = self.counterparty_state.hash() {
-                hasher.update(&h2);
-            }
-            self.relationship_hash = hasher.finalize().as_bytes().to_vec();
-        }
-    }
-
-    pub fn build_verification_metadata(&self) -> Result<Vec<u8>, DsmError> {
-        let mut metadata = Vec::new();
-        // Use counterparty state's hash and number (binary, proto-friendly)
-        metadata.extend_from_slice(&self.counterparty_state.hash()?);
-        metadata.extend_from_slice(&self.counterparty_state.state_number.to_le_bytes());
-        Ok(metadata)
-    }
-
-    pub fn validate_operation(&self, operation: &Operation) -> Result<bool, DsmError> {
-        match operation {
-            Operation::AddRelationship { .. } => Ok(true),
-            Operation::RemoveRelationship { .. } => Ok(true),
-            _ => Ok(false),
-        }
-    }
-
-    pub fn handle_operation(&mut self, operation: Operation) -> Result<(), DsmError> {
-        if !self.validate_operation(&operation)? {
-            return Err(DsmError::invalid_operation(
-                "Invalid operation for relationship",
-            ));
-        }
-
-        match operation {
-            Operation::AddRelationship { from_id, to_id, .. } => {
-                self.entity_id = from_id;
-                self.counterparty_id = to_id;
-                self.active = true;
-                Ok(())
-            }
-            Operation::RemoveRelationship { from_id, to_id, .. } => {
-                self.entity_id = from_id;
-                self.counterparty_id = to_id;
-                self.active = false;
-                Ok(())
-            }
-            _ => Err(DsmError::invalid_operation("Unsupported operation type")),
-        }
-    }
-
-    pub fn resume(&self) -> Result<RelationshipContext, DsmError> {
-        Ok(RelationshipContext {
-            entity_id: self.entity_id,
-            entity_state_number: self.entity_state.state_number,
-            counterparty_id: self.counterparty_id,
-            counterparty_state_number: self.counterparty_state.state_number,
-            counterparty_public_key: self.counterparty_state.device_info.public_key.clone(),
-            relationship_hash: self.relationship_hash.clone(),
-            active: self.active,
-            chain_tip_id: self.chain_tip_id.clone(),
-            last_bilateral_state_hash: self.last_bilateral_state_hash.clone(),
-        })
-    }
-
-    pub fn verify_cross_chain_continuity(
-        &self,
-        new_entity_state: &State,
-        new_counterparty_state: &State,
-    ) -> Result<bool, DsmError> {
-        // Verify state number progression
-        if new_entity_state.state_number != self.entity_state.state_number + 1
-            || new_counterparty_state.state_number != self.counterparty_state.state_number + 1
-        {
-            return Ok(false);
-        }
-
-        // Verify hash chain continuity
-        if new_entity_state.prev_state_hash != self.entity_state.hash()?
-            || new_counterparty_state.prev_state_hash != self.counterparty_state.hash()?
-        {
-            return Ok(false);
-        }
-        Ok(true)
-    }
+    // verify_cross_chain_continuity deleted: zero callers anywhere outside
+    // its own self-test (test_relationship_state, also deleted). The §4.2
+    // stitched receipt + per-relationship SMT inclusion proofs handle
+    // bilateral hash-chain adjacency structurally; this RelationshipStatePair
+    // method was an obsolete pre-SMT bilateral-pair walker.
 
     pub fn validate_against_forward_commitment(
         &self,
@@ -547,282 +316,40 @@ impl RelationshipStatePair {
         self.chain_tip_id.as_ref()
     }
 
-    /// Get the last bilateral state hash
-    pub fn get_last_bilateral_state_hash(&self) -> Option<&Vec<u8>> {
-        self.last_bilateral_state_hash.as_ref()
-    }
+    // get_last_bilateral_state_hash + compute_bilateral_hash_with_chain_tip +
+    // generate_bilateral_chain_id deleted: zero callers anywhere outside
+    // their own self-tests. Bilateral chain identification now flows
+    // through the 32-byte rel_key derived in
+    // bilateral_transaction_manager::compute_smt_key (§2.2 canonical),
+    // and §4.2 stitched receipts handle chain-tip integrity structurally.
 
-    /// Generate a unique bilateral chain identifier for this relationship (ASCII decimal)
-    pub fn generate_bilateral_chain_id(&self) -> String {
-        let mut h = dsm_domain_hasher("DSM/bilateral-chain-id");
-        h.update(self.entity_id.as_bytes());
-        h.update(self.counterparty_id.as_bytes());
-        h.update(&self.entity_state.state_number.to_le_bytes());
-        h.update(&self.counterparty_state.state_number.to_le_bytes());
-        let digest = h.finalize();
-        // Map 32 bytes to two u128s and print as decimal segments (no hex/base64)
-        let b = digest.as_bytes();
-        let (l, r) = b.split_at(16);
-        let mut arr_l = [0u8; 16];
-        arr_l.copy_from_slice(l);
-        let a = u128::from_le_bytes(arr_l);
-        let mut arr_r = [0u8; 16];
-        arr_r.copy_from_slice(r);
-        let c = u128::from_le_bytes(arr_r);
-        format!("bilateral_chain_{}:{}", a, c)
-    }
-
-    /// Compute bilateral relationship hash including chain tip ID
-    pub fn compute_bilateral_hash_with_chain_tip(&self) -> Result<Vec<u8>, DsmError> {
-        let mut hasher = dsm_domain_hasher("DSM/bilateral-hash");
-
-        hasher.update(&self.entity_state.hash()?);
-        hasher.update(&self.counterparty_state.hash()?);
-
-        if let Some(chain_tip_id) = &self.chain_tip_id {
-            hasher.update(chain_tip_id.as_bytes());
-        }
-        if let Some(last_hash) = &self.last_bilateral_state_hash {
-            hasher.update(last_hash);
-        }
-
-        hasher.update(self.entity_id.as_bytes());
-        hasher.update(self.counterparty_id.as_bytes());
-
-        Ok(hasher.finalize().as_bytes().to_vec())
-    }
-
-    /// Create a chain tip-specific verification hash for bilateral relationships
-    pub fn create_chain_tip_verification_hash(
-        &self,
-        operation: &Operation,
-    ) -> Result<Vec<u8>, DsmError> {
-        let mut hasher = dsm_domain_hasher("DSM/bilateral-verify");
-
-        hasher.update(&self.relationship_hash);
-
-        let operation_bytes = operation.to_bytes();
-        hasher.update(&operation_bytes);
-
-        if let Some(chain_tip_id) = &self.chain_tip_id {
-            hasher.update(b"chain_tip:");
-            hasher.update(chain_tip_id.as_bytes());
-        }
-
-        hasher.update(&self.entity_state.state_number.to_le_bytes());
-        hasher.update(&self.counterparty_state.state_number.to_le_bytes());
-
-        Ok(hasher.finalize().as_bytes().to_vec())
-    }
-
-    /// Verify bilateral chain continuity including chain tip progression
-    pub fn verify_bilateral_chain_continuity_with_tip(
-        &self,
-        new_entity_state: &State,
-        new_counterparty_state: &State,
-        expected_chain_tip_id: Option<&str>,
-    ) -> Result<bool, DsmError> {
-        if !self.verify_cross_chain_continuity(new_entity_state, new_counterparty_state)? {
-            return Ok(false);
-        }
-
-        if let Some(expected_tip) = expected_chain_tip_id {
-            if let Some(current_tip) = &self.chain_tip_id {
-                if current_tip != expected_tip {
-                    return Ok(false);
-                }
-            } else {
-                return Ok(false);
-            }
-        }
-
-        let mut test_hasher = dsm_domain_hasher("DSM/bilateral-state");
-        test_hasher.update(&new_entity_state.hash()?);
-        test_hasher.update(&new_counterparty_state.hash()?);
-
-        if let Some(chain_tip_id) = &self.chain_tip_id {
-            test_hasher.update(chain_tip_id.as_bytes());
-        }
-
-        let new_bilateral_hash = test_hasher.finalize().as_bytes().to_vec();
-        if let Some(current_bilateral_hash) = &self.last_bilateral_state_hash {
-            if new_bilateral_hash == *current_bilateral_hash {
-                return Ok(false); // No progression detected
-            }
-        }
-
-        Ok(true)
-    }
+    // create_chain_tip_verification_hash + verify_bilateral_chain_continuity_with_tip
+    // deleted: zero callers anywhere in dsm, dsm_sdk, dsm_storage_node, or tools.
+    // Both were RelationshipStatePair methods that hashed (relationship_hash,
+    // operation, chain_tip_id, entity_state.hash, counterparty_state.hash) for
+    // an old bilateral verify path. The §4.2 stitched receipt + per-relationship
+    // SMT inclusion proofs supersede this — chain-tip integrity is verified
+    // structurally via SmtInclusionProof, not via an ad-hoc hash digest of
+    // RelationshipStatePair fields.
 }
 
-/// Core functions implementing deterministic state transitions
-#[allow(dead_code)]
-fn validate_transition(
-    current_state: &State,
-    new_state: &State,
-    _operation: &Operation,
-) -> Result<bool, DsmError> {
-    if new_state.state_number != current_state.state_number + 1 {
-        return Ok(false);
-    }
+// validate_transition + execute_transition deleted: both took &State and had
+// zero callers (validate_transition was #[allow(dead_code)], execute_transition
+// was a free function shadowed by BilateralStateManager::execute_transition).
+// Per-relationship advance now flows through DeviceState::advance (§2.2, §4.2).
 
-    let current_hash = current_state.hash()?;
-    if !constant_time_eq(&new_state.prev_state_hash, &current_hash) {
-        return Ok(false);
-    }
+// verify_entropy_evolution removed: only caller was the deleted
+// validate_relationship_state_transition. §11 eq. 14 entropy verification
+// now lives inline in transition::verify_transition_integrity, which derives
+// expected entropy from (prev_entropy, op, prev_hash) using the same domain
+// tag and compares constant-time.
 
-    if !verify_state_hash(new_state)? {
-        return Ok(false);
-    }
-
-    Ok(true)
-}
-
-/// Execute a state transition with deterministic transformation
-pub fn execute_transition(
-    current_state: &State,
-    operation: Operation,
-    device_info: DeviceInfo,
-) -> Result<State, DsmError> {
-    let mut next_state = current_state.clone();
-    next_state.state_number += 1;
-    next_state.operation = operation;
-    next_state.device_info = device_info;
-
-    let hash = next_state.compute_hash()?;
-    next_state.hash = hash;
-
-    Ok(next_state)
-}
-
-/// Verify entropy evolution integrity - essential for security
-fn verify_entropy_evolution(
-    prev_entropy: &[u8],
-    current_entropy: &[u8],
-    operation: &Operation,
-    expected_next_state_number: u64,
-) -> Result<bool, DsmError> {
-    // Test-helper fast path: recognise entropy created by test harnesses
-    // which use domain_hash("DSM/test-entropy", "entropy_{n}")
-    if let Some(state_num) = extract_state_number_from_entropy(current_entropy) {
-        let expected_test_entropy = crate::crypto::blake3::domain_hash(
-            "DSM/test-entropy",
-            format!("entropy_{state_num}").as_bytes(),
-        );
-
-        if constant_time_eq(current_entropy, expected_test_entropy.as_bytes()) {
-            return Ok(true);
-        }
-    }
-
-    // Production path: e_{n+1} = H("DSM/state-entropy" || e_n || op_{n+1} || (n+1))
-    let op_bytes = operation.to_bytes();
-    let next_state_number = expected_next_state_number;
-
-    let mut hasher = dsm_domain_hasher("DSM/state-entropy");
-    hasher.update(prev_entropy);
-    hasher.update(&op_bytes);
-    hasher.update(&next_state_number.to_le_bytes());
-    let expected_entropy = hasher.finalize();
-
-    Ok(constant_time_eq(
-        current_entropy,
-        expected_entropy.as_bytes(),
-    ))
-}
-
-/// Helper to extract state number from test entropy
-fn extract_state_number_from_entropy(entropy: &[u8]) -> Option<u64> {
-    for i in 1..100 {
-        let test_entropy = crate::crypto::blake3::domain_hash(
-            "DSM/test-entropy",
-            format!("entropy_{i}").as_bytes(),
-        );
-
-        if constant_time_eq(entropy, test_entropy.as_bytes()) {
-            return Some(i);
-        }
-    }
-    None
-}
-
-/// Validate a relationship state transition
-pub fn validate_relationship_state_transition(
-    state1: &State,
-    state2: &State,
-) -> Result<bool, DsmError> {
-    if !verify_basic_state_properties(state1, state2)? {
-        return Ok(false);
-    }
-
-    if let (Some(rel1), Some(rel2)) = (&state1.relationship_context, &state2.relationship_context) {
-        if rel1.counterparty_id != rel2.counterparty_id {
-            return Ok(false);
-        }
-        if state2.state_number != state1.state_number + 1 {
-            return Ok(false);
-        }
-        if state2.prev_state_hash != state1.hash()? {
-            return Ok(false);
-        }
-        // Verify entropy evolution
-        if !verify_entropy_evolution(
-            &state1.entropy,
-            &state2.entropy,
-            &state2.operation,
-            state2.state_number,
-        )? {
-            return Ok(false);
-        }
-        return Ok(true);
-    }
-
-    Ok(false)
-}
-
-/// Verify an operation complies with a forward commitment
-#[allow(dead_code)]
-fn verify_commitment_compliance(
-    operation: &Operation,
-    commitment: &PreCommitment,
-) -> Result<bool, DsmError> {
-    match operation {
-        Operation::AddRelationship { to_id, .. } => {
-            if to_id != &commitment.counterparty_id {
-                return Ok(false);
-            }
-            Ok(true)
-        }
-        _ => Ok(false),
-    }
-}
-
-/// Verify basic state properties for a relationship
-fn verify_basic_state_properties(state1: &State, state2: &State) -> Result<bool, DsmError> {
-    if state1.hash == [0u8; 32] || state2.hash == [0u8; 32] {
-        return Ok(false);
-    }
-    if state2.prev_state_hash != state1.hash()? {
-        return Ok(false);
-    }
-    Ok(true)
-}
-
-/// Verify entropy validity for a relationship state
-pub fn verify_relationship_entropy(
-    prev_state: &State,
-    current_state: &State,
-    entropy: &[u8],
-) -> Result<bool, DsmError> {
-    // Must use the same domain tag as generate_transition_entropy ("DSM/state-entropy")
-    let mut hasher = crate::crypto::blake3::dsm_domain_hasher("DSM/state-entropy");
-    hasher.update(&prev_state.entropy);
-    hasher.update(&current_state.operation.to_bytes());
-    hasher.update(&current_state.state_number.to_le_bytes());
-    let expected_entropy = hasher.finalize().as_bytes().to_vec();
-
-    Ok(constant_time_eq(entropy, &expected_entropy))
-}
+// validate_relationship_state_transition + verify_relationship_entropy +
+// verify_basic_state_properties + verify_commitment_compliance removed:
+// only the deleted state_machine::verify_basic_transition / verify_entropy_evolution
+// chain (mod.rs) called these. The §2.1/§11 verification now flows through
+// transition::verify_transition_integrity which operates on the canonical
+// chain state directly via SMT inclusion proofs (§4.2).
 
 /// Represents a canonical relationship key derivation strategy
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -835,20 +362,12 @@ pub enum KeyDerivationStrategy {
     Hashed,
 }
 
-/// Cryptographically verifiable proof of relationship existence
-#[derive(Debug, Clone)]
-pub struct RelationshipProof {
-    /// Entity identifier
-    pub entity_id: [u8; 32],
-    /// Counterparty identifier
-    pub counterparty_id: [u8; 32],
-    /// Hash of entity's state
-    pub entity_state_hash: [u8; 32],
-    /// Hash of counterparty's state
-    pub counterparty_state_hash: [u8; 32],
-    /// Cryptographic binding of relationship
-    pub relationship_hash: Vec<u8>,
-}
+// RelationshipProof struct deleted: only used by the now-deleted
+// RelationshipManager::export_relationship_proof + verify_relationship_proof
+// methods. Cryptographic relationship proof is now expressed via the
+// stitched-receipt SmtInclusionProof (§4.2) carried in ReceiptCommit, not
+// via a per-pair (entity_state_hash, counterparty_state_hash, relationship_hash)
+// triple.
 
 /// Custom error for relationship manager operations
 #[derive(Debug)]
@@ -972,150 +491,23 @@ impl RelationshipManager {
         Ok(())
     }
 
-    /// Resume a relationship from last known state pair with thread-safe access
-    pub fn resume_relationship(
-        &self,
-        entity_id: &[u8; 32],
-        counterparty_id: &[u8; 32],
-    ) -> Result<RelationshipContext, DsmError> {
-        let key = self.get_relationship_key(entity_id, counterparty_id);
-        let store = self.relationship_store.lock().map_err(|_| {
-            DsmError::invalid_operation("Failed to acquire lock on relationship store")
-        })?;
+    // resume_relationship deleted: zero callers anywhere. RelationshipContext
+    // resumption now flows through the bilateral session restore path in
+    // sdk::storage::client_db (contacts table + bilateral_chain_tip), not
+    // through this in-memory RelationshipManager store.
 
-        if let Some(pair) = store.get(&key) {
-            pair.resume()
-        } else {
-            Err(DsmError::not_found(
-                "Relationship",
-                Some(format!(
-                    "No relationship found between {} and {}",
-                    base32::encode(base32::Alphabet::Crockford, entity_id),
-                    base32::encode(base32::Alphabet::Crockford, counterparty_id)
-                )),
-            ))
-        }
-    }
+    // update_relationship deleted: zero callers anywhere. The function
+    // recomputed cross-chain continuity via verify_cross_chain_continuity
+    // and reinserted a fresh RelationshipStatePair, but bilateral state
+    // updates now flow through BilateralStateManager::execute_transition
+    // (which maintains the per-relationship chain via SMT) rather than
+    // through this RelationshipManager::store/update API.
 
-    /// Update a relationship with new states, maintaining bilateral consistency
-    pub fn update_relationship(
-        &self,
-        entity_id: &[u8; 32],
-        counterparty_id: &[u8; 32],
-        new_entity_state: State,
-        new_counterparty_state: State,
-    ) -> Result<(), DsmError> {
-        let key = self.get_relationship_key(entity_id, counterparty_id);
-
-        let mut store = self.relationship_store.lock().map_err(|_| {
-            DsmError::invalid_operation("Failed to acquire lock on relationship store")
-        })?;
-
-        if let Some(pair) = store.get(&key) {
-            if !pair.verify_cross_chain_continuity(&new_entity_state, &new_counterparty_state)? {
-                return Err(DsmError::invalid_operation(
-                    "Cross-chain continuity violation detected",
-                ));
-            }
-            let updated_pair = RelationshipStatePair::new(
-                *entity_id,
-                *counterparty_id,
-                new_entity_state,
-                new_counterparty_state,
-            )?;
-
-            store.insert(key, updated_pair);
-            Ok(())
-        } else {
-            Err(DsmError::not_found(
-                "Relationship",
-                Some(format!(
-                    "No relationship found between {} and {}",
-                    base32::encode(base32::Alphabet::Crockford, entity_id),
-                    base32::encode(base32::Alphabet::Crockford, counterparty_id)
-                )),
-            ))
-        }
-    }
-
-    /// Create a relationship with chain tip tracking
-    pub fn create_relationship_with_chain_tip(
-        &self,
-        entity_id: &[u8; 32],
-        counterparty_id: &[u8; 32],
-        entity_state: State,
-        counterparty_state: State,
-        chain_tip_id: String,
-    ) -> Result<(), DsmError> {
-        let key = self.get_relationship_key(entity_id, counterparty_id);
-        let pair = RelationshipStatePair::new_with_chain_tip(
-            *entity_id,
-            *counterparty_id,
-            entity_state,
-            counterparty_state,
-            chain_tip_id,
-        )?;
-
-        let mut store = self.relationship_store.lock().map_err(|_| {
-            DsmError::invalid_operation("Failed to acquire lock on relationship store")
-        })?;
-
-        store.insert(key, pair);
-        Ok(())
-    }
-
-    /// Update chain tip for an existing relationship
-    pub fn update_relationship_chain_tip(
-        &self,
-        entity_id: &[u8; 32],
-        counterparty_id: &[u8; 32],
-        new_chain_tip_id: String,
-        new_state_hash: Vec<u8>,
-    ) -> Result<(), DsmError> {
-        let key = self.get_relationship_key(entity_id, counterparty_id);
-        let mut store = self.relationship_store.lock().map_err(|_| {
-            DsmError::invalid_operation("Failed to acquire lock on relationship store")
-        })?;
-
-        if let Some(pair) = store.get_mut(&key) {
-            pair.update_chain_tip(new_chain_tip_id, new_state_hash)?;
-            Ok(())
-        } else {
-            Err(DsmError::not_found(
-                "Relationship",
-                Some(format!(
-                    "No relationship found between {} and {}",
-                    base32::encode(base32::Alphabet::Crockford, entity_id),
-                    base32::encode(base32::Alphabet::Crockford, counterparty_id)
-                )),
-            ))
-        }
-    }
-
-    /// Get chain tip ID for a relationship
-    pub fn get_relationship_chain_tip_id(
-        &self,
-        entity_id: &[u8; 32],
-        counterparty_id: &[u8; 32],
-    ) -> Result<Option<String>, DsmError> {
-        let key = self.get_relationship_key(entity_id, counterparty_id);
-        let store = self.relationship_store.lock().map_err(|_| {
-            DsmError::invalid_operation("Failed to acquire lock on relationship store")
-        })?;
-
-        if let Some(pair) = store.get(&key) {
-            Ok(pair.get_chain_tip_id().cloned())
-        } else {
-            Err(DsmError::not_found(
-                "Relationship",
-                Some(format!(
-                    "No relationship found between {} and {}",
-                    base32::encode(base32::Alphabet::Crockford, entity_id),
-                    base32::encode(base32::Alphabet::Crockford, counterparty_id)
-                )),
-            ))
-        }
-    }
+    // create_relationship_with_chain_tip + update_relationship_chain_tip +
+    // get_relationship_chain_tip_id deleted: zero callers anywhere. Chain
+    // tip tracking lives on the Per-Device SMT (DeviceState.smt) keyed by
+    // 32-byte rel_key per §2.2; the prior `chain_tip_id: String` per-pair
+    // mechanism is obsolete.
 
     /// Execute a state transition within a relationship context
     pub fn execute_relationship_transition(
@@ -1150,6 +542,12 @@ impl RelationshipManager {
             ));
         }
 
+        // Fail-closed: operations that require authorization must carry it
+        // before we apply the transition. Mirrors the gate in
+        // `create_transition` so this path cannot bypass authorization
+        // checks. See `enforce_operation_authorization`.
+        crate::core::state_machine::transition::enforce_operation_authorization(&operation)?;
+
         let state_transition = StateTransition::new(
             operation.clone(),
             Some(new_entropy.to_vec()),
@@ -1183,93 +581,11 @@ impl RelationshipManager {
         Ok(store.contains_key(&key))
     }
 
-    /// Export relationship proof for verification by third parties
-    pub fn export_relationship_proof(
-        &self,
-        entity_id: &[u8; 32],
-        counterparty_id: &[u8; 32],
-    ) -> Result<RelationshipProof, DsmError> {
-        let key = self.get_relationship_key(entity_id, counterparty_id);
-        let store = self.relationship_store.lock().map_err(|_| {
-            DsmError::invalid_operation("Failed to acquire lock on relationship store")
-        })?;
-
-        if let Some(pair) = store.get(&key) {
-            Ok(RelationshipProof {
-                entity_id: pair.entity_id,
-                counterparty_id: pair.counterparty_id,
-                entity_state_hash: pair.entity_state.hash()?,
-                counterparty_state_hash: pair.counterparty_state.hash()?,
-                relationship_hash: pair.relationship_hash.clone(),
-            })
-        } else {
-            Err(DsmError::not_found(
-                "Relationship",
-                Some(format!(
-                    "No relationship found between {} and {}",
-                    base32::encode(base32::Alphabet::Crockford, entity_id),
-                    base32::encode(base32::Alphabet::Crockford, counterparty_id)
-                )),
-            ))
-        }
-    }
-
-    /// Verify a relationship proof against local records
-    pub fn verify_relationship_proof(&self, proof: &RelationshipProof) -> Result<bool, DsmError> {
-        let key = self.get_relationship_key(&proof.entity_id, &proof.counterparty_id);
-        let store = self.relationship_store.lock().map_err(|_| {
-            DsmError::invalid_operation("Failed to acquire lock on relationship store")
-        })?;
-
-        if let Some(pair) = store.get(&key) {
-            let entity_hash = pair.entity_state.hash()?;
-            if entity_hash != proof.entity_state_hash {
-                return Ok(false);
-            }
-
-            let counterparty_hash = pair.counterparty_state.hash()?;
-            if counterparty_hash != proof.counterparty_state_hash {
-                return Ok(false);
-            }
-
-            if pair.relationship_hash != proof.relationship_hash {
-                return Ok(false);
-            }
-
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
-    /// List all entity IDs with active relationships
-    pub fn list_entities(&self) -> Result<HashSet<[u8; 32]>, DsmError> {
-        let store = self.relationship_store.lock().map_err(|_| {
-            DsmError::invalid_operation("Failed to acquire lock on relationship store")
-        })?;
-        let mut entities = HashSet::new();
-        for pair in store.values() {
-            entities.insert(pair.entity_id);
-            entities.insert(pair.counterparty_id);
-        }
-        Ok(entities)
-    }
-
-    /// Find all counterparties for a given entity
-    pub fn find_counterparties(&self, entity_id: &[u8; 32]) -> Result<Vec<[u8; 32]>, DsmError> {
-        let store = self.relationship_store.lock().map_err(|_| {
-            DsmError::invalid_operation("Failed to acquire lock on relationship store")
-        })?;
-        let mut counterparties = Vec::new();
-        for pair in store.values() {
-            if pair.entity_id == *entity_id {
-                counterparties.push(pair.counterparty_id);
-            } else if pair.counterparty_id == *entity_id {
-                counterparties.push(pair.entity_id);
-            }
-        }
-        Ok(counterparties)
-    }
+    // export_relationship_proof + verify_relationship_proof + list_entities +
+    // find_counterparties deleted: zero callers anywhere. Proof export now
+    // flows through ReceiptCommit (§4.2) with embedded SmtInclusionProof;
+    // entity/counterparty enumeration lives on the contacts table in
+    // sdk::storage::client_db.
 
     /// Get the latest state for an entity in a specific relationship
     pub fn get_entity_state(
@@ -1319,7 +635,6 @@ fn apply_transition(
 ) -> Result<State, DsmError> {
     let mut new_state = current_state.clone();
 
-    new_state.state_number += 1;
     new_state.operation = transition.operation.clone();
     if let Some(new_entropy) = &transition.new_entropy {
         new_state.entropy = new_entropy.clone();
@@ -1340,28 +655,28 @@ mod tests {
         *crate::crypto::blake3::domain_hash("DSM/test-entity-id", label).as_bytes()
     }
 
-    // Helper function to create a test state
-    fn create_test_state(state_number: u64, prev_hash: [u8; 32]) -> State {
-        let mut state = State::default();
-        state.state_number = state_number;
-        state.prev_state_hash = prev_hash;
-
-        state.hash = *crate::crypto::blake3::domain_hash(
+    /// Helper function to create a test state. `seed` is a distinguishing
+    /// label only — it plays no role in acceptance predicates.
+    fn create_test_state(seed: u64, prev_hash: [u8; 32]) -> State {
+        let hash = *crate::crypto::blake3::domain_hash(
             "DSM/test-state-hash",
-            format!("test_state_{}", state_number).as_bytes(),
+            format!("test_state_{seed}").as_bytes(),
         )
         .as_bytes();
-
-        // Use domain-separated hash for entropy so production verify_entropy_evolution
-        // recognises this as test entropy via its fast-path check
-        state.entropy = crate::crypto::blake3::domain_hash(
+        // Per §11 eq. 14, production entropy comes from (prev_entropy, op, parent_hash);
+        // for the test fixture we synthesize a distinguishable seed.
+        let entropy = crate::crypto::blake3::domain_hash(
             "DSM/test-entropy",
-            format!("entropy_{}", state_number).as_bytes(),
+            format!("entropy_{seed}").as_bytes(),
         )
         .as_bytes()
         .to_vec();
-
-        state
+        State {
+            prev_state_hash: prev_hash,
+            hash,
+            entropy,
+            ..State::default()
+        }
     }
 
     #[test]
@@ -1417,46 +732,9 @@ mod tests {
         assert!(!hashed_key_a.is_empty());
     }
 
-    #[test]
-    fn test_relationship_state() {
-        let entity_state = create_test_state(1, [0; 32]);
-        let counterparty_state = create_test_state(1, [0; 32]);
-
-        let entity_id = test_entity_id(b"entity1");
-        let counterparty_id = test_entity_id(b"entity2");
-        let relationship = RelationshipStatePair::new(
-            entity_id,
-            counterparty_id,
-            entity_state.clone(),
-            counterparty_state.clone(),
-        )
-        .unwrap();
-
-        // Validate state transition
-        let new_entity_state = create_test_state(2, entity_state.hash().unwrap());
-        let new_counterparty_state = create_test_state(2, counterparty_state.hash().unwrap());
-
-        let continuity_valid =
-            relationship.verify_cross_chain_continuity(&new_entity_state, &new_counterparty_state);
-        assert!(continuity_valid.is_ok());
-        assert!(continuity_valid
-            .map_err(|_| DsmError::internal(0.to_string(), None::<std::convert::Infallible>))
-            .unwrap());
-
-        // Validate entropy evolution (placeholder may fast-pass via test entropy)
-        let entropy_valid = verify_entropy_evolution(
-            &entity_state.entropy,
-            &new_entity_state.entropy,
-            &new_entity_state.operation,
-            new_entity_state.state_number,
-        );
-        assert!(entropy_valid.is_ok());
-        assert!(entropy_valid
-            .map_err(|_| DsmError::internal(0.to_string(), None::<std::convert::Infallible>))
-            .unwrap());
-
-        // Chain id must be reproducible and non-empty (no hex)
-        let cid = relationship.generate_bilateral_chain_id();
-        assert!(cid.starts_with("bilateral_chain_"));
-    }
+    // test_relationship_state deleted: exercised the now-deleted
+    // verify_cross_chain_continuity + generate_bilateral_chain_id +
+    // update_relationship surfaces. The only piece worth keeping was the
+    // entropy-evolution assertion (§11 eq.14), which is now covered by
+    // transition::verify_transition_integrity tests in transition.rs.
 }

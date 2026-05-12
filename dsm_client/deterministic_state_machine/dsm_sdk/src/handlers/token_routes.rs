@@ -16,7 +16,6 @@ use super::response_helpers::{err, pack_envelope_ok};
 
 const POLICY_INDEX_KEY: &str = "dsm.policy.index";
 const POLICY_PREFIX: &str = "dsm.policy.";
-const TOKEN_PREFIX: &str = "dsm.token.";
 
 #[derive(Debug, Clone, Default)]
 struct ParsedTokenPolicy {
@@ -24,6 +23,7 @@ struct ParsedTokenPolicy {
     alias: String,
     decimals: u32,
     max_supply: Option<String>,
+    initial_alloc: u128,
     kind: Option<String>,
     description: Option<String>,
     icon_url: Option<String>,
@@ -121,7 +121,13 @@ fn parse_token_policy(raw_proto: &[u8]) -> Option<ParsedTokenPolicy> {
                 max_supply = (max_supply << 8) | (*b as u128);
             }
             off += 16;
-            off += 16; // initialAlloc
+
+            let initial_alloc_bytes = pb.get(off..off + 16)?;
+            let mut initial_alloc = 0u128;
+            for b in initial_alloc_bytes {
+                initial_alloc = (initial_alloc << 8) | (*b as u128);
+            }
+            off += 16;
 
             let desc_len = ((*pb.get(off)? as usize) << 8) | (*pb.get(off + 1)? as usize);
             off += 2;
@@ -148,6 +154,7 @@ fn parse_token_policy(raw_proto: &[u8]) -> Option<ParsedTokenPolicy> {
                 alias,
                 decimals,
                 max_supply: Some(max_supply.to_string()),
+                initial_alloc,
                 kind,
                 description,
                 icon_url,
@@ -446,15 +453,106 @@ impl AppRouterImpl {
                     fields,
                 };
 
-                if let Err(e) = self
-                    .wallet
-                    .import_token_metadata(token_id.clone(), metadata)
+                // Build a PolicyFile matching the parsed TLV so
+                // `PolicyAnchor::from_policy` produces the authoritative
+                // policy_commit used by every subsequent balance op.
+                let policy_file = {
+                    let transferable = parsed.as_ref().map(|p| p.transferable).unwrap_or(true);
+                    let description = parsed.as_ref().and_then(|p| p.description.clone());
+                    let mut pf =
+                        dsm::types::policy_types::PolicyFile::new(&ticker, "1", "dsm_token_route");
+                    if let Some(desc) = description.as_ref() {
+                        pf.description = Some(desc.clone());
+                    }
+                    pf.add_metadata("created_by", "dsm_token_route")
+                        .add_metadata("token_name", &ticker)
+                        .add_metadata("transferable", if transferable { "true" } else { "false" });
+                    if !transferable {
+                        pf.add_metadata("transfer_restricted", "true")
+                            .add_metadata("allowed_operations", "mint,burn");
+                    }
+                    pf
+                };
+
+                // Register the policy with TokenPolicySystem so PolicyEnforcer
+                // (and resolve_policy_commit_strict) can bind policy_commit for
+                // every downstream op on this token_id.
+                let anchor = match self
+                    .core_sdk
+                    .register_token_policy(&token_id, policy_file)
                     .await
                 {
-                    return err(format!("token.create: metadata import failed: {e}"));
+                    Ok(a) => a,
+                    Err(e) => {
+                        return err(format!("token.create: register_token_policy failed: {e}"));
+                    }
+                };
+                let policy_commit: [u8; 32] = *anchor.as_bytes();
+
+                // Cache authoritative TokenMetadata (no Generic shim op).
+                if let Err(e) = self
+                    .wallet
+                    .token_sdk
+                    .cache_token_metadata_strict(metadata.clone())
+                {
+                    return err(format!("token.create: metadata cache failed: {e}"));
                 }
 
-                app_state_set(&format!("{TOKEN_PREFIX}{token_id}"), &anchor_b32);
+                // Materialise initial supply via a self-loop Mint, if any.
+                let initial_alloc = parsed.as_ref().map(|p| p.initial_alloc).unwrap_or(0);
+                if initial_alloc > 0 {
+                    let initial_alloc_u64: u64 = match u64::try_from(initial_alloc) {
+                        Ok(v) => v,
+                        Err(_) => {
+                            return err(
+                                "token.create: initial_alloc exceeds u64::MAX (Balance is u64)"
+                                    .into(),
+                            );
+                        }
+                    };
+
+                    let dev_id = self.device_id_bytes;
+                    let rel_key =
+                        dsm::core::bilateral_transaction_manager::compute_smt_key(&dev_id, &dev_id);
+                    let init_tip =
+                        dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                            &dev_id, &dev_id,
+                        );
+
+                    // Reference state hash for the Balance token (§4.3 positioning).
+                    let ref_hash = self
+                        .core_sdk
+                        .device_head()
+                        .map(|s| s.genesis_digest())
+                        .unwrap_or([0u8; 32]);
+
+                    let mint_op = dsm::types::operations::Operation::Mint {
+                        amount: dsm::types::token_types::Balance::from_state(
+                            initial_alloc_u64,
+                            ref_hash,
+                        ),
+                        token_id: token_id.as_bytes().to_vec(),
+                        authorized_by: dev_id.to_vec(),
+                        proof_of_authorization: policy_commit.to_vec(),
+                        message: format!("initial allocation for {ticker}"),
+                    };
+
+                    let deltas = [dsm::types::device_state::BalanceDelta {
+                        policy_commit,
+                        direction: dsm::types::device_state::BalanceDirection::Credit,
+                        amount: initial_alloc_u64,
+                    }];
+
+                    if let Err(e) = self.core_sdk.execute_on_relationship(
+                        rel_key,
+                        dev_id,
+                        mint_op,
+                        &deltas,
+                        Some(init_tip),
+                    ) {
+                        return err(format!("token.create: initial-allocation Mint failed: {e}"));
+                    }
+                }
 
                 let resp = generated::TokenCreateResponse {
                     success: true,
@@ -702,7 +800,6 @@ mod tests {
     fn token_route_constants() {
         assert_eq!(POLICY_INDEX_KEY, "dsm.policy.index");
         assert!(POLICY_PREFIX.starts_with("dsm.policy."));
-        assert!(TOKEN_PREFIX.starts_with("dsm.token."));
     }
 
     #[test]

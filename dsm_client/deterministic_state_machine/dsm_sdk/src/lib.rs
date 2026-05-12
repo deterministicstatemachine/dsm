@@ -2,18 +2,51 @@
 //!
 //! The `dsm_sdk` crate bridges the pure, deterministic [`dsm`] core library to
 //! platform-specific runtimes (Android/JNI, iOS/FFI, desktop test harnesses).
-//! It enforces the single authoritative path:
+//!
+//! ## Architecture: One Agnostic Ingress
+//!
+//! The crate is organised into three tiers:
+//!
+//! 1. **ABI shims** - platform-specific marshalling only, no semantic logic:
+//!    - Android: `jni/unified_protobuf_bridge.rs` - `extern "system"` JNI exports
+//!    - iOS: `platform/ios/transport.rs` - `extern "C"` FFI exports
+//!
+//! 2. **Shared ingress** (`ingress`) - the single semantic boundary:
+//!    - Both shims translate ABI inputs into [`generated::IngressRequest`] and
+//!      call [`ingress::dispatch_ingress`].
+//!    - Equivalent Android and iOS operations map to the same `IngressRequest`
+//!      and produce the same `IngressResponse`.
+//!
+//! 3. **SDK internals** - `sdk`, `handlers`, `bluetooth`, `bridge`, etc.
+//!
+//! The canonical contract is expressed in `proto/dsm_app.proto`:
+//! `IngressRequest` / `IngressResponse`. No platform-specific semantics are
+//! permitted past the ABI shim.
+//!
+//! ## Authoritative Data Paths
 //!
 //! ```text
-//! UI/WebView → MessagePort → Kotlin Bridge → JNI → SDK → Core
+//! Android: UI -> MessagePort -> Kotlin Bridge -> JNI shim
+//!                                              |
+//!                                              v
+//!                                        IngressRequest
+//!                                              |
+//! iOS:     Swift caller -> FFI shim -----------+
+//!                                              |
+//!                                              v
+//!                              ingress::dispatch_ingress
+//!                                              |
+//!                                              v
+//!                                       SDK / Core
 //! ```
 //!
-//! ## Crate Architecture
+//! ## Crate Modules
 //!
 //! | Module | Purpose |
 //! |--------|---------|
+//! | [`ingress`] | Shared platform-agnostic ingress dispatch |
 //! | [`sdk`] | High-level SDK facades (wallet, token, bilateral, DLV, Bitcoin tap) |
-//! | `jni` | Android JNI entry points (87+ `extern "system"` functions, cfg-gated) |
+//! | `jni` | Android JNI ABI shim (87+ `extern "system"` functions, cfg-gated) |
 //! | [`handlers`] | `AppRouter`, `BilateralHandler`, `UnilateralHandler` implementations |
 //! | [`bluetooth`] | BLE bilateral sessions, frame chunking, pairing orchestration |
 //! | [`bridge`] | Trait-object dispatch layer connecting handlers to core |
@@ -21,10 +54,8 @@
 //! | [`security`] | DBRW clone-detection validation at the SDK boundary |
 //! | [`storage`] | SQLite-backed client database for contacts, chain tips, bilateral state |
 //! | [`network`] | Multi-node storage endpoint registry and env-config loader |
-//! | [`event`] | Protobuf-encoded broadcast event stream for UI subscriptions |
 //! | [`recovery`] | Capsule, tombstone, and rollup recovery flows |
 //! | [`vault`] | DLV (Deterministic Limbo Vault) SDK operations |
-//! | [`policy`] | Built-in policy integrity checks (assert on library load) |
 //!
 //! ## Readiness Lifecycle
 //!
@@ -71,7 +102,7 @@
 pub mod policy;
 
 #[allow(dead_code)]
-#[ctor::ctor]
+#[ctor::ctor(unsafe)]
 fn _dsm_builtins_guard() {
     // Zero-cost unless placeholder commit replaced; hash runs once on load.
     crate::policy::builtins::assert_builtins_sound();
@@ -82,11 +113,14 @@ pub mod prelude;
 #[cfg(all(target_os = "android", feature = "jni"))]
 pub mod jni;
 
+mod binding_key;
 pub mod bridge;
-pub mod crypto_performance;
+// crypto_performance module deleted: orphan benchmark helpers that only
+// referenced HashChainSDK + IdentitySDK, with no consumers outside the
+// orphaned performance_demo.rs file (also deleted).
 pub mod envelope;
-pub mod event;
 pub mod handlers;
+pub mod ingress;
 pub mod init;
 pub mod logging;
 pub mod network;
@@ -101,10 +135,8 @@ pub mod wire;
 pub mod storage;
 // BLE backend registry (simple trait + OnceCell) for platform integration
 pub mod ble;
-#[cfg(test)]
-mod comprehensive_validation;
-#[cfg(test)]
-mod crypto_performance_tests;
+// comprehensive_validation + crypto_performance_tests modules deleted:
+// orphaned HashChainSDK/IdentitySDK demos with no consumers.
 #[cfg(test)]
 mod device_id_tests;
 #[cfg(test)]
@@ -133,7 +165,11 @@ pub mod platform;
 
 // iOS protobuf-native transport functions (extern "C" for Swift bridging)
 #[cfg(target_os = "ios")]
-pub use platform::ios::transport::{dsm_process_envelope_protobuf, dsm_free_envelope_bytes};
+pub use platform::ios::transport::{
+    dsm_configure_env, dsm_dispatch_ingress_request, dsm_dispatch_startup_request,
+    dsm_free_envelope_bytes, dsm_init_dsm_sdk, dsm_initialize_sdk, dsm_initialize_sdk_context,
+    dsm_process_envelope_protobuf, dsm_set_storage_base_dir,
+};
 
 pub mod runtime;
 
@@ -197,10 +233,18 @@ pub async fn init_dsm_sdk() -> Result<(), dsm::types::error::DsmError> {
                     gen.len()
                 );
                 if dev.len() == 32 && gen.len() == 32 {
-                    log::info!("Initializing SDK context from persisted AppState");
-                    let dbrw = fetch_dbrw_binding_key()?;
-                    let entropy = derive_production_entropy(&dev, &gen, &dbrw);
-                    initialize_sdk_context(dev, gen.clone(), entropy)?;
+                    match fetch_dbrw_binding_key() {
+                        Ok(dbrw) => {
+                            log::info!("Initializing SDK context from persisted AppState");
+                            let entropy = derive_production_entropy(&dev, &gen, &dbrw);
+                            initialize_sdk_context(dev, gen.clone(), entropy)?;
+                        }
+                        Err(_) => {
+                            log::info!(
+                                "Persisted identity found without C-DBRW binding key; deferring SDK context initialization"
+                            );
+                        }
+                    }
                 } else {
                     return Err(dsm::types::error::DsmError::invalid_parameter(format!(
                         "Invalid persisted identity sizes: device_id={}, genesis={}",
@@ -256,7 +300,7 @@ pub fn initialize_sdk_context(
 ///
 /// Inputs are expected to be 32 bytes for `device_id` and `genesis_hash`. `dbrw_binding`
 /// Derive production entropy from device identity + C-DBRW binding.
-fn derive_production_entropy(
+pub(crate) fn derive_production_entropy(
     device_id: &[u8],
     genesis_hash: &[u8],
     cdbrw_binding: &[u8],
@@ -269,26 +313,22 @@ fn derive_production_entropy(
 }
 
 pub(crate) fn fetch_dbrw_binding_key() -> Result<Vec<u8>, dsm::types::error::DsmError> {
-    #[cfg(target_os = "android")]
-    {
-        let key = crate::jni::cdbrw::get_cdbrw_binding_key().ok_or_else(|| {
-            dsm::types::error::DsmError::invalid_parameter(
-                "C-DBRW binding key unavailable; initialize C-DBRW before SDK context",
-            )
-        })?;
-        if key.len() != 32 {
-            return Err(dsm::types::error::DsmError::invalid_parameter(
-                "C-DBRW binding key must be 32 bytes",
-            ));
-        }
-        Ok(key)
-    }
-    #[cfg(not(target_os = "android"))]
-    {
-        Err(dsm::types::error::DsmError::invalid_parameter(
-            "C-DBRW binding key unavailable on this platform",
-        ))
-    }
+    crate::binding_key::get_binding_key().ok_or_else(|| {
+        dsm::types::error::DsmError::invalid_parameter(
+            "C-DBRW binding key unavailable; initialize startup/bootstrap before SDK context",
+        )
+    })
+}
+
+pub(crate) fn install_canonical_binding_key(
+    binding_key: Vec<u8>,
+) -> Result<(), dsm::types::error::DsmError> {
+    crate::binding_key::install_binding_key(binding_key)
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn set_cdbrw_binding_key_for_testing(key: Vec<u8>) {
+    let _ = crate::binding_key::install_binding_key(key);
 }
 
 /// Check if the global SDK context is properly initialized
@@ -300,6 +340,7 @@ pub fn is_sdk_context_initialized() -> bool {
 #[cfg(any(test, feature = "test-utils"))]
 pub fn reset_sdk_context_for_testing() {
     get_sdk_context().reset_for_testing();
+    crate::binding_key::clear_binding_key_for_testing();
 }
 
 /// Get transport headers from SDK context for envelope v3

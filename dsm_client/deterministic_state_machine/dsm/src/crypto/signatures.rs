@@ -4,7 +4,7 @@
 //!
 //! - Protobuf-only (no JSON/base64 transports in this layer).
 //! - Clockless (no wall-clock markers; ordering is not time-based).
-//! - Default parameter set: SPX256s (robust, future-proof).
+//! - Default parameter set: SPX256f (fast variant, canonical for all DSM operations).
 //!
 //! Public API surface (stable):
 //!     - struct SignatureKeyPair { public_key, secret_key, params }
@@ -21,10 +21,10 @@ pub use crate::crypto::sphincs::SphincsVariant as ParameterSet;
 use crate::types::error::DsmError;
 use zeroize::Zeroize;
 
-/// SPX256s: 256-bit post-quantum security (29,792 byte signatures).
-/// BLE bilateral transfers compress the envelope before chunking to reduce
-/// the chunk count from 168 to ~50-60 for acceptable transfer times.
-const DEFAULT_PARAMS: ParameterSet = ParameterSet::SPX256s;
+/// SPX256f: 256-bit post-quantum security, fast variant (49,856 byte signatures).
+/// Must match init.rs keypair derivation (SPX256f) and sphincs.rs default wrappers.
+/// BLE bilateral transfers compress the envelope before chunking.
+const DEFAULT_PARAMS: ParameterSet = ParameterSet::SPX256f;
 
 /// Signature bytes alias
 pub type Signature = Vec<u8>;
@@ -136,6 +136,11 @@ impl SignatureKeyPair {
     /// Convenience accessor
     pub fn public_key(&self) -> &[u8] {
         &self.public_key
+    }
+
+    /// Convenience accessor
+    pub fn secret_key(&self) -> &[u8] {
+        &self.secret_key
     }
 
     /// Test-only convenience: generate a keypair quickly for unit tests.
@@ -336,6 +341,29 @@ mod tests {
             assert_eq!(kp1.public_key, kp2.public_key);
             assert_eq!(kp1.secret_key, kp2.secret_key);
         }
+    }
+
+    #[test]
+    fn default_entropy_keypair_digest_is_stable() {
+        let kp = SignatureKeyPair::generate_from_entropy(b"DSM/default-entropy-kat")
+            .expect("deterministic keypair generation");
+        let pk_digest = *blake3::hash(&kp.public_key).as_bytes();
+        let sk_digest = *blake3::hash(&kp.secret_key).as_bytes();
+
+        assert_eq!(
+            pk_digest,
+            [
+                76, 122, 75, 56, 104, 93, 225, 30, 171, 126, 221, 51, 199, 247, 235, 203, 61, 74,
+                247, 119, 84, 208, 248, 217, 208, 161, 89, 96, 245, 217, 216, 225,
+            ]
+        );
+        assert_eq!(
+            sk_digest,
+            [
+                0, 120, 172, 29, 214, 213, 18, 207, 207, 112, 129, 26, 14, 246, 78, 249, 6, 87, 65,
+                84, 200, 188, 231, 111, 53, 92, 101, 144, 28, 92, 141, 163,
+            ]
+        );
     }
 
     #[test]

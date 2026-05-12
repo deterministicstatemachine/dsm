@@ -427,16 +427,19 @@
 }
 
 .transaction-item {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 12px;
+  /* Simple block stacking — the card has N row-children
+     (.transaction-main, .transaction-amount-line, .transaction-details,
+     optionally .transaction-expanded-details) and each one is already
+     its own flex row. Don't flex the outer container; that creates
+     horizontal-row semantics that fight the intended vertical stack
+     and leaves empty voids on low-info cards (e.g. faucet). */
+  display: block;
+  padding: 8px 10px;
   border: 1px solid var(--border);
   border-radius: 6px;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
   background-color: rgba(var(--text-rgb),0.05);
   transition: background-color 0.2s ease;
-  overflow: hidden;
   max-width: 100%;
 }
 
@@ -468,6 +471,84 @@
   white-space: nowrap;
 }
 
+/* Dedicated amount line: full-width row so large numbers (e.g. BTC with
+   8 decimals) never get truncated by sibling flex items. Kept compact so
+   low-info cards (faucet) don't balloon vertically when collapsed. */
+.transaction-amount-line {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  width: 100%;
+  padding: 0;
+  margin: 0;
+  line-height: 1.2;
+  font-family: 'Martian Mono', 'Courier New', monospace;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.transaction-amount-line .transaction-amount-value {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-dark);
+  white-space: normal;
+}
+
+.transaction-amount-line .transaction-amount-token {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-disabled);
+  letter-spacing: 0.5px;
+}
+
+.transaction-amount-line.outgoing .transaction-amount-value::before {
+  content: '↓ ';
+  color: var(--stateboy-dark);
+}
+
+.transaction-amount-line.incoming .transaction-amount-value::before {
+  content: '↑ ';
+  color: var(--stateboy-dark);
+}
+
+.transaction-recipient {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.transaction-recipient .transaction-recipient-label {
+  color: var(--text-disabled);
+  font-weight: 600;
+  font-size: 10px;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+
+.transaction-recipient .transaction-recipient-value {
+  color: var(--text-dark);
+  font-family: 'Martian Mono', 'Courier New', monospace;
+}
+
+/* Full-hash rows in expanded details: let the hash take the whole row so
+   nothing is truncated and wrapping is predictable. */
+.transaction-expanded-details .detail-row-hash {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+}
+
+.transaction-expanded-details .detail-value-hash {
+  max-width: 100%;
+  text-align: left;
+  font-size: 10px;
+  word-break: break-all;
+  overflow-wrap: anywhere;
+}
+
 .transaction-counterparty {
   font-size: 10px;
   color: var(--text-disabled);
@@ -476,6 +557,7 @@
 .transaction-status {
   text-align: right;
   flex-shrink: 0;
+  flex-grow: 1;
   white-space: nowrap;
 }
 
@@ -783,8 +865,6 @@
 .transaction-item.expanded {
   background-color: rgba(var(--text-rgb),0.12);
   border-color: var(--text-dark);
-  flex-direction: column;
-  align-items: stretch;
 }
 
 .transaction-item .transaction-main {
@@ -793,7 +873,10 @@
   gap: 8px;
   width: 100%;
   min-width: 0;
-  overflow: hidden;
+  /* No overflow hidden: with the amount moved to its own row below, the
+     type + status + arrow row must have enough slack to spell out the
+     full status word ("completed", not "com"). Wrap instead of clipping. */
+  flex-wrap: wrap;
 }
 
 .transaction-item .expand-indicator {
@@ -1336,7 +1419,9 @@
   }
   
   .transaction-item {
-    min-height: 56px;
+    /* No forced min-height: low-info cards (faucet) must be allowed to
+       size to their content; a hardcoded 56px floor was creating a
+       large visual void on cards with just a type + amount row. */
   }
 }
 

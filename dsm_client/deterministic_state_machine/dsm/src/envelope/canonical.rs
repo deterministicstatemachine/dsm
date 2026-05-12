@@ -14,14 +14,7 @@ pub fn to_canonical_bytes(envelope: &Envelope) -> Vec<u8> {
 
 /// Decode canonical protobuf bytes to an Envelope
 pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Envelope, DsmError> {
-    Envelope::decode(bytes).map_err(|e| {
-        DsmError::serialization_error(
-            format!("Failed to decode canonical bytes to envelope: {e}"),
-            "Envelope",
-            None::<String>,
-            Some(e),
-        )
-    })
+    super::from_canonical_bytes(bytes)
 }
 
 #[cfg(test)]

@@ -1,8 +1,8 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import * as pb from '../proto/dsm_app_pb';
-import { syncWithStorageStrictBridge, appRouterQueryBin, appRouterInvokeBin } from './WebViewBridge';
+import { syncWithStorageStrictBridge, routerQueryBin, routerInvokeBin } from './WebViewBridge';
 import { decodeFramedEnvelopeV3 } from './decoding';
-import { StorageStatus, DlvIndexEntry } from './types';
+import { StorageStatus } from './types';
 import { bytesToBase32CrockfordPrefix } from '../utils/textId';
 import { emitWalletRefresh } from './events';
 import logger from '../utils/logger';
@@ -89,7 +89,7 @@ export async function syncWithStorage(params?: { pullInbox?: boolean; pushPendin
  */
 export async function getStorageStatus(): Promise<StorageStatus> {
   const arg = new pb.ArgPack({ codec: pb.Codec.PROTO, body: new Uint8Array(0) });
-  const resBytes = await appRouterQueryBin('storage.status', new Uint8Array(arg.toBinary()));
+  const resBytes = await routerQueryBin('storage.status', new Uint8Array(arg.toBinary()));
   if (!resBytes || resBytes.length === 0) {
     throw new Error('getStorageStatus: empty response from bridge');
   }
@@ -130,7 +130,7 @@ export async function getStorageStatus(): Promise<StorageStatus> {
 export async function getNodeHealth(endpoints?: string[]): Promise<pb.StorageNodeStatsResponse> {
   const req = new pb.StorageNodeStatsRequest({ endpoints: endpoints ?? [] });
   const arg = new pb.ArgPack({ codec: pb.Codec.PROTO, body: new Uint8Array(req.toBinary()) });
-  const resBytes = await appRouterQueryBin('storage.nodeHealth', new Uint8Array(arg.toBinary()));
+  const resBytes = await routerQueryBin('storage.nodeHealth', new Uint8Array(arg.toBinary()));
 
   if (!resBytes || resBytes.length === 0) {
     throw new Error('getNodeHealth: empty response from bridge');
@@ -158,7 +158,7 @@ export async function getNodeHealth(endpoints?: string[]): Promise<pb.StorageNod
 export async function addStorageNode(): Promise<pb.StorageNodeManageResponse> {
   const req = new pb.StorageNodeManageRequest({ action: 'add', autoAssign: true });
   const arg = new pb.ArgPack({ codec: pb.Codec.PROTO, body: new Uint8Array(req.toBinary()) });
-  const resBytes = await appRouterInvokeBin('storage.addNode', new Uint8Array(arg.toBinary()));
+  const resBytes = await routerInvokeBin('storage.addNode', new Uint8Array(arg.toBinary()));
 
   if (!resBytes || resBytes.length === 0) {
     throw new Error('addStorageNode: empty response from bridge');
@@ -181,7 +181,7 @@ export async function addStorageNode(): Promise<pb.StorageNodeManageResponse> {
 export async function removeStorageNode(url: string): Promise<pb.StorageNodeManageResponse> {
   const req = new pb.StorageNodeManageRequest({ action: 'remove', url });
   const arg = new pb.ArgPack({ codec: pb.Codec.PROTO, body: new Uint8Array(req.toBinary()) });
-  const resBytes = await appRouterInvokeBin('storage.removeNode', new Uint8Array(arg.toBinary()));
+  const resBytes = await routerInvokeBin('storage.removeNode', new Uint8Array(arg.toBinary()));
 
   if (!resBytes || resBytes.length === 0) {
     throw new Error('removeStorageNode: empty response from bridge');
@@ -198,82 +198,12 @@ export async function removeStorageNode(url: string): Promise<pb.StorageNodeMana
   return env.payload.value;
 }
 
-/**
- * List all local dBTC vaults (DLVs) via the bitcoin.vault.list bridge route.
- * Returns a DlvIndexEntry[] mapped from BitcoinVaultSummary proto messages.
- */
-export async function listLocalDlvs(): Promise<DlvIndexEntry[]> {
-  const arg = new pb.ArgPack({ codec: pb.Codec.PROTO, body: new Uint8Array(0) });
-  let resBytes: Uint8Array | undefined;
-  try {
-    resBytes = await appRouterQueryBin('bitcoin.vault.list', new Uint8Array(arg.toBinary()));
-  } catch (e) {
-    logger.warn('[DSM:listLocalDlvs] Bridge call failed:', e);
-    return [];
-  }
-
-  if (!resBytes || resBytes.length === 0) {
-    logger.debug('[DSM:listLocalDlvs] Empty response from bridge');
-    return [];
-  }
-
-  let env: pb.Envelope;
-  try {
-    env = decodeFramedEnvelopeV3(resBytes);
-  } catch (e) {
-    logger.error('[DSM:listLocalDlvs] Failed to decode FramedEnvelopeV3:', e);
-    return [];
-  }
-
-  if (env.payload.case === 'error') {
-    logger.warn('[DSM:listLocalDlvs] Bridge returned error:', env.payload.value.message);
-    return [];
-  }
-
-  if (env.payload.case !== 'bitcoinVaultListResponse') {
-    logger.warn('[DSM:listLocalDlvs] Unexpected payload.case:', env.payload.case);
-    return [];
-  }
-
-  const stateMap: Record<string, DlvIndexEntry['status']> = {
-    limbo: 'LOCKED',
-    unlocked: 'UNLOCKABLE',
-    claimed: 'SPENT',
-    invalidated: 'EXPIRED',
-  };
-
-  return env.payload.value.vaults.map((v): DlvIndexEntry => ({
-    vaultId: v.vaultId,
-    cptaAnchorHex: v.vaultId,
-    createdAtTick: 0n,
-    status: stateMap[v.state] ?? 'LOCKED',
-    balance: {
-      tokenId: 'dBTC',
-      baseUnits: BigInt(v.amountSats),
-      decimals: 8,
-      symbol: 'dBTC',
-    },
-    conditions: [],
-    expectedReplication: 0,
-    localLabel:
-      v.direction === 'btc_to_dbtc'
-        ? 'BTC → dBTC'
-        : v.direction === 'dbtc_to_btc'
-          ? 'dBTC → BTC'
-          : 'dBTC Vault',
-    kind: 'dBTC',
-  }));
-}
 
 /**
- * Check whether a DLV anchor is replicated on storage nodes.
- * Returns false when no vault ID is provided; full per-node presence query
- * is not yet exposed via a single-vault route.
+ * Create a local backup file.
+ * Not yet implemented — NFC ring backup is the primary backup mechanism.
+ * See NFC Recovery screen for functional backup/restore.
  */
-export function checkDlvPresence(anchorHex: string): Promise<boolean> {
-  return Promise.resolve(!!anchorHex);
-}
-
 export function createBackup(): Promise<string> {
-  return Promise.resolve('/storage/emulated/0/Download/dsm_backup.nfc');
+  return Promise.reject(new Error('Local file backup not implemented. Use NFC ring backup.'));
 }

@@ -81,10 +81,12 @@ impl DlvPreCommitmentSdk {
     pub async fn create_dlv_pre_commitment(
         &self,
         config: DlvPreCommitmentConfig,
-        creator_keypair: (&[u8], &[u8]), // (SPHINCS+ pk, sk)
-        creator_kyber_pk: &[u8],         // Kyber PK for vault content encryption
+        creator_kyber_pk: &[u8], // Kyber PK for vault content encryption
         reference_state: &State,
     ) -> Result<DlvPreCommitmentResult, DsmError> {
+        let creator_signing_keypair =
+            crate::sdk::signing_authority::derive_current_signing_keypair()?;
+
         // Validate base config early (no alternate paths)
         Self::ensure_non_empty("fixed_params", !config.base_config.fixed_params.is_empty())?;
         self.ensure_variable_params_valid(&config.base_config)?;
@@ -101,22 +103,27 @@ impl DlvPreCommitmentSdk {
             let intended_recipient = dlv_cfg.required_params.get("recipient_public_key").cloned();
             let encryption_key = intended_recipient.as_deref().unwrap_or(creator_kyber_pk);
 
+            let draft = self.dlv_manager.prepare_vault(
+                creator_signing_keypair.public_key(),
+                dlv_cfg.unlock_condition.clone(),
+                content,
+                std::str::from_utf8(mime)
+                    .map_err(|_| DsmError::invalid_operation("mime must be valid UTF-8"))?,
+                intended_recipient.clone(),
+                encryption_key,
+                &reference_state.hash,
+            )?;
+            let creator_signature = dsm::crypto::sphincs::sphincs_sign(
+                creator_signing_keypair.secret_key(),
+                &draft.parameters_hash,
+            )
+            .map_err(|e| DsmError::crypto("sphincs_sign", Some(e)))?;
             // Create vault strictly with provided inputs
-            let (vault_id, _op) = self
+            let (vault_id_bytes, _op) = self
                 .dlv_manager
-                .create_vault(
-                    creator_keypair,
-                    dlv_cfg.unlock_condition.clone(),
-                    content,
-                    std::str::from_utf8(mime)
-                        .map_err(|_| DsmError::invalid_operation("mime must be valid UTF-8"))?,
-                    intended_recipient.clone(),
-                    encryption_key,
-                    reference_state,
-                    None,
-                    None,
-                )
+                .finalize_vault(draft, &creator_signature, None, None)
                 .await?;
+            let vault_id = crate::util::text_id::encode_base32_crockford(&vault_id_bytes);
 
             fork_vault_bindings.insert(fork_id.clone(), vault_id.clone());
             dlv_ids.push(vault_id.clone());
@@ -149,12 +156,7 @@ impl DlvPreCommitmentSdk {
 
         // Make the pre-commitment with forks
         let pre_commitment = self
-            .create_pre_commitment_with_forks(
-                &config.base_config,
-                fork_configs,
-                creator_keypair,
-                reference_state,
-            )
+            .create_pre_commitment_with_forks(&config.base_config, fork_configs, reference_state)
             .await?;
 
         // External commitments (context-bound)
@@ -187,12 +189,14 @@ impl DlvPreCommitmentSdk {
         pre_commitment: &mut PreCommitment,
         selected_fork_id: &str,
         execution_params: &HashMap<String, Vec<u8>>,
-        executor_keypair: (&[u8], &[u8]), // (SPHINCS+ pk, sk)
-        executor_kyber_sk: &[u8],         // Kyber SK for vault content decapsulation
+        requester_kyber_pk: &[u8], // Kyber PK checked against intended_recipient
+        executor_kyber_sk: &[u8],  // Kyber SK for vault content decapsulation
         reference_state: &State,
         fork_vault_bindings: &BTreeMap<String, String>,
         execution_proof: Option<FulfillmentProof>,
     ) -> Result<DlvPreCommitmentResult, DsmError> {
+        let executor_signing_public_key = crate::sdk::signing_authority::current_public_key()?;
+
         // Validate integrity before execution
         pre_commitment.validate_pre_commitment_integrity()?;
 
@@ -226,14 +230,19 @@ impl DlvPreCommitmentSdk {
         };
 
         // Attempt unlock, then claim
+        let vid32 = crate::util::text_id::decode_bytes32(&vault_id).ok_or_else(|| {
+            DsmError::invalid_operation(format!(
+                "execute_dlv_pre_commitment: fork vault_id {vault_id} is not a valid Base32 32-byte id"
+            ))
+        })?;
         let (unlocked, _unlock_op) = self
             .dlv_manager
             .try_unlock_vault(
-                &vault_id,
+                &vid32,
                 proof,
-                executor_keypair.1, // Kyber key for intended_recipient check
-                executor_keypair.0, // SPHINCS+ PK for operation signature verification
-                reference_state,
+                requester_kyber_pk,
+                &executor_signing_public_key,
+                &reference_state.hash,
             )
             .await?;
         if !unlocked {
@@ -245,10 +254,10 @@ impl DlvPreCommitmentSdk {
         let (_content, _claim_op) = self
             .dlv_manager
             .claim_vault_content(
-                &vault_id,
+                &vid32,
                 executor_kyber_sk,
-                executor_keypair.0,
-                reference_state,
+                &executor_signing_public_key,
+                &reference_state.hash,
             )
             .await?;
 
@@ -266,7 +275,6 @@ impl DlvPreCommitmentSdk {
         &self,
         cfg: &PreCommitmentConfig,
         mut forks: Vec<PreCommitmentFork>,
-        creator_keypair: (&[u8], &[u8]), // (pk, sk)
         reference_state: &State,
     ) -> Result<PreCommitment, DsmError> {
         // Compute deterministic pre-commit hash
@@ -275,7 +283,10 @@ impl DlvPreCommitmentSdk {
 
         // Sign with creator SK
         let mut signatures = HashMap::new();
-        let sig = sphincs::sphincs_sign(creator_keypair.1, &pre_hash)?;
+        let sig = sphincs::sphincs_sign(
+            &crate::sdk::signing_authority::current_secret_key()?,
+            &pre_hash,
+        )?;
         signatures.insert("creator".to_string(), sig);
 
         let mut pc = PreCommitment::new_with_signatures(pre_hash, signatures);
@@ -437,7 +448,12 @@ impl DlvPreCommitmentSdk {
     ) -> Result<HashMap<String, VaultState>, DsmError> {
         let mut out = HashMap::new();
         for id in dlv_ids {
-            let v = self.dlv_manager.get_vault(id).await?;
+            let vid32 = crate::util::text_id::decode_bytes32(id).ok_or_else(|| {
+                DsmError::invalid_operation(format!(
+                    "get_dlv_status: vault_id {id} is not a valid Base32 32-byte id"
+                ))
+            })?;
+            let v = self.dlv_manager.get_vault(&vid32).await?;
             let guard = v.lock().await;
             out.insert(id.clone(), guard.state.clone());
         }

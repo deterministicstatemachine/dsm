@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { decodeBase32Crockford, encodeBase32Crockford } from '../../utils/textId';
-import { appRouterInvokeBin, appRouterQueryBin } from '../../dsm/WebViewBridge';
+import { routerInvokeBin, routerQueryBin } from '../../dsm/WebViewBridge';
 import { decodeFramedEnvelopeV3 } from '../../dsm/decoding';
+import { startNfcReaderHost, stopNfcReaderHost, writeNfcTagPayloadHost } from '../../dsm/NativeHostBridge';
 import {
   AppStateRequest,
   ArgPack,
@@ -17,6 +18,7 @@ export type NfcBackupStatus = {
   pendingCapsule: boolean;
   capsuleCount: number;
   lastCapsuleIndex: number;
+  autoWriteEnabled: boolean;
 };
 
 export type CapsulePreview = {
@@ -157,22 +159,22 @@ export function capsulePreviewFromBase32(base32: string, maxBytes = 20): string 
 }
 
 export async function generateMnemonic(): Promise<string> {
-  const res = await appRouterInvokeBin('recovery.generateMnemonic', new Uint8Array(0));
+  const res = await routerInvokeBin('recovery.generateMnemonic', new Uint8Array(0));
   return extractAppStateValue(res);
 }
 
 export async function enableNfcBackup(mnemonic: string): Promise<void> {
-  const res = await appRouterInvokeBin('recovery.enable', packStringArg(normalizeMnemonic(mnemonic)));
+  const res = await routerInvokeBin('recovery.enable', packStringArg(normalizeMnemonic(mnemonic)));
   extractAppStateValue(res);
 }
 
 export async function disableNfcBackup(): Promise<void> {
-  const res = await appRouterInvokeBin('recovery.disable', new Uint8Array(0));
+  const res = await routerInvokeBin('recovery.disable', new Uint8Array(0));
   extractAppStateValue(res);
 }
 
 export async function cacheRecoveryMnemonic(mnemonic: string): Promise<void> {
-  const res = await appRouterInvokeBin(
+  const res = await routerInvokeBin(
     'recovery.cacheMnemonic',
     packStringArg(normalizeMnemonic(mnemonic)),
   );
@@ -180,7 +182,7 @@ export async function cacheRecoveryMnemonic(mnemonic: string): Promise<void> {
 }
 
 export async function getNfcBackupStatus(): Promise<NfcBackupStatus> {
-  const res = await appRouterQueryBin('recovery.status');
+  const res = await routerQueryBin('recovery.status');
   const pairs = parseKeyValuePairs(extractAppStateValue(res));
   return {
     enabled: pairs.enabled === 'true',
@@ -188,11 +190,12 @@ export async function getNfcBackupStatus(): Promise<NfcBackupStatus> {
     pendingCapsule: pairs.pending === 'true',
     capsuleCount: parseInt(pairs.capsule_count ?? '0', 10),
     lastCapsuleIndex: parseInt(pairs.last_capsule_index ?? '0', 10),
+    autoWriteEnabled: pairs.auto_write === 'true',
   };
 }
 
 export async function createCapsule(mnemonic: string): Promise<Uint8Array> {
-  const res = await appRouterInvokeBin(
+  const res = await routerInvokeBin(
     'recovery.createCapsule',
     packStringArg(normalizeMnemonic(mnemonic)),
   );
@@ -216,7 +219,7 @@ export async function decryptCapsuleBytes(
   const req = new NfcRecoveryCapsule({
     payload: toBytes(capsuleBytes),
   });
-  const res = await appRouterInvokeBin('recovery.decryptCapsule', req.toBinary());
+  const res = await routerInvokeBin('recovery.decryptCapsule', req.toBinary());
   const env = decodeFramedEnvelopeV3(res);
   if (env.payload.case === 'error') {
     throw new Error(env.payload.value.message || 'decryptCapsule failed');
@@ -238,7 +241,7 @@ export async function inspectCapsuleBytes(
   const req = new NfcRecoveryCapsule({
     payload: toBytes(capsuleBytes),
   });
-  const res = await appRouterInvokeBin('recovery.inspectCapsule', req.toBinary());
+  const res = await routerInvokeBin('recovery.inspectCapsule', req.toBinary());
   const env = decodeFramedEnvelopeV3(res);
   if (env.payload.case === 'error') {
     throw new Error(env.payload.value.message || 'inspectCapsule failed');
@@ -260,7 +263,7 @@ export async function decryptCapsuleFromBase32(params: {
 
 export async function getCapsulePreview(): Promise<CapsulePreview> {
   try {
-    const res = await appRouterQueryBin('recovery.capsulePreview');
+    const res = await routerQueryBin('recovery.capsulePreview');
     const val = extractAppStateValue(res);
     if (!val || val === 'none') return null;
     const pairs = parseKeyValuePairs(val);
@@ -276,25 +279,122 @@ export async function getCapsulePreview(): Promise<CapsulePreview> {
 }
 
 export async function readNfcRing(): Promise<void> {
-  const res = await appRouterInvokeBin('nfc.ring.read', new Uint8Array(0));
+  const res = await routerInvokeBin('nfc.ring.read', new Uint8Array(0));
   const env = decodeFramedEnvelopeV3(res);
   if (env.payload.case === 'error') {
     throw new Error(env.payload.value.message || 'NFC read failed');
   }
+  await startNfcReaderHost();
 }
 
 export async function stopNfcRead(): Promise<void> {
   try {
-    await appRouterInvokeBin('nfc.ring.stopRead', new Uint8Array(0));
+    await stopNfcReaderHost();
   } catch {
     // Best-effort teardown — ignore errors.
   }
 }
 
 export async function writeToNfcRing(): Promise<void> {
-  const res = await appRouterInvokeBin('nfc.ring.write', new Uint8Array(0));
+  const res = await routerInvokeBin('nfc.ring.write', new Uint8Array(0));
   const env = decodeFramedEnvelopeV3(res);
   if (env.payload.case === 'error') {
     throw new Error(env.payload.value.message || 'NFC write failed');
   }
+  await writeNfcTagPayloadHost();
+}
+
+export async function setAutoWriteEnabled(enabled: boolean): Promise<void> {
+  const res = await routerInvokeBin('recovery.setAutoWrite', packStringArg(enabled ? 'true' : 'false'));
+  extractAppStateValue(res);
+}
+
+// ── Recovery Pipeline Functions ──────────────────────────────────────────────
+
+export type PipelineResult = {
+  phase: string;
+  tombstoneHash: string;
+  pushed: number;
+  failed: number;
+  total: number;
+};
+
+export type AckStatus = {
+  newAcks: number;
+  synced: number;
+  total: number;
+  allSynced: boolean;
+};
+
+export type SyncProgress = {
+  synced: number;
+  total: number;
+  pending: string[];
+};
+
+export type ResumeResult = {
+  success: boolean;
+  resumed: number;
+};
+
+export async function getRecoveryPhase(): Promise<string> {
+  const res = await routerQueryBin('recovery.phase');
+  return extractAppStateValue(res) || 'none';
+}
+
+export async function executePipeline(): Promise<PipelineResult> {
+  const res = await routerInvokeBin('recovery.executePipeline', new Uint8Array(0));
+  const pairs = parseKeyValuePairs(extractAppStateValue(res));
+  return {
+    phase: pairs.phase ?? 'unknown',
+    tombstoneHash: pairs.tombstone_hash ?? '',
+    pushed: parseInt(pairs.pushed ?? '0', 10),
+    failed: parseInt(pairs.failed ?? '0', 10),
+    total: parseInt(pairs.total ?? '0', 10),
+  };
+}
+
+export async function pollAcks(): Promise<AckStatus> {
+  const res = await routerInvokeBin('recovery.pollAcks', new Uint8Array(0));
+  const pairs = parseKeyValuePairs(extractAppStateValue(res));
+  return {
+    newAcks: parseInt(pairs.new_acks ?? '0', 10),
+    synced: parseInt(pairs.synced ?? '0', 10),
+    total: parseInt(pairs.total ?? '0', 10),
+    allSynced: pairs.all_synced === 'true',
+  };
+}
+
+export async function getSyncProgress(): Promise<SyncProgress> {
+  const res = await routerQueryBin('recovery.syncStatus');
+  const pairs = parseKeyValuePairs(extractAppStateValue(res));
+  const pending = pairs.pending ? pairs.pending.split(',').filter(Boolean) : [];
+  return {
+    synced: parseInt(pairs.synced ?? '0', 10),
+    total: parseInt(pairs.total ?? '0', 10),
+    pending,
+  };
+}
+
+export async function resumeAll(): Promise<ResumeResult> {
+  const res = await routerInvokeBin('recovery.resumeAll', new Uint8Array(0));
+  const pairs = parseKeyValuePairs(extractAppStateValue(res));
+  return {
+    success: pairs.success === 'true',
+    resumed: parseInt(pairs.resumed ?? '0', 10),
+  };
+}
+
+export type TombstoneCheck = {
+  found: boolean;
+  tombstonedDevice: string;
+};
+
+export async function checkForTombstones(): Promise<TombstoneCheck> {
+  const res = await routerInvokeBin('recovery.checkTombstones', new Uint8Array(0));
+  const pairs = parseKeyValuePairs(extractAppStateValue(res));
+  return {
+    found: pairs.found === 'true',
+    tombstonedDevice: pairs.tombstoned_device ?? '',
+  };
 }

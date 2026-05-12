@@ -72,38 +72,6 @@ object DsmNative {
         }
         return out
     }
-
-    /**
-     * Bootstrap the SDK with canonical platform context.
-     * This is the single point of entry for initializing the deterministic core.
-     * @param deviceId Device ID bytes (32 bytes)
-     * @param genesisHash Genesis hash bytes (32 bytes)
-     * @param dbrwHw DBRW hardware entropy (baseline)
-     * @param dbrwEnv DBRW environment fingerprint (baseline)
-     * @param dbrwSalt DBRW salt (32 bytes)
-     * @return true on success
-     */
-    @JvmStatic
-    external fun sdkBootstrap(
-        deviceId: ByteArray,
-        genesisHash: ByteArray,
-        dbrwHw: ByteArray,
-        dbrwEnv: ByteArray,
-        dbrwSalt: ByteArray
-    ): Boolean
-
-    @JvmStatic
-    fun sdkBootstrapStrict(
-        deviceId: ByteArray,
-        genesisHash: ByteArray,
-        dbrwHw: ByteArray,
-        dbrwEnv: ByteArray,
-        dbrwSalt: ByteArray
-    ) {
-        if (!sdkBootstrap(deviceId, genesisHash, dbrwHw, dbrwEnv, dbrwSalt)) {
-            throw DsmNativeException("sdkBootstrap returned false")
-        }
-    }
 }
 
 class DsmNativeException(message: String, cause: Throwable? = null) : RuntimeException(message, cause)

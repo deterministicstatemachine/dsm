@@ -12,6 +12,11 @@ type NavigationSnapshot = {
 
 type MenuIndexUpdate = number | ((prev: number) => number);
 
+// Allowlist of valid navigation targets.  Every entry MUST also be
+// routed by `AppScreenRouter.tsx` and present in the `ScreenType`
+// union in `types/app.ts`.  Adding a screen anywhere else without
+// updating this set causes silent navigation drops (the `navigate`
+// early-returns when `to` is not in the set).
 const VALID_NAV_TARGETS = new Set<ScreenType>([
   'home',
   'wallet',
@@ -26,9 +31,14 @@ const VALID_NAV_TARGETS = new Set<ScreenType>([
   'dev_dlv',
   'dev_cdbrw',
   'dev_policy',
+  'dev_sofi_launch',
+  'sofi',
+  'liquidity',
+  'mail',
   'lock_setup',
   'recovery',
   'nfc_recovery',
+  'recovery_pipeline',
   'vault',
   'bluetooth',
 ]);

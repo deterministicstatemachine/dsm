@@ -4,12 +4,12 @@
 // Fetch and encode pairing ContactQrV3 URI from router.
 
 import { encodeBase32Crockford as base32CrockfordEncode } from '../../utils/textId';
-import { appRouterQueryBin } from '../../dsm/WebViewBridge';
+import { routerQueryBin } from '../../dsm/WebViewBridge';
 
 import { decodeFramedEnvelopeV3 } from '../../dsm/decoding';
 
 export async function fetchPairingContactUri(): Promise<string> {
-  const resp = await appRouterQueryBin('identity.pairing_qr');
+  const resp = await routerQueryBin('identity.pairing_qr');
 
   try {
     const env = decodeFramedEnvelopeV3(resp);

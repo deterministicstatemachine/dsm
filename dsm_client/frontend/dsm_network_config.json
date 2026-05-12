@@ -57,12 +57,12 @@
       }
     ],
     "production_nodes": [
-      { "name": "dsm-node-1", "region": "us-east-1", "endpoint": "https://13.218.83.69:8080" },
-      { "name": "dsm-node-2", "region": "us-east-1", "endpoint": "https://44.223.31.184:8080" },
-      { "name": "dsm-node-3", "region": "eu-west-1", "endpoint": "https://54.74.145.172:8080" },
-      { "name": "dsm-node-4", "region": "eu-west-1", "endpoint": "https://3.249.79.215:8080" },
-      { "name": "dsm-node-5", "region": "ap-southeast-1", "endpoint": "https://18.141.56.252:8080" },
-      { "name": "dsm-node-6", "region": "ap-southeast-1", "endpoint": "https://13.215.175.231:8080" }
+      { "name": "us-east1-a", "region": "us-east1", "endpoint": "https://34.73.141.32:8080" },
+      { "name": "us-east1-b", "region": "us-east1", "endpoint": "https://35.243.157.151:8080" },
+      { "name": "europe-west1-a", "region": "europe-west1", "endpoint": "https://35.205.9.157:8080" },
+      { "name": "europe-west1-b", "region": "europe-west1", "endpoint": "https://34.53.251.120:8080" },
+      { "name": "asia-southeast1-a", "region": "asia-southeast1", "endpoint": "https://34.21.157.56:8080" },
+      { "name": "asia-southeast1-b", "region": "asia-southeast1", "endpoint": "https://34.87.93.29:8080" }
     ]
   }
 }

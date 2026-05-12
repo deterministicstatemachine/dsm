@@ -8,6 +8,7 @@
 
 import * as pb from '../proto/dsm_app_pb';
 import { decodeFramedEnvelopeV3 } from './decoding';
+import { decodeNativeHostEventToLegacyTopic } from './NativeHostBridge';
 import { dispatchNativeQrScannerActive } from './qrScannerState';
 import { bytesToBase32CrockfordPrefix, encodeBase32Crockford } from '../utils/textId';
 import { bridgeEvents } from '../bridge/bridgeEvents';
@@ -77,6 +78,58 @@ export interface BleConnectionResult {
 }
 export type BleParseResult = BleDeviceFoundResult | BleErrorResult | BleConnectionResult;
 export type EnvelopeParseResult = OfflineTransferParseResult | BleParseResult | { rawEnvelope: Uint8Array } | null;
+
+// Re-dispatch a genesis lifecycle topic on the DOM `dsm-event-bin` channel so
+// that `addDsmEventListener` subscribers (e.g. `useGenesisFlow`) receive it.
+// The existing `dsm-event-bin` listener in this file will also call the
+// internal `emit()` on the `topicSubs` bus for any `EventBridge.on('genesis.*')`
+// subscribers, so both buses stay in sync.
+function dispatchGenesisTopic(topic: string, payload: Uint8Array): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.dispatchEvent(
+      new CustomEvent('dsm-event-bin', {
+        detail: { topic, payload: new Uint8Array(payload) },
+      }),
+    );
+  } catch (e) {
+    try { logger.warn('[EventBridge] dispatchGenesisTopic failed', e); } catch {}
+  }
+}
+
+function emitGenesisLifecycleFromEnvelope(bytes: Uint8Array): boolean {
+  const env = decodeFramedEnvelopeV3(bytes);
+  if (env.payload.case !== 'genesisLifecycle') return false;
+  const lifecycle = env.payload.value;
+  switch (lifecycle.kind) {
+    case pb.GenesisLifecycleEvent_Kind.GENESIS_KIND_STARTED:
+      dispatchGenesisTopic('genesis.started', new Uint8Array(0));
+      return true;
+    case pb.GenesisLifecycleEvent_Kind.GENESIS_KIND_SECURING_DEVICE:
+      dispatchGenesisTopic('genesis.securing-device', new Uint8Array(0));
+      return true;
+    case pb.GenesisLifecycleEvent_Kind.GENESIS_KIND_SECURING_PROGRESS:
+      dispatchGenesisTopic(
+        'genesis.securing-device-progress',
+        new Uint8Array([lifecycle.progress & 0xff]),
+      );
+      return true;
+    case pb.GenesisLifecycleEvent_Kind.GENESIS_KIND_SECURING_COMPLETE:
+      dispatchGenesisTopic('genesis.securing-device-complete', new Uint8Array(0));
+      return true;
+    case pb.GenesisLifecycleEvent_Kind.GENESIS_KIND_SECURING_ABORTED:
+      dispatchGenesisTopic('genesis.securing-device-aborted', new Uint8Array(0));
+      return true;
+    case pb.GenesisLifecycleEvent_Kind.GENESIS_KIND_OK:
+      dispatchGenesisTopic('genesis.ok', new Uint8Array(0));
+      return true;
+    case pb.GenesisLifecycleEvent_Kind.GENESIS_KIND_ERROR:
+      dispatchGenesisTopic('genesis.error', new Uint8Array(0));
+      return true;
+    default:
+      return false;
+  }
+}
 
 function decodeSessionState(bytes: Uint8Array): NativeSessionSnapshot {
   // Session state arrives envelope-wrapped from Rust: [0x03][Envelope(SessionStateResponse)]
@@ -222,6 +275,20 @@ export function initializeEventBridge(): void {
   let bleWalletRefreshCounter = 0;
   const BLE_WALLET_REFRESH_EVERY = 8; // emit 1 in 8 BLE-triggered refreshes
 
+  window.addEventListener('dsm-native-host-event-bin', (ev: Event) => {
+    try {
+      const detail = (ev as CustomEvent<{ payload?: unknown }>).detail;
+      const raw = detail?.payload;
+      const bytes = raw instanceof Uint8Array ? raw : raw instanceof ArrayBuffer ? new Uint8Array(raw) : null;
+      if (!bytes) return;
+      const mapped = decodeNativeHostEventToLegacyTopic(bytes);
+      if (!mapped) return;
+      window.dispatchEvent(new CustomEvent('dsm-event-bin', { detail: mapped }));
+    } catch (err) {
+      try { logger.warn('[EventBridge] Malformed dsm-native-host-event-bin', err); } catch {}
+    }
+  });
+
   window.addEventListener('dsm-event-bin', (ev: Event) => {
     try {
       const e: any = ev as any;
@@ -231,11 +298,19 @@ export function initializeEventBridge(): void {
       const bytes = raw instanceof Uint8Array ? raw : raw instanceof ArrayBuffer ? new Uint8Array(raw) : null;
       if (!bytes) return;
 
-      // Genesis lifecycle relay: Rust JNI builds a GenesisLifecycleEvent inside a BleEvent,
-      // dispatched on topic ble.envelope.bin. The ble.envelope.bin handler below decodes it
-      // and re-dispatches with the canonical genesis.* topic so addDsmEventListener subscribers
-      // (e.g. useGenesisFlow) receive it transparently.
       if (topic.startsWith('genesis.')) {
+        emit(topic, bytes);
+        return;
+      }
+
+      if (topic === 'canonical.envelope.bin') {
+        try {
+          if (emitGenesisLifecycleFromEnvelope(bytes)) {
+            return;
+          }
+        } catch (e) {
+          logger.warn('[EventBridge] canonical envelope decode failed:', e);
+        }
         emit(topic, bytes);
         return;
       }
@@ -535,30 +610,6 @@ export function initializeEventBridge(): void {
               // refresh (ContactsContext) detect bleAddress from the backend.
               // This ensures pairing is bilateral: both devices must have their
               // backend confirm the link before the UI shows "Paired!".
-            } else if (evCase === 'genesisLifecycle') {
-              // Rust JNI authored genesis lifecycle event. Map Kind → named topic and
-              // re-dispatch as dsm-event-bin so addDsmEventListener subscribers (useGenesisFlow)
-              // receive it with the canonical topic string, then fall through to emit() below.
-              const gl = bleEvent.ev.value as pb.GenesisLifecycleEvent;
-              const kind = typeof gl?.kind === 'number' ? gl.kind : 0;
-              const kindToTopic: Record<number, string> = {
-                1: 'genesis.started',
-                2: 'genesis.ok',
-                3: 'genesis.error',
-                4: 'genesis.securing-device',
-                5: 'genesis.securing-device-progress',
-                6: 'genesis.securing-device-complete',
-                7: 'genesis.securing-device-aborted',
-              };
-              const genTopic = kindToTopic[kind];
-              if (genTopic) {
-                const progressPayload = kind === 5
-                  ? new Uint8Array([typeof gl?.progress === 'number' ? gl.progress & 0xFF : 0])
-                  : new Uint8Array(0);
-                window.dispatchEvent(new CustomEvent('dsm-event-bin', {
-                  detail: { topic: genTopic, payload: progressPayload },
-                }));
-              }
             } else if (evCase === 'blePermission') {
               const bpe = bleEvent.ev.value as pb.BlePermissionEvent;
               try { bridgeEvents.emit('ble.permission.error', { message: bpe?.operation ?? '' }); } catch {}

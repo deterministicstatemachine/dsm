@@ -85,7 +85,7 @@ async fn test_b0x_integration_full_flow() {
     let recipient_genesis_b32 = text_id::encode_base32_crockford(&recipient_genesis_hash);
 
     let dummy_hash = [0u8; 32];
-    let amount = Balance::from_state(100, dummy_hash, 0);
+    let amount = Balance::from_state(100, dummy_hash);
 
     let op = Operation::Transfer {
         to_device_id: recipient_id_bytes.clone(),
@@ -285,7 +285,7 @@ async fn test_b0x_live_recipient_roundtrip() {
         .await
         .expect("receiver registration");
 
-    let amount = Balance::from_state(7, [0u8; 32], 0);
+    let amount = Balance::from_state(7, [0u8; 32]);
     let op = Operation::Transfer {
         to_device_id: receiver_device.to_vec(),
         amount,

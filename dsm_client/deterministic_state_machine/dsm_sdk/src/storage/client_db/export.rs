@@ -249,6 +249,7 @@ pub fn import_state_blob(blob: &[u8]) -> Result<(bool, String)> {
                 last_seen_online_counter: 0,
                 last_seen_ble_counter: 0,
                 public_key: Vec::new(), // Will be populated during BLE prepare exchange
+                kyber_public_key: Vec::new(),
                 previous_chain_tip: None,
             };
             let _ = store_contact(&rec);

@@ -8,7 +8,7 @@
  * - No wall-clock time; event/tick-driven only.
  */
 
-import { getAppRouterStatusBridge } from './WebViewBridge';
+import { getRouterStatusBridge } from './WebViewBridge';
 
 export type BridgePrereqState = {
   bridgeReady: boolean;
@@ -80,7 +80,7 @@ export class BridgeGate {
       this.prereq.routerGateSupported = false;
     } else {
       try {
-        const st = getAppRouterStatusBridge();
+        const st = getRouterStatusBridge();
         this.onEvent({ type: 'router.status', status: st });
         if (st > 0) this.onEvent({ type: 'router.installed' });
       } catch {

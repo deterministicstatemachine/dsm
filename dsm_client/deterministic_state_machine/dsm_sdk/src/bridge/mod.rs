@@ -35,8 +35,8 @@
 //!
 //! Implement the handler in `handlers/app_router_impl.rs`, add a match arm in
 //! `query()` or `invoke()`, and define the protobuf types in `dsm_app.proto`.
-//! No JNI changes needed — `appRouterQueryFramed`/`appRouterInvokeFramed`
-//! dispatch generically by path string.
+//! No Android boundary changes are needed — `dispatchIngress`
+//! dispatches generically by path string.
 //!
 //! See `docs/INTEGRATION_GUIDE.md` for the full developer onboarding guide.
 //!
@@ -80,20 +80,70 @@ pub struct AppResult {
 pub trait AppRouter: Send + Sync {
     async fn query(&self, q: AppQuery) -> AppResult;
     async fn invoke(&self, i: AppInvoke) -> AppResult;
-    /// Reload in-memory balance cache from SQLite after external balance changes (e.g. BLE debit).
+    /// Reload in-memory balance cache from SQLite after external balance
+    /// changes (e.g. BLE bilateral receiver credit landing in the
+    /// `balance_projections` table). The canonical DeviceState head is
+    /// installed by `execute_on_relationship` at the AdvanceOutcome
+    /// chokepoint; settlement-layer state never needs to be pushed back
+    /// into CoreSDK.
     fn sync_balance_cache(&self) {}
-    /// Return the device's canonical tip state (authoritative token balances).
+
+    /// Read-only snapshot of the canonical [`DeviceState`] head (§2.2 `r_A`).
     ///
-    /// Used by bilateral settlement to source B_n before applying the transfer
-    /// delta.  Returns `None` if no canonical state is available yet.
-    fn get_device_current_state(&self) -> Option<dsm::types::state_types::State> {
+    /// Used by settlement delegates to materialise display-layer projections
+    /// from the device head's authoritative balance scalar — never to mutate
+    /// it. Returns `None` when the router does not yet hold an identity
+    /// (pre-genesis bootstrap router).
+    fn device_head(&self) -> Option<dsm::types::device_state::DeviceState> {
         None
     }
 
-    /// Push a settled canonical state into CoreSDK's in-memory state machine.
-    /// Must be called BEFORE sync_balance_cache() after bilateral settlement
-    /// so the in-memory tip is ahead of any stale BCR archive entry.
-    fn push_device_state(&self, _state: &dsm::types::state_types::State) {}
+    /// Pure-prepare view of the canonical AdvanceOutcome — used by the BLE
+    /// sender to build a stitched receipt with the real post-advance SMT
+    /// roots/proofs before the canonical commit lands (canonical commit
+    /// happens later inside `execute_on_relationship_for_bilateral`).
+    /// Returns identical outcome for identical inputs, so the simulated
+    /// receipt is byte-exact with the eventual real advance.
+    fn simulate_advance_for_confirm(
+        &self,
+        _rel_key: [u8; 32],
+        _counterparty_devid: [u8; 32],
+        _operation: dsm::types::operations::Operation,
+        _deltas: &[dsm::types::device_state::BalanceDelta],
+        _initial_chain_tip: Option<[u8; 32]>,
+    ) -> Result<dsm::types::device_state::AdvanceOutcome, dsm::types::error::DsmError> {
+        Err(dsm::types::error::DsmError::invalid_operation(
+            "simulate_advance_for_confirm not implemented on this router",
+        ))
+    }
+
+    /// Execute a prepared bilateral advance through the canonical
+    /// [`CoreSDK::execute_on_relationship`] chokepoint.
+    ///
+    /// This is the bilateral entry point into the §2.2 single Per-Device SMT
+    /// advance (`prepare_advance_relationship → commit_advance`). It returns
+    /// only the [`AdvanceOutcome`] — settlement and BLE paths do not need the
+    /// compat `State` view. Callers feed in the tripwire-verified operation
+    /// and balance deltas produced by
+    /// `BilateralTransactionManager::finalize_offline_transfer_with_entropy`
+    /// (which no longer mutates any SMT itself), along with the parent chain
+    /// tip for CAS-style linkage.
+    ///
+    /// Returns `Err` if the router is not yet attached to an identity, or if
+    /// the underlying advance fails (§4.3 acceptance, §6.1 tripwire, §8
+    /// balance binding).
+    fn execute_on_relationship_for_bilateral(
+        &self,
+        _rel_key: [u8; 32],
+        _counterparty_devid: [u8; 32],
+        _operation: dsm::types::operations::Operation,
+        _deltas: &[dsm::types::device_state::BalanceDelta],
+        _initial_chain_tip: Option<[u8; 32]>,
+    ) -> Result<dsm::types::device_state::AdvanceOutcome, dsm::types::error::DsmError> {
+        Err(dsm::types::error::DsmError::invalid_operation(
+            "execute_on_relationship_for_bilateral not implemented on this router",
+        ))
+    }
 }
 
 /// App router storage. Uses RwLock to allow replacement (MinimalBootstrapRouter → AppRouterImpl).
@@ -124,6 +174,20 @@ pub fn install_app_router(router: Arc<dyn AppRouter>) -> Result<(), dsm::types::
 
 pub fn app_router() -> Option<Arc<dyn AppRouter>> {
     APP_ROUTER.read().ok()?.clone()
+}
+
+#[cfg(test)]
+pub(crate) unsafe fn reset_bridge_handlers_for_tests() {
+    if let Ok(mut guard) = APP_ROUTER.write() {
+        *guard = None;
+    }
+    if let Ok(mut guard) = UNILATERAL_HANDLER.write() {
+        *guard = None;
+    }
+    std::ptr::write(
+        std::ptr::addr_of!(BILATERAL_HANDLER) as *mut OnceCell<Arc<dyn BilateralHandler>>,
+        OnceCell::new(),
+    );
 }
 
 // ---------- Unilateral Ops ----------
@@ -214,7 +278,7 @@ pub fn get_all_balances_strict() -> Result<Vec<crate::generated::TokenBalanceEnt
             } else {
                 &result.data
             };
-            if let Ok(envelope) = crate::generated::Envelope::decode(data) {
+            if let Ok(envelope) = crate::envelope::from_canonical_bytes(data) {
                 if let Some(crate::generated::envelope::Payload::BalancesListResponse(resp)) =
                     envelope.payload
                 {

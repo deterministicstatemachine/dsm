@@ -13,7 +13,7 @@ use reqwest::{
     Client,
 };
 
-use dsm::types::proto::{BatchEnvelope, Envelope};
+use crate::generated::{BatchEnvelope, Envelope};
 
 const CT_PROTO: &str = "application/octet-stream";
 const MAX_ENVELOPE_BYTES: usize = 128 * 1024;
@@ -112,9 +112,7 @@ impl StorageSyncSdk {
         }
 
         // Local hygiene to match server expectations
-        if env.version != 3 {
-            return Err(anyhow!("Envelope.version must be 3"));
-        }
+        crate::envelope::validate_envelope_v3(env).map_err(anyhow::Error::msg)?;
         if env.message_id.len() != 16 {
             return Err(anyhow!("Envelope.message_id must be exactly 16 bytes"));
         }

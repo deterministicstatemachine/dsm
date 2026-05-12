@@ -2,7 +2,7 @@
 //!
 //! [`CryptoError`] captures the context, operation name, and optional source
 //! error string for failures occurring within the DSM cryptographic subsystem
-//! (BLAKE3, SPHINCS+, ML-KEM-768, Pedersen, DBRW, etc.).
+//! (BLAKE3, SPHINCS+, ML-KEM-768, DBRW, salted-BLAKE3 commitments, etc.).
 
 use std::fmt;
 

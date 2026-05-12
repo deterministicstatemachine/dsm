@@ -645,7 +645,7 @@ fn handle_system_genesis(req: &gp::SystemGenesisRequest) -> Result<Vec<u8>, Stri
 /// The real runtime dispatcher lives in the SDK. The core returns structured
 /// errors to signal that callers must go through the SDK for bilateral flows.
 pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
-    let envelope = match gp::Envelope::decode(env_bytes) {
+    let envelope = match crate::envelope::from_canonical_bytes(env_bytes) {
         Ok(env) => env,
         Err(err) => {
             return envelope_error(400, &format!("failed to decode envelope: {err}"))
@@ -1457,7 +1457,17 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
         | Some(gp::envelope::Payload::SessionStateResponse(_))
         | Some(gp::envelope::Payload::TokenPolicyListResponse(_))
         // Outbound-only push envelopes — never arrive as inbound requests
-        | Some(gp::envelope::Payload::NfcRecoveryCapsule(_)) => {
+        | Some(gp::envelope::Payload::NfcRecoveryCapsule(_))
+        | Some(gp::envelope::Payload::GenesisLifecycle(_))
+        | Some(gp::envelope::Payload::BootstrapMeasurementReport(_))
+        | Some(gp::envelope::Payload::BootstrapFinalizeResponse(_))
+        // C-DBRW Protocol 6.2 payloads — owned entirely by the SDK layer
+        // (cdbrw_responder / cdbrw_enrollment_writer / cdbrw_verifier).
+        // The core bridge never constructs or consumes these.
+        | Some(gp::envelope::Payload::CdbrwTrustSnapshot(_))
+        | Some(gp::envelope::Payload::CdbrwRespondResponse(_))
+        | Some(gp::envelope::Payload::CdbrwVerifyResponse(_))
+        | Some(gp::envelope::Payload::CdbrwEnrollResponse(_)) => {
             gp::envelope::Payload::Error(gp::Error {
                 code: 501,
                 message: "SDK-owned payloads are handled at the SDK layer".to_string(),
@@ -1516,7 +1526,7 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
 /// BilateralPrepareResponse results, each embedding a BLAKE3 commitment to the
 /// raw operation_data. Signatures and state hashes are left for higher layers.
 pub fn handle_bilateral_offline_send(env_bytes: &[u8], ble_address: &str) -> Vec<u8> {
-    let envelope = match gp::Envelope::decode(env_bytes) {
+    let envelope = match crate::envelope::from_canonical_bytes(env_bytes) {
         Ok(env) => env,
         Err(e) => {
             log::error!("[BRIDGE:offline_send] decode failed: {e}");
@@ -1885,6 +1895,39 @@ mod tests {
                 );
             }
             other => panic!("expected error envelope, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn universal_bridge_rejects_wrong_envelope_version() {
+        let env = gp::Envelope {
+            version: 2,
+            headers: Some(gp::Headers {
+                device_id: vec![4u8; 32],
+                chain_tip: vec![5u8; 32],
+                genesis_hash: vec![3u8; 32],
+                seq: 1,
+            }),
+            message_id: vec![6u8; 16],
+            payload: Some(gp::envelope::Payload::UniversalTx(gp::UniversalTx {
+                ops: vec![],
+                atomic: false,
+            })),
+        };
+
+        let resp_bytes = handle_envelope_universal(&env.encode_to_vec());
+        let resp_env = gp::Envelope::decode(resp_bytes.as_slice()).expect("decode response");
+
+        match resp_env.payload {
+            Some(gp::envelope::Payload::Error(err)) => {
+                assert_eq!(err.code, 400);
+                assert!(
+                    err.message.contains("Envelope.version must be 3"),
+                    "unexpected error: {}",
+                    err.message
+                );
+            }
+            other => panic!("expected error payload, got {:?}", other),
         }
     }
 

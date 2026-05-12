@@ -15,10 +15,16 @@ import android.nfc.NdefRecord
 import android.nfc.NfcAdapter
 import android.nfc.Tag
 import android.nfc.tech.Ndef
+import android.nfc.tech.NdefFormatable
+import android.nfc.tech.NfcA
 import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.os.BatteryManager
 import android.os.IBinder
 import android.os.Bundle
+import android.os.Message
 import android.util.Log
 import android.view.Gravity
 import android.view.View
@@ -47,6 +53,7 @@ import androidx.webkit.WebMessagePortCompat
 import androidx.webkit.WebViewAssetLoader
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
+import com.google.protobuf.ByteString
 import com.dsm.wallet.BuildConfig
 import com.dsm.wallet.bridge.BleEventRelay
 import com.dsm.wallet.bridge.SinglePathWebViewBridge
@@ -57,6 +64,12 @@ import com.dsm.wallet.permissions.BluetoothPermissionHelper
 import com.dsm.wallet.security.AccessLevel
 import com.dsm.wallet.service.BleBackgroundService
 import com.dsm.wallet.session.NativeFirstCutoverReset
+import dsm.types.proto.BiometricAuthorizeResult
+import dsm.types.proto.NativeHostRequest
+import dsm.types.proto.NativeHostEvent
+import dsm.types.proto.NativeHostEventKind
+import dsm.types.proto.NativeHostRequestKind
+import dsm.types.proto.QrScanResultPayload
 import dsm.types.proto.SessionHardwareFactsProto
 import java.io.ByteArrayInputStream
 import java.io.File
@@ -98,13 +111,20 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
     // Native QR scanner launcher and callback
     lateinit var qrScannerLauncher: ActivityResultLauncher<Intent>
     @Volatile var qrScanCallback: ((String?) -> Unit)? = null
-    @Volatile private var qrScannerActive = false
+    @Volatile private var qrLockRoundTripState = QrLockRoundTripState()
     @Volatile private var walletRefreshHint = 0L
     @Volatile private var isAppForeground = true
     @Volatile private var batteryCharging = false
     @Volatile private var batteryLevelPercent = 100
-    // NFC inline reader state (ring reads happen on MainActivity, not a separate Activity)
-    @Volatile private var nfcReaderActive = false
+    // NFC inline state (reads AND writes happen on MainActivity, not separate Activities)
+    private enum class NfcHostMode {
+        DISABLED,
+        SUPPRESSED,
+        READ,
+        WRITE,
+    }
+
+    @Volatile private var nfcHostMode = NfcHostMode.DISABLED
     private var nfcAdapter: NfcAdapter? = null
     // Bluetooth enable prompt launcher
     lateinit var btEnableLauncher: ActivityResultLauncher<Intent>
@@ -142,6 +162,9 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
 
     companion object {
         private const val EVENT_DISPATCH_TAG = "DsmEventDispatch"
+        private const val STATE_QR_SCANNER_ACTIVE = "qr_scanner_active"
+        private const val STATE_QR_SCANNER_RESUME_PENDING = "qr_scanner_resume_pending"
+        private const val NTAG216_MIN_USABLE_BYTES = 500
 
         // Weak reference to the currently active activity instance to avoid memory leaks.
         @Volatile
@@ -159,13 +182,13 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
          * Payload is raw protobuf bytes (no base32/json/hex).
          */
         @JvmStatic
-        fun dispatchDsmEventToWebView(topic: String, payload: ByteArray) {
+        fun dispatchDsmEventToWebView(topic: String, payload: ByteArray): Boolean {
             val inst = getActiveInstance()
             if (inst == null) {
                 Log.w(EVENT_DISPATCH_TAG, "dispatchDsmEventToWebView: no active MainActivity (topic=$topic)")
-                return
+                return false
             }
-            inst.dispatchDsmEventOnUi(topic, payload)
+            return inst.dispatchDsmEventOnUiBlocking(topic, payload)
         }
 
         /**
@@ -205,11 +228,17 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
 
     /**
      * Dispatch QR scan result into WebView via binary MessagePort.
-     * Payload is UTF-8 encoded QR text (empty = cancelled/no result).
+     * Payload is NativeHostEvent(QR_SCAN_RESULT) carrying a typed QR result proto.
      */
     fun dispatchQrScanResult(qrText: String?) {
-        val payload = (qrText ?: "").toByteArray(Charsets.UTF_8)
-        dispatchDsmEventOnUi("qr_scan_result", payload)
+        val payload = QrScanResultPayload.newBuilder()
+            .setTextUtf8(qrText ?: "")
+            .build()
+            .toByteArray()
+        dispatchNativeHostEventOnUi(
+            NativeHostEventKind.NATIVE_HOST_EVENT_KIND_QR_SCAN_RESULT,
+            payload,
+        )
     }
 
     /**
@@ -221,31 +250,89 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         dispatchDsmEventOnUi(safeName, detail.toByteArray(Charsets.UTF_8))
     }
 
+    private fun scheduleNfcModeTransition(targetMode: NfcHostMode) {
+        nfcHostMode = targetMode
+        runOnUiThread {
+            if (nfcHostMode != targetMode) return@runOnUiThread
+            applyNfcMode(targetMode)
+        }
+    }
+
+    private fun applyNfcMode(targetMode: NfcHostMode) {
+        val adapter = nfcAdapter ?: NfcAdapter.getDefaultAdapter(this)
+        nfcAdapter = adapter
+
+        if (targetMode == NfcHostMode.DISABLED) {
+            try { adapter?.disableReaderMode(this) } catch (_: Throwable) {}
+            nfcHostMode = NfcHostMode.DISABLED
+            return
+        }
+
+        if (adapter == null || !adapter.isEnabled) {
+            nfcHostMode = NfcHostMode.DISABLED
+            return
+        }
+
+        try { adapter.disableReaderMode(this) } catch (_: Throwable) {}
+
+        when (targetMode) {
+            NfcHostMode.SUPPRESSED -> {
+                adapter.enableReaderMode(
+                    this,
+                    { /* silent no-op — tag swallowed */ },
+                    NfcAdapter.FLAG_READER_NFC_A or NfcAdapter.FLAG_READER_NO_PLATFORM_SOUNDS,
+                    null
+                )
+            }
+            NfcHostMode.READ -> {
+                adapter.enableReaderMode(
+                    this,
+                    this,
+                    NfcAdapter.FLAG_READER_NFC_A
+                        or NfcAdapter.FLAG_READER_NFC_B
+                        or NfcAdapter.FLAG_READER_NFC_V,
+                    android.os.Bundle().apply {
+                        putInt(NfcAdapter.EXTRA_READER_PRESENCE_CHECK_DELAY, 250)
+                    }
+                )
+            }
+            NfcHostMode.WRITE -> {
+                adapter.enableReaderMode(
+                    this,
+                    this,
+                    NfcAdapter.FLAG_READER_NFC_A
+                        or NfcAdapter.FLAG_READER_NFC_V,
+                    android.os.Bundle().apply {
+                        putInt(NfcAdapter.EXTRA_READER_PRESENCE_CHECK_DELAY, 250)
+                    }
+                )
+            }
+            NfcHostMode.DISABLED -> {
+                // Handled by the early return above.
+            }
+        }
+
+        nfcHostMode = targetMode
+    }
+
     /**
      * Enable NFC reader mode on this activity so the ring can be read inline
-     * without leaving the WebView. Called from BridgeRouterHandler on nfc.ring.read.
+     * without leaving the WebView. Called from the native host bridge NFC control path.
      */
-    fun startNfcReader() {
-        runOnUiThread {
-            val adapter = nfcAdapter ?: NfcAdapter.getDefaultAdapter(this)
-            nfcAdapter = adapter
-            if (adapter == null || !adapter.isEnabled) {
-                Log.w(tag, "startNfcReader: NFC not available or disabled")
-                return@runOnUiThread
-            }
-            if (nfcReaderActive) {
-                Log.d(tag, "startNfcReader: already active")
-                return@runOnUiThread
-            }
-            nfcReaderActive = true
-            adapter.enableReaderMode(
-                this,
-                this,
-                NfcAdapter.FLAG_READER_NFC_A or NfcAdapter.FLAG_READER_NFC_B,
-                null
-            )
-            Log.i(tag, "startNfcReader: reader mode enabled")
+    fun startNfcReader(): Boolean {
+        val adapter = nfcAdapter ?: NfcAdapter.getDefaultAdapter(this)
+        nfcAdapter = adapter
+        if (adapter == null || !adapter.isEnabled) {
+            Log.w(tag, "startNfcReader: NFC not available or disabled")
+            return false
         }
+        if (nfcHostMode == NfcHostMode.READ) {
+            Log.d(tag, "startNfcReader: already active")
+            return true
+        }
+        scheduleNfcModeTransition(NfcHostMode.READ)
+        Log.i(tag, "startNfcReader: reader mode enabled")
+        return true
     }
 
     /**
@@ -253,26 +340,49 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
      * "WAITING FOR RING" screen, or when a read completes.
      */
     fun stopNfcReader() {
-        runOnUiThread {
-            if (!nfcReaderActive) return@runOnUiThread
-            nfcReaderActive = false
-            try {
-                nfcAdapter?.disableReaderMode(this)
-            } catch (t: Throwable) {
-                Log.w(tag, "stopNfcReader: disableReaderMode failed", t)
-            }
-            Log.i(tag, "stopNfcReader: reader mode disabled")
+        if (nfcHostMode != NfcHostMode.READ && nfcHostMode != NfcHostMode.WRITE) return
+        // Restore silent suppression instead of fully disabling — this prevents
+        // Android's system NFC popup from appearing while the app is in foreground.
+        scheduleNfcModeTransition(NfcHostMode.SUPPRESSED)
+        Log.i(tag, "stopNfcReader: reader mode stopped, suppression restored")
+    }
+
+    /**
+     * Enable NFC writer mode. The next onTagDiscovered call will write the
+     * pending recovery capsule instead of reading. The user stays in the WebView
+     * the entire time — no separate Activity, no gray screen.
+     */
+    fun startNfcWriter(): Boolean {
+        val adapter = nfcAdapter ?: NfcAdapter.getDefaultAdapter(this)
+        nfcAdapter = adapter
+        if (adapter == null || !adapter.isEnabled) {
+            Log.w(tag, "startNfcWriter: NFC not available or disabled")
+            return false
         }
+        if (nfcHostMode == NfcHostMode.WRITE) {
+            Log.d(tag, "startNfcWriter: already active")
+            return true
+        }
+        scheduleNfcModeTransition(NfcHostMode.WRITE)
+        Log.i(tag, "startNfcWriter: write mode enabled, waiting for tag")
+        return true
     }
 
     /**
      * NfcAdapter.ReaderCallback — called on a binder thread when a tag is discovered.
-     * Reads the NDEF capsule record and dispatches it through BleEventRelay → WebView.
+     * Routes to read or write path depending on the current NFC host mode.
      * The user never leaves the WebView.
      */
     override fun onTagDiscovered(tag: Tag) {
-        if (!nfcReaderActive) return
+        Log.d(this.tag, "onTagDiscovered: mode=$nfcHostMode tagId=${tag.id?.joinToString("") { "%02x".format(it) }}")
+        when (nfcHostMode) {
+            NfcHostMode.WRITE -> handleNfcWrite(tag)
+            NfcHostMode.READ -> handleNfcRead(tag)
+            else -> return
+        }
+    }
 
+    private fun handleNfcRead(tag: Tag) {
         bridgeExecutor.execute {
             try {
                 val ndef = Ndef.get(tag)
@@ -306,17 +416,178 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                 }
                 Log.i(this.tag, "onTagDiscovered: dispatched recovery capsule (${payload.size} bytes)")
 
-                // Auto-stop reader after successful read
-                runOnUiThread {
-                    nfcReaderActive = false
-                    try {
-                        nfcAdapter?.disableReaderMode(this)
-                    } catch (_: Throwable) {}
-                }
+                // Auto-stop reader after successful read, restore suppression
+                scheduleNfcModeTransition(NfcHostMode.SUPPRESSED)
             } catch (e: Exception) {
                 Log.w(this.tag, "onTagDiscovered: NFC read failed: ${e.message}")
             }
         }
+    }
+
+    /**
+     * Inline NFC write — replaces the old NfcWriteActivity.
+     * Runs on bridgeExecutor (off UI thread). Vibrates on success.
+     */
+    private fun handleNfcWrite(tag: Tag) {
+        bridgeExecutor.execute {
+            try {
+                val capsuleBytes = com.dsm.wallet.bridge.UnifiedNativeApi.getPendingRecoveryCapsule()
+                if (capsuleBytes.isEmpty()) {
+                    Log.w(this.tag, "handleNfcWrite: no pending capsule available")
+                    scheduleNfcModeTransition(NfcHostMode.SUPPRESSED)
+                    return@execute
+                }
+
+                Log.i(this.tag, "handleNfcWrite: preparing to write ${capsuleBytes.size} bytes capsule")
+                val ndefBytes = com.dsm.wallet.bridge.UnifiedNativeApi.prepareNfcWritePayload(capsuleBytes)
+                val ndefMessage = NdefMessage(ndefBytes)
+
+                val preparedTag = prepareNfcTag(tag)
+                if (preparedTag == null) {
+                    Log.w(this.tag, "handleNfcWrite: tag preparation failed")
+                    scheduleNfcModeTransition(NfcHostMode.SUPPRESSED)
+                    return@execute
+                }
+
+                writeNdefToTag(preparedTag, ndefMessage)
+                com.dsm.wallet.bridge.UnifiedNativeApi.clearPendingRecoveryCapsule()
+
+                // Immediately arm the next capsule so the index advances and
+                // the ring backup is ready for the next state change.
+                try {
+                    com.dsm.wallet.bridge.UnifiedNativeApi.maybeRefreshNfcCapsule()
+                } catch (_: Throwable) { /* best-effort */ }
+
+                runOnUiThread {
+                    vibrateNfcCommit()
+                    scheduleNfcModeTransition(NfcHostMode.SUPPRESSED)
+                }
+
+                Log.i(this.tag, "handleNfcWrite: committed ${ndefBytes.size} bytes")
+
+                try {
+                    com.dsm.wallet.bridge.UnifiedNativeApi.createNfcBackupWrittenEnvelope()
+                        .takeIf { it.isNotEmpty() }
+                        ?.let { BleEventRelay.dispatchEnvelope(it) }
+                } catch (t: Throwable) {
+                    Log.w(this.tag, "handleNfcWrite: committed write but failed to dispatch completion envelope: ${t.message}")
+                }
+
+            } catch (e: IOException) {
+                Log.d(this.tag, "handleNfcWrite: write failed (tag moved?): ${e.message}")
+            } catch (e: Exception) {
+                Log.d(this.tag, "handleNfcWrite: failed: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * Prepare a tag for NDEF writing. Auto-formats factory-blank NTAG216 tags.
+     */
+    private fun prepareNfcTag(tag: Tag): Tag? {
+        var ndef = Ndef.get(tag)
+
+        if (ndef == null) {
+            val formatable = NdefFormatable.get(tag)
+            if (formatable == null) {
+                Log.w(this.tag, "prepareNfcTag: tag exposes neither NDEF nor NdefFormatable")
+                return null
+            }
+            try {
+                formatable.connect()
+                formatable.format(NdefMessage(arrayOf(NdefRecord(
+                    NdefRecord.TNF_EMPTY, ByteArray(0), ByteArray(0), ByteArray(0)
+                ))))
+                formatable.close()
+                Log.i(this.tag, "prepareNfcTag: auto-formatted blank tag")
+            } catch (e: Exception) {
+                Log.w(this.tag, "prepareNfcTag: auto-format failed: ${e.message}")
+                try { formatable.close() } catch (_: Exception) {}
+                return null
+            }
+            ndef = Ndef.get(tag) ?: return null
+        }
+
+        try {
+            ndef.connect()
+            val maxSize = ndef.maxSize
+            ndef.close()
+
+            if (maxSize < NTAG216_MIN_USABLE_BYTES) {
+                Log.w(this.tag, "prepareNfcTag: capacity too small: $maxSize bytes")
+                if (maxSize < 200) {
+                    try {
+                        fixNfcCapabilityContainer(tag)
+                    } catch (e: Exception) {
+                        Log.w(this.tag, "prepareNfcTag: CC fix failed: ${e.message}")
+                        return null
+                    }
+                } else {
+                    return null
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(this.tag, "prepareNfcTag: capacity check failed: ${e.message}")
+            return null
+        }
+
+        return tag
+    }
+
+    private fun writeNdefToTag(tag: Tag, message: NdefMessage) {
+        val ndef = Ndef.get(tag) ?: throw IOException("Tag lost NDEF handle after prep")
+        ndef.connect()
+        try {
+            if (!ndef.isWritable) throw IOException("Tag is read-only")
+            val messageSize = message.toByteArray().size
+            if (ndef.maxSize < messageSize) {
+                throw IOException("Tag too small: need $messageSize, have ${ndef.maxSize}")
+            }
+            ndef.writeNdefMessage(message)
+        } finally {
+            ndef.close()
+        }
+    }
+
+    /**
+     * Fix CC bytes on page 3 for NTAG216 (E1 10 6D 00 = 888 bytes).
+     * Factory-blank tags sometimes get formatted with NTAG213 CC (144 bytes).
+     */
+    private fun fixNfcCapabilityContainer(tag: Tag) {
+        val nfcA = NfcA.get(tag) ?: throw IOException("NfcA not available")
+        nfcA.connect()
+        try {
+            val writeCmd = byteArrayOf(
+                0xA2.toByte(), 0x03,
+                0xE1.toByte(), 0x10, 0x6D, 0x00
+            )
+            nfcA.transceive(writeCmd)
+            Log.i(this.tag, "fixNfcCapabilityContainer: CC written (NTAG216)")
+        } finally {
+            nfcA.close()
+        }
+    }
+
+    /** Single haptic pulse — the NFC write commit event. */
+    private fun vibrateNfcCommit() {
+        val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val mgr = getSystemService(VIBRATOR_MANAGER_SERVICE) as VibratorManager
+            mgr.defaultVibrator
+        } else {
+            @Suppress("DEPRECATION")
+            getSystemService(VIBRATOR_SERVICE) as Vibrator
+        }
+        vibrator.vibrate(VibrationEffect.createOneShot(50, VibrationEffect.DEFAULT_AMPLITUDE))
+    }
+
+    /**
+     * Enable silent NFC reader mode that swallows tags without triggering
+     * Android's system NFC popup. Active whenever the app is in the foreground
+     * but not actively reading/writing a ring.
+     */
+    private fun enableNfcSuppression() {
+        if (nfcHostMode == NfcHostMode.READ || nfcHostMode == NfcHostMode.WRITE) return
+        scheduleNfcModeTransition(NfcHostMode.SUPPRESSED)
     }
 
     private fun extractCapsuleRecord(messages: List<NdefMessage>): NdefRecord? {
@@ -339,33 +610,98 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
     private fun dispatchDsmEventOnUi(topic: String, payload: ByteArray) {
         // Always hop to UI thread for WebView MessagePort dispatch.
         runOnUiThread {
+            dispatchDsmEventOnUiNow(topic, payload)
+        }
+    }
+
+    private fun dispatchDsmEventOnUiBlocking(topic: String, payload: ByteArray): Boolean {
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+            return dispatchDsmEventOnUiNow(topic, payload)
+        }
+
+        val latch = java.util.concurrent.CountDownLatch(1)
+        var delivered = false
+        runOnUiThread {
             try {
-                val shouldRefreshSessionHint = topic == "dsm-wallet-refresh" || topic == "inbox.updated"
-                if (shouldRefreshSessionHint) {
-                    walletRefreshHint += 1L
-                }
+                delivered = dispatchDsmEventOnUiNow(topic, payload)
+            } finally {
+                latch.countDown()
+            }
+        }
+
+        val completed = try {
+            latch.await(750, java.util.concurrent.TimeUnit.MILLISECONDS)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            false
+        }
+
+        if (!completed) {
+            Log.w(EVENT_DISPATCH_TAG, "dispatch timed out waiting for UI thread (topic=$topic)")
+            return false
+        }
+
+        return delivered
+    }
+
+    private fun dispatchDsmEventOnUiNow(topic: String, payload: ByteArray): Boolean {
+        return try {
+            val shouldRefreshSessionHint = topic == "dsm-wallet-refresh" || topic == "inbox.updated"
+            if (shouldRefreshSessionHint) {
+                walletRefreshHint += 1L
+            }
+            val port = dsmPort
+            if (port == null) {
+                Log.w(EVENT_DISPATCH_TAG, "dispatch failed (no MessagePort) topic=$topic")
+                return false
+            }
+            if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_ARRAY_BUFFER)) {
+                Log.w(EVENT_DISPATCH_TAG, "dispatch failed: ArrayBuffer not supported")
+                return false
+            }
+
+            // Canonical async event payload: protobuf AppRouterPayload(method_name=topic, args=payload)
+            // This removes previous 0x02 topic frame wrapping.
+            val eventBytes = com.dsm.wallet.bridge.BridgeEnvelopeCodec.encodeAppRouterPayload(topic, payload)
+
+            if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_PORT_POST_MESSAGE)) {
+                Log.w(EVENT_DISPATCH_TAG, "dispatch failed: MessagePort postMessage not supported")
+                return false
+            }
+
+            port.postMessage(WebMessageCompat(eventBytes))
+            if (shouldRefreshSessionHint) {
+                publishSessionState("walletRefresh")
+            }
+            true
+        } catch (e: Throwable) {
+            Log.w(EVENT_DISPATCH_TAG, "dispatch failed (topic=$topic): ${e.message}")
+            false
+        }
+    }
+
+    fun dispatchNativeHostEventOnUi(kind: NativeHostEventKind, payload: ByteArray) {
+        runOnUiThread {
+            try {
                 val port = dsmPort
                 if (port == null) {
-                    Log.w(EVENT_DISPATCH_TAG, "dispatch failed (no MessagePort) topic=$topic")
+                    Log.w(EVENT_DISPATCH_TAG, "host dispatch failed (no MessagePort) kind=$kind")
                     return@runOnUiThread
                 }
                 if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_ARRAY_BUFFER)) {
-                    Log.w(EVENT_DISPATCH_TAG, "dispatch failed: ArrayBuffer not supported")
+                    Log.w(EVENT_DISPATCH_TAG, "host dispatch failed: ArrayBuffer not supported")
                     return@runOnUiThread
                 }
-
-                // Canonical async event payload: protobuf AppRouterPayload(method_name=topic, args=payload)
-                // This removes previous 0x02 topic frame wrapping.
-                val eventBytes = com.dsm.wallet.bridge.BridgeEnvelopeCodec.encodeAppRouterPayload(topic, payload)
-
+                val eventBytes = NativeHostEvent.newBuilder()
+                    .setKind(kind)
+                    .setPayload(ByteString.copyFrom(payload))
+                    .build()
+                    .toByteArray()
                 if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_PORT_POST_MESSAGE)) {
                     port.postMessage(WebMessageCompat(eventBytes))
                 }
-                if (shouldRefreshSessionHint) {
-                    publishSessionState("walletRefresh")
-                }
             } catch (e: Throwable) {
-                Log.w(EVENT_DISPATCH_TAG, "dispatch failed (topic=$topic): ${e.message}")
+                Log.w(EVENT_DISPATCH_TAG, "host dispatch failed (kind=$kind): ${e.message}")
             }
         }
     }
@@ -388,6 +724,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
     private fun publishSessionState(reason: String = "") {
         val adapter = getBluetoothAdapterSafely(this)
         val service = bleBackgroundService
+        val qrState = qrLockRoundTripState
         val facts = SessionHardwareFactsProto.newBuilder()
             .setAppForeground(isAppForeground && !isFinishing && !isDestroyed)
             .setBleEnabled(adapter?.isEnabled == true)
@@ -395,7 +732,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
             .setBleScanning(service?.isScanningActive() == true)
             .setBleAdvertising(service?.isAdvertisingActive() == true)
             .setQrAvailable(true)
-            .setQrActive(qrScannerActive)
+            .setQrActive(qrState.effectiveQrActive())
             .setCameraPermission(NativeFirstCutoverReset.hasCameraPermission(this))
             .setBatteryCharging(batteryCharging)
             .setBatteryLevelPercent(batteryLevelPercent.coerceIn(0, 100))
@@ -479,8 +816,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
     private fun invokeNativeRouterInvoke(method: String, args: ByteArray = ByteArray(0)) {
         bridgeExecutor.execute {
             try {
-                val payload = com.dsm.wallet.bridge.BridgeEnvelopeCodec.encodeAppRouterPayload(method, args)
-                com.dsm.wallet.bridge.SinglePathWebViewBridge.handleBinaryRpcRaw("appRouterInvoke", payload)
+                com.dsm.wallet.bridge.NativeBoundaryBridge.routerInvoke(method, args)
             } catch (t: Throwable) {
                 Log.w(tag, "invokeNativeRouterInvoke failed for $method", t)
             }
@@ -657,10 +993,20 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                 return
             }
 
-            // createGenesisBin includes silicon fingerprint enrollment (~60s on first boot).
-            // Running it on the main thread causes ANR. Dispatch to background executor;
-            // port.postMessage is thread-safe and can be called from any thread.
-            if (method == "createGenesisBin") {
+            val isLongRunningNativeHostRequest = if (method == "nativeHostRequest") {
+                try {
+                    NativeHostRequest.parseFrom(body).kind ==
+                        NativeHostRequestKind.NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_DEVICE_BINDING_CAPTURE
+                } catch (_: Throwable) {
+                    false
+                }
+            } else {
+                false
+            }
+
+            // Device-binding capture includes silicon fingerprint enrollment (~60s on first boot).
+            // Run it on the dedicated executor to avoid starving the general bridge worker pool.
+            if (isLongRunningNativeHostRequest) {
                 genesisExecutor.execute {
                     val respBytes: ByteArray = try {
                         SinglePathWebViewBridge.handleBinaryRpc(method, body)
@@ -676,6 +1022,12 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                     if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_PORT_POST_MESSAGE)) {
                         port.postMessage(WebMessageCompat(responseWithId))
                     }
+                    // After device-binding capture finalizes, Rust SDK_READY flips to true
+                    // and BOOTSTRAP_SECURING flips to false. Publish a fresh session snapshot
+                    // so React can transition securing_device → wallet_ready without waiting
+                    // for the next lifecycle event (resume/pause/etc). Without this push the
+                    // UI stays stuck on the progress screen until the user exits and returns.
+                    runOnUiThread { publishSessionState("deviceBindingCapture") }
                 }
                 return
             }
@@ -723,12 +1075,12 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         Log.i(tag, "launchNativeQrScanner: starting native scanner")
         qrScanCallback = callback
         try {
-            qrScannerActive = true
+            qrLockRoundTripState = qrLockRoundTripState.onScannerLaunch()
             publishSessionState("qrStart")
             val intent = Intent(this, QrScannerActivity::class.java)
             qrScannerLauncher.launch(intent)
         } catch (t: Throwable) {
-            qrScannerActive = false
+            qrLockRoundTripState = qrLockRoundTripState.onScannerLaunchFailure()
             qrScanCallback = null
             Log.e(tag, "launchNativeQrScanner: failed to launch scanner", t)
             publishSessionState("qrLaunchFailed")
@@ -771,11 +1123,27 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         }
     }
 
+    fun requestNamedPermissionsFromUi(permissions: Array<String>) {
+        val needed = permissions
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
+            .toTypedArray()
+        if (needed.isEmpty()) {
+            return
+        }
+        requestPermissions(needed, cameraPermCode)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         // Drop the launch theme as soon as the activity starts so the splash artwork
         // does not remain as the live window background after the first frame.
         setTheme(com.dsm.wallet.R.style.Theme_DsmClient)
         super.onCreate(savedInstanceState)
+        qrLockRoundTripState = QrLockRoundTripState(
+            scannerActive = savedInstanceState?.getBoolean(STATE_QR_SCANNER_ACTIVE, false) == true,
+            resumePending = savedInstanceState?.getBoolean(STATE_QR_SCANNER_RESUME_PENDING, false) == true,
+        )
 
         // Fade-in/fade-out transition from the Irrefutable Labs splash screen
         @Suppress("DEPRECATION")
@@ -888,7 +1256,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         }
         
         qrScannerLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-            qrScannerActive = false
+            qrLockRoundTripState = qrLockRoundTripState.onScannerResult()
             val data = if (result.resultCode == RESULT_OK) {
                 result.data?.getStringExtra(QrScannerActivity.EXTRA_QR_DATA)
             } else {
@@ -968,6 +1336,10 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         activeInstance = WeakReference(this)
         isAppForeground = true
         publishSessionState("resume")
+        if (qrLockRoundTripState.resumePending && !qrLockRoundTripState.scannerActive) {
+            qrLockRoundTripState = qrLockRoundTripState.onResumeSettled()
+            publishSessionState("qrResumeSettled")
+        }
         if (hasIdentityViaRust()) {
             invokeNativeRouterInvoke("inbox.resume")
         }
@@ -990,25 +1362,22 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         } else {
             Log.d(tag, "onResume: skipping BLE restart (no identity yet, pre-genesis)")
         }
+
+        // Suppress Android's system NFC popup while the app is in foreground.
+        // When not actively reading/writing, tags are silently swallowed.
+        if (nfcHostMode != NfcHostMode.READ && nfcHostMode != NfcHostMode.WRITE) {
+            enableNfcSuppression()
+        }
     }
 
     override fun onPause() {
         super.onPause()
         isAppForeground = false
 
-        // Stop NFC reader mode so the ring never triggers when the app is backgrounded.
-        if (nfcReaderActive) {
-            nfcReaderActive = false
-            try { nfcAdapter?.disableReaderMode(this) } catch (_: Throwable) {}
-        }
+        // Fully disable NFC (active reader + suppression) when backgrounded.
+        nfcHostMode = NfcHostMode.DISABLED
+        try { nfcAdapter?.disableReaderMode(this) } catch (_: Throwable) {}
 
-        try {
-            if (::bridge.isInitialized) {
-                bridge.handleHostPause()
-            }
-        } catch (t: Throwable) {
-            Log.w(tag, "onPause: failed to notify genesis interruption guard", t)
-        }
         // Rust receives app_foreground=false via publishSessionState and decides lock policy
         publishSessionState("pause")
         // Do not stop advertising here; background service owns BLE state.
@@ -1022,22 +1391,32 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         // No-op: bars are permanently dark. Kept so the bridge route doesn't error.
     }
 
-    private fun showBiometricPrompt() {
+    fun showBiometricPrompt(
+        promptTitle: String = "DSM Wallet",
+        promptSubtitle: String = "Authenticate to unlock",
+        negativeText: String = "Use PIN / Combo",
+    ) {
         val executor = ContextCompat.getMainExecutor(this)
         val callback = object : BiometricPrompt.AuthenticationCallback() {
             override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                // Payload: [0x01] = success
-                dispatchDsmEventOnUi("dsm-biometric-result", byteArrayOf(0x01))
+                dispatchNativeHostEventOnUi(
+                    NativeHostEventKind.NATIVE_HOST_EVENT_KIND_BIOMETRIC_RESULT,
+                    BiometricAuthorizeResult.newBuilder()
+                        .setSuccess(true)
+                        .build()
+                        .toByteArray(),
+                )
             }
             override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
-                // Payload: [0x00][errorCode as u16 BE][UTF-8 error message]
-                val msgBytes = errString.toString().toByteArray(Charsets.UTF_8)
-                val payload = ByteArray(3 + msgBytes.size)
-                payload[0] = 0x00
-                payload[1] = ((errorCode shr 8) and 0xFF).toByte()
-                payload[2] = (errorCode and 0xFF).toByte()
-                System.arraycopy(msgBytes, 0, payload, 3, msgBytes.size)
-                dispatchDsmEventOnUi("dsm-biometric-result", payload)
+                dispatchNativeHostEventOnUi(
+                    NativeHostEventKind.NATIVE_HOST_EVENT_KIND_BIOMETRIC_RESULT,
+                    BiometricAuthorizeResult.newBuilder()
+                        .setSuccess(false)
+                        .setErrorCode(errorCode)
+                        .setErrorMessage(errString.toString())
+                        .build()
+                        .toByteArray(),
+                )
             }
             override fun onAuthenticationFailed() {
                 // Finger not recognised — BiometricPrompt shows retry UI automatically.
@@ -1045,15 +1424,26 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         }
         val prompt = BiometricPrompt(this, executor, callback)
         val promptInfo = BiometricPrompt.PromptInfo.Builder()
-            .setTitle("DSM Wallet")
-            .setSubtitle("Authenticate to unlock")
-            .setNegativeButtonText("Use PIN / Combo")
+            .setTitle(if (promptTitle.isBlank()) "DSM Wallet" else promptTitle)
+            .setSubtitle(if (promptSubtitle.isBlank()) "Authenticate to unlock" else promptSubtitle)
+            .setNegativeButtonText(if (negativeText.isBlank()) "Use PIN / Combo" else negativeText)
             .build()
         prompt.authenticate(promptInfo)
     }
 
     override fun onStart() {
         super.onStart()
+        // Start as a foreground service FIRST so it survives onStop() unbind.
+        // Without this, BIND_AUTO_CREATE alone creates a bound-only service that
+        // is destroyed when unbindService() is called in onStop(), killing BLE
+        // advertising, GATT server, and all peer connections mid-transfer.
+        if (hasIdentityViaRust()) {
+            try {
+                BleBackgroundService.start(this)
+            } catch (t: Throwable) {
+                Log.w(tag, "onStart: startForegroundService failed", t)
+            }
+        }
         val intent = Intent(this, BleBackgroundService::class.java)
         try {
             bindService(intent, bleServiceConnection, Context.BIND_AUTO_CREATE)
@@ -1072,6 +1462,18 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
             }
             bleServiceBound = false
             bleBackgroundService = null
+        }
+        if (!isChangingConfigurations && hasIdentityViaRust()) {
+            try {
+                invokeNativeRouterInvoke("inbox.stopPoller")
+            } catch (t: Throwable) {
+                Log.w(tag, "onStop: inbox.stopPoller failed", t)
+            }
+            try {
+                BleBackgroundService.stop(this)
+            } catch (t: Throwable) {
+                Log.w(tag, "onStop: stopForegroundService failed", t)
+            }
         }
     }
 
@@ -1097,6 +1499,8 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         try { if (::bridge.isInitialized) outState.putInt("bridge_status", bridge.getBridgeStatus()) } catch (_: Throwable) {}
+        outState.putBoolean(STATE_QR_SCANNER_ACTIVE, qrLockRoundTripState.scannerActive)
+        outState.putBoolean(STATE_QR_SCANNER_RESUME_PENDING, qrLockRoundTripState.resumePending)
     }
 
     override fun onRestoreInstanceState(savedInstanceState: Bundle) {
@@ -1132,9 +1536,6 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
             // initialize GATT/advertising after genesis (hasIdentityViaRust).
             try {
                 val svc = bleBackgroundService
-                if (svc == null) {
-                    BleBackgroundService.start(this@MainActivity)
-                }
                 if (hasIdentityViaRust()) {
                     val gattResult = svc?.ensureGattServerStarted() ?: false
                     Log.i(tag, "Bluetooth permissions granted: GATT server ensure-start result=$gattResult")
@@ -1230,6 +1631,14 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
             }
         }
 
+        if (outFile.exists() && outFile.canRead() && outFile.length() > 0L) {
+            Log.w(
+                tag,
+                "Falling back to previously materialized env config at ${outFile.absolutePath} after bundled asset materialization failed: ${lastErr?.message}"
+            )
+            return outFile
+        }
+
         Log.e(tag, "Materialize env config failed after $maxAttempts attempts: ${lastErr?.message}")
         val errorMsg = "Failed to load configuration: ${lastErr?.message ?: "unknown"}"
         try { Unified.setSessionFatalError(errorMsg) } catch (_: Throwable) {}
@@ -1269,13 +1678,13 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         Log.i(tag, "signalBridgeReady: Dispatching events to JS...")
         BleEventRelay.markBridgeReady(this)
         dispatchDsmEventOnUi("dsm-bridge-ready", ByteArray(0))
-        // Delay session state publish so JS has time to process the MessagePort
-        // delivery and install its onmessage handler. webView.post {} is insufficient
-        // because the JS engine may not have yielded between port receipt and the
-        // incoming data message. 100ms is conservative transport-layer delay (Invariant #4 allowed).
-        webView.postDelayed({
-            publishSessionState("bridgeReady")
-        }, 100)
+        // Publish session state at 100 ms, 500 ms, and 1500 ms.
+        // Redundant deliveries are harmless — the snapshot is idempotent.
+        // This covers any JS-side port-setup race without a frontend fallback timer;
+        // if one delivery races with the JS engine not yet ready, a later one wins.
+        webView.postDelayed({ publishSessionState("bridgeReady") }, 100)
+        webView.postDelayed({ publishSessionState("bridgeReady.r1") }, 500)
+        webView.postDelayed({ publishSessionState("bridgeReady.r2") }, 1500)
         Log.i(tag, "signalBridgeReady: COMPLETE")
     }
 
@@ -1401,11 +1810,16 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                         }
 
                         if (capturedDeviceId.size == 32 && capturedGenesis.size == 32) {
+                            // Start BLE as a foreground service so it survives activity
+                            // lifecycle transitions. Must happen on the UI thread (context
+                            // requirement) BEFORE the background GATT init thread.
                             try {
                                 BleBackgroundService.start(this@MainActivity)
+                                Log.i(tag, "initDsmAndSignalReady: BLE foreground service started")
                             } catch (t: Throwable) {
-                                Log.w(tag, "initDsmAndSignalReady: BleBackgroundService.start failed before identity publish", t)
+                                Log.w(tag, "initDsmAndSignalReady: BLE foreground service start failed", t)
                             }
+
                             // GATT server init + identity write are synchronous Bluetooth
                             // framework calls (100-500ms). Run on a background thread to
                             // avoid blocking the UI thread on slower chipsets (MediaTek).
@@ -1420,12 +1834,6 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                                     Log.w(tag, "initDsmAndSignalReady: GATT/identity setup failed", t)
                                 }
                             }.start()
-                            try {
-                                BleBackgroundService.start(this@MainActivity)
-                                Log.i(tag, "initDsmAndSignalReady: BleBackgroundService.start invoked")
-                            } catch (t: Throwable) {
-                                Log.w(tag, "initDsmAndSignalReady: BleBackgroundService.start failed", t)
-                            }
                         } else {
                             Log.i(tag, "initDsmAndSignalReady: BLE identity not yet present in persisted bytes; skipping setIdentityValue")
                         }
@@ -1461,14 +1869,18 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
             val allGranted = grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }
             if (!allGranted) {
                 Log.w(tag, "Bluetooth permissions not granted")
-                // Payload: [0x00] = denied
-                dispatchDsmEventOnUi("bluetooth-permissions", byteArrayOf(0x00))
+                dispatchNativeHostEventOnUi(
+                    NativeHostEventKind.NATIVE_HOST_EVENT_KIND_BLUETOOTH_PERMISSIONS,
+                    byteArrayOf(0x00),
+                )
             } else {
                 Log.i(tag, "Bluetooth permissions granted, notifying WebView")
                 // BLE ops are NOT auto-started here. The UI must explicitly request
-                // scanning/advertising via bridge RPC (device.ble.scan.start, device.ble.advertise.start).
-                // Payload: [0x01] = granted
-                dispatchDsmEventOnUi("bluetooth-permissions", byteArrayOf(0x01))
+                // scanning/advertising via the native host boundary.
+                dispatchNativeHostEventOnUi(
+                    NativeHostEventKind.NATIVE_HOST_EVENT_KIND_BLUETOOTH_PERMISSIONS,
+                    byteArrayOf(0x01),
+                )
             }
             publishSessionState("runtimePermissions")
         }
@@ -1499,11 +1911,53 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
 
         installDsmBinaryBridge(wv)
 
+        wv.settings.setSupportMultipleWindows(true)
         wv.webChromeClient = object : WebChromeClient() {
             // Suppress the default blue page-loading progress bar.
             // All loading feedback is handled by the React UI with themed colors.
             override fun onProgressChanged(view: WebView?, newProgress: Int) {
                 // No-op: suppress default WebView progress indicator
+            }
+
+            // Handle window.open() calls — intercept and open in system browser
+            // instead of creating a child WebView that breaks app state.
+            override fun onCreateWindow(
+                view: WebView?,
+                isDialog: Boolean,
+                isUserGesture: Boolean,
+                resultMsg: Message?
+            ): Boolean {
+                try {
+                    // Extract the URL from the hit test result
+                    val hitResult = view?.hitTestResult
+                    val url = hitResult?.extra
+                    if (!url.isNullOrEmpty()) {
+                        Log.i(tag, "window.open intercepted — opening in system browser: $url")
+                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                        startActivity(intent)
+                        return false
+                    }
+                    // Fallback: create a temporary WebView to capture the URL
+                    val tempWebView = WebView(view?.context ?: this@MainActivity)
+                    tempWebView.webViewClient = object : WebViewClient() {
+                        override fun shouldOverrideUrlLoading(v: WebView?, request: WebResourceRequest?): Boolean {
+                            val uri = request?.url
+                            if (uri != null) {
+                                Log.i(tag, "window.open fallback — opening in system browser: ${uri.host}")
+                                val intent = Intent(Intent.ACTION_VIEW, uri)
+                                startActivity(intent)
+                            }
+                            tempWebView.destroy()
+                            return true
+                        }
+                    }
+                    (resultMsg?.obj as? WebView.WebViewTransport)?.webView = tempWebView
+                    resultMsg?.sendToTarget()
+                    return true
+                } catch (t: Throwable) {
+                    Log.w(tag, "onCreateWindow: error", t)
+                }
+                return false
             }
 
             override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
@@ -1575,8 +2029,9 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
 
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                 try {
-                    val uri = request?.url
-                    if (uri != null && uri.scheme == "dsm" && uri.host == "native") {
+                    val uri = request?.url ?: return false
+                    // Handle native DSM deep links
+                    if (uri.scheme == "dsm" && uri.host == "native") {
                         val path = uri.path ?: ""
                         if (path == "/qr/start") {
                             Log.i(tag, "WebView requested native QR scan")
@@ -1585,6 +2040,13 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                             }
                             return true
                         }
+                    }
+                    // External URLs (http/https): open in system browser, keep WebView intact
+                    if (uri.scheme == "http" || uri.scheme == "https") {
+                        Log.i(tag, "Opening external URL in system browser: ${uri.host}")
+                        val intent = Intent(Intent.ACTION_VIEW, uri)
+                        startActivity(intent)
+                        return true
                     }
                 } catch (t: Throwable) {
                     Log.w(tag, "shouldOverrideUrlLoading: error", t)

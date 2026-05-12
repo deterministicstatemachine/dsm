@@ -102,25 +102,23 @@ fn sanitize_generated_prost(out_dir: &std::path::Path) {
             if sanitized != src {
                 if let Err(e) = fs::write(&generated, sanitized) {
                     eprintln!(
-                        "warning: failed to sanitize generated proto file {}: {}",
-                        generated.display(),
+                        "warning: failed to sanitize generated proto file dsm.rs: {}",
                         e
                     );
                 } else {
-                    println!(
-                        "cargo:warning=Sanitized generated proto file to avoid clippy ICE: {}",
-                        generated.display()
-                    );
+                    println!("cargo:warning=Sanitized generated proto file to avoid clippy ICE");
                 }
             }
         }
-        Err(e) => eprintln!(
-            "warning: failed to read generated proto file {}: {}",
-            generated.display(),
-            e
-        ),
+        Err(e) => eprintln!("warning: failed to read generated proto file dsm.rs: {}", e),
     }
 }
+
+// `compile_cdbrw_entropy_health` used to build `cdbrw_entropy_health.c` into
+// `libdsm_sdk.so` via the `cc` crate. The C sources were removed with the
+// Protocol 6.2 single-path collapse — histogram / entropy / autocorrelation /
+// LZ78 / manufacturing-gate math now lives entirely in `security::cdbrw_ffi`
+// as pure Rust. No build-time C step is needed.
 
 fn main() {
     // Safety check: prevent release builds with test-only flags
@@ -141,10 +139,7 @@ fn main() {
     let vendored_include = protoc_bin_vendored::include_path().ok();
     if let Ok(protoc_path) = protoc_bin_vendored::protoc_bin_path() {
         std::env::set_var("PROTOC", &protoc_path);
-        println!(
-            "cargo:warning=dsm@0.1.0: Using vendored protoc at {}",
-            protoc_path.display()
-        );
+        println!("cargo:warning=dsm@0.1.0: Using vendored protoc");
     }
 
     // Resolve repo root and canonical proto root
@@ -169,10 +164,7 @@ fn main() {
 
     let include_paths: Vec<&std::path::Path> = if let Some(ref vendored_include) = vendored_include
     {
-        println!(
-            "cargo:warning=dsm@0.1.0: Using vendored protoc include {}",
-            vendored_include.display()
-        );
+        println!("cargo:warning=dsm@0.1.0: Using vendored protoc include");
         vec![proto_root.as_path(), vendored_include.as_path()]
     } else {
         vec![proto_root.as_path()]

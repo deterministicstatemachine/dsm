@@ -1,10 +1,11 @@
 jest.mock('../WebViewBridge', () => ({
-  appRouterQueryBin: jest.fn(),
+  routerQueryBin: jest.fn(),
+  captureCdbrwOrbitTimings: jest.fn(),
 }));
 
 import * as pb from '../../proto/dsm_app_pb';
 import { getDbrwStatus } from '../dbrw';
-import { appRouterQueryBin } from '../WebViewBridge';
+import { captureCdbrwOrbitTimings, routerQueryBin } from '../WebViewBridge';
 
 function frameEnvelope(envelope: pb.Envelope): Uint8Array {
   const bytes = envelope.toBinary();
@@ -15,13 +16,31 @@ function frameEnvelope(envelope: pb.Envelope): Uint8Array {
 }
 
 function makeDbrwStatusResponse(overrides: Record<string, unknown> = {}): pb.DbrwStatusResponse {
+  const trustExplicit = 'trust' in overrides;
+  const trustOverride = overrides.trust as pb.CdbrwTrustSnapshot | undefined;
+  const baseOverrides = { ...overrides };
+  delete baseOverrides.trust;
+  const trust = trustExplicit
+    ? trustOverride
+    : new pb.CdbrwTrustSnapshot({
+          accessLevel: pb.CdbrwAccessLevel.CDBRW_ACCESS_FULL_ACCESS,
+          resonantStatus: pb.CdbrwResonantStatus.CDBRW_RESONANT_PASS,
+          trustScore: 0.95,
+          hHat: 0.98,
+          rhoHat: 0.02,
+          lHat: 4.5,
+          h0Eff: 0.96,
+          recommendedN: 1024,
+          w1Distance: 0.01,
+          w1Threshold: 0.05,
+          note: '',
+        })
+      : (trustOverride);
   return new pb.DbrwStatusResponse({
     enrolled: true,
     bindingKeyPresent: true,
     verifierKeypairPresent: true,
     storageBaseDirSet: true,
-    observeOnly: false,
-    accessMode: 'full',
     enrollmentRevision: 3,
     arenaBytes: 4096,
     probes: 9,
@@ -36,23 +55,8 @@ function makeDbrwStatusResponse(overrides: Record<string, unknown> = {}): pb.Dbr
     verifierPublicKeyLen: 1952,
     storageBaseDir: '/data/dbrw',
     statusNote: 'healthy',
-    runtimeMetricsPresent: true,
-    runtimeAccessLevel: 'full',
-    runtimeTrustScore: 0.95,
-    runtimeHealthCheckRan: true,
-    runtimeHealthCheckPassed: true,
-    runtimeHHat: 0.98,
-    runtimeRhoHat: 0.02,
-    runtimeLHat: 4.5,
-    runtimeMatchScore: 0.99,
-    runtimeW1Distance: 0.01,
-    runtimeW1Threshold: 0.05,
-    runtimeAnchorPrefix: new Uint8Array(8).fill(0xDD),
-    runtimeError: '',
-    runtimeH0Eff: 0.96,
-    runtimeRecommendedN: 1024,
-    runtimeResonantStatus: 'PASS',
-    ...overrides,
+    trust,
+    ...baseOverrides,
   } as any);
 }
 
@@ -66,15 +70,13 @@ describe('dbrw.ts', () => {
         version: 3,
         payload: { case: 'dbrwStatusResponse', value: resp },
       });
-      (appRouterQueryBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
+      (routerQueryBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
 
       const status = await getDbrwStatus();
       expect(status.enrolled).toBe(true);
       expect(status.bindingKeyPresent).toBe(true);
       expect(status.verifierKeypairPresent).toBe(true);
       expect(status.storageBaseDirSet).toBe(true);
-      expect(status.observeOnly).toBe(false);
-      expect(status.accessMode).toBe('full');
       expect(status.enrollmentRevision).toBe(3);
       expect(status.arenaBytes).toBe(4096);
       expect(status.probes).toBe(9);
@@ -89,18 +91,47 @@ describe('dbrw.ts', () => {
       expect(status.runtimeError).toBe('');
     });
 
-    test('passes "live" params when live=true', async () => {
-      const resp = makeDbrwStatusResponse();
-      const env = new pb.Envelope({
+    test('uses enrolled histogram bins for live trust measurement', async () => {
+      const statusResp = makeDbrwStatusResponse({ histogramBins: 64 });
+      const statusEnv = new pb.Envelope({
         version: 3,
-        payload: { case: 'dbrwStatusResponse', value: resp },
+        payload: { case: 'dbrwStatusResponse', value: statusResp },
       });
-      (appRouterQueryBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
+      const trustEnv = new pb.Envelope({
+        version: 3,
+        payload: {
+          case: 'cdbrwTrustSnapshot',
+          value: new pb.CdbrwTrustSnapshot({
+            accessLevel: pb.CdbrwAccessLevel.CDBRW_ACCESS_PIN_REQUIRED,
+            resonantStatus: pb.CdbrwResonantStatus.CDBRW_RESONANT_ADAPTED,
+            trustScore: 0.42,
+            hHat: 0.5,
+            rhoHat: 0.1,
+            lHat: 0.2,
+            w1Distance: 0.3,
+            w1Threshold: 0.2,
+            note: 'live trust',
+            h0Eff: 0.45,
+            recommendedN: 16384,
+          }),
+        },
+      });
+      (routerQueryBin as jest.Mock)
+        .mockResolvedValueOnce(frameEnvelope(statusEnv))
+        .mockResolvedValueOnce(frameEnvelope(trustEnv));
+      (captureCdbrwOrbitTimings as jest.Mock).mockResolvedValue(
+        new Uint8Array([1, 0, 0, 0, 0, 0, 0, 0]),
+      );
 
       await getDbrwStatus(true);
-      const [route, params] = (appRouterQueryBin as jest.Mock).mock.calls[0];
-      expect(route).toBe('dbrw.status');
-      expect(new TextDecoder().decode(params)).toBe('live');
+      expect((routerQueryBin as jest.Mock).mock.calls[0][0]).toBe('dbrw.status');
+      expect((routerQueryBin as jest.Mock).mock.calls[1][0]).toBe('cdbrw.measure_trust');
+
+      const trustReq = pb.CdbrwMeasureTrustRequest.fromBinary(
+        (routerQueryBin as jest.Mock).mock.calls[1][1],
+      );
+      expect(trustReq.histogramBins).toBe(64);
+      expect(trustReq.orbit?.timings.length).toBe(1);
     });
 
     test('passes empty params when live=false', async () => {
@@ -109,20 +140,20 @@ describe('dbrw.ts', () => {
         version: 3,
         payload: { case: 'dbrwStatusResponse', value: resp },
       });
-      (appRouterQueryBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
+      (routerQueryBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
 
       await getDbrwStatus(false);
-      const [, params] = (appRouterQueryBin as jest.Mock).mock.calls[0];
+      const [, params] = (routerQueryBin as jest.Mock).mock.calls[0];
       expect(params.length).toBe(0);
     });
 
     test('throws on empty response', async () => {
-      (appRouterQueryBin as jest.Mock).mockResolvedValue(new Uint8Array(0));
+      (routerQueryBin as jest.Mock).mockResolvedValue(new Uint8Array(0));
       await expect(getDbrwStatus()).rejects.toThrow(/empty response/);
     });
 
     test('throws on null response', async () => {
-      (appRouterQueryBin as jest.Mock).mockResolvedValue(null);
+      (routerQueryBin as jest.Mock).mockResolvedValue(null);
       await expect(getDbrwStatus()).rejects.toThrow(/empty response/);
     });
 
@@ -131,7 +162,7 @@ describe('dbrw.ts', () => {
         version: 3,
         payload: { case: 'error', value: new pb.Error({ message: 'dbrw not enrolled' }) },
       });
-      (appRouterQueryBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
+      (routerQueryBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
 
       await expect(getDbrwStatus()).rejects.toThrow(/dbrw not enrolled/);
     });
@@ -141,7 +172,7 @@ describe('dbrw.ts', () => {
         version: 3,
         payload: { case: 'balancesListResponse', value: new pb.BalancesListResponse() },
       });
-      (appRouterQueryBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
+      (routerQueryBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
 
       await expect(getDbrwStatus()).rejects.toThrow(/unexpected payload/);
     });
@@ -151,30 +182,28 @@ describe('dbrw.ts', () => {
         version: 3,
         payload: { case: 'dbrwStatusResponse', value: new pb.DbrwStatusResponse() },
       });
-      (appRouterQueryBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
+      (routerQueryBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
 
       const status = await getDbrwStatus();
       expect(status.enrolled).toBe(false);
-      expect(status.accessMode).toBe('');
       expect(status.arenaBytes).toBe(0);
     });
 
     test('maps unenrolled status correctly', async () => {
       const resp = makeDbrwStatusResponse({
         enrolled: false,
-        runtimeMetricsPresent: false,
-        runtimeResonantStatus: 'FAIL',
+        trust: undefined,
       });
       const env = new pb.Envelope({
         version: 3,
         payload: { case: 'dbrwStatusResponse', value: resp },
       });
-      (appRouterQueryBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
+      (routerQueryBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
 
       const status = await getDbrwStatus();
       expect(status.enrolled).toBe(false);
       expect(status.runtimeMetricsPresent).toBe(false);
-      expect(status.runtimeResonantStatus).toBe('FAIL');
+      expect(status.runtimeResonantStatus).toBe('UNSPECIFIED');
     });
   });
 });

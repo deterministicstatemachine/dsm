@@ -13,10 +13,9 @@ import androidx.annotation.Keep
 //
 // HOW TO HOOK IN:
 //   1. Unified initializes automatically (System.loadLibrary("dsm_sdk")).
-//   2. Bootstrap: SinglePathWebViewBridge.bootstrapFromPrefs() or manual
-//      Unified.sdkBootstrap(...) with device_id, genesis, DBRW entropy.
-//   3. Queries:  Unified.appRouterQueryFramed(framedRequest) -> ByteArray
-//   4. Invokes:  Unified.appRouterInvokeFramed(framedRequest) -> ByteArray
+//   2. Bootstrap: SinglePathWebViewBridge.bootstrapFromPrefs() or the
+//      shared startup/ingress boundary plus host measurement capture.
+//   3. Shared ingress: Unified.dispatchIngress(requestBytes) -> ByteArray
 //   5. Decode:   strip 0x03 prefix -> Envelope.parseFrom(rest)
 //
 // PROTOCOL RULES:
@@ -26,9 +25,9 @@ import androidx.annotation.Keep
 //   - All crypto (SPHINCS+, ML-KEM-768, DBRW) handled in Rust beneath.
 //
 // DOMAIN GROUPS:
-//   Identity:  sdkBootstrap, extractGenesisIdentity, recordPeerIdentity
+//   Identity:  extractGenesisIdentity, recordPeerIdentity
 //   Protocol:  processEnvelopeV3, processEnvelopeV3WithAddress
-//   AppRouter: appRouterQueryFramed, appRouterInvokeFramed
+//   Shared boundary: dispatchStartup, dispatchIngress
 //   Bilateral: bilateralOfflineSend, acceptBilateralByCommitment, ...
 //   BLE:       initBleCoordinator, processBleChunk, chunkEnvelopeForBle, ...
 //   Contacts:  removeContact, handleContactQrV3, hasContactForDeviceId
@@ -86,6 +85,10 @@ object Unified {
     @Keep @JvmStatic fun initDsmSdk(configPath: String) {
         UnifiedNativeApi.initDsmSdk(configPath)
     }
+    @Keep @JvmStatic fun dispatchStartup(requestBytes: ByteArray): ByteArray =
+        UnifiedNativeApi.dispatchStartup(requestBytes)
+    @Keep @JvmStatic fun dispatchIngress(requestBytes: ByteArray): ByteArray =
+        UnifiedNativeApi.dispatchIngress(requestBytes)
     @Keep @JvmStatic fun getTransportHeadersV3Status(): Byte =
         UnifiedNativeApi.getTransportHeadersV3Status()
     @Keep @JvmStatic fun getTransportHeadersV3(): ByteArray =
@@ -94,12 +97,6 @@ object Unified {
         UnifiedNativeApi.processEnvelopeV3(envelope)
     @Keep @JvmStatic fun processEnvelopeV3WithAddress(envelope: ByteArray, deviceAddress: String): ByteArray =
         UnifiedNativeApi.processEnvelopeV3WithAddress(envelope, deviceAddress)
-    @Keep @JvmStatic fun initializeSdkContext(
-        deviceId: ByteArray,
-        genesisHash: ByteArray,
-        entropy: ByteArray
-    ): Boolean = UnifiedNativeApi.initializeSdkContext(deviceId, genesisHash, entropy)
-
     /**
      * Extract device_id and genesis_hash from a GenesisCreated envelope
      * Returns byte array: [device_id 32 bytes][genesis_hash 32 bytes] or empty on error
@@ -120,15 +117,6 @@ object Unified {
      */
     @Keep @JvmStatic fun getWalletHistoryStrict(): ByteArray =
         UnifiedNativeApi.getWalletHistoryStrict()
-
-    // App router operations (protobuf payload transport)
-    // Query input format: [8-byte reqId][AppRouterPayload protobuf bytes]
-    // Invoke input format: [AppRouterPayload protobuf bytes]
-    // Query response format: [8-byte reqId][payload]
-    @Keep @JvmStatic fun appRouterQueryFramed(framedRequest: ByteArray): ByteArray? =
-        UnifiedNativeApi.appRouterQueryFramed(framedRequest)
-    @Keep @JvmStatic fun appRouterInvokeFramed(framedRequest: ByteArray): ByteArray? =
-        UnifiedNativeApi.appRouterInvokeFramed(framedRequest)
 
     // BLE bilateral operations
     @Keep @JvmStatic fun bilateralOfflineSend(deviceAddress: String, envelope: ByteArray): ByteArray {
@@ -329,6 +317,12 @@ object Unified {
      */
     @Keep @JvmStatic fun processGattIdentityRead(bleAddress: String, rawProtoBytes: ByteArray): ByteArray =
         UnifiedNativeApi.processGattIdentityRead(bleAddress, rawProtoBytes)
+    /**
+     * Observe raw protobuf bytes read from the GATT identity characteristic for an already-paired peer.
+     * Rust re-anchors the peer identity and updates persistence without sending write-back pairing data.
+     */
+    @Keep @JvmStatic fun observeGattIdentityRead(bleAddress: String, rawProtoBytes: ByteArray): ByteArray =
+        UnifiedNativeApi.observeGattIdentityRead(bleAddress, rawProtoBytes)
 
     @Keep @JvmStatic fun createTransactionErrorEnvelope(address: String, code: Int, message: String): ByteArray? =
         UnifiedNativeApi.createTransactionErrorEnvelope(address, code, message)
@@ -496,6 +490,12 @@ object Unified {
     @Keep @JvmStatic fun resolveBleAddressForDeviceIdBin(deviceId: ByteArray): ByteArray =
         UnifiedNativeApi.resolveBleAddressForDeviceIdBin(deviceId)
     /**
+     * Resolve the persisted peer identity for a BLE address.
+     * Returns 64 bytes ordered as [device_id(32)][genesis_hash(32)], or empty if unknown.
+     */
+    @Keep @JvmStatic fun resolvePeerIdentityForBleAddressBin(address: String): ByteArray =
+        UnifiedNativeApi.resolvePeerIdentityForBleAddressBin(address)
+    /**
      * Retrieve 32-byte local chain tip for a remote device (for identity payload composition).
      * @param deviceAddress MAC address or hex device ID
      * @return 32-byte chain tip or empty array if unavailable
@@ -590,15 +590,10 @@ object Unified {
         return UnifiedNativeDiagnostics.runNativeBridgeSelfTest()
     }
 
-    /**
-     * Collect a live Android-side C-DBRW runtime snapshot for the Rust `dbrw.status` route.
-     *
-     * The returned bytes use the fixed binary layout defined in `UnifiedCdbrwBridge`.
-     * Empty means runtime metrics are currently unavailable (for example, no active activity).
-     */
-    @Keep @JvmStatic fun getCdbrwRuntimeSnapshot(): ByteArray {
-        return UnifiedCdbrwBridge.collectRuntimeSnapshot()
-    }
+    // getCdbrwRuntimeSnapshot() was removed with the Protocol 6.2 collapse.
+    // Kotlin no longer computes trust/entropy/Wasserstein on its own — the
+    // `cdbrw.measure_trust` router query publishes a live CdbrwTrustSnapshot
+    // with the same data, and frontend/UI consume that directly.
 
     // ---------- BLE pairing orchestration (Rust-driven loop) ----------
 
@@ -620,20 +615,6 @@ object Unified {
 
     @Keep @JvmStatic fun onConnectionFailed(address: String, reason: String) {
         UnifiedBleEvents.onConnectionFailed(address, reason)
-    }
-
-    /**
-     * Safe wrapper for appRouterInvokeFramed that returns binary error envelope on failure.
-     */
-    @Keep @JvmStatic fun appRouterInvokeFramedSafe(framedRequest: ByteArray): ByteArray {
-        return UnifiedNativeDiagnostics.appRouterInvokeFramedSafe(framedRequest)
-    }
-
-    /**
-     * Safe wrapper for appRouterQueryFramed that returns binary error envelope on failure.
-     */
-    @Keep @JvmStatic fun appRouterQueryFramedSafe(framedRequest: ByteArray): ByteArray {
-        return UnifiedNativeDiagnostics.appRouterQueryFramedSafe(framedRequest)
     }
 
     /**

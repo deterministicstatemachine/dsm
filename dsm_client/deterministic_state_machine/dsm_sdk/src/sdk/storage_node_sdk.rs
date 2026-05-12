@@ -20,6 +20,9 @@ use tokio::sync::{Mutex, RwLock};
 use log::{debug, info, warn};
 
 use crate::util::deterministic_time as dt;
+use crate::util::registry_addr::{
+    build_root_device_tree_evidence, registry_content_addr_b64url, REGISTRY_QUORUM_THRESHOLD,
+};
 use dsm::common::deterministic_id;
 use dsm::crypto::blake3::dsm_domain_hasher;
 
@@ -262,7 +265,6 @@ pub fn ca_certs_loaded_count() -> u32 {
 #[derive(Debug, Clone)]
 pub struct MpcGenesisConfig {
     pub identity_id: String,
-    pub threshold: u32,
     pub participants: Vec<String>,
     pub quantum_resistant: bool,
     pub key_rotation_interval_hours: u64,
@@ -298,10 +300,8 @@ pub struct GenesisCreationResponse {
     pub genesis_device_id: Vec<u8>,
     /// Current session state
     pub state: String,
-    /// Number of contributions received
+    /// Number of contributions received (n-of-n; whitepaper §2.5)
     pub contributions_received: usize,
-    /// Required threshold
-    pub threshold: usize,
     /// Whether genesis creation is complete
     pub complete: bool,
     /// Genesis hash for verification (available when complete)
@@ -1054,11 +1054,9 @@ impl StorageNodeSDK {
             *mpc_config = Some(config.clone());
         } // Lock is released here
 
-        // Initialize identity with the storage node using the create_genesis_with_mpc method
-        match self
-            .create_genesis_with_mpc(Some(config.threshold as u8), None)
-            .await
-        {
+        // Initialize identity with the storage node using the create_genesis_with_mpc method.
+        // No threshold parameter — n-of-n MPC per whitepaper §2.5.
+        match self.create_genesis_with_mpc(None).await {
             Ok(response) => {
                 if !response.session_id.is_empty() {
                     info!(
@@ -1158,7 +1156,6 @@ impl StorageNodeSDK {
                         genesis_device_id: g.device_id.clone(),
                         state: "complete".to_string(),
                         contributions_received: 0_usize, // detailed counts not always provided here
-                        threshold: g.threshold as usize,
                         complete: true,
                         genesis_hash: g.genesis_hash.as_ref().map(|h| h.v.clone()),
                         participating_nodes: g.storage_nodes.clone(),
@@ -1473,7 +1470,7 @@ impl StorageNodeSDK {
         preimage.extend_from_slice(&state_hash_bytes);
         preimage.extend_from_slice(&params_bytes);
         preimage.extend_from_slice(&next_state.to_le_bytes());
-        let pre_commitment_hash = dsm::crypto::blake3::domain_hash("DSM/precommit-hash", &preimage);
+        let pre_commitment_hash = dsm::crypto::blake3::domain_hash("DSM/precommit", &preimage);
 
         // transaction_payload is the canonical proto bytes for parameters
         let transaction_payload = params_bytes.clone();
@@ -1542,8 +1539,7 @@ impl StorageNodeSDK {
         expected_preimage.extend_from_slice(&state_hash_bytes);
         expected_preimage.extend_from_slice(&params_bytes);
         expected_preimage.extend_from_slice(&next_state.to_le_bytes());
-        let expected_hash =
-            dsm::crypto::blake3::domain_hash("DSM/precommit-hash", &expected_preimage);
+        let expected_hash = dsm::crypto::blake3::domain_hash("DSM/precommit", &expected_preimage);
 
         if bilateral_entry.pre_commitment_hash != expected_hash.as_bytes() {
             bilateral_entry.status = BilateralTransactionStatus::Rejected;
@@ -1625,12 +1621,16 @@ impl StorageNodeSDK {
         Ok(())
     }
 
-    /// Create a DSM Genesis Identity via Multi-Party Computation (MPC)
+    /// Create a DSM Genesis Identity via Multi-Party Computation (MPC).
     ///
-    /// See module docs above for full details.
+    /// Per whitepaper §2.5: this is n-of-n commit-then-reveal entropy
+    /// aggregation, NOT threshold cryptography.  Every configured storage
+    /// node contributes; the floor is `≥3` (anti-2-collusion).  The prior
+    /// `threshold` argument and `node_urls.iter().take(threshold_count)`
+    /// pre-truncation (Issue #252 prefix-bias sub-bug) have been removed:
+    /// every node contributes its entropy, every contribution goes into G.
     pub async fn create_genesis_with_mpc(
         &self,
-        threshold: Option<u8>,
         client_entropy: Option<Vec<u8>>,
     ) -> Result<GenesisCreationResponse, DsmError> {
         // Genesis is created LOCALLY by gathering entropy from storage nodes
@@ -1666,27 +1666,25 @@ impl StorageNodeSDK {
             ));
         }
 
-        // Gather entropy from storage nodes
+        // Gather entropy from ALL storage nodes (n-of-n).
         let node_urls = self.get_node_urls();
-        let threshold_count = threshold.unwrap_or(3).min(node_urls.len() as u8) as usize;
 
-        if node_urls.len() < threshold_count {
+        if node_urls.len() < 3 {
             return Err(DsmError::invalid_operation(format!(
-                "Need at least {} storage nodes, only {} configured",
-                threshold_count,
+                "Need at least 3 storage nodes for MPC genesis (whitepaper §2.5), only {} configured",
                 node_urls.len()
             )));
         }
 
         log::info!(
-            "Gathering entropy from {} storage nodes (threshold={})",
+            "Gathering entropy from all {} storage nodes (n-of-n; whitepaper §2.5)",
             node_urls.len(),
-            threshold_count
         );
 
-        // Fetch entropy from each storage node
+        // Fetch entropy from EVERY storage node.  No prefix truncation —
+        // closes Issue #252's "first threshold_count nodes" bias.
         let mut mpc_participants = Vec::new();
-        for (i, url) in node_urls.iter().take(threshold_count).enumerate() {
+        for (i, url) in node_urls.iter().enumerate() {
             let entropy_url = format!("{}/api/v2/genesis/entropy", url.trim_end_matches('/'));
 
             log::info!("Fetching entropy from node {}: {}", i, entropy_url);
@@ -1769,7 +1767,6 @@ impl StorageNodeSDK {
             genesis_device_id: device_id, // Genesis hash = Device ID for root device
             state: "complete".to_string(),
             contributions_received: mpc_participants.len(),
-            threshold: threshold_count,
             complete: true,
             genesis_hash: Some(genesis_info.genesis_hash),
             participating_nodes: mpc_participants
@@ -1898,7 +1895,6 @@ impl StorageNodeSDK {
             genesis_device_id: new_device_id,
             state: "complete".to_string(),
             contributions_received: 0, // No MPC for secondary devices
-            threshold: 0,
             complete: true,
             genesis_hash: Some(genesis_hash),
             participating_nodes: vec![],
@@ -1946,7 +1942,6 @@ impl StorageNodeSDK {
                                     .clone()
                                     .try_into()
                                     .unwrap_or([0u8; 32]),
-                                threshold: gen.threshold as usize,
                                 participants: HashSet::new(),
                                 merkle_root: None,
                                 device_id: None,
@@ -2210,8 +2205,22 @@ impl StorageNodeSDK {
         Ok(resp)
     }
 
-    /// Register a device in the Device Tree on storage nodes
-    /// This publishes device tree evidence to the registry for contact discovery
+    /// Register a device in the Device Tree on storage nodes.
+    ///
+    /// Publishes the 100-byte DeviceTreeEntry evidence blob to the
+    /// content-addressed `/api/v2/registry/publish` endpoint on all configured
+    /// nodes. The entry is required for contact discovery (`contacts.addManual`
+    /// → `verify_device_tree_evidence_quorum`).
+    ///
+    /// **Quorum contract.** The read side requires at least
+    /// [`REGISTRY_QUORUM_THRESHOLD`] nodes to hold the entry before a contact
+    /// can be resolved. If fewer nodes accept the publish, this function
+    /// returns an `Err` so the caller can surface (or retry) the failure
+    /// rather than silently proceeding with an unreachable identity.
+    ///
+    /// Writes are idempotent — the server keys each object by
+    /// `BLAKE3("DSM/registry\0" || evidence)`, so repeated publishes of the
+    /// same 100-byte evidence are no-ops and safe to call on every bootstrap.
     pub async fn register_device_in_tree(
         &self,
         device_id: &[u8],
@@ -2220,21 +2229,30 @@ impl StorageNodeSDK {
         #[cfg(feature = "perf-metrics")]
         let start_time = dt::tick();
 
-        // Build device tree evidence structure (simplified - encode as protobuf-like bytes)
-        // Format: device_id || genesis_hash || parent_hash || depth
-        let mut evidence_bytes = Vec::with_capacity(device_id.len() + genesis_hash.len() + 36);
-        evidence_bytes.extend_from_slice(device_id);
-        evidence_bytes.extend_from_slice(genesis_hash);
-        evidence_bytes.extend_from_slice(&[0u8; 32]); // Root device has no parent
-        evidence_bytes.extend_from_slice(&[0u8; 4]); // Tree depth = 0
+        if device_id.len() != 32 {
+            return Err(DsmError::invalid_parameter(format!(
+                "register_device_in_tree: device_id must be 32 bytes, got {}",
+                device_id.len()
+            )));
+        }
+        if genesis_hash.len() != 32 {
+            return Err(DsmError::invalid_parameter(format!(
+                "register_device_in_tree: genesis_hash must be 32 bytes, got {}",
+                genesis_hash.len()
+            )));
+        }
 
-        // Publish to registry endpoint on all storage nodes
-        let mut published_count = 0u32;
+        // Canonical 100-byte evidence (shared with the quorum reader).
+        let evidence_bytes = build_root_device_tree_evidence(device_id, genesis_hash);
+
+        // Publish to registry endpoint on all storage nodes.
+        let mut published_count: u32 = 0;
+        let mut last_error: Option<String> = None;
+        // HTTP headers require text; use Base32 Crockford (canon), not hex/base64.
+        let genesis_text = crate::util::text_id::encode_base32_crockford(genesis_hash);
+
         for node_url in &self.config.node_urls {
             let url = format!("{}/api/v2/registry/publish", node_url.trim_end_matches('/'));
-
-            // HTTP headers require text; use Base32 Crockford (canon), not hex/base64.
-            let genesis_text = crate::util::text_id::encode_base32_crockford(genesis_hash);
 
             match self
                 .inner
@@ -2242,7 +2260,7 @@ impl StorageNodeSDK {
                 .post(&url)
                 .header("Content-Type", "application/octet-stream")
                 .header("X-DSM-Kind", "1") // Device tree evidence kind
-                .header("X-DSM-DLV-ID", genesis_text)
+                .header("X-DSM-DLV-ID", genesis_text.clone())
                 .body(evidence_bytes.clone())
                 .send()
                 .await
@@ -2252,18 +2270,21 @@ impl StorageNodeSDK {
                     published_count += 1;
                 }
                 Ok(resp) => {
-                    log::warn!(
-                        "Failed to register device on node {}: status {}",
+                    let err = format!(
+                        "register_device_in_tree: node {} returned HTTP {}",
                         node_url,
                         resp.status()
                     );
+                    log::warn!("{err}");
+                    last_error = Some(err);
                 }
                 Err(e) => {
-                    log::warn!(
-                        "Network error registering device on node {}: {}",
-                        node_url,
-                        e
+                    let err = format!(
+                        "register_device_in_tree: network error on node {}: {}",
+                        node_url, e
                     );
+                    log::warn!("{err}");
+                    last_error = Some(err);
                 }
             }
         }
@@ -2273,9 +2294,26 @@ impl StorageNodeSDK {
             start_time,
             evidence_bytes.len() as u64,
             0,
-            published_count > 0,
+            published_count as usize >= REGISTRY_QUORUM_THRESHOLD,
         )
         .await;
+
+        // Reject any publish that fell below the quorum threshold required by
+        // the reader. Without this gate, an identity would be persisted locally
+        // with no way for peers to verify it, leaving QR pairing permanently
+        // broken until a manual re-publish (see fix: systemic silent failure).
+        if (published_count as usize) < REGISTRY_QUORUM_THRESHOLD {
+            return Err(DsmError::internal(
+                format!(
+                    "register_device_in_tree: published to only {}/{} nodes (need >= {} for quorum). Last error: {:?}",
+                    published_count,
+                    self.config.node_urls.len(),
+                    REGISTRY_QUORUM_THRESHOLD,
+                    last_error
+                ),
+                None::<std::io::Error>,
+            ));
+        }
 
         // Avoid hex/base64 in filenames/keys: render a deterministic small decimal suffix.
         let device_prefix_u64 = {
@@ -2285,15 +2323,96 @@ impl StorageNodeSDK {
             u64::from_le_bytes(b)
         };
 
-        let resp = crate::generated::PublishGenesisResponse {
-            success: published_count > 0,
-            published: published_count > 0,
+        Ok(crate::generated::PublishGenesisResponse {
+            success: true,
+            published: true,
             key: format!("device_tree:{}", device_prefix_u64),
             published_to_nodes: published_count,
             event_counter: dt::tick(),
-        };
+        })
+    }
 
-        Ok(resp)
+    /// Idempotent self-heal for a root device's registry entry.
+    ///
+    /// Verifies that the content-addressed DeviceTreeEntry for `(device_id,
+    /// genesis_hash)` is present on at least [`REGISTRY_QUORUM_THRESHOLD`]
+    /// storage nodes. If the entry is already visible to a quorum of nodes,
+    /// returns immediately without any writes. Otherwise, re-runs
+    /// [`Self::register_device_in_tree`] to republish.
+    ///
+    /// This exists to close the "silent publish failure" gap that used to
+    /// leave users with locally-valid-but-network-invisible genesis states.
+    /// Call it from bootstrap so any previously dropped publish heals itself
+    /// on the first successful network round-trip after the issue.
+    ///
+    /// Returns:
+    /// - `Ok(verified_count)` with `verified_count >= REGISTRY_QUORUM_THRESHOLD`
+    ///   on success (either already present or republish succeeded).
+    /// - `Err(_)` if the entry is below quorum AND republish fails.
+    pub async fn ensure_device_in_tree(
+        &self,
+        device_id: &[u8],
+        genesis_hash: &[u8],
+    ) -> Result<u32, DsmError> {
+        if device_id.len() != 32 || genesis_hash.len() != 32 {
+            return Err(DsmError::invalid_parameter(
+                "ensure_device_in_tree: device_id and genesis_hash must be 32 bytes",
+            ));
+        }
+
+        let evidence = build_root_device_tree_evidence(device_id, genesis_hash);
+        let addr = registry_content_addr_b64url(&evidence);
+
+        // Quick verify pass: count nodes that already hold the entry.
+        let mut verified: u32 = 0;
+        for node_url in &self.config.node_urls {
+            let trimmed = node_url.trim_end_matches('/');
+            if trimmed.is_empty() {
+                continue;
+            }
+            let url = format!("{}/api/v2/registry/get/{}", trimmed, addr);
+            match self.inner.client.get(&url).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    verified += 1;
+                }
+                Ok(resp) => {
+                    log::debug!(
+                        "ensure_device_in_tree: node {} returned HTTP {} (will attempt republish if below quorum)",
+                        trimmed,
+                        resp.status()
+                    );
+                }
+                Err(e) => {
+                    log::debug!(
+                        "ensure_device_in_tree: network error verifying node {}: {}",
+                        trimmed,
+                        e
+                    );
+                }
+            }
+
+            if verified as usize >= REGISTRY_QUORUM_THRESHOLD {
+                log::info!(
+                    "ensure_device_in_tree: registry entry already visible on {} nodes (>= quorum {}), no republish needed",
+                    verified,
+                    REGISTRY_QUORUM_THRESHOLD
+                );
+                return Ok(verified);
+            }
+        }
+
+        // Below quorum — republish. register_device_in_tree is idempotent
+        // (content-addressed), so this is safe on every bootstrap.
+        log::warn!(
+            "ensure_device_in_tree: registry entry visible on only {}/{} nodes (< quorum {}), republishing",
+            verified,
+            self.config.node_urls.len(),
+            REGISTRY_QUORUM_THRESHOLD
+        );
+        let resp = self
+            .register_device_in_tree(device_id, genesis_hash)
+            .await?;
+        Ok(resp.published_to_nodes)
     }
 
     /// Register device with storage nodes for authentication
@@ -2873,7 +2992,7 @@ mod tests {
         preimage.extend_from_slice(&state_hash_bytes_for_test);
         preimage.extend_from_slice(&params_bytes);
         preimage.extend_from_slice(&2u64.to_le_bytes());
-        let expected = dsm::crypto::blake3::domain_hash("DSM/precommit-hash", &preimage);
+        let expected = dsm::crypto::blake3::domain_hash("DSM/precommit", &preimage);
         assert_eq!(entry.pre_commitment_hash, expected.as_bytes());
         assert_eq!(entry.state_number, 1);
         assert_eq!(entry.status, BilateralTransactionStatus::Pending);

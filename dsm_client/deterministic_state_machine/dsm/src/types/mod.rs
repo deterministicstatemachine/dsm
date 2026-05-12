@@ -3,7 +3,8 @@
 //! This module organizes all data types used throughout the DSM protocol:
 //!
 //! - [`error`] — [`error::DsmError`] comprehensive error type with deterministic safety classifications
-//! - [`state_types`] — [`State`] struct (the central protocol data type) and related parameters
+//! - [`device_state`] — [`device_state::DeviceState`] canonical Per-Device SMT head (§2.2 / §4 / §8)
+//! - [`state_types`] — Legacy `State` compatibility view (slated for deletion)
 //! - [`token_types`] — [`Token`], [`TokenStatus`], supply parameters, and state context
 //! - [`identifiers`] — Type-safe wrappers: [`NodeId`], [`VaultId`], [`SessionId`], [`TransactionId`], etc.
 //! - [`operations`] — Operation trait hierarchy: [`Ops`], [`TokenOps`], [`IdOps`], [`SmartCommitOps`]
@@ -13,7 +14,6 @@
 //! - [`receipt_types`] — Stitched receipts and verification contexts
 //! - [`contact_types`] — Verified contact information
 //! - [`general`] — Shared types: [`Commitment`], [`KeyPair`], [`SecurityLevel`]
-//! - [`state_builder`] — Fluent builder for constructing [`State`] instances
 //! - [`crypto_error`] — Cryptographic operation errors
 //! - [`serialization`] — Protobuf serialization helpers
 //! - [`proto`] — Generated protobuf types (from `dsm_app.proto`)
@@ -22,6 +22,7 @@
 
 pub mod contact_types;
 pub mod crypto_error;
+pub mod device_state; // §2.2, §4, §8: Per-Device SMT head + relationship chains
 pub mod error;
 pub mod general;
 pub mod genesis_types;
@@ -32,7 +33,6 @@ pub mod policy_types;
 pub mod proto; // generated OUT_DIR include (dsm.rs)
 pub mod receipt_types; // Canonical receipt structures
 pub mod serialization;
-pub mod state_builder;
 pub mod state_types;
 pub mod token_types;
 pub mod ui_error;
@@ -47,6 +47,8 @@ pub use policy_types::{PolicyAnchor, PolicyFile, TokenPolicy};
 pub use receipt_types::{
     ParentConsumptionTracker, ReceiptAcceptance, ReceiptVerificationContext, StitchedReceiptV2,
 };
-pub use state_builder::StateBuilder;
-pub use state_types::State;
+// `pub use state_types::State` removed: no consumer imports via this short
+// path. All remaining consumers spell out `types::state_types::State`.
+// The State struct is being decomposed into DeviceState + RelationshipChainState
+// per §2.2; the shorter re-export was unnecessary scaffolding.
 pub use token_types::{Token, TokenStatus};

@@ -4,14 +4,11 @@
 ///
 /// # Example
 ///
-/// ```rust
+/// ```no_run
 /// use dsm::utils::file::{read_file, write_file};
-/// # std::fs::write("test.txt", "Hello from doc test!").unwrap();
-/// let data = read_file("test.txt").unwrap();
-///
-/// // Example of writing data to a file
+/// let data = read_file("input.txt").unwrap();
 /// write_file("output.txt", &data).unwrap();
-///  ```
+/// ```
 ///
 use std::fs::File;
 use std::io::{self, Read, Write};

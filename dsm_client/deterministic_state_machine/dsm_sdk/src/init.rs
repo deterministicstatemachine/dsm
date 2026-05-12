@@ -18,7 +18,10 @@ use std::sync::Arc;
 use crate::bridge::install_bilateral_handler as install_sdk_bilateral_handler;
 use crate::bridge::install_unilateral_handler as install_sdk_unilateral_handler;
 use crate::bridge::install_app_router as install_sdk_app_router;
-use crate::handlers::{BiImpl, UniImpl, AppRouterImpl, install_app_router_adapter};
+use crate::handlers::{
+    AppRouterImpl, BiImpl, UniImpl, handle_system_genesis_query, install_app_router_adapter,
+};
+use crate::handlers::misc_routes::dispatch_dbrw_query;
 use dsm::types::proto as pb;
 use prost::Message;
 
@@ -301,15 +304,18 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
     dsm::core::bridge::install_unilateral_handler(core_uni_bridge);
 
     // 4) Install AppRouter into BOTH SDK and core layers
-    //    - If device_id is ready: full AppRouter
-    //    - If device_id is missing: minimal bootstrap router (sys.tick only)
+    //    - If canonical identity context is ready: full AppRouter
+    //    - Otherwise: minimal bootstrap router (sys.tick + narrow bootstrap queries)
     //
     // IMPORTANT:
     // This init function can be called more than once per process lifetime (e.g. Android
     // WebView/bridge re-inits after createGenesisV2). Therefore, we must always prefer the
     // full router when identity is available, even if a MinimalBootstrapRouter was installed
     // earlier.
-    if crate::sdk::app_state::AppState::get_device_id().is_some() {
+    let canonical_identity_ready = crate::sdk::app_state::AppState::get_device_id().is_some()
+        && crate::fetch_dbrw_binding_key().is_ok();
+
+    if canonical_identity_ready {
         let app_router = Arc::new(
             AppRouterImpl::new(cfg.clone())
                 .map_err(|e| format!("Failed to create AppRouter: {:?}", e))?,
@@ -350,6 +356,10 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
                             error_message: None,
                         }
                     }
+                    "system.genesis" => handle_system_genesis_query(q),
+                    // Bootstrap needs C-DBRW enrollment/trust before the full
+                    // identity context exists. Keep this allowlist narrow.
+                    "cdbrw.enroll" | "cdbrw.measure_trust" => dispatch_dbrw_query(q).await,
                     _ => AppResult {
                         success: false,
                         data: Vec::new(),
@@ -456,10 +466,13 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
         // DBRW is mandatory for wallet initialization/signing availability, but it must NOT
         // participate in genesis creation.
         //
-        // Per whitepaper: S_master = HKDF(G || DevID || K_DBRW || s_0)
-        let dbrw_key = crate::jni::cdbrw::get_cdbrw_binding_key().ok_or_else(|| {
-            "C-DBRW not initialized: call sdkBootstrap (or platform C-DBRW init) before initializing wallet/signing"
-                .to_string()
+        // The live path concatenates `genesis || device_id || K_DBRW`, then
+        // `SignatureKeyPair::generate_from_entropy()` compresses that material with
+        // `domain_hash("DSM/sphincs-seed", ...)` before deterministic SPHINCS keygen.
+        let dbrw_key = crate::fetch_dbrw_binding_key().map_err(|e| {
+            format!(
+                "C-DBRW not initialized: call canonical bootstrap before initializing wallet/signing ({e})"
+            )
         })?;
         if dbrw_key.len() != 32 {
             return Err(format!(
@@ -604,11 +617,14 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
             });
         });
 
-        // Let contact sync complete asynchronously — it is not required for SDK
-        // readiness and BluetoothManager is thread-safe (Arc<RwLock>).  Blocking
-        // here delays the entire init pipeline and pushes the UI-thread callback
-        // later, extending perceived unresponsiveness on slower devices.
-        drop(handle);
+        // Block until contact sync completes. Without this, the BilateralBleHandler's
+        // in-memory ContactManager is empty when the first BLE prepare arrives, causing
+        // "Sender not found in verified contacts" rejections. The sync is fast (single
+        // SQLite query + HashMap inserts) — typically <50ms even with dozens of contacts.
+        match handle.join() {
+            Ok(_) => log::info!("[SDK Init] Contact sync thread completed"),
+            Err(_) => log::warn!("[SDK Init] Contact sync thread panicked"),
+        }
     }
 
     Ok(())

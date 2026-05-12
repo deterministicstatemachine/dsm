@@ -26,15 +26,10 @@ import com.dsm.wallet.security.AccessLevel
 //   removed. The WebView sends [8-byte msgId][BridgeRpcRequest proto]
 //   and receives [0x03][Envelope v3 proto] responses.
 //
-// METHOD ROUTING (50+ methods, grouped by domain):
-//   Bootstrap:  "sdkBootstrap"
-//   Protocol:   "processEnvelopeV3"
-//   AppRouter:  "appRouterQuery", "appRouterInvoke"
-//   Bilateral:  "bilateralOfflineSend", "bilateralAcceptByCommitment", ...
-//   BLE:        "bleCommand", "getBleStats", "retryBle", ...
-//   Contacts:   "contactAdd", "contactRemove", "handleContactQrV3"
-//   System:     "getTransportHeaders", "setSystemBarColor", "setPreference"
-//   Recovery:   appRouter routes "recovery.*", "nfc.ring.write"
+// METHOD ROUTING (grouped by boundary):
+//   Shared boundary: "nativeBoundaryStartup", "nativeBoundaryIngress"
+//   Private host boundary: "nativeHostRequest"
+//   Legacy native helpers that still back non-WebView callers remain internal only.
 //
 // ERROR CODES (returned in response envelope):
 //   0 = success
@@ -101,15 +96,6 @@ class SinglePathWebViewBridge(private val context: Context) {
         
         @Volatile private var instance: SinglePathWebViewBridge? = null
         private val sdkContextInitialized = AtomicBoolean(false)
-        private val routerReqCounter = java.util.concurrent.atomic.AtomicLong(1L)
-
-        private fun nextRouterReqId(): ByteArray {
-            val id = routerReqCounter.getAndIncrement()
-            val buf = ByteArray(8)
-            val bb = java.nio.ByteBuffer.wrap(buf).order(java.nio.ByteOrder.BIG_ENDIAN)
-            bb.putLong(id)
-            return buf
-        }
         
         fun getInstance(context: Context): SinglePathWebViewBridge {
             return instance ?: synchronized(this) {
@@ -430,37 +416,43 @@ class SinglePathWebViewBridge(private val context: Context) {
                     BridgePreferencesHandler.setPreference(inst.prefs(), payload)
                 }
 
-                // Unified router calls - pass full framed payload to Rust
-                "appRouterInvoke" -> {
-                    val result = BridgeRouterHandler.appRouterInvoke(payload, ::nextRouterReqId, TAG)
-                    // State may have mutated — refresh NFC capsule if backup enabled.
-                    try { UnifiedNativeApi.maybeRefreshNfcCapsule() } catch (_: Throwable) {}
-                    result
+                "nativeBoundaryStartup" -> {
+                    NativeBoundaryBridge.startup(payload)
                 }
-                
-                "appRouterQuery" -> BridgeRouterHandler.appRouterQuery(payload, ::nextRouterReqId)
+
+                "nativeBoundaryIngress" -> {
+                    NativeBoundaryBridge.ingress(payload)
+                }
+
+                "nativeHostRequest" -> {
+                    NativeHostBridge.hostRequest(
+                        context = inst.context,
+                        prefs = inst.prefs(),
+                        sdkContextInitialized = sdkContextInitialized,
+                        logTag = TAG,
+                        keyDeviceId = KEY_DEVICE_ID,
+                        keyGenesisHash = KEY_GENESIS_HASH,
+                        keyGenesisEnvelope = KEY_GENESIS_ENVELOPE,
+                        keyDbrwSalt = KEY_DBRW_SALT,
+                        requestBytes = payload,
+                    )
+                }
 
                 // Transport headers (bytes-only). Must be available early for identity/QR/faucet.
-                // This bypasses the appRouter to avoid decode ambiguity (Error envelope vs Headers).
-                "getTransportHeadersV3Bin" -> BridgeRouterHandler.getTransportHeadersV3Bin(
-                    isSdkReady = { sdkContextInitialized.get() },
-                    bootstrap = { inst.bootstrapFromPrefs() }
-                )
-
-                "createGenesisBin" -> {
-                    val parsed = try {
-                        dsm.types.proto.CreateGenesisPayload.parseFrom(payload)
-                    } catch (e: com.google.protobuf.InvalidProtocolBufferException) {
-                        throw IllegalArgumentException("createGenesisBin: invalid protobuf payload: ${e.message}")
+                "getTransportHeadersV3Bin" -> {
+                    if (!sdkContextInitialized.get()) {
+                        try {
+                            inst.bootstrapFromPrefs()
+                        } catch (_: Throwable) {
+                            // fall through
+                        }
                     }
-                    val locale = parsed.locale
-                    val networkId = parsed.networkId
-                    val entropy = parsed.entropy.toByteArray()
-                    if (entropy.size != 32) throw IllegalArgumentException("createGenesisBin: entropy must be 32 bytes")
-                    val result = inst.createGenesis(locale, networkId, entropy)
-                    // State mutated (genesis created) — refresh NFC capsule if backup enabled.
-                    try { UnifiedNativeApi.maybeRefreshNfcCapsule() } catch (_: Throwable) {}
-                    result
+                    val st = try { Unified.getTransportHeadersV3Status().toInt() } catch (_: Throwable) { -1 }
+                    if (st >= 1) {
+                        Unified.getTransportHeadersV3()
+                    } else {
+                        ByteArray(0)
+                    }
                 }
 
                 // Rust-driven pairing orchestration: scan all unpaired contacts automatically
@@ -600,6 +592,36 @@ class SinglePathWebViewBridge(private val context: Context) {
                     }
                 }
 
+                "captureCdbrwOrbitTimings" -> {
+                    try {
+                        val envBytes = com.dsm.wallet.security.AntiCloneGate.buildEnvironmentBytes()
+                        val timings = com.dsm.wallet.security.SiliconFingerprintNative.captureOrbitDensity(
+                            envBytes,
+                            1024 * 1024, // 1MB arena
+                            9, // 9 probes
+                            1000, // 1000 steps per probe
+                            1, // 1 warmup round
+                            7 // rotation bits
+                        )
+                        if (timings == null) {
+                            Log.w(TAG, "captureCdbrwOrbitTimings: silicon PUF returned null")
+                            return ByteArray(0)
+                        }
+                        // Convert LongArray to ByteArray (little-endian i64)
+                        val result = ByteArray(timings.size * 8)
+                        for (i in timings.indices) {
+                            val value = timings[i]
+                            for (j in 0..7) {
+                                result[i * 8 + j] = (value shr (j * 8)).toByte()
+                            }
+                        }
+                        result
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "captureCdbrwOrbitTimings failed", t)
+                        ByteArray(0)
+                    }
+                }
+
                 else -> throw IllegalArgumentException("Unknown binary RPC method: $method")
             }
         }
@@ -619,9 +641,12 @@ class SinglePathWebViewBridge(private val context: Context) {
             try {
                 Log.d(TAG, "postBinary: forwarding topic=$topic payloadBytes=${payload.size}")
                 // MainActivity is responsible for posting via MessagePort (ArrayBuffer)
-                com.dsm.wallet.ui.MainActivity.dispatchDsmEventToWebView(topic, payload)
+                if (!com.dsm.wallet.ui.MainActivity.dispatchDsmEventToWebView(topic, payload)) {
+                    throw IllegalStateException("WebView dispatch unavailable for topic=$topic")
+                }
             } catch (t: Throwable) {
                 Log.w(TAG, "postBinary: unable to dispatch to WebView (topic=$topic, len=${payload.size}): ${t.message}")
+                throw t
             }
         }
         
@@ -694,15 +719,4 @@ class SinglePathWebViewBridge(private val context: Context) {
         )
     }
 
-    fun handleHostPause() {
-        BridgeIdentityHandler.handleHostPauseDuringGenesis(
-            prefs = prefs(),
-            sdkContextInitialized = sdkContextInitialized,
-            logTag = TAG,
-            keyDeviceId = KEY_DEVICE_ID,
-            keyGenesisHash = KEY_GENESIS_HASH,
-            keyGenesisEnvelope = KEY_GENESIS_ENVELOPE,
-            keyDbrwSalt = KEY_DBRW_SALT
-        )
-    }
 }

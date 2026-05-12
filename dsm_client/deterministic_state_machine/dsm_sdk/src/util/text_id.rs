@@ -100,6 +100,21 @@ pub fn decode_base32_crockford(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Decode a Base32 Crockford string into a fixed 32-byte array.
+///
+/// Used at the SDK boundary to convert textual vault_id representations
+/// (carried in persisted records, API responses, UI payloads) into the raw
+/// 32-byte form expected by DLVManager and core vault operations.
+pub fn decode_bytes32(s: &str) -> Option<[u8; 32]> {
+    let v = decode_base32_crockford(s)?;
+    if v.len() != 32 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&v);
+    Some(out)
+}
+
 /// Alias for decoding textual identifiers used for genesis hash.
 /// Decodes Base32 Crockford (with substitutions for o/O, i/I/l/L).
 pub fn decode(s: &str) -> Option<Vec<u8>> {

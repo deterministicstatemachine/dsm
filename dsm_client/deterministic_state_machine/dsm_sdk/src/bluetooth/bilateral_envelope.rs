@@ -82,6 +82,11 @@ pub fn extract_prepare_request(
 ) -> Result<generated::BilateralPrepareRequest, DsmError> {
     match &envelope.payload {
         Some(generated::envelope::Payload::UniversalTx(tx)) => {
+            if tx.ops.len() != 1 {
+                return Err(DsmError::invalid_operation(
+                    "expected exactly one operation in transaction",
+                ));
+            }
             if let Some(op) = tx.ops.first() {
                 match &op.kind {
                     Some(generated::universal_op::Kind::Invoke(invoke))
@@ -132,6 +137,11 @@ pub fn extract_confirm_request(
 ) -> Result<generated::BilateralConfirmRequest, DsmError> {
     match &envelope.payload {
         Some(generated::envelope::Payload::UniversalTx(tx)) => {
+            if tx.ops.len() != 1 {
+                return Err(DsmError::invalid_operation(
+                    "expected exactly one operation in transaction",
+                ));
+            }
             if let Some(op) = tx.ops.first() {
                 match &op.kind {
                     Some(generated::universal_op::Kind::Invoke(invoke))
@@ -361,6 +371,32 @@ mod tests {
     }
 
     #[test]
+    fn extract_prepare_request_rejects_multiple_ops() {
+        let req = generated::BilateralPrepareRequest {
+            counterparty_device_id: vec![1; 32],
+            operation_data: vec![2; 16],
+            validity_iterations: 100,
+            expected_genesis_hash: None,
+            expected_counterparty_state_hash: None,
+            ble_address: String::new(),
+            sender_signing_public_key: vec![0; 64],
+            sender_device_id: vec![0; 32],
+            sender_genesis_hash: None,
+            sender_chain_tip: None,
+            transfer_amount: 0,
+            token_id_hint: String::new(),
+            memo_hint: String::new(),
+            transfer_amount_display: String::new(),
+        };
+        let body = req.encode_to_vec();
+        let mut env = make_invoke_envelope("bilateral.prepare", &body);
+        if let Some(generated::envelope::Payload::UniversalTx(tx)) = env.payload.as_mut() {
+            tx.ops.push(tx.ops[0].clone());
+        }
+        assert!(extract_prepare_request(&env).is_err());
+    }
+
+    #[test]
     fn extract_confirm_request_success() {
         let req = generated::BilateralConfirmRequest {
             commitment_hash: Some(generated::Hash32 { v: vec![0xCC; 32] }),
@@ -382,6 +418,27 @@ mod tests {
     #[test]
     fn extract_confirm_request_wrong_method() {
         let env = make_invoke_envelope("bilateral.prepare", &[]);
+        assert!(extract_confirm_request(&env).is_err());
+    }
+
+    #[test]
+    fn extract_confirm_request_rejects_multiple_ops() {
+        let req = generated::BilateralConfirmRequest {
+            commitment_hash: Some(generated::Hash32 { v: vec![0xCC; 32] }),
+            sender_signature: vec![3; 16],
+            sender_smt_root: vec![],
+            rel_proof_parent: vec![],
+            rel_proof_child: vec![],
+            stitched_receipt: vec![],
+            shared_chain_tip_new: Some(generated::Hash32 { v: vec![0; 32] }),
+            pre_entropy: vec![],
+            sender_smt_root_before: vec![],
+        };
+        let body = req.encode_to_vec();
+        let mut env = make_invoke_envelope("bilateral.confirm", &body);
+        if let Some(generated::envelope::Payload::UniversalTx(tx)) = env.payload.as_mut() {
+            tx.ops.push(tx.ops[0].clone());
+        }
         assert!(extract_confirm_request(&env).is_err());
     }
 }

@@ -1,3 +1,4 @@
+#![allow(unused_variables)]
 //! Default settlement delegate for bilateral BLE transfers.
 //!
 //! This module lives in the **application layer** and implements the
@@ -5,16 +6,30 @@
 //! [`bluetooth`](crate::bluetooth) module.  All token- and balance-specific
 //! logic (balance debits/credits, transaction history, wallet cache sync) is
 //! concentrated here so that the BLE transport layer remains coin-agnostic.
+//!
+//! # Whitepaper alignment (post-§2.2 / §4.2 / §8 refactor)
+//!
+//! The canonical device head lives in [`dsm::types::device_state::DeviceState`].
+//! The BLE bilateral path does NOT route through
+//! [`execute_on_relationship`](crate::sdk::core_sdk::CoreSDK::execute_on_relationship)
+//! All bilateral advances — online sender, online receiver, BLE sender,
+//! BLE receiver — route through the canonical `CoreSDK::execute_on_relationship`
+//! chokepoint (`AppRouter::execute_on_relationship_for_bilateral` for the
+//! BLE paths). That single chokepoint applies balance deltas to the
+//! canonical `DeviceState` head atomically with the SMT leaf update
+//! (§8 balance binding). This delegate therefore only materialises the
+//! SQLite display-layer projection + transaction-history record — it does
+//! NOT mutate `DeviceState.balances` itself.
 
 use crate::bluetooth::bilateral_ble_handler::{
     BilateralSettlementContext, BilateralSettlementDelegate, BilateralSettlementOutcome,
 };
-use crate::sdk::token_state::{self, canonicalize_token_id, TransferFields};
+use crate::sdk::token_state::{canonicalize_token_id, TransferFields};
 use crate::sdk::transfer_hooks::TransferMeta;
 use crate::storage::client_db::BalanceProjectionRecord;
 use crate::util::text_id::encode_base32_crockford;
+use dsm::types::device_state::DeviceState;
 use dsm::types::operations::Operation;
-use dsm::types::state_types::State;
 use log::{error, warn};
 
 /// Parse `(amount, token_id)` from raw operation bytes.
@@ -57,45 +72,31 @@ fn parse_transfer(operation_bytes: &[u8]) -> Option<TransferFields> {
 }
 
 fn resolve_policy_commit(token_id: &str) -> Result<[u8; 32], String> {
-    if let Ok(commit) = crate::policy::strict_policy_commit_for_token(token_id, None) {
-        return Ok(commit);
-    }
-
-    let anchor_b32 = crate::sdk::app_state::AppState::handle_app_state_request(
-        &format!("dsm.token.{token_id}"),
-        "get",
-        "",
-    );
-    if anchor_b32.is_empty() {
-        return Err(format!("missing policy anchor for token {token_id}"));
-    }
-
-    crate::policy::strict_policy_commit_for_token(
-        token_id,
-        Some(&format!("dsm:policy:{anchor_b32}")),
-    )
-    .map_err(|e| format!("resolve policy commit failed for {token_id}: {e}"))
+    // Builtins (ERA, dBTC) resolve via the constant table.  Custom tokens
+    // MUST be resolved through the authoritative TokenPolicySystem +
+    // TokenMetadata cache via `TokenSDK::resolve_policy_commit_strict`;
+    // the old `dsm.token.<id>` prefs fallback is gone (plan Part E).
+    crate::policy::strict_policy_commit_for_token(token_id, None)
+        .map_err(|e| format!("resolve policy commit failed for {token_id}: {e}"))
 }
 
-/// Build the canonical settled state from the caller-provided canonical state.
+/// Build the post-settlement balance projection from the canonical
+/// [`DeviceState`] head.
 ///
-/// `ctx.canonical_state` is treated as the authoritative post-transition state
-/// emitted by the state machine. Settlement must not re-apply token deltas.
-fn build_canonical_settled_state(
+/// The canonical advance (`AppRouter::execute_on_relationship_for_bilateral`)
+/// has already applied the sender debit / receiver credit to the device
+/// head atomically with the SMT update, so this function just mirrors
+/// `head.balance(policy_commit)` for both roles.
+///
+/// Returns `Ok(None)` for transfers that resolve to zero amount or non-transfer
+/// operations — the caller still persists the transaction history record.
+fn build_settlement_projection(
     ctx: &BilateralSettlementContext,
-) -> Result<(Option<State>, Option<BalanceProjectionRecord>), String> {
-    let canonical_state = match ctx.canonical_state.as_ref() {
-        Some(s) => s,
-        None => {
-            return Err(
-                "missing canonical_state for settlement (strict fail-closed path)".to_string(),
-            )
-        }
-    };
-
+    head: &DeviceState,
+) -> Result<Option<BalanceProjectionRecord>, String> {
     let transfer = match parse_transfer(&ctx.operation_bytes) {
         Some(t) if t.amount > 0 => t,
-        _ => return Ok((Some(canonical_state.clone()), None)),
+        _ => return Ok(None),
     };
 
     let token_for_policy = if transfer.token_id.is_empty() {
@@ -105,88 +106,30 @@ fn build_canonical_settled_state(
     };
     let policy_commit = resolve_policy_commit(token_for_policy)?;
 
-    // Bilateral settlement uses a SEPARATE state machine (BTM) for the relationship
-    // chain. The device's canonical_state (from app_router) does NOT have the transfer
-    // delta applied — only the BTM relationship state does. We must apply the delta here.
-    let mut settled_state = canonical_state.clone();
+    let effective_balance = head.balance(&policy_commit);
 
-    if ctx.is_sender {
-        let token_id = if transfer.token_id.is_empty() {
-            "ERA"
-        } else {
-            transfer.token_id.as_str()
-        };
-        if let Some(recipient_owner) = token_state::canonical_transfer_recipient_owner(
-            transfer.recipient.as_slice(),
-            transfer.to_device_id.as_slice(),
-        ) {
-            token_state::apply_transfer_debit_credit(
-                &mut settled_state.token_balances,
-                &policy_commit,
-                &canonical_state.device_info.public_key,
-                recipient_owner,
-                token_id,
-                transfer.amount,
-                canonical_state.hash,
-                canonical_state.state_number,
-            )?;
-        } else {
-            token_state::apply_transfer_debit(
-                &mut settled_state.token_balances,
-                &policy_commit,
-                &canonical_state.device_info.public_key,
-                token_id,
-                transfer.amount,
-                canonical_state.hash,
-                canonical_state.state_number,
-            )?;
-        }
-    } else {
-        let token_id = if transfer.token_id.is_empty() {
-            "ERA"
-        } else {
-            transfer.token_id.as_str()
-        };
-
-        token_state::apply_transfer_credit(
-            &mut settled_state.token_balances,
-            &policy_commit,
-            &canonical_state.device_info.public_key,
-            token_id,
-            transfer.amount,
-            canonical_state.hash,
-            canonical_state.state_number,
-        )?;
-    }
-
-    // Advance device state_number for the settled state.
-    settled_state.state_number = canonical_state.state_number + 1;
-
-    settled_state.hash = settled_state
-        .compute_hash()
-        .map_err(|e| format!("settlement hash recompute failed: {e}"))?;
-
-    // Sync balance projection so balance.list reflects the updated balance.
     let local_txt = encode_base32_crockford(&ctx.local_device_id);
     let locked = crate::storage::client_db::get_locked_balance(&local_txt, token_for_policy)
         .map_err(|e| format!("read locked balance failed: {e}"))?;
-    let projection = crate::storage::client_db::build_balance_projection_from_state(
+
+    let projection = crate::storage::client_db::build_balance_projection_from_device_head(
         &local_txt,
         token_for_policy,
         &policy_commit,
-        &settled_state,
+        head,
+        effective_balance,
         locked,
     )
     .map_err(|e| format!("build balance projection failed: {e}"))?;
 
-    Ok((Some(settled_state), Some(projection)))
+    Ok(Some(projection))
 }
 
 /// Application-layer implementation of [`BilateralSettlementDelegate`].
 ///
 /// Installed on [`BilateralBleHandler`](crate::bluetooth::BilateralBleHandler)
 /// during SDK initialisation (see [`BluetoothManager::new`](crate::bluetooth::BluetoothManager::new)).
-/// Handles balance debit/credit and transaction-history persistence once the
+/// Handles balance projection sync and transaction-history persistence once the
 /// cryptographic BLE protocol has successfully completed.
 pub struct DefaultBilateralSettlementDelegate;
 
@@ -199,7 +142,7 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
         (amount_opt, token_opt)
     }
 
-    /// Apply token-specific settlement: balance update + transaction history.
+    /// Apply token-specific settlement: balance projection sync + transaction history.
     ///
     /// Called by the transport layer after the 3-phase BLE protocol completes.
     /// Returns [`TransferMeta`] (token_id + amount) for upstream hooks, or an
@@ -257,27 +200,33 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
                 );
             }
         }
-        let (canonical_state, projection) = build_canonical_settled_state(&ctx)?;
 
-        // Log the canonical state for debugging
-        match &canonical_state {
-            Some(state) => {
-                let era_balance = state
-                    .token_balances
-                    .values()
-                    .find_map(|b| if b.value() > 0 { Some(b.value()) } else { None })
-                    .unwrap_or(0);
-                log::info!(
-                    "[BILATERAL][settle] canonical_state=Some hash={} state_number={} era_balance={}",
-                    encode_base32_crockford(&state.hash),
-                    state.state_number,
-                    era_balance
-                );
-            }
-            None => {
-                log::warn!("[BILATERAL][settle] canonical_state=None");
-            }
-        }
+        // Canonical advance chokepoint is the sole authority for balance
+        // mutation across every path (§8 balance binding):
+        //  - BLE sender  : `AppRouter::execute_on_relationship_for_bilateral`
+        //  - BLE receiver: `AppRouter::execute_on_relationship_for_bilateral`
+        //  - Online sender / receiver: `CoreSDK::execute_on_relationship`
+        //
+        // The settlement delegate only materialises the SQLite display-layer
+        // projection + `tx_history` record. It does NOT mutate
+        // `DeviceState.balances` — doing so here would be either redundant
+        // (canonical head already debited / credited) or a double-apply bug.
+        let router = crate::bridge::app_router().ok_or_else(|| {
+            "bilateral settle: app router unavailable (not bootstrapped)".to_string()
+        })?;
+
+        // Read the now-canonical DeviceState head from the bridge.
+        let device_head = router.device_head().ok_or_else(|| {
+            "bilateral settle: device head unavailable (router not bootstrapped)".to_string()
+        })?;
+
+        log::info!(
+            "[BILATERAL][settle] device_head root={} balances={}",
+            encode_base32_crockford(&device_head.root()),
+            device_head.balances_snapshot().len(),
+        );
+
+        let projection = build_settlement_projection(&ctx, &device_head)?;
 
         let counterparty_txt = encode_base32_crockford(&ctx.counterparty_device_id);
         let (from_txt, to_txt) = if ctx.is_sender {
@@ -294,7 +243,7 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
             amount: transfer_amount,
             tx_type: ctx.tx_type.to_string(),
             status: "completed".to_string(),
-            chain_height: canonical_state.as_ref().map_or(0, |s| s.state_number),
+            chain_height: 0,
             step_index: crate::util::deterministic_time::tick(),
             commitment_hash: Some(encode_base32_crockford(&ctx.commitment_hash).into_bytes()),
             proof_data: ctx.proof_data,
@@ -318,23 +267,25 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
 
         if ctx.is_sender {
             if transfer_amount > 0 {
-                let debit_result = crate::storage::client_db::apply_sender_settlement_bundle_atomic(
-                    &local_txt,
-                    token_for_atomic,
-                    transfer_amount,
-                    &tx_record,
-                    canonical_state.as_ref(),
-                    projection.as_ref(),
-                );
+                let bundle_result =
+                    crate::storage::client_db::apply_bilateral_settlement_bundle_atomic(
+                        crate::storage::client_db::BilateralSenderSettlementBundle {
+                            counterparty_device_id: &ctx.counterparty_device_id,
+                            new_chain_tip: &ctx.new_chain_tip,
+                            sender_device_id: &local_txt,
+                            token_id: token_for_atomic,
+                            amount: transfer_amount,
+                            tx: &tx_record,
+                            projection: projection.as_ref(),
+                        },
+                    );
 
-                if let Err(e) = &debit_result {
+                if let Err(e) = &bundle_result {
                     error!(
                         "[BilateralSettlement] sender settlement persistence failed: token={} amount={} error={}",
-                        token_id_str,
-                        transfer_amount,
-                        e
+                        token_id_str, transfer_amount, e
                     );
-                    debit_result.map_err(|e| format!("atomic sender settlement failed: {e}"))?;
+                    bundle_result.map_err(|e| format!("atomic sender settlement failed: {e}"))?;
                 }
             } else if let Err(e) = crate::storage::client_db::store_transaction(&tx_record) {
                 warn!("[BilateralSettlement] Failed to store zero-amount sender tx history: {e}");
@@ -349,7 +300,6 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
                     token_id: token_for_atomic,
                     amount: transfer_amount,
                     tx: &tx_record,
-                    settled_state: canonical_state.as_ref(),
                     projection: projection.as_ref(),
                 },
             );
@@ -375,7 +325,6 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
                 token_id: token_id_str,
                 amount: transfer_amount,
             },
-            canonical_state,
         })
     }
 }
@@ -398,7 +347,7 @@ mod tests {
     fn parse_transfer_fields_returns_canonical_dbtc() {
         let op = Operation::Transfer {
             to_device_id: vec![0x11; 32],
-            amount: Balance::from_state(5, [0u8; 32], 0),
+            amount: Balance::from_state(5, [0u8; 32]),
             token_id: b"DBTC".to_vec(),
             mode: TransactionMode::Bilateral,
             nonce: vec![],
@@ -420,7 +369,7 @@ mod tests {
         let recipient_owner = vec![0x42; 64];
         let op = Operation::Transfer {
             to_device_id: vec![0x11; 32],
-            amount: Balance::from_state(7, [0u8; 32], 0),
+            amount: Balance::from_state(7, [0u8; 32]),
             token_id: b"ERA".to_vec(),
             mode: TransactionMode::Bilateral,
             nonce: vec![],

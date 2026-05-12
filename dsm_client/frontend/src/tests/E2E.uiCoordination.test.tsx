@@ -12,7 +12,7 @@
  * - WalletProvider / useWallet (REAL React context with real refreshAll)
  * - UXProvider (REAL)
  * - dsmClient.getAllBalances() → dsm/wallet.ts::getAllBalances() → WebViewBridge::getAllBalancesStrictBridge() → callBin() → __callBin (mock)
- * - dsmClient.getWalletHistory() → dsm/wallet.ts::getWalletHistory() → WebViewBridge::getWalletHistoryStrictBridge() → appRouterQueryBin() → __callBin (mock)
+ * - dsmClient.getWalletHistory() → dsm/wallet.ts::getWalletHistory() → WebViewBridge::getWalletHistoryStrictBridge() → routerQueryBin() → __callBin (mock)
  * - dsmClient.getIdentity() → dsm/identity.ts::getIdentity() → getHeaders() → getTransportHeadersV3Bin() → __callBin (mock)
  * - dsmClient.isReady() → hasIdentity() → checkIdentityState() → __callBin (mock)
  * - acceptIncomingTransfer() → acceptOfflineTransfer() → acceptBilateralByCommitmentBridge() → callBin() → __callBin (mock)
@@ -88,22 +88,26 @@ function wrapError(msg: string): Uint8Array {
   return (global as any).createDsmBridgeErrorResponse(msg);
 }
 
-/** Decode a BridgeRpcRequest to extract method and router method name */
-function decodeBridgeReq(reqBytes: Uint8Array): { method: string; payload: Uint8Array; routerMethod?: string } {
+function wrapIngressOk(data: Uint8Array): Uint8Array {
+  return wrapSuccess(
+    new pb.IngressResponse({
+      result: { case: 'okBytes', value: data },
+    }).toBinary(),
+  );
+}
+
+/** Decode a BridgeRpcRequest to extract method and payload */
+function decodeBridgeReq(reqBytes: Uint8Array): { method: string; payload: Uint8Array } {
   const req = pb.BridgeRpcRequest.fromBinary(reqBytes);
   let payload = new Uint8Array(0);
-  let routerMethod: string | undefined;
 
   if (req.payload?.case === 'bytes') {
     payload = req.payload.value.data || new Uint8Array(0);
-  } else if (req.payload?.case === 'appRouter') {
-    routerMethod = (req.payload.value as any).methodName;
-    payload = (req.payload.value as any).args || new Uint8Array(0);
   } else if (req.payload?.case === 'bilateral') {
     const bp = req.payload.value as any;
     payload = bp.commitment || new Uint8Array(0);
   }
-  return { method: req.method, payload, routerMethod };
+  return { method: req.method, payload };
 }
 
 /** Wrap Envelope in 0x03 framing prefix (FramedEnvelopeV3 format) */
@@ -113,13 +117,6 @@ function frameEnvelope(env: pb.Envelope): Uint8Array {
   framed[0] = 0x03;
   framed.set(bytes, 1);
   return framed;
-}
-
-/** Add 8-byte router request-id prefix */
-function withRouterPrefix(data: Uint8Array): Uint8Array {
-  const out = new Uint8Array(8 + data.length);
-  out.set(data, 8);
-  return out;
 }
 
 /** Build FramedEnvelopeV3 containing a BalancesListResponse */
@@ -183,7 +180,7 @@ function installCallBinMock() {
   const bridge = {
     __binary: true,
     __callBin: async (reqBytes: Uint8Array): Promise<Uint8Array> => {
-      const { method, payload, routerMethod } = decodeBridgeReq(reqBytes);
+      const { method, payload } = decodeBridgeReq(reqBytes);
       capturedMethods.push(method);
 
       // --- Direct bridge methods ---
@@ -221,35 +218,33 @@ function installCallBinMock() {
         return wrapSuccess(new Uint8Array(0));
       }
 
-      // --- Router methods (responses include 8-byte request-id prefix) ---
-
-      if (method === 'appRouterQuery') {
-        if (routerMethod === 'wallet.history') {
-          // Returns 8-byte prefix + FramedEnvelopeV3
-          return wrapSuccess(withRouterPrefix(makeHistoryFramedEnvelope(historyState)));
+      if (method === 'nativeBoundaryIngress') {
+        const ingress = pb.IngressRequest.fromBinary(payload);
+        if (ingress.operation.case === 'routerQuery') {
+          const routerMethod = ingress.operation.value.method;
+          if (routerMethod === 'wallet.history') {
+            return wrapIngressOk(makeHistoryFramedEnvelope(historyState));
+          }
+          if (routerMethod === 'bitcoin.balance') {
+            const resp = new pb.BalanceGetResponse({
+              tokenId: 'BTC_CHAIN',
+              available: 0n as any,
+              locked: 0n as any,
+            } as any);
+            const env = new pb.Envelope({
+              version: 3,
+              payload: { case: 'balanceGetResponse', value: resp },
+            } as any);
+            return wrapIngressOk(frameEnvelope(env));
+          }
+          if (routerMethod === 'prefs.get' || routerMethod === 'prefs.set') {
+            return wrapIngressOk(new Uint8Array(0));
+          }
+          return wrapIngressOk(new Uint8Array(0));
         }
-        if (routerMethod === 'bitcoin.balance') {
-          // Return a valid BalanceGetResponse for dBTC (zero balance)
-          const resp = new pb.BalanceGetResponse({
-            tokenId: 'BTC_CHAIN',
-            available: 0n as any,
-            locked: 0n as any,
-          } as any);
-          const env = new pb.Envelope({
-            version: 3,
-            payload: { case: 'balanceGetResponse', value: resp },
-          } as any);
-          return wrapSuccess(withRouterPrefix(frameEnvelope(env)));
+        if (ingress.operation.case === 'routerInvoke') {
+          return wrapIngressOk(makeSuccessFramedEnvelope());
         }
-        if (routerMethod === 'prefs.get' || routerMethod === 'prefs.set') {
-          return wrapSuccess(withRouterPrefix(new Uint8Array(0)));
-        }
-        // Default router query: empty
-        return wrapSuccess(withRouterPrefix(new Uint8Array(0)));
-      }
-
-      if (method === 'appRouterInvoke') {
-        return wrapSuccess(withRouterPrefix(makeSuccessFramedEnvelope()));
       }
 
       // Default: error for unknown methods
@@ -1015,7 +1010,7 @@ describe('INTEGRATED: Full chain with __callBin-only mock', () => {
 
     await waitFor(() => {
       expect(capturedMethods).toContain('getAllBalancesStrict');
-      expect(capturedMethods).toContain('appRouterQuery');
+      expect(capturedMethods).toContain('nativeBoundaryIngress');
     });
 
     expect(screen.getByTestId('i-balance-era').textContent).toBe('10000');

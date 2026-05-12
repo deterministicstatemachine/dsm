@@ -3,7 +3,7 @@
 
 import { useSyncExternalStore } from 'react';
 import { dsmClient } from '../services/dsmClient';
-import type { DlvIndexEntry } from '../dsm/index';
+import { listVaults, type VaultSummary } from '../services/bitcoinTap';
 import { storageNodeService } from '../services/storageNodeService';
 import { isFeatureEnabled } from '../config/featureFlags';
 import type {
@@ -22,25 +22,11 @@ export type StorageOverviewStatus = {
   backupStatus: string;
 };
 
-export type DlvPresenceNode = {
-  node: string;
-  reachable: boolean;
-  hasDescriptor: boolean | 'unknown';
-  hasState: boolean | 'unknown';
-};
-
-export type DlvPresenceSummary = {
-  anchor?: string;
-  observed: number;
-  nodes?: DlvPresenceNode[];
-};
-
 type StorageStoreSnapshot = {
   storageInfo: StorageOverviewStatus | null;
   overviewLoading: boolean;
   overviewError: string | null;
-  dlvs: DlvIndexEntry[];
-  presence: Record<string, DlvPresenceSummary>;
+  dlvs: VaultSummary[];
   dlvLoading: boolean;
   showObjectsTab: boolean;
   nodesConfig: StorageNodesConfig;
@@ -56,8 +42,6 @@ type BackupResult = { success: boolean; error?: string };
 type DsmStorageApi = {
   getStorageStatus?: () => Promise<StorageOverviewStatus | null | undefined>;
   createBackup?: (password?: string) => Promise<BackupResult>;
-  listLocalDlvs?: () => Promise<DlvIndexEntry[]>;
-  checkDlvPresence?: (entry: DlvIndexEntry) => Promise<DlvPresenceSummary | null | undefined>;
 };
 
 const client = dsmClient as unknown as DsmStorageApi;
@@ -68,7 +52,6 @@ class StorageStore {
     overviewLoading: true,
     overviewError: null,
     dlvs: [],
-    presence: {},
     dlvLoading: true,
     showObjectsTab: false,
     nodesConfig: storageNodeService.getNodesConfig(),
@@ -149,20 +132,8 @@ class StorageStore {
   refreshDlvsAndPresence = async (): Promise<void> => {
     this.setState({ dlvLoading: true });
     try {
-      const list = await client.listLocalDlvs?.();
-      const dlvs = Array.isArray(list) ? list : [];
-      const presence: Record<string, DlvPresenceSummary> = {};
-
-      for (const entry of dlvs) {
-        try {
-          const summary = await client.checkDlvPresence?.(entry);
-          if (summary?.anchor) {
-            presence[entry.cptaAnchorHex] = summary;
-          }
-        } catch {}
-      }
-
-      this.setState({ dlvs, presence, dlvLoading: false });
+      const dlvs = await listVaults();
+      this.setState({ dlvs, dlvLoading: false });
     } catch (error: any) {
       console.warn('[StorageStore] refreshDlvsAndPresence error:', error?.message || error);
       this.setState({ dlvLoading: false });

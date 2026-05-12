@@ -1197,7 +1197,7 @@ impl BilateralStorageSDK {
                 remote_device_id,
                 &state.chain_tip,
                 &state.chain_tip,
-                state.state_number as i64,
+                0u64 as i64,
                 now,
                 1,
             ],

@@ -17,7 +17,6 @@ use crate::crypto::canonical_lp;
 use crate::crypto::sphincs;
 use crate::types::error::DsmError;
 use crate::types::operations::Operation;
-use crate::types::state_types::State;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{fence, Ordering};
@@ -110,6 +109,13 @@ pub struct EmbeddedCommitment {
 /// Format: (fork_id, fixed_parameters, variable_parameters)
 pub type ForkPath = (String, HashMap<String, Vec<u8>>, HashSet<String>);
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForkCandidate {
+    pub fork_id: String,
+    pub payload: Vec<u8>,
+    pub entropy: Vec<u8>,
+}
+
 #[derive(Debug, Clone)]
 pub struct SecurityParameters {
     pub min_signatures: usize,
@@ -189,18 +195,17 @@ pub struct PreCommitment {
 }
 
 impl PreCommitment {
-    /// Generate commitment root hash:
-    /// H( DOM || state_hash || op_bytes || next_entropy )
+    /// Generate a v2 branch commitment:
+    /// `C_pre^i = H("DSM/precommit/commitment-hash/v2\0" || h_n || payload_i || e_i)`.
     ///
     /// Deterministic encoding:
     /// - domain separated
     /// - length prefixed for all fields
     pub fn generate_hash(
-        state: &State,
+        state_hash: &[u8; 32],
         operation: &Operation,
         next_entropy: &[u8],
     ) -> Result<[u8; 32], DsmError> {
-        let state_hash = state.hash()?;
         let op_bytes = operation.to_bytes();
 
         if op_bytes.len() > MAX_OP_BYTES_LEN {
@@ -216,12 +221,100 @@ impl PreCommitment {
             .into());
         }
 
+        Self::commitment_hash_for_payload(state_hash, &op_bytes, next_entropy)
+    }
+
+    pub fn commitment_hash_for_payload(
+        parent_tip: &[u8; 32],
+        payload: &[u8],
+        entropy: &[u8],
+    ) -> Result<[u8; 32], DsmError> {
+        if payload.len() > MAX_OP_BYTES_LEN {
+            return Err(CommitmentError::Verification {
+                context: format!("Operation bytes too large: {}", payload.len()),
+            }
+            .into());
+        }
+        if entropy.len() > MAX_ENTROPY_LEN {
+            return Err(CommitmentError::Verification {
+                context: format!("Entropy too large: {}", entropy.len()),
+            }
+            .into());
+        }
+
         Ok(canonical_lp::hash_lp3(
-            DOM_PRECOMMIT_ROOT,
-            &state_hash,
-            &op_bytes,
-            next_entropy,
+            DOM_PRECOMMIT_COMMITMENT_HASH,
+            parent_tip,
+            payload,
+            entropy,
         ))
+    }
+
+    fn encode_fork_candidates(
+        parent_tip: &[u8; 32],
+        candidates: &[ForkCandidate],
+    ) -> Result<Vec<u8>, DsmError> {
+        if candidates.is_empty() {
+            return Err(CommitmentError::Verification {
+                context: "At least one fork candidate required".into(),
+            }
+            .into());
+        }
+
+        let mut ordered = candidates.to_vec();
+        ordered.sort_by(|a, b| a.fork_id.cmp(&b.fork_id));
+        let mut out = Vec::new();
+        for candidate in ordered {
+            validate_id(&candidate.fork_id, "fork_id")?;
+            let hash = Self::commitment_hash_for_payload(
+                parent_tip,
+                &candidate.payload,
+                &candidate.entropy,
+            )?;
+            let fork_id = candidate.fork_id.as_bytes();
+            out.extend_from_slice(&(fork_id.len() as u32).to_le_bytes());
+            out.extend_from_slice(fork_id);
+            out.extend_from_slice(&(hash.len() as u32).to_le_bytes());
+            out.extend_from_slice(&hash);
+            out.extend_from_slice(&(candidate.payload.len() as u32).to_le_bytes());
+            out.extend_from_slice(&candidate.payload);
+            out.extend_from_slice(&(candidate.entropy.len() as u32).to_le_bytes());
+            out.extend_from_slice(&candidate.entropy);
+        }
+        Ok(out)
+    }
+
+    /// Generate the fork root:
+    /// `C_pre^root = H("DSM/precommit/root/v2\0" || h_n || enc(candidates))`.
+    pub fn fork_root_for_candidates(
+        parent_tip: &[u8; 32],
+        candidates: &[ForkCandidate],
+    ) -> Result<[u8; 32], DsmError> {
+        let encoded = Self::encode_fork_candidates(parent_tip, candidates)?;
+        Ok(canonical_lp::hash_lp2(
+            DOM_PRECOMMIT_ROOT,
+            parent_tip,
+            &encoded,
+        ))
+    }
+
+    /// Generate the fork context:
+    /// `ctx_fork = H("DSM/precommit/fork-context/v2\0" || h_n || C_pre^root)`.
+    pub fn fork_context(parent_tip: &[u8; 32], fork_root: &[u8; 32]) -> [u8; 32] {
+        canonical_lp::hash_lp2(DOM_FORK_CONTEXT, parent_tip, fork_root)
+    }
+
+    /// Generate the invalidation proof commitment:
+    /// `pi_inv = H("DSM/precommit/invalidation-proof/v2\0" || enc(invalidated))`.
+    pub fn invalidation_proof_commitment(invalidated: &[[u8; 32]]) -> [u8; 32] {
+        let mut ordered = invalidated.to_vec();
+        ordered.sort();
+        let mut encoded = Vec::with_capacity(ordered.len() * (4 + 32));
+        for hash in ordered {
+            encoded.extend_from_slice(&32u32.to_le_bytes());
+            encoded.extend_from_slice(&hash);
+        }
+        canonical_lp::hash_lp1(DOM_INVALIDATION_PROOF, &encoded)
     }
 
     pub fn new(hash: [u8; 32]) -> Self {
@@ -556,48 +649,11 @@ impl PreCommitment {
         self.forward_commitment.as_ref()
     }
 
-    /// Shallow verification against a state:
-    /// - verifies internal commitment_hash correctness
-    /// - verifies selected fork integrity if set
-    ///
-    /// Note: Full transition verification requires operation + next_entropy and should use
-    /// `verify_transition_root(...)` below.
-    pub fn verify(&self, state: &State) -> Result<bool, DsmError> {
-        let _state_hash = state.hash()?; // kept to preserve callsite expectations (and future tightening).
-
-        let expected_commitment_hash =
-            canonical_lp::hash_lp1(DOM_PRECOMMIT_COMMITMENT_HASH, &self.hash);
-        if self.commitment_hash.as_slice() != expected_commitment_hash.as_slice() {
-            return Ok(false);
-        }
-
-        if let Some(fork_id) = &self.selected_fork_id {
-            let fork = match self.forks.iter().find(|f| &f.fork_id == fork_id) {
-                Some(f) => f,
-                None => return Ok(false),
-            };
-            if !fork.is_selected {
-                return Ok(false);
-            }
-            if !self.verify_fork_selection(fork)? {
-                return Ok(false);
-            }
-        }
-
-        Ok(true)
-    }
-
-    /// Full root verification for a transition.
-    /// Recomputes the root hash exactly as `generate_hash(...)` would.
-    pub fn verify_transition_root(
-        &self,
-        state: &State,
-        operation: &Operation,
-        next_entropy: &[u8],
-    ) -> Result<bool, DsmError> {
-        let expected = Self::generate_hash(state, operation, next_entropy)?;
-        Ok(expected.as_slice() == self.hash.as_slice())
-    }
+    // PreCommitment::verify(&State) and verify_transition_root(&State, ...)
+    // deleted: zero callers. Both took `&State` purely to read state.hash() —
+    // verify dropped the result entirely (assigned to `_state_hash` with a
+    // comment "kept to preserve callsite expectations"), and verify_transition_root
+    // forwarded to generate_hash which now takes `&[u8; 32]` directly.
 
     pub fn from_forward_linked_commitment(flc: &ForwardLinkedCommitment) -> Result<Self, DsmError> {
         let mut signatures = HashMap::new();
@@ -1104,5 +1160,52 @@ mod tests {
 
         let i3 = derive_event_index("forkB", &fork_hash, &selected_hash);
         assert_ne!(i1, i3);
+    }
+
+    #[test]
+    fn fork_v2_commitments_are_parent_bound_and_order_stable() {
+        let parent = [0x11; 32];
+        let candidates = vec![
+            ForkCandidate {
+                fork_id: "b".to_string(),
+                payload: b"pay-carol".to_vec(),
+                entropy: vec![0x02; 32],
+            },
+            ForkCandidate {
+                fork_id: "a".to_string(),
+                payload: b"pay-bob".to_vec(),
+                entropy: vec![0x01; 32],
+            },
+        ];
+        let mut reversed = candidates.clone();
+        reversed.reverse();
+
+        let root = PreCommitment::fork_root_for_candidates(&parent, &candidates).unwrap();
+        let root_reversed = PreCommitment::fork_root_for_candidates(&parent, &reversed).unwrap();
+        assert_eq!(root, root_reversed);
+
+        let mut other_parent = parent;
+        other_parent[0] ^= 0x01;
+        let other_root =
+            PreCommitment::fork_root_for_candidates(&other_parent, &candidates).unwrap();
+        assert_ne!(root, other_root);
+
+        let ctx = PreCommitment::fork_context(&parent, &root);
+        let other_ctx = PreCommitment::fork_context(&other_parent, &root);
+        assert_ne!(ctx, other_ctx);
+    }
+
+    #[test]
+    fn invalidation_commitment_is_order_stable_and_content_bound() {
+        let a = [0x01; 32];
+        let b = [0x02; 32];
+        let c = [0x03; 32];
+
+        let first = PreCommitment::invalidation_proof_commitment(&[b, a]);
+        let second = PreCommitment::invalidation_proof_commitment(&[a, b]);
+        assert_eq!(first, second);
+
+        let third = PreCommitment::invalidation_proof_commitment(&[a, c]);
+        assert_ne!(first, third);
     }
 }

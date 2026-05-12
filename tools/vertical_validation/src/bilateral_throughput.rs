@@ -16,6 +16,7 @@ use instant::Instant;
 use serde::Serialize;
 
 use dsm::core::state_machine::StateMachine;
+use dsm::core::token::{derive_canonical_balance_key, resolve_policy_commit};
 use dsm::crypto::blake3::domain_hash;
 use dsm::crypto::sphincs::{generate_keypair_from_seed, sphincs_sign, SphincsVariant};
 use dsm::types::operations::{Operation, TransactionMode, VerificationType};
@@ -63,10 +64,11 @@ fn make_genesis(seed: &[u8; 32], pk: &[u8]) -> (State, StateMachine) {
     if let Ok(h) = state.hash() {
         state.hash = h;
     }
-    state.token_balances.insert(
-        "ERA".into(),
-        Balance::from_state(1_000_000, state.hash, state.state_number),
-    );
+    let era_pc = resolve_policy_commit("ERA").expect("ERA policy_commit");
+    let era_key = derive_canonical_balance_key(&era_pc, pk, "ERA");
+    state
+        .token_balances
+        .insert(era_key, Balance::from_state(1_000_000, state.hash));
     let mut machine = StateMachine::new();
     machine.set_state(state.clone());
     (state, machine)
@@ -181,7 +183,7 @@ fn benchmark_with_signing(
         let mut op = Operation::Transfer {
             token_id: "ERA".into(),
             to_device_id: vec![0xDD; 32],
-            amount: Balance::from_state(1, state.hash, state.state_number),
+            amount: Balance::from_state(1, state.hash),
             mode: TransactionMode::Unilateral,
             nonce,
             verification: VerificationType::Standard,
@@ -198,7 +200,7 @@ fn benchmark_with_signing(
         }
 
         // Execute transition
-        match machine.execute_transition(op) {
+        match crate::compat_shim::machine_execute_transition(&mut machine, op) {
             Ok(new_state) => {
                 state = new_state;
             }
@@ -262,7 +264,7 @@ fn benchmark_without_signing(seed: &[u8; 32], pk: &[u8], iterations: u64) -> Thr
         }
 
         let iter_start = Instant::now();
-        match machine.execute_transition(op) {
+        match crate::compat_shim::machine_execute_transition(&mut machine, op) {
             Ok(_) => {}
             Err(e) => {
                 eprintln!("    WARNING: transition {i} failed: {e}");

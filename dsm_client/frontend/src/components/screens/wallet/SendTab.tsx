@@ -108,8 +108,16 @@ function SendTabInner({
               : ('accepted' in res ? Boolean((res as { accepted?: boolean }).accepted) : false))
           : false;
         if (!success) {
-          const message = res && typeof res === 'object' && 'message' in res ? String((res as { message?: string }).message || '') : '';
-          let msg = message || 'Offline transfer failed';
+          // GenericTxResponse carries the SDK's reason in `result` (sometimes `message`
+          // for legacy callers). Read both so we surface the real failure cause to the
+          // user instead of the generic fallback.
+          const resultText = res && typeof res === 'object' && 'result' in res
+            ? String((res as { result?: string }).result || '')
+            : '';
+          const messageText = res && typeof res === 'object' && 'message' in res
+            ? String((res as { message?: string }).message || '')
+            : '';
+          let msg = resultText || messageText || 'Offline transfer failed';
           const failureReason = res && typeof res === 'object' && 'failureReason' in res ? (res as { failureReason?: unknown }).failureReason : undefined;
           const failureReasonNum = typeof failureReason === 'number'
             ? failureReason

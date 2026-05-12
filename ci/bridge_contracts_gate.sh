@@ -30,7 +30,6 @@ allow_paths=(
   dsm_client/android/app/src/main/java/com/dsm/wallet/bridge/BleEventRelay.kt
   dsm_client/android/app/src/main/java/com/dsm/wallet/bridge/SinglePathWebViewBridge.kt
   dsm_client/android/app/src/main/java/com/dsm/wallet/security/AntiCloneGate.kt
-  dsm_client/android/app/src/main/java/com/dsm/wallet/recovery/NfcRecoveryActivity.kt
   dsm_client/android/app/src/main/java/com/dsm/wallet/bridge/DsmBluetoothService.kt
 )
 

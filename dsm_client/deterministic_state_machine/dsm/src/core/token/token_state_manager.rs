@@ -15,15 +15,14 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use crate::common::helpers::secure_eq;
 use crate::crypto::sphincs;
 use crate::core::token::policy::TokenPolicySystem;
 
 use crate::{
     types::{
         error::DsmError,
-        operations::{Operation, Ops},
-        state_types::{SparseIndex, State, StateParams, PreCommitment},
+        operations::Operation,
+        state_types::State,
         token_types::{Balance, StateContext, Token, TokenStatus},
     },
 };
@@ -34,6 +33,19 @@ use crate::{
 /// `policy_commit` serves as the cryptographic sub-domain for each token type.
 pub trait PolicyCommitResolver: Send + Sync {
     fn resolve(&self, token_id: &str) -> Result<[u8; 32], DsmError>;
+}
+
+/// Strict UTF-8 decoding for a token_id byte string.
+///
+/// Returns `None` for malformed UTF-8 or empty inputs. Using
+/// `from_utf8_lossy` would silently substitute U+FFFD for invalid bytes and
+/// cause distinct malformed token_ids to collide onto the same balance key,
+/// enabling cross-token aliasing in `token_balances`.
+fn canonical_token_id_str(token_id: &[u8]) -> Option<&str> {
+    match std::str::from_utf8(token_id) {
+        Ok(s) if !s.is_empty() => Some(s),
+        _ => None,
+    }
 }
 
 /// Derive the stable canonical balance key for a token position.
@@ -59,37 +71,58 @@ pub fn builtin_policy_commit_for_token(token_id: &str) -> Option<[u8; 32]> {
     // These values must match the SDK's policy/builtins.rs for consistency.
     // Era/dBTC are the canonical builtin tokens for DSM.
     match token_id {
-        "ERA" => Some([
-            0xaf, 0x13, 0x49, 0xb9, 0xf5, 0xf9, 0xa1, 0xa6, 0xa0, 0x40, 0x4d, 0xea, 0x36, 0xdc,
-            0xc9, 0x49, 0x9b, 0xcb, 0x25, 0xc9, 0xad, 0xc1, 0x12, 0xb7, 0xcc, 0x9a, 0x93, 0xca,
-            0xe4, 0x1f, 0x32, 0x62,
-        ]),
-        "dBTC" => Some([
-            0x03, 0xa4, 0x2b, 0x67, 0x19, 0x17, 0xaf, 0x84, 0x2f, 0x07, 0x3d, 0x87, 0xcf, 0xa4,
-            0x59, 0xd8, 0x45, 0xb9, 0x68, 0xfd, 0xb1, 0xab, 0xcb, 0x03, 0x31, 0x2d, 0x91, 0x4e,
-            0x35, 0x01, 0x62, 0x22,
-        ]),
+        "ERA" => Some(ERA_POLICY_COMMIT),
+        "dBTC" => Some(DBTC_POLICY_COMMIT),
         _ => None,
     }
 }
 
-/// Resolve policy_commit for any token, including non-builtins.
+/// Reverse of [`builtin_policy_commit_for_token`]: given a 32-byte
+/// `policy_commit`, return the builtin token_id ("ERA" or "dBTC") if it
+/// matches one of the canonical constants. Returns `None` for non-builtin
+/// (CPTA-anchored) tokens, whose ticker must be resolved via the token
+/// registry / CPTA cache.
 ///
-/// §9.1: All TokenOps MUST include `policy_commit`. For builtins (ERA, dBTC),
-/// the precomputed constants are returned. For CPTA-anchored custom tokens,
-/// the policy_commit is derived deterministically from the token_id using
-/// BLAKE3 domain separation. The full CPTA bytes should ideally be cached
-/// locally and verified by digest, but this derivation ensures balance
-/// mutations are never skipped for valid token operations.
-pub fn resolve_policy_commit(token_id: &str) -> [u8; 32] {
-    builtin_policy_commit_for_token(token_id).unwrap_or_else(|| {
-        // §9.3: policy_commit := BLAKE3-256("DSM/cpta\0" || canonical_cpta_bytes)
-        // For non-builtin tokens without cached CPTA bytes, derive a
-        // deterministic placeholder from the token_id. This ensures the
-        // state machine applies balance deltas for all tokens, not just
-        // builtins. The real policy_commit is verified at the receipt
-        // acceptance layer (§9.5 binding to policy).
-        crate::crypto::blake3::domain_hash_bytes("DSM/token-policy\0", token_id.as_bytes())
+/// Used by the DeviceState → State compatibility projection to reconstruct
+/// balance keys in the canonical `{prefix}|{token_id}` format produced by
+/// [`derive_canonical_balance_key`].
+pub fn builtin_token_id_for_policy_commit(policy_commit: &[u8; 32]) -> Option<&'static str> {
+    if *policy_commit == ERA_POLICY_COMMIT {
+        Some("ERA")
+    } else if *policy_commit == DBTC_POLICY_COMMIT {
+        Some("dBTC")
+    } else {
+        None
+    }
+}
+
+const ERA_POLICY_COMMIT: [u8; 32] = [
+    0xaf, 0x13, 0x49, 0xb9, 0xf5, 0xf9, 0xa1, 0xa6, 0xa0, 0x40, 0x4d, 0xea, 0x36, 0xdc, 0xc9, 0x49,
+    0x9b, 0xcb, 0x25, 0xc9, 0xad, 0xc1, 0x12, 0xb7, 0xcc, 0x9a, 0x93, 0xca, 0xe4, 0x1f, 0x32, 0x62,
+];
+
+const DBTC_POLICY_COMMIT: [u8; 32] = [
+    0x03, 0xa4, 0x2b, 0x67, 0x19, 0x17, 0xaf, 0x84, 0x2f, 0x07, 0x3d, 0x87, 0xcf, 0xa4, 0x59, 0xd8,
+    0x45, 0xb9, 0x68, 0xfd, 0xb1, 0xab, 0xcb, 0x03, 0x31, 0x2d, 0x91, 0x4e, 0x35, 0x01, 0x62, 0x22,
+];
+
+/// Resolve policy_commit for a token by ticker.
+///
+/// §9.1: all TokenOps MUST include `policy_commit`. Builtins (ERA, dBTC)
+/// resolve to their precomputed constants. For CPTA-anchored custom tokens
+/// the canonical policy_commit is `BLAKE3-256("DSM/cpta\0" || canonical_cpta_bytes)`
+/// and can only be produced by reading the registered `TokenPolicyV3` — not
+/// derived from the ticker string.
+///
+/// This function therefore strict-fails for any non-builtin token.  Callers
+/// that handle custom tokens MUST carry `policy_commit` explicitly on the
+/// `BalanceDelta` (the `execute_on_relationship` path) so the transition
+/// layer applies the authoritative value from the producing SDK.
+pub fn resolve_policy_commit(token_id: &str) -> Result<[u8; 32], DsmError> {
+    builtin_policy_commit_for_token(token_id).ok_or_else(|| {
+        DsmError::invalid_operation(format!(
+            "resolve_policy_commit: no registered policy for token_id {token_id}; custom tokens must carry policy_commit on the BalanceDelta (no fallback derivation)"
+        ))
     })
 }
 
@@ -148,71 +181,8 @@ impl TokenStateManager {
         }
     }
 
-    /// Create a state transition that atomically applies token balance changes.
-    pub fn create_token_state_transition(
-        &self,
-        current_state: &State,
-        operation: Operation,
-        new_entropy: Vec<u8>,
-        encapsulated_entropy: Option<Vec<u8>>,
-    ) -> Result<State, DsmError> {
-        // Validate operation basic shape if your Operation supports validation.
-        // If validate() doesn't exist in your tree, remove this block.
-        if let Err(e) = operation.validate() {
-            return Err(DsmError::invalid_operation(format!(
-                "Invalid operation for token state transition: {e}"
-            )));
-        }
-
-        let updated_balances = self.apply_token_operation(current_state, &operation)?;
-
-        let prev_state_hash = current_state.hash()?;
-        let next_state_number = current_state.state_number + 1;
-
-        // Build sparse index deterministically
-        let mut indices = Vec::new();
-        let mut n = next_state_number;
-        while n > 0 {
-            if n & 1 == 1 {
-                indices.push(n);
-            }
-            n >>= 1;
-        }
-        let sparse_index = SparseIndex::new(indices);
-
-        // Verify forward-commitment rules if present
-        if let Some(pre_commit) = &current_state.forward_commitment {
-            if !self.verify_precommitment_parameters(pre_commit, &operation)? {
-                return Err(DsmError::policy_violation(
-                    "forward commitment".to_string(),
-                    "Operation violates forward commitment parameters".to_string(),
-                    None::<std::io::Error>,
-                ));
-            }
-        }
-
-        let mut params = StateParams::new(
-            next_state_number,
-            new_entropy,
-            operation,
-            current_state.device_info.clone(),
-        );
-
-        params = params
-            .with_encapsulated_entropy(encapsulated_entropy.unwrap_or_default())
-            .with_prev_state_hash(prev_state_hash)
-            .with_sparse_index(sparse_index);
-
-        let mut new_state = State::new(params);
-
-        // Atomic set of balances (state is the truth)
-        new_state.token_balances = updated_balances;
-
-        new_state.id = format!("state_{}", new_state.state_number);
-        new_state.hash = new_state.compute_hash()?;
-
-        Ok(new_state)
-    }
+    // create_token_state_transition deleted — all transitions now go through
+    // DeviceState::advance via StateMachine::advance_relationship (§2.2, §4.2).
 
     pub fn apply_token_operation(
         &self,
@@ -220,11 +190,7 @@ impl TokenStateManager {
         operation: &Operation,
     ) -> Result<HashMap<String, Balance>, DsmError> {
         // Establish canonical state context
-        let ctx = StateContext::new(
-            current_state.hash,
-            current_state.state_number,
-            current_state.device_info.device_id,
-        );
+        let ctx = StateContext::new(current_state.hash, current_state.device_info.device_id);
         StateContext::set_current(ctx);
 
         struct ContextGuard;
@@ -246,18 +212,21 @@ impl TokenStateManager {
                 recipient,
                 ..
             } => {
-                let token_id_str = String::from_utf8_lossy(token_id);
+                let token_id_str = canonical_token_id_str(token_id).ok_or_else(|| {
+                    DsmError::invalid_operation("Transfer has malformed or empty token_id")
+                })?;
                 let sender_pk = &current_state.device_info.public_key;
-                let sender_key = self.make_balance_key(sender_pk, &token_id_str)?;
-                let recipient_key = self.make_balance_key(recipient.as_slice(), &token_id_str)?;
+                let sender_key = self.make_balance_key(sender_pk, token_id_str)?;
+                let recipient_key = self.make_balance_key(recipient.as_slice(), token_id_str)?;
 
-                let sender_balance = new_balances.get(&sender_key).cloned().unwrap_or_else(|| {
-                    Balance::from_state(0, current_state.hash, current_state.state_number)
-                });
+                let sender_balance = new_balances
+                    .get(&sender_key)
+                    .cloned()
+                    .unwrap_or_else(|| Balance::from_state(0, current_state.hash));
 
                 if sender_balance.value() < amount.value() {
                     return Err(DsmError::insufficient_balance(
-                        token_id_str.into_owned(),
+                        token_id_str.to_string(),
                         sender_balance.value(),
                         amount.value(),
                     ));
@@ -266,16 +235,12 @@ impl TokenStateManager {
                 let new_sender_balance = Balance::from_state(
                     sender_balance.value().saturating_sub(amount.value()),
                     current_state.hash,
-                    current_state.state_number,
                 );
 
-                let recipient_balance =
-                    new_balances
-                        .get(&recipient_key)
-                        .cloned()
-                        .unwrap_or_else(|| {
-                            Balance::from_state(0, current_state.hash, current_state.state_number)
-                        });
+                let recipient_balance = new_balances
+                    .get(&recipient_key)
+                    .cloned()
+                    .unwrap_or_else(|| Balance::from_state(0, current_state.hash));
 
                 let new_recipient_value = recipient_balance
                     .value()
@@ -283,11 +248,8 @@ impl TokenStateManager {
                     .ok_or_else(|| {
                         DsmError::invalid_operation("Balance overflow on transfer credit")
                     })?;
-                let new_recipient_balance = Balance::from_state(
-                    new_recipient_value,
-                    current_state.hash,
-                    current_state.state_number,
-                );
+                let new_recipient_balance =
+                    Balance::from_state(new_recipient_value, current_state.hash);
 
                 new_balances.insert(sender_key, new_sender_balance);
                 new_balances.insert(recipient_key, new_recipient_balance);
@@ -300,9 +262,11 @@ impl TokenStateManager {
                 proof_of_authorization,
                 ..
             } => {
-                let token_id_str = String::from_utf8_lossy(token_id);
+                let token_id_str = canonical_token_id_str(token_id).ok_or_else(|| {
+                    DsmError::invalid_operation("Mint has malformed or empty token_id")
+                })?;
                 if !self.verify_mint_authorization(
-                    &token_id_str,
+                    token_id_str,
                     authorized_by,
                     proof_of_authorization,
                 )? {
@@ -313,11 +277,12 @@ impl TokenStateManager {
                 }
 
                 let owner_pk = &current_state.device_info.public_key;
-                let owner_key = self.make_balance_key(owner_pk, &token_id_str)?;
+                let owner_key = self.make_balance_key(owner_pk, token_id_str)?;
 
-                let current_balance = new_balances.get(&owner_key).cloned().unwrap_or_else(|| {
-                    Balance::from_state(0, current_state.hash, current_state.state_number)
-                });
+                let current_balance = new_balances
+                    .get(&owner_key)
+                    .cloned()
+                    .unwrap_or_else(|| Balance::from_state(0, current_state.hash));
 
                 let new_mint_value = current_balance
                     .value()
@@ -325,11 +290,7 @@ impl TokenStateManager {
                     .ok_or_else(|| DsmError::invalid_operation("Balance overflow on mint"))?;
                 new_balances.insert(
                     owner_key,
-                    Balance::from_state(
-                        new_mint_value,
-                        current_state.hash,
-                        current_state.state_number,
-                    ),
+                    Balance::from_state(new_mint_value, current_state.hash),
                 );
             }
 
@@ -339,8 +300,10 @@ impl TokenStateManager {
                 proof_of_ownership,
                 ..
             } => {
-                let token_id_str = String::from_utf8_lossy(token_id);
-                if !self.verify_token_ownership(&token_id_str, proof_of_ownership)? {
+                let token_id_str = canonical_token_id_str(token_id).ok_or_else(|| {
+                    DsmError::invalid_operation("Burn has malformed or empty token_id")
+                })?;
+                if !self.verify_token_ownership(token_id_str, proof_of_ownership)? {
                     return Err(DsmError::unauthorized(
                         "Invalid burn authorization",
                         None::<std::io::Error>,
@@ -348,15 +311,16 @@ impl TokenStateManager {
                 }
 
                 let owner_pk = &current_state.device_info.public_key;
-                let owner_key = self.make_balance_key(owner_pk, &token_id_str)?;
+                let owner_key = self.make_balance_key(owner_pk, token_id_str)?;
 
-                let owner_balance = new_balances.get(&owner_key).cloned().unwrap_or_else(|| {
-                    Balance::from_state(0, current_state.hash, current_state.state_number)
-                });
+                let owner_balance = new_balances
+                    .get(&owner_key)
+                    .cloned()
+                    .unwrap_or_else(|| Balance::from_state(0, current_state.hash));
 
                 if owner_balance.value() < amount.value() {
                     return Err(DsmError::insufficient_balance(
-                        token_id_str.into_owned(),
+                        token_id_str.to_string(),
                         owner_balance.value(),
                         amount.value(),
                     ));
@@ -367,7 +331,6 @@ impl TokenStateManager {
                     Balance::from_state(
                         owner_balance.value().saturating_sub(amount.value()),
                         current_state.hash,
-                        current_state.state_number,
                     ),
                 );
             }
@@ -386,22 +349,20 @@ impl TokenStateManager {
             } => {
                 if let (Some(tid), Some(amount)) = (token_id, locked_amount) {
                     if amount.value() > 0 {
-                        let tid_str = String::from_utf8_lossy(tid);
+                        let tid_str = canonical_token_id_str(tid).ok_or_else(|| {
+                            DsmError::invalid_operation("DlvCreate has malformed or empty token_id")
+                        })?;
                         let creator_key =
-                            self.make_balance_key(creator_public_key.as_slice(), &tid_str)?;
+                            self.make_balance_key(creator_public_key.as_slice(), tid_str)?;
 
-                        let creator_balance =
-                            new_balances.get(&creator_key).cloned().unwrap_or_else(|| {
-                                Balance::from_state(
-                                    0,
-                                    current_state.hash,
-                                    current_state.state_number,
-                                )
-                            });
+                        let creator_balance = new_balances
+                            .get(&creator_key)
+                            .cloned()
+                            .unwrap_or_else(|| Balance::from_state(0, current_state.hash));
 
                         if creator_balance.value() < amount.value() {
                             return Err(DsmError::insufficient_balance(
-                                tid_str.into_owned(),
+                                tid_str.to_string(),
                                 creator_balance.value(),
                                 amount.value(),
                             ));
@@ -413,7 +374,6 @@ impl TokenStateManager {
                             Balance::from_state(
                                 creator_balance.value().saturating_sub(amount.value()),
                                 current_state.hash,
-                                current_state.state_number,
                             ),
                         );
                     }
@@ -636,7 +596,8 @@ impl TokenStateManager {
         }
 
         if let Some(ctx) = StateContext::get_current() {
-            context.insert("tick".to_string(), ctx.state_number.to_le_bytes().to_vec());
+            // Bind policy context to the current state hash (§2.1 adjacency), not a counter.
+            context.insert("state_hash".to_string(), ctx.state_hash.to_vec());
         }
 
         let op_type = match operation {
@@ -648,8 +609,13 @@ impl TokenStateManager {
             _ => "unknown",
         };
 
-        let token_id_str = String::from_utf8_lossy(token_id);
-        let token_id_owned = token_id_str.into_owned();
+        let token_id_owned = canonical_token_id_str(token_id)
+            .ok_or_else(|| {
+                DsmError::invalid_operation(
+                    "Policy verification rejected: malformed or empty token_id",
+                )
+            })?
+            .to_string();
         let result = if tokio::runtime::Handle::try_current().is_ok() {
             let policy_system = policy_system.clone();
             let context_clone = context.clone();
@@ -711,82 +677,8 @@ impl TokenStateManager {
         Ok(())
     }
 
-    fn verify_precommitment_parameters(
-        &self,
-        pre_commit: &PreCommitment,
-        operation: &Operation,
-    ) -> Result<bool, DsmError> {
-        let matches_type = match operation {
-            Operation::Transfer { .. } => pre_commit.operation_type == "transfer",
-            Operation::Mint { .. } => pre_commit.operation_type == "mint",
-            Operation::Burn { .. } => pre_commit.operation_type == "burn",
-            Operation::LockToken { .. } => pre_commit.operation_type == "lock",
-            Operation::UnlockToken { .. } => pre_commit.operation_type == "unlock",
-            _ => false,
-        };
-
-        if !matches_type {
-            return Ok(false);
-        }
-
-        let matches_fixed = match operation {
-            Operation::Transfer {
-                token_id,
-                recipient,
-                ..
-            } => {
-                let token_ok = if let Some(exp) = pre_commit.fixed_parameters.get("token_id") {
-                    secure_eq(token_id.as_slice(), exp)
-                } else {
-                    true
-                };
-
-                let recip_ok = if let Some(exp) = pre_commit.fixed_parameters.get("recipient") {
-                    secure_eq(recipient.as_slice(), exp)
-                } else {
-                    true
-                };
-
-                token_ok && recip_ok
-            }
-            Operation::Mint { token_id, .. } | Operation::Burn { token_id, .. } => {
-                if let Some(exp) = pre_commit.fixed_parameters.get("token_id") {
-                    secure_eq(token_id.as_slice(), exp)
-                } else {
-                    true
-                }
-            }
-            _ => true,
-        };
-
-        if !matches_fixed {
-            return Ok(false);
-        }
-
-        let variable_ok = match operation {
-            Operation::Transfer { amount, .. }
-            | Operation::Mint { amount, .. }
-            | Operation::Burn { amount, .. } => {
-                if pre_commit.variable_parameters.contains("amount") {
-                    true
-                } else if let Some(exp) = pre_commit.fixed_parameters.get("amount") {
-                    if exp.len() == 8 {
-                        let mut arr = [0u8; 8];
-                        arr.copy_from_slice(&exp[..8]);
-                        let expected = u64::from_le_bytes(arr);
-                        amount.value() == expected
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                }
-            }
-            _ => true,
-        };
-
-        Ok(matches_type && matches_fixed && variable_ok)
-    }
+    // verify_precommitment_parameters deleted — only caller was the
+    // deleted create_token_state_transition.
 
     fn update_balance_cache(
         &self,
@@ -845,7 +737,7 @@ impl TokenStateManager {
         }
 
         if let Some(ctx) = StateContext::get_current() {
-            Ok(Balance::from_state(0, ctx.state_hash, ctx.state_number))
+            Ok(Balance::from_state(0, ctx.state_hash))
         } else {
             Ok(Balance::zero())
         }
@@ -949,7 +841,32 @@ impl TokenStateManager {
 
 #[cfg(test)]
 mod tests {
-    use super::derive_canonical_balance_key;
+    use super::{derive_canonical_balance_key, resolve_policy_commit};
+
+    #[test]
+    fn resolve_policy_commit_succeeds_for_builtins() {
+        let era = resolve_policy_commit("ERA").expect("ERA is a builtin");
+        let dbtc = resolve_policy_commit("dBTC").expect("dBTC is a builtin");
+        assert_ne!(era, [0u8; 32]);
+        assert_ne!(dbtc, [0u8; 32]);
+        assert_ne!(era, dbtc);
+    }
+
+    #[test]
+    fn resolve_policy_commit_fails_for_unregistered_token() {
+        // No BLAKE3-of-token-id fallback: custom tokens MUST carry policy_commit
+        // on the BalanceDelta path.  Strict-fail closed here.
+        let err = resolve_policy_commit("FOOBAR").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("FOOBAR"),
+            "error must name the offending token_id, got: {msg}"
+        );
+        assert!(
+            msg.contains("no registered policy"),
+            "error must explain missing registration, got: {msg}"
+        );
+    }
 
     #[test]
     fn canonical_balance_key_is_stable_for_same_semantic_input() {

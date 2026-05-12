@@ -6,6 +6,10 @@ internal object UnifiedContactBridge {
         return try { Unified.resolveBleAddressForDeviceIdBin(deviceId) } catch (_: Throwable) { ByteArray(0) }
     }
 
+    fun resolvePeerIdentityForBleAddressBin(address: String): ByteArray {
+        return try { Unified.resolvePeerIdentityForBleAddressBin(address) } catch (_: Throwable) { ByteArray(0) }
+    }
+
     fun handleContactQrV3(bytes: ByteArray): ByteArray {
         return try { Unified.handleContactQrV3(bytes) } catch (_: Throwable) { ByteArray(0) }
     }

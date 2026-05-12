@@ -10,6 +10,7 @@
 //! | Tag | Usage |
 //! |-----|-------|
 //! | `DSM/ek\0` | Ephemeral key seed derivation |
+//! | `DSM/ek-cert\0` | Per-step ephemeral-key certification (whitepaper §11.1) |
 
 use crate::crypto::blake3::dsm_domain_hasher;
 use crate::crypto::sphincs::{generate_keypair_from_seed, sign, sphincs_verify, SphincsVariant};
@@ -122,6 +123,53 @@ pub fn derive_kyber_coins(
     *hasher.finalize().as_bytes()
 }
 
+// ============================ Ephemeral cert chain =============================
+//
+// Whitepaper §11.1 (Ephemeral certification, normative):
+//
+//     cert_{n+1} = Sign_{SK_n}( BLAKE3-256("DSM/ek-cert\0" || EK_pk_{n+1} || h_n) )
+//
+// Each per-step ephemeral SPHINCS+ key is certified by the previous signer
+// (AK for n=0, else EK_n). Verification replays the chain back to AK_pk and
+// checks Device-Tree inclusion of the AK-bound DevID. This is what gives a
+// receipt verifier cryptographic AK-rooted authorization for the per-step
+// ephemeral that signed the receipt body.
+//
+// Placement: the cert is carried in the receipt envelope, not in the
+// canonical ReceiptCommit form (whose 10-field list is frozen by §4.2.1).
+
+/// Compute the certification hash:
+/// `BLAKE3-256("DSM/ek-cert\0" || EK_pk_{n+1} || h_n)`.
+pub fn derive_ek_cert_hash(ek_pk_next: &[u8], h_n: &[u8; 32]) -> [u8; 32] {
+    let mut hasher = dsm_domain_hasher("DSM/ek-cert");
+    hasher.update(ek_pk_next);
+    hasher.update(h_n);
+    *hasher.finalize().as_bytes()
+}
+
+/// Sign a cert for the next step's ephemeral key with the previous signer's
+/// secret key (AK at n=0, else EK_n). Uses SPHINCS+ SPX256f per §11.1.
+pub fn sign_ek_cert(
+    prev_sk: &[u8],
+    ek_pk_next: &[u8],
+    h_n: &[u8; 32],
+) -> Result<Vec<u8>, DsmError> {
+    let cert_hash = derive_ek_cert_hash(ek_pk_next, h_n);
+    sign(SphincsVariant::SPX256f, prev_sk, &cert_hash)
+}
+
+/// Verify a cert for the next step's ephemeral key against the previous
+/// signer's public key (AK at n=0, else EK_n).
+pub fn verify_ek_cert(
+    prev_pk: &[u8],
+    ek_pk_next: &[u8],
+    h_n: &[u8; 32],
+    cert: &[u8],
+) -> Result<bool, DsmError> {
+    let cert_hash = derive_ek_cert_hash(ek_pk_next, h_n);
+    sphincs_verify(prev_pk, &cert_hash, cert)
+}
+
 // ================================= Tests ====================================
 
 #[cfg(test)]
@@ -166,6 +214,100 @@ mod tests {
         let c1 = derive_kyber_coins(&h_n, &c_pre, &dev_id, &k_dbrw);
         let c2 = derive_kyber_coins(&h_n, &c_pre, &dev_id, &k_dbrw);
         assert_eq!(c1, c2);
+    }
+
+    #[test]
+    fn ek_cert_hash_deterministic() {
+        let ek_pk = [0xAAu8; 64];
+        let h_n = [0x55u8; 32];
+        let h1 = derive_ek_cert_hash(&ek_pk, &h_n);
+        let h2 = derive_ek_cert_hash(&ek_pk, &h_n);
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn ek_cert_hash_diverges_on_pk_change() {
+        let h_n = [0x55u8; 32];
+        let h_pk1 = derive_ek_cert_hash(&[0x01u8; 64], &h_n);
+        let h_pk2 = derive_ek_cert_hash(&[0x02u8; 64], &h_n);
+        assert_ne!(h_pk1, h_pk2);
+    }
+
+    #[test]
+    fn ek_cert_hash_diverges_on_parent_tip_change() {
+        let ek_pk = [0xAAu8; 64];
+        let h_a = derive_ek_cert_hash(&ek_pk, &[0x11u8; 32]);
+        let h_b = derive_ek_cert_hash(&ek_pk, &[0x22u8; 32]);
+        assert_ne!(h_a, h_b);
+    }
+
+    /// Whitepaper §11.1 ephemeral cert round-trip: signer SK_n certifies
+    /// EK_pk_{n+1} bound to h_n; verifier checks against the signer's PK.
+    #[test]
+    fn ek_cert_sign_and_verify_round_trip() {
+        // Generate the "previous signer" keypair (the AK or EK_n).
+        let prev_seed = [0x11u8; 32];
+        let (prev_pk, prev_sk) = generate_ephemeral_keypair(&prev_seed).expect("prev keygen");
+
+        // Generate the "next" ephemeral keypair to be certified.
+        let next_seed = [0x22u8; 32];
+        let (next_pk, _) = generate_ephemeral_keypair(&next_seed).expect("next keygen");
+
+        let h_n = [0x33u8; 32];
+
+        let cert = sign_ek_cert(&prev_sk, &next_pk, &h_n).expect("sign cert");
+        assert!(verify_ek_cert(&prev_pk, &next_pk, &h_n, &cert).expect("verify cert"));
+    }
+
+    /// A cert valid for one parent tip MUST NOT verify under a different
+    /// parent tip — the cert's binding to h_n is what links the per-step
+    /// EK to a specific position in the chain.
+    #[test]
+    fn ek_cert_rejects_wrong_parent_tip() {
+        let prev_seed = [0x11u8; 32];
+        let (prev_pk, prev_sk) = generate_ephemeral_keypair(&prev_seed).expect("prev keygen");
+        let next_seed = [0x22u8; 32];
+        let (next_pk, _) = generate_ephemeral_keypair(&next_seed).expect("next keygen");
+
+        let h_n = [0x33u8; 32];
+        let h_other = [0x44u8; 32];
+
+        let cert = sign_ek_cert(&prev_sk, &next_pk, &h_n).expect("sign cert");
+        assert!(!verify_ek_cert(&prev_pk, &next_pk, &h_other, &cert).expect("verify cert"));
+    }
+
+    /// A cert MUST NOT verify under a substituted EK_pk — the cert binds
+    /// EK_pk_{n+1} cryptographically; substituting another key fails.
+    #[test]
+    fn ek_cert_rejects_substituted_ek_pk() {
+        let prev_seed = [0x11u8; 32];
+        let (prev_pk, prev_sk) = generate_ephemeral_keypair(&prev_seed).expect("prev keygen");
+        let real_seed = [0x22u8; 32];
+        let (real_pk, _) = generate_ephemeral_keypair(&real_seed).expect("real keygen");
+        let attacker_seed = [0x99u8; 32];
+        let (attacker_pk, _) = generate_ephemeral_keypair(&attacker_seed).expect("attacker keygen");
+
+        let h_n = [0x33u8; 32];
+        let cert = sign_ek_cert(&prev_sk, &real_pk, &h_n).expect("sign cert");
+        assert!(!verify_ek_cert(&prev_pk, &attacker_pk, &h_n, &cert).expect("verify"));
+    }
+
+    /// A cert signed by an unauthorized SK MUST NOT verify against the
+    /// expected previous-signer PK. This is the core forgery resistance
+    /// the cert chain provides.
+    #[test]
+    fn ek_cert_rejects_unauthorized_signer() {
+        let real_prev_seed = [0x11u8; 32];
+        let (real_prev_pk, _) = generate_ephemeral_keypair(&real_prev_seed).expect("real keygen");
+        let attacker_seed = [0x99u8; 32];
+        let (_, attacker_sk) = generate_ephemeral_keypair(&attacker_seed).expect("attacker keygen");
+
+        let next_seed = [0x22u8; 32];
+        let (next_pk, _) = generate_ephemeral_keypair(&next_seed).expect("next keygen");
+
+        let h_n = [0x33u8; 32];
+        let forged_cert = sign_ek_cert(&attacker_sk, &next_pk, &h_n).expect("sign forged cert");
+        assert!(!verify_ek_cert(&real_prev_pk, &next_pk, &h_n, &forged_cert).expect("verify"));
     }
 
     #[test]

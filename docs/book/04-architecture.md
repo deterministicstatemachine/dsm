@@ -1,6 +1,6 @@
 # Chapter 4 — Architecture
 
-Deep dive into DSM's system design, layer boundaries, data flow, and crate structure.
+System design, layer boundaries, data flow, and crate structure.
 
 ---
 
@@ -15,16 +15,19 @@ Deep dive into DSM's system design, layer boundaries, data flow, and crate struc
 │                                                                     │
 │    MessagePort (ArrayBuffer): [8-byte msgId][BridgeRpcRequest]      │
 ├─────────────────────────────────────────────────────────────────────┤
-│  Layer 2: Android Kotlin (API 24+, compileSdk 35)                   │
-│    MainActivity.kt → handleDsmPortMessage()                         │
-│    SinglePathWebViewBridge.handleBinaryRpc() → routes method names  │
-│    UnifiedNativeApi.kt (87+ external JNI methods)                   │
-│    BleCoordinator (actor pattern, Channel-serialized)               │
-│                                                                     │
-│    JNI: extern "system" fn Java_com_dsm_wallet_bridge_*             │
+│  Layer 2: Platform ABI shims                                        │
+│    Android Kotlin (API 24+, compileSdk 35)                          │
+│      MainActivity.kt → handleDsmPortMessage()                       │
+│      SinglePathWebViewBridge.handleBinaryRpc()                      │
+│      UnifiedNativeApi.kt (87+ external JNI methods)                 │
+│      BleCoordinator (actor pattern, Channel-serialized)             │
+│    iOS Swift / Objective-C FFI                                      │
+│      dsm_process_envelope_protobuf()                                │
 ├─────────────────────────────────────────────────────────────────────┤
 │  Layer 3: Rust SDK (dsm_sdk, cdylib + rlib)                        │
-│    jni/unified_protobuf_bridge.rs — main RPC dispatcher             │
+│    ingress.rs — shared platform-agnostic native ingress             │
+│    jni/unified_protobuf_bridge.rs — Android ABI shim                │
+│    platform/ios/transport.rs — iOS envelope FFI shim                │
 │    jni/bootstrap.rs — PBI bootstrap (PlatformContext in OnceLock)   │
 │    bluetooth/bilateral_ble_handler.rs — 3-phase bilateral protocol  │
 │    bluetooth/ble_frame_coordinator.rs — BLE chunking/reassembly     │
@@ -32,7 +35,8 @@ Deep dive into DSM's system design, layer boundaries, data flow, and crate struc
 │                                                                     │
 ├─────────────────────────────────────────────────────────────────────┤
 │  Layer 4: Core Library (dsm, pure Rust)                             │
-│    crypto/ — BLAKE3, SPHINCS+, ML-KEM-768, Pedersen, ChaCha20      │
+│    crypto/ — BLAKE3, SPHINCS+, ML-KEM-768, ChaCha20, salted-BLAKE3 │
+│              commitments (Pedersen removed — Issue #184 F2)        │
 │    core/ — state machine, bilateral, token, merkle/SMT              │
 │    vault/ — DLV (Limbo Vaults), fulfillment                        │
 │    emissions.rs — DJTE emissions                                    │
@@ -48,7 +52,7 @@ Deep dive into DSM's system design, layer boundaries, data flow, and crate struc
 - **Layer 2 → Layer 3:** JNI boundary. All 87+ methods are declared as `external` in `UnifiedNativeApi.kt` and implemented in Rust via `extern "system"` FFI.
 - **Layer 3 → Layer 4:** Direct Rust function calls. The SDK imports core crate types and calls core functions. Core has no knowledge of JNI, Android, or I/O.
 
-The single authoritative data path is: **UI → MessagePort → Kotlin Bridge → JNI → SDK → Core**. No side channels are permitted.
+The single authoritative native data path is: **ABI shim → IngressRequest → shared Rust ingress → SDK/Core**. No semantic side channels are permitted past the shim.
 
 ---
 
@@ -69,7 +73,7 @@ The core crate contains all protocol logic with zero I/O dependencies:
 | `crypto/sphincs.rs` | SPHINCS+ post-quantum signatures |
 | `crypto/kyber.rs` | ML-KEM-768 key encapsulation |
 | `crypto/dbrw.rs` | DBRW anti-cloning |
-| `crypto/pedersen.rs` | Pedersen commitments |
+| `crypto/blake3.rs` (commitments) | Salted-BLAKE3 commitments via `dsm_domain_hasher`; replaces the removed Pedersen module (Issue #184 F2) — see `vault::limbo_vault::dlv_content_commitment` |
 | `merkle/sparse_merkle_tree.rs` | Per-device Sparse Merkle Tree |
 | `vault/dlv_manager.rs` | Deterministic Limbo Vault management |
 | `vault/limbo_vault.rs` | Vault lifecycle states |
@@ -80,16 +84,18 @@ The core crate contains all protocol logic with zero I/O dependencies:
 | `recovery/` | Capsule, tombstone, rollup recovery |
 | `common/domain_tags.rs` | BLAKE3 domain tag constants |
 
-### `dsm_sdk` — JNI Bridge + Platform Adapters
+### `dsm_sdk` — Platform ABI Shims + Shared Ingress
 
 Location: `dsm_client/deterministic_state_machine/dsm_sdk/src/`
 
-Wraps the core crate with platform-specific adapters:
+Wraps the core crate with thin ABI shims plus a shared semantic ingress:
 
 | Module | Purpose |
 |--------|---------|
+| `ingress.rs` | Canonical `IngressRequest` / `IngressResponse` dispatch |
 | `jni/mod.rs` | JNI module root, `JNI_OnLoad` |
-| `jni/unified_protobuf_bridge.rs` | Main protobuf-based RPC dispatcher |
+| `jni/unified_protobuf_bridge.rs` | Android JNI ABI shim |
+| `platform/ios/transport.rs` | iOS envelope FFI shim |
 | `jni/bootstrap.rs` | PBI bootstrap (device_id + genesis_hash + DBRW entropy) |
 | `jni/create_genesis.rs` | MPC genesis creation |
 | `bluetooth/bilateral_ble_handler.rs` | BLE bilateral session handler |

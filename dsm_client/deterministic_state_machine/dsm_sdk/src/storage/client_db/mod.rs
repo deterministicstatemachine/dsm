@@ -21,6 +21,7 @@ mod bilateral_sessions;
 pub mod bilateral_tip_sync;
 mod bitcoin_accounts;
 mod ble_chunk_buffer;
+pub mod cert_chain;
 mod contacts;
 mod dlv_receipts;
 mod export;
@@ -49,6 +50,7 @@ pub use bcr::*;
 pub use bilateral_sessions::*;
 pub use bitcoin_accounts::*;
 pub use ble_chunk_buffer::*;
+pub use cert_chain::*;
 pub use contacts::*;
 pub use dlv_receipts::*;
 pub use export::*;
@@ -130,6 +132,8 @@ pub fn init_database() -> Result<()> {
         ensure_contacts_device_tree_root(&conn)?;
         ensure_contacts_observed_remote_tip_columns(&conn)?;
         ensure_stitched_receipts_sig_b_nullable(&conn)?;
+        ensure_bilateral_sessions_created_at_step(&conn)?;
+        ensure_bilateral_sessions_stitched_receipt_bytes(&conn)?;
         migrate_legacy_withdrawal_states(&conn)?;
 
         {
@@ -172,7 +176,17 @@ pub fn is_database_initialized() -> bool {
 /// completely fresh named in-memory SQLite database. This prevents
 /// SQLITE_LOCKED_SHAREDCACHE errors that occur when a concurrent test
 /// still holds an Arc clone to the previous shared-cache connection.
+///
+/// Serializes with `init_database` via `TEST_DB_LIFECYCLE_LOCK` so that
+/// a concurrent `init_database` cannot observe a torn-down connection
+/// handle with a half-incremented generation counter, which would cause
+/// two tests to race on the same named in-memory shared-cache database
+/// and manifest as intermittent assertion failures (e.g. a persisted
+/// row disappearing between write and read).
 pub fn reset_database_for_tests() {
+    #[cfg(test)]
+    let _test_db_lifecycle_guard = TEST_DB_LIFECYCLE_LOCK.lock();
+
     // Drop all user tables before releasing the connection so the shared
     // in-memory DB (`mode=memory&cache=shared`) starts clean for the next
     // test.  Simply clearing the connection handle is not enough because
@@ -285,6 +299,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
             alias                       TEXT NOT NULL,
             genesis_hash                BLOB NOT NULL,
             public_key                  BLOB,
+            kyber_public_key            BLOB,
             chain_tip                   BLOB,
             added_at                    INTEGER NOT NULL,
             verified                    INTEGER NOT NULL,
@@ -377,22 +392,43 @@ fn create_schema(conn: &Connection) -> Result<()> {
             created_at  INTEGER NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS bcr_states(
-            device_id       BLOB NOT NULL,
-            state_number    INTEGER NOT NULL,
-            state_hash      BLOB NOT NULL,
-            prev_state_hash BLOB NOT NULL,
-            state_bytes     BLOB NOT NULL,
-            published       INTEGER NOT NULL,
-            created_at      INTEGER NOT NULL,
-            PRIMARY KEY (device_id, state_hash)
+        -- Per-relationship chain state archive (§2.2/§4.2).
+        -- Authoritative per-advance history keyed by chain_tip (h_{n+1}).
+        -- The legacy device-monolith `bcr_states` table is fully removed —
+        -- canonical history lives here, current head lives in
+        -- `bcr_device_heads` below.
+        CREATE TABLE IF NOT EXISTS bcr_chain_states(
+            device_id        BLOB NOT NULL,    -- 32B (DevID_A)
+            rel_key          BLOB NOT NULL,    -- 32B (k_{A↔B} per §2.2)
+            chain_tip        BLOB NOT NULL,    -- 32B (h_{n+1} = compute_chain_tip())
+            embedded_parent  BLOB NOT NULL,    -- 32B (h_n on this chain)
+            state_bytes      BLOB NOT NULL,    -- canonical RelationshipChainState bytes
+            published        INTEGER NOT NULL,
+            created_at       INTEGER NOT NULL,
+            PRIMARY KEY (device_id, chain_tip)
         );
 
-        CREATE INDEX IF NOT EXISTS idx_bcr_states_device_number
-            ON bcr_states(device_id, state_number);
+        CREATE INDEX IF NOT EXISTS idx_bcr_chain_by_rel
+            ON bcr_chain_states(device_id, rel_key, created_at);
+        CREATE INDEX IF NOT EXISTS idx_bcr_chain_by_time
+            ON bcr_chain_states(device_id, created_at);
 
-        CREATE INDEX IF NOT EXISTS idx_bcr_states_device_published
-            ON bcr_states(device_id, published);
+        -- Device head cache (§2.2). Non-authoritative latest snapshot of the
+        -- canonical DeviceState (SMT root + balances + tips). UPSERTed on
+        -- every successful advance and at genesis. Authoritative source
+        -- remains the bcr_chain_states log + the in-memory StateMachine.
+        CREATE TABLE IF NOT EXISTS bcr_device_heads(
+            device_id   BLOB PRIMARY KEY,      -- 32B
+            smt_root    BLOB NOT NULL,         -- 32B (r_A — stored for sanity check)
+            head_bytes  BLOB NOT NULL,         -- canonical DeviceState bytes
+            updated_at  INTEGER NOT NULL
+        );
+
+        -- Legacy device-monolith table removed (§4.3): no state counter, no
+        -- monolithic snapshot keyed by hash. Drop any pre-migration rows so
+        -- they cannot be read accidentally during the transition.
+        DROP TABLE IF EXISTS bcr_states;
+        DROP INDEX IF EXISTS idx_bcr_states_device_published;
 
         CREATE TABLE IF NOT EXISTS bilateral_sessions(
             commitment_hash           BLOB PRIMARY KEY,
@@ -404,7 +440,8 @@ fn create_schema(conn: &Connection) -> Result<()> {
             counterparty_signature    BLOB,
             created_at_step           INTEGER NOT NULL,
             sender_ble_address        TEXT,
-            updated_at                INTEGER NOT NULL
+            updated_at                INTEGER NOT NULL,
+            stitched_receipt_bytes    BLOB
         );
 
         -- §5.3 Atomic bilateral commit: persists the confirm envelope atomically
@@ -443,7 +480,12 @@ fn create_schema(conn: &Connection) -> Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_system_peer_events_created
             ON system_peer_events(peer_key, created_at ASC);
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_system_peer_events_source_state
+        -- §4.3: there is no counter. Two distinct events may legitimately
+        -- carry the same `source_state_number` (it is now derived material,
+        -- e.g. hash[0]). Drop any pre-migration UNIQUE index, then create a
+        -- non-unique companion index for lookup.
+        DROP INDEX IF EXISTS idx_system_peer_events_source_state;
+        CREATE INDEX IF NOT EXISTS idx_system_peer_events_source_state_nonunique
             ON system_peer_events(peer_key, source_state_number);
 
         CREATE TABLE IF NOT EXISTS transactions(
@@ -632,6 +674,33 @@ fn create_schema(conn: &Connection) -> Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_in_flight_withdrawal_legs_withdrawal
             ON in_flight_withdrawal_legs(withdrawal_id, state);
+
+        -- Per-relationship cert chain heads (whitepaper §11.1 ek-cert chain).
+        -- One row per (relationship_key, side). `side` is 0 for the local
+        -- device's chain head (used to sign outgoing certs and to advance
+        -- after acceptance) and 1 for the counterparty's chain head (used
+        -- to verify incoming certs).
+        --
+        -- chain_head_pubkey is the SPHINCS+ public key of the prior signer:
+        -- AK_pk at step 0, EK_pk_n for n > 0.
+        --
+        -- chain_head_sk_encrypted is the ChaCha20-Poly1305 ciphertext of
+        -- the corresponding SECRET key (for Local rows only; NULL for
+        -- Counterparty), encrypted under a key derived from K_DBRW so
+        -- extracted ciphertext cannot be used on a different device.
+        -- Used at receipt creation time to sign cert_{n+1}; wiped after
+        -- consumption when chain_head advances.
+        --
+        -- step_count tracks the current chain length for this relationship.
+        CREATE TABLE IF NOT EXISTS cert_chain_heads(
+            relationship_key        BLOB NOT NULL,
+            side                    INTEGER NOT NULL CHECK(side IN (0, 1)),
+            chain_head_pubkey       BLOB NOT NULL,
+            chain_head_sk_encrypted BLOB,
+            step_count              INTEGER NOT NULL DEFAULT 0,
+            updated_at              INTEGER NOT NULL,
+            PRIMARY KEY (relationship_key, side)
+        );
         "#,
         );
         match res {
@@ -678,6 +747,26 @@ fn ensure_bilateral_sessions_created_at_step(conn: &Connection) -> Result<()> {
 
     conn.execute(
         "ALTER TABLE bilateral_sessions ADD COLUMN created_at_step INTEGER NOT NULL DEFAULT 0;",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Add the `stitched_receipt_bytes` column to existing `bilateral_sessions`
+/// tables created before per-step EK signing landed. The column carries the
+/// sender-side cached signed receipt so post-crash recovery can reuse it
+/// verbatim — see `BilateralSessionRecord::stitched_receipt_bytes`.
+fn ensure_bilateral_sessions_stitched_receipt_bytes(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(bilateral_sessions)")?;
+    let cols = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for col in cols {
+        if col? == "stitched_receipt_bytes" {
+            return Ok(());
+        }
+    }
+
+    conn.execute(
+        "ALTER TABLE bilateral_sessions ADD COLUMN stitched_receipt_bytes BLOB;",
         [],
     )?;
     Ok(())
@@ -992,6 +1081,32 @@ pub(super) fn settings_set(conn: &Connection, key: &str, value: &str) -> Result<
         params![key, value],
     )?;
     Ok(())
+}
+
+// =========================== public settings accessors ===========================
+
+/// Get a setting value by key. Public wrapper for use from handlers.
+pub fn get_setting(key: &str) -> Result<Option<String>> {
+    let arc = get_connection()?;
+    let conn = arc.lock().map_err(|e| anyhow!("DB lock poisoned: {e}"))?;
+    settings_get(&conn, key)
+}
+
+/// Set a setting value by key. Public wrapper for use from handlers.
+pub fn set_setting(key: &str, value: &str) -> Result<()> {
+    let arc = get_connection()?;
+    let conn = arc.lock().map_err(|e| anyhow!("DB lock poisoned: {e}"))?;
+    settings_set(&conn, key, value)
+}
+
+/// Count total processed transactions (inbox items applied).
+pub fn get_transaction_count() -> Result<u64> {
+    let arc = get_connection()?;
+    let conn = arc.lock().map_err(|e| anyhow!("DB lock poisoned: {e}"))?;
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM transactions", [], |row| row.get(0))
+        .unwrap_or(0);
+    Ok(count as u64)
 }
 
 // =========================== tests ===========================
@@ -1400,6 +1515,7 @@ mod tests {
             alias: "peer".to_string(),
             genesis_hash: genesis_hash.to_vec(),
             public_key: vec![7u8; 32],
+            kyber_public_key: Vec::new(),
             current_chain_tip: None,
             added_at: 1,
             verified: true,
@@ -1881,7 +1997,13 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_advance_system_chain_tip_rejects_duplicate_source_state_number() {
+    fn test_advance_system_chain_tip_accepts_duplicate_source_state_number_per_section_4_3() {
+        // Per §4.3 there is no `state_number`. The prior test asserted that a
+        // duplicate `source_state_number` was rejected — that check was a
+        // residual counter check that bricked beta-tester faucet claims when
+        // `state.hash[0]` happened to fall (e.g. 2 ≤ 17). Acceptance now
+        // depends only on structural parent-tip continuity (verified below
+        // by the second advance succeeding from `first.child_tip`).
         unsafe {
             std::env::set_var("DSM_SDK_TEST_MODE", "1");
         }
@@ -1910,7 +2032,8 @@ mod tests {
         )
         .expect("advance first event");
 
-        let err = advance_system_chain_tip(
+        // Duplicate source_state_number must NOT block the advance under §4.3.
+        let second = advance_system_chain_tip(
             "era-source-dlv",
             SystemPeerType::Dlv,
             &first.child_tip,
@@ -1918,8 +2041,9 @@ mod tests {
             &[0x72u8; 32],
             9,
         )
-        .expect_err("duplicate source state number must fail");
-        assert!(err.to_string().contains("must advance monotonically"));
+        .expect("duplicate source_state_number must succeed (§4.3, no counter)");
+        assert_eq!(second.parent_tip, first.child_tip);
+        assert_eq!(second.source_state_number, 9);
     }
 
     #[test]
@@ -1939,6 +2063,7 @@ mod tests {
             alias: "peer".to_string(),
             genesis_hash: [0x33u8; 32].to_vec(),
             public_key: vec![0x44u8; 64],
+            kyber_public_key: Vec::new(),
             current_chain_tip: Some(original_tip.to_vec()),
             added_at: 7,
             verified: true,
@@ -1959,6 +2084,7 @@ mod tests {
             alias: "peer-fixed".to_string(),
             genesis_hash: [0x55u8; 32].to_vec(),
             public_key: vec![0x66u8; 64],
+            kyber_public_key: Vec::new(),
             current_chain_tip: None,
             added_at: 999,
             verified: true,

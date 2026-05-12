@@ -98,6 +98,7 @@ else
 fi
 
 FRONTEND_LOCKFILE="${PROJECT_ROOT}/dsm_client/frontend/package-lock.json"
+MCP_PACKAGE="${PROJECT_ROOT}/dsm-mcp/packages/server/package.json"
 MCP_LOCKFILE="${PROJECT_ROOT}/dsm-mcp/packages/server/package-lock.json"
 WORKSPACE_PACKAGE="${PROJECT_ROOT}/package.json"
 ANDROID_ROOT_BUILD="${PROJECT_ROOT}/dsm_client/android/build.gradle.kts"
@@ -345,6 +346,42 @@ generate_workspace_manifest_sbom() {
         ' "${WORKSPACE_PACKAGE}" > "${WORKSPACE_MANIFEST_SBOM_PATH}"
 }
 
+generate_placeholder_sbom() {
+    local output_path="$1"
+    local component_name="$2"
+    local component_version="$3"
+    local note="$4"
+
+    jq -n \
+        --arg timestamp "${GENERATED_AT}" \
+        --arg component_name "${component_name}" \
+        --arg component_version "${component_version}" \
+        --arg note "${note}" \
+        '
+        {
+            bomFormat: "CycloneDX",
+            specVersion: "1.5",
+            version: 1,
+            metadata: {
+                timestamp: $timestamp,
+                component: {
+                    type: "application",
+                    "bom-ref": ("placeholder:" + $component_name + "@" + $component_version),
+                    name: $component_name,
+                    version: $component_version,
+                    properties: [
+                        { name: "dsm.inventory.kind", value: "placeholder" },
+                        { name: "dsm.inventory.source", value: "optional-workspace-absent" },
+                        { name: "dsm.note", value: $note }
+                    ]
+                }
+            },
+            components: [],
+            dependencies: []
+        }
+        ' > "${output_path}"
+}
+
 declare -A GRADLE_VARS=()
 
 collect_gradle_vars() {
@@ -564,7 +601,7 @@ generate_validation_evidence() {
 }
 
 generate_metadata() {
-    local rust_workspace_members rust_components frontend_components mcp_components workspace_manifest_components android_components total_components
+    local rust_workspace_members rust_components frontend_components mcp_components workspace_manifest_components android_components total_components mcp_lockfile_rel
     rust_workspace_members="$(jq '.workspace_members | length' "${RUST_METADATA_PATH}")"
     rust_components="$(jq '.components | length' "${RUST_SBOM_PATH}")"
     frontend_components="$(jq '.components | length' "${FRONTEND_SBOM_PATH}")"
@@ -572,6 +609,11 @@ generate_metadata() {
     workspace_manifest_components="$(jq '.components | length' "${WORKSPACE_MANIFEST_SBOM_PATH}")"
     android_components="$(jq '.components | length' "${ANDROID_SBOM_PATH}")"
     total_components="$(jq '.components | length' "${CONSOLIDATED_SBOM_PATH}")"
+    if [[ -f "${MCP_LOCKFILE}" ]]; then
+        mcp_lockfile_rel="$(relative_path "${MCP_LOCKFILE}")"
+    else
+        mcp_lockfile_rel=""
+    fi
 
     jq -n \
         --arg run_id "${RUN_ID}" \
@@ -588,7 +630,7 @@ generate_metadata() {
         --arg validation_log "$(relative_path "${VALIDATION_LOG_PATH}")" \
         --arg rust_metadata "$(relative_path "${RUST_METADATA_PATH}")" \
         --arg frontend_lockfile "$(relative_path "${FRONTEND_LOCKFILE}")" \
-        --arg mcp_lockfile "$(relative_path "${MCP_LOCKFILE}")" \
+        --arg mcp_lockfile "${mcp_lockfile_rel}" \
         --arg workspace_manifest "$(relative_path "${WORKSPACE_PACKAGE}")" \
         --arg android_root_build "$(relative_path "${ANDROID_ROOT_BUILD}")" \
         --arg android_app_build "$(relative_path "${ANDROID_APP_BUILD}")" \
@@ -634,7 +676,7 @@ generate_metadata() {
             },
             limits: [
                 "Rust dependencies are resolved through cargo-cyclonedx for the current host target and current feature set.",
-                "Frontend and MCP server Node inventories are lockfile-resolved because package-lock.json is present.",
+                "Frontend and optional MCP server Node inventories are lockfile-resolved where package-lock.json is present.",
                 "The root JS workspace inventory is lockfile-resolved via package-lock.json.",
                 "Android dependencies are build-file derived in this run; they are not Gradle-resolved.",
                 "No vulnerability scan or license/compliance verdict is included by this generator."
@@ -649,7 +691,12 @@ main() {
 
     generate_rust_sboms
     generate_node_lockfile_sbom "${FRONTEND_LOCKFILE}" "${FRONTEND_SBOM_PATH}" "dsm-wallet" "$(jq -r '.version // "0.0.0"' "${PROJECT_ROOT}/dsm_client/frontend/package.json")"
-    generate_node_lockfile_sbom "${MCP_LOCKFILE}" "${MCP_SBOM_PATH}" "@dsm/mcp-server" "$(jq -r '.version // "0.0.0"' "${PROJECT_ROOT}/dsm-mcp/packages/server/package.json")"
+    if [[ -f "${MCP_LOCKFILE}" && -f "${MCP_PACKAGE}" ]]; then
+        generate_node_lockfile_sbom "${MCP_LOCKFILE}" "${MCP_SBOM_PATH}" "@dsm/mcp-server" "$(jq -r '.version // "0.0.0"' "${MCP_PACKAGE}")"
+    else
+        log "Skipping optional MCP inventory; dsm-mcp workspace is not present"
+        generate_placeholder_sbom "${MCP_SBOM_PATH}" "@dsm/mcp-server" "0.0.0" "Optional MCP workspace not present in this checkout"
+    fi
     generate_workspace_manifest_sbom
     generate_android_manifest_sbom
     generate_consolidated_sbom

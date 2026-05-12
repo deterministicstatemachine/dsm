@@ -18,7 +18,9 @@ use dsm::commitments::smart_commitment::{
 };
 use dsm::types::error::DsmError;
 use dsm::types::operations::{Operation, TransactionMode, VerificationType};
-use dsm::types::state_types::State;
+// State import removed: SmartCommitment API now takes &[u8; 32] + &[u8] instead
+// of &State, and the dead execute_smart_commitment helper that returned State
+// has been deleted.
 use dsm::types::token_types::Balance;
 
 /// Device identifier alias (kept for compatibility with previous code).
@@ -249,7 +251,7 @@ impl SmartCommitmentSDK {
     ) -> Result<Operation, DsmError> {
         Ok(Operation::Transfer {
             token_id: commitment.token_id.as_bytes().to_vec(),
-            amount: Balance::from_state(commitment.amount, [0u8; 32], 0),
+            amount: Balance::from_state(commitment.amount, [0u8; 32]),
             recipient: commitment.recipient.as_bytes().to_vec(),
             to: commitment.recipient.as_bytes().to_vec(),
             message: "Smart commitment transfer".to_string(),
@@ -397,32 +399,18 @@ impl SmartCommitmentSDK {
 
         SmartCommitment::new(
             &commitment_id,
-            &current_state,
+            &current_state.hash,
+            &current_state.entropy,
             DsmCommitmentCondition::default(),
             operation,
         )
     }
 
-    /// (Optional) Example of executing a commitment locally.
-    #[allow(dead_code)]
-    fn execute_smart_commitment(&self, commitment: &SmartCommitmentSdk) -> Result<State, DsmError> {
-        let operation = Operation::Transfer {
-            to_device_id: commitment.recipient.clone().into_bytes(),
-            amount: Balance::from_state(commitment.amount, [0u8; 32], 0),
-            recipient: commitment.recipient.clone().into_bytes(),
-            token_id: commitment.token_id.clone().into_bytes(),
-            to: commitment.recipient.clone().into_bytes(),
-            message: "Smart commitment transfer".to_string(),
-            mode: TransactionMode::Bilateral,
-            nonce: Vec::new(),
-            verification: VerificationType::Standard,
-            pre_commit: None,
-            signature: Vec::new(),
-        };
-
-        // Integrate with CoreSDK transition
-        self.core_sdk.execute_dsm_operation(operation)
-    }
+    // execute_smart_commitment(&self, ...) -> Result<State, DsmError> deleted:
+    // #[allow(dead_code)] helper with zero callers. It was an "example of
+    // executing a commitment locally" that returned a full State from
+    // execute_on_relationship. Callers that want the same flow should call
+    // core_sdk.execute_on_relationship directly with the desired operation.
 
     /// Create a commitment-creation Operation in the DSM system.
     pub fn create_commitment_operation(&self) -> Result<Operation, DsmError> {
@@ -517,7 +505,7 @@ mod tests {
     fn make_transfer_op() -> Operation {
         Operation::Transfer {
             to_device_id: b"device_A".to_vec(),
-            amount: Balance::from_state(1000, [0u8; 32], 0),
+            amount: Balance::from_state(1000, [0u8; 32]),
             token_id: b"ROOT".to_vec(),
             mode: TransactionMode::Bilateral,
             nonce: b"nonce1".to_vec(),
@@ -532,7 +520,7 @@ mod tests {
 
     fn make_mint_op() -> Operation {
         Operation::Mint {
-            amount: Balance::from_state(500, [0u8; 32], 0),
+            amount: Balance::from_state(500, [0u8; 32]),
             token_id: b"ROOT".to_vec(),
             authorized_by: b"authority".to_vec(),
             proof_of_authorization: b"auth_proof".to_vec(),
@@ -542,7 +530,7 @@ mod tests {
 
     fn make_burn_op() -> Operation {
         Operation::Burn {
-            amount: Balance::from_state(250, [0u8; 32], 0),
+            amount: Balance::from_state(250, [0u8; 32]),
             token_id: b"ROOT".to_vec(),
             proof_of_ownership: b"ownership_proof".to_vec(),
             message: "burn".to_string(),
@@ -553,7 +541,7 @@ mod tests {
         Operation::Receive {
             token_id: b"ROOT".to_vec(),
             from_device_id: b"sender_dev".to_vec(),
-            amount: Balance::from_state(100, [0u8; 32], 0),
+            amount: Balance::from_state(100, [0u8; 32]),
             recipient: b"recipient".to_vec(),
             message: "receive".to_string(),
             mode: TransactionMode::Bilateral,
@@ -830,7 +818,8 @@ mod tests {
         let mut sdk = SmartCommitmentSDK::new(core);
         assert!(sdk.executed_commitments.is_empty());
 
-        let state = State::default();
+        let origin_hash = [0u8; 32];
+        let origin_entropy = vec![0u8; 32];
         let op = Operation::Generic {
             operation_type: b"test".to_vec(),
             data: vec![],
@@ -839,7 +828,8 @@ mod tests {
         };
         let sc = dsm::commitments::smart_commitment::SmartCommitment::new(
             "test_commit",
-            &state,
+            &origin_hash,
+            &origin_entropy,
             DsmCommitmentCondition::default(),
             op,
         )
@@ -855,7 +845,7 @@ mod tests {
         let op1 = make_transfer_op();
         let mut op2 = make_transfer_op();
         if let Operation::Transfer { ref mut amount, .. } = op2 {
-            *amount = Balance::from_state(9999, [0u8; 32], 0);
+            *amount = Balance::from_state(9999, [0u8; 32]);
         }
         let fp1 = SmartCommitmentSDK::op_fingerprint(&op1);
         let fp2 = SmartCommitmentSDK::op_fingerprint(&op2);
@@ -879,7 +869,7 @@ mod tests {
         let op1 = make_mint_op();
         let mut op2 = make_mint_op();
         if let Operation::Mint { ref mut amount, .. } = op2 {
-            *amount = Balance::from_state(9999, [0u8; 32], 0);
+            *amount = Balance::from_state(9999, [0u8; 32]);
         }
         let fp1 = SmartCommitmentSDK::op_fingerprint(&op1);
         let fp2 = SmartCommitmentSDK::op_fingerprint(&op2);

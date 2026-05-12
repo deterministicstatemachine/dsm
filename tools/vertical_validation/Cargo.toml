@@ -18,7 +18,7 @@ tokio = { version = "1.51", features = ["full"] }
 reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls"] }
 
 # CLI argument parsing
-clap = { version = "4.4", features = ["derive"] }
+clap = { version = "4.6", features = ["derive"] }
 
 # Protobuf encoding for ByteCommitV3
 prost = "0.13"
@@ -40,7 +40,7 @@ regex = "1.10"
 instant = "0.1"
 
 # Direct access to core DSM types, state machine, and crypto primitives
-dsm = { version = "0.1.0-beta.1", path = "../../dsm_client/deterministic_state_machine/dsm" }
+dsm = { version = "0.1.0-beta.3", path = "../../dsm_client/deterministic_state_machine/dsm" }
 
 # Deterministic seeded RNG for reproducible property tests
 rand = "0.8"

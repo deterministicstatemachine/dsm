@@ -270,16 +270,6 @@ export default function WithdrawView({
             ))}
           </div>
 
-          {reviewResult.blockedVaults.length > 0 && (
-            <div style={{ marginTop: 10, padding: '8px 10px', border: '1px dashed var(--border)', borderRadius: 6, fontSize: 10, background: 'var(--bg-secondary)', color: 'var(--text-dark)' }}>
-              <div style={{ fontWeight: 600, marginBottom: 4 }}>Excluded Vaults</div>
-              {reviewResult.blockedVaults.map((vault) => (
-                <div key={`${vault.vaultId}-${vault.reason}`}>
-                  {vault.vaultId.slice(0, 10)}…: {vault.reason}
-                </div>
-              ))}
-            </div>
-          )}
 
           {reviewResult.planClass === 'insufficient_dbtc' && (
             <div style={{ marginTop: 10, padding: '8px 10px', border: '1px solid var(--warning-border, #e0a800)', borderRadius: 6, fontSize: 11, background: 'var(--warning-bg, #fff3cd)', color: 'var(--warning-text, #856404)' }}>

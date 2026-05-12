@@ -9,7 +9,7 @@ import { encodeBase32Crockford } from '../../utils/textId';
 jest.mock('../../dsm/WebViewBridge', () => ({
   getPendingBilateralListStrictBridge: jest.fn(),
   addDsmEventListener: jest.fn(() => () => {}), // No-op cleanup
-  appRouterInvokeBin: jest.fn(),
+  routerInvokeBin: jest.fn(),
 }));
 
 import { getPendingBilateralListStrictBridge } from '../../dsm/WebViewBridge';

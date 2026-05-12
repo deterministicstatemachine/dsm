@@ -198,7 +198,7 @@ The SDK accepts an Envelope v3 `UniversalTx` carrying an `ArgPack { codec=PROTO,
 
 ### BLE Transport Chunking
 
-BLE has MTU limitations (typically 20–512 bytes per packet). The `ble_frame_coordinator.rs` handles:
+BLE has MTU limitations (typically 20-512 bytes per packet). The `ble_frame_coordinator.rs` handles:
 
 1. **Segmentation:** Large protobuf messages are split into MTU-sized frames
 2. **Reassembly:** Frames are collected and reassembled on the receiving end

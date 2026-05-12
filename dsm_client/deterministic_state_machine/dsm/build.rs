@@ -6,10 +6,28 @@
 
 use std::env;
 use std::path::PathBuf;
+use std::process::Command;
+
+fn rustc_version() -> Result<String, Box<dyn std::error::Error>> {
+    let rustc = env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+    let output = Command::new(rustc).arg("--version").output()?;
+    if !output.status.success() {
+        return Err("failed to query rustc version".into());
+    }
+
+    Ok(String::from_utf8(output.stdout)?.trim().to_string())
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
     let vendored_include = protoc_bin_vendored::include_path()?;
+    let target = env::var("TARGET")?;
+    let rustc_version = rustc_version()?;
+
+    println!("cargo:rustc-env=DSM_BUILD_TARGET={target}");
+    println!("cargo:rustc-env=DSM_RUSTC_VERSION={rustc_version}");
+    println!("cargo:rerun-if-env-changed=RUSTC");
+    println!("cargo:rerun-if-env-changed=TARGET");
 
     // Canonical schema location is the repository root at `proto/`.
     // Allow override via DSM_PROTO_ROOT, but default to the repo-root canonical path.
@@ -53,11 +71,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Also rerun if proto under workspace root changes
     println!("cargo:rerun-if-changed={}", proto_file.display());
-    println!("cargo:warning=Proto file: {}", proto_file.display());
-    println!("cargo:warning=Proto root: {}", proto_root.display());
-    println!(
-        "cargo:warning=Vendored protoc include: {}",
-        vendored_include.display()
-    );
     Ok(())
 }

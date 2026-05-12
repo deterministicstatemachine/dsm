@@ -3,10 +3,9 @@
 import React, { useCallback, useEffect, useRef, useState, memo } from 'react';
 import { dsmClient } from '../../services/dsmClient';
 import { exportStateBackupFile, importStateBackupFile } from '../../services/settings/backupService';
-import { BETA_FEEDBACK_TEMPLATE, buildGitHubIssueUrl } from '../../utils/githubIssue';
-
 import {
   getNfcBackupStatus,
+  setAutoWriteEnabled,
   type NfcBackupStatus,
 } from '../../services/recovery/nfcRecoveryService';
 import { getNfcBackupUiModel } from '../../services/recovery/nfcBackupUi';
@@ -38,6 +37,7 @@ const emptyNfcStatus: NfcBackupStatus = {
   pendingCapsule: false,
   capsuleCount: 0,
   lastCapsuleIndex: 0,
+  autoWriteEnabled: false,
 };
 
 interface SettingsMainScreenProps {
@@ -56,6 +56,8 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
 
   // --- Compact NFC status (full management is on NfcRecoveryScreen) ---
   const [nfcStatus, setNfcStatus] = useState<NfcBackupStatus>(emptyNfcStatus);
+
+
 
   useEffect(() => {
     void (async () => {
@@ -210,27 +212,6 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
     if (typeof window === 'undefined') return;
     window.dispatchEvent(new CustomEvent(OPEN_DIAGNOSTICS_EVENT, { detail: { autoGather: true } }));
     setStatus('Diagnostics workspace opened');
-  }, []);
-
-  const openBetaFeedback = useCallback(async () => {
-    try {
-      const url = buildGitHubIssueUrl({
-        template: BETA_FEEDBACK_TEMPLATE,
-        title: 'Beta feedback',
-      });
-      const popup = window.open(url, '_blank', 'noopener');
-      if (!popup && navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(url);
-        setStatus('Feedback link copied to clipboard');
-        return;
-      }
-      if (!popup) {
-        throw new Error('Popup blocked');
-      }
-      setStatus('Beta feedback form opened');
-    } catch {
-      setStatus('Unable to open beta feedback form');
-    }
   }, []);
 
   return (
@@ -439,53 +420,20 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
             INSPECT OR RECOVER
           </button>
         </div>
-      </section>
-
-      <section
-        aria-labelledby="beta-support-title"
-        className="settings-shell__panel"
-      >
-        <div
-          id="beta-support-title"
-          style={{
-            fontSize: '10px',
-            fontWeight: 'bold',
-            marginBottom: '8px',
-            color: 'var(--text-dark)',
-            letterSpacing: '1px',
-          }}
-        >
-          BETA SUPPORT
-        </div>
-        <div
-          style={{
-            fontSize: '8px',
-            color: 'var(--text-dark)',
-            marginBottom: '12px',
-            lineHeight: '1.4',
-            opacity: 0.8,
-          }}
-        >
-          OPEN THE DIAGNOSTICS WORKSPACE, EXPORT A REPORT, OR SEND GENERAL BETA FEEDBACK.
-        </div>
-        <div className="settings-shell__button-row">
+        {nfcStatus.enabled && nfcStatus.configured && (
           <button
-            type="button"
             className="settings-shell__button"
-            style={{ fontSize: '9px' }}
-            onClick={openDiagnosticsWorkspace}
+            onClick={() => {
+              const next = !nfcStatus.autoWriteEnabled;
+              void setAutoWriteEnabled(next).then(() =>
+                setNfcStatus((prev) => ({ ...prev, autoWriteEnabled: next })),
+              );
+            }}
+            style={{ fontSize: '9px', width: '100%', marginTop: 6 }}
           >
-            REPORT ISSUE
+            AUTO-BACKUP TO RING: {nfcStatus.autoWriteEnabled ? 'ON' : 'OFF'}
           </button>
-          <button
-            type="button"
-            className="settings-shell__button"
-            style={{ fontSize: '9px' }}
-            onClick={openBetaFeedback}
-          >
-            SEND FEEDBACK
-          </button>
-        </div>
+        )}
       </section>
 
       {/* Developer Options (only when unlocked) */}
@@ -542,9 +490,18 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
               type="button"
               className="settings-shell__button"
               style={{ fontSize: '9px' }}
-              onClick={() => onNavigate?.('dev_detfi_launch')}
+              onClick={() => onNavigate?.('dev_sofi_launch')}
             >
-              DETFI LAUNCH
+              SOFI LAUNCH
+            </button>
+
+            <button
+              type="button"
+              className="settings-shell__button"
+              style={{ fontSize: '9px' }}
+              onClick={openDiagnosticsWorkspace}
+            >
+              REPORT ISSUE / FEEDBACK
             </button>
 
           </div>

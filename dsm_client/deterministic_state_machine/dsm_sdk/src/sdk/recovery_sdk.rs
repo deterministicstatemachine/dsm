@@ -7,17 +7,25 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 use dsm::recovery::{
-    create_recovery_capsule, create_recovery_capsule_with_key, decrypt_recovery_capsule,
-    create_tombstone_receipt, create_succession_receipt, verify_tombstone_receipt,
-    verify_succession_receipt, update_rollup, verify_rollup, init_recovery, EncryptedCapsule,
-    RecoveryCapsule, ReceiptRollup, TombstoneReceipt, SuccessionReceipt,
+    create_recovery_capsule, decrypt_recovery_capsule, create_tombstone_receipt,
+    create_succession_receipt, verify_tombstone_receipt, verify_succession_receipt, update_rollup,
+    verify_rollup, init_recovery, EncryptedCapsule, RecoveryCapsule, ReceiptRollup,
+    TombstoneReceipt, SuccessionReceipt,
 };
-use dsm::recovery::capsule::{decrypt_capsule_with_key, derive_recovery_key};
+use dsm::recovery::capsule::{
+    decrypt_capsule_with_key, derive_recovery_key, derive_recovery_authority_seed,
+};
 use dsm::types::error::DsmError;
 
 /// In-memory cached recovery key (derived from mnemonic via Argon2id + HKDF-BLAKE3).
-/// Never persisted to disk — cleared on disable or app restart.
+/// Also persisted to SQLite encrypted by a device-bound key so it survives app restarts.
 static RECOVERY_KEY: Mutex<Option<[u8; 32]>> = Mutex::new(None);
+
+/// In-memory cached recovery authority SPHINCS+ keypair (public, secret).
+/// Derived from the mnemonic via a separate HKDF domain (`DSM/recovery-authority`).
+/// Used to sign tombstone and succession receipts during device recovery.
+/// Never persisted to disk — cleared alongside the encryption key.
+static RECOVERY_AUTHORITY_KEYPAIR: Mutex<Option<(Vec<u8>, Vec<u8>)>> = Mutex::new(None);
 
 /// SDK for DSM recovery operations
 pub struct RecoverySDK;
@@ -27,6 +35,10 @@ struct RecoveryCapsuleState {
     counterparty_tips: HashMap<String, (u64, Vec<u8>)>,
     rollup: ReceiptRollup,
     next_index: u64,
+    /// Device ID of this device (for capsule source binding).
+    source_device_id: Vec<u8>,
+    /// Genesis hash of this device (for capsule genesis binding).
+    genesis_hash: Vec<u8>,
 }
 
 impl RecoverySDK {
@@ -258,31 +270,179 @@ impl RecoverySDK {
     }
 
     /// Derive recovery key from mnemonic and cache it in memory.
+    ///
     /// Key derivation: S_mn = Argon2id("DSM/recovery-ring\0", mnemonic)
     ///                 K_R  = BLAKE3 derive-key("DSM/recovery-aead\0", S_mn)
+    ///                 K_A  = BLAKE3 derive-key("DSM/recovery-authority\0", S_mn)
+    ///                 (pk, sk) = SPHINCS+.generate_from_seed(K_A)
+    ///
+    /// Both the encryption key and the authority keypair are cached in memory.
     pub fn derive_and_cache_key(mnemonic: &str) -> Result<(), DsmError> {
         let key = derive_recovery_key(mnemonic)?;
-        let mut guard = RECOVERY_KEY
-            .lock()
-            .map_err(|_| DsmError::InvalidState("Recovery key mutex poisoned".into()))?;
-        *guard = Some(key);
+        {
+            let mut guard = RECOVERY_KEY
+                .lock()
+                .map_err(|_| DsmError::InvalidState("Recovery key mutex poisoned".into()))?;
+            *guard = Some(key);
+        }
+
+        // Persist the key encrypted by a device-bound wrapping key so it
+        // survives app restarts without requiring the mnemonic again.
+        if let Err(e) = Self::persist_recovery_key(&key) {
+            log::warn!("[RECOVERY_SDK] Failed to persist recovery key (non-fatal): {e}");
+        }
+
+        // Derive and cache the recovery authority SPHINCS+ keypair.
+        let authority_seed = derive_recovery_authority_seed(mnemonic)?;
+        let keypair = dsm::crypto::sphincs::generate_keypair_from_seed(
+            dsm::crypto::sphincs::SphincsVariant::SPX256f,
+            &authority_seed,
+        )
+        .map_err(|e| DsmError::InvalidState(format!("Recovery authority keygen failed: {e}")))?;
+        {
+            let mut guard = RECOVERY_AUTHORITY_KEYPAIR.lock().map_err(|_| {
+                DsmError::InvalidState("Recovery authority keypair mutex poisoned".into())
+            })?;
+            *guard = Some((keypair.public_key.clone(), keypair.secret_key.clone()));
+        }
+        log::info!("[RECOVERY_SDK] Cached recovery encryption key and authority keypair");
         Ok(())
     }
 
-    /// Clear the cached recovery key from memory (for disable or app shutdown).
+    /// Clear the cached recovery key and authority keypair from memory and storage.
     pub fn clear_cached_key() {
         if let Ok(mut guard) = RECOVERY_KEY.lock() {
             if let Some(ref mut k) = *guard {
-                // Zeroize before dropping
                 k.iter_mut().for_each(|b| *b = 0);
             }
             *guard = None;
         }
+        if let Ok(mut guard) = RECOVERY_AUTHORITY_KEYPAIR.lock() {
+            if let Some((ref mut pk, ref mut sk)) = *guard {
+                pk.iter_mut().for_each(|b| *b = 0);
+                sk.iter_mut().for_each(|b| *b = 0);
+            }
+            *guard = None;
+        }
+        // Also wipe the persisted encrypted blob.
+        let _ = crate::storage::client_db::recovery::delete_encrypted_recovery_key();
     }
 
     /// Check if a recovery key is currently cached in memory.
     pub fn has_cached_key() -> bool {
         RECOVERY_KEY.lock().map(|g| g.is_some()).unwrap_or(false)
+    }
+
+    /// Get the cached recovery authority keypair (public_key, secret_key).
+    /// Returns `None` if no mnemonic has been cached yet.
+    pub fn get_cached_authority_keypair() -> Option<(Vec<u8>, Vec<u8>)> {
+        RECOVERY_AUTHORITY_KEYPAIR
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+    }
+
+    /// Derive a device-bound wrapping key from device_id + genesis_hash.
+    /// Used to encrypt the recovery key before persisting to SQLite.
+    fn device_wrapping_key() -> Result<[u8; 32], DsmError> {
+        let device_id = crate::sdk::app_state::AppState::get_device_id()
+            .ok_or_else(|| DsmError::InvalidState("Device ID not available".into()))?;
+        let genesis_hash = crate::sdk::app_state::AppState::get_genesis_hash().unwrap_or_default();
+        let mut hasher = dsm::crypto::blake3::Hasher::new_derive_key("DSM/recovery-persist\0");
+        hasher.update(&device_id);
+        hasher.update(&genesis_hash);
+        Ok(*hasher.finalize().as_bytes())
+    }
+
+    /// Encrypt the recovery key with a device-bound wrapping key and store in SQLite.
+    /// Format: nonce (24 bytes) || ciphertext+tag.
+    fn persist_recovery_key(key: &[u8; 32]) -> Result<(), DsmError> {
+        use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
+        use chacha20poly1305::aead::Aead;
+
+        let wrapping_key = Self::device_wrapping_key()?;
+        let cipher = XChaCha20Poly1305::new_from_slice(&wrapping_key)
+            .map_err(|e| DsmError::InvalidState(format!("wrapping cipher init: {e}")))?;
+
+        // Nonce derived from wrapping key AND plaintext — safe even if the
+        // mnemonic (and therefore key) changes between persist calls.
+        let nonce_hash = {
+            let mut h = dsm::crypto::blake3::Hasher::new_derive_key("DSM/recovery-persist-nonce\0");
+            h.update(&wrapping_key);
+            h.update(key);
+            h.finalize()
+        };
+        let nonce = XNonce::from_slice(&nonce_hash.as_bytes()[..24]);
+
+        let ciphertext = cipher
+            .encrypt(nonce, key.as_ref())
+            .map_err(|e| DsmError::InvalidState(format!("recovery key encryption: {e}")))?;
+
+        // Store nonce || ciphertext so decrypt doesn't need to re-derive from plaintext.
+        let mut blob = Vec::with_capacity(24 + ciphertext.len());
+        blob.extend_from_slice(nonce.as_slice());
+        blob.extend_from_slice(&ciphertext);
+
+        crate::storage::client_db::recovery::store_encrypted_recovery_key(&blob)
+            .map_err(|e| DsmError::InvalidState(format!("persist encrypted key: {e}")))?;
+
+        log::info!(
+            "[RECOVERY_SDK] Recovery key persisted (encrypted, {} bytes)",
+            blob.len()
+        );
+        Ok(())
+    }
+
+    /// Load the persisted encrypted recovery key, decrypt it, and cache in memory.
+    /// Returns Ok(true) if loaded, Ok(false) if no persisted key exists.
+    fn load_persisted_recovery_key() -> Result<bool, DsmError> {
+        use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
+        use chacha20poly1305::aead::Aead;
+
+        let blob = match crate::storage::client_db::recovery::load_encrypted_recovery_key() {
+            Ok(Some(b)) => b,
+            Ok(None) => return Ok(false),
+            Err(e) => {
+                return Err(DsmError::InvalidState(format!(
+                    "load encrypted recovery key: {e}"
+                )))
+            }
+        };
+
+        if blob.len() < 24 {
+            return Err(DsmError::InvalidState(format!(
+                "persisted key blob too short: {} bytes",
+                blob.len()
+            )));
+        }
+
+        let nonce = XNonce::from_slice(&blob[..24]);
+        let ciphertext = &blob[24..];
+
+        let wrapping_key = Self::device_wrapping_key()?;
+        let cipher = XChaCha20Poly1305::new_from_slice(&wrapping_key)
+            .map_err(|e| DsmError::InvalidState(format!("wrapping cipher init: {e}")))?;
+
+        let plaintext = cipher
+            .decrypt(nonce, ciphertext)
+            .map_err(|e| DsmError::InvalidState(format!("recovery key decryption: {e}")))?;
+
+        if plaintext.len() != 32 {
+            return Err(DsmError::InvalidState(format!(
+                "decrypted key wrong length: {} (expected 32)",
+                plaintext.len()
+            )));
+        }
+
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&plaintext);
+        {
+            let mut guard = RECOVERY_KEY
+                .lock()
+                .map_err(|_| DsmError::InvalidState("Recovery key mutex poisoned".into()))?;
+            *guard = Some(key);
+        }
+        Ok(true)
     }
 
     /// Decrypt an encrypted capsule using the in-memory cached recovery key.
@@ -302,22 +462,35 @@ impl RecoverySDK {
         decrypt_capsule_with_key(&encrypted, &key)
     }
 
-    /// Silently refresh the pending NFC capsule if backup is enabled and a key is cached.
+    /// Refresh the pending NFC capsule if backup is enabled and a key is available.
     ///
     /// Called by the transport layer (Kotlin) after every state-mutating operation.
-    /// Rust decides whether to actually create a capsule. If backup is not enabled
-    /// or no key is cached, this is a no-op. If capsule creation fails, it logs
-    /// and moves on — it's not critical.
-    ///
-    /// The capsule overwrites any previous pending capsule. It sits there until
-    /// the NFC ring comes into range, at which point Kotlin writes it, vibrates,
-    /// and clears pending.
+    /// If the in-memory key was lost (app restart), this auto-loads the persisted
+    /// encrypted key from SQLite before creating the capsule.
     pub fn maybe_refresh_nfc_capsule() {
         if !Self::is_nfc_backup_enabled() {
             return;
         }
+
+        // Auto-load persisted key if the in-memory cache was lost (app restart).
         if !Self::has_cached_key() {
-            return;
+            log::info!("[NFC_BACKUP] No cached key — attempting to load persisted key");
+            match Self::load_persisted_recovery_key() {
+                Ok(true) => {
+                    log::info!("[NFC_BACKUP] Persisted key loaded successfully");
+                }
+                Ok(false) => {
+                    log::warn!(
+                        "[NFC_BACKUP] No persisted key found — capsule refresh skipped. \
+                         User must re-enter mnemonic via Settings."
+                    );
+                    return;
+                }
+                Err(e) => {
+                    log::warn!("[NFC_BACKUP] Failed to load persisted key: {e}");
+                    return;
+                }
+            }
         }
 
         match Self::create_capsule_from_current_state_with_cached_key() {
@@ -375,14 +548,18 @@ impl RecoverySDK {
             counterparty_tips,
             rollup,
             next_index,
+            source_device_id,
+            genesis_hash,
         } = Self::build_capsule_state()?;
         let tip_count = counterparty_tips.len();
-        let encrypted = create_recovery_capsule_with_key(
+        let encrypted = dsm::recovery::create_recovery_capsule_with_binding(
             &smt_root,
             counterparty_tips,
             &rollup,
             key,
             next_index,
+            &source_device_id,
+            &genesis_hash,
         )?;
         let capsule_bytes = encrypted.to_bytes();
         Self::persist_capsule(next_index, &smt_root, &capsule_bytes, tip_count)?;
@@ -423,20 +600,41 @@ impl RecoverySDK {
         }
 
         // If there's already a pending (unconsumed) capsule, reuse its index —
-        // we only care about the newest state. Index only advances after the ring
-        // actually consumes a capsule and clears pending.
+        // we only care about the newest state. The pending capsule is continuously
+        // overwritten with the latest SMT root until the ring consumes it.
+        //
+        // When there's NO pending capsule (ring consumed it via clearPending),
+        // always advance to max_index + 1. We cannot compare SMT roots here
+        // because the consumed capsule was already overwritten with the current
+        // state before being written to the ring — the roots would match and
+        // the index would never advance.
         let next_index = match crate::storage::client_db::recovery::get_pending_recovery_capsule() {
             Ok(Some((idx, _))) => idx,
-            _ => crate::storage::client_db::recovery::get_max_capsule_index()
-                .map_err(|e| DsmError::InvalidState(format!("Failed to read capsule index: {e}")))?
-                .saturating_add(1),
+            _ => {
+                let max_idx = crate::storage::client_db::recovery::get_max_capsule_index()
+                    .map_err(|e| {
+                        DsmError::InvalidState(format!("Failed to read capsule index: {e}"))
+                    })?;
+                if max_idx == 0 {
+                    // No capsules exist yet — start at 1.
+                    1
+                } else {
+                    // Ring consumed the previous capsule — always advance.
+                    max_idx.saturating_add(1)
+                }
+            }
         };
+
+        let genesis_hash_bytes =
+            crate::sdk::app_state::AppState::get_genesis_hash().unwrap_or_default();
 
         Ok(RecoveryCapsuleState {
             smt_root,
             counterparty_tips,
             rollup,
             next_index,
+            source_device_id: device_id_bytes,
+            genesis_hash: genesis_hash_bytes,
         })
     }
 

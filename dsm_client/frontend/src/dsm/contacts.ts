@@ -3,7 +3,7 @@ import * as pb from '../proto/dsm_app_pb';
 import {
   getContactsStrictBridge,
   normalizeToBytes,
-  appRouterInvokeBin,
+  routerInvokeBin,
   requestBlePermissions as bridgeRequestBlePermissions,
 } from './WebViewBridge';
 import { ContactsList, AddContactArgs, AddContactResult, BilateralRelationshipDTO, ChainTipDTO } from './types';
@@ -113,7 +113,7 @@ export async function addContact(args: AddContactArgs): Promise<AddContactResult
       body: new Uint8Array(req.toBinary()) as any,
     });
 
-    const responseBytes = await appRouterInvokeBin(
+    const responseBytes = await routerInvokeBin(
       'contacts.addManual',
       argPack.toBinary()
     );

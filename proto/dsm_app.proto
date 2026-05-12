@@ -178,7 +178,34 @@ message FulfillmentMechanism {
     And and = 7;
     Or or = 8;
     BitcoinHTLC bitcoin_htlc = 9;
+    AmmConstantProduct amm_constant_product = 10;
   }
+}
+
+// AMM (constant-product) liquidity vault.  The vault holds two token
+// reserves and unlocks via a routed swap: a trader puts `input_amount`
+// of `token_in` in, the vault releases `expected_output_amount` of
+// `token_out` per the constant-product invariant
+//   k = reserve_in * reserve_out   (post-fee adjusted at swap time)
+//
+// Reserves are vault-state, not advertisement state.  When a routed
+// unlock is accepted, both reserves advance atomically:
+//   reserve_in  += input_after_fee
+//   reserve_out -= output
+// and the vault republishes its `RoutingVaultAdvertisementV1` with
+// `updated_state_number++`.  A stale advertisement causes a mis-quoted
+// route, which the chunk-7 re-simulation gate catches at unlock time
+// (SoFi spec §3, §8).
+//
+// `token_a` / `token_b` are stored in canonical lex-sorted order so
+// the vault has a single canonical pair identity regardless of trade
+// direction; `reserve_a` / `reserve_b` follow the same ordering.
+message AmmConstantProduct {
+  bytes  token_a            = 1 [(dsm_max_len)=64];   // lex-lower token id
+  bytes  token_b            = 2 [(dsm_max_len)=64];   // lex-higher token id
+  bytes  reserve_a_u128     = 3 [(dsm_fixed_len)=16]; // big-endian u128
+  bytes  reserve_b_u128     = 4 [(dsm_fixed_len)=16]; // big-endian u128
+  uint32 fee_bps            = 5;                      // basis points (e.g. 30 = 0.30 %)
 }
 
 message BitcoinHTLC {
@@ -699,7 +726,7 @@ message Invalidated { uint64 invalidated_state_number = 1; string reason = 2; by
 
 // Limbo vault canonical proto for storage/transport
 message LimboVaultProto {
-  string id = 1;
+  bytes id = 1 [(dsm_fixed_len)=32];
   uint64 created_at_state = 2;
   bytes creator_public_key = 3;
   FulfillmentMechanism fulfillment_condition = 4;
@@ -717,7 +744,7 @@ message LimboVaultProto {
 
 // Vault post wrapper for storage nodes
 message VaultPostProto {
-  string vault_id = 1;
+  bytes vault_id = 1 [(dsm_fixed_len)=32];
   string lock_description = 2;
   string creator_id = 3;
   bytes commitment_hash = 4;
@@ -787,13 +814,53 @@ message TokenCreateResponse {
 }
 
 // ------------------------- DLV Lifecycle Objects --------------------------
-message DlvCreateV3 {
-  // domain: "DSM/dlv/create\0"
-  bytes device_id      = 1 [(dsm_fixed_len)=32];
-  bytes policy_digest  = 2 [(dsm_fixed_len)=32];
-  bytes precommit      = 3 [(dsm_fixed_len)=32];
-  bytes vault_id       = 4 [(dsm_fixed_len)=32];
-  bytes parent_digest  = 5 [(dsm_fixed_len)=32]; // optional, empty allowed
+// Device-neutral, content-addressed vault template.
+// spec_id (implicit) := BLAKE3("DSM/dlv-spec\0" ||
+//     policy_digest || content_digest || fulfillment_digest || recipient_digest)
+// where recipient_digest = BLAKE3("DSM/dlv-recipient\0" || intended_recipient) if set
+// else 32 zero bytes.
+
+// Anchor enforcement posture for an AMM vault.
+//
+// REQUIRED: every routed unlock against this vault MUST carry
+//   `(vault_state_anchor_seq, vault_state_reserves_digest,
+//   vault_state_anchor_digest)` on its `RouteCommitHopV1`.  The
+//   chunks #7 gate verifies these against the vault's local
+//   `DLVManager` state (NOT against storage).  Missing fields or
+//   mismatch ⇒ typed reject.
+//
+// OPTIONAL: anchor fields are accepted if present but not required.
+//   When absent, gate falls through to the existing reserves-value
+//   check.  The unlock response surfaces a flag indicating identity-
+//   binding was not enforced.
+//
+// UNSPECIFIED: grandfathered behaviour for vaults predating Tier 2
+//   Foundation.  Treated as OPTIONAL by the gate.  New vaults SHOULD
+//   set REQUIRED.
+enum AnchorEnforcement {
+  ANCHOR_ENFORCEMENT_UNSPECIFIED = 0;
+  ANCHOR_ENFORCEMENT_OPTIONAL    = 1;
+  ANCHOR_ENFORCEMENT_REQUIRED    = 2;
+}
+
+message DlvSpecV1 {
+  bytes policy_digest       = 1 [(dsm_fixed_len)=32];  // CPTA anchor
+  bytes content_digest      = 2 [(dsm_fixed_len)=32];  // H("DSM/dlv-content", content)
+  bytes fulfillment_digest  = 3 [(dsm_fixed_len)=32];  // H("DSM/dlv-fulfillment", fulfillment_bytes)
+  bytes intended_recipient  = 4 [(dsm_max_len)=1568];  // Kyber pk, optional (empty = self-encrypted)
+  bytes fulfillment_bytes   = 5 [(dsm_max_len)=65535]; // canonical FulfillmentMechanism proto
+  bytes content             = 6 [(dsm_max_len)=65535]; // plaintext for local; sender-encrypted for posted
+  AnchorEnforcement anchor_enforcement = 7;
+}
+
+// Instance creation.  Carries everything Operation::DlvCreate needs.
+// The creator's chain_tip enters via execute_on_relationship, not this proto.
+message DlvInstantiateV1 {
+  DlvSpecV1 spec            = 1;
+  bytes creator_public_key  = 2 [(dsm_max_len)=65535]; // SPHINCS+ pk
+  bytes token_id            = 3 [(dsm_max_len)=64];    // optional; empty = content-only vault
+  bytes locked_amount_u128  = 4 [(dsm_fixed_len)=16];  // big-endian u128; all-zeros if no lock
+  bytes signature           = 5 [(dsm_max_len)=65535]; // SPHINCS+ over canonical Operation::DlvCreate bytes
 }
 
 message DlvOpenV3 {
@@ -801,6 +868,288 @@ message DlvOpenV3 {
   bytes device_id       = 1 [(dsm_fixed_len)=32];
   bytes vault_id        = 2 [(dsm_fixed_len)=32];
   bytes reveal_material = 3 [(dsm_max_len)=65535];
+}
+
+// ===================== ROUTE TRADE-FLOW REQUESTS (Track C.3) =====================
+// Frontend-facing wrappers for the AMM trade pipeline.  Each request
+// is consumed by a handler in `dsm_sdk/src/handlers/route_routes.rs`
+// that delegates to the audited `routing_sdk` / `routing_path_sdk` /
+// `route_commit_sdk` helpers.  Per the "all business logic stays in
+// Rust" rule, frontend never builds digests, signs, or runs path
+// search — it only frames typed inputs.
+message PublishRoutingAdvertisementRequest {
+  bytes  vault_id              = 1 [(dsm_fixed_len)=32];
+  bytes  token_a               = 2 [(dsm_max_len)=64];
+  bytes  token_b               = 3 [(dsm_max_len)=64];
+  bytes  reserve_a_u128        = 4 [(dsm_fixed_len)=16];
+  bytes  reserve_b_u128        = 5 [(dsm_fixed_len)=16];
+  uint32 fee_bps               = 6;
+  bytes  unlock_spec_digest    = 7 [(dsm_fixed_len)=32];
+  string unlock_spec_key       = 8;
+  bytes  owner_public_key      = 9 [(dsm_max_len)=65535];
+  // Full encoded `VaultPostProto` — the handler computes the
+  // BLAKE3 digest and binds it into the advertisement.  Frontend
+  // does not derive crypto.
+  bytes  vault_proto_bytes     = 10;
+}
+
+message RoutingPairRequest {
+  bytes token_a = 1 [(dsm_max_len)=64];
+  bytes token_b = 2 [(dsm_max_len)=64];
+}
+
+message FindAndBindRouteRequest {
+  bytes  input_token            = 1 [(dsm_max_len)=64];
+  bytes  output_token           = 2 [(dsm_max_len)=64];
+  bytes  input_amount_u128      = 3 [(dsm_fixed_len)=16];
+  uint32 max_hops               = 4; // 0 → server default (4)
+  bytes  nonce                  = 5 [(dsm_fixed_len)=32];
+  // initiator_public_key is left empty here on purpose — the
+  // subsequent `route.signRouteCommit` invoke stamps the wallet's
+  // pk and overwrites whatever the bind step put there.
+}
+
+// Owner-side summary of an AMM vault for the monitor screen.
+// Returned by `dlv.listOwnedAmmVaults` (one entry per vault whose
+// `creator_public_key` matches the local wallet's signing pk).
+message AmmVaultSummaryV1 {
+  bytes  vault_id                  = 1 [(dsm_fixed_len)=32];
+  bytes  token_a                   = 2 [(dsm_max_len)=64];
+  bytes  token_b                   = 3 [(dsm_max_len)=64];
+  bytes  reserve_a_u128            = 4 [(dsm_fixed_len)=16];
+  bytes  reserve_b_u128            = 5 [(dsm_fixed_len)=16];
+  uint32 fee_bps                   = 6;
+  // Mirror of the published advertisement's state_number; 0 if not advertised.
+  uint64 advertised_state_number   = 7;
+  // True if a routing-vault advertisement was found at the canonical
+  // pair key for this vault on storage nodes.
+  bool   routing_advertised        = 8;
+  // Tier 2 Foundation: vault's local current_sequence (the
+  // authoritative truth source for the chunks #7 gate).
+  uint64 anchor_sequence       = 9;
+  // Vault policy for anchor enforcement.  REQUIRED vaults reject
+  // routed unlocks lacking the anchor binding fields.
+  AnchorEnforcement anchor_enforcement = 10;
+}
+
+// Per-vault signed state anchor.  Owner publishes one at vault
+// creation (sequence=0) and one after every accepted routed unlock
+// (sequence=N+1).  Stored at `defi/vault-state/{vault_id_b32}/latest`
+// for off-device traders to read at quote time.  The chunks #7 gate
+// does NOT read this — it verifies against the local DLVManager.
+//
+// `reserves_digest` =
+//   BLAKE3("DSM/amm-reserves\0" || token_a || token_b ||
+//          reserve_a_u128_be || reserve_b_u128_be || fee_bps_be)
+//
+// `owner_signature` is SPHINCS+ over
+//   BLAKE3("DSM/vault-state-anchor\0" || vault_id || sequence_be ||
+//          reserves_digest)
+message VaultStateAnchorV1 {
+  bytes  vault_id           = 1 [(dsm_fixed_len)=32];
+  uint64 sequence           = 2;
+  bytes  reserves_digest    = 3 [(dsm_fixed_len)=32];
+  bytes  owner_public_key   = 4 [(dsm_max_len)=65535];
+  bytes  owner_signature    = 5 [(dsm_max_len)=65535];
+}
+
+// One hop in a `RouteCommitV1`.  Bound at routing time to the vault
+// advertisement digest + state number that was current when the path
+// was selected — recipients re-verify these fields against the live
+// `RoutingVaultAdvertisementV1` at unlock time, rejecting the route if
+// the vault's state has moved on (SoFi spec §3.3 step 5).
+message RouteCommitHopV1 {
+  bytes  vault_id                  = 1 [(dsm_fixed_len)=32];
+  bytes  token_in                  = 2 [(dsm_max_len)=64];
+  bytes  token_out                 = 3 [(dsm_max_len)=64];
+  bytes  input_amount_u128         = 4 [(dsm_fixed_len)=16];
+  bytes  expected_output_amount_u128 = 5 [(dsm_fixed_len)=16];
+  uint32 fee_bps                   = 6;
+  // BLAKE3("DSM/routing-vault-ad", vault_proto_bytes) at routing time.
+  bytes  advertisement_digest      = 7 [(dsm_fixed_len)=32];
+  uint64 state_number              = 8;
+  bytes  unlock_spec_digest        = 9 [(dsm_fixed_len)=32];
+  bytes  owner_public_key          = 10 [(dsm_max_len)=65535];
+  // Tier 2 Foundation state-anchor binding.  Trader stamps these
+  // from the vault's `defi/vault-state/{vault_id}/latest` at quote
+  // time.  Gate verifies against local DLVManager state (NOT storage).
+  // For vaults with `anchor_enforcement = REQUIRED` these fields are
+  // mandatory; for OPTIONAL/UNSPECIFIED they may be absent.
+  uint64 vault_state_anchor_seq      = 11;
+  bytes  vault_state_reserves_digest = 12 [(dsm_fixed_len)=32];
+  bytes  vault_state_anchor_digest   = 13 [(dsm_fixed_len)=32];
+}
+
+// Off-chain routing proof produced by chunk #2's path search and
+// signed by the initiating trader.  The external commitment
+// `X = BLAKE3("DSM/ext\0" || canonical(RouteCommitV1{initiator_signature=[]}))`
+// is the value referenced by every vault on the route — when X is
+// published to storage nodes (see `ExternalCommitmentV1` below), all
+// vaults atomically become unlockable (SoFi spec §3.2, §5.1).
+message RouteCommitV1 {
+  uint32 version                            = 1;
+  // 32-byte random nonce — replay protection (X re-uses across
+  // identical `(input, output, amount, hops, balances)` would otherwise
+  // collide).  Caller MUST pick a fresh nonce per route.
+  bytes  nonce                              = 2 [(dsm_fixed_len)=32];
+  bytes  input_token                        = 3 [(dsm_max_len)=64];
+  bytes  output_token                       = 4 [(dsm_max_len)=64];
+  bytes  input_amount_u128                  = 5 [(dsm_fixed_len)=16];
+  bytes  expected_final_output_amount_u128  = 6 [(dsm_fixed_len)=16];
+  uint64 total_fee_bps                      = 7;
+  repeated RouteCommitHopV1 hops            = 8;
+  // SPHINCS+ pk of the initiating trader.
+  bytes  initiator_public_key               = 9 [(dsm_max_len)=65535];
+  // SPHINCS+ signature over the canonical RouteCommit bytes with
+  // `initiator_signature` zeroed.  The same canonical-bytes
+  // computation is the input to the BLAKE3-derived external
+  // commitment X — sign-and-commit once.
+  bytes  initiator_signature                = 10 [(dsm_max_len)=65535];
+}
+
+// Storage-node anchor proving an external commitment X has been
+// published.  Each unlock-time verifier fetches this record at key
+// `defi/extcommit/{x_b32}`; existence implies "all vaults bound by X
+// may now unlock" (atomic visibility, SoFi spec §3.2).
+//
+// The record is INTENTIONALLY minimal — storage nodes are dumb
+// mirrors, the authoritative truth is the RouteCommit bytes the
+// trader hands to each vault owner.  This anchor proves only that the
+// commitment exists; the recipient still recomputes X from the
+// RouteCommit they received and checks the binding.
+message ExternalCommitmentV1 {
+  uint32 version                = 1;
+  // 32-byte X = BLAKE3("DSM/ext\0" || canonical(RouteCommit)).
+  bytes  x                      = 2 [(dsm_fixed_len)=32];
+  // SPHINCS+ pk of the publisher (typically the initiating trader,
+  // matches RouteCommitV1.initiator_public_key).
+  bytes  publisher_public_key   = 3 [(dsm_max_len)=65535];
+  // Optional human-readable hint — purely informational, ignored by
+  // verification.  Useful for tooling / audit trails.
+  string label                  = 4;
+}
+
+// Storage-node-mirrored advertisement for a SoFi routing vault.
+//
+// Keyed under `defi/vault/{token_a_b32}/{token_b_b32}/{vault_id_b32}` —
+// PUBLIC discovery by ordered token pair, no recipient scoping.  The
+// router enumerates all vaults matching `(tokenA, tokenB)` (or its
+// reverse, in which case reserves swap roles) and feeds the result
+// into a fee-weighted Dijkstra over the resulting liquidity graph
+// (SoFi spec §3.3, §8.3).
+//
+// Storage nodes are dumb mirrors.  Authenticity for routing purposes
+// is rooted in `vault_proto_digest` binding the ad to a full vault
+// proto under `defi/vault-proto/{..}/{..}` — exactly the same pattern
+// as DbtcVaultAdvertisementV1 and PostedDlvAdvertisementV1, mounted
+// in a different keyspace.
+//
+// Token-pair canonicalisation: `token_a` and `token_b` are the
+// LEXICOGRAPHICALLY LOWER and HIGHER token-id bytes respectively.
+// Reserves are reported in the matching order (reserve_a is the
+// pool of token_a).  This collapses the "A→B" and "B→A" entries
+// for a single vault into one canonical advertisement; the router
+// flips reserve roles based on the requested trade direction.
+message RoutingVaultAdvertisementV1 {
+  uint32 version                 = 1;
+  bytes  vault_id                = 2 [(dsm_fixed_len)=32];
+  bytes  token_a                 = 3 [(dsm_max_len)=64];   // lexicographically lower
+  bytes  token_b                 = 4 [(dsm_max_len)=64];   // lexicographically higher
+  bytes  reserve_a_u128          = 5 [(dsm_fixed_len)=16]; // big-endian u128, pool of token_a
+  bytes  reserve_b_u128          = 6 [(dsm_fixed_len)=16]; // big-endian u128, pool of token_b
+  // Fee in basis points (e.g. 30 = 0.30 %).  Full-fixed integer keeps
+  // the routing graph weights deterministic and clockless.
+  uint32 fee_bps                 = 7;
+  // Hash of the canonical CPTA spec describing the vault's unlock
+  // condition set (constant product, stable swap, custom curve, …).
+  // Routers verify a vault is satisfiable by re-fetching the spec
+  // bytes via the `unlock_spec_key` storage pointer below.
+  bytes  unlock_spec_digest      = 8 [(dsm_fixed_len)=32];
+  string unlock_spec_key         = 9;
+  bytes  vault_proto_key         = 10; // not [(dsm_fixed_len)] — string blob
+  bytes  vault_proto_digest      = 11 [(dsm_fixed_len)=32]; // BLAKE3("DSM/routing-vault-ad", proto_bytes)
+  // Vault owner's SPHINCS+ pk.  Used by the router to compute the
+  // expected per-hop unlock receipt commit; not used for ad
+  // authenticity (see vault_proto_digest above).
+  bytes  owner_public_key        = 12 [(dsm_max_len)=65535];
+  string lifecycle_state         = 13; // "active" | "exhausted" | "withdrawn"
+  uint64 updated_state_number    = 14; // dedup signal; matches dBTC + posted-dlv pattern
+}
+
+// Typed request for `dlv.unlockRouted` — the routed atomic-unlock
+// path for SoFi.  The trader hands each vault owner a copy of the
+// `RouteCommitV1` they signed; the vault owner then invokes this
+// route on their own device.  The handler runs the SDK eligibility
+// check (vault_id ∈ RouteCommit AND ExtCommit(X) visible at storage
+// nodes) before emitting the standard `Operation::DlvUnlock` on the
+// vault owner's self-loop.
+//
+// Atomic execution model: each vault unlocks INDEPENDENTLY on its
+// owner's hash chain — the coordination point is the
+// `ExternalCommitmentV1` anchor.  Until X is published all vaults
+// reject; once it is, all vaults accept.  No global coordinator.
+message DlvUnlockRoutedV1 {
+  bytes vault_id              = 1 [(dsm_fixed_len)=32];
+  bytes device_id             = 2 [(dsm_fixed_len)=32];
+  // Canonical `RouteCommitV1` bytes the trader produced via
+  // `route_commit_sdk::bind_path_to_route_commit` + signed.
+  bytes route_commit_bytes    = 3 [(dsm_max_len)=65535];
+  // SPHINCS+ pk of the unlocker (vault owner / claimant).
+  bytes unlocker_public_key   = 4 [(dsm_max_len)=65535];
+  // SPHINCS+ signature over canonical Operation::DlvUnlock bytes.
+  bytes signature             = 5 [(dsm_max_len)=65535];
+}
+
+// Typed request for `dlv.invalidate`.  Replaces the inline
+// `[32-byte vault_id][utf8 reason]` body shape used pre-Track-A; the
+// canonical Operation::DlvInvalidate carries the same fields.
+message DlvInvalidateV1 {
+  bytes  vault_id              = 1 [(dsm_fixed_len)=32];
+  string reason                = 2 [(dsm_max_len)=512];   // optional human-readable reason
+  bytes  creator_public_key    = 3 [(dsm_max_len)=65535]; // SPHINCS+ pk of vault creator
+  bytes  signature             = 4 [(dsm_max_len)=65535]; // SPHINCS+ over canonical Operation::DlvInvalidate
+}
+
+// Typed request for `dlv.claim`.  Replaces the inline
+// `[32-byte vault_id][claim_proof bytes]` body shape used pre-Track-A;
+// the canonical Operation::DlvClaim carries the same fields.
+message DlvClaimV1 {
+  bytes vault_id              = 1 [(dsm_fixed_len)=32];
+  bytes claim_proof           = 2 [(dsm_max_len)=65535];
+  bytes claimant_public_key   = 3 [(dsm_max_len)=65535]; // SPHINCS+ pk of claimant
+  bytes signature             = 4 [(dsm_max_len)=65535]; // SPHINCS+ over canonical Operation::DlvClaim
+}
+
+// Storage-node-mirrored advertisement for a posted-mode DLV.
+//
+// Keyed under `dlv/posted/{recipient_kyber_pk_b32}/{dlv_id_b32}`; the full
+// VaultPostProto is mirrored alongside at `dlv/posted-proto/{recipient_kyber_pk_b32}/{dlv_id_b32}`
+// and bound to this advertisement by `vault_proto_digest = BLAKE3("DSM/posted-dlv-ad", proto_bytes)`.
+//
+// Storage nodes are dumb mirrors. Authenticity is recipient-verified:
+//   1. creator_signature (SPHINCS+) over the canonical advertisement bytes with this field zeroed.
+//   2. vault_proto_digest binds the ad to the full vault post.
+//   3. The recipient's Kyber SK is required to decrypt vault content; the advertisement
+//      carries no secrets.
+//
+// Lifecycle state transitions: "active" -> "claimed" (recipient after successful
+// DlvClaim) or "active" -> "invalidated" (creator after DlvInvalidate).
+// Deduplication at load time: highest `updated_state_number` wins; lex-smallest
+// key tiebreaker. Matches the dBTC vault selector pattern (§13 storage nodes).
+message PostedDlvAdvertisementV1 {
+  uint32 version                 = 1;
+  bytes  dlv_id                  = 2 [(dsm_fixed_len)=32];
+  bytes  recipient_kyber_pk      = 3 [(dsm_max_len)=1568]; // ML-KEM-1024 public key
+  bytes  creator_public_key      = 4 [(dsm_max_len)=65535]; // SPHINCS+ pk of creator
+  bytes  policy_commit           = 5 [(dsm_fixed_len)=32]; // CPTA anchor of locked token (if any)
+  string vault_proto_key         = 6;  // storage-node key of the full VaultPostProto
+  bytes  vault_proto_digest      = 7 [(dsm_fixed_len)=32]; // BLAKE3("DSM/posted-dlv-ad", proto_bytes)
+  string lifecycle_state         = 8;  // "active" | "claimed" | "invalidated"
+  uint64 updated_state_number    = 9;  // dedup signal; increments monotonically per state change
+  bytes  creator_signature       = 10 [(dsm_max_len)=65535]; // SPHINCS+ over canonical ad bytes (field 10 zeroed)
+  // Optional claim attestation: set only on state transitions authored by the recipient
+  // ("claimed" ads). Signed by the recipient's Kyber-derived SPHINCS+ identity.
+  bytes  claimant_signature      = 11 [(dsm_max_len)=65535];
 }
 
 // ===================== STORAGE NODE ADMIN/GOSSIP/LIST (V1) ==================
@@ -1086,7 +1435,14 @@ message TokenMpcRequest {
 }
 
 // ======================= System Genesis (binary) ====================
-message SystemGenesisRequest { string locale = 1; string network_id = 2; bytes device_entropy = 3 [(dsm_fixed_len)=32]; }
+message SystemGenesisRequest {
+  string locale = 1;
+  string network_id = 2;
+  bytes device_entropy = 3 [(dsm_fixed_len)=32];
+  bytes cdbrw_hw_entropy = 4 [(dsm_max_len)=1024];
+  bytes cdbrw_env_fingerprint = 5 [(dsm_max_len)=1024];
+  bytes cdbrw_salt = 6 [(dsm_fixed_len)=32];
+}
 message SystemGenesisResponse { Hash32 genesis_hash = 1; bytes public_key = 2 [(dsm_max_len)=512]; }
 message GenesisCreated {
   bytes  device_id    = 1 [(dsm_fixed_len)=32];
@@ -1243,6 +1599,13 @@ message BilateralCommitResponse {
   Hash32 transaction_hash = 3;
   string message          = 4;
   Hash32 commitment_hash  = 5;
+  // §11.1 receiver counter-sign: receiver's locally-built copy of the
+  // stitched receipt with B-side per-step EK signing artifacts
+  // (ek_pk_b / ek_cert_b / kyber_ct_b / sig_b) stamped on top of the
+  // sender's A-side fields. Sender verifies this on receipt and persists
+  // a fully co-signed copy to its own archive. This field is required for
+  // offline receipt authorization.
+  bytes  counter_signed_receipt = 6 [(dsm_max_len)=131072];
 }
 
 // 3-step BLE protocol: Step 3 — Sender confirms (A→B), both finalize.
@@ -1279,6 +1642,35 @@ message ReceiptCommit {
   // Proto3 omits empty bytes fields, so canonical encode_to_vec() skips these.
   bytes sig_a = 12 [(dsm_max_len)=65535]; // SPHINCS+ sig from party A
   bytes sig_b = 13 [(dsm_max_len)=65535]; // SPHINCS+ sig from party B
+  // Per-step ephemeral-key certificates (whitepaper §11.1).
+  // cert_{n+1} = Sign_{SK_n}( BLAKE3("DSM/ek-cert\0" || EK_pk_{n+1} || h_n) )
+  // Carried in the envelope alongside sig_a/sig_b. NOT in canonical commit
+  // preimage (§4.2.1 freezes the 10-field commit form). The cert binds the
+  // per-step EK to the prior chain head (AK at n=0, else EK_n) and lets a
+  // verifier walk the chain back to the device-attested AK_pk.
+  bytes ek_cert_a = 14 [(dsm_max_len)=65535];
+  bytes ek_cert_b = 15 [(dsm_max_len)=65535];
+  // Per-step ephemeral SPHINCS+ public keys (whitepaper §11.1). Each receipt
+  // is signed by a freshly-derived EK_pk_{n+1} = SPHINCS+.KeyGen(E_{n+1}),
+  // where E_{n+1} = HKDF("DSM/ek\0" || h_n || C_pre || k_step || K_DBRW).
+  // The verifier uses these to verify sig_a/sig_b without needing them
+  // out-of-band; ek_cert_a/b chain them back to AK_pk. Wire-only, with the
+  // same placement rationale as ek_cert_a/b.
+  bytes ek_pk_a = 16 [(dsm_max_len)=65535];
+  bytes ek_pk_b = 17 [(dsm_max_len)=65535];
+  // Per-step Kyber/ML-KEM ciphertexts (whitepaper §11). The sender derives
+  // deterministic Kyber coins from
+  //   coins = BLAKE3-256("DSM/kyber-coins\0" || h_n || C_pre
+  //                       || DevID_sender || K_DBRW)
+  // encapsulates against the recipient's Kyber public key, and the
+  // resulting ciphertext travels here. The recipient decapsulates with
+  // their local Kyber secret key to recover the same shared secret `ss`,
+  // then derives k_step = BLAKE3("DSM/kyber-ss\0" || ss). Both parties
+  // arrive at identical k_step, which is then mixed into the per-step
+  // EK derivation alongside K_DBRW. Wire-only — not part of canonical
+  // commit form (§4.2.1).
+  bytes kyber_ct_a = 18 [(dsm_max_len)=2048];
+  bytes kyber_ct_b = 19 [(dsm_max_len)=2048];
 }
 
 
@@ -1409,9 +1801,8 @@ message PairingStatusUpdate {
   string ble_address = 4; // peer BLE MAC if known
 }
 
-// Genesis lifecycle events — authored by Rust, transported via BleEvent envelope.
-// Kotlin MUST NOT dispatch these directly; it calls createGenesis*Envelope() JNI
-// functions which return a framed Envelope v3 to relay verbatim.
+// Genesis/bootstrap lifecycle events — authored by Rust and transported via
+// canonical Envelope v3 payloads and async ingress event drain.
 message GenesisLifecycleEvent {
   enum Kind {
     GENESIS_KIND_UNSPECIFIED        = 0;
@@ -1425,6 +1816,54 @@ message GenesisLifecycleEvent {
   }
   Kind   kind     = 1;
   uint32 progress = 2; // 0–100, only meaningful for SECURING_PROGRESS
+}
+
+// Host-side measurement report forwarded into Rust bootstrap control.
+message BootstrapMeasurementReport {
+  enum Phase {
+    BOOTSTRAP_PHASE_UNSPECIFIED = 0;
+    BOOTSTRAP_PHASE_STARTED = 1;
+    BOOTSTRAP_PHASE_PROGRESS = 2;
+    BOOTSTRAP_PHASE_FINALIZE = 3;
+    BOOTSTRAP_PHASE_ABORTED = 4;
+    BOOTSTRAP_PHASE_ERROR = 5;
+    BOOTSTRAP_PHASE_RESUME_FINALIZE = 6;
+  }
+
+  enum TrustLevel {
+    BOOTSTRAP_TRUST_LEVEL_UNSPECIFIED = 0;
+    BOOTSTRAP_TRUST_LEVEL_FULL_ACCESS = 1;
+    BOOTSTRAP_TRUST_LEVEL_PIN_REQUIRED = 2;
+    BOOTSTRAP_TRUST_LEVEL_READ_ONLY = 3;
+    BOOTSTRAP_TRUST_LEVEL_BLOCKED = 4;
+  }
+
+  Phase phase = 1;
+  bytes device_id = 2 [(dsm_fixed_len)=32];
+  bytes genesis_hash = 3 [(dsm_fixed_len)=32];
+  uint32 progress_percent = 4;
+  bytes cdbrw_hw_entropy = 5 [(dsm_max_len)=1024];
+  bytes cdbrw_env_fingerprint = 6 [(dsm_max_len)=1024];
+  bytes cdbrw_salt = 7 [(dsm_fixed_len)=32];
+  TrustLevel trust_level = 8;
+  string error_message = 9;
+}
+
+message BootstrapFinalizeResponse {
+  enum Result {
+    BOOTSTRAP_RESULT_UNSPECIFIED = 0;
+    BOOTSTRAP_RESULT_READY = 1;
+    BOOTSTRAP_RESULT_REJECTED = 2;
+    BOOTSTRAP_RESULT_READ_ONLY = 3;
+    BOOTSTRAP_RESULT_BLOCKED = 4;
+    BOOTSTRAP_RESULT_ABORTED = 5;
+    BOOTSTRAP_RESULT_ERROR = 6;
+  }
+
+  Result result = 1;
+  bytes device_id = 2 [(dsm_fixed_len)=32];
+  bytes genesis_hash = 3 [(dsm_fixed_len)=32];
+  string message = 4;
 }
 
 // BLE permission denied notification — authored by Rust, transport via BleEvent.
@@ -1454,7 +1893,6 @@ message BleEvent {
     BleIdentityObserved identity_observed = 13;
     PairingStatusUpdate pairing_status    = 14;
     BlePairingConfirm   pairing_confirm  = 15;
-    GenesisLifecycleEvent genesis_lifecycle = 16;
     BlePermissionEvent    ble_permission     = 17;
   }
 }
@@ -1870,6 +2308,15 @@ message Envelope {
     BilateralReconciliationResponse   reconciliation_response          = 98;
 
     Error                             error                            = 99;
+    GenesisLifecycleEvent             genesis_lifecycle                = 100;
+    BootstrapMeasurementReport        bootstrap_measurement_report     = 101;
+    BootstrapFinalizeResponse         bootstrap_finalize_response      = 102;
+
+    // C-DBRW Protocol 6.2 (ZK challenge/response)
+    CdbrwTrustSnapshot                cdbrw_trust_snapshot             = 103;
+    CdbrwRespondResponse              cdbrw_respond_response           = 104;
+    CdbrwVerifyResponse               cdbrw_verify_response            = 105;
+    CdbrwEnrollResponse               cdbrw_enroll_response            = 106;
   }
 }
 
@@ -1889,12 +2336,6 @@ message InitFailed {
 
 // ============ RECOVERY OPERATIONS (binary IDs) ==============
 
-message ThermalStateProto {
-  string health = 1;
-  int32 status_code = 2;
-  string description = 3;
-  string recommendation = 4;
-}
 message ArchitectureInfoProto {
   string status = 1;
   string device_arch = 2;
@@ -1929,6 +2370,19 @@ message RecoverySuccessionRequest { Hash32 tombstone_hash = 1; bytes device_entr
 message RecoverySuccessionResponse{ bool success = 1; Hash32 succession_hash = 2; bytes succession_receipt = 3 [(dsm_max_len)=4096]; Hash32 new_genesis_hash = 4; }
 message RecoveryResumeRequest  { bytes counterparty_device_id = 1 [(dsm_fixed_len)=32]; Hash32 last_head_hash = 2; uint64 last_height = 3; }
 message RecoveryResumeResponse { bool success = 1; Hash32 new_transaction_hash = 2; bytes transaction_receipt = 3 [(dsm_max_len)=4096]; }
+
+// Internal codec for `dsm::recovery::tombstone::TombstoneReceipt` — the
+// SPHINCS+-signed device-invalidation receipt. Replaces prior bincode
+// serialization so recovery state stays on the protobuf-only wire.
+message TombstoneReceiptProto {
+  string device_id       = 1;
+  bytes  old_smt_root    = 2 [(dsm_fixed_len)=32];
+  uint64 old_counter     = 3;
+  bytes  old_rollup_hash = 4 [(dsm_fixed_len)=32];
+  uint64 tick            = 5;
+  bytes  signature       = 6 [(dsm_max_len)=65535]; // SPX256f = 49_856 bytes
+  bytes  tombstone_hash  = 7 [(dsm_fixed_len)=32];
+}
 
 // ==================== Minimal deterministic identity =================
 message ContactQrV3 {
@@ -2189,13 +2643,17 @@ message StorageStatusResponse {
 }
 
 // ========================= C-DBRW Status =========================
+//
+// Snapshot of the Rust-side C-DBRW state for the Dev screen. Field 37
+// (`trust`) carries the live verdict published by `cdbrw_access_gate` —
+// frontend/UI consume this to drive the fail-closed gate. Runtime metrics
+// previously fetched via reverse JNI (Rust → Kotlin `getCdbrwRuntimeSnapshot`)
+// are gone; Kotlin is transport-only now and never computes trust state.
 message DbrwStatusResponse {
   bool enrolled = 1;
   bool binding_key_present = 2;
   bool verifier_keypair_present = 3;
   bool storage_base_dir_set = 4;
-  bool observe_only = 5;
-  string access_mode = 6;
   uint32 enrollment_revision = 7;
   uint32 arena_bytes = 8;
   uint32 probes = 9;
@@ -2210,25 +2668,136 @@ message DbrwStatusResponse {
   uint32 verifier_public_key_len = 18;
   string storage_base_dir = 19;
   string status_note = 20;
-  bool runtime_metrics_present = 21;
-  string runtime_access_level = 22;
-  float runtime_trust_score = 23;
-  bool runtime_health_check_ran = 24;
-  bool runtime_health_check_passed = 25;
-  float runtime_h_hat = 26;
-  float runtime_rho_hat = 27;
-  float runtime_l_hat = 28;
-  float runtime_match_score = 29;
-  float runtime_w1_distance = 30;
-  float runtime_w1_threshold = 31;
-  bytes runtime_anchor_prefix = 32 [(dsm_max_len)=16];
-  string runtime_error = 33;
+  // Live trust snapshot from the Rust access gate. Empty when the gate has
+  // never been updated (i.e. device not yet enrolled or no probe run).
+  CdbrwTrustSnapshot trust = 37;
+}
 
-  // Derived C-DBRW resonant health metrics (§4.5.4, §4.6, §8.1 of C-DBRW spec)
-  // Computed in SDK from raw hHat/rhoHat/lHat — not in the Android binary snapshot.
-  float runtime_h0_eff = 34; // Effective entropy rate: hHat * (1 - |rhoHat|) per Prop 4.23
-  uint32 runtime_recommended_n = 35; // Recommended orbit length for current entropy rate
-  string runtime_resonant_status = 36; // PASS | RESONANT | ADAPTED | FAIL per tri-layer §7
+// ===================== C-DBRW Protocol 6.2 (Algorithm 3) =====================
+// Frontend/bridge shuttles raw orbit timings + environment bytes to Rust; the
+// SDK runs the entropy health test, histogram build, Wasserstein-1 drift check,
+// BLAKE3 γ commitment, deterministic Kyber-1024 encaps, ephemeral HKDF step key,
+// and SPHINCS+ Cat-5 signing. Verification runs the inverse path.
+//
+// Single-path rule: these messages travel as opaque router_query / router_invoke
+// args (sub-routes cdbrw.respond / cdbrw.verify / cdbrw.measure_trust /
+// cdbrw.enroll). Responses wrap the result in Envelope v3 payload slots 103-106.
+
+// Fail-closed access ordering (ordinal comparison in Rust).
+enum CdbrwAccessLevel {
+  CDBRW_ACCESS_UNSPECIFIED = 0;
+  CDBRW_ACCESS_BLOCKED     = 1; // hardware anchor missing or fatal health fail
+  CDBRW_ACCESS_READ_ONLY   = 2; // degraded — view only, no writes
+  CDBRW_ACCESS_PIN_REQUIRED= 3; // drift or ADAPTED — step-up auth
+  CDBRW_ACCESS_FULL_ACCESS = 4; // PASS or RESONANT with clean drift
+}
+
+// Tri-layer resonant classification per C-DBRW §7.
+enum CdbrwResonantStatus {
+  CDBRW_RESONANT_UNSPECIFIED = 0;
+  CDBRW_RESONANT_PASS        = 1; // Ĥ ≥ 0.45, |ρ̂| ≤ 0.3, L̂ ≥ 0.45
+  CDBRW_RESONANT_RESONANT    = 2; // h0_eff in [0.30, 0.45) — longer orbit OK
+  CDBRW_RESONANT_ADAPTED     = 3; // degraded entropy — step-up required
+  CDBRW_RESONANT_FAIL        = 4; // below minimum — reject
+}
+
+// One PUF orbit trial (ARX interrogation walk timings).
+message CdbrwOrbitTrial {
+  repeated int64 timings = 1 [(dsm_max_len)=16384]; // per-step ARX timing samples
+}
+
+// cdbrw.measure_trust args — compute resonant health and current access verdict
+// without running a full ZK response. Frontend polls this to surface UI state.
+message CdbrwMeasureTrustRequest {
+  bytes env_bytes       = 1 [(dsm_max_len)=1024]; // environment fingerprint blob
+  CdbrwOrbitTrial orbit = 2; // single N=HEALTH_N probe
+  uint32 histogram_bins = 3; // must match enrollment bins
+}
+
+// cdbrw.respond args — device side of Algorithm 3.
+// K_DBRW lives in Rust (set via bootstrap); Kotlin never touches signing keys.
+message CdbrwRespondRequest {
+  bytes env_bytes           = 1 [(dsm_max_len)=1024];
+  CdbrwOrbitTrial orbit     = 2; // live orbit after challenge
+  bytes challenge           = 3 [(dsm_fixed_len)=32]; // V1 verifier nonce
+  bytes chain_tip           = 4 [(dsm_fixed_len)=32]; // adjacency anchor
+  bytes commitment_preimage = 5 [(dsm_fixed_len)=32]; // 32-byte C_pre per Alg. 3
+  bytes device_id           = 6 [(dsm_fixed_len)=32];
+  bytes verifier_public_key = 7 [(dsm_max_len)=2048]; // Kyber-1024 pk
+  uint32 histogram_bins     = 8;
+}
+
+// cdbrw.verify args — pure Rust verifier path. No Kotlin orchestration.
+message CdbrwVerifyRequest {
+  bytes challenge             = 1 [(dsm_fixed_len)=32];
+  bytes gamma                 = 2 [(dsm_fixed_len)=32]; // BLAKE3 commitment
+  bytes ciphertext            = 3 [(dsm_max_len)=4096]; // Kyber ct
+  bytes signature             = 4 [(dsm_max_len)=16384]; // SPHINCS+ Cat-5
+  bytes ephemeral_public_key  = 5 [(dsm_max_len)=4096]; // HKDF-derived ephk
+  bytes chain_tip             = 6 [(dsm_fixed_len)=32];
+  bytes commitment_preimage   = 7 [(dsm_fixed_len)=32];
+  bytes enrollment_anchor     = 8 [(dsm_fixed_len)=32];
+  float epsilon_intra         = 9;
+  float epsilon_inter         = 10;
+}
+
+// cdbrw.enroll args — K-trial enrollment (Path A Rust writer).
+// Replaces the Kotlin EnrollmentStore.write() path. The SDK derives the
+// reference histogram, ε_intra, and attractor commitment AC_D, and persists
+// the `dsm_silicon_fp_v4.bin` binary compatible with load_cdbrw_enrollment.
+message CdbrwEnrollRequest {
+  bytes env_bytes                 = 1 [(dsm_max_len)=1024];
+  repeated CdbrwOrbitTrial trials = 2 [(dsm_max_len)=64]; // K ≥ 16 per §6.1
+  uint32 arena_bytes              = 3;
+  uint32 probes                   = 4;
+  uint32 steps_per_probe          = 5;
+  uint32 histogram_bins           = 6;
+  uint32 rotation_bits            = 7;
+}
+
+// Shared trust state returned with every C-DBRW op. Frontend/UI reads this
+// to drive the access gate; the ordinal AccessLevel is the only thing that
+// matters for authorization decisions — metrics are diagnostic.
+message CdbrwTrustSnapshot {
+  CdbrwAccessLevel access_level       = 1;
+  CdbrwResonantStatus resonant_status = 2;
+  float h_hat         = 3; // Shannon entropy
+  float rho_hat       = 4; // lag-1 autocorrelation
+  float l_hat         = 5; // LZ78 normalized compressibility
+  float h0_eff        = 6; // h_hat * (1 - |rho_hat|)
+  float trust_score   = 7; // [0.0, 1.0] — adapted×0.75, failed×0
+  uint64 iter         = 8; // TRUST_ITER monotonic counter (clockless)
+  uint32 recommended_n= 9; // orbit length for current h0_eff
+  float w1_distance   = 10; // Wasserstein-1 drift vs reference histogram
+  float w1_threshold  = 11;
+  string note         = 12; // diagnostic reason (never leaks secrets)
+}
+
+// cdbrw.respond response — full Algorithm 3 output plus trust snapshot.
+message CdbrwRespondResponse {
+  bytes ciphertext            = 1 [(dsm_max_len)=4096];
+  bytes gamma                 = 2 [(dsm_fixed_len)=32];
+  bytes signature             = 3 [(dsm_max_len)=16384];
+  bytes ephemeral_public_key  = 4 [(dsm_max_len)=4096];
+  CdbrwTrustSnapshot trust    = 5;
+}
+
+// cdbrw.verify response — pass/fail with diagnostic distance.
+message CdbrwVerifyResponse {
+  bool accepted          = 1;
+  string reason          = 2; // "ok" | "gamma_distance_exceeds_tau" | ...
+  float gamma_distance   = 3; // sqrt(Σ(γᵢ - anchor_iᵢ)²)/256
+  float threshold        = 4; // (ε_intra + ε_inter) / 2
+}
+
+// cdbrw.enroll response — binary reference snapshot summary (no keys).
+message CdbrwEnrollResponse {
+  uint32 revision              = 1;
+  float epsilon_intra          = 2;
+  uint32 mean_histogram_len    = 3;
+  bytes reference_anchor_prefix= 4 [(dsm_max_len)=16]; // first 10 bytes of AC_D (display hint)
+  CdbrwTrustSnapshot trust     = 5;
+  bytes reference_anchor       = 6 [(dsm_fixed_len)=32]; // full 32-byte AC_D for bootstrap handoff
 }
 
 // ========================= Storage Node Stats =========================
@@ -2514,6 +3083,305 @@ message DlvReceiptQuery {
 
 message DlvReceiptResponse {
   repeated DlvReceiptSubmission receipts = 1;
+}
+
+// ====================== Native Ingress Contract ======================
+// Platform-agnostic ingress contract for native clients (Android JNI, iOS FFI).
+//
+// Both platforms translate ABI-specific inputs to IngressRequest, pass them
+// through the single shared Rust ingress, and translate IngressResponse back
+// to their respective ABI outputs. The only platform-specific code is the
+// thin ABI marshalling layer; all semantic behaviour is identical after that
+// point.
+
+// AppRouter read-only query: method name + opaque protobuf args.
+message RouterQueryOp {
+  string method = 1 [(dsm_max_len)=256];
+  bytes  args   = 2 [(dsm_max_len)=65535];
+}
+
+// AppRouter mutating invoke: method name + opaque protobuf args.
+message RouterInvokeOp {
+  string method = 1 [(dsm_max_len)=256];
+  bytes  args   = 2 [(dsm_max_len)=65535];
+}
+
+// Generic Envelope v3 dispatch: raw protobuf-encoded Envelope bytes.
+// The 0x03 framing prefix is optional; the ingress strips it if present.
+message EnvelopeOp {
+  bytes envelope_bytes = 1 [(dsm_max_len)=65535];
+}
+
+// Session hardware-state snapshot update.
+message HardwareFactsOp {
+  SessionHardwareFactsProto facts = 1;
+}
+
+// Drain queued SDK events as a typed protobuf batch.
+message DrainEventsOp {
+  uint32 max_events = 1;
+}
+
+enum SdkEventKind {
+  SDK_EVENT_KIND_UNSPECIFIED = 0;
+  SDK_EVENT_KIND_SESSION_STATE = 1;
+  SDK_EVENT_KIND_BILATERAL_EVENT = 2;
+  SDK_EVENT_KIND_BLE_ENVELOPE = 3;
+  SDK_EVENT_KIND_INBOX_UPDATED = 4;
+  SDK_EVENT_KIND_WALLET_REFRESH = 5;
+  SDK_EVENT_KIND_IDENTITY_READY = 6;
+  SDK_EVENT_KIND_ENV_CONFIG_ERROR = 7;
+  SDK_EVENT_KIND_BIOMETRIC_RESULT = 8;
+  SDK_EVENT_KIND_QR_SCAN_RESULT = 9;
+  SDK_EVENT_KIND_BLUETOOTH_PERMISSIONS = 10;
+  SDK_EVENT_KIND_DETERMINISTIC_SAFETY = 11;
+  SDK_EVENT_KIND_CONTACT_BLE_UPDATED = 12;
+  SDK_EVENT_KIND_NFC_RECOVERY_CAPSULE = 13;
+  SDK_EVENT_KIND_NFC_BACKUP_WRITTEN = 14;
+  SDK_EVENT_KIND_BRIDGE_READY = 15;
+  SDK_EVENT_KIND_CANONICAL_ENVELOPE = 16;
+}
+
+// Typed async SDK event envelope. `payload` contains the canonical protobuf
+// bytes for the declared event kind.
+message SdkEvent {
+  SdkEventKind kind = 1;
+  bytes payload = 2 [(dsm_max_len)=65535];
+}
+
+message SdkEventBatch {
+  repeated SdkEvent events = 1;
+  bool has_more = 2;
+}
+
+// Canonical platform-agnostic ingress request.
+message IngressRequest {
+  oneof operation {
+    RouterQueryOp   router_query   = 1;
+    RouterInvokeOp  router_invoke  = 2;
+    EnvelopeOp      envelope       = 3;
+    HardwareFactsOp hardware_facts = 4;
+    DrainEventsOp   drain_events   = 5;
+  }
+}
+
+// Canonical platform-agnostic ingress response.
+message IngressResponse {
+  oneof result {
+    bytes ok_bytes = 1 [(dsm_max_len)=65535];
+    Error error    = 2;
+  }
+}
+
+// Startup/bootstrap operations are modeled separately from request ingress.
+// They express one-time native platform setup rather than protocol requests.
+
+// Configure the SDK storage base directory.
+message SetStorageBaseDirOp {
+  string path_utf8 = 1 [(dsm_max_len)=2048];
+}
+
+// Configure the authoritative env-config TOML path used by the SDK.
+message ConfigureEnvOp {
+  string config_path_utf8 = 1 [(dsm_max_len)=2048];
+}
+
+// Initialize the SDK runtime, storage-node registry, and router layer.
+message InitializeSdkOp {}
+
+// Install canonical identity context using the already-validated binding key.
+message InitializeIdentityContextOp {
+  bytes device_id    = 1 [(dsm_fixed_len)=32];
+  bytes genesis_hash = 2 [(dsm_fixed_len)=32];
+  bytes binding_key  = 3 [(dsm_fixed_len)=32];
+}
+
+// Restore canonical identity context by re-deriving the binding key from
+// persisted deterministic C-DBRW inputs. This is the fast cold-start path
+// after a successful first bootstrap / enrollment.
+message RestoreIdentityContextOp {
+  bytes device_id             = 1 [(dsm_fixed_len)=32];
+  bytes genesis_hash          = 2 [(dsm_fixed_len)=32];
+  bytes cdbrw_hw_entropy      = 3 [(dsm_fixed_len)=32];
+  bytes cdbrw_env_fingerprint = 4 [(dsm_max_len)=1024];
+  bytes cdbrw_salt            = 5 [(dsm_fixed_len)=32];
+}
+
+// Canonical startup/bootstrap request shared by native platforms.
+message StartupRequest {
+  oneof operation {
+    SetStorageBaseDirOp        set_storage_base_dir     = 1;
+    ConfigureEnvOp             configure_env            = 2;
+    InitializeSdkOp            initialize_sdk           = 3;
+    InitializeIdentityContextOp initialize_identity_context = 4;
+    RestoreIdentityContextOp   restore_identity_context = 5;
+  }
+}
+
+// Canonical startup/bootstrap response.
+message StartupResponse {
+  oneof result {
+    bytes ok_bytes = 1 [(dsm_max_len)=65535];
+    Error error    = 2;
+  }
+}
+
+// Project-private native host boundary for WebView <-> platform host control.
+enum NativeHostRequestKind {
+  NATIVE_HOST_REQUEST_KIND_UNSPECIFIED = 0;
+
+  // host_control.*
+  NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_CAPABILITIES_GET = 1;
+  NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_QR_START_SCAN = 2;
+  NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_QR_STOP_SCAN = 3;
+  NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_SCAN_START = 4;
+  NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_SCAN_STOP = 5;
+  NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_ADVERTISE_START = 6;
+  NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_ADVERTISE_STOP = 7;
+  NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_NFC_READER_START = 8;
+  NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_NFC_READER_STOP = 9;
+  NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_PERMISSIONS_REQUEST = 10;
+
+  // platform_primitive.*
+  NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_DEVICE_BINDING_CAPTURE = 101;
+  NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BIOMETRIC_AUTHORIZE = 102;
+  NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_SECURE_HARDWARE_GENERATE_KEY = 103;
+  NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_SECURE_HARDWARE_SIGN = 104;
+  NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_READ_PAYLOAD = 105;
+  NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_WRITE_PAYLOAD = 106;
+  NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BLE_TRANSPORT_OPEN = 107;
+  NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BLE_TRANSPORT_SEND_CHUNKS = 108;
+  NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BLE_TRANSPORT_CLOSE = 109;
+}
+
+message NativeHostRequest {
+  NativeHostRequestKind kind = 1;
+  bytes payload = 2 [(dsm_max_len)=65535];
+}
+
+message NativeHostCapabilities {
+  repeated NativeHostRequestKind supported_requests = 1;
+}
+
+message NativeHostResponse {
+  oneof result {
+    bytes ok_bytes = 1 [(dsm_max_len)=65535];
+    NativeHostCapabilities capabilities = 2;
+    Error error = 3;
+  }
+}
+
+enum NativeHostEventKind {
+  NATIVE_HOST_EVENT_KIND_UNSPECIFIED = 0;
+  NATIVE_HOST_EVENT_KIND_QR_SCAN_RESULT = 1;
+  NATIVE_HOST_EVENT_KIND_BLUETOOTH_PERMISSIONS = 2;
+  NATIVE_HOST_EVENT_KIND_BIOMETRIC_RESULT = 3;
+  NATIVE_HOST_EVENT_KIND_NFC_TAG_READ = 4;
+  NATIVE_HOST_EVENT_KIND_NFC_TAG_WRITE = 5;
+  NATIVE_HOST_EVENT_KIND_SESSION_STATE_HINT = 6;
+}
+
+message NativeHostEvent {
+  NativeHostEventKind kind = 1;
+  bytes payload = 2 [(dsm_max_len)=65535];
+}
+
+message NativeHostAck {
+  bool success = 1;
+}
+
+message HostPermissionsRequestPayload {
+  repeated string permissions = 1;
+}
+
+message HostPermissionsResult {
+  repeated string granted_permissions = 1;
+  bool all_granted = 2;
+}
+
+message DeviceBindingCapturePayload {
+  bytes genesis_envelope = 1 [(dsm_max_len)=65535];
+}
+
+message BiometricAuthorizePayload {
+  string prompt_title = 1 [(dsm_max_len)=128];
+  string prompt_subtitle = 2 [(dsm_max_len)=256];
+  string negative_text = 3 [(dsm_max_len)=64];
+}
+
+message BiometricAuthorizeResult {
+  bool success = 1;
+  uint32 error_code = 2;
+  string error_message = 3 [(dsm_max_len)=256];
+}
+
+message SecureHardwareGenerateKeyPayload {
+  string key_alias = 1 [(dsm_max_len)=128];
+  bytes key_context = 2 [(dsm_max_len)=4096];
+}
+
+message SecureHardwareGenerateKeyResult {
+  bytes key_handle = 1 [(dsm_max_len)=4096];
+}
+
+message SecureHardwareSignPayload {
+  string key_alias = 1 [(dsm_max_len)=128];
+  bytes message = 2 [(dsm_max_len)=65535];
+  bytes key_handle = 3 [(dsm_max_len)=4096];
+}
+
+message SecureHardwareSignResult {
+  bytes signature = 1 [(dsm_max_len)=65535];
+}
+
+message NfcTagReadPayload {
+  string mime_type = 1 [(dsm_max_len)=128];
+}
+
+message NfcTagReadResult {
+  bool reader_started = 1;
+}
+
+message NfcTagWritePayload {
+  string mime_type = 1 [(dsm_max_len)=128];
+  bytes payload = 2 [(dsm_max_len)=65535];
+}
+
+message NfcTagWriteResult {
+  bool launched = 1;
+}
+
+message BleTransportOpenPayload {
+  string ble_address = 1 [(dsm_max_len)=128];
+}
+
+message BleTransportOpenResult {
+  bool ready = 1;
+}
+
+message BleTransportSendChunksPayload {
+  string ble_address = 1 [(dsm_max_len)=128];
+  bytes envelope_bytes = 2 [(dsm_max_len)=65535];
+}
+
+message BleTransportSendChunksResult {
+  bytes response_envelope = 1 [(dsm_max_len)=65535];
+}
+
+message BleTransportClosePayload {
+  string ble_address = 1 [(dsm_max_len)=128];
+}
+
+message BleTransportCloseResult {
+  bool closed = 1;
+}
+
+message QrScanResultPayload {
+  string text_utf8 = 1 [(dsm_max_len)=4096];
+}
+
+message HostSessionStateHint {
+  string reason = 1 [(dsm_max_len)=128];
 }
 
 // ─── Storage Node Regulation (clockless, signature-free) ────────────────────

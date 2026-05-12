@@ -8,7 +8,7 @@ pub mod capsule;
 pub mod rollup;
 pub mod tombstone;
 
-pub use capsule::{CapsuleMetadata, EncryptedCapsule, RecoveryCapsule};
+pub use capsule::{CapsuleMetadata, EncryptedCapsule, RecoveryCapsule, derive_recovery_authority_seed};
 pub use rollup::{ReceiptRollup, RollupEntry};
 pub use tombstone::{TombstoneReceipt, SuccessionReceipt, RecoveryReceipt};
 
@@ -54,6 +54,27 @@ pub fn create_recovery_capsule_with_key(
     counter: u64,
 ) -> Result<EncryptedCapsule, DsmError> {
     capsule::create_encrypted_capsule_with_key(smt_root, counterparty_tips, rollup, key, counter)
+}
+
+/// Create an encrypted recovery capsule with device-binding metadata.
+pub fn create_recovery_capsule_with_binding(
+    smt_root: &[u8],
+    counterparty_tips: HashMap<String, (u64, Vec<u8>)>,
+    rollup: &ReceiptRollup,
+    key: &[u8; 32],
+    counter: u64,
+    source_device_id: &[u8],
+    genesis_hash: &[u8],
+) -> Result<EncryptedCapsule, DsmError> {
+    capsule::create_encrypted_capsule_with_binding(
+        smt_root,
+        counterparty_tips,
+        rollup,
+        key,
+        counter,
+        source_device_id,
+        genesis_hash,
+    )
 }
 
 /// Decrypt and verify a recovery capsule from NFC ring

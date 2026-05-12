@@ -184,7 +184,7 @@ export default function AppContent({
     case 'loading':
       return (
         <div className="dsm-content">
-          <LoadingSpinner message="Wallet" size="large" eraTokenSrc={eraTokenSrc} />
+            <LoadingSpinner message="Wallet" size="large" eraTokenSrc={eraTokenSrc} />
           <StatusText
             lines={[
               'INITIALIZING DSM',
@@ -199,7 +199,7 @@ export default function AppContent({
     case 'runtime_loading':
       return (
         <div className="dsm-content">
-          <LoadingSpinner message="Starting Runtime" size="large" eraTokenSrc={eraTokenSrc} />
+            <LoadingSpinner message="Starting Runtime" size="large" eraTokenSrc={eraTokenSrc} />
           <StatusText
             lines={[
               'STARTING RUNTIME',
@@ -292,7 +292,17 @@ export default function AppContent({
               items={menuItems}
               currentMenuIndex={currentMenuIndex}
               setCurrentMenuIndex={setCurrentMenuIndex}
-              options={{ itemClassName: 'home-brick' }}
+              options={{
+                itemClassName: 'home-brick',
+                actions: {
+                  WALLET: () => navigate('wallet'),
+                  TOKENS: () => navigate('accounts'),
+                  SOFI: () => navigate('sofi'),
+                  CONTACTS: () => navigate('contacts'),
+                  STORAGE: () => navigate('storage'),
+                  SETTINGS: () => navigate('settings'),
+                },
+              }}
             />
             <StatusText lines={buildHomeStatusLines({ appState, soundEnabled, error })} />
             {showLockPrompt ? (

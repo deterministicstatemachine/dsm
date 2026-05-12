@@ -164,27 +164,24 @@ pub fn advance_system_chain_tip(
         ));
     }
 
-    let last_state_number: Option<u64> = tx
-        .query_row(
-            "SELECT source_state_number
-               FROM system_peer_events
-              WHERE peer_key = ?1
-              ORDER BY created_at DESC, rowid DESC
-              LIMIT 1",
-            params![peer_key],
-            |row| Ok(row.get::<_, i64>(0)? as u64),
-        )
-        .optional()?;
-    if let Some(last_state_number) = last_state_number {
-        if source_state_number <= last_state_number {
-            return Err(anyhow!(
-                "System peer {} must advance monotonically: {} <= {}",
-                peer_key,
-                source_state_number,
-                last_state_number
-            ));
-        }
-    }
+    // Per §4.3 there is no `state_number` — the prior monotonic check that
+    // required `source_state_number > last_state_number` was a residual
+    // counter-check from before the §4.3 refactor. Callers (e.g.
+    // wallet_sdk::execute_faucet) were passing `state.hash[0] as u64` as
+    // the "state number" — a value in [0,255] that does not monotonically
+    // increase across state transitions. Beta testers on Pixel 9 hit this
+    // when a new state's hash[0] happened to be ≤ a prior advance's hash[0]
+    // (e.g. 2 ≤ 17), permanently bricking faucet claims.
+    //
+    // Chain integrity is already enforced structurally below:
+    //   - `expected_parent_tip == current_chain_tip` (the caller must know
+    //     the current head — no third party can fake a parent),
+    //   - `last_child_tip == parent_tip` (the event log is append-only and
+    //     parent-chain consistent).
+    // Together these provide the §4.3 hash-adjacency guarantee without any
+    // counter. The `source_state_number` column in system_peer_events is
+    // retained as advisory audit metadata only; it is stored on insert but
+    // never gates acceptance.
 
     let last_child_tip: Option<Vec<u8>> = tx
         .query_row(
@@ -702,7 +699,12 @@ mod tests {
 
     #[test]
     #[serial]
-    fn advance_rejects_non_monotonic_state_number() {
+    fn advance_accepts_non_monotonic_state_number_per_section_4_3() {
+        // Per §4.3 there is no state_number; the prior monotonic check on
+        // source_state_number was a residual counter check that bricked
+        // beta-tester faucet claims when `state.hash[0]` happened to fall
+        // (e.g. 2 ≤ 17). Chain integrity is enforced structurally via
+        // expected_parent_tip + last_child_tip matching, not via a counter.
         init_test_db();
         let peer = make_peer("dlv", SystemPeerType::Dlv);
         store_system_peer(&peer).unwrap();
@@ -717,8 +719,11 @@ mod tests {
         )
         .unwrap();
 
+        // source_state_number going DOWN (5 -> 3) must succeed now that the
+        // §4.3 violation is removed. The advance is only blocked by parent-tip
+        // mismatch or other structural violations.
         let parent: [u8; 32] = e1.child_tip.try_into().unwrap();
-        let err = advance_system_chain_tip(
+        let e2 = advance_system_chain_tip(
             "dlv",
             SystemPeerType::Dlv,
             &parent,
@@ -726,8 +731,9 @@ mod tests {
             &[0xBB; 32],
             3,
         )
-        .unwrap_err();
-        assert!(err.to_string().contains("monotonically"));
+        .expect("non-monotonic source_state_number must succeed (§4.3)");
+        assert_eq!(e2.parent_tip, parent.to_vec());
+        assert_eq!(e2.source_state_number, 3);
     }
 
     #[test]

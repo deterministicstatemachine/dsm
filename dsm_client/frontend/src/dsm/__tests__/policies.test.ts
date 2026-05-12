@@ -1,8 +1,14 @@
 jest.mock('../WebViewBridge', () => ({
-  appRouterInvokeBin: jest.fn(),
+  routerInvokeBin: jest.fn(),
   getTokenPolicyBytes: jest.fn(),
   listCachedTokenPolicies: jest.fn(),
   publishTokenPolicyBytes: jest.fn(),
+}));
+
+jest.mock('../events', () => ({
+  emitWalletRefresh: jest.fn(),
+  emitBilateralCommitted: jest.fn(),
+  DSM_WALLET_REFRESH_EVENT: 'dsm-wallet-refresh',
 }));
 
 import * as pb from '../../proto/dsm_app_pb';
@@ -15,7 +21,7 @@ import {
   publishTokenPolicy,
 } from '../policies';
 import {
-  appRouterInvokeBin,
+  routerInvokeBin,
   getTokenPolicyBytes as getTokenPolicyBytesBridge,
   listCachedTokenPolicies,
   publishTokenPolicyBytes as publishTokenPolicyBytesBridge,
@@ -88,7 +94,7 @@ describe('policies.ts', () => {
           }),
         },
       });
-      (appRouterInvokeBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
+      (routerInvokeBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
 
       const result = await createToken({
         ticker: 'MTK',
@@ -109,7 +115,7 @@ describe('policies.ts', () => {
         version: 3,
         payload: { case: 'error', value: new pb.Error({ message: 'token exists' }) },
       });
-      (appRouterInvokeBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
+      (routerInvokeBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
 
       const result = await createToken({
         ticker: 'DUP',
@@ -145,7 +151,7 @@ describe('policies.ts', () => {
           value: new pb.TokenCreateResponse({ success: true, tokenId: 'FT', policyAnchor: anchor as any }),
         },
       });
-      (appRouterInvokeBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
+      (routerInvokeBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
 
       const result = await createToken({
         ticker: 'FT',
@@ -154,6 +160,67 @@ describe('policies.ts', () => {
         maxSupply: '5000',
       });
       expect(result.success).toBe(true);
+    });
+
+    test('emits wallet refresh on successful creation', async () => {
+      const { emitWalletRefresh } = jest.requireMock('../events');
+      const anchor = new Uint8Array(32).fill(0xDA);
+      (publishTokenPolicyBytesBridge as jest.Mock).mockResolvedValue(anchor);
+
+      const env = new pb.Envelope({
+        version: 3,
+        payload: {
+          case: 'tokenCreateResponse',
+          value: new pb.TokenCreateResponse({
+            success: true,
+            tokenId: 'NEWTOK',
+            policyAnchor: anchor as any,
+          }),
+        },
+      });
+      (routerInvokeBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
+
+      await createToken({
+        ticker: 'NEW',
+        alias: 'New Token',
+        decimals: 6,
+        maxSupply: '10000',
+      });
+      expect(emitWalletRefresh).toHaveBeenCalledTimes(1);
+      expect(emitWalletRefresh).toHaveBeenCalledWith(
+        expect.objectContaining({
+          source: 'token.create',
+          tokenId: 'NEWTOK',
+        }),
+      );
+    });
+
+    test('does NOT emit wallet refresh when core returns success=false', async () => {
+      const { emitWalletRefresh } = jest.requireMock('../events');
+      const anchor = new Uint8Array(32).fill(0xDB);
+      (publishTokenPolicyBytesBridge as jest.Mock).mockResolvedValue(anchor);
+
+      const env = new pb.Envelope({
+        version: 3,
+        payload: {
+          case: 'tokenCreateResponse',
+          value: new pb.TokenCreateResponse({
+            success: false,
+            tokenId: '',
+            policyAnchor: anchor as any,
+            message: 'rejected',
+          }),
+        },
+      });
+      (routerInvokeBin as jest.Mock).mockResolvedValue(frameEnvelope(env));
+
+      await createToken({
+        ticker: 'BAD',
+        alias: 'Bad Token',
+        decimals: 0,
+        maxSupply: '1',
+      });
+      expect(emitWalletRefresh).not.toHaveBeenCalled();
     });
   });
 

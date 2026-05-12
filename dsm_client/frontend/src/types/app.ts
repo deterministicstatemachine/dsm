@@ -16,9 +16,13 @@ export type ScreenType =
   | 'dev_dlv'
   | 'dev_cdbrw'
   | 'dev_policy'
-  | 'dev_detfi_launch'
+  | 'dev_sofi_launch'
+  | 'sofi'
+  | 'liquidity'
+  | 'mail'
   | 'bluetooth'
   | 'vault'
   | 'lock_setup'
   | 'recovery'
-  | 'nfc_recovery';
+  | 'nfc_recovery'
+  | 'recovery_pipeline';

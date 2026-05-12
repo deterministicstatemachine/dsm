@@ -218,6 +218,71 @@ pub extern "C" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_isBleAddressPaired
     )
 }
 
+/// JNI external: Resolve persisted contact identity for a BLE address.
+/// Returns 64 bytes ordered as [device_id(32)][genesis_hash(32)], or empty if unknown.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "C" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_resolvePeerIdentityForBleAddressBin(
+    mut env: jni::JNIEnv,
+    _class: jni::objects::JClass,
+    address_jstring: jni::sys::jstring,
+) -> jni::sys::jbyteArray {
+    crate::jni::bridge_utils::jni_catch_unwind_jbytearray(
+        "resolvePeerIdentityForBleAddressBin",
+        std::panic::AssertUnwindSafe(|| {
+            use jni::objects::JString;
+
+            let address_obj = unsafe { JString::from_raw(address_jstring) };
+            let address: String = match env.get_string(&address_obj) {
+                Ok(js) => js.into(),
+                Err(e) => {
+                    log::warn!(
+                        "[JNI] resolvePeerIdentityForBleAddressBin: failed to convert address: {}",
+                        e
+                    );
+                    return env
+                        .byte_array_from_slice(&[])
+                        .map(|a| a.into_raw())
+                        .unwrap_or(std::ptr::null_mut());
+                }
+            };
+
+            let Some(contact) = crate::storage::client_db::get_contact_by_ble_address(&address)
+                .ok()
+                .flatten()
+            else {
+                return env
+                    .byte_array_from_slice(&[])
+                    .map(|a| a.into_raw())
+                    .unwrap_or(std::ptr::null_mut());
+            };
+
+            if contact.device_id.len() != 32 || contact.genesis_hash.len() != 32 {
+                log::warn!(
+                    "[JNI] resolvePeerIdentityForBleAddressBin: invalid contact identity lengths device_id={} genesis_hash={}",
+                    contact.device_id.len(),
+                    contact.genesis_hash.len()
+                );
+                return env
+                    .byte_array_from_slice(&[])
+                    .map(|a| a.into_raw())
+                    .unwrap_or(std::ptr::null_mut());
+            }
+
+            let mut device_id = [0u8; 32];
+            device_id.copy_from_slice(&contact.device_id);
+            crate::jni::state::register_ble_address_mapping(&device_id, &address);
+
+            let mut out = Vec::with_capacity(64);
+            out.extend_from_slice(&contact.device_id);
+            out.extend_from_slice(&contact.genesis_hash);
+            env.byte_array_from_slice(&out)
+                .map(|a| a.into_raw())
+                .unwrap_or(std::ptr::null_mut())
+        }),
+    )
+}
+
 /// JNI external: Check if an envelope contains a BilateralCommit operation.
 /// Used by DsmBluetoothService to detect commit envelopes and trigger retransmission.
 #[cfg(target_os = "android")]
@@ -232,7 +297,6 @@ pub extern "C" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_isCommitEnvelope(
         std::panic::AssertUnwindSafe(|| {
             use jni::objects::JByteArray;
             use jni::sys::{JNI_FALSE, JNI_TRUE};
-            use prost::Message;
 
             let envelope_obj = unsafe { JByteArray::from_raw(envelope_bytes) };
             let bytes = match env.convert_byte_array(envelope_obj) {
@@ -247,7 +311,7 @@ pub extern "C" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_isCommitEnvelope(
             };
 
             // Decode envelope
-            let envelope = match crate::generated::Envelope::decode(&bytes[..]) {
+            let envelope = match crate::envelope::from_canonical_bytes(&bytes[..]) {
                 Ok(e) => e,
                 Err(e) => {
                     log::debug!("[JNI] isCommitEnvelope: failed to decode envelope: {}", e);
@@ -287,7 +351,6 @@ pub extern "C" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_isRejectEnvelope(
         "isRejectEnvelope",
         std::panic::AssertUnwindSafe(|| {
             use jni::objects::JByteArray;
-            use prost::Message;
 
             let envelope_obj = unsafe { JByteArray::from_raw(envelope_bytes) };
             let bytes = match env.convert_byte_array(envelope_obj) {
@@ -304,7 +367,7 @@ pub extern "C" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_isRejectEnvelope(
                 }
             };
 
-            let envelope = match crate::generated::Envelope::decode(&bytes[..]) {
+            let envelope = match crate::envelope::from_canonical_bytes(&bytes[..]) {
                 Ok(e) => e,
                 Err(e) => {
                     log::debug!("[JNI] isRejectEnvelope: failed to decode envelope: {}", e);

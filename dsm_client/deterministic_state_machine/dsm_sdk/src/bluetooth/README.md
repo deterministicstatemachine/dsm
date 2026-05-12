@@ -1,6 +1,6 @@
 # Canonical Android BLE Bridge (Offline Bilateral Path)
 
-## Status: ACTIVE – Single, enforced path
+## Status: ACTIVE - Single, enforced path
 
 This directory contains the ONLY permitted Bluetooth Low Energy (BLE) integration for DSM. All previous multi-module / exploratory stacks (discovery, connection managers, messaging layers, bluetooth_impl, retry schedulers) have been permanently removed and are CI‑guarded against resurrection.
 
@@ -32,9 +32,9 @@ core bilateral manager       // Forward-only state updates
 - Forward-only chain progression; no rollback / fork semantics
 - Protocol semantics are clockless: wall-clock must never affect envelope contents, commitment bytes, chain ordering, or acceptance.
 - BLE transport/runtime may use wall-clock timers for handshake freshness, ACK timeout, reconnect backoff, pacing, reassembly expiry, and idle session cleanup.
-- No JSON / Base64 / hex application framing – raw protobuf bytes only
+- No JSON / Base64 / hex application framing - raw protobuf bytes only
 - No deprecated modules or symbols (`BluetoothConnectionManager`, `BluetoothMessaging`, `BluetoothDiscovery`, etc.)
-- Commitment hash produced directly at preparation step (BLAKE3 precommitment) – no heuristic session scans
+- Commitment hash produced directly at preparation step (BLAKE3 precommitment) - no heuristic session scans
 
 ## CI Enforcement
 
@@ -64,7 +64,7 @@ Extend only via the handler or coordinator with protobuf-compatible frame types.
 
 ## Security & Integrity Notes
 
-- All cryptographic commitments must originate from the bilateral transaction manager – do not recompute externally.
+- All cryptographic commitments must originate from the bilateral transaction manager - do not recompute externally.
 - Do not introduce alternative hashing or envelope versions without updating global contracts.
 
 ## Maintenance

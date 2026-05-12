@@ -9,7 +9,12 @@ import kotlinx.coroutines.withTimeoutOrNull
 internal object UnifiedBleBridge {
 
     private var bleCoordinator: BleCoordinator? = null
-    private const val TX_RESPONSE_SUBSCRIBE_MAX_ATTEMPTS = 3
+    // Bumped from 3 → 8 because slower phones (e.g. mid-tier non-Samsung)
+    // can take ~1.8s to complete GATT service discovery after the connect
+    // event. With 200ms*attempt backoff, 3 attempts only span 1.2s and abort
+    // before `responseCharacteristic` becomes non-null. 8 attempts span
+    // ~5.6s of backoff — comfortably above observed discovery latency.
+    private const val TX_RESPONSE_SUBSCRIBE_MAX_ATTEMPTS = 8
     private const val TX_RESPONSE_SUBSCRIBE_TIMEOUT_MS = 2500L
 
     private fun sendViaActiveClientSession(

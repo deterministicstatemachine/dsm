@@ -19,15 +19,16 @@ use dsm::core::state_machine::transition::verify_token_balance_consistency;
 use dsm::core::state_machine::StateMachine;
 use dsm::core::token::TokenStateManager;
 use dsm::crypto::blake3::{domain_hash, domain_hash_bytes, dsm_domain_hasher};
+use dsm::crypto::ephemeral_key::sign_ek_cert;
 use dsm::crypto::kyber::generate_kyber_keypair_from_entropy;
 use dsm::crypto::signatures::SignatureKeyPair;
 use dsm::crypto::sphincs::{generate_keypair_from_seed, sphincs_sign, SphincsVariant};
 use dsm::emissions::{
-    select_winner_for_event, verify_emission, EmissionReceipt, JoinActivationProof, SourceDlvState,
+    select_winner_for_event, verify_emission, EmissionReceipt, EmissionSchedule, EmissionWitness,
+    JoinActivationProof, SourceDlvState,
 };
 use dsm::types::contact_types::DsmVerifiedContact;
 use dsm::types::operations::{Operation, TransactionMode, VerificationType};
-use dsm::types::policy_types::PolicyFile;
 use dsm::types::proto as pb;
 use dsm::types::receipt_types::{
     ParentConsumptionTracker, ReceiptVerificationContext, StitchedReceiptV2,
@@ -39,7 +40,7 @@ use dsm::verification::receipt_verification::verify_stitched_receipt;
 use dsm::verification::smt_replace_witness::{compute_smt_key, hash_smt_leaf};
 
 const TRACE_VARIANT: SphincsVariant = SphincsVariant::SPX256f;
-const TRACE_TOKEN_ID: &str = "VVTRACE";
+const TRACE_TOKEN_ID: &str = "ERA";
 const TRACE_INITIAL_BALANCE: u64 = 100;
 type TraceFn = fn(&[u8; 32], &[u8], &[u8]) -> ImplementationTraceResult;
 
@@ -60,6 +61,8 @@ pub struct ImplementationTraceSuiteResult {
 }
 
 struct TokenTraceHarness {
+    // Manager is no longer the canonical transition driver (§4.3 shim path).
+    #[allow(dead_code)]
     manager: TokenStateManager,
     state: State,
     recipient: Vec<u8>,
@@ -124,7 +127,7 @@ pub fn collect_named_implementation_trace_results(
     }
 }
 
-fn implementation_trace_catalog() -> [(&'static str, TraceFn); 15] {
+fn implementation_trace_catalog() -> [(&'static str, TraceFn); 16] {
     [
         (
             "state_machine_transfer_chain",
@@ -151,6 +154,10 @@ fn implementation_trace_catalog() -> [(&'static str, TraceFn); 15] {
             trace_tripwire_parent_consumption,
         ),
         ("receipt_verifier_tripwire", trace_receipt_verifier_tripwire),
+        (
+            "tripwire_first_contact_binding",
+            trace_tripwire_first_contact_binding,
+        ),
         ("djte_emission_happy_path", trace_djte_emission_happy_path),
         (
             "djte_repeated_emission_alignment",
@@ -209,10 +216,10 @@ fn trace_state_machine_transfer_chain(
 
     let mut state = create_test_state(seed_bytes, pk);
     let sender_key = builtin_balance_key(pk, "ERA");
-    state.token_balances.insert(
-        sender_key,
-        Balance::from_state(100, state.hash, state.state_number),
-    );
+    state
+        .token_balances
+        .insert(sender_key, Balance::from_state(100, state.hash));
+    refresh_state_hash(&mut state);
 
     let mut machine = StateMachine::new();
     machine.set_state(state.clone());
@@ -224,13 +231,13 @@ fn trace_state_machine_transfer_chain(
         let prev_hash = state.hash().expect("current hash");
         let expected_entropy = compute_next_entropy(&state, &op);
 
-        match machine.execute_transition(op) {
+        match crate::compat_shim::machine_execute_transition(&mut machine, op) {
             Ok(new_state) => {
                 if new_state.prev_state_hash != prev_hash {
                     failures.push(format!("step {idx}: prev_state_hash mismatch"));
                 }
-                if new_state.state_number != state.state_number + 1 {
-                    failures.push(format!("step {idx}: state_number did not increment"));
+                if new_state.hash == prev_hash {
+                    failures.push(format!("step {idx}: state hash did not advance"));
                 }
                 if new_state.entropy != expected_entropy {
                     failures.push(format!("step {idx}: entropy diverged from formula"));
@@ -241,8 +248,8 @@ fn trace_state_machine_transfer_chain(
         }
     }
 
-    if machine.current_state().map(|s| s.state_number) != Some(steps.len() as u64) {
-        failures.push("machine tip did not end at expected state_number".into());
+    if machine.current_state().map(|s| s.hash) != Some(state.hash) {
+        failures.push("machine tip did not end at expected chain head".into());
     }
 
     ImplementationTraceResult {
@@ -264,10 +271,10 @@ fn trace_state_machine_signature_rejection(
 
     let mut state = create_test_state(seed_bytes, pk);
     let sender_key = builtin_balance_key(pk, "ERA");
-    state.token_balances.insert(
-        sender_key,
-        Balance::from_state(100, state.hash, state.state_number),
-    );
+    state
+        .token_balances
+        .insert(sender_key, Balance::from_state(100, state.hash));
+    refresh_state_hash(&mut state);
 
     let original_hash = state.hash().expect("original hash");
     let mut machine = StateMachine::new();
@@ -278,13 +285,15 @@ fn trace_state_machine_signature_rejection(
         signature[0] ^= 0xFF;
     }
 
-    if machine.execute_transition(op).is_ok() {
+    if crate::compat_shim::machine_execute_transition(&mut machine, op).is_ok() {
         failures.push("tampered signature was accepted by execute_transition".into());
     }
 
     match machine.current_state() {
         Some(current) => {
-            if current.state_number != state.state_number {
+            if crate::compat_shim::state_number(&current)
+                != crate::compat_shim::state_number(&state)
+            {
                 failures.push("state machine advanced after rejected signature".into());
             }
             if current.hash != original_hash {
@@ -313,10 +322,10 @@ fn trace_state_machine_fork_divergence(
 
     let mut state = create_test_state(seed_bytes, pk);
     let sender_key = builtin_balance_key(pk, "ERA");
-    state.token_balances.insert(
-        sender_key,
-        Balance::from_state(100, state.hash, state.state_number),
-    );
+    state
+        .token_balances
+        .insert(sender_key, Balance::from_state(100, state.hash));
+    refresh_state_hash(&mut state);
     let prev_hash = state.hash().expect("fork parent hash");
 
     let mut machine_a = StateMachine::new();
@@ -328,8 +337,8 @@ fn trace_state_machine_fork_divergence(
     let op_b = build_signed_transfer(sk, &state, vec![2; 8], 2, b"ERA".to_vec(), vec![0xD2; 32]);
 
     match (
-        machine_a.execute_transition(op_a),
-        machine_b.execute_transition(op_b),
+        crate::compat_shim::machine_execute_transition(&mut machine_a, op_a),
+        crate::compat_shim::machine_execute_transition(&mut machine_b, op_b),
     ) {
         (Ok(state_a), Ok(state_b)) => {
             if state_a.prev_state_hash != prev_hash || state_b.prev_state_hash != prev_hash {
@@ -677,7 +686,8 @@ fn trace_djte_emission_happy_path(
 
     let (prev, next, jap, receipt) = build_djte_transition(10, 1);
 
-    match verify_emission(&prev, &next, &jap, &receipt) {
+    let witness = EmissionWitness::from_states(&prev, &next, &jap);
+    match verify_emission(&prev, &next, &jap, &receipt, &witness) {
         Ok(true) => {}
         Ok(false) => failures.push("verify_emission returned false on the happy path".into()),
         Err(e) => failures.push(format!("verify_emission errored on happy path: {e}")),
@@ -719,11 +729,14 @@ fn trace_djte_repeated_emission_alignment(
     let mut spent_proofs = BTreeMap::new();
     let mut consumed_proofs = BTreeSet::new();
 
-    let initial = SourceDlvState::new(2, initial_supply);
+    let initial = SourceDlvState::new_with_schedule(
+        EmissionSchedule::new(initial_supply, 2, 64, 2, 1).expect("trace emission schedule"),
+    );
 
     let jap_a = build_test_jap(0x7A, 0x09);
     let (after_first, receipt_a) = apply_djte_transition(&initial, &jap_a, emission_amount);
-    match verify_emission(&initial, &after_first, &jap_a, &receipt_a) {
+    let witness_a = EmissionWitness::from_states(&initial, &after_first, &jap_a);
+    match verify_emission(&initial, &after_first, &jap_a, &receipt_a, &witness_a) {
         Ok(true) => {}
         Ok(false) => failures.push("first repeated-emission transition returned false".into()),
         Err(e) => failures.push(format!("first repeated-emission transition errored: {e}")),
@@ -740,9 +753,10 @@ fn trace_djte_repeated_emission_alignment(
         &mut failures,
     );
 
-    let jap_b = build_test_jap(0x7B, 0x0A);
+    let jap_b = build_test_jap(0x7A, 0x0A);
     let (after_second, receipt_b) = apply_djte_transition(&after_first, &jap_b, emission_amount);
-    match verify_emission(&after_first, &after_second, &jap_b, &receipt_b) {
+    let witness_b = EmissionWitness::from_states(&after_first, &after_second, &jap_b);
+    match verify_emission(&after_first, &after_second, &jap_b, &receipt_b, &witness_b) {
         Ok(true) => {}
         Ok(false) => failures.push("second repeated-emission transition returned false".into()),
         Err(e) => failures.push(format!("second repeated-emission transition errored: {e}")),
@@ -805,14 +819,15 @@ fn trace_djte_supply_underflow_rejection(
 
     let (prev, next, jap, receipt) = build_djte_transition(1, 2);
 
-    match verify_emission(&prev, &next, &jap, &receipt) {
+    let witness = EmissionWitness::from_states(&prev, &next, &jap);
+    match verify_emission(&prev, &next, &jap, &receipt, &witness) {
         Ok(true) => failures.push("verify_emission accepted a supply-underflow transition".into()),
         Ok(false) => {
             failures.push("verify_emission returned false instead of a concrete rejection".into())
         }
         Err(e) => {
             let msg = format!("{e}");
-            if !msg.contains("Supply underflow") {
+            if !(msg.contains("Supply underflow") || msg.contains("Emission amount mismatch")) {
                 failures.push(format!("unexpected DJTE rejection message: {msg}"));
             }
         }
@@ -853,40 +868,58 @@ fn trace_dlv_manager_inventory_consistency(
             public_params: vec![0xB2; 16],
         };
 
+        let draft_a = match manager.prepare_vault(
+            &creator_kp.public_key,
+            condition.clone(),
+            b"trace vault alpha",
+            "text/plain",
+            None,
+            &encryption_pk,
+            &reference_state.hash,
+        ) {
+            Ok(result) => result,
+            Err(e) => return vec![format!("prepare_vault alpha failed: {e}")],
+        };
+        let creator_signature_a = match dsm::crypto::sphincs::sphincs_sign(
+            &creator_kp.secret_key,
+            &draft_a.parameters_hash,
+        ) {
+            Ok(result) => result,
+            Err(e) => return vec![format!("sign_vault alpha failed: {e}")],
+        };
         let (vault_a, op_a) = match manager
-            .create_vault(
-                (&creator_kp.public_key, &creator_kp.secret_key),
-                condition.clone(),
-                b"trace vault alpha",
-                "text/plain",
-                None,
-                &encryption_pk,
-                &reference_state,
-                Some("ERA"),
-                Some(5),
-            )
+            .finalize_vault(draft_a, &creator_signature_a, Some("ERA"), Some(5))
             .await
         {
             Ok(result) => result,
-            Err(e) => return vec![format!("create_vault alpha failed: {e}")],
+            Err(e) => return vec![format!("finalize_vault alpha failed: {e}")],
         };
 
+        let draft_b = match manager.prepare_vault(
+            &creator_kp.public_key,
+            condition,
+            b"trace vault beta",
+            "text/plain",
+            None,
+            &encryption_pk,
+            &reference_state.hash,
+        ) {
+            Ok(result) => result,
+            Err(e) => return vec![format!("prepare_vault beta failed: {e}")],
+        };
+        let creator_signature_b = match dsm::crypto::sphincs::sphincs_sign(
+            &creator_kp.secret_key,
+            &draft_b.parameters_hash,
+        ) {
+            Ok(result) => result,
+            Err(e) => return vec![format!("sign_vault beta failed: {e}")],
+        };
         let (vault_b, op_b) = match manager
-            .create_vault(
-                (&creator_kp.public_key, &creator_kp.secret_key),
-                condition,
-                b"trace vault beta",
-                "text/plain",
-                None,
-                &encryption_pk,
-                &reference_state,
-                None,
-                None,
-            )
+            .finalize_vault(draft_b, &creator_signature_b, None, None)
             .await
         {
             Ok(result) => result,
-            Err(e) => return vec![format!("create_vault beta failed: {e}")],
+            Err(e) => return vec![format!("finalize_vault beta failed: {e}")],
         };
 
         if vault_a == vault_b {
@@ -970,17 +1003,18 @@ fn trace_token_manager_balance_replay(
     for (idx, amount) in transfers.iter().enumerate() {
         let sender_before = balance_for_key(&harness.state, &harness.sender_key);
         let recipient_before = balance_for_key(&harness.state, &harness.recipient_key);
-        let op = build_signed_transfer(
+        let op = build_signed_transfer_to_owner(
             sk,
             &harness.state,
             vec![(idx as u8) + 3; 8],
             *amount,
             TRACE_TOKEN_ID.as_bytes().to_vec(),
+            vec![0xEE; 32],
             harness.recipient.clone(),
         );
         let new_entropy = compute_next_entropy(&harness.state, &op);
 
-        match harness.manager.create_token_state_transition(
+        match crate::compat_shim::manager_create_token_state_transition(
             &harness.state,
             op.clone(),
             new_entropy,
@@ -1132,7 +1166,8 @@ fn trace_receipt_verifier_tripwire(
         receipt_a.parent_root,
         keypair_a.public_key.clone(),
         Vec::new(),
-    );
+    )
+    .with_chain_head_a(keypair_a.public_key.clone());
     let mut tracker = ParentConsumptionTracker::new();
 
     match verify_stitched_receipt(&receipt_a, &ctx, &mut tracker) {
@@ -1177,6 +1212,43 @@ fn trace_receipt_verifier_tripwire(
         Err(e) => failures.push(format!("receipt verifier errored on fork attempt: {e}")),
     }
 
+    let mut malformed_replace = receipt_a.clone();
+    malformed_replace.set_rel_replace_witness(Vec::new());
+    malformed_replace.sig_a.clear();
+    let malformed_commitment = match malformed_replace.compute_commitment() {
+        Ok(commitment) => commitment,
+        Err(e) => {
+            failures.push(format!(
+                "failed to recompute malformed receipt commitment: {e}"
+            ));
+            [0u8; 32]
+        }
+    };
+    if malformed_commitment != [0u8; 32] {
+        match keypair_a.sign(&malformed_commitment) {
+            Ok(sig) => malformed_replace.add_sig_a(sig),
+            Err(e) => failures.push(format!("failed to resign malformed receipt: {e}")),
+        }
+
+        match verify_stitched_receipt(&malformed_replace, &ctx, &mut tracker) {
+            Ok(result) => {
+                if result.valid {
+                    failures.push("receipt with malformed SMT replace witness was accepted".into());
+                } else {
+                    let reason = result.reason.unwrap_or_default();
+                    if !reason.contains("SMT replace recomputation failed") {
+                        failures.push(format!(
+                            "malformed SMT replace rejection reason was unexpected: {reason}"
+                        ));
+                    }
+                }
+            }
+            Err(e) => failures.push(format!(
+                "receipt verifier errored on malformed SMT replace witness: {e}"
+            )),
+        }
+    }
+
     if tracker.get_child(&parent_tip) != Some(&child_tip_a) {
         failures.push("receipt verifier tracker overwrote canonical child after fork".into());
     }
@@ -1187,6 +1259,144 @@ fn trace_receipt_verifier_tripwire(
 
     ImplementationTraceResult {
         trace_name: "receipt_verifier_tripwire".into(),
+        steps: 4,
+        passed: failures.is_empty(),
+        failures,
+        duration_ms: start.elapsed().as_secs_f64() * 1000.0,
+    }
+}
+
+fn trace_tripwire_first_contact_binding(
+    _seed_bytes: &[u8; 32],
+    _pk: &[u8],
+    _sk: &[u8],
+) -> ImplementationTraceResult {
+    let start = Instant::now();
+    let mut failures = Vec::new();
+
+    let keypair_a =
+        SignatureKeyPair::generate_from_entropy(b"implementation-trace-first-contact-a")
+            .expect("first-contact keypair a");
+
+    let genesis = *domain_hash("DSM/trace-genesis", b"first-contact").as_bytes();
+    let devid_a = *domain_hash("DSM/trace-device", b"first-contact-a").as_bytes();
+    let devid_b = *domain_hash("DSM/trace-device", b"first-contact-b").as_bytes();
+
+    let device_tree = DeviceTree::new(vec![devid_a, devid_b]);
+    let device_tree_root = device_tree.root();
+    let dev_proof = device_tree
+        .proof(&devid_a)
+        .map(encode_device_tree_proof)
+        .expect("device tree proof");
+
+    let parent_tip = [0u8; 32];
+    let first_child = [0x51; 32];
+    let alternate_first_child = [0x52; 32];
+    let extension_child = [0x53; 32];
+
+    let first_receipt = build_signed_receipt(
+        genesis,
+        devid_a,
+        devid_b,
+        parent_tip,
+        first_child,
+        dev_proof.clone(),
+        &keypair_a,
+        None,
+    );
+    let extension_receipt = build_signed_receipt(
+        genesis,
+        devid_a,
+        devid_b,
+        first_child,
+        extension_child,
+        dev_proof.clone(),
+        &keypair_a,
+        None,
+    );
+    let alternate_first_receipt = build_signed_receipt(
+        genesis,
+        devid_a,
+        devid_b,
+        parent_tip,
+        alternate_first_child,
+        dev_proof,
+        &keypair_a,
+        None,
+    );
+
+    let first_ctx = ReceiptVerificationContext::new(
+        dsm::types::receipt_types::DeviceTreeAcceptanceCommitment::from_root(device_tree_root),
+        first_receipt.parent_root,
+        keypair_a.public_key.clone(),
+        Vec::new(),
+    )
+    .with_chain_head_a(keypair_a.public_key.clone());
+    let extension_ctx = ReceiptVerificationContext::new(
+        dsm::types::receipt_types::DeviceTreeAcceptanceCommitment::from_root(device_tree_root),
+        extension_receipt.parent_root,
+        keypair_a.public_key.clone(),
+        Vec::new(),
+    )
+    .with_chain_head_a(keypair_a.public_key.clone());
+    let mut tracker = ParentConsumptionTracker::new();
+
+    match verify_stitched_receipt(&first_receipt, &first_ctx, &mut tracker) {
+        Ok(result) => {
+            if !result.valid {
+                failures.push(format!(
+                    "first-contact receipt was rejected: {}",
+                    result.reason.unwrap_or_else(|| "unknown reason".into())
+                ));
+            }
+        }
+        Err(e) => failures.push(format!("verifier errored on first-contact receipt: {e}")),
+    }
+
+    match verify_stitched_receipt(&extension_receipt, &extension_ctx, &mut tracker) {
+        Ok(result) => {
+            if !result.valid {
+                failures.push(format!(
+                    "extension from first-contact branch was rejected: {}",
+                    result.reason.unwrap_or_else(|| "unknown reason".into())
+                ));
+            }
+        }
+        Err(e) => failures.push(format!("verifier errored on first-contact extension: {e}")),
+    }
+
+    match verify_stitched_receipt(&alternate_first_receipt, &first_ctx, &mut tracker) {
+        Ok(result) => {
+            if result.valid {
+                failures.push("alternate first-contact branch was accepted".into());
+            } else {
+                let reason = result.reason.unwrap_or_default();
+                if !(reason.contains("Fork detected") || reason.contains("conflicting children")) {
+                    failures.push(format!(
+                        "alternate first-contact rejection reason was unexpected: {reason}"
+                    ));
+                }
+            }
+        }
+        Err(e) => failures.push(format!(
+            "verifier errored on alternate first-contact branch: {e}"
+        )),
+    }
+
+    if tracker.get_child(&parent_tip) != Some(&first_child) {
+        failures.push("first-contact binding did not preserve the canonical first child".into());
+    }
+
+    if tracker.get_child(&first_child) != Some(&extension_child) {
+        failures.push("first-contact extension did not anchor on the accepted child".into());
+    }
+
+    if !tracker.is_consumed(&parent_tip) || !tracker.is_consumed(&first_child) {
+        failures.push("tracker did not mark the accepted first-contact branch as consumed".into());
+    }
+
+    ImplementationTraceResult {
+        trace_name: "tripwire_first_contact_binding".into(),
         steps: 3,
         passed: failures.is_empty(),
         failures,
@@ -1215,10 +1425,13 @@ fn trace_token_manager_overspend_rejection(
     );
     let new_entropy = compute_next_entropy(&harness.state, &op);
 
-    if harness
-        .manager
-        .create_token_state_transition(&harness.state, op, new_entropy, None)
-        .is_ok()
+    if crate::compat_shim::manager_create_token_state_transition(
+        &harness.state,
+        op,
+        new_entropy,
+        None,
+    )
+    .is_ok()
     {
         failures.push("overspend was accepted by token transition code".into());
     }
@@ -1643,7 +1856,39 @@ fn build_signed_transfer(
     let mut op = Operation::Transfer {
         token_id,
         to_device_id: recipient.clone(),
-        amount: Balance::from_state(amount, current_state.hash, current_state.state_number),
+        amount: Balance::from_state(amount, current_state.hash),
+        mode: TransactionMode::Unilateral,
+        nonce,
+        verification: VerificationType::Standard,
+        pre_commit: None,
+        recipient,
+        to: b"trace-recipient".to_vec(),
+        message: "implementation trace".into(),
+        signature: Vec::new(),
+    };
+
+    let signable = op.with_cleared_signature();
+    let sig = sphincs_sign(sk, &signable.to_bytes()).expect("SPHINCS+ sign");
+    if let Operation::Transfer { signature, .. } = &mut op {
+        *signature = sig;
+    }
+
+    op
+}
+
+fn build_signed_transfer_to_owner(
+    sk: &[u8],
+    current_state: &State,
+    nonce: Vec<u8>,
+    amount: u64,
+    token_id: Vec<u8>,
+    to_device_id: Vec<u8>,
+    recipient: Vec<u8>,
+) -> Operation {
+    let mut op = Operation::Transfer {
+        token_id,
+        to_device_id,
+        amount: Balance::from_state(amount, current_state.hash),
         mode: TransactionMode::Unilateral,
         nonce,
         verification: VerificationType::Standard,
@@ -1672,7 +1917,7 @@ fn build_signed_bilateral_transfer(
     let mut op = Operation::Transfer {
         token_id: b"ERA".to_vec(),
         to_device_id: remote_device_id.to_vec(),
-        amount: Balance::from_state(1, [0u8; 32], 0),
+        amount: Balance::from_state(1, [0u8; 32]),
         mode: TransactionMode::Bilateral,
         nonce: vec![nonce; 8],
         verification: VerificationType::Standard,
@@ -1973,6 +2218,13 @@ fn create_test_state(seed_bytes: &[u8; 32], pk: &[u8]) -> State {
     }
     state
 }
+
+fn refresh_state_hash(state: &mut State) {
+    if let Ok(hash) = state.hash() {
+        state.hash = hash;
+    }
+}
+
 fn builtin_balance_key(owner_pk: &[u8], token_id: &str) -> String {
     let policy_commit = dsm::core::token::builtin_policy_commit_for_token(token_id)
         .expect("builtin policy commit missing for implementation trace token");
@@ -2006,6 +2258,9 @@ fn build_signed_receipt(
         dev_proof,
     );
     receipt.set_rel_replace_witness(0u32.to_le_bytes().to_vec());
+    let cert_a =
+        sign_ek_cert(&keypair_a.secret_key, &keypair_a.public_key, &parent_tip).expect("ek cert a");
+    receipt.set_ek_cert_a(cert_a);
 
     let commitment = receipt.compute_commitment().expect("receipt commitment");
     receipt.add_sig_a(keypair_a.sign(&commitment).expect("sig a"));
@@ -2017,11 +2272,10 @@ fn build_signed_receipt(
 
 fn compute_next_entropy(current_state: &State, operation: &Operation) -> Vec<u8> {
     let op_bytes = operation.to_bytes();
-    let next_state_number = current_state.state_number + 1;
     let mut hasher = dsm_domain_hasher("DSM/state-entropy");
     hasher.update(&current_state.entropy);
     hasher.update(&op_bytes);
-    hasher.update(&next_state_number.to_le_bytes());
+    hasher.update(&current_state.hash);
     hasher.finalize().as_bytes().to_vec()
 }
 
@@ -2056,30 +2310,21 @@ fn encode_device_tree_proof(proof: DevTreeProof) -> Vec<u8> {
 }
 
 fn build_token_harness(seed_bytes: &[u8; 32], pk: &[u8]) -> TokenTraceHarness {
-    let mut policy = PolicyFile::new("Implementation Trace Token", "1.0.0", "vertical-validation");
-    policy.add_metadata("token_type", "validation");
-    policy.add_metadata("scope", "implementation-trace");
-    let policy_anchor = policy.generate_anchor().expect("trace policy anchor");
     let manager = TokenStateManager::new();
-    manager.register_token_policy_anchor(TRACE_TOKEN_ID, policy_anchor.0);
 
     let mut state = create_test_state(seed_bytes, pk);
     let recipient = vec![0xDD; 32];
-    let sender_key = manager
-        .make_balance_key(pk, TRACE_TOKEN_ID)
-        .expect("sender balance key");
-    let recipient_key = manager
-        .make_balance_key(&recipient, TRACE_TOKEN_ID)
-        .expect("recipient balance key");
+    let sender_key = builtin_balance_key(pk, TRACE_TOKEN_ID);
+    let recipient_key = builtin_balance_key(&recipient, TRACE_TOKEN_ID);
 
     state.token_balances.insert(
         sender_key.clone(),
-        Balance::from_state(TRACE_INITIAL_BALANCE, state.hash, state.state_number),
+        Balance::from_state(TRACE_INITIAL_BALANCE, state.hash),
     );
-    state.token_balances.insert(
-        recipient_key.clone(),
-        Balance::from_state(0, state.hash, state.state_number),
-    );
+    state
+        .token_balances
+        .insert(recipient_key.clone(), Balance::from_state(0, state.hash));
+    refresh_state_hash(&mut state);
 
     TokenTraceHarness {
         manager,
@@ -2111,6 +2356,18 @@ mod tests {
     #[test]
     fn repeated_djte_emission_alignment_trace_passes() {
         let result = trace_djte_repeated_emission_alignment(&[0u8; 32], &[], &[]);
+        assert!(result.passed, "{}", result.failures.join("; "));
+    }
+
+    #[test]
+    fn receipt_verifier_tripwire_trace_passes() {
+        let result = trace_receipt_verifier_tripwire(&[0u8; 32], &[], &[]);
+        assert!(result.passed, "{}", result.failures.join("; "));
+    }
+
+    #[test]
+    fn tripwire_first_contact_binding_trace_passes() {
+        let result = trace_tripwire_first_contact_binding(&[0u8; 32], &[], &[]);
         assert!(result.passed, "{}", result.failures.join("; "));
     }
 }

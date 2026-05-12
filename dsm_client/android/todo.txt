@@ -1,6 +1,0 @@
-1. Fix `connectToDevice()` blocking the BLE actor lane.
-2. Improve state cleanup in `notifyAdvertiserPairingComplete()` and `closeStaleGattSessions()`.
-3. Standardize `stopScanning()` usage.
-4. Fix `PairingAckReceived` pairing flag clearing.
-5. Make `scanStartTimestamps` thread-safe.
-6. Guard delayed reconnects in `handleSessionEvent(ErrorOccurred)`.

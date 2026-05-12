@@ -5,6 +5,7 @@ import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.dsm.wallet.ui.MainActivity
+import com.google.protobuf.ByteString
 import java.io.File
 import java.io.FileOutputStream
 import org.junit.Assert.assertEquals
@@ -26,6 +27,10 @@ import java.util.Locale
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.CyclicBarrier
 import java.util.concurrent.atomic.AtomicInteger
+import dsm.types.proto.IngressRequest
+import dsm.types.proto.IngressResponse
+import dsm.types.proto.RouterInvokeOp
+import dsm.types.proto.RouterQueryOp
 
 /**
  * ON-DEVICE PROOF: Android Layer Correctness
@@ -369,13 +374,14 @@ class AndroidLayerProofTest {
     }
 
     @Test
-    fun t27_method_appRouterQuery_balanceList() {
+    fun t27_method_nativeBoundaryIngress_routerQuery_balanceList() {
         ensureGenesis()
         claimFaucet()
 
-        val payload = BridgeEnvelopeCodec.encodeAppRouterPayload("balance.list", ByteArray(0))
-        // Wrap in BridgeRpcRequest field 6 (appRouterPayload)
-        val requestBytes = encodeBridgeRpcRequestWithAppRouter("appRouterQuery", payload)
+        val requestBytes = encodeBridgeRpcRequest(
+            "nativeBoundaryIngress",
+            buildRouterQueryIngressRequest("balance.list", ByteArray(0))
+        )
 
         val framedResp = MainActivity.processBridgeRequestForTest(ctx, prependMessageId(100L, requestBytes))
         assertTrue("Must get response", framedResp.size > 8)
@@ -383,24 +389,31 @@ class AndroidLayerProofTest {
 
         val respBody = framedResp.copyOfRange(8, framedResp.size)
         val (isSuccess, data) = BridgeEnvelopeCodec.parseEnvelopeResponse(respBody)
-        assertTrue("appRouterQuery(balance.list) must succeed", isSuccess)
-        assertTrue("Must have reqId + framed envelope", data.size > 8)
-
-        // Strip 8-byte reqId, then decode the rest
-        val innerPayload = data.copyOfRange(8, data.size)
-        assertTrue("Inner payload must be non-empty", innerPayload.isNotEmpty())
+        assertTrue("nativeBoundaryIngress(routerQuery balance.list) must succeed", isSuccess)
+        val ingressResponse = IngressResponse.parseFrom(data)
+        assertEquals(
+            "Ingress response should carry ok bytes",
+            IngressResponse.ResultCase.OK_BYTES,
+            ingressResponse.resultCase
+        )
+        assertTrue("Router query response payload must be non-empty", ingressResponse.okBytes.isNotEmpty())
     }
 
     @Test
-    fun t28_method_appRouterInvoke_prefsGetSet() {
+    fun t28_method_nativeBoundaryIngress_routerInvoke_sessionLock() {
         ensureGenesis()
 
-        // Set a preference via appRouterInvoke
-        val setPayload = BridgeEnvelopeCodec.encodeAppRouterPayload("prefs.set", ByteArray(0))
-        val setReq = encodeBridgeRpcRequestWithAppRouter("appRouterInvoke", setPayload)
+        val setReq = encodeBridgeRpcRequest(
+            "nativeBoundaryIngress",
+            buildRouterInvokeIngressRequest("session.lock", ByteArray(0))
+        )
         val setResp = MainActivity.processBridgeRequestForTest(ctx, prependMessageId(200L, setReq))
         assertTrue("Set response must exist", setResp.size > 8)
         assertEquals("Message ID must match", 200L, readMessageId(setResp))
+        val (isSuccess, data) = BridgeEnvelopeCodec.parseEnvelopeResponse(setResp.copyOfRange(8, setResp.size))
+        assertTrue("session.lock invoke must succeed", isSuccess)
+        val ingressResponse = IngressResponse.parseFrom(data)
+        assertEquals(IngressResponse.ResultCase.OK_BYTES, ingressResponse.resultCase)
     }
 
     @Test
@@ -790,10 +803,10 @@ class AndroidLayerProofTest {
     }
 
     @Test
-    fun t65_error_invalidAppRouterPayload() {
-        // appRouterQuery with invalid payload (not a valid AppRouterPayload)
+    fun t65_error_invalidIngressPayload() {
+        // nativeBoundaryIngress with invalid payload bytes should return an error envelope, not crash
         val garbage = byteArrayOf(0xFF.toByte(), 0xFE.toByte(), 0xFD.toByte())
-        val requestBytes = encodeBridgeRpcRequestWithAppRouter("appRouterQuery", garbage)
+        val requestBytes = encodeBridgeRpcRequest("nativeBoundaryIngress", garbage)
         val framedResp = MainActivity.processBridgeRequestForTest(ctx, prependMessageId(500L, requestBytes))
 
         assertTrue("Must get response", framedResp.size > 8)
@@ -874,8 +887,10 @@ class AndroidLayerProofTest {
                 byteArrayOf(0x10, 0x01) +                                  // codec = CODEC_PROTO (1)
                 encodeLengthDelimitedField(3, faucetClaimReqBytes)          // body
 
-            val appRouterPayload = BridgeEnvelopeCodec.encodeAppRouterPayload("faucet.claim", argPackBytes)
-            val requestBytes = encodeBridgeRpcRequestWithAppRouter("appRouterInvoke", appRouterPayload)
+            val requestBytes = encodeBridgeRpcRequest(
+                "nativeBoundaryIngress",
+                buildRouterInvokeIngressRequest("faucet.claim", argPackBytes)
+            )
             MainActivity.processBridgeRequestForTest(ctx, prependMessageId(9999L, requestBytes))
         } catch (_: Throwable) {
             // Faucet may fail (already claimed, etc.) — don't block tests
@@ -911,14 +926,27 @@ class AndroidLayerProofTest {
         return methodField + bytesPayloadField
     }
 
-    /**
-     * Encode a BridgeRpcRequest with field 6 = appRouterPayload.
-     */
-    private fun encodeBridgeRpcRequestWithAppRouter(method: String, appRouterPayload: ByteArray): ByteArray {
-        val methodField = encodeLengthDelimitedField(1, method.toByteArray(Charsets.UTF_8))
-        val routerField = encodeLengthDelimitedField(6, appRouterPayload)
-        return methodField + routerField
-    }
+    private fun buildRouterQueryIngressRequest(method: String, args: ByteArray): ByteArray =
+        IngressRequest.newBuilder()
+            .setRouterQuery(
+                RouterQueryOp.newBuilder()
+                    .setMethod(method)
+                    .setArgs(ByteString.copyFrom(args))
+                    .build()
+            )
+            .build()
+            .toByteArray()
+
+    private fun buildRouterInvokeIngressRequest(method: String, args: ByteArray): ByteArray =
+        IngressRequest.newBuilder()
+            .setRouterInvoke(
+                RouterInvokeOp.newBuilder()
+                    .setMethod(method)
+                    .setArgs(ByteString.copyFrom(args))
+                    .build()
+            )
+            .build()
+            .toByteArray()
 
     private fun prependMessageId(messageId: Long, requestBytes: ByteArray): ByteArray {
         val out = ByteArray(8 + requestBytes.size)

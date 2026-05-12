@@ -14,7 +14,6 @@ use std::time::Instant;
 
 use dsm::types::error::DsmError;
 use dsm::types::operations::Operation;
-use dsm::types::state_types::State;
 use log::{info, warn};
 use tokio::sync::Mutex;
 
@@ -57,20 +56,19 @@ pub struct BilateralSettlementContext {
     /// New bilateral chain tip required for the receiver-side atomic persistence
     /// boundary.  Set to `[0u8; 32]` on sender paths where it is not needed.
     pub new_chain_tip: [u8; 32],
-    /// Canonical post-protocol state transition, when the caller has one.
-    ///
-    /// The application layer may merge token-balance settlement into this state
-    /// so the archived BCR snapshot reflects the completed wallet settlement.
-    pub canonical_state: Option<State>,
 }
 
 /// Result returned by [`BilateralSettlementDelegate::settle`].
+///
+/// The settlement layer no longer carries a "canonical state" snapshot back to
+/// the transport. The canonical [`DeviceState`](dsm::types::device_state::DeviceState)
+/// head is installed at the [`execute_on_relationship`](crate::sdk::core_sdk::CoreSDK::execute_on_relationship)
+/// chokepoint, so settlement only needs to materialise display projections
+/// (SQLite `balance_projections`) and fire transfer hooks.
 #[derive(Debug, Default)]
 pub struct BilateralSettlementOutcome {
     /// Transfer metadata used by frontend hooks and notifications.
     pub transfer_meta: crate::sdk::transfer_hooks::TransferMeta,
-    /// Canonical state snapshot to archive after settlement, when available.
-    pub canonical_state: Option<State>,
 }
 
 /// Application-layer callback installed on [`BilateralBleHandler`](super::BilateralBleHandler).
@@ -125,6 +123,11 @@ pub struct BilateralBleSession {
     /// ensuring the actual post-finalize tip matches the pre-computed
     /// `shared_chain_tip_new` sent in the BilateralConfirmRequest.
     pub pre_finalize_entropy: Option<[u8; 32]>,
+    /// Stitched receipt bytes built during `send_bilateral_confirm` (sender-only).
+    /// Cached here so `mark_sender_committed_with_post_state_hash` can persist
+    /// the same verifiable receipt instead of building a degraded one after the
+    /// Per-Device SMT has already been mutated.
+    pub stitched_receipt_bytes: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -273,6 +276,7 @@ impl SessionStore {
             counterparty_signature: session.counterparty_signature.clone(),
             created_at_step: session.created_at_ticks,
             sender_ble_address: session.sender_ble_address.clone(),
+            stitched_receipt_bytes: session.stitched_receipt_bytes.clone(),
         };
         store_bilateral_session(&record).map_err(|e| {
             DsmError::invalid_operation(format!("Failed to persist bilateral session: {e}"))
@@ -495,6 +499,7 @@ impl SessionStore {
             sender_ble_address: record.sender_ble_address.clone(),
             created_at_wall: Instant::now(),
             pre_finalize_entropy: None,
+            stitched_receipt_bytes: None,
         })
     }
 }
@@ -517,6 +522,7 @@ mod tests {
             expires_at_ticks: u64::MAX,
             sender_ble_address: None,
             created_at_wall: Instant::now(),
+            stitched_receipt_bytes: None,
             pre_finalize_entropy: None,
         }
     }

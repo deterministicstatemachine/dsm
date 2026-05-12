@@ -3,8 +3,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use log::{debug, info, warn};
-use prost::Message;
-
 use dsm::types::error::DsmError;
 
 use crate::bluetooth::bilateral_ble_handler::BilateralBleHandler;
@@ -237,15 +235,16 @@ impl BleTransportDelegate for BilateralTransportAdapter {
                     }
                 }
                 BleFrameType::BilateralPrepareResponse => {
-                    let is_prepare_response = match crate::generated::Envelope::decode(
-                        &mut std::io::Cursor::new(&message.payload),
-                    ) {
-                        Ok(env) => matches!(
+                    let is_prepare_response =
+                        match crate::envelope::from_canonical_bytes(&message.payload) {
+                            Ok(env) => {
+                                matches!(
                             env.payload,
                             Some(crate::generated::envelope::Payload::BilateralPrepareResponse(_))
-                        ),
-                        Err(_) => false,
-                    };
+                        )
+                            }
+                            Err(_) => false,
+                        };
                     if !is_prepare_response {
                         debug!(
                             "Pass-through BilateralPrepareResponse frame (non-prepare-response envelope detected) size={}",
@@ -273,17 +272,16 @@ impl BleTransportDelegate for BilateralTransportAdapter {
                     }
                 }
                 BleFrameType::BilateralPrepareReject => {
-                    let is_prepare_reject = match crate::generated::Envelope::decode(
-                        &mut std::io::Cursor::new(&message.payload),
-                    ) {
-                        Ok(env) => matches!(
-                            env.payload,
-                            Some(crate::generated::envelope::Payload::BilateralPrepareReject(
-                                _
-                            ))
-                        ),
-                        Err(_) => false,
-                    };
+                    let is_prepare_reject =
+                        match crate::envelope::from_canonical_bytes(&message.payload) {
+                            Ok(env) => matches!(
+                                env.payload,
+                                Some(crate::generated::envelope::Payload::BilateralPrepareReject(
+                                    _
+                                ))
+                            ),
+                            Err(_) => false,
+                        };
                     if !is_prepare_reject {
                         debug!(
                             "Pass-through BilateralPrepareReject frame (non-reject envelope detected) size={}",
@@ -301,29 +299,28 @@ impl BleTransportDelegate for BilateralTransportAdapter {
                     Ok(Vec::new())
                 }
                 BleFrameType::BilateralConfirm => {
-                    let is_confirm_request = match crate::generated::Envelope::decode(
-                        &mut std::io::Cursor::new(&message.payload),
-                    ) {
-                        Ok(env) => {
-                            if let Some(crate::generated::envelope::Payload::UniversalTx(tx)) =
-                                env.payload
-                            {
-                                if let Some(op) = tx.ops.first() {
-                                    match &op.kind {
-                                        Some(crate::generated::universal_op::Kind::Invoke(
-                                            invoke,
-                                        )) => invoke.method == "bilateral.confirm",
-                                        _ => false,
+                    let is_confirm_request =
+                        match crate::envelope::from_canonical_bytes(&message.payload) {
+                            Ok(env) => {
+                                if let Some(crate::generated::envelope::Payload::UniversalTx(tx)) =
+                                    env.payload
+                                {
+                                    if let Some(op) = tx.ops.first() {
+                                        match &op.kind {
+                                            Some(crate::generated::universal_op::Kind::Invoke(
+                                                invoke,
+                                            )) => invoke.method == "bilateral.confirm",
+                                            _ => false,
+                                        }
+                                    } else {
+                                        false
                                     }
                                 } else {
                                     false
                                 }
-                            } else {
-                                false
                             }
-                        }
-                        Err(_) => false,
-                    };
+                            Err(_) => false,
+                        };
                     if !is_confirm_request {
                         debug!(
                             "Pass-through BilateralConfirm frame (non-confirm UniversalTx detected) size={}",
@@ -383,15 +380,16 @@ impl BleTransportDelegate for BilateralTransportAdapter {
                     }
                 }
                 BleFrameType::BilateralCommitResponse => {
-                    let is_commit_response = match crate::generated::Envelope::decode(
-                        &mut std::io::Cursor::new(&message.payload),
-                    ) {
-                        Ok(env) => matches!(
+                    let is_commit_response =
+                        match crate::envelope::from_canonical_bytes(&message.payload) {
+                            Ok(env) => {
+                                matches!(
                             env.payload,
                             Some(crate::generated::envelope::Payload::BilateralCommitResponse(_))
-                        ),
-                        Err(_) => false,
-                    };
+                        )
+                            }
+                            Err(_) => false,
+                        };
                     if !is_commit_response {
                         debug!(
                             "Pass-through BilateralCommitResponse frame (non-commit-response envelope detected) size={}",

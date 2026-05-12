@@ -38,6 +38,7 @@ shift 2
 RUN_SEQ="$(ls -1 "$TLA_DIR/states" 2>/dev/null | wc -l | tr -d ' ')"
 RUN_ID="run_${RUN_SEQ}"
 WORKDIR="$TLA_DIR/states/$RUN_ID"
+TLC_DFID_DEPTH="${DSM_TLC_DFID_DEPTH:-10}"
 mkdir -p "$WORKDIR"
 
 # TLC uses the current working directory to resolve relative module paths.
@@ -47,10 +48,13 @@ echo "== TLC run =="
 echo "spec:   $SPEC_PATH"
 echo "config: $CFG_PATH"
 echo "workdir:$WORKDIR"
+echo "dfid:   $TLC_DFID_DEPTH"
 
-# -workers auto uses all cores; keep deterministic scheduling *out* of TLC itself.
+# Use depth-first iterative deepening by default so local validation does not
+# depend on TLC's Java RMI FPSet path, which is blocked in sandboxed runs.
+# Set DSM_TLC_DFID_DEPTH to tune the bounded check depth for larger configs.
 java -XX:+UseParallelGC -cp "$JAR" tlc2.TLC \
-  -workers auto \
+  -dfid "$TLC_DFID_DEPTH" \
   -checkpoint 0 \
   -metadir "$WORKDIR" \
   -config "$CFG_PATH" \

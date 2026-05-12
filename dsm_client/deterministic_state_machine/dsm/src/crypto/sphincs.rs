@@ -222,13 +222,33 @@ fn blake3_kdf(out_len: usize, inputs: &[&[u8]]) -> Vec<u8> {
     out
 }
 
+/// Construct a BLAKE3 keyed hasher with a strictly 32-byte key, regardless of
+/// the SPHINCS+ parameter set's `n`.
+///
+/// **Issue #184 Finding #4 resolution.** Previously this function silently
+/// zero-padded short keys to 32 bytes, leaking known-zero key material to
+/// any attacker who knew the selected parameter set (`n < 32` for SPX128/192
+/// variants). With BLAKE3's keyed mode, a key with predictable bytes degrades
+/// the PRF strength below what SPHINCS+'s security proof requires.
+///
+/// Fix: for keys shorter than 32 bytes, expand via `blake3::derive_key` — the
+/// canonical BLAKE3 KDF — with a fixed domain context. Keys that are already
+/// 32+ bytes are passed through unchanged (preserves SPX256 behavior; SPX256
+/// is the production-default variant, so this preserves all KAT digests).
+///
+/// The domain context `"DSM/sphincs-key-expand"` is unique to this use to
+/// prevent cross-domain collisions with any other BLAKE3 KDF call.
 fn blake3_keyed(n: usize, key: &[u8], inputs: &[&[u8]]) -> Vec<u8> {
-    let mut keyarr = [0u8; 32];
-    if key.len() >= 32 {
-        keyarr.copy_from_slice(&key[..32]);
+    let keyarr: [u8; 32] = if key.len() >= 32 {
+        let mut k = [0u8; 32];
+        k.copy_from_slice(&key[..32]);
+        k
     } else {
-        keyarr[..key.len()].copy_from_slice(key);
-    }
+        // Expand short key material to 32 bytes via BLAKE3's canonical KDF
+        // instead of zero-padding. Domain-separated context prevents
+        // cross-domain reuse.
+        blake3::derive_key("DSM/sphincs-key-expand", key)
+    };
     let mut h = blake3::Hasher::new_keyed(&keyarr);
     for inp in inputs {
         h.update(inp);

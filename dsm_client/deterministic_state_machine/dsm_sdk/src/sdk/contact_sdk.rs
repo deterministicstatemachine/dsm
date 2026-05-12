@@ -15,11 +15,9 @@ use prost::Message;
 use tokio::sync::RwLock;
 
 use dsm::core::contact_manager::{ContactError, DsmContactManager};
-use dsm::core::state_machine::transition::StateTransition;
 use dsm::types::error::DsmError;
 use dsm::types::identifiers::NodeId;
 use dsm::types::operations::{Operation, TransactionMode};
-use dsm::types::state_types::State;
 
 // Use the SAME proto namespace as the rest of the app to avoid type mismatches.
 use dsm::types::proto as pb;
@@ -181,28 +179,14 @@ impl ContactManager {
                         ble_address: record.ble_address.clone(),
                     };
 
-                    let smt_arc = crate::security::shared_smt::init_shared_smt(256);
-                    let own_device_id = self.device_id;
                     let load_result =
                         self.with_manager_write_sync("load_contacts_from_database", move |mgr| {
                             mgr.add_verified_contact(verified_contact.clone())?;
-                            if let Some(chain_tip) = verified_contact.chain_tip {
-                                let mut smt = smt_arc.blocking_write();
-                                let smt_key =
-                                    dsm::core::bilateral_transaction_manager::compute_smt_key(
-                                        &own_device_id,
-                                        &device_id,
-                                    );
-                                mgr.initialize_contact_chain_tip(
-                                    &device_id, chain_tip, &mut smt, &smt_key,
-                                )
-                                .map_err(|e| {
-                                    DsmError::internal(
-                                        "Failed to initialize contact chain tip",
-                                        Some(e),
-                                    )
-                                })?;
-                            }
+                            // §2.2: no initial SMT seeding. The first canonical
+                            // advance for this relationship populates T_A at
+                            // `k_{A↔B}` via `DeviceState::advance`, with
+                            // `initial_chain_tip_from_device_ids` as the
+                            // seed for `embedded_parent`.
                             Ok(())
                         });
 
@@ -305,26 +289,13 @@ impl ContactManager {
             ble_address: ble_address.clone(),
         };
         {
-            let smt_arc = crate::security::shared_smt::init_shared_smt(256);
-            let mut smt = smt_arc.write().await;
-            let smt_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
-                &self.device_id,
-                &contact_device_id,
-            );
             let mut mgr = self.dsm_manager.write().await;
             mgr.add_verified_contact(verified.clone()).map_err(|e| {
                 ContactError::InvalidContactData(format!("Core add_verified_contact failed: {e}"))
             })?;
-            if let Err(e) = mgr.initialize_contact_chain_tip(
-                &contact_device_id,
-                initial_chain_tip,
-                &mut smt,
-                &smt_key,
-            ) {
-                return Err(ContactError::InvalidChainTip(format!(
-                    "Failed to initialize chain tip SMT proof: {e}"
-                )));
-            }
+            // §2.2: first canonical advance populates T_A at k_{A↔B} via
+            // `DeviceState::advance` (with `initial_chain_tip_from_device_ids`
+            // as the `embedded_parent` seed). No up-front SMT seeding needed.
         }
 
         // ✅ PRODUCTION FIX: Persist to SQLite for durability across restarts
@@ -356,6 +327,7 @@ impl ContactManager {
                 last_seen_online_counter: 0,
                 last_seen_ble_counter: 0,
                 public_key: signing_public_key.clone(),
+                kyber_public_key: Vec::new(),
                 previous_chain_tip: None,
             };
 
@@ -609,12 +581,6 @@ impl ContactManager {
             ble_address: ble_address.clone(),
         };
         {
-            let smt_arc = crate::security::shared_smt::init_shared_smt(256);
-            let mut smt = smt_arc.write().await;
-            let smt_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
-                &self.device_id,
-                &contact_device_id,
-            );
             let mut mgr = self.dsm_manager.write().await;
             log::info!(
                 "[DSM_SDK] ➕ Adding contact to in-memory HashMap: alias={}",
@@ -623,16 +589,7 @@ impl ContactManager {
             mgr.add_verified_contact(verified.clone()).map_err(|e| {
                 ContactError::InvalidContactData(format!("Core add_verified_contact failed: {e}"))
             })?;
-            if let Err(e) = mgr.initialize_contact_chain_tip(
-                &contact_device_id,
-                initial_chain_tip,
-                &mut smt,
-                &smt_key,
-            ) {
-                return Err(ContactError::InvalidChainTip(format!(
-                    "Failed to initialize chain tip SMT proof: {e}"
-                )));
-            }
+            // §2.2: first canonical advance populates T_A at k_{A↔B}.
             log::info!("[DSM_SDK] ✅ Contact added to HashMap successfully");
         }
 
@@ -676,6 +633,7 @@ impl ContactManager {
                 last_seen_online_counter: 0,
                 last_seen_ble_counter: 0,
                 public_key: signing_public_key.clone(),
+                kyber_public_key: Vec::new(),
                 previous_chain_tip: None,
             };
 
@@ -832,44 +790,31 @@ impl ContactManager {
         expected_parent_tip: [u8; 32],
         new_chain_tip: [u8; 32],
     ) -> Result<(), ContactError> {
-        // §4.2: SMT-Replace is mandatory for every state transition.
-        let smt_arc = crate::security::shared_smt::get_shared_smt().ok_or(
-            ContactError::InvalidContactData(
-                "Per-Device SMT not initialized — cannot produce valid proof (§4.2)".into(),
-            ),
-        )?;
-        let smt = smt_arc.read().await;
-        let smt_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
-            &self.device_id,
-            &contact_device_id,
-        );
-        let mut mgr = self.dsm_manager.write().await;
-        mgr.update_contact_chain_tip_unilateral(&contact_device_id, new_chain_tip, &smt, &smt_key)?;
-
-        {
-            let request = crate::storage::client_db::bilateral_tip_sync::TipSyncRequest {
-                counterparty_device_id: contact_device_id,
-                expected_parent_tip,
-                target_tip: new_chain_tip,
-                observed_gate: None,
-                clear_gate_on_success: false,
-            };
-            match crate::storage::client_db::bilateral_tip_sync::sync_bilateral_tips_atomically(&request) {
-                Ok(outcome) => match outcome {
-                    crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::Advanced { .. }
-                    | crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::RepairedAtTarget { .. }
-                    | crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::AlreadyAtTarget { .. } => {}
-                    _ => {
-                        return Err(ContactError::InvalidChainTip(
-                            "Finalized unilateral chain tip parent mismatch".to_string(),
-                        ));
-                    }
-                },
-                Err(e) => {
-                    return Err(ContactError::InvalidChainTip(format!(
-                        "Failed to persist finalized unilateral chain tip update: {e}"
-                    )));
+        // §2.2: Canonical advance (DeviceState.smt) already owns SMT state.
+        // This helper only persists the symmetric §16.6 tip to contacts.chain_tip
+        // for future precommit + b0x addressing.
+        let request = crate::storage::client_db::bilateral_tip_sync::TipSyncRequest {
+            counterparty_device_id: contact_device_id,
+            expected_parent_tip,
+            target_tip: new_chain_tip,
+            observed_gate: None,
+            clear_gate_on_success: false,
+        };
+        match crate::storage::client_db::bilateral_tip_sync::sync_bilateral_tips_atomically(&request) {
+            Ok(outcome) => match outcome {
+                crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::Advanced { .. }
+                | crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::RepairedAtTarget { .. }
+                | crate::storage::client_db::bilateral_tip_sync::TipSyncOutcome::AlreadyAtTarget { .. } => {}
+                _ => {
+                    return Err(ContactError::InvalidChainTip(
+                        "Finalized unilateral chain tip parent mismatch".to_string(),
+                    ));
                 }
+            },
+            Err(e) => {
+                return Err(ContactError::InvalidChainTip(format!(
+                    "Failed to persist finalized unilateral chain tip update: {e}"
+                )));
             }
         }
 
@@ -939,13 +884,39 @@ impl ContactManager {
         let mut out: Vec<pb::ContactAddResponse> = Vec::with_capacity(contacts.len());
 
         for c in contacts {
+            let persisted = match crate::storage::client_db::get_contact_by_device_id(&c.device_id)
+            {
+                Ok(record) => record,
+                Err(e) => {
+                    log::debug!(
+                        "[DSM_SDK] export_contacts: get_contact_by_device_id error: {}",
+                        e
+                    );
+                    None
+                }
+            };
+            let persisted_chain_tip = persisted
+                .as_ref()
+                .and_then(|record| record.current_chain_tip.as_ref())
+                .and_then(|tip| {
+                    if tip.len() == 32 {
+                        let mut arr = [0u8; 32];
+                        arr.copy_from_slice(tip);
+                        Some(arr)
+                    } else {
+                        None
+                    }
+                });
+
             out.push(pb::ContactAddResponse {
                 alias: c.alias.clone(),
                 device_id: c.device_id.to_vec(),
                 genesis_hash: Some(pb::Hash32 {
                     v: c.genesis_hash.to_vec(),
                 }),
-                chain_tip: c.chain_tip.map(|h| pb::Hash32 { v: h.to_vec() }),
+                chain_tip: persisted_chain_tip
+                    .or(c.chain_tip)
+                    .map(|h| pb::Hash32 { v: h.to_vec() }),
                 chain_tip_smt_proof: None,
                 alias_binding: None,
                 genesis_verified_online: c.genesis_verified_online,
@@ -956,7 +927,11 @@ impl ContactManager {
                     .iter()
                     .map(|n| n.to_string())
                     .collect(),
-                ble_address: c.ble_address.clone().unwrap_or_default(),
+                ble_address: persisted
+                    .as_ref()
+                    .and_then(|record| record.ble_address.clone())
+                    .or_else(|| c.ble_address.clone())
+                    .unwrap_or_default(),
                 signing_public_key: c.public_key.clone(),
                 send_status: Some(
                     crate::handlers::relationship_status::derive_local_send_status_for_device_id(
@@ -1097,23 +1072,10 @@ impl ContactManager {
 
 // ------------------------ Optional state update hook ------------------------
 
-impl ContactManager {
-    pub fn update_contact_from_transition(
-        &mut self,
-        transition: &StateTransition,
-        state: &State,
-    ) -> Result<(), DsmError> {
-        match &transition.operation {
-            Operation::AddRelationship { .. } | Operation::RemoveRelationship { .. } => {
-                let _ = state; // no-op for now; reserved for future chain-tip syncing
-                Ok(())
-            }
-            _ => Err(DsmError::invalid_operation(
-                "Unsupported operation type for contact update",
-            )),
-        }
-    }
-}
+// update_contact_from_transition deleted: zero production callers, and
+// the body explicitly dropped the &State parameter (`let _ = state`,
+// "reserved for future chain-tip syncing"). Classic dead-parameter
+// residue. Chain-tip sync now flows through ChainTipStore + DeviceState.
 
 #[cfg(test)]
 mod tests {
@@ -1243,6 +1205,72 @@ mod tests {
         let _ = result;
     }
 
+    #[test]
+    #[serial_test::serial]
+    fn export_contacts_overlays_persisted_chain_tip() {
+        unsafe {
+            std::env::set_var("DSM_SDK_TEST_MODE", "1");
+        }
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+
+        let mut manager = test_manager();
+        let contact_device_id = [0xCC; 32];
+        let contact_genesis = [0xDD; 32];
+        let persisted_tip = [0xEE; 32];
+
+        manager
+            .restore_contact_from_storage_sync(dsm::types::contact_types::DsmVerifiedContact {
+                alias: "Persisted Tip".to_string(),
+                device_id: contact_device_id,
+                genesis_hash: contact_genesis,
+                public_key: vec![0xAB; 32],
+                genesis_material: Vec::new(),
+                chain_tip: None,
+                chain_tip_smt_proof: None,
+                genesis_verified_online: true,
+                verified_at_commit_height: 1,
+                added_at_commit_height: 1,
+                last_updated_commit_height: 1,
+                verifying_storage_nodes: Vec::new(),
+                ble_address: None,
+            })
+            .expect("seed in-memory contact");
+
+        crate::storage::client_db::store_contact(&crate::storage::client_db::ContactRecord {
+            contact_id: "persisted-tip-contact".to_string(),
+            device_id: contact_device_id.to_vec(),
+            alias: "Persisted Tip".to_string(),
+            genesis_hash: contact_genesis.to_vec(),
+            public_key: vec![0xAB; 32],
+            kyber_public_key: Vec::new(),
+            current_chain_tip: Some(persisted_tip.to_vec()),
+            added_at: 1,
+            verified: true,
+            verification_proof: None,
+            metadata: HashMap::new(),
+            ble_address: None,
+            status: "BleCapable".to_string(),
+            needs_online_reconcile: false,
+            last_seen_online_counter: 0,
+            last_seen_ble_counter: 0,
+            previous_chain_tip: None,
+        })
+        .expect("seed persisted contact");
+
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let exported = rt
+            .block_on(manager.export_contacts())
+            .expect("export contacts");
+        let exported_tip = exported
+            .contacts
+            .first()
+            .and_then(|contact| contact.chain_tip.as_ref())
+            .map(|hash| hash.v.clone());
+
+        assert_eq!(exported_tip, Some(persisted_tip.to_vec()));
+    }
+
     // ── Operation builders (fail-closed) ─────────────────────────────
 
     #[test]
@@ -1302,42 +1330,8 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ── update_contact_from_transition ────────────────────────────────
-
-    fn stub_transition(op: Operation) -> StateTransition {
-        StateTransition::new(op, None, None, &[0u8; 32])
-    }
-
-    #[test]
-    fn update_contact_from_transition_accepts_add_relationship() {
-        let mut cm = test_manager();
-        let transition = stub_transition(Operation::AddRelationship {
-            from_id: [0x01; 32],
-            to_id: [0x02; 32],
-            relationship_type: b"friend".to_vec(),
-            metadata: vec![],
-            proof: vec![],
-            mode: TransactionMode::Unilateral,
-            message: "test".into(),
-        });
-        let state = State::default();
-        assert!(cm
-            .update_contact_from_transition(&transition, &state)
-            .is_ok());
-    }
-
-    #[test]
-    fn update_contact_from_transition_rejects_unsupported_ops() {
-        let mut cm = test_manager();
-        let transition = stub_transition(Operation::Generic {
-            operation_type: b"test".to_vec(),
-            data: vec![],
-            message: "test".into(),
-            signature: vec![],
-        });
-        let state = State::default();
-        assert!(cm
-            .update_contact_from_transition(&transition, &state)
-            .is_err());
-    }
+    // update_contact_from_transition tests removed: function deleted as
+    // it had zero production callers and explicitly dropped its &State
+    // parameter. The "accepts AddRelationship" / "rejects Generic" pattern
+    // is no longer meaningful since the function is gone.
 }

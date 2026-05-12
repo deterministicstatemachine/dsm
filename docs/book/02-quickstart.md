@@ -47,7 +47,7 @@ make build
 
 `make setup` is valid before Android tooling is installed. It only generates the Android cargo config when `ANDROID_NDK_HOME` or `ANDROID_NDK_ROOT` is configured. `make doctor` reports the pinned Rust toolchain version, `cargo-ndk`, the resolved NDK path, the detected NDK host tag, and the generated Android cargo config state when Android tooling is present.
 
-First build takes 3–8 minutes (downloading and compiling all dependencies). You will see many `Compiling ...` lines — wait for `Finished`.
+First build takes 3-8 minutes (downloading and compiling all dependencies). You will see many `Compiling ...` lines — wait for `Finished`.
 
 This compiles:
 - `dsm` — cryptographic core (SPHINCS+, ML-KEM-768, BLAKE3)
@@ -132,7 +132,7 @@ make test
 make install
 ```
 
-This builds native libraries (3 ABIs), the React frontend, packages the debug APK, and installs it on all connected USB devices. Takes 5–10 minutes on first build.
+This builds native libraries (3 ABIs), the React frontend, packages the debug APK, and installs it on all connected USB devices. Takes 5-10 minutes on first build.
 
 ### Manual steps (if `make install` fails)
 

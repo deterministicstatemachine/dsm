@@ -10,7 +10,7 @@
 //! ### Core Foundational Modules
 //!
 //! * `core_sdk`: Central integration point for all DSM functionality
-//! * `hashchain_sdk`: Manages state transitions and evolution in the DSM system
+//! * `hashchain_sdk` removed: superseded by DeviceState (§2.2) for current tip + BCR archive for history
 //! * `identity_sdk`: Handles cryptographic identity creation and management
 //! * `token_sdk`: Provides token operations and policy enforcement
 //! * `token_mpc_sdk`: Implements secure token creation using MPC and manages bilateral transfers
@@ -30,14 +30,8 @@
 //! * `contact_sdk`: Manages peer relationships and communications
 //! * `wallet_sdk`: Key management and secure storage capabilities
 //!
-//! ### Utilities and Metrics
-//!
-//! * `protocol_metrics`: Performance monitoring and system diagnostics
-
-pub use protocol_metrics::ProtocolMetricsManager;
 pub mod bootstrap;
 pub mod kv;
-pub mod protocol_metrics;
 pub mod runtime_config;
 pub mod sdk_context;
 
@@ -54,13 +48,14 @@ pub mod core_sdk;
 pub mod counterparty_genesis_helpers;
 pub mod dlv_sdk;
 pub mod external_commitment_sdk;
-pub mod hashchain_sdk;
+// pub mod hashchain_sdk; — deleted (superseded by DeviceState + BCR archive)
 pub mod identity_sdk;
 pub mod inbox_poller;
 pub mod policy_cache;
 #[cfg(test)]
 mod qr; // QR code creation and parsing for contacts - enabled for tests only
 pub mod session_manager; // Native-first session state projection
+pub mod signing_authority;
 pub mod tls_transport_sdk;
 pub mod token_mpc_sdk;
 pub mod token_sdk;
@@ -81,16 +76,27 @@ pub mod storage_node_sdk;
 // If blockchain transport functionality is required, implement a protobuf-based transport
 // that communicates using generated proto messages and prost encoding.
 // pub mod blockchain_transport;  // removed by purge
-pub mod chain_tip_sync_sdk;
+// pub mod chain_tip_sync_sdk;  // deleted: 787-line module with zero external
+// consumers. ChainTipSyncSDK was never instantiated outside its own tests; its
+// internal UniversalTransport trait had no implementors beyond the tests' DummyTransport.
+// Per-relationship chain-tip anchoring is now handled inline in
+// bilateral_transaction_manager + contacts store.
 
 // Smart contract and commitment functionality
+#[cfg(feature = "demos")]
+pub mod amm_demo;
 pub mod bitcoin_key_store;
 pub mod bitcoin_tap_sdk;
 pub mod bitcoin_tx_builder;
 pub mod dlv_pre_commitment_sdk;
 pub mod dlv_receipt_sdk;
+pub mod posted_dlv_sdk;
+pub mod route_commit_sdk;
+pub mod routing_path_sdk;
+pub mod routing_sdk;
 pub mod smart_commitment_sdk;
 pub mod transfer_hooks;
+pub mod vault_state_anchor_codec;
 
 // Recovery system SDK
 pub mod recovery_sdk;
@@ -118,7 +124,7 @@ pub use bluetooth_transport::{
     BluetoothMode, BluetoothTransport, BleBridgeEvent, BilateralBluetoothMessage,
 };
 pub use core_sdk::CoreSDK;
-pub use hashchain_sdk::HashChainSDK;
+// pub use hashchain_sdk::HashChainSDK; — module deleted
 pub use identity_sdk::IdentitySDK;
 pub use wallet_sdk::WalletSDK;
 pub use storage_node_sdk::StorageNodeSDK;
@@ -137,9 +143,7 @@ pub use dlv_receipt_sdk::DlvReceiptSdk;
 pub use recovery_sdk::RecoverySDK;
 pub use token_sdk::TokenSDK;
 pub use token_mpc_sdk::TokenMpcSDK;
-pub use chain_tip_sync_sdk::{
-    ChainTipSyncSDK, ChainTipSyncSDKBuilder, ChainTip, TransactionBatch, SyncResult, SyncMetrics,
-};
+// chain_tip_sync_sdk re-exports removed alongside the module deletion above.
 // blockchain_transport removed as part of protobuf-only purge.
 // If chain integration is required, implement a protobuf-native transport and reintroduce here.
 pub use runtime_config::RuntimeConfig;

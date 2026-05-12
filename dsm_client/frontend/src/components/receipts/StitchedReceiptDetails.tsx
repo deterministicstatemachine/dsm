@@ -7,13 +7,6 @@ function toB32(bytes: Uint8Array): string {
   return encodeBase32Crockford(bytes);
 }
 
-function b32Preview(bytes: Uint8Array, head = 8, tail = 8): string {
-  const full = toB32(bytes);
-  if (!full) return '—';
-  if (full.length <= head + tail + 3) return full;
-  return `${full.slice(0, head)}…${full.slice(-tail)}`;
-}
-
 type Props = {
   bytes?: Uint8Array | null;
   title?: string;
@@ -65,10 +58,10 @@ const StitchedReceiptDetails: React.FC<Props> = ({ bytes, title = 'Stitched Rece
 
   return (
     <details style={{ marginTop: 8 }}>
-      <summary style={{ cursor: 'pointer', fontSize: 9, color: 'var(--text)', textTransform: 'uppercase', display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+      <summary style={{ cursor: 'pointer', fontSize: 9, color: 'var(--text)', textTransform: 'uppercase', display: 'flex', flexWrap: 'wrap', gap: 6, wordBreak: 'break-all', overflowWrap: 'anywhere' }}>
         <span>{title}</span>
         <span>· {totalBytes} bytes</span>
-        <span>· {b32Preview(tipBytes)}</span>
+        <span style={{ fontFamily: "'Martian Mono', 'Courier New', monospace", textTransform: 'none' }}>· {toB32(tipBytes) || '—'}</span>
       </summary>
       <div style={{ marginTop: 8, padding: '8px 10px', border: '1px solid var(--border)', borderRadius: 6, background: 'rgba(var(--text-dark-rgb),0.08)' }}>
         <div style={rowStyle}>

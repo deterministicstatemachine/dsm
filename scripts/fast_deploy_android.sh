@@ -82,7 +82,7 @@ if [[ $LOCAL_DEV -eq 1 ]]; then
   if [[ $_nodes_ok -eq 0 ]]; then
     echo ""
     echo "WARNING: local storage nodes do not appear to be running (no response on 8080-8084)."
-    echo "         Genesis will fail. Start them with: cd dsm_storage_node && ./start_dev_nodes.sh"
+    echo "         Genesis will fail. Start them with: cd dsm_storage_node && ./scripts/dev/start_dev_nodes.sh"
     echo ""
   fi
 else

@@ -71,7 +71,7 @@ fn decode_internal_envelope(result: AppResult, route: &str) -> Result<generated:
         .data
         .strip_prefix(&[0x03])
         .ok_or_else(|| format!("{route}: missing envelope v3 framing"))?;
-    generated::Envelope::decode(payload)
+    dsm::envelope::from_canonical_bytes(payload)
         .map_err(|e| format!("{route}: failed to decode envelope: {e}"))
 }
 
@@ -139,7 +139,7 @@ fn sync_dbtc_projection_from_state(
             available: spendable,
             locked: locked_sats,
             source_state_hash: crate::util::text_id::encode_base32_crockford(&state_hash),
-            source_state_number: state.state_number,
+            source_state_number: state.hash[0] as u64,
             updated_at: crate::util::deterministic_time::tick(),
         },
     )
@@ -150,7 +150,7 @@ fn sync_dbtc_projection_from_state(
         spendable,
         locked_sats,
         projected.available(),
-        state.state_number,
+        state.hash[0] as u64,
     );
     Ok(())
 }
@@ -523,11 +523,8 @@ impl AppRouterImpl {
             .wallet
             .get_kyber_public_key()
             .map_err(|e| format!("{route}: wallet Kyber key unavailable: {e}"))?;
-        let signing_public_key = self
-            .wallet
-            .get_signing_keypair()
-            .map(|(pk, _)| pk)
-            .map_err(|e| format!("{route}: wallet SPHINCS key unavailable: {e}"))?;
+        let signing_public_key = crate::sdk::signing_authority::current_public_key()
+            .map_err(|e| format!("{route}: canonical signing key unavailable: {e}"))?;
 
         let deposit_record = self
             .bitcoin_tap
@@ -589,7 +586,7 @@ impl AppRouterImpl {
             current_state.clone()
         };
 
-        let state_number_bytes = sigma_state.state_number.to_le_bytes();
+        let state_number_bytes = (sigma_state.hash[0] as u64).to_le_bytes();
         let (protocol_transition_bytes, protocol_transition_commitment) =
             build_protocol_transition_commitment(
                 route.as_bytes(),
@@ -1635,14 +1632,6 @@ impl AppRouterImpl {
                         return err(format!("bitcoin.deposit.initiate: state unavailable: {e}"))
                     }
                 };
-                let (creator_pk, creator_sk) = match self.wallet.get_signing_keypair() {
-                    Ok(k) => k,
-                    Err(e) => {
-                        return err(format!(
-                            "bitcoin.deposit.initiate: wallet signing key unavailable: {e}"
-                        ))
-                    }
-                };
                 let kem_public_key = match self.wallet.get_kyber_public_key() {
                     Ok(k) => k,
                     Err(e) => {
@@ -1690,7 +1679,6 @@ impl AppRouterImpl {
                             req.btc_amount_sats,
                             btc_pubkey,
                             req.refund_iterations.max(1),
-                            (&creator_pk, &creator_sk),
                             &current_state,
                             network,
                             kem_public_key.as_slice(),
@@ -1835,15 +1823,39 @@ impl AppRouterImpl {
                                 ))
                                     }
                                 };
-                            let unlock_applied_state =
-                                match self.core_sdk.execute_dsm_operation(signed_unlock_op) {
-                                    Ok(s) => s,
-                                    Err(e) => {
-                                        return err(format!(
+                            // DLV unlock via relationship-aware path (§9.5).
+                            // rel_key = k_{device↔vault}
+                            let device_id = match self.core_sdk.get_current_state() {
+                                Ok(s) => s.device_info.device_id,
+                                Err(e) => {
+                                    return err(format!("bitcoin.deposit.complete: no state: {e}"))
+                                }
+                            };
+                            let vault_id = *dsm::crypto::blake3::domain_hash(
+                                "DSM/vault-device",
+                                req.vault_op_id.as_bytes(),
+                            )
+                            .as_bytes();
+                            let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
+                                &device_id, &vault_id,
+                            );
+                            let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                                &device_id, &vault_id,
+                            );
+                            let unlock_applied_state = match self.core_sdk.execute_on_relationship(
+                                rel_key,
+                                vault_id,
+                                signed_unlock_op,
+                                &[],
+                                Some(init_tip),
+                            ) {
+                                Ok((s, _)) => s,
+                                Err(e) => {
+                                    return err(format!(
                                     "bitcoin.deposit.complete: failed to apply DLV unlock op: {e}"
                                 ))
-                                    }
-                                };
+                                }
+                            };
                             if unlock_applied_state.hash.len() == 32 {
                                 if let Err(e) = crate::get_sdk_context()
                                     .update_chain_tip(unlock_applied_state.hash.to_vec())
@@ -1969,7 +1981,7 @@ impl AppRouterImpl {
                             );
                             metadata.insert(
                                 "source_state_number".to_string(),
-                                applied_state.state_number.to_le_bytes().to_vec(),
+                                (applied_state.hash[0] as u64).to_le_bytes().to_vec(),
                             );
                             let rec = crate::storage::client_db::TransactionRecord {
                                 tx_id: format!("deposit_{}", completion.vault_op_id),
@@ -1979,7 +1991,7 @@ impl AppRouterImpl {
                                 amount,
                                 tx_type: tx_type_str.to_string(),
                                 status: "completed".to_string(),
-                                chain_height: applied_state.state_number,
+                                chain_height: applied_state.hash[0] as u64,
                                 step_index: 0,
                                 commitment_hash: Some(prep.protocol_transition_commitment.to_vec()),
                                 proof_data: None,
@@ -2108,18 +2120,9 @@ impl AppRouterImpl {
                         return err(format!("bitcoin.deposit.refund: state unavailable: {e}"))
                     }
                 };
-                let (_creator_pk, creator_sk) = match self.wallet.get_signing_keypair() {
-                    Ok(k) => k,
-                    Err(e) => {
-                        return err(format!(
-                            "bitcoin.deposit.refund: wallet signing key unavailable: {e}"
-                        ))
-                    }
-                };
-
                 match self
                     .bitcoin_tap
-                    .close_tap(&req.vault_op_id, &creator_sk, &current_state)
+                    .close_tap(&req.vault_op_id, &current_state)
                     .await
                 {
                     Ok(restore_op) => {
@@ -2585,15 +2588,6 @@ impl AppRouterImpl {
                         ))
                     }
                 };
-                let (sphincs_pk, sphincs_sk) =
-                    match dsm::crypto::sphincs::generate_sphincs_keypair() {
-                        Ok(kp) => kp,
-                        Err(e) => {
-                            return err(format!(
-                                "bitcoin.fractional.exit: SPHINCS keygen failed: {e}"
-                            ))
-                        }
-                    };
                 let kyber_kp = match dsm::crypto::kyber::generate_kyber_keypair() {
                     Ok(kp) => kp,
                     Err(e) => {
@@ -2611,7 +2605,6 @@ impl AppRouterImpl {
                         exec_data.successor_depth,
                         req.exit_amount_sats,
                         req.refund_iterations,
-                        (&sphincs_pk, &sphincs_sk),
                         &state,
                         network,
                         &kyber_kp.public_key,
@@ -3818,29 +3811,31 @@ impl AppRouterImpl {
                 // to ensure header_chain.len() + 1 >= vault.min_confirmations in
                 // verify_bitcoin_htlc (dBTC §6.4).
                 if let Some(vault_id) = &record.vault_id {
-                    match self.bitcoin_tap.dlv_manager().get_vault(vault_id).await {
-                        Ok(vault_lock) => {
-                            let vault = vault_lock.lock().await;
-                            if let dsm::vault::fulfillment::FulfillmentMechanism::BitcoinHTLC {
-                                min_confirmations,
-                                ..
-                            } = &vault.fulfillment_condition
-                            {
-                                log::info!(
-                                    "[AWAIT_AND_COMPLETE] Vault {} min_confirmations={}, params={}",
-                                    vault_id,
+                    if let Some(vid32) = crate::util::text_id::decode_bytes32(vault_id) {
+                        match self.bitcoin_tap.dlv_manager().get_vault(&vid32).await {
+                            Ok(vault_lock) => {
+                                let vault = vault_lock.lock().await;
+                                if let dsm::vault::fulfillment::FulfillmentMechanism::BitcoinHTLC {
                                     min_confirmations,
-                                    effective_min_conf
+                                    ..
+                                } = &vault.fulfillment_condition
+                                {
+                                    log::info!(
+                                        "[AWAIT_AND_COMPLETE] Vault {} min_confirmations={}, params={}",
+                                        vault_id, min_confirmations, effective_min_conf
+                                    );
+                                    effective_min_conf = *min_confirmations;
+                                }
+                            }
+                            Err(e) => {
+                                log::warn!(
+                                    "[AWAIT_AND_COMPLETE] Could not load vault {}: {} — using params.min_confirmations={}",
+                                    vault_id, e, effective_min_conf
                                 );
-                                effective_min_conf = *min_confirmations;
                             }
                         }
-                        Err(e) => {
-                            log::warn!(
-                                "[AWAIT_AND_COMPLETE] Could not load vault {}: {} — using params.min_confirmations={}",
-                                vault_id, e, effective_min_conf
-                            );
-                        }
+                    } else {
+                        log::warn!("[AWAIT_AND_COMPLETE] Invalid Base32 vault_id {vault_id}");
                     }
                 }
 
@@ -3992,8 +3987,26 @@ impl AppRouterImpl {
                                 Ok(op) => op,
                                 Err(e) => return err(format!("bitcoin.deposit.await_and_complete: failed to sign DLV unlock op: {e}")),
                             };
-                            let unlock_applied_state = match self.core_sdk.execute_dsm_operation(signed_unlock_op) {
-                                Ok(s) => s,
+                            // DLV unlock via relationship path (§9.5)
+                            let device_id = match self.core_sdk.get_current_state() {
+                                Ok(s) => s.device_info.device_id,
+                                Err(e) => return err(format!("await_and_complete: no state: {e}")),
+                            };
+                            let vault_id = *dsm::crypto::blake3::domain_hash(
+                                "DSM/vault-device",
+                                vault_op_id.as_bytes(),
+                            )
+                            .as_bytes();
+                            let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
+                                &device_id, &vault_id,
+                            );
+                            let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                                &device_id, &vault_id,
+                            );
+                            let unlock_applied_state = match self.core_sdk.execute_on_relationship(
+                                rel_key, vault_id, signed_unlock_op, &[], Some(init_tip),
+                            ) {
+                                Ok((s, _)) => s,
                                 Err(e) => return err(format!("bitcoin.deposit.await_and_complete: failed to apply DLV unlock op: {e}")),
                             };
                             if unlock_applied_state.hash.len() == 32 {
@@ -4137,7 +4150,7 @@ impl AppRouterImpl {
                                 );
                                 metadata.insert(
                                     "source_state_number".to_string(),
-                                    applied_state.state_number.to_le_bytes().to_vec(),
+                                    (applied_state.hash[0] as u64).to_le_bytes().to_vec(),
                                 );
                                 let rec = crate::storage::client_db::TransactionRecord {
                                     tx_id: format!("deposit_{}", completion.vault_op_id),
@@ -4147,7 +4160,7 @@ impl AppRouterImpl {
                                     amount,
                                     tx_type: tx_type_str.to_string(),
                                     status: "completed".to_string(),
-                                    chain_height: applied_state.state_number,
+                                    chain_height: applied_state.hash[0] as u64,
                                     step_index: 0,
                                     commitment_hash: Some(
                                         prep.protocol_transition_commitment.to_vec(),
@@ -4874,6 +4887,28 @@ mod tests {
     use crate::init::SdkConfig;
     use crate::storage::client_db;
 
+    fn install_test_identity(device_id: Vec<u8>, genesis_hash: Vec<u8>, binding_key: Vec<u8>) {
+        crate::reset_sdk_context_for_testing();
+        crate::sdk::app_state::AppState::reset_memory_for_testing();
+        crate::sdk::app_state::AppState::prime_memory_for_testing();
+        crate::sdk::signing_authority::clear_binding_key_for_testing();
+        let (public_key, _secret_key) =
+            crate::sdk::signing_authority::derive_signing_keys_for_testing(
+                &device_id,
+                &genesis_hash,
+                &binding_key,
+            )
+            .expect("derive canonical signing keypair");
+        crate::sdk::signing_authority::set_binding_key_for_testing(binding_key);
+        crate::sdk::app_state::AppState::set_identity_info(
+            device_id,
+            public_key,
+            genesis_hash,
+            vec![0u8; 32],
+        );
+        crate::sdk::app_state::AppState::set_has_identity(true);
+    }
+
     fn init_withdrawal_invoke_test_router(test_name: &str) -> AppRouterImpl {
         unsafe {
             std::env::set_var("DSM_SDK_TEST_MODE", "1");
@@ -4883,13 +4918,7 @@ mod tests {
         let _ = crate::storage_utils::set_storage_base_dir(PathBuf::from(format!(
             "./.dsm_testdata_{test_name}"
         )));
-        crate::sdk::app_state::AppState::set_identity_info(
-            vec![0xA1; 32],
-            vec![0xB1; 32],
-            vec![0xC1; 32],
-            vec![0xD1; 32],
-        );
-        crate::sdk::app_state::AppState::set_has_identity(true);
+        install_test_identity(vec![0xA1; 32], vec![0xC1; 32], vec![0xD1; 32]);
         client_db::init_database().expect("init db");
         set_withdrawal_bridge_sync_test_results(Vec::new());
         crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::reset_dbtc_storage_test_state();
@@ -4929,9 +4958,17 @@ mod tests {
         }
     }
 
-    fn put_active_vault(vault_id: &str, amount_sats: u64) {
+    /// Derive a deterministic 32-byte test vault_id from a human-readable label.
+    /// Test labels stay descriptive in source while the on-disk + on-wire id is
+    /// the strict 32-byte form `LimboVaultProto.id` requires.
+    fn vid_from_label(label: &str) -> [u8; 32] {
+        dsm::crypto::blake3::domain_hash_bytes("DSM/dbtc-test-vault", label.as_bytes())
+    }
+
+    fn put_active_vault(vault_id: [u8; 32], amount_sats: u64) {
+        let vid_b32 = crate::util::text_id::encode_base32_crockford(&vault_id);
         let proto = generated::LimboVaultProto {
-            id: vault_id.to_string(),
+            id: vault_id.to_vec(),
             fulfillment_condition: Some(generated::FulfillmentMechanism {
                 kind: Some(generated::fulfillment_mechanism::Kind::BitcoinHtlc(
                     generated::BitcoinHtlc {
@@ -4949,17 +4986,18 @@ mod tests {
         }
         .encode_to_vec();
 
-        client_db::put_vault(vault_id, &proto, "active", &[0x44; 80], amount_sats)
+        client_db::put_vault(&vid_b32, &proto, "active", &[0x44; 80], amount_sats)
             .expect("store vault");
     }
 
-    fn put_active_vault_record(vault_id: &str, amount_sats: u64) {
+    fn put_active_vault_record(vault_id: [u8; 32], amount_sats: u64) {
+        let vid_b32 = crate::util::text_id::encode_base32_crockford(&vault_id);
         client_db::upsert_vault_record(&client_db::PersistedVaultRecord {
-            vault_op_id: format!("deposit-{vault_id}"),
+            vault_op_id: format!("deposit-{vid_b32}"),
             direction: "btc_to_dbtc".to_string(),
             vault_state: "completed".to_string(),
             hash_lock: vec![0x33; 32],
-            vault_id: Some(vault_id.to_string()),
+            vault_id: Some(vid_b32),
             btc_amount_sats: amount_sats,
             btc_pubkey: vec![0x03; 33],
             htlc_script: Some(vec![0x66; 64]),
@@ -4984,14 +5022,15 @@ mod tests {
     }
 
     fn seed_vault_execution_advertisement(
-        vault_id: &str,
+        vault_id: [u8; 32],
         amount_sats: u64,
         policy_commit: [u8; 32],
     ) {
+        let vid_b32 = crate::util::text_id::encode_base32_crockford(&vault_id);
         let ad_key = format!(
             "dbtc/manifold/{}/vault/{}",
             crate::util::text_id::encode_base32_crockford(&policy_commit),
-            vault_id
+            vid_b32
         );
         let redeem_params = generated::DbtcRedeemParams {
             htlc_script: vec![0x66; 64],
@@ -5004,7 +5043,7 @@ mod tests {
         let advertisement = generated::DbtcVaultAdvertisementV1 {
             version: 1,
             policy_commit: policy_commit.to_vec(),
-            vault_id: vault_id.to_string(),
+            vault_id: vid_b32,
             controller_device_id: vec![0xA1; 32],
             amount_sats,
             successor_depth: 0,
@@ -5051,7 +5090,7 @@ mod tests {
             available: amount_sats,
             locked: 0,
             source_state_hash: crate::util::text_id::encode_base32_crockford(&state_hash),
-            source_state_number: state.state_number,
+            source_state_number: state.hash[0] as u64,
             updated_at: crate::util::deterministic_time::tick(),
         })
         .expect("seed dBTC projection");
@@ -5107,6 +5146,9 @@ mod tests {
         );
     }
 
+    // dBTC withdrawal tests use BLAKE3-derived 32-byte ids via `vid_from_label`
+    // so they round-trip through the strict `LimboVaultProto.id` schema while
+    // keeping the source-readable test labels intact.
     #[tokio::test]
     #[serial]
     async fn bitcoin_withdraw_execute_rejects_reuse_of_consumed_plan() {
@@ -5114,10 +5156,11 @@ mod tests {
         let request_net_sats = 173_333;
         let full_fee = crate::sdk::bitcoin_tap_sdk::estimated_full_withdrawal_fee_sats();
         let source_amount = request_net_sats + full_fee;
+        let vault_id = vid_from_label("000-vault-consumed");
 
         seed_dbtc_balance(&router, request_net_sats * 3); // enough for multiple withdrawals
-        put_active_vault("000-vault-consumed", source_amount);
-        put_active_vault_record("000-vault-consumed", source_amount);
+        put_active_vault(vault_id, source_amount);
+        put_active_vault_record(vault_id, source_amount);
 
         set_withdrawal_bridge_sync_test_results(vec![
             Ok(sync_response(true, 0)),
@@ -5263,10 +5306,11 @@ mod tests {
         let request_net_sats = 150_000;
         let full_fee = crate::sdk::bitcoin_tap_sdk::estimated_full_withdrawal_fee_sats();
         let source_amount = request_net_sats + full_fee;
+        let vault_id = vid_from_label("vault-execute-success");
 
         seed_dbtc_balance(&router, request_net_sats * 3);
-        put_active_vault("vault-execute-success", source_amount);
-        put_active_vault_record("vault-execute-success", source_amount);
+        put_active_vault(vault_id, source_amount);
+        put_active_vault_record(vault_id, source_amount);
 
         set_withdrawal_bridge_sync_test_results(vec![
             Ok(sync_response(true, 0)),
@@ -5386,9 +5430,10 @@ mod tests {
         let request_net_sats = 150_000;
         let full_fee = crate::sdk::bitcoin_tap_sdk::estimated_full_withdrawal_fee_sats();
         let source_amount = request_net_sats + full_fee;
+        let vault_id = vid_from_label("vault-addr-mismatch");
 
-        put_active_vault("vault-addr-mismatch", source_amount);
-        put_active_vault_record("vault-addr-mismatch", source_amount);
+        put_active_vault(vault_id, source_amount);
+        put_active_vault_record(vault_id, source_amount);
 
         set_withdrawal_bridge_sync_test_results(vec![
             Ok(sync_response(true, 0)),
@@ -5443,10 +5488,11 @@ mod tests {
         let request_gross_sats = 150_000;
         let full_fee = crate::sdk::bitcoin_tap_sdk::estimated_full_withdrawal_fee_sats();
         let source_amount = request_gross_sats + full_fee;
+        let vault_id = vid_from_label("vault-policy");
 
         seed_dbtc_balance(&router, request_gross_sats * 3);
-        put_active_vault("vault-policy", source_amount);
-        put_active_vault_record("vault-policy", source_amount);
+        put_active_vault(vault_id, source_amount);
+        put_active_vault_record(vault_id, source_amount);
 
         set_withdrawal_bridge_sync_test_results(vec![
             Ok(sync_response(true, 0)),
@@ -5545,11 +5591,9 @@ mod tests {
         let mismatched_policy_commit = [0xAB; 32];
 
         seed_dbtc_balance(&router, amount_sats);
-        seed_vault_execution_advertisement(
-            "vault-policy-mismatch",
-            amount_sats,
-            actual_policy_commit,
-        );
+        let mismatch_vid = vid_from_label("vault-policy-mismatch");
+        let mismatch_b32 = crate::util::text_id::encode_base32_crockford(&mismatch_vid);
+        seed_vault_execution_advertisement(mismatch_vid, amount_sats, actual_policy_commit);
         client_db::create_withdrawal(client_db::CreateWithdrawalParams {
             withdrawal_id: "wd-policy-mismatch",
             device_id: &device_id_b32,
@@ -5566,7 +5610,7 @@ mod tests {
             .invoke(AppInvoke {
                 method: "bitcoin.full.sweep".to_string(),
                 args: pack_proto(&generated::BitcoinFractionalExitRequest {
-                    source_vault_id: "vault-policy-mismatch".to_string(),
+                    source_vault_id: mismatch_b32,
                     destination_address: "tb1qpolicymismatch".to_string(),
                     plan_id: "wd-policy-mismatch".to_string(),
                     ..Default::default()

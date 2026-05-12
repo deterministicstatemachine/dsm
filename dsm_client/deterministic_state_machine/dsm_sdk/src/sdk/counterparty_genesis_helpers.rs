@@ -10,7 +10,8 @@ use std::{
     sync::RwLock,
 };
 
-use super::hashchain_sdk::HashChainSDK;
+// HashChainSDK import removed: create_bilateral_branch + get_branch_tip_id
+// helpers (the only HashChainSDK consumers in this file) deleted below.
 
 /// Storage format for cached Genesis states
 #[derive(Clone, Debug)]
@@ -210,45 +211,11 @@ pub fn create_genesis_binding(
     Ok(binding)
 }
 
-/// Create a bilateral branch from a Genesis binding
-pub fn create_bilateral_branch(
-    _hashchain_sdk: &HashChainSDK,
-    counterparty_id: &str,
-    genesis_binding: &[u8],
-) -> Result<String, DsmError> {
-    // Create a unique branch ID based on the Genesis binding
-    let branch_id = format!(
-        "bilateral_{}_{}",
-        crate::util::text_id::short_id(genesis_binding, std::cmp::min(8, genesis_binding.len())),
-        counterparty_id
-    );
-
-    // In a real implementation, we would:
-    // 1. Create a new branch in the hash chain
-    // 2. Initialize it with the genesis binding
-    // 3. Set up appropriate metadata
-
-    // For now, just return the branch ID
-    Ok(branch_id)
-}
-
-/// Get the hash of the tip of a branch
-pub fn get_branch_tip_id(
-    hashchain_sdk: &HashChainSDK,
-    branch_id: &str,
-) -> Result<String, DsmError> {
-    // For the main chain (empty branch ID), get the merkle root
-    if branch_id.is_empty() {
-        let root = hashchain_sdk.merkle_root()?;
-        let tip_id = crate::util::text_id::encode_base32_crockford(root.as_bytes());
-        // Return the actual merkle root tip ID
-        Ok(tip_id)
-    } else {
-        // In a real implementation, we would look up the branch's tip
-        // For now, return a test value
-        Ok(format!("tip_{branch_id}"))
-    }
-}
+// create_bilateral_branch + get_branch_tip_id deleted alongside HashChainSDK:
+// both were placeholder stubs that took a HashChainSDK but either ignored it
+// (`_hashchain_sdk`) or called `hashchain_sdk.merkle_root()` whose underlying
+// state-history tree is superseded by DeviceState's per-relationship SMT.
+// Zero external callers for either function.
 
 /// Fetch a Genesis state from a storage node (network operation)
 pub async fn fetch_genesis_state(
@@ -266,8 +233,12 @@ pub async fn fetch_genesis_state(
     // Use a fixed small set of test nodes (deterministic; no network dependency)
     let nodes = vec![NodeId::new("n1"), NodeId::new("n2"), NodeId::new("n3")];
 
-    // Threshold pinned to production minimum (3)
-    create_genesis_via_blind_mpc(device_id_arr, nodes, 3, None).await
+    // Per whitepaper §2.5: n-of-n MPC; no threshold parameter.
+    let k_dbrw = crate::sdk::app_state::AppState::take_platform_cdbrw_binding_key(
+        "counterparty_genesis_helpers",
+    )
+    .map_err(dsm::types::error::DsmError::invalid_operation)?;
+    create_genesis_via_blind_mpc(device_id_arr, nodes, k_dbrw, None).await
 }
 
 /// Verify a Genesis state against known storage nodes
@@ -296,7 +267,6 @@ mod tests {
         GS {
             hash,
             initial_entropy: [0u8; 32],
-            threshold: 2,
             participants: Default::default(),
             merkle_root: None,
             device_id: Some([0x01; 32]),
@@ -572,25 +542,7 @@ mod tests {
         assert_eq!(binding.len(), 3 + 1 + 32 + 32);
     }
 
-    // ── create_bilateral_branch ──
-
-    #[test]
-    fn create_bilateral_branch_id_format() {
-        let sdk = HashChainSDK::new();
-        let binding = vec![0xAA; 16];
-        let branch = create_bilateral_branch(&sdk, "bob", &binding).unwrap();
-        assert!(branch.starts_with("bilateral_"));
-        assert!(branch.ends_with("_bob"));
-    }
-
-    #[test]
-    fn create_bilateral_branch_deterministic() {
-        let sdk = HashChainSDK::new();
-        let binding = vec![0xBB; 32];
-        let b1 = create_bilateral_branch(&sdk, "alice", &binding).unwrap();
-        let b2 = create_bilateral_branch(&sdk, "alice", &binding).unwrap();
-        assert_eq!(b1, b2);
-    }
+    // create_bilateral_branch tests removed alongside the helper.
 
     // ── hash_genesis_state ──
 
@@ -607,14 +559,7 @@ mod tests {
         assert_eq!(hash_genesis_state(&gs).len(), 32);
     }
 
-    // ── get_branch_tip_id ──
-
-    #[test]
-    fn get_branch_tip_id_named_branch() {
-        let sdk = HashChainSDK::new();
-        let tip = get_branch_tip_id(&sdk, "mybranch").unwrap();
-        assert_eq!(tip, "tip_mybranch");
-    }
+    // get_branch_tip_id tests removed alongside the helper.
 
     // ── CachedGenesisState clone & debug ──
 
@@ -755,26 +700,8 @@ mod tests {
         );
     }
 
-    // ── create_bilateral_branch: different counterparties ──
-
-    #[test]
-    fn create_bilateral_branch_different_counterparties() {
-        let sdk = HashChainSDK::new();
-        let binding = vec![0xAA; 16];
-        let b1 = create_bilateral_branch(&sdk, "alice", &binding).unwrap();
-        let b2 = create_bilateral_branch(&sdk, "bob", &binding).unwrap();
-        assert_ne!(b1, b2);
-        assert!(b1.ends_with("_alice"));
-        assert!(b2.ends_with("_bob"));
-    }
-
-    #[test]
-    fn create_bilateral_branch_different_bindings() {
-        let sdk = HashChainSDK::new();
-        let b1 = create_bilateral_branch(&sdk, "peer", &[0x01; 16]).unwrap();
-        let b2 = create_bilateral_branch(&sdk, "peer", &[0x02; 16]).unwrap();
-        assert_ne!(b1, b2);
-    }
+    // create_bilateral_branch tests (different counterparties / different
+    // bindings) removed alongside the helper.
 
     // ── hash_genesis_state: different hashes ──
 

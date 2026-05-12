@@ -3,6 +3,7 @@
 use dsm_sdk::handlers::AppRouterImpl;
 use dsm_sdk::bridge::{AppQuery, AppInvoke, AppRouter as _};
 use dsm_sdk::init::SdkConfig;
+use serial_test::serial;
 use std::path::PathBuf;
 
 fn init_test_storage() {
@@ -15,9 +16,14 @@ fn init_test_storage() {
         vec![0xCC; 32],
         vec![0xDD; 32],
     );
+    // Install a deterministic 32-byte C-DBRW binding key so the canonical
+    // signing authority can derive a keypair during AppRouter::new().
+    // DBRW enforcement is ON, so without this the router fails to construct.
+    dsm_sdk::set_cdbrw_binding_key_for_testing(vec![0xEE; 32]);
 }
 
 #[tokio::test]
+#[serial]
 async fn unknown_query_path_returns_fallback() {
     init_test_storage();
     let cfg = SdkConfig {
@@ -41,6 +47,7 @@ async fn unknown_query_path_returns_fallback() {
 }
 
 #[tokio::test]
+#[serial]
 async fn unknown_invoke_method_returns_fallback() {
     init_test_storage();
     let cfg = SdkConfig {

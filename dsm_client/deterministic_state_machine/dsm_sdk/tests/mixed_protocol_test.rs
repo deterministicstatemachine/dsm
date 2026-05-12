@@ -27,7 +27,7 @@ fn make_transfer_op(
 ) -> Operation {
     Operation::Transfer {
         to_device_id: remote_device_id.to_vec(),
-        amount: Balance::from_state(amount, [0u8; 32], 0),
+        amount: Balance::from_state(amount, [0u8; 32]),
         token_id: b"token_1".to_vec(),
         mode: TransactionMode::Bilateral,
         nonce,
@@ -53,6 +53,7 @@ fn store_online_capable_contact(
         alias: alias.into(),
         genesis_hash: genesis_hash.to_vec(),
         public_key: vec![0u8; 32],
+        kyber_public_key: Vec::new(),
         current_chain_tip: None,
         added_at: 1,
         verified: true,

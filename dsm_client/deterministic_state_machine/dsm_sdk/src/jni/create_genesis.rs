@@ -52,9 +52,6 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_createGenesis<'a>(
         };
 
         // ---- Convert Java byte[] -> Vec<u8> (strict 32B) ----
-        // Genesis creation must NOT depend on DBRW being initialized.
-        // DBRW remains mandatory for wallet initialization / signing, but first-time genesis
-        // needs to be able to run on a fresh device.
         let entropy = match env.convert_byte_array(unsafe { JByteArray::from_raw(_entropy_bytes) })
         {
             Ok(bytes) => {
@@ -81,6 +78,21 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_createGenesis<'a>(
                 );
             }
         };
+        let k_dbrw =
+            match crate::sdk::app_state::AppState::take_platform_cdbrw_binding_key("createGenesis")
+            {
+                Ok(k) => k,
+                Err(e) => {
+                    log::error!("createGenesis: {e}");
+                    return encode_env_as_bytes(
+                        &mut env,
+                        crate::jni::helpers::encode_error_transport(400, &e),
+                    );
+                }
+            };
+        let binding_record = crate::util::text_id::encode_base32_crockford(
+            dsm::crypto::blake3::domain_hash("DSM/cdbrw-binding-record", &k_dbrw).as_bytes(),
+        );
 
         // ---- Ensure runtime for async work ----
         crate::runtime::dsm_init_runtime();
@@ -90,6 +102,7 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_createGenesis<'a>(
             let locale = locale.clone();
             let network_id = network_id.clone();
             let entropy = entropy.clone();
+            let binding_record = binding_record.clone();
 
             async move {
                 use crate::sdk::storage_node_sdk::{StorageNodeConfig, StorageNodeSDK};
@@ -115,9 +128,7 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_createGenesis<'a>(
                     .map_err(|e| format!("sdk.new: {e}"))?;
 
                 // MPC-only genesis (strict mode): local bootstrap path is not permitted.
-                let mpc_res = sdk
-                    .create_genesis_with_mpc(Some(3), Some(entropy.clone()))
-                    .await;
+                let mpc_res = sdk.create_genesis_with_mpc(Some(entropy.clone())).await;
 
                 let (
                     genesis_device_id,
@@ -139,19 +150,22 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_createGenesis<'a>(
                         return Err(msg);
                     }
                 };
+                crate::install_canonical_binding_key(k_dbrw.to_vec())
+                    .map_err(|e| format!("createGenesis: install C-DBRW binding failed: {e}"))?;
+                crate::jni::cdbrw::set_cdbrw_binding_key(k_dbrw.to_vec());
 
                 // CRITICAL: Derive signing keypair deterministically from genesis + device_id
-                // Per whitepaper: S_master = HKDF(G || DevID || K_DBRW || s_0)
-                // This ensures the same key is derived every time for a given identity
+                // plus the C-DBRW binding key.
+                // This ensures the same key is derived every time for a given identity.
                 //
-                // NOTE: The `entropy` passed here is the DBRW binding key derived in the JNI layer
-                // via DbrwInstance::initialize -> DbrwCommitment::derive_binding_key.
-                // It MUST be used as the sole source of entropy for this derivation.
+                // The live path concatenates `genesis || device_id || K_DBRW`, then
+                // `SignatureKeyPair::generate_from_entropy()` compresses that material with
+                // `domain_hash("DSM/sphincs-seed", ...)` before deterministic SPHINCS keygen.
                 let public_key = {
                     let mut key_entropy = Vec::with_capacity(96);
                     key_entropy.extend_from_slice(&genesis_hash_bytes);
                     key_entropy.extend_from_slice(&genesis_device_id);
-                    key_entropy.extend_from_slice(&entropy); // DBRW binding key
+                    key_entropy.extend_from_slice(&k_dbrw);
 
                     match dsm::crypto::SignatureKeyPair::generate_from_entropy(&key_entropy) {
                         Ok(kp) => {
@@ -191,17 +205,32 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_createGenesis<'a>(
                 };
 
                 // --- Publish genesis to storage nodes ---
+                //
+                // Publish failures do NOT abort genesis creation: the local
+                // keys/state are still valid and we want the user to end up
+                // with a persisted identity they can recover. The self-heal
+                // path in the bootstrap ingress path retries on every
+                // subsequent app start via `storage_node_sdk::ensure_device_in_tree`.
                 let publish_result = sdk.publish_genesis_to_nodes(gc.clone()).await;
                 match &publish_result {
                     Ok(resp) => {
                         log::info!("Genesis published to storage nodes: {:?}", resp);
                     }
                     Err(e) => {
-                        log::warn!("Failed to publish genesis to storage nodes: {}", e);
+                        log::error!(
+                            "Failed to publish genesis to storage nodes: {}. \
+                             Identity will be healed on next successful bootstrap.",
+                            e
+                        );
                     }
                 }
 
                 // --- Register device in device tree ---
+                //
+                // `register_device_in_tree` enforces quorum (>=3 nodes) and
+                // returns Err when fewer succeed. We deliberately don't fail
+                // genesis creation on error — the bootstrap self-heal will
+                // re-attempt on the next app start when the network recovers.
                 let register_result = sdk
                     .register_device_in_tree(&genesis_device_id, &genesis_hash_bytes)
                     .await;
@@ -210,7 +239,11 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_createGenesis<'a>(
                         log::info!("Device registered in tree: {:?}", resp);
                     }
                     Err(e) => {
-                        log::warn!("Failed to register device in tree: {}", e);
+                        log::error!(
+                            "Failed to register device in tree: {}. \
+                             Identity will be healed on next successful bootstrap.",
+                            e
+                        );
                     }
                 }
 
@@ -269,9 +302,9 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_createGenesis<'a>(
                     match crate::init::init_dsm_sdk(&sdk_cfg) {
                         Ok(_) => log::info!("createGenesis: init_dsm_sdk completed successfully"),
                         Err(e) => {
-                            // Non-fatal: DBRW is not yet initialized at genesis time.
-                            // Kotlin calls sdkBootstrap() after extracting identity from
-                            // this envelope, which initializes DBRW and re-runs SDK init.
+                            // Non-fatal: strict bootstrap has not yet finalized on a fresh device.
+                            // The host now forwards measurement envelopes through ingress, and Rust
+                            // completes binding + identity installation during bootstrap finalize.
                             log::warn!("createGenesis: init_dsm_sdk deferred (expected on fresh device): {}", e);
                         }
                     }
@@ -413,7 +446,7 @@ pub extern "system" fn Java_com_dsm_native_DsmNative_createGenesis<'a>(
                             &genesis_device_id,
                         ),
                         mpc_proof: session_id.clone(),
-                        dbrw_binding: crate::util::text_id::encode_base32_crockford(&entropy),
+                        dbrw_binding: binding_record,
                         merkle_root: crate::util::text_id::encode_base32_crockford(&[0u8; 32]), // Initial empty SMT root
                         participant_count: threshold_usize as u32,
                         // Deterministic, clockless marker (no wall-clock time).

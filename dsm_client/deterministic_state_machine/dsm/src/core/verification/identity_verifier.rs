@@ -29,12 +29,17 @@ impl IdentityVerifier {
             return Ok(false);
         }
 
-        // 2. Verify the claim signature using cryptographic primitives
+        // 2. The claim must present the same public key as the registered anchor.
+        if claim.public_key != anchor.public_key {
+            return Ok(false);
+        }
+
+        // 3. Verify the claim signature using cryptographic primitives.
         if !Self::verify_claim_signature(claim)? {
             return Ok(false);
         }
 
-        // 3. Verify the claim commitments against anchor expectations
+        // 4. Verify the claim commitments against anchor expectations
         if !Self::verify_claim_commitments(claim, anchor)? {
             return Ok(false);
         }
@@ -42,32 +47,27 @@ impl IdentityVerifier {
         Ok(true)
     }
 
-    /// Verify identity claim signature
+    /// Verify identity claim signature using the claim's anchored SPHINCS+ public key.
     fn verify_claim_signature(claim: &IdentityClaim) -> Result<bool, DsmError> {
-        // Generate hash of claim data
         let mut hasher = crate::crypto::blake3::dsm_domain_hasher("DSM/identity/claim");
-
-        // Add all claim fields to hash
         hasher.update(claim.identity_id.as_bytes());
         hasher.update(&claim.tick.to_le_bytes());
         hasher.update(&claim.expires_at_tick.to_le_bytes());
-
-        // Verify signature on the hash
         let claimed_hash = hasher.finalize();
 
-        // In a real implementation, this would verify the signature
-        // using the appropriate signature scheme (e.g., ECDSA, EdDSA)
-        // For now, we simply check that the signature is not empty
-        if claim.signature.is_empty() {
+        if claim.signature.is_empty() || claim.public_key.is_empty() {
             return Ok(false);
         }
 
-        // Compare hash to the expected value (in real implementation this would check signature)
         if claimed_hash.as_bytes() != claim.claim_hash.as_slice() {
             return Ok(false);
         }
 
-        Ok(true)
+        crate::crypto::verify_signature(
+            &claim.public_key,
+            claimed_hash.as_bytes(),
+            &claim.signature,
+        )
     }
 
     /// Verify claim commitments against anchor expectations
@@ -121,6 +121,7 @@ impl IdentityVerifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::signatures::SignatureKeyPair;
     use crate::types::state_types::DeviceInfo;
     use std::collections::HashMap;
 
@@ -150,15 +151,17 @@ mod tests {
         let expires_at_tick = 100u64;
         let created_at_tick = 5u64;
 
+        let keypair = SignatureKeyPair::new().expect("identity keypair");
         let claim_hash = compute_claim_hash(identity_id, tick, expires_at_tick);
+        let signature = keypair.sign(&claim_hash).expect("sign identity claim");
         let anchor_commitment = compute_anchor_commitment(identity_id, created_at_tick, None);
 
         let claim = IdentityClaim {
             identity_id: identity_id.to_string(),
             tick,
             expires_at_tick,
-            public_key: vec![0x42; 32],
-            signature: vec![0xFF; 64], // non-empty
+            public_key: keypair.public_key.clone(),
+            signature,
             claim_hash,
             anchor_commitment,
             device_info: DeviceInfo::default(),
@@ -167,7 +170,7 @@ mod tests {
 
         let anchor = IdentityAnchor {
             identity_id: identity_id.to_string(),
-            public_key: vec![0x42; 32],
+            public_key: keypair.public_key.clone(),
             created_at_tick,
             revoked_at_tick: None,
             meta_data: HashMap::new(),
@@ -208,6 +211,27 @@ mod tests {
 
         let result = IdentityVerifier::verify_identity_claim(&claim, &anchor).unwrap();
         assert!(!result, "wrong claim hash should fail");
+    }
+
+    #[test]
+    fn verify_rejects_non_cryptographic_signature_bytes() {
+        let (mut claim, anchor) = make_valid_claim_and_anchor();
+        claim.signature = vec![0xAA; 64];
+
+        let result = IdentityVerifier::verify_identity_claim(&claim, &anchor).unwrap();
+        assert!(
+            !result,
+            "a non-empty but invalid signature must fail real cryptographic verification"
+        );
+    }
+
+    #[test]
+    fn verify_rejects_anchor_public_key_mismatch() {
+        let (claim, mut anchor) = make_valid_claim_and_anchor();
+        anchor.public_key = vec![0x55; 32];
+
+        let result = IdentityVerifier::verify_identity_claim(&claim, &anchor).unwrap();
+        assert!(!result, "anchor/public-key mismatch should fail");
     }
 
     #[test]
@@ -274,12 +298,15 @@ mod tests {
         let anchor_commitment =
             compute_anchor_commitment(identity_id, created_at_tick, revoked_at_tick);
 
+        let keypair = SignatureKeyPair::new().expect("identity keypair");
+        let signature = keypair.sign(&claim_hash).expect("sign identity claim");
+
         let claim = IdentityClaim {
             identity_id: identity_id.to_string(),
             tick,
             expires_at_tick: expires,
-            public_key: vec![0x42; 32],
-            signature: vec![0xFF; 64],
+            public_key: keypair.public_key.clone(),
+            signature,
             claim_hash,
             anchor_commitment,
             device_info: DeviceInfo::default(),
@@ -288,7 +315,7 @@ mod tests {
 
         let anchor = IdentityAnchor {
             identity_id: identity_id.to_string(),
-            public_key: vec![0x42; 32],
+            public_key: keypair.public_key.clone(),
             created_at_tick,
             revoked_at_tick,
             meta_data: HashMap::new(),

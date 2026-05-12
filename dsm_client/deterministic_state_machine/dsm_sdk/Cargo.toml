@@ -1,6 +1,6 @@
 [package]
 name = "dsm_sdk"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.3"
 edition = "2021"
 description = "DSM SDK - Deterministic State Machine Software Development Kit"
 repository = "https://github.com/deterministicstatemachine/dsm"
@@ -12,14 +12,16 @@ categories = ["cryptography", "authentication"]
 [lib]
 name = "dsm_sdk"
 path = "src/lib.rs"
-crate-type = ["cdylib", "rlib"]
+crate-type = ["cdylib", "staticlib", "rlib"]
 doctest = false
 
 # No binaries - just library
 
 [features]
 default = []
-strict = []
+# `strict` feature was removed — C-DBRW enforcement is now always on. The
+# responder and the bootstrap ingress path both fail-closed on ReadOnly
+# verdicts without any feature gate.
 demos = []
 dev-discovery = ["mdns"]
 jni = ["dep:jni"]
@@ -48,16 +50,16 @@ blake3 = "1.5.0"
 anyhow = "1.0"
 prost = "0.13"
 prost-build = "0.14"
-prost-types = "0.12"
+prost-types = "0.14"
 tonic-build = { version = "0.13", default-features = false, features = ["prost"] }
 protoc-bin-vendored = "3"
 glob = "0.3"
 
 
 [dependencies]
-ctor = "0.6"
+ctor = "1.0"
 # Core dependencies
-dsm = { version = "0.1.0-beta.1", path = "../dsm", default-features = false }
+dsm = { version = "0.1.0-beta.3", path = "../dsm", default-features = false }
 
 # JNI for Android integration
 jni = { version = "0.21", optional = true }
@@ -72,10 +74,8 @@ serde_json = "1.0"
 base32 = "0.4"
 
 
-# Core numeric processing
-num-traits = "0.2.17"
-num-integer = "0.1.46"
-num-primes = "0.3.0"
+# num-traits / num-integer / num-primes REMOVED — Pedersen-only deps,
+# excised with the Pedersen module (Issue #184 F2 + Brandon).
 
 # Async runtime
 tokio = { version = "1.51.0", features = ["macros", "rt-multi-thread", "time", "fs", "io-util", "sync", "net"] }
@@ -85,9 +85,9 @@ futures = { version = "0.3.30", default-features = false, features = ["std"] }
 # Error handling
 thiserror = "2.0.18"
 anyhow = "1.0.99"
-toml_edit = "0.22"
+toml_edit = "0.25"
 
-toml = "0.8.20"
+toml = "1.1.2"
 
 # Storage
 
@@ -97,7 +97,7 @@ bitcoin = { version = "0.32", default-features = false, features = ["std"] }
 blake3 = "1.5.0"
 # AEAD
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc", "std"] }
-hmac = "0.12.1"
+hmac = "0.13.0"
 rand = "0.8.5"
 rand_chacha = "0.3.1"
 getrandom = "0.4.2"
@@ -133,7 +133,7 @@ metrics = "0.24.3"
 bip39 = "2.0.0"
 once_cell = "1.19.0"
 log = "0.4.20"
-env_logger = "0.10.0"
+env_logger = "0.11.10"
 uuid = { version = "1.23", features = ["v4", "v7", "std"] }
 erased-serde = "0.4.1"
 bytes = "1.5.0"
@@ -160,21 +160,21 @@ bincode = "1.3.3"
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 
 # Android logging
-android_logger = "0.13.3"
+android_logger = "0.15.1"
 
 # Protobuf types
-prost-types = "0.12"
+prost-types = "0.14"
 
 [dev-dependencies]
-criterion = { version = "0.5.1", features = ["async_tokio", "html_reports"] }
-mockall = "0.12.1"
+criterion = { version = "0.8.2", features = ["async_tokio", "html_reports"] }
+mockall = "0.14.0"
 tempfile = "3.10.0"
-test-log = { version = "0.2.14", features = ["trace"] }
+test-log = { version = "0.2.20", features = ["trace"] }
 proptest = "1.11.0"
 quickcheck = "1.0.3"
 rstest = "0.26.1"
 serial_test = "3.0.0"
-dsm = { version = "0.1.0-beta.1", path = "../dsm", default-features = false, features = ["testing"] }
+dsm = { version = "0.1.0-beta.3", path = "../dsm", default-features = false, features = ["testing"] }
 
 
  

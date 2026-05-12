@@ -99,27 +99,6 @@
             </intent-filter>
         </activity>
 
-        <!-- NFC Recovery Activity (handles NDEF capsules - READ).
-             No NDEF_DISCOVERED intent filter — the ring must not auto-trigger
-             this activity just by being near the phone.  Reading only happens
-             when the user is on the recovery screen and Kotlin explicitly
-             launches this activity via enableReaderMode, same as NfcWriteActivity. -->
-        <activity
-            android:name="com.dsm.wallet.recovery.NfcRecoveryActivity"
-            android:exported="false"
-            android:launchMode="singleTop"
-            android:configChanges="orientation|keyboardHidden|screenSize" />
-
-        <!-- NFC Write Activity (writes recovery capsules to NFC ring - WRITE) -->
-        <activity
-            android:name="com.dsm.wallet.recovery.NfcWriteActivity"
-            android:exported="false"
-            android:launchMode="singleTop"
-            android:screenOrientation="portrait"
-            android:theme="@style/Theme.AppCompat.NoActionBar"
-            android:configChanges="orientation|keyboardHidden|screenSize"
-            tools:ignore="LockedOrientationActivity" />
-
         <!-- Native QR Scanner Activity (ML Kit + CameraX) -->
         <activity
             android:name="com.dsm.wallet.ui.QrScannerActivity"

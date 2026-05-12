@@ -16,12 +16,16 @@ const mockStorageNodeService = {
 const mockDsmClient = {
   getStorageStatus: jest.fn(),
   createBackup: jest.fn(),
-  listLocalDlvs: jest.fn(),
-  checkDlvPresence: jest.fn(),
 };
+
+const mockListVaults = jest.fn();
 
 jest.mock('../../services/dsmClient', () => ({
   dsmClient: mockDsmClient,
+}));
+
+jest.mock('../../services/bitcoinTap', () => ({
+  listVaults: (...args: any[]) => mockListVaults(...args),
 }));
 
 jest.mock('../../services/storageNodeService', () => ({
@@ -41,6 +45,7 @@ import { isFeatureEnabled } from '../../config/featureFlags';
 function freshModule() {
   jest.resetModules();
   jest.doMock('../../services/dsmClient', () => ({ dsmClient: mockDsmClient }));
+  jest.doMock('../../services/bitcoinTap', () => ({ listVaults: (...args: any[]) => mockListVaults(...args) }));
   jest.doMock('../../services/storageNodeService', () => ({ storageNodeService: mockStorageNodeService }));
   jest.doMock('../../config/featureFlags', () => ({ isFeatureEnabled: jest.fn().mockResolvedValue(false) }));
   jest.doMock('../../types/storage', () => ({ asDisplayOnlyNumber: (n: number) => n }));
@@ -63,7 +68,6 @@ describe('StorageStore', () => {
       expect(s.overviewLoading).toBe(true);
       expect(s.overviewError).toBeNull();
       expect(s.dlvs).toEqual([]);
-      expect(s.presence).toEqual({});
       expect(s.dlvLoading).toBe(true);
       expect(s.showObjectsTab).toBe(false);
       expect(s.nodeHealth).toEqual([]);
@@ -162,39 +166,20 @@ describe('StorageStore', () => {
   });
 
   describe('refreshDlvsAndPresence()', () => {
-    it('loads DLVs and checks presence', async () => {
+    it('loads vaults from bitcoinTap.listVaults', async () => {
       const { storageStore } = freshModule();
-      const dlv = { cptaAnchorHex: '0xabc' };
-      mockDsmClient.listLocalDlvs.mockResolvedValue([dlv]);
-      mockDsmClient.checkDlvPresence.mockResolvedValue({ anchor: '0xabc', observed: 2 });
+      const vault = { vaultId: 'v1', state: 'active', amountSats: 100000n, direction: 'btc_to_dbtc', htlcAddress: 'bc1q...', entryHeader: new Uint8Array(0) };
+      mockListVaults.mockResolvedValue([vault]);
 
       await storageStore.refreshDlvsAndPresence();
       const s = storageStore.getSnapshot();
-      expect(s.dlvs).toEqual([dlv]);
-      expect(s.presence['0xabc']).toEqual({ anchor: '0xabc', observed: 2 });
+      expect(s.dlvs).toEqual([vault]);
       expect(s.dlvLoading).toBe(false);
     });
 
-    it('handles empty DLV list', async () => {
+    it('handles empty vault list', async () => {
       const { storageStore } = freshModule();
-      mockDsmClient.listLocalDlvs.mockResolvedValue([]);
-
-      await storageStore.refreshDlvsAndPresence();
-      expect(storageStore.getSnapshot().dlvs).toEqual([]);
-    });
-
-    it('skips presence entries without anchor', async () => {
-      const { storageStore } = freshModule();
-      mockDsmClient.listLocalDlvs.mockResolvedValue([{ cptaAnchorHex: '0x1' }]);
-      mockDsmClient.checkDlvPresence.mockResolvedValue({ observed: 1 }); // no anchor
-
-      await storageStore.refreshDlvsAndPresence();
-      expect(storageStore.getSnapshot().presence).toEqual({});
-    });
-
-    it('handles listLocalDlvs returning non-array', async () => {
-      const { storageStore } = freshModule();
-      mockDsmClient.listLocalDlvs.mockResolvedValue(null);
+      mockListVaults.mockResolvedValue([]);
 
       await storageStore.refreshDlvsAndPresence();
       expect(storageStore.getSnapshot().dlvs).toEqual([]);
@@ -203,7 +188,7 @@ describe('StorageStore', () => {
     it('handles error gracefully', async () => {
       const { storageStore } = freshModule();
       jest.spyOn(console, 'warn').mockImplementation(() => {});
-      mockDsmClient.listLocalDlvs.mockRejectedValue(new Error('fail'));
+      mockListVaults.mockRejectedValue(new Error('fail'));
 
       await storageStore.refreshDlvsAndPresence();
       expect(storageStore.getSnapshot().dlvLoading).toBe(false);

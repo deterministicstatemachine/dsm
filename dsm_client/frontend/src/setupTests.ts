@@ -95,16 +95,26 @@ if (typeof (global as any).window !== 'undefined') {
         // Return success for setting preferences
         return createDsmBridgeSuccessResponse(new Uint8Array(0));
       }
-      
-      if (method === 'appRouterInvoke') {
-        // Return empty success for router invoke calls
-        return createDsmBridgeSuccessResponse(new Uint8Array(0));
+
+      if (method === 'nativeBoundaryStartup') {
+        const response = new pb.StartupResponse({
+          result: { case: 'okBytes', value: new Uint8Array(0) },
+        });
+        return createDsmBridgeSuccessResponse(response.toBinary());
       }
 
-      if (method === 'appRouterQuery') {
-        // Return empty success with 8-byte router request-ID prefix for router query calls
-        const prefix = new Uint8Array(8);
-        return createDsmBridgeSuccessResponse(prefix);
+      if (method === 'nativeBoundaryIngress') {
+        const response = new pb.IngressResponse({
+          result: { case: 'okBytes', value: new Uint8Array(0) },
+        });
+        return createDsmBridgeSuccessResponse(response.toBinary());
+      }
+
+      if (method === 'nativeHostRequest') {
+        const response = new pb.NativeHostResponse({
+          result: { case: 'okBytes', value: new Uint8Array(0) },
+        });
+        return createDsmBridgeSuccessResponse(response.toBinary());
       }
 
       // Default: return an error for unmocked methods
@@ -148,11 +158,7 @@ if (typeof (global as any).TextEncoder === 'undefined') {
 // This prevents errors when StorageNodeService tries to load preferences
 import * as WebViewBridge from './dsm/WebViewBridge';
 
-// Mock the specific functions that are used during initialization
-const _originalGetPreference = WebViewBridge.getPreference;
-const _originalSetPreference = WebViewBridge.setPreference;
-
-(WebViewBridge as any).getPreference = jest.fn(async () => null);
-(WebViewBridge as any).setPreference = jest.fn(async () => {});
-
+// Use jest.spyOn so restoreMocks:true can restore originals between tests
+jest.spyOn(WebViewBridge, 'getPreference').mockResolvedValue(null);
+jest.spyOn(WebViewBridge, 'setPreference').mockResolvedValue(undefined);
 
