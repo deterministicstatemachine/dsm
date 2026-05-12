@@ -65,7 +65,7 @@ dsm = { version = "0.1.0-beta.3", path = "../dsm", default-features = false }
 jni = { version = "0.21", optional = true }
 
 # mDNS service discovery
-mdns-sd = { version = "0.18.2", optional = true }
+mdns-sd = { version = "0.19.1", optional = true }
 
 # Protobuf support
 prost = "0.13"
