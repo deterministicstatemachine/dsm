@@ -26,6 +26,31 @@ use dsm_sdk::util::text_id;
 const DEFAULT_K: u32 = 3;
 const DEFAULT_FLAT_RATE: i64 = 1000;
 
+/// PaidK spend-gate predicate for storage writes (whitepaper §16, storagenodes §16).
+///
+/// Returns `Ok(())` if the supplied device has satisfied the PaidK threshold
+/// (K distinct operators paid at or above the flat rate), otherwise
+/// `Err(StatusCode::PAYMENT_REQUIRED)`. DB errors map to 500.
+///
+/// `device_id` is the canonical Base32-Crockford form used as the PaidK
+/// storage key (matches `submit_receipt` ingestion at line 63 above).
+///
+/// PaidK gating applies to device-initiated writes (object put/delete,
+/// b0x submit). Operator-side artifact publishing (ByteCommit, DLV slot
+/// mutation) is governed by stake/registry binding instead and does not
+/// route through this gate.
+pub async fn require_paidk(state: &AppState, device_id: &str) -> Result<(), StatusCode> {
+    let pool = &*state.db_pool;
+    match db::is_paidk_satisfied(pool, device_id).await {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(StatusCode::PAYMENT_REQUIRED),
+        Err(e) => {
+            log::warn!("paidk: is_paidk_satisfied DB error for {device_id}: {e}");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
 pub fn create_router(state: Arc<AppState>) -> Router<()> {
     Router::new()
         .route("/api/v2/paidk/receipt", post(submit_receipt))

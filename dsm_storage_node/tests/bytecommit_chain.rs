@@ -56,7 +56,13 @@ async fn bytecommit_chain_records_parent_link() -> anyhow::Result<()> {
         )
         .expect("Failed to create replication manager"),
     );
-    let state = AppState::new(unique_node_id(), None, Arc::new(pool), replication_manager);
+    let state = AppState::new(
+        unique_node_id(),
+        "http://localhost:8080",
+        None,
+        Arc::new(pool),
+        replication_manager,
+    );
 
     // Ensure DLV slot exists for bytecommit namespace.
     // Deterministic, small capacity.

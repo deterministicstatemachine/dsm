@@ -17,9 +17,11 @@ pub mod partitioning;
 pub mod replication;
 pub mod timing;
 
+use replication::StorageNodeId;
+
 #[derive(Clone)]
 pub struct AppState {
-    pub node_id: Arc<String>,
+    pub node_id: StorageNodeId,
     pub hsts_max_age: Option<u64>,
     pub db_pool: Arc<db::DBPool>,
     pub replication_manager: Arc<replication::ReplicationManager>,
@@ -27,14 +29,23 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Build an AppState. The supplied `node_id_input` is canonicalised exactly
+    /// like `canonical_node_info` does for gossip: if it is a valid 32-byte
+    /// base32-crockford string, it is decoded as-is; otherwise a 32-byte node
+    /// id is derived from `address_or_seed`. The result is the single
+    /// canonical operator identity used across replication, ByteCommit
+    /// emission, HTTP headers, and DB chain anchoring.
     pub fn new(
-        node_id: String,
+        node_id_input: String,
+        address_or_seed: &str,
         hsts_max_age: Option<u64>,
         db_pool: Arc<db::DBPool>,
         replication_manager: Arc<replication::ReplicationManager>,
     ) -> Self {
+        let node_id =
+            StorageNodeId::from_base32_or_derive(&node_id_input, address_or_seed.as_bytes());
         Self {
-            node_id: Arc::new(node_id),
+            node_id,
             hsts_max_age,
             db_pool,
             replication_manager,
@@ -87,6 +98,7 @@ pub async fn build_app_for_tests() -> anyhow::Result<axum::Router> {
 
     let state = AppState::new(
         "test-node".to_string(),
+        "http://localhost:8080",
         None,
         Arc::new(pool),
         replication_manager,

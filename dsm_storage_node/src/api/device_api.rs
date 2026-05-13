@@ -281,6 +281,7 @@ mod tests {
             );
             let state = AppState::new(
                 "test-node".to_string(),
+                "http://localhost:8080",
                 None,
                 test_db.pool.clone(),
                 replication_manager,
@@ -333,6 +334,7 @@ mod tests {
             );
             let state = AppState::new(
                 "test-node".to_string(),
+                "http://localhost:8080",
                 None,
                 test_db.pool.clone(),
                 replication_manager,
@@ -384,6 +386,7 @@ mod tests {
             );
             let state = AppState::new(
                 "test-node".to_string(),
+                "http://localhost:8080",
                 None,
                 test_db.pool.clone(),
                 replication_manager,

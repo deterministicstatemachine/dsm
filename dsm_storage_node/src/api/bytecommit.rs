@@ -21,7 +21,6 @@ use std::sync::Arc;
 
 use super::hardening::{blake3_tagged, mirror_set_w, window_index, B_GLOBAL};
 use crate::db;
-use crate::replication::StorageNodeId;
 use crate::AppState;
 use dsm_sdk::util::text_id;
 
@@ -258,8 +257,10 @@ pub async fn emit_cycle_commitment(
 ) -> Result<[u8; 32], anyhow::Error> {
     let pool = &*state.db_pool;
 
-    let node_id = StorageNodeId::from_base32_or_derive(&state.node_id, state.node_id.as_bytes());
-    let node_id_32 = *node_id.as_bytes();
+    // Canonical 32-byte operator identity (single source of truth via AppState).
+    // Per spec §7, ByteCommit carries the same canonical node_id used in gossip
+    // and replica placement; no separate derivation is performed here.
+    let node_id_32 = *state.node_id.as_bytes();
 
     // 1) Compute node storage stats (SMT root + bytes_used) over current served objects.
     let (smt_root, bytes_used) = db::get_current_cycle_stats(pool).await?;

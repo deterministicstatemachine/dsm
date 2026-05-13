@@ -189,6 +189,11 @@ async fn submit_b0x_envelope(
 
     let env = dsm::envelope::from_canonical_bytes(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
 
+    // PaidK spend-gate (whitepaper §16): b0x submission is a device-initiated
+    // write that stores an artifact addressed to the recipient. The sender
+    // device must have satisfied PaidK before its envelope is admitted.
+    super::paidk::require_paidk(&app, &_ctx.device_id).await?;
+
     // NOTE: Storage nodes are dumb mirrors.
     // Do NOT validate SmartPolicy / protocol semantics here (clients verify).
 
@@ -604,6 +609,7 @@ mod tests {
         );
         let app_state = Arc::new(AppState::new(
             "test-node".to_string(),
+            "http://localhost:8080",
             None,
             db_pool.clone(),
             replication_manager,

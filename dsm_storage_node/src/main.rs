@@ -391,8 +391,14 @@ async fn async_main() -> Result<()> {
         )
     };
 
+    let bind_addr_str = format!(
+        "https://{}:{}",
+        server_config.bind_addr.ip(),
+        server_config.bind_addr.port()
+    );
     let state = AppState::new(
         server_config.node_id.clone(),
+        &bind_addr_str,
         server_config.hsts_max_age,
         db_pool.clone(),
         replication_manager,
