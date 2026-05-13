@@ -28,13 +28,6 @@ object DsmNative {
     @JvmStatic
     external fun initializeBilateralSdk(): Boolean
 
-    @JvmStatic
-    fun initializeBilateralSdkStrict() {
-        if (!initializeBilateralSdk()) {
-            throw DsmNativeException("initializeBilateralSdk returned false")
-        }
-    }
-
     /**
      * Extract device_id and genesis_hash from a GenesisCreated envelope
      * @param envelopeBytes Protobuf-encoded envelope
@@ -42,15 +35,6 @@ object DsmNative {
      */
     @JvmStatic
     external fun extractGenesisIdentity(envelopeBytes: ByteArray): ByteArray
-
-    @JvmStatic
-    fun extractGenesisIdentityStrict(envelopeBytes: ByteArray): ByteArray {
-        val out = extractGenesisIdentity(envelopeBytes)
-        if (out.size != 64) {
-            throw DsmNativeException("extractGenesisIdentity returned ${out.size} bytes")
-        }
-        return out
-    }
 }
 
 class DsmNativeException(message: String, cause: Throwable? = null) : RuntimeException(message, cause)
